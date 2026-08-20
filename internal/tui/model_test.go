@@ -1029,8 +1029,8 @@ func TestPermissionDialogUppercaseKeysWork(t *testing.T) {
 
 func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
 	client := &nestedTaskClient{responses: []*agent.Message{
-		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-parent-task", "task", `{"prompt":"spawn nested"}`)}},
-		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-child-task", "task", `{"prompt":"use ask tool"}`)}},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-parent-task", "task", `{"prompt":"spawn nested","agent":"build"}`)}},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-child-task", "task", `{"prompt":"use ask tool","agent":"general"}`)}},
 		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-ask", "ask_tool", `{}`)}},
 		{Role: "assistant", Content: "nested complete"},
 		{Role: "assistant", Content: "child complete"},
@@ -2200,7 +2200,7 @@ func TestBuildSidebarRenderDataShowsCacheAndSpendInline(t *testing.T) {
 	}
 
 	got := strings.Join(m.buildSidebarRenderData().bottomLines, "\n")
-	for _, want := range []string{"In 1k  Cache 300  Out 2k", "$0.1234"} {
+	for _, want := range []string{"In 1k Cache 300 (23.1%) Out 2k", "$0.1234"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected sidebar usage block to include %q, got %q", want, got)
 		}
@@ -6170,7 +6170,7 @@ func TestHandleSessionLoadRestoresSidebarUsageAndTodoState(t *testing.T) {
 	}
 
 	got := strings.Join(m.buildSidebarRenderData().bottomLines, "\n")
-	for _, want := range []string{"In 12  Cache 9  Out 34", "$0.0350"} {
+	for _, want := range []string{"In 12 Cache 9 (42.9%) Out 34", "$0.0350"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected restored sidebar usage block to include %q, got %q", want, got)
 		}

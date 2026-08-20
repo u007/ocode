@@ -8,6 +8,7 @@ package lsp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/u007/ocode/internal/lsp/broker"
 )
 
 // DefaultTimeout bounds a single LSP request. Initial indexing (gopls loading
@@ -33,6 +36,7 @@ type rpcResult struct {
 }
 
 type Client struct {
+	broker *broker.RPCClient
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	reader *bufio.Reader
@@ -57,6 +61,35 @@ type Client struct {
 	// map and returns immediately). Setting it is the Manager's job;
 	// tests can plug in a custom hook.
 	onDiagnostics func(uri string, diags []Diagnostic)
+}
+
+// NewBrokerClient connects to an already-running authenticated broker. It
+// does not perform discovery or start a broker; callers own that policy.
+func NewBrokerClient(ctx context.Context, meta broker.Metadata, clientID string) (*Client, error) {
+	conn, err := broker.Connect(ctx, meta, clientID, 1, 0)
+	if err != nil {
+		return nil, err
+	}
+	c := &Client{broker: broker.NewRPCClient(conn), langID: meta.Identity.LanguageID, pending: make(map[int]chan rpcResult), opened: make(map[string]openedDoc), closeCh: make(chan struct{})}
+	rpc := c.broker
+	rpc.OnPush(func(method string, params json.RawMessage) {
+		if method != "textDocument/publishDiagnostics" {
+			return
+		}
+		var p struct {
+			URI         string       `json:"uri"`
+			Diagnostics []Diagnostic `json:"diagnostics"`
+		}
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.mu.Lock()
+			handler := c.onDiagnostics
+			c.mu.Unlock()
+			if handler != nil {
+				handler(p.URI, p.Diagnostics)
+			}
+		}
+	})
+	return c, nil
 }
 
 // SetDiagnosticsHandler installs a callback invoked for every
@@ -250,6 +283,9 @@ func (c *Client) Call(method string, params interface{}) (json.RawMessage, error
 }
 
 func (c *Client) CallTimeout(method string, params interface{}, timeout time.Duration) (json.RawMessage, error) {
+	if c.broker != nil {
+		return c.broker.CallTimeout(method, params, timeout)
+	}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -283,6 +319,9 @@ func (c *Client) CallTimeout(method string, params interface{}, timeout time.Dur
 
 // Notify sends a notification (no response expected).
 func (c *Client) Notify(method string, params interface{}) error {
+	if c.broker != nil {
+		return c.broker.Notify(method, params)
+	}
 	return c.writeMessage(map[string]interface{}{"jsonrpc": "2.0", "method": method, "params": params})
 }
 
@@ -292,6 +331,9 @@ func (c *Client) Notify(method string, params interface{}) error {
 // so no zombie lingers. Close itself just signals shutdown; it does NOT
 // call Wait.
 func (c *Client) Close() error {
+	if c.broker != nil {
+		return c.broker.Close()
+	}
 	var firstErr error
 	c.closeOnce.Do(func() {
 		c.mu.Lock()

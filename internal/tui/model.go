@@ -1586,7 +1586,11 @@ func (m *model) getInitialTools() ([]tool.Tool, *lsp.Manager) {
 	// (replaceAgent). Without ownership here, every rebuild leaks the
 	// gopls child.
 	if m.lspMgr == nil {
-		m.lspMgr = lsp.NewManager(".")
+		shared := false
+		if m.config != nil {
+			shared = m.config.LSPShared
+		}
+		m.lspMgr = lsp.NewManagerWithShared(".", shared)
 		// Wire up the diagnostics notification channel so the sidebar LSP
 		// count updates proactively when new diagnostics arrive.
 		if m.lspDiagCh == nil {
@@ -11365,13 +11369,12 @@ func (m *model) handleContextCmd(args []string) {
 	if m.agent.Client() != nil {
 		mcModel = m.agent.Client().GetModel()
 	}
-	if mc := agent.LoadModelContext(mcModel); mc != "" {
-		mcTok := estimateTok(mc)
+	if res := agent.LoadModelContextWithSource(mcModel); res.Kind != "" {
+		mcTok := estimateTok(res.Content)
 		baseTotal += mcTok
-		source := "built-in"
-		diskPath := mcModel + ".OCODE.md"
-		if _, err := os.Stat(diskPath); err == nil {
-			source = "disk"
+		source := "embedded:" + res.Path
+		if res.Kind == "file" {
+			source = "disk:" + res.Path
 		}
 		fmt.Fprintf(&b, "  Model ctx  %-20s ~%s tok (%s)\n", mcModel, formatTok(mcTok), source)
 	}
@@ -16240,6 +16243,52 @@ func lspFailureHint(cmd string) string {
 	}
 }
 
+// renderModelContextRow renders a display-only banner for the chat tab that
+// shows the active model-specific prompt is active (e.g. muse-spark-1.2.OCODE.md).
+// It is never sent to the LLM — the same content is already injected as the
+// hidden [ocode:model_context] system message via agent.BasePromptMessages.
+// Display-only: styled as a single clamped status row with a ◆ prefix so it
+// looks like a transcript display message but sits in the fixed bottom chrome
+// (between the transcript and the input) and does not scroll away.
+func (m model) renderModelContextRow() string {
+	if m.agent == nil || m.agent.Client() == nil {
+		return ""
+	}
+	kind, path := m.agent.ModelContextInfo()
+	if kind == "" {
+		return ""
+	}
+	// Use basename for readability — the absolute path already appears in the
+	// details view and would truncate on narrow terminals if shown raw.
+	base := path
+	if kind == "file" {
+		base = filepath.Base(path)
+	}
+	if base == "" {
+		base = path
+	}
+	source := "embedded"
+	if kind == "file" {
+		source = "file"
+	}
+	// Token estimate from the cached content — no disk re-read on each frame.
+	tokInfo := ""
+	if content := m.agent.ModelContextContent(); content != "" {
+		tokInfo = fmt.Sprintf(" · ~%s tok", formatTok(estimateTok(content)))
+	}
+	msg := fmt.Sprintf("◆ Model prompt · %s (%s)%s", base, source, tokInfo)
+	// Also surface the active model id so the banner makes sense when the
+	// file is a wildcard match (e.g. minimax-m*.OCODE.md → minimax-m2.5).
+	if mcModel := m.agent.Client().GetModel(); mcModel != "" {
+		msg += fmt.Sprintf(" · %s", mcModel)
+	}
+	w := m.statusContentWidth()
+	// Status style keeps the banner visually tied to the status chrome; hint
+	// would be too dim against the bordered input. Clamp to one row like the
+	// queue/agent strips so bottom chrome height stays predictable.
+	return m.styles.Status.Width(w).MaxHeight(1).Render(ansi.Truncate(msg, w, "..."))
+}
+
 func (m model) renderActivityRow() string {
 	if !m.activityRowReserved {
 		return ""
@@ -17060,6 +17109,9 @@ func (m model) renderTabContent() string {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.inputViewWithSelection())
 	}
 	leftParts := []string{transcript}
+	if row := m.renderModelContextRow(); row != "" {
+		leftParts = append(leftParts, row)
+	}
 	// The find bar appears between the transcript and the slash popup /
 	// queue / input rows when ctrl+f (or /search) opens it on the chat tab.
 	// Same width as the input area (panelWidth-2) so the two bordered boxes
@@ -17341,8 +17393,26 @@ func (m *model) renderStatus() string {
 		leftStatus += fmt.Sprintf(" · subagent: %s", subagentModel)
 	}
 
+	// Display-only indicator of where the active model's model-specific
+	// context came from (full disk path, or the embedded fallback). Rendered
+	// as an uninformative text segment appended after the permission-mode
+	// region, so it does not affect the permission click hit-test columns.
+	if m.agent != nil {
+		if kind, path := m.agent.ModelContextInfo(); kind != "" {
+			label := "embedded:" + path
+			if kind == "file" {
+				label = "file:" + path
+			}
+			leftStatus += fmt.Sprintf(" · ctx: %s", label)
+		}
+	}
+
 	// Second line: session ID and hints
-	rightContent := fmt.Sprintf("Session: %s%s", m.sessionID, suffix)
+	rightContent := fmt.Sprintf("Session: %s", m.sessionID)
+	if m.workDir != "" {
+		rightContent += " · Root: " + m.workDir
+	}
+	rightContent += suffix
 	if m.showPermDialog {
 		pending := permissionRuleLabel(m.pendingPermission)
 		if m.pendingPermission.Command != "" {

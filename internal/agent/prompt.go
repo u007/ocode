@@ -127,13 +127,15 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 		msgs = append(msgs, Message{Role: "system", Content: promptContextMarker + "\nContext and rules:\n" + ctx})
 	}
 	if a.client != nil {
-		mc := a.preloadedModelContext
-		if mc == "" {
-			mc = LoadModelContext(a.client.GetModel())
-			a.preloadedModelContext = mc
+		if !a.preloadedModelContextReady {
+			res := LoadModelContextWithSource(a.client.GetModel())
+			a.preloadedModelContext = res.Content
+			a.preloadedModelContextKind = res.Kind
+			a.preloadedModelContextPath = res.Path
+			a.preloadedModelContextReady = true
 		}
-		if mc != "" {
-			msgs = append(msgs, Message{Role: "system", Content: promptModelCtxMarker + "\nModel-specific context:\n" + mc})
+		if a.preloadedModelContext != "" {
+			msgs = append(msgs, Message{Role: "system", Content: promptModelCtxMarker + "\nModel-specific context:\n" + a.preloadedModelContext})
 		}
 	}
 	if a.DocPromptEnabled() {

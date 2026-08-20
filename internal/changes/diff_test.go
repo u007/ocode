@@ -60,7 +60,7 @@ func TestRenderDiffDifferent(t *testing.T) {
 }
 
 // TestRenderDiffAdded verifies that a file with no backup (FirstBackupPath == "")
-// returns the "new file" message.
+// returns a synthetic diff showing the entire file.
 func TestRenderDiffAdded(t *testing.T) {
 	dir := t.TempDir()
 
@@ -73,13 +73,19 @@ func TestRenderDiffAdded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderDiff added: unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "new file") {
-		t.Fatalf("expected 'new file' message, got: %q", out)
+	if !strings.Contains(out, "--- /dev/null") || !strings.Contains(out, "+++ b/") {
+		t.Fatalf("expected synthetic diff header with /dev/null, got: %q", out)
+	}
+	if !strings.Contains(out, "+new file content") {
+		t.Fatalf("expected '+new file content' in diff, got: %q", out)
+	}
+	if !strings.Contains(out, "@@ -0,0 +1,1 @@") {
+		t.Fatalf("expected hunk header @@ -0,0 +1,1 @@, got: %q", out)
 	}
 }
 
 // TestRenderDiffBackupMissing verifies that a missing backup path (non-existent)
-// returns the "new file" message.
+// returns a synthetic diff showing the entire file.
 func TestRenderDiffBackupMissing(t *testing.T) {
 	dir := t.TempDir()
 
@@ -93,8 +99,11 @@ func TestRenderDiffBackupMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderDiff backup missing: unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "new file") {
-		t.Fatalf("expected 'new file' message, got: %q", out)
+	if !strings.Contains(out, "--- /dev/null") || !strings.Contains(out, "+++ b/") {
+		t.Fatalf("expected synthetic diff header with /dev/null, got: %q", out)
+	}
+	if !strings.Contains(out, "+content") {
+		t.Fatalf("expected '+content' in diff, got: %q", out)
 	}
 }
 

@@ -1,10 +1,14 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/u007/ocode/internal/changes"
+	"github.com/u007/ocode/internal/snapshot"
 )
 
 func TestPatchExecuteAllowsTempDirTargetsOutsideWorkspace(t *testing.T) {
@@ -22,6 +26,8 @@ func TestPatchExecuteAllowsTempDirTargetsOutsideWorkspace(t *testing.T) {
 	}
 
 	tool := PatchTool{}
+	store := snapshot.NewStore("main", filepath.Join(tmpDir, ".opencode", "snapshots"))
+	ctx := snapshot.WithStore(context.Background(), store)
 	args, err := json.Marshal(map[string]string{
 		"patchText": "*** Begin Patch\n*** Update File: " + externalFile + "\n@@ \n-outside\n+inside\n*** End Patch\n",
 	})
@@ -29,7 +35,7 @@ func TestPatchExecuteAllowsTempDirTargetsOutsideWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = tool.Execute(args)
+	_, err = tool.ExecuteCtx(ctx, args)
 	if err != nil {
 		t.Fatalf("expected patch execution to succeed for temp-dir path, got %v", err)
 	}
@@ -64,6 +70,9 @@ func TestPatchExecuteRollsBackSnapshotsOnFailure(t *testing.T) {
 	}
 
 	tool := PatchTool{}
+	store := snapshot.NewStore("main", filepath.Join(tmpDir, ".opencode", "snapshots"))
+	ctx := snapshot.WithStore(context.Background(), store)
+	ctx = snapshot.WithToolCallID(ctx, "tc-rollback")
 	// "-world" won't match "hello" so deriveNewContents will fail after snapshot.
 	args, err := json.Marshal(map[string]string{
 		"patchText": "*** Begin Patch\n*** Update File: inside.txt\n@@ \n-world\n+planet\n*** End Patch\n",
@@ -72,7 +81,7 @@ func TestPatchExecuteRollsBackSnapshotsOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = tool.Execute(args)
+	_, err = tool.ExecuteCtx(ctx, args)
 	if err == nil {
 		t.Fatal("expected patch execution to fail")
 	}
@@ -111,6 +120,102 @@ func TestPatchAddFile(t *testing.T) {
 	}
 	if string(content) != "Hello world\n" {
 		t.Fatalf("unexpected content: %q", content)
+	}
+}
+
+func TestPatchAddFileAppearsInChangesRegistry(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	store := snapshot.NewStore("main", filepath.Join(tmpDir, "snapshots"))
+	ctx := snapshot.WithToolCallID(
+		snapshot.WithStore(context.Background(), store),
+		"tc-add",
+	)
+	args, err := json.Marshal(map[string]string{
+		"patchText": "*** Begin Patch\n*** Add File: added.txt\n+Hello world\n*** End Patch\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (PatchTool{}).ExecuteCtx(ctx, args); err != nil {
+		t.Fatalf("apply_patch failed: %v", err)
+	}
+
+	path, err := filepath.Abs("added.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := changes.NewRegistry()
+	if err := registry.AttachSnapshotStore("main", store); err != nil {
+		t.Fatal(err)
+	}
+	got := registry.List()
+	if len(got) != 1 {
+		t.Fatalf("expected added file in changes registry, got %d entries: %+v", len(got), got)
+	}
+	if got[0].OriginalPath != path {
+		t.Fatalf("expected tracked path %q, got %q", path, got[0].OriginalPath)
+	}
+	if got[0].Status != changes.FileAdded {
+		t.Errorf("expected added status, got %v", got[0].Status)
+	}
+	if got[0].UndoAllTCID != "tc-add" {
+		t.Errorf("expected tool call id tc-add, got %q", got[0].UndoAllTCID)
+	}
+}
+
+func TestPatchMoveTracksBothPathsInChangesRegistry(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("source.txt", []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := snapshot.NewStore("main", filepath.Join(tmpDir, "snapshots"))
+	ctx := snapshot.WithToolCallID(
+		snapshot.WithStore(context.Background(), store),
+		"tc-move",
+	)
+	args, err := json.Marshal(map[string]string{
+		"patchText": "*** Begin Patch\n*** Update File: source.txt\n*** Move to: destination.txt\n@@ \n-old\n+new\n*** End Patch\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (PatchTool{}).ExecuteCtx(ctx, args); err != nil {
+		t.Fatalf("apply_patch move failed: %v", err)
+	}
+
+	registry := changes.NewRegistry()
+	if err := registry.AttachSnapshotStore("main", store); err != nil {
+		t.Fatal(err)
+	}
+	got := registry.List()
+	if len(got) != 2 {
+		t.Fatalf("expected both move paths in changes registry, got %d entries: %+v", len(got), got)
+	}
+	statuses := make(map[string]changes.FileStatus, len(got))
+	for _, file := range got {
+		statuses[file.OriginalPath] = file.Status
+	}
+	source, _ := filepath.Abs("source.txt")
+	destination, _ := filepath.Abs("destination.txt")
+	if statuses[source] != changes.FileDeleted {
+		t.Errorf("expected source status FileDeleted, got %v", statuses[source])
+	}
+	if statuses[destination] != changes.FileAdded {
+		t.Errorf("expected destination status FileAdded, got %v", statuses[destination])
 	}
 }
 

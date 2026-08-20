@@ -248,13 +248,43 @@ func globalOcodeDir() string {
 // Within a single directory, an exact match beats a wildcard match for the
 // same model — so a specific {model}.OCODE.md overrides a wildcard catch-all
 // in the same dir.
-func LoadModelContext(modelName string) string {
+// ModelContextResult is the loaded model-specific context plus where it came
+// from, so the UI can surface an indicator (disk file path vs embedded
+// fallback). Kind is "file" (Path is the absolute file path), "embedded"
+// (Path is the embedded filename), or "" when no context was found.
+type ModelContextResult struct {
+	Content string
+	Kind    string
+	Path    string
+}
+
+// LoadModelContextWithSource is like LoadModelContext but also reports the
+// source of the loaded context (disk path or embedded fallback).
+func LoadModelContextWithSource(modelName string) ModelContextResult {
+	res := ModelContextResult{}
 	if modelName == "" {
-		return ""
+		return res
 	}
 	modelLower := strings.ToLower(strings.TrimSpace(modelName))
 	if modelLower == "" {
-		return ""
+		return res
+	}
+
+	// Normalize for matching: strip provider prefix, OpenRouter variant suffix,
+	// and opencode-zen "-free" tier suffix so a disk file named
+	// "muse-spark-1.2.OCODE.md" matches bare, provider-qualified, or
+	// variant-qualified ids like "opencode/muse-spark-1.2",
+	// "opencode-go/muse-spark-1.2:free" or "muse-spark-1.2-free".
+	normalized := modelLower
+	if idx := strings.IndexByte(normalized, ':'); idx >= 0 {
+		normalized = normalized[:idx]
+	}
+	if base := strings.TrimSuffix(normalized, "-free"); base != normalized {
+		normalized = base
+	}
+	bareLower := normalized
+	if idx := strings.LastIndex(normalized, "/"); idx >= 0 {
+		bareLower = normalized[idx+1:]
 	}
 
 	// stemMatches reports whether the given (lowercased) file stem matches the
@@ -262,7 +292,7 @@ func LoadModelContext(modelName string) string {
 	// exact match, ok=true with isWild=true for a prefix-wildcard match, and
 	// ok=false otherwise.
 	stemMatches := func(stemLower string) (ok, isWild bool) {
-		if stemLower == modelLower {
+		if stemLower == bareLower {
 			return true, false
 		}
 		if strings.HasSuffix(stemLower, "*") {
@@ -271,7 +301,7 @@ func LoadModelContext(modelName string) string {
 			// '*.OCODE.md' cannot accidentally match every model and shadow
 			// all real files (project-root-wins would otherwise make it
 			// silently override everything).
-			if prefix != "" && strings.HasPrefix(modelLower, prefix) {
+			if prefix != "" && strings.HasPrefix(bareLower, prefix) {
 				return true, true
 			}
 		}
@@ -288,7 +318,7 @@ func LoadModelContext(modelName string) string {
 	// Across directories, the first directory to claim a match (the
 	// highest-priority one) wins — preserves the original first-match-wins
 	// precedence rule.
-	var matched []string
+	var matched string
 	for _, dir := range searchDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -322,28 +352,54 @@ func LoadModelContext(modelName string) string {
 			}
 		}
 		if exactPath != "" {
-			matched = append(matched, exactPath)
+			matched = exactPath
 			break // higher-priority dir already claimed; stop.
 		}
 		if wildcardPath != "" {
-			matched = append(matched, wildcardPath)
+			matched = wildcardPath
 			break
 		}
 	}
 
-	if len(matched) == 0 {
-		// No disk-based file found — fall back to the embedded model config
-		// (e.g. deepseek-v4-flash.OCODE.md bundled via //go:embed in main.go).
-		return loadBundledModelContext(modelName)
+	if matched != "" {
+		// A disk-based file matched. Report its (absolute) path even if it is
+		// briefly unreadable, and do NOT fall back to the embedded config —
+		// the on-disk file is the authoritative source for this model.
+		res.Kind = "file"
+		if abs, err := filepath.Abs(matched); err == nil {
+			res.Path = abs
+		} else {
+			res.Path = matched
+		}
+		if content, ok := readContextFile(matched); ok {
+			// Match the framing the original LoadModelContext produced so
+			// callers that only read .Content see identical output.
+			res.Content = "\n--- " + filepath.Base(matched) + " ---\n" + content + "\n"
+		}
+		return res
 	}
 
-	var context string
-	for _, filePath := range matched {
-		// Use readContextFile for git-aware HEAD-vs-working-tree logic,
-		// consistent with how AGENTS.md, CLAUDE.md, and OCODE.md are loaded.
-		if content, ok := readContextFile(filePath); ok {
-			context += "\n--- " + filepath.Base(filePath) + " ---\n" + content + "\n"
-		}
+	// No disk-based file found — fall back to the embedded model config
+	// (e.g. deepseek-v4-flash.OCODE.md bundled via //go:embed in main.go).
+	// Use the bare (provider-stripped, variant-stripped) id for the embedded
+	// lookup so "opencode/muse-spark-1.2:free" still finds the embedded
+	// "muse-spark-1.2.OCODE.md" baked into the binary.
+	if bundled := loadBundledModelContext(bareLower); bundled != "" {
+		res.Content = bundled
+		res.Kind = "embedded"
+		res.Path = bareLower + ".OCODE.md"
 	}
-	return context
+	return res
+}
+
+// LoadModelContext loads model-specific OCODE.md files from the project root,
+// .opencode/ directory, and global config directory (~/.config/opencode/).
+// Files must match the pattern {MODEL_NAME}.OCODE.md (case-insensitive).
+// When the active model matches the stem, the file content is included.
+// Uses the same git-aware HEAD-vs-working-tree logic as readContextFile.
+//
+// It returns only the concatenated context content; for the source of the
+// loaded context (disk path vs embedded fallback) use LoadModelContextWithSource.
+func LoadModelContext(modelName string) string {
+	return LoadModelContextWithSource(modelName).Content
 }

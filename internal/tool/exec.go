@@ -112,7 +112,7 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 	if tcID != "" {
 		store := snapshot.FromContext(ctx)
 		for _, p := range destructiveBashBackupPaths(params.Command) {
-			safe, err := confinedPath(p)
+			safe, err := confinedPath(ctx, p)
 			if err != nil {
 				continue // outside the allowed scope — not ours to back up
 			}

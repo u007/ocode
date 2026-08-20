@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import { Loader2, Settings2 } from "lucide-react";
@@ -38,6 +38,8 @@ interface FileEditorProps {
   onReloadFromDisk?: () => void;
   onDismissExternalChange?: () => void;
 }
+
+import { memo } from "react";
 
 // Map file extensions to Monaco language identifiers.
 function extensionToLanguage(filePath: string): string {
@@ -91,7 +93,7 @@ function isModifiedHunk(hunk: Hunk): boolean {
   return hunk.lines.some((l: DiffLine) => l.type === "del") && hunk.lines.some((l: DiffLine) => l.type === "add");
 }
 
-export default function FileEditor({
+function FileEditorImpl({
   path,
   content,
   language,
@@ -120,6 +122,60 @@ export default function FileEditor({
   // Refs for diff decoration cleanup
   const decorationIdsRef = useRef<string[]>([]);
   const viewZoneIdsRef = useRef<string[]>([]);
+
+  // ── Stable callback refs ──
+  // The parent recreates onChange / onSelectionChange on every render (App.tsx
+  // inlines `(v) => handleEditorChange(id, v)`). If we pass those identities
+  // straight through to Monaco, the @monaco-editor/react wrapper tears down
+  // and re-creates its onDidChangeModelContent listener on every keystroke.
+  // That shows up as a stutter when typing over a selection (selection
+  // replacement fires content + selection events in quick succession). Keep a
+  // stable caller that forwards through a ref.
+  const onChangeRef = useRef(onChange);
+  const onSelectionChangeRef = useRef(onSelectionChange);
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
+  useEffect(() => {
+    onSelectionChangeRef.current = onSelectionChange;
+  }, [onSelectionChange]);
+
+  const stableOnChange = useCallback((val: string | undefined) => {
+    onChangeRef.current?.(val || "");
+  }, []);
+
+  // ── Memoized editor options ──
+  // Building this object inline makes it a new reference every render, which
+  // drives Monaco's `updateOptions` and contributes to jank on the typing
+  // hot path. Memoize so options only change when an actual setting does.
+  const editorOptions = useMemo<editor.IStandaloneEditorConstructionOptions>(
+    () => ({
+      readOnly,
+      fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', 'Menlo', monospace",
+      scrollBeyondLastLine: false,
+      insertSpaces: true,
+      renderWhitespace: "selection",
+      bracketPairColorization: { enabled: true },
+      autoClosingBrackets: "always",
+      autoClosingQuotes: "always",
+      formatOnPaste: true,
+      smoothScrolling: true,
+      cursorBlinking: "smooth",
+      cursorSmoothCaretAnimation: "on",
+      padding: { top: 8 },
+      suggest: {
+        showKeywords: true,
+        showSnippets: true,
+      },
+      multiCursorModifier: "alt",
+      selectionClipboard: true,
+      // Persisted settings override defaults — intentionally spread last so a
+      // user's saved fontSize/tabSize etc. win without recreating the object
+      // when `persistedSettings` hasn't changed.
+      ...persistedSettings,
+    }),
+    [readOnly, persistedSettings],
+  );
 
   // Load persisted Monaco settings on mount
   useEffect(() => {
@@ -202,27 +258,34 @@ export default function FileEditor({
   }, [persistKey]);
 
   // ── Selection tracking ──
-  // Wire onDidChangeCursorSelection after mount to report non-collapsed selections.
+  // Subscribe once per mount and forward through a ref so we never tear down
+  // the Monaco listener on every parent render. The old effect depended on
+  // `onSelectionChange` identity, which the parent recreates on every
+  // keystroke (it closes over `editorTabs`), causing a dispose+resubscribe
+  // on the typing hot path — the visible stall when replacing a selection.
   useEffect(() => {
     const ed = editorRef.current;
-    if (!ed || !onSelectionChange) return;
+    if (!ed) return;
 
     const disposable = ed.onDidChangeCursorSelection((e) => {
+      const cb = onSelectionChangeRef.current;
+      if (!cb) return;
       const sel = e.selection;
-        if (sel.startLineNumber === sel.endLineNumber && sel.startColumn === sel.endColumn) {
-          // Collapsed (cursor only, no selection)
-          onSelectionChange(null);
-        } else {
-          onSelectionChange({
-            startLine: sel.startLineNumber,
-            // Monaco endLineNumber is exclusive only when the selection ends at column 1 of that line
-            endLine: sel.endColumn === 1 ? sel.endLineNumber - 1 : sel.endLineNumber,
-          });
-        }
-      });
+      if (sel.startLineNumber === sel.endLineNumber && sel.startColumn === sel.endColumn) {
+        cb(null);
+      } else {
+        cb({
+          startLine: sel.startLineNumber,
+          endLine: sel.endColumn === 1 ? sel.endLineNumber - 1 : sel.endLineNumber,
+        });
+      }
+    });
 
     return () => disposable.dispose();
-  }, [onSelectionChange]);
+    // Intentionally empty deps: we wire once after mount and read the
+    // latest callback through the ref. Adding `onSelectionChange` here would
+    // recreate the subscription on every keystroke.
+  }, []);
 
   // ── Inline diff decorations ──
   // Fetch the change diff whenever path or session changes, parse it, and apply
@@ -464,39 +527,43 @@ export default function FileEditor({
           key={path}
           language={lang}
           value={content}
-          onChange={(val) => onChange?.(val || "")}
+          onChange={stableOnChange}
           onMount={handleEditorMount}
           loading={
             <div className="flex items-center justify-center h-full">
               <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
             </div>
           }
-          options={{
-            readOnly,
-            fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', 'Menlo', monospace",
-            scrollBeyondLastLine: false,
-            insertSpaces: true,
-            renderWhitespace: "selection",
-            bracketPairColorization: { enabled: true },
-            autoClosingBrackets: "always",
-            autoClosingQuotes: "always",
-            formatOnPaste: true,
-            smoothScrolling: true,
-            cursorBlinking: "smooth",
-            cursorSmoothCaretAnimation: "on",
-            padding: { top: 8 },
-            suggest: {
-              showKeywords: true,
-              showSnippets: true,
-            },
-            multiCursorModifier: "alt",
-            selectionClipboard: true,
-            // Persisted settings override defaults
-            ...persistedSettings,
-          }}
+          options={editorOptions}
           theme={persistedTheme}
         />
       </div>
     </div>
   );
 }
+
+// Memoized outer wrapper — inactive tabs skip re-render when another tab's
+// content changes. Without this every keystroke re-renders *every* FileEditor
+// (App maps over editorTabs) and each runs `editor.getValue()` in the
+// Monaco wrapper, multiplying work by tab count. The lag is most visible
+// when replacing a selection because that fires both a content and a
+// selection event back-to-back.
+function arePropsEqual(prev: FileEditorProps, next: FileEditorProps): boolean {
+  return (
+    prev.path === next.path &&
+    prev.content === next.content &&
+    prev.language === next.language &&
+    prev.readOnly === next.readOnly &&
+    prev.session === next.session &&
+    prev.diffVersion === next.diffVersion &&
+    prev.persistKey === next.persistKey &&
+    prev.externalChange === next.externalChange &&
+    // Callbacks are forwarded through refs inside the component (stable
+    // `stableOnChange` / selection ref), so their identity is intentionally
+    // ignored here — the parent inlines `(v) => handleEditorChange(id, v)`
+    // on every render and that would otherwise defeat memoization.
+    prev.onOpenSettings === next.onOpenSettings
+  );
+}
+
+export default memo(FileEditorImpl, arePropsEqual);

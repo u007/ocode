@@ -182,6 +182,19 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
       useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
     );
 
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+      const el = scrollRef.current;
+      if (!el || el.scrollWidth <= el.clientWidth + 1) return;
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (delta === 0) return;
+      const atLeft = el.scrollLeft <= 0;
+      const atRight = el.scrollLeft + el.clientWidth >= el.scrollWidth - 1;
+      if ((delta < 0 && atLeft) || (delta > 0 && atRight)) return;
+      e.preventDefault();
+      el.scrollLeft += delta;
+    };
+
     const handleTabDragEnd = (event: DragEndEvent) => {
       const { active, over } = event;
       if (!over || active.id === over.id) return;
@@ -216,8 +229,8 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
       if (!active || !available || autoOpened.current) return;
       autoOpened.current = true;
       const saved = loadSessionTerminals(sessionId);
-      skipNextSave.current = true;
       if (saved) {
+        skipNextSave.current = true;
         bumpSeqPast(saved.terminals.map((t) => t.title));
         setTerminals(saved.terminals);
         setActiveId(
@@ -240,6 +253,48 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
       }
       saveSessionTerminals(sessionId, terminals, activeId);
     }, [sessionId, terminals, activeId]);
+
+    // Keep this session's terminal list in sync across same-origin windows.
+    // When another tab opens or closes a terminal, `saveSessionTerminals`
+    // writes to localStorage — the other tab receives a `storage` event.
+    const terminalsRef = useRef(terminals);
+    const activeIdRef = useRef(activeId);
+    useEffect(() => {
+      terminalsRef.current = terminals;
+      activeIdRef.current = activeId;
+    }, [terminals, activeId]);
+    useEffect(() => {
+      const handler = (e: StorageEvent) => {
+        if (e.key !== "ocode.ui.terminals.v1") return;
+        if (!restored.current) return;
+        const saved = loadSessionTerminals(sessionId);
+        const curTerminals = terminalsRef.current;
+        const curActive = activeIdRef.current;
+        if (!saved) {
+          if (curTerminals.length !== 0) {
+            skipNextSave.current = true;
+            setTerminals([]);
+            setActiveId("");
+          }
+          return;
+        }
+        const same =
+          saved.terminals.length === curTerminals.length &&
+          saved.terminals.every((t, i) => t.id === curTerminals[i]?.id && t.title === curTerminals[i]?.title) &&
+          saved.activeId === curActive;
+        if (same) return;
+        skipNextSave.current = true;
+        bumpSeqPast(saved.terminals.map((t) => t.title));
+        setTerminals(saved.terminals);
+        const nextActive =
+          saved.activeId && saved.terminals.some((t) => t.id === saved.activeId)
+            ? saved.activeId
+            : saved.terminals[saved.terminals.length - 1]?.id ?? "";
+        setActiveId(nextActive);
+      };
+      window.addEventListener("storage", handler);
+      return () => window.removeEventListener("storage", handler);
+    }, [sessionId]);
 
     const startRename = (t: TerminalInstance) => {
       setRenameValue(t.title);
@@ -297,7 +352,12 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
 
     return (
       <div className="flex h-full flex-col bg-zinc-900">
-        <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-zinc-700 bg-zinc-900 px-2">
+        <div
+          ref={scrollRef}
+          onWheel={handleWheel}
+          className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto overflow-y-hidden scrollbar-hide flex-nowrap min-w-0 w-full touch-pan-x overscroll-x-contain border-b border-zinc-700 bg-zinc-900 px-2"
+          style={{ WebkitOverflowScrolling: "touch" } as React.CSSProperties}
+        >
           <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleTabDragEnd}>
             <SortableContext items={terminals.map((t) => t.id)} strategy={horizontalListSortingStrategy}>
               {terminals.map((t) => (

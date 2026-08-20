@@ -171,8 +171,12 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
       // Every project keeps a "New session" tab available — even when real
       // session tabs exist, so a deep-linked session always opens *beside* a
       // New tab. Idempotent: no-op when the project already has a new- tab.
-      // Prepends so the New tab sits first; the active tab is left untouched
-      // (a deep-link tab must stay active when this fires after it).
+      // Prepends so the New tab sits first. The active tab is left untouched
+      // when it already exists (deep-link must stay active when this fires
+      // after it). When the project has real tabs but no active tab (boot
+      // with persisted tabs), keep the most-recent real tab active instead of
+      // stealing focus to the placeholder — the placeholder is visible in the
+      // bar but doesn't pop up as the foreground session.
       const list = state.tabsByProject[action.path] || [];
       if (list.some((t) => t.id.startsWith("new-"))) {
         return state;
@@ -183,12 +187,23 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         title: "New session",
         activeSubTab: "chat",
       };
+      const existingActive = state.activeTabByProject[action.path] ?? null;
+      let nextActive: string | null;
+      if (existingActive) {
+        nextActive = existingActive;
+      } else if (list.length > 0) {
+        // Project already has real sessions (restored from storage). Keep the
+        // last real tab active; don't pop the New placeholder to the front.
+        nextActive = list[list.length - 1].id;
+      } else {
+        nextActive = newTab.id;
+      }
       return {
         ...state,
         tabsByProject: { ...state.tabsByProject, [action.path]: [newTab, ...list] },
         activeTabByProject: {
           ...state.activeTabByProject,
-          [action.path]: state.activeTabByProject[action.path] ?? newTab.id,
+          [action.path]: nextActive,
         },
       };
     }
@@ -324,6 +339,71 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "RESTORE_TABS", tabsByProject: {}, activeTabByProject: {} });
     }
   }, []);
+
+  // Keep tabs in sync across same-origin windows/tabs. localStorage's
+  // `storage` event fires in every *other* browsing context when one tab
+  // writes — without this, opening or closing a chat tab in window A
+  // never appears in window B until a full reload.
+  useEffect(() => {
+    const handler = (e: StorageEvent) => {
+      if (e.key !== STORAGE_KEY) return;
+      const external = loadPersistedTabs();
+      const prev = store.state;
+      // Don't clobber state before the initial restore settled.
+      if (!prev.tabsRestored) return;
+      const mergedByProject: Record<string, Tab[]> = {};
+      const mergedActive: Record<string, string | null> = { ...prev.activeTabByProject };
+      const allProjects = new Set<string>([
+        ...Object.keys(prev.tabsByProject),
+        ...Object.keys(external.tabsByProject),
+      ]);
+      for (const path of allProjects) {
+        const local = prev.tabsByProject[path] || [];
+        const localNew = local.filter((t: Tab) => t.id.startsWith("new-"));
+        const extReal = external.tabsByProject[path] || [];
+        if (extReal.length === 0 && localNew.length === 0) continue;
+        // Real tabs come from storage; new-* tabs stay local.
+        const merged = [...extReal];
+        for (const nt of localNew) {
+          if (!merged.some((t) => t.id === nt.id)) merged.push(nt);
+        }
+        if (merged.length > 0) mergedByProject[path] = merged;
+        const extActive = external.activeTabByProject[path];
+        const localActive = prev.activeTabByProject[path] || null;
+        // Keep a local new-* active tab over the external active.
+        if (localActive && localActive.startsWith("new-") && localNew.some((t: Tab) => t.id === localActive)) {
+          mergedActive[path] = localActive;
+        } else if (extActive && merged.some((t) => t.id === extActive)) {
+          mergedActive[path] = extActive;
+        } else if (localActive && merged.some((t) => t.id === localActive)) {
+          mergedActive[path] = localActive;
+        } else {
+          mergedActive[path] = merged.length > 0 ? merged[merged.length - 1].id : null;
+          if (merged.length === 0) delete mergedActive[path];
+        }
+      }
+      // Include projects that only exist in external (new project added elsewhere)
+      for (const [path, tabs] of Object.entries(external.tabsByProject)) {
+        if (mergedByProject[path]) continue;
+        mergedByProject[path] = tabs;
+        mergedActive[path] = external.activeTabByProject[path] ?? tabs[tabs.length - 1]?.id ?? null;
+      }
+      // Remove projects that were deleted externally (no real nor new tabs)
+      for (const path of Object.keys(mergedByProject)) {
+        if (mergedByProject[path].length === 0) {
+          delete mergedByProject[path];
+          delete mergedActive[path];
+        }
+      }
+      const prevStr = JSON.stringify({ tbp: prev.tabsByProject, atb: prev.activeTabByProject });
+      const nextStr = JSON.stringify({ tbp: mergedByProject, atb: mergedActive });
+      if (prevStr !== nextStr) {
+        store.setState((s) => ({ ...s, tabsByProject: mergedByProject, activeTabByProject: mergedActive }));
+      }
+    };
+    window.addEventListener("storage", handler);
+    return () => window.removeEventListener("storage", handler);
+  }, [store]);
 
   const refreshProjects = useCallback(async () => {
     dispatch({ type: "SET_LOADING", loading: true });
@@ -545,8 +625,43 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     if (!sawLoading.current || bootAutoSelect.current.ran) return;
     bootAutoSelect.current.ran = true;
     if (state.activeProject) return; // user already picked one — don't override
+    const persistedPaths = Object.keys(store.state.tabsByProject);
+    const hasPersistedTabs = persistedPaths.length > 0;
     (async () => {
       try {
+        // If the user already has persisted session tabs, restore the project
+        // that owns them instead of auto-switching to the server's cwd project.
+        // Auto-switching to cwd steals focus to a different project's New tab
+        // and is perceived as a random popup on boot. Only the cwd fallback
+        // runs on a fresh install (no persisted tabs).
+        if (hasPersistedTabs) {
+          if (activeProjectRef.current) return;
+          await refreshProjects();
+          if (activeProjectRef.current) return;
+          const fresh = await api.listProjects();
+          // Prefer the project that owns the most-recent active tab, else the
+          // first persisted path that still exists in the project list.
+          const persistedActive = store.state.activeTabByProject;
+          let targetPath: string | null = null;
+          for (const [path, tabId] of Object.entries(persistedActive)) {
+            if (tabId && persistedPaths.includes(path) && fresh.some((p) => p.path === path)) {
+              targetPath = path;
+              break;
+            }
+          }
+          if (!targetPath) {
+            targetPath = persistedPaths.find((p) => fresh.some((fp) => fp.path === p)) ?? null;
+          }
+          if (targetPath) {
+            const match = fresh.find((p) => p.path === targetPath);
+            if (match) {
+              if (activeProjectRef.current) return;
+              selectProject(match);
+              return;
+            }
+          }
+          // Persisted project no longer exists (deleted) — fall through to cwd.
+        }
         const res = await api.getCurrentProject();
         const proj = res?.project;
         if (!proj) return;
@@ -554,7 +669,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         if (activeProjectRef.current) return;
         // Refresh so the sidebar shows the project (the server may have just
         // auto-added it), then select the freshest copy.
-        await refreshProjects();
+        if (!hasPersistedTabs) await refreshProjects();
         if (activeProjectRef.current) return;
         const fresh = await api.listProjects();
         const match = fresh.find((p) => p.path === proj.path);

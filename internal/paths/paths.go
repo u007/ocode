@@ -18,6 +18,43 @@ import (
 // AppName is the directory name used under the platform data root.
 const AppName = "opencode"
 
+// OcodeAppName is the ocode-specific directory name for ocode-only state
+// (profile sidecars, window-state) that must not pollute the shared
+// opencode namespace.
+const OcodeAppName = "ocode"
+
+// OcodeGlobalDataDir returns the ocode-specific global data dir:
+//   macOS: ~/.local/share/ocode
+//   Linux: $XDG_DATA_HOME/ocode or ~/.local/share/ocode
+//   Windows: %LOCALAPPDATA%/ocode
+func OcodeGlobalDataDir() (string, error) {
+	if runtime.GOOS == "darwin" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return ensureDir(filepath.Join(home, ".local", "share", OcodeAppName))
+	}
+	if runtime.GOOS == "windows" {
+		if local := os.Getenv("LOCALAPPDATA"); local != "" {
+			return ensureDir(filepath.Join(local, OcodeAppName))
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return ensureDir(filepath.Join(home, "AppData", "Local", OcodeAppName))
+	}
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return ensureDir(filepath.Join(xdg, OcodeAppName))
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return ensureDir(filepath.Join(home, ".local", "share", OcodeAppName))
+}
+
 // gitToplevelCache memoizes `git rev-parse --show-toplevel` per working dir so
 // repeated slug computations don't re-spawn git.
 var gitToplevelMu sync.Mutex

@@ -23,6 +23,7 @@ import AssetsPanel from "./components/Assets/AssetsPanel";
 import CronPanel from "./components/Cron/CronPanel";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import TopTabs from "./components/Layout/TopTabs";
+import { ProfileSwitcher } from "./components/ProfileSwitcher";
 import SettingsPanel from "./components/Settings/SettingsPanel";
 import EditorTabBar from "./components/Layout/EditorTabBar";
 import ProjectSidebar from "./components/Layout/ProjectSidebar";
@@ -126,6 +127,11 @@ function HomeApp() {
   const [activeView, setActiveView] = useState<
     "files" | "git" | "cron" | "assets" | "sessions" | "settings"
   >("sessions");
+  useEffect(() => {
+    const h = () => setActiveView("settings")
+    window.addEventListener("ocode:open-settings-profiles", h)
+    return () => window.removeEventListener("ocode:open-settings-profiles", h)
+  }, [])
   const {
     editorTabs,
     activeEditorTabId,
@@ -464,7 +470,12 @@ function HomeApp() {
         <main className="flex flex-1 flex-col overflow-hidden">
           {/* Tabs context wraps header triggers + content panels */}
           <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)} className="flex flex-col flex-1 overflow-hidden">
-            <TopTabs activeTab={activeView} onTabSelect={(v) => setActiveView(v as typeof activeView)} />
+            <div className="flex items-center justify-between gap-2 border-b pr-2">
+              <div className="flex-1 min-w-0">
+                <TopTabs activeTab={activeView} onTabSelect={(v) => setActiveView(v as typeof activeView)} />
+              </div>
+              <ProfileSwitcher />
+            </div>
 
             <div className="flex-1 overflow-hidden flex flex-col pb-2">
               <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0 flex flex-col">

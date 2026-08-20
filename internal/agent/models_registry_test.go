@@ -240,6 +240,13 @@ func TestProviderModelsOpenRouterBare(t *testing.T) {
 	}
 }
 
+func TestProviderModelsOrcaRouterIncludesAuto(t *testing.T) {
+	got := providerModelsFromRegistry("orcarouter", false)
+	if !containsString(got, "auto") {
+		t.Fatalf("providerModelsFromRegistry(orcarouter) = %v, want documented auto model", got)
+	}
+}
+
 // ── Registry freshness / refresh tests ─────────────────────────────────────
 
 // withSandboxedModelsCache redirects the models.json cache, its lock file, and

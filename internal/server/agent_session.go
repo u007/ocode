@@ -3,11 +3,13 @@ package server
 import (
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -65,15 +67,33 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		return nil, "model", fmt.Errorf("no model configured")
 	}
 
+	// Resolve effective profile per-session when windowId is bound, otherwise
+	// fall back to env > window-state global (v1 global fallback).
+	effCfg := h.cfg
+	var prof string
+	if entry := h.sessions.Lookup(sessionID); entry != nil && entry.WindowID != "" {
+		if v := os.Getenv("OCODE_PROFILE"); v != "" {
+			prof = v
+		} else {
+			prof = h.getWindowProfile(entry.WindowID)
+		}
+	} else {
+		prof = h.globalEffectiveProfile()
+	}
+	if prof != "" {
+		if cfg, _, err := config.LoadEffectiveForProfile(prof); err == nil {
+			effCfg = cfg
+		}
+	}
 	// Stage "model": LLM client + agent shell.
 	h.publishBootstrapStage(sessionID, "model")
-	client := agent.NewClient(h.cfg, model)
+	client := agent.NewClient(effCfg, model)
 	if client == nil {
 		return nil, "model", fmt.Errorf("failed to create LLM client")
 	}
 	lspMgr := h.lspManagerFor(projectRoot)
-	tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
-	ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
+	tools := tool.InitBuiltinTools(lspMgr, effCfg, h.scheduler)
+	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
 	ag.SetSessionID(sessionID)
 	// The agent's workdir comes from the registry entry's project root, not
 	// the process cwd — multi-project sessions run against their own repo
@@ -83,9 +103,17 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		ag.SetWorkDir(projectRoot)
 	}
 
+	// Wire secret redaction (tier-1 regex hook + tier-2 LLM scanner) from the
+	// effective config, mirroring the TUI. This makes the Security & Redaction
+	// settings (including a local LM Studio / local-model scanner) take effect
+	// on the web/desktop server, not just the TUI.
+	if effCfg != nil && effCfg.Ocode.Security.Redaction.Enabled {
+		h.applyRedactionToAgent(ag, effCfg.Ocode.Security.Redaction)
+	}
+
 	// Stage "tools": external/plugin tools.
 	h.publishBootstrapStage(sessionID, "tools")
-	ag.LoadExternalTools(h.cfg)
+	ag.LoadExternalTools(effCfg)
 
 	// Stage "mcp": MCP tools with a bounded wait. Stragglers are dropped with
 	// a warning event rather than stalling the bootstrap.

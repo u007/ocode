@@ -112,6 +112,7 @@ type fileNode struct {
 type filesModel struct {
 	workDir              string
 	nodes                []fileNode
+	nodesErr             error
 	cursor               int
 	preview              viewport.Model
 	allPaths             []string
@@ -207,16 +208,16 @@ func newFilesModel(workDir string) filesModel {
 	m.preview.SoftWrap = true
 	m.preview.LeftGutterFunc = diffLineNumbers
 	m.promptInput = textarea.New()
-	m.nodes = loadDirChildren(workDir, 0, false)
+	m.nodes, m.nodesErr = loadDirChildren(workDir, 0, false)
 	m.refreshGitStatus()
 	m.tree = NewListBox(0, 0)
 	return m
 }
 
-func loadDirChildren(dir string, depth int, showHidden bool) []fileNode {
+func loadDirChildren(dir string, depth int, showHidden bool) ([]fileNode, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	nodes := make([]fileNode, 0, len(entries))
 	for _, e := range entries {
@@ -234,7 +235,7 @@ func loadDirChildren(dir string, depth int, showHidden bool) []fileNode {
 			depth:   depth,
 		})
 	}
-	return nodes
+	return nodes, nil
 }
 
 const (
@@ -751,7 +752,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 	case "ctrl+t":
 		return m, m.refreshPreviewCmd()
 	case "ctrl+u":
-		m.nodes = loadDirChildren(m.workDir, 0, m.showHidden)
+		m.nodes, m.nodesErr = loadDirChildren(m.workDir, 0, m.showHidden)
 		m.cursor = 0
 		m.previewLoading = false
 		m.previewHasMore = false
@@ -778,7 +779,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		m.statusMsg = "content search: type query, Tab to switch filter, Enter to search"
 	case "ctrl+h":
 		m.showHidden = !m.showHidden
-		m.nodes = loadDirChildren(m.workDir, 0, m.showHidden)
+		m.nodes, m.nodesErr = loadDirChildren(m.workDir, 0, m.showHidden)
 		m.cursor = 0
 		m.previewLoading = false
 		m.previewHasMore = false
@@ -1227,7 +1228,7 @@ func (m *filesModel) toggleDir(idx int) {
 		m.nodes = append(m.nodes[:idx+1], m.nodes[end:]...)
 		n.expanded = false
 	} else {
-		children := loadDirChildren(n.path, n.depth+1, m.showHidden)
+		children, _ := loadDirChildren(n.path, n.depth+1, m.showHidden)
 		newNodes := make([]fileNode, 0, len(m.nodes)+len(children))
 		newNodes = append(newNodes, m.nodes[:idx+1]...)
 		newNodes = append(newNodes, children...)
@@ -1472,7 +1473,7 @@ func (m *filesModel) buildAllPaths() {
 }
 
 func (m *filesModel) navigateTo(relPath string) {
-	m.nodes = loadDirChildren(m.workDir, 0, m.showHidden)
+	m.nodes, m.nodesErr = loadDirChildren(m.workDir, 0, m.showHidden)
 	parts := strings.Split(relPath, string(filepath.Separator))
 	current := m.workDir
 	for i, part := range parts {
@@ -1546,7 +1547,7 @@ func (m *filesModel) rebuildTreeKeeping(path string) {
 	if err != nil || strings.HasPrefix(rel, "..") {
 		rel = ""
 	}
-	m.nodes = loadDirChildren(m.workDir, 0, m.showHidden)
+	m.nodes, m.nodesErr = loadDirChildren(m.workDir, 0, m.showHidden)
 	m.refreshGitStatus()
 	if rel != "" && rel != "." {
 		m.navigateTo(rel)
@@ -2210,6 +2211,21 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	var treeContentFull string
 	if m.mode == filesModeFuzzy {
 		treeContentFull = m.fuzzyPopupView(treeW-2, h-4, styles)
+	} else if len(m.nodes) == 0 {
+		var header string
+		if len(headerRows) > 0 {
+			header = strings.Join(headerRows, "\n") + "\n"
+		}
+		emptyMsg := "Empty directory"
+		if m.workDir == "" {
+			emptyMsg = "No directory open"
+		} else if m.nodesErr != nil {
+			emptyMsg = "Cannot read: " + m.workDir
+		} else if !m.showHidden {
+			emptyMsg = "Empty directory — press . for hidden"
+		}
+		body := lipgloss.NewStyle().Width(treeContentWidth).Height(totalTreeHeight).Align(lipgloss.Center, lipgloss.Center).Render(styles.Hint.Render(emptyMsg))
+		treeContentFull = header + body
 	} else {
 		treeContentFull = m.tree.Render()
 	}

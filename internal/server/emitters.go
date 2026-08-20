@@ -240,37 +240,39 @@ func (h *Handler) startTerminalProcessesEmitter() {
 // call *on the same *process.Process value*, so process handles are cached
 // across ticks (a fresh NewProcess each tick would always read 0%); the cache
 // is pruned each tick to drop pids that exited.
+//
+// gatherProcessStats is the single helper for walking a snapshot of terminal
+// entries. Both the emitter (long-lived cache) and the REST handler (throwaway
+// cache) share it so sumProcessTree fixes stay in one place. touched is the
+// per-tick/per-request dedup for pid reuse and the cycle guard — it must be
+// shared across all terminals in a single snapshot to avoid double-counting.
+func gatherProcessStats(entries map[string]terminalProcEntry, cache map[int32]*process.Process, touched map[int32]bool) []terminalProcessStat {
+	stats := make([]terminalProcessStat, 0, len(entries))
+	for id, entry := range entries {
+		cpu, mem := sumProcessTree(entry.PID, cache, touched)
+		stats = append(stats, terminalProcessStat{ID: id, PID: entry.PID, CPUPercent: cpu, MemBytes: mem})
+	}
+	return stats
+}
+
 func (h *Handler) terminalProcessesEmitterLoop() {
 	ticker := time.NewTicker(terminalProcsPollInterval)
 	defer ticker.Stop()
 	cache := make(map[int32]*process.Process)
 	idleFor := time.Duration(0)
-	for range ticker.C {
-		if h.bus.SubscriberCount() == 0 {
-			idleFor += terminalProcsPollInterval
-			if idleFor >= emitterIdleExit {
-				h.terminalProcsEmitterOn.Store(false)
-				return
-			}
-			continue
-		}
-		idleFor = 0
 
+	publish := func() {
 		entries := h.terminalProcs.snapshot()
 		if len(entries) == 0 {
-			continue
+			return
 		}
-
-		byProject := make(map[string][]terminalProcessStat, len(entries))
 		touched := make(map[int32]bool)
-		for id, entry := range entries {
-			cpu, mem := sumProcessTree(entry.PID, cache, touched)
-			byProject[entry.Project] = append(byProject[entry.Project], terminalProcessStat{
-				ID:         id,
-				PID:        entry.PID,
-				CPUPercent: cpu,
-				MemBytes:   mem,
-			})
+		stats := gatherProcessStats(entries, cache, touched)
+		byProject := make(map[string][]terminalProcessStat, len(entries))
+		for _, s := range stats {
+			// entries[s.ID] is safe: gatherProcessStats preserves every id.
+			proj := entries[s.ID].Project
+			byProject[proj] = append(byProject[proj], s)
 		}
 		for pid := range cache {
 			if !touched[pid] {
@@ -279,6 +281,36 @@ func (h *Handler) terminalProcessesEmitterLoop() {
 		}
 		for proj, stats := range byProject {
 			h.bus.Publish("terminal_processes", proj, "", stats)
+		}
+	}
+
+	// Push an immediate snapshot if a terminal is already registered when the
+	// loop starts — avoids making a freshly opened terminal wait a full tick
+	// for its first memory reading. The initial CPU% will be 0 (Percent needs
+	// one prior sample), but memory is valid and the next tick corrects CPU.
+	if h.bus.SubscriberCount() > 0 {
+		publish()
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			if h.bus.SubscriberCount() == 0 {
+				idleFor += terminalProcsPollInterval
+				if idleFor >= emitterIdleExit {
+					h.terminalProcsEmitterOn.Store(false)
+					return
+				}
+				continue
+			}
+			idleFor = 0
+			publish()
+		case <-h.terminalProcsWake:
+			if h.bus.SubscriberCount() == 0 {
+				continue
+			}
+			idleFor = 0
+			publish()
 		}
 	}
 }

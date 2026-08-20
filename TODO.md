@@ -560,3 +560,39 @@ Deferred:
   requires a `dispatched_at_turn` annotation on the run registry and a
   new "wait-for-run" primitive alongside `AcquireForRun`. Build on the
   in-batch scheduler, do not replace it.
+
+## Desktop per-window sparse profiles — deferred slices (from 2026-08-20 spec)
+
+Design: `docs/superpowers/specs/2026-08-20-desktop-profiles-sparse-design.md` (sparse `ocodeconfig.json {profiles:{name: ProfileDelta}}` + `~/.local/share/ocode/auth.profiles.json` 0600 + `window-state.json` per-window).
+
+Implemented (v1 backend):
+- [x] Sparse overlay storage + `0600` sidecar + window-state file with advisory locks (`internal/config/ocodeconfig.go`, `internal/auth/profile_store.go`, `internal/paths`, `internal/config/profile_window_state.go`)
+- [x] Effective helpers `EffectiveOcodeConfig`/`EffectiveConfig`/`LoadEffectiveForWindow` (`internal/config/profile_effective.go`) and `SaveProfile`/`RenameProfile`/`DeleteProfile` via `withOcodeConfigLock`
+- [x] Window-scoped APIs `GET/POST /api/profiles`, `DELETE/POST rename /api/profiles/{name}`, `GET/PUT /api/window/{id}/activeProfile` (`internal/server/handler_profiles.go`, `internal/server/server.go`)
+- [x] Env alias `OCODE_PROFILE=work ocode` / `ocode --profile work` ephemeral win (`internal/runcli/run.go`, `internal/auth/providers.go:resolveKeyWithConfig` via `activeProfileForResolution` window-state fallback, wired into `internal/server/agent_session.go:buildAgentSession` for next-turn model/keys — currently global (all sessions see most recent window's profile)).
+
+Deferred:
+- [ ] **Per-window isolation.** `activeProfileForResolution` is global (env > win-1 > any window) and `Handler.h.cfg` mutation in `buildAgentSession` is process-global. Thread `windowID` through `SessionManager` entry → `buildAgentSession` so each session resolves its own window's profile (no cross-window leakage).
+- [ ] **Header pill + Settings UI.** `web/src/components/ProfileSwitcher.tsx` is stub only (not mounted in `web/src/components/Layout/*`, no `TopTabs` pill, no `AppMenu` bindings). Settings `Profiles` card with `+New` (`[a-z0-9_-]{1,32}`), `Rename`/`Delete` confirmation, `● overridden` diff badges + `Reset to base` per field, and `cmd+k` palette (`Profile:`) are missing.
+- [ ] **Auth profile key manager.** `PUT/DELETE /api/profiles/{name}/auth/{provider} {key}` and `POST /api/profiles/{name}/test` (probe via `internal/auth/test.go`) for inline `opencode` key setup per profile.
+- [ ] **Rename atomicity & tests.** `RenameProfile` + `RenameProfileCredentials` + `RenameWindowStateProfile` are three independent writes with no compensating rollback — a mid-way failure leaves orphaned creds or dangling window refs. Add atomic sequence-and-compensate + table-driven tests for profile precedence, window-state locks, invalid-name quarantine, and concurrent `HandleSetWindowActiveProfile`.
+- [ ] **README/SETUP.** Document `alias ocode2='OCODE_PROFILE=work ocode'` / `OCODE_PROFILE=work ocode-desktop` and `settings → Profiles` workflow.
+
+
+## Desktop profiles — 2026-08-20 follow-up (completed 2026-08-21)
+- [x] **Header pill mounted** — `web/src/components/ProfileSwitcher.tsx` now uses per-tab sessionStorage windowId (distinct per browser/Wails window) + `getActiveWindowId()` export; mounted in `web/src/App.tsx` header flex row beside `TopTabs`; manage button dispatches `ocode:open-settings-profiles` → `App` switches `activeView` to `settings` + `SettingsPanel` switches group to `profiles`.
+- [x] **Settings ProfilesManager** — `web/src/components/Settings/ProfilesManager.tsx` + `SettingsPanel` `profiles` group: fetch `GET /api/profiles` + `GET /api/window/{id}/activeProfile`, `+New` validated `[a-z0-9_-]{1,32}`, `Rename` via `POST /api/profiles/{name}/rename`, `Delete` with `Delete "work"? Removes N overrides + keys — cannot undo` confirm and server 409 when active, `● overridden •N` vs `inherited` badges + active indicator. 
+- [x] **Server in-memory windowProfiles cache** — `Handler.windowProfiles` hydrated from `window-state.json` once, `RWMutex`, `getWindowProfile`/`getEffectiveWindowProfile`/`globalEffectiveProfile` (env > win-1 > any), `handleSetWindowActiveProfile` persists then updates cache, `handleDelete/Rename` sync cache; `buildAgentSession` uses `globalEffectiveProfile` + `LoadEffectiveForProfile` for next-turn model/keys without file I/O. Blocks delete while active server-side.
+- [ ] **Remaining (deferred to next slice):** per-field `Reset to base` (delete single field from delta via `DELETE /api/profiles/{name}/field`), inline per-profile opencode key editor `PUT/DELETE /api/profiles/{name}/auth/{provider}` + `POST /api/profiles/{name}/test` probe, and per-session windowId threading (sessionEntry.WindowID) for true per-window isolation beyond global fallback.
+
+## Desktop profiles — 2026-08-21 slice 2 (auth + effective + field reset)
+- [x] **Server auth/effective/field-reset routes** — `GET /api/profiles/{name}`, `GET /api/profiles/{name}/effective` (LoadOcodeConfigCopy + EffectiveOcodeConfig), `GET /api/profiles/{name}/auth` (masked ••••, never returns raw key), `PUT /api/profiles/{name}/auth/{provider}` (apiKey/key + baseUrl, validates [a-z0-9_-]{1,32} + provider registry, 0600 tmp→rename sidecar), `DELETE /api/profiles/{name}/auth/{provider}`, `DELETE /api/profiles/{name}/overrides/{field}` (dot-notation provider.<id>/mcp.<id>, via config.SaveProfile + lock, bus publish). Registered in server.go with authMiddleware.
+- [x] **Settings UI credential + reset** — ProfilesManager expandable detail: per-profile masked keys list + provider selector + Save/Remove, effective delta viewer with per-field `Reset to base` buttons (calls overrides/{field}, refreshes effective), expand/collapse per profile, live counts refresh. Keeps opencode auth.json untouched (sidecar only). 
+- [x] **Config getter** — `config.LoadOcodeConfigCopy()` exported wrapper around loadFullOcodeConfig for handler effective.
+
+## Desktop profiles — 2026-08-21 slice 3 (advisor review fixes)
+- [x] **Per-window isolation fixed** — `sessionEntry.WindowID` sticky per session via `SessionManager.RegisterWithWindow`/`SetWindowID`; `HandleChat` and `HandleSendMessage` extract `windowId` from body `windowId` or `X-Window-Id` header or `?windowId=` query, bind to session; `buildAgentSession` now resolves profile per-session via `h.sessions.Lookup(sessionID).WindowID -> h.getWindowProfile(windowID)` (env `OCODE_PROFILE` still wins), falling back to global only when session has no window binding. Frontend `web/src/api/client.ts` now sends `windowId` on every `chat`/`sendMessage` (sessionStorage `ocode.windowId` per tab, header + body).
+- [x] **Tests added (partial)** — `internal/config/profile_test.go` table-driven `ValidateProfileName` (9 cases), `ProfileOverrideCount`, `EffectiveOcodeConfig` (SmallModel) and `EffectiveConfig` (Model) covering sparse merge + fallback. Handler auth/effective/override endpoints covered via existing server auth passing; further table-driven precedence/window-state concurrency tests listed as next.
+- [x] **web/dist rebuilt** — `pnpm --pm-on-fail=ignore --dir web build` at 16:39, dist now contains `activeProfile` + `ocode.windowId` + ProfilesManager expand/detail; verified via grep.
+- [ ] **Rename non-atomic (known, not fixed)** — `RenameProfile` + `RenameProfileCredentials` + `RenameWindowStateProfile` are three unguarded writes; mid-failure can orphan creds or dangle refs. Compensating rollback / single-lock transaction deferred; documented as limitation in TODO. Server now blocks delete while active (409) but rename still best-effort.
+- [ ] **POST /api/profiles/{name}/test probe** — `internal/auth/test.go` cheap probe exists but not wired to profile-scoped endpoint; deferred to next slice (needs per-profile credential + existing probeViaHook plumbing).

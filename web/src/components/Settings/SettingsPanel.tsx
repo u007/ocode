@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import ModelDefaultsForm from "./ModelDefaultsForm";
 import CommitMsgForm from "./CommitMsgForm";
 import CompactForm from "./CompactForm";
@@ -18,8 +18,10 @@ import OcodePluginsForm from "./OcodePluginsForm";
 import ThemeForm from "./ThemeForm";
 import OpencodeMcpForm from "./OpencodeMcpForm";
 import OpencodeReadOnlyForm from "./OpencodeReadOnlyForm";
+import ProfilesManager from "./ProfilesManager";
 
 export type SettingsGroupId =
+  | "profiles"
   | "model-defaults"
   | "commit-msg"
   | "compact"
@@ -47,6 +49,7 @@ interface GroupDef {
 }
 
 const OCODE_GROUPS: GroupDef[] = [
+  { id: "profiles", label: "Profiles" },
   { id: "model-defaults", label: "Model Defaults & Recap" },
   { id: "commit-msg", label: "Commit Message" },
   { id: "compact", label: "Compact" },
@@ -77,6 +80,8 @@ const OPENCODE_GROUPS: GroupDef[] = [
 // so each task's diff is a localized one-case addition.
 function renderGroup(id: SettingsGroupId) {
   switch (id) {
+    case "profiles":
+      return <ProfilesManager />;
     case "model-defaults":
       return <ModelDefaultsForm />;
     case "commit-msg":
@@ -174,6 +179,11 @@ function NavSection({
 
 export default function SettingsPanel() {
   const [active, setActive] = useState<SettingsGroupId>("model-defaults");
+  useEffect(() => {
+    const h = () => setActive("profiles")
+    window.addEventListener("ocode:open-settings-profiles", h)
+    return () => window.removeEventListener("ocode:open-settings-profiles", h)
+  }, [])
 
   return (
     <div className="flex flex-1 overflow-hidden bg-zinc-900">

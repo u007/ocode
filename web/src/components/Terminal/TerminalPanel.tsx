@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { apiPath, authHeaders, authToken } from "@/api/client";
 import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
@@ -147,6 +148,14 @@ export default function TerminalPanel({
     const serialize = new SerializeAddon();
     term.loadAddon(serialize);
     term.open(el);
+    // Try WebGL renderer — GPU-accelerated, much lower memory than the DOM
+    // renderer for large scrollback buffers. Falls back to DOM if WebGL is
+    // unavailable (e.g. headless, offscreen, or unsupported browser).
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => { webgl.dispose(); });
+      term.loadAddon(webgl);
+    } catch { /* fall back to DOM renderer */ }
     termRef.current = term;
     fitRef.current = fit;
     serializeRef.current = serialize;
@@ -171,13 +180,36 @@ export default function TerminalPanel({
       term.write("\r\n\x1b[2m── restored, shell disconnected ──\x1b[0m\r\n");
     }
 
-    const saveBuffer = () => {
+    // Defer serialization to avoid blocking the main thread. serialize() can
+    // be CPU-heavy for large scrollback buffers, so we use requestIdleCallback
+    // (with setTimeout fallback) for periodic saves. On pagehide/visibilitychange
+    // we save immediately — the browser will complete the task before
+    // unloading. The idle handle is stored so cleanup can correctly cancel it.
+    let saveIdleId: number | null = null;
+    const scheduleSave = () => {
+      if (saveIdleId !== null) return; // already scheduled
+      if (typeof requestIdleCallback === "function") {
+        saveIdleId = requestIdleCallback(
+          () => {
+            saveIdleId = null;
+            doSave();
+          },
+          { timeout: 5000 },
+        ) as unknown as number;
+      } else {
+        saveIdleId = setTimeout(() => {
+          saveIdleId = null;
+          doSave();
+        }, 0) as unknown as number;
+      }
+    };
+    const doSave = () => {
       const s = serializeRef.current;
       if (!s) return;
       saveTerminalBuffer(id, s.serialize({ scrollback: scrollbackLines }));
     };
-    const saveInterval = setInterval(saveBuffer, 5000);
-    const onPageHide = () => saveBuffer();
+    const saveInterval = setInterval(scheduleSave, 30000);
+    const onPageHide = () => doSave();
     document.addEventListener("visibilitychange", onPageHide);
     window.addEventListener("pagehide", onPageHide);
 
@@ -202,12 +234,38 @@ export default function TerminalPanel({
 
     const decoder = new TextDecoder();
     sock.onopen = () => fitAndResize.current();
+    // Chunk large binary writes to prevent memory spikes from one-shot decode+write.
+    const CHUNK_THRESHOLD = 64 * 1024; // 64KB
+    const CHUNK_SIZE = 16 * 1024;      // 16KB per chunk
+    const pendingChunks: string[] = [];
+    let chunkRafId = 0;
+    const flushChunks = () => {
+      chunkRafId = 0;
+      // Write up to 4 chunks per frame to stay under 16ms.
+      for (let i = 0; i < 4 && pendingChunks.length > 0; i++) {
+        term.write(pendingChunks.shift()!);
+      }
+      if (pendingChunks.length > 0) {
+        chunkRafId = requestAnimationFrame(flushChunks);
+      }
+    };
     sock.onmessage = (ev) => {
       if (typeof ev.data === "string") {
         term.write(ev.data);
         return;
       }
-      term.write(decoder.decode(new Uint8Array(ev.data as ArrayBuffer), { stream: true }));
+      const decoded = decoder.decode(new Uint8Array(ev.data as ArrayBuffer), { stream: true });
+      if (decoded.length < CHUNK_THRESHOLD && pendingChunks.length === 0) {
+        term.write(decoded);
+        return;
+      }
+      // Split into chunks and schedule incremental writes.
+      for (let i = 0; i < decoded.length; i += CHUNK_SIZE) {
+        pendingChunks.push(decoded.slice(i, i + CHUNK_SIZE));
+      }
+      if (chunkRafId === 0) {
+        chunkRafId = requestAnimationFrame(flushChunks);
+      }
     };
     sock.onerror = () => {
       // The browser gives no detail on WS errors; onclose carries the code.
@@ -234,12 +292,22 @@ export default function TerminalPanel({
     observer.observe(el);
 
     return () => {
-      saveBuffer();
+      doSave();
       clearInterval(saveInterval);
+      if (saveIdleId !== null) {
+        if (typeof cancelIdleCallback === "function") {
+          cancelIdleCallback(saveIdleId as unknown as number);
+        } else {
+          clearTimeout(saveIdleId as unknown as number);
+        }
+      }
       document.removeEventListener("visibilitychange", onPageHide);
       window.removeEventListener("pagehide", onPageHide);
       observer.disconnect();
       dataSub.dispose();
+      // Cancel any pending chunk writes.
+      if (chunkRafId) cancelAnimationFrame(chunkRafId);
+      pendingChunks.length = 0;
       // Closing the socket is what kills the pty process server-side.
       sock.close();
       socketRef.current = null;

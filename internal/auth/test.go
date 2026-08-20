@@ -25,6 +25,8 @@ func TestCredential(ctx context.Context, id string) error {
 		return probeAnthropicKey(ctx, ResolveKey(id))
 	case "openrouter":
 		return probeBearer(ctx, "https://openrouter.ai/api/v1/models", ResolveKey(id))
+	case "orcarouter":
+		return probeBearer(ctx, "https://api.orcarouter.ai/v1/models", ResolveKey(id))
 	case "google":
 		k := ResolveKey(id)
 		if k == "" {

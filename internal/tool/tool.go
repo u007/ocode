@@ -180,6 +180,10 @@ func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any) []Tool {
 // TUI caches one per session) so both the manager and the tool list come
 // from a single source of truth.
 func LoadBuiltins(cfg *config.Config, svc any) ([]Tool, *lsp.Manager) {
-	lspMgr := lsp.NewManager(".")
+	shared := true
+	if cfg != nil {
+		shared = cfg.LSPShared
+	}
+	lspMgr := lsp.NewManagerWithShared(".", shared)
 	return InitBuiltinTools(lspMgr, cfg, svc), lspMgr
 }

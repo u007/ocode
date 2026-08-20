@@ -95,6 +95,22 @@ func TestLoadFromStringValidJSON(t *testing.T) {
 	}
 }
 
+func TestLoadFromStringLSPSharedLayering(t *testing.T) {
+	cfg := &Config{LSPShared: true}
+	if err := loadFromString(`{"lsp_shared":false}`, cfg); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if cfg.LSPShared {
+		t.Fatal("expected explicit lsp_shared=false to disable sharing")
+	}
+	if err := loadFromString(`{"lsp_shared":true}`, cfg); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !cfg.LSPShared {
+		t.Fatal("expected later config layer to re-enable sharing")
+	}
+}
+
 func TestMCPConfigDefaultsToEnabledAndInfersLocal(t *testing.T) {
 	cfg := &Config{
 		Tools:      make(map[string]bool),

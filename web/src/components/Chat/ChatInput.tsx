@@ -293,7 +293,7 @@ export default function ChatInput({
   };
 
   return (
-    <div 
+    <div
       className={`border-t border-zinc-700 p-4 relative transition-colors ${
         isDragging ? "bg-blue-500/10 border-blue-500" : ""
       }`}

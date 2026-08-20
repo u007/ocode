@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Gauge } from "lucide-react";
 import { eventBus } from "@/lib/eventBus";
+import { api } from "@/api/client";
 import { loadSessionTerminals } from "./terminalPersistence";
 
 interface TerminalProcessStat {
@@ -26,26 +27,67 @@ function formatBytes(bytes: number): string {
  */
 export default function ProcessesPanel({ sessionId }: { sessionId: string }) {
   const [stats, setStats] = useState<Record<string, TerminalProcessStat>>({});
-  const [titles, setTitles] = useState<Record<string, string>>({});
+  const [titles, setTitles] = useState<Record<string, string>>(() => {
+    const saved = loadSessionTerminals(sessionId);
+    if (!saved) return {};
+    return Object.fromEntries(saved.terminals.map((t) => [t.id, t.title]));
+  });
 
-  useEffect(() => {
-    const off = eventBus.on("terminal_processes", (env) => {
-      const rows = env.data as TerminalProcessStat[];
-      if (!Array.isArray(rows)) return;
+  function refreshTitles() {
+    const saved = loadSessionTerminals(sessionId);
+    if (saved) {
+      setTitles(Object.fromEntries(saved.terminals.map((t) => [t.id, t.title])));
+    }
+  }
+
+  function mergeRows(rows: TerminalProcessStat[], mode: "replace" | "merge" = "merge") {
+    // SSE envelopes are per-project, so a single envelope never represents
+    // the global live set. Replacing the global map with one project's
+    // snapshot clobbers other projects' terminals (flicker in multi-project
+    // servers). Merge per-project envelopes; only the global REST snapshot
+    // replaces the whole map. Closed terminals are hidden by the title
+    // filter (titles[s.id] !== undefined) so merged ghosts do not render.
+    if (mode === "replace") {
+      const next: Record<string, TerminalProcessStat> = {};
+      for (const row of rows) next[row.id] = row;
+      setStats(next);
+    } else {
       setStats((prev) => {
         const next = { ...prev };
         for (const row of rows) next[row.id] = row;
         return next;
       });
-      // Refresh titles from the persisted terminal list on every update — it's
-      // a single localStorage read, and picks up renames/new terminals without
-      // needing TerminalTabs to be lifted into shared state.
-      const saved = loadSessionTerminals(sessionId);
-      if (saved) {
-        setTitles(Object.fromEntries(saved.terminals.map((t) => [t.id, t.title])));
-      }
+    }
+    refreshTitles();
+  }
+
+  useEffect(() => {
+    // Sync titles immediately so rows are not filtered out while waiting for
+    // the first SSE envelope (localStorage already has the terminal list).
+    refreshTitles();
+
+    // Fetch a live snapshot so the tab shows memory instantly even if it
+    // mounted between SSE ticks or before the emitter's first tick.
+    let cancelled = false;
+    api
+      .getTerminalProcesses()
+      .then((rows) => {
+        if (cancelled || !Array.isArray(rows) || rows.length === 0) return;
+        mergeRows(rows as TerminalProcessStat[], "replace");
+      })
+      .catch(() => {
+        // Non-fatal — SSE will still populate.
+      });
+
+    const off = eventBus.on("terminal_processes", (env) => {
+      const rows = env.data as TerminalProcessStat[];
+      if (!Array.isArray(rows)) return;
+      mergeRows(rows);
     });
-    return off;
+    return () => {
+      cancelled = true;
+      off();
+    };
   }, [sessionId]);
 
   const rows = useMemo(() => {
@@ -78,7 +120,7 @@ export default function ProcessesPanel({ sessionId }: { sessionId: string }) {
             <tbody>
               {rows.map((row) => (
                 <tr key={row.id} className="border-b border-zinc-800/50 text-zinc-300">
-                  <td className="px-3 py-2">{titles[row.id]}</td>
+                  <td className="px-3 py-2">{titles[row.id] ?? row.id}</td>
                   <td className="px-3 py-2 text-zinc-500">{row.pid}</td>
                   <td
                     className={`px-3 py-2 tabular-nums ${

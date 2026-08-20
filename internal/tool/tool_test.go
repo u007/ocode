@@ -2,6 +2,7 @@ package tool
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -353,7 +354,7 @@ func TestConfinedPathAllowsConfiguredExtraRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := confinedPath(target); err != nil {
+	if _, err := confinedPath(context.Background(), target); err != nil {
 		t.Fatalf("expected path to be allowed, got error: %v", err)
 	}
 }
@@ -382,7 +383,7 @@ func TestAddExtraAllowedPath_AllowsNonexistentRootThenConfinesInsideIt(t *testin
 	if err := os.WriteFile(target, []byte("ok"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := confinedPath(target); err != nil {
+	if _, err := confinedPath(context.Background(), target); err != nil {
 		t.Fatalf("expected path under newly-added root to be allowed, got error: %v", err)
 	}
 }
@@ -632,7 +633,7 @@ func TestConfinedPathExpandsTildeToToolResults(t *testing.T) {
 	// confinedPath should accept ~/... paths that resolve into allowed roots
 	// such as the tool-results cache directory.
 	p := filepath.Join("~", ".local", "state", "opencode", "tool-results")
-	got, err := confinedPath(p)
+	got, err := confinedPath(context.Background(), p)
 	if err != nil {
 		t.Fatalf("confinedPath(%q) error: %v", p, err)
 	}

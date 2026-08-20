@@ -9,7 +9,9 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/ocr"
+	"github.com/u007/ocode/internal/redact"
 )
 
 func (h *Handler) HandleGetModel(w http.ResponseWriter, r *http.Request) {
@@ -628,6 +630,9 @@ func (h *Handler) HandleSetMaskEnabled(w http.ResponseWriter, r *http.Request) {
 	})
 	h.mu.Unlock()
 
+	// Propagate to live agent sessions so the toggle takes effect immediately.
+	h.applyRedactionToLiveSessions(h.cfg.Ocode.Security.Redaction)
+
 	writeJSON(w, http.StatusOK, map[string]bool{"enabled": req.Enabled})
 }
 
@@ -648,6 +653,9 @@ func (h *Handler) HandleSetMaskMode(w http.ResponseWriter, r *http.Request) {
 	})
 	h.mu.Unlock()
 
+	// Mode only affects scanning behaviour; re-apply so live sessions pick it up.
+	h.applyRedactionToLiveSessions(h.cfg.Ocode.Security.Redaction)
+
 	writeJSON(w, http.StatusOK, map[string]string{"mode": req.Mode})
 }
 
@@ -667,6 +675,10 @@ func (h *Handler) HandleSetMaskModel(w http.ResponseWriter, r *http.Request) {
 		rc.Model = req.Model
 	})
 	h.mu.Unlock()
+
+	// Rebuild the tier-2 scanner for live sessions (e.g. a newly chosen local
+	// LM Studio model) without restarting the server.
+	h.applyRedactionToLiveSessions(h.cfg.Ocode.Security.Redaction)
 
 	writeJSON(w, http.StatusOK, map[string]string{"model": req.Model})
 }
@@ -1384,10 +1396,108 @@ func (h *Handler) HandleSetMaskAdvanced(w http.ResponseWriter, r *http.Request) 
 	h.cfg.Ocode.Security.Redaction.CustomWords = req.CustomWords
 	h.mu.Unlock()
 
+	// Rebuild the tier-2 scanner for live sessions (e.g. a new base URL pointing
+	// at a local model server) without restarting the server.
+	h.applyRedactionToLiveSessions(h.cfg.Ocode.Security.Redaction)
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"base_url":           req.BaseURL,
 		"fail_mode":          req.FailMode,
 		"allow_remote_tier2": req.AllowRemoteTier2,
 		"custom_words":       req.CustomWords,
 	})
+}
+
+// buildRedactionScanner constructs the tier-2 LLM scanner for secret
+// redaction from a RedactionConfig, mirroring the TUI's buildLLMScanner. It
+// resolves the provider API key from the auth store and applies the local
+// model rewrites (LM Studio prefix strip, /localmodel manifest serve id).
+// Returns nil when no usable scanner can be built (no model/base_url, a
+// non-local endpoint without allow_remote_tier2, or an unresolvable local/*
+// manifest).
+func (h *Handler) buildRedactionScanner(rc config.RedactionConfig) *redact.LLMScanner {
+	baseURL := rc.BaseURL
+	model := rc.Model
+	// Auto-detect the default base URL for known local providers when a model
+	// is set but no explicit base_url was configured.
+	if baseURL == "" && model != "" {
+		if def := redact.DefaultRedactionBaseURL(model); def != "" {
+			baseURL = def
+		}
+	}
+	model = redact.NormalizeRedactionModelName(model, baseURL)
+	if baseURL == "" || model == "" {
+		return nil
+	}
+	if !rc.AllowRemoteTier2 && !redact.IsLocalEndpoint(baseURL) {
+		return nil
+	}
+
+	var apiKey string
+	if provider, _ := config.SplitProviderModel(model); provider != "" {
+		if key := auth.ResolveKey(provider); key != "" {
+			apiKey = key
+		} else if cred, ok := auth.Get(provider); ok && cred.Key != "" {
+			apiKey = cred.Key
+		}
+	}
+
+	scannerModel := redact.ScannerRequestModelName(model)
+	if strings.HasPrefix(model, "local/") {
+		man, ok := discovery.ChatManifestForHost(model)
+		if !ok {
+			// Fail closed: a local/* id with no chat manifest for this host
+			// cannot be served by the /localmodel lifecycle, so the base URL
+			// is stale or the id was hand-typed. Skip tier-2 (regex tier-1
+			// still applies).
+			return nil
+		}
+		scannerModel = man.ExpectedServeID()
+	}
+
+	return redact.NewScanner(baseURL, scannerModel, rc.AllowRemoteTier2, apiKey)
+}
+
+// applyRedactionToAgent wires the current redaction configuration into a live
+// agent: the tier-1 regex hook, the token registry, and the tier-2 LLM
+// scanner. This mirrors the TUI's syncRedactionRuntime and makes the web/
+// desktop server honour the same Security & Redaction settings the TUI does.
+func (h *Handler) applyRedactionToAgent(ag *agent.Agent, rc config.RedactionConfig) {
+	if ag == nil {
+		return
+	}
+	if !rc.Enabled {
+		ag.SetRedactionEnabled(false)
+		ag.SetRedactionRegistry(nil)
+		ag.SetRedactionHook(nil)
+		ag.SetRedactionScanner(nil)
+		return
+	}
+	reg := redact.NewRegistry(redact.NewNonce())
+	ag.SetRedactionEnabled(true)
+	ag.SetRedactionRegistry(reg)
+	ag.SetRedactionHook(redact.NetHookEnabled(reg))
+	ag.SetRedactionScanner(h.buildRedactionScanner(rc))
+}
+
+// applyRedactionToLiveSessions re-applies the redaction configuration to every
+// resident agent session so runtime changes made via the Settings UI take
+// effect without restarting the server. The h.mu map lock is only held to
+// snapshot the session ids; the per-session apply takes each as.mu.
+func (h *Handler) applyRedactionToLiveSessions(rc config.RedactionConfig) {
+	h.mu.Lock()
+	ids := make([]string, 0, len(h.agents))
+	for id := range h.agents {
+		ids = append(ids, id)
+	}
+	h.mu.Unlock()
+	for _, id := range ids {
+		as := h.lookupAgentSession(id)
+		if as == nil {
+			continue
+		}
+		as.mu.Lock()
+		h.applyRedactionToAgent(as.agent, rc)
+		as.mu.Unlock()
+	}
 }

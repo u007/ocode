@@ -319,12 +319,15 @@ type Agent struct {
 	// recoverOneOrphanedToolCall that are abandoned on timeout/cancel.
 	// Shutdown waits on it before resetting shared state (snapshotStore,
 	// changes registry) so an abandoned goroutine can't race that reset.
-	orphanRecoveryWG      sync.WaitGroup
-	memoryEnabled         bool   // whether memory prompt injection is active
-	docPromptEnabled      bool   // whether doc-first development prompt is injected
-	preloadedModelContext string // cached result of LoadModelContext, set once lazily
-	envPromptDate         string // date string used to build envPromptStr; stale = rebuild
-	envPromptStr          string // cached result of environmentPrompt()
+	orphanRecoveryWG           sync.WaitGroup
+	memoryEnabled              bool   // whether memory prompt injection is active
+	docPromptEnabled           bool   // whether doc-first development prompt is injected
+	preloadedModelContext      string // cached result of LoadModelContext, set once lazily
+	preloadedModelContextKind  string // "file" | "embedded" | "" — source of preloadedModelContext
+	preloadedModelContextPath  string // absolute file path (Kind=="file") or embedded filename (Kind=="embedded")
+	preloadedModelContextReady bool   // true once ModelContextInfo has been computed
+	envPromptDate              string // date string used to build envPromptStr; stale = rebuild
+	envPromptStr               string // cached result of environmentPrompt()
 	// pipeline, if set, runs in-process hook callbacks for tool calls and chat
 	// requests. Field is named "pipeline" (not "hooks") because the hooks package
 	// is already imported under that name.
@@ -3559,6 +3562,13 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 		toolCtx = snapshot.WithStore(toolCtx, a.snapshotStore)
 		toolCtx = snapshot.WithToolCallID(toolCtx, toolCallID)
 	}
+	// Carry the agent's project root so path-confining helpers (confinedPath)
+	// confine writes against the project, not the process working directory.
+	// Without this, absolute (full-path) writes inside the project are wrongly
+	// rejected whenever the process cwd differs from the project root, and so
+	// never reach the changes tab. An empty workDir is harmless: confinedPath
+	// falls back to os.Getwd().
+	toolCtx = tool.WithWorkDir(toolCtx, a.workDir)
 
 	var result string
 	var err error
@@ -3819,6 +3829,9 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 			a.client = client
 			a.clearEnvironmentPromptCache()
 			a.preloadedModelContext = "" // model may have changed; reload model-specific context lazily
+			a.preloadedModelContextKind = ""
+			a.preloadedModelContextPath = ""
+			a.preloadedModelContextReady = false
 			// Re-wire the tier-1 redaction hook onto the new client.
 			if a.redactionHook != nil {
 				if gc, ok := a.client.(*GenericClient); ok {
@@ -3843,6 +3856,44 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 func (a *Agent) clearEnvironmentPromptCache() {
 	a.envPromptDate = ""
 	a.envPromptStr = ""
+}
+
+// ModelContextInfo reports where the active model's model-specific context was
+// loaded from, for UI display. kind is "file" (path is the absolute file path)
+// or "embedded" (path is the embedded filename), or "" when none was found.
+// The result is computed lazily on first call and cached (alongside
+// preloadedModelContext) so repeated TUI renders do not re-read the disk.
+func (a *Agent) ModelContextInfo() (kind, path string) {
+	if a.client == nil {
+		return "", ""
+	}
+	if !a.preloadedModelContextReady {
+		res := LoadModelContextWithSource(a.client.GetModel())
+		a.preloadedModelContext = res.Content
+		a.preloadedModelContextKind = res.Kind
+		a.preloadedModelContextPath = res.Path
+		a.preloadedModelContextReady = true
+	}
+	return a.preloadedModelContextKind, a.preloadedModelContextPath
+}
+
+// ModelContextContent returns the cached model-specific prompt content for the
+// active model (empty when none). It shares the same lazy cache as
+// ModelContextInfo so repeated TUI renders do not re-read the disk. Display-only:
+// callers should never send this as an LLM message — it is already injected via
+// BasePromptMessages.
+func (a *Agent) ModelContextContent() string {
+	if a.client == nil {
+		return ""
+	}
+	if !a.preloadedModelContextReady {
+		res := LoadModelContextWithSource(a.client.GetModel())
+		a.preloadedModelContext = res.Content
+		a.preloadedModelContextKind = res.Kind
+		a.preloadedModelContextPath = res.Path
+		a.preloadedModelContextReady = true
+	}
+	return a.preloadedModelContext
 }
 
 func (a *Agent) Spec() *AgentSpec {

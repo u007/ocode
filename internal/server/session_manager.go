@@ -46,6 +46,7 @@ type SessionManager struct {
 type sessionEntry struct {
 	SessionID   string
 	ProjectRoot string
+	WindowID    string
 
 	// agent is the lazily-built in-memory agent session. Nil until the first
 	// turn; released by EvictIdle. Mirrored in Handler.agents for the legacy
@@ -105,17 +106,44 @@ func NewSessionManager(idleTimeout time.Duration, projectRoots func() []string, 
 // the binding is updated (an explicit project_path from the client wins over
 // an earlier implicit resolution). An agent that is already built is kept.
 func (m *SessionManager) Register(sessionID, projectRoot string) *sessionEntry {
+	return m.RegisterWithWindow(sessionID, projectRoot, "")
+}
+
+// RegisterWithWindow is Register that also binds a windowId for per-window
+// profile isolation. WindowID is sticky: first window wins, later calls with
+// a different non-empty windowId update it (e.g. user moved tab), empty
+// windowId leaves existing value intact.
+func (m *SessionManager) RegisterWithWindow(sessionID, projectRoot, windowID string) *sessionEntry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry, ok := m.entries[sessionID]
 	if !ok {
-		entry = &sessionEntry{SessionID: sessionID, ProjectRoot: projectRoot}
+		entry = &sessionEntry{SessionID: sessionID, ProjectRoot: projectRoot, WindowID: windowID}
 		m.entries[sessionID] = entry
-	} else if projectRoot != "" {
-		entry.ProjectRoot = projectRoot
+	} else {
+		if projectRoot != "" {
+			entry.ProjectRoot = projectRoot
+		}
+		if windowID != "" {
+			entry.WindowID = windowID
+		}
 	}
 	entry.lastActivity = time.Now()
 	return entry
+}
+
+// SetWindowID updates the window binding for an existing session. No-op if
+// session unknown or windowID empty.
+func (m *SessionManager) SetWindowID(sessionID, windowID string) {
+	if windowID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e, ok := m.entries[sessionID]; ok {
+		e.WindowID = windowID
+		e.lastActivity = time.Now()
+	}
 }
 
 // Lookup returns the registry entry for sessionID if it is already known

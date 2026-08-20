@@ -213,19 +213,82 @@ func expandTilde(p string) string {
 	return p
 }
 
-// confinedPath resolves p relative to the process working directory and
+// stripLineRef removes a trailing ":L" or ":L-M" line/range reference from a
+// path (the vim/editor convention "path:start-end"). The file-editing and
+// read tools take start_line/end_line as separate arguments, so a stray
+// ":197-224" suffix would otherwise be treated as part of the filename: the
+// open/read fails, the edit silently never happens, and it never reaches the
+// changes tab. Only the strict digit form is stripped — "path:abc" or
+// "path:1.2" is left untouched so genuinely colon-bearing filenames (and
+// Windows drive letters like "C:") are unaffected.
+func stripLineRef(p string) string {
+	colon := strings.LastIndexByte(p, ':')
+	if colon < 0 {
+		return p
+	}
+	suffix := p[colon+1:]
+	// ":199" or ":199-224"
+	if allDigits(suffix) {
+		return p[:colon]
+	}
+	if dash := strings.IndexByte(suffix, '-'); dash > 0 {
+		if allDigits(suffix[:dash]) && allDigits(suffix[dash+1:]) {
+			return p[:colon]
+		}
+	}
+	return p
+}
+
+// allDigits reports whether s is non-empty and consists only of ASCII digits.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// confinedPath resolves p against the agent's working directory (the session
+// project root, supplied via WithWorkDir in the tool-execution context) and
 // verifies that the result is within the workspace, a configured extra root,
 // a well-known temp directory, the tool-results cache, or the managed
 // repository cache. It returns the cleaned absolute path on success, or an
 // error if the path would escape all allowed roots.
-func confinedPath(p string) (string, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("could not determine working directory: %w", err)
+//
+// Relative paths are joined onto the project root, not the process working
+// directory: the process cwd is whatever directory ocode was launched from and
+// is frequently not the project root, so confining against it wrongly rejects
+// legitimate writes to absolute paths inside the project (which made full-path
+// edits silently fail and never reach the changes tab). When ctx carries no
+// workDir (non-agent callers such as ocodeconfig, and most unit tests) it
+// falls back to os.Getwd(), preserving the previous behavior.
+func confinedPath(ctx context.Context, p string) (string, error) {
+	wd := workDirFromContext(ctx)
+	if wd == "" {
+		var err error
+		wd, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("could not determine working directory: %w", err)
+		}
 	}
-	abs, err := filepath.Abs(expandTilde(p))
-	if err != nil {
-		return "", fmt.Errorf("invalid path %q: %w", p, err)
+	expanded := expandTilde(p)
+	// Tolerate a trailing ":L" / ":L-M" editor line reference (e.g. the agent
+	// emitting "path:197-224"); the dedicated start_line/end_line arguments
+	// already carry the range, so the suffix must not become part of the
+	// filename (which would make the edit fail and never reach the changes tab).
+	expanded = stripLineRef(expanded)
+	var abs string
+	if filepath.IsAbs(expanded) {
+		abs = expanded
+	} else {
+		abs = filepath.Join(wd, expanded)
+	}
+	if !filepath.IsAbs(abs) {
+		return "", fmt.Errorf("invalid path %q: could not resolve to an absolute path", p)
 	}
 	if pathscope.IsTempDir(abs) {
 		return abs, nil
@@ -329,7 +392,7 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	safe, err := confinedPath(params.Path)
+	safe, err := confinedPath(context.Background(), params.Path)
 	if err != nil {
 		return "", err
 	}
@@ -399,7 +462,7 @@ func (t ReadTool) ExecuteImage(args json.RawMessage) ([]byte, string, error) {
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, "", err
 	}
-	safe, err := confinedPath(params.Path)
+	safe, err := confinedPath(context.Background(), params.Path)
 	if err != nil {
 		return nil, "", err
 	}
@@ -512,7 +575,7 @@ func (t WriteTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 		return "", err
 	}
 
-	safe, err := confinedPath(params.Path)
+	safe, err := confinedPath(ctx, params.Path)
 	if err != nil {
 		return "", err
 	}
@@ -623,7 +686,7 @@ func (t ReplaceLinesToolImpl) ExecuteCtx(ctx context.Context, args json.RawMessa
 		return "", fmt.Errorf("end_line must be >= start_line")
 	}
 
-	safe, err := confinedPath(params.Path)
+	safe, err := confinedPath(ctx, params.Path)
 	if err != nil {
 		return "", err
 	}
@@ -712,7 +775,7 @@ func (t DeleteTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (strin
 		return "", err
 	}
 
-	safe, err := confinedPath(params.Path)
+	safe, err := confinedPath(ctx, params.Path)
 	if err != nil {
 		return "", err
 	}
@@ -778,7 +841,7 @@ func (t EditTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		return "", err
 	}
 
-	safe, err := confinedPath(params.Path)
+	safe, err := confinedPath(ctx, params.Path)
 	if err != nil {
 		return "", err
 	}
@@ -887,7 +950,7 @@ func (t MultiEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 		return "", fmt.Errorf("no edits provided")
 	}
 
-	safe, err := confinedPath(params.FilePath)
+	safe, err := confinedPath(ctx, params.FilePath)
 	if err != nil {
 		return "", err
 	}
@@ -1023,7 +1086,7 @@ func (t MultiFileEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage)
 	var fileOrder []string
 
 	for i, e := range params.Edits {
-		safe, err := confinedPath(e.Path)
+		safe, err := confinedPath(ctx, e.Path)
 		if err != nil {
 			return "", err
 		}

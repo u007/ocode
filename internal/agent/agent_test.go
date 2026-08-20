@@ -154,6 +154,33 @@ func TestNewClientParsesOpenCodeProviderModel(t *testing.T) {
 	}
 }
 
+func TestNewClientParsesOrcaRouterProviderModel(t *testing.T) {
+	t.Setenv("ORCAROUTER_API_KEY", "test-key")
+	client := NewClient(nil, "orcarouter/auto")
+	got, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected GenericClient for OrcaRouter model, got %T", client)
+	}
+	if got.Provider != "orcarouter" {
+		t.Fatalf("expected provider orcarouter, got %q", got.Provider)
+	}
+	if got.Model != "auto" {
+		t.Fatalf("expected stripped model auto, got %q", got.Model)
+	}
+	if got.BaseURL != "https://api.orcarouter.ai/v1" {
+		t.Fatalf("expected OrcaRouter base URL, got %q", got.BaseURL)
+	}
+	if got.APIKey != "test-key" {
+		t.Fatalf("expected OrcaRouter API key from environment, got %q", got.APIKey)
+	}
+	if got.requestModel() != "orcarouter/auto" {
+		t.Fatalf("expected OrcaRouter named router model, got %q", got.requestModel())
+	}
+	if routed := (&GenericClient{Provider: "orcarouter", Model: "anthropic/claude-sonnet-4.6"}).requestModel(); routed != "anthropic/claude-sonnet-4.6" {
+		t.Fatalf("expected upstream-prefixed OrcaRouter model unchanged, got %q", routed)
+	}
+}
+
 func TestStepCancellationAfterChatSkipsToolCalls(t *testing.T) {
 	var calls int32
 	tc := ToolCall{ID: "call-1", Type: "function"}
@@ -319,8 +346,8 @@ func TestNestedSubagentPermissionCallbackCascades(t *testing.T) {
 		return tc
 	}
 	client := &MockToolClient{responses: []*Message{
-		{Role: "assistant", ToolCalls: []ToolCall{mkToolCall("call-parent-task", "task", `{"prompt":"spawn nested"}`)}},
-		{Role: "assistant", ToolCalls: []ToolCall{mkToolCall("call-child-task", "task", `{"prompt":"use ask tool"}`)}},
+		{Role: "assistant", ToolCalls: []ToolCall{mkToolCall("call-parent-task", "task", `{"prompt":"spawn nested","agent":"build"}`)}},
+		{Role: "assistant", ToolCalls: []ToolCall{mkToolCall("call-child-task", "task", `{"prompt":"use ask tool","agent":"general"}`)}},
 		{Role: "assistant", ToolCalls: []ToolCall{mkToolCall("call-ask", "ask_tool", `{}`)}},
 		{Role: "assistant", Content: "nested complete"},
 		{Role: "assistant", Content: "child complete"},

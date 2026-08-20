@@ -423,26 +423,52 @@ func (t PatchTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 	tcID := snapshot.ToolCallIDFromContext(ctx)
 	store := snapshot.FromContext(ctx)
 
-	// Snapshot all affected files before applying.
-	var backedUp int
+	// Snapshot every path that the patch can touch before applying it. This
+	// includes Add File targets (Backup records an empty pre-write snapshot
+	// for a new file) and both sides of a Move to operation. Without a
+	// snapshot, the Changes tab has no source from which to discover the
+	// change, even though the file was written successfully.
+	var (
+		backedUp     int
+		restorePaths []string
+	)
+	backedUpSet := make(map[string]struct{})
 	for _, h := range hunks {
-		if h.typ == "add" {
-			continue
+		paths := []string{h.path}
+		if h.typ == "update" && h.movePath != "" {
+			paths = append(paths, h.movePath)
 		}
-		safe, err := confinedPath(h.path)
-		if err != nil {
-			if backedUp > 0 {
-				_ = store.DiscardRecent(backedUp)
+		for _, path := range paths {
+			safe, err := confinedPath(ctx, path)
+			if err != nil {
+				if backedUp > 0 {
+					_ = store.DiscardRecent(backedUp)
+				}
+				return "", err
 			}
-			return "", err
-		}
-		if err := store.Backup(safe, tcID); err != nil {
-			if backedUp > 0 {
-				_ = store.DiscardRecent(backedUp)
+			if _, seen := backedUpSet[safe]; seen {
+				continue
 			}
-			return "", fmt.Errorf("failed to back up %s: %w", safe, err)
+			backedUpSet[safe] = struct{}{}
+
+			_, statErr := os.Stat(safe)
+			if statErr != nil && !os.IsNotExist(statErr) {
+				if backedUp > 0 {
+					_ = store.DiscardRecent(backedUp)
+				}
+				return "", fmt.Errorf("failed to inspect %s: %w", safe, statErr)
+			}
+			if statErr == nil {
+				restorePaths = append(restorePaths, safe)
+			}
+			if err := store.Backup(safe, tcID); err != nil {
+				if backedUp > 0 {
+					_ = store.DiscardRecent(backedUp)
+				}
+				return "", fmt.Errorf("failed to back up %s: %w", safe, err)
+			}
+			backedUp++
 		}
-		backedUp++
 	}
 
 	var (
@@ -457,21 +483,8 @@ func (t PatchTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 			}
 		}
 		if backedUp > 0 {
-			seen := make(map[string]struct{}, backedUp)
-			for i := len(hunks) - 1; i >= 0; i-- {
-				h := hunks[i]
-				if h.typ == "add" {
-					continue
-				}
-				safe, err := confinedPath(h.path)
-				if err != nil {
-					return strings.Join(results, "\n"), fmt.Errorf("%w (rollback path resolution failed: %v)", cause, err)
-				}
-				if _, ok := seen[safe]; ok {
-					continue
-				}
-				seen[safe] = struct{}{}
-				if restoreErr := store.Restore(safe); restoreErr != nil {
+			for i := len(restorePaths) - 1; i >= 0; i-- {
+				if restoreErr := store.Restore(restorePaths[i]); restoreErr != nil {
 					return strings.Join(results, "\n"), fmt.Errorf("%w (rollback failed: %v)", cause, restoreErr)
 				}
 			}
@@ -485,13 +498,14 @@ func (t PatchTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 	for _, h := range hunks {
 		switch h.typ {
 		case "add":
-			safe, err := confinedPath(h.path)
+			safe, err := confinedPath(ctx, h.path)
 			if err != nil {
 				return rollback(err)
 			}
 			if err := os.MkdirAll(filepath.Dir(safe), 0755); err != nil {
 				return rollback(err)
 			}
+			cleanupPaths = append(cleanupPaths, safe)
 			content := h.contents
 			if !strings.HasSuffix(content, "\n") {
 				content += "\n"
@@ -499,12 +513,11 @@ func (t PatchTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 			if err := os.WriteFile(safe, []byte(content), 0644); err != nil {
 				return rollback(err)
 			}
-			cleanupPaths = append(cleanupPaths, safe)
 			writtenPaths = append(writtenPaths, safe)
 			results = append(results, "A "+h.path)
 
 		case "delete":
-			safe, err := confinedPath(h.path)
+			safe, err := confinedPath(ctx, h.path)
 			if err != nil {
 				return rollback(err)
 			}
@@ -515,7 +528,7 @@ func (t PatchTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 			results = append(results, "D "+h.path)
 
 		case "update":
-			safe, err := confinedPath(h.path)
+			safe, err := confinedPath(ctx, h.path)
 			if err != nil {
 				return rollback(err)
 			}
@@ -531,7 +544,7 @@ func (t PatchTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 			newContent := strings.Join(newLines, "\n")
 			dest := safe
 			if h.movePath != "" {
-				dest, err = confinedPath(h.movePath)
+				dest, err = confinedPath(ctx, h.movePath)
 				if err != nil {
 					return rollback(err)
 				}
@@ -541,12 +554,13 @@ func (t PatchTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 				if err := os.Remove(safe); err != nil {
 					return rollback(err)
 				}
+				cleanupPaths = append(cleanupPaths, dest)
 			}
 			if err := os.WriteFile(dest, []byte(newContent), 0644); err != nil {
 				return rollback(err)
 			}
 			if h.movePath != "" {
-				cleanupPaths = append(cleanupPaths, dest)
+				writtenPaths = append(writtenPaths, safe)
 			}
 			writtenPaths = append(writtenPaths, dest)
 			if h.movePath != "" {
@@ -558,7 +572,12 @@ func (t PatchTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 	}
 
 	if tcID != "" {
+		registered := make(map[string]struct{}, len(writtenPaths))
 		for _, p := range writtenPaths {
+			if _, seen := registered[p]; seen {
+				continue
+			}
+			registered[p] = struct{}{}
 			store.RegisterWrite(p, tcID)
 		}
 	}

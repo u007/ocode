@@ -132,6 +132,7 @@ var Providers = []Provider{
 	{ID: "opencode", Label: "OpenCode Zen", EnvVar: "OPENCODE_API_KEY"},
 	{ID: "opencode-go", Label: "OpenCode Go", EnvVar: "OPENCODE_API_KEY"},
 	{ID: "openrouter", Label: "OpenRouter", EnvVar: "OPENROUTER_API_KEY"},
+	{ID: "orcarouter", Label: "OrcaRouter", EnvVar: "ORCAROUTER_API_KEY"},
 	{ID: "zai", Label: "Z.AI", EnvVar: "ZAI_API_KEY"},
 	{ID: "zai-coding", Label: "Z.AI Coding", EnvVar: "ZAI_CODING_API_KEY"},
 	{ID: "moonshot", Label: "Moonshot", EnvVar: "MOONSHOT_API_KEY"},
@@ -189,19 +190,34 @@ func FindProvider(id string) *Provider {
 // options.apiKey > stored credential > "". Accepts a pre-loaded config to avoid
 // repeated disk reads when called in a loop (e.g. HydrateEnv).
 func resolveKeyWithConfig(p *Provider, id string, cfg *config.Config) string {
-	// 0. OPENCODE_AUTH_TOKEN env var — highest priority override. When set,
-	//    it takes precedence over all other resolution (env vars, config,
-	//    stored credentials) for every provider.
+	// 0. OPENCODE_AUTH_TOKEN env var — highest priority override.
 	if v := os.Getenv("OPENCODE_AUTH_TOKEN"); v != "" {
 		return v
 	}
-	// 1. Environment variable (highest priority — allows env to override config).
+	// 0b. Active profile via OCODE_PROFILE env or window-state fallback (win-1 first).
+	//     Desktop switches write window-state; this path makes the switch take effect
+	//     on the next turn without requiring a process env change. v1 is window-global
+	//     (all sessions see the most recent window's profile); per-window isolation
+	//     requires threading windowID through session/agent construction (follow-up).
+	activeProfile := activeProfileForResolution()
+	if activeProfile != "" {
+		if cred, ok := GetProfileCredential(activeProfile, id); ok {
+			cred = refreshIfExpiring(id, cred)
+			if cred.Kind == KindAPIKey && cred.Key != "" {
+				return cred.Key
+			}
+		}
+		if key := providerConfigAPIKeyForProfile(cfg, activeProfile, id); key != "" {
+			return key
+		}
+	}
+	// 1. Environment variable (provider-specific env override).
 	if p.EnvVar != "" {
 		if v := os.Getenv(p.EnvVar); v != "" {
 			return v
 		}
 	}
-	// 2. Config file provider.<id>.options.apiKey.
+	// 2. Config file provider.<id>.options.apiKey (base config).
 	if key := providerConfigAPIKey(cfg, id); key != "" {
 		return key
 	}
@@ -215,6 +231,63 @@ func resolveKeyWithConfig(p *Provider, id string, cfg *config.Config) string {
 	}
 	return ""
 }
+
+// ResolveKeyForProfile returns the effective key for provider id under the
+// named profile, using the provided effective config and profile store.
+func ResolveKeyForProfile(id, profile string, cfg *config.Config) string {
+	p := FindProvider(id)
+	if p == nil {
+		return ""
+	}
+	if v := os.Getenv("OPENCODE_AUTH_TOKEN"); v != "" {
+		return v
+	}
+	if profile != "" {
+		if cred, ok := GetProfileCredential(profile, id); ok {
+			cred = refreshIfExpiring(id, cred)
+			if cred.Kind == KindAPIKey && cred.Key != "" {
+				return cred.Key
+			}
+		}
+		if key := providerConfigAPIKeyForProfile(cfg, profile, id); key != "" {
+			return key
+		}
+	}
+	return resolveKeyWithConfig(p, id, cfg)
+}
+
+func providerConfigAPIKeyForProfile(cfg *config.Config, profile, id string) string {
+	if profile == "" {
+		return ""
+	}
+	// cfg may already be the effective config (merged via EffectiveConfig), in which
+	// case providerConfigAPIKey would have returned the profile value. This helper handles
+	// the base-config case by reading the profile delta directly from ocodeconfig.
+	return config.GetProfileProviderAPIKey(profile, id)
+}
+
+func activeProfileForResolution() string {
+	if v := os.Getenv("OCODE_PROFILE"); v != "" {
+		return v
+	}
+	// window-state fallback makes desktop window switches affect next turn.
+	// v1 is global (win-1 preferred); per-window isolation needs windowID threading.
+	if m, err := config.WindowStateForTest(); err == nil {
+		if p, ok := m["win-1"]; ok && p != "" {
+			return p
+		}
+		for _, p := range m {
+			if p != "" {
+				return p
+			}
+		}
+	}
+	return ""
+}
+
+// ActiveProfile returns the currently effective profile for this process
+// (OCODE_PROFILE env or window-state fallback). Exported for server wiring.
+func ActiveProfile() string { return activeProfileForResolution() }
 
 // ResolveKey returns the effective API key for a provider.
 // Precedence: OPENCODE_AUTH_TOKEN > env var > config file options.apiKey > stored credential > "".

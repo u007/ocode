@@ -96,7 +96,15 @@ export default function SecurityForm() {
           open={modelDialogOpen}
           onClose={() => setModelDialogOpen(false)}
           purpose="mask"
-          onPick={(_, m) => setModel(m)}
+          onPick={(_, m) => {
+            setModel(m);
+            // Mirror the TUI: a local provider with no base URL yet gets the
+            // default local-server endpoint so the tier-2 scanner can reach it.
+            const provider = m.split("/")[0];
+            if (provider === "lmstudio" && baseUrl.trim() === "") {
+              setBaseUrl("http://localhost:1234/v1");
+            }
+          }}
           currentValues={{ mask: model }}
         />
       </div>

@@ -43,7 +43,11 @@ bundle-desktop-assets:
 	mkdir -p cmd/ocode-desktop/embedded-assets/.opencode/plugins
 	cp -R skills/. cmd/ocode-desktop/embedded-assets/skills
 	cp -R .opencode/plugins/. cmd/ocode-desktop/embedded-assets/.opencode/plugins
-	cp deepseek-v4-flash.OCODE.md cmd/ocode-desktop/embedded-assets/deepseek-v4-flash.OCODE.md
+	# Copy every concrete (non-wildcard) model prompt. Files whose names
+	# contain '*' (e.g. minimax-m*.OCODE.md, the disk-only wildcard catch-all)
+	# are excluded: go:embed cannot embed such names, and they are not used by
+	# the exact-name bundled fallback.
+	find . -maxdepth 1 -name '*.OCODE.md' ! -name '*[*]*' -exec cp -f {} cmd/ocode-desktop/embedded-assets/ \;
 
 desktop: web-build bundle-desktop-assets
 	$(DESKTOP_BUILD)
@@ -334,6 +338,7 @@ build-desktop-all:
 	@chmod +x release/ocode-desktop-darwin-* release/ocode-desktop-linux-*
 	@echo "✅ Built all desktop binaries:"
 	@ls -lh release/ocode-desktop-*
+	open release/
 
 # Alias for backward compatibility with the plan
 docker-release: build-desktop-all

@@ -461,7 +461,7 @@ func (t *ImageGenTool) generateGemini(ctx context.Context, baseURL, apiKey, mode
 		{"text": p.Prompt},
 	}
 	if p.ImagePath != "" {
-		raw, mime, err := readImageFile(p.ImagePath)
+		raw, mime, err := readImageFile(ctx, p.ImagePath)
 		if err != nil {
 			return nil, "", err
 		}
@@ -676,7 +676,7 @@ func (t *ImageGenTool) saveImages(p imgGenParams, imgs []generatedImage) ([]save
 		base = filepath.Join(wd, fmt.Sprintf("%s_%s", strings.ReplaceAll(p.Provider, "-", "_"), time.Now().Format("20060102_150405")))
 	} else {
 		// Confine the output path to the working directory / allowed roots.
-		confined, cerr := confinedPath(base)
+		confined, cerr := confinedPath(context.Background(), base)
 		if cerr != nil {
 			// Fall back to treating it as a name under the working directory.
 			base = filepath.Join(wd, filepath.Base(base))
@@ -756,8 +756,8 @@ func defaultBaseName(p imgGenParams) string {
 	return strings.ReplaceAll(model, "/", "_")
 }
 
-func readImageFile(path string) ([]byte, string, error) {
-	safe, err := confinedPath(path)
+func readImageFile(ctx context.Context, path string) ([]byte, string, error) {
+	safe, err := confinedPath(ctx, path)
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid image_path: %w", err)
 	}

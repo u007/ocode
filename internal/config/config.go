@@ -161,6 +161,10 @@ type Config struct {
 	RemoteConfig   string                     `json:"remote_config"`
 	Ocode          OcodeConfig                `json:"-"`
 	UseWebSocket   bool                       `json:"use_websocket,omitempty"`
+	// LSPShared controls cross-process broker sharing. It defaults to enabled;
+	// a pointer is used while loading so an explicit false survives layered
+	// config merges.
+	LSPShared bool `json:"-"`
 }
 
 func Load() (*Config, error) {
@@ -171,6 +175,7 @@ func Load() (*Config, error) {
 		Plugins:    make(map[string]PluginConfig),
 		Hooks:      make(map[string]HookConfig),
 		Formatters: make(map[string]FormatterConfig),
+		LSPShared:  true,
 	}
 
 	globalPath, err := getGlobalConfigPath()
@@ -510,12 +515,21 @@ func loadFromString(content string, config *Config) error {
 	cleanData := stripJSONCComments([]byte(content))
 
 	var temp Config
+	var raw struct {
+		LSPShared *bool `json:"lsp_shared"`
+	}
+	if err := json.Unmarshal(cleanData, &raw); err != nil {
+		return err
+	}
 	if err := json.Unmarshal(cleanData, &temp); err != nil {
 		return err
 	}
 
 	if temp.Model != "" {
 		config.Model = temp.Model
+	}
+	if raw.LSPShared != nil {
+		config.LSPShared = *raw.LSPShared
 	}
 	if temp.DefaultAgent != "" {
 		config.DefaultAgent = temp.DefaultAgent

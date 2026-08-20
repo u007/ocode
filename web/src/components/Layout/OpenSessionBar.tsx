@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useChatDispatch, useChatState, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
@@ -58,6 +58,20 @@ export default function OpenSessionBar() {
     clearQueue(tabId);
   }, [closeSessionTab, chatDispatch]);
 
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    const el = scrollRef.current;
+    if (!el || el.scrollWidth <= el.clientWidth + 1) return;
+    const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (delta === 0) return;
+    // Only hijack the wheel when we can still scroll in that direction.
+    const atLeft = el.scrollLeft <= 0;
+    const atRight = el.scrollLeft + el.clientWidth >= el.scrollWidth - 1;
+    if ((delta < 0 && atLeft) || (delta > 0 && atRight)) return;
+    e.preventDefault();
+    el.scrollLeft += delta;
+  };
+
   // A real session tab is "loading" while its slice hasn't finished its first
   // fetch yet (ChatPanel's own initial-load effect sets `initialized`).
   const isLoadingTab = (tabId: string) =>
@@ -69,7 +83,12 @@ export default function OpenSessionBar() {
   }
 
   return (
-    <div className="flex items-center h-8 px-2 gap-0.5 bg-zinc-900 border-b border-zinc-700 overflow-x-auto scrollbar-hide">
+    <div
+      ref={scrollRef}
+      onWheel={handleWheel}
+      className="flex items-center h-8 px-2 gap-0.5 bg-zinc-900 border-b border-zinc-700 overflow-x-auto overflow-y-hidden scrollbar-hide flex-nowrap min-w-0 w-full touch-pan-x overscroll-x-contain"
+      style={{ WebkitOverflowScrolling: "touch" } as React.CSSProperties}
+    >
       {tabs.map((tab) => {
         const isActive = activeTabId === tab.id;
         const slice = getSessionSlice(chatState, tab.id);

@@ -54,11 +54,17 @@ type Handler struct {
 	// agents this handler creates. Seeded from config, flipped from the web
 	// sidebar, never persisted back to config.
 	advisorEnabled bool
-	workDir        string // server project root; overridden by the boot path
-	projects       *projects.Store
-	projectGroups  *projects.GroupStore
-	tabsStore      *tabs.Store
-	monaco         *monaco.Store
+	// windowProfiles caches windowId -> activeProfile (empty = Default).
+	// Hydrated from window-state.json once at startup; mutated only via
+	// handleSetWindowActiveProfile which also persists to disk. Avoids file I/O
+	// on every auth resolution.
+	windowProfiles   map[string]string
+	windowProfilesMu sync.RWMutex
+	workDir          string // server project root; overridden by the boot path
+	projects         *projects.Store
+	projectGroups    *projects.GroupStore
+	tabsStore        *tabs.Store
+	monaco           *monaco.Store
 	// terminalAuthConfigured and terminalLoopback are set by Server.New. A
 	// terminal is only exposed without credentials when the server is bound to
 	// a loopback address.
@@ -67,6 +73,11 @@ type Handler struct {
 	// terminalProcs tracks the pid of every open terminal pty, read by the
 	// terminal-processes emitter to report per-terminal CPU/mem.
 	terminalProcs *terminalRegistry
+	// terminalProcsWake is a one-slot wake signal for the
+	// terminal-processes emitter so a newly opened terminal pushes its
+	// memory footprint immediately instead of waiting for the next ticker
+	// interval. Capacity 1 + non-blocking send keeps it edge-triggered.
+	terminalProcsWake chan struct{}
 
 	// headlessSubs is the subscriber list for broadcasting live SSE events
 	// in headless/serve mode (when no RC bridge is active). The SSE mirror
@@ -136,7 +147,11 @@ func (h *Handler) lspManagerFor(root string) *lsp.Manager {
 	}
 	mgr, ok := h.lspMgrs[root]
 	if !ok {
-		mgr = lsp.NewManager(root)
+		shared := false
+		if h.cfg != nil {
+			shared = h.cfg.LSPShared
+		}
+		mgr = lsp.NewManagerWithShared(root, shared)
 		h.lspMgrs[root] = mgr
 	}
 	return mgr
@@ -219,19 +234,20 @@ func NewHandler() *Handler {
 	}
 
 	h := &Handler{
-		agents:         make(map[string]*agentSession),
-		cfg:            cfg,
-		advisorEnabled: advisorEnabled,
-		workDir:        defaultWorkDir,
-		projects:       projStore,
-		projectGroups:  projGroupStore,
-		tabsStore:      tabsStore,
-		monaco:         monacoStore,
-		headlessSubs:   make(map[chan SSEEvent]struct{}),
-		mcpCache:       newMCPCache(),
-		titleGen:       newTitleGenState(),
-		bus:            NewEventBus(),
-		terminalProcs:  newTerminalRegistry(),
+		agents:            make(map[string]*agentSession),
+		cfg:               cfg,
+		advisorEnabled:    advisorEnabled,
+		workDir:           defaultWorkDir,
+		projects:          projStore,
+		projectGroups:     projGroupStore,
+		tabsStore:         tabsStore,
+		monaco:            monacoStore,
+		headlessSubs:      make(map[chan SSEEvent]struct{}),
+		mcpCache:          newMCPCache(),
+		titleGen:          newTitleGenState(),
+		bus:               NewEventBus(),
+		terminalProcs:     newTerminalRegistry(),
+		terminalProcsWake: make(chan struct{}, 1),
 	}
 
 	// The session registry is the single authority for session → project root
@@ -252,6 +268,12 @@ func NewHandler() *Handler {
 	})
 
 	h.mcpCache.warm(cfg)
+	h.windowProfiles = make(map[string]string)
+	if m, err := config.WindowStateForTest(); err == nil {
+		for k, v := range m {
+			h.windowProfiles[k] = v
+		}
+	}
 
 	// Wire the agent's debug log sink so the Log tab (backed by debuglog.Log,
 	// see handler_logs.go) receives entries in headless/desktop mode. The TUI
@@ -283,6 +305,16 @@ func (h *Handler) allowedProjectRoots() []string {
 		}
 	}
 	return roots
+}
+
+// notifyTerminalProcsChanged wakes the terminal-processes emitter so a
+// freshly registered terminal publishes its memory footprint without waiting
+// for the next ticker tick. Non-blocking and edge-triggered.
+func (h *Handler) notifyTerminalProcsChanged() {
+	select {
+	case h.terminalProcsWake <- struct{}{}:
+	default:
+	}
 }
 
 // SetWorkDir sets the working directory for git commands (used in tests) and
@@ -458,6 +490,21 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	windowID := req.WindowID
+	if windowID == "" {
+		windowID = r.Header.Get("X-Window-Id")
+	}
+	if windowID == "" {
+		windowID = r.URL.Query().Get("windowId")
+	}
+	if windowID == "" {
+		windowID = r.URL.Query().Get("window_id")
+	}
+	// Normalize windowID: trim spaces, allow empty = no binding
+	if windowID != "" {
+		windowID = strings.TrimSpace(windowID)
+	}
+
 	model := req.Model
 	if model == "" && h.cfg != nil {
 		model = h.cfg.Model
@@ -485,7 +532,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		// the agent is built against the right workdir and cross-project 404s
 		// become impossible for sessions that exist.
 		if req.ProjectPath != "" {
-			h.sessions.Register(sid, req.ProjectPath)
+			h.sessions.RegisterWithWindow(sid, req.ProjectPath, windowID)
 		}
 		var err error
 		entry, err = h.sessions.Resolve(sid)
@@ -493,7 +540,10 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			// Session exists in no registered project. Today this call site is
 			// lenient (a missing session silently starts with empty history);
 			// preserve that by binding to the default root and continuing.
-			entry = h.sessions.Register(sid, projectRoot)
+			entry = h.sessions.RegisterWithWindow(sid, projectRoot, windowID)
+		} else if windowID != "" {
+			h.sessions.SetWindowID(sid, windowID)
+			entry = h.sessions.Lookup(sid)
 		}
 	} else {
 		// A model is only required to create a new session.
@@ -503,7 +553,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		sid = session.NewSessionID()
 		createdSession = true
-		entry = h.sessions.Register(sid, projectRoot)
+		entry = h.sessions.RegisterWithWindow(sid, projectRoot, windowID)
 	}
 
 	opts := turnOptions{sessionStarted: createdSession, requestID: req.RequestID}
@@ -690,7 +740,8 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 
 func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id string) {
 	var req struct {
-		Content string `json:"content"`
+		Content  string `json:"content"`
+		WindowID string `json:"windowId,omitempty"`
 		// Async: see ChatRequest.Async.
 		Async bool `json:"async,omitempty"`
 	}
@@ -712,6 +763,22 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
+	}
+	// Per-window profile binding: capture windowId from body/header/query for
+	// later turns (buildAgentSession uses entry.WindowID).
+	windowID := req.WindowID
+	if windowID == "" {
+		windowID = r.Header.Get("X-Window-Id")
+	}
+	if windowID == "" {
+		windowID = r.URL.Query().Get("windowId")
+	}
+	if windowID != "" {
+		windowID = strings.TrimSpace(windowID)
+		if windowID != "" {
+			h.sessions.SetWindowID(id, windowID)
+			entry = h.sessions.Lookup(id)
+		}
 	}
 
 	if rc := h.RCBridge(); rc != nil && id == rc.SessionID {

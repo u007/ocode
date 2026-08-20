@@ -394,6 +394,10 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ shell }),
     }),
+  getTerminalProcesses: () =>
+    fetchJSON<
+      { id: string; pid: number; cpu_percent: number; mem_bytes: number }[]
+    >("/api/terminal/processes"),
   // TUI status (consolidated snapshot pushed by the TUI on every state
   // change). The web also subscribes to the "status" SSE event so the bar
   // updates live without polling.
@@ -461,23 +465,44 @@ export const api = {
   // requests — a second session would just sit there doing nothing. The turn's
   // output arrives over the session mirror (see SessionTabSync), which is where
   // the UI renders it from anyway.
-  sendMessage: (sessionId: string, content: string) =>
-    fetchJSON<ChatResponse>(`/api/sessions/${sessionId}/message`, {
+  sendMessage: (sessionId: string, content: string) => {
+    let windowId = ""
+    try {
+      windowId = sessionStorage.getItem("ocode.windowId") || ""
+      if (!windowId) {
+        windowId = `win-${crypto.randomUUID().slice(0, 8)}`
+        sessionStorage.setItem("ocode.windowId", windowId)
+      }
+    } catch {}
+    return fetchJSON<ChatResponse>(`/api/sessions/${sessionId}/message`, {
       method: "POST",
-      body: JSON.stringify({ content, async: true }),
-    }),
-  chat: (content: string, sessionId?: string, model?: string, requestId?: string, projectPath?: string) =>
-    fetchJSON<ChatResponse>("/api/chat", {
+      headers: windowId ? { "X-Window-Id": windowId } : undefined,
+      body: JSON.stringify({ content, windowId, async: true }),
+    })
+  },
+  chat: (content: string, sessionId?: string, model?: string, requestId?: string, projectPath?: string) => {
+    let windowId = ""
+    try {
+      windowId = sessionStorage.getItem("ocode.windowId") || ""
+      if (!windowId) {
+        windowId = `win-${crypto.randomUUID().slice(0, 8)}`
+        sessionStorage.setItem("ocode.windowId", windowId)
+      }
+    } catch {}
+    return fetchJSON<ChatResponse>("/api/chat", {
       method: "POST",
+      headers: windowId ? { "X-Window-Id": windowId } : undefined,
       body: JSON.stringify({
         content,
         sessionId,
         model,
         request_id: requestId,
         project_path: projectPath,
+        windowId,
         async: true,
       }),
-    }),
+    })
+  },
   openFile: (path: string, line?: number) =>
     fetchJSON<{ path: string; status: string }>("/api/files/open", {
       method: "POST",

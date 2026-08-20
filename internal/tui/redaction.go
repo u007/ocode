@@ -130,7 +130,10 @@ func (m *model) setRedactionMode(mode string) error {
 
 // defaultRedactionBaseURL returns the default base URL for a model if its
 // provider is a known local server (e.g. lmstudio → http://localhost:1234/v1).
-// Returns "" when the provider has no local default.
+// Returns "" when the provider has no local default. The "local" provider's
+// port is derived from the registered local-model set (see
+// discovery.AssignChatPort), which the redact package cannot compute, so the
+// lmstudio static default is delegated and the local/* port is resolved here.
 func defaultRedactionBaseURL(modelName string) string {
 	if modelName == "" {
 		return ""
@@ -139,7 +142,7 @@ func defaultRedactionBaseURL(modelName string) string {
 	provider, _ := config.SplitProviderModel(modelName)
 	switch provider {
 	case "lmstudio":
-		return "http://localhost:1234/v1"
+		return redact.DefaultRedactionBaseURL(modelName)
 	case "local":
 		// /localmodel-managed chat models serve OpenAI-compatible /v1 on a
 		// deterministic per-model port (discovery.AssignChatPort, 11458+).
@@ -161,27 +164,14 @@ func defaultRedactionBaseURL(modelName string) string {
 // the tier-2 model. Bare LM Studio ids are normalized to lmstudio/<name> when
 // the configured base_url points at the default LM Studio endpoint.
 func normalizeRedactionModelName(modelName, baseURL string) string {
-	if modelName == "" {
-		return ""
-	}
-	if strings.Contains(modelName, "/") {
-		return modelName
-	}
-	switch strings.TrimRight(baseURL, "/") {
-	case "http://localhost:1234/v1", "http://localhost:1234":
-		return "lmstudio/" + modelName
-	}
-	return modelName
+	return redact.NormalizeRedactionModelName(modelName, baseURL)
 }
 
 // scannerRequestModelName returns the model id to send to the tier-2 scanner.
 // LM Studio expects the bare model name, even when the persisted/display name
 // is lmstudio/<name>.
 func scannerRequestModelName(modelName string) string {
-	if strings.HasPrefix(modelName, "lmstudio/") {
-		return strings.TrimPrefix(modelName, "lmstudio/")
-	}
-	return modelName
+	return redact.ScannerRequestModelName(modelName)
 }
 
 // setRedactionModel persists the tier-2 model and refreshes the runtime scanner.
@@ -284,7 +274,7 @@ func buildLLMScanner(baseURL, model string, allowRemote bool) *redact.LLMScanner
 		}
 	}
 
-	scannerModel := scannerRequestModelName(model)
+	scannerModel := redact.ScannerRequestModelName(model)
 	// /localmodel-managed MLX servers (mlx_lm.server, unlike llama-server)
 	// honour the request body's "model" field as a live model-switch
 	// instruction, so the persisted id ("local/bonsai-8b-1bit") must be
@@ -308,7 +298,7 @@ func buildLLMScanner(baseURL, model string, allowRemote bool) *redact.LLMScanner
 		scannerModel = man.ExpectedServeID()
 	}
 
-	return &redact.LLMScanner{BaseURL: baseURL, Model: scannerModel, AllowRemote: allowRemote, APIKey: apiKey}
+	return redact.NewScanner(baseURL, scannerModel, allowRemote, apiKey)
 }
 
 // extractProvider extracts the provider prefix from a model name.

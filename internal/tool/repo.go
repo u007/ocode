@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	urlpkg "net/url"
@@ -180,7 +181,7 @@ func (t RepoOverviewTool) Execute(args json.RawMessage) (string, error) {
 
 	target := params.Path
 	if target != "" {
-		safe, err := confinedPath(target)
+		safe, err := confinedPath(context.Background(), target)
 		if err != nil {
 			return "", err
 		}

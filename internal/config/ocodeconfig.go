@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -20,6 +21,245 @@ const (
 	lastModelKey          = "last_model"
 	lastThinkingBudgetKey = "last_thinking_budget"
 )
+
+var profileNameRe = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
+
+// ProfileDelta is a sparse overlay for OcodeConfig and Config-level fields.
+// Only present fields override the base; absent fields inherit.
+type ProfileDelta struct {
+	DisplayName             *string                    `json:"display_name,omitempty"`
+	Model                   *string                    `json:"model,omitempty"`
+	Provider                map[string]interface{}     `json:"provider,omitempty"`
+	MCP                     map[string]MCPConfig       `json:"mcp,omitempty"`
+	Permission              map[string]interface{}     `json:"permission,omitempty"`
+	SmallModel              *string                    `json:"small_model,omitempty"`
+	SmallModelEnabled       *bool                      `json:"small_model_enabled,omitempty"`
+	RecapModel              *string                    `json:"recap_model,omitempty"`
+	RecapModelEnabled       *bool                      `json:"recap_model_enabled,omitempty"`
+	Editor                  *string                    `json:"editor,omitempty"`
+	EditorMode              *string                    `json:"editor_mode,omitempty"`
+	IDEMode                 *string                    `json:"ide_mode,omitempty"`
+	MaxSteps                *int                       `json:"max_steps,omitempty"`
+	MaxImageDim             *int                       `json:"image_max_dim,omitempty"`
+	MemoryEnabled           *bool                      `json:"memory_enabled,omitempty"`
+	DocPromptEnabled        *bool                      `json:"doc_prompt_enabled,omitempty"`
+	TerminalShell           *string                    `json:"terminal_shell,omitempty"`
+	TerminalFontFamily      *string                    `json:"terminal_font_family,omitempty"`
+	TerminalFontSize        *int                       `json:"terminal_font_size,omitempty"`
+	TerminalScrollbackLines *int                       `json:"terminal_scrollback_lines,omitempty"`
+	TUI                     *TUIConfig                 `json:"tui,omitempty"`
+	Extra                   map[string]json.RawMessage `json:"-"`
+}
+
+func ValidateProfileName(name string) error {
+	if !profileNameRe.MatchString(name) {
+		return fmt.Errorf("invalid profile name %q: must match [a-z0-9_-]{1,32}", name)
+	}
+	return nil
+}
+
+func ProfileOverrideCount(delta ProfileDelta) int {
+	n := 0
+	if delta.DisplayName != nil {
+		n++
+	}
+	if delta.Model != nil {
+		n++
+	}
+	if len(delta.Provider) > 0 {
+		n += len(delta.Provider)
+	}
+	if len(delta.MCP) > 0 {
+		n += len(delta.MCP)
+	}
+	if len(delta.Permission) > 0 {
+		n += len(delta.Permission)
+	}
+	if delta.SmallModel != nil {
+		n++
+	}
+	if delta.SmallModelEnabled != nil {
+		n++
+	}
+	if delta.RecapModel != nil {
+		n++
+	}
+	if delta.RecapModelEnabled != nil {
+		n++
+	}
+	if delta.Editor != nil {
+		n++
+	}
+	if delta.EditorMode != nil {
+		n++
+	}
+	if delta.IDEMode != nil {
+		n++
+	}
+	if delta.MaxSteps != nil {
+		n++
+	}
+	if delta.MaxImageDim != nil {
+		n++
+	}
+	if delta.MemoryEnabled != nil {
+		n++
+	}
+	if delta.DocPromptEnabled != nil {
+		n++
+	}
+	if delta.TerminalShell != nil {
+		n++
+	}
+	if delta.TerminalFontFamily != nil {
+		n++
+	}
+	if delta.TerminalFontSize != nil {
+		n++
+	}
+	if delta.TerminalScrollbackLines != nil {
+		n++
+	}
+	if delta.TUI != nil {
+		n++
+	}
+	return n
+}
+
+// EffectiveOcodeConfig returns a copy of base merged with the named profile delta.
+func EffectiveOcodeConfig(base *OcodeConfig, profile string) *OcodeConfig {
+	if base == nil {
+		d := defaultOcodeConfig()
+		base = &d
+	}
+	if profile == "" {
+		clone := *base
+		return &clone
+	}
+	delta, ok := base.Profiles[profile]
+	if !ok {
+		clone := *base
+		return &clone
+	}
+	clone := *base
+	clone.Profiles = nil
+	if delta.SmallModel != nil {
+		clone.SmallModel = *delta.SmallModel
+	}
+	if delta.SmallModelEnabled != nil {
+		clone.SmallModelEnabled = *delta.SmallModelEnabled
+	}
+	if delta.RecapModel != nil {
+		clone.RecapModel = *delta.RecapModel
+	}
+	if delta.RecapModelEnabled != nil {
+		clone.RecapModelEnabled = *delta.RecapModelEnabled
+	}
+	if delta.Editor != nil {
+		clone.Editor = *delta.Editor
+	}
+	if delta.EditorMode != nil {
+		clone.EditorMode = *delta.EditorMode
+	}
+	if delta.IDEMode != nil {
+		clone.IDEMode = *delta.IDEMode
+	}
+	if delta.MaxSteps != nil {
+		clone.MaxSteps = *delta.MaxSteps
+	}
+	if delta.MaxImageDim != nil {
+		clone.MaxImageDim = *delta.MaxImageDim
+	}
+	if delta.MemoryEnabled != nil {
+		clone.MemoryEnabled = *delta.MemoryEnabled
+	}
+	if delta.DocPromptEnabled != nil {
+		clone.DocPromptEnabled = *delta.DocPromptEnabled
+	}
+	if delta.TerminalShell != nil {
+		clone.TerminalShell = *delta.TerminalShell
+	}
+	if delta.TerminalFontFamily != nil {
+		clone.TerminalFontFamily = *delta.TerminalFontFamily
+	}
+	if delta.TerminalFontSize != nil {
+		clone.TerminalFontSize = *delta.TerminalFontSize
+	}
+	if delta.TerminalScrollbackLines != nil {
+		clone.TerminalScrollbackLines = *delta.TerminalScrollbackLines
+	}
+	if delta.TUI != nil {
+		clone.TUI = *delta.TUI
+	}
+	return &clone
+}
+
+// EffectiveConfig applies profile provider/mcp/model overrides to a Config copy.
+func EffectiveConfig(base *Config, profile string, profiles map[string]ProfileDelta) *Config {
+	if base == nil {
+		return nil
+	}
+	if profile == "" {
+		clone := *base
+		return &clone
+	}
+	delta, ok := profiles[profile]
+	if !ok {
+		clone := *base
+		return &clone
+	}
+	clone := *base
+	if delta.Model != nil {
+		clone.Model = *delta.Model
+	}
+	if len(delta.Provider) > 0 {
+		if clone.Provider == nil {
+			clone.Provider = make(map[string]interface{}, len(delta.Provider))
+		} else {
+			clone.Provider = cloneProviderMap(clone.Provider)
+		}
+		for k, v := range delta.Provider {
+			clone.Provider[k] = v
+		}
+	}
+	if len(delta.MCP) > 0 {
+		if clone.MCP == nil {
+			clone.MCP = make(map[string]MCPConfig, len(delta.MCP))
+		} else {
+			clone.MCP = cloneMCPMap(clone.MCP)
+		}
+		for k, v := range delta.MCP {
+			clone.MCP[k] = v
+		}
+	}
+	if len(delta.Permission) > 0 {
+		if clone.Permission == nil {
+			clone.Permission = make(map[string]interface{}, len(delta.Permission))
+		} else {
+			clone.Permission = cloneProviderMap(clone.Permission)
+		}
+		for k, v := range delta.Permission {
+			clone.Permission[k] = v
+		}
+	}
+	return &clone
+}
+
+func cloneProviderMap(m map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneMCPMap(m map[string]MCPConfig) map[string]MCPConfig {
+	out := make(map[string]MCPConfig, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
 
 type CompactConfig struct {
 	Enabled               bool    `json:"enabled"`
@@ -161,17 +401,17 @@ type OcodeConfig struct {
 	// starts. Empty means use $SHELL, falling back to /bin/sh.
 	TerminalShell     string
 	ExtraAllowedPaths []string
-	Editor                  string
-	EditorMode              string
-	IDEMode                 string
-	SmallModel              string
-	SmallModelEnabled       bool
-	RecapModel              string
-	RecapModelEnabled       bool
-	CommitMsgModel          string
-	CommitMsgPrompt         string
-	TUI                     TUIConfig
-	MaxSteps                int `json:"max_steps,omitempty"`
+	Editor            string
+	EditorMode        string
+	IDEMode           string
+	SmallModel        string
+	SmallModelEnabled bool
+	RecapModel        string
+	RecapModelEnabled bool
+	CommitMsgModel    string
+	CommitMsgPrompt   string
+	TUI               TUIConfig
+	MaxSteps          int `json:"max_steps,omitempty"`
 	// MaxImageDim caps the longest edge (px) of an embedded image; larger
 	// images are downscaled to fit, preserving aspect ratio. 0 means use the
 	// agent package default (2000).
@@ -204,8 +444,9 @@ type OcodeConfig struct {
 	UploadDir string `json:"upload_dir,omitempty"`
 	// Ocr holds the OCR tool configuration (backend, model, endpoint).
 	// Backend accepts openai-compat, paddle, and the lmstudio alias.
-	Ocr      ocr.OcrConfig  `json:"ocr"`
-	ImageGen ImageGenConfig `json:"imagegen"`
+	Ocr      ocr.OcrConfig           `json:"ocr"`
+	ImageGen ImageGenConfig          `json:"imagegen"`
+	Profiles map[string]ProfileDelta `json:"profiles,omitempty"`
 	Extra    map[string]json.RawMessage
 }
 
@@ -417,6 +658,7 @@ type ocodeConfigFile struct {
 	UploadDir               string                      `json:"upload_dir,omitempty"`
 	Ocr                     *ocr.OcrConfig              `json:"ocr,omitempty"`
 	ImageGen                *ImageGenConfig             `json:"imagegen,omitempty"`
+	Profiles                map[string]ProfileDelta     `json:"profiles,omitempty"`
 	// Legacy fields (read from old configs for migration)
 	OcrModel   string `json:"ocr_model,omitempty"`
 	OcrEnabled *bool  `json:"ocr_enabled,omitempty"`
@@ -945,6 +1187,28 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "imagegen")
 	}
 
+	if _, ok := raw["profiles"]; ok {
+		if len(file.Profiles) > 0 {
+			if cfg.Profiles == nil {
+				cfg.Profiles = make(map[string]ProfileDelta, len(file.Profiles))
+			}
+			for name, delta := range file.Profiles {
+				if err := ValidateProfileName(name); err != nil {
+					continue
+				}
+				cfg.Profiles[name] = delta
+			}
+		} else {
+			// Preserve empty map if explicitly set to {} to distinguish from absent.
+			if rawProfiles, err := json.Marshal(raw["profiles"]); err == nil && string(rawProfiles) == "{}" {
+				if cfg.Profiles == nil {
+					cfg.Profiles = make(map[string]ProfileDelta)
+				}
+			}
+		}
+		delete(raw, "profiles")
+	}
+
 	if cfg.Extra == nil {
 		cfg.Extra = make(map[string]json.RawMessage)
 	}
@@ -1352,13 +1616,16 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.UploadDir != "" {
 		payload["upload_dir"] = cfg.UploadDir
 	}
+	if len(cfg.Profiles) > 0 {
+		payload["profiles"] = cfg.Profiles
+	}
 	payload["ocr"] = cfg.Ocr
 	payload["imagegen"] = cfg.ImageGen
 	if cfg.TUI.Theme != "" || cfg.TUI.Mouse != nil || cfg.TUI.Scroll != 0 || cfg.TUI.LeaderTimeout != 0 || len(cfg.TUI.Keybinds) > 0 {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" {
 			continue
 		}
 		payload[k] = v
@@ -1382,6 +1649,129 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		return fmt.Errorf("rename ocode config: %w", err)
 	}
 	return nil
+}
+
+// Profile CRUD — all use withOcodeConfigLock so concurrent sessions cannot drop each other's changes.
+
+func SaveProfile(name string, delta ProfileDelta) error {
+	if err := ValidateProfileName(name); err != nil {
+		return err
+	}
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.Profiles == nil {
+			cfg.Profiles = make(map[string]ProfileDelta)
+		}
+		cfg.Profiles[name] = delta
+		return nil
+	})
+}
+
+func DeleteProfile(name string) error {
+	if err := ValidateProfileName(name); err != nil {
+		return err
+	}
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.Profiles == nil {
+			return nil
+		}
+		delete(cfg.Profiles, name)
+		if len(cfg.Profiles) == 0 {
+			cfg.Profiles = nil
+		}
+		return nil
+	})
+}
+
+func RenameProfile(oldName, newName string) error {
+	if err := ValidateProfileName(oldName); err != nil {
+		return err
+	}
+	if err := ValidateProfileName(newName); err != nil {
+		return err
+	}
+	if oldName == newName {
+		return nil
+	}
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.Profiles == nil {
+			return fmt.Errorf("profile %q not found", oldName)
+		}
+		delta, ok := cfg.Profiles[oldName]
+		if !ok {
+			return fmt.Errorf("profile %q not found", oldName)
+		}
+		if _, exists := cfg.Profiles[newName]; exists {
+			return fmt.Errorf("profile %q already exists", newName)
+		}
+		cfg.Profiles[newName] = delta
+		delete(cfg.Profiles, oldName)
+		return nil
+	})
+}
+
+func GetProfile(name string) (ProfileDelta, bool) {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return ProfileDelta{}, false
+	}
+	if cfg.Profiles == nil {
+		return ProfileDelta{}, false
+	}
+	delta, ok := cfg.Profiles[name]
+	return delta, ok
+}
+
+func LoadOcodeConfigCopy() (*OcodeConfig, error) {
+	return loadFullOcodeConfig()
+}
+
+func ListProfiles() []string {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil || cfg.Profiles == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Profiles))
+	for n := range cfg.Profiles {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func GetProfileProviderAPIKey(profile, providerID string) string {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil || cfg.Profiles == nil {
+		return ""
+	}
+	delta, ok := cfg.Profiles[profile]
+	if !ok || delta.Provider == nil {
+		return ""
+	}
+	raw, ok := delta.Provider[providerID]
+	if !ok {
+		return ""
+	}
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	opts, ok := m["options"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	apiKeyVal, ok := opts["apiKey"]
+	if !ok {
+		return ""
+	}
+	rawKey, ok := apiKeyVal.(string)
+	if !ok {
+		return ""
+	}
+	if strings.HasPrefix(rawKey, "{env:") && strings.HasSuffix(rawKey, "}") {
+		envVar := strings.TrimSuffix(strings.TrimPrefix(rawKey, "{env:"), "}")
+		return os.Getenv(envVar)
+	}
+	return rawKey
 }
 
 func SaveOcodePermissions(permissions PermissionConfig) error {

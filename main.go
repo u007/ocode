@@ -20,6 +20,7 @@ import (
 	// Codex backend.
 	"github.com/u007/ocode/internal/cli"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/lsp"
 	_ "github.com/u007/ocode/internal/plugin/codex"
 	_ "github.com/u007/ocode/internal/plugin/grok"
 	"github.com/u007/ocode/internal/runcli"
@@ -37,7 +38,7 @@ var bundledSkills embed.FS
 //go:embed all:.opencode/plugins
 var bundledPlugins embed.FS
 
-//go:embed deepseek-v4-flash.OCODE.md
+//go:embed deepseek-v4-flash.OCODE.md muse-spark-1.2.OCODE.md
 var bundledModelConfigs embed.FS
 
 // bundledSkillsFS exposes the embedded skills/ tree to the skill package
@@ -50,9 +51,15 @@ func bundledSkillsFS() fs.FS {
 }
 
 // bundledModelConfigFS exposes the embedded model-specific OCODE.md files
-// (e.g. deepseek-v4-flash.OCODE.md) as a plain fs.FS. The agent package
-// uses these as a fallback when no disk-based model context file is found,
-// ensuring every build ships with its own model instructions baked in.
+// (the concrete, non-wildcard *.OCODE.md at the repo root, e.g.
+// deepseek-v4-flash.OCODE.md and muse-spark-1.2.OCODE.md) as a plain fs.FS.
+// The agent package uses these as a fallback when no disk-based model context
+// file is found, ensuring every build ships with its own model instructions
+// baked in. NOTE: the minimax-m*.OCODE.md wildcard-named file is intentionally
+// absent — go:embed cannot embed filenames containing '*', and the wildcard
+// file only matters for disk-based wildcard matching (handled by LoadModelContext
+// against the working tree), not the exact-name bundled fallback. Add any new
+// concrete model prompt file here so it is baked into the build.
 func bundledModelConfigFS() fs.FS {
 	return bundledModelConfigs
 }
@@ -178,6 +185,16 @@ func main() {
 			return
 		case "models":
 			if err := models.Run(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "lsp-daemon":
+			// Hidden subcommand: spawned detached by Manager.ClientForExt's
+			// shared-broker discovery path (internal/lsp/manager.go), never
+			// invoked directly by a user. Deliberately absent from
+			// printUsage.
+			if err := lsp.RunDaemon(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}

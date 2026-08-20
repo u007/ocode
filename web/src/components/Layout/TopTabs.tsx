@@ -59,6 +59,11 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
     const el = tabsRef.current;
     if (!el || el.scrollWidth <= el.clientWidth + 1) return;
     const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (delta === 0) return;
+    const atLeft = el.scrollLeft <= 0;
+    const atRight = el.scrollLeft + el.clientWidth >= el.scrollWidth - 1;
+    if ((delta < 0 && atLeft) || (delta > 0 && atRight)) return;
+    e.preventDefault();
     el.scrollLeft += delta;
   };
 
@@ -76,7 +81,8 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
       <TabsList
         ref={tabsRef}
         onWheel={handleWheel}
-        className="bg-transparent p-0 h-auto gap-1 justify-start flex-1 min-w-0 overflow-x-auto scrollbar-hide flex-nowrap"
+        className="bg-transparent p-0 h-auto gap-1 justify-start flex-1 min-w-0 overflow-x-auto overflow-y-hidden scrollbar-hide flex-nowrap touch-pan-x overscroll-x-contain"
+        style={{ WebkitOverflowScrolling: "touch" } as React.CSSProperties}
       >
         {mainTabs.map((tab) => {
           const Icon = tab.icon;

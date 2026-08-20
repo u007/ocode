@@ -203,6 +203,7 @@ func (s *Server) registerRoutes() {
 	// Authorization header on a WebSocket, so this relies on
 	// authMiddleware's ?token= support.
 	s.mux.HandleFunc("GET /api/terminal/ws", s.authMiddleware(s.handleTerminalWS))
+	s.mux.HandleFunc("GET /api/terminal/processes", s.authMiddleware(s.handleTerminalProcesses))
 	s.mux.HandleFunc("GET /api/config/advisor", s.authMiddleware(s.handleGetAdvisor))
 	s.mux.HandleFunc("PUT /api/config/advisor", s.authMiddleware(s.handleSetAdvisor))
 	s.mux.HandleFunc("GET /api/config/advisor-enabled", s.authMiddleware(s.handleGetAdvisorEnabled))
@@ -284,6 +285,20 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/projects/groups/rename", s.authMiddleware(s.handleRenameGroup))
 	s.mux.HandleFunc("POST /api/projects/groups/reorder", s.authMiddleware(s.handleReorderGroups))
 	s.mux.HandleFunc("POST /api/projects/groups/collapse", s.authMiddleware(s.handleSetGroupCollapsed))
+
+	// Profiles — desktop per-window sparse overlays
+	s.mux.HandleFunc("GET /api/profiles", s.authMiddleware(s.handler.handleListProfiles))
+	s.mux.HandleFunc("POST /api/profiles", s.authMiddleware(s.handler.handleCreateProfile))
+	s.mux.HandleFunc("GET /api/profiles/{name}", s.authMiddleware(s.handler.handleGetProfile))
+	s.mux.HandleFunc("GET /api/profiles/{name}/effective", s.authMiddleware(s.handler.handleGetProfileEffective))
+	s.mux.HandleFunc("DELETE /api/profiles/{name}", s.authMiddleware(s.handler.handleDeleteProfile))
+	s.mux.HandleFunc("POST /api/profiles/{name}/rename", s.authMiddleware(s.handler.handleRenameProfile))
+	s.mux.HandleFunc("GET /api/profiles/{name}/auth", s.authMiddleware(s.handler.handleGetProfileAuth))
+	s.mux.HandleFunc("PUT /api/profiles/{name}/auth/{provider}", s.authMiddleware(s.handler.handleSetProfileAuth))
+	s.mux.HandleFunc("DELETE /api/profiles/{name}/auth/{provider}", s.authMiddleware(s.handler.handleDeleteProfileAuth))
+	s.mux.HandleFunc("DELETE /api/profiles/{name}/overrides/{field}", s.authMiddleware(s.handler.handleResetProfileField))
+	s.mux.HandleFunc("GET /api/window/{id}/activeProfile", s.authMiddleware(s.handler.handleGetWindowActiveProfile))
+	s.mux.HandleFunc("PUT /api/window/{id}/activeProfile", s.authMiddleware(s.handler.handleSetWindowActiveProfile))
 
 	// Open-session tab state (server-side persistence; survives desktop restarts)
 	s.mux.HandleFunc("GET /api/tabs", s.authMiddleware(s.handleGetTabs))
@@ -902,6 +917,9 @@ func (s *Server) handleSetLocalModelsConfig(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleTerminalWS(w, r)
 }
+func (s *Server) handleTerminalProcesses(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleTerminalProcesses(w, r)
+}
 func (s *Server) handleGetAdvisor(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetAdvisor(w, r)
 }
@@ -1138,6 +1156,9 @@ type ChatRequest struct {
 	// ProjectPath binds the session to a project root (multi-project). Empty
 	// falls back to the server's own workdir.
 	ProjectPath string `json:"project_path,omitempty"`
+	// WindowID binds the session to a desktop window for per-window profile
+	// isolation. First value wins; later non-empty values update the binding.
+	WindowID string `json:"windowId,omitempty"`
 	// Async, when set, makes the endpoint acknowledge with 202 as soon as the
 	// turn is dispatched instead of holding the HTTP connection open until the
 	// agent finishes. The web UI sets it: a browser allows only six concurrent

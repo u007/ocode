@@ -4,8 +4,8 @@ okf_version: 0.1
 
 # Concepts
 
+- [Changes Tab](changes-tab.md) - A per-session TUI tab listing files added or edited by the current chat session (main agent + sub-agents), with unified diffs and undo.
 - [File-Edit Snapshot & Undo Mechanism](file-edit-snapshot.md) - ocode takes a per-agent file snapshot before every write/edit/patch and provides an undo_file_change tool to revert by tool_call_id.
-- [Changes Tab](changes-tab.md) - Per-session TUI tab listing files added or edited by the current chat session, with unified diffs and undo.
 - [Knowledge Bundle System](knowledge-bundle.md) - Internal architecture of the OKF v0.1 knowledge bundle — bundle detection, scanning, frontmatter parsing, doc search, .okfignore exclusion, and store CRUD with documented edge cases and gotchas.
 - [Plugin System](plugins.md) - Overview of ocode's plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, and plugin lifecycle management.
 - [Scheduled Jobs / Cron Dispatch](scheduled-jobs.md) - Persistent, disk-backed cron engine + headless agent dispatcher for ocode, modeled on nanobot's CronService and Claude Code's CronCreate/CronList/CronDelete semantics.
@@ -15,6 +15,7 @@ okf_version: 0.1
 
 # architecture
 
+- [Shared LSP Broker Server-State and Routing Gotchas](architecture/lsp-broker-shared-server-gotchas.md) - Updated with confirmed spec violations from 2026-08-21 review: Manager sharing enabled by default, docs map unbounded/didClose absent, conflicting didOpen/didChange overwrites, daemon inherits terminal fds
 - [Sidebar TUI/Web Parity Gaps](architecture/sidebar-tui-parity-gaps.md) - Gap analysis of web frontend sidebar features missing relative to the TUI sidebar, covering backend fields not consumed and missing TS types.
 
 # gotchas
@@ -27,27 +28,63 @@ okf_version: 0.1
 
 - [okf/_schema/scorecard.template.md](okf/_schema/scorecard.template.md)
 - [okf/conduct/scores/deepseek-v4-flash.md](okf/conduct/scores/deepseek-v4-flash.md)
+- [okf/conduct/scores/mimo-v2.5.md](okf/conduct/scores/mimo-v2.5.md)
+- [okf/conduct/scores/muse-spark-1.2.md](okf/conduct/scores/muse-spark-1.2.md)
 - [okf/conduct/scores/tencent__hy3.md](okf/conduct/scores/tencent__hy3.md)
 - [okf/conduct/scores/tencent__hy3.with-skill.md](okf/conduct/scores/tencent__hy3.with-skill.md)
+- [okf/csharp/derived/csharp.mimo-v2.5.SKILL.md](okf/csharp/derived/csharp.mimo-v2.5.SKILL.md) - Corrective C# knowledge for mimo-v2.5, targeting the nullable-reference/ record-equality and pattern-matching gaps this model showed on the closed-book csharp benchmark (record class mutability, switch expression exhaustiveness, property-pattern syntax, `is` binding scope).
+
+- [okf/csharp/scores/mimo-v2.5.md](okf/csharp/scores/mimo-v2.5.md)
 - [okf/csharp/scores/tencent__hy3.md](okf/csharp/scores/tencent__hy3.md)
+- [okf/dotnet/scores/mimo-v2.5.md](okf/dotnet/scores/mimo-v2.5.md)
 - [okf/dotnet/scores/tencent__hy3.md](okf/dotnet/scores/tencent__hy3.md)
 - [okf/elixir/derived/elixir.tencent__hy3.SKILL.md](okf/elixir/derived/elixir.tencent__hy3.SKILL.md) - Corrective Elixir knowledge for tencent/hy3, targeting the pattern-matching gaps this model showed on the closed-book elixir benchmark (guard restrictions, the FunctionClauseError / MatchError failure modes, and the "match is not assignment" framing).
 
+- [okf/elixir/scores/mimo-v2.5.md](okf/elixir/scores/mimo-v2.5.md)
+- [okf/elixir/scores/muse-spark-1.2.md](okf/elixir/scores/muse-spark-1.2.md)
 - [okf/elixir/scores/tencent__hy3.md](okf/elixir/scores/tencent__hy3.md)
 - [okf/elixir/scores/tencent__hy3.with-skill.md](okf/elixir/scores/tencent__hy3.with-skill.md)
+- [okf/golang/scores/mimo-v2.5.md](okf/golang/scores/mimo-v2.5.md)
+- [okf/golang/scores/muse-spark-1.2.md](okf/golang/scores/muse-spark-1.2.md)
 - [okf/golang/scores/tencent__hy3.md](okf/golang/scores/tencent__hy3.md)
+- [okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md](okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md) - Corrective NestJS guidance for the exact area mimo-v2.5 tests weak on (shutdown/lifecycle hook order and triggers). Loaded only in NestJS repos when this exact model is active.
+- [okf/nestjs/scores/mimo-v2.5.md](okf/nestjs/scores/mimo-v2.5.md)
 - [okf/nestjs/scores/tencent__hy3.md](okf/nestjs/scores/tencent__hy3.md)
+- [okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md](okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md) - Corrective Next.js App Router guidance for the exact area mimo-v2.5 tests weak on (metadata). Loaded only in Next.js repos when this exact model is active.
+- [okf/nextjs/scores/mimo-v2.5.md](okf/nextjs/scores/mimo-v2.5.md)
 - [okf/nextjs/scores/tencent__hy3.md](okf/nextjs/scores/tencent__hy3.md)
+- [okf/php/scores/mimo-v2.5.md](okf/php/scores/mimo-v2.5.md)
+- [okf/php/scores/muse-spark-1.2.md](okf/php/scores/muse-spark-1.2.md)
 - [okf/php/scores/tencent__hy3.md](okf/php/scores/tencent__hy3.md)
+- [okf/python/scores/mimo-v2.5.md](okf/python/scores/mimo-v2.5.md)
+- [okf/python/scores/muse-spark-1.2.md](okf/python/scores/muse-spark-1.2.md)
 - [okf/python/scores/tencent__hy3.md](okf/python/scores/tencent__hy3.md)
 - [okf/react/derived/react.claude-opus-4-8.SKILL.md](okf/react/derived/react.claude-opus-4-8.SKILL.md) - Corrective React guidance for the exact areas claude-opus-4-8 tests weak on (RSC boundaries, Suspense, refs). Loaded only in React repos when this exact model is active.
 - [okf/react/scores/claude-opus-4-8.md](okf/react/scores/claude-opus-4-8.md)
+- [okf/react/scores/mimo-v2.5.md](okf/react/scores/mimo-v2.5.md)
 - [okf/react/scores/tencent__hy3.md](okf/react/scores/tencent__hy3.md)
+- [okf/ror/derived/ror.mimo-v2.5.SKILL.md](okf/ror/derived/ror.mimo-v2.5.SKILL.md) - Corrective Rails migrations/schema guidance for the exact gaps mimo-v2.5 tests weak on — the purpose of the schema.rb/structure.sql dump, and the two classic dangerous-migration patterns on large production tables (locking column defaults/NOT NULL, and index builds). Loaded only in Rails repos when this exact model is active.
+- [okf/ror/scores/mimo-v2.5.md](okf/ror/scores/mimo-v2.5.md)
 - [okf/ror/scores/tencent__hy3.md](okf/ror/scores/tencent__hy3.md)
+- [okf/ruby/scores/mimo-v2.5.md](okf/ruby/scores/mimo-v2.5.md)
 - [okf/ruby/scores/tencent__hy3.md](okf/ruby/scores/tencent__hy3.md)
+- [okf/rust/scores/mimo-v2.5.md](okf/rust/scores/mimo-v2.5.md)
+- [okf/rust/scores/muse-spark-1.2.md](okf/rust/scores/muse-spark-1.2.md)
 - [okf/rust/scores/tencent__hy3.md](okf/rust/scores/tencent__hy3.md)
+- [okf/tanstack/derived/tanstack.mimo-v2.5.SKILL.md](okf/tanstack/derived/tanstack.mimo-v2.5.SKILL.md) - Corrective TanStack Router knowledge for mimo-v2.5, targeting the router-search gaps this model showed on the closed-book tanstack benchmark (reading search params via useSearch(), loaderDeps for search-driven loaders, and the type-safety surface useSearch() gets from validateSearch).
+
+- [okf/tanstack/scores/mimo-v2.5.md](okf/tanstack/scores/mimo-v2.5.md)
+- [okf/tanstack/scores/muse-spark-1.2.md](okf/tanstack/scores/muse-spark-1.2.md)
 - [okf/tanstack/scores/tencent__hy3.md](okf/tanstack/scores/tencent__hy3.md)
+- [okf/vbnet/derived/vbnet.mimo-v2.5.SKILL.md](okf/vbnet/derived/vbnet.mimo-v2.5.SKILL.md) - Corrective VB.NET guidance for the exact area mimo-v2.5 tests weak on (WithEvents/Handles vs AddHandler/RemoveHandler event wiring). Loaded only in VB.NET repos when this exact model is active.
+- [okf/vbnet/derived/vbnet.muse-spark-1.2.SKILL.md](okf/vbnet/derived/vbnet.muse-spark-1.2.SKILL.md) - Corrective VB.NET guidance for the exact area muse-spark-1.2 tests weak on (WithEvents/Handles and AddHandler/RemoveHandler event-wiring edge cases). Loaded only in VB.NET repos when this exact model is active.
+- [okf/vbnet/scores/mimo-v2.5.md](okf/vbnet/scores/mimo-v2.5.md)
+- [okf/vbnet/scores/muse-spark-1.2.md](okf/vbnet/scores/muse-spark-1.2.md)
 - [okf/vbnet/scores/tencent__hy3.md](okf/vbnet/scores/tencent__hy3.md)
+
+# superpowers
+
+- [Stabilize web and desktop chat streaming](superpowers/specs/2026-08-05-web-desktop-chat-streaming-design.md)
 
 # Unclassified
 
@@ -71,49 +108,112 @@ okf_version: 0.1
 - [question-format.md](okf/_schema/question-format.md)
 - [rubric-guide.md](okf/_schema/rubric-guide.md)
 - [stack-detection.md](okf/_schema/stack-detection.md)
+- [deepseek-v4-flash.md](okf/conduct/answers/deepseek-v4-flash.md)
 - [deepseek-v4-flash.spotcheck.md](okf/conduct/answers/deepseek-v4-flash.spotcheck.md)
+- [mimo-v2.5.md](okf/conduct/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/conduct/answers/muse-spark-1.2.md)
 - [tencent__hy3.digest-spotcheck.md](okf/conduct/answers/tencent__hy3.digest-spotcheck.md)
 - [tencent__hy3.md](okf/conduct/answers/tencent__hy3.md)
 - [tencent__hy3.with-skill.md](okf/conduct/answers/tencent__hy3.with-skill.md)
 - [conduct.deepseek-v4-flash.SKILL.md](okf/conduct/derived/conduct.deepseek-v4-flash.SKILL.md)
+- [conduct.mimo-v2.5.SKILL.md](okf/conduct/derived/conduct.mimo-v2.5.SKILL.md)
+- [conduct.muse-spark-1.2.SKILL.md](okf/conduct/derived/conduct.muse-spark-1.2.SKILL.md)
 - [conduct.tencent__hy3.SKILL.md](okf/conduct/derived/conduct.tencent__hy3.SKILL.md)
 - [questions.md](okf/conduct/questions.md)
+- [mimo-v2.5.md](okf/csharp/answers/mimo-v2.5.md)
 - [tencent__hy3.md](okf/csharp/answers/tencent__hy3.md)
 - [questions.md](okf/csharp/questions.md)
+- [mimo-v2.5.md](okf/dotnet/answers/mimo-v2.5.md)
 - [tencent__hy3.md](okf/dotnet/answers/tencent__hy3.md)
 - [questions.md](okf/dotnet/questions.md)
+- [mimo-v2.5.md](okf/elixir/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/elixir/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/elixir/answers/tencent__hy3.md)
 - [tencent__hy3.with-skill.md](okf/elixir/answers/tencent__hy3.with-skill.md)
 - [questions.md](okf/elixir/questions.md)
+- [mimo-v2.5.md](okf/golang/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/golang/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/golang/answers/tencent__hy3.md)
 - [questions.md](okf/golang/questions.md)
+- [mimo-v2.5.md](okf/nestjs/answers/mimo-v2.5.md)
 - [tencent__hy3.md](okf/nestjs/answers/tencent__hy3.md)
 - [questions.md](okf/nestjs/questions.md)
+- [mimo-v2.5.md](okf/nextjs/answers/mimo-v2.5.md)
 - [tencent__hy3.md](okf/nextjs/answers/tencent__hy3.md)
 - [questions.md](okf/nextjs/questions.md)
+- [mimo-v2.5.md](okf/php/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/php/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/php/answers/tencent__hy3.md)
 - [questions.md](okf/php/questions.md)
+- [mimo-v2.5.md](okf/python/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/python/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/python/answers/tencent__hy3.md)
 - [questions.md](okf/python/questions.md)
+- [mimo-v2.5.md](okf/react/answers/mimo-v2.5.md)
 - [tencent__hy3.md](okf/react/answers/tencent__hy3.md)
 - [questions.md](okf/react/questions.md)
 - [README.md](okf/react/scores/README.md)
+- [mimo-v2.5.md](okf/ror/answers/mimo-v2.5.md)
 - [tencent__hy3.md](okf/ror/answers/tencent__hy3.md)
 - [questions.md](okf/ror/questions.md)
+- [mimo-v2.5.md](okf/ruby/answers/mimo-v2.5.md)
 - [tencent__hy3.md](okf/ruby/answers/tencent__hy3.md)
 - [questions.md](okf/ruby/questions.md)
+- [mimo-v2.5.md](okf/rust/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/rust/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/rust/answers/tencent__hy3.md)
 - [questions.md](okf/rust/questions.md)
+- [mimo-v2.5.md](okf/tanstack/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/tanstack/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/tanstack/answers/tencent__hy3.md)
 - [questions.md](okf/tanstack/questions.md)
+- [mimo-v2.5.md](okf/vbnet/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/vbnet/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/vbnet/answers/tencent__hy3.md)
 - [questions.md](okf/vbnet/questions.md)
 - [2026-07-21-session-storage-ojsonl.md](superpowers/plans/2026-07-21-session-storage-ojsonl.md)
+- [2026-07-24-web-changes-parity.md](superpowers/plans/2026-07-24-web-changes-parity.md)
+- [2026-07-24-web-cron-parity.md](superpowers/plans/2026-07-24-web-cron-parity.md)
+- [2026-07-24-web-editor-context-diff.md](superpowers/plans/2026-07-24-web-editor-context-diff.md)
+- [2026-07-24-web-editor-core.md](superpowers/plans/2026-07-24-web-editor-core.md)
+- [2026-07-28-account-login-config-sync.md](superpowers/plans/2026-07-28-account-login-config-sync.md)
+- [2026-07-30-terminal-bench-harness.md](superpowers/plans/2026-07-30-terminal-bench-harness.md)
+- [2026-08-01-local-model-instance-manager.md](superpowers/plans/2026-08-01-local-model-instance-manager.md)
+- [2026-08-02-resume-cancelled-subagent.md](superpowers/plans/2026-08-02-resume-cancelled-subagent.md)
+- [2026-08-06-web-agents-tab.md](superpowers/plans/2026-08-06-web-agents-tab.md)
+- [2026-08-08-per-tab-chat-state.md](superpowers/plans/2026-08-08-per-tab-chat-state.md)
+- [2026-08-09-web-session-tab-hierarchy.md](superpowers/plans/2026-08-09-web-session-tab-hierarchy.md)
+- [2026-08-11-configuration-api-backend.md](superpowers/plans/2026-08-11-configuration-api-backend.md)
+- [2026-08-11-configuration-ui-frontend.md](superpowers/plans/2026-08-11-configuration-ui-frontend.md)
+- [01-session-manager.md](superpowers/plans/2026-08-12-multiproject-event-architecture/01-session-manager.md)
+- [02-event-bus.md](superpowers/plans/2026-08-12-multiproject-event-architecture/02-event-bus.md)
+- [03-async-bootstrap-turn-state.md](superpowers/plans/2026-08-12-multiproject-event-architecture/03-async-bootstrap-turn-state.md)
+- [04-frontend-transport.md](superpowers/plans/2026-08-12-multiproject-event-architecture/04-frontend-transport.md)
+- [05-frontend-status-streaming.md](superpowers/plans/2026-08-12-multiproject-event-architecture/05-frontend-status-streaming.md)
+- [06-rc-first-class-cleanup.md](superpowers/plans/2026-08-12-multiproject-event-architecture/06-rc-first-class-cleanup.md)
+- [INDEX.md](superpowers/plans/2026-08-12-multiproject-event-architecture/INDEX.md)
 - [2026-07-08-global-runtime-artifacts-design.md](superpowers/specs/2026-07-08-global-runtime-artifacts-design.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [2026-07-11-model-stack-benchmark-design.md](superpowers/specs/2026-07-11-model-stack-benchmark-design.md)
 - [2026-07-14-tool-result-smart-sizing-design.md](superpowers/specs/2026-07-14-tool-result-smart-sizing-design.md)
 - [2026-07-21-session-storage-ojsonl-design.md](superpowers/specs/2026-07-21-session-storage-ojsonl-design.md)
 - [2026-07-22-changes-tab-design.md](superpowers/specs/2026-07-22-changes-tab-design.md)
+- [2026-07-24-web-changes-parity-design.md](superpowers/specs/2026-07-24-web-changes-parity-design.md)
+- [2026-07-24-web-cron-parity-design.md](superpowers/specs/2026-07-24-web-cron-parity-design.md)
+- [2026-07-24-web-editor-context-diff-design.md](superpowers/specs/2026-07-24-web-editor-context-diff-design.md)
+- [2026-07-24-web-editor-core-design.md](superpowers/specs/2026-07-24-web-editor-core-design.md)
+- [2026-07-28-account-login-config-sync-design.md](superpowers/specs/2026-07-28-account-login-config-sync-design.md)
+- [2026-07-30-terminal-bench-harness-design.md](superpowers/specs/2026-07-30-terminal-bench-harness-design.md)
+- [2026-08-01-local-model-instance-manager-design.md](superpowers/specs/2026-08-01-local-model-instance-manager-design.md)
+- [2026-08-02-resume-cancelled-subagent-design.md](superpowers/specs/2026-08-02-resume-cancelled-subagent-design.md)
+- [2026-08-06-web-agents-tab-design.md](superpowers/specs/2026-08-06-web-agents-tab-design.md)
+- [2026-08-08-per-tab-chat-state-design.md](superpowers/specs/2026-08-08-per-tab-chat-state-design.md)
+- [2026-08-09-web-session-tab-hierarchy-design.md](superpowers/specs/2026-08-09-web-session-tab-hierarchy-design.md)
+- [2026-08-11-configuration-ui-design.md](superpowers/specs/2026-08-11-configuration-ui-design.md)
+- [2026-08-12-multiproject-event-architecture-design.md](superpowers/specs/2026-08-12-multiproject-event-architecture-design.md)
+- [2026-08-18-debug-helper-design.md](superpowers/specs/2026-08-18-debug-helper-design.md)
+- [2026-08-19-desktop-sharing-design.md](superpowers/specs/2026-08-19-desktop-sharing-design.md)
+- [2026-08-20-shared-lsp-broker-design.md](superpowers/specs/2026-08-20-shared-lsp-broker-design.md)
 - [telegram-bot.md](telegram-bot.md)
+- [web-desktop-parity-todo.md](web-desktop-parity-todo.md)
 

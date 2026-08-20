@@ -6,6 +6,10 @@
 
 
 
+
+## 2026-08-20
+
+* **Creation**: Shared LSP Broker Server-State and Routing Gotchas ([architecture/lsp-broker-shared-server-gotchas.md](/architecture/lsp-broker-shared-server-gotchas.md))
 ## 2026-07-22
 
 * **Creation**: Skill Tool Test Fixture Gap — expectedBuiltinTools Missing load_skill ([gotchas/skill-tool-test-fixture-gap.md](/gotchas/skill-tool-test-fixture-gap.md))

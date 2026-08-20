@@ -693,3 +693,33 @@ func TestChatOpenAI_MaxTokensFromContextOverride(t *testing.T) {
 		t.Fatalf("expected max_tokens omitted without override, got %v", gotMaxTokens)
 	}
 }
+
+func TestChatOpenAIOrcaRouterUsesQualifiedRouterModel(t *testing.T) {
+	var gotModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]interface{}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("bad request body: %v", err)
+		}
+		gotModel, _ = payload["model"].(string)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	c := &GenericClient{
+		APIKey:   "test",
+		Model:    "auto",
+		BaseURL:  srv.URL,
+		Provider: "orcarouter",
+	}
+	if _, err := c.chatOpenAI(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("chatOpenAI error: %v", err)
+	}
+	if gotModel != "orcarouter/auto" {
+		t.Fatalf("request model = %q, want %q", gotModel, "orcarouter/auto")
+	}
+}

@@ -55,6 +55,14 @@ export function useEditorTabs(): UseEditorTabsResult {
   const [activeEditorContext, setActiveEditorContext] = useState<ActiveEditorContext | null>(null);
   const openFileIdsRef = useRef<Set<string>>(new Set());
 
+  // Refs so callbacks that fire on the typing hot path don't need to close
+  // over `editorTabs` / `activeEditorTabId` and thus don't change identity
+  // on every keystroke (which would churn downstream Monaco subscriptions).
+  const activeEditorTabIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeEditorTabIdRef.current = activeEditorTabId;
+  }, [activeEditorTabId]);
+
   const fetchFileContent = useCallback(async (path: string, projectRoot?: string): Promise<string> => {
     const query = new URLSearchParams({ path });
     if (projectRoot) query.set("project_root", projectRoot);
@@ -224,16 +232,18 @@ export function useEditorTabs(): UseEditorTabsResult {
           return { ...prev, selection: sel ?? undefined };
         }
 
-        if (!activeEditorTabId) return null;
-        const tab = editorTabs.find((t) => t.id === activeEditorTabId);
+        const activeId = activeEditorTabIdRef.current;
+        if (!activeId) return null;
+        const tab = editorTabsRef.current.find((t) => t.id === activeId);
         if (!tab) return null;
         return {
           path: tab.path,
+          projectRoot: tab.projectRoot,
           selection: sel ?? undefined,
         };
       });
     },
-    [activeEditorTabId, editorTabs],
+    [],
   );
 
   useEffect(() => {

@@ -58,7 +58,7 @@ Edit `opencode.json` to add API keys or provider configuration:
 }
 ```
 
-Or use environment variables (ocode respects `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
+Or use environment variables (ocode respects `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ORCAROUTER_API_KEY`, etc.). OrcaRouter models use the OpenAI-compatible `https://api.orcarouter.ai/v1` endpoint; for example, `orcarouter/auto`.
 
 **Global override:** Set `OPENCODE_AUTH_TOKEN` to use a single token for all providers, bypassing per-provider configuration and stored credentials. This is useful for CI/CD or when using a proxy that handles authentication.
 
@@ -117,6 +117,17 @@ DEBUG=1 go run .
 ```
 
 ocode logs to stderr and a debug panel in the TUI (visible in the Files tab).
+
+## Profiles — multiple API keys & seamless switching (desktop)
+
+ocode supports sparse per-window profiles for seamless key/config switching without touching the upstream `opencode` auth contract.
+
+- **Storage:** base `~/.config/ocode/ocodeconfig.json` + sparse `profiles:{name: delta}` + sidecar `~/.local/share/ocode/auth.profiles.json` (0600 tmp→rename) + `window-state.json` per-window active profile + `OCODE_PROFILE` env ephemeral override.
+- **Precedence:** `OPENCODE_AUTH_TOKEN` > `OCODE_PROFILE` env > provider `EnvVar` > `ocodeconfig.profiles[active].provider.apiKey` > `auth.profiles[active]` > base `auth.json`.
+- **CLI alias:** `alias ocode2='OCODE_PROFILE=work ocode'` or `ocode --profile work` hot-swaps model/keys for that invocation; desktop `OCODE_PROFILE=work ocode-desktop` works the same.
+- **Desktop UI:** header pill `Base ▾` / `work •3 ▾` per-window (sessionStorage `ocode.windowId` distinct per tab/window), click `PUT /api/window/{id}/activeProfile`; per-session `WindowID` binding via `X-Window-Id`/`windowId` on `POST /api/chat` and `POST /api/sessions/{id}/message` ensures true per-window isolation (`buildAgentSession` resolves `sessionEntry.WindowID -> getWindowProfile`, not global fallback). `Settings → Profiles` card for `+New` / `Rename` / `Delete` with confirmation (blocked while active, server 409), expandable per-profile masked `auth.profiles.json` keys (`PUT/DELETE .../auth/{provider}` never returns raw key) + per-field `Reset to base` (`DELETE .../overrides/{field}` dot-notation `provider.openai`). Switch takes effect on next turn (mid-stream turn finishes on old profile).
+- **Validation:** profile names `[a-z0-9_-]{1,32}`; server validates on every write.
+- **Known limits (v1):** `RenameProfile` is three unguarded writes (config + sidecar + window-state) — mid-failure can orphan creds/dangle refs (compensating transaction deferred); `POST .../test` key probe not yet wired (existing `auth/test.go` generic probe available).
 
 ## Troubleshooting
 

@@ -27,10 +27,11 @@ import (
 var modelsSnapshotData []byte
 
 const (
-	modelsDevURL    = "https://models.dev/api.json"
-	modelsCacheTTL  = 5 * time.Minute
-	modelsCacheFile = "models.json"
-	envModelsPath   = "OPENCODE_MODELS_PATH"
+	modelsDevURL        = "https://models.dev/api.json"
+	modelsCacheTTL      = 5 * time.Minute
+	modelsCacheFile     = "models.json"
+	envModelsPath       = "OPENCODE_MODELS_PATH"
+	orcaRouterModelsURL = "https://api.orcarouter.ai/v1/models"
 )
 
 // registryLockWait bounds how long a registry load waits on the cross-process
@@ -1012,6 +1013,29 @@ func allProviderModelsFromRegistry(refresh bool) []string {
 			}
 		}
 	}
+	// OrcaRouter live models — supplement the snapshot so hosted models appear
+	// in the picker. Guarded by refresh to avoid blocking the main loop.
+	if refresh {
+		if orcaLive := fetchOrcaRouterLiveModels(); len(orcaLive) > 0 {
+			have := make(map[string]bool, len(ids))
+			for _, id := range ids {
+				have[id] = true
+			}
+			for _, key := range orcaLive {
+				id := "orcarouter/" + key
+				if !have[id] {
+					ids = append(ids, id)
+					have[id] = true
+				}
+			}
+		}
+	}
+	// OrcaRouter's built-in router is available independently of the upstream
+	// model catalog. Keep its documented default visible in the picker even when
+	// models.dev does not list OrcaRouter yet.
+	if !containsString(ids, "orcarouter/auto") {
+		ids = append(ids, "orcarouter/auto")
+	}
 	if len(ids) == 0 {
 		return nil
 	}
@@ -1063,7 +1087,38 @@ func providerModelsFromRegistry(provider string, refresh bool) []string {
 		}
 		return providerModelsFromSnapshot(provider)
 	}
-	return providerModelsFromSnapshot(provider)
+	if provider == "orcarouter" {
+		// OrcaRouter exposes an authenticated OpenAI-compatible /models endpoint.
+		// Prefer it so newly added hosted models (including free deployments) are
+		// available in the picker; retain auto and the static fallback on failure.
+		// Guarded by refresh to avoid blocking the main loop.
+		if refresh {
+			if live := fetchOrcaRouterLiveModels(); len(live) > 0 {
+				ids := make([]string, 0, len(live)+1)
+				ids = append(ids, live...)
+				if !containsString(ids, "auto") {
+					ids = append(ids, "auto")
+				}
+				sort.Strings(ids)
+				return ids
+			}
+		}
+	}
+	ids := providerModelsFromSnapshot(provider)
+	if provider == "orcarouter" && !containsString(ids, "auto") {
+		ids = append(ids, "auto")
+		sort.Strings(ids)
+	}
+	return ids
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // providerModelsFromSnapshot loads models for the given provider from the
@@ -1383,6 +1438,43 @@ var openRouterLiveData struct {
 	mu        sync.RWMutex
 	models    map[string]modelEntry // bare model id (after openrouter/) → entry
 	lastFetch time.Time             // last successful fetch
+}
+
+// fetchOrcaRouterLiveModels fetches OrcaRouter's authenticated OpenAI-compatible
+// model catalog. It returns bare IDs suitable for the provider picker.
+func fetchOrcaRouterLiveModels() []string {
+	key := auth.ResolveKey("orcarouter")
+	if key == "" {
+		return nil
+	}
+	req, err := http.NewRequest(http.MethodGet, orcaRouterModelsURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return nil
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(payload.Data))
+	for _, model := range payload.Data {
+		if model.ID != "" {
+			ids = append(ids, model.ID)
+		}
+	}
+	return ids
 }
 
 // fetchOpenRouterLiveModels fetches the model list from OpenRouter's public API and

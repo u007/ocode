@@ -16,6 +16,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
+	"github.com/shirou/gopsutil/v4/process"
 
 	"github.com/u007/ocode/internal/config"
 )
@@ -157,6 +158,7 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	// just doesn't show up in the Processes tab.
 	terminalID := r.URL.Query().Get("terminal_id")
 	h.terminalProcs.register(terminalID, terminalProcEntry{Project: workDir, PID: int32(cmd.Process.Pid)})
+	h.notifyTerminalProcsChanged()
 
 	ws, err := terminalUpgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -260,4 +262,49 @@ func terminalShellCommand(shell string) *exec.Cmd {
 // exited", which is the expected case when the user types `exit`.
 func isProcessDone(err error) bool {
 	return errors.Is(err, os.ErrProcessDone)
+}
+
+// HandleTerminalProcesses returns a live snapshot of per-terminal CPU and
+// memory usage. It exists so the Processes tab can render immediately on
+// mount instead of waiting up to one poll interval for the next
+// terminal_processes SSE envelope. The snapshot is sampled inline without
+// reusing the emitter's Percent cache, so CPU% is expected to be 0 on this
+// call — callers should treat memory as the authoritative instant value and
+// let the SSE stream correct CPU on the next tick.
+func (h *Handler) HandleTerminalProcesses(w http.ResponseWriter, r *http.Request) {
+	entries := h.terminalProcs.snapshot()
+	// Use a throwaway cache so this ad-hoc sample does not pollute the
+	// emitter's long-lived Percent cache (Percent(0) needs consecutive calls
+	// on the same Process handle to produce a meaningful delta).
+	tmpCache := make(map[int32]*process.Process)
+	touched := make(map[int32]bool)
+	// Optional ?project= scoping so a per-project Processes panel does not
+	// learn pids from other projects. Absent means global (backward compat for
+	// callers that predate multi-project). Validation mirrors the terminal WS
+	// project_path check.
+	if proj := r.URL.Query().Get("project"); proj != "" {
+		allowed := false
+		for _, root := range h.allowedProjectRoots() {
+			if proj == root {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			writeError(w, http.StatusForbidden, "project is not a project registered with this server")
+			return
+		}
+		filtered := make(map[string]terminalProcEntry, len(entries))
+		for id, e := range entries {
+			if e.Project == proj {
+				filtered[id] = e
+			}
+		}
+		entries = filtered
+	}
+	stats := gatherProcessStats(entries, tmpCache, touched)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(stats); err != nil {
+		log.Printf("terminal processes: failed to encode response: %v", err)
+	}
 }

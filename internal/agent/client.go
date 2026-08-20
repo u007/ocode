@@ -400,6 +400,17 @@ func (c *GenericClient) samplingTunable() bool {
 	return true
 }
 
+// requestModel returns the model identifier expected by the provider API.
+// OrcaRouter's named routers use the provider-qualified form (for example,
+// "orcarouter/auto"), while upstream models routed through OrcaRouter already
+// contain their own provider prefix (for example, "anthropic/claude-sonnet").
+func (c *GenericClient) requestModel() string {
+	if c.Provider == "orcarouter" && !strings.Contains(c.Model, "/") {
+		return "orcarouter/" + c.Model
+	}
+	return c.Model
+}
+
 // isReasoningOnlyModel returns true for models that reject temperature/top_p.
 // Kept narrow on purpose: only the OpenAI o-series and gpt-5* families are
 // known-bad today. Extend as new families surface the same constraint.
@@ -800,7 +811,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	}
 
 	payload := map[string]interface{}{
-		"model":    c.Model,
+		"model":    c.requestModel(),
 		"messages": openAIMessages,
 		"stream":   true,
 	}
@@ -3484,6 +3495,7 @@ var providers = map[string]providerInfo{
 	"openai":         {"OPENAI_API_KEY", "https://api.openai.com/v1"},
 	"anthropic":      {"ANTHROPIC_API_KEY", "https://api.anthropic.com/v1"},
 	"openrouter":     {"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"},
+	"orcarouter":     {"ORCAROUTER_API_KEY", "https://api.orcarouter.ai/v1"},
 	"google":         {"GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai"},
 	"zai":            {"ZAI_API_KEY", "https://api.z.ai/v1"},
 	"z.ai":           {"ZAI_API_KEY", "https://api.z.ai/v1"},
@@ -3920,7 +3932,7 @@ func (c *GenericClient) chatOpenAIWebSocket(ctx context.Context, messages []Mess
 	}
 
 	payload := map[string]interface{}{
-		"model":    c.Model,
+		"model":    c.requestModel(),
 		"messages": openAIMessages,
 		"stream":   true,
 	}
@@ -3965,7 +3977,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	}
 
 	payload := map[string]interface{}{
-		"model":    c.Model,
+		"model":    c.requestModel(),
 		"messages": openAIMessages,
 		"stream":   true,
 	}

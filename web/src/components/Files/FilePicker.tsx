@@ -45,13 +45,15 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath }: P
 
   useEffect(() => {
     if (!open) return;
+    if (!projectPath) {
+      setFiles([]);
+      return;
+    }
     // depth=0 asks the server for the full tree (no depth cap) so files
     // nested deep in the project are searchable, not just the shallow ones.
     // An explicit path anchors the request to the active project instead of
     // the server's own workDir (fixed at launch, e.g. home dir on desktop).
-    const query = projectPath
-      ? `path=${encodeURIComponent(projectPath)}&depth=0`
-      : "depth=0";
+    const query = `path=${encodeURIComponent(projectPath)}&depth=0`;
     fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders() })
       .then((res) => res.json())
       .then((data: FileTreeResponse) => {

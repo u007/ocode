@@ -211,15 +211,21 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
     return opts;
   }, [projectPath, extraPaths]);
 
-  // Load tree whenever the active root changes. Without an explicit path,
-  // the server falls back to its own anchored workDir, which on desktop is
-  // fixed at process launch (often the home dir) and not the active project.
+  // Load tree whenever the active root changes. When no project is
+  // selected (no active project yet) we do not fall back to the server's
+  // anchored workDir — that would list an unrelated directory (e.g. home or
+  // "/") and show a confusing empty "No files" state on a fresh install.
   useEffect(() => {
+    const root = activeRoot ?? projectPath;
+    if (!root) {
+      setTree([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     (async () => {
       try {
-        const root = activeRoot ?? projectPath;
-        const query = root ? `path=${encodeURIComponent(root)}&depth=1` : "depth=1";
+        const query = `path=${encodeURIComponent(root)}&depth=1`;
         const res = await fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders() });
         if (!res.ok) throw new Error("Failed to load file tree");
         const data: FileTreeResponse = await res.json();
@@ -263,6 +269,12 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
         {loading ? (
           <div className="flex items-center justify-center py-12 text-xs text-muted-foreground">
             Loading…
+          </div>
+        ) : !(activeRoot ?? projectPath) ? (
+          <div className="px-4 py-12 text-center text-xs text-muted-foreground">
+            <FolderOpen className="w-8 h-8 mx-auto mb-2 text-muted-foreground/60" />
+            <p>No project added yet</p>
+            <p className="mt-1">Add a project from the sidebar to browse files</p>
           </div>
         ) : tree.length === 0 ? (
           <div className="px-4 py-12 text-center text-xs text-muted-foreground">

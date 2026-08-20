@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { FileCode, Files as FilesIcon, X } from "lucide-react";
 
 export interface EditorTabInfo {
@@ -27,8 +28,26 @@ export default function EditorTabBar({
 }: Props) {
   if (editorTabs.length === 0) return null;
 
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    const el = scrollRef.current;
+    if (!el || el.scrollWidth <= el.clientWidth + 1) return;
+    const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (delta === 0) return;
+    const atLeft = el.scrollLeft <= 0;
+    const atRight = el.scrollLeft + el.clientWidth >= el.scrollWidth - 1;
+    if ((delta < 0 && atLeft) || (delta > 0 && atRight)) return;
+    e.preventDefault();
+    el.scrollLeft += delta;
+  };
+
   return (
-    <div className="flex items-center h-8 px-2 gap-1 bg-zinc-900 border-b border-zinc-700 overflow-x-auto scrollbar-hide">
+    <div
+      ref={scrollRef}
+      onWheel={handleWheel}
+      className="flex items-center h-8 px-2 gap-1 bg-zinc-900 border-b border-zinc-700 overflow-x-auto overflow-y-hidden scrollbar-hide flex-nowrap min-w-0 w-full touch-pan-x overscroll-x-contain"
+      style={{ WebkitOverflowScrolling: "touch" } as React.CSSProperties}
+    >
       <button
         onClick={onSelectTree}
         className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${

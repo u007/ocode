@@ -1,7 +1,9 @@
 package lsp
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -9,6 +11,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/u007/ocode/internal/lsp/broker"
 )
 
 // serverSpec describes how to launch a language server for a file extension.
@@ -87,9 +92,11 @@ type ServerStatus struct {
 //
 // It is safe for concurrent use.
 type Manager struct {
-	root    string
-	mu      sync.Mutex
-	clients map[string]*Client
+	root         string
+	mu           sync.Mutex
+	sharedBroker bool
+	brokerMeta   map[string]broker.Metadata
+	clients      map[string]*Client
 	// openByURI maps file:// URI -> server extension (e.g. ".go"). The watcher
 	// calls back into handleFileChange, which uses this map to dispatch to
 	// the right client. The map's keys are file URIs, not paths, so they
@@ -113,19 +120,89 @@ type Manager struct {
 // limits on a hostile host), the manager still works but files edited
 // out-of-band will not trigger didChange.
 func NewManager(root string) *Manager {
+	// Isolated by default — sharing is gated behind the lsp_shared config
+	// flag via NewManagerWithShared / NewSharedManager. See
+	// docs/architecture/lsp-broker-shared-server-gotchas.md and
+	// docs/superpowers/specs/2026-08-20-shared-lsp-broker-design.md:108.
+	return newManager(root, false)
+}
+
+// NewManagerWithShared constructs a manager with an explicit broker policy.
+// This is used by config-aware callers; NewManager preserves the historical
+// default of opportunistic sharing.
+func NewManagerWithShared(root string, enabled bool) *Manager {
+	return newManager(root, enabled)
+}
+
+// NewSharedManager opts into the gopls broker path.
+func NewSharedManager(root string) *Manager {
+	return newManager(root, true)
+}
+
+func newManager(root string, sharedBroker bool) *Manager {
 	if root == "" {
 		root = "."
 	}
 	m := &Manager{
-		root:        root,
-		clients:     make(map[string]*Client),
-		openByURI:   make(map[string]string),
-		diagnostics: newDiagnosticStore(),
+		root:         root,
+		sharedBroker: sharedBroker,
+		brokerMeta:   make(map[string]broker.Metadata),
+		clients:      make(map[string]*Client),
+		openByURI:    make(map[string]string),
+		diagnostics:  newDiagnosticStore(),
 	}
 	if w, err := newFileWatcher(root, m); err == nil {
 		m.watcher = w
 	}
 	return m
+}
+
+// AttachBroker records an authenticated broker endpoint for ext. The endpoint
+// is consumed by ClientForExt on first use.
+func (m *Manager) AttachBroker(ext string, meta broker.Metadata) error {
+	if m == nil {
+		return fmt.Errorf("nil LSP manager")
+	}
+	spec, ok := serversByExt[ext]
+	if !ok {
+		return fmt.Errorf("no language server configured for %q files", ext)
+	}
+	if meta.Port <= 0 || meta.Token == "" {
+		return fmt.Errorf("shared broker attachment for %q requires port and token", ext)
+	}
+	if meta.Protocol != broker.ProtocolVersion {
+		return fmt.Errorf("shared broker attachment for %q has unsupported protocol %d", ext, meta.Protocol)
+	}
+	canonicalRoot, err := broker.CanonicalRoot(m.root)
+	if err != nil {
+		return fmt.Errorf("shared broker attachment for %q: resolve manager root: %w", ext, err)
+	}
+	if meta.Identity.Root != canonicalRoot {
+		return fmt.Errorf("shared broker attachment for %q has root %q, want %q", ext, meta.Identity.Root, canonicalRoot)
+	}
+	if meta.Identity.LanguageID != spec.langID || meta.Identity.Executable == "" {
+		return fmt.Errorf("shared broker attachment for %q has incompatible identity", ext)
+	}
+	m.mu.Lock()
+	m.brokerMeta[ext] = meta
+	m.mu.Unlock()
+	return nil
+}
+
+// BrokerAttached reports whether an explicit broker endpoint was recorded for ext.
+func (m *Manager) BrokerAttached(ext string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	_, ok := m.brokerMeta[ext]
+	m.mu.Unlock()
+	return ok
+}
+
+// SharedBrokerEnabled reports the construction-time broker policy.
+func (m *Manager) SharedBrokerEnabled() bool {
+	return m != nil && m.sharedBroker
 }
 
 // Diagnostics returns the project-wide diagnostic store. The store is
@@ -139,6 +216,21 @@ func (m *Manager) Diagnostics() *DiagnosticStore {
 	return m.diagnostics
 }
 
+func (m *Manager) installDiagnosticsHandler(ext string, c *Client) {
+	store := m.diagnostics
+	if store == nil {
+		return
+	}
+	generation := store.Generation()
+	cmd := serversByExt[ext].cmd
+	c.SetDiagnosticsHandler(func(uri string, diags []Diagnostic) {
+		for i := range diags {
+			diags[i].ServerCmd = cmd
+		}
+		store.SetURIIfGeneration(uri, diags, generation)
+	})
+}
+
 // ClientForExt returns an initialised client for the given file extension,
 // starting the server on first use. It returns a descriptive error (never a
 // silent fallback) when no server is configured or the binary is missing.
@@ -147,41 +239,62 @@ func (m *Manager) ClientForExt(ext string) (*Client, error) {
 	if !ok {
 		return nil, fmt.Errorf("no language server configured for %q files (supported: %s)", ext, SupportedExtensions())
 	}
-
 	m.mu.Lock()
 	if c, ok := m.clients[ext]; ok {
 		m.mu.Unlock()
 		return c, nil
 	}
-	if _, err := exec.LookPath(spec.cmd); err != nil {
+	meta, attached := m.brokerMeta[ext]
+	if !attached && m.sharedBroker {
 		m.mu.Unlock()
+		if discovered, ok := discoverOrSpawnDaemon(m.root, ext, spec); ok {
+			meta, attached = discovered, true
+		}
+		m.mu.Lock()
+	}
+	if attached {
+		m.mu.Unlock()
+		c, err := NewBrokerClient(context.Background(), meta, fmt.Sprintf("manager-%s", strings.TrimPrefix(ext, ".")))
+		if err != nil {
+			// A stale/dead broker must never make LSP unavailable. Remove only
+			// this attachment and continue with the isolated stdio path.
+			m.mu.Lock()
+			delete(m.brokerMeta, ext)
+		} else {
+			m.mu.Lock()
+			if existing := m.clients[ext]; existing != nil {
+				m.mu.Unlock()
+				_ = c.Close()
+				return existing, nil
+			}
+			m.installDiagnosticsHandler(ext, c)
+			m.clients[ext] = c
+			m.mu.Unlock()
+			return c, nil
+		}
+	}
+	// Do not hold the manager mutex while starting or initializing a process.
+	// Initialization can block on the server and would otherwise serialize all
+	// callers (and deadlock callbacks that need manager state).
+	m.mu.Unlock()
+	if _, err := exec.LookPath(spec.cmd); err != nil {
 		return nil, fmt.Errorf("language server %q not found in PATH (install it for %s support)", spec.cmd, ext)
 	}
 	c, err := NewClient(spec.cmd, spec.args...)
 	if err != nil {
-		m.mu.Unlock()
 		return nil, fmt.Errorf("start %s: %w", spec.cmd, err)
 	}
 	if err := c.Initialize(m.root, spec.langID); err != nil {
-		m.mu.Unlock()
 		c.Close()
 		return nil, fmt.Errorf("initialize %s: %w", spec.cmd, err)
 	}
-	// Install a per-server diagnostics hook that funnels publishDiagnostics
-	// frames into the manager's shared store. The handler captures the store
-	// generation so stale frames from a previous server lifecycle are ignored
-	// after Close/Restart bumps the generation.
-	store := m.diagnostics
-	if store != nil {
-		generation := store.Generation()
-		cmd := spec.cmd
-		c.SetDiagnosticsHandler(func(uri string, diags []Diagnostic) {
-			for i := range diags {
-				diags[i].ServerCmd = cmd
-			}
-			store.SetURIIfGeneration(uri, diags, generation)
-		})
+	m.mu.Lock()
+	if existing := m.clients[ext]; existing != nil {
+		m.mu.Unlock()
+		_ = c.Close()
+		return existing, nil
 	}
+	m.installDiagnosticsHandler(ext, c)
 	m.clients[ext] = c
 	// Read eventCh while holding the lock, then send outside the lock.
 	eventCh := m.eventCh
@@ -199,6 +312,124 @@ func (m *Manager) ClientForExt(ext string) (*Client, error) {
 // ClientForFile is ClientForExt keyed by a file path's extension.
 func (m *Manager) ClientForFile(path string) (*Client, error) {
 	return m.ClientForExt(filepath.Ext(path))
+}
+
+// daemonConnectAttempts/daemonConnectDelay bound how long ClientForExt waits
+// for a just-spawned daemon to publish its metadata and accept a connection
+// before giving up and falling back to an isolated stdio client. gopls's own
+// startup is much slower than this window, but the daemon only needs to bind
+// its listener and write metadata before this succeeds — the LSP
+// initialize handshake itself happens inside the daemon process, off this
+// call's critical path only for the *next* caller, not this one, since this
+// call still waits on NewBrokerClient -> Connect, which succeeds as soon as
+// the daemon's listener is up (the daemon's own real client Initialize call
+// runs beforehand as part of its start() function — see cmd_daemon.go — so a
+// slow gopls index does delay the very first ClientForExt call for a fresh
+// project, same as today's isolated-client path).
+const (
+	daemonConnectAttempts = 20
+	daemonConnectDelay    = 500 * time.Millisecond
+)
+
+// discoverOrSpawnDaemon finds a reachable daemon for (root, ext), spawning
+// one (detached, not waited on) if none is reachable, and returns its
+// metadata. Returns ok=false on any failure — callers must fall back to an
+// isolated stdio client rather than treat this as a hard error, since a
+// shared daemon is an optimization, not a requirement.
+func discoverOrSpawnDaemon(root, ext string, spec serverSpec) (broker.Metadata, bool) {
+	if underTempDir(root) {
+		// A daemon's shared identity is keyed on root, so a root inside the
+		// OS temp dir (e.g. t.TempDir() in tests) is guaranteed unique per
+		// run and can never be reconnected to — spawning one here would
+		// only ever produce an orphan detached process. Refuse and let the
+		// caller fall back to the isolated stdio client instead.
+		log.Printf("lsp: refusing to spawn shared daemon for %s under temp root %q (never shareable)", ext, root)
+		return broker.Metadata{}, false
+	}
+	identity, err := broker.NewIdentity(root, spec.cmd, spec.args, spec.langID, nil, nil)
+	if err != nil {
+		return broker.Metadata{}, false
+	}
+	path, err := broker.MetadataPath(identity)
+	if err != nil {
+		return broker.Metadata{}, false
+	}
+
+	if meta, ok := tryConnect(path); ok {
+		return meta, true
+	}
+
+	if err := spawnDaemonProcess(root, ext); err != nil {
+		log.Printf("lsp: spawn shared daemon for %s: %v", ext, err)
+		return broker.Metadata{}, false
+	}
+
+	for i := 0; i < daemonConnectAttempts; i++ {
+		time.Sleep(daemonConnectDelay)
+		if meta, ok := tryConnect(path); ok {
+			return meta, true
+		}
+	}
+	return broker.Metadata{}, false
+}
+
+// underTempDir reports whether root resolves inside the OS temp directory
+// (where t.TempDir() and similar throwaway workspaces live). Best-effort:
+// on any resolution failure it returns false so callers fall through to the
+// normal (safe, just non-deduplicated) spawn path rather than blocking it.
+func underTempDir(root string) bool {
+	canonicalRoot, err := broker.CanonicalRoot(root)
+	if err != nil {
+		return false
+	}
+	tmp, err := broker.CanonicalRoot(os.TempDir())
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(tmp, canonicalRoot)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && rel != "")
+}
+
+// tryConnect reads metadata at path and probes it with a single short-lived
+// connection, closing it immediately — this call only establishes
+// reachability, the real Client connection is made separately by
+// NewBrokerClient in ClientForExt.
+func tryConnect(path string) (broker.Metadata, bool) {
+	meta, err := broker.ReadMetadata(path)
+	if err != nil {
+		return broker.Metadata{}, false
+	}
+	conn, err := broker.Connect(context.Background(), meta, "manager-probe", 1, 0)
+	if err != nil {
+		return broker.Metadata{}, false
+	}
+	_ = conn.Close()
+	return meta, true
+}
+
+// spawnDaemonProcess launches `<this executable> lsp-daemon --root=... --ext=...`
+// detached from the current process (see detachProcAttr) so it outlives
+// this ocode process's exit — the whole point of the daemon is to keep
+// serving other ocode processes after the one that spawned it is gone.
+// Not waited on: the daemon's own StartOnce/metadata-lock handles startup
+// races between multiple ocode processes spawning it concurrently.
+func spawnDaemonProcess(root, ext string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve ocode executable: %w", err)
+	}
+	cmd := exec.Command(exe, "lsp-daemon", "--root="+root, "--ext="+ext)
+	// Do not inherit the parent terminal (TUI Output Safety: raw daemon
+	// log writes would corrupt the alt-screen). Stdin from empty reader,
+	// stdout/stderr discarded; see internal/lsp/daemon.go:144.
+	cmd.Stdin = strings.NewReader("")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	detachProcAttr(cmd)
+	return cmd.Start()
 }
 
 // EnsureOpen opens path with the right client and registers a file watch so
@@ -292,12 +523,16 @@ func (m *Manager) Close() {
 	if m.diagnostics != nil {
 		m.diagnostics.BumpGeneration()
 	}
+	clients := make([]*Client, 0, len(m.clients))
 	for ext, c := range m.clients {
-		c.Close()
+		clients = append(clients, c)
 		delete(m.clients, ext)
 	}
 	m.openByURI = make(map[string]string)
 	m.mu.Unlock()
+	for _, c := range clients {
+		_ = c.Close()
+	}
 	if m.watcher != nil {
 		_ = m.watcher.Close()
 		m.watcher = nil

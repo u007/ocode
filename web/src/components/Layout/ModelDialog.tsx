@@ -52,8 +52,29 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
 
   useEffect(() => {
     if (open) {
-      api.listModels().then(setModels).catch(console.error);
       setSearch("");
+      // Load the standard registry models, augmented for the Security &
+      // Redaction (mask) purpose with the user's enabled local/LM Studio models
+      // so a tier-2 scanner can run against a local model server — mirroring the
+      // TUI's redaction-model picker, which lists LocalModels.
+      const loadModels = async () => {
+        const base = await api.listModels();
+        if (purpose === "mask") {
+          try {
+            const local = await api.getLocalModelsConfig();
+            const extra: ModelInfo[] = Object.entries(local)
+              .filter(([, v]) => v.enabled)
+              .map(([id]) => ({ name: id, model: id, provider: "Local Models", active: false }));
+            if (extra.length > 0) setModels([...base, ...extra]);
+            else setModels(base);
+          } catch {
+            setModels(base);
+          }
+        } else {
+          setModels(base);
+        }
+      };
+      loadModels().catch(console.error);
       api.getConfigModel().then((res) => {
         dispatch({ type: "SET_MODEL", model: res.model });
       }).catch(console.error);

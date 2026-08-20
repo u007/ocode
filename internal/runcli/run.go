@@ -55,6 +55,7 @@ type runOptions struct {
 	password       string
 	timeout        int
 	effort         string
+	profile        string
 }
 
 func parseRunArgs(args []string) (runOptions, []string, error) {
@@ -92,6 +93,7 @@ func parseRunArgs(args []string) (runOptions, []string, error) {
 	fs.StringVar(&opts.password, "password", "", "Basic auth password for --attach")
 	fs.IntVar(&opts.timeout, "timeout", 150, "Per-request LLM timeout in seconds (0 = no timeout, wait indefinitely)")
 	fs.StringVar(&opts.password, "P", "", "Basic auth password for --attach")
+	fs.StringVar(&opts.profile, "profile", "", "Profile to use (overrides config; same as OCODE_PROFILE env)")
 
 	if err := fs.Parse(args); err != nil {
 		return opts, nil, err
@@ -153,6 +155,12 @@ func Run(args []string) error {
 	_ = opts.share
 	_ = opts.variant
 	_ = opts.thinking
+	if opts.profile != "" {
+		if err := config.ValidateProfileName(opts.profile); err != nil {
+			return err
+		}
+		_ = os.Setenv("OCODE_PROFILE", opts.profile)
+	}
 
 	if opts.dir != "" {
 		if err := os.Chdir(opts.dir); err != nil {

@@ -373,6 +373,14 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	// reflect sub-agent file changes.
 	subAgent.snapshotStore = t.mainAgent.snapshotStore
 
+	// Propagate the parent's project root so the sub-agent's file writes are
+	// confined against the project (not the process cwd) and appear on the
+	// changes tab — same as the main agent. Plain field assignment (not
+	// SetWorkDir) so it does not re-point the already-shared snapshot store.
+	if t.mainAgent.workDir != "" {
+		subAgent.workDir = t.mainAgent.workDir
+	}
+
 	// Wire the sub-agent's advisor gate to the parent's atomic flag so
 	// mid-run toggles propagate immediately (reactive, not a snapshot).
 	subAgent.SetParentAdvisorEnabled(&t.mainAgent.advisorEnabled)

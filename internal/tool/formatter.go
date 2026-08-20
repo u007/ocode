@@ -54,7 +54,7 @@ func (t FormatTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (strin
 		return "No formatters configured", nil
 	}
 
-	safe, err := confinedPath(params.Path)
+	safe, err := confinedPath(ctx, params.Path)
 	if err != nil {
 		return "", err
 	}
