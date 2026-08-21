@@ -198,6 +198,7 @@ A React-based web interface that mirrors the TUI experience:
 | **File browser** | ✅ Tree-based with preview and editing |
 | **Git panel** | ✅ Real diff rendering with file status |
 | **Logs panel** | ✅ SSE-backed live log streaming with reconnection |
+| **Cron panel** | ✅ Scheduled jobs management |
 | **Session management** | ✅ Resume, history, routing |
 | **Model selection** | ✅ Model dialog with main/small/advisor tabs |
 | **Permissions dialog** | ✅ Interactive allow/deny prompts |
@@ -240,7 +241,16 @@ token; all app logic stays behind the same HTTP/SSE API the browser uses.
 
 Native extras: system tray (show/quit), dock badge with the running-agent
 count (macOS/Windows), and finished/failed-run notifications when the window
-is unfocused (clicking one focuses the window).
+is unfocused (clicking one focuses the window). The custom app menu gives
+**Cmd+Q** a native "Quit ocode?" confirmation, while **Cmd+W** is deliberately
+left unbound so it falls through to the webview and closes the active session
+tab instead of quitting. If the in-process server fails to boot, a **native
+error dialog** reports it (stderr is invisible from a Finder-launched `.app`).
+Finder/Dock launches also anchor the working directory to your home directory
+instead of `/` and reload that project's `opencode.json`, so provider
+overrides and file trees resolve against the right project. Scheduled (cron)
+jobs run inside the long-lived desktop host (`internal/desktop/scheduler.go`)
+— manage them from the web UI's Cron panel.
 
 ```bash
 make desktop        # build bin/ocode-desktop (requires cgo + platform SDK)
@@ -304,6 +314,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 - **VS Code `/ide`** — Lock discovery, WebSocket + MCP client, selection/open-editor/mention streaming, auto-attach
 - **IDE status chip** in sidebar — shows connection state
 - **IDE mode config** — toggle via sidebar click or `/ide status`
+- **Zed / ACP (`ocode acp`)** — Agent Client Protocol server so ocode appears in Zed's agent panel alongside Claude Code / Codex
 
 ### 📊 Debug & Observability
 
@@ -424,6 +435,7 @@ ocode adds **first-class permission modes** (`normal`, `yolo`, `locked`) with pe
 - **Skill system** with installer and CLI
 - **VS Code `/ide` integration** with lock discovery
 - **Web UI** with `/rc` remote control, Git panel, Logs panel, theme sync
+- **Desktop app** — native Wails v3 shell (tray, dock badge, notifications) with the cron scheduler running in-host
 - **AI code review** (`/review`) for working dir, commits, branches, PRs
 - **GitHub integration** — PR, issue, workflow commands
 - **LSP eager warm-up** with sidebar status, install hints
