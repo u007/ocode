@@ -171,6 +171,59 @@ describe("useEditorTabs", () => {
     expect(tab.externalChange).toBe(true);
   });
 
+  it("rapid concurrent opens of the same file create exactly one tab", async () => {
+    // Regression: the open-id guard used to run before the async content
+    // fetch, so two rapid calls (double-click on a tree row) both passed it
+    // and appended two tabs with the same id — two stacked Monaco editors
+    // fighting over focus and caret position.
+    let resolveFetch!: (v: { ok: boolean; json: () => Promise<{ content: string }> }) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveFetch = resolve;
+          }),
+      ),
+    );
+
+    const { result } = renderHook(() => useEditorTabs());
+    // Fire two opens without awaiting the first — both enter the fetch phase.
+    const first = result.current.handleOpenFile("/a/b.txt");
+    const second = result.current.handleOpenFile("/a/b.txt");
+    await act(async () => {
+      resolveFetch({ ok: true, json: async () => ({ content: "hello" }) });
+      await Promise.all([first, second]);
+    });
+
+    expect(result.current.editorTabs).toHaveLength(1);
+    expect(result.current.editorTabs[0].id).toBe("editor-/a/b.txt");
+    expect(result.current.activeEditorTabId).toBe("editor-/a/b.txt");
+  });
+
+  it("a failed open releases its claim so the file can be reopened", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) }),
+    );
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("/missing.txt");
+    });
+    expect(result.current.editorTabs).toHaveLength(0);
+
+    // Disk recovers — the same file must be openable again.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: "back" }) }),
+    );
+    await act(async () => {
+      await result.current.handleOpenFile("/missing.txt");
+    });
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+    expect(result.current.editorTabs[0].content).toBe("back");
+  });
+
   it("reloadTabFromDisk discards the draft in favour of disk content", async () => {
     const { result } = renderHook(() => useEditorTabs());
     await act(async () => {

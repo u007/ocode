@@ -144,6 +144,14 @@ func main() {
 		if err == nil {
 			q := parsed.Query()
 			q.Set("windowId", desktopWindowName)
+			// The desktop server boots with a random auth token that gates every
+			// /api/* route. The webview SPA reads it from the ?token= query param
+			// at load time and replays it as a Bearer header on every fetch. The
+			// production URL (appURL) already carries it; the dev override must
+			// too, or every API call (incl. /api/chat) returns 401 Unauthorized.
+			if handle != nil {
+				q.Set("token", handle.Token)
+			}
 			parsed.RawQuery = q.Encode()
 			desktopURL = parsed.String()
 		} else {

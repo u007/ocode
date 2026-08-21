@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Routes, Route } from "react-router-dom";
+import { PanelLeft, PanelLeftClose, Plus } from "lucide-react";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatState, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, useProjectState } from "./stores/projectStore";
@@ -43,7 +44,7 @@ import { dispatchCommand } from "./components/Chat/commands";
 import SessionPage from "./pages/SessionPage";
 import FilePicker from "./components/Files/FilePicker";
 import ConfirmCloseDialog from "./components/Files/ConfirmCloseDialog";
-import { isNewSessionTabEmpty } from "./lib/tabDrafts";
+import { isNewSessionTabEmpty, rekeyDraft } from "./lib/tabDrafts";
 import { rekeyQueue } from "./lib/tabQueue";
 import { notifyWailsRuntimeReady } from "./lib/wails";
 import { eventBus } from "./lib/eventBus";
@@ -104,6 +105,13 @@ function HomeApp() {
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const sidebar = useResizableSidebar();
+  const fileTreePane = useResizableSidebar({
+    storageKey: "ocode.ui.filetree_width",
+    defaultWidth: 260,
+    minWidth: 160,
+    maxWidth: 500,
+    collapsible: true,
+  });
 
   // Part 05: per-session status on tab activation + streaming watchdog.
   useSessionStatus(activeTabId);
@@ -409,6 +417,7 @@ function HomeApp() {
   const handleSessionCreated = (tempTabId: string, sessionId: string) => {
     dispatch({ type: "REKEY_SESSION", oldId: tempTabId, newId: sessionId });
     rekeyQueue(tempTabId, sessionId);
+    rekeyDraft(tempTabId, sessionId);
     projectDispatch({
       type: "UPDATE_TAB_ID",
       oldId: tempTabId,
@@ -478,46 +487,72 @@ function HomeApp() {
             </div>
 
             <div className="flex-1 overflow-hidden flex flex-col pb-2">
-              <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0 flex flex-col">
-                <EditorTabBar
-                  editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path, isDirty: t.isDirty }))}
-                  activeEditorTabId={activeEditorTabId}
-                  onSelectTree={() => setActiveEditorTabId(null)}
-                  onSelectTab={setActiveEditorTabId}
-                  onCloseTab={requestCloseTab}
-                />
-                <div className="relative flex-1 overflow-hidden">
-                  <div className={activeEditorTabId === null ? "absolute inset-0" : "absolute inset-0 hidden"}>
+              <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0 flex">
+                <div
+                  className="relative shrink-0 h-full overflow-hidden border-r border-zinc-800 transition-[width] duration-100"
+                  style={{ width: fileTreePane.collapsed ? 0 : fileTreePane.width }}
+                >
+                  <div className="absolute inset-0" style={{ width: fileTreePane.width }}>
                     <FileTree onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} />
                   </div>
-                  {editorTabs.map((et) => (
-                    <div
-                      key={et.id}
-                      className={et.id === activeEditorTabId ? "absolute inset-0" : "absolute inset-0 hidden"}
-                    >
-                      <FileEditor
-                        path={et.path}
-                        persistKey={et.id}
-                        content={et.content}
-                        onChange={(value) => handleEditorChange(et.id, value)}
-                        readOnly={false}
-                        session={activeTabId ?? undefined}
-                        diffVersion={et.diffVersion}
-                        onSelectionChange={handleSelectionChange}
-                        externalChange={et.externalChange}
-                        onReloadFromDisk={() => reloadTabFromDisk(et.id)}
-                        onDismissExternalChange={() => dismissExternalChange(et.id)}
-                      />
-                    </div>
-                  ))}
+                </div>
+                {!fileTreePane.collapsed && (
+                  <div
+                    ref={fileTreePane.handleRef}
+                    onPointerDown={fileTreePane.onPointerDown}
+                    onDoubleClick={fileTreePane.resetToDefault}
+                    className="w-1 shrink-0 cursor-col-resize hover:bg-zinc-700 active:bg-zinc-600"
+                  />
+                )}
+                <button
+                  onClick={fileTreePane.toggleCollapsed}
+                  title={fileTreePane.collapsed ? "Show file tree" : "Hide file tree"}
+                  className="shrink-0 self-start mt-1 p-0.5 rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300"
+                >
+                  {fileTreePane.collapsed ? <PanelLeft className="w-3.5 h-3.5" /> : <PanelLeftClose className="w-3.5 h-3.5" />}
+                </button>
+                <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+                  <EditorTabBar
+                    editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path, isDirty: t.isDirty }))}
+                    activeEditorTabId={activeEditorTabId}
+                    onSelectTab={setActiveEditorTabId}
+                    onCloseTab={requestCloseTab}
+                  />
+                  <div className="relative flex-1 overflow-hidden">
+                    {editorTabs.length === 0 && (
+                      <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500">
+                        No file open
+                      </div>
+                    )}
+                    {editorTabs.map((et) => (
+                      <div
+                        key={et.id}
+                        className={et.id === activeEditorTabId ? "absolute inset-0" : "absolute inset-0 hidden"}
+                      >
+                        <FileEditor
+                          path={et.path}
+                          persistKey={et.id}
+                          content={et.content}
+                          onChange={(value) => handleEditorChange(et.id, value)}
+                          readOnly={false}
+                          session={activeTabId ?? undefined}
+                          diffVersion={et.diffVersion}
+                          onSelectionChange={handleSelectionChange}
+                          externalChange={et.externalChange}
+                          onReloadFromDisk={() => reloadTabFromDisk(et.id)}
+                          onDismissExternalChange={() => dismissExternalChange(et.id)}
+                        />
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </TabsContent>
 
               <TabsContent value="git" forceMount className="flex-1 overflow-hidden m-0">
-                <GitPanel onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} />
+                <GitPanel onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} active={activeView === "git"} />
               </TabsContent>
               <TabsContent value="cron" forceMount className="flex-1 overflow-hidden m-0">
-                <CronPanel />
+                <CronPanel active={activeView === "cron"} />
               </TabsContent>
               <TabsContent value="assets" forceMount className="flex-1 overflow-hidden m-0">
                 <AssetsPanel />
@@ -531,6 +566,18 @@ function HomeApp() {
                   <OpenSessionBar />
                   <SessionSubTabs />
                   <div className="relative flex-1 min-h-0 overflow-hidden">
+                    {tabs.length === 0 && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-zinc-500">
+                        <p className="text-sm">No open sessions for this project</p>
+                        <button
+                          onClick={() => openNewSessionTab(false)}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          New session
+                        </button>
+                      </div>
+                    )}
                     {allChatTabs.map((tab) => (
                       <div
                         key={`${tab.id}:chat`}
@@ -583,7 +630,14 @@ function HomeApp() {
                             : "absolute inset-0 hidden"
                         }
                       >
-                        <ChangesPanel session={tab.id} />
+                        <ChangesPanel
+                          session={tab.id}
+                          active={
+                            tab.projectPath === projectState.activeProject?.path &&
+                            tab.id === activeTabId &&
+                            tab.activeSubTab === "changes"
+                          }
+                        />
                       </div>
                     ))}
                     {allChatTabs.map((tab) => (

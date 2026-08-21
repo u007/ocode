@@ -112,6 +112,13 @@ func TestHandleResolvePermissionForwardsToBridgeWhenBridged(t *testing.T) {
 	h := NewHandler()
 	h.rc = &RCBridge{SessionID: "tui-sess", ResolveCh: resolveCh}
 
+	// Guard the no-broadcast invariant: in bridge mode the server must NOT
+	// emit permission_resolved on headlessSubs — the bridged web client listens
+	// on the TUI's bridge channel, and the TUI broadcasts the dismissal itself
+	// once it applies the resolution.
+	evCh := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(evCh)
+
 	// Approve must forward an "allow" resolution; deny an explicit "deny".
 	for _, tc := range []struct {
 		approved bool
@@ -134,6 +141,14 @@ func TestHandleResolvePermissionForwardsToBridgeWhenBridged(t *testing.T) {
 			}
 		case <-time.After(time.Second):
 			t.Fatalf("approved=%v no resolution forwarded to the bridge", tc.approved)
+		}
+		select {
+		case ev := <-evCh:
+			if ev.Event == "permission_resolved" {
+				t.Fatalf("approved=%v server must not broadcast permission_resolved in bridge mode (got SessionID=%q)", tc.approved, ev.SessionID)
+			}
+		case <-time.After(100 * time.Millisecond):
+			// Expected: no headless-channel event for the bridged resolution.
 		}
 	}
 }

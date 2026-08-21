@@ -3,15 +3,21 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 )
 
 // opencode persists the user's recent / favourite model selections in
-// ${XDG_STATE_HOME}/opencode/model.json. We read it as a fallback for
-// the default model and write back to it when the user picks a model
-// in the TUI so the two CLIs stay in sync.
+// ${XDG_STATE_HOME}/opencode/model.json. The file is owned by the upstream
+// opencode CLI; ocode reads it for picker display and writes recent entries
+// back when the user picks a model in the TUI so the two CLIs stay in sync.
+// It is deliberately NOT consulted as a startup-model fallback — see Load()
+// in config.go: the list churns from every tool/instance sharing it, and
+// silently adopting whatever another session used last surfaced as surprise
+// startup models the user never picked.
 
 type modelStateEntry struct {
 	ProviderID string `json:"providerID"`
@@ -26,6 +32,45 @@ type modelState struct {
 }
 
 const recentCap = 25
+
+// lockModelState takes an exclusive cross-process lock around model.json
+// read-modify-write cycles. The upstream opencode CLI shares this file and
+// does not honor the lock, but serializing ocode's own writers removes lost
+// updates between concurrent ocode instances (e.g. many TUIs launched at
+// once). Mirrors lockOcodeConfig: O_EXCL create, stale-lock steal after 10s,
+// proceed unlocked after a 5s deadline rather than failing the save.
+func lockModelState() (func(), error) {
+	path, err := getModelStatePath()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	lockPath := path + ".lock"
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if err == nil {
+			f.Close()
+			return func() { os.Remove(lockPath) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+		// A crashed process can leave the lock file behind forever; steal it
+		// once it's clearly stale rather than deadlocking every future save.
+		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 10*time.Second {
+			os.Remove(lockPath)
+			continue
+		}
+		if time.Now().After(deadline) {
+			log.Printf("config: model state lock %s still held after 5s; saving unlocked (a concurrent write may be lost)", lockPath)
+			return func() {}, nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
 
 func getModelStatePath() (string, error) {
 	if env := os.Getenv("XDG_STATE_HOME"); env != "" {
@@ -78,60 +123,34 @@ func SaveRecentModel(providerModel string) error {
 	if provID == "" || modelID == "" {
 		return fmt.Errorf("invalid provider/model id: %q", providerModel)
 	}
-
-	path, err := getModelStatePath()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-
-	var full map[string]json.RawMessage
-	if data, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(data, &full); err != nil {
-			full = nil
+	return readWriteModelState(func(full map[string]json.RawMessage) error {
+		var recent []modelStateEntry
+		if raw, ok := full["recent"]; ok {
+			_ = json.Unmarshal(raw, &recent)
 		}
-	}
-	if full == nil {
-		full = make(map[string]json.RawMessage)
-	}
 
-	var recent []modelStateEntry
-	if raw, ok := full["recent"]; ok {
-		_ = json.Unmarshal(raw, &recent)
-	}
-
-	filtered := make([]modelStateEntry, 0, len(recent)+1)
-	filtered = append(filtered, modelStateEntry{ProviderID: provID, ModelID: modelID})
-	for _, e := range recent {
-		if e.ProviderID == provID && e.ModelID == modelID {
-			continue
+		filtered := make([]modelStateEntry, 0, len(recent)+1)
+		filtered = append(filtered, modelStateEntry{ProviderID: provID, ModelID: modelID})
+		for _, e := range recent {
+			if e.ProviderID == provID && e.ModelID == modelID {
+				continue
+			}
+			if e.ProviderID == "" || e.ModelID == "" {
+				continue
+			}
+			filtered = append(filtered, e)
+			if len(filtered) >= recentCap {
+				break
+			}
 		}
-		if e.ProviderID == "" || e.ModelID == "" {
-			continue
-		}
-		filtered = append(filtered, e)
-		if len(filtered) >= recentCap {
-			break
-		}
-	}
 
-	newRecent, err := json.Marshal(filtered)
-	if err != nil {
-		return err
-	}
-	full["recent"] = newRecent
-
-	out, err := json.MarshalIndent(full, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+		newRecent, err := json.Marshal(filtered)
+		if err != nil {
+			return err
+		}
+		full["recent"] = newRecent
+		return nil
+	})
 }
 
 func splitProviderModel(s string) (string, string) {
@@ -177,6 +196,14 @@ func readWriteModelState(modify func(full map[string]json.RawMessage) error) err
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	// Serialize ocode's own read-modify-write cycles and give each writer its
+	// own scratch file: a shared ".tmp" let two concurrent instances rename a
+	// half-written file into place or silently drop each other's entries.
+	unlock, err := lockModelState()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	var full map[string]json.RawMessage
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &full); err != nil {
@@ -193,7 +220,7 @@ func readWriteModelState(modify func(full map[string]json.RawMessage) error) err
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
+	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
 	if err := os.WriteFile(tmp, out, 0o644); err != nil {
 		return err
 	}

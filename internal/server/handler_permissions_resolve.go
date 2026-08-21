@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/u007/ocode/internal/agent"
-	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -106,9 +105,12 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusServiceUnavailable, "resolve channel full; try again")
 			return
 		}
-		// Dismiss the web dialog; the TUI will also broadcast this once it
-		// applies the resolution, but sending it now keeps the UI snappy.
-		h.broadcastEvent(SSEEvent{SessionID: req.SessionID, Event: "permission_resolved", Data: map[string]string{"request_id": req.RequestID}})
+		// No server-side dismissal broadcast here: in bridge mode /api/events
+		// streams from the TUI's bridge channel, not headlessSubs, so a
+		// broadcastEvent would never reach the web dialog. Dismissal signals:
+		// the resolving tab dispatches locally on 200, and every other watcher
+		// gets the TUI's own broadcastRC("permission_resolved") once the
+		// resolution is applied (auto-tagged with the bridge session id).
 		writeJSON(w, http.StatusOK, ChatResponse{})
 		return
 	}
@@ -147,6 +149,10 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	resp, err := as.agent.Step(working)
 	if err != nil {
 		log.Printf("serve error: permission resolve step: %v", err)
+		// The approved tool already ran and its result is in `working`; keep it
+		// (plus any rounds Step completed) instead of leaving the session on the
+		// unresolved sentinel.
+		h.commitPartialTranscript(sessID, as, append(working, resp...), true)
 		h.broadcastEvent(SSEEvent{
 			SessionID: sessID,
 			Event:     "error",
@@ -165,7 +171,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	_ = session.Save(sessID, "", as.messages, nil)
+	_ = h.saveSession(sessID, "", as.messages, nil)
 
 	// Tell the mirror the dialog can be dismissed, then stream the continuation.
 	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "permission_resolved", Data: map[string]string{"request_id": req.RequestID}})

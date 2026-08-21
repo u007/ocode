@@ -25,6 +25,17 @@ export function clearDraft(tabId: string | null | undefined) {
   drafts.delete(tabId);
 }
 
+/** Move a draft from one tab id to another — the temp `new-*` id becomes a
+ *  real session id on first send. Without this the typed draft would be
+ *  orphaned under the temp id forever (a slow per-tab leak). */
+export function rekeyDraft(oldId: string | null | undefined, newId: string | null | undefined) {
+  if (!oldId || !newId || oldId === newId) return;
+  const draft = drafts.get(oldId);
+  if (draft === undefined) return;
+  drafts.delete(oldId);
+  if (!drafts.has(newId)) drafts.set(newId, draft);
+}
+
 /**
  * Single source of truth for "is the active tab a completely empty new-session
  * tab" — the predicate the "New session" buttons use to decide whether to

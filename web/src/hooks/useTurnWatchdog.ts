@@ -7,6 +7,7 @@ import {
   type ChatState,
 } from "../stores/chatStore";
 import { api } from "../api/client";
+import { RECONCILE_PAGE_SIZE } from "../lib/sessionEvents";
 
 /** Stall threshold: no turn_heartbeat for this long while a turn is active
  *  means the stream (or the turn) is stuck. */
@@ -35,11 +36,27 @@ export function applyReconcileState(
 
 async function reconcileSession(
   dispatch: (a: ChatAction) => void,
+  getState: () => ChatState,
   sessionId: string,
 ): Promise<void> {
   try {
+    const wasActive = getTurnState(getState(), sessionId).turnActive;
     const state = await api.getSessionState(sessionId);
     applyReconcileState(dispatch, sessionId, state);
+    if (!state.turn_active && wasActive) {
+      // The turn finished server-side but its terminal events were lost
+      // (missed turn_done + turn-boundary messages broadcast). Recovery is
+      // refetch, never replay: pull the committed transcript. The merge is
+      // dispatched after SET_TURN_STATE flipped turnActive, so the reducer's
+      // mid-turn guard does not hold it back.
+      const detail = await api.getSession(sessionId, { limit: RECONCILE_PAGE_SIZE });
+      dispatch({
+        type: "MERGE_SNAPSHOT",
+        sessionId,
+        messages: detail.messages,
+        total: detail.total,
+      });
+    }
   } catch (err) {
     console.warn(`turn watchdog: reconcile failed for ${sessionId}`, err);
   }
@@ -65,7 +82,7 @@ export function runWatchdogTick(
         );
         dispatch({ type: "SET_TURN_STALLED", sessionId, stalled: true });
       }
-      void reconcileSession(dispatch, sessionId);
+      void reconcileSession(dispatch, getState, sessionId);
     }
   }
 }

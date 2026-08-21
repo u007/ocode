@@ -61,6 +61,7 @@ func (a *Agent) ensureDiscovery() {
 			if a.procs == nil {
 				return fmt.Errorf("no process registry available for local server")
 			}
+			cmdline = tool.WrapWithParentMonitor(cmdline)
 			p := a.procs.StartBackground(cmdline)
 			// StartBackground sets ProcExited synchronously when cmd.Start (or
 			// supervisor Register) fails — surface that instead of letting the

@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { FileCode, Files as FilesIcon, X } from "lucide-react";
+import { FileCode, X } from "lucide-react";
 
 export interface EditorTabInfo {
   id: string;
@@ -10,7 +10,6 @@ export interface EditorTabInfo {
 interface Props {
   editorTabs: EditorTabInfo[];
   activeEditorTabId: string | null;
-  onSelectTree: () => void;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
 }
@@ -22,7 +21,6 @@ function fileNameFromPath(path: string): string {
 export default function EditorTabBar({
   editorTabs,
   activeEditorTabId,
-  onSelectTree,
   onSelectTab,
   onCloseTab,
 }: Props) {
@@ -48,17 +46,6 @@ export default function EditorTabBar({
       className="flex items-center h-8 px-2 gap-1 bg-zinc-900 border-b border-zinc-700 overflow-x-auto overflow-y-hidden scrollbar-hide flex-nowrap min-w-0 w-full touch-pan-x overscroll-x-contain"
       style={{ WebkitOverflowScrolling: "touch" } as React.CSSProperties}
     >
-      <button
-        onClick={onSelectTree}
-        className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-          activeEditorTabId === null
-            ? "bg-zinc-700 text-white"
-            : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
-        }`}
-      >
-        <FilesIcon className="w-3.5 h-3.5" />
-        File tree
-      </button>
       {editorTabs.map((et) => {
         const isActive = activeEditorTabId === et.id;
         return (

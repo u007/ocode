@@ -1246,6 +1246,11 @@ type ModelInfo struct {
 	Model    string `json:"model"`
 	Provider string `json:"provider"`
 	Active   bool   `json:"active"`
+	// DisplayName is the human-readable name from the models.dev registry
+	// (e.g. "Ox Alpha Free" for the zen codename "opencode/x-preview-f-free").
+	// Empty when the registry doesn't know the model — UIs fall back to the
+	// raw id in that case.
+	DisplayName string `json:"display_name,omitempty"`
 	// Favorite and Recent mirror the TUI model picker's priority sections
 	// (★ Favorites / Recently Used): the web and desktop selectors surface
 	// these first, sorted exactly like the TUI.

@@ -738,6 +738,18 @@ func AllProviderModelsCached() []string {
 	return allProviderModelsFromRegistry(false)
 }
 
+// ModelDisplayName returns the human-readable model name from the models.dev
+// registry — e.g. "Ox Alpha Free" for the zen codename "opencode/x-preview-f-free".
+// Returns "" when the registry doesn't know the model or the entry has no name,
+// so callers fall back to the raw provider/model id. Safe to call from any
+// goroutine; never touches the network (reads the loaded registry/snapshot).
+func ModelDisplayName(modelID string) string {
+	if m, ok := modelEntryFor(modelID); ok {
+		return m.Name
+	}
+	return ""
+}
+
 // ModelWindow returns the context window size for a given model ID in
 // "provider/model" format (e.g. "openai/gpt-4o") or bare model name.
 // It checks the models.dev registry first, then falls back to 0.

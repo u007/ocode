@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/u007/ocode/internal/paths"
@@ -16,7 +17,18 @@ var (
 	profileStoreMu sync.Mutex
 	profileCache   map[string]map[string]Credential // profile -> provider -> cred
 	profileLoaded  bool
+	profileVersion atomic.Int64
 )
+
+// ProfileCredentialVersion returns a counter bumped on every profile
+// credential mutation (set/remove/delete/rename). Callers that cache
+// something built from profile credentials (e.g. an LLM client keyed by
+// profile name) can snapshot this value at build time and compare it later
+// to detect an in-place credential edit that a same-name profile comparison
+// would otherwise miss.
+func ProfileCredentialVersion() int64 {
+	return profileVersion.Load()
+}
 
 // ProfileAuthPath returns the ocode-only sidecar path for per-profile credentials:
 //   <OcodeGlobalDataDir>/auth.profiles.json  (0600)
@@ -126,6 +138,7 @@ func SetProfileCredential(profile, provider string, cred Credential) error {
 		profileCache[profile] = m
 	}
 	m[provider] = cred
+	profileVersion.Add(1)
 	return writeProfileStoreLocked()
 }
 
@@ -144,6 +157,7 @@ func RemoveProfileCredential(profile, provider string) error {
 	if len(m) == 0 {
 		delete(profileCache, profile)
 	}
+	profileVersion.Add(1)
 	return writeProfileStoreLocked()
 }
 
@@ -184,6 +198,7 @@ func DeleteProfileCredentials(profile string) error {
 		return err
 	}
 	delete(profileCache, profile)
+	profileVersion.Add(1)
 	return writeProfileStoreLocked()
 }
 
@@ -203,6 +218,7 @@ func RenameProfileCredentials(oldName, newName string) error {
 	}
 	profileCache[newName] = m
 	delete(profileCache, oldName)
+	profileVersion.Add(1)
 	return writeProfileStoreLocked()
 }
 

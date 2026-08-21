@@ -19,6 +19,11 @@ export interface AgentRunsState {
 // lets AgentPreview and AgentsPanel (both mounted for the same session at
 // once) share the seed fetch instead of doubling it.
 const latestCache = new Map<string, AgentRun[]>();
+// Active-consumer count per session id. The cache exists so simultaneously
+// mounted consumers (AgentPreview rail + AgentsPanel) share one seed fetch;
+// when the last consumer unmounts (session tab closed) its entry is dropped,
+// otherwise run trees would accumulate for every session ever viewed.
+const cacheRefs = new Map<string, number>();
 
 // useAgentRuns subscribes to the live agent-run tree for the given session and
 // returns the current snapshot. The stream pushes a full tree on every change.
@@ -34,6 +39,8 @@ export function useAgentRuns(sessionId: string | null): AgentRunsState {
     setRuns([]);
     setLoaded(false);
     if (!realSessionId) return;
+
+    cacheRefs.set(realSessionId, (cacheRefs.get(realSessionId) ?? 0) + 1);
 
     const cached = latestCache.get(realSessionId);
     if (cached) {
@@ -73,6 +80,13 @@ export function useAgentRuns(sessionId: string | null): AgentRunsState {
       cancelled = true;
       off();
       offReconnect();
+      const refs = (cacheRefs.get(realSessionId) ?? 1) - 1;
+      if (refs <= 0) {
+        cacheRefs.delete(realSessionId);
+        latestCache.delete(realSessionId);
+      } else {
+        cacheRefs.set(realSessionId, refs);
+      }
     };
   }, [realSessionId]);
 

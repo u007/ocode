@@ -54,7 +54,7 @@ func (h *Handler) maybeGenerateSessionTitle(sessionID string, as *agentSession) 
 	// Save derives a fallback title from the first user message, but
 	// TitleGenerated distinguishes that fallback from an explicit or LLM title.
 	// Only the latter should suppress generation.
-	s, err := session.Load(sessionID)
+	s, err := h.loadSession(sessionID)
 	if err != nil {
 		return
 	}
@@ -119,13 +119,13 @@ func (h *Handler) finishSessionTitle(sessionID, title string) {
 		msgs = append([]agent.Message(nil), as.messages...)
 		as.mu.Unlock()
 	} else {
-		s, err := session.Load(sessionID)
+		s, err := h.loadSession(sessionID)
 		if err != nil {
 			return
 		}
 		msgs = s.Messages
 	}
-	if err := session.Save(sessionID, title, msgs, nil); err != nil {
+	if err := h.saveSession(sessionID, title, msgs, nil); err != nil {
 		log.Printf("serve: save generated title for %s: %v", sessionID, err)
 		return
 	}

@@ -241,7 +241,7 @@ func (m *model) openModelPicker() tea.Cmd {
 	if len(favorites) > 0 {
 		appendHeader("★ Favorites")
 		for _, f := range favorites {
-			appendModel("  ★ "+f, f)
+			appendModel("  ★ "+modelPickerLabel(f), f)
 		}
 		appendHeader("")
 	}
@@ -255,7 +255,7 @@ func (m *model) openModelPicker() tea.Cmd {
 	if len(recentModels) > 0 {
 		appendHeader("Recently Used")
 		for _, r := range recentModels {
-			appendModel("  "+r, r)
+			appendModel("  "+modelPickerLabel(r), r)
 		}
 		appendHeader("")
 	}
@@ -337,7 +337,8 @@ func loadFullModelPickerCmd(shown map[string]bool, imageOnly bool) tea.Cmd {
 			models := providerMap[provider]
 			sort.Strings(models)
 			for _, model := range models {
-				appendModel("  "+provider+"/"+model, provider+"/"+model)
+				id := provider + "/" + model
+				appendModel("  "+modelPickerLabel(id), id)
 			}
 		}
 		if lmsResult.NeedsAPIKey && len(providerMap["lmstudio"]) == 0 {
@@ -401,7 +402,7 @@ func (m *model) buildFullModelPickerItems() {
 	if len(favorites) > 0 {
 		appendHeader("★ Favorites")
 		for _, f := range favorites {
-			appendModel("  ★ "+f, f)
+			appendModel("  ★ "+modelPickerLabel(f), f)
 		}
 		appendHeader("")
 	}
@@ -415,7 +416,7 @@ func (m *model) buildFullModelPickerItems() {
 	if len(recentModels) > 0 {
 		appendHeader("Recently Used")
 		for _, r := range recentModels {
-			appendModel("  "+r, r)
+			appendModel("  "+modelPickerLabel(r), r)
 		}
 		appendHeader("")
 	}
@@ -441,7 +442,8 @@ func (m *model) buildFullModelPickerItems() {
 		models := providerMap[provider]
 		sort.Strings(models)
 		for _, model := range models {
-			appendModel("  "+provider+"/"+model, provider+"/"+model)
+			id := provider + "/" + model
+			appendModel("  "+modelPickerLabel(id), id)
 		}
 	}
 	if lmsResult.NeedsAPIKey && len(providerMap["lmstudio"]) == 0 {
@@ -721,6 +723,23 @@ func (m *model) closePicker() {
 // modelPickerKeywords splits a model picker query into keywords, treating
 // whitespace and dashes as separators so e.g. "gpt 4o" and "gpt-4o" both
 // produce ["gpt", "4o"].
+// modelPickerLabel renders a picker row label for a "provider/model" id.
+// When the models.dev registry knows a display name for the model (e.g.
+// "Ox Alpha Free" for the zen codename "opencode/x-preview-f-free"), it is
+// appended after an em dash so codename/stealth ids stay recognizable. The
+// name is part of the label, so the picker's fuzzy filter matches it too.
+// The row's *value* stays the raw id — only the label is decorated.
+func modelPickerLabel(id string) string {
+	name := agent.ModelDisplayName(id)
+	if name == "" || name == id {
+		return id
+	}
+	if _, model := splitPickerModel(id); model != "" && name == model {
+		return id // name is just the bare id restated — nothing to add
+	}
+	return id + " — " + name
+}
+
 func modelPickerKeywords(query string) []string {
 	return strings.FieldsFunc(query, func(r rune) bool {
 		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '-' || r == '_'

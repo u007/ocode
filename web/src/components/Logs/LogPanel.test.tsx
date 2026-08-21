@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import LogPanel from "./LogPanel";
+import LogPanel, { appendLogCapped, type LogEntry } from "./LogPanel";
 
 // LogPanel consumes live logs from the shared event bus (the single
 // /api/events connection); the old per-panel EventSource is gone. Mock the
@@ -153,6 +153,12 @@ describe("LogPanel scroll behavior", () => {
   });
 
   it("catches up to the latest logs when re-opening while following", async () => {
+    // While hidden, live entries are dropped; activation refetches the
+    // backlog from the server (bounded ring) — simulate that here. Every
+    // active flip refetches, so the default mock answers [] and the final
+    // activation gets the missed entry via mockResolvedValueOnce.
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => [] });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
     const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
     await act(async () => {});
     const scroller = getScroller(container);
@@ -161,15 +167,48 @@ describe("LogPanel scroll behavior", () => {
     act(() => rerender(<LogPanel active={true} sessionId="test-session" />)); // open #1 -> bottom (following)
     expect(scroller.scrollTop).toBe(1000);
 
-    // Leave while pinned to the bottom, and let logs stream in while hidden.
+    // Leave while pinned to the bottom. Entries emitted while hidden are
+    // dropped, not accumulated.
     act(() => rerender(<LogPanel active={false} sessionId="test-session" />));
     scroller.scrollTop = 0;
     setScrollHeight(2000);
-    emitLog("hidden entry");
+    emitLog("dropped while hidden");
 
-    // Re-open: jumps to the new bottom to catch up.
+    // Re-open: the backlog refetch delivers what was missed and the viewport
+    // jumps to the new bottom to catch up.
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [{ kind: "TOOL", message: "hidden entry" }],
+    });
     act(() => rerender(<LogPanel active={true} sessionId="test-session" />));
+    await act(async () => {}); // flush the activation refetch
     expect(scroller.scrollTop).toBe(2000);
+    expect(screen.getByText("hidden entry")).toBeTruthy();
+    expect(screen.queryByText("dropped while hidden")).toBeNull();
+  });
+
+  it("keeps buffering while hidden when Settings → Logs background buffering is on", () => {
+    window.localStorage.setItem(
+      "ocode.ui.logs.v1",
+      JSON.stringify({ backgroundBuffering: true, maxEntries: 1000 }),
+    );
+    try {
+      const { container } = render(<LogPanel active={false} sessionId="test-session" />);
+      getScroller(container);
+      emitLog("kept while hidden");
+      expect(screen.getByText("kept while hidden")).toBeTruthy();
+    } finally {
+      window.localStorage.removeItem("ocode.ui.logs.v1");
+    }
+  });
+
+  it("appendLogCapped keeps at most max entries, dropping the oldest", () => {
+    const e = (m: string): LogEntry => ({ kind: "TOOL", message: m });
+    expect(appendLogCapped([], e("a"), 3)).toHaveLength(1);
+    let logs = appendLogCapped([e("a"), e("b"), e("c")], e("d"), 3);
+    expect(logs.map((l) => l.message)).toEqual(["b", "c", "d"]);
+    logs = appendLogCapped(logs, e("e"), 3);
+    expect(logs.map((l) => l.message)).toEqual(["c", "d", "e"]);
   });
 
   it("re-enabling auto-scroll from the toolbar jumps to the bottom", async () => {

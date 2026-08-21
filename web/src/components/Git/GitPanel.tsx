@@ -23,9 +23,13 @@ const REFRESH_INTERVAL = 10000;
 interface Props {
   onOpenFile?: (path: string, projectRoot?: string) => void;
   projectPath?: string;
+  /** True while the Git view is frontmost. The panel is force-mounted so its
+   *  DOM survives view switches; without this gate it polls git status and
+   *  the full diff every 10s forever, even while the user is chatting. */
+  active?: boolean;
 }
 
-export default function GitPanel({ onOpenFile, projectPath }: Props) {
+export default function GitPanel({ onOpenFile, projectPath, active = true }: Props) {
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [files, setFiles] = useState<GitDiffFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -57,12 +61,13 @@ export default function GitPanel({ onOpenFile, projectPath }: Props) {
   useEffect(() => {
     fetchStatus();
     fetchDiff();
+    if (!active) return;
     const interval = setInterval(() => {
       fetchStatus();
       fetchDiff();
     }, REFRESH_INTERVAL);
     return () => clearInterval(interval);
-  }, [fetchStatus, fetchDiff]);
+  }, [fetchStatus, fetchDiff, active]);
 
   if (!status) return null;
 

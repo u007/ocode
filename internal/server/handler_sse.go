@@ -225,7 +225,7 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	as.messages = append(as.messages, resp...)
-	_ = session.Save(sessionID, "", as.messages, nil)
+	_ = h.saveSession(sessionID, "", as.messages, nil)
 
 	// Headless-only: generate a title for an untitled session after its first
 	// turn (mirrors the TUI; no-op when an RC bridge is attached).

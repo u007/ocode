@@ -54,6 +54,8 @@ export interface ModelInfo {
   model: string;
   provider: string;
   active: boolean;
+  /** Human-readable name from the models.dev registry (e.g. "Ox Alpha Free" for codename ids). Absent when unknown. */
+  display_name?: string;
 }
 
 export interface AgentInfo {

@@ -94,7 +94,8 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     (m) =>
       m.name.toLowerCase().includes(search.toLowerCase()) ||
       m.model.toLowerCase().includes(search.toLowerCase()) ||
-      m.provider.toLowerCase().includes(search.toLowerCase())
+      m.provider.toLowerCase().includes(search.toLowerCase()) ||
+      (m.display_name ?? "").toLowerCase().includes(search.toLowerCase())
   );
 
   const groupedModels = filteredModels.reduce((acc, m) => {
@@ -215,7 +216,11 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
                       : "text-zinc-300 hover:bg-zinc-800"
                   }`}
                 >
-                  <span className="truncate">{m.model}</span>
+                  <span className="truncate">
+                    {m.display_name && m.display_name !== m.model
+                      ? `${m.display_name} (${m.model})`
+                      : m.model}
+                  </span>
                   {(getCurrentModel() === (purpose === "advisor" ? m.model : m.name) || m.active) && (
                     <Check className="h-4 w-4 text-blue-400 flex-shrink-0" />
                   )}

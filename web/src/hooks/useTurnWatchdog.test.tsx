@@ -2,11 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useEffect, type ReactNode } from "react";
 import { ChatProvider, useChatDispatch } from "../stores/chatStore";
+import { RECONCILE_PAGE_SIZE } from "../lib/sessionEvents";
 import { useTurnWatchdogAll, applyReconcileState, STALL_THRESHOLD_MS } from "./useTurnWatchdog";
 
 const mockGetSessionState = vi.fn();
+const mockGetSession = vi.fn();
 vi.mock("../api/client", () => ({
-  api: { getSessionState: (...a: unknown[]) => mockGetSessionState(...a) },
+  api: {
+    getSessionState: (...a: unknown[]) => mockGetSessionState(...a),
+    getSession: (...a: unknown[]) => mockGetSession(...a),
+  },
 }));
 
 function Wrapper({ children }: { children: ReactNode }) {
@@ -83,14 +88,27 @@ describe("useTurnWatchdogAll", () => {
     );
 
     mockGetSessionState.mockResolvedValue({ bootstrap_stage: "ready", turn_active: false, last_seq: 9 });
+    mockGetSession.mockResolvedValue({
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "done" },
+      ],
+      total: 2,
+    });
     // Advance past the stall threshold plus one watchdog tick.
     vi.advanceTimersByTime(STALL_THRESHOLD_MS + 5_000);
-    await Promise.resolve(); // settle the reconcile promise chain
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve(); // settle the reconcile promise chain (state fetch + transcript refetch)
 
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("s1"));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("s2"));
     expect(mockGetSessionState).toHaveBeenCalledWith("s1");
     expect(mockGetSessionState).toHaveBeenCalledWith("s2");
+    // The turn finished server-side while the client thought it active, so
+    // the committed transcript is refetched (recovery = refetch, not replay).
+    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE });
+    expect(mockGetSession).toHaveBeenCalledWith("s2", { limit: RECONCILE_PAGE_SIZE });
     warn.mockRestore();
   });
 
@@ -118,6 +136,8 @@ describe("useTurnWatchdogAll", () => {
       vi.advanceTimersByTime(5_000);
     });
     expect(warn.mock.calls.filter((c) => String(c[0]).includes("stalled")).length).toBe(1);
+    // Turn still active server-side — no transcript refetch mid-turn.
+    expect(mockGetSession).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 });

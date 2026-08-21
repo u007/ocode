@@ -129,6 +129,13 @@ func TestHandleAnswerQuestionForwardsToBridgeWhenBridged(t *testing.T) {
 	h := NewHandler()
 	h.rc = &RCBridge{SessionID: "tui-sess", ResolveCh: resolveCh}
 
+	// Guard the no-broadcast invariant: in bridge mode the server must NOT
+	// emit question_resolved on headlessSubs — the bridged web client listens
+	// on the TUI's bridge channel, and the TUI broadcasts the dismissal itself
+	// once it applies the answers.
+	evCh := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(evCh)
+
 	body := `{"request_id":"call-1","answers":[{"question":"q","answers":[{"label":"Staging"}]}]}`
 	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -143,6 +150,14 @@ func TestHandleAnswerQuestionForwardsToBridgeWhenBridged(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("no resolution forwarded to the bridge")
+	}
+	select {
+	case ev := <-evCh:
+		if ev.Event == "question_resolved" {
+			t.Fatalf("server must not broadcast question_resolved in bridge mode (got SessionID=%q)", ev.SessionID)
+		}
+	case <-time.After(100 * time.Millisecond):
+		// Expected: no headless-channel event for the bridged resolution.
 	}
 }
 

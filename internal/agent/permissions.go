@@ -107,6 +107,11 @@ type PermissionManager struct {
 	webfetchDomains       map[string]PermissionLevel
 	autoPermissionEnabled bool
 	autoGrants            []config.AutoGrant
+	claudeBashAllow       []string
+	claudeBashDeny        []string
+	claudeBashAsk         []string
+	claudeBareDeny        map[string]bool
+	claudeBareAsk         map[string]bool
 	// sessionID tags this manager's debug-log entries with the owning
 	// agent's session (set via Agent.SetSessionID). Empty means untagged
 	// (process-global) — see emitDebug.
@@ -827,6 +832,10 @@ func NewPermissionManager() *PermissionManager {
 	// No bash prefixes are banned by default — bans are opt-in via
 	// `/ban add <prefix>`. The `sed` special-casing below (compound-command
 	// parsing) applies to any sed rule a user configures.
+	// Adhere to Claude Code's .claude/settings.json permissions: load global
+	// user rules now; project-specific rules are added when workDir is set via
+	// SetWorkDir (covers /cd, desktop project switches, and per-session roots).
+	pm.LoadClaudePermissions(pm.workDir)
 	return pm
 }
 
@@ -923,6 +932,17 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		if isHardBlockedCommand(command) {
 			pm.emitDebug("perm", fmt.Sprintf("Decide DENY (hard-blocked): tool=bash command=%q", command))
 			return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+		}
+		// Claude Code settings: a matching deny is a hard block even before
+		// the dangerous-rm ask (deny > ask). Check each subcommand so
+		// compound lines like "echo hi; rm -rf /" are still caught.
+		if parsed, err := parseShellCommandLine(command); err == nil {
+			for _, cmd := range parsed {
+				if sub := rebuildCommandLine(cmd.cmdWords); sub != "" && pm.claudeIsDenied(sub) {
+					pm.emitDebug("perm", fmt.Sprintf("Decide DENY (claude deny): tool=bash command=%q", command))
+					return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+				}
+			}
 		}
 		if parsed, err := parseShellCommandLine(command); err == nil {
 			for _, cmd := range parsed {
@@ -2424,6 +2444,7 @@ func (pm *PermissionManager) MatchInterpreterGrant(ie *InterpreterExec, sourceHa
 
 func (pm *PermissionManager) SetWorkDir(path string) {
 	pm.workDir = filepath.Clean(path)
+	pm.LoadClaudePermissions(pm.workDir)
 }
 
 func (pm *PermissionManager) SetWebfetchDomain(domain string, level PermissionLevel) {
@@ -2456,6 +2477,9 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 		webfetchDomains:       make(map[string]PermissionLevel, len(pm.webfetchDomains)),
 		autoPermissionEnabled: pm.autoPermissionEnabled,
 		autoGrants:            append([]config.AutoGrant(nil), pm.autoGrants...),
+		claudeBashAllow:       append([]string(nil), pm.claudeBashAllow...),
+		claudeBashDeny:        append([]string(nil), pm.claudeBashDeny...),
+		claudeBashAsk:         append([]string(nil), pm.claudeBashAsk...),
 	}
 	for k, v := range pm.rules {
 		clone.rules[k] = v
@@ -2480,6 +2504,18 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 	}
 	for toolName, entries := range pm.pathPatterns {
 		clone.pathPatterns[toolName] = append([]pathPatternEntry(nil), entries...)
+	}
+	if pm.claudeBareDeny != nil {
+		clone.claudeBareDeny = make(map[string]bool, len(pm.claudeBareDeny))
+		for k, v := range pm.claudeBareDeny {
+			clone.claudeBareDeny[k] = v
+		}
+	}
+	if pm.claudeBareAsk != nil {
+		clone.claudeBareAsk = make(map[string]bool, len(pm.claudeBareAsk))
+		for k, v := range pm.claudeBareAsk {
+			clone.claudeBareAsk[k] = v
+		}
 	}
 	return clone
 }
@@ -3586,6 +3622,15 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
 	}
 
+	// Claude Code settings: deny takes precedence over everything (mirrors
+	// Claude's deny > ask > allow evaluation order). A matching deny in
+	// .claude/settings.json or .claude/settings.local.json is a hard block
+	// that no allow rule or auto-allow can bypass.
+	if pm.claudeIsDenied(command) {
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (claude deny): command=%q", command))
+		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+	}
+
 	// Harmful operations (git revert/stash/reset/clean/checkout/restore/switch,
 	// git push/pull --force, exfiltration) always require explicit human
 	// approval and must never auto-allow — even when a broader prefix rule or a
@@ -3594,6 +3639,18 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	if IsHarmfulBashCommand(command) {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (harmful): command=%q", command))
 		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
+	}
+
+	// Claude ask/allow are evaluated after harmful (so force-push stays ask)
+	// but before ocode's own auto-allow lists, so an explicit project
+	// permission like "Bash(git push *)" is honoured without prompting.
+	if pm.claudeIsAsk(command) {
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (claude ask): command=%q", command))
+		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
+	}
+	if pm.claudeIsAllowed(command) {
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (claude allow): command=%q", command))
+		return PermissionDecision{Level: PermissionAllow}
 	}
 
 	// Loopback netcat (127.0.0.0/8, ::1, localhost) stays on-host and cannot

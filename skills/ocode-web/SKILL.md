@@ -211,6 +211,8 @@ When the web server runs alongside the TUI (`/rc` command):
 
 **Single source of truth**: The TUI/server holds the canonical message list. The `turn_done` SSE event carries a full snapshot (`messages` event) that replaces the current state via `MERGE_SNAPSHOT`. The live buffer (`live[]`) is cleared when the snapshot arrives. Dropped SSE events self-heal at the next snapshot.
 
+**Failed turns keep their work**: when an LLM call fails part-way through a turn, `Agent.Step` returns the rounds that already completed alongside the error, and the server persists them and emits a `messages` snapshot *before* `turn_error`. So a failed turn ends the same way a successful one does — snapshot first, terminal frame second — and reopening the session shows everything that actually ran. The same applies to the permission/question continuations (`/api/permissions/resolve`, `/api/questions/answer`), which keep the resolved tool result instead of leaving the session on an unresolved sentinel.
+
 **Lazy-loading chat history**: `ChatPanel` loads the last 50 messages (via `GET /api/sessions/{id}/messages` with `?after=` cursor), then prepends older messages on scroll-up via `PREPEND_MESSAGES`.
 
 **Live rendering flow**:

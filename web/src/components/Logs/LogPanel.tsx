@@ -2,12 +2,28 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { apiPath, authHeaders } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
+import { useLogPrefs } from "@/hooks/useLogPrefs";
 import { Trash2, Pause, Play, Filter } from "lucide-react";
 
-interface LogEntry {
+// Default cap on retained entries (user-tunable in Settings → Logs via
+// logViewPrefs). Every open session tab mounts a LogPanel for its whole
+// lifetime; without a cap a chatty turn grows the array without bound and
+// the webview's memory climbs for as long as the app runs.
+export const MAX_LOGS = 1000;
+
+export interface LogEntry {
   kind: string;
   message: string;
   session_id?: string;
+}
+
+/** Append an entry, keeping at most `max` entries (oldest dropped first).
+ *  Exported for tests — this cap is what bounds the panel's memory. */
+export function appendLogCapped(prev: LogEntry[], entry: LogEntry, max: number): LogEntry[] {
+  if (prev.length >= max) {
+    return [...prev.slice(prev.length - max + 1), entry];
+  }
+  return [...prev, entry];
 }
 
 const KIND_COLORS: Record<string, string> = {
@@ -29,6 +45,13 @@ export default function LogPanel({ active, sessionId }: { active: boolean; sessi
   const [autoScroll, setAutoScroll] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  // Settings → Logs: whether hidden tabs keep buffering, and the retention
+  // cap. Read through refs so pref changes don't re-subscribe the bus handler.
+  const prefs = useLogPrefs();
+  const prefsRef = useRef(prefs);
+  useEffect(() => {
+    prefsRef.current = prefs;
+  }, [prefs]);
 
   // Mirror of `autoScroll` for handlers that must read the current value
   // without re-running their effects (scroll handler, tab-visibility effect).
@@ -36,6 +59,17 @@ export default function LogPanel({ active, sessionId }: { active: boolean; sessi
   useEffect(() => {
     autoScrollRef.current = autoScroll;
   }, [autoScroll]);
+
+  // Mirror of `active` for the bus handler below (a stable closure that must
+  // not re-subscribe on every visibility flip).
+  const activeRef = useRef(active);
+  useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
+
+  // Tracks the previous session id so the load effect only clears the list
+  // when the session actually changed (not on every visibility flip).
+  const prevSessionRef = useRef(sessionId);
 
   // Tab-visibility bookkeeping. The panel is force-mounted and hidden with
   // `display: none` while the tab is inactive, so "mounted" !== "open". The
@@ -61,36 +95,57 @@ export default function LogPanel({ active, sessionId }: { active: boolean; sessi
   }, []);
 
   useEffect(() => {
-    // Load initial logs, scoped to this session (plus process-global entries
-    // — see HandleGetLogs).
-    setLogs([]);
+    // Load logs scoped to this session (plus process-global entries — see
+    // HandleGetLogs). Runs on session change AND whenever the tab becomes
+    // visible: while hidden, live entries are dropped instead of accumulated
+    // (see the bus subscription below), so activation refetches the backlog
+    // to catch up. The server keeps a bounded ring buffer (debuglog cap=500),
+    // so this returns recent history; older entries remain on the disk mirror.
+    if (prevSessionRef.current !== sessionId) {
+      prevSessionRef.current = sessionId;
+      setLogs([]); // fresh session — don't flash the previous tab's logs
+    }
+    let cancelled = false;
     fetch(apiPath(`/api/logs?session_id=${encodeURIComponent(sessionId)}`), { headers: authHeaders() })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
       .then((data) => {
+        if (cancelled) return;
         setLogs(data as LogEntry[]);
         setError(null);
       })
       .catch((err) => {
+        if (cancelled) return;
         console.error("Failed to fetch logs:", err);
         setError("Failed to load logs");
       });
-  }, [sessionId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, active]);
 
   // Live logs arrive as `logs` envelopes on the shared event bus (the single
   // /api/events connection). The `streaming` toggle pauses consumption (the
   // bus itself stays connected — other consumers share it). Only entries for
   // this session (or untagged process-global ones) are kept — see
   // logBusForwardLoop.
+  //
+  // While the tab is hidden the panel drops entries instead of accumulating
+  // them: every open session tab keeps one of these mounted for its whole
+  // lifetime, so unconditional accumulation grew memory (and hidden-list
+  // re-render churn) without bound. Activation refetches the backlog above.
+  // Settings → Logs → "Buffer logs in background tabs" restores the old
+  // keep-everything behavior for users who want full history in-panel.
   useEffect(() => {
     if (!streaming) return;
     const off = eventBus.on("logs", (env) => {
       const entry = env.data as LogEntry;
       if (!entry || typeof entry.message !== "string") return;
       if (entry.session_id && entry.session_id !== sessionId) return;
-      setLogs((prev) => [...prev, entry]);
+      if (!activeRef.current && !prefsRef.current.backgroundBuffering) return;
+      setLogs((prev) => appendLogCapped(prev, entry, prefsRef.current.maxEntries));
     });
     return off;
   }, [streaming, sessionId]);

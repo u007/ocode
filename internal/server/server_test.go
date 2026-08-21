@@ -233,4 +233,17 @@ func TestListModels(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &models); err != nil {
 		t.Errorf("invalid JSON: %v", err)
 	}
+
+	// Registry-known models must carry the models.dev display name (e.g. the
+	// zen codename opencode/x-preview-f-free → "Ox Alpha Free"). Skip quietly
+	// if a future snapshot drops the model rather than failing the suite.
+	for _, m := range models {
+		if m.Name == "opencode/x-preview-f-free" {
+			if m.DisplayName != "Ox Alpha Free" {
+				t.Errorf("display_name for %s = %q, want %q", m.Name, m.DisplayName, "Ox Alpha Free")
+			}
+			return
+		}
+	}
+	t.Log("opencode/x-preview-f-free absent from registry; display_name mapping unverified")
 }

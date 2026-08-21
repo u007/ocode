@@ -119,17 +119,42 @@ export default function TerminalPanel({
   // Fit to the container and tell the pty about the new size. No-op while the
   // container has no layout (hidden tab), which would otherwise force xterm to
   // a degenerate 1x1 grid and wreck the shell's line wrapping.
+  const initialFitDoneRef = useRef(false);
   const fitAndResize = useRef(() => {
     const el = containerRef.current;
     const term = termRef.current;
     const fit = fitRef.current;
     if (!el || !term || !fit) return;
     if (el.clientWidth === 0 || el.clientHeight === 0) return;
-    fit.fit();
-    const sock = socketRef.current;
-    if (sock && sock.readyState === WebSocket.OPEN) {
-      sock.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+
+    const applyFit = () => {
+      fit.fit();
+      const sock = socketRef.current;
+      if (sock && sock.readyState === WebSocket.OPEN) {
+        sock.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+      }
+    };
+
+    if (initialFitDoneRef.current) {
+      applyFit();
+      return;
     }
+
+    // On cold launch the surrounding layout (tab bar, sidebar panels) can
+    // still be settling when this first fires, so el.clientWidth may be
+    // transiently too narrow. Fitting against that reflows a restored
+    // buffer's box-drawing content into garbage a later, correctly-sized fit
+    // can't undo — so wait for width to hold steady across two frames before
+    // the first real fit. ResizeObserver keeps re-invoking this while layout
+    // is still settling, so the check naturally retries.
+    const w = el.clientWidth;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (!containerRef.current || containerRef.current.clientWidth !== w) return;
+        initialFitDoneRef.current = true;
+        applyFit();
+      });
+    });
   });
 
   useEffect(() => {

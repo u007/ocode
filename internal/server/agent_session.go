@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/session"
@@ -159,7 +160,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 
 	ag.SetAdvisorEnabled(h.advisorFlag())
 	h.wireCompactCallbacks(sessionID, ag)
-	as := &agentSession{agent: ag, messages: messages, model: model, profile: prof}
+	as := &agentSession{agent: ag, messages: messages, model: model, profile: prof, credVersion: auth.ProfileCredentialVersion()}
 	h.publishBootstrapStage(sessionID, "ready")
 	return as, "", nil
 }
@@ -199,7 +200,7 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 		return nil, nil
 	}
 	entry := h.sessions.Lookup(id)
-	if entry == nil || entry.WindowID == "" {
+	if entry == nil {
 		return as, nil
 	}
 	// Never tear down an agent mid-turn. The running turn keeps its pointer to
@@ -208,17 +209,28 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 	if h.sessions.IsTurnActive(id) {
 		return as, nil
 	}
-	cur := h.resolveSessionProfile(entry)
-	if cur == as.profile {
+	// A model switch (e.g. the desktop model picker) must rebuild the client
+	// even when the profile is unbound to a window — the cached agentSession
+	// otherwise keeps talking to whatever model it was originally built with.
+	modelChanged := model != "" && model != as.model
+	// The credential version is global, not per-profile: an in-place edit must
+	// invalidate the cached client for window-unbound sessions too, so it is
+	// read unconditionally rather than only on the window-bound path.
+	curCredVersion := auth.ProfileCredentialVersion()
+	cur := as.profile
+	if entry.WindowID != "" {
+		cur = h.resolveSessionProfile(entry)
+	}
+	if !modelChanged && cur == as.profile && curCredVersion == as.credVersion {
 		return as, nil
 	}
 	newAs, stage, err := h.buildAgentSession(id, model, as.messages, entry.ProjectRoot)
 	if err != nil {
-		log.Printf("serve error: rebuild agent for %s on profile switch (stage %s): %v", id, stage, err)
+		log.Printf("serve error: rebuild agent for %s (stage %s): %v", id, stage, err)
 		return as, err
 	}
 	h.replaceAgentSession(id, newAs)
-	log.Printf("profile: rebuilt agent for session %s (%s -> %s)", id, as.profile, cur)
+	log.Printf("agent: rebuilt session %s (profile %s -> %s, credVersion %d -> %d, model %s -> %s)", id, as.profile, cur, as.credVersion, curCredVersion, as.model, model)
 	return newAs, nil
 }
 
@@ -508,6 +520,11 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 	resp, err := as.agent.Step(messages)
 	if err != nil {
 		log.Printf("serve error: agent step: %v", err)
+		// Keep whatever the turn produced before it failed. Step returns the
+		// completed rounds alongside the error, and those were already streamed
+		// to the browser — discarding them here is what made a failed turn
+		// reopen as nothing but the user's own message.
+		h.commitPartialTranscript(sessionID, as, append(as.messages, resp...), headless)
 		h.publishTurnError(sessionID, err, "")
 		if headless {
 			h.broadcastEvent(SSEEvent{
@@ -551,6 +568,33 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 	as.agent.MaybeCompactAsync(as.messages)
 
 	return reply.String(), nil
+}
+
+// commitPartialTranscript stores, persists and mirrors the transcript of a turn
+// that failed part-way through. Every message in msgs was already streamed to
+// the browser (and every tool result in it already ran), so a failed final LLM
+// round must not erase it: without this, reopening the session shows nothing
+// but the user's own message. mirror is false for bridged sessions, which
+// broadcast their own frames.
+func (h *Handler) commitPartialTranscript(sessionID string, as *agentSession, msgs []agent.Message, mirror bool) {
+	if len(msgs) == 0 {
+		return
+	}
+	// Copy: callers build msgs with append() over the session's own slice, so
+	// storing it directly would leave two slice headers sharing one backing
+	// array — a later append through either one (an injection flush, a compact
+	// result) would write into the other's elements.
+	as.messages = append([]agent.Message(nil), msgs...)
+	if err := h.saveSession(sessionID, "", as.messages, nil); err != nil {
+		log.Printf("serve error: persisting partial transcript for session %s: %v", sessionID, err)
+	}
+	if mirror {
+		h.broadcastEvent(SSEEvent{
+			SessionID: sessionID,
+			Event:     "messages",
+			Data:      as.messages,
+		})
+	}
 }
 
 // turnHeartbeat emits turn_heartbeat on the bus every interval while a turn
@@ -828,4 +872,16 @@ func (h *Handler) saveSession(sessionID, title string, msgs []agent.Message, met
 		return session.SaveForDir(e.ProjectRoot, sessionID, title, msgs, metadata)
 	}
 	return session.Save(sessionID, title, msgs, metadata)
+}
+
+// loadSession is the read-side counterpart to saveSession: it resolves the
+// session's owning project from the registry before loading, so a
+// multi-project session is found even when it is not the process's own
+// project. Falls back to the process default only when the registry entry is
+// unknown.
+func (h *Handler) loadSession(sessionID string) (*session.Session, error) {
+	if e := h.sessions.Lookup(sessionID); e != nil && e.ProjectRoot != "" {
+		return session.LoadForDir(e.ProjectRoot, sessionID)
+	}
+	return session.Load(sessionID)
 }

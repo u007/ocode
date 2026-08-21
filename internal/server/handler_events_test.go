@@ -72,6 +72,74 @@ func TestHandleEventsStreamsEnvelopes(t *testing.T) {
 	}
 }
 
+// TestHandleEventsSendsKeepaliveComments: an idle /api/events stream receives
+// SSE comment frames on the keepalive interval, so proxies/browsers don't
+// reap a connection that carries no events. Comment frames are ignored by
+// EventSource, and a published envelope must still arrive while the
+// keepalive ticker runs (the two select cases share the loop).
+func TestHandleEventsSendsKeepaliveComments(t *testing.T) {
+	h := NewHandler()
+	h.sseKeepaliveInterval = 10 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.HandleEvents(w, r)
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/events")
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer resp.Body.Close()
+	reader := bufio.NewReader(resp.Body)
+
+	readLine := func(what string) string {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				t.Fatalf("read SSE frame while waiting for %s: %v", what, err)
+			}
+			if line != "\n" && line != ": connected\n" {
+				return line
+			}
+		}
+	}
+
+	// Two keepalive comments on an otherwise idle stream.
+	for i := 0; i < 2; i++ {
+		if got := readLine("keepalive comment"); got != ": ping\n" {
+			t.Fatalf("frame = %q, want \": ping\\n\"", got)
+		}
+	}
+
+	// A real envelope published mid-stream still arrives.
+	h.bus.Publish("turn_done", "/proj", "ses_1", map[string]string{"model": "m"})
+	for {
+		line := readLine("envelope after keepalive")
+		if strings.HasPrefix(line, ": ping") {
+			continue // keepalives may interleave; keep waiting for the event
+		}
+		if strings.HasPrefix(line, "event: ") {
+			continue // SSE frame header — the payload is on the data: line
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			t.Fatalf("unexpected frame %q", line)
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &m); err != nil {
+			t.Fatalf("bad envelope JSON: %v", err)
+		}
+		if m["event"] != "turn_done" || m["session_id"] != "ses_1" {
+			t.Fatalf("envelope = %v", m)
+		}
+		break
+	}
+}
+
 // TestHandleEventsRegistersProjectViews: the projects query param drives the
 // bus's subscriber-aware scope.
 func TestHandleEventsRegistersProjectViews(t *testing.T) {

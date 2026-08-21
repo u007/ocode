@@ -69,6 +69,19 @@ func (h *Handler) runsEmitterLoop() {
 		}
 		h.mu.Unlock()
 
+		// Prune cached trees for agents released since the last tick so the
+		// map tracks live sessions only (otherwise it kept an entry — and its
+		// serialized run tree — for every session id ever served).
+		liveIDs := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			liveIDs[id] = struct{}{}
+		}
+		for id := range last {
+			if _, ok := liveIDs[id]; !ok {
+				delete(last, id)
+			}
+		}
+
 		for _, id := range ids {
 			data, err := json.Marshal(h.runsSnapshot(id))
 			if err != nil {

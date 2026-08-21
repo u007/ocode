@@ -182,14 +182,16 @@ corrected mid-investigation — see Bug C below):
   bge-m3 attaches (`0.49 ≥ 0.40`), LFM2.5 does not (`≤0.26`). The gated
   `OCODE_LIVE_RETEST=1 go test ./internal/discovery/ -run TestLiveRetest` runs
   against a live server on 11457.
-- [ ] **Migration wrinkle (STILL OPEN).** `EnsureLocalServer` fail-opens when a
-  FOREIGN-model server squats the shared port 11457 (served id ≠ `ExpectedServeID`)
-  instead of replacing it — so switching local models (or the MLX→llama.cpp
-  migration) needs a manual `pkill -f llama-server` + restart. Hit repeatedly this
-  session. Consider: when a wrong-model server occupies OUR fixed port 11457, stop
-  it and spawn the right one (guard against killing a user's own LM Studio on a
-  different port — 11457 is ocode-owned, so a wrong model there is almost certainly
-  a stale ocode spawn).
+- [x] **Migration wrinkle (FIXED 2026-08-21).** `EnsureLocalServer` now auto-reclaims
+  11457 when a FOREIGN-model or wedged server squats it: cross-process
+  `embed.start.lock` (`O_CREATE|O_EXCL` + pid liveness + 10m mtime stale) serializes
+  spawns across `ocode` instances; `reapStrayEmbedServer` (mirrors
+  `reapStrayChatServer`) re-probes before kill, requires `ExpectedServeID` +
+  `--port 11457` + `listeningPIDs` ownership, SIGTERM→5s→SIGKILL, fail-closed on
+  unidentifiable holder (protects LM Studio on 11457). User-explicit
+  `UserBaseURL` mismatch still hard-errors without reap. First probe wrong-model
+  no longer fail-opens — falls through to lock→reap→spawn. In-process `localMu`
+  preserved.
 - Note: `mlx_embed_server.py` + the `BackendMLX` spawn path are retained (dormant)
   for any future MLX-only model; no default local model uses MLX now.
 - [ ] **Optional (measured NOT worth it for attachment):** the http/local embedder
@@ -596,3 +598,10 @@ Deferred:
 - [x] **web/dist rebuilt** — `pnpm --pm-on-fail=ignore --dir web build` at 16:39, dist now contains `activeProfile` + `ocode.windowId` + ProfilesManager expand/detail; verified via grep.
 - [ ] **Rename non-atomic (known, not fixed)** — `RenameProfile` + `RenameProfileCredentials` + `RenameWindowStateProfile` are three unguarded writes; mid-failure can orphan creds or dangle refs. Compensating rollback / single-lock transaction deferred; documented as limitation in TODO. Server now blocks delete while active (409) but rename still best-effort.
 - [ ] **POST /api/profiles/{name}/test probe** — `internal/auth/test.go` cheap probe exists but not wired to profile-scoped endpoint; deferred to next slice (needs per-profile credential + existing probeViaHook plumbing).
+
+## Mid-turn failure transcript loss — 2026-08-21
+- [x] **`Agent.Step` returns the completed rounds with the error** (`internal/agent/agent.go`): both LLM-error returns inside the step loop returned `nil, err`, throwing away assistant text and tool results the user had already watched stream in (and tools that had already run). Now `newMsgs, err`. Covered by `internal/agent/step_partial_test.go`.
+- [x] **Server persists a failed turn's partial transcript** (`internal/server/agent_session.go` `commitPartialTranscript`, used by `runTurn`, `HandleResolvePermission`, `HandleAnswerQuestion`): the error paths returned without ever calling `saveSession`, so reopening a failed session showed only the user's own message. Covered by `internal/server/agent_session_partial_test.go`.
+- [ ] **TUI still drops partial work on a failed turn** — `internal/tui/model.go` (`resp, err := m.agent.Step(...)` → `return errorMsg(err)`) discards the now-available `resp`. Same data loss as the web/desktop bug; not fixed here to keep the change scoped to the reported web/desktop path.
+- [ ] **Root cause of "streaming stops halfway" not yet proven** — the transcript loss above explains "everything gone on reopen" and is fixed, but *why* the turn stopped (mid-turn provider error vs a genuine block inside `Step`) is still open. The desktop shell writes its server log only to stderr, which is lost for a Finder-launched `.app`, so a hang leaves no evidence behind.
+- [ ] **No durable server log / hang dump for the desktop** — mirror `serve`-level logs to `~/.local/share/opencode/logs/serve.log` (`debuglog.MirrorKindToFile` is currently wired only in the TUI) and add a `SIGUSR1` goroutine dump so the next stall is diagnosable after the fact instead of needing a live pprof session.

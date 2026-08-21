@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/u007/ocode/internal/agent"
-	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -140,7 +139,10 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "resolve channel full; try again")
 			return
 		}
-		h.broadcastEvent(SSEEvent{SessionID: req.SessionID, Event: "question_resolved", Data: map[string]string{"request_id": req.RequestID}})
+		// No server-side dismissal broadcast here — same reasoning as the
+		// permission resolve bridge path: the bridged web client listens on
+		// the TUI's bridge channel, and the TUI broadcasts question_resolved
+		// itself when the answers are applied.
 		writeJSON(w, http.StatusOK, ChatResponse{})
 		return
 	}
@@ -172,6 +174,9 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	resp, err := as.agent.Step(working)
 	if err != nil {
 		log.Printf("serve error: question answer step: %v", err)
+		// The answer is already in `working`; keep it (plus any rounds Step
+		// completed) so a failed continuation does not discard the exchange.
+		h.commitPartialTranscript(sessID, as, append(working, resp...), true)
 		h.broadcastEvent(SSEEvent{
 			SessionID: sessID,
 			Event:     "error",
@@ -190,7 +195,7 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	_ = session.Save(sessID, "", as.messages, nil)
+	_ = h.saveSession(sessID, "", as.messages, nil)
 
 	// Tell the mirror the dialog can be dismissed, then stream the continuation.
 	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "question_resolved", Data: map[string]string{"request_id": req.RequestID}})

@@ -423,14 +423,40 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // Merge snapshot into current state.
       // If action.messages is a full snapshot (length == total), replace all.
       // Otherwise it's a paginated subset — the initial page load.
-      return updateSession(state, action.sessionId, (s) => ({
-        ...s,
-        messages: action.messages,
-        totalMessages: action.total,
-        hasMore: action.messages.length < action.total,
-        live: [],
-        initialized: true,
-      }));
+      //
+      // Mid-turn guard: the server persists a transcript only after the
+      // turn's Step returns (runTurn saves post-Step), so a snapshot fetched
+      // mid-turn is staler than memory — but only where memory actually
+      // holds newer state. The guard therefore keys off content (committed
+      // messages or live parts), NOT merely turnActive: a freshly-loaded
+      // page reconciles mid-turn with turnActive=true on a virgin slice,
+      // and dropping the snapshot there would leave the tab empty until
+      // turn_done (nothing in memory to protect — disk is strictly newer).
+      // For a populated slice, applying the stale page would regress
+      // `messages` to the pre-turn transcript and wipe the live buffer —
+      // the "chat stuck after some messages" bug. The turn-boundary
+      // `messages` broadcast commits the full transcript when the turn ends.
+      // reconcileOpenSessions dispatches SET_TURN_STATE before this merge,
+      // so a genuinely finished turn whose turn_done was missed flips
+      // turnActive first and still gets the recovery merge below.
+      return updateSession(state, action.sessionId, (s) => {
+        if (s.turnActive && (s.messages.length > 0 || s.live.length > 0)) {
+          return {
+            ...s,
+            totalMessages: action.total,
+            hasMore: action.messages.length < action.total,
+            initialized: true,
+          };
+        }
+        return {
+          ...s,
+          messages: action.messages,
+          totalMessages: action.total,
+          hasMore: action.messages.length < action.total,
+          live: [],
+          initialized: true,
+        };
+      });
     default:
       return state;
   }

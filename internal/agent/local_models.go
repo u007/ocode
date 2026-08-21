@@ -33,6 +33,7 @@ func StartLocalModelInstance(ag *Agent, id string, maxParallel int) error {
 	}
 	procs := ag.Procs()
 	spawn := func(cmdline string) error {
+		cmdline = tool.WrapWithParentMonitor(cmdline)
 		p := procs.StartBackground(cmdline)
 		if p != nil && p.SnapshotStatus() == tool.ProcExited {
 			return fmt.Errorf("local chat server process exited immediately on spawn")

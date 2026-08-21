@@ -54,7 +54,7 @@ func TestTurnTriggersAutoCompactHeadless(t *testing.T) {
 	h.agents["sess-autocompact"] = as
 	h.mu.Unlock()
 
-	rec := chatRequest(t, h, map[string]any{"content": "hello", "sessionId": "sess-autocompact"})
+	rec := chatRequest(t, h, map[string]any{"content": "hello", "sessionId": "sess-autocompact", "model": "fake-model"})
 	if rec.Code != 200 {
 		t.Fatalf("chat turn: expected 200, got %d", rec.Code)
 	}

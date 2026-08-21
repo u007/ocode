@@ -133,6 +133,10 @@ function FileEditorImpl({
   // stable caller that forwards through a ref.
   const onChangeRef = useRef(onChange);
   const onSelectionChangeRef = useRef(onSelectionChange);
+  // Last model value this component forwarded to the parent via onChange.
+  const lastEmittedRef = useRef<string>(content);
+  // Latest incoming content, readable from mount/async callbacks.
+  const contentRef = useRef(content);
   useEffect(() => {
     onChangeRef.current = onChange;
   }, [onChange]);
@@ -141,6 +145,14 @@ function FileEditorImpl({
   }, [onSelectionChange]);
 
   const stableOnChange = useCallback((val: string | undefined) => {
+    // Remember what WE emitted so the external-content sync effect can tell
+    // "parent echoed our own keystroke back" (skip) from "parent has new
+    // content from disk/draft/reload" (apply). Without this, any momentary
+    // prop/model divergence makes @monaco-editor/react's controlled sync fire
+    // a full-document executeEdits — visually reverting the in-flight
+    // keystroke and slamming the caret (the "first keypress is eaten" /
+    // "cursor jumps while typing" bug class).
+    lastEmittedRef.current = val || "";
     onChangeRef.current?.(val || "");
   }, []);
 
@@ -161,7 +173,11 @@ function FileEditorImpl({
       formatOnPaste: true,
       smoothScrolling: true,
       cursorBlinking: "smooth",
-      cursorSmoothCaretAnimation: "on",
+      // Smooth caret animation renders the caret ~30-60ms BEHIND the insertion
+      // point; during fast typing it visibly trails the text and appears to
+      // land in the wrong place (user-reported "cursor lags / mispositions
+      // while typing"). Keep blinking smooth, drop the position animation.
+      cursorSmoothCaretAnimation: "off",
       padding: { top: 8 },
       suggest: {
         showKeywords: true,
@@ -199,9 +215,85 @@ function FileEditorImpl({
 
   const scrollSaveTimer = useRef<number | null>(null);
 
+  // Keep contentRef in sync for mount-time and async readers.
+  useEffect(() => {
+    contentRef.current = content;
+  }, [content]);
+
+  // ── External content sync (uncontrolled editor) ──
+  // The editor is UNCONTROLLED: it owns its model while the user types, and
+  // this effect applies only GENUINE external content changes (reload from
+  // disk, draft restore, clean-tab disk follow). A change that merely echoes
+  // what we emitted via onChange is skipped — feeding user edits back through
+  // the value prop is what made @monaco-editor/react's controlled sync fire a
+  // full-document executeEdits on any divergence, eating keystrokes over a
+  // selection and yanking the caret.
+  useEffect(() => {
+    const ed = editorRef.current;
+    const model = ed?.getModel();
+    if (!ed || !model) return;
+    const incoming = content;
+    if (incoming === model.getValue()) return;
+    if (incoming === lastEmittedRef.current) return;
+
+    lastEmittedRef.current = incoming;
+    const sel = ed.getSelection();
+    model.pushEditOperations(
+      sel ? [sel] : [],
+      [{ range: model.getFullModelRange(), text: incoming }],
+      () => null,
+    );
+    // Restore the caret/selection (clamped to the new text automatically).
+    if (sel) {
+      try {
+        ed.setSelection(sel);
+      } catch {
+        // Selection no longer valid in the new text — Monaco already clamped.
+      }
+    }
+  }, [content]);
+
+  // ── Selection tracking ──
+  // Wired inside handleEditorMount (where the editor instance is guaranteed
+  // non-null) and forwarded through a ref so we never tear down the Monaco
+  // listener on parent renders. The previous empty-deps effect read
+  // editorRef.current during the first commit — always null, because Monaco
+  // is created asynchronously by @monaco-editor/loader AFTER effects run — so
+  // the subscription silently never attached.
+  const wireSelectionTracking = useCallback((ed: editor.IStandaloneCodeEditor) => {
+    ed.onDidChangeCursorSelection((e) => {
+      const cb = onSelectionChangeRef.current;
+      if (!cb) return;
+      const sel = e.selection;
+      if (sel.startLineNumber === sel.endLineNumber && sel.startColumn === sel.endColumn) {
+        cb(null);
+      } else {
+        cb({
+          startLine: sel.startLineNumber,
+          endLine: sel.endColumn === 1 ? sel.endLineNumber - 1 : sel.endLineNumber,
+        });
+      }
+    });
+  }, []);
+
   const handleEditorMount: OnMount = useCallback((ed, monaco) => {
     editorRef.current = ed;
     monacoRef.current = monaco;
+
+    // Selection tracking (see wireSelectionTracking above).
+    wireSelectionTracking(ed);
+
+    // Content may have arrived between the first render and this async mount
+    // (loader resolution). Reconcile once so the model never starts stale.
+    const model = ed.getModel();
+    if (model && contentRef.current !== model.getValue()) {
+      lastEmittedRef.current = contentRef.current;
+      model.pushEditOperations(
+        [],
+        [{ range: model.getFullModelRange(), text: contentRef.current }],
+        () => null,
+      );
+    }
 
     // Restore the persisted scroll position and keep it saved (debounced) as
     // the user scrolls, so reopening this file lands where they left off.
@@ -255,37 +347,7 @@ function FileEditorImpl({
     });
 
     monaco.editor.setTheme("ocode-dark");
-  }, [persistKey]);
-
-  // ── Selection tracking ──
-  // Subscribe once per mount and forward through a ref so we never tear down
-  // the Monaco listener on every parent render. The old effect depended on
-  // `onSelectionChange` identity, which the parent recreates on every
-  // keystroke (it closes over `editorTabs`), causing a dispose+resubscribe
-  // on the typing hot path — the visible stall when replacing a selection.
-  useEffect(() => {
-    const ed = editorRef.current;
-    if (!ed) return;
-
-    const disposable = ed.onDidChangeCursorSelection((e) => {
-      const cb = onSelectionChangeRef.current;
-      if (!cb) return;
-      const sel = e.selection;
-      if (sel.startLineNumber === sel.endLineNumber && sel.startColumn === sel.endColumn) {
-        cb(null);
-      } else {
-        cb({
-          startLine: sel.startLineNumber,
-          endLine: sel.endColumn === 1 ? sel.endLineNumber - 1 : sel.endLineNumber,
-        });
-      }
-    });
-
-    return () => disposable.dispose();
-    // Intentionally empty deps: we wire once after mount and read the
-    // latest callback through the ref. Adding `onSelectionChange` here would
-    // recreate the subscription on every keystroke.
-  }, []);
+  }, [persistKey, wireSelectionTracking]);
 
   // ── Inline diff decorations ──
   // Fetch the change diff whenever path or session changes, parse it, and apply
@@ -526,7 +588,7 @@ function FileEditorImpl({
         <Editor
           key={path}
           language={lang}
-          value={content}
+          defaultValue={content}
           onChange={stableOnChange}
           onMount={handleEditorMount}
           loading={

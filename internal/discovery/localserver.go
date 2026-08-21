@@ -132,17 +132,90 @@ func EnsureLocalServer(spawn func(cmdline string) error, modelID string, cacheDi
 	// 2) Manifest port (cross-process share with other ocode instances).
 	if healthy, served := probeLocalServerModel(base, man.HealthPath, expect); healthy {
 		if !modelMatches(served, expect) {
-			return "", 0, fmt.Errorf("local embed server already on %s serves %v, not %s; stop it or restart ocode to switch models", base, served, modelID)
+			// STILL OPEN migration wrinkle fix: don't fail-open on wrong-model
+			// occupant of OUR fixed port 11457 — reap it (if identifiable as an
+			// ocode embed server) and fall through to the spawn path. 11457 is
+			// ocode-owned, so a wrong model there is almost certainly a stale
+			// ocode spawn from a prior version/model switch. Guard: if the
+			// user explicitly pointed UserBaseURL at 11457, the user case above
+			// already returned a hard error, so reaching here means the occupant
+			// is the bundled port, not a user LM Studio on a different port.
+			emitDiscoveryDebug("DISCOVERY", fmt.Sprintf("local embed server on %s serves %v, not %s — will reclaim port", base, served, modelID))
+		} else {
+			emitDiscoveryDebug("DISCOVERY", "adopted shared embed server: "+base)
+			localBase, localModelID = base, modelID
+			if setStatus != nil {
+				setStatus("ready")
+			}
+			return localBase, man.Dim, nil
 		}
-		emitDiscoveryDebug("DISCOVERY", "adopted shared embed server: "+base)
-		localBase, localModelID = base, modelID
-		if setStatus != nil {
-			setStatus("ready")
-		}
-		return localBase, man.Dim, nil
 	}
 
-	// 3) Spawn our own.
+	// 3) Spawn our own - serialized across ocode processes like chat instances.
+	// Acquire cross-process start lock so two ocode processes racing to spawn the
+	// embed server on 11457 don't both spawn competing python/llama servers.
+	acquired, release, lockErr := acquireEmbedStartLock(cacheDir)
+	if lockErr != nil {
+		if setStatus != nil {
+			setStatus("none")
+		}
+		return "", 0, lockErr
+	}
+	if !acquired {
+		// Another ocode is mid-spawn — wait for its server instead of racing.
+		waitErr := waitForEmbedHealth(base, man)
+		if waitErr == nil {
+			localBase, localModelID = base, modelID
+			if setStatus != nil {
+				setStatus("ready")
+			}
+			return base, man.Dim, nil
+		}
+		// The holder had the full health window and still produced nothing
+		// usable: it is wedged, not merely slow, and its lock will not go
+		// stale for embedStartLockStaleAfter. Break the lock and take over the
+		// spawn so the reap path below can reclaim the port.
+		emitDiscoveryDebug("WARN", fmt.Sprintf("embed start lock holder produced no healthy server (%v) — breaking the lock and taking over the spawn", waitErr))
+		breakEmbedStartLock(cacheDir)
+		var reacqErr error
+		acquired, release, reacqErr = acquireEmbedStartLock(cacheDir)
+		if reacqErr != nil || !acquired {
+			if reacqErr != nil {
+				emitDiscoveryDebug("WARN", fmt.Sprintf("could not re-acquire embed start lock after breaking it: %v", reacqErr))
+			}
+			if setStatus != nil {
+				setStatus("none")
+			}
+			return "", 0, waitErr
+		}
+	}
+	defer release()
+
+	// Holding the start lock means a bound-but-unhealthy or wrong-model occupant
+	// is a stray from a dead ocode process, not a sibling's in-flight spawn,
+	// so it is safe to reclaim. Re-probe after lock acquisition in case the
+	// winner bound between the first probe and the lock.
+	if healthy, served := probeLocalServerModel(base, man.HealthPath, expect); healthy {
+		if modelMatches(served, expect) {
+			// Winner showed up while we waited for the lock.
+			localBase, localModelID = base, modelID
+			if setStatus != nil {
+				setStatus("ready")
+			}
+			return base, man.Dim, nil
+		}
+		// Wrong model re-probed while holding lock — treat as stray.
+	}
+	if chatPortHeld(11457) {
+		if reaped, err := reapStrayEmbedServer(man); err != nil {
+			if setStatus != nil {
+				setStatus("none")
+			}
+			return "", 0, err
+		} else if reaped {
+			emitDiscoveryDebug("DISCOVERY", "reaped stray embed server on "+base)
+		}
+	}
 	switch man.Backend {
 	case BackendMLX:
 		if err := spawnMLXServer(spawn, man, cacheDir, setStatus); err != nil {
@@ -160,27 +233,18 @@ func EnsureLocalServer(spawn func(cmdline string) error, modelID string, cacheDi
 		}
 	}
 
-	// Wait for health (model load can take seconds). Reject a wrong-model server.
-	for i := 0; i < 60; i++ {
-		if healthy, served := probeLocalServerModel(base, man.HealthPath, expect); healthy {
-			if !modelMatches(served, expect) {
-				if setStatus != nil {
-					setStatus("none")
-				}
-				return "", 0, fmt.Errorf("spawned embed server on %s serves %v, not %s", base, served, modelID)
-			}
-			localBase, localModelID = base, modelID
-			if setStatus != nil {
-				setStatus("ready")
-			}
-			return base, man.Dim, nil
+	// Wait for health (model load can take seconds).
+	if err := waitForEmbedHealth(base, man); err != nil {
+		if setStatus != nil {
+			setStatus("none")
 		}
-		time.Sleep(time.Second)
+		return "", 0, err
 	}
+	localBase, localModelID = base, modelID
 	if setStatus != nil {
-		setStatus("none")
+		setStatus("ready")
 	}
-	return "", 0, fmt.Errorf("local embed server did not become healthy on %s", base)
+	return base, man.Dim, nil
 }
 
 // spawnLlamaCppServer downloads the GGUF + server binary (idempotent, sha-pinned)
@@ -303,7 +367,8 @@ func modelMatches(served []string, expect string) bool {
 // embedding model changes so the next EnsureLocalServer re-probes instead of
 // reusing a server that serves a different model. It does not kill a
 // cross-process server; if one is squatting the port with the wrong model,
-// EnsureLocalServer returns a clear error telling the user to restart ocode.
+// EnsureLocalServer will now reclaim it via reapStrayEmbedServer (if identifiable
+// as an ocode embed server) instead of fail-opening.
 func StopLocalServer() {
 	localMu.Lock()
 	localBase = ""
@@ -338,6 +403,86 @@ func libDirForBinary(binPath string) string {
 		return "" // not extracted yet, or a flat layout with no sibling libs
 	}
 	return filepath.Dir(binPath)
+}
+
+// embedStartLockStaleAfter bounds the embed start-lock like chatStartLockStaleAfter
+// but shorter: embed download is at most a few GGUFs + 60s health poll. 10m
+// still covers a slow cold download without blocking a contender for 50m.
+const embedStartLockStaleAfter = 10 * time.Minute
+
+// acquireEmbedStartLock is the embed equivalent of acquireChatStartLock - a
+// cross-process O_CREATE|O_EXCL lock for the singleton 11457 port. Like chat it
+// writes the owner pid so chatStartLockOwnerDead can reclaim instantly when the
+// holder died, with mtime staleness as fallback.
+func acquireEmbedStartLock(cacheDir string) (bool, func(), error) {
+	lockDir := filepath.Join(cacheDir, "locks")
+	if err := os.MkdirAll(lockDir, 0755); err != nil {
+		return false, nil, err
+	}
+	lockPath := embedStartLockPath(cacheDir)
+	for attempt := 0; attempt < 2; attempt++ {
+		f, openErr := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if openErr == nil {
+			if _, writeErr := fmt.Fprintf(f, "%d", os.Getpid()); writeErr != nil {
+				emitDiscoveryDebugAt("DISCOVERY", fmt.Sprintf("could not record owner pid in embed start lock %s: %v", lockPath, writeErr), false)
+			}
+			f.Close()
+			released := false
+			return true, func() {
+				if released {
+					return
+				}
+				released = true
+				os.Remove(lockPath)
+			}, nil
+		}
+		if !os.IsExist(openErr) {
+			return false, nil, fmt.Errorf("create embed start lock %s: %w", lockPath, openErr)
+		}
+		if attempt == 0 {
+			if chatStartLockOwnerDead(lockPath) {
+				os.Remove(lockPath)
+				continue
+			}
+			if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > embedStartLockStaleAfter {
+				os.Remove(lockPath)
+				continue
+			}
+		}
+		break
+	}
+	return false, nil, nil
+}
+
+func embedStartLockPath(cacheDir string) string {
+	return filepath.Join(cacheDir, "locks", "embed.start.lock")
+}
+
+// breakEmbedStartLock removes the start lock held by a live-but-wedged owner.
+// Only for the caller that has already waited out waitForEmbedHealth on the
+// holder's behalf — otherwise the lock's whole purpose (one spawner at a time)
+// is defeated.
+func breakEmbedStartLock(cacheDir string) {
+	if err := os.Remove(embedStartLockPath(cacheDir)); err != nil && !os.IsNotExist(err) {
+		emitDiscoveryDebugAt("DISCOVERY", fmt.Sprintf("could not break wedged embed start lock: %v", err), false)
+	}
+}
+
+// waitForEmbedHealth polls the embed server on base until it reports healthy
+// and serving man.ExpectedServeID(), shared by the lock winner and lock losers
+// (who are just waiting on someone else's in-flight spawn).
+func waitForEmbedHealth(base string, man ServerManifest) error {
+	expect := man.ExpectedServeID()
+	for i := 0; i < 60; i++ {
+		if healthy, served := probeLocalServerModel(base, man.HealthPath, expect); healthy {
+			if !modelMatches(served, expect) {
+				return fmt.Errorf("spawned embed server on %s serves %v, not %s", base, served, man.ModelID)
+			}
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	return fmt.Errorf("local embed server did not become healthy on %s", base)
 }
 
 // NewLocalEmbedder wraps the HTTP embedder transport pointed at the local server.

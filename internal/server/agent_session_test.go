@@ -75,7 +75,7 @@ func TestChatSessionsRunConcurrently(t *testing.T) {
 
 	busyDone := make(chan int, 1)
 	go func() {
-		rec := chatRequest(t, h, map[string]any{"content": "slow", "sessionId": "sess-busy"})
+		rec := chatRequest(t, h, map[string]any{"content": "slow", "sessionId": "sess-busy", "model": "fake-model"})
 		busyDone <- rec.Code
 	}()
 
@@ -88,7 +88,7 @@ func TestChatSessionsRunConcurrently(t *testing.T) {
 
 	freeDone := make(chan int, 1)
 	go func() {
-		rec := chatRequest(t, h, map[string]any{"content": "quick", "sessionId": "sess-free"})
+		rec := chatRequest(t, h, map[string]any{"content": "quick", "sessionId": "sess-free", "model": "fake-model"})
 		freeDone <- rec.Code
 	}()
 
@@ -118,7 +118,7 @@ func TestHandlerEndpointsStayResponsiveDuringTurn(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		chatRequest(t, h, map[string]any{"content": "slow", "sessionId": "sess-busy"})
+		chatRequest(t, h, map[string]any{"content": "slow", "sessionId": "sess-busy", "model": "fake-model"})
 		close(done)
 	}()
 
@@ -183,7 +183,7 @@ func TestCompactDoesNotBlockOtherSessions(t *testing.T) {
 
 	chatDone := make(chan int, 1)
 	go func() {
-		rec := chatRequest(t, h, map[string]any{"content": "quick", "sessionId": "sess-other"})
+		rec := chatRequest(t, h, map[string]any{"content": "quick", "sessionId": "sess-other", "model": "fake-model"})
 		chatDone <- rec.Code
 	}()
 
@@ -209,21 +209,25 @@ func TestChatAsyncReturnsBeforeTurnCompletes(t *testing.T) {
 	blocking := newBlockingClient()
 	as := newTestSession(h, "sess-async", blocking)
 
-	rec := chatRequest(t, h, map[string]any{"content": "slow", "sessionId": "sess-async", "async": true})
+	rec := chatRequest(t, h, map[string]any{"content": "slow", "sessionId": "sess-async", "async": true, "model": "fake-model"})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d %s", rec.Code, rec.Body.String())
 	}
 
 	select {
 	case <-blocking.started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("async turn never started")
 	}
 
 	close(blocking.release)
 
 	// The turn completes on its own goroutine and commits to the session.
-	deadline := time.Now().Add(5 * time.Second)
+	// The deadlines here are liveness bounds only — under a parallel package
+	// run (e.g. `go test ./internal/tui/ ./internal/server/`) goroutine
+	// scheduling can stall for seconds, so these are deliberately generous
+	// rather than asserting any real latency property.
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		as.mu.Lock()
 		n := len(as.messages)

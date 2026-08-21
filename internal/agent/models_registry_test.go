@@ -878,3 +878,45 @@ func TestForceRefreshFailureRecordsHistory(t *testing.T) {
 		t.Fatalf("expected force error entry, got %+v", entries[0])
 	}
 }
+
+// seedNamedModelSnapshot installs a synthetic snapshot containing one named
+// model (mimicking models.dev entries like opencode/x-preview-f-free →
+// "Ox Alpha Free") and one unnamed model, so display-name resolution can be
+// exercised without network access.
+func seedNamedModelSnapshot(t *testing.T) {
+	t.Helper()
+	withSandboxedModelsCache(t)
+	wrapped := registryFile{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Providers: map[string]providerEntry{
+			"synthprov": {
+				ID: "synthprov",
+				Models: map[string]modelEntry{
+					"codename-model": {ID: "codename-model", Name: "Friendly Model Name"},
+					"plain-model":    {ID: "plain-model"},
+				},
+			},
+		},
+	}
+	b, err := json.Marshal(wrapped)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	withSnapshotBytes(t, b)
+}
+
+func TestModelDisplayName(t *testing.T) {
+	seedNamedModelSnapshot(t)
+
+	if got := ModelDisplayName("synthprov/codename-model"); got != "Friendly Model Name" {
+		t.Fatalf("ModelDisplayName(codename) = %q, want %q", got, "Friendly Model Name")
+	}
+	// Unnamed entry → empty string so callers fall back to the raw id.
+	if got := ModelDisplayName("synthprov/plain-model"); got != "" {
+		t.Fatalf("ModelDisplayName(plain) = %q, want empty", got)
+	}
+	// Unknown model/provider → empty string, never an error.
+	if got := ModelDisplayName("nope/missing"); got != "" {
+		t.Fatalf("ModelDisplayName(unknown) = %q, want empty", got)
+	}
+}

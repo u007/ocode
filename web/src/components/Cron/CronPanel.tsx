@@ -10,7 +10,7 @@ import { CalendarClock, PencilLine, Pause, Play, Plus, RefreshCcw, Trash2 } from
 
 const REFRESH_INTERVAL = 10_000;
 
-export default function CronPanel() {
+export default function CronPanel({ active = true }: { active?: boolean }) {
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [outbox, setOutbox] = useState<CronDelivery[]>([]);
   const [targets, setTargets] = useState<Record<string, number>>({});
@@ -68,11 +68,14 @@ export default function CronPanel() {
   }, [loadJobs, loadTargets]);
 
   useEffect(() => {
+    // Poll only while the Cron view is frontmost — the panel is force-mounted
+    // so its DOM survives view switches, and background polling was pure churn.
+    if (!active) return;
     const interval = window.setInterval(() => {
       void refreshJobs();
     }, REFRESH_INTERVAL);
     return () => window.clearInterval(interval);
-  }, [refreshJobs]);
+  }, [refreshJobs, active]);
 
   const openAddDialog = () => {
     setEditingJob(null);

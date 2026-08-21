@@ -80,6 +80,12 @@ export function useEditorTabs(): UseEditorTabsResult {
       setActiveEditorTabId(id);
       return;
     }
+    // Claim the id SYNCHRONOUSLY before any await. The fetch below is async;
+    // claiming only after it resolved let two rapid open calls (double-click
+    // on a tree row, restore racing a user click) both pass the guard and
+    // append two tabs with the same id — two stacked Monaco editors fighting
+    // over focus, selection sync, and caret position.
+    openFileIdsRef.current.add(id);
     const draft = loadEditorDraft(id);
     let tab: EditorTab;
     try {
@@ -113,6 +119,9 @@ export function useEditorTabs(): UseEditorTabsResult {
       }
     } catch (err) {
       if (!draft) {
+        // Release the claim — the tab was never created and must be openable
+        // again once the failure clears.
+        openFileIdsRef.current.delete(id);
         console.error("Failed to open file:", err);
         return;
       }
@@ -131,8 +140,9 @@ export function useEditorTabs(): UseEditorTabsResult {
         externalChange: true,
       };
     }
-    openFileIdsRef.current.add(id);
-    setEditorTabs((prev) => [...prev, tab]);
+    // Defensive dedupe: never append a second tab for an id that slipped
+    // through (e.g. a concurrent call that raced ahead of this one).
+    setEditorTabs((prev) => (prev.some((t) => t.id === id) ? prev : [...prev, tab]));
     setActiveEditorTabId(id);
   }, [fetchFileContent]);
 

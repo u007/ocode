@@ -13,6 +13,11 @@
     "/Users/james/.cache/uv/archive-v0/HQu-BTwTmwjpzN-urVptz/lib/python3.12/site-packages/terminal_bench/harness",
     "/Users/james/.vite-plus/bin",
     "/Users/james/.config/opencode",
-    "/opt/homebrew/bin"
+    "/opt/homebrew/bin",
+    "/Users/james/.cache/opencode",
+    "/Users/james/bin",
+    "/Users/james/.local/state/opencode",
+    "/Users/james/go/bin",
+    "/Users/james/.opencode"
   ]
 }

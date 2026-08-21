@@ -90,6 +90,18 @@ describe("routeBusEnvelope", () => {
     expect(slice.error).toBe("boom");
   });
 
+  // A failed turn must stop the spinner as well as the turn state: turn_error
+  // is the only terminal frame the permission/question continuation paths emit
+  // on the bus, so leaving isStreaming set makes a failed turn look like one
+  // that is still streaming forever.
+  it("turn_error stops the streaming spinner", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("user_message", { data: { content: "hi" } }), router);
+    expect(getState().sessions["s1"].isStreaming).toBe(true);
+    routeBusEnvelope(env("turn_error", { data: { error: "boom" } }), router);
+    expect(getState().sessions["s1"].isStreaming).toBe(false);
+  });
+
   it("session_bootstrap records the stage", () => {
     const { router, getState } = makeRouter(["s1"]);
     routeBusEnvelope(env("session_bootstrap", { data: { stage: "mcp" } }), router);
@@ -110,12 +122,34 @@ describe("routeBusEnvelope", () => {
     expect(router.openSessionIds.has("s9")).toBe(true);
   });
 
-  it("routes chat events for a session with no open tab (background sessions stay live)", () => {
+  it("does not create a slice for a never-opened session (memory-leak guard)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { router, getState } = makeRouter(["s1"]);
     routeBusEnvelope(env("text", { session_id: "other", data: { delta: "x" } }), router);
     expect(warn).not.toHaveBeenCalled();
-    expect(getState().sessions["other"]?.live[0]).toMatchObject({ kind: "text", text: "x" });
+    expect(getState().sessions["other"]).toBeUndefined();
+  });
+
+  it("keeps updating an existing slice after its tab closes (late turn tail)", () => {
+    const { router, getState } = makeRouter(["s1", "old"]);
+    routeBusEnvelope(env("user_message", { session_id: "old", data: { content: "hi" } }), router);
+    // Tab closes: the id leaves the routing set, but the slice shell remains
+    // until RESET — late turn-tail events must still land on it.
+    router.openSessionIds.delete("old");
+    routeBusEnvelope(env("turn_done", { session_id: "old", data: {} }), router);
+    expect(getState().sessions["old"]).toBeDefined();
+    expect(getState().sessions["old"]?.turnActive).toBe(false);
+  });
+
+  it("status events do not create a slice for an unknown session but still patch globals", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(
+      env("status", { session_id: "ghost", data: { advisor_enabled: true, main_model: "m" } }),
+      router,
+    );
+    expect(getState().sessions["ghost"]).toBeUndefined();
+    expect(getState().advisorEnabled).toBe(true);
+    expect(getState().model).toBe("m");
   });
 
   it("warns for a session-scoped event without any session id", () => {

@@ -121,3 +121,30 @@ describe("projectStore session sub-tabs", () => {
     expect(result.current.state.tabsByProject["/proj-a"]).toBeUndefined();
   });
 });
+
+describe("no auto-ensured New session tab", () => {
+  it("selectProject does not create a New session tab", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+    });
+    await act(async () => {});
+    expect(result.current.state.tabsByProject["/proj-a"]).toBeUndefined();
+    expect(result.current.activeTabId).toBeNull();
+  });
+
+  it("openNewSessionTab still creates a New tab on explicit user action", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+    });
+    await act(async () => {
+      result.current.openNewSessionTab(false);
+    });
+    expect(result.current.state.tabsByProject["/proj-a"]).toHaveLength(1);
+    expect(result.current.state.tabsByProject["/proj-a"][0].id).toMatch(/^new-/);
+    expect(result.current.activeTabId).toBe(
+      result.current.state.tabsByProject["/proj-a"][0].id,
+    );
+  });
+});

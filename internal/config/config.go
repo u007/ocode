@@ -216,13 +216,17 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to load ocode config: %w", err)
 	}
 
-	// Restore the last model used in ocode. Falls back to opencode's recent
-	// list only when ocode has no preference of its own.
+	// Restore the last model ocode itself persisted. The upstream opencode
+	// CLI's shared recent-models list is deliberately NOT consulted here:
+	// it churns from every tool and instance that shares the file, and
+	// silently adopting whatever another session used last surfaced as
+	// surprise startup models the user never picked (e.g. launches coming
+	// up on a model from a different tool's history). With no last_model,
+	// an explicit config/env model still applies; otherwise the TUI starts
+	// agentless ("no model") until the user picks one, which persists it.
 	if os.Getenv("OPENCODE_MODEL") == "" {
 		if lastModel := GetLastModel(); lastModel != "" {
 			config.Model = lastModel
-		} else if recent := LoadRecentModels(); len(recent) > 0 {
-			config.Model = recent[0]
 		}
 	}
 

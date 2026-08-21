@@ -94,6 +94,9 @@ type Handler struct {
 	// turnHeartbeatInterval is the turn_heartbeat period (10s default; tests
 	// shorten it). It must be set before any turn starts for that handler.
 	turnHeartbeatInterval time.Duration
+	// sseKeepaliveInterval is the /api/events idle-comment period (20s
+	// default; tests shorten it). Set before the first events connection.
+	sseKeepaliveInterval time.Duration
 	// mcpBootstrapTimeout bounds the MCP wait during agent bootstrap (30s
 	// default; tests shorten it). Set before any bootstrap for that handler.
 	mcpBootstrapTimeout time.Duration
@@ -210,7 +213,11 @@ type agentSession struct {
 	// Compared against the window's current active profile on each turn so a
 	// profile switch takes effect on the next turn without an app restart.
 	profile string
-	mu      sync.Mutex
+	// credVersion snapshots auth.ProfileCredentialVersion() at build time, so
+	// an in-place credential edit on the same profile (not just a switch to a
+	// different profile) also triggers a rebuild — see reconcileProfileAgent.
+	credVersion int64
+	mu          sync.Mutex
 }
 
 func NewHandler() *Handler {
@@ -264,6 +271,12 @@ func NewHandler() *Handler {
 		as := h.agents[sessionID]
 		delete(h.agents, sessionID)
 		h.mu.Unlock()
+		// Drop the per-session turn lock too — otherwise one mutex leaks per
+		// session id the process has ever served (the map is keyed by id and
+		// nothing else removed entries).
+		h.turnMu.Lock()
+		delete(h.turnLocks, sessionID)
+		h.turnMu.Unlock()
 		// Shut down the released agent so plugin/LSP/background workers
 		// don't linger past eviction (mirrors the register-dedup path).
 		if as != nil && as.agent != nil {
@@ -981,10 +994,11 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 			modelName = id
 		}
 		models = append(models, ModelInfo{
-			Name:     id,
-			Model:    modelName,
-			Provider: provider,
-			Active:   id == currentModel,
+			Name:        id,
+			Model:       modelName,
+			Provider:    provider,
+			Active:      id == currentModel,
+			DisplayName: agent.ModelDisplayName(id),
 			// A model that is both favorite and recent shows only in the
 			// Favorites section, matching the TUI's dedupe.
 			Favorite: favSet[id],
@@ -1069,7 +1083,7 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 	compacted = append(compacted, after...)
 	as.messages = compacted
 
-	_ = session.Save(id, "", as.messages, nil)
+	_ = h.saveSession(id, "", as.messages, nil)
 
 	// Broadcast the compacted snapshot so the SSE mirror (and every connected
 	// browser) replaces its stale message list — otherwise the web transcript
@@ -1116,7 +1130,7 @@ func (h *Handler) HandleRecapSession(w http.ResponseWriter, r *http.Request, id 
 }
 
 func (h *Handler) HandleExportSession(w http.ResponseWriter, r *http.Request, id string) {
-	s, err := session.Load(id)
+	s, err := h.loadSession(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -1137,7 +1151,7 @@ func (h *Handler) HandleExportSession(w http.ResponseWriter, r *http.Request, id
 }
 
 func (h *Handler) HandleExportClaudeSession(w http.ResponseWriter, r *http.Request, id string) {
-	s, err := session.Load(id)
+	s, err := h.loadSession(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -1156,7 +1170,7 @@ func (h *Handler) HandleExportClaudeSession(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *Handler) HandleShareSession(w http.ResponseWriter, r *http.Request, id string) {
-	s, err := session.Load(id)
+	s, err := h.loadSession(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -1194,7 +1208,7 @@ func (h *Handler) HandleBtw(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	s, err := session.Load(id)
+	s, err := h.loadSession(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -1206,7 +1220,7 @@ func (h *Handler) HandleBtw(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	s.Messages = append(s.Messages, msg)
 
-	if err := session.Save(id, s.Title, s.Messages, nil); err != nil {
+	if err := h.saveSession(id, s.Title, s.Messages, nil); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1226,13 +1240,13 @@ func (h *Handler) HandleSetSessionTitle(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	s, err := session.Load(id)
+	s, err := h.loadSession(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	if err := session.Save(id, req.Title, s.Messages, nil); err != nil {
+	if err := h.saveSession(id, req.Title, s.Messages, nil); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

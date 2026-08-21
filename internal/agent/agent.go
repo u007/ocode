@@ -1071,7 +1071,10 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			messages = append(messages, summarizeMsg)
 			resp, err := a.chatWithDelta(stopCh, messages, toolDefs)
 			if err != nil {
-				return nil, err
+				// Hand back the rounds that already completed: the caller
+				// persists them alongside the error (see the mid-loop error
+				// return below for the full rationale).
+				return newMsgs, err
 			}
 			if isCancelled() {
 				return newMsgs, nil
@@ -1100,7 +1103,13 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				a.emitDebug("ERROR", fmt.Sprintf("LLM error: provider=%s model=%q apiKey=%s error: %v",
 					a.client.GetProvider(), a.client.GetModel(), maskKey(getClientAPIKey(a.client)), err))
 			}
-			return nil, err
+			// Return the work already done together with the error. Everything
+			// in newMsgs (assistant text, tool calls, tool results) has already
+			// been streamed to the UI and, for tools, actually executed against
+			// the filesystem — dropping it makes a mid-turn provider failure
+			// erase a turn the user watched happen. Callers that only care
+			// about success keep ignoring the slice when err != nil.
+			return newMsgs, err
 		}
 		if isCancelled() {
 			return newMsgs, nil

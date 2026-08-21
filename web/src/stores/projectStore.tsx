@@ -44,7 +44,6 @@ export type ProjectAction =
   | { type: "UPDATE_TAB_TITLE"; id: string; title: string }
   | { type: "UPDATE_TAB_ID"; oldId: string; newId: string; newTitle?: string }
   | { type: "RESTORE_TABS"; tabsByProject: Record<string, Tab[]>; activeTabByProject: Record<string, string | null> }
-  | { type: "ENSURE_NEW_TAB"; path: string }
   | { type: "SET_SESSION_PICKER"; open: boolean }
   | { type: "SET_GROUPS"; groups: ProjectGroup[] };
 const initialState: ProjectState = {
@@ -167,46 +166,6 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
     }
     case "RESTORE_TABS":
       return { ...state, tabsByProject: action.tabsByProject, activeTabByProject: action.activeTabByProject, tabsRestored: true };
-    case "ENSURE_NEW_TAB": {
-      // Every project keeps a "New session" tab available — even when real
-      // session tabs exist, so a deep-linked session always opens *beside* a
-      // New tab. Idempotent: no-op when the project already has a new- tab.
-      // Prepends so the New tab sits first. The active tab is left untouched
-      // when it already exists (deep-link must stay active when this fires
-      // after it). When the project has real tabs but no active tab (boot
-      // with persisted tabs), keep the most-recent real tab active instead of
-      // stealing focus to the placeholder — the placeholder is visible in the
-      // bar but doesn't pop up as the foreground session.
-      const list = state.tabsByProject[action.path] || [];
-      if (list.some((t) => t.id.startsWith("new-"))) {
-        return state;
-      }
-      const newTab: Tab = {
-        id: `new-${Date.now()}`,
-        projectPath: action.path,
-        title: "New session",
-        activeSubTab: "chat",
-      };
-      const existingActive = state.activeTabByProject[action.path] ?? null;
-      let nextActive: string | null;
-      if (existingActive) {
-        nextActive = existingActive;
-      } else if (list.length > 0) {
-        // Project already has real sessions (restored from storage). Keep the
-        // last real tab active; don't pop the New placeholder to the front.
-        nextActive = list[list.length - 1].id;
-      } else {
-        nextActive = newTab.id;
-      }
-      return {
-        ...state,
-        tabsByProject: { ...state.tabsByProject, [action.path]: [newTab, ...list] },
-        activeTabByProject: {
-          ...state.activeTabByProject,
-          [action.path]: nextActive,
-        },
-      };
-    }
     case "SET_GROUPS":
       return { ...state, groups: action.groups };
     default:
@@ -442,8 +401,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       console.error("Failed to load project sessions:", err);
       dispatch({ type: "SET_SESSIONS_LOADING", loading: false });
     }
-    // Guarantee the project's tab set exists (default "New session" tab).
-    dispatch({ type: "ENSURE_NEW_TAB", path: project.path });
+    // No auto-ensured "New session" tab: the frontend must not force a tab
+    // into existence. A New tab is created only on explicit user action
+    // ("+" button, Cmd/Ctrl+N, /new) via openNewSessionTab.
   }, []);
 
   const openSessionTab = useCallback((sessionId: string, sessionTitle: string) => {

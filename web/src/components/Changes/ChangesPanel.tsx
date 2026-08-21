@@ -10,11 +10,15 @@ const REFRESH_INTERVAL = 10_000;
 
 interface Props {
   session?: string;
+  /** True while this panel's session tab + sub-tab is frontmost. One of
+   *  these is mounted per open session tab (hidden via CSS), so background
+   *  instances must not poll — N hidden tabs would hammer /api/changes. */
+  active?: boolean;
 }
 
 type PendingUndo = { path: string; kind: "file" | "block" } | null;
 
-export default function ChangesPanel({ session }: Props) {
+export default function ChangesPanel({ session, active = true }: Props) {
   const [files, setFiles] = useState<FileChange[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -35,9 +39,12 @@ export default function ChangesPanel({ session }: Props) {
 
   useEffect(() => {
     refresh();
+    // Poll only while frontmost; activation refreshes once so re-opening a
+    // tab shows current data before the next tick.
+    if (!active) return;
     const interval = setInterval(refresh, REFRESH_INTERVAL);
     return () => clearInterval(interval);
-  }, [refresh]);
+  }, [refresh, active]);
 
   const confirmUndo = useCallback(async () => {
     if (!pendingUndo) return;

@@ -7877,3 +7877,39 @@ func TestSelectImageModelPickerRunsImageModelCommand(t *testing.T) {
 		t.Fatalf("expected /image model openai/gpt-image-1 to be dispatched, got messages %#v", got.messages)
 	}
 }
+
+// TestModelPickerLabelDecoratesDisplayName verifies the picker label contract:
+// the raw provider/model id is always the label base, and when the models.dev
+// registry knows a distinct display name (e.g. "Ox Alpha Free" for the zen
+// codename opencode/x-preview-f-free) it is appended after an em dash. The
+// row value must stay the raw id either way.
+func TestModelPickerLabelDecoratesDisplayName(t *testing.T) {
+	// Unknown model → label is the bare id, no decoration.
+	if got := modelPickerLabel("totally-unknown-provider/no-such-model"); got != "totally-unknown-provider/no-such-model" {
+		t.Fatalf("modelPickerLabel(unknown) = %q, want undecorated id", got)
+	}
+
+	// For every model the registry actually knows: label is either the bare id
+	// (when there is no distinct display name) or "id — Name".
+	for _, id := range []string{
+		"opencode/x-preview-f-free",
+		"opencode/gpt-5.6-luna",
+		"openai/gpt-4o",
+	} {
+		label := modelPickerLabel(id)
+		name := agent.ModelDisplayName(id)
+		if name == "" || name == id {
+			if label != id {
+				t.Fatalf("modelPickerLabel(%q) = %q, want bare id (registry name=%q)", id, label, name)
+			}
+			continue
+		}
+		want := id + " — " + name
+		if label != want {
+			t.Fatalf("modelPickerLabel(%q) = %q, want %q", id, label, want)
+		}
+		if !strings.Contains(label, name) {
+			t.Fatalf("label %q must contain display name %q", label, name)
+		}
+	}
+}

@@ -2,9 +2,11 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -421,7 +423,7 @@ func TestLoadWithConfigContentEnv(t *testing.T) {
 	}
 }
 
-func TestLoadPrefersRecentModelOverConfig(t *testing.T) {
+func TestLoadDoesNotRestoreRecentModelOverConfig(t *testing.T) {
 	tmpHome, err := os.MkdirTemp("", "ocode-home")
 	if err != nil {
 		t.Fatal(err)
@@ -459,8 +461,55 @@ func TestLoadPrefersRecentModelOverConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model != "recent/model" {
-		t.Fatalf("expected recent model, got %s", cfg.Model)
+	// The shared opencode recent-models list must never silently become the
+	// active model — an explicit config model wins, and recents are display-only.
+	if cfg.Model != "config/model" {
+		t.Fatalf("expected config model to win over recents, got %s", cfg.Model)
+	}
+}
+
+func TestLoadDoesNotRestoreRecentModelWithoutPreference(t *testing.T) {
+	tmpHome, err := os.MkdirTemp("", "ocode-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpHome)
+
+	tmpState, err := os.MkdirTemp("", "ocode-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpState)
+
+	tmpDir, err := os.MkdirTemp("", "ocode-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("XDG_STATE_HOME", tmpState)
+	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	// Another tool/instance (upstream opencode CLI, a second ocode in another
+	// repo) recently used this model. A fresh launch here must NOT adopt it.
+	if err := SaveRecentModel("openai/gpt-4o"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model != "" {
+		t.Fatalf("expected no model (no last_model preference), got %q", cfg.Model)
 	}
 }
 
@@ -490,6 +539,53 @@ func TestLoadKeepsExplicitEnvModelOverRecent(t *testing.T) {
 	}
 	if cfg.Model != "env/model" {
 		t.Fatalf("expected env model, got %s", cfg.Model)
+	}
+}
+
+// TestSaveRecentModelConcurrentWritesSurvive pins the cross-process race fix:
+// concurrent read-modify-write cycles on the shared model.json used to run
+// unlocked with a shared ".tmp" path, so parallel writers lost entries or
+// renamed half-written scratch files into place. Under lockModelState every
+// writer's entry must survive and the file must stay parseable.
+func TestSaveRecentModelConcurrentWritesSurvive(t *testing.T) {
+	tmpState, err := os.MkdirTemp("", "ocode-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpState)
+	t.Setenv("XDG_STATE_HOME", tmpState)
+
+	const writers = 16
+	var wg sync.WaitGroup
+	errCh := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := SaveRecentModel(fmt.Sprintf("prov/m%d", i)); err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent save failed: %v", err)
+	}
+
+	recents := LoadRecentModels()
+	seen := make(map[string]bool, len(recents))
+	for _, r := range recents {
+		seen[r] = true
+	}
+	for i := 0; i < writers; i++ {
+		id := fmt.Sprintf("prov/m%d", i)
+		if !seen[id] {
+			t.Fatalf("recent entry %q lost under concurrent writes; got %#v", id, recents)
+		}
+	}
+	if len(recents) > recentCap {
+		t.Fatalf("recents exceeded cap: %d > %d", len(recents), recentCap)
 	}
 }
 

@@ -134,10 +134,10 @@ export function apiPath(path: string): string {
 }
 
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(apiPath(path), {
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    ...init,
-  });
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
+  const res = await fetch(apiPath(path), { ...init, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.message || err.error || res.statusText);
@@ -146,10 +146,10 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function fetchEmpty(path: string, init?: RequestInit): Promise<void> {
-  const res = await fetch(apiPath(path), {
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    ...init,
-  });
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
+  const res = await fetch(apiPath(path), { ...init, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || res.statusText);
