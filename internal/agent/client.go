@@ -56,6 +56,13 @@ var llmRetryBaseDelay = 500 * time.Millisecond
 // returns an empty response (no text content and no tool calls).
 var ErrNoResponseFromOpenAIResponses = errors.New("no response from openai responses api")
 
+// ErrNoResponseFromProvider is returned when any provider's streaming API
+// returns a 200-OK response whose SSE stream parsed to no message (no text
+// content and no tool calls). This is a transient empty-stream that should
+// be retried via the standard backoff loop, just like
+// ErrNoResponseFromOpenAIResponses.
+var ErrNoResponseFromProvider = errors.New("no response from provider")
+
 type Message struct {
 	Role             string  `json:"role"`
 	Content          string  `json:"content"`
@@ -150,6 +157,14 @@ type GenericClient struct {
 	// every call site; mutex-guarding the field is the lighter alternative
 	// noted as acceptable in the original review.
 	deltaMu sync.Mutex
+
+	// deltaWrapToken identifies which ChatWithContext attempt currently owns
+	// the deltaEmitted-tracking wrapper installed over OnDelta. Funcs aren't
+	// comparable in Go, so identity is tracked via this token (guarded by
+	// deltaMu) rather than comparing OnDelta itself — lets a finishing attempt
+	// restore OnDelta only if it still owns the wrapper, instead of clobbering
+	// a different concurrent caller's override.
+	deltaWrapToken *int
 
 	// UseWebSocket enables WebSocket transport for OpenAI Responses API.
 	UseWebSocket bool
@@ -511,6 +526,25 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 			return nil, ctx.Err()
 		}
 		attempts = attempt + 1
+		// Track whether any delta was streamed to the UI during this attempt.
+		// parseOpenAIChatCompletionsStream cannot return ErrNoResponseFromProvider
+		// after emitting deltas (it only returns nil when content/toolCalls are
+		// empty), but other retryable errors (e.g. mid-stream EOF) could occur
+		// after partial deltas. Retrying after deltas would duplicate streamed
+		// text in the transcript, so we gate retries on deltaEmitted.
+		deltaEmitted := false
+		c.deltaMu.Lock()
+		origDelta := c.OnDelta
+		var myToken *int
+		if origDelta != nil {
+			myToken = new(int)
+			c.OnDelta = func(kind, text string) {
+				deltaEmitted = true
+				origDelta(kind, text)
+			}
+			c.deltaWrapToken = myToken
+		}
+		c.deltaMu.Unlock()
 		var (
 			msg *Message
 			err error
@@ -524,6 +558,15 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 		} else {
 			msg, err = c.chatOpenAI(ctx, messages, tools)
 		}
+		c.deltaMu.Lock()
+		// Only restore if nothing else re-pointed OnDelta while we were
+		// streaming (e.g. a concurrent ChatWithContext call on a shared
+		// client) — otherwise this would clobber that caller's own wrapper.
+		if myToken != nil && c.deltaWrapToken == myToken {
+			c.OnDelta = origDelta
+			c.deltaWrapToken = nil
+		}
+		c.deltaMu.Unlock()
 		if err == nil {
 			return msg, nil
 		}
@@ -535,8 +578,23 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 
 		// Determine retry strategy for this error.
 		is429 := isRateLimitError(err)
-		isRetryable := is429 || isRetryableLLMClientError(err)
+		isRetryable := is429 || isServerUnavailableError(err) || isRetryableLLMClientError(err)
 		if !isRetryable {
+			break
+		}
+		// Do not retry if we already streamed partial content — retrying would
+		// duplicate deltas already rendered in the UI. Most retryable errors
+		// (timeouts, EOF) occur before any delta, so this gate is a safety net.
+		// EXCEPTION: empty-response errors (ErrNoResponseFromOpenAIResponses /
+		// ErrNoResponseFromProvider). Reasoning models on the Responses API
+		// stream reasoning-summary deltas BEFORE any output text, so these
+		// errors can arrive legitimately after deltas were emitted. The final
+		// response contained no text and no tool calls, so only cosmetic
+		// reasoning text can duplicate — worth retrying to avoid hard-failing
+		// the turn. This is the documented invariant; do not "tighten" it
+		// without also threading delta-kind through OnDelta call sites.
+		if deltaEmitted && !is429 &&
+			!errors.Is(err, ErrNoResponseFromProvider) && !errors.Is(err, ErrNoResponseFromOpenAIResponses) {
 			break
 		}
 
@@ -570,26 +628,69 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 	return nil, fmt.Errorf("llm request failed after %d attempt(s): %w", attempts, lastErr)
 }
 
+// providerStatusError carries the HTTP status from a provider chat response so
+// retry classification can key on the status code instead of substring-matching
+// the formatted message (whose body text previously influenced behavior).
+type providerStatusError struct {
+	Provider string // exact literal used in today's message prefix
+	Code     int
+	Body     string
+}
+
+func (e *providerStatusError) Error() string {
+	return fmt.Sprintf("%s error (%d): %s", e.Provider, e.Code, e.Body)
+}
+
 // isRateLimitError returns true when err is an HTTP 429 (Too Many Requests)
-// error originating from any of the provider chat methods. All of them format
-// the error as "<provider> error (429): …", so we detect the status code in
-// the formatted string.
+// error originating from any of the provider chat methods. Typed provider
+// status errors (*providerStatusError) are classified by their Code; other
+// errors fall back to detecting " (429)" in the formatted string, matching
+// the historical "<provider> error (429): …" format.
 func isRateLimitError(err error) bool {
 	if err == nil {
 		return false
+	}
+	var se *providerStatusError
+	if errors.As(err, &se) {
+		return se.Code == http.StatusTooManyRequests
 	}
 	lower := strings.ToLower(err.Error())
 	return strings.Contains(lower, " (429)")
 }
 
+// isServerUnavailableError reports whether err is a typed provider status
+// error with a transient gateway/server availability code (502/503/504),
+// which are safe to retry with short backoff.
+func isServerUnavailableError(err error) bool {
+	var se *providerStatusError
+	if errors.As(err, &se) {
+		switch se.Code {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		}
+	}
+	return false
+}
+
+// isRetryableLLMClientError reports whether err represents a transient client /
+// transport failure worth retrying. Typed provider status errors
+// (*providerStatusError) are classified purely by their HTTP code via
+// isRateLimitError / isServerUnavailableError in the callers, so they return
+// false here regardless of body text — deliberate behavior change: a 5xx/4xx
+// whose body text contains "timeout"/"eof" etc. no longer retries due to body
+// text alone. The checks below apply only to non-typed errors.
 func isRetryableLLMClientError(err error) bool {
 	if err == nil {
+		return false
+	}
+	var statusErr *providerStatusError
+	if errors.As(err, &statusErr) {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
-	if errors.Is(err, ErrNoResponseFromOpenAIResponses) {
+	if errors.Is(err, ErrNoResponseFromOpenAIResponses) || errors.Is(err, ErrNoResponseFromProvider) {
 		return true
 	}
 	var netErr net.Error
@@ -653,14 +754,14 @@ func (c *GenericClient) chatCopilot(ctx context.Context, messages []Message, too
 		body, _ := io.ReadAll(resp.Body)
 		msg := fmt.Sprintf("copilot error (%d): %s", resp.StatusCode, string(body))
 		c.emitDebug("error", msg)
-		return nil, fmt.Errorf("%s", msg)
+		return nil, &providerStatusError{Provider: "copilot", Code: resp.StatusCode, Body: string(body)}
 	}
 	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
 	if err != nil {
 		return nil, err
 	}
 	if msg == nil {
-		return nil, fmt.Errorf("no response from copilot")
+		return nil, fmt.Errorf("no response from copilot: %w", ErrNoResponseFromProvider)
 	}
 	if msg.Model == "" {
 		msg.Model = c.Model
@@ -753,9 +854,8 @@ func (c *GenericClient) chatGrokSubscription(ctx context.Context, messages []Mes
 		if resp.StatusCode == http.StatusUnauthorized {
 			return nil, fmt.Errorf("Grok subscription session expired — run /connect to re-authenticate")
 		}
-		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
 		c.emitDebug("ERROR", fmt.Sprintf("chatGrokSubscription: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
-		return nil, fmt.Errorf("%s", msg)
+		return nil, &providerStatusError{Provider: c.Provider, Code: resp.StatusCode, Body: string(body)}
 	}
 
 	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
@@ -763,7 +863,7 @@ func (c *GenericClient) chatGrokSubscription(ctx context.Context, messages []Mes
 		return nil, err
 	}
 	if msg == nil {
-		return nil, fmt.Errorf("no response from %s", c.Provider)
+		return nil, fmt.Errorf("no response from %s: %w", c.Provider, ErrNoResponseFromProvider)
 	}
 	if msg.Model == "" {
 		msg.Model = c.Model
@@ -856,9 +956,8 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
 		c.emitDebug("ERROR", fmt.Sprintf("chatOpenAI: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
-		return nil, fmt.Errorf("%s", msg)
+		return nil, &providerStatusError{Provider: c.Provider, Code: resp.StatusCode, Body: string(body)}
 	}
 
 	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
@@ -866,7 +965,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 		return nil, err
 	}
 	if msg == nil {
-		return nil, fmt.Errorf("no response from %s", c.Provider)
+		return nil, fmt.Errorf("no response from %s: %w", c.Provider, ErrNoResponseFromProvider)
 	}
 	if msg.Model == "" {
 		msg.Model = c.Model
@@ -960,9 +1059,8 @@ func (c *GenericClient) chatGoogle(ctx context.Context, messages []Message, tool
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
 		c.emitDebug("ERROR", fmt.Sprintf("chatGoogle: status=%d url=%s", resp.StatusCode, url))
-		return nil, fmt.Errorf("%s", msg)
+		return nil, &providerStatusError{Provider: c.Provider, Code: resp.StatusCode, Body: string(body)}
 	}
 
 	msg, usageRaw, err := parseGoogleInteractionsStream(resp.Body, c.onDelta(), c.onUsage())
@@ -970,7 +1068,7 @@ func (c *GenericClient) chatGoogle(ctx context.Context, messages []Message, tool
 		return nil, err
 	}
 	if msg == nil {
-		return nil, fmt.Errorf("no response from %s", c.Provider)
+		return nil, fmt.Errorf("no response from %s: %w", c.Provider, ErrNoResponseFromProvider)
 	}
 	if msg.Model == "" {
 		msg.Model = c.Model
@@ -2498,7 +2596,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 		}
 		msg := fmt.Sprintf("openai responses error (%d): %s", resp.StatusCode, string(body))
 		c.emitDebug("error", msg)
-		return nil, fmt.Errorf("%s", msg)
+		return nil, &providerStatusError{Provider: "openai responses", Code: resp.StatusCode, Body: string(body)}
 	}
 
 	// Parse SSE stream to accumulate the full response.
@@ -3042,7 +3140,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 		body, _ := io.ReadAll(resp.Body)
 		msg := fmt.Sprintf("anthropic error (%d): %s", resp.StatusCode, string(body))
 		c.emitDebug("error", msg)
-		return nil, fmt.Errorf("%s", msg)
+		return nil, &providerStatusError{Provider: "anthropic", Code: resp.StatusCode, Body: string(body)}
 	}
 
 	// Streaming parser. Anthropic emits one of:
@@ -3284,7 +3382,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 	if resMsg.Content != "" || len(resMsg.ToolCalls) > 0 {
 		return resMsg, nil
 	}
-	return nil, fmt.Errorf("no response from anthropic")
+	return nil, fmt.Errorf("no response from anthropic: %w", ErrNoResponseFromProvider)
 }
 
 // supportsVision reports whether the client's active model can accept image
@@ -4108,9 +4206,8 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
 		c.emitDebug("ERROR", fmt.Sprintf("chatOpenAIHTTP: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
-		return nil, fmt.Errorf("%s", msg)
+		return nil, &providerStatusError{Provider: c.Provider, Code: resp.StatusCode, Body: string(body)}
 	}
 
 	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
@@ -4118,7 +4215,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 		return nil, err
 	}
 	if msg == nil {
-		return nil, fmt.Errorf("no response from %s", c.Provider)
+		return nil, fmt.Errorf("no response from %s: %w", c.Provider, ErrNoResponseFromProvider)
 	}
 	if msg.Model == "" {
 		msg.Model = c.Model

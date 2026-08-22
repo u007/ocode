@@ -160,6 +160,15 @@ type RecapResult struct {
 	Short bool // true for 1-line auto-recap, false for full /recap
 }
 
+// AutoContinueJudgeResult carries an async auto-continue judge verdict plus a
+// generation tag so callers can ignore stale results after a newer turn has
+// already started (see Agent.AutoContinueJudgeAsync).
+type AutoContinueJudgeResult struct {
+	Gen    uint64
+	Resume bool
+	Err    error
+}
+
 type Agent struct {
 	client   LLMClient
 	tools    map[string]tool.Tool
@@ -319,6 +328,9 @@ type Agent struct {
 	// OnRecap, if set, is invoked when async recap finishes. The callback
 	// receives the recap result produced by the small model.
 	OnRecap func(RecapResult)
+	// OnAutoContinueJudge, if set, is invoked when an async auto-continue
+	// judge call finishes (see AutoContinueJudgeAsync).
+	OnAutoContinueJudge func(AutoContinueJudgeResult)
 	// OnPermissionAsk, if set, is invoked synchronously when a tool call
 	// requires a permission decision. It blocks until the user (via the TUI)
 	// responds, returning the permission response. When set, HandleToolCall acts
@@ -364,11 +376,20 @@ type Agent struct {
 	subAgentPermAsker func(PermissionRequest) PermissionResponse
 	// maxSteps limits the number of agentic iterations. 0 = unlimited.
 	maxSteps int
+	// stepLimitHit records whether the most recent Step() call was cut off by
+	// maxSteps and forced into the "stop and summarize" branch, rather than
+	// finishing because the model naturally stopped calling tools. Callers
+	// (the TUI's auto-continue feature) use this to tell a genuinely-finished
+	// turn apart from one truncated mid-task. atomic because Step() runs on
+	// the streaming goroutine while the TUI reads it from Update()'s goroutine.
+	stepLimitHit atomic.Bool
 	// compactMu serialises async compaction passes so a slow summary call
 	// can't fire OnCompact twice for overlapping snapshots.
 	compactMu sync.Mutex
 	// recapMu serialises async recap passes.
 	recapMu sync.Mutex
+	// autoContinueJudgeMu serialises async auto-continue judge calls.
+	autoContinueJudgeMu sync.Mutex
 	// subagentDispatchGuard tracks consecutive identical task-tool dispatches
 	// since the last user input, to break runaway loops where a small model
 	// keeps re-launching the same subagent in response to its own completion
@@ -957,6 +978,7 @@ func (t AgentTool) Execute(args json.RawMessage) (string, error) {
 }
 
 func (a *Agent) Step(messages []Message) ([]Message, error) {
+	a.stepLimitHit.Store(false)
 	if a.client == nil {
 		return []Message{{Role: "assistant", Content: "(no llm client configured)"}}, nil
 	}
@@ -1063,6 +1085,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			limit = 100
 		}
 		if i >= limit {
+			a.stepLimitHit.Store(true)
 			summarizeMsg := Message{
 				Role:    "user",
 				Content: "You have reached the maximum number of steps (" + strconv.Itoa(limit) + "). Stop using tools and respond with a summary of your work and any remaining tasks.",
@@ -1918,6 +1941,84 @@ func (a *Agent) recapClient() LLMClient {
 	return a.client
 }
 
+// autoContinueJudgeClient resolves the client used to judge whether a reply
+// looks interrupted. Requires Ocode.AutoContinueModel to be explicitly set —
+// unlike recapClient, this does NOT fall back to the small model or main
+// client, because an unset AutoContinueModel means "judge disabled, rely on
+// StepLimitHit only" (see AutoContinueJudgeAsync). Falling back silently
+// would turn every turn into an extra LLM call for users who never opted in.
+func (a *Agent) autoContinueJudgeClient() LLMClient {
+	if a.config == nil {
+		return nil
+	}
+	model := strings.TrimSpace(a.config.Ocode.AutoContinueModel)
+	if model == "" {
+		return nil
+	}
+	return NewClient(a.config, model)
+}
+
+// AutoContinueJudgeAsync asks the configured auto-continue judge model
+// whether the most recent assistant reply looks like a genuinely interrupted,
+// unfinished response that should be auto-resumed, rather than a naturally
+// completed one. Returns false (no call made) if no judge model is
+// configured or a judge call is already in flight. The verdict arrives via
+// OnAutoContinueJudge; on any error the caller receives Resume=false (fail
+// closed — never auto-resume on an ambiguous/failed judge call).
+func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64) bool {
+	client := a.autoContinueJudgeClient()
+	if client == nil {
+		return false
+	}
+	if !a.autoContinueJudgeMu.TryLock() {
+		return false
+	}
+	snapshot := make([]Message, len(messages))
+	copy(snapshot, messages)
+	go func() {
+		defer a.autoContinueJudgeMu.Unlock()
+		resume, err := a.runAutoContinueJudge(client, snapshot)
+		if a.OnAutoContinueJudge != nil {
+			a.OnAutoContinueJudge(AutoContinueJudgeResult{Gen: gen, Resume: resume, Err: err})
+		}
+	}()
+	return true
+}
+
+// runAutoContinueJudge sends the tail of the conversation to the judge client
+// and expects a bare YES/NO verdict. Any error, empty response, or anything
+// other than an unambiguous "YES" is treated as NO (fail closed).
+func (a *Agent) runAutoContinueJudge(client LLMClient, messages []Message) (bool, error) {
+	const tailN = 6
+	tail := messages
+	if len(tail) > tailN {
+		tail = tail[len(tail)-tailN:]
+	}
+	var b strings.Builder
+	b.WriteString("You are judging whether an AI assistant's most recent reply, below, was cut off mid-task " +
+		"(e.g. truncated output, an unfinished code block or sentence, or the assistant explicitly saying it will " +
+		"continue) versus a reply that naturally finished the user's request. " +
+		"Answer with exactly one word: YES if the reply looks cut off and should be resumed, NO otherwise.\n\n")
+	for _, m := range tail {
+		if m.Content == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "[%s]\n%s\n\n", m.Role, m.Content)
+	}
+	resp, err := client.Chat([]Message{{Role: "user", Content: b.String()}}, nil)
+	if err != nil {
+		return false, err
+	}
+	if resp == nil {
+		return false, nil
+	}
+	// A local model rarely returns a bare "YES" even when told to — expect
+	// "YES.", "YES — the reply cuts off...", etc. Prefix match, still fails
+	// closed for anything not unambiguously starting with YES.
+	verdict := strings.ToUpper(strings.TrimSpace(resp.Content))
+	return strings.HasPrefix(verdict, "YES"), nil
+}
+
 // runCompact performs the synchronous compaction. When force is true (manual /
 // compact API), it summarises the whole conversation after the prompt prefix
 // even if the recent tail already fits the token budget, so the user always
@@ -2170,6 +2271,19 @@ func (a *Agent) SetWorkDir(dir string) {
 	if at, ok := a.tools["advisor"].(AdvisorTool); ok {
 		at.workDir = dir
 		a.tools["advisor"] = at
+	}
+	// Re-point the bash change recorder so Pre/Post walks the active project,
+	// not the process launch directory (desktop .app launches with cwd "/" and
+	// would otherwise walk "/" or $HOME on every bash invocation — a multi-
+	// second hang the user experiences as "bash hangs").
+	if a.changes != nil {
+		if bt, ok := a.tools["bash"].(*tool.BashTool); ok {
+			bt.Recorder = changes.NewStatBashRecorder(dir, a.changes)
+			a.tools["bash"] = bt
+		} else if btv, ok := a.tools["bash"].(tool.BashTool); ok {
+			btv.Recorder = changes.NewStatBashRecorder(dir, a.changes)
+			a.tools["bash"] = &btv
+		}
 	}
 }
 
@@ -3162,10 +3276,73 @@ func runPermissionModelLoop(stopCh <-chan struct{}, client LLMClient, messages [
 			resp *Message
 			err  error
 		)
-		if cc, ok := client.(ctxChatter); ok {
-			resp, err = cc.ChatWithContext(ctx, messages, callTools)
-		} else {
-			resp, err = client.Chat(messages, callTools)
+		// Retry loop for transient LLM errors. GenericClient.ChatWithContext
+		// already retries internally, but permission-model calls also go through
+		// plain LLMClient.Chat (test fakes) or may still see a persistent
+		// retryable error after the client's own retries. This outer loop
+		// ensures the auto-permission agent gets the same 2x default retry
+		// as the main LLM loop, without consuming the tool-call budget (i).
+		// Persistent empty-stream (ErrNoResponseFromProvider) that already
+		// exhausted the client's retries is not re-retried here to avoid
+		// ~1.5s → ~4.5s blow-up.
+		for attempt := 0; ; attempt++ {
+			if cc, ok := client.(ctxChatter); ok {
+				resp, err = cc.ChatWithContext(ctx, messages, callTools)
+			} else {
+				resp, err = client.Chat(messages, callTools)
+			}
+			if err == nil {
+				break
+			}
+			// Context cancelled — do not retry.
+			if ctx.Err() != nil {
+				emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_error tool=%s model=%s error=%v", toolName, modelLabel, err))
+				return "", false, fmt.Sprintf("LLM error: %v", err)
+			}
+			select {
+			case <-stopCh:
+				emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_cancelled tool=%s model=%s attempt=%d", toolName, modelLabel, i))
+				return "", false, "cancelled"
+			default:
+			}
+			is429 := isRateLimitError(err)
+			isRetryable := is429 || isServerUnavailableError(err) || isRetryableLLMClientError(err)
+			if !isRetryable {
+				break
+			}
+			// Avoid double-retrying a persistent empty-stream that GenericClient
+			// already retried 3x. The client's retry loop already surfaced
+			// RetryNotifier; re-driving the same 4-attempt cycle would turn a
+			// 1.5s fast-fail into ~6s.
+			if _, isGeneric := client.(*GenericClient); isGeneric && (errors.Is(err, ErrNoResponseFromProvider) || errors.Is(err, ErrNoResponseFromOpenAIResponses)) {
+				break
+			}
+			maxRetries := llmMaxRetries
+			if is429 {
+				maxRetries = llmMaxRetries429
+			}
+			if attempt >= maxRetries {
+				break
+			}
+			var delay time.Duration
+			if is429 {
+				delay = 3*time.Second + time.Duration(attempt)*400*time.Millisecond
+				if delay > 5*time.Second {
+					delay = 5 * time.Second
+				}
+			} else {
+				delay = time.Duration(attempt+1) * llmRetryBaseDelay
+			}
+			emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_retry tool=%s model=%s attempt=%d delay=%v error=%v", toolName, modelLabel, attempt, delay, err))
+			select {
+			case <-ctx.Done():
+				return "", false, "cancelled"
+			case <-stopCh:
+				return "", false, "cancelled"
+			case <-time.After(delay):
+			}
+			// retry same i without consuming budget
+			continue
 		}
 		if err != nil {
 			emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_error tool=%s model=%s error=%v", toolName, modelLabel, err))
@@ -3658,9 +3835,17 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	if toolCtx == nil {
 		toolCtx = context.Background()
 	}
-	if a.snapshotStore != nil && toolCallID != "" {
+	if a.snapshotStore != nil {
 		toolCtx = snapshot.WithStore(toolCtx, a.snapshotStore)
-		toolCtx = snapshot.WithToolCallID(toolCtx, toolCallID)
+		// Only attach a tool_call_id when one exists (Step loop dispatch).
+		// Direct/test/approved callers without one (see handleToolCall's doc
+		// comment) still need the store attached above — omitting it entirely
+		// silently fell back to snapshot.FromContext's disconnected global
+		// store, so the write never surfaced on the Changes tab even though
+		// it succeeded on disk.
+		if toolCallID != "" {
+			toolCtx = snapshot.WithToolCallID(toolCtx, toolCallID)
+		}
 	}
 	// Carry the agent's project root so path-confining helpers (confinedPath)
 	// confine writes against the project, not the process working directory.
@@ -3907,6 +4092,13 @@ func (a *Agent) SetMaxSteps(n int) {
 // (default cap of 100 applies in the step loop).
 func (a *Agent) GetMaxSteps() int {
 	return a.maxSteps
+}
+
+// StepLimitHit reports whether the most recently completed Step() call was
+// truncated by the maxSteps cap (forced to stop and summarize) rather than
+// finishing because the model stopped calling tools on its own.
+func (a *Agent) StepLimitHit() bool {
+	return a.stepLimitHit.Load()
 }
 
 // applySpecModel swaps the active LLM client when the spec declares a Model

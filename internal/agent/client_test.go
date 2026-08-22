@@ -3,11 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -721,5 +724,250 @@ func TestChatOpenAIOrcaRouterUsesQualifiedRouterModel(t *testing.T) {
 	}
 	if gotModel != "orcarouter/auto" {
 		t.Fatalf("request model = %q, want %q", gotModel, "orcarouter/auto")
+	}
+}
+
+// statusResponse builds a minimal HTTP response with the given status and body
+// for stubbing llmHTTPClient in retry-classification tests.
+func statusResponse(code int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: code,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}
+}
+
+// openAIChatOKStream is a minimal successful chat-completions SSE stream that
+// parseOpenAIChatCompletionsStream accepts (one content delta + DONE).
+const openAIChatOKStream = "data: {\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n"
+
+// stubLLMHTTP replaces the package-level llmHTTPClient for the duration of a
+// test and restores it (plus llmRetryBaseDelay, zeroed to keep retries fast)
+// on cleanup.
+func stubLLMHTTP(t *testing.T, transport roundTripFunc) {
+	t.Helper()
+	originalClient := llmHTTPClient
+	originalDelay := llmRetryBaseDelay
+	llmRetryBaseDelay = 0
+	llmHTTPClient = &http.Client{Timeout: llmRequestTimeout, Transport: transport}
+	t.Cleanup(func() {
+		llmHTTPClient = originalClient
+		llmRetryBaseDelay = originalDelay
+	})
+}
+
+func TestChatRetries503ThenSucceeds(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		n := atomic.AddInt32(&calls, 1)
+		if n <= 2 {
+			return statusResponse(http.StatusServiceUnavailable, `{"error":{"message":"upstream unavailable"}}`), nil
+		}
+		return statusResponse(http.StatusOK, openAIChatOKStream), nil
+	}))
+
+	client := &GenericClient{Provider: "opencode", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	msg, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("expected success after 503 retries, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("expected 3 attempts (2x503 + success), got %d", got)
+	}
+	if msg == nil || msg.Content != "ok" {
+		t.Fatalf("expected final message content %q, got %+v", "ok", msg)
+	}
+}
+
+func TestChatRetriesGatewayStatusCodes(t *testing.T) {
+	for _, code := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			var calls int32
+			stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+				n := atomic.AddInt32(&calls, 1)
+				if n == 1 {
+					return statusResponse(code, `{"error":"gateway blip"}`), nil
+				}
+				return statusResponse(http.StatusOK, openAIChatOKStream), nil
+			}))
+
+			client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+			if _, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+				t.Fatalf("code %d: expected transient gateway error to be retried to success, got %v", code, err)
+			}
+			if got := atomic.LoadInt32(&calls); got != 2 {
+				t.Fatalf("code %d: expected 2 attempts, got %d", code, got)
+			}
+		})
+	}
+}
+
+func TestChatFailsFastOn500(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return statusResponse(http.StatusInternalServerError, `{"error":{"message":"boom"}}`), nil
+	}))
+
+	client := &GenericClient{Provider: "opencode", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected fail-fast after 1 attempt for non-gateway 5xx, got %d calls", got)
+	}
+	if !strings.Contains(err.Error(), "llm request failed after 1 attempt(s)") ||
+		!strings.Contains(err.Error(), "opencode error (500)") {
+		t.Fatalf("unexpected error format: %v", err)
+	}
+}
+
+func TestStatusErrorBodyTextDoesNotCauseRetry(t *testing.T) {
+	// Deliberate behavior change pinned here: typed provider status errors are
+	// classified purely by HTTP code. A 500 whose BODY text contains
+	// "timeout"/"eof" must NOT become retryable via the legacy substring
+	// checks (it silently was before the typed error existed).
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return statusResponse(http.StatusInternalServerError, `upstream timeout occurred while reading EOF`), nil
+	}))
+
+	client := &GenericClient{Provider: "opencode", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("body text must not influence status-error classification; expected 1 call, got %d", got)
+	}
+	var se *providerStatusError
+	if !errors.As(err, &se) || se.Code != http.StatusInternalServerError {
+		t.Fatalf("expected wrapped *providerStatusError with code 500, got %v", err)
+	}
+}
+
+func TestEmptyStreamRetriesThenSucceeds(t *testing.T) {
+	// A 200 whose SSE stream parses to no content/tool calls surfaces as
+	// ErrNoResponseFromProvider, which is retryable.
+	emptyStream := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\ndata: [DONE]\n"
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return statusResponse(http.StatusOK, emptyStream), nil
+		}
+		return statusResponse(http.StatusOK, openAIChatOKStream), nil
+	}))
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	msg, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("expected empty-stream error to be retried to success, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 attempts, got %d", got)
+	}
+	if msg == nil || msg.Content != "ok" {
+		t.Fatalf("expected final message content %q, got %+v", "ok", msg)
+	}
+}
+
+// TestEmptyResponsesRetryAfterReasoningDeltas reproduces the bug where an
+// OpenAI Responses-API empty-response error (no text, no tool calls) arrives
+// AFTER reasoning-summary deltas were already streamed. The deltaEmitted gate
+// must NOT suppress the retry for this error class: the final response produced
+// nothing of substance, so retrying is safe (only cosmetic reasoning text can
+// duplicate). Before the fix this failed fast at 1 attempt.
+func TestEmptyResponsesRetryAfterReasoningDeltas(t *testing.T) {
+	var calls int32
+	// Attempt 1: reasoning deltas then an empty final response.
+	emptyWithReasoning := "event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"model\":\"gpt-5.6-test\"}\n\n" +
+		"event: response.reasoning_summary_text.delta\n" +
+		"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"hmm thinking\"}\n\n" +
+		"data: [DONE]\n"
+	// Attempt 2: a normal successful response.
+	okResponses := "event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"model\":\"gpt-5.6-test\"}\n\n" +
+		"event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"model\":\"gpt-5.6-test\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n" +
+		"data: [DONE]\n"
+
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return statusResponse(http.StatusOK, emptyWithReasoning), nil
+		}
+		return statusResponse(http.StatusOK, okResponses), nil
+	}))
+
+	// opencode-go + gpt-5.6 prefix routes Chat → chatOpenAIResponses.
+	client := &GenericClient{Provider: "opencode-go", Model: "gpt-5.6-test", BaseURL: "https://example.test/v1"}
+	// OnDelta set so the reasoning delta arms deltaEmitted (the bug condition).
+	client.OnDelta = func(kind, text string) {}
+	msg, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("expected empty-response error to be retried to success, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 attempts (empty w/ reasoning deltas retried), got %d", got)
+	}
+	if msg == nil || msg.Content != "ok" {
+		t.Fatalf("expected final message content %q, got %+v", "ok", msg)
+	}
+}
+
+func TestProviderStatusErrorClassification(t *testing.T) {
+	cases := []struct {
+		code              int
+		wantServerUnavail bool
+		wantRateLimit     bool
+	}{
+		{http.StatusBadRequest, false, false},
+		{http.StatusUnauthorized, false, false},
+		{http.StatusTooManyRequests, false, true},
+		{http.StatusInternalServerError, false, false},
+		{http.StatusBadGateway, true, false},
+		{http.StatusServiceUnavailable, true, false},
+		{http.StatusGatewayTimeout, true, false},
+	}
+	for _, tc := range cases {
+		err := &providerStatusError{Provider: "test-provider", Code: tc.code, Body: "boom"}
+		if got := isServerUnavailableError(err); got != tc.wantServerUnavail {
+			t.Errorf("code %d: isServerUnavailableError = %v, want %v", tc.code, got, tc.wantServerUnavail)
+		}
+		if got := isRateLimitError(err); got != tc.wantRateLimit {
+			t.Errorf("code %d: isRateLimitError = %v, want %v", tc.code, got, tc.wantRateLimit)
+		}
+		if got := isRetryableLLMClientError(err); got {
+			t.Errorf("code %d: typed status errors must never be retryable via body/transport checks", tc.code)
+		}
+	}
+
+	// Message format preserved byte-for-byte so downstream string consumers
+	// (isRateLimitError fallback, TUI " (429)" match) keep working.
+	e := &providerStatusError{Provider: "test-provider", Code: 503, Body: "boom"}
+	if got, want := e.Error(), "test-provider error (503): boom"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+
+	// Untyped errors still classify via the legacy substring fallback.
+	if !isRateLimitError(errors.New("x error (429): slow down")) {
+		t.Fatal("untyped 429 substring fallback broken")
+	}
+	if isRateLimitError(errors.New("x error (503): down")) {
+		t.Fatal("untyped 503 must not classify as rate limit")
+	}
+
+	// Classification works through the final %w wrap produced by Chat.
+	wrapped := fmt.Errorf("llm request failed after 1 attempt(s): %w",
+		&providerStatusError{Provider: "p", Code: http.StatusServiceUnavailable, Body: ""})
+	if !isServerUnavailableError(wrapped) {
+		t.Fatal("errors.As must see through the attempt-count wrap")
+	}
+	if !strings.Contains(wrapped.Error(), "p error (503): ") {
+		t.Fatalf("empty body must render trailing colon-space exactly, got %q", wrapped.Error())
 	}
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -1452,11 +1453,27 @@ func (h *Handler) HandleSetMaskAdvanced(w http.ResponseWriter, r *http.Request) 
 // non-local endpoint without allow_remote_tier2, or an unresolvable local/*
 // manifest).
 func (h *Handler) buildRedactionScanner(rc config.RedactionConfig) *redact.LLMScanner {
-	baseURL := rc.BaseURL
 	model := rc.Model
-	// Auto-detect the default base URL for known local providers when a model
-	// is set but no explicit base_url was configured.
-	if baseURL == "" && model != "" {
+	if model == "" {
+		return nil
+	}
+	baseURL := rc.BaseURL
+	// "local" (/localmodel-managed) models are served on a port owned by the
+	// instance manager, not a user-configured endpoint — resolve the live base
+	// URL from the running server instead of a (possibly stale) persisted
+	// base_url. discovery.LocalModelBaseURL returns "" when no live server
+	// answers, which fails the tier-2 pass closed to regex tier-1.
+	if strings.HasPrefix(model, "local/") {
+		if live := discovery.LocalModelBaseURL(model); live != "" {
+			baseURL = live
+		} else if registeredIDs, err := config.RegisteredLocalModelIDs(); err == nil {
+			if port, err := discovery.AssignChatPort(model, registeredIDs); err == nil {
+				baseURL = fmt.Sprintf("http://localhost:%d/v1", port)
+			}
+		}
+	} else if baseURL == "" {
+		// Auto-detect the default base URL for known local providers when a model
+		// is set but no explicit base_url was configured.
 		if def := redact.DefaultRedactionBaseURL(model); def != "" {
 			baseURL = def
 		}

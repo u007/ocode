@@ -346,6 +346,10 @@ export interface TUIStatus {
   // TUI's ctrl+d / /effort reasoning level so the sidebar can display and
   // change it.
   thinking_budget?: number;
+  mode?: string;
+  temperature?: number;
+  permission_mode?: string;
+  permission_auto_allow?: boolean;
   small_model?: string;
   small_model_enabled?: boolean;
   advisor_model?: string;

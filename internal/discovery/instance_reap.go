@@ -45,6 +45,31 @@ func chatPortHeld(port int) bool {
 // for this port. Command lines alone are not sufficient evidence: an unrelated
 // process can contain the same model and port text in its arguments.
 func findStrayChatServer(man ServerManifest, port int) (pid int, cmdline string, found bool) {
+	token := man.ExpectedServeID()
+	if token == "" {
+		return 0, "", false
+	}
+	return findServerMatching(port, func(args []string) bool {
+		return strayServerArgsMatch(args, token, port)
+	})
+}
+
+// findOcodeEmbedServer locates a running process that owns port AND looks like
+// an ocode-spawned local model server REGARDLESS of which model it serves — a
+// wrong-model squat is precisely what reapStrayEmbedServer exists to reclaim,
+// so matching only the requested manifest's ExpectedServeID would protect
+// exactly the squatter we need to evict.
+func findOcodeEmbedServer(port int, cacheDir string) (pid int, cmdline string, found bool) {
+	return findServerMatching(port, func(args []string) bool {
+		return embedServerArgsMatch(args, port, cacheDir)
+	})
+}
+
+// findServerMatching returns the first non-self process that both owns a
+// listener on port and satisfies match. Identification is by command line plus
+// listening-socket ownership, so it also catches servers orphaned by an ocode
+// process that died before it could record anything.
+func findServerMatching(port int, match func([]string) bool) (pid int, cmdline string, found bool) {
 	listenerPIDs, err := listeningPIDs(port)
 	if err != nil {
 		emitDiscoveryDebugAt("DISCOVERY", fmt.Sprintf("could not identify the listener for port %d: %v", port, err), false)
@@ -53,10 +78,6 @@ func findStrayChatServer(man ServerManifest, port int) (pid int, cmdline string,
 	procs, err := gopsprocess.Processes()
 	if err != nil {
 		emitDiscoveryDebugAt("DISCOVERY", fmt.Sprintf("could not enumerate processes to look for a stray server on port %d: %v", port, err), false)
-		return 0, "", false
-	}
-	token := man.ExpectedServeID()
-	if token == "" {
 		return 0, "", false
 	}
 	self := os.Getpid()
@@ -74,11 +95,50 @@ func findStrayChatServer(man ServerManifest, port int) (pid int, cmdline string,
 		if err != nil || len(args) == 0 {
 			continue
 		}
-		if strayServerArgsMatch(args, token, port) {
+		if match(args) {
 			return int(p.Pid), strings.Join(args, " "), true
 		}
 	}
 	return 0, "", false
+}
+
+// embedServerArgsMatch identifies an ocode-owned local model server on port
+// independent of the served model: EITHER the served-model token of ANY known
+// manifest (catches squatters spawned by older ocode versions whose layout or
+// default model differed), OR any argument referencing an artifact under
+// cacheDir's local model tree (<cacheDir>/local-<os>-<arch>/... GGUF/binary
+// paths, or the bundled mlx_embed_server.py). Both forms always ride on top
+// of the exact "--port N" flag check, and the caller additionally requires
+// listening-socket ownership. Foreign servers that merely bind the same fixed
+// port (user LM Studio etc.) carry neither signature and are reported, never
+// killed.
+func embedServerArgsMatch(args []string, port int, cacheDir string) bool {
+	if !hasExactPortArg(args, port) {
+		return false
+	}
+	for _, m := range localManifests {
+		if strayServerArgsMatch(args, m.ExpectedServeID(), port) {
+			return true
+		}
+	}
+	return referencesDiscoveryArtifact(args, cacheDir)
+}
+
+// referencesDiscoveryArtifact reports whether any argument points into
+// cacheDir's local-model artifact tree (llama-server binaries/GGUFs under
+// local-<os>-<arch>/, or the bundled MLX script written at the tree root).
+func referencesDiscoveryArtifact(args []string, cacheDir string) bool {
+	if cacheDir == "" {
+		return false
+	}
+	prefix := filepath.Join(cacheDir, "local-")
+	script := filepath.Join(cacheDir, mlxEmbedServerScriptName)
+	for _, arg := range args {
+		if strings.HasPrefix(arg, prefix) || arg == script {
+			return true
+		}
+	}
+	return false
 }
 
 // listeningPIDs returns only processes that currently own a TCP listener that
@@ -174,6 +234,15 @@ func pidOwnsListener(pid int32, port int) bool {
 // enumeration and signalling: owning the port alone is not enough if the PID
 // has since become an unrelated listener.
 func strayProcessStillMatches(pid int32, man ServerManifest, port int) bool {
+	return strayProcessStillMatchesFunc(pid, port, func(args []string) bool {
+		return strayServerArgsMatch(args, man.ExpectedServeID(), port)
+	})
+}
+
+// strayProcessStillMatchesFunc is strayProcessStillMatches with the command
+// line predicate parameterized, so embed-server reaping can revalidate against
+// model-independent identification (see embedServerArgsMatch).
+func strayProcessStillMatchesFunc(pid int32, port int, match func([]string) bool) bool {
 	if !pidOwnsListener(pid, port) {
 		return false
 	}
@@ -182,7 +251,7 @@ func strayProcessStillMatches(pid int32, man ServerManifest, port int) bool {
 		return false
 	}
 	args, err := proc.CmdlineSlice()
-	return err == nil && strayServerArgsMatch(args, man.ExpectedServeID(), port)
+	return err == nil && match(args)
 }
 
 // reapStrayChatServer reclaims port for modelID when it is held by a chat
@@ -253,42 +322,23 @@ func reapStrayChatServer(modelID string, port int, man ServerManifest) (reaped b
 	return false, fmt.Errorf("unresponsive %s server (pid %d) still holds port %d after SIGKILL — kill it manually, then restart the model via /localmodel", modelID, pid, port)
 }
 
-// chatStartLockOwnerDead reports whether lockPath records an owner pid that is
-// no longer running. A lock whose owner is gone was orphaned by a process that
-// died before releasing it, and blocking on it only delays the stray-server
-// reap that the same dead process's leftovers require. Locks written by an
-// older ocode (no pid recorded) return false and fall back to mtime staleness.
-//
-// PID reuse can make a dead owner look alive; that errs toward waiting, which
-// is the safe direction.
-func chatStartLockOwnerDead(lockPath string) bool {
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		// intentionally not logged: the lock vanishing between the failed
-		// create and this read is the normal race with a holder releasing it.
-		return false
+// reapStrayEmbedServer reclaims port when it is held by a wedged OR wrong-model
+// ocode embed/local-model server. Mirrors reapStrayChatServer but for the
+// singleton embed port, with one deliberate difference: identification does
+// NOT require the holder to serve the manifest we are about to launch. A
+// stale server from a previous version or model switch serving a DIFFERENT
+// model is exactly the squat this function exists to reclaim — matching only
+// the expected serve id would protect the squatter and keep the port hostage.
+// Evidence required instead: listening-socket ownership on port AND command-
+// line evidence of being ocode-spawned (embedServerArgsMatch). Like chat, it
+// re-probes before killing, SIGTERM->SIGKILLs with strayReapGrace, and a port
+// held by an unidentifiable process is reported, never blindly killed
+// (protects user's LM Studio if they manually set it to 11457).
+// Caller must hold acquireEmbedStartLock. cacheDir scopes artifact evidence.
+func reapStrayEmbedServer(man ServerManifest, cacheDir string, port int) (bool, error) {
+	matchArgs := func(args []string) bool {
+		return embedServerArgsMatch(args, port, cacheDir)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return false // pre-pid lock file, or a partial write — use mtime instead
-	}
-	alive, err := gopsprocess.PidExists(int32(pid))
-	if err != nil {
-		emitDiscoveryDebugAt("DISCOVERY", fmt.Sprintf("could not check whether chat start lock owner pid %d is alive: %v", pid, err), false)
-		return false
-	}
-	return !alive
-}
-
-// reapStrayEmbedServer reclaims 11457 when it is held by a wedged or wrong-model
-// embed server. Mirrors reapStrayChatServer but for the singleton embed port:
-// like chat, it re-probes before killing, identifies the holder by BOTH
-// ExpectedServeID and --port 11457 via gopsutil plus listening-socket ownership,
-// and SIGTERM->SIGKILLs with strayReapGrace. A port held by an unidentifiable
-// process is reported, never blindly killed (protects user's LM Studio if they
-// manually set it to 11457). Caller must hold acquireEmbedStartLock.
-func reapStrayEmbedServer(man ServerManifest) (bool, error) {
-	port := 11457
 	if !chatPortHeld(port) {
 		return false, nil
 	}
@@ -296,36 +346,36 @@ func reapStrayEmbedServer(man ServerManifest) (bool, error) {
 		emitDiscoveryDebugAt("DISCOVERY", fmt.Sprintf("port %d answered on re-probe — not a stray, leaving %s embed server alone", port, man.ModelID), false)
 		return false, nil
 	}
-	pid, cmdline, found := findStrayChatServer(man, port)
+	pid, cmdline, found := findOcodeEmbedServer(port, cacheDir)
 	if !found {
-		return false, fmt.Errorf("port %d is held by another process (not a %s embed server) — free the port, then restart ocode", port, man.ModelID)
+		return false, fmt.Errorf("port %d is held by another process (not an ocode embed server) — free the port, then restart ocode", port)
 	}
-	emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("port %d is held by an unresponsive %s embed server (pid %d) — reclaiming it: %s", port, man.ModelID, pid, cmdline))
+	emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("port %d is held by an unresponsive ocode embed server (pid %d) — reclaiming it: %s", port, pid, cmdline))
 	proc, findErr := os.FindProcess(pid)
 	if findErr != nil {
-		return false, fmt.Errorf("found unresponsive %s embed server on port %d (pid %d) but could not address it: %w", man.ModelID, port, pid, findErr)
+		return false, fmt.Errorf("found unresponsive ocode embed server on port %d (pid %d) but could not address it: %w", port, pid, findErr)
 	}
-	if !strayProcessStillMatches(int32(pid), man, port) {
-		return false, fmt.Errorf("found an unresponsive %s embed server candidate on port %d (pid %d), but could not verify its command line and listening-socket ownership — refusing to signal it", man.ModelID, port, pid)
+	if !strayProcessStillMatchesFunc(int32(pid), port, matchArgs) {
+		return false, fmt.Errorf("found an unresponsive ocode embed server candidate on port %d (pid %d), but could not verify its command line and listening-socket ownership — refusing to signal it", port, pid)
 	}
 	if sigErr := proc.Signal(syscall.SIGTERM); sigErr != nil {
-		emitDiscoveryDebugAt("DISCOVERY", fmt.Sprintf("SIGTERM to stray %s embed server pid %d failed (%v) — escalating to kill", man.ModelID, pid, sigErr), false)
+		emitDiscoveryDebugAt("DISCOVERY", fmt.Sprintf("SIGTERM to stray ocode embed server pid %d failed (%v) — escalating to kill", pid, sigErr), false)
 	}
 	if waitForPortFree(port) {
-		emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("reclaimed port %d from %s embed server pid %d", port, man.ModelID, pid))
+		emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("reclaimed port %d from ocode embed server pid %d", port, pid))
 		return true, nil
 	}
-	if !strayProcessStillMatches(int32(pid), man, port) {
-		return false, fmt.Errorf("unresponsive %s embed server candidate (pid %d) no longer matches or owns port %d — refusing to SIGKILL it", man.ModelID, pid, port)
+	if !strayProcessStillMatchesFunc(int32(pid), port, matchArgs) {
+		return false, fmt.Errorf("unresponsive ocode embed server candidate (pid %d) no longer matches or owns port %d — refusing to SIGKILL it", pid, port)
 	}
 	if killErr := proc.Kill(); killErr != nil {
-		return false, fmt.Errorf("unresponsive %s embed server (pid %d) is holding port %d and could not be killed: %w — kill it manually, then restart ocode", man.ModelID, pid, port, killErr)
+		return false, fmt.Errorf("unresponsive ocode embed server (pid %d) is holding port %d and could not be killed: %w — kill it manually, then restart ocode", pid, port, killErr)
 	}
 	if waitForPortFree(port) {
-		emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("reclaimed port %d from %s embed server pid %d (required SIGKILL)", port, man.ModelID, pid))
+		emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("reclaimed port %d from ocode embed server pid %d (required SIGKILL)", port, pid))
 		return true, nil
 	}
-	return false, fmt.Errorf("unresponsive %s embed server (pid %d) still holds port %d after SIGKILL — kill it manually, then restart ocode", man.ModelID, pid, port)
+	return false, fmt.Errorf("unresponsive ocode embed server (pid %d) still holds port %d after SIGKILL — kill it manually, then restart ocode", pid, port)
 }
 
 // waitForPortFree polls until the port is bindable or strayReapGrace elapses.

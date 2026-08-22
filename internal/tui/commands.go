@@ -14,6 +14,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/commands"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/memory"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/plugins"
@@ -165,6 +166,7 @@ func init() {
 			handler: runLocalModelCmd},
 		{name: "/docs", aliases: []string{"/doc-mode"}, usage: "/docs [on|off|status|init|update|cleanup]", help: "Manage documentation-first development and OKF knowledge bundle: on/off toggle, status show counts, init create bundle, update force maintenance, cleanup remove deprecated docs", handler: runDocsCmd},
 		{name: "/goal", usage: "/goal <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runGoalCmd},
+		{name: "/autocontinue", usage: "/autocontinue [on|off|status|model [name]]", help: "Auto-resume any turn cut off by /max-step (or judged interrupted by an optional judge model), general-purpose across TUI and /rc web turns", handler: runAutoContinueCmd},
 		{name: "/ocr", usage: "/ocr [status|enable|disable|model [name]]", help: "Show OCR status, toggle OCR, or set the OCR model (from LM Studio)", handler: runOcrCmd},
 		{name: "/image", usage: "/image [status|enable|disable|model [provider/model]]", help: "Show imagegen status, toggle image generation, or set the image model/provider", handler: runImageCmd},
 		{name: "/cron", usage: "/cron [list|describe <id>|remove <id>|add <kind> <args> <message...>]", help: "Manage scheduled jobs (see docs/scheduled-jobs.md). Jobs fire in the long-lived serve/web/desktop host, not the TUI.", handler: runCronCmd},
@@ -1215,6 +1217,14 @@ func maskStatusText(m *model, includeHint bool) string {
 			state = "inactive (redaction disabled)"
 		}
 		baseURL := m.llmScanner.BaseURL
+		// For local/* models the scanner resolves the live port at scan time;
+		// surface that live endpoint in the status so it matches what the
+		// scanner actually targets.
+		if strings.HasPrefix(m.redactionModel, "local/") {
+			if live := discovery.LocalModelBaseURL(m.redactionModel); live != "" {
+				baseURL = live
+			}
+		}
 		if len(baseURL) > 40 {
 			baseURL = baseURL[:37] + "..."
 		}
@@ -1387,11 +1397,12 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 		// Show or set the tier-2 scanning model
 		if len(args) > 1 {
 			// Set model
-			if err := m.setRedactionModel(args[1]); err != nil {
+			resolved := m.resolveMaskModelArg(args[1])
+			if err := m.setRedactionModel(resolved); err != nil {
 				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
 				return nil
 			}
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tier-2 model: %s", args[1])})
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tier-2 model: %s", resolved)})
 		} else {
 			// Open the model picker to select the tier-2 scanning model
 			return m.openRedactionModelPicker()
@@ -1687,6 +1698,57 @@ func runGoalCmd(m *model, args []string) tea.Cmd {
 		text: fmt.Sprintf("[Goal] Starting pipeline for: %s\nRunning in background — status updates will appear here.", goal),
 	})
 	return runGoalBackground(m, goal, false)
+}
+
+func runAutoContinueCmd(m *model, args []string) tea.Cmd {
+	if len(args) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: autoContinueStatusText(m)})
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "model":
+		return m.handleAutoContinueModelSub(args[1:])
+	case "on", "true", "yes", "enable":
+		if err := config.SaveAutoContinueEnabled(true); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+			return nil
+		}
+		m.autoContinueEnabled = true
+		if m.config != nil {
+			m.config.Ocode.AutoContinueEnabled = true
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Auto-continue: enabled — a turn cut off by /max-step will auto-resume (up to " + strconv.Itoa(autoContinueMaxChain) + " times in a row, reset on your next message)."})
+	case "off", "false", "no", "disable":
+		if err := config.SaveAutoContinueEnabled(false); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+			return nil
+		}
+		m.autoContinueEnabled = false
+		if m.config != nil {
+			m.config.Ocode.AutoContinueEnabled = false
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Auto-continue: disabled"})
+	case "status":
+		m.messages = append(m.messages, message{role: roleAssistant, text: autoContinueStatusText(m)})
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /autocontinue [on|off|status|model [name]]"})
+	}
+	return nil
+}
+
+func autoContinueStatusText(m *model) string {
+	state := "disabled"
+	if m.autoContinueEnabled {
+		state = "enabled"
+	}
+	judgeModel := "(none — StepLimitHit only)"
+	if m.config != nil && m.config.Ocode.AutoContinueModel != "" {
+		judgeModel = m.config.Ocode.AutoContinueModel
+	}
+	return fmt.Sprintf("Auto-continue: %s (chain so far this session: %d/%d)\nJudge model: %s\n\n"+
+		"When enabled, any turn cut off by the /max-step cap — not just /goal — is automatically resumed with a \"continue\" prompt, general-purpose across whatever command or task is running (including /rc web turns). "+
+		"If a judge model is set (see /autocontinue model), it's also asked to check replies that did NOT hit /max-step but might still look interrupted. Capped at %d consecutive auto-fires and reset whenever you send a new message, so a stuck local model can't loop forever.",
+		state, m.autoContinueCount, autoContinueMaxChain, judgeModel, autoContinueMaxChain)
 }
 
 func runDiscoverCmd(m *model, args []string) tea.Cmd {

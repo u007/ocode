@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -47,6 +48,47 @@ func AssignChatPort(modelID string, registeredIDs []string) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("model %q is not in the registered id set", modelID)
+}
+
+// LocalModelBaseURL returns the OpenAI-compatible /v1 base URL of modelID's
+// running local chat server, or "" if no live server is reachable. It mirrors
+// the liveness-hardened port resolution in agent.NewClient: prefer the
+// in-process instance record (authoritative port this process spawned), then
+// probe the deterministic AssignChatPort for a server started by another ocode
+// process. A dead or absent server yields "" so callers can fail closed to
+// regex tier-1 (the chat client) or skip the tier-2 LLM scan (the redaction
+// scanner) rather than pointing a client/scanner at a port nothing answers.
+//
+// This is the single source of truth for where a /localmodel-managed model is
+// actually listening — a persisted redaction base_url (or any static port
+// assumption) can be stale when the instance was spawned under a different
+// registered-id set than the one on disk now, or simply has not been started
+// yet.
+func LocalModelBaseURL(modelID string) string {
+	// Prefer the authoritative in-process record, but only after confirming it
+	// still answers — GetModelInstance is never invalidated when the spawned
+	// server crashes on its own, so trusting its BaseURL blindly reports a dead
+	// port as live.
+	if info, ok := GetModelInstance(modelID); ok && info.Port != 0 {
+		if _, ok := ProbeModelInstance(modelID, info.Port); ok {
+			return fmt.Sprintf("http://localhost:%d/v1", info.Port)
+		}
+		return ""
+	}
+	// Otherwise resolve the deterministic port and probe for a live server
+	// (possibly started by a different ocode process or a previous run).
+	registeredIDs, err := config.RegisteredLocalModelIDs()
+	if err != nil {
+		return ""
+	}
+	port, err := AssignChatPort(modelID, registeredIDs)
+	if err != nil {
+		return ""
+	}
+	if _, ok := ProbeModelInstance(modelID, port); ok {
+		return fmt.Sprintf("http://localhost:%d/v1", port)
+	}
+	return ""
 }
 
 // InstanceState is the lifecycle state of one managed chat model instance.
@@ -337,23 +379,30 @@ func waitForChatHealth(modelID, base string, man ServerManifest) error {
 				chatBreakerRecordFailure(modelID)
 				return fmt.Errorf("spawned chat server on %s serves %v, not %s", base, served, modelID)
 			}
-			warmupCtx, warmupCancel := context.WithCancel(context.Background())
 			instMu.Lock()
 			if inst, ok := instances[modelID]; ok {
 				if inst.warmupCancel != nil {
 					inst.warmupCancel()
 				}
+				warmupCtx, warmupCancel := context.WithCancel(context.Background())
 				inst.info.State = InstanceReady
 				inst.info.BaseURL = base
 				inst.warmupCancel = warmupCancel
+				instMu.Unlock()
+				chatBreakerReset(modelID)
+				// Fire-and-forget: the warm-up is best-effort and only improves a
+				// later RSS reading; a slow first forward pass (up to the client's
+				// 60s timeout) must not stall health-ready reporting, so it runs
+				// off the caller's critical path.
+				go warmUpChatModel(warmupCtx, base, man)
+				return nil
 			}
 			instMu.Unlock()
 			chatBreakerReset(modelID)
-			// Fire-and-forget: the warm-up is best-effort and only improves a
-			// later RSS reading; a slow first forward pass (up to the client's
-			// 60s timeout) must not stall health-ready reporting, so it runs
-			// off the caller's critical path.
-			go warmUpChatModel(warmupCtx, base, man)
+			// Instance was removed concurrently (e.g. StopModelInstance raced
+			// the health probe). No warmupCancel to track, so use a background
+			// context for the best-effort warmup.
+			go warmUpChatModel(context.Background(), base, man)
 			return nil
 		}
 		time.Sleep(time.Second)
@@ -452,21 +501,18 @@ func acquireChatStartLock(cacheDir, modelID string) (acquired bool, release func
 					return
 				}
 				released = true
-				os.Remove(lockPath)
+				pidLockRelease(lockPath)
 			}, nil
 		}
 		if !os.IsExist(openErr) {
 			return false, nil, fmt.Errorf("create chat start lock %s: %w", lockPath, openErr)
 		}
-		if attempt == 0 {
-			if chatStartLockOwnerDead(lockPath) {
-				os.Remove(lockPath) // holder is gone — reclaim and retry
-				continue
-			}
-			if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > chatStartLockStaleAfter {
-				os.Remove(lockPath) // abandoned lock from a crashed holder — reclaim and retry
-				continue
-			}
+		if attempt == 0 && pidLockReclaimable(lockPath, chatStartLockStaleAfter) {
+			// Dead recorded owner (instant reclaim — the whole point of
+			// recording pids) or garbage/stale lock past mtime budget.
+			// Never steals from a fresh live holder.
+			os.Remove(lockPath)
+			continue
 		}
 		break
 	}

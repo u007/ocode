@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // BashRecorder is the seam between BashTool and the changes
@@ -67,6 +68,32 @@ func NewStatBashRecorder(workDir string, reg *Registry) BashRecorder {
 // noiseDirNames are directories the stat-walk skips. The pre/post
 // stat is bounded by walk time; skipping the standard build/dependency
 // noise keeps it cheap for large repos.
+// walkBudget bounds how long a single Pre/Post fingerprint walk may run.
+// Without this, a workDir that resolves to the user's home directory (or
+// any other huge/slow tree — a network mount, an iCloud-synced folder with
+// undownloaded placeholder files) blocks every bash call for as long as the
+// walk takes, with no cancellation available (Pre runs before the bash
+// exec's timeout context even exists). Exceeding the budget aborts the walk
+// early and yields a partial (best-effort) fingerprint rather than hanging.
+const walkBudget = 2 * time.Second
+
+// unsafeWalkRoot reports whether workDir is a directory too large/slow to
+// safely fingerprint on every bash call: the filesystem root, or the user's
+// home directory. This is the fallback workDir used when a session has no
+// real project root bound to it (see cmd/ocode-desktop/main.go), and walking
+// it defeats the point of the recorder (there's no meaningful "project" to
+// track changes for) while risking a multi-minute stall.
+func unsafeWalkRoot(workDir string) bool {
+	clean := filepath.Clean(workDir)
+	if clean == string(filepath.Separator) {
+		return true
+	}
+	if home, err := os.UserHomeDir(); err == nil && clean == filepath.Clean(home) {
+		return true
+	}
+	return false
+}
+
 var noiseDirNames = map[string]struct{}{
 	".git":              {},
 	".opencode":         {},
@@ -128,12 +155,16 @@ var pathTokenRegex = regexp.MustCompile(`(?:^|\s|=|;|\|)([A-Za-z0-9_./~+-]+/[A-Z
 // .git, etc.) and any directory whose name starts with a dot (to keep
 // .opencode snapshots out of the per-invocation diff).
 func (r *StatBashRecorder) Pre() {
-	if r.workDir == "" {
+	if r.workDir == "" || unsafeWalkRoot(r.workDir) {
 		r.pre = nil
 		return
 	}
 	fps := make(map[string]fileFingerprint)
+	start := time.Now()
 	_ = filepath.Walk(r.workDir, func(path string, info os.FileInfo, err error) error {
+		if time.Since(start) > walkBudget {
+			return filepath.SkipAll
+		}
 		if err != nil {
 			// Permissions errors etc.: skip the entry. The walk
 			// continues so a single bad leaf doesn't blackhole
@@ -177,12 +208,16 @@ func (r *StatBashRecorder) Pre() {
 // enhancement. A non-zero exit code does not change the diff: the
 // shell may have partially written files before failing.
 func (r *StatBashRecorder) Post(command string, exitCode int) {
-	if r.workDir == "" || r.reg == nil {
+	if r.workDir == "" || r.reg == nil || unsafeWalkRoot(r.workDir) {
 		r.pre = nil
 		return
 	}
 	post := make(map[string]fileFingerprint)
+	start := time.Now()
 	_ = filepath.Walk(r.workDir, func(path string, info os.FileInfo, err error) error {
+		if time.Since(start) > walkBudget {
+			return filepath.SkipAll
+		}
 		if err != nil {
 			return nil
 		}

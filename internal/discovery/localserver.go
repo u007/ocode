@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,9 @@ import (
 )
 
 const localServerPort = "11457" // fixed port so separate ocode processes share one server
+
+// localServerPortInt is localServerPort as a number for socket/process checks.
+const localServerPortInt = 11457
 
 // Embedding backend identifiers (mirror manifest.Backend*; defined here so
 // callers in this file don't reach across for the constants).
@@ -162,8 +166,11 @@ func EnsureLocalServer(spawn func(cmdline string) error, modelID string, cacheDi
 		return "", 0, lockErr
 	}
 	if !acquired {
-		// Another ocode is mid-spawn — wait for its server instead of racing.
-		waitErr := waitForEmbedHealth(base, man)
+		// Another ocode holds the spawn lock. Wait for ITS server, watching
+		// the recorded holder pid: a holder that died ends the wait within a
+		// poll tick instead of burning the whole window, while a live holder
+		// (mid-download) is waited out up to the budget.
+		waitErr := waitForEmbedHealthTracked(base, man, embedStartLockPath(cacheDir), embedWaitLiveAttempts)
 		if waitErr == nil {
 			localBase, localModelID = base, modelID
 			if setStatus != nil {
@@ -171,22 +178,41 @@ func EnsureLocalServer(spawn func(cmdline string) error, modelID string, cacheDi
 			}
 			return base, man.Dim, nil
 		}
-		// The holder had the full health window and still produced nothing
-		// usable: it is wedged, not merely slow, and its lock will not go
-		// stale for embedStartLockStaleAfter. Break the lock and take over the
-		// spawn so the reap path below can reclaim the port.
-		emitDiscoveryDebug("WARN", fmt.Sprintf("embed start lock holder produced no healthy server (%v) — breaking the lock and taking over the spawn", waitErr))
-		breakEmbedStartLock(cacheDir)
-		var reacqErr error
-		acquired, release, reacqErr = acquireEmbedStartLock(cacheDir)
-		if reacqErr != nil || !acquired {
-			if reacqErr != nil {
-				emitDiscoveryDebug("WARN", fmt.Sprintf("could not re-acquire embed start lock after breaking it: %v", reacqErr))
-			}
+		if !errors.Is(waitErr, errEmbedHolderGone) {
+			// Live holder produced no usable server within the budget. Do NOT
+			// break its lock: breaking lets two processes race onto the same
+			// singleton port, and this process's reap path below could then
+			// kill the winner's innocent server. The holder releases its own
+			// lock when its spawn settles; surface the failure instead.
 			if setStatus != nil {
 				setStatus("none")
 			}
 			return "", 0, waitErr
+		}
+		// Holder exited without producing a server — take over immediately.
+		emitDiscoveryDebug("DISCOVERY", "embed start-lock holder exited — taking over the spawn")
+		var reacqErr error
+		acquired, release, reacqErr = acquireEmbedStartLock(cacheDir)
+		if reacqErr != nil {
+			if setStatus != nil {
+				setStatus("none")
+			}
+			return "", 0, reacqErr
+		}
+		if !acquired {
+			// Lost the takeover race to another contender; give its spawn a
+			// short tracked window rather than failing outright.
+			if werr := waitForEmbedHealthTracked(base, man, embedStartLockPath(cacheDir), embedWaitTakeoverAttempts); werr != nil {
+				if setStatus != nil {
+					setStatus("none")
+				}
+				return "", 0, werr
+			}
+			localBase, localModelID = base, modelID
+			if setStatus != nil {
+				setStatus("ready")
+			}
+			return base, man.Dim, nil
 		}
 	}
 	defer release()
@@ -206,8 +232,8 @@ func EnsureLocalServer(spawn func(cmdline string) error, modelID string, cacheDi
 		}
 		// Wrong model re-probed while holding lock — treat as stray.
 	}
-	if chatPortHeld(11457) {
-		if reaped, err := reapStrayEmbedServer(man); err != nil {
+	if chatPortHeld(localServerPortInt) {
+		if reaped, err := reapStrayEmbedServer(man, cacheDir, localServerPortInt); err != nil {
 			if setStatus != nil {
 				setStatus("none")
 			}
@@ -410,62 +436,62 @@ func libDirForBinary(binPath string) string {
 // still covers a slow cold download without blocking a contender for 50m.
 const embedStartLockStaleAfter = 10 * time.Minute
 
-// acquireEmbedStartLock is the embed equivalent of acquireChatStartLock - a
-// cross-process O_CREATE|O_EXCL lock for the singleton 11457 port. Like chat it
-// writes the owner pid so chatStartLockOwnerDead can reclaim instantly when the
-// holder died, with mtime staleness as fallback.
+// acquireEmbedStartLock is the embed equivalent of acquireChatStartLock — a
+// cross-process lock for the singleton embed port, backed by the central
+// pid-recording lock helper (see pidlock.go). Machine-global scope is
+// deliberate: unlike LSP daemons (per-project-root flock), the embed port is
+// shared by every ocode process on the machine regardless of project.
 func acquireEmbedStartLock(cacheDir string) (bool, func(), error) {
-	lockDir := filepath.Join(cacheDir, "locks")
-	if err := os.MkdirAll(lockDir, 0755); err != nil {
-		return false, nil, err
-	}
-	lockPath := embedStartLockPath(cacheDir)
-	for attempt := 0; attempt < 2; attempt++ {
-		f, openErr := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-		if openErr == nil {
-			if _, writeErr := fmt.Fprintf(f, "%d", os.Getpid()); writeErr != nil {
-				emitDiscoveryDebugAt("DISCOVERY", fmt.Sprintf("could not record owner pid in embed start lock %s: %v", lockPath, writeErr), false)
-			}
-			f.Close()
-			released := false
-			return true, func() {
-				if released {
-					return
-				}
-				released = true
-				os.Remove(lockPath)
-			}, nil
-		}
-		if !os.IsExist(openErr) {
-			return false, nil, fmt.Errorf("create embed start lock %s: %w", lockPath, openErr)
-		}
-		if attempt == 0 {
-			if chatStartLockOwnerDead(lockPath) {
-				os.Remove(lockPath)
-				continue
-			}
-			if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > embedStartLockStaleAfter {
-				os.Remove(lockPath)
-				continue
-			}
-		}
-		break
-	}
-	return false, nil, nil
+	return acquirePidLock(embedStartLockPath(cacheDir), embedStartLockStaleAfter)
 }
 
 func embedStartLockPath(cacheDir string) string {
 	return filepath.Join(cacheDir, "locks", "embed.start.lock")
 }
 
-// breakEmbedStartLock removes the start lock held by a live-but-wedged owner.
-// Only for the caller that has already waited out waitForEmbedHealth on the
-// holder's behalf — otherwise the lock's whole purpose (one spawner at a time)
-// is defeated.
-func breakEmbedStartLock(cacheDir string) {
-	if err := os.Remove(embedStartLockPath(cacheDir)); err != nil && !os.IsNotExist(err) {
-		emitDiscoveryDebugAt("DISCOVERY", fmt.Sprintf("could not break wedged embed start lock: %v", err), false)
+// errEmbedHolderGone reports that the start-lock holder exited without
+// producing a healthy server (crash, SIGKILL, or gave up). Callers should
+// retry acquiring the lock instead of failing the start.
+var errEmbedHolderGone = errors.New("embed start-lock holder exited")
+
+// embedWaitTakeoverAttempts bounds the short tracked wait given to a second
+// contender that lost the takeover race after the original holder exited
+// without producing a server — deliberately shorter than embedWaitLiveAttempts
+// since this holder has already proven itself capable of spawning quickly.
+const embedWaitTakeoverAttempts = 120 // ~2m
+
+// embedWaitLiveAttempts bounds how long a contender waits on a LIVE lock
+// holder (weight download + boot). Crash recovery does not ride this timer:
+// waitForEmbedHealthTracked notices a dead holder within one poll tick.
+const embedWaitLiveAttempts = 600 // ~10m, matching embedStartLockStaleAfter
+
+// waitForEmbedHealthTracked polls base until it serves expect OR the lock's
+// recorded holder stops running. Waiting out a crashed holder used to cost
+// the full health window before takeover was even attempted — exactly wrong
+// when the holder is "completely not up"; the pid check makes takeover
+// immediate instead. Returns nil when base is healthy and serving expect,
+// errEmbedHolderGone when the caller should retry acquiring the lock, or any
+// other error when a LIVE holder failed to produce a usable server (wrong
+// model served, or still starting past budget); callers MUST NOT break the
+// holder's lock in response.
+func waitForEmbedHealthTracked(base string, man ServerManifest, lockPath string, attempts int) error {
+	expect := man.ExpectedServeID()
+	holderPID := 0
+	for i := 0; i < attempts; i++ {
+		if healthy, served := probeLocalServerModel(base, man.HealthPath, expect); healthy {
+			if !modelMatches(served, expect) {
+				return fmt.Errorf("embed server on %s serves %v, not %s", base, served, man.ModelID)
+			}
+			return nil
+		}
+		holder, ok := pidLockOwner(lockPath)
+		if !ok || !pidAlive(holder) {
+			return errEmbedHolderGone
+		}
+		holderPID = holder
+		time.Sleep(time.Second)
 	}
+	return fmt.Errorf("local embed server did not become healthy on %s (lock holder pid %d is still running)", base, holderPID)
 }
 
 // waitForEmbedHealth polls the embed server on base until it reports healthy

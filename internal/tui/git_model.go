@@ -2065,7 +2065,7 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 	if m.aheadBehind != "" {
 		ab = "  " + m.aheadBehind
 	}
-	headerLeft := appHeaderLeftPad + styles.Header.Render("\u25c6 ocode  Git"+ab) + appHeaderHintGap + hintStyle.Render("opencode clone")
+	headerLeft := appHeaderLeftPad + styles.Header.Render(ocodeBrandIcon+" ocode  Git"+ab) + appHeaderHintGap + hintStyle.Render("opencode clone")
 	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
 	if headerPad < 0 {
 		headerPad = 0

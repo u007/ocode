@@ -1,5 +1,17 @@
 # TODO
 
+## `/autocontinue` — general auto-resume (2026-08-23)
+
+Implemented, general-purpose (fires for whatever command/task is in flight, not scoped to `/goal`), across TUI and `/rc` (web) turns:
+- `internal/agent/agent.go`: `Agent.StepLimitHit()` (hard signal, true only when a turn was cut off by the `/max-step` cap, no extra LLM call) and `Agent.AutoContinueJudgeAsync` (optional judge-model call for replies that look interrupted WITHOUT hitting the step cap — only runs when `/autocontinue model` is set).
+- `internal/tui/model.go`: `streamDoneMsg` auto-continue logic (`autoContinueEnabled`/`autoContinueCount`/`lastTurnWasAutoContinue`/`autoContinueMaxChain` cap = 4), `autoContinueJudgeFinishedMsg` handling (requires `!m.streaming`, `!m.queueDrainBlocked()`, no pending compaction splice, and a matching `autoContinueGen` before acting on a judge verdict — the turn may have moved on since dispatch), `/rc` support via `pendingRCAutoContinue`/`autoContinueJudgeForRC` (the `/rc` listener is deliberately left un-armed mid-chain because `rcRequestMsg` has no re-entrancy guard against `m.streaming` and would race the chain's own `askAgent()` call), sidebar toggle row (`autoContinueToggleTopIdx`/`Rows`, click handler, `sidebarAutoContinueToggleForClick`).
+- `internal/tui/commands.go` / `picker.go`: `/autocontinue [on|off|status|model [name]]`, judge-model picker (kind `"autocontinue-model"`, wired into every model-picker membership check, `selectPickerIndex` dispatch, and `refreshModelPickerItems`).
+- `internal/config/ocodeconfig.go`: `AutoContinueEnabled`/`AutoContinueModel` + `SaveAutoContinueEnabled`/`SaveAutoContinueModel`.
+
+Deferred (out of scope for this pass — flag to the user if they want it):
+- No automated test coverage for the `/rc` (web) auto-continue path specifically — the deferred-listener-rearm logic (`pendingRCAutoContinue`, `autoContinueJudgeForRC`) was verified by tracing `rcRequestMsg`'s lack of a `m.streaming` re-entrancy guard, but there's no integration test driving an actual `RCRequest`/`streamDoneMsg`/judge sequence end-to-end (would need a fake SSE client + mock agent harness). The pure chain-cap logic (`shouldAutoContinue`) does have tests in `internal/tui/autocontinue_test.go`.
+- The judge model's prompt/verdict format (`internal/agent/agent.go` `runAutoContinueJudge`, bare YES/NO) is unvalidated against a real local model — only compile-checked, not run against a live LM Studio/local server.
+
 ## `.ojsonl` session format — concurrent-writer safety not solved (from design: 2026-07-21)
 
 Design: `docs/superpowers/specs/2026-07-21-session-storage-ojsonl-design.md`.
@@ -182,16 +194,9 @@ corrected mid-investigation — see Bug C below):
   bge-m3 attaches (`0.49 ≥ 0.40`), LFM2.5 does not (`≤0.26`). The gated
   `OCODE_LIVE_RETEST=1 go test ./internal/discovery/ -run TestLiveRetest` runs
   against a live server on 11457.
-- [x] **Migration wrinkle (FIXED 2026-08-21).** `EnsureLocalServer` now auto-reclaims
-  11457 when a FOREIGN-model or wedged server squats it: cross-process
-  `embed.start.lock` (`O_CREATE|O_EXCL` + pid liveness + 10m mtime stale) serializes
-  spawns across `ocode` instances; `reapStrayEmbedServer` (mirrors
-  `reapStrayChatServer`) re-probes before kill, requires `ExpectedServeID` +
-  `--port 11457` + `listeningPIDs` ownership, SIGTERM→5s→SIGKILL, fail-closed on
-  unidentifiable holder (protects LM Studio on 11457). User-explicit
-  `UserBaseURL` mismatch still hard-errors without reap. First probe wrong-model
-  no longer fail-opens — falls through to lock→reap→spawn. In-process `localMu`
-  preserved.
+- [x] **Migration wrinkle (FIXED 2026-08-21; tightened 2026-08-22).** `EnsureLocalServer` now auto-reclaims
+  11457 when a FOREIGN-model or wedged server squats it: central pid-recorded
+  `embed.start.lock` (machine-global, not project-scoped; `O_CREATE|O_EXCL` + owner pid; instant reclaim when holder pid dead instead of burning the full wait, 10m mtime stale fallback for pre-pid locks) serializes spawns across `ocode` instances; contender waits with per-second holder-pid liveness check (`waitForEmbedHealthTracked`) for fast crash takeover (live-holder lock is never broken — no `breakEmbedStartLock` race); `reapStrayEmbedServer` re-probes before kill and identifies ocode servers by ANY manifest token OR cache-artifact path (`<cache>/local-*` + `mlx_embed_server.py`) plus `--port 11457` + `listeningPIDs` ownership, so a stale server from a prior version/model switch serving a different model is correctly reclaimed (previously protected the squatter by matching only `ExpectedServeID`). An unidentifiable holder is reported, never killed (protects LM Studio on 11457). User-explicit `UserBaseURL` mismatch still hard-errors without reap. Chat `*.start.lock` now uses the same central pidlock with conditional release (only removes own pid). LSP daemons remain project-root scoped via `broker.StartOnce` flock (kernel-released on crash, no pid file needed). First probe wrong-model no longer fail-opens — falls through to lock→reap→spawn. In-process `localMu` preserved.
 - Note: `mlx_embed_server.py` + the `BackendMLX` spawn path are retained (dormant)
   for any future MLX-only model; no default local model uses MLX now.
 - [ ] **Optional (measured NOT worth it for attachment):** the http/local embedder
@@ -605,3 +610,21 @@ Deferred:
 - [ ] **TUI still drops partial work on a failed turn** — `internal/tui/model.go` (`resp, err := m.agent.Step(...)` → `return errorMsg(err)`) discards the now-available `resp`. Same data loss as the web/desktop bug; not fixed here to keep the change scoped to the reported web/desktop path.
 - [ ] **Root cause of "streaming stops halfway" not yet proven** — the transcript loss above explains "everything gone on reopen" and is fixed, but *why* the turn stopped (mid-turn provider error vs a genuine block inside `Step`) is still open. The desktop shell writes its server log only to stderr, which is lost for a Finder-launched `.app`, so a hang leaves no evidence behind.
 - [ ] **No durable server log / hang dump for the desktop** — mirror `serve`-level logs to `~/.local/share/opencode/logs/serve.log` (`debuglog.MirrorKindToFile` is currently wired only in the TUI) and add a `SIGUSR1` goroutine dump so the next stall is diagnosable after the fact instead of needing a live pprof session.
+
+
+## Web/Desktop sidebar parity — deferred TUI gaps (from architecture/sidebar-tui-parity-gaps.md, 2026-07-09)
+
+The TUI sidebar is canonical; CoworkSidebar mirrors it via TUIStatus + REST. Gaps closed in this patch: Mode, Temperature, Recap toggle, YOLO toggle, IDE status, Spending. Deferred (need backend fields + CoworkSidebar wiring):
+
+- [ ] **Gap 6: Selection section** — `m.buildSelectionSidebarData()` has no `TUIStatus` field; web has no selection tracking.
+- [ ] **Gap 7: Git details** — ahead/behind + staged/modified/untracked counts not in `TUIStatus`; web shows branch+CWD only via `tuiStatus.cwd` + `/api/git/status`.
+- [ ] **Gap 8: Agent run registry** — `m.agent.Runs().Snapshot()` (name, model, up/down tokens + N completed) via `/api/agents/runs` not rendered in CoworkSidebar (shows current agent only).
+- [ ] **Gap 9: Allowed section completeness** — bash auto-allow prefixes from `permissions.bash.prefixes` not in `TUIStatus`; web shows extra paths only.
+- [ ] **Gap 12: Shortcuts bar** — hardcoded `Ctrl+B bg bash r run l lint b build` bottom-pinned hints have no web equivalent.
+
+Follow-up: enrich `TUIStatus` + `buildTUIStatusSnapshot` and render in `CoworkSidebar` (Settings vs sidebar).
+
+
+## Startup-model diagnostics (2026-08-22, deferred)
+- [ ] If the gpt-4o-mini startup reset EVER recurs on a post-7d3d77a binary: instrument `GetLastModel()` (internal/config/ocodeconfig.go ~2126) with resolved-file-path logging at the READ site.
+- [ ] Behavioral decision pending: `last_model` now overrides a project `.opencode` config `model` value — confirm that precedence is intended.

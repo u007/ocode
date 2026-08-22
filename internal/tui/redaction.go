@@ -160,6 +160,25 @@ func defaultRedactionBaseURL(modelName string) string {
 	return ""
 }
 
+// resolveMaskModelArg normalizes a bare local-model name typed to
+// `/mask model <name>` (e.g. "bonsai-8b-mlx-1bit") to its registered
+// "local/<name>" id, mirroring localModelID's normalization for /localmodel
+// and /models. Without this, a bare name has no provider prefix,
+// defaultRedactionBaseURL never matches the "local" case, and
+// setRedactionModel silently keeps whatever base_url was previously
+// configured (e.g. a stale LM Studio :1234 default) instead of recomputing
+// the model's actual assigned port.
+func (m *model) resolveMaskModelArg(name string) string {
+	if strings.Contains(name, "/") || m.config == nil {
+		return name
+	}
+	prefixed := "local/" + name
+	if _, ok := m.config.Ocode.LocalModels[prefixed]; ok {
+		return prefixed
+	}
+	return name
+}
+
 // normalizeRedactionModelName returns the canonical persisted/display name for
 // the tier-2 model. Bare LM Studio ids are normalized to lmstudio/<name> when
 // the configured base_url points at the default LM Studio endpoint.
@@ -247,7 +266,27 @@ func redactText(text string, reg *redact.Registry) string {
 // allowRemote overrides the local-endpoint security check for users running
 // tier-2 scanning through a Docker bridge, Tailscale tunnel, or LAN proxy.
 func buildLLMScanner(baseURL, model string, allowRemote bool) *redact.LLMScanner {
-	if baseURL == "" || model == "" {
+	if model == "" {
+		return nil
+	}
+	// "local" (/localmodel-managed) models are served on a port owned by the
+	// instance manager, not a user-configured endpoint — so resolve the base
+	// URL from the running server (live) or, failing that, the deterministic
+	// AssignChatPort the instance manager will bind. This avoids trusting a
+	// (possibly stale) persisted base_url. A server that is not yet running
+	// yields the deterministic port (scanner still constructed); the scan-time
+	// resolver (resolveLiveScanner) returns nil when no live server answers, so
+	// the tier-2 pass is skipped rather than blocking sends under fail_mode=block.
+	if strings.HasPrefix(model, "local/") {
+		if live := discovery.LocalModelBaseURL(model); live != "" {
+			baseURL = live
+		} else if registeredIDs, err := config.RegisteredLocalModelIDs(); err == nil {
+			if port, err := discovery.AssignChatPort(model, registeredIDs); err == nil {
+				baseURL = fmt.Sprintf("http://localhost:%d/v1", port)
+			}
+		}
+	}
+	if baseURL == "" {
 		return nil
 	}
 	if !allowRemote && !redact.IsLocalEndpoint(baseURL) {
@@ -299,6 +338,27 @@ func buildLLMScanner(baseURL, model string, allowRemote bool) *redact.LLMScanner
 	}
 
 	return redact.NewScanner(baseURL, scannerModel, allowRemote, apiKey)
+}
+
+// resolveLiveScanner returns the tier-2 scanner to use at scan time. For
+// local/* models the base URL is resolved live (the instance manager owns the
+// port) so the scanner always targets the running server even if it started
+// after config was loaded; when no local server is live it returns nil so the
+// tier-2 pass is skipped and regex tier-1 still applies.
+func (m *model) resolveLiveScanner() redact.Scanner {
+	if m == nil || m.llmScanner == nil {
+		return m.llmScanner
+	}
+	if !strings.HasPrefix(m.redactionModel, "local/") {
+		return m.llmScanner
+	}
+	if m.config == nil {
+		return m.llmScanner
+	}
+	if live := discovery.LocalModelBaseURL(m.redactionModel); live != "" {
+		return buildLLMScanner(live, m.redactionModel, m.config.Ocode.Security.Redaction.AllowRemoteTier2)
+	}
+	return nil
 }
 
 // extractProvider extracts the provider prefix from a model name.

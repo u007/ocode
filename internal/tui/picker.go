@@ -169,6 +169,10 @@ func (m *model) refreshModelPickerItems() {
 	if kind == "recap-model" {
 		m.prependRecapModelClearOption()
 	}
+	if kind == "autocontinue-model" {
+		m.appendAutoContinueModelLocalModels()
+		m.prependAutoContinueModelClearOption()
+	}
 	if kind == "redaction-model" {
 		m.appendRedactionModelLocalModels()
 	}
@@ -859,7 +863,7 @@ func (m model) pickerRowForY(y int) (int, bool) {
 		return 0, false
 	}
 	row := start + idx
-	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 	if !isFiltered && row < len(m.pickerIsHeader) && m.pickerIsHeader[row] {
 		return 0, false
 	}
@@ -875,7 +879,7 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 		m.closePicker()
 		return m, nil
 	}
-	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 	if !isFiltered && index < len(m.pickerIsHeader) && m.pickerIsHeader[index] {
 		m.closePicker()
 		return m, nil
@@ -928,6 +932,9 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 	if kind == "recap-model" {
 		return m.handleCommand("/recap model " + selected)
 	}
+	if kind == "autocontinue-model" {
+		return m.handleCommand("/autocontinue model " + selected)
+	}
 	if kind == "embedding-model" {
 		return m.handleCommand("/discover model " + selected)
 	}
@@ -942,7 +949,7 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 
 func (m model) renderPicker() string {
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
-	if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "image-model" {
+	if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "image-model" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+f favorite · ctrl+r refresh · Esc cancel · type to filter")
 	} else if m.pickerKind == "advisor" || m.pickerKind == "ocr-model" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+r refresh · Esc cancel · type to filter")
@@ -977,6 +984,9 @@ func (m model) renderPicker() string {
 	}
 	if m.pickerKind == "redaction-model" {
 		title = "Select tier-2 scanning model"
+	}
+	if m.pickerKind == "autocontinue-model" {
+		title = "Select auto-continue judge model"
 	}
 	if m.pickerKind == "advisor" {
 		title = "Select advisor model"
@@ -1016,7 +1026,7 @@ func (m model) renderPicker() string {
 		}
 		body.WriteString(hintStyle.Render(empty))
 	} else {
-		isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
+		isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 		start, end := m.pickerVisibleRange()
 		for i := start; i < end; i++ {
 			line := items[i]
@@ -1100,7 +1110,7 @@ func (m model) renderThemePreview(width int) string {
 	}
 
 	// Build the preview pieces using the live theme styles.
-	headerLine := m.styles.Header.Render("◆ ocode") + "  " + m.styles.Hint.Render("/theme")
+	headerLine := m.styles.Header.Render(ocodeBrandIcon+" ocode") + "  " + m.styles.Hint.Render("/theme")
 
 	userLabel := m.styles.User.Render("You")
 	userMsg := m.styles.Text.Inline(true).Render(" what's new?")
@@ -1245,10 +1255,58 @@ func (m *model) openRecapModelPicker() tea.Cmd {
 }
 
 func (m *model) prependRecapModelClearOption() {
-	if m.pickerKind != "recap-model" {
+	if m.pickerKind != "recap-model" && m.pickerKind != "autocontinue-model" {
 		return
 	}
 	m.pickerItems = append([]string{"  auto (resolve from priority list)"}, m.pickerItems...)
 	m.pickerValues = append([]string{"auto"}, m.pickerValues...)
+	m.pickerIsHeader = append([]bool{false}, m.pickerIsHeader...)
+}
+
+func (m *model) openAutoContinueModelPicker() tea.Cmd {
+	// Reuse the model picker listing with kind="autocontinue-model" so
+	// picker selection saves the auto-continue judge model instead of
+	// switching the active model.
+	cmd := m.openModelPicker()
+	m.pickerKind = "autocontinue-model"
+	// The judge is typically a local model, same rationale as
+	// redaction-model — surface registered /localmodel entries.
+	m.appendAutoContinueModelLocalModels()
+	m.prependAutoContinueModelClearOption()
+	return cmd
+}
+
+// appendAutoContinueModelLocalModels mirrors appendRedactionModelLocalModels
+// for kind="autocontinue-model".
+func (m *model) appendAutoContinueModelLocalModels() {
+	if m.pickerKind != "autocontinue-model" || m.config == nil {
+		return
+	}
+	ids := make([]string, 0, len(m.config.Ocode.LocalModels))
+	for id, lm := range m.config.Ocode.LocalModels {
+		if lm.Enabled {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	sort.Strings(ids)
+	m.pickerItems = append(m.pickerItems, "Local Models")
+	m.pickerValues = append(m.pickerValues, "")
+	m.pickerIsHeader = append(m.pickerIsHeader, true)
+	for _, id := range ids {
+		m.pickerItems = append(m.pickerItems, "  "+id)
+		m.pickerValues = append(m.pickerValues, id)
+		m.pickerIsHeader = append(m.pickerIsHeader, false)
+	}
+}
+
+func (m *model) prependAutoContinueModelClearOption() {
+	if m.pickerKind != "autocontinue-model" {
+		return
+	}
+	m.pickerItems = append([]string{"  none (StepLimitHit only, no extra LLM call)"}, m.pickerItems...)
+	m.pickerValues = append([]string{"none"}, m.pickerValues...)
 	m.pickerIsHeader = append([]bool{false}, m.pickerIsHeader...)
 }

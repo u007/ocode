@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { api, apiPath, authHeaders } from "../../api/client";
-import { useChatState, getSessionSlice } from "../../stores/chatStore";
+import { useChatState, useChatDispatch, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { eventBus } from "../../lib/eventBus";
 import type { AgentInfo, LSPStatus } from "../../api/types";
@@ -47,6 +47,7 @@ const DEFAULT_SECTIONS: Record<string, boolean> = {
   files: false,
   todo: false,
   git: true,
+  permissions: true,
 };
 
 function loadExpandedSections(): Record<string, boolean> {
@@ -80,12 +81,14 @@ export default function CoworkSidebar({
   const projectState = useProjectState();
   const [gitBranch, setGitBranch] = useState<string>("");
   const [todoItems] = useState<string[]>([]);
+  const [yoloLoading, setYoloLoading] = useState(false);
   // Locally-tracked active agent. The `activeAgent` prop is fixed by the
   // parent, so switching agents is reflected via this optimistic state.
   const [selectedAgent, setSelectedAgent] = useState<string>(activeAgent);
   const [agentBusy, setAgentBusy] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(false);
   const chatState = useChatState();
+  const dispatch = useChatDispatch();
   const { model } = chatState;
   const { activeTabId: sessionId } = projectState;
   const activeProject = projectState.state.activeProject ?? null;
@@ -188,6 +191,31 @@ export default function CoworkSidebar({
   // column reclaims the space (push layout).
   if (!isOpen && !isMobile) return null;
 
+
+  const toggleYolo = async () => {
+    const currentMode = tuiStatus?.permission_mode || "";
+    const enabled = currentMode !== "yolo";
+    setYoloLoading(true);
+    try {
+      const res = await fetch(apiPath("/api/permissions/yolo"), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ enabled }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => null);
+        console.error("toggle yolo failed", j);
+      } else if (sessionId) {
+        const status = await api.getSessionStatus(sessionId);
+        dispatch({ type: "SET_TUI_STATUS", sessionId, status });
+      }
+    } catch (e) {
+      console.error("toggle yolo error", e);
+    } finally {
+      setYoloLoading(false);
+    }
+  };
+
   const content = (
     <>
       {/* Header */}
@@ -275,6 +303,80 @@ export default function CoworkSidebar({
               {tuiStatus?.cwd && (
                 <div className="text-xs text-zinc-500 mt-1 truncate" title={tuiStatus.cwd}>
                   {tuiStatus.cwd}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Permissions — mirrors TUI sidebar Allowed section + perm toggle */}
+        <div className="border-b border-zinc-700">
+          <button
+            onClick={() => toggleSection("permissions")}
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+          >
+            {expandedSections.permissions ? (
+              <ChevronDown className="w-4 h-4" />
+            ) : (
+              <ChevronRight className="w-4 h-4" />
+            )}
+            <Target className="w-4 h-4 text-purple-400" />
+            Permissions
+          </button>
+          {expandedSections.permissions && (
+            <div className="px-4 pb-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-zinc-400">Mode</span>
+                <span className="text-xs font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-200">
+                  {tuiStatus?.mode || "—"}
+                </span>
+              </div>
+              {tuiStatus?.temperature !== undefined && tuiStatus?.temperature !== null && (
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-zinc-400">Temperature</span>
+                  <span className="text-xs font-mono text-zinc-300">{tuiStatus.temperature}</span>
+                </div>
+              )}
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-zinc-400">Permission</span>
+                <span className="text-xs font-mono text-zinc-300">{tuiStatus?.permission_mode || "normal"}</span>
+              </div>
+              <label className="flex items-center justify-between cursor-pointer">
+                <span className="text-xs text-zinc-400">YOLO (auto-allow all)</span>
+                <input
+                  type="checkbox"
+                  checked={tuiStatus?.permission_mode === "yolo"}
+                  disabled={yoloLoading}
+                  onChange={toggleYolo}
+                  className="w-8 h-4 rounded-full appearance-none bg-zinc-700 checked:bg-purple-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+                />
+              </label>
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-zinc-400">Auto-permission</span>
+                <span className={`text-xs px-1.5 py-0.5 rounded ${tuiStatus?.permission_auto_allow ? "bg-emerald-900/50 text-emerald-300" : "bg-zinc-800 text-zinc-500"}`}>
+                  {tuiStatus?.permission_auto_allow ? "on" : "off"}
+                </span>
+              </div>
+              {tuiStatus?.ide_mode && (
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-zinc-400">IDE</span>
+                  <span className="text-xs text-zinc-300 truncate" title={tuiStatus.ide_status || tuiStatus.ide_mode}>
+                    {tuiStatus.ide_status || tuiStatus.ide_mode}
+                  </span>
+                </div>
+              )}
+              {tuiStatus?.recap_model && (
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-zinc-400">Recap</span>
+                  <span className="text-xs font-mono text-zinc-300 truncate" title={tuiStatus.recap_model}>
+                    {tuiStatus.recap_model} {tuiStatus.recap_model_enabled ? "●" : "○"}
+                  </span>
+                </div>
+              )}
+              {tuiStatus?.spending_usd !== undefined && tuiStatus.spending_usd > 0 && (
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-zinc-400">Spending</span>
+                  <span className="text-xs font-mono text-amber-300">${tuiStatus.spending_usd.toFixed(4)}</span>
                 </div>
               )}
             </div>

@@ -15,6 +15,14 @@ type TUIStatus struct {
 	// TUI's ctrl+d / /effort reasoning level so the web sidebar can display and
 	// change it. Not omitempty: 0 is the meaningful "off" level.
 	ThinkingBudget int `json:"thinking_budget"`
+	// Agent mode (CODE/PLAN) uppercased, mirroring the TUI sidebar badge.
+	Mode string `json:"mode,omitempty"`
+	// Effective LLM temperature for the main model, mirroring the TUI sidebar.
+	Temperature float64 `json:"temperature,omitempty"`
+	// Permission mode (normal/yolo/locked) mirroring the TUI sidebar.
+	PermissionMode string `json:"permission_mode,omitempty"`
+	// Whether the LLM auto-permission judge is enabled.
+	PermissionAutoAllow bool `json:"permission_auto_allow"`
 	// Small model name + runtime on/off (the web should mirror both).
 	SmallModel   string `json:"small_model,omitempty"`
 	SmallModelOn bool   `json:"small_model_enabled"`

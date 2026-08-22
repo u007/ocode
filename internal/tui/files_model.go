@@ -2309,7 +2309,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	} else {
 		exitBtn = styles.Hint.Padding(0, 1).Render("\u2715 exit")
 	}
-	headerLeft := appHeaderLeftPad + styles.Header.Render("\u25c6 ocode  Files") + appHeaderHintGap + hintStyle.Render("opencode clone")
+	headerLeft := appHeaderLeftPad + styles.Header.Render(ocodeBrandIcon+" ocode  Files") + appHeaderHintGap + hintStyle.Render("opencode clone")
 	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
 	if headerPad < 0 {
 		headerPad = 0

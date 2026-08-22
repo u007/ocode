@@ -404,19 +404,21 @@ type OcodeConfig struct {
 	TerminalFontSize int
 	// TerminalShell overrides which shell binary the interactive terminal
 	// starts. Empty means use $SHELL, falling back to /bin/sh.
-	TerminalShell     string
-	ExtraAllowedPaths []string
-	Editor            string
-	EditorMode        string
-	IDEMode           string
-	SmallModel        string
-	SmallModelEnabled bool
-	RecapModel        string
-	RecapModelEnabled bool
-	CommitMsgModel    string
-	CommitMsgPrompt   string
-	TUI               TUIConfig
-	MaxSteps          int `json:"max_steps,omitempty"`
+	TerminalShell       string
+	ExtraAllowedPaths   []string
+	Editor              string
+	EditorMode          string
+	IDEMode             string
+	SmallModel          string
+	SmallModelEnabled   bool
+	RecapModel          string
+	RecapModelEnabled   bool
+	AutoContinueEnabled bool
+	AutoContinueModel   string
+	CommitMsgModel      string
+	CommitMsgPrompt     string
+	TUI                 TUIConfig
+	MaxSteps            int `json:"max_steps,omitempty"`
 	// MaxImageDim caps the longest edge (px) of an embedded image; larger
 	// images are downscaled to fit, preserving aspect ratio. 0 means use the
 	// agent package default (2000).
@@ -653,6 +655,8 @@ type ocodeConfigFile struct {
 	SmallModelEnabled       *bool                       `json:"small_model_enabled,omitempty"`
 	RecapModel              string                      `json:"recap_model,omitempty"`
 	RecapModelEnabled       *bool                       `json:"recap_model_enabled,omitempty"`
+	AutoContinueEnabled     *bool                       `json:"auto_continue_enabled,omitempty"`
+	AutoContinueModel       string                      `json:"auto_continue_model,omitempty"`
 	RecapTimeoutSeconds     *int                        `json:"recap_timeout_seconds,omitempty"`
 	UndoMaxAgeDelta         *int                        `json:"undo_max_age_delta,omitempty"`
 	MaxConcurrentAgents     *int                        `json:"max_concurrent_agents,omitempty"`
@@ -1053,6 +1057,18 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.RecapModelEnabled = *file.RecapModelEnabled
 		}
 		delete(raw, "recap_model_enabled")
+	}
+	if _, ok := raw["auto_continue_enabled"]; ok {
+		if file.AutoContinueEnabled != nil {
+			cfg.AutoContinueEnabled = *file.AutoContinueEnabled
+		}
+		delete(raw, "auto_continue_enabled")
+	}
+	if _, ok := raw["auto_continue_model"]; ok {
+		if file.AutoContinueModel != "" {
+			cfg.AutoContinueModel = file.AutoContinueModel
+		}
+		delete(raw, "auto_continue_model")
 	}
 
 	if _, ok := raw["commit_msg_model"]; ok {
@@ -1593,6 +1609,10 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["recap_model"] = cfg.RecapModel
 	}
 	payload["recap_model_enabled"] = cfg.RecapModelEnabled
+	payload["auto_continue_enabled"] = cfg.AutoContinueEnabled
+	if cfg.AutoContinueModel != "" {
+		payload["auto_continue_model"] = cfg.AutoContinueModel
+	}
 	if cfg.RecapTimeoutSeconds > 0 {
 		payload["recap_timeout_seconds"] = cfg.RecapTimeoutSeconds
 	}
@@ -1639,7 +1659,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" {
 			continue
 		}
 		payload[k] = v
@@ -2406,6 +2426,24 @@ func SaveRecapModel(model string) error {
 func SaveRecapModelEnabled(enabled bool) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.RecapModelEnabled = enabled
+		return nil
+	})
+}
+
+// SaveAutoContinueEnabled persists the auto-continue enabled/disabled state to config.
+func SaveAutoContinueEnabled(enabled bool) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.AutoContinueEnabled = enabled
+		return nil
+	})
+}
+
+// SaveAutoContinueModel persists the auto-continue judge model override.
+// Empty clears it, meaning auto-continue only ever fires on the hard
+// StepLimitHit signal (no extra LLM call).
+func SaveAutoContinueModel(model string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.AutoContinueModel = model
 		return nil
 	})
 }

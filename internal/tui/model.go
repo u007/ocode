@@ -106,6 +106,90 @@ const (
 	roleThinking
 )
 
+// autoContinueMaxChain caps consecutive auto-fired /autocontinue resumes
+// (see model.autoContinueCount) so a model that keeps re-hitting the
+// /max-step cap can't loop forever unattended.
+const autoContinueMaxChain = 4
+
+// shouldAutoContinue decides whether the just-finished turn should trigger an
+// auto-continue resume. Pulled out as a pure function (rather than inlined in
+// the streamDoneMsg handler) so the loop-safety guarantee — bounded chain
+// length, only firing on a genuine step-limit cutoff (or, once configured, a
+// judge-model verdict) — has direct unit test coverage. Applies uniformly to
+// TUI and /rc(web)-originated turns; the /rc-specific listener re-arming
+// concern is handled separately in streamDoneMsg, not here.
+func shouldAutoContinue(enabled, stepLimitHit bool, count int) bool {
+	return enabled && stepLimitHit && count < autoContinueMaxChain
+}
+
+// settleAutoContinueChain resets the auto-continue chain counter unless the
+// turn that just finished was itself fired by auto-continue — any other real
+// turn completion (human-submitted, queue drain, job-completion resume, or a
+// fresh /rc request) counts as a fresh start.
+func (m *model) settleAutoContinueChain() {
+	if !m.lastTurnWasAutoContinue {
+		m.autoContinueCount = 0
+	}
+	m.lastTurnWasAutoContinue = false
+}
+
+// fireAutoContinue increments the chain counter, appends the auto-continue
+// hint plus an explicit resume prompt, and returns the Cmd that resumes the
+// turn. Callers must have already confirmed shouldAutoContinue().
+// fireAutoContinue increments the chain counter, appends the auto-continue
+// hint plus an explicit resume prompt, and returns the Cmd that resumes the
+// turn. Callers must have already confirmed eligibility (shouldAutoContinue,
+// or a judge verdict plus the same enabled/cap checks). stepLimited
+// distinguishes the two trigger reasons only for the transcript hint/prompt
+// wording — the loop-safety guarantees (counter, cap) are identical either
+// way.
+func (m *model) fireAutoContinue(stepLimited bool) tea.Cmd {
+	m.autoContinueCount++
+	m.lastTurnWasAutoContinue = true
+	reason := "the auto-continue judge model flagged this reply as cut off"
+	if stepLimited {
+		reason = "cut off by /max-step"
+	}
+	hint := fmt.Sprintf("↩ auto-continue (%d/%d) — %s, resuming", m.autoContinueCount, autoContinueMaxChain, reason)
+	m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render(hint), transient: true})
+	continuePrompt := "Continue the task from where you left off; do not just repeat any previous summary."
+	if stepLimited {
+		// The step-limit cutoff itself just told the model "Stop using tools
+		// and respond with a summary" (agent.go's summarizeMsg), and that
+		// instruction is still the most recent one in transcript history.
+		// Explicitly countermand it, or the model is likely to just
+		// re-summarize instead of resuming work.
+		continuePrompt = "The step limit has been reset — you may use tools again. " + continuePrompt
+	}
+	m.messages = append(m.messages, message{role: roleUser, text: continuePrompt, raw: &agent.Message{Role: "user", Content: continuePrompt}})
+	m.rerenderTranscriptAndMaybeScroll()
+	return m.askAgent()
+}
+
+// maybeDispatchAutoContinueJudge tries to start an async auto-continue judge
+// call for the turn that just finished. Only meaningful when the hard
+// StepLimitHit signal did NOT already justify continuing (callers check that
+// first) — the judge exists to catch replies that look interrupted WITHOUT
+// having hit the step cap (provider truncation, the model stopping mid
+// thought, etc.). Returns false immediately (no LLM call made) when
+// auto-continue is disabled, the chain is already at its cap, or no judge
+// model is configured (Agent.AutoContinueJudgeAsync itself no-ops in that
+// case). forRC records whether the eventual verdict must re-arm /rc
+// listening (see autoContinueJudgeForRC).
+func (m *model) maybeDispatchAutoContinueJudge(forRC bool) bool {
+	if !m.autoContinueEnabled || m.agent == nil || m.autoContinueCount >= autoContinueMaxChain {
+		return false
+	}
+	agentMsgs, _ := m.buildAgentMessagesSnapshot()
+	newGen := m.autoContinueGen + 1
+	if !m.agent.AutoContinueJudgeAsync(agentMsgs, newGen) {
+		return false
+	}
+	m.autoContinueGen = newGen
+	m.autoContinueJudgeForRC = forRC
+	return true
+}
+
 // queueItemKind classifies entries in the unified queuedItems queue so
 // drain/render/recall can dispatch each item by type while preserving
 // insertion order across all previously-separate queues.
@@ -816,8 +900,49 @@ type model struct {
 	smallModelEnabledSet    bool // whether smallModelEnabled should be applied to newly installed agents
 	recapModelEnabled       bool // runtime recap model state; persisted across agent rebuilds
 	recapModelEnabledSet    bool // whether recapModelEnabled should be applied to newly installed agents
-	ocrEnabled              bool // runtime OCR tool state; persisted across agent rebuilds
-	ocrEnabledSet           bool // whether ocrEnabled should be applied to newly installed agents
+	// autoContinueEnabled toggles the general-purpose auto-continue feature:
+	// when a turn ends because the agent hit its maxSteps cap (a genuinely
+	// interrupted, mid-task stop — see Agent.StepLimitHit), the TUI
+	// automatically injects a "continue" prompt instead of waiting for the
+	// user. Not tied to any specific slash command (e.g. /goal) — it applies
+	// to whatever task is in flight when a turn is truncated this way.
+	autoContinueEnabled bool
+	// autoContinueCount counts consecutive auto-fired continues since the
+	// last turn that was NOT itself an auto-continue (see
+	// lastTurnWasAutoContinue). Capped at autoContinueMaxChain to guarantee
+	// termination even if a local model keeps re-triggering maxSteps.
+	autoContinueCount int
+	// lastTurnWasAutoContinue marks that the turn currently finishing was
+	// kicked off by auto-continue itself, so the streamDoneMsg handler knows
+	// NOT to reset autoContinueCount (a human-submitted or otherwise
+	// externally-resumed turn always resets it).
+	lastTurnWasAutoContinue bool
+	// pendingRCAutoContinue is true while an /rc (web) originated turn is
+	// mid-auto-continue-chain. While true, the /rc request listener
+	// (waitForRCRequest) is deliberately NOT re-armed — rcRequestMsg's
+	// handler unconditionally clobbers m.pendingRC and calls askAgent()
+	// with no re-entrancy guard, so a new web message arriving mid-chain
+	// would race the chain's own askAgent() call. Listening resumes only
+	// once the chain settles (auto-continue declines to fire again).
+	pendingRCAutoContinue bool
+	// autoContinueModel, when set, names the provider/model (or "local/…")
+	// used to judge whether a reply that did NOT hit the /max-step cap still
+	// looks like a genuinely interrupted/incomplete response worth
+	// auto-resuming. Empty means auto-continue only ever fires on the hard
+	// StepLimitHit signal (no extra LLM call).
+	autoContinueModel string
+	// autoContinueGen is a monotonic counter bumped on every judge dispatch
+	// so a stale autoContinueJudgeFinishedMsg (from a superseded turn) is
+	// ignored — mirrors recapGen.
+	autoContinueGen uint64
+	// autoContinueJudgeForRC is true while an in-flight auto-continue judge
+	// call was dispatched for an /rc(web)-originated turn, meaning the /rc
+	// listener was deliberately left un-armed pending the verdict (same
+	// rationale as pendingRCAutoContinue) and must be re-armed once the
+	// judge result lands, whichever way it goes.
+	autoContinueJudgeForRC bool
+	ocrEnabled             bool // runtime OCR tool state; persisted across agent rebuilds
+	ocrEnabledSet          bool // whether ocrEnabled should be applied to newly installed agents
 	// kaizenAnnounced is the sorted set of digest-contributing Kaizen skill
 	// names last announced in the transcript, so the "directives active" notice
 	// is emitted once per active-model change rather than on every request.
@@ -1041,6 +1166,7 @@ type model struct {
 	compactCh                chan agent.CompactResult
 	compactStartCh           chan struct{}
 	recapCh                  chan recapFinishedMsg
+	autoContinueJudgeCh      chan autoContinueJudgeFinishedMsg
 	btwCh                    chan btwResultMsg
 	recapText                string // held until recap finishes, then cleared; recap result goes to m.messages
 	recapGen                 uint64 // monotonic counter; bumped on /new and each recap request so stale recap goroutines can be ignored
@@ -1893,6 +2019,12 @@ func newModel(opts ...RunOptions) model {
 			return false
 		}(),
 		recapModelEnabledSet: true,
+		autoContinueEnabled: func() bool {
+			if cfg != nil {
+				return cfg.Ocode.AutoContinueEnabled
+			}
+			return false
+		}(),
 		ocrEnabled: func() bool {
 			if cfg != nil {
 				return cfg.Ocode.Ocr.Enabled
@@ -1963,6 +2095,7 @@ func newModel(opts ...RunOptions) model {
 		compactCh:            make(chan agent.CompactResult, 4),
 		compactStartCh:       make(chan struct{}, 4),
 		recapCh:              make(chan recapFinishedMsg, 4),
+		autoContinueJudgeCh:  make(chan autoContinueJudgeFinishedMsg, 4),
 		btwCh:                make(chan btwResultMsg, 64),
 		btwViewport:          viewport.New(viewport.WithWidth(80), viewport.WithHeight(8)),
 		titleCh:              make(chan titleResult, 4),
@@ -2157,7 +2290,7 @@ func newModel(opts ...RunOptions) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitRecapEvent(m.recapCh), waitTitleEvent(m.titleCh), waitBtwEvent(m.btwCh)}
+	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitRecapEvent(m.recapCh), waitAutoContinueJudgeEvent(m.autoContinueJudgeCh), waitTitleEvent(m.titleCh), waitBtwEvent(m.btwCh)}
 	if m.permissionGrantCh != nil {
 		cmds = append(cmds, listenPermissionGrant(m.permissionGrantCh))
 	}
@@ -3146,7 +3279,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pickerIndex = 0
 	case modelPickerFullModelsLoadedMsg:
 		m.pickerLoadingAll = false
-		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "ocr-model" && m.pickerKind != "image-model") {
+		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "autocontinue-model" && m.pickerKind != "ocr-model" && m.pickerKind != "image-model") {
 			return m, nil
 		}
 		// Append provider sections below the existing favs+recents items.
@@ -3159,7 +3292,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pickerRefreshing = false
 		// If the picker was closed while the refresh was in flight, just
 		// surface the result as a transcript message and skip repopulation.
-		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "image-model") {
+		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "autocontinue-model" && m.pickerKind != "image-model") {
 			if msg.err != nil {
 				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Model cache refresh failed: %v", msg.err)})
 				m.rerenderTranscriptAndMaybeScroll()
@@ -4059,6 +4192,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.waitStreamEvent(msg.ch, msg.deltaCh, msg.errCh, msg.cancel)
 	case streamDoneMsg:
+		// Continuing a previously-RC(web)-initiated auto-continue chain
+		// (iteration 2+ — no fresh RCRequest arrived this round, so there is
+		// no rc.ResultCh to deliver to; that happened on iteration 1 below).
+		// Handled as its own self-contained branch, deliberately NOT falling
+		// into the generic TUI body below: job-resume/queue-drain/recap stay
+		// TUI-only, matching this file's existing RC-minimalism, and the /rc
+		// listener must stay un-armed until the chain actually settles (see
+		// pendingRCAutoContinue's doc comment for why).
+		if m.pendingRC == nil && m.pendingRCAutoContinue {
+			m.settleAutoContinueChain()
+			stepLimitHit := msg.err == nil && m.agent != nil && m.agent.StepLimitHit()
+			if shouldAutoContinue(m.autoContinueEnabled, stepLimitHit, m.autoContinueCount) {
+				m.pendingRCAutoContinue = true
+				return m, m.fireAutoContinue(true)
+			}
+			if msg.err == nil && !stepLimitHit && m.maybeDispatchAutoContinueJudge(true) {
+				// Judge in flight — leave the /rc listener un-armed until it
+				// resolves (autoContinueJudgeFinishedMsg re-arms it either way).
+				return m, nil
+			}
+			m.pendingRCAutoContinue = false
+			// The chain has genuinely settled — reset streaming state here too.
+			// The pre-existing RC early-return paths never reached the normal
+			// TUI settle code below (m.streaming = false etc.), so without this
+			// m.streaming stays stuck true for the rest of the session after
+			// the first /rc turn, permanently failing the !m.streaming guard
+			// in the autoContinueJudgeFinishedMsg handler (and any other code
+			// that reads m.streaming as "is a turn in flight").
+			m.streaming = false
+			m.cancelStream = nil
+			m.broadcastTUIStatus()
+			m.broadcastRCSnapshot()
+			if m.rcCh != nil {
+				return m, waitForRCRequest(m.rcCh)
+			}
+			return m, nil
+		}
 		// If we have a pending RC request, send the final result and clear it
 		if m.pendingRC != nil {
 			rc := m.pendingRC
@@ -4086,14 +4256,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.broadcastRC("error", map[string]string{"error": msg.err.Error()})
 			}
 			m.broadcastRCSnapshot()
+			m.settleAutoContinueChain()
+			stepLimitHit := msg.err == nil && m.agent != nil && m.agent.StepLimitHit()
+			if shouldAutoContinue(m.autoContinueEnabled, stepLimitHit, m.autoContinueCount) {
+				// Do NOT also re-arm waitForRCRequest here: rcRequestMsg's
+				// handler unconditionally clobbers m.pendingRC and calls
+				// askAgent() with no re-entrancy guard against m.streaming,
+				// so a new web message landing mid-chain would race this
+				// chain's own askAgent() call. Listening resumes once the
+				// chain settles (the branch at the top of this case).
+				m.pendingRCAutoContinue = true
+				return m, m.fireAutoContinue(true)
+			}
+			if msg.err == nil && !stepLimitHit && m.maybeDispatchAutoContinueJudge(true) {
+				return m, nil
+			}
+			// The chain has genuinely settled — reset streaming state here too
+			// (see the matching comment in the RC-chain-continuation branch
+			// above for why this can't just fall through to the code below).
+			m.streaming = false
+			m.cancelStream = nil
+			m.broadcastTUIStatus()
 			// Resume listening for next RC request
 			if m.rcCh != nil {
 				return m, waitForRCRequest(m.rcCh)
 			}
+			return m, nil
 		}
 		if !m.streaming {
 			return m, nil
 		}
+		// Reset the auto-continue chain counter unless THIS turn was itself
+		// fired by auto-continue — any other real turn completion
+		// (human-submitted, queue drain, job-completion resume) counts as a
+		// fresh start. Placed after the !m.streaming guard above so a
+		// spurious/duplicate streamDoneMsg (e.g. the synthetic
+		// context.Canceled done sent on Esc/cancel below) can't consume
+		// lastTurnWasAutoContinue or zero the counter without a real turn
+		// having actually completed.
+		m.settleAutoContinueChain()
 		m.streaming = false
 		m.cancelStream = nil
 		m.lastActivity = agent.ActivitySnapshot{}
@@ -4184,6 +4385,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if cmd, drained := m.drainQueuedItems(); drained {
 					return m, cmd
+				}
+				// General-purpose auto-continue: only after every other
+				// continuation path above has declined. Not scoped to /goal or
+				// any other specific command. Two trigger paths: the hard
+				// StepLimitHit signal (free, no extra LLM call) fires
+				// immediately; when that's false, an optional judge model
+				// (if configured via /autocontinue model) is asked whether the
+				// reply still looks interrupted — its verdict lands later via
+				// autoContinueJudgeFinishedMsg.
+				stepLimitHit := m.agent != nil && m.agent.StepLimitHit()
+				if shouldAutoContinue(m.autoContinueEnabled, stepLimitHit, m.autoContinueCount) {
+					return m, m.fireAutoContinue(true)
+				}
+				if msg.err == nil && !stepLimitHit {
+					m.maybeDispatchAutoContinueJudge(false)
 				}
 			}
 			// Auto-recap when stream completes successfully and recap is enabled.
@@ -4303,6 +4519,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 		}
 		return m, waitRecapEvent(m.recapCh)
+	case autoContinueJudgeFinishedMsg:
+		if msg.gen != m.autoContinueGen {
+			// Superseded by a newer turn's dispatch — ignore.
+			return m, waitAutoContinueJudgeEvent(m.autoContinueJudgeCh)
+		}
+		forRC := m.autoContinueJudgeForRC
+		m.autoContinueJudgeForRC = false
+		// The turn may have moved on since the judge call was dispatched —
+		// the user could have typed/submitted, pressed Esc, or a compaction
+		// could be pending application. Only act on the verdict when the
+		// session is still exactly where it was: idle, no queued items
+		// blocked, no compaction splice pending. Otherwise fail closed (same
+		// as an errored/negative verdict) — never inject "continue" into the
+		// middle of a turn the user already started.
+		resume := msg.err == nil && msg.resume && !m.streaming && !m.queueDrainBlocked() &&
+			len(m.pendingCompactUIIdx) == 0 && m.autoContinueEnabled && m.autoContinueCount < autoContinueMaxChain
+		if resume {
+			if forRC {
+				m.pendingRCAutoContinue = true
+			}
+			return m, tea.Batch(m.fireAutoContinue(false), waitAutoContinueJudgeEvent(m.autoContinueJudgeCh))
+		}
+		if forRC {
+			// The chain's /rc listener was deliberately left un-armed while
+			// this judge call was in flight (see maybeDispatchAutoContinueJudge)
+			// — re-arm it now regardless of which way the verdict went.
+			m.pendingRCAutoContinue = false
+			m.broadcastRCSnapshot()
+			if m.rcCh != nil {
+				return m, tea.Batch(waitForRCRequest(m.rcCh), waitAutoContinueJudgeEvent(m.autoContinueJudgeCh))
+			}
+		}
+		return m, waitAutoContinueJudgeEvent(m.autoContinueJudgeCh)
 	case btwResultMsg:
 		if msg.gen == m.btwGen {
 			if msg.live {
@@ -4679,7 +4928,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			newM, cmd := m.selectPickerIndex(m.pickerIndex)
 			return true, newM, cmd
 		case "ctrl+r":
-			if m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "recap-model" || m.pickerKind == "image-model" {
+			if m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "image-model" {
 				if m.pickerRefreshing {
 					return true, m, nil
 				}
@@ -6324,6 +6573,18 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.sidebarSel = selectionState{}
 				return m, nil, true
 			}
+			if m.sidebarAutoContinueToggleForClick(mouse) {
+				m.autoContinueEnabled = !m.autoContinueEnabled
+				if m.config != nil {
+					m.config.Ocode.AutoContinueEnabled = m.autoContinueEnabled
+				}
+				if err := config.SaveAutoContinueEnabled(m.autoContinueEnabled); err != nil {
+					log.Printf("save auto-continue enabled: %v", err)
+				}
+				m.broadcastTUIStatus()
+				m.sidebarSel = selectionState{}
+				return m, nil, true
+			}
 			if m.sidebarOcrToggleForClick(mouse) {
 				m.ocrEnabled = !m.ocrEnabled
 				m.ocrEnabledSet = true
@@ -7507,6 +7768,30 @@ func (m *model) drainQueuedItems() (tea.Cmd, bool) {
 			text := strings.Join(parts, "\n---\n")
 			m.layout()
 			m.maybeScrollTranscriptToBottom()
+			// Discard stranded injection-queue entries that correspond to the
+			// queued items we just popped. Without this a message EnqueueInjection'd
+			// while streaming but missed the Step drain window would be both
+			// resent here as a coalesced follow-up turn and re-injected at the
+			// start of the next turn, appearing twice in the transcript.
+			if firstKind == queueItemInput && m.agent != nil && m.agent.HasPendingInjections() {
+				pending := m.agent.DrainPendingInjections()
+				popped := make(map[string]int, len(parts))
+				for _, pr := range parts {
+					popped[pr]++
+				}
+				var keep []agent.Message
+				for _, msg := range pending {
+					key := strings.TrimSpace(msg.Content)
+					if cnt, ok := popped[key]; ok && cnt > 0 {
+						popped[key]--
+						continue
+					}
+					keep = append(keep, msg)
+				}
+				for _, k := range keep {
+					m.agent.EnqueueInjection(k)
+				}
+			}
 			return m.processFileReferences(text), true
 		}
 
@@ -9235,6 +9520,47 @@ func (m *model) handleRecapModelSub(args []string) tea.Cmd {
 	return nil
 }
 
+// handleAutoContinueModelSub implements `/autocontinue model [name]`. With no
+// args it opens the model picker. "auto"/"none" clears the override, meaning
+// auto-continue only ever fires on the hard StepLimitHit signal (no extra LLM
+// call). Otherwise it validates and persists the judge model, mirroring
+// handleRecapModelSub.
+func (m *model) handleAutoContinueModelSub(args []string) tea.Cmd {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Auto-continue judge model requires a config. Run /connect first."})
+		return nil
+	}
+	if len(args) == 0 {
+		return m.openAutoContinueModelPicker()
+	}
+
+	target := strings.ToLower(args[0])
+	if target == "auto" || target == "none" || target == "off" {
+		m.config.Ocode.AutoContinueModel = ""
+		if err := config.SaveAutoContinueModel(""); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to clear auto-continue judge model: %v", err)})
+			return nil
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Auto-continue judge model cleared — falling back to StepLimitHit only (no extra LLM call)."})
+		return nil
+	}
+
+	client := agent.NewClient(m.config, args[0])
+	if client == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create client for %s — unknown provider or missing configuration.", args[0])})
+		return nil
+	}
+
+	m.config.Ocode.AutoContinueModel = args[0]
+	if err := config.SaveAutoContinueModel(args[0]); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save auto-continue judge model: %v", err)})
+		return nil
+	}
+
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Auto-continue judge model updated to %s\nPersisted to config for next session.", args[0])})
+	return nil
+}
+
 func (m *model) handleRecapStatus() {
 	if m.config == nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Recap status requires a config. Run /connect first."})
@@ -9366,6 +9692,16 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.titleGen++
 	m.titleRegenerating = false
 	m.recapGen++
+	// Auto-continue chain state is per-conversation — a fresh session must
+	// start at zero, and a stale pendingRCAutoContinue/autoContinueJudgeForRC
+	// from the just-abandoned session must not route the NEW session's first
+	// turn through the RC-chain-continuation branch or leave the /rc listener
+	// un-armed.
+	m.autoContinueCount = 0
+	m.lastTurnWasAutoContinue = false
+	m.pendingRCAutoContinue = false
+	m.autoContinueJudgeForRC = false
+	m.autoContinueGen++
 	tool.SetTodoSession(m.sessionID)
 	snapshot.Reset()
 	tool.ResetTodoState()
@@ -12216,6 +12552,14 @@ func (m *model) appendAgentMessage(am agent.Message) {
 					// render the same inline approve/deny dialog.
 					m.broadcastRC("permission", ev)
 					m.rcPendingPerm = &rcPendingPerm{req: req, toolName: req.ToolName, args: req.Args, requestID: am.ToolID}
+				} else if m.rcBridge != nil {
+					// No RC request pending (mirror mode): the TUI is driving the turn
+					// locally but a web/desktop mirror is watching. Broadcast the
+					// permission ask so the mirror can show the same dialog and
+					// resolve it via /api/permissions/resolve → rc.ResolveCh.
+					ev := newRCPermissionEvent(am.ToolID, req)
+					m.broadcastRC("permission", ev)
+					m.rcPendingPerm = &rcPendingPerm{req: req, toolName: req.ToolName, args: req.Args, requestID: am.ToolID}
 				}
 				// Telegram drives this request with no one at the terminal: pause
 				// and wait for the remote decision; do not open the local dialog.
@@ -13157,7 +13501,7 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 		// When failMode is "block" and the scanner errors, the error is
 		// returned and the message is NOT sent to the LLM.
 		if m.redactionEnabled && m.llmScanner != nil && m.redactionRegistry != nil {
-			if err := applyTier2Scan(agentMsgs, m.llmScanner, m.redactionRegistry, m.redactFailMode, m.redactMode); err != nil {
+			if err := applyTier2Scan(agentMsgs, m.resolveLiveScanner(), m.redactionRegistry, m.redactFailMode, m.redactMode); err != nil {
 				close(msgCh)
 				errCh <- err
 				return
@@ -13204,6 +13548,9 @@ func isRetryableLLMError(err error) bool {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, agent.ErrNoResponseFromProvider) || errors.Is(err, agent.ErrNoResponseFromOpenAIResponses) {
 		return true
 	}
 	var netErr net.Error
@@ -13566,6 +13913,16 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 	if m.config != nil {
 		snap.MainModel = m.config.Model
 		snap.ThinkingBudget = m.config.ThinkingBudget
+		if m.agent != nil && m.agent.Permissions() != nil {
+			snap.PermissionMode = string(m.agent.Permissions().Mode())
+			snap.PermissionAutoAllow = m.agent.Permissions().AutoPermissionEnabled()
+		}
+		if m.agent != nil {
+			snap.Mode = strings.ToUpper(string(m.agent.Mode()))
+			if t := m.agent.EffectiveTemperature(); t != nil {
+				snap.Temperature = *t
+			}
+		}
 		snap.SmallModel = m.config.Ocode.SmallModel
 		snap.AdvisorModel = m.config.Ocode.Advisor.Model
 		snap.ExtraAllowedPaths = m.config.Ocode.ExtraAllowedPaths
@@ -14012,7 +14369,7 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 	} else {
 		exitBtn = hintStyle.Padding(0, 1).Render("\u2715 exit")
 	}
-	header := m.renderAppHeader("\u25c6 ocode", "\u00b7  opencode clone++ v"+version.Version, tabBar, exitBtn, m.width)
+	header := m.renderAppHeader(ocodeBrandIcon+" ocode", "\u00b7  opencode clone++ v"+version.Version, tabBar, exitBtn, m.width)
 	var inputArea string
 	if m.showRetryDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderRetryDialog(panelWidth - 2))
@@ -15616,6 +15973,13 @@ func (m *model) wireCompactCallbacks() {
 		default:
 		}
 	}
+	autoContinueJudgeDoneCh := m.autoContinueJudgeCh
+	m.agent.OnAutoContinueJudge = func(result agent.AutoContinueJudgeResult) {
+		select {
+		case autoContinueJudgeDoneCh <- autoContinueJudgeFinishedMsg{gen: result.Gen, resume: result.Resume, err: result.Err}:
+		default:
+		}
+	}
 	usageCh := m.usageCh
 	m.agent.OnUsage = func(inputTokens, outputTokens int64) {
 		if usageCh == nil {
@@ -15770,6 +16134,18 @@ type recapFinishedMsg struct {
 	gen   uint64
 	text  string
 	short bool // true for 1-line auto-recap, false for manual /recap
+}
+
+func waitAutoContinueJudgeEvent(doneCh chan autoContinueJudgeFinishedMsg) tea.Cmd {
+	return func() tea.Msg {
+		return <-doneCh
+	}
+}
+
+type autoContinueJudgeFinishedMsg struct {
+	gen    uint64
+	resume bool
+	err    error
 }
 
 func waitBtwEvent(doneCh chan btwResultMsg) tea.Cmd {
@@ -16983,6 +17359,7 @@ func findThinkingEnd(text string) (int, int) {
 func (m model) View() tea.View {
 	v := tea.NewView(m.renderContent())
 	v.AltScreen = true
+	v.WindowTitle = m.terminalTitle()
 	if m.mouseEnabled() {
 		// AllMotion (not CellMotion) so plain hover events arrive even with no
 		// button held — required for hover-underline of clickable sidebar files.
@@ -16995,11 +17372,45 @@ func (m model) mouseEnabled() bool {
 	return m.config == nil || m.config.Ocode.TUI.Mouse == nil || *m.config.Ocode.TUI.Mouse
 }
 
+// ocodeBrandIcon is the ring-with-dot used as the ocode brand mark, matching
+// the desktop app's appicon.svg / appicon.png (green broken ring + offset
+// dot, "abstract o" — gradient #86efac→#22c55e→#15803d on #151821). Previously
+// "\u25c6" (◆ diamond) was used in the TUI header; "\u29bf" (⦿ circled bullet)
+// visually matches the ring+dot and is set as the terminal window title so
+// Supacode's integrated terminal tab shows the same mark via OSC 2 /
+// WindowTitle. The TUI header renders it in the theme's Header style (blue);
+// the terminal title is plain text. Both are width 1 so header budget and
+// TestRenderAppHeader* remain intact.
+const ocodeBrandIcon = "\u29bf"
+
+// terminalTitle returns the string set as the terminal window title (OSC 2 /
+// tea.View.WindowTitle). Bubbletea emits it as "\x1b]2;<title>\x07" on every
+// render when set. Supacode (VS Code fork) surfaces this as the integrated
+// terminal tab title when "terminal.integrated.tabs.title" includes
+// "${sequence}" (default is "${process}" which ignores OSC 2), so the ring
+// prefix makes the TUI tab visually match the desktop app's dock/taskbar
+// icon once that setting is enabled.
+func (m model) terminalTitle() string {
+	base := ocodeBrandIcon + " ocode"
+	title := m.sessionTitle
+	if title == "" {
+		if prompt := m.firstUserPromptText(); prompt != "" {
+			title = truncateTitle(prompt, maxExplicitTitleLen)
+		}
+	}
+	title = strings.ReplaceAll(title, "\n", " ")
+	title = strings.TrimSpace(title)
+	if title != "" {
+		return base + " \u2014 " + title
+	}
+	return base
+}
+
 // appHeaderTopPad is the blank row rendered above every tab's header line so the
 // title doesn't sit flush against the terminal top edge.
 const appHeaderTopPad = "\n"
 
-// appHeaderLeftPad is a single leading space on the title so the bold "◆" mark
+// appHeaderLeftPad is a single leading space on the title so the bold "⦿" mark
 // doesn't pin to the column-0 border.
 const appHeaderLeftPad = " "
 
@@ -17115,9 +17526,9 @@ func (m model) renderTabContent() string {
 	} else {
 		exitBtn = hintStyle.Padding(0, 1).Render("\u2715 exit")
 	}
-	headerTitle := "\u25c6 ocode"
+	headerTitle := ocodeBrandIcon + " ocode"
 	if title != "" {
-		headerTitle = "\u25c6 ocode " + title
+		headerTitle = ocodeBrandIcon + " ocode " + title
 	}
 	header := m.renderAppHeader(headerTitle, versionHint, tabBar, exitBtn, m.width)
 
@@ -17538,29 +17949,31 @@ type sidebarTelemetry struct {
 }
 
 type sidebarRenderData struct {
-	topLines               []string
-	scrollLines            []string
-	bottomLines            []string
-	fileScrollLinePaths    map[int]string
-	allowedHeaderBottomIdx int    // index in bottomLines of the Allowed header, -1 if absent
-	advisorToggleTopIdx    int    // index in topLines of the advisor on/off row, -1 if absent
-	advisorToggleRows      int    // number of (possibly wrapped) rows the advisor row occupies
-	smallModelToggleTopIdx int    // index in topLines of the small model on/off row, -1 if absent
-	smallModelToggleRows   int    // number of (possibly wrapped) rows the small model row occupies
-	permModelToggleTopIdx  int    // index in topLines of the perm model on/off row, -1 if absent
-	permModelToggleRows    int    // number of (possibly wrapped) rows the perm model row occupies
-	ideToggleTopIdx        int    // index in topLines of the IDE on/off row, -1 if absent
-	ideToggleRows          int    // number of (possibly wrapped) rows the IDE row occupies
-	recapModelToggleTopIdx int    // index in topLines of the recap model on/off row, -1 if absent
-	recapModelToggleRows   int    // number of (possibly wrapped) rows the recap model row occupies
-	ocrToggleTopIdx        int    // index in topLines of the OCR on/off row, -1 if absent
-	ocrToggleRows          int    // number of (possibly wrapped) rows the OCR row occupies
-	discoverToggleTopIdx   int    // index in topLines of the discovery on/off row, -1 if absent
-	discoverToggleRows     int    // number of (possibly wrapped) rows the discovery row occupies
-	cwdTopIdx              int    // index in topLines of the "cwd:" row, -1 if absent
-	cwdRows                int    // number of (possibly wrapped) rows the cwd row occupies
-	cwdLabel               string // dim "cwd: " label (ANSI styled), kept for hover underline
-	cwdPath                string // raw working-dir path text (unstyled), for hover underline
+	topLines                 []string
+	scrollLines              []string
+	bottomLines              []string
+	fileScrollLinePaths      map[int]string
+	allowedHeaderBottomIdx   int    // index in bottomLines of the Allowed header, -1 if absent
+	advisorToggleTopIdx      int    // index in topLines of the advisor on/off row, -1 if absent
+	advisorToggleRows        int    // number of (possibly wrapped) rows the advisor row occupies
+	smallModelToggleTopIdx   int    // index in topLines of the small model on/off row, -1 if absent
+	smallModelToggleRows     int    // number of (possibly wrapped) rows the small model row occupies
+	permModelToggleTopIdx    int    // index in topLines of the perm model on/off row, -1 if absent
+	permModelToggleRows      int    // number of (possibly wrapped) rows the perm model row occupies
+	ideToggleTopIdx          int    // index in topLines of the IDE on/off row, -1 if absent
+	ideToggleRows            int    // number of (possibly wrapped) rows the IDE row occupies
+	recapModelToggleTopIdx   int    // index in topLines of the recap model on/off row, -1 if absent
+	recapModelToggleRows     int    // number of (possibly wrapped) rows the recap model row occupies
+	autoContinueToggleTopIdx int    // index in topLines of the auto-continue on/off row, -1 if absent
+	autoContinueToggleRows   int    // number of (possibly wrapped) rows the auto-continue row occupies
+	ocrToggleTopIdx          int    // index in topLines of the OCR on/off row, -1 if absent
+	ocrToggleRows            int    // number of (possibly wrapped) rows the OCR row occupies
+	discoverToggleTopIdx     int    // index in topLines of the discovery on/off row, -1 if absent
+	discoverToggleRows       int    // number of (possibly wrapped) rows the discovery row occupies
+	cwdTopIdx                int    // index in topLines of the "cwd:" row, -1 if absent
+	cwdRows                  int    // number of (possibly wrapped) rows the cwd row occupies
+	cwdLabel                 string // dim "cwd: " label (ANSI styled), kept for hover underline
+	cwdPath                  string // raw working-dir path text (unstyled), for hover underline
 }
 
 func (t sidebarTelemetry) usedTokens() int64 {
@@ -17871,7 +18284,7 @@ func renderSidebarModelToggle(label, model string, on bool, width int) string {
 }
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
-	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1, recapModelToggleTopIdx: -1, ocrToggleTopIdx: -1, discoverToggleTopIdx: -1, cwdTopIdx: -1}
+	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1, recapModelToggleTopIdx: -1, autoContinueToggleTopIdx: -1, ocrToggleTopIdx: -1, discoverToggleTopIdx: -1, cwdTopIdx: -1}
 	// User requested no border/padding on scroll sections (2026-05-25)
 	outerBodyWidth := sidebarColumnWidth - 4
 	boxBodyWidth := sidebarColumnWidth - 4
@@ -18048,6 +18461,15 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	data.recapModelToggleTopIdx = len(data.topLines)
 	appendWrapped(&data.topLines, renderSidebarModelToggle("recap", recapModel, recapModelOn, outerBodyWidth), outerBodyWidth)
 	data.recapModelToggleRows = len(data.topLines) - data.recapModelToggleTopIdx
+	// Auto-continue row doubles as an on/off toggle (click to flip the runtime gate).
+	autoContinueOn := m.autoContinueEnabled
+	autoContinueModel := "(step-limit only)"
+	if m.config != nil && m.config.Ocode.AutoContinueModel != "" {
+		autoContinueModel = m.config.Ocode.AutoContinueModel
+	}
+	data.autoContinueToggleTopIdx = len(data.topLines)
+	appendWrapped(&data.topLines, renderSidebarModelToggle("autocont", autoContinueModel, autoContinueOn, outerBodyWidth), outerBodyWidth)
+	data.autoContinueToggleRows = len(data.topLines) - data.autoContinueToggleTopIdx
 	data.ideToggleTopIdx = len(data.topLines)
 	appendWrapped(&data.topLines, m.ideSidebarStatusLine(), outerBodyWidth)
 	data.ideToggleRows = len(data.topLines) - data.ideToggleTopIdx
@@ -18874,6 +19296,23 @@ func (m model) sidebarRecapModelToggleForClick(mouse tea.Mouse) bool {
 	return mouse.Y >= startY && mouse.Y < endY
 }
 
+func (m model) sidebarAutoContinueToggleForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) {
+		return false
+	}
+	data := m.buildSidebarRenderData()
+	if data.autoContinueToggleTopIdx < 0 {
+		return false
+	}
+	layout := m.sidebarScreenLayout(data)
+	if data.autoContinueToggleTopIdx >= layout.topCount {
+		return false
+	}
+	startY := layout.contentTopY + data.autoContinueToggleTopIdx
+	endY := minInt(startY+data.autoContinueToggleRows, layout.scrollScreenY)
+	return mouse.Y >= startY && mouse.Y < endY
+}
+
 // sidebarDiscoverToggleForClick returns true when the click lands on the
 // discovery on/off row.
 func (m model) sidebarDiscoverToggleForClick(mouse tea.Mouse) bool {
@@ -19125,7 +19564,7 @@ func (m model) renderAgentsTab() string {
 		running = m.agent.Runs().RunningCount()
 	}
 	hint := fmt.Sprintf("  ·  %d agent%s · %d running · click to open · j/k scroll", total, plural(total), running)
-	header := m.renderAppHeader("◆ ocode", hint, tabBar, exitBtn, m.width)
+	header := m.renderAppHeader(ocodeBrandIcon+" ocode", hint, tabBar, exitBtn, m.width)
 
 	sb := renderScrollbar(m.agentsViewport.Height(), m.agentsViewport.TotalLineCount(), m.agentsViewport.VisibleLineCount(), m.agentsViewport.YOffset())
 	viewportContent := lipgloss.JoinHorizontal(lipgloss.Top,
@@ -19233,7 +19672,7 @@ func (m model) renderLogTab() string {
 	} else {
 		exitBtn = m.styles.Hint.Padding(0, 1).Render("✕ exit")
 	}
-	header := m.renderAppHeader("\u25c6 ocode", "  \u00b7  debug log", tabBar, exitBtn, m.width)
+	header := m.renderAppHeader(ocodeBrandIcon+" ocode", "  \u00b7  debug log", tabBar, exitBtn, m.width)
 
 	// search bar
 	searchPrefix := hintStyle.Render("/ ")

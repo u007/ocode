@@ -18,6 +18,7 @@
     "/Users/james/bin",
     "/Users/james/.local/state/opencode",
     "/Users/james/go/bin",
-    "/Users/james/.opencode"
+    "/Users/james/.opencode",
+    "/Users/james/Library/Application Support/opencode"
   ]
 }

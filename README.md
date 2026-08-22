@@ -1,6 +1,6 @@
 # ocode
 
-**The fastest, lightest AI coding agent in your terminal.** A single static Go binary — under 50MB RAM, zero runtime dependencies, instant startup.
+**The fastest, lightest AI coding agent in your terminal — and on your desktop.** A single static Go binary — under 50MB RAM, zero runtime dependencies, instant startup. The same agent powers the TUI, a React web UI, and a native Wails desktop shell.
 
 > Started as an opencode clone, now diverged. See [Differences from opencode](#differences-from-opencode) for what changed and why.
 
@@ -8,6 +8,9 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.26.1-00ADD8?logo=go)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Documentation](https://img.shields.io/badge/Docs-GitHub%20Pages-blue?logo=readthedocs)](https://u007.github.io/ocode-docs/)
+
+> 📚 **Full documentation at [u007.github.io/ocode-docs](https://u007.github.io/ocode-docs/)** — TUI/web guides, config, tools, slash commands, screenshots. Source at [u007/ocode-docs](https://github.com/u007/ocode-docs).
 
 ---
 
@@ -35,12 +38,25 @@ A clean Go package architecture makes it trivial to add providers, tools, plugin
 ```bash
 # Build and run — that's it
 go build -o ocode .
-./ocode
+./ocode                 # TUI (default)
+./ocode serve           # HTTP server + web UI
+./ocode serve --open    # server + open browser
+./ocode run "fix tests" # headless / CI
+./ocode acp             # Zed editor integration
 ```
+
+| Entry point | What it does |
+|-------------|--------------|
+| `ocode` | Interactive Bubble Tea TUI — six tabs, slash commands, streaming agent loop |
+| `ocode serve` / `ocode web` | In-process HTTP server + React SPA + SSE event bus; `web` is `serve --open` |
+| `ocode run [flags] [prompt]` | Headless non-interactive run (CI, scripts, cron jobs) |
+| `ocode acp` | Agent Client Protocol server over stdio for Zed |
+| `bin/ocode-desktop` | Native Wails v3 desktop shell — same web UI, plus tray/dock/notifications |
 
 - **Setup:** See [SETUP.md](SETUP.md) for prerequisites, installation, and configuration
 - **Contributing:** See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and PR guidelines
 - **Testing:** See [TESTING.md](TESTING.md) for feature coverage and known issues
+- **Man pages:** `docs/man/ocode*.1`
 
 ---
 
@@ -50,42 +66,50 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 
 ---
 
-
 ## Features
 
 ### 💬 Chat & Agent Loop
 
 | Feature | Detail |
 |---------|--------|
-| **Multi-Provider LLM** | OpenAI, Anthropic (Claude thinking/extended thinking), Google Gemini, Z.AI (GLM), Alibaba (Qwen), GitHub Copilot, Novita AI, OpenRouter, OrcaRouter |
+| **Multi-Provider LLM** | OpenAI, Anthropic (Claude thinking / extended thinking + prompt caching), Google Gemini, Z.AI (GLM), Alibaba (Qwen), GitHub Copilot, Novita AI, OpenRouter, OrcaRouter, Zhipu, DeepSeek (opencode-go route), Minimax |
 | **Live Model Resolution** | OpenRouter and Novita AI models are resolved from each provider's live API at startup (30s TTL cache, graceful fallback to the static registry) so context sizes, pricing, and vision support are accurate for models absent from or renamed in models.dev (e.g. `openrouter/tencent/hy3:free`) |
-| **Extended Thinking** | Toggle thinking budget on Claude models via `Alt+T` (off/low/med/high) |
-| **Prompt Caching** | Anthropic `cache_control` markers on system messages and large tool results; OpenAI server-side caching |
+| **Model Display Names** | `agent.ModelDisplayName` surfaces models.dev `name`; TUI picker shows `id — Name`, web `/api/models` exposes `display_name` |
+| **Reasoning Effort** | Toggle thinking budget on Claude models via `Alt+T` (off/low/med/high/xhigh/max) or `/effort`; per-turn effort via `ocode run --effort` |
+| **Prompt Caching** | Anthropic `cache_control` markers on system messages and large tool results; OpenAI server-side caching. Tools → system → messages prefix order is cache-stable. |
 | **Context-Aware Compaction** | Ratio-triggered automatic summarization with custom model support, anchor-update across multiple compactions, `safeCut` invariant, and `max_summary_input_tokens` batching |
-| **Custom Compaction Model** | Offload summarization to a cheap/fast model while chatting on a powerful one — configured in `ocodeconfig.json` |
-| **Async Sub-Agent Runs** | Launch background agents with transcript capture, process registry, and detail-view drill-in |
-| **Undo/Redo** | Session history undo/redo stack for file changes |
-| **Slash Command Queue** | Commands entered while streaming are queued and drained automatically — only `/exit` bypasses |
+| **Custom Compaction / Recap Models** | Offload summarization to a cheap/fast model while chatting on a powerful one — `compact.summary_provider/model` and `recap` model in `ocodeconfig.json`; `/recap` to drive manually |
+| **Session Title Generation** | LLM-generated titles with race guard; `/title` to set/reset |
+| **Async Sub-Agent Runs** | Launch background agents with transcript capture, process registry, detail-view drill-in, and a DAG scheduler (`id` / `depends_on`) that streams predecessor output into dependents |
+| **Task Contracts** | Optional `expected_output` per `task` dispatch — small-model verifier checks shape and retries once in place |
+| **Slash Command Queue** | Commands entered while streaming/compacting are queued and drained automatically — only instant UI commands bypass (see [Slash Commands](#-slash-commands)) |
+| **Persistent Todo Plans** | `todowrite` / `todoread` / `todo_update` backed by `.ocode/todo/<session>.md` (revision + flock, snapshot-captured, re-anchored every turn) |
+| **In-Chat Find Bar** | `Ctrl+F` / `/search` / `/find` on the chat tab |
 
-### 🔧 Tool System
+### 🔧 Tool System — 39 Built-ins
 
 | Tool | Description |
 |------|-------------|
 | `read`, `write`, `edit`, `delete` | Full file I/O with path confinement and permissions |
-| `undo_file_change` | Roll back a previous `write`/`edit`/`multi_edit`/`multi_file_edit`/`replace_lines`/`delete` by `tool_call_id` (10-agent-step window, conflicts with newer same-file writes are detected and refused) |
-| `bash` | Shell execution with background support, circular output buffer (256KB), `Ctrl+B` to foreground→background, and **live streaming** of combined stdout/stderr into the transcript as the command runs |
-| `grep`, `glob`, `repo_overview` | Advanced search and repository analysis |
-| `lsp` | Go-to-definition, hover docs, symbol search, diagnostics |
-| `agent` | Delegate work to sub-agents with permission isolation |
+| `replace_lines`, `multiedit`, `multi_file_edit`, `apply_patch` | Line-range, multi-edit, multi-file, and structured diff patching |
+| `undo_file_change` | Roll back any `write`/`edit`/`multiedit`/`multi_file_edit`/`replace_lines`/`delete` by `tool_call_id` (10-step window; refuses if a newer same-file write would conflict). Backed by `internal/snapshot`. |
+| `bash` | Shell execution with background support, circular output buffer (256KB), `Ctrl+B` foreground→background, **live streaming** of combined stdout/stderr into the transcript |
+| `bash_output`, `kill_shell`, `list_processes` | Inspect / kill / list background shells |
+| `grep`, `glob`, `list`, `repo_overview`, `repo_clone` | Search (ripgrep-backed), file glob, directory listing, repository analysis & cloning |
+| `lsp`, `lsp_diagnostics`, `ast`, `ast_grep`, `format` | Go-to-definition / hover / symbol search / diagnostics; semantic `ast` (auto-enabled when any LSP server is on PATH); structural `ast_grep` (opt-in `plugins.ast`); formatter dispatch |
+| `agent` / `task` | Delegate work to sub-agents with permission isolation, DAG deps, and contract verification |
 | `websearch`, `webfetch` | Web search and page fetching via DuckDuckGo |
-| `ocr` | Extract text from images with openai-compat, LM Studio native chat, or paddle; LM Studio reuses stored credentials from `auth.json` when available |
-| `question` | Interactive user prompts with selectable options |
-| `apply_patch` | Structured multi-file diff patching |
-| `skill` | Load skill definitions on demand |
-| `plan`, `todo` | Project planning and todo list management |
-| `doc_search`, `doc_get`, `doc_write`, `doc_deprecate` | OKF knowledge bundle CRUD — search, read, write, and deprecate curated project docs with frontmatter round-trip and auto-maintained index/log |
-| `knowledge_lookup` | Dispatch the `context` sub-agent to answer why/decision/playbook questions from the knowledge bundle |
-| `task_cancel` | Cancel a background task you dispatched (cooperative, ownership-guarded) |
+| `github_pr`, `github_issue`, `github_workflow` | GitHub PR / issue / workflow inspection |
+| `ocr` | Extract text from images (openai-compat, LM Studio native chat, or paddle); reuses stored `auth.json` creds |
+| `imagegen` | Generate images via configured provider |
+| `cron` | Manage scheduled jobs from the agent (create/list/remove) |
+| `plan_enter`, `plan_exit` | Structured planning phase (creates `plan.md`) |
+| `todowrite`, `todoread`, `todo_update` | Persistent todo list (see above) |
+| `skill`, `load_skill` | Load skill definitions on demand (alias pair) |
+| `question` | Interactive user prompts with selectable options (TUI + web bridge) |
+| `skill` + `load_skill` + plugin `CustomTool` | Plugins can contribute additional tools from a `tools/` directory |
+
+Tool permissions are enforced per-tool and per bash-prefix (two-word granularity, e.g. `git push` allowed while `git push --force` always asks). See [Permissions](#-permissions-system).
 
 ### Git Integration
 
@@ -95,72 +119,81 @@ Full git capability built into the TUI — no context-switching to a separate to
 |---------|----------|
 | **Status & Diff** | Real-time diff with line numbers and soft-wrap |
 | **Stage / Unstage / Discard** | `Ctrl+S` / `Ctrl+U` / `Ctrl+D` |
-| **AI Commit Messages** | `Ctrl+G` auto-generates from staged changes (configurable model) |
+| **AI Commit Messages** | `Ctrl+G` auto-generates from staged changes (configurable `commit_msg_model`) |
 | **Push / Pull / Fetch** | `Ctrl+O` / `Ctrl+P` / `Ctrl+G` |
 | **Branch Management** | Create, delete, checkout branches |
 | **Stash Operations** | Stash, apply, list stashes |
 | **AI Code Review** | `/review` reviews working directory, files, commits, branches, or GitHub PRs |
+
+Web parity: the **Git** tab (`GET /api/git/*`) renders the same diff with file status.
 
 ### 📁 File Browser
 
 A full-featured tree-based file explorer with:
 
 - **Tree navigation** with vertical scrollbar and scrollbar drag support
-- **Preview panel** with syntax-highlighted content
-- **Inline vim-style editor** (`i` insert, `:w`, `:q`, `:wq`)
-- **External editor** with tmux-split, tmux-window, or plain exec modes
+- **Preview panel** with syntax-highlighted content (progressive, binary-detected — routes to system opener)
+- **Inline vim-style editor** (`i` insert, `:w`, `:q`, `:wq`) and external editor (tmux-split / tmux-window / plain exec via `/editor` + `/editor-mode`)
 - **Content search** across files with incremental streaming results and `Ctrl+F`
 - **Fuzzy file finder** overlay with `Ctrl+G`
 - **In-file search** with highlighted matches and `n`/`N` jumping
 - **Hidden files toggle** (`Ctrl+H`) — hidden entries visually dimmed
 - **Multi-select delete** with depth-sorted ordering (children before parents)
-- **Binary file detection** — auto-routes to system opener
 - **Double-click directory** opens in OS file explorer
 - **Rename overwrite confirmation** — double-enter to confirm
 
+Web parity: **Files** top tab (`GET /api/files/tree`, Monaco editor via `GET /api/files/content`, `PUT /api/files/content`, undo/redo).
+
+### 🔄 Changes Tab (Per-Session)
+
+- Lists **every file the current session touched** (main agent + sub-agents), derived from the snapshot store — not `git status`.
+- Per-file unified diffs and **file-level or block-level undo**.
+- TUI: `internal/tui/changes_model.go` + `internal/snapshot.Store`; Web: `ChangesPanel` via `GET /api/changes` + `POST /api/changes/undo-*`.
+
 ### 🎨 Theme System
 
-- **Built-in themes:** Tokyo Night, Tokyo Night Storm, Catppuccin Mocha, LCARS (Star Trek-inspired)
+- **Built-in themes:** Tokyo Night, Tokyo Night Storm, Catppuccin Mocha, LCARS (Star Trek-inspired), Pip-Boy (Vault Boy ASCII)
 - **JSON theme loading** — drop custom themes on disk, no recompilation needed
 - **Live theme preview** in the picker as you type
-- **Theme sync endpoint** — Web UI maps theme colors to CSS variables
-- **`/theme`** command to switch instantly
+- **Theme sync endpoint** — Web UI maps theme colors to CSS variables (`GET /api/themes`, `GET /api/theme`)
+- **`/theme`** / **`/themes`** command to switch instantly; `web/src` respects the same tokens
 
 ### 🧩 MCP Client
 
 - **Local + Remote MCP servers** with full lifecycle management
-- **OAuth support** for remote server authentication
-- **CLI management commands:** `/mcp list`, `/mcp enable`, `/mcp disable`, `/mcp-auth`
-- **Configurable timeouts** per server
+- **OAuth support** for remote server authentication (`/mcp-auth`)
+- **CLI:** `/mcp list`, `/mcp enable`, `/mcp disable`, `/mcp-auth`; headless `ocode mcp [add|list|ls|auth]`
+- **Configurable timeouts** per server (`mcp` in `ocodeconfig.json` / `opencode.json`)
 
 ### 🪢 Plugin System
 
 See **[docs/plugins.md](docs/plugins.md)** for the complete reference.
 
-- **Provider plugin interface** for custom model backends
-- **Codex plugin** — OpenAI Codex with browser + device auth flows
-- **Plugin registry** with `list`, `install`, `update`, `remove`, `enable`, `disable`, `sync` operations
-- **Custom command loader** — plugins can register new slash commands from Markdown files
+- **Provider plugin interface** for custom model backends (e.g. `internal/plugin/codex`, `grok`)
+- **Plugin registry** with `list`, `install`, `update`, `remove`, `enable`, `disable`, `sync` operations (`/plugin`); Git-based (no marketplace)
+- **Custom command loader** — plugins can register new slash commands from Markdown files (`internal/commands`)
 - **Custom tools** — plugins can provide executable tools in a `tools/` directory
 - **LLM instructions** — plugins inject context into the system prompt
 - **MCP auto-registration** — plugins can register and unregister MCP servers on install/remove
+- **Bundled plugins** under `.opencode/plugins` (embedded in the binary via `go:embed`)
 
 ### 🎯 Skills
 
-- **On-demand skill loading** — skills are lightweight SKILL.md definitions loaded when relevant
-- **`/skills`** command to browse and activate
-- **`/learn`** command to list project-root skills and guide skill creation/update
-- **Skill-as-command** — any installed skill is also available directly as a slash command: typing `/<skill-name>` (e.g. `/agent-browser`, `/pdf`) activates that skill, loading its SKILL.md as the run prompt (extra words become context). Resolves against the current project root, so skills installed under a `/cd` target are matched
-- **Bundled skill library** — ~58 bundled skills covering Google Workspace (`gws-*`), PDF tooling, context compression (`compress`, `caveman*`), browser automation (`agent-browser`, `htrcli`), web QA/testing (`webapp-qa`, `webapp-testing`), framework migration (`nextjs-to-tanstack`), and skill authoring (`skill-creator`)
-- **Skill installer** with status detection
-- **Custom skill creation** via the skill-creator skill
+- **On-demand skill loading** — skills are lightweight `SKILL.md` definitions loaded when relevant; backed by a retrieval corpus (discovery)
+- **`/skills`** to browse and activate; **`/learn`** to list project-root skills and guide skill creation/update
+- **Skill-as-command** — any installed skill is also available directly as a slash command: `/<skill-name>` (e.g. `/agent-browser`, `/pdf`) loads its `SKILL.md` as the run prompt (extra words become context)
+- **`/discover`** — toggle retrieval-based skill/MCP discovery, pick the query-embedding model, manage ignored paths
+- **Discovery corpus** — markdown docs + skills indexed via small-model summaries (cached at `.ocode/md-summaries.json`); names-index is system-cached, full content is volatile tail
+- **Discovery API:** `GET/PUT /api/config/ocode/discovery` + `GET /api/skills` + `GET /api/commands`
+- **Bundled skill library** — ~60+ bundled skills covering Google Workspace (`gws-*`), PDF tooling, context compression (`compress`, `caveman*`), browser automation (`agent-browser`, `htrcli`), web QA/testing (`webapp-qa`, `webapp-testing`), framework migration (`nextjs-to-tanstack`), and skill authoring (`skill-creator`)
+- **Skill installer** with status detection (`/plugin`, `skill` tool)
 
 ### 🧠 LSP Integration
 
 - **Eager server warm-up** — language servers start at app init based on project file extensions
-- **Two-phase lifecycle** (`starting` → `ready`) with sidebar status display
-- **Go-to-definition**, hover documentation, symbol search
-- **Diagnostics** with error/warning counts per file
+- **Two-phase lifecycle** (`starting` → `ready`) with sidebar status display (`/lsp`, `GET /api/lsp/statuses`)
+- **Go-to-definition**, hover documentation, symbol search, diagnostics (`lsp` + `lsp_diagnostics` + `ast` tools)
+- **Shared LSP broker** (`internal/lsp/broker`) — authenticated loopback TCP, bounded framing, multiplexed RPC, optional multi-client sharing (gated)
 - **Install hints** — actionable instructions when LSP binary is missing
 - **Sidebar telemetry** and debug log entries for LSP events
 
@@ -169,180 +202,283 @@ See **[docs/plugins.md](docs/plugins.md)** for the complete reference.
 | Mode | Behavior |
 |------|----------|
 | **Normal** | Follow tool & bash-prefix rules; project-confined writes auto-allowed; delete, shell, network, delegation ask |
-| **YOLO** | Allow permission-gated tools without prompting (respecting hard safety blocks) |
+| **YOLO** | Allow permission-gated tools without prompting (respecting hard safety blocks); `ocode --yolo` / `/yolo` |
 | **Locked** | Read/search-only — no mutations |
 
 - **Per-tool rules:** `allow` / `ask` / `deny` for every tool
-- **Bash prefix rules:** Granular two-word subcommand control (e.g. `git push` allowed, `git push --force` always asks)
-- **Path scope confinement** with tilde expansion and temp-directory auto-allow
-- **LLM auto-permission** — configure a fast model to handle allow/deny decisions autonomously
-- **Advisor module** — catches risky operations with configurable strictness
-- **`/permissions`** command to view/set rules interactively; **`/ban`** is a shortcut for the bash deny list (lists banned prefixes, add/remove entries, supports multi-word prefixes, and `/ban clear` requires confirmation)
+- **Bash prefix rules:** Granular two-word subcommand control (e.g. `git push` allowed, `git push --force` always asks); managed via `/ban` (deny list) and `/permissions`
+- **Path scope confinement** with tilde expansion and temp-directory auto-allow; project-scoped `extra_allowed_paths` in `.ocode/settings.json`
+- **LLM auto-permission** — configure a fast model to handle allow/deny decisions autonomously (`permissions.auto_permission_model`)
+- **Advisor module** — catches risky operations with configurable strictness and `advisor.checkpoints` (`["plan","done"]` by default)
+- **`/permissions`** to view/set rules interactively; **`/ban`** is a shortcut for the bash deny list (supports multi-word prefixes, `list`/`add`/`remove`/`clear` with confirmation)
+- **Web parity:** `PermissionsForm` + `PermissionDialog` + `POST /api/permissions/resolve` + `POST /api/rc/permission/resolve`
 
 ### 🖱️ TUI Mouse Support
 
 - **Clickable chrome** — tabs, sidebar buttons, file tree, menus
-- **In-app text selection** — click-drag to select content, auto-copies to clipboard
-- **Hover effects** — underline-on-hover for clickable paths and UI elements
+- **In-app text selection** — click-drag to select content, auto-copies to clipboard (`selection.go` + `clipboard.WriteAll`)
+- **Hover effects** — underline-on-hover for clickable paths and UI elements (`MouseModeAllMotion`)
 - **Scrollbar click + drag** — mouse-driven scrolling on all scrollable surfaces
-- **Clickable file paths** — file-path tokens in transcript open in `$EDITOR`
-- **`MouseModeAllMotion`** enables hover without sacrificing text selection
+- **Clickable file paths & URLs** — file-path tokens open in `$EDITOR`; URLs show a Y/N confirmation dialog before opening (`url_dialog.go`)
+- **Clickable status/activity rows** clamped to one line so long content can't warp the layout
 
-### 🖥️ Web UI (Beta)
+### 🖥️ Web UI
 
-A React-based web interface that mirrors the TUI experience:
+A React + shadcn/ui + Tailwind SPA that mirrors the TUI experience, served by the same Go binary (`internal/server` + `web/` embed). All state streams over SSE (`GET /api/events` with 20s `: ping` keepalive, multiproject tagged bus).
 
-| Feature | Status |
-|---------|--------|
-| **Chat with streaming** | ✅ Live agent responses with markdown, syntax highlighting, code blocks |
-| **File browser** | ✅ Tree-based with preview and editing |
-| **Git panel** | ✅ Real diff rendering with file status |
-| **Logs panel** | ✅ SSE-backed live log streaming with reconnection |
-| **Cron panel** | ✅ Scheduled jobs management |
-| **Session management** | ✅ Resume, history, routing |
-| **Model selection** | ✅ Model dialog with main/small/advisor tabs |
-| **Permissions dialog** | ✅ Interactive allow/deny prompts |
-| **Question dialog** | ✅ Interactive `question` tool prompts with selectable options, server-bridged via `POST /api/questions` |
-| **Remote control** | ✅ `/rc` command mirrors TUI session to browser in real time |
-| **Live status panel** | ✅ Real-time model, context, LSP, spending, modified files |
-| **File uploads** | ✅ Drag-and-drop or `/upload` command to set directory |
-| **Web shell** | ✅ `!` prefix runs local shell commands inline with live stdout/stderr streaming |
-| **Mobile sidebar** | ✅ Overlay with backdrop on viewports < 768px |
-| **Theme sync** | ✅ CSS variables auto-mapped from TUI theme |
-| **Agent cowork panel** | ✅ Parallel agent monitoring sidebar |
-| **Slash commands** | ✅ Autocomplete popup with keyboard navigation |
+| Surface | What it does | Key files / API |
+|---------|--------------|-----------------|
+| **Chat** | Streaming agent responses with markdown, syntax highlighting, code blocks, tool-call cards, thinking blocks, todo plan, clickable paths/URLs | `ChatPanel`, `MessageBubble`, `TurnParts`; `POST /api/chat`, `POST /api/sessions/{id}/message`, `GET /api/chat/stream` |
+| **Sessions & Tabs** | Session list/creation/resume, per-session sub-tabs (chat/agents), open-session bar, tab hierarchy, pagination & delete & share | `SessionSubTabs`, `OpenSessionBar`, `SessionTabSync`; `GET /api/sessions`, `GET /api/sessions/{id}/state`, `POST /api/sessions/{id}/compact` |
+| **File Browser** | Tree + Monaco editor (uncontrolled, `defaultValue` + `lastEmittedRef`), preview, open/save/undo/redo | `FileTree`, `FileEditor`, `EditorTabBar`; `GET /api/files/tree`, `GET/PUT /api/files/content` |
+| **Changes** | Per-session diff list with file/block undo | `ChangesPanel`; `GET /api/changes`, `POST /api/changes/undo-*` |
+| **Git** | Repo-wide status & diff | `GitPanel`; `GET /api/git/*` |
+| **Terminal** | xterm.js tabs over WebSocket, process list, scrollback, font/shell config | `TerminalTabs`, `TerminalPanel`; `GET /api/terminal/ws`, `GET /api/terminal/processes` |
+| **Cron / Scheduler** | Scheduled jobs management (list/create/remove, outbox, targets) | `CronPanel`; `GET/POST /api/cron/*` |
+| **Assets / Uploads** | Drag-and-drop uploads, upload dir, image preview | `AssetsPanel`; `POST /api/uploads`, `/api/files/open` |
+| **Agents** | Parallel agent monitoring, runs stream | `AgentsPanel`; `GET /api/agents/runs/stream` |
+| **Logs** | SSE-backed live log streaming with reconnection, retention cap, background buffering toggle | `LogPanel`, `LogsForm`; `GET /api/logs/stream`, `GET /api/logs` |
+| **Settings** | 20-section settings overlay (profiles, models, compact, permissions, security, terminal, logs, OCR, discovery, TUI, editor, paths, features, limits, imagegen, plugins, themes, MCP) | `SettingsPanel`; `GET/PUT /api/config/ocode/*`, `/api/config/*` |
+| **Model Selection** | Model dialog with main/small/advisor tabs, display names | `ModelDialog`; `GET /api/models` |
+| **Permissions / Questions** | Interactive allow/deny + question prompts, server-bridged | `PermissionDialog`, `QuestionDialog`; `POST /api/permissions`, `/api/questions` |
+| **Remote Control** | `/rc` mirrors a TUI session to the browser in real time (multiproject event bus) | `POST /api/rc/*`, `GET /api/events` |
+| **Slash Commands** | Autocomplete popup with keyboard nav, merges `GET /api/commands` + `GET /api/skills` | `ChatInput`, `CommandPalette` |
+| **Live Status** | Real-time model, context, LSP, spending, modified files | `StatusPanel`, `CoworkSidebar`; `GET /api/tui-status`, `/api/spending` |
+| **Web Shell** | `!` prefix runs local shell commands inline with live stdout/stderr streaming | `POST /api/shell` |
+| **Theming** | CSS variables auto-mapped from TUI theme | `GET /api/themes`, `GET /api/theme` |
+| **Mobile** | Overlay sidebar with backdrop on viewports < 768px | `App.tsx` `matchMedia` |
 
-### 📚 Knowledge Bundle (`/docs`)
+### 📚 Knowledge Bundle (`/docs` — OKF v0.1)
 
-An optional **OKF (Open Knowledge Format)** knowledge bundle at `docs/` that
-the agent curates automatically. When active, the agent's system prompt
-includes a `[ocode:knowledge]` index and a `knowledge_lookup` tool for
-semantic retrieval.
+An optional **OKF (Open Knowledge Format)** knowledge bundle at `docs/` that the agent curates automatically. When active, the agent's system prompt includes a `[ocode:knowledge]` index and a `knowledge_lookup` tool for semantic retrieval.
 
 | Command | Purpose |
 |---------|---------|
 | `/docs on` / `/docs off` | Toggle the knowledge system flag |
-| `/docs init` | Create bundle marker + dispatch the `context` subagent to annotate existing docs |
+| `/docs init` | Create bundle marker (`docs/index.md` + `docs/log.md`) + dispatch the `context` subagent to annotate existing docs |
 | `/docs status` | Show bundle presence, doc counts, last log entry |
 | `/docs update [focus]` | Force a maintenance pass (scan for staleness, duplicates) |
-| `/docs cleanup` | List deprecated docs; `--yes` confirms deletion |
+| `/docs cleanup [--yes]` | List deprecated docs; `--yes` confirms deletion |
 
-Knowledge curation happens via the dedicated `context` subagent (the sole
-automated writer), which verifies doc claims against code before writing and
-deprecates rather than deletes. The main agent never gains `doc_write` or
-`doc_deprecate` tools.
+Knowledge curation happens via the dedicated `context` subagent (the sole automated writer), which verifies doc claims against code before writing and deprecates rather than deletes. The main agent never gains `doc_write` or `doc_deprecate` tools. Docs: `docs/knowledge-bundle.md`, `docs/log.md`.
 
-### 🪟 Desktop App (Beta)
+### 🗓️ Scheduled Jobs / Cron
 
-A native desktop shell (`cmd/ocode-desktop`) that opens the same web UI in a
-Wails v3 window over an in-process server — no separate `ocode serve` step.
-The server binds `127.0.0.1` on a random port with a fresh per-launch auth
-token; all app logic stays behind the same HTTP/SSE API the browser uses.
+Persistent, disk-backed cron engine + headless agent dispatcher. Jobs fire in the **long-lived host** (`ocode serve` / `ocode web` / desktop), not in the TUI.
 
-Native extras: system tray (show/quit), dock badge with the running-agent
-count (macOS/Windows), and finished/failed-run notifications when the window
-is unfocused (clicking one focuses the window). The custom app menu gives
-**Cmd+Q** a native "Quit ocode?" confirmation, while **Cmd+W** is deliberately
-left unbound so it falls through to the webview and closes the active session
-tab instead of quitting. If the in-process server fails to boot, a **native
-error dialog** reports it (stderr is invisible from a Finder-launched `.app`).
-Finder/Dock launches also anchor the working directory to your home directory
-instead of `/` and reload that project's `opencode.json`, so provider
-overrides and file trees resolve against the right project. Scheduled (cron)
-jobs run inside the long-lived desktop host (`internal/desktop/scheduler.go`)
-— manage them from the web UI's Cron panel.
+- Create cron or one-shot jobs that run a prompt as a headless agent; results land in the outbox.
+- TUI: `/cron [list|describe <id>|remove <id>|add <kind> <args> <message...>]`
+- Web: **Cron** top tab (`CronPanel`, `CronJobDialog`, `CronOutboxPanel`, `CronTargetsPanel`) via `GET/POST /api/cron/*`
+- Agent tool: `cron` (create/list/remove from within a turn)
+- Storage: `scheduler.DefaultStorePath` (project-scoped); runner is `internal/server/scheduler_runner.go` / `internal/desktop/scheduler.go`
+- Docs: `docs/scheduled-jobs.md`
+
+### 🪟 Desktop App
+
+A native desktop shell (`cmd/ocode-desktop`) that opens the same web UI in a Wails v3 window over an **in-process server** — no separate `ocode serve` step. The server binds `127.0.0.1` on a random port with a fresh per-launch auth token; all app logic stays behind the same HTTP/SSE API the browser uses.
+
+**Native extras:**
+
+- **System tray** — Show / Quit (`internal/desktop` + `cmd/ocode-desktop/native.go`)
+- **Dock badge** with the running-agent count (macOS/Windows; Linux has no badge)
+- **Finished/failed-run notifications** when the window is unfocused (clicking one focuses the window) — driven by `internal/desktop/watch.go` poll-and-diff watcher keyed by session+run
+- **Custom app menu** — `Cmd+Q` gets a native "Quit ocode?" confirmation, while `Cmd+W` is deliberately left unbound so it falls through to the webview and closes the active session tab instead of quitting
+- **Native error dialog** if the in-process server fails to boot (stderr is invisible from a Finder-launched `.app`)
+- **Finder/Dock launch anchoring** — working directory anchored to `$HOME` instead of `/`, and that project's `opencode.json` is reloaded so provider overrides and file trees resolve correctly
+- **Cron host** — scheduled jobs run inside the long-lived desktop host (`internal/desktop/scheduler.go`); manage them from the web UI's Cron panel
+- **Embedded assets** — the React SPA (`web.FS()`), bundled skills, bundled plugin manifests, and bundled model configs are embedded via `go:embed` so the desktop binary is self-contained
+- **Dev hot-reload** — set `OCODE_DESKTOP_DEV_URL` to your Vite dev server; the API still runs in-process and its address + token are logged on startup for the Vite `/api` proxy
+- **Window lifecycle** — Wails v3 `application` + `dock` + `notifications`; `StartServer` (`internal/desktop/boot.go`) picks a sticky random loopback port, mints a 16-byte hex token, and exposes `Handle{URL,Token,Srv}`
 
 ```bash
 make desktop        # build bin/ocode-desktop (requires cgo + platform SDK)
 make desktop-app    # macOS: bundle bin/ocode.app via scripts/bundle-macos.sh
 ```
 
-Platform prerequisites: macOS — Xcode Command Line Tools; Linux —
-`webkit2gtk-4.1-dev`, `libgtk-3-dev` (no dock badge on Linux); Windows —
-WebView2 runtime (bootstrapped by Wails). Pinned to
-`github.com/wailsapp/wails/v3 v3.0.0-alpha2.111` (alpha — API may drift).
+Platform prerequisites: macOS — Xcode Command Line Tools; Linux — `webkit2gtk-4.1-dev`, `libgtk-3-dev` (no dock badge on Linux); Windows — WebView2 runtime (bootstrapped by Wails). Pinned to `github.com/wailsapp/wails/v3 v3.0.0-alpha2.111` (alpha — API may drift).
 
-Dev hot-reload: set `OCODE_DESKTOP_DEV_URL` to your Vite dev server; the API
-still runs in-process and its address + token are logged on startup for the
-Vite `/api` proxy. The macOS bundle is unsigned (Gatekeeper prompts on other
-machines); signing/installers are tracked in `TODO.md`.
+The macOS bundle is unsigned (Gatekeeper prompts on other machines); signing/installers are tracked in `TODO.md`.
 
-### 🎮 Slash Commands
+### 🔌 IDE & Editor Integrations
 
-Type `/` in the chat input to open the palette. Commands execute inline or via `ocode run -command <name>`:
+- **VS Code `/ide`** — lock discovery, WebSocket + MCP client, selection/open-editor/mention streaming, auto-attach; sidebar chip shows connection state; toggle via `/ide [claude|off|status]`
+- **Zed / ACP (`ocode acp`)** — Agent Client Protocol server over stdio so ocode appears in Zed's agent panel alongside Claude Code / Codex; spec at `docs/acp-zed-spec.md`, guide at `docs/zed.md`
+- **External editor** — `/editor [command]` + `/editor-mode [external|tmux-split|tmux-window]`; web Monaco editor with `cursorSmoothCaretAnimation:off` and external-sync guard
+
+### 🤖 Telegram Bot (Optional)
+
+Headless Telegram bridge (`docs/telegram-bot.md`) — run ocode as a Telegram bot that responds to messages via the same agent loop. Configure via env / `ocodeconfig.json`.
+
+### 🎮 Slash Commands — Complete Reference
+
+Type `/` in the chat input to open the palette. Commands execute inline or via `ocode run -command <name>`. Custom plugin commands and skill-as-command entries are merged in automatically.
 
 | Command | Aliases | Purpose |
 |---------|---------|---------|
-| `/model` | `/m` | Switch LLM provider/model with fuzzy search |
-| `/advisor` | | Set the advisor model for strategic guidance; `advisor.checkpoints` config (default `["plan", "done"]`, set `[]` to disable) makes the agent loop enforce advisor review of first write batches and completion claims |
+| `/model` | `/models`, `/m` | List and switch LLM provider/model with fuzzy search |
+| `/advisor` | | Set the advisor model for strategic guidance; `advisor.checkpoints` config (default `["plan","done"]`, set `[]` to disable) enforces advisor review of first write batches and completion claims |
 | `/agents` | | Show active/queued subagents and the concurrency limit, or set it with `/agents limit <n>` (0 = unlimited; persisted to `ocodeconfig.json`) |
+| `/agent` | | Switch agent definition (`build`, `plan`, `review`, `debug`, `docs`, …) |
 | `/compact` | `[focus]` | Manually compact context; optional focus guides summary |
-| `/review` | | AI code review of working dir, file, commit, branch, or PR |
+| `/recap` | `[model|status|enable|disable]` | Summarize conversation / manage recap model |
+| `/context` | | Show context window token budget and system prompt, plus Knowledge Bundle, Memory, and Discovery sections |
+| `/review` | `[file|commit|branch|pr]` | AI code review with actionable findings |
 | `/standup` | `/catchup` | Caveman summary of recent commits + pending changes, with sorted TODOs and missed stubs |
-| `/session` | `/s`, `/resume` | List, pick, resume sessions |
-| `/export` | | Export session as JSON (full transcript) |
-| `/export-claude` | | Export in Claude Code compatible format |
+| `/changes` | | Analyze repo changes: diffs, LSP errors, and in-progress specs |
+| `/session` | `/sessions`, `/resume`, `/s` | List, pick, resume sessions |
+| `/connect` | | Show/Set provider API keys |
+| `/login` | | Log in and enable encrypted config sync |
+| `/logout` | `/sync-logout` | Log out and stop config sync |
+| `/new` | `/clear` | Start a fresh session |
+| `/export` | | Save chat as Markdown |
+| `/export-claude` | | Append chat to Claude Code JSONL |
 | `/share` | | Generate shareable session link |
-| `/rc` | `/remote-control` | Start/stop web UI (`/rc off`) to mirror this session |
+| `/title` | `[text]` | Set session title (no arg = reset to auto-generate) |
+| `/rc` | `/remote-control` | Start/stop web UI to remote-control this session (`/rc off` to stop) |
 | `/cd` | `/cwd` | Change the project root to another directory |
-| `/context` | | Show context window token budget and system prompt, plus Knowledge Bundle, Memory, and Discovery (corpus index vs volatile tail, context-saved metrics) sections |
-| `/docs` | `/doc-mode` | Manage OKF knowledge bundle (on, off, status, init, update, cleanup) |
+| `/add-dir` | `/add-dirs` | Add a directory to extra allowed paths |
+| `/paths` | | Show all relevant filesystem paths: root, extra allowed paths, config files, and data directories |
 | `/upload` | `/uploads` | Show or set the file upload directory |
 | `/search` | `/find` | Find a message by keyword (opens the in-chat find bar) |
-| `/add-dir` | `/add-dirs` | Add a directory to extra allowed paths |
-| `/ide` | | Connect to VS Code (Claude Code extension) |
-| `/theme` | `/themes` | Switch themes instantly |
-| `/permissions` | | View/set tool and bash permissions |
-| `/ban` | | List or manage banned bash command prefixes, including multi-word prefixes (`/ban clear` confirms before wiping them; no prefixes are banned by default) |
-| `/yolo` | | Toggle YOLO mode on/off |
-| `/git` | | Git operations from command line |
-| `/github` | | PR, issue, and workflow commands |
-| `/plugin` | | Plugin management (install, sync, list, etc.) |
-| `/skills` | | Browse available skills |
-| `/learn` | | List project-root skills and guide skill creation/update |
-| `/undo` | `/redo` | Undo/redo file changes |
-| `/lsp` | | LSP diagnostics and status |
-| `/mcp` | `/mcp-auth` | MCP server management |
-| `/editor` | `/editor-mode` | External editor configuration |
-| `/small-model` | | Switch the small model for lightweight tasks |
-| `/usage` | | LLM token usage by model and date range |
-| `/new` | `/clear` | Start a fresh conversation |
-| `/help` | `/?` | Show all available commands |
+| `/btw` | `/by-the-way` | Add a quick aside to the conversation (`/btw <message>`) |
+| `/docs` | `/doc-mode` | Manage OKF knowledge bundle (on, off, status, init, update, cleanup) |
+| `/doc-sync` | `[session|all]` | Update `AGENTS.md`/rules/skills to reflect current changes (small model) |
+| `/mem` | `[on|off|status|update [user|project|global] [focus]]` | Toggle memory context injection, inspect memory files, or update a memory scope |
+| `/discover` | `[enable|disable|status|model [name]|ignore [add|remove|clear] [path]]` | Toggle retrieval-based skill/MCP discovery, pick the query-embedding model, manage ignored paths |
+| `/goal` | `<goal>` | Run the multi-agent orchestration pipeline on a coding goal |
+| `/init` | `[focus]` | Analyze project and generate `AGENTS.md` |
+| `/learn` | `[focus]` | List project-root skills and guide skill creation/update |
+| `/lsp` | `[show|open <path>|errors|all]` | Show current LSP diagnostics and error counts |
+| `/undo` | | Revert last file change (snapshot-backed) |
+| `/redo` | | Restore last undone change |
+| `/ide` | `[claude|off|status]` | Connect to VS Code (Claude Code extension) for live file/selection context |
+| `/theme` | `/themes` | List and switch themes (`/themes [name]`); live preview as you type |
+| `/permissions` | `[auto-add|auto-remove|mode|auto|model|<tool>]` | View or set tool, bash auto-allow, and LLM auto-permissions |
+| `/ban` | `[list|add <cmd...>|remove <cmd...>|clear]` | Manage banned bash command prefixes (multi-word prefixes supported; no prefixes banned by default) |
+| `/yolo` | `[on|off|status]` | Toggle YOLO permissions mode |
+| `/small-model` | `[model]` | Show or switch the small model (used for lightweight tasks: title, discovery, compaction fallback) |
+| `/github` | `<pr|issue|workflow> [args]` | GitHub PR / issue / workflow commands |
+| `/plugin` | `[list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|confirm|cancel]` | Plugin management |
+| `/skills` | | List available skills |
+| `/commands` | | List all available commands (built-in + custom + skill-as-command) |
+| `/mcp` | `[list|enable <server>|disable <server>]` | List or toggle MCP servers |
+| `/mcp-auth` | `<server>` | Authenticate with a remote MCP server via OAuth |
+| `/editor` | `[command]` | Choose default external editor |
+| `/editor-mode` | `[external|tmux-split|tmux-window]` | Set editor open mode |
+| `/sidebar` | | Toggle sidebar |
+| `/thinking` | | Toggle visibility of agent thoughts (reasoning blocks) |
+| `/effort` | `[off|low|med|high|xhigh|max]` | Show or set the reasoning effort (thinking budget) level |
+| `/sound` | `[on|off|test]` | Toggle terminal bell on task completion |
+| `/details` | | Toggle tool execution details in the transcript |
+| `/max-step` | `/max-steps` `[n]` | Show or set the max tool-call steps before auto-summary |
+| `/mask` | `[on|off|status|mode [lenient|full]|model [name]|list]` | Secret redaction: toggle, set mode, pick tier-2 local model, or list detected secrets |
+| `/ocr` | `[status|enable|disable|model [name]]` | OCR status / toggle / model selection (from LM Studio) |
+| `/image` | `[status|enable|disable|model [provider/model]]` | Image generation status / toggle / model selection |
+| `/localmodel` | | Manage locally-run chat/completion model instances (e.g. Bonsai 8B 1-bit) that LM Studio can't serve |
+| `/usage` | `[hour|day|week|month|last-month|last-3-month|all]` | Show LLM token usage summary by model and date range |
+| `/cron` | `[list|describe <id>|remove <id>|add <kind> <args> <message...>]` | Manage scheduled jobs (see `docs/scheduled-jobs.md`) |
+| `/help` | | Show help for all commands |
+| `/exit` | `/quit`, `/q` | Quit the app (always instant, even while streaming) |
 
-### 🔧 IDE Integration
-
-- **VS Code `/ide`** — Lock discovery, WebSocket + MCP client, selection/open-editor/mention streaming, auto-attach
-- **IDE status chip** in sidebar — shows connection state
-- **IDE mode config** — toggle via sidebar click or `/ide status`
-- **Zed / ACP (`ocode acp`)** — Agent Client Protocol server so ocode appears in Zed's agent panel alongside Claude Code / Codex
+> **Queuing note:** `/exit`/`/quit`/`/q` and ~30 read-only UI commands (`/model`, `/themes`, `/help`, `/thinking`, `/details`, `/sidebar`, `/context`, `/commands`, `/permissions`, `/yolo`, `/small-model`, `/editor`, `/lsp`, `/usage`, `/share`, `/connect`, `/agent`, `/mcp`, `/advisor`, `/mask`, `/rc`, `/search`, `/find`, `/docs`, `/goal`, `/agents status`, …) run instantly. Everything else — and any command that mutates persistent state mid-stream (`/add-dir`, `/doc-sync`, `/agents limit`) — queues behind the current turn and drains via `agentStreamDoneMsg` / `compactFinishedMsg`. `handleCommand` is the single chokepoint; keep it in sync with `AGENTS.md`.
 
 ### 📊 Debug & Observability
 
-- **Debug log panel** — filterable by kind (agent, tool, LSP, git, auth, MCP, plugin)
-- **Sidebar telemetry** — context window usage, model info, token counts
-- **Token usage tracking** — `/usage` command with per-model, per-date-range breakdown
-- **LLM costing** — pricing module tracks spend across providers
-- **Session export** — full JSON transcripts for debugging or migration
+- **Debug log panel** — filterable by kind (agent, tool, LSP, git, auth, MCP, plugin); ring cap 500, background buffering toggle + retention cap (web `LogsForm`)
+- **Sidebar telemetry** — context window gauge, model info, LSP status, token counts, modified-files list
+- **Token usage & costing** — `/usage` with per-model, per-date-range breakdown; `internal/pricing` + `internal/usage` tracks spend across providers; web `GET /api/spending`
+- **Session export** — `/export` (Markdown) and `/export-claude` (Claude Code JSONL); `GET /api/sessions/{id}/export*`
+- **TUI Output Safety** — `log.SetOutput(debugLogWriter)` while the alt-screen is live; no raw `fmt.Print` over the frame; subprocess output captured via buffer
+- **Prompt cache stability** — tools→system→messages prefix order, deterministic tool ordering, sticky discovery set, split stable/volatile tail injection (`[ocode:discovery]` user-role coalesces without busting the system cache)
 
-### 🛠️ Background Processes
+### 🛠️ Background Processes & Concurrency
 
 - **Foreground → background** — `Ctrl+B` during a running bash tool moves it to the background, freeing the agent to continue
-- **256KB circular output buffer** — tail long-running processes
-- **Lifecycle tracking** — `bash_output`, `agent_status`, `task_status`, `wait` tools
-- **Sub-agent process registry** — nested run tree with detail-view drill-in
+- **256KB circular output buffer** — tail long-running processes without OOM
+- **Lifecycle tools** — `bash_output`, `kill_shell`, `list_processes`, `agent_status`, `task_status`, `wait`
+- **Sub-agent process registry** — nested run tree with detail-view drill-in; concurrency limit via `/agents limit` + `AgentRunRegistry`
+- **In-batch task DAG** — `task(id, depends_on)` builds a wave scheduler that injects predecessor output into dependents; cycle / duplicate-id / unknown-id / background-dep validation
+- **Web terminal** — `GET /api/terminal/ws` WebSocket + `GET /api/terminal/processes` with scrollback, font/shell config
+
+---
+
+## CLI Reference
+
+```bash
+# TUI
+ocode                          # start TUI
+ocode -session <id>            # resume specific session
+ocode -continue                # resume most recent session
+ocode --yolo                   # auto-approve permissions
+ocode --permission-mode auto|off
+ocode --effort off|low|med|high|xhigh|max
+
+# Server + Web UI
+ocode serve [--port 8080] [--open] [--host 127.0.0.1]
+ocode web                      # alias for serve --open
+
+# Headless / CI / Cron target
+ocode run [prompt...] [flags]
+  -prompt, -p <text>           # prompt text
+  -model, -m <provider/model>  # model override
+  -agent <name>                # agent profile
+  -effort <level>              # reasoning effort
+  -session, -s <id>            # resume session
+  -continue, -c                # continue last session
+  -fork                        # fork from last session
+  -file, -f <path>             # attach file(s) to message
+  -format default|json|summary # output format
+  -title <text>                # session title
+  -attach <url>                # attach remote serve URL
+  -port <n>                    # server port (when attaching)
+  -yolo, --dangerously-skip-permissions
+  -command <name>              # run a slash command headlessly
+  -dir <path>                  # project root override
+  -username, -u / -password, -P # basic auth for remote attach
+  -timeout <seconds>
+  --permission-mode auto|off
+  -profile <name>              # config profile
+
+# Integrations
+ocode acp                      # ACP server over stdio (Zed)
+ocode mcp [add|list|ls|auth]   # MCP server management
+ocode models                   # list available models
+ocode skills                   # skill management
+ocode goal <goal>              # orchestration pipeline
+ocode lsp-daemon               # (internal) LSP broker daemon
+
+# Desktop
+make desktop                   # bin/ocode-desktop
+make desktop-app               # bin/ocode.app (macOS bundle)
+OCODE_DESKTOP_DEV_URL=http://localhost:5173 bin/ocode-desktop  # dev hot-reload
+```
 
 ---
 
 ## Config
 
-Configuration lives in two files, loaded from `~/.config/opencode/` and the nearest project root:
+Configuration lives in two files, loaded from `~/.config/opencode/` and the nearest project root. Project-level `opencode.json` overrides global; `ocodeconfig.json` is the ocode-only writable store.
 
 | File | Role |
 |------|------|
-| **`opencode.json`** | Upstream-compatible settings (provider creds, model prefs). **Read-only** — ocode never writes to it. Can be checked into git. |
-| **`ocodeconfig.json`** | ocode-only state (permissions, editor, compaction, model history). **Written by ocode** to persist runtime state. `.gitignore`-friendly. |
+| **`opencode.json`** | Upstream-compatible settings (provider creds, model prefs, `mcp` servers). **Read-only** — ocode never writes to it. Can be checked into git. |
+| **`ocodeconfig.json`** | ocode-only state (permissions, editor, compaction, model history, profiles, discovery, limits, features). **Written by ocode** to persist runtime state. `.gitignore`-friendly. |
 
-Project-scoped `extra_allowed_paths` are stored separately in `.ocode/settings.json` and merged additively with the global `ocodeconfig.json` entries.
+Additional stores:
+
+| Path | Purpose |
+|------|---------|
+| `.ocode/settings.json` | Project-scoped `extra_allowed_paths` (additive with global `ocodeconfig.json`) |
+| `.ocode/todo/<session>.md` | Persistent todo plan (revision + flock) |
+| `.ocode/md-summaries.json` | Discovery markdown summary cache (mtime+size gate, sha256 key) |
+| `~/.local/share/opencode/project/<slug>/sessions/` | Chat session JSON/ojsonl (slug = SHA-256 prefix of git root) |
+| `~/.local/share/opencode/usage/records.jsonl` | Token usage records |
+| `~/.local/share/opencode/auth.json` | Provider API keys and OAuth tokens |
+| `~/.local/state/opencode/model.json` | `last_model` + recent models (cross-process lockfile) |
+
+### Profiles
+
+Named config overlays (`profiles` in `ocodeconfig.json`) that swap model / provider / permissions / editor / MCP / terminal / TUI in one switch. Managed via web **Settings → Profiles** and `GET/PUT /api/config/ocode/*` + `GET /api/profiles`.
 
 ### Quick config examples
 
@@ -381,6 +517,23 @@ Project-scoped `extra_allowed_paths` are stored separately in `.ocode/settings.j
 }
 ```
 
+### Server / Web API
+
+The server exposes a REST + SSE surface under `/api/*` (see `internal/server/server.go:registerRoutes`). Highlights:
+
+- **Chat & sessions:** `POST /api/chat`, `GET /api/sessions`, `GET /api/sessions/{id}/state`, `POST /api/sessions/{id}/message`, `POST /api/sessions/{id}/compact`, `GET /api/sessions/{id}/export*`, `GET /api/chat/stream` (SSE)
+- **Models & agents:** `GET /api/models`, `GET /api/agents/runs/stream`
+- **Files & git:** `GET /api/files/tree`, `GET/PUT /api/files/content`, `GET /api/git/status|diff`, `GET /api/changes`, `POST /api/changes/undo-*`
+- **Terminal & shell:** `POST /api/shell`, `GET /api/terminal/ws` (WebSocket), `GET /api/terminal/processes`
+- **Config:** `GET/PUT /api/config/ocode/*` (11 sections: recap, commit-msg, compact, permissions-auto, discovery, tui, editor, imagegen, paths, limits, features) + `/api/config/{model,thinking-budget,small-model,terminal,advisor,ocr,mask,agents}`
+- **Permissions / questions / RC:** `GET/POST /api/permissions`, `POST /api/questions`, `POST /api/permissions/resolve`, `POST /api/rc/*`
+- **MCP / plugins / skills / commands:** `GET /api/mcp`, `GET /api/plugins`, `GET /api/skills`, `GET /api/commands`
+- **Events & logs:** `GET /api/events` (SSE, multiproject tagged bus), `GET /api/logs/stream`, `GET /api/tui-status`, `GET /api/spending`, `GET /api/lsp/statuses`
+- **Cron:** `GET/POST /api/cron/*` (jobs, outbox, targets)
+- **Projects:** `GET/POST /api/projects`, `DELETE /api/projects/{path...}`
+- **Uploads:** `POST /api/uploads` → `<project>/.ocode/uploads`
+- Auth via `?token=` for EventSource/WS; rate-limited; loopback-bound by default.
+
 ---
 
 ## Differences from opencode
@@ -392,7 +545,7 @@ ocode shares opencode's overall shape (TUI agent, multi-provider, MCP, sessions)
 | Area | opencode | ocode |
 |------|----------|-------|
 | Language | TypeScript + Bun + Effect | **Go 1.26.1** |
-| TUI | Solid-based custom renderer | **Bubble Tea / Lipgloss** |
+| TUI | Solid-based custom renderer | **Bubble Tea / Lipgloss v2** |
 | Distribution | npm + Bun runtime | **Single static binary** |
 | Memory | 500MB+ typical | **30–50MB typical** |
 | Transcript render | O(N) per frame | **O(1) FastViewport (41× faster)** |
@@ -405,19 +558,23 @@ ocode adds **first-class permission modes** (`normal`, `yolo`, `locked`) with pe
 
 - ocode can **list, pick, and resume** opencode sessions **and** Claude Code sessions (cloned as `claude-<id>`)
 - Auto-save, session picker, `Ctrl+Y` retry on LLM timeout
-- Session pagination and delete support
+- Session pagination, delete, share, and `.ojsonl` append-only storage with cross-project resume guard
+- Per-session **Changes** tab backed by snapshot store (not just `git status`)
 
 ### TUI features unique to ocode
 
 - **FastViewport** — custom 0.73ms transcript rendering vs standard viewport
-- **Extended thinking toggle** on Claude models (`Alt+T`)
+- **Extended thinking toggle** on Claude models (`Alt+T`) + `/effort` levels
 - **Foreground bash → background** (`Ctrl+B`)
-- **Inline vim-like editor** in Files tab
-- **Async sub-agent runs** with drill-in detail view
+- **Inline vim-like editor** in Files tab + external editor modes
+- **Async sub-agent runs** with DAG, contracts, and drill-in detail view
 - **ModalStack** — composable overlay system (permission dialogs, pickers, dialogs, list boxes)
 - **In-app text selection** — click-drag copies, plain click activates
-- **Hover effects** on all clickable surfaces
-- **File tree scrollbars** with drag support
+- **Hover effects** on all clickable surfaces + scrollbar drag
+- **Clickable file paths & URLs** (URLs confirm before opening)
+- **In-chat find bar** (`Ctrl+F` / `/search`)
+- **Persistent todo plan** (`.ocode/todo/<session>.md`)
+- **Six tabs:** Chat, Agents, Files, Changes, Git, Log
 
 ### Compaction
 
@@ -427,77 +584,97 @@ ocode adds **first-class permission modes** (`normal`, `yolo`, `locked`) with pe
 | Tool-pair safety | Implicit | **Explicit `safeCut`** — proven symmetry on both sides |
 | Markers | Typed message part | **Sentinel-tagged system message** `[ocode:compaction-summary]` |
 | Batching | Single pass | **Multi-batch** when middle exceeds `max_summary_input_tokens` |
+| Recap model | — | **Separate `recap` model** (`/recap`) |
 
 ### Added in ocode (not in opencode)
 
-- **Theme system** with JSON loading and live preview
-- **Plugin system** with provider interface and registry
-- **Skill system** with installer and CLI
-- **VS Code `/ide` integration** with lock discovery
-- **Web UI** with `/rc` remote control, Git panel, Logs panel, theme sync
-- **Desktop app** — native Wails v3 shell (tray, dock badge, notifications) with the cron scheduler running in-host
-- **AI code review** (`/review`) for working dir, commits, branches, PRs
-- **GitHub integration** — PR, issue, workflow commands
-- **LSP eager warm-up** with sidebar status, install hints
-- **`/usage`** — per-model token cost tracking
-- **File content search** with incremental streaming
+- **Theme system** with JSON loading and live preview (Tokyo Night, Catppuccin, LCARS, Pip-Boy)
+- **Plugin system** with provider interface and Git-based registry
+- **Skill system** with retrieval-based discovery, corpus indexing, and skill-as-command
+- **Knowledge bundle** (`/docs`, OKF v0.1) with `context` subagent curation
+- **Scheduled jobs / Cron** — persistent disk-backed dispatcher
+- **VS Code `/ide` integration** with lock discovery + Zed/ACP (`ocode acp`)
+- **Web UI** — full React SPA (chat, files, changes, git, terminal, cron, assets, agents, logs, settings) with SSE event bus, multiproject routing, and `/rc` remote control
+- **Desktop app** — native Wails v3 shell (tray, dock badge, notifications, cron host) with embedded SPA
+- **AI code review** (`/review`) for working dir, commits, branches, PRs + GitHub CLI (`/github`)
+- **LSP eager warm-up** with sidebar status, install hints, and shared broker
+- **`/usage`** — per-model token cost tracking + `GET /api/spending`
+- **File content search** with incremental streaming + fuzzy file finder
 - **Custom command loader** from plugin Markdown files
-- **Debug log panel** with filtered kinds and word-wrap
+- **Debug log panel** with filtered kinds and word-wrap + web Logs panel
 - **Session pagination, delete, and share**
 - **`commit_msg_model`** config for AI commit message generation
 - **Safe built-in deny rules** for `git push --force` and `rm -rf`
 - **Progressive file preview** with binary detection
+- **OCR & Image generation** tools (`/ocr`, `/image`)
+- **Local model instance manager** (`/localmodel`) for models LM Studio can't serve
+- **Secret redaction** (`/mask`) with tier-1 regex + tier-2 local LLM scanning, lenient/full modes, local-only endpoint guard
+- **Telegram bot** bridge
+- **Memory system** (`/mem`) — user / project / global scopes with injection toggle
 
 ### What ocode does **not** have (vs opencode)
 
 - No plugin marketplace (plugin system is Git-based)
-- Smaller skill ecosystem
-- No `plan-reminder` / `build-switch` prompt overlays
+- Smaller skill ecosystem (growing; bundled ~60+ skills)
+- No `plan-reminder` / `build-switch` prompt overlays (replaced by todo plans + discovery)
 
 ---
 
 ## Stack
 
 - **Go 1.26.1** — single static binary, zero runtime deps
-- **Bubble Tea / Bubbles / Lipgloss** — Charm ecosystem for TUI
-- **React + shadcn/ui + Tailwind** — Web UI frontend
+- **Bubble Tea / Bubbles / Lipgloss v2** — Charm ecosystem for TUI
+- **React + shadcn/ui + Tailwind + Monaco + xterm.js** — Web UI frontend (Vite)
+- **Wails v3** — Desktop shell (webview + Go backend)
 - **FastViewport** — custom O(1) transcript viewport
-- **MCP** — Model Context Protocol client (local + remote)
+- **MCP** — Model Context Protocol client (local + remote, OAuth)
+- **SSE + WebSocket** — Streaming (chat, logs, agents, terminal)
 
 ---
 
 ## Layout
 
 ```
-main.go                    Entry point
-internal/acp/              Agent Client Protocol server (Zed / ACP integration)
-internal/agent/            LLM client, agent registry, permissions, tool truncation
+main.go                    Entry point (TUI + serve/web/run/acp/mcp/models/skills/goal)
+cmd/ocode-desktop/         Wails v3 desktop shell (native.go, main.go, embedded-assets)
+internal/acp/              Agent Client Protocol server (Zed integration)
+internal/agent/            LLM client, agent registry, permissions, tool truncation, title gen
 internal/auth/             Multi-provider OAuth + keychain
-internal/commands/         Custom command loader
-internal/config/           Config loading (opencode.json / ocodeconfig.json)
+internal/bundled/          Embedded plugin/skill/model-config FS helpers
+internal/cli/              goal orchestration CLI
+internal/commands/         Custom command loader (plugin Markdown)
+internal/config/           Config loading (opencode.json / ocodeconfig.json + profiles)
 internal/debuglog/         Shared debug log for TUI and non-TUI consumers
+internal/desktop/          Desktop boot helper, window watcher, scheduler host
 internal/github/           GitHub API client (PR, issues, workflows)
 internal/hooks/            Git hooks integration
 internal/ide/              VS Code / IDE lock discovery and client
-internal/lsp/              Language server manager with eager warm-up
-internal/mcp/              MCP client (local + remote)
+internal/lsp/              Language server manager + shared broker (broker/)
+internal/mcp/              MCP client (local + remote, OAuth)
 internal/mcpcli/           MCP CLI integration
-internal/models/           Model registry and pricing
+internal/memory/           User / project / global memory scopes
+internal/models/           Model registry and pricing (models.dev + live resolution)
 internal/pathscope/        Path scope utilities (temp dirs, expansion)
 internal/plugin/           Plugin provider interface and registry
 internal/plugins/          Plugin loader, manager, sync
 internal/pricing/          LLM token cost tracking
+internal/redact/           Secret redaction (tier-1 regex + tier-2 LLM)
 internal/runcli/           Headless CLI mode
-internal/server/           HTTP server (web UI, APIs, SSE, /rc)
-internal/session/          Session management (save, resume, export, migrate)
-internal/skill/            Skill loader and installer
-internal/snapshot/         Per-agent snapshot store: file backups keyed by `tool_call_id` for `undo_file_change`, with cross-agent and same-agent write-conflict detection
+internal/scheduler/        Cron engine + job store
+internal/server/           HTTP server (web UI, APIs, SSE, /rc, scheduler runner)
+internal/session/          Session management (save, resume, export, migrate, ojsonl)
+internal/skill/            Skill loader, installer, discovery corpus
+internal/snapshot/         Per-agent snapshot store for undo_file_change
 internal/theme/            Theme system (JSON loading, definitions)
-internal/tool/             Built-in tools (read, write, edit, bash, grep, glob, LSP, etc.)
-internal/tui/              Bubble Tea TUI (model, view, update, components)
+internal/tool/             39 built-in tools
+internal/tui/              Bubble Tea TUI (model, view, update, components, commands)
 internal/usage/            Token usage tracking
 internal/version/          Version info
-docs/                      Design specs, plans, and enhancement proposals
+internal/ocr/              OCR backends
+web/                       React SPA (Vite + Tailwind + shadcn + Monaco + xterm.js)
+docs/                      Design specs, plans, OKF knowledge bundle, man pages
+skills/                    Bundled skill definitions (SKILL.md)
+.opencode/plugins/         Bundled plugin manifests (embedded in binary)
 ```
 
 ---
@@ -539,7 +716,6 @@ The `/mask model [name]` command sets the local LLM used for tier-2 contextual s
 
 - **Pip-Boy / Vault Boy ASCII art** — three variants shown randomly on the pipboy theme empty screen, sourced from [emojicombos.com/fallout-ascii-art](https://emojicombos.com/fallout-ascii-art)
 - **LCARS / Star Trek ASCII art** — five variants shown randomly on the lcars theme empty screen
-- 
 
 ---
 

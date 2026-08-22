@@ -267,6 +267,35 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 				cancel()
 			}()
 			return fmt.Sprintf("Moved running bash command to background as %s. Continue the turn now; poll with bash_output(id=%q), stop with kill_shell(id=%q), or trust the completion push when it finishes.", proc.ID, proc.ID, proc.ID), nil
+		case <-ctx.Done():
+			// The exec timeout (or caller cancellation) fired before the
+			// command exited. exec.CommandContext's default Cancel only
+			// kills the direct child (cmd.Process); setProcGroup put the
+			// child in its own process group, so a grandchild that
+			// inherited the stdout/stderr pipes (e.g. a pipeline stage)
+			// can keep them open indefinitely and block pumpWg.Wait()
+			// forever even after the child is dead. Kill the whole
+			// process group and return immediately with whatever output
+			// was captured so far; draining the pipes and finalizing the
+			// process record continues on its own goroutine instead of
+			// blocking this call.
+			shouldCancel = false
+			if cmd.Process != nil {
+				_ = killProcessGroup(cmd.Process)
+			}
+			streaming.Store(false)
+			res, _, _, _ := t.Procs.Dump(proc.ID)
+			go func() {
+				err := waitState.Wait()
+				pumpWg.Wait()
+				finalizeManagedProcess(proc, sup, onDone, err)
+				cancel()
+			}()
+			registerBashWrites(ctx, tcID, backedUpPaths)
+			if t.Recorder != nil {
+				t.Recorder.Post(params.Command, 124)
+			}
+			return finalizeExecResult(res, ctx.Err(), true, timeout, emit == nil), nil
 		}
 	}
 

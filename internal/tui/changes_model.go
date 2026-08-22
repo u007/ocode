@@ -288,7 +288,7 @@ func (m changesModel) View(w, h int, styles Styles) string {
 	// --- Build header row ---
 	tabBar := renderTabBar(tabChanges, false)
 	exitBtn := hintStyle.Padding(0, 1).Render("\u2715 exit")
-	headerLeft := appHeaderLeftPad + styles.Header.Render("\u25c6 ocode  Changes") + appHeaderHintGap + hintStyle.Render("opencode clone")
+	headerLeft := appHeaderLeftPad + styles.Header.Render(ocodeBrandIcon+" ocode  Changes") + appHeaderHintGap + hintStyle.Render("opencode clone")
 	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
 	if headerPad < 0 {
 		headerPad = 0
