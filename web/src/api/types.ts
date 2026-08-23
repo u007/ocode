@@ -17,7 +17,19 @@ export interface Message {
 export type LivePart =
   | { kind: "thinking"; text: string }
   | { kind: "text"; text: string }
-  | { kind: "tool"; tool: string; command?: string; output?: string }
+  | {
+      kind: "tool";
+      tool: string;
+      /** The model's tool-call id, used to pair streamed output and the final
+       *  result with this bubble. Absent on legacy events, which fall back to
+       *  positional matching. */
+      callId?: string;
+      command?: string;
+      /** Incremental output received while the tool is still running. Progress
+       *  only — `output` carries the authoritative result. */
+      stream?: string;
+      output?: string;
+    }
   | { kind: "status"; text: string };
 
 export interface ChatRequest {

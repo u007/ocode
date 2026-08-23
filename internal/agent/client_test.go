@@ -404,6 +404,113 @@ func TestParseOpenAIChatCompletionsStream_MalformedArgumentsErrors(t *testing.T)
 	}
 }
 
+func TestParseOpenAIChatCompletionsStream_SplitsParallelCallsSharingAnIndex(t *testing.T) {
+	// Accumulation was keyed on tool_calls[i].index alone. When a provider
+	// repeats or resets index across parallel calls, two distinct calls landed
+	// in the same slot: the later name/id overwrote the earlier one and the
+	// argument fragments were CONCATENATED into one string. The result is valid
+	// JSON with duplicate keys, so it passed the json.Valid check below and was
+	// executed last-wins — silently running one tool call the model never made
+	// and dropping the other entirely.
+	//
+	// This is not hypothetical: 60 such calls are present in on-disk session
+	// history, e.g. a task_status call whose arguments assembled to
+	// {"task_id":"agent-run-2","task_id":"agent-run-3"}. Reproduced here.
+	//
+	// A delta carrying a different non-empty id is a new call regardless of
+	// index, which is the one signal every provider must get right — the id is
+	// what the tool result is correlated against.
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-a","function":{"name":"task_status","arguments":"{\"task_id\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"agent-run-2\"}"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-b","function":{"name":"task_status","arguments":"{\"task_id\":\"agent-run-3\"}"}}]}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	msg, _, err := parseOpenAIChatCompletionsStream(strings.NewReader(stream), nil, nil)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if len(msg.ToolCalls) != 2 {
+		t.Fatalf("two calls sharing an index must stay separate, got %d: %+v", len(msg.ToolCalls), msg.ToolCalls)
+	}
+	if msg.ToolCalls[0].ID != "call-a" || msg.ToolCalls[0].Function.Arguments != `{"task_id":"agent-run-2"}` {
+		t.Fatalf("first call corrupted: %+v", msg.ToolCalls[0])
+	}
+	if msg.ToolCalls[1].ID != "call-b" || msg.ToolCalls[1].Function.Arguments != `{"task_id":"agent-run-3"}` {
+		t.Fatalf("second call corrupted: %+v", msg.ToolCalls[1])
+	}
+}
+
+func TestParseOpenAIChatCompletionsStream_RepeatedIDIsOneCall(t *testing.T) {
+	// The converse guard: many providers echo the same id on every fragment of
+	// a call. Splitting on "id is present" rather than "id CHANGED" would shatter
+	// one call into one call per fragment, which is a worse failure than the bug
+	// being fixed — so this pins the boundary.
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-a","function":{"name":"bash","arguments":"{\"command"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-a","function":{"arguments":"\":\"ls\"}"}}]}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	msg, _, err := parseOpenAIChatCompletionsStream(strings.NewReader(stream), nil, nil)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if len(msg.ToolCalls) != 1 {
+		t.Fatalf("a repeated id is one call, got %d: %+v", len(msg.ToolCalls), msg.ToolCalls)
+	}
+	if msg.ToolCalls[0].Function.Arguments != `{"command":"ls"}` {
+		t.Fatalf("arguments not reassembled: %q", msg.ToolCalls[0].Function.Arguments)
+	}
+}
+
+func TestParseOpenAIChatCompletionsStream_RejectsDuplicateKeyArguments(t *testing.T) {
+	// Defense in depth for the merge above. json.Valid accepts duplicate keys,
+	// which is precisely why every merged call executed silently instead of
+	// erroring. If any provider still produces a concatenated argument string —
+	// one that sends neither a usable index nor a changing id — it must fail
+	// loudly rather than run last-wins.
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-a","function":{"name":"read","arguments":"{\"path\":\"a.txt\",\"path\":\"b.txt\"}"}}]}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	msg, _, err := parseOpenAIChatCompletionsStream(strings.NewReader(stream), nil, nil)
+	if err == nil {
+		t.Fatalf("duplicate-key arguments must not be executed, got %+v", msg.ToolCalls)
+	}
+	if !strings.Contains(err.Error(), `repeat key "path"`) {
+		t.Fatalf("error should name the repeated key so the provider bug is diagnosable: %v", err)
+	}
+}
+
+func TestDuplicateTopLevelKey_OnlyInspectsTopLevel(t *testing.T) {
+	// The check is deliberately top-level only. Measured against local session
+	// history, 58 of the 60 duplicate-key tool calls repeat a top-level key
+	// (`path`, `command`, `task_id`); the other 2 repeat a key inside a nested
+	// array element (a `multiedit` edits[] entry). Recursing would add traversal
+	// for those 2, and a nested repeat is far likelier to be legitimate
+	// model-authored content than a merged call. This pins the boundary so it
+	// stays a decision rather than an accident.
+	if got := duplicateTopLevelKey(`{"path":"a","end_line":1,"path":"b"}`); got != "path" {
+		t.Fatalf("top-level repeat must be reported, got %q", got)
+	}
+	if got := duplicateTopLevelKey(`{"edits":[{"newString":"x","newString":"y"}]}`); got != "" {
+		t.Fatalf("nested repeat must not be reported, got %q", got)
+	}
+	// A key reused across two different nested objects is not a repeat at all.
+	if got := duplicateTopLevelKey(`{"a":{"k":1},"b":{"k":2}}`); got != "" {
+		t.Fatalf("same key in sibling nested objects is not a repeat, got %q", got)
+	}
+	if got := duplicateTopLevelKey(`{}`); got != "" {
+		t.Fatalf("empty object: %q", got)
+	}
+}
+
 func TestChatOpenAI_RoutesOpenCodeGoGPT56ToResponses(t *testing.T) {
 	// opencode-go/gpt-5.6-luna must be served via the OpenAI Responses API
 	// (responses-lite), not chat/completions, or its tool calls come back empty.

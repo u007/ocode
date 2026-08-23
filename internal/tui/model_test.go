@@ -7914,3 +7914,50 @@ func TestModelPickerLabelDecoratesDisplayName(t *testing.T) {
 		}
 	}
 }
+
+// retainProbeClient records the agent's RetainFullToolOutput at the moment the
+// stream is live (inside Chat) — which is exactly when the flag governs whether
+// a bash tool result keeps its full output or is capped at 30000 chars.
+// Asserting after streamStep returns would race the goroutine that sets the
+// callbacks and the defer that clears them.
+type retainProbeClient struct {
+	agentRef *agent.Agent
+	got      chan bool
+}
+
+func (c *retainProbeClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
+	c.got <- c.agentRef.RetainFullToolOutput
+	return nil, errors.New("stop after probe")
+}
+func (c *retainProbeClient) GetProvider() string { return "test" }
+func (c *retainProbeClient) GetModel() string    { return "test-model" }
+
+// TestStreamStepOptsIntoFullToolOutput verifies the TUI opts into full tool
+// output retention for the duration of a stream. The TUI renders streamed bash
+// output AS the transcript and reads the full text back from
+// Message.DisplayContent, so capping its results at 30000 chars would silently
+// truncate what the user already watched scroll past.
+//
+// Retention is opt-in (default false) so the SSE server stays bounded; this
+// test is what keeps the TUI on the opted-in side.
+func TestStreamStepOptsIntoFullToolOutput(t *testing.T) {
+	c := &retainProbeClient{got: make(chan bool, 1)}
+	a := agent.NewAgent(c, nil, nil, nil)
+	c.agentRef = a
+
+	if a.RetainFullToolOutput {
+		t.Fatal("precondition: RetainFullToolOutput must default to false")
+	}
+
+	m := model{agent: a, styles: ApplyThemeColors("tokyonight")}
+	m.streamStep([]agent.Message{{Role: "user", Content: "hi"}})
+
+	select {
+	case retained := <-c.got:
+		if !retained {
+			t.Fatal("streamStep must set RetainFullToolOutput while streaming, so live-rendered bash output is not capped at 30000 chars")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the agent client to be invoked")
+	}
+}

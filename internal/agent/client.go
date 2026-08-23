@@ -1505,6 +1505,57 @@ func finalizeStep(msg *Message, step *stepAccum, onDelta func(kind, text string)
 	}
 }
 
+// streamToolCall is a tool call under construction, tagged with the stream
+// index it arrived on so the assembled calls can be restored to index order.
+// Two calls may share an index; see the split in
+// parseOpenAIChatCompletionsStream.
+type streamToolCall struct {
+	call  *ToolCall
+	index int
+}
+
+// duplicateTopLevelKey reports the first repeated top-level object key in a
+// JSON argument string, or "" if there is none.
+//
+// encoding/json treats duplicate keys as valid (last wins), so this is the only
+// way to detect argument fragments from two different tool calls that were
+// concatenated into one syntactically valid object.
+func duplicateTopLevelKey(args string) string {
+	dec := json.NewDecoder(strings.NewReader(args))
+	tok, err := dec.Token()
+	if err != nil {
+		// Not decodable as a token stream. json.Valid has already passed at the
+		// call site, so this is not a validity check — leave the reporting to it.
+		return ""
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return "" // not an object; no top-level keys to repeat
+	}
+	seen := map[string]bool{}
+	// Decode consumes each value whole, nested objects and arrays included, so
+	// every token read here is a top-level key (or the closing brace, which
+	// ends More()). No depth tracking is needed.
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return ""
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return ""
+		}
+		if seen[key] {
+			return key
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return ""
+		}
+	}
+	return ""
+}
+
 // parseOpenAIChatCompletionsStream parses a Server-Sent Events stream in the
 // OpenAI chat-completions format and returns the assembled assistant Message
 // plus the raw usage payload (last `data:` line with non-empty usage). Used by
@@ -1520,8 +1571,11 @@ func finalizeStep(msg *Message, step *stepAccum, onDelta func(kind, text string)
 // the per-choice `tool_calls[i].index`.
 func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text string), onUsage func(inputTokens, outputTokens int64)) (*Message, json.RawMessage, error) {
 	msg := &Message{Role: "assistant"}
-	toolByIdx := map[int]*ToolCall{}
-	var toolOrder []int
+	// Accumulated in arrival order. A map keyed on index alone cannot represent
+	// two calls that share an index, which providers do emit — see the split
+	// below. curByIdx holds the call currently open at each index.
+	var streamed []*streamToolCall
+	curByIdx := map[int]*streamToolCall{}
 	var usageRaw json.RawMessage
 	thinkSplitter := inlineThinkingSplitter{}
 
@@ -1626,12 +1680,26 @@ func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text st
 			}
 		}
 		for _, tc := range ch.Delta.ToolCalls {
-			existing, ok := toolByIdx[tc.Index]
-			if !ok {
-				existing = &ToolCall{Type: "function"}
-				toolByIdx[tc.Index] = existing
-				toolOrder = append(toolOrder, tc.Index)
+			open, ok := curByIdx[tc.Index]
+			// A delta bearing a DIFFERENT non-empty id opens a new call even at
+			// the same index. Some providers repeat or reset index across
+			// parallel calls; keying on index alone concatenated two calls'
+			// argument fragments into one string, which stayed valid JSON with
+			// duplicate keys and executed last-wins — running a call the model
+			// never made and silently dropping the other. The id is the one
+			// field every provider must get right, since tool results are
+			// correlated by it. Comparing against the id already seen (rather
+			// than merely "an id is present") keeps providers that echo the
+			// same id on every fragment as a single call.
+			if ok && tc.ID != "" && open.call.ID != "" && tc.ID != open.call.ID {
+				ok = false
 			}
+			if !ok {
+				open = &streamToolCall{call: &ToolCall{Type: "function"}, index: tc.Index}
+				curByIdx[tc.Index] = open
+				streamed = append(streamed, open)
+			}
+			existing := open.call
 			if tc.ID != "" {
 				existing.ID = tc.ID
 			}
@@ -1665,9 +1733,12 @@ func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text st
 			onDelta(part.kind, part.text)
 		}
 	}
-	sort.Ints(toolOrder)
-	for _, idx := range toolOrder {
-		tc := *toolByIdx[idx]
+	// Stable sort by index preserves the previous index ordering for
+	// well-behaved providers while keeping arrival order among calls that share
+	// one index, which a plain index sort cannot express.
+	sort.SliceStable(streamed, func(i, j int) bool { return streamed[i].index < streamed[j].index })
+	for _, s := range streamed {
+		tc := *s.call
 		// Malformed (non-empty but unparseable) arguments are fatal: executing
 		// them would run a tool call the model did not actually express.
 		//
@@ -1685,6 +1756,13 @@ func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text st
 			tc.Function.Arguments = "{}"
 		} else if !json.Valid([]byte(tc.Function.Arguments)) {
 			return nil, nil, fmt.Errorf("openai: invalid tool call arguments for %s (id=%s, %d bytes)", tc.Function.Name, tc.ID, len(tc.Function.Arguments))
+		} else if dup := duplicateTopLevelKey(tc.Function.Arguments); dup != "" {
+			// Defense in depth for the index-merge above. json.Valid ACCEPTS
+			// duplicate keys, which is why merged calls executed silently
+			// last-wins instead of erroring. A provider that supplies neither a
+			// usable index nor a changing id can still concatenate fragments;
+			// fail loudly here rather than run a call the model never made.
+			return nil, nil, fmt.Errorf("openai: tool call arguments for %s (id=%s) repeat key %q — two calls were likely merged by the provider stream", tc.Function.Name, tc.ID, dup)
 		}
 		msg.ToolCalls = append(msg.ToolCalls, tc)
 	}

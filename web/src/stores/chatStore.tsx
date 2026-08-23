@@ -148,8 +148,15 @@ export type ChatAction =
   | { type: "SET_ERROR"; sessionId: string; error: string | null }
   | { type: "APPEND_DELTA"; sessionId: string; delta: string }
   | { type: "LIVE_DELTA"; sessionId: string; kind: "thinking" | "text"; delta: string }
-  | { type: "LIVE_TOOL_START"; sessionId: string; tool: string; command?: string }
-  | { type: "LIVE_TOOL_RESULT"; sessionId: string; output: string }
+  | {
+      type: "LIVE_TOOL_START";
+      sessionId: string;
+      tool: string;
+      callId?: string;
+      command?: string;
+    }
+  | { type: "LIVE_TOOL_OUTPUT"; sessionId: string; callId?: string; chunk: string }
+  | { type: "LIVE_TOOL_RESULT"; sessionId: string; callId?: string; output: string }
   | { type: "LIVE_RESET"; sessionId: string }
   | { type: "LIVE_PERMISSION_CHECK"; sessionId: string; tool: string; model: string; active: boolean }
   | { type: "PERMISSION_REQUEST"; sessionId: string; permission: PermissionRequest }
@@ -193,6 +200,26 @@ function updateSession(
 ): ChatState {
   const current = state.sessions[sessionId] ?? emptySessionSlice;
   return { ...state, sessions: { ...state.sessions, [sessionId]: updater(current) } };
+}
+
+/** Locate the live tool part a streamed chunk or result belongs to.
+ *
+ *  With a callId the match is exact, which is what keeps concurrent tool calls
+ *  from writing into each other's bubbles. Without one (legacy events that
+ *  predate call-id threading) it falls back to the most recent tool still
+ *  awaiting output — correct for sequential calls, a guess for parallel ones.
+ *  Returns -1 when nothing matches. */
+function findPendingToolIndex(live: LivePart[], callId?: string): number {
+  if (callId) {
+    return live.findIndex(
+      (p) => p.kind === "tool" && p.callId === callId && p.output === undefined,
+    );
+  }
+  for (let i = live.length - 1; i >= 0; i--) {
+    const part = live[i];
+    if (part.kind === "tool" && part.output === undefined) return i;
+  }
+  return -1;
 }
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
@@ -271,20 +298,35 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case "LIVE_TOOL_START":
       return updateSession(state, action.sessionId, (s) => ({
         ...s,
-        live: [...s.live, { kind: "tool", tool: action.tool, command: action.command }],
+        live: [
+          ...s.live,
+          {
+            kind: "tool",
+            tool: action.tool,
+            callId: action.callId,
+            command: action.command,
+          },
+        ],
       }));
+    case "LIVE_TOOL_OUTPUT":
+      return updateSession(state, action.sessionId, (s) => {
+        const idx = findPendingToolIndex(s.live, action.callId);
+        if (idx < 0) return s;
+        const part = s.live[idx];
+        if (part.kind !== "tool") return s;
+        const live = [...s.live];
+        live[idx] = { ...part, stream: (part.stream ?? "") + action.chunk };
+        return { ...s, live };
+      });
     case "LIVE_TOOL_RESULT":
       return updateSession(state, action.sessionId, (s) => {
+        const idx = findPendingToolIndex(s.live, action.callId);
+        if (idx < 0) return s;
+        const part = s.live[idx];
+        if (part.kind !== "tool") return s;
         const live = [...s.live];
-        // Attach to the most recent tool part still awaiting its result.
-        for (let i = live.length - 1; i >= 0; i--) {
-          const part = live[i];
-          if (part.kind === "tool" && part.output === undefined) {
-            live[i] = { ...part, output: action.output };
-            return { ...s, live };
-          }
-        }
-        return s;
+        live[idx] = { ...part, output: action.output };
+        return { ...s, live };
       });
     case "LIVE_RESET":
       return updateSession(state, action.sessionId, (s) => ({ ...s, live: [] }));

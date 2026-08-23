@@ -1,5 +1,144 @@
 # TODO
 
+## Tool calls with duplicate argument keys executed silently (2026-08-23)
+
+Found by scanning on-disk `.ojsonl` session history while investigating the
+desktop hang, **not** by reproducing the hang. Two separate defects; only the
+first has confirmed on-disk instances.
+
+- [x] **Duplicate-key tool arguments were executed last-wins, silently**
+  (`duplicateTopLevelKey` in `internal/agent/client.go`). `json.Valid` — the only
+  argument check — **accepts** duplicate keys, and `encoding/json` resolves them
+  last-wins. A model that emits `{"path":"a.py","end_line":120,"path":"b.md"}`
+  therefore read `b.md`, silently discarding the rest of what it asked for, with
+  no error anywhere.
+  **Measured incidence: 60 of 59,041 tool calls in local session history**
+  (`read`, `bash`, `grep`, `task`, `task_status`), concentrated in a handful of
+  sessions. 58 repeat a *top-level* key; the remaining 2 repeat a key inside a
+  nested `multiedit` `edits[]` element and are deliberately **not** caught — see
+  `TestDuplicateTopLevelKey_OnlyInspectsTopLevel` for the reasoning.
+  These are model-emitted, not parser-assembled: each is a single valid object
+  with interleaved keys (`end_line` sits *between* the two `path` keys), whereas
+  a parser concatenation would produce `{…}{…}`, which does not parse at all.
+- [x] **`parseOpenAIChatCompletionsStream` could merge two parallel tool calls**
+  (`internal/agent/client.go`). Accumulation was keyed solely on
+  `tool_calls[i].index`, and an absent `index` unmarshals to `0`. A provider that
+  repeats or resets `index` across parallel calls would land both in one slot:
+  later `id`/`name` overwriting the earlier, argument fragments concatenated.
+  **Latent — no confirmed on-disk instances** (a concatenation would be
+  unparseable and none were found); fixed on inspection of the accumulator.
+  Fix: accumulate in arrival order; a delta bearing a **different** non-empty
+  `id` opens a new call even at the same index — compared against the id already
+  seen, so providers that echo one id per fragment stay a single call. Ordering
+  is `sort.SliceStable` by index, preserving the previous index ordering while
+  being able to express two calls at one index. Residual gap: a provider that
+  sends `id` only on a *later* fragment leaves the open call's id empty and will
+  not split — the duplicate-key check above is the net for that case.
+  Covered by `TestParseOpenAIChatCompletionsStream_{SplitsParallelCallsSharingAnIndex,RepeatedIDIsOneCall,RejectsDuplicateKeyArguments}`;
+  the over-split boundary was sabotage-verified.
+  This is the only *lazily* index-keyed tool accumulator. The Anthropic path
+  (`client.go:3350`) also keys blocks by index but creates them on the
+  protocol-mandated explicit `content_block_start` and **assigns** rather than
+  concatenating, so it cannot merge two calls.
+
+- [ ] **DECISION TO REVISIT: duplicate-key arguments are now fatal to the turn.**
+  Chosen deliberately, for consistency with the sibling "invalid tool call
+  arguments" error immediately above it, and because silently running a call the
+  model did not express is worse than a visible failure. But this **will** fire
+  on real traffic (~0.1% of tool calls, concentrated by model), where it
+  previously half-worked. The error also does not reach the model as a tool
+  error — it ends the turn — so the model cannot self-correct. If it proves
+  disruptive, the alternative is a sentinel error added to
+  `isRetryableLLMClientError` so the request is re-rolled.
+- [ ] **Neither defect explains the 22GB hang.** Both produce one executable
+  call; these are correctness bugs, not memory bugs. The hang item below stays
+  open and unproven.
+
+## Bash runaway-output memory guard + tool-output streaming (2026-08-23)
+
+Prompted by a report of the desktop chat hanging on a single tool call while
+memory climbed to ~22GB. Root cause is **still unproven** — see the open items.
+
+- [x] **Bash output is bounded while the command runs** (`internal/tool/exec.go`,
+  `internal/tool/bounded_buffer.go`): the pump copied a child's stdout/stderr into
+  an uncapped `bytes.Buffer` for the whole timeout window (up to 600s of arbitrary
+  output). `bashMaxOutputLength` (30000) is applied by `truncateOutput` only
+  *after* the command exits, so it never bounded the peak. Both sinks are now
+  `boundedBuffer` capped at `bashMaxRetainedBytes` (64MiB per stream, so 2x that
+  per command since stdout and stderr are separate), head-retained so
+  `truncateOutput` still shows the genuine start of the output. Dropped bytes are
+  reported via `appendRunawayNotice`, never silently discarded. `boundedBuffer.Write`
+  always reports full consumption because `io.Copy` aborts on a short write, which
+  would otherwise tear down the pump (and live streaming) at the cap. Covered by
+  `internal/tool/bounded_buffer_test.go` and `TestBashTool_BoundsRunawayOutput`.
+- [x] **Full-output retention decoupled from "is a stream wired"**
+  (`internal/tool/fulloutput_ctx.go`, `internal/agent/agent.go`,
+  `internal/tui/model.go`): `capAtMax` was derived from `emit == nil`, so wiring a
+  streaming sink silently disabled the 30000-char cap. That mattered because the
+  uncapped text reaches a UI only via `Message.DisplayContent`, which is `json:"-"`
+  and never serialized to the browser — so wiring `emit` on the SSE server would
+  have retained unbounded output for a consumer that structurally cannot read it.
+  Retention is now opt-in via `tool.WithFullOutputRetained` /
+  `Agent.RetainFullToolOutput`; the TUI opts in (unchanged behavior), the server
+  stays capped. Covered by `TestBashTool_StreamCapsWithoutRetainFlag`,
+  `TestExecuteToolCallCapsOutputByDefault`, `TestStreamStepOptsIntoFullToolOutput`.
+  **Note: this changes no observable behavior on its own** — it is a prerequisite
+  for streaming tool output to the desktop (below).
+
+- [x] **Tool output streams to the web/desktop UI.** `Agent.OnToolOutput` was
+  wired only in `internal/tui/model.go`, so a browser saw nothing between
+  `tool_start` and `tool_result` and a slow tool was indistinguishable from a hung
+  one. The server now wires it (`wireHeadlessAgentCallbacks`) through
+  `internal/server/tool_output_stream.go`, a **goroutine-free** coalescer: chunks
+  batch until ~100ms elapses or 8KiB accumulates, decided inline on the producing
+  goroutine with the time passed in. No ticker and no per-call timer — a leak
+  there is the exact failure shape under investigation. Per-call streaming is
+  capped at 256KiB (the shared bus buffer is 256 slots across every session and
+  panel) with a one-time notice, and the cap short-circuits before any buffering.
+  Unlike the TUI — which backpressures its single in-process consumer — the server
+  never blocks: a slow or vanished browser must not stall a running command, and
+  the authoritative content still arrives via `tool_result`. Buffers are released
+  when the result lands (`activeCalls()` returns to zero). New `tool_output` SSE
+  event; rendered by `ToolBlock` while pending.
+- [x] **`call_id` threaded through `tool_start` / `tool_output` / `tool_result`**
+  (server + the TUI's RC bridge), with `findPendingToolIndex` pairing on it in
+  `chatStore` and falling back to the old positional match only for events without
+  one. Covered by `internal/server/tool_events_test.go` and frontend tests that
+  were verified to fail when `call_id` is dropped.
+
+Deferred:
+
+- [ ] **Allocation measurement for the streaming path not done.** Wiring `emit`
+  moves bash onto the streaming branch (`exec.go` `emitWriter` → `safeEmit`),
+  adding a string allocation per chunk — roughly 32KiB of transient garbage per
+  pipe write — on the exact hot path under suspicion for the memory event. The
+  coalescer bounds what reaches the *bus*, not what the emit path allocates
+  upstream of it. Measure a high-volume command before/after before treating this
+  as memory-neutral.
+- [ ] **Elapsed-time indicator on `ToolBlock`** (`web/src/components/Chat/TurnParts.tsx`).
+  Client-only, zero server/bus cost. Streaming does **not** help when the stuck tool
+  produces no output — which "hang forever" most likely means — because the bubble
+  still just reads "running…". An elapsed timer is what makes a silent hang legible.
+- [ ] **Other unbounded single-call memory paths — found, not fixed.** The
+  reported symptom was *one* tool call, so these stay live suspects while the
+  diagnosis is open: `ReadTool.Execute` (`internal/tool/file.go`) calls
+  `os.ReadFile` with no `Stat` size check and then `strings.Split(string(content),
+  "\n")`, doubling a large file in memory before `maxReadLines` truncates at
+  format time — `read` is one of the most-invoked tools; `SearchTool`
+  (`internal/tool/search.go`) reads each matched file whole inside a
+  `filepath.Walk` and accumulates matches with no cap on the total; `imagegen.go`
+  uses `io.ReadAll(resp.Body)` without a `LimitReader` (`web.go` correctly does
+  use one). Mirror the `boundedBuffer` / `LimitReader` treatment if any of these
+  is implicated.
+- [ ] **22GB hang root cause still unproven.** The uncapped buffer above is the
+  leading candidate and is now fixed, but it was never desktop-specific, so it does
+  not by itself explain "TUI works fine". Next repro: confirm *which* OS process
+  holds the memory (Wails runs a separate WebKit renderer), then capture
+  `GET /debug/pprof/heap?debug=1` with the bearer token (`internal/server/server.go`
+  registers it; token at `cmd/ocode-desktop/main.go`). Discriminating signal: are
+  retained bytes under `bytes.Buffer.grow` beneath `io.Copy`? Blocked on the
+  durable-desktop-log gap in "Mid-turn failure transcript loss — 2026-08-21".
+
 ## `/autocontinue` — general auto-resume (2026-08-23)
 
 Implemented, general-purpose (fires for whatever command/task is in flight, not scoped to `/goal`), across TUI and `/rc` (web) turns:
@@ -241,9 +380,11 @@ user-submit), and the web app (`connectSessionMirror`, store `live` buffer,
 - **Optimistic echo removed.** Web-typed messages now render only after the
   round-trip `user_message` broadcast — invisible on localhost, a perceptible
   delay over Tailscale. Decide whether to re-add optimistic-add with dedup.
-- **`tool_result` carries no call-id** (`Tool: "tool"`), so concurrent tool
-  results can mis-pair in the *live* view; the `turn_done` snapshot heals it.
-  Thread the tool name/call-id through `tool_result` for correct live pairing.
+- ~~**`tool_result` carries no call-id**~~ — FIXED 2026-08-23. `tool_start`,
+  `tool_output`, and `tool_result` all carry `call_id` (`ToolCall.ID` /
+  `Message.ToolID`), and the store pairs on it via `findPendingToolIndex`,
+  falling back to the old positional match only for events without one. See
+  "Bash runaway-output memory guard + tool-output streaming".
 - **`SET_STREAMING: true` + autoscroll fire on every token delta** — fine on
   localhost, potentially janky on long turns over a network. Throttle if needed.
 - **Browser "Stop" is local-only** — during a TUI-originated turn it re-locks the

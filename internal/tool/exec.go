@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,6 +17,21 @@ import (
 
 const bashDefaultTimeout = 300 * time.Second
 const bashMaxOutputLength = 30000
+
+// bashMaxRetainedBytes bounds how much output is held in memory WHILE a command
+// runs. It applies to stdout and stderr independently, so the ceiling is 2x this
+// per command — and commands in a parallel tool batch each carry their own pair.
+//
+// bashMaxOutputLength is a display cap applied by truncateOutput after the
+// command exits, so it never bounds the peak: until then the sink grows for as
+// long as the command runs, which the timeout allows to be up to 600s of
+// arbitrary output.
+//
+// This is a runaway guard, not a display limit — it sits far above any
+// legitimate command's output so normal use never reaches it, and only stops an
+// accidental infinite loop or a `find / | xargs cat` from growing the heap
+// without limit.
+const bashMaxRetainedBytes = 64 << 20 // 64MiB
 
 // BashRecorder is the seam between BashTool and the changes registry.
 // The tool calls Pre() before executing a command and Post(command, exitCode)
@@ -173,14 +187,17 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 		emit(string(b))
 	}
 
-	var stdout, stderr bytes.Buffer
+	// Bounded so a runaway command cannot grow the heap for the whole timeout
+	// window; see bashMaxRetainedBytes.
+	stdout := newBoundedBuffer(bashMaxRetainedBytes)
+	stderr := newBoundedBuffer(bashMaxRetainedBytes)
 	var proc *Process
 	if t.Procs == nil {
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
 		if emit != nil {
-			cmd.Stdout = io.MultiWriter(&stdout, emitWriter{emit: safeEmit})
-			cmd.Stderr = io.MultiWriter(&stderr, emitWriter{emit: safeEmit})
+			cmd.Stdout = io.MultiWriter(stdout, emitWriter{emit: safeEmit})
+			cmd.Stderr = io.MultiWriter(stderr, emitWriter{emit: safeEmit})
 		}
 	}
 
@@ -218,13 +235,13 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 			return fmt.Sprintf("Command failed: %v", regErr), nil
 		}
 
-		// Pump stdout/stderr concurrently into the shared bytes.Buffers AND
+		// Pump stdout/stderr concurrently into the shared bounded buffers AND
 		// the Process output ring. The WaitGroup guarantees both pumps have
 		// returned before the foreground branch reads the buffers, otherwise
 		// io.Copy could still be writing after cmd.Wait() unblocks — a data
 		// race that the -race detector flags.
 		var pumpWg sync.WaitGroup
-		pump := func(dst *bytes.Buffer, rc io.Reader) {
+		pump := func(dst *boundedBuffer, rc io.Reader) {
 			defer pumpWg.Done()
 			if emit != nil {
 				_, _ = io.Copy(io.MultiWriter(dst, processWriter{p: proc}, emitWriter{emit: safeEmit}), rc)
@@ -233,8 +250,8 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 			}
 		}
 		pumpWg.Add(2)
-		go pump(&stdout, stdoutPipe)
-		go pump(&stderr, stderrPipe)
+		go pump(stdout, stdoutPipe)
+		go pump(stderr, stderrPipe)
 
 		go func() {
 			waitState.Store(cmd.Wait())
@@ -247,7 +264,7 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 			// kernel-buffered tail of stdout/stderr may still be in flight.
 			pumpWg.Wait()
 			err := waitState.Result()
-			res := joinStdoutStderr(stdout.String(), stderr.String())
+			res := appendRunawayNotice(joinStdoutStderr(stdout.String(), stderr.String()), stdout.Dropped()+stderr.Dropped())
 			// finalizeManagedProcess is the sole place that marks the
 			// supervisor exited/killed — the inline MarkExited/MarkKilled
 			// block that used to live here duplicated that work.
@@ -256,7 +273,7 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 			if t.Recorder != nil {
 				t.Recorder.Post(params.Command, commandExitCode(err))
 			}
-			return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, emit == nil), nil
+			return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, !FullOutputRetained(ctx)), nil
 		case <-proc.bgRequestCh:
 			streaming.Store(false)
 			shouldCancel = false
@@ -295,17 +312,17 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 			if t.Recorder != nil {
 				t.Recorder.Post(params.Command, 124)
 			}
-			return finalizeExecResult(res, ctx.Err(), true, timeout, emit == nil), nil
+			return finalizeExecResult(res, ctx.Err(), true, timeout, !FullOutputRetained(ctx)), nil
 		}
 	}
 
 	err := cmd.Run()
-	res := joinStdoutStderr(stdout.String(), stderr.String())
+	res := appendRunawayNotice(joinStdoutStderr(stdout.String(), stderr.String()), stdout.Dropped()+stderr.Dropped())
 	registerBashWrites(ctx, tcID, backedUpPaths)
 	if t.Recorder != nil {
 		t.Recorder.Post(params.Command, commandExitCode(err))
 	}
-	return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, emit == nil), nil
+	return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, !FullOutputRetained(ctx)), nil
 }
 
 // registerBashWrites records backed-up paths as written in the snapshot
@@ -345,11 +362,16 @@ func joinStdoutStderr(stdoutStr, stderrStr string) string {
 
 // finalizeExecResult formats the user-facing output string for a finished
 // shell command, identical for the registry-managed and registry-less paths.
-// When capAtMax is false (i.e. the command streamed its output live), the
-// 30000-char hard cap is skipped so the canonical result keeps the full output
-// that was already shown to the user; the agent truncates for the LLM prompt
-// separately via TruncateToolResult, and the full text is carried to the UI
-// through Message.DisplayContent.
+// When capAtMax is false, the 30000-char hard cap is skipped so the canonical
+// result keeps the full output that was already shown to the user; the agent
+// truncates for the LLM prompt separately via TruncateToolResult, and the full
+// text is carried to the UI through Message.DisplayContent.
+//
+// capAtMax is driven by tool.FullOutputRetained(ctx), NOT by whether a
+// streaming sink was wired. Streaming and full-output retention are separate
+// questions: the SSE server streams chunks for live progress but receives the
+// authoritative result through a separately-truncated frame, and cannot read
+// DisplayContent at all (json:"-"). See fulloutput_ctx.go.
 func finalizeExecResult(res string, err error, timedOut bool, timeout time.Duration, capAtMax bool) string {
 	applyCap := func(s string) string {
 		if capAtMax {
@@ -371,6 +393,19 @@ func finalizeExecResult(res string, err error, timedOut bool, timeout time.Durat
 		return "Command executed successfully (no output)."
 	}
 	return applyCap(res)
+}
+
+// appendRunawayNotice records that the runaway output guard discarded bytes, so
+// an incomplete result is never presented as a complete one. When the result is
+// additionally capped by truncateOutput the notice is trimmed away with the
+// rest of the tail, but that path carries its own truncation notice already.
+func appendRunawayNotice(res string, dropped int) string {
+	if dropped <= 0 {
+		return res
+	}
+	return res + fmt.Sprintf(
+		"\n\n... [output truncated: %d bytes dropped past the %d-byte runaway output guard]",
+		dropped, bashMaxRetainedBytes)
 }
 
 func truncateOutput(s string) string {

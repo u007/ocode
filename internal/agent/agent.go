@@ -304,6 +304,20 @@ type Agent struct {
 	// Execute path.
 	OnToolOutput func(toolCallID, chunk string)
 
+	// RetainFullToolOutput declares that this agent's UI renders the streamed
+	// tool text AS the transcript and therefore needs the canonical tool result
+	// to keep its FULL, uncapped output (read back via Message.DisplayContent).
+	//
+	// Deliberately separate from "is OnToolOutput wired". The TUI streams and
+	// keeps the text on screen, so it opts in. The HTTP/SSE server streams for
+	// live progress only: the browser gets the authoritative result through a
+	// separately-truncated tool_result frame and cannot read DisplayContent at
+	// all (json:"-"), so retaining the uncapped text there is unbounded memory
+	// growth on the hot bash path for a consumer that cannot read it.
+	//
+	// Default false keeps tool output bounded; retention is opt-in.
+	RetainFullToolOutput bool
+
 	// OnNoteBusEntry, if set, is called on the bus owner goroutine
 	// each time a new entry is appended to the shared notes bus
 	// (the group bus created by maybeBuildGroupBus). The entry has
@@ -3854,6 +3868,10 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	// never reach the changes tab. An empty workDir is harmless: confinedPath
 	// falls back to os.Getwd().
 	toolCtx = tool.WithWorkDir(toolCtx, a.workDir)
+	// Declare whether this agent's UI keeps the streamed text as the transcript.
+	// Tools that would otherwise return an unbounded result (bash) cap their
+	// output unless this is set. See Agent.RetainFullToolOutput.
+	toolCtx = tool.WithFullOutputRetained(toolCtx, a.RetainFullToolOutput)
 
 	var result string
 	var err error

@@ -242,3 +242,49 @@ describe("reconcileOpenSessions", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("bad"), expect.any(Error));
   });
 });
+
+describe("tool output streaming events", () => {
+  it("routes tool_output to the call that produced it, not the newest bubble", () => {
+    const { router, getState } = makeRouter();
+    // Two calls in flight. The positional fallback attaches to the LAST pending
+    // tool, so output for the first one is the case that catches a lost call_id.
+    routeBusEnvelope(
+      env("tool_start", { data: { tool: "bash", call_id: "c1", command: "ls" } }),
+      router,
+    );
+    routeBusEnvelope(
+      env("tool_start", { data: { tool: "read", call_id: "c2" } }),
+      router,
+    );
+    routeBusEnvelope(
+      env("tool_output", { data: { call_id: "c1", chunk: "partial…" } }),
+      router,
+    );
+
+    const live = getState().sessions["s1"].live;
+    expect(live[0]).toMatchObject({ callId: "c1", stream: "partial…" });
+    expect(live[1]).toMatchObject({ callId: "c2" });
+    expect((live[1] as { stream?: string }).stream).toBeUndefined();
+  });
+
+  it("carries call_id from tool_start and tool_result through to the store", () => {
+    const { router, getState } = makeRouter();
+    routeBusEnvelope(
+      env("tool_start", { data: { tool: "bash", call_id: "c1" } }),
+      router,
+    );
+    routeBusEnvelope(
+      env("tool_start", { data: { tool: "read", call_id: "c2" } }),
+      router,
+    );
+    // Result for the OLDER call — the fallback would misfile this on c2.
+    routeBusEnvelope(
+      env("tool_result", { data: { call_id: "c1", output: "done" } }),
+      router,
+    );
+
+    const live = getState().sessions["s1"].live;
+    expect(live[0]).toMatchObject({ callId: "c1", output: "done" });
+    expect((live[1] as { output?: string }).output).toBeUndefined();
+  });
+});

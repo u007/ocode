@@ -27,14 +27,34 @@ type TextDelta struct {
 }
 
 type ToolStartEvent struct {
-	Tool    string `json:"tool"`
+	Tool string `json:"tool"`
+	// CallID is the model's own tool-call id (agent.ToolCall.ID), echoed back
+	// on the matching ToolResultEvent. It lets a UI attach a result to the
+	// bubble that started it instead of guessing positionally, which mis-pairs
+	// whenever a turn dispatches tool calls in parallel.
+	CallID  string `json:"call_id,omitempty"`
 	Command string `json:"command,omitempty"`
 	Content string `json:"content,omitempty"`
 }
 
 type ToolResultEvent struct {
-	Tool   string `json:"tool"`
+	Tool string `json:"tool"`
+	// CallID matches the ToolStartEvent that opened this call
+	// (agent.Message.ToolID). See ToolStartEvent.CallID.
+	CallID string `json:"call_id,omitempty"`
 	Output string `json:"output"`
+}
+
+// ToolOutputEvent carries incremental output produced by a running tool, so a
+// browser can watch a long command progress instead of staring at a bubble that
+// reads "running…" until the call completes.
+//
+// Chunks are coalesced and capped per call (see toolOutputCoalescer) and may be
+// dropped under bus backpressure: this is a progress signal, not the
+// transcript. The authoritative content always arrives via ToolResultEvent.
+type ToolOutputEvent struct {
+	CallID string `json:"call_id"`
+	Chunk  string `json:"chunk"`
 }
 
 type ToolErrorEvent struct {
@@ -205,6 +225,7 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 			for _, tc := range m.ToolCalls {
 				sendSSE(w, flusher, "tool_start", ToolStartEvent{
 					Tool:    tc.Function.Name,
+					CallID:  tc.ID,
 					Command: tc.Function.Arguments,
 				})
 			}
@@ -212,6 +233,7 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		if m.Role == "tool" {
 			sendSSE(w, flusher, "tool_result", ToolResultEvent{
 				Tool:   "tool",
+				CallID: m.ToolID,
 				Output: m.Content,
 			})
 		}

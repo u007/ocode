@@ -372,6 +372,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
               key={`live-${i}`}
               tool={part.tool}
               command={part.command}
+              stream={part.stream}
               output={part.output}
             />
           );

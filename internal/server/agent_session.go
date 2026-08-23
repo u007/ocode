@@ -339,6 +339,10 @@ func (h *Handler) publishTurnStarted(sessionID string) {
 // bus both get it; when an RC bridge is attached the mirror is fed by the
 // bridge, so the bus publish is direct.
 func (h *Handler) publishTurnDone(sessionID, model string) {
+	// Release any tool-output buffers whose tool_result never arrived (the
+	// agent's tool loop returns early on mid-batch cancellation), so nothing is
+	// retained past the turn that created it.
+	h.toolOutput.dropSession(sessionID)
 	ev := DoneEvent{SessionID: sessionID, Model: model}
 	if h.RCBridge() == nil {
 		h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "turn_done", Data: ev})
@@ -353,6 +357,8 @@ func (h *Handler) publishTurnDone(sessionID, model string) {
 // failing stage." In headless mode the legacy mirror also receives an "error"
 // frame (its existing streaming-clearing signal).
 func (h *Handler) publishTurnError(sessionID string, err error, stage string) {
+	// See publishTurnDone: a failed turn must release its buffers too.
+	h.toolOutput.dropSession(sessionID)
 	data := map[string]any{"session_id": sessionID, "error": err.Error()}
 	if stage != "" {
 		data["stage"] = stage

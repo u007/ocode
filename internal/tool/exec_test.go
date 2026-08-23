@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"runtime"
@@ -130,11 +131,16 @@ func TestBashTool_RejectsEmptyCommand(t *testing.T) {
 }
 
 // TestBashTool_StreamKeepsFullOutput verifies the chunked-tool-result fix:
-// when the command streams its output live (emit != nil), the canonical
-// returned result is NOT capped at bashMaxOutputLength (30000), so the full
-// output is carried to the UI. The synchronous Execute path still caps at
-// 30000. Without this, a large streamed result would be clobbered by the cap
-// on completion and the live chunks would appear "not applied".
+// a consumer that renders the live stream AS the transcript (the TUI) opts in
+// via WithFullOutputRetained, and its canonical result is NOT capped at
+// bashMaxOutputLength (30000), so the full output is carried to the UI.
+// The synchronous Execute path still caps at 30000. Without this, a large
+// streamed result would be clobbered by the cap on completion and the live
+// chunks would appear "not applied".
+//
+// Opting in used to be implicit in "emit != nil". It is now explicit, so that
+// streaming for live progress only (the SSE server) stays capped — see
+// TestBashTool_StreamCapsWithoutRetainFlag.
 func TestBashTool_StreamKeepsFullOutput(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses bash -c")
@@ -148,13 +154,14 @@ func TestBashTool_StreamKeepsFullOutput(t *testing.T) {
 
 	var mu sync.Mutex
 	var chunks []string
-	streamed, err := bt.ExecuteStream(args, func(chunk string) {
+	ctx := WithFullOutputRetained(context.Background(), true)
+	streamed, err := bt.ExecuteStreamCtx(ctx, args, func(chunk string) {
 		mu.Lock()
 		chunks = append(chunks, chunk)
 		mu.Unlock()
 	})
 	if err != nil {
-		t.Fatalf("ExecuteStream returned error: %v", err)
+		t.Fatalf("ExecuteStreamCtx returned error: %v", err)
 	}
 	// The live-streamed path must keep the FULL output (no 30000 cap), so it
 	// must NOT carry the truncation notice and must exceed the cap.
@@ -180,5 +187,98 @@ func TestBashTool_StreamKeepsFullOutput(t *testing.T) {
 	}
 	if len(capped) != bashMaxOutputLength {
 		t.Fatalf("expected capped content length %d, got %d", bashMaxOutputLength, len(capped))
+	}
+}
+
+// TestBashTool_StreamCapsWithoutRetainFlag is the memory-retention guard for
+// the server/desktop path. Wiring a streaming sink (emit != nil) must NOT by
+// itself disable the bashMaxOutputLength cap: only an explicit
+// WithFullOutputRetained(ctx, true) may do that.
+//
+// The distinction matters because the full, uncapped text is carried to a UI
+// solely via Message.DisplayContent, which is json:"-" and therefore never
+// serialized to the browser. A server that streams but does not opt in would
+// retain an unbounded result for a consumer that structurally cannot receive
+// it — pure memory growth on the hot bash path.
+func TestBashTool_StreamCapsWithoutRetainFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses bash -c")
+	}
+	procs := NewProcessRegistry()
+	bt := BashTool{Procs: procs}
+
+	// Generate ~50000 chars — well above the 30000 cap.
+	cmd := `yes "0123456789ABCDEFGHIJ" | head -n 2000`
+	args, _ := json.Marshal(map[string]interface{}{"command": cmd})
+
+	var mu sync.Mutex
+	var chunks []string
+	// Streaming sink wired, but the context does NOT opt into full retention.
+	out, err := bt.ExecuteStreamCtx(context.Background(), args, func(chunk string) {
+		mu.Lock()
+		chunks = append(chunks, chunk)
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStreamCtx returned error: %v", err)
+	}
+
+	// Chunks must still stream live — capping the canonical result must not
+	// disable streaming.
+	mu.Lock()
+	streamed := strings.Join(chunks, "")
+	mu.Unlock()
+	if streamed == "" {
+		t.Fatal("expected live chunks to stream even when the result is capped, got none")
+	}
+
+	if !strings.Contains(out, "exceeds 30000 chars") {
+		t.Fatalf("result must be capped without the retain flag, got no truncation notice; len=%d", len(out))
+	}
+	capped := out
+	if idx := strings.Index(out, "\n\n... [output truncated"); idx >= 0 {
+		capped = out[:idx]
+	}
+	if len(capped) != bashMaxOutputLength {
+		t.Fatalf("expected capped content length %d, got %d", bashMaxOutputLength, len(capped))
+	}
+}
+
+// TestBashTool_BoundsRunawayOutput is the memory guard for the reported hang:
+// a single command producing more than bashMaxRetainedBytes must not grow the
+// in-memory sink without limit. The pre-existing 30000-char cap does not help
+// here — truncateOutput runs only after the command exits, so it never bounds
+// the peak while a runaway command is still writing.
+//
+// Uses the retain-full-output path (the TUI's), because that is the path with
+// no other cap in front of it: without the guard this result would be the full
+// multi-megabyte stream.
+func TestBashTool_BoundsRunawayOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses bash -c yes/head pipeline")
+	}
+	procs := NewProcessRegistry()
+	bt := BashTool{Procs: procs}
+
+	// Emit ~2MB past the cap.
+	overshoot := bashMaxRetainedBytes + 2<<20
+	cmd := fmt.Sprintf(`yes "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" | head -c %d`, overshoot)
+	args, _ := json.Marshal(map[string]interface{}{"command": cmd})
+
+	ctx := WithFullOutputRetained(context.Background(), true)
+	out, err := bt.ExecuteStreamCtx(ctx, args, nil)
+	if err != nil {
+		t.Fatalf("ExecuteStreamCtx returned error: %v", err)
+	}
+
+	// Retention must be bounded by the guard, not by the command's volume.
+	if len(out) > bashMaxRetainedBytes+2048 {
+		t.Fatalf("retained output must be bounded near the %d-byte guard, got %d",
+			bashMaxRetainedBytes, len(out))
+	}
+	// Dropping bytes must be reported, never silent.
+	if !strings.Contains(out, "runaway output guard") {
+		t.Fatalf("expected a truncation notice naming the runaway guard; got tail %q",
+			out[max(0, len(out)-200):])
 	}
 }

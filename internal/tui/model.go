@@ -4140,12 +4140,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Relay streaming events to the /rc web UI if active
 			if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
 				select {
-				case m.pendingRC.StreamCh <- server.SSEEvent{Event: "tool_result", Data: server.ToolResultEvent{Tool: "tool", Output: msg.msg.Content}}:
+				case m.pendingRC.StreamCh <- server.SSEEvent{Event: "tool_result", Data: server.ToolResultEvent{Tool: "tool", CallID: msg.msg.ToolID, Output: msg.msg.Content}}:
 				default:
 				}
 			}
 			// Mirror tool result to all connected /rc web clients.
-			m.broadcastRC("tool_result", server.ToolResultEvent{Tool: "tool", Output: msg.msg.Content})
+			m.broadcastRC("tool_result", server.ToolResultEvent{Tool: "tool", CallID: msg.msg.ToolID, Output: msg.msg.Content})
 		} else if msg.msg.Role == "assistant" {
 			m.appendAgentMessage(msg.msg)
 			if m.activeTab != tabChat {
@@ -4155,14 +4155,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Mirror tool calls to all connected /rc web clients (final text is
 			// already mirrored live via text deltas + the turn snapshot).
 			for _, tc := range msg.msg.ToolCalls {
-				m.broadcastRC("tool_start", server.ToolStartEvent{Tool: tc.Function.Name, Command: tc.Function.Arguments})
+				m.broadcastRC("tool_start", server.ToolStartEvent{Tool: tc.Function.Name, CallID: tc.ID, Command: tc.Function.Arguments})
 			}
 			// Relay streaming events to the /rc web UI if active
 			if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
 				if len(msg.msg.ToolCalls) > 0 {
 					for _, tc := range msg.msg.ToolCalls {
 						select {
-						case m.pendingRC.StreamCh <- server.SSEEvent{Event: "tool_start", Data: server.ToolStartEvent{Tool: tc.Function.Name, Command: tc.Function.Arguments}}:
+						case m.pendingRC.StreamCh <- server.SSEEvent{Event: "tool_start", Data: server.ToolStartEvent{Tool: tc.Function.Name, CallID: tc.ID, Command: tc.Function.Arguments}}:
 						default:
 						}
 					}
@@ -13400,6 +13400,7 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 			a.OnMDIndexing = nil
 			a.OnToolOutput = nil
 			a.OnNoteBusEntry = nil
+			a.RetainFullToolOutput = false
 		}()
 
 		// Keep delta streaming best-effort so a burst of reasoning tokens can
@@ -13419,6 +13420,12 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 				atomic.AddUint64(&m.deltaDrops, 1)
 			}
 		}
+		// The TUI renders streamed tool output AS the transcript and reads the
+		// full text back from Message.DisplayContent, so its tool results must
+		// keep their full output instead of being capped at 30000 chars.
+		// Retention is opt-in (see Agent.RetainFullToolOutput) so consumers that
+		// only stream for live progress — the SSE server — stay bounded.
+		a.RetainFullToolOutput = true
 		// Stream incremental tool output (e.g. live bash stdout/stderr) to the
 		// same delta channel so waitStreamEvent delivers it through the normal
 		// stream path and the TUI can render it live under the tool call.

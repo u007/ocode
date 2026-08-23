@@ -316,3 +316,111 @@ describe("chatStore Part 05 turn/status state", () => {
     expect(turn.turnStalled).toBe(false);
   });
 });
+
+describe("live tool output streaming", () => {
+  it("LIVE_TOOL_OUTPUT appends chunks to the tool part with the matching callId", () => {
+    let state = initialState;
+    state = chatReducer(state, {
+      type: "LIVE_TOOL_START",
+      sessionId: "s",
+      tool: "bash",
+      callId: "call-1",
+      command: "npm test",
+    });
+    state = chatReducer(state, {
+      type: "LIVE_TOOL_OUTPUT",
+      sessionId: "s",
+      callId: "call-1",
+      chunk: "running tests\n",
+    });
+    state = chatReducer(state, {
+      type: "LIVE_TOOL_OUTPUT",
+      sessionId: "s",
+      callId: "call-1",
+      chunk: "all passed\n",
+    });
+
+    const part = getSessionSlice(state, "s").live[0];
+    expect(part).toMatchObject({
+      kind: "tool",
+      callId: "call-1",
+      stream: "running tests\nall passed\n",
+    });
+    // Still pending: a stream is progress, not the authoritative result.
+    expect((part as { output?: string }).output).toBeUndefined();
+  });
+
+  it("routes concurrent tool streams to their own bubbles", () => {
+    let state = initialState;
+    for (const [tool, callId] of [
+      ["bash", "call-a"],
+      ["read", "call-b"],
+    ]) {
+      state = chatReducer(state, {
+        type: "LIVE_TOOL_START",
+        sessionId: "s",
+        tool,
+        callId,
+      });
+    }
+    state = chatReducer(state, {
+      type: "LIVE_TOOL_OUTPUT",
+      sessionId: "s",
+      callId: "call-b",
+      chunk: "file contents",
+    });
+
+    const live = getSessionSlice(state, "s").live;
+    expect((live[0] as { stream?: string }).stream).toBeUndefined();
+    expect((live[1] as { stream?: string }).stream).toBe("file contents");
+  });
+
+  it("LIVE_TOOL_RESULT pairs by callId even when results arrive out of order", () => {
+    let state = initialState;
+    for (const [tool, callId] of [
+      ["bash", "call-a"],
+      ["read", "call-b"],
+    ]) {
+      state = chatReducer(state, {
+        type: "LIVE_TOOL_START",
+        sessionId: "s",
+        tool,
+        callId,
+      });
+    }
+    // Second call finishes first — the positional heuristic would mis-pair.
+    state = chatReducer(state, {
+      type: "LIVE_TOOL_RESULT",
+      sessionId: "s",
+      callId: "call-b",
+      output: "b output",
+    });
+    state = chatReducer(state, {
+      type: "LIVE_TOOL_RESULT",
+      sessionId: "s",
+      callId: "call-a",
+      output: "a output",
+    });
+
+    const live = getSessionSlice(state, "s").live;
+    expect(live[0]).toMatchObject({ callId: "call-a", output: "a output" });
+    expect(live[1]).toMatchObject({ callId: "call-b", output: "b output" });
+  });
+
+  it("still pairs a result that carries no callId (legacy positional path)", () => {
+    let state = initialState;
+    state = chatReducer(state, {
+      type: "LIVE_TOOL_START",
+      sessionId: "s",
+      tool: "bash",
+    });
+    state = chatReducer(state, {
+      type: "LIVE_TOOL_RESULT",
+      sessionId: "s",
+      output: "legacy output",
+    });
+    expect(getSessionSlice(state, "s").live[0]).toMatchObject({
+      output: "legacy output",
+    });
+  });
+});

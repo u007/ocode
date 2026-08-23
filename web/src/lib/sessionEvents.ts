@@ -40,6 +40,7 @@ const SESSION_SCOPED_EVENTS = new Set([
   "thinking",
   "text",
   "tool_start",
+  "tool_output",
   "tool_result",
   "turn_started",
   "turn_heartbeat",
@@ -247,14 +248,24 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
           type: "LIVE_TOOL_START",
           sessionId,
           tool: (data as { tool: string }).tool,
+          callId: (data as { call_id?: string }).call_id,
           command: (data as { command?: string }).command,
         });
         r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
+        return;
+      case "tool_output":
+        r.dispatch({
+          type: "LIVE_TOOL_OUTPUT",
+          sessionId,
+          callId: (data as { call_id?: string }).call_id,
+          chunk: (data as { chunk: string }).chunk,
+        });
         return;
       case "tool_result":
         r.dispatch({
           type: "LIVE_TOOL_RESULT",
           sessionId,
+          callId: (data as { call_id?: string }).call_id,
           output: (data as { output: string }).output,
         });
         return;

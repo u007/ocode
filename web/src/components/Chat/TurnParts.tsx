@@ -107,11 +107,15 @@ export function ToolBlock({
   tool,
   command,
   output,
+  stream,
   highlight = "",
 }: {
   tool: string;
   command?: string;
   output?: string;
+  /** Incremental output while the tool is still running. Shown only until the
+   *  authoritative `output` arrives, which then replaces it. */
+  stream?: string;
   highlight?: string;
 }) {
   const displayOutput =
@@ -149,6 +153,13 @@ export function ToolBlock({
                   <HighlightedCode code={command} lang="json" />
                 )}
               </pre>
+            )}
+            {pending && stream && (
+              <div className="rounded bg-zinc-900/70 p-2">
+                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-zinc-400">
+                  {stream.split("\n").slice(-TOOL_OUTPUT_PREVIEW_LINES).join("\n")}
+                </pre>
+              </div>
             )}
             {output !== undefined && output !== "" && (
               <div className="rounded bg-zinc-900/70 p-2">

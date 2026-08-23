@@ -161,3 +161,64 @@ func TestExecuteToolCallStreamingCallbackSnapshotSurvivesNilFlip(t *testing.T) {
 		t.Fatal("timed out waiting for streamed callback")
 	}
 }
+
+// TestExecuteToolCallCapsOutputByDefault is the memory-retention guard at the
+// agent boundary. Wiring OnToolOutput (live progress) must NOT by itself
+// disable the 30000-char cap on the canonical result — only an explicit
+// Agent.RetainFullToolOutput may.
+//
+// The SSE server streams for progress but delivers the authoritative result
+// through a separately-truncated tool_result frame, and cannot read
+// DisplayContent at all (json:"-"). Retaining the uncapped text there would be
+// unbounded memory growth on the hot bash path for a consumer that
+// structurally cannot read it.
+func TestExecuteToolCallCapsOutputByDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses bash -c")
+	}
+	a := &Agent{
+		tools: map[string]tool.Tool{"bash": tool.BashTool{}},
+	}
+	// Streaming sink wired, but retention NOT opted into (the server's shape).
+	a.OnToolOutput = func(string, string) {}
+
+	// ~42000 chars — well above the 30000 cap.
+	cmd := `yes "0123456789ABCDEFGHIJ" | head -n 2000`
+	args, _ := json.Marshal(map[string]interface{}{"command": cmd})
+
+	res, err := a.executeToolCall("bash", json.RawMessage(args), nil, "call-cap")
+	if err != nil {
+		t.Fatalf("executeToolCall returned error: %v", err)
+	}
+	if !strings.Contains(res, "exceeds 30000 chars") {
+		t.Fatalf("result must be capped by default, got no truncation notice; len=%d", len(res))
+	}
+}
+
+// TestExecuteToolCallRetainsFullOutputWhenOptedIn is the opt-in counterpart:
+// the TUI renders the streamed text as the transcript, so it sets
+// RetainFullToolOutput and keeps the uncapped result.
+func TestExecuteToolCallRetainsFullOutputWhenOptedIn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses bash -c")
+	}
+	a := &Agent{
+		tools:                map[string]tool.Tool{"bash": tool.BashTool{}},
+		RetainFullToolOutput: true,
+	}
+	a.OnToolOutput = func(string, string) {}
+
+	cmd := `yes "0123456789ABCDEFGHIJ" | head -n 2000`
+	args, _ := json.Marshal(map[string]interface{}{"command": cmd})
+
+	res, err := a.executeToolCall("bash", json.RawMessage(args), nil, "call-retain")
+	if err != nil {
+		t.Fatalf("executeToolCall returned error: %v", err)
+	}
+	if strings.Contains(res, "exceeds 30000 chars") {
+		t.Fatalf("opted-in result must not be capped, but got truncation notice; len=%d", len(res))
+	}
+	if len(res) <= 30000 {
+		t.Fatalf("expected opted-in result to exceed the 30000 cap, got %d", len(res))
+	}
+}

@@ -86,6 +86,11 @@ type Handler struct {
 	headlessSubs map[chan SSEEvent]struct{}
 	headlessMu   sync.Mutex
 
+	// toolOutput batches incremental tool output into tool_output events.
+	// Keyed by session+call so concurrent tool calls stay independent; entries
+	// are released when their tool_result arrives.
+	toolOutput *toolOutputCoalescer
+
 	// turnMu guards turnLocks, the per-session turn serialization mutexes
 	// (Part 03 persist-then-202 / async bootstrap). Turns on different
 	// sessions run in parallel; turns on one session are strictly ordered.
@@ -254,6 +259,7 @@ func NewHandler() *Handler {
 		tabsStore:         tabsStore,
 		monaco:            monacoStore,
 		headlessSubs:      make(map[chan SSEEvent]struct{}),
+		toolOutput:        newToolOutputCoalescer(),
 		mcpCache:          newMCPCache(),
 		titleGen:          newTitleGenState(),
 		bus:               NewEventBus(),
@@ -452,6 +458,26 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 			Data:      TextDelta{Delta: text},
 		})
 	}
+	// Stream incremental tool output (e.g. live bash stdout/stderr) so a long
+	// command shows progress instead of a bubble stuck on "running…".
+	//
+	// Unlike the TUI — which backpressures its single in-process consumer
+	// rather than lose transcript text — this must never block: the producer is
+	// the tool's own output pump, and a slow or vanished browser must not be
+	// able to stall a running command. Chunks are coalesced, capped per call,
+	// and dropped on bus backpressure; the authoritative content still arrives
+	// via tool_result.
+	ag.OnToolOutput = func(toolCallID, chunk string) {
+		payload, flush := h.toolOutput.add(sessionID+"\x00"+toolCallID, chunk, time.Now())
+		if !flush {
+			return
+		}
+		h.broadcastEvent(SSEEvent{
+			SessionID: sessionID,
+			Event:     "tool_output",
+			Data:      ToolOutputEvent{CallID: toolCallID, Chunk: payload},
+		})
+	}
 	ag.OnPermissionCheck = func(toolName, modelLabel string, active bool) {
 		h.broadcastEvent(SSEEvent{
 			SessionID: sessionID,
@@ -480,16 +506,27 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 					Event:     "tool_start",
 					Data: ToolStartEvent{
 						Tool:    tc.Function.Name,
+						CallID:  tc.ID,
 						Command: tc.Function.Arguments,
 					},
 				})
 			}
 		}
 		if m.Role == "tool" {
+			// Flush whatever the call buffered below the thresholds and release
+			// its state, so a short command's tail is not stranded and no
+			// per-call buffer outlives the call.
+			if tail, ok := h.toolOutput.finish(sessionID + "\x00" + m.ToolID); ok {
+				h.broadcastEvent(SSEEvent{
+					SessionID: sessionID,
+					Event:     "tool_output",
+					Data:      ToolOutputEvent{CallID: m.ToolID, Chunk: tail},
+				})
+			}
 			h.broadcastEvent(SSEEvent{
 				SessionID: sessionID,
 				Event:     "tool_result",
-				Data:      ToolResultEvent{Tool: "tool", Output: m.Content},
+				Data:      ToolResultEvent{Tool: "tool", CallID: m.ToolID, Output: m.Content},
 			})
 			if prompts, ok := parseQuestionAsk(m.Content); ok {
 				h.broadcastEvent(SSEEvent{
