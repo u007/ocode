@@ -1127,44 +1127,50 @@ type model struct {
 	// textinput, the last non-empty query, the ordered list of message indices
 	// that match, the cursor into that list, and the index of the message
 	// currently being flashed (bumped to -1 once the flash window expires).
-	chatSearchActive         bool
-	chatSearchInput          textinput.Model
-	chatSearchQuery          string
-	chatSearchMatches        []int
-	chatSearchCursor         int
-	chatSearchFlashMsg       int
-	chatSearchNoMatch        bool // true when the bar is open with a non-empty query that has zero matches; used for the inline counter styling
-	filesSel                 selectionState
-	inputSel                 selectionState
-	gitSel                   selectionState
-	sidebarSel               selectionState
-	rawSidebarLines          []string
-	statusSel                selectionState
-	statusRawLines           []string
-	statusPermColStart       int            // column where permission text starts on status line 0
-	statusPermColEnd         int            // column where permission text ends on status line 0
-	hoverSidebarFile         string         // file path hovered by mouse in sidebar, empty when no hover
-	hoverSidebarCWD          bool           // true when the mouse hovers the clickable "cwd:" sidebar row
-	hoverSidebarTitleGen     bool           // true when the mouse hovers the clickable "gen" title button
-	hoverLink                pathLinkRegion // file-path link hovered in the transcript
-	hoverLinkActive          bool           // whether hoverLink is set
-	hoverLinkProbe           pathLinkProbeCache
-	hoverUrlLink             urlLinkRegion // URL link (markdown or raw) hovered in the transcript
-	hoverUrlLinkActive       bool          // whether hoverUrlLink is set
-	hoverUrlLinkProbe        urlLinkProbeCache
-	hoverDetailLink          pathLinkRegion // file-path link hovered in the agent-detail view
-	hoverDetailLinkActive    bool           // whether hoverDetailLink is set
-	hoverDetailLinkProbe     pathLinkProbeCache
-	hoverPickerIdx           int // index of hovered picker row, -1 for none
-	hoverSlashIdx            int // index of hovered slash popup row, -1 for none
-	hoverTabIdx              int // index of hovered tab, -1 for none
-	rawInputLines            []string
-	rawInputLinesDirty       bool
-	inputThemeApplied        bool
-	inputThemeShellMode      bool
-	sidebarCache             *sidebarComputeCache
-	compactCh                chan agent.CompactResult
-	compactStartCh           chan struct{}
+	chatSearchActive      bool
+	chatSearchInput       textinput.Model
+	chatSearchQuery       string
+	chatSearchMatches     []int
+	chatSearchCursor      int
+	chatSearchFlashMsg    int
+	chatSearchNoMatch     bool // true when the bar is open with a non-empty query that has zero matches; used for the inline counter styling
+	filesSel              selectionState
+	inputSel              selectionState
+	gitSel                selectionState
+	sidebarSel            selectionState
+	rawSidebarLines       []string
+	statusSel             selectionState
+	statusRawLines        []string
+	statusPermColStart    int            // column where permission text starts on status line 0
+	statusPermColEnd      int            // column where permission text ends on status line 0
+	hoverSidebarFile      string         // file path hovered by mouse in sidebar, empty when no hover
+	hoverSidebarCWD       bool           // true when the mouse hovers the clickable "cwd:" sidebar row
+	hoverSidebarTitleGen  bool           // true when the mouse hovers the clickable "gen" title button
+	hoverLink             pathLinkRegion // file-path link hovered in the transcript
+	hoverLinkActive       bool           // whether hoverLink is set
+	hoverLinkProbe        pathLinkProbeCache
+	hoverUrlLink          urlLinkRegion // URL link (markdown or raw) hovered in the transcript
+	hoverUrlLinkActive    bool          // whether hoverUrlLink is set
+	hoverUrlLinkProbe     urlLinkProbeCache
+	hoverDetailLink       pathLinkRegion // file-path link hovered in the agent-detail view
+	hoverDetailLinkActive bool           // whether hoverDetailLink is set
+	hoverDetailLinkProbe  pathLinkProbeCache
+	hoverPickerIdx        int // index of hovered picker row, -1 for none
+	hoverSlashIdx         int // index of hovered slash popup row, -1 for none
+	hoverTabIdx           int // index of hovered tab, -1 for none
+	rawInputLines         []string
+	rawInputLinesDirty    bool
+	inputThemeApplied     bool
+	inputThemeShellMode   bool
+	sidebarCache          *sidebarComputeCache
+	compactCh             chan agent.CompactResult
+	compactStartCh        chan struct{}
+	advisorCkptCh         chan advisorCheckpointMsg
+	// advisorCkptIdx is the transcript index of the "advisor reviewing…" line
+	// so the finish event can rewrite it in place instead of adding a second
+	// line. -1 when no checkpoint is in flight.
+	advisorCkptIdx           int
+	advisorCkptStart         time.Time
 	recapCh                  chan recapFinishedMsg
 	autoContinueJudgeCh      chan autoContinueJudgeFinishedMsg
 	btwCh                    chan btwResultMsg
@@ -1175,6 +1181,7 @@ type model struct {
 	usageCh                  chan usageEvent
 	sideUsageCh              chan sideUsageData
 	streamFinalOutputTokens  int64 // exact output tokens from streaming usage event (0 = not yet received)
+	lastInputTokens          int64 // provider-reported input (prompt) tokens of the most recent completed LLM call; ≈ current context-window occupancy for the status snapshot's ContextCurrentTokens
 	streamingThinkingIdx     int   // index into m.messages of the in-flight roleThinking message; -1 when none
 	streamAssistantFinalized bool  // true once the current stream has emitted its final assistant message
 	pendingStreamDeltas      []deltaEvent
@@ -2094,6 +2101,8 @@ func newModel(opts ...RunOptions) model {
 		permViewport:         viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
 		compactCh:            make(chan agent.CompactResult, 4),
 		compactStartCh:       make(chan struct{}, 4),
+		advisorCkptCh:        make(chan advisorCheckpointMsg, 4),
+		advisorCkptIdx:       -1,
 		recapCh:              make(chan recapFinishedMsg, 4),
 		autoContinueJudgeCh:  make(chan autoContinueJudgeFinishedMsg, 4),
 		btwCh:                make(chan btwResultMsg, 64),
@@ -2290,7 +2299,7 @@ func newModel(opts ...RunOptions) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitRecapEvent(m.recapCh), waitAutoContinueJudgeEvent(m.autoContinueJudgeCh), waitTitleEvent(m.titleCh), waitBtwEvent(m.btwCh)}
+	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitAdvisorCheckpointEvent(m.advisorCkptCh), waitRecapEvent(m.recapCh), waitAutoContinueJudgeEvent(m.autoContinueJudgeCh), waitTitleEvent(m.titleCh), waitBtwEvent(m.btwCh)}
 	if m.permissionGrantCh != nil {
 		cmds = append(cmds, listenPermissionGrant(m.permissionGrantCh))
 	}
@@ -4074,8 +4083,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch res.Decision {
 			case "deny":
 				choice = "n"
-			case "always":
+			case "always", "always_rule":
+				// "always" is the legacy alias (Telegram bridge era);
+				// "always_rule" is the explicit web/desktop decision name.
 				choice = "a"
+			case "always_tool":
+				choice = "t"
 			}
 			cmd := m.handlePermissionChoice(choice)
 			m.broadcastRC("permission_resolved", map[string]string{"request_id": res.RequestID})
@@ -4414,6 +4427,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case advisorCheckpointMsg:
+		if msg.running {
+			m.advisorCkptStart = time.Now()
+			m.advisorCkptIdx = len(m.messages)
+			m.messages = append(m.messages, message{
+				role:      roleAssistant,
+				text:      hintStyle.Render(fmt.Sprintf("◆ advisor %s checkpoint — reviewing…", msg.kind)),
+				transient: true,
+			})
+		} else if m.advisorCkptIdx >= 0 && m.advisorCkptIdx < len(m.messages) &&
+			strings.Contains(m.messages[m.advisorCkptIdx].text, "checkpoint — reviewing") {
+			// Identity check, not just a bounds check: anything that splices the
+			// transcript between start and finish would otherwise make this
+			// overwrite an unrelated line.
+			elapsed := time.Since(m.advisorCkptStart).Round(time.Second)
+			m.messages[m.advisorCkptIdx].text = hintStyle.Render(
+				fmt.Sprintf("◆ advisor %s checkpoint — reviewed in %s", msg.kind, formatDuration(elapsed)))
+			m.advisorCkptIdx = -1
+		}
+		m.rerenderTranscriptAndMaybeScroll()
+		m.layout()
+		return m, tea.Batch(
+			waitAdvisorCheckpointEvent(m.advisorCkptCh),
+			tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} }),
+		)
 	case compactStartedMsg:
 		m.compacting = true
 		m.lastCompactErr = nil
@@ -4653,6 +4691,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
 	case usageMsg:
+		if msg.inputTokens > 0 {
+			m.lastInputTokens = msg.inputTokens
+		}
 		if msg.outputTokens > 0 {
 			m.streamFinalOutputTokens = msg.outputTokens
 		}
@@ -6525,6 +6566,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				if m.config != nil {
 					m.config.Ocode.SmallModelEnabled = m.smallModelEnabled
 				}
+				// Keep the live agent's runtime override in sync so the
+				// agent-side gate and every display source (snapshot,
+				// sidebar) agree on the latest writer, whether TUI or web.
+				if m.agent != nil {
+					m.agent.SetSmallModelRuntimeEnabled(m.smallModelEnabled)
+				}
 				if err := config.SaveSmallModelEnabled(m.smallModelEnabled); err != nil {
 					log.Printf("save small model enabled: %v", err)
 				}
@@ -7587,6 +7634,15 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/ocr" ||
 		cmd == "/image" ||
 		cmd == "/cron" ||
+		// /localmodel and /autocontinue are synchronous local config/inspection
+		// commands like /mask and /small-model: they never start an agent request.
+		// /localmodel enable|limit do their slow work on a returned tea.Cmd
+		// (instance manager only — it never touches the in-flight turn), and
+		// /autocontinue's toggle is read live at stream-done time, so applying it
+		// mid-stream is exactly the point: arming or disarming auto-resume takes
+		// effect on the very turn at risk of being cut off.
+		cmd == "/localmodel" ||
+		cmd == "/autocontinue" ||
 		cmd == "/goal"
 	// Agent status is a local inspection command and must remain usable while
 	// the stream is busy. Changing the persistent limit is deliberately queued,
@@ -8267,11 +8323,21 @@ func (m *model) finishModelSwitch(modelID string) tea.Cmd {
 	}
 	// Kaizen skill-as-slash admit depends on active model — rebuild popup list.
 	m.refreshCustomCommands()
-	// Persist the user's selection even when the new client cannot be built yet
-	// (e.g. provider credentials are not connected). The UI model name should
-	// still reflect the chosen model so the picker / status line stay in sync.
-	if err := config.SaveLastModel(modelID); err != nil {
-		log.Printf("save last model: %v", err)
+	// Persist the user's selection even when the new client cannot be built
+	// yet (e.g. provider credentials are not connected). The UI model name
+	// should still reflect the chosen model so the picker / status line stay
+	// in sync. Exception: an id with NO provider prefix ("gpt-4o-mini"
+	// instead of "openai/gpt-4o-mini") can never resolve — persisting it as
+	// last_model made every later start/resume bootstrap fail with a
+	// misleading "no API key" refusal (observed 2026-08-23), so keep those
+	// session-local and say so.
+	if strings.Contains(modelID, "/") || strings.Contains(modelID, ":") {
+		if err := config.SaveLastModel(modelID); err != nil {
+			log.Printf("save last model: %v", err)
+		}
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant,
+			text: fmt.Sprintf("Model %q has no provider prefix; it will be used this session only and cannot be restored on next start.", modelID), transient: true})
 	}
 	if strings.Contains(modelID, "/") {
 		if err := config.SaveRecentModel(modelID); err != nil {
@@ -11014,6 +11080,11 @@ func (m *model) handlePermissionModelCmd(args []string) tea.Cmd {
 		if m.config != nil && m.config.Ocode.Permissions.Auto != nil {
 			m.config.Ocode.Permissions.Auto.Model = ""
 		}
+		// Push the clear to the live agent so the very next consult falls back
+		// to the small model (empty override = explicitly cleared this session).
+		if m.agent != nil {
+			m.agent.SetAutoPermissionModel("")
+		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Permission model cleared. Will fall back to small model."})
 		return nil
 	}
@@ -11078,6 +11149,11 @@ func (m *model) handlePermissionModelCmd(args []string) tea.Cmd {
 			m.config.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
 		}
 		m.config.Ocode.Permissions.Auto.Model = target
+	}
+	// Same live push as the clear path — the judge resolves per consult, so
+	// this applies without a rebuild and every display source follows.
+	if m.agent != nil {
+		m.agent.SetAutoPermissionModel(target)
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission model updated to %s\nPersisted to config for next session.", target)})
 	// Start the server for a registered-but-stopped local model so permission
@@ -13204,49 +13280,14 @@ func (m *model) allowOutOfScopePath(req agent.PermissionRequest, persist bool) {
 
 // isOutOfScopePathRequest reports whether req is an out-of-workspace path ask
 // whose "always" answer should persist a path to extra_allowed_paths rather than
-// a bash-prefix or tool rule. It covers bash cd-target/path-arg asks (which carry
-// OutOfScopePath) and the redirection/env out-of-scope asks.
+// a bash-prefix or tool rule. Delegates to the shared agent helper so the
+// web/desktop resolve endpoint classifies identically.
 func isOutOfScopePathRequest(req agent.PermissionRequest) bool {
-	return req.OutOfScopePath != "" || strings.HasSuffix(req.Rule, ".out_of_scope") || strings.HasSuffix(req.Rule, ".path_pattern")
+	return agent.IsOutOfScopePathRequest(req)
 }
 
 func outOfScopePathRoot(req agent.PermissionRequest) string {
-	if req.OutOfScopePath != "" {
-		return pathRootFromTarget(req.OutOfScopePath)
-	}
-	if !strings.HasSuffix(req.Rule, ".out_of_scope") && !strings.HasSuffix(req.Rule, ".path_pattern") {
-		return ""
-	}
-	return pathRootFromPermissionArgs(req.Args)
-}
-
-func pathRootFromPermissionArgs(args json.RawMessage) string {
-	var params struct {
-		Path     string `json:"path"`
-		FilePath string `json:"file_path"`
-	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return ""
-	}
-	target := strings.TrimSpace(params.Path)
-	if target == "" {
-		target = strings.TrimSpace(params.FilePath)
-	}
-	return pathRootFromTarget(target)
-}
-
-// pathRootFromTarget normalizes an absolute target path to the directory root to
-// persist: the path itself when it is (or resolves to) a directory, else its
-// parent. Returns "" for empty or non-absolute targets.
-func pathRootFromTarget(target string) string {
-	target = strings.TrimSpace(target)
-	if target == "" || !filepath.IsAbs(target) {
-		return ""
-	}
-	if info, err := os.Stat(target); err == nil && info.IsDir() {
-		return target
-	}
-	return filepath.Dir(target)
+	return agent.OutOfScopePathRoot(req)
 }
 
 func (m model) executeApprovedTool(toolName string, args json.RawMessage, pathRoot string) tea.Cmd {
@@ -13920,9 +13961,22 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 	if m.config != nil {
 		snap.MainModel = m.config.Model
 		snap.ThinkingBudget = m.config.ThinkingBudget
+		if m.config.Ocode.Permissions.Auto != nil {
+			snap.PermissionModel = m.config.Ocode.Permissions.Auto.Model
+		}
+		// A web-side pick stores a runtime override on the live agent
+		// (SetAutoPermissionModel) — prefer it so the sidebar shows the model
+		// actually in force, including an explicit clear ("").
+		if m.agent != nil {
+			if v, ok := m.agent.AutoPermissionModelOverride(); ok {
+				snap.PermissionModel = v
+			}
+		}
 		if m.agent != nil && m.agent.Permissions() != nil {
 			snap.PermissionMode = string(m.agent.Permissions().Mode())
 			snap.PermissionAutoAllow = m.agent.Permissions().AutoPermissionEnabled()
+		} else if m.config.Ocode.Permissions.Auto != nil {
+			snap.PermissionAutoAllow = m.config.Ocode.Permissions.Auto.Enabled
 		}
 		if m.agent != nil {
 			snap.Mode = strings.ToUpper(string(m.agent.Mode()))
@@ -13953,6 +14007,13 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 	snap.SessionTitle = m.sessionTitle
 	snap.CWD = m.workDir
 	snap.SmallModelOn = m.smallModelEnabled
+	// The runtime small-model gate can be flipped externally (the web config
+	// endpoint applying to this bridged agent) — prefer the live agent's
+	// effective view so the displayed state matches what agents enforce,
+	// exactly like the advisor gate below.
+	if m.agent != nil {
+		snap.SmallModelOn = m.agent.SmallModelRuntimeEnabled()
+	}
 	snap.RecapModelOn = m.recapModelEnabled
 	snap.OcrEnabled = m.ocrEnabled
 	snap.AdvisorEnabled = m.advisorEnabled
@@ -13989,12 +14050,17 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 		snap.ActiveTools = tools
 	}
 	// Context usage: use the model's full window from the agent registry. The
-	// current-input count is left at zero when the TUI isn't streaming a turn;
-	// the web computes the running total from /api/sessions/{id}/context and
-	// combines it with ContextMaxTokens to render the gauge.
+	// current count is the last call's provider-reported input tokens (≈ what
+	// the context window holds right now; 0 until the first usage event —
+	// e.g. a freshly restored session). The web combines it with
+	// ContextMaxTokens to render the gauge; per-session REST fetches fall back
+	// to a transcript estimate when this is zero.
 	modelName := m.currentModelName()
 	snap.ContextModel = modelName
 	snap.ContextMaxTokens = int(agent.ModelWindow(modelName))
+	if m.lastInputTokens > 0 {
+		snap.ContextCurrentTokens = int(m.lastInputTokens)
+	}
 	// Modified files + LSP servers come from the embedded helpers.
 	snap.ModifiedFiles = m.collectModifiedFiles()
 	snap.LSPServers = m.collectLSPStatuses()
@@ -14661,38 +14727,23 @@ var permConfirmBtnDefs = []permBtnDef{
 
 // permDialogBtnDefs returns the button set for the current dialog step.
 // shellControlKeywords are bash/sh constructs that are not real commands and
-// make no sense as an "always allow prefix" rule.
-var shellControlKeywords = map[string]bool{
-	"if": true, "else": true, "elif": true, "fi": true,
-	"then": true, "while": true, "do": true, "done": true,
-	"for": true, "case": true, "esac": true, "until": true,
-	"function": true, "select": true, "time": true,
-}
+// make no sense as an "always allow prefix" rule — the canonical map lives in
+// the agent package (agent.ShellControlKeywords) so the TUI and the web/desktop
+// resolve endpoint enforce identical availability rules.
 
 // permAlwaysRuleAvailable reports whether the [A] "always allow rule" choice is
-// offered for req. Git mutating subcommands are excluded: a two-word `git <sub>`
-// always-allow would blanket-approve every future invocation of that subcommand
-// (e.g. all `git push ...`), so they must be approved each time. Read-only git is
-// auto-allowed and never reaches this dialog; harmful git already cannot persist.
-// Shell control-flow keywords (if, else, while, …) are also excluded: they are
-// not real commands and an always-allow prefix for them is meaningless.
+// offered for req. Delegates to the shared agent helper so the web/desktop
+// permission dialog cannot drift from the TUI's rules.
 func permAlwaysRuleAvailable(req agent.PermissionRequest) bool {
-	if req.ToolName == "bash" && req.Scope == agent.PermissionScopeBashPrefix {
-		if strings.HasPrefix(req.Prefix, "git ") {
-			return false
-		}
-		if shellControlKeywords[req.Prefix] {
-			return false
-		}
-	}
-	return true
+	return agent.AlwaysRuleChoiceAvailable(req)
 }
 
 // permAlwaysToolAvailable reports whether the [T] "always allow tool" choice is
-// offered for req. The bash tool is excluded: a tool-level allow blanket-approves
-// every future shell command from one prompt, which is too broad to surface here.
+// offered for req. Delegates to the shared agent helper (the bash tool is
+// excluded: a tool-level allow blanket-approves every future shell command
+// from one prompt, which is too broad to surface here).
 func permAlwaysToolAvailable(req agent.PermissionRequest) bool {
-	return req.ToolName != "bash"
+	return agent.AlwaysToolChoiceAvailable(req)
 }
 
 func (m *model) permDialogBtnDefs() []permBtnDef {
@@ -15973,6 +16024,13 @@ func (m *model) wireCompactCallbacks() {
 		default:
 		}
 	}
+	advisorCkptCh := m.advisorCkptCh
+	m.agent.OnAdvisorCheckpoint = func(kind string, running bool) {
+		select {
+		case advisorCkptCh <- advisorCheckpointMsg{kind: kind, running: running}:
+		default:
+		}
+	}
 	recapDoneCh := m.recapCh
 	m.agent.OnRecap = func(result agent.RecapResult) {
 		select {
@@ -16128,6 +16186,21 @@ func waitCompactEvent(startCh chan struct{}, doneCh chan agent.CompactResult) te
 		case r := <-doneCh:
 			return compactFinishedMsg{result: r}
 		}
+	}
+}
+
+// advisorCheckpointMsg reports that a loop-enforced advisor checkpoint has
+// started or finished. The checkpoint blocks the agent loop on a second model
+// (up to a 5-minute Claude Code subprocess), so without a transcript line the
+// UI shows no motion for its whole duration.
+type advisorCheckpointMsg struct {
+	kind    string
+	running bool
+}
+
+func waitAdvisorCheckpointEvent(ch chan advisorCheckpointMsg) tea.Cmd {
+	return func() tea.Msg {
+		return <-ch
 	}
 }
 
@@ -18441,6 +18514,17 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 			pPermModel = m.config.Ocode.Permissions.Auto.Model
 		}
 	}
+	// Prefer the live agent's runtime override so a web-side pick/clear is
+	// reflected without a restart (same rationale as the snapshot source).
+	if m.agent != nil {
+		if v, ok := m.agent.AutoPermissionModelOverride(); ok {
+			if v == "" {
+				pPermModel = "(none)"
+			} else {
+				pPermModel = v
+			}
+		}
+	}
 	// Advisor row doubles as an on/off toggle (click to flip the runtime gate).
 	advisorOn := m.agent == nil || m.agent.AdvisorEnabled()
 	data.advisorToggleTopIdx = len(data.topLines)
@@ -18448,6 +18532,9 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	data.advisorToggleRows = len(data.topLines) - data.advisorToggleTopIdx
 	// Small model row doubles as an on/off toggle (click to flip the runtime gate).
 	smallModelOn := m.smallModelEnabled
+	if m.agent != nil {
+		smallModelOn = m.agent.SmallModelRuntimeEnabled()
+	}
 	data.smallModelToggleTopIdx = len(data.topLines)
 	appendWrapped(&data.topLines, renderSidebarModelToggle("small", smallModel, smallModelOn, outerBodyWidth), outerBodyWidth)
 	data.smallModelToggleRows = len(data.topLines) - data.smallModelToggleTopIdx
@@ -18782,7 +18869,16 @@ func (m model) renderSidebar() string {
 		} else {
 			rows[last] = ansi.Truncate(rows[last], innerWidth-btnW, "…")
 		}
-		rows[last] = rows[last] + btnStyle.Render(btnLabel)
+		// Right-align the button within innerWidth so the visual position
+		// matches the far-right hit-box used by sidebarTitleGenForClick.
+		// Without padding a short title like "Untitled" leaves the button
+		// flush after the title on the left, while the hit-box stays at
+		// innerRight — the click then lands on empty padding and looks dead.
+		pad := innerWidth - lipgloss.Width(rows[last]) - btnW
+		if pad < 0 {
+			pad = 0
+		}
+		rows[last] = rows[last] + strings.Repeat(" ", pad) + btnStyle.Render(btnLabel)
 		header = strings.Join(rows, "\n")
 	}
 

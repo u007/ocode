@@ -263,13 +263,27 @@ type Agent struct {
 	// own advisorEnabled. Sub-agents set this to point at the parent agent's
 	// advisorEnabled field so mid-run toggles propagate immediately.
 	parentAdvisorEnabled *atomic.Bool
-	jobEvents            chan JobEvent
-	memoryMaintCh        chan MemoryMaintenanceRequest
-	docMaintCh           chan DocMaintenanceRequest
-	docMaintShutdownOnce sync.Once
-	docMaintMu           sync.Mutex // guards docMaintClosing + the close
-	docMaintClosing      bool       // true after shutdown initiated
-	docMaintDone         chan struct{}
+	// Runtime overrides for the small-model gate/name and the auto-permission
+	// judge model. Nil means "follow config"; once set, the override is
+	// authoritative for the agent's lifetime, and a non-nil EMPTY string model
+	// override means "explicitly cleared this session" — it skips the
+	// possibly-stale persisted value instead of silently resurrecting it.
+	// Atomics, mirroring advisorEnabled: HTTP-handler goroutines write (web
+	// config endpoints applying to a bridged/live agent) while agent-loop
+	// goroutines read on every consult, so a plain struct write would be a
+	// data race. Needed because a bridged TUI agent holds its own config
+	// instance (loaded at TUI startup), so handler-side h.cfg mutations never
+	// reach it.
+	smallModelEnabledOverride   atomic.Pointer[bool]
+	smallModelOverride          atomic.Pointer[string]
+	autoPermissionModelOverride atomic.Pointer[string]
+	jobEvents                   chan JobEvent
+	memoryMaintCh               chan MemoryMaintenanceRequest
+	docMaintCh                  chan DocMaintenanceRequest
+	docMaintShutdownOnce        sync.Once
+	docMaintMu                  sync.Mutex // guards docMaintClosing + the close
+	docMaintClosing             bool       // true after shutdown initiated
+	docMaintDone                chan struct{}
 	// memoryMaintDone/memoryMaintShutdownOnce mirror the doc-maintenance
 	// worker lifecycle above. The memory worker (memoryMaintenanceWorker)
 	// only exits when memoryMaintCh is closed, so without an explicit
@@ -342,6 +356,12 @@ type Agent struct {
 	// OnRecap, if set, is invoked when async recap finishes. The callback
 	// receives the recap result produced by the small model.
 	OnRecap func(RecapResult)
+	// OnAdvisorCheckpoint, if set, is invoked when a loop-enforced advisor
+	// checkpoint starts (running=true) and finishes (running=false). The
+	// checkpoint blocks the agent loop on a second model — without this the
+	// UI shows no motion for its whole duration. It runs from the Step
+	// goroutine — keep handlers fast and non-blocking.
+	OnAdvisorCheckpoint func(kind string, running bool)
 	// OnAutoContinueJudge, if set, is invoked when an async auto-continue
 	// judge call finishes (see AutoContinueJudgeAsync).
 	OnAutoContinueJudge func(AutoContinueJudgeResult)
@@ -1200,22 +1220,6 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			break
 		}
 
-		// "plan" checkpoint: defer the first write-tool batch until the advisor
-		// has reviewed the proposed changes. Deferred calls get synthetic tool
-		// results (protocol-safe) and the model re-issues them next loop.
-		if deferred := a.advisorPlanCheckpoint(ckpt, resp); deferred != nil {
-			for _, m := range deferred {
-				newMsgs = append(newMsgs, m)
-				messages = append(messages, m)
-				if a.OnMessage != nil {
-					if isCancelled() {
-						return newMsgs, nil
-					}
-					a.OnMessage(m)
-				}
-			}
-			continue
-		}
 		ckpt.countBatch(resp.ToolCalls)
 
 		type tcResult struct {
@@ -1324,6 +1328,15 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				dispatch := func(tc ToolCall, binding *taskBinding, toolCallID string, predecessorContext string) (string, []Image, error) {
 					a.activity.toolStarted(tc.Function.Name)
 					defer a.activity.toolDone(tc.Function.Name)
+					// dagContextFrom re-marshals args through taskToolParams when a
+					// predecessor exists, and encoding/json resolves duplicate top-level
+					// keys last-wins during that round-trip — so the skip-guard must run
+					// on the raw bytes here, or a task+depends_on call with conflicting
+					// arguments would execute on a value the model never settled on.
+					if dupErr := duplicateKeySkipError(json.RawMessage(tc.Function.Arguments)); dupErr != nil {
+						a.emitDebug("TOOL", fmt.Sprintf("skipped %s: %v", tc.Function.Name, dupErr))
+						return "", nil, dupErr
+					}
 					args, err := dagContextFrom(json.RawMessage(tc.Function.Arguments), predecessorContext)
 					if err != nil {
 						return "", nil, err
@@ -1530,6 +1543,22 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				a.maybePostTaskDiscoveryOptimization(sig, userGoal)
 			}
 			return newMsgs, nil
+		}
+
+		// "plan" checkpoint: the first write-tool batch has now been applied.
+		// The advisor reviews what was done and its review is injected as a
+		// user message the next loop acts on. The batch is deliberately NOT
+		// deferred — deferring made the model regenerate the whole write
+		// (a full apply_patch diff) after the review, doubling the wait.
+		if advice := a.advisorPlanCheckpoint(ckpt, resp); advice != nil {
+			if isCancelled() {
+				return newMsgs, nil
+			}
+			newMsgs = append(newMsgs, *advice)
+			messages = append(messages, *advice)
+			if a.OnMessage != nil {
+				a.OnMessage(*advice)
+			}
 		}
 	}
 
@@ -1945,8 +1974,8 @@ func (a *Agent) recapClient() LLMClient {
 		}
 	}
 	// Fall back to small model.
-	small := strings.TrimSpace(a.config.Ocode.SmallModel)
-	if small == "" || !a.config.Ocode.SmallModelEnabled {
+	small := a.smallModelExplicitName()
+	if small == "" || !a.SmallModelRuntimeEnabled() {
 		return a.client
 	}
 	if client := NewClient(a.config, small); client != nil {
@@ -2206,8 +2235,8 @@ func (a *Agent) compactSummaryClient() LLMClient {
 		// enabled (compaction is a good fit for it — cheap/fast, no tool
 		// calls), falling back to the main client when small-model use is
 		// disabled or unresolvable.
-		if a.config.Ocode.SmallModelEnabled {
-			if small := ResolveSmallModel(a.config); small != "" {
+		if a.SmallModelRuntimeEnabled() {
+			if small := a.resolveSmallModel(); small != "" {
 				if client := NewClient(a.config, small); client != nil {
 					return client
 				}
@@ -2563,6 +2592,16 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 // lets ContextualTool implementations (notably bash and formatters) stop when
 // recovery is cancelled or times out.
 func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
+	// A model that writes the same argument key twice in one object gave two
+	// answers and settled on neither. encoding/json would pick the last one and
+	// run the call anyway, silently. Skip it instead and name both values: this
+	// returns as a tool result, so the turn survives and the model can re-issue
+	// the call correctly on the next loop.
+	if dupErr := duplicateKeySkipError(args); dupErr != nil {
+		a.emitDebug("TOOL", fmt.Sprintf("skipped %s: %v", name, dupErr))
+		return "", dupErr
+	}
+
 	if deny, ok := gateToolCall(a.Mode(), name, args); !ok {
 		return deny, nil
 	}
@@ -2720,13 +2759,22 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 }
 
 func (a *Agent) autoPermissionModelName() string {
-	if a == nil || a.config == nil {
-		return "unavailable"
-	}
-	if auto := a.config.Ocode.Permissions.Auto; auto != nil {
-		if model := strings.TrimSpace(auto.Model); model != "" {
-			return model
+	if v, ok := a.AutoPermissionModelOverride(); ok {
+		// A non-nil empty override means the judge model was explicitly cleared
+		// this session — skip the persisted value, which may be stale in a
+		// bridged agent's own config snapshot.
+		if v != "" {
+			return v
 		}
+	} else if a.config != nil {
+		if auto := a.config.Ocode.Permissions.Auto; auto != nil {
+			if model := strings.TrimSpace(auto.Model); model != "" {
+				return model
+			}
+		}
+	}
+	if a.config == nil {
+		return "unavailable"
 	}
 	if model := ResolveSmallModel(a.config); model != "" {
 		return model
@@ -2735,13 +2783,19 @@ func (a *Agent) autoPermissionModelName() string {
 }
 
 func (a *Agent) autoPermissionModelDisplayName() string {
-	if a == nil || a.config == nil {
-		return "unavailable"
-	}
-	if auto := a.config.Ocode.Permissions.Auto; auto != nil {
-		if model := strings.TrimSpace(auto.Model); model != "" {
-			return model
+	if v, ok := a.AutoPermissionModelOverride(); ok {
+		if v != "" {
+			return v
 		}
+	} else if a.config != nil {
+		if auto := a.config.Ocode.Permissions.Auto; auto != nil {
+			if model := strings.TrimSpace(auto.Model); model != "" {
+				return model
+			}
+		}
+	}
+	if a.config == nil {
+		return "unavailable"
 	}
 	if model := ResolveSmallModel(a.config); model != "" {
 		return model + " (resolved small model)"
@@ -4064,6 +4118,76 @@ func (a *Agent) isToolAllowed(name string) bool {
 // SetAdvisorEnabled toggles the advisor tool for this agent at runtime. It does
 // not persist to config — the change lives only for the agent's lifetime.
 func (a *Agent) SetAdvisorEnabled(enabled bool) { a.advisorEnabled.Store(enabled) }
+
+// SetSmallModelRuntimeEnabled flips the small-model gate for this live agent
+// without persisting or rebuilding. Web config endpoints call this on a
+// bridged TUI agent because it holds its own config snapshot loaded at TUI
+// startup — handler-side config writes never reach it.
+func (a *Agent) SetSmallModelRuntimeEnabled(enabled bool) {
+	v := enabled
+	a.smallModelEnabledOverride.Store(&v)
+}
+
+// SetSmallModelRuntimeModel overrides the explicit small-model id for this
+// live agent. An empty string clears the override for the session: resolution
+// then skips the persisted SmallModel value (which may be stale in a bridged
+// agent's own config snapshot) and falls through to registry resolution.
+func (a *Agent) SetSmallModelRuntimeModel(model string) {
+	a.smallModelOverride.Store(&model)
+}
+
+// SmallModelRuntimeEnabled reports the effective small-model gate: a runtime
+// override when set, otherwise the agent's config.
+func (a *Agent) SmallModelRuntimeEnabled() bool {
+	if v := a.smallModelEnabledOverride.Load(); v != nil {
+		return *v
+	}
+	return a.config != nil && a.config.Ocode.SmallModelEnabled
+}
+
+// AutoPermissionModelOverride reports the effective auto-permission judge
+// model override. ok is false when no override was set this session (config
+// governs); an ok ("", true) result means explicitly cleared.
+func (a *Agent) AutoPermissionModelOverride() (string, bool) {
+	v := a.autoPermissionModelOverride.Load()
+	if v == nil {
+		return "", false
+	}
+	return *v, true
+}
+
+// SetAutoPermissionModel overrides the judge model this agent consults before
+// each auto-permission judgment. An empty string clears it for the session:
+// resolution then skips the persisted Permissions.Auto.Model value and falls
+// back to the small model. Applies to the very next consult — no rebuild.
+func (a *Agent) SetAutoPermissionModel(model string) {
+	a.autoPermissionModelOverride.Store(&model)
+}
+
+// smallModelExplicitName returns the override small-model id when set, else
+// the persisted explicit name trimmed; "" when neither applies.
+func (a *Agent) smallModelExplicitName() string {
+	if v := a.smallModelOverride.Load(); v != nil {
+		return strings.TrimSpace(*v)
+	}
+	if a.config == nil {
+		return ""
+	}
+	return strings.TrimSpace(a.config.Ocode.SmallModel)
+}
+
+// resolveSmallModel returns the effective small-model id: runtime override
+// first, then the persisted explicit name, then registry resolution against
+// the agent's config. "" when nothing resolves.
+func (a *Agent) resolveSmallModel() string {
+	if m := a.smallModelExplicitName(); m != "" {
+		return m
+	}
+	if a.config == nil {
+		return ""
+	}
+	return ResolveSmallModel(a.config)
+}
 
 // SetParentAdvisorEnabled wires this agent's advisor gate to the parent's
 // atomic flag. When set, isToolAllowed and AdvisorEnabled dereference the

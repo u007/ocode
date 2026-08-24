@@ -255,6 +255,49 @@ func (h *cronHandler) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, j)
 }
 
+// handleCronRuns returns the run history for a single job: GET /api/cron/{id}/runs
+func (s *Server) handleCronRuns(w http.ResponseWriter, r *http.Request) {
+	if s.schedulerRuns == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"runs": []any{}, "total": 0})
+		return
+	}
+	id := r.PathValue("id")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	runs, total, err := s.schedulerRuns.List(id, limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "total": total})
+}
+
+// handleCronRunDetail returns a single run: GET /api/cron/{id}/runs/{runId}
+func (s *Server) handleCronRunDetail(w http.ResponseWriter, r *http.Request) {
+	if s.schedulerRuns == nil {
+		writeError(w, http.StatusNotFound, "no scheduler attached")
+		return
+	}
+	id := r.PathValue("id")
+	runID := r.PathValue("runId")
+	rec, err := s.schedulerRuns.Get(id, runID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if rec == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("run %s not found", runID))
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
 // SetScheduler attaches a scheduler.Service to the server: it adds
 // /api/cron/* routes, exposes the service, wires it into the handler so the
 // `cron` tool is included in agent sessions created on this server, and adds
@@ -269,17 +312,24 @@ func (s *Server) SetScheduler(svc *scheduler.Service) {
 		storePath, _ := scheduler.DefaultStorePath(s.workDir)
 		if storePath != "" {
 			s.schedulerOutbox = scheduler.NewOutbox(storePath)
+			s.schedulerRuns = scheduler.NewRunHistory(storePath)
 			s.schedulerTargets = scheduler.NewTargets(storePath)
 		}
 		s.mux.HandleFunc("GET /api/cron/outbox", s.authMiddleware(s.handleCronOutbox))
 		s.mux.HandleFunc("GET /api/cron/targets", s.authMiddleware(s.handleCronTargetsList))
 		s.mux.HandleFunc("POST /api/cron/targets", s.authMiddleware(s.handleCronTargetsSet))
+		s.mux.HandleFunc("GET /api/cron/{id}/runs", s.authMiddleware(s.handleCronRuns))
+		s.mux.HandleFunc("GET /api/cron/{id}/runs/{runId}", s.authMiddleware(s.handleCronRunDetail))
 	}
 }
 
 // SchedulerOutbox returns the outbox the server is writing to (nil if no
 // scheduler is attached).
 func (s *Server) SchedulerOutbox() *scheduler.Outbox { return s.schedulerOutbox }
+
+// SchedulerRuns returns the run history the server reads from (nil if no
+// scheduler is attached).
+func (s *Server) SchedulerRuns() *scheduler.RunHistory { return s.schedulerRuns }
 
 // SchedulerTargets returns the per-project cron-targets registry (nil if no
 // scheduler is attached). Useful for tests and for hosts that want to

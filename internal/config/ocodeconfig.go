@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -2134,6 +2135,16 @@ func ActiveOcodeConfigPath() (string, error) {
 // SaveLastModel persists the last used provider/model string into the ocodeconfig.json
 // file so it can be restored across sessions.
 func SaveLastModel(providerModel string) error {
+	// A model id without a "provider/model" or "provider:model" separator
+	// cannot be resolved back to a provider by agent.NewClient — restoring it
+	// on the next start makes every bootstrap fail with a misleading
+	// "no API key for provider openai" refusal (observed 2026-08-23 with a
+	// bare "gpt-4o-mini" landing here). Persisting is allowed (callers rely
+	// on the UI reflecting the pick), but the bad value is called out so the
+	// writer can be identified from the log.
+	if !strings.Contains(providerModel, "/") && !strings.Contains(providerModel, ":") {
+		log.Printf("config: saving last_model %q without a provider prefix; this model will not resolve on next start", providerModel)
+	}
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		raw, _ := json.Marshal(providerModel)
 		cfg.Extra[lastModelKey] = json.RawMessage(raw)

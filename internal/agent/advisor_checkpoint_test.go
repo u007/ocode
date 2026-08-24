@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/config"
 )
@@ -109,7 +111,7 @@ func TestAdvisorCheckpointEnabled_Gating(t *testing.T) {
 	}
 }
 
-func TestAdvisorPlanCheckpoint_DefersWriteBatch(t *testing.T) {
+func TestAdvisorPlanCheckpoint_InjectsReviewWithoutDeferring(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
 	a, fake := checkpointTestAgent(t, []string{"plan"})
 	st := &advisorCheckpointState{userGoal: "add feature X"}
@@ -122,18 +124,24 @@ func TestAdvisorPlanCheckpoint_DefersWriteBatch(t *testing.T) {
 			writeToolCall("tc2", "b.go"),
 		},
 	}
-	deferred := a.advisorPlanCheckpoint(st, resp)
-	if len(deferred) != 2 {
-		t.Fatalf("expected 2 deferred tool results, got %d", len(deferred))
+	review := a.advisorPlanCheckpoint(st, resp)
+	if review == nil {
+		t.Fatal("expected the plan checkpoint to return an advisor review")
 	}
 	if fake.calls != 1 {
 		t.Fatalf("expected 1 advisor call, got %d", fake.calls)
 	}
-	if deferred[0].ToolID != "tc1" || deferred[1].ToolID != "tc2" {
-		t.Fatalf("tool IDs not preserved: %+v", deferred)
+	// The review is injected as a user message: the write batch already ran,
+	// so no synthetic tool results are produced and the model never has to
+	// regenerate the writes.
+	if review.Role != "user" {
+		t.Fatalf("expected the review to be injected as a user message, got role %q", review.Role)
 	}
-	if !strings.Contains(deferred[0].Content, fake.advice) {
-		t.Fatal("first deferred result must carry the advisor advice")
+	if review.ToolID != "" {
+		t.Fatalf("review must not impersonate a tool result, got ToolID %q", review.ToolID)
+	}
+	if !strings.Contains(review.Content, fake.advice) {
+		t.Fatal("review must carry the advisor advice")
 	}
 	if !strings.Contains(fake.lastPrompt, "add feature X") || !strings.Contains(fake.lastPrompt, "a.go") {
 		t.Fatalf("plan prompt missing goal or file: %q", fake.lastPrompt)
@@ -175,7 +183,7 @@ func TestAdvisorPlanCheckpoint_AdvisorFailureExecutesNormally(t *testing.T) {
 
 	resp := &Message{Role: "assistant", ToolCalls: []ToolCall{writeToolCall("tc1", "a.go")}}
 	if d := a.advisorPlanCheckpoint(st, resp); d != nil {
-		t.Fatal("advisor failure must not defer the batch")
+		t.Fatal("advisor failure must not inject a review")
 	}
 	if !st.planChecked {
 		t.Fatal("failed checkpoint still counts as checked (no retry loop)")
@@ -237,24 +245,22 @@ func TestAdvisorDoneCheckpoint_SkipsTrivialTurn(t *testing.T) {
 // TestAdvisorDoneCheckpoint_FiresAfterDeferredPlanWithoutReissue exercises the
 // bypass case: the plan checkpoint defers the first write batch, the model then
 // stops without re-issuing tools, and the done checkpoint must still run.
-func TestAdvisorDoneCheckpoint_FiresAfterDeferredPlanWithoutReissue(t *testing.T) {
+func TestAdvisorDoneCheckpoint_FiresAfterPlanCheckpointOnSameTurn(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
 	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
 	st := &advisorCheckpointState{userGoal: "fix the bug"}
 
 	planResp := &Message{Role: "assistant", ToolCalls: []ToolCall{writeToolCall("tc1", "a.go")}}
-	deferred := a.advisorPlanCheckpoint(st, planResp)
-	if deferred == nil {
-		t.Fatal("expected plan checkpoint to defer the first write batch")
-	}
-	if !st.deferredWriteIntent {
-		t.Fatal("expected deferredWriteIntent to be recorded")
+	// The Step loop counts the batch (it executed) before the plan checkpoint runs.
+	st.countBatch(planResp.ToolCalls)
+	if review := a.advisorPlanCheckpoint(st, planResp); review == nil {
+		t.Fatal("expected plan checkpoint to review the first write batch")
 	}
 
 	finalResp := &Message{Role: "assistant", Content: "Done, fixed."}
 	followUp := a.advisorDoneCheckpoint(st, finalResp)
 	if followUp == nil {
-		t.Fatal("expected done checkpoint to fire after deferred writes even without reissue")
+		t.Fatal("expected done checkpoint to fire after a write batch")
 	}
 	if fake.calls != 2 {
 		t.Fatalf("expected two advisor calls (plan + done), got %d", fake.calls)
@@ -264,7 +270,7 @@ func TestAdvisorDoneCheckpoint_FiresAfterDeferredPlanWithoutReissue(t *testing.T
 	}
 }
 
-// TestAdvisorPlanCheckpoint_NonWriteTools pass through without deferral.
+// TestAdvisorPlanCheckpoint_NonWriteTools pass through without a review.
 // This validates that the expanded isWriteTool list is consistent: read-only
 // tool names (read, glob, grep, list, lsp, bash, webfetch, websearch) should
 // never trigger the plan checkpoint.
@@ -349,5 +355,64 @@ func TestNewAdvisorCheckpointState_ReceivesExplicitGoal(t *testing.T) {
 	}
 	if st2.userGoal == lastUserContent(messagesWithTail) {
 		t.Fatal("checkpoint goal must NOT be derived from tail-injected messages")
+	}
+}
+
+// ctxCheckpointFakeAdvisor is a stub advisor that blocks until its context is
+// cancelled, so the checkpoint's cancellation wiring can be exercised.
+type ctxCheckpointFakeAdvisor struct {
+	checkpointFakeAdvisor
+	started chan struct{}
+}
+
+func (f *ctxCheckpointFakeAdvisor) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
+	close(f.started)
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func TestRunAdvisorCheckpoint_CancelledByAgentStop(t *testing.T) {
+	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
+	a, _ := checkpointTestAgent(t, []string{"plan"})
+	fake := &ctxCheckpointFakeAdvisor{started: make(chan struct{})}
+	a.tools["advisor"] = fake
+
+	go func() {
+		<-fake.started
+		a.Cancel()
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if advice, ok := a.runAdvisorCheckpoint(checkpointPlan, "review this"); ok {
+			t.Errorf("expected cancelled advisor to report ok=false, got advice %q", advice)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runAdvisorCheckpoint did not return after the agent was cancelled")
+	}
+}
+
+func TestRunAdvisorCheckpoint_ReportsProgress(t *testing.T) {
+	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
+	a, _ := checkpointTestAgent(t, []string{"plan"})
+
+	var events []bool
+	a.OnAdvisorCheckpoint = func(kind string, running bool) {
+		if kind != checkpointPlan {
+			t.Errorf("unexpected checkpoint kind %q", kind)
+		}
+		events = append(events, running)
+	}
+
+	if _, ok := a.runAdvisorCheckpoint(checkpointPlan, "review this"); !ok {
+		t.Fatal("expected the fake advisor to return advice")
+	}
+	if len(events) != 2 || !events[0] || events[1] {
+		t.Fatalf("expected start(true) then finish(false), got %v", events)
 	}
 }

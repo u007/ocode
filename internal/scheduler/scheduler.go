@@ -465,7 +465,14 @@ func (s *Service) computeNextRun(j *Job, from time.Time) (int64, error) {
 		if j.Schedule.EveryMs <= 0 {
 			return 0, fmt.Errorf("every_ms must be > 0")
 		}
-		return from.UnixMilli() + j.Schedule.EveryMs, nil
+		// Clamp rather than reject: validateSchedule blocks this on
+		// create/update, but a job persisted before the floor existed (or
+		// hand-edited on disk) must not keep firing below it forever.
+		interval := j.Schedule.EveryMs
+		if interval < minEveryMs {
+			interval = minEveryMs
+		}
+		return from.UnixMilli() + interval, nil
 	case KindCron:
 		loc := time.Local
 		if j.Schedule.TZ != "" {
@@ -510,6 +517,9 @@ func validateSchedule(sc Schedule) error {
 	case KindEvery:
 		if sc.EveryMs <= 0 {
 			return fmt.Errorf("every schedule requires every_ms > 0")
+		}
+		if sc.EveryMs < minEveryMs {
+			return fmt.Errorf("every_ms must be >= %d (%s) — each firing builds a full agent; shorter intervals aren't supported", minEveryMs, time.Duration(minEveryMs)*time.Millisecond)
 		}
 	case KindCron:
 		if sc.Expr == "" {

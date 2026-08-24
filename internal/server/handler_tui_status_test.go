@@ -121,19 +121,22 @@ func TestPushStatusSnapshotMergesWithBridgeSnapshot(t *testing.T) {
 
 	// Simulate a TUI snapshot with TUI-owned fields set.
 	bridge.StatusStore().Set(TUIStatus{
-		MainModel:        "gpt-4o-mini",
-		SmallModel:       "opencode-go/deepseek-v4-flash",
-		SmallModelOn:     true,
-		AdvisorModel:     "advisor-model",
-		SessionID:        "sess-tui-1",
-		SessionTitle:     "TUI title",
-		CWD:              "/tmp",
-		ContextMaxTokens: 200000,
+		MainModel:           "gpt-4o-mini",
+		SmallModel:          "opencode-go/deepseek-v4-flash",
+		SmallModelOn:        true,
+		AdvisorModel:        "advisor-model",
+		PermissionModel:     "prov/tui-owned",
+		PermissionAutoAllow: false,
+		SessionID:           "sess-tui-1",
+		SessionTitle:        "TUI title",
+		CWD:                 "/tmp",
+		ContextMaxTokens:    200000,
 	}, bridge)
 
 	h.mu.Lock()
 	h.cfg.Model = "claude-sonnet-4-5"
 	h.cfg.Ocode.SmallModelEnabled = false
+	h.cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "prov/from-web"}
 	h.mu.Unlock()
 
 	h.pushStatusSnapshot()
@@ -144,6 +147,14 @@ func TestPushStatusSnapshotMergesWithBridgeSnapshot(t *testing.T) {
 	}
 	if snap.SmallModelOn {
 		t.Error("SmallModelOn = true, want false after toggle")
+	}
+	// The permission fields follow the same server-config-wins merge contract:
+	// a web-side set must be visible even before the TUI's next organic push.
+	if snap.PermissionModel != "prov/from-web" {
+		t.Errorf("PermissionModel = %q, want prov/from-web after web-side set", snap.PermissionModel)
+	}
+	if !snap.PermissionAutoAllow {
+		t.Error("PermissionAutoAllow = false, want true after web-side enable")
 	}
 	// TUI-owned fields must survive the merge.
 	if snap.SessionID != "sess-tui-1" {
@@ -361,5 +372,123 @@ func TestHandleSetThinkingBudgetRejectsBadInputs(t *testing.T) {
 	// Nothing may have been persisted for invalid input.
 	if h.cfg.ThinkingBudget != 0 {
 		t.Errorf("h.cfg.ThinkingBudget = %d after invalid inputs, want 0", h.cfg.ThinkingBudget)
+	}
+}
+
+// --- permission-model endpoint coverage (mirrors the small-model siblings) ---
+
+func TestHandleSetPermissionModelRejectsEmptyBody(t *testing.T) {
+	h := testHandlerWithConfig(t)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/permission-model", strings.NewReader(`{}`))
+	h.HandleSetPermissionModel(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+// The {model}/{enabled} fields are independently optional and must not
+// clobber each other; "auto" normalizes to "" (fall back to the small model).
+// HOME is redirected so config.Save* writes land in a temp dir, mirroring the
+// pattern used by internal/config tests.
+func TestHandleSetPermissionModelPartialUpdatesAndAutoNormalization(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	h := testHandlerWithConfig(t)
+	h.mu.Lock()
+	h.cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "prov/old"}
+	h.mu.Unlock()
+
+	put := func(body string) (string, bool, int) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("PUT", "/api/config/permission-model", strings.NewReader(body))
+		h.HandleSetPermissionModel(w, r)
+		var resp struct {
+			Model   string `json:"model"`
+			Enabled bool   `json:"enabled"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &resp)
+		return resp.Model, resp.Enabled, w.Code
+	}
+
+	// Model-only update: enabled gate untouched.
+	if model, enabled, code := put(`{"model":"prov/new"}`); code != 200 || model != "prov/new" || !enabled {
+		t.Fatalf("model-only PUT = (%q, %v, %d), want (prov/new, true, 200)", model, enabled, code)
+	}
+	h.mu.Lock()
+	got := *h.cfg.Ocode.Permissions.Auto
+	h.mu.Unlock()
+	if got.Model != "prov/new" || !got.Enabled {
+		t.Fatalf("after model-only PUT, cfg auto = %+v, want Model=prov/new Enabled=true", got)
+	}
+
+	// Enabled-only update: model preserved.
+	if model, enabled, code := put(`{"enabled":false}`); code != 200 || model != "prov/new" || enabled {
+		t.Fatalf("enabled-only PUT = (%q, %v, %d), want (prov/new, false, 200)", model, enabled, code)
+	}
+	h.mu.Lock()
+	got = *h.cfg.Ocode.Permissions.Auto
+	h.mu.Unlock()
+	if got.Model != "prov/new" || got.Enabled {
+		t.Fatalf("after enabled-only PUT, cfg auto = %+v, want Model=prov/new Enabled=false", got)
+	}
+
+	// "auto" clears the override instead of persisting a literal model id.
+	if model, _, code := put(`{"model":"auto"}`); code != 200 || model != "" {
+		t.Fatalf(`"auto" PUT = (%q, %d), want ("", 200)`, model, code)
+	}
+	h.mu.Lock()
+	got = *h.cfg.Ocode.Permissions.Auto
+	h.mu.Unlock()
+	if got.Model != "" {
+		t.Fatalf(`"auto" must normalize to empty, got %q`, got.Model)
+	}
+}
+
+func TestHandleGetPermissionModelPrefersLiveBridgeSnapshot(t *testing.T) {
+	h := testHandlerWithConfig(t)
+	h.mu.Lock()
+	h.cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false, Model: "prov/from-config"}
+	bridge := &RCBridge{}
+	h.rc = bridge
+	h.mu.Unlock()
+
+	bridge.StatusStore().Set(TUIStatus{
+		UpdatedAt:           "2026-08-23T00:00:00Z",
+		PermissionModel:     "prov/live",
+		PermissionAutoAllow: true,
+	}, bridge)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/config/permission-model", nil)
+	h.HandleGetPermissionModel(w, r)
+
+	var resp struct {
+		Model   string `json:"model"`
+		Enabled bool   `json:"enabled"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Model != "prov/live" || !resp.Enabled {
+		t.Fatalf("GET with live bridge = (%q, %v), want (prov/live, true)", resp.Model, resp.Enabled)
+	}
+}
+
+// A nil Permissions.Auto block must not panic the headless snapshot build,
+// and a populated block must flow into both new TUIStatus fields.
+func TestBuildStatusSnapshotCarriesPermissionFields(t *testing.T) {
+	h := testHandlerWithConfig(t)
+
+	snap := h.buildStatusSnapshot() // Auto == nil
+	if snap.PermissionModel != "" || snap.PermissionAutoAllow {
+		t.Errorf("nil Auto snapshot = (%q, %v), want empty/false", snap.PermissionModel, snap.PermissionAutoAllow)
+	}
+
+	h.mu.Lock()
+	h.cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "prov/judge"}
+	h.mu.Unlock()
+	snap = h.buildStatusSnapshot()
+	if snap.PermissionModel != "prov/judge" || !snap.PermissionAutoAllow {
+		t.Errorf("snapshot = (%q, %v), want (prov/judge, true)", snap.PermissionModel, snap.PermissionAutoAllow)
 	}
 }

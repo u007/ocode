@@ -23,6 +23,8 @@ type TUIStatus struct {
 	PermissionMode string `json:"permission_mode,omitempty"`
 	// Whether the LLM auto-permission judge is enabled.
 	PermissionAutoAllow bool `json:"permission_auto_allow"`
+	// Auto-permission model name (provider/model) for the LLM judge.
+	PermissionModel string `json:"permission_model,omitempty"`
 	// Small model name + runtime on/off (the web should mirror both).
 	SmallModel   string `json:"small_model,omitempty"`
 	SmallModelOn bool   `json:"small_model_enabled"`

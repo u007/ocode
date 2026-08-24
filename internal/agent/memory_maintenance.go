@@ -155,13 +155,10 @@ func (a *Agent) memoryMaintenanceClient() LLMClient {
 	if a.config == nil {
 		return a.client
 	}
-	if !a.config.Ocode.SmallModelEnabled {
+	if !a.SmallModelRuntimeEnabled() {
 		return a.client
 	}
-	model := strings.TrimSpace(a.config.Ocode.SmallModel)
-	if model == "" {
-		model = ResolveSmallModel(a.config)
-	}
+	model := a.resolveSmallModel()
 	if model == "" {
 		return a.client
 	}

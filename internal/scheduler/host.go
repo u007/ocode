@@ -53,9 +53,11 @@ func StartForHost(cfg any, workDir string, runner AgentRunner) (*Service, error)
 	}
 	svc := NewService(storePath)
 	ob := NewOutbox(storePath)
+	rh := NewRunHistory(storePath)
 	d := &Dispatcher{
-		Runner: runner,
-		Outbox: ob,
+		Runner:     runner,
+		Outbox:     ob,
+		RunHistory: rh,
 	}
 	svc.SetOnJob(d.OnJob)
 	// Attach a drainer so the outbox doesn't accumulate indefinitely.

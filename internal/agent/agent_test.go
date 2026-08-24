@@ -720,7 +720,7 @@ func TestOpenAIResponsesCapturesReasoningAndFunctionCallItems(t *testing.T) {
 				StatusCode: http.StatusOK,
 				Body: io.NopCloser(strings.NewReader(
 					"event: response.output_item.done\n" +
-						"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_123\",\"summary\":[]}}\n\n" +
+						"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_123\",\"summary\":[],\"status\":\"completed\"}}\n\n" +
 						"event: response.output_item.done\n" +
 						"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_123\",\"call_id\":\"call_123\",\"name\":\"read\",\"arguments\":\"{\\\"filePath\\\":\\\"README.md\\\"}\"}}\n\n" +
 						"event: response.completed\n" +
@@ -742,6 +742,9 @@ func TestOpenAIResponsesCapturesReasoningAndFunctionCallItems(t *testing.T) {
 	}
 	if msg.OpenAIResponseItems[0]["type"] != "reasoning" || msg.OpenAIResponseItems[1]["type"] != "function_call" {
 		t.Fatalf("unexpected response items: %#v", msg.OpenAIResponseItems)
+	}
+	if _, ok := msg.OpenAIResponseItems[0]["status"]; ok {
+		t.Fatal("output-only reasoning status must not be stored for replay")
 	}
 	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].ID != "call_123" || msg.ToolCalls[0].Function.Name != "read" {
 		t.Fatalf("unexpected tool calls: %#v", msg.ToolCalls)
@@ -827,7 +830,7 @@ func TestOpenAIResponsesIncludesStoredOutputItemsBeforeToolResult(t *testing.T) 
 		{
 			Role: "assistant",
 			OpenAIResponseItems: []map[string]interface{}{
-				{"type": "reasoning", "id": "rs_123", "summary": []interface{}{}},
+				{"type": "reasoning", "id": "rs_123", "summary": []interface{}{}, "status": "completed"},
 				{"type": "function_call", "id": "fc_123", "call_id": "call_123", "name": "read", "arguments": "{}"},
 			},
 		},
@@ -847,6 +850,12 @@ func TestOpenAIResponsesIncludesStoredOutputItemsBeforeToolResult(t *testing.T) 
 		if !ok || item["type"] != wantType {
 			t.Fatalf("input[%d] = %#v, want type %q", i, input[i], wantType)
 		}
+	}
+	if _, ok := input[1].(map[string]interface{})["status"]; ok {
+		t.Fatal("output-only reasoning status must not be replayed as input")
+	}
+	if _, ok := messages[1].OpenAIResponseItems[0]["status"]; !ok {
+		t.Fatal("sanitizing replay input must not mutate stored response items")
 	}
 }
 
@@ -1422,6 +1431,113 @@ func TestAgentToolExecution(t *testing.T) {
 	}
 }
 
+func TestAgentSkipsDuplicateKeyToolArguments(t *testing.T) {
+	// Models sometimes emit the same argument key twice inside one object —
+	// {"path":"a.py","end_line":120,"path":"b.md"} — 60 such calls sit in local
+	// session history. encoding/json accepts that and resolves it last-wins, so
+	// the call used to run silently against a value the model never settled on.
+	// Rejecting it in the stream parser instead ended the whole turn, which is
+	// worse: nothing reaches the model, so it cannot re-issue the call.
+	//
+	// The call must be skipped, the conflict handed back as a tool result, and
+	// the loop must continue.
+	step1 := &Message{
+		Role: "assistant",
+		ToolCalls: []ToolCall{{
+			ID:   "call1",
+			Type: "function",
+			Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: "test_tool", Arguments: `{"path":"a.py","end_line":120,"path":"b.md"}`},
+		}},
+	}
+	step2 := &Message{Role: "assistant", Content: "Done!"}
+
+	mock := &MockToolClient{responses: []*Message{step1, step2}}
+	a := NewAgent(mock, nil, nil, nil)
+	a.Permissions().SetRule("test_tool", PermissionAllow)
+	a.AddTools([]tool.Tool{&MockTool{name: "test_tool", result: "success"}})
+
+	msgs, err := a.Step([]Message{{Role: "user", Content: "do tool"}})
+	if err != nil {
+		t.Fatalf("duplicate-key arguments must not end the turn: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("expected assistant/tool/assistant, got %d: %+v", len(msgs), msgs)
+	}
+	// tool_call_id pairing: an assistant tool_calls entry with no matching tool
+	// message makes the NEXT request a 400, trading one dead loop for another.
+	if msgs[1].Role != "tool" || msgs[1].ToolID != "call1" {
+		t.Fatalf("a skipped call still needs a paired tool result: %+v", msgs[1])
+	}
+	if msgs[1].Content == "success" {
+		t.Fatal("the tool ran; duplicate-key arguments must never reach it")
+	}
+	for _, want := range []string{`"path"`, `"a.py"`, `"b.md"`} {
+		if !strings.Contains(msgs[1].Content, want) {
+			t.Fatalf("the result must name the key and both values so the model can re-issue; %s missing from %q", want, msgs[1].Content)
+		}
+	}
+}
+
+// TestAgentSkipsDuplicateKeyDAGTaskArguments extends the funnel-side guarantee
+// to the in-batch DAG path. When a task call declares depends_on, its args are
+// re-marshalled through taskToolParams to attach predecessor context — and
+// encoding/json resolves duplicate top-level keys last-wins during that round-
+// trip, so a guard that only ran at the funnel would see clean JSON and let the
+// call execute on a value the model never settled on. The dispatch closure must
+// check the raw bytes first; this pins that the call is skipped with a paired
+// tool result while an unrelated sibling still runs.
+func TestAgentSkipsDuplicateKeyDAGTaskArguments(t *testing.T) {
+	step1 := &Message{
+		Role: "assistant",
+		ToolCalls: []ToolCall{
+			{ID: "call-a", Type: "function", Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: "task", Arguments: `{"prompt":"run me","id":"a"}`}},
+			{ID: "call-b", Type: "function", Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: "task", Arguments: `{"path":"a.py","id":"b","depends_on":["a"],"path":"b.md"}`}},
+		},
+	}
+	step2 := &Message{Role: "assistant", Content: "Done!"}
+
+	mock := &MockToolClient{responses: []*Message{step1, step2}}
+	a := NewAgent(mock, nil, nil, nil)
+	a.Permissions().SetRule("task", PermissionAllow)
+	a.AddTools([]tool.Tool{&MockTool{name: "task", result: "ran"}})
+
+	msgs, err := a.Step([]Message{{Role: "user", Content: "fan out"}})
+	if err != nil {
+		t.Fatalf("a skipped DAG node must not end the turn: %v", err)
+	}
+	var toolB *Message
+	toolCount := 0
+	for i := range msgs {
+		if msgs[i].Role == "tool" && msgs[i].ToolID == "call-b" {
+			m := msgs[i]
+			toolB = &m
+		}
+		if msgs[i].Role == "tool" {
+			toolCount++
+		}
+	}
+	if toolCount != 2 {
+		t.Fatalf("both calls need paired tool results, got %d: %+v", toolCount, msgs)
+	}
+	if toolB == nil {
+		t.Fatalf("call-b must get a paired tool result: %+v", msgs)
+	}
+	for _, want := range []string{"call skipped", `"path"`, `"a.py"`, `"b.md"`} {
+		if !strings.Contains(toolB.Content, want) {
+			t.Fatalf("skip result must name key and both values; %s missing from %q", want, toolB.Content)
+		}
+	}
+}
+
 // TestOnPermissionAskRoutesSubAgentDecision verifies that when OnPermissionAsk
 // is set (the sub-agent path), an Ask-level tool call invokes the callback and
 // acts on the returned level instead of emitting the PERMISSION_ASK sentinel.
@@ -1789,16 +1905,16 @@ func TestAutoPermissionModelFallbackUsesRawModelID(t *testing.T) {
 	prevClientFn := newClientFn
 	t.Cleanup(func() { newClientFn = prevClientFn })
 	newClientFn = func(_ *config.Config, model string) LLMClient {
-		if model != "opencode-go/deepseek-v4-flash" {
+		if model != "opencode-go/qwen3.5-plus" {
 			return nil
 		}
 		return &MockClient{Response: &Message{Role: "assistant", Content: "ALLOW: ok"}}
 	}
 
-	if got := a.autoPermissionModelName(); got != "opencode-go/deepseek-v4-flash" {
+	if got := a.autoPermissionModelName(); got != "opencode-go/qwen3.5-plus" {
 		t.Fatalf("expected raw fallback model id, got %q", got)
 	}
-	if got := a.autoPermissionModelDisplayName(); got != "opencode-go/deepseek-v4-flash (resolved small model)" {
+	if got := a.autoPermissionModelDisplayName(); got != "opencode-go/qwen3.5-plus (resolved small model)" {
 		t.Fatalf("expected display label for fallback model, got %q", got)
 	}
 }
@@ -1821,7 +1937,7 @@ func TestHandleToolCallAutoPermissionUsesResolvedSmallModelFallback(t *testing.T
 	seenModels := make([]string, 0, 4)
 	newClientFn = func(_ *config.Config, model string) LLMClient {
 		seenModels = append(seenModels, model)
-		if model != "opencode-go/deepseek-v4-flash" {
+		if model != "opencode-go/qwen3.5-plus" {
 			return nil
 		}
 		return &MockClient{Response: &Message{Role: "assistant", Content: "ALLOW: safe tool call"}}

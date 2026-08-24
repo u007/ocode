@@ -275,12 +275,14 @@ The list is not git-based — it derives from the snapshot store
   `compactFinishedMsg` handlers, after input items are processed, so
   a command never fires while another stream is in flight.
   - Current instant commands: `/model`, `/models`, `/help`, `/thinking`,
-    `/details`, `/login`, `/new`, `/clear`, `/sidebar`, `/commands`,
-    `/permissions`, `/yolo`, `/small-model`, `/editor`, `/editor-mode`,
-    `/themes`, `/theme`, `/lsp`, `/usage`, `/share`, `/connect`, `/agent`,
-    `/mcp`, `/advisor`, `/mask`, `/rc`,
-    `/remote-control`, `/search`, `/find`, `/docs`, `/doc-mode`, `/recap`,
-    `/goal`, and `/agents status` (or `/agents` with no arguments).
+    `/details`, `/sound`, `/login`, `/logout`, `/sync-logout`, `/new`,
+    `/clear`, `/sidebar`, `/commands`, `/permissions`, `/ban`, `/yolo`,
+    `/small-model`, `/editor`, `/editor-mode`, `/themes`, `/theme`, `/lsp`,
+    `/usage`, `/share`, `/connect`, `/agent`, `/mcp`, `/advisor`, `/mask`,
+    `/mem`, `/paths`, `/rc`, `/remote-control`, `/search`, `/find`,
+    `/discover`, `/docs`, `/doc-mode`, `/recap`, `/ocr`, `/image`, `/cron`,
+    `/localmodel`, `/autocontinue`, `/goal`,
+    and `/agents status` (or `/agents` with no arguments).
     `/btw`/`/by-the-way` is deliberately NOT instant: it starts an independent
     side-query agent loop (its own child agent with its own client — see
     `Agent.AskLoopAsync`), and running it mid-stream would interleave a second

@@ -52,6 +52,7 @@ const SESSION_SCOPED_EVENTS = new Set([
   "permission",
   "permission_resolved",
   "permission_check",
+  "advisor_checkpoint",
   "error",
   "session_bootstrap",
 ]);
@@ -303,6 +304,16 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
           sessionId,
           tool: evData.tool,
           model: evData.model,
+          active: evData.active,
+        });
+        return;
+      }
+      case "advisor_checkpoint": {
+        const evData = data as { kind: string; active: boolean };
+        r.dispatch({
+          type: "LIVE_ADVISOR_CHECKPOINT",
+          sessionId,
+          kind: evData.kind,
           active: evData.active,
         });
         return;

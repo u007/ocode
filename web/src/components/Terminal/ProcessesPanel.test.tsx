@@ -2,23 +2,23 @@ import { render, screen, waitFor, act } from "@testing-library/react";
 import { describe, expect, it, beforeEach } from "vitest";
 import ProcessesPanel from "./ProcessesPanel";
 import { eventBus } from "@/lib/eventBus";
-import { saveSessionTerminals } from "./terminalPersistence";
+import { saveProjectTerminals } from "./terminalPersistence";
 
 describe("ProcessesPanel", () => {
-  const sessionId = "sess-1";
+  const projectPath = "/project";
 
   beforeEach(() => {
     window.localStorage.clear();
   });
 
   it("shows nothing until a terminal_processes envelope arrives", () => {
-    render(<ProcessesPanel sessionId={sessionId} />);
+    render(<ProcessesPanel projectPath={projectPath} />);
     expect(screen.getByText(/No terminal process data yet/)).toBeInTheDocument();
   });
 
   it("renders rows sorted by CPU% descending, using persisted terminal titles", async () => {
-    saveSessionTerminals(
-      sessionId,
+    saveProjectTerminals(
+      projectPath,
       [
         { id: "term-a", title: "Terminal 1" },
         { id: "term-b", title: "Terminal 2" },
@@ -26,7 +26,7 @@ describe("ProcessesPanel", () => {
       "term-a",
     );
 
-    render(<ProcessesPanel sessionId={sessionId} />);
+    render(<ProcessesPanel projectPath={projectPath} />);
 
     act(() => {
       eventBus["handlers"]

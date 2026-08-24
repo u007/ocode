@@ -257,3 +257,44 @@ func TestModelSupportsVision_FallbackFamilies(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildAnthropicMessages_ToolResultThenUserText covers the shape the
+// advisor plan checkpoint produces: a tool-result batch immediately followed by
+// an injected plain user message (the advisor's review). The two must stay in
+// separate user turns — mixing tool_result and text blocks in one user message
+// is rejected by strict providers (e.g. Minimax, which routes through this
+// path) — and the tool_result must keep its tool_use_id pairing.
+func TestBuildAnthropicMessages_ToolResultThenUserText(t *testing.T) {
+	c := &GenericClient{Provider: "opencode-go", Model: "minimax-m3"}
+	asst := Message{Role: "assistant"}
+	asst.ToolCalls = []ToolCall{namedToolCall("tc1", "apply_patch", `{"patchText":"x"}`)}
+	msgs := []Message{
+		{Role: "user", Content: "patch it"},
+		asst,
+		{Role: "tool", ToolID: "tc1", Content: "Success."},
+		{Role: "user", Content: "[advisor plan checkpoint] review"},
+	}
+
+	out, err := c.buildAnthropicMessages(msgs)
+	if err != nil {
+		t.Fatalf("buildAnthropicMessages: %v", err)
+	}
+	if len(out) != 4 {
+		t.Fatalf("expected 4 messages (user, assistant, tool_result, review), got %d: %+v", len(out), out)
+	}
+	if out[2]["role"] != "user" || out[3]["role"] != "user" {
+		t.Fatalf("tool_result and review must both be user turns, got %q and %q", out[2]["role"], out[3]["role"])
+	}
+	toolContent, _ := out[2]["content"].([]interface{})
+	if !hasToolResultBlock(toolContent) {
+		t.Fatalf("expected a tool_result block in the tool turn, got %+v", toolContent)
+	}
+	reviewContent, _ := out[3]["content"].([]interface{})
+	if hasToolResultBlock(reviewContent) {
+		t.Fatalf("review turn must not carry tool_result blocks, got %+v", reviewContent)
+	}
+	block, _ := reviewContent[0].(map[string]interface{})
+	if block["type"] != "text" || !strings.Contains(block["text"].(string), "advisor plan checkpoint") {
+		t.Fatalf("review turn must carry the review text, got %+v", block)
+	}
+}

@@ -60,6 +60,18 @@ func TestComputeNextRun(t *testing.T) {
 	if _, err := s.computeNextRun(bad, from); err == nil {
 		t.Fatal("cron: expected error for bad expr")
 	}
+
+	// every below the floor -> clamped, not rejected: a job persisted before
+	// minEveryMs existed (or hand-edited on disk) must not keep firing at its
+	// original sub-floor interval forever.
+	tooFast := &Job{Schedule: Schedule{Kind: KindEvery, EveryMs: 5000}}
+	nr, err = s.computeNextRun(tooFast, from)
+	if err != nil {
+		t.Fatalf("every below floor: %v", err)
+	}
+	if nr != from.UnixMilli()+minEveryMs {
+		t.Fatalf("every below floor: want clamped to %dms got %dms", minEveryMs, nr-from.UnixMilli())
+	}
 }
 
 func TestAddJobValidation(t *testing.T) {
@@ -83,6 +95,16 @@ func TestAddJobValidation(t *testing.T) {
 	s.SetMaxJobs(1)
 	if _, err := s.AddJob(Job{Schedule: Schedule{Kind: KindEvery, EveryMs: int64(time.Minute / time.Millisecond)}, Payload: Payload{Message: "x"}}); err == nil {
 		t.Fatal("expected job-limit error")
+	}
+}
+
+func TestAddJobRejectsEveryBelowMinInterval(t *testing.T) {
+	s := newTestService(t)
+	if _, err := s.AddJob(Job{Schedule: Schedule{Kind: KindEvery, EveryMs: minEveryMs - 1}, Payload: Payload{Message: "too fast"}}); err == nil {
+		t.Fatal("expected error for every_ms below minEveryMs")
+	}
+	if _, err := s.AddJob(Job{Schedule: Schedule{Kind: KindEvery, EveryMs: minEveryMs}, Payload: Payload{Message: "exactly at floor"}}); err != nil {
+		t.Fatalf("every_ms == minEveryMs should be accepted: %v", err)
 	}
 }
 

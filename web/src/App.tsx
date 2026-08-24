@@ -51,7 +51,7 @@ import { eventBus } from "./lib/eventBus";
 import { useSessionStatus } from "./hooks/useSessionStatus";
 import { useTurnWatchdogAll } from "./hooks/useTurnWatchdog";
 
-type ModelDialogTab = "main" | "small" | "advisor";
+type ModelDialogTab = "main" | "small" | "advisor" | "permission" | "recap" | "ocr" | "mask" | "commit" | "summary";
 
 function StatusMetricsHydrator() {
   const dispatch = useChatDispatch();
@@ -290,10 +290,12 @@ function HomeApp() {
     },
     onNewTerminal: () => {
       // Ctrl/Cmd+T: if on terminal sub-tab, open a new terminal instance;
-      // otherwise create a new session tab (same as Ctrl/Cmd+N).
+      // otherwise create a new session tab (same as Ctrl/Cmd+N). Terminal is
+      // project-scoped so the handle is keyed by project path.
       const currentTab = tabs.find((t) => t.id === activeTabId);
       if (currentTab?.activeSubTab === "terminal") {
-        terminalRefs.current.get(activeTabId!)?.openTerminal();
+        const proj = projectState.activeProject?.path ?? "";
+        terminalRefs.current.get(proj)?.openTerminal();
       } else {
         openNewSessionTab(isNewSessionTabEmpty(activeTabId));
       }
@@ -319,11 +321,9 @@ function HomeApp() {
       }
       if (activeView !== "sessions" || !activeTabId) return;
       const currentTab = tabs.find((t) => t.id === activeTabId);
-      if (
-        currentTab?.activeSubTab === "terminal" &&
-        terminalRefs.current.get(activeTabId)?.closeActiveTerminal()
-      ) {
-        return;
+      if (currentTab?.activeSubTab === "terminal") {
+        const proj = projectState.activeProject?.path ?? "";
+        if (terminalRefs.current.get(proj)?.closeActiveTerminal()) return;
       }
       closeSessionTab(activeTabId);
       dispatch({ type: "RESET", sessionId: activeTabId });
@@ -429,7 +429,9 @@ function HomeApp() {
   const allChatTabs = Object.values(projectState.tabsByProject).flat();
   const activeSessionTab = tabs.find((t) => t.id === activeTabId);
 
-  // Refs to TerminalTabs instances so Ctrl/Cmd+T can open a new terminal
+  // Refs to TerminalTabs instances so Ctrl/Cmd+T can open a new terminal.
+  // Keyed by project path (terminal is project-scoped, not session-scoped,
+  // so switching chat sessions never kills the pty).
   const terminalRefs = useRef<Map<string, TerminalTabsHandle>>(new Map());
 
   return (
@@ -657,46 +659,54 @@ function HomeApp() {
                         />
                       </div>
                     ))}
-                    {allChatTabs.map((tab) => (
-                      <div
-                        key={`${tab.id}:terminal`}
-                        className={
-                          tab.projectPath === projectState.activeProject?.path &&
-                          tab.id === activeTabId &&
-                          tab.activeSubTab === "terminal"
-                            ? "absolute inset-0"
-                            : "absolute inset-0 hidden"
-                        }
-                      >
-                        <TerminalTabs
-                          ref={(handle) => {
-                            if (handle) terminalRefs.current.set(tab.id, handle);
-                            else terminalRefs.current.delete(tab.id);
-                          }}
-                          active={
-                            tab.projectPath === projectState.activeProject?.path &&
-                            tab.id === activeTabId &&
-                            tab.activeSubTab === "terminal"
-                          }
-                          projectPath={tab.projectPath}
-                          sessionId={tab.id}
-                        />
-                      </div>
-                    ))}
-                    {allChatTabs.map((tab) => (
-                      <div
-                        key={`${tab.id}:processes`}
-                        className={
-                          tab.projectPath === projectState.activeProject?.path &&
-                          tab.id === activeTabId &&
-                          tab.activeSubTab === "processes"
-                            ? "absolute inset-0"
-                            : "absolute inset-0 hidden"
-                        }
-                      >
-                        <ProcessesPanel sessionId={tab.id} />
-                      </div>
-                    ))}
+                    {(() => {
+                      // Terminal + Processes are project-scoped (not session-scoped)
+                      // so switching chat sessions within the same project never
+                      // hides or kills the pty. Render one instance per distinct
+                      // project path and keep them mounted hidden for fast switch.
+                      const projectPaths = Array.from(
+                        new Set(
+                          [
+                            ...Object.keys(projectState.tabsByProject),
+                            ...(projectState.activeProject ? [projectState.activeProject.path] : []),
+                          ].filter(Boolean) as string[],
+                        ),
+                      );
+                      const activeProjectPath = projectState.activeProject?.path ?? "";
+                      const terminalActive = activeSessionTab?.activeSubTab === "terminal";
+                      const processesActive = activeSessionTab?.activeSubTab === "processes";
+                      return (
+                        <>
+                          {projectPaths.map((pp) => (
+                            <div
+                              key={`${pp}:terminal`}
+                              className={
+                                pp === activeProjectPath && terminalActive ? "absolute inset-0" : "absolute inset-0 hidden"
+                              }
+                            >
+                              <TerminalTabs
+                                ref={(handle) => {
+                                  if (handle) terminalRefs.current.set(pp, handle);
+                                  else terminalRefs.current.delete(pp);
+                                }}
+                                active={pp === activeProjectPath && terminalActive}
+                                projectPath={pp}
+                              />
+                            </div>
+                          ))}
+                          {projectPaths.map((pp) => (
+                            <div
+                              key={`${pp}:processes`}
+                              className={
+                                pp === activeProjectPath && processesActive ? "absolute inset-0" : "absolute inset-0 hidden"
+                              }
+                            >
+                              <ProcessesPanel projectPath={pp} />
+                            </div>
+                          ))}
+                        </>
+                      );
+                    })()}
                     {allChatTabs.map((tab) => (
                       tab.projectPath === projectState.activeProject?.path &&
                       tab.id === activeTabId &&
@@ -764,8 +774,15 @@ function HomeApp() {
           open={true}
           tool={pendingPermission.tool}
           command={pendingPermission.command}
+          rule={pendingPermission.rule}
+          summary={pendingPermission.summary}
+          denyReason={pendingPermission.deny_reason}
+          modelUnavailable={pendingPermission.model_unavailable}
+          scope={pendingPermission.scope}
+          prefix={pendingPermission.prefix}
+          outOfScopePath={pendingPermission.out_of_scope_path}
           requestId={pendingPermission.request_id}
-          onApprove={resolvePermission}
+          onDecide={resolvePermission}
         />
       )}
 

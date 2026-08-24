@@ -91,6 +91,13 @@ const sevenDaysMs = int64(7 * 24 * 60 * 60 * 1000)
 // many jobs don't all hit the API on the same wall second.
 const maxJitterMs = int64(30 * 1000)
 
+// minEveryMs is the shortest interval a KindEvery schedule may fire at. Each
+// firing builds a full Agent (LLM client, tools, LSP manager/file watcher) for
+// one Step call, so a misconfigured job below this (e.g. a copy-pasted
+// every_ms in seconds instead of ms) can no longer fire every few seconds
+// forever with no bound.
+const minEveryMs = int64(30 * 1000)
+
 // maxPollLeg is the longest the timer sleeps before re-checking the wall clock,
 // so VM throttling / clock changes don't permanently drift the schedule.
 const maxPollLeg = 60 * time.Second

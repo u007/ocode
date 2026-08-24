@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
-import { Loader2, Settings2 } from "lucide-react";
+import { Loader2, Settings2, HelpCircle } from "lucide-react";
 import { api } from "../../api/client";
 import { Button } from "../ui/button";
 import {
@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import MonacoSettingsPanel from "./MonacoSettingsPanel";
+import EditorHelpDialog from "./EditorHelpDialog";
 import { loadEditorScroll, saveEditorScroll } from "./editorTabsPersistence";
 import { parseDiffPatch, type DiffLine, type Hunk } from "../../lib/parseDiffPatch";
 
@@ -117,6 +118,7 @@ function FileEditorImpl({
   // When the parent doesn't provide onOpenSettings (the current default), the
   // Settings button opens the Monaco settings/extensions panel in a dialog.
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const lang = language || extensionToLanguage(path);
 
   // Refs for diff decoration cleanup
@@ -529,6 +531,16 @@ function FileEditorImpl({
           )}
           <Button
             variant="ghost"
+            size="icon"
+            className="h-6 w-6 text-muted-foreground hover:text-foreground"
+            onClick={() => setHelpOpen(true)}
+            title="Editor help & shortcuts"
+            aria-label="Editor help & shortcuts"
+          >
+            <HelpCircle className="w-3.5 h-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
             size="sm"
             className="h-6 px-1.5 gap-1 text-muted-foreground hover:text-foreground"
             onClick={() => (onOpenSettings ? onOpenSettings() : setSettingsOpen(true))}
@@ -582,6 +594,9 @@ function FileEditorImpl({
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Editor help & shortcuts */}
+      <EditorHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
 
       {/* Monaco editor */}
       <div className="flex-1 overflow-hidden">

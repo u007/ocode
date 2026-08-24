@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/u007/ocode/internal/tool"
 )
 
 // Advisor checkpoint names, matching cfg.Ocode.Advisor.Checkpoints values.
@@ -29,12 +31,8 @@ type advisorCheckpointState struct {
 	userGoal    string
 	planChecked bool
 	doneChecked bool
-	// deferredWriteIntent is set when the plan checkpoint deferred a write batch.
-	// It keeps the final-answer checkpoint from being bypassed if the model
-	// acknowledges the review and then stops without re-issuing the writes.
-	deferredWriteIntent bool
-	toolCalls           int
-	writeCalls          int
+	toolCalls   int
+	writeCalls  int
 }
 
 func (a *Agent) newAdvisorCheckpointState(userGoal string) *advisorCheckpointState {
@@ -51,8 +49,7 @@ func lastUserContent(messages []Message) string {
 }
 
 // countBatch records an executed tool batch toward the "done" checkpoint's
-// non-triviality threshold. Deferred (plan-checkpointed) batches are not
-// counted — their calls never executed.
+// non-triviality threshold.
 func (st *advisorCheckpointState) countBatch(calls []ToolCall) {
 	st.toolCalls += len(calls)
 	for _, tc := range calls {
@@ -95,6 +92,11 @@ func (a *Agent) advisorCheckpointEnabled(name string) bool {
 // runAdvisorCheckpoint executes the advisor tool with the given prompt.
 // Advisor failure must never block the agent loop, so errors are logged and
 // reported as ok=false — the caller proceeds without advice.
+//
+// The call is bound to the agent's stop channel, so Escape aborts an in-flight
+// advisor instead of leaving the loop parked on it (a Claude Code advisor
+// subprocess runs up to 5 minutes). OnAdvisorCheckpoint brackets the call so
+// the UI can show that the loop is waiting on a second model.
 func (a *Agent) runAdvisorCheckpoint(kind, prompt string) (string, bool) {
 	t, ok := a.tools["advisor"]
 	if !ok {
@@ -107,7 +109,20 @@ func (a *Agent) runAdvisorCheckpoint(kind, prompt string) (string, bool) {
 	}
 	a.emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint firing", kind))
 	a.activity.toolStarted("advisor")
-	advice, err := t.Execute(args)
+	if a.OnAdvisorCheckpoint != nil {
+		a.OnAdvisorCheckpoint(kind, true)
+	}
+	ctx, cancel := stopChContext(a.StopCh())
+	var advice string
+	if ct, isCtx := t.(tool.ContextualTool); isCtx {
+		advice, err = ct.ExecuteCtx(ctx, args)
+	} else {
+		advice, err = t.Execute(args)
+	}
+	cancel()
+	if a.OnAdvisorCheckpoint != nil {
+		a.OnAdvisorCheckpoint(kind, false)
+	}
 	a.activity.toolDone("advisor")
 	if err != nil {
 		a.emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint failed (continuing without advice): %v", kind, err))
@@ -121,13 +136,14 @@ func (a *Agent) runAdvisorCheckpoint(kind, prompt string) (string, bool) {
 	return advice, true
 }
 
-// advisorPlanCheckpoint fires once per Step, on the first assistant batch that
-// contains a write-class tool call. The whole batch is deferred: every call
-// gets a synthetic tool result carrying (or referencing) the advisor's review,
-// and the loop continues so the model can re-issue or adjust. Returns nil when
-// the checkpoint does not apply (or the advisor is unavailable), in which case
-// the batch executes normally.
-func (a *Agent) advisorPlanCheckpoint(st *advisorCheckpointState, resp *Message) []Message {
+// advisorPlanCheckpoint fires once per Step, immediately after the first
+// executed tool batch that contained a write-class call. The batch is NOT
+// deferred: the writes are already applied, so the model never regenerates
+// them. The review comes back as a user message injected into the loop, which
+// the model acts on next iteration (correcting the applied change if the
+// advisor found a problem). Returns nil when the checkpoint does not apply, or
+// when the advisor is unavailable, in which case the loop continues unchanged.
+func (a *Agent) advisorPlanCheckpoint(st *advisorCheckpointState, resp *Message) *Message {
 	if st.planChecked || len(resp.ToolCalls) == 0 || !a.advisorCheckpointEnabled(checkpointPlan) {
 		return nil
 	}
@@ -147,7 +163,7 @@ func (a *Agent) advisorPlanCheckpoint(st *advisorCheckpointState, resp *Message)
 	for _, tc := range resp.ToolCalls {
 		fmt.Fprintf(&plan, "- %s %s\n", tc.Function.Name, summarizeToolArgs(tc.Function.Name, tc.Function.Arguments))
 	}
-	prompt := fmt.Sprintf(`PLAN CHECKPOINT: the executor is about to make its first code changes for this task. Review the plan before implementation.
+	prompt := fmt.Sprintf(`PLAN CHECKPOINT: the executor has just made its first code changes for this task. Review the approach now, while it is still cheap to correct.
 
 User goal:
 %s
@@ -155,7 +171,7 @@ User goal:
 Executor's reasoning:
 %s
 
-Proposed tool calls:
+Tool calls just applied:
 %s
 Advise: is this the right approach? Wrong files, missing prior exploration, simpler alternative, risks? Answer with either "proceed" plus cautions, or a corrected approach. This is an automated checkpoint — the executor cannot answer follow-up questions; if context is thin, give your best read with explicit caveats rather than requesting more information.`,
 		st.userGoal, resp.Content, plan.String())
@@ -164,18 +180,12 @@ Advise: is this the right approach? Wrong files, missing prior exploration, simp
 	if !ok {
 		return nil
 	}
-	st.deferredWriteIntent = true
 
-	msgs := make([]Message, 0, len(resp.ToolCalls))
-	for j, tc := range resp.ToolCalls {
-		content := "[advisor plan checkpoint] Call deferred, not executed. See the advisor review in the first tool result of this batch; re-issue this call if the plan stands."
-		if j == 0 {
-			content = "[advisor plan checkpoint] Call deferred, not executed. Advisor review of your plan:\n\n" + advice +
-				"\n\nIf the review confirms your approach, re-issue the deferred calls unchanged. Otherwise adjust your plan first. This checkpoint fires only once per turn."
-		}
-		msgs = append(msgs, Message{Role: "tool", ToolID: tc.ID, Content: content})
+	return &Message{
+		Role: "user",
+		Content: "[advisor plan checkpoint] An advisor reviewed the changes you just made:\n\n" + advice +
+			"\n\nIf the review confirms your approach, carry on. Otherwise correct the changes now — they are already applied, so fix them in place rather than re-issuing the same calls. This checkpoint fires only once per turn.",
 	}
-	return msgs
 }
 
 // advisorDoneCheckpoint fires once per Step when the model produces a final
@@ -187,7 +197,7 @@ func (a *Agent) advisorDoneCheckpoint(st *advisorCheckpointState, resp *Message)
 	if st.doneChecked || !a.advisorCheckpointEnabled(checkpointDone) {
 		return nil
 	}
-	if st.writeCalls == 0 && st.toolCalls < doneCheckpointMinToolCalls && !st.deferredWriteIntent {
+	if st.writeCalls == 0 && st.toolCalls < doneCheckpointMinToolCalls {
 		return nil
 	}
 	st.doneChecked = true

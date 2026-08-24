@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Gauge } from "lucide-react";
 import { eventBus } from "@/lib/eventBus";
 import { api } from "@/api/client";
-import { loadSessionTerminals } from "./terminalPersistence";
+import { loadProjectTerminals } from "./terminalPersistence";
 
 interface TerminalProcessStat {
   id: string;
@@ -17,24 +17,25 @@ function formatBytes(bytes: number): string {
 }
 
 /**
- * Chrome-Task-Manager-style view of every open terminal in this session tab:
+ * Chrome-Task-Manager-style view of every open terminal in the active project:
  * CPU% and memory summed across the whole process tree (the shell plus
  * whatever it launched — a nested `ocode`, its `/rc` server, etc.), so a
  * runaway grandchild process surfaces even though the pty's own pid stays
  * quiet. Rows come from the `terminal_processes` envelope the server emitter
  * publishes (see internal/server/emitters.go); titles come from the same
- * localStorage-persisted terminal list TerminalTabs itself reads.
+ * localStorage-persisted terminal list TerminalTabs itself reads (now
+ * project-scoped so the view survives session switches).
  */
-export default function ProcessesPanel({ sessionId }: { sessionId: string }) {
+export default function ProcessesPanel({ projectPath }: { projectPath: string }) {
   const [stats, setStats] = useState<Record<string, TerminalProcessStat>>({});
   const [titles, setTitles] = useState<Record<string, string>>(() => {
-    const saved = loadSessionTerminals(sessionId);
+    const saved = loadProjectTerminals(projectPath);
     if (!saved) return {};
     return Object.fromEntries(saved.terminals.map((t) => [t.id, t.title]));
   });
 
   function refreshTitles() {
-    const saved = loadSessionTerminals(sessionId);
+    const saved = loadProjectTerminals(projectPath);
     if (saved) {
       setTitles(Object.fromEntries(saved.terminals.map((t) => [t.id, t.title])));
     }
@@ -88,7 +89,7 @@ export default function ProcessesPanel({ sessionId }: { sessionId: string }) {
       cancelled = true;
       off();
     };
-  }, [sessionId]);
+  }, [projectPath]);
 
   const rows = useMemo(() => {
     return Object.values(stats)

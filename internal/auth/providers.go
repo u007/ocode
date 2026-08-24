@@ -133,6 +133,7 @@ var Providers = []Provider{
 	{ID: "opencode-go", Label: "OpenCode Go", EnvVar: "OPENCODE_API_KEY"},
 	{ID: "openrouter", Label: "OpenRouter", EnvVar: "OPENROUTER_API_KEY"},
 	{ID: "orcarouter", Label: "OrcaRouter", EnvVar: "ORCAROUTER_API_KEY"},
+	{ID: "aihubmix", Label: "AIHubMix", EnvVar: "AIHUBMIX_API_KEY"},
 	{ID: "zai", Label: "Z.AI", EnvVar: "ZAI_API_KEY"},
 	{ID: "zai-coding", Label: "Z.AI Coding", EnvVar: "ZAI_CODING_API_KEY"},
 	{ID: "moonshot", Label: "Moonshot", EnvVar: "MOONSHOT_API_KEY"},

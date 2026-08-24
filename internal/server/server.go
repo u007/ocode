@@ -75,8 +75,9 @@ type Server struct {
 	handler          *Handler
 	webFS            fs.FS
 	workDir          string
-	scheduler        any                // optional *scheduler.Service; set via SetScheduler
-	schedulerOutbox  *scheduler.Outbox  // optional; set via SetScheduler
+	scheduler        any               // optional *scheduler.Service; set via SetScheduler
+	schedulerOutbox  *scheduler.Outbox // optional; set via SetScheduler
+	schedulerRuns    *scheduler.RunHistory
 	schedulerTargets *scheduler.Targets // optional; set via SetScheduler
 	startedAt        time.Time
 
@@ -178,6 +179,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/thinking-budget", s.authMiddleware(s.handleSetThinkingBudget))
 	s.mux.HandleFunc("GET /api/config/small-model", s.authMiddleware(s.handleGetSmallModel))
 	s.mux.HandleFunc("PUT /api/config/small-model", s.authMiddleware(s.handleSetSmallModel))
+	s.mux.HandleFunc("GET /api/config/permission-model", s.authMiddleware(s.handleGetPermissionModel))
+	s.mux.HandleFunc("PUT /api/config/permission-model", s.authMiddleware(s.handleSetPermissionModel))
 	s.mux.HandleFunc("GET /api/config/terminal", s.authMiddleware(s.handleGetTerminalConfig))
 	s.mux.HandleFunc("PUT /api/config/terminal", s.authMiddleware(s.handleSetTerminalConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/recap", s.authMiddleware(s.handleGetRecapConfig))
@@ -872,6 +875,12 @@ func (s *Server) handleGetSmallModel(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleSetSmallModel(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetSmallModel(w, r)
+}
+func (s *Server) handleGetPermissionModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPermissionModel(w, r)
+}
+func (s *Server) handleSetPermissionModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPermissionModel(w, r)
 }
 func (s *Server) handleGetTerminalConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetTerminalConfig(w, r)

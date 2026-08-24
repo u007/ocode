@@ -10,6 +10,12 @@ export interface PermissionRequest {
   deny_reason?: string;
   model_unavailable?: string;
   request_id: string;
+  /** "tool" | "bash_prefix" — drives always-allow button availability. */
+  scope?: string;
+  /** Bash prefix for bash_prefix-scope asks (e.g. "rm"). */
+  prefix?: string;
+  /** Out-of-workspace target path; "always" persists this root to extra_allowed_paths. */
+  out_of_scope_path?: string;
 }
 
 export interface QuestionRequest {
@@ -159,6 +165,7 @@ export type ChatAction =
   | { type: "LIVE_TOOL_RESULT"; sessionId: string; callId?: string; output: string }
   | { type: "LIVE_RESET"; sessionId: string }
   | { type: "LIVE_PERMISSION_CHECK"; sessionId: string; tool: string; model: string; active: boolean }
+  | { type: "LIVE_ADVISOR_CHECKPOINT"; sessionId: string; kind: string; active: boolean }
   | { type: "PERMISSION_REQUEST"; sessionId: string; permission: PermissionRequest }
   | { type: "PERMISSION_RESOLVED"; sessionId: string; requestId?: string }
   | { type: "QUESTION_REQUEST"; sessionId: string; question: QuestionRequest }
@@ -332,6 +339,23 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return updateSession(state, action.sessionId, (s) => ({ ...s, live: [] }));
     case "LIVE_PERMISSION_CHECK": {
       const text = `Checking permission for ${action.tool} (${action.model})…`;
+      return updateSession(state, action.sessionId, (s) => {
+        if (action.active) {
+          return { ...s, live: [...s.live, { kind: "status", text }] };
+        }
+        const live = [...s.live];
+        for (let i = live.length - 1; i >= 0; i--) {
+          const part = live[i];
+          if (part.kind === "status" && part.text === text) {
+            live.splice(i, 1);
+            break;
+          }
+        }
+        return { ...s, live };
+      });
+    }
+    case "LIVE_ADVISOR_CHECKPOINT": {
+      const text = `Advisor ${action.kind} checkpoint — reviewing…`;
       return updateSession(state, action.sessionId, (s) => {
         if (action.active) {
           return { ...s, live: [...s.live, { kind: "status", text }] };

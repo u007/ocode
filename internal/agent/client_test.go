@@ -467,12 +467,17 @@ func TestParseOpenAIChatCompletionsStream_RepeatedIDIsOneCall(t *testing.T) {
 	}
 }
 
-func TestParseOpenAIChatCompletionsStream_RejectsDuplicateKeyArguments(t *testing.T) {
-	// Defense in depth for the merge above. json.Valid accepts duplicate keys,
-	// which is precisely why every merged call executed silently instead of
-	// erroring. If any provider still produces a concatenated argument string —
-	// one that sends neither a usable index nor a changing id — it must fail
-	// loudly rather than run last-wins.
+func TestParseOpenAIChatCompletionsStream_PassesDuplicateKeyArgumentsThrough(t *testing.T) {
+	// Duplicate keys used to be fatal here, which ended the whole turn: the
+	// error matches nothing in isRetryableLLMClientError, so the model never
+	// saw what was wrong and could not re-issue the call. The policy now lives
+	// at the dispatch site, where a skipped call still gets a paired tool
+	// result — see TestAgentSkipsDuplicateKeyToolArguments, which carries the
+	// "never executes" guarantee this test used to hold.
+	//
+	// The parser's job ends at reporting what arrived, verbatim: it must not
+	// drop, reorder, or rewrite the argument bytes on the way, or the dispatch
+	// site cannot name both conflicting values.
 	stream := strings.Join([]string{
 		`data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-a","function":{"name":"read","arguments":"{\"path\":\"a.txt\",\"path\":\"b.txt\"}"}}]}}]}`,
 		`data: [DONE]`,
@@ -480,11 +485,14 @@ func TestParseOpenAIChatCompletionsStream_RejectsDuplicateKeyArguments(t *testin
 	}, "\n")
 
 	msg, _, err := parseOpenAIChatCompletionsStream(strings.NewReader(stream), nil, nil)
-	if err == nil {
-		t.Fatalf("duplicate-key arguments must not be executed, got %+v", msg.ToolCalls)
+	if err != nil {
+		t.Fatalf("duplicate keys are no longer a parse error: %v", err)
 	}
-	if !strings.Contains(err.Error(), `repeat key "path"`) {
-		t.Fatalf("error should name the repeated key so the provider bug is diagnosable: %v", err)
+	if len(msg.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(msg.ToolCalls))
+	}
+	if got := msg.ToolCalls[0].Function.Arguments; got != `{"path":"a.txt","path":"b.txt"}` {
+		t.Fatalf("arguments must reach dispatch unmodified, got %s", got)
 	}
 }
 
@@ -496,18 +504,25 @@ func TestDuplicateTopLevelKey_OnlyInspectsTopLevel(t *testing.T) {
 	// for those 2, and a nested repeat is far likelier to be legitimate
 	// model-authored content than a merged call. This pins the boundary so it
 	// stays a decision rather than an accident.
-	if got := duplicateTopLevelKey(`{"path":"a","end_line":1,"path":"b"}`); got != "path" {
-		t.Fatalf("top-level repeat must be reported, got %q", got)
+	key, first, second := duplicateTopLevelKey(`{"path":"a","end_line":1,"path":"b"}`)
+	if key != "path" {
+		t.Fatalf("top-level repeat must be reported, got %q", key)
 	}
-	if got := duplicateTopLevelKey(`{"edits":[{"newString":"x","newString":"y"}]}`); got != "" {
-		t.Fatalf("nested repeat must not be reported, got %q", got)
+	// Both values, not just the key: the tool result is the model's only chance
+	// to see which two values it gave. A message it cannot act on turns one
+	// dead turn into a loop of them.
+	if first != `"a"` || second != `"b"` {
+		t.Fatalf("both conflicting values must be reported, got %s and %s", first, second)
+	}
+	if key, _, _ := duplicateTopLevelKey(`{"edits":[{"newString":"x","newString":"y"}]}`); key != "" {
+		t.Fatalf("nested repeat must not be reported, got %q", key)
 	}
 	// A key reused across two different nested objects is not a repeat at all.
-	if got := duplicateTopLevelKey(`{"a":{"k":1},"b":{"k":2}}`); got != "" {
-		t.Fatalf("same key in sibling nested objects is not a repeat, got %q", got)
+	if key, _, _ := duplicateTopLevelKey(`{"a":{"k":1},"b":{"k":2}}`); key != "" {
+		t.Fatalf("same key in sibling nested objects is not a repeat, got %q", key)
 	}
-	if got := duplicateTopLevelKey(`{}`); got != "" {
-		t.Fatalf("empty object: %q", got)
+	if key, _, _ := duplicateTopLevelKey(`{}`); key != "" {
+		t.Fatalf("empty object: %q", key)
 	}
 }
 

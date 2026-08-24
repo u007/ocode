@@ -370,6 +370,56 @@ func TestSyncAuthCommandsBypassBusyQueue(t *testing.T) {
 	}
 }
 
+// TestLocalModelAndAutoContinueBypassBusyQueue guards that /localmodel and
+// /autocontinue run immediately while the agent is busy. They are synchronous
+// local config/inspection commands (like /mask and /small-model): they never
+// start an agent request, /localmodel's slow spawn work runs on a returned
+// tea.Cmd against the instance manager only, and /autocontinue's toggle is read
+// live at stream-done time so arming it mid-stream protects the very turn in
+// flight.
+func TestLocalModelAndAutoContinueBypassBusyQueue(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // both commands persist config on apply
+	for _, command := range []string{
+		"/localmodel",
+		"/localmodel list",
+		"/localmodel status",
+		"/localmodel enable local/not-registered",
+		"/autocontinue",
+		"/autocontinue status",
+		"/autocontinue off",
+	} {
+		m := model{
+			width:     80,
+			height:    20,
+			input:     textarea.New(),
+			viewport:  fastviewport.New(80, 20),
+			streaming: true,
+			config:    &config.Config{},
+		}
+
+		updated, _ := m.handleCommand(command)
+		got := updated.(*model)
+		if len(got.queuedItems) != 0 {
+			t.Fatalf("expected %s to run immediately while streaming, got queued %#v", command, got.queuedItems)
+		}
+		if len(got.messages) == 0 || got.messages[0].role != roleUser || got.messages[0].text != command {
+			t.Fatalf("expected %s to be recorded immediately, got %#v", command, got.messages)
+		}
+	}
+
+	// Control: a mutating non-instant command still queues while streaming, so
+	// this test cannot pass vacuously via an always-empty queue decision.
+	m := model{
+		streaming: true,
+		input:     textarea.New(),
+	}
+	updated, _ := m.handleCommand("/doc-sync")
+	got := updated.(*model)
+	if len(got.queuedItems) != 1 || got.queuedItems[0].text != "/doc-sync" {
+		t.Fatalf("control /doc-sync should still queue while streaming, got %#v", got.queuedItems)
+	}
+}
+
 func TestNewCommandBypassesBusyQueue(t *testing.T) {
 	m := model{
 		width:     80,

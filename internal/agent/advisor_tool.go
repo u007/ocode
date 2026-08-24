@@ -181,6 +181,14 @@ func (t AdvisorTool) getAdvisorTools() []tool.Tool {
 }
 
 func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+// ExecuteCtx is Execute bound to ctx: cancelling ctx kills the Claude Code
+// advisor subprocess and stops the advisor sub-agent's loop. The loop-enforced
+// checkpoints (see runAdvisorCheckpoint) pass the agent's stop channel, so
+// Escape aborts an advisor call instead of leaving the caller parked on it.
+func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Prompt string `json:"prompt"`
 	}
@@ -206,7 +214,7 @@ func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 			modelName = "claude-sonnet-4-6"
 		}
 		emitDebug("ADVISOR", fmt.Sprintf("calling Claude Code CLI with model: %s", modelName))
-		result, err := executeClaudeCodeAdvisor(modelName, params.Prompt, t.workDir)
+		result, err := executeClaudeCodeAdvisor(ctx, modelName, params.Prompt, t.workDir)
 		if err != nil {
 			return "", fmt.Errorf("claude code advisor call failed: %w", err)
 		}
@@ -246,7 +254,17 @@ func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 			{Role: "system", Content: advisorSystemPrompt},
 			{Role: "user", Content: params.Prompt},
 		}
-		resp, err := client.Chat(messages, nil)
+		var (
+			resp *Message
+			err  error
+		)
+		if cc, okCtx := client.(interface {
+			ChatWithContext(context.Context, []Message, []map[string]interface{}) (*Message, error)
+		}); okCtx {
+			resp, err = cc.ChatWithContext(ctx, messages, nil)
+		} else {
+			resp, err = client.Chat(messages, nil)
+		}
 		if err != nil {
 			return "", fmt.Errorf("advisor call failed: %w", err)
 		}
@@ -287,6 +305,20 @@ func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 		advisorAgent.OnPermissionAsk = t.mainAgent.subAgentPermAsker
 		advisorAgent.SetSubAgentPermAsker(t.mainAgent.subAgentPermAsker)
 	}
+
+	// Bind the sub-agent's loop to ctx: Agent.Step has no context parameter,
+	// so cancellation is delivered through its stop channel. The watcher exits
+	// on either ctx cancellation or the done channel, so it cannot outlive the
+	// call.
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			advisorAgent.Cancel()
+		case <-watchDone:
+		}
+	}()
 
 	// Run the agentic tool loop with the user's context prompt.
 	messages := []Message{{Role: "user", Content: params.Prompt}}
@@ -378,7 +410,7 @@ const claudeCodeAdvisorPrompt = `You are a READ-ONLY strategic advisor. DO NOT w
 //   - --bare is intentionally omitted: it skips keychain reads, breaking OAuth auth.
 //   - The prompt must come after "--" because --disallowedTools consumes all
 //     subsequent positional args otherwise.
-func executeClaudeCodeAdvisor(modelName, prompt, workDir string) (string, error) {
+func executeClaudeCodeAdvisor(parent context.Context, modelName, prompt, workDir string) (string, error) {
 	args := []string{
 		"-p",
 		"--model", modelName,
@@ -390,7 +422,7 @@ func executeClaudeCodeAdvisor(modelName, prompt, workDir string) (string, error)
 
 	// Use a 5-minute timeout to prevent hanging subprocesses from permanently
 	// locking the advisorRecursionGuard and leaking a goroutine.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	if workDir != "" {

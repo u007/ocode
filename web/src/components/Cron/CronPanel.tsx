@@ -6,7 +6,8 @@ import { describeSchedule, lastRunLabel, nextRunLabel } from "./cronFormat";
 import CronJobDialog from "./CronJobDialog";
 import CronOutboxPanel from "./CronOutboxPanel";
 import CronTargetsPanel from "./CronTargetsPanel";
-import { CalendarClock, PencilLine, Pause, Play, Plus, RefreshCcw, Trash2 } from "lucide-react";
+import CronHistoryPanel from "./CronHistoryPanel";
+import { CalendarClock, PencilLine, Pause, Play, Plus, RefreshCcw, Trash2, History } from "lucide-react";
 
 const REFRESH_INTERVAL = 10_000;
 
@@ -18,6 +19,7 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | null>(null);
+  const [historyJob, setHistoryJob] = useState<CronJob | null>(null);
 
   const loadJobs = useCallback(async () => {
     const [jobsRes, outboxRes] = await Promise.all([api.listCronJobs(), api.getCronOutbox()]);
@@ -186,19 +188,19 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
                     <th className="px-4 py-3 text-left font-medium">Last Status</th>
                     <th className="px-4 py-3 text-left font-medium">Runs</th>
                     <th className="px-4 py-3 text-left font-medium">Enabled</th>
-                    <th className="px-4 py-3 text-right font-medium">Delete</th>
+                    <th className="px-4 py-3 text-right font-medium">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800">
                   {loading ? (
                     <tr>
-                      <td colSpan={8} className="px-4 py-8 text-center text-zinc-500">
+                      <td colSpan={9} className="px-4 py-8 text-center text-zinc-500">
                         Loading cron jobs…
                       </td>
                     </tr>
                   ) : jobs.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="px-4 py-8 text-center text-zinc-500">
+                      <td colSpan={9} className="px-4 py-8 text-center text-zinc-500">
                         No cron jobs yet.
                       </td>
                     </tr>
@@ -250,6 +252,18 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
                               <Button
                                 variant="ghost"
                                 size="sm"
+                                className="h-8 px-2 text-zinc-400 hover:text-blue-300"
+                                title="View run history"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setHistoryJob(job);
+                                }}
+                              >
+                                <History className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
                                 className="h-8 px-2 text-zinc-400 hover:text-zinc-100"
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -279,6 +293,14 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
               </table>
             </div>
           </div>
+
+          {historyJob && (
+            <CronHistoryPanel
+              jobId={historyJob.id}
+              jobName={historyJob.name || historyJob.payload.message}
+              onClose={() => setHistoryJob(null)}
+            />
+          )}
 
           <div className="grid gap-4 lg:grid-cols-2">
             <CronOutboxPanel entries={outbox} onClear={clearOutbox} />

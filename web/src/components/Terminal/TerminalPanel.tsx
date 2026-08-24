@@ -348,7 +348,7 @@ export default function TerminalPanel({
       fitRef.current = null;
       serializeRef.current = null;
     };
-  }, [scrollbackLines, projectPath]);
+  }, [scrollbackLines, projectPath, id]);
 
   // Apply font changes to the live terminal in place instead of tearing down
   // the session (which would kill the pty/websocket) whenever settings change.

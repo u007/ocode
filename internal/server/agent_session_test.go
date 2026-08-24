@@ -43,6 +43,9 @@ func (instantClient) GetProvider() string { return "fake" }
 func (instantClient) GetModel() string    { return "fake-model" }
 
 func newTestSession(h *Handler, id string, client agent.LLMClient) *agentSession {
+	if h.cfg != nil {
+		h.cfg.Model = "fake-model"
+	}
 	as := &agentSession{agent: agent.NewAgent(client, nil, nil, nil), model: "fake-model"}
 	h.mu.Lock()
 	h.agents[id] = as

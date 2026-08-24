@@ -13,7 +13,7 @@ import {
 
 /** The single model-selection purpose this dialog is opened for. Each settings
  *  field opens the dialog for exactly one purpose — there are no tabs. */
-export type ModelDialogTab = "main" | "small" | "advisor" | "recap" | "ocr" | "mask" | "commit" | "summary";
+export type ModelDialogTab = "main" | "small" | "advisor" | "recap" | "ocr" | "mask" | "commit" | "summary" | "permission";
 
 const PURPOSE_TITLES: Record<ModelDialogTab, string> = {
   main: "Select Model",
@@ -24,6 +24,7 @@ const PURPOSE_TITLES: Record<ModelDialogTab, string> = {
   mask: "Select Mask Model",
   commit: "Select Commit Message Model",
   summary: "Select Summary Model",
+  permission: "Select Permission Model",
 };
 
 interface Props {
@@ -47,19 +48,21 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   // convention (provider set → claude_code = (provider === "claude-code"))
   // cannot silently flip a toggle the user set explicitly.
   const [advisorClaudeCode, setAdvisorClaudeCode] = useState(false);
+  const [permissionModelState, setPermissionModelState] = useState("");
   const { model: activeModel, smallModel, advisorModel } = useChatState();
   const dispatch = useChatDispatch();
 
   useEffect(() => {
     if (open) {
       setSearch("");
-      // Load the standard registry models, augmented for the Security &
-      // Redaction (mask) purpose with the user's enabled local/LM Studio models
-      // so a tier-2 scanner can run against a local model server — mirroring the
-      // TUI's redaction-model picker, which lists LocalModels.
+      // Load the standard registry models, augmented for the permission and
+      // Security & Redaction (mask) purposes with the user's enabled local/LM
+      // Studio models — mirroring the TUI's permission-model and redaction-model
+      // pickers, which list enabled LocalModels. The permission judge is
+      // typically a local model, so it must be selectable here.
       const loadModels = async () => {
         const base = await api.listModels();
-        if (purpose === "mask") {
+        if (purpose === "mask" || purpose === "permission") {
           try {
             const local = await api.getLocalModelsConfig();
             const extra: ModelInfo[] = Object.entries(local)
@@ -87,8 +90,13 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
       api.getAdvisorFull().then((res) => {
         setAdvisorClaudeCode(res.claude_code);
       }).catch(console.error);
+      if (purpose === "permission") {
+        api.getPermissionModel().then((res) => {
+          setPermissionModelState(res.model ?? "");
+        }).catch(console.error);
+      }
     }
-  }, [open, dispatch]);
+  }, [open, dispatch, purpose]);
 
   const filteredModels = models.filter(
     (m) =>
@@ -111,6 +119,8 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         return smallModel;
       case "advisor":
         return advisorModel;
+      case "permission":
+        return currentValues?.permission ?? permissionModelState;
       default:
         return currentValues?.[purpose] ?? activeModel;
     }
@@ -138,6 +148,13 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         dispatch({ type: "SET_MODEL", model: modelId });
         api.setConfigModel(modelId).catch(console.error);
         break;
+      case "permission":
+        onPick?.(purpose, modelId, selectedModel);
+        // If no form owns this pick (sidebar direct trigger), persist directly.
+        if (!onPick) {
+          api.setPermissionModel(modelId).catch(console.error);
+        }
+        break;
       default:
         // Form-owned purpose (recap/ocr/mask/commit/summary): hand the pick to
         // the owning form, which persists it via its own Save.
@@ -161,6 +178,12 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
       case "main":
         dispatch({ type: "SET_MODEL", model: "" });
         api.setConfigModel("").catch(console.error);
+        break;
+      case "permission":
+        onPick?.(purpose, "");
+        if (!onPick) {
+          api.setPermissionModel("").catch(console.error);
+        }
         break;
       default:
         // Form-owned purpose: hand empty string to the owning form.

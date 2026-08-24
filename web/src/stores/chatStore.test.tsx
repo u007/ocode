@@ -424,3 +424,72 @@ describe("live tool output streaming", () => {
     });
   });
 });
+
+describe("chatStore permission dialog lifecycle", () => {
+  const ask = {
+    tool: "bash",
+    command: "rm -rf build",
+    request_id: "call-1",
+    scope: "bash_prefix",
+    prefix: "rm",
+  };
+
+  function withPendingPermission(): ChatState {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "PERMISSION_REQUEST",
+      sessionId: "a",
+      permission: ask,
+    });
+    return state;
+  }
+
+  it("PERMISSION_REQUEST sets and PERMISSION_RESOLVED clears the dialog (auto-close)", () => {
+    expect(getSessionSlice(withPendingPermission(), "a").pendingPermission).toEqual(ask);
+
+    const state = chatReducer(withPendingPermission(), {
+      type: "PERMISSION_RESOLVED",
+      sessionId: "a",
+      requestId: "call-1",
+    });
+    expect(getSessionSlice(state, "a").pendingPermission).toBeNull();
+  });
+
+  it("a permission_resolved for an older request never closes a newer dialog", () => {
+    let state = withPendingPermission();
+    state = chatReducer(state, {
+      type: "PERMISSION_REQUEST",
+      sessionId: "a",
+      permission: { ...ask, tool: "delete", request_id: "call-2" },
+    });
+
+    state = chatReducer(state, {
+      type: "PERMISSION_RESOLVED",
+      sessionId: "a",
+      requestId: "call-1",
+    });
+    // The stale dismissal must not close the newer ask.
+    expect(getSessionSlice(state, "a").pendingPermission?.request_id).toBe("call-2");
+
+    state = chatReducer(state, {
+      type: "PERMISSION_RESOLVED",
+      sessionId: "a",
+      requestId: "call-2",
+    });
+    expect(getSessionSlice(state, "a").pendingPermission).toBeNull();
+  });
+
+  it("carries scope/prefix/out_of_scope_path for always-allow availability", () => {
+    const slice = getSessionSlice(
+      chatReducer(initial(), {
+        type: "PERMISSION_REQUEST",
+        sessionId: "a",
+        permission: { ...ask, out_of_scope_path: "/var/log" },
+      }),
+      "a",
+    );
+    expect(slice.pendingPermission?.scope).toBe("bash_prefix");
+    expect(slice.pendingPermission?.prefix).toBe("rm");
+    expect(slice.pendingPermission?.out_of_scope_path).toBe("/var/log");
+  });
+});

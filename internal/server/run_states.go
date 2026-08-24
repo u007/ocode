@@ -1,12 +1,23 @@
 package server
 
 import (
+	"errors"
 	"sort"
 	"strings"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/tool"
 )
+
+// ErrPermissionPending is returned by runTurn when a session's transcript
+// tail is still an unresolved PERMISSION_ASK: the turn is refused outright
+// (no message appended, no Step call) rather than stepping the agent on top
+// of a decision the user hasn't made yet. Every turn entry point (HandleChat,
+// HandleSendMessage, the async turn-job queue) funnels through runTurn, so
+// this is the single choke point that stops a second request — another
+// browser tab, the desktop shell, a scheduler/Telegram dispatch — from
+// resuming the agent loop while a permission dialog is still up.
+var ErrPermissionPending = errors.New("a permission decision is pending for this session; resolve it before sending a new message")
 
 // RunState is a minimal cross-package view of one top-level agent run.
 // The desktop shell polls this for dock-badge counts and finished-run

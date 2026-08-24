@@ -33,6 +33,10 @@ type Dispatcher struct {
 	// (Telegram bot, RC client, web poll endpoint) read from this outbox
 	// to push the result to the user. See deliver.go.
 	Outbox *Outbox
+	// RunHistory is the persistent per-run history (input/output/logs with
+	// rundate and duration). Unlike Outbox which drains, this is append-only
+	// and queryable per-job. See runs.go.
+	RunHistory *RunHistory
 	// Deliver is an additional, optional in-process callback invoked after a
 	// successful run with the job and the result string. The runner's
 	// returned string is passed; Outbox + Deliver can coexist.
@@ -45,7 +49,41 @@ func (d *Dispatcher) OnJob(ctx context.Context, job *Job) error {
 	if d == nil || d.Runner == nil {
 		return fmt.Errorf("scheduler: no agent runner attached (host did not wire Dispatcher.Runner)")
 	}
+	startedAt := time.Now().UTC()
 	result, err := d.Runner.RunScheduledJob(ctx, job)
+	finishedAt := time.Now().UTC()
+	durationMs := finishedAt.Sub(startedAt).Milliseconds()
+	status := "ok"
+	if err != nil {
+		status = "error"
+	}
+	// Build datetime logs — coarse lifecycle entries (start/finish/error).
+	// Each entry carries its own timestamp to satisfy "each log must be datetime logs".
+	logs := []RunLogEntry{
+		{At: startedAt, Level: "info", Message: fmt.Sprintf("Job %s (%s) started — input: %s", job.ID, job.Name, job.Payload.Message)},
+	}
+	if err != nil {
+		logs = append(logs, RunLogEntry{At: finishedAt, Level: "error", Message: fmt.Sprintf("Job finished with error after %dms: %v", durationMs, err)})
+	} else {
+		logs = append(logs, RunLogEntry{At: finishedAt, Level: "info", Message: fmt.Sprintf("Job finished successfully in %dms", durationMs)})
+	}
+	if d.RunHistory != nil {
+		rec := RunRecord{
+			JobID:      job.ID,
+			JobName:    job.Name,
+			StartedAt:  startedAt,
+			FinishedAt: finishedAt,
+			DurationMs: durationMs,
+			Status:     status,
+			Input:      job.Payload.Message,
+			Output:     result,
+			Logs:       logs,
+		}
+		if err != nil {
+			rec.Error = err.Error()
+		}
+		_ = d.RunHistory.Append(rec)
+	}
 	// Always record to the outbox (when configured) — both successes and
 	// failures. The outbox is the durable receipt the user/agent can
 	// consult to know whether the job ran.

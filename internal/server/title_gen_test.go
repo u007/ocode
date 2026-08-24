@@ -128,6 +128,9 @@ func TestMaybeGenerateSessionTitleSkipsTitledAndBridge(t *testing.T) {
 func TestFinishSessionTitleBroadcastsStatus(t *testing.T) {
 	h := NewHandler()
 	h.titleGen = newTitleGenState()
+	if h.cfg != nil {
+		h.cfg.Model = "gpt-4o-mini"
+	}
 
 	// Seed the session on disk so the title save has a base to append to.
 	sessID := seedSession(t, "", "", []agent.Message{
@@ -156,6 +159,16 @@ func TestFinishSessionTitleBroadcastsStatus(t *testing.T) {
 		}
 		if snap.SessionTitle == "" || len([]rune(snap.SessionTitle)) > maxGeneratedTitleLen {
 			t.Errorf("SessionTitle = %q, want non-empty ≤ %d runes", snap.SessionTitle, maxGeneratedTitleLen)
+		}
+		// The snapshot must carry the session's context fields — the title
+		// broadcast lands right after the first turn, and a context-less
+		// status event zeroes the web sidebar's Context gauge (fields are
+		// omitempty on the wire).
+		if snap.ContextCurrentTokens <= 0 {
+			t.Errorf("ContextCurrentTokens = %d, want > 0 from the seeded transcript", snap.ContextCurrentTokens)
+		}
+		if snap.ContextModel == "" || snap.ContextMaxTokens <= 0 {
+			t.Errorf("context = %q/%d, want model + window", snap.ContextModel, snap.ContextMaxTokens)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("no status event broadcast")

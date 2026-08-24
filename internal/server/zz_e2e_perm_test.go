@@ -35,6 +35,9 @@ func (f *fakeClientAskBashE2E) GetModel() string    { return "fake-model" }
 //  5. wait for `permission_resolved` SSE frame
 func TestE2EWebPermissionFlow(t *testing.T) {
 	h := NewHandler()
+	if h.cfg != nil {
+		h.cfg.Model = "fake-model"
+	}
 	ag := agent.NewAgent(&fakeClientAskBashE2E{}, nil, nil, nil)
 	_ = ag
 	// Pre-register a session like the browser would after first message

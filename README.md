@@ -23,7 +23,7 @@ JS-based coding agents routinely consume 500MB+ just to sit in a terminal. ocode
 Our custom **FastViewport** component renders 1000 message pairs in **0.73ms** — a 41× improvement over the standard bubbles viewport. While other agents stutter on long conversations, ocode stays buttery smooth.
 
 ### 🧠 Multi-provider, multi-model, zero lock-in
-OpenAI, Anthropic, Google Gemini, Zhipu Z.AI, Alibaba, GitHub Copilot, Novita AI, OpenRouter, OrcaRouter — bring your own model or use the one best suited to the task. Switch mid-conversation with `/model`. Use a cheap model for compaction and a powerful one for code. No vendor lock-in, no gatekeeping.
+OpenAI, Anthropic, Google Gemini, Zhipu Z.AI, Alibaba, GitHub Copilot, Novita AI, OpenRouter, OrcaRouter, AIHubMix — bring your own model or use the one best suited to the task. Switch mid-conversation with `/model`. Use a cheap model for compaction and a powerful one for code. No vendor lock-in, no gatekeeping.
 
 ### 🔒 Permissions you can trust
 First-class permission modes (`normal` / `yolo` / `locked`) with per-tool rules, bash-prefix granularity, scope confinement, and an optional **LLM auto-permission model** that makes smart allow/deny decisions so you stay in flow. The advisor module catches risky operations before they happen. No silent `rm -rf`.
@@ -72,7 +72,7 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 
 | Feature | Detail |
 |---------|--------|
-| **Multi-Provider LLM** | OpenAI, Anthropic (Claude thinking / extended thinking + prompt caching), Google Gemini, Z.AI (GLM), Alibaba (Qwen), GitHub Copilot, Novita AI, OpenRouter, OrcaRouter, Zhipu, DeepSeek (opencode-go route), Minimax |
+| **Multi-Provider LLM** | OpenAI, Anthropic (Claude thinking / extended thinking + prompt caching), Google Gemini, Z.AI (GLM), Alibaba (Qwen), GitHub Copilot, Novita AI, OpenRouter, OrcaRouter, AIHubMix, Zhipu, DeepSeek (opencode-go route), Minimax |
 | **Live Model Resolution** | OpenRouter and Novita AI models are resolved from each provider's live API at startup (30s TTL cache, graceful fallback to the static registry) so context sizes, pricing, and vision support are accurate for models absent from or renamed in models.dev (e.g. `openrouter/tencent/hy3:free`) |
 | **Model Display Names** | `agent.ModelDisplayName` surfaces models.dev `name`; TUI picker shows `id — Name`, web `/api/models` exposes `display_name` |
 | **Reasoning Effort** | Toggle thinking budget on Claude models via `Alt+T` (off/low/med/high/xhigh/max) or `/effort`; per-turn effort via `ocode run --effort` |
@@ -316,7 +316,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | Command | Aliases | Purpose |
 |---------|---------|---------|
 | `/model` | `/models`, `/m` | List and switch LLM provider/model with fuzzy search |
-| `/advisor` | | Set the advisor model for strategic guidance; `advisor.checkpoints` config (default `["plan","done"]`, set `[]` to disable) enforces advisor review of first write batches and completion claims |
+| `/advisor` | | Set the advisor model for strategic guidance; `advisor.checkpoints` config (default `["plan","done"]`, set `[]` to disable) enforces advisor review of the first write batch (reviewed *after* it is applied, so the model never regenerates the write) and of completion claims. A checkpoint shows as a transcript line while it runs, and Escape cancels it |
 | `/agents` | | Show active/queued subagents and the concurrency limit, or set it with `/agents limit <n>` (0 = unlimited; persisted to `ocodeconfig.json`) |
 | `/agent` | | Switch agent definition (`build`, `plan`, `review`, `debug`, `docs`, …) |
 | `/compact` | `[focus]` | Manually compact context; optional focus guides summary |

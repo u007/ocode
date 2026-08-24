@@ -43,7 +43,7 @@ export default function ChatInput({
   const [queueCount, setQueueCount] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const dragCounterRef = useRef(0);
-  const { sendMessage, executeShell, stop, isStreaming } = useChat(sessionTabId ?? null, {
+  const { sendMessage, executeShell, stop, isStreaming, pendingPermission } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
         onSessionCreated?.(sessionTabId, sessionId);
@@ -93,7 +93,13 @@ export default function ChatInput({
   // Auto-drain the queue once the turn (streaming or shell exec) frees up,
   // in FIFO order — mirrors the TUI's drainQueuedItems. Stops as soon as an
   // item starts a new turn; the next busy->free transition continues it.
-  const busy = isStreaming || shellInFlight;
+  //
+  // pendingPermission counts as busy even though the server already marked
+  // the turn inactive (turn_done fires as soon as Step pauses on the
+  // PERMISSION_ASK sentinel) — otherwise the composer unlocks and the queue
+  // drains while the dialog is still up, starting a new turn on top of an
+  // unresolved permission ask.
+  const busy = isStreaming || shellInFlight || !!pendingPermission;
   const prevBusyRef = useRef(busy);
   useEffect(() => {
     if (prevBusyRef.current && !busy) {
@@ -399,6 +405,19 @@ export default function ChatInput({
             disabled
           >
             Running…
+          </Button>
+        ) : pendingPermission ? (
+          // A permission dialog is up. isStreaming is already false (the
+          // server marks the turn inactive the moment it pauses), so without
+          // this branch Send would look available while the ask is still
+          // unresolved.
+          <Button
+            type="button"
+            size="sm"
+            className="shrink-0"
+            disabled
+          >
+            Waiting for permission…
           </Button>
         ) : (
           <Button

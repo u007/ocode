@@ -124,6 +124,31 @@ export interface CronDelivery {
   at: string;
 }
 
+export interface CronRunLog {
+  at: string;
+  level?: string;
+  message: string;
+}
+
+export interface CronRun {
+  id: string;
+  job_id: string;
+  job_name: string;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  status: string;
+  input: string;
+  output?: string;
+  error?: string;
+  logs: CronRunLog[];
+}
+
+export interface CronRunsResponse {
+  runs: CronRun[];
+  total: number;
+}
+
 export interface CronJobsResponse {
   jobs: CronJob[];
 }
@@ -196,7 +221,20 @@ export interface SSEPermissionEvent {
   deny_reason?: string;
   model_unavailable?: string;
   request_id: string;
+  /** "tool" | "bash_prefix" — drives always-allow button availability. */
+  scope?: string;
+  /** Bash prefix for bash_prefix-scope asks (e.g. "rm", "git push"). */
+  prefix?: string;
+  /** Out-of-workspace target path; "always" persists this root to extra_allowed_paths. */
+  out_of_scope_path?: string;
 }
+
+/** Decisions accepted by POST /api/permissions/resolve (`decision` field). */
+export type PermissionDecision =
+  | "allow"
+  | "deny"
+  | "always_rule"
+  | "always_tool";
 
 export interface SSEDoneEvent {
   session_id: string;
@@ -362,6 +400,7 @@ export interface TUIStatus {
   temperature?: number;
   permission_mode?: string;
   permission_auto_allow?: boolean;
+  permission_model?: string;
   small_model?: string;
   small_model_enabled?: boolean;
   advisor_model?: string;

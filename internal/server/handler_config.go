@@ -33,6 +33,15 @@ func (h *Handler) HandleSetModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	// A model id without a "provider/model" (or "provider:model") separator
+	// cannot be resolved back to a provider by agent.NewClient. Persisting it
+	// as last_model makes every later start/resume bootstrap fail with a
+	// misleading "no API key" refusal (observed 2026-08-23 with a bare
+	// "gpt-4o-mini"). Reject it here instead of poisoning persisted state.
+	if !strings.Contains(req.Model, "/") && !strings.Contains(req.Model, ":") {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("model %q has no provider prefix; use a \"provider/model\" id", req.Model))
+		return
+	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -232,6 +241,19 @@ func (h *Handler) HandleSetSmallModel(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		// Live application — same bridged-TUI-agent reasoning as in
+		// HandleSetPermissionModel: small-model consumers read the agent's
+		// own config/override per use, not this handler's h.cfg.
+		if h.rc != nil {
+			if ag := h.rc.Agent(); ag != nil {
+				ag.SetSmallModelRuntimeEnabled(*req.Enabled)
+			}
+		}
+		for _, as := range h.agents {
+			if as != nil && as.agent != nil {
+				as.agent.SetSmallModelRuntimeEnabled(*req.Enabled)
+			}
+		}
 	}
 
 	if req.Model != "" {
@@ -243,6 +265,17 @@ func (h *Handler) HandleSetSmallModel(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			h.cfg.Ocode.SmallModel = resolved
+			applySmallModelName := func(ag *agent.Agent) { ag.SetSmallModelRuntimeModel(resolved) }
+			if h.rc != nil {
+				if ag := h.rc.Agent(); ag != nil {
+					applySmallModelName(ag)
+				}
+			}
+			for _, as := range h.agents {
+				if as != nil && as.agent != nil {
+					applySmallModelName(as.agent)
+				}
+			}
 			h.pushStatusSnapshot()
 			writeJSON(w, http.StatusOK, map[string]any{
 				"model":   resolved,
@@ -257,6 +290,17 @@ func (h *Handler) HandleSetSmallModel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.cfg.Ocode.SmallModel = req.Model
+		applySmallModelName := func(ag *agent.Agent) { ag.SetSmallModelRuntimeModel(req.Model) }
+		if h.rc != nil {
+			if ag := h.rc.Agent(); ag != nil {
+				applySmallModelName(ag)
+			}
+		}
+		for _, as := range h.agents {
+			if as != nil && as.agent != nil {
+				applySmallModelName(as.agent)
+			}
+		}
 	}
 
 	// Push a fresh status snapshot so the web's status bar / sidebar reflect
@@ -267,6 +311,133 @@ func (h *Handler) HandleSetSmallModel(w http.ResponseWriter, r *http.Request) {
 		"model":   h.cfg.Ocode.SmallModel,
 		"enabled": h.cfg.Ocode.SmallModelEnabled,
 		"source":  "manual",
+	})
+}
+
+// HandleGetPermissionModel reports the auto-permission LLM judge model and
+// whether it is enabled. Prefers the live TUI snapshot when a bridge is
+// attached, mirroring HandleGetSmallModel's live-override behavior.
+func (h *Handler) HandleGetPermissionModel(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	current := ""
+	enabled := false
+	if h.cfg != nil && h.cfg.Ocode.Permissions.Auto != nil {
+		current = h.cfg.Ocode.Permissions.Auto.Model
+		enabled = h.cfg.Ocode.Permissions.Auto.Enabled
+	}
+	if rc := h.rc; rc != nil {
+		live := rc.TUIStatus()
+		if live.UpdatedAt != "" {
+			if live.PermissionModel != "" {
+				current = live.PermissionModel
+			}
+			enabled = live.PermissionAutoAllow
+		} else if live.PermissionModel != "" {
+			current = live.PermissionModel
+		}
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model":   current,
+		"enabled": enabled,
+	})
+}
+
+// HandleSetPermissionModel sets the auto-permission model and/or its enabled
+// gate. Either field may be provided on its own. Model persistence goes
+// through SavePermissionModel (exclusive owner of the Model field); enabled
+// goes through SaveAutoPermissionEnabled.
+func (h *Handler) HandleSetPermissionModel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model   *string `json:"model"`
+		Enabled *bool   `json:"enabled"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if req.Model == nil && req.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "model or enabled is required")
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		writeError(w, http.StatusInternalServerError, "config not loaded")
+		return
+	}
+	if req.Enabled != nil {
+		if err := config.SaveAutoPermissionEnabled(*req.Enabled); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if h.cfg.Ocode.Permissions.Auto == nil {
+			h.cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{}
+		}
+		h.cfg.Ocode.Permissions.Auto.Enabled = *req.Enabled
+		// Apply to live agents so the change takes effect immediately: the
+		// gate is read from the PermissionManager at every tool call
+		// (agent.go handleToolCallWithContext), and a bridged TUI agent holds
+		// its own config snapshot that handler-side writes never reach.
+		// SetAutoPermissionEnabled is YOLO-guarded internally. Mirrors
+		// HandleSetAdvisorEnabled's runtime-application pattern.
+		applyEnabled := func(ag *agent.Agent) {
+			if pm := ag.Permissions(); pm != nil {
+				pm.SetAutoPermissionEnabled(*req.Enabled)
+			}
+		}
+		if h.rc != nil {
+			if ag := h.rc.Agent(); ag != nil {
+				applyEnabled(ag)
+			}
+		}
+		for _, as := range h.agents {
+			if as != nil && as.agent != nil {
+				applyEnabled(as.agent)
+			}
+		}
+	}
+	if req.Model != nil {
+		model := *req.Model
+		if model == "auto" {
+			model = ""
+		}
+		if err := config.SavePermissionModel(model); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if h.cfg.Ocode.Permissions.Auto == nil {
+			h.cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{}
+		}
+		h.cfg.Ocode.Permissions.Auto.Model = model
+		// Same live-application rationale as Enabled above: the judge model
+		// resolves per consult; an empty model means explicitly cleared this
+		// session (falls back to the small model) rather than "keep whatever
+		// the stale snapshot says".
+		applyModel := func(ag *agent.Agent) {
+			ag.SetAutoPermissionModel(model)
+		}
+		if h.rc != nil {
+			if ag := h.rc.Agent(); ag != nil {
+				applyModel(ag)
+			}
+		}
+		for _, as := range h.agents {
+			if as != nil && as.agent != nil {
+				applyModel(as.agent)
+			}
+		}
+	}
+	h.pushStatusSnapshot()
+	current := ""
+	enabled := false
+	if h.cfg.Ocode.Permissions.Auto != nil {
+		current = h.cfg.Ocode.Permissions.Auto.Model
+		enabled = h.cfg.Ocode.Permissions.Auto.Enabled
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model":   current,
+		"enabled": enabled,
 	})
 }
 

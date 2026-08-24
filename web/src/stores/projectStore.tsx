@@ -2,7 +2,6 @@ import { createContext, useContext, useEffect, useCallback, useRef, type ReactNo
 import { Store, useSelector } from "@tanstack/react-store";
 import { api } from "../api/client";
 import type { Project, ProjectGroup, SessionInfo } from "../api/types";
-import { dropSessionTerminals } from "../components/Terminal/terminalPersistence";
 
 export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "terminal" | "processes";
 
@@ -442,7 +441,10 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
   const closeSessionTab = useCallback((sessionId: string) => {
     dispatch({ type: "REMOVE_TAB", id: sessionId });
-    dropSessionTerminals(sessionId);
+    // Terminals are now project-scoped (survive session close) so closing a
+    // chat session no longer drops its terminal tabs. Project-scoped
+    // terminals are GC'd only when their buffers become orphaned across all
+    // projects.
   }, []);
 
   const addProject = useCallback(async (path: string) => {

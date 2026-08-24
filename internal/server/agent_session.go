@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -87,7 +88,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	h.publishBootstrapStage(sessionID, "model")
 	client := agent.NewClientWithProfile(effCfg, model, prof)
 	if client == nil {
-		return nil, "model", fmt.Errorf("failed to create LLM client")
+		return nil, "model", fmt.Errorf("failed to create LLM client for model %q (check the model id has a provider prefix and its credentials are connected)", model)
 	}
 	// Profile debug: emit active profile + overrides to the log tab when the
 	// dedicated toggle is on (default off). This surfaces per-window effective
@@ -346,6 +347,11 @@ func (h *Handler) publishTurnDone(sessionID, model string) {
 	ev := DoneEvent{SessionID: sessionID, Model: model}
 	if h.RCBridge() == nil {
 		h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "turn_done", Data: ev})
+		// Push a fresh session-tagged status snapshot so the web sidebar's
+		// Context gauge reflects the turn that just finished (the transcript
+		// was already persisted above). Without this the gauge only updates
+		// on tab activation or reconnect.
+		h.publishTurnStatusSnapshot(sessionID)
 		return
 	}
 	h.publishBusEvent("turn_done", sessionID, ev)
@@ -462,6 +468,10 @@ type turnOptions struct {
 func (h *Handler) runTurn(sessionID string, as *agentSession, content string, opts turnOptions) (string, error) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
+
+	if tailIsPermissionAsk(as.messages) {
+		return "", ErrPermissionPending
+	}
 
 	as.messages = append(as.messages, agent.Message{Role: "user", Content: content})
 	messages := append([]agent.Message(nil), as.messages...)
@@ -719,7 +729,15 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 	// agent on the window's new active profile before turning the first
 	// pending message. reconcileProfileAgent is a no-op when no turn is active
 	// and the profile hasn't changed.
-	if reb, err := h.reconcileProfileAgent(id, as, job.model); err != nil {
+	reconcileModel := job.model
+	if reconcileModel == "" {
+		h.mu.Lock()
+		if h.cfg != nil {
+			reconcileModel = h.cfg.Model
+		}
+		h.mu.Unlock()
+	}
+	if reb, err := h.reconcileProfileAgent(id, as, reconcileModel); err != nil {
 		log.Printf("serve error: reconcile profile for %s: %v", id, err)
 	} else {
 		as = reb
@@ -732,9 +750,17 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 			break
 		}
 		_, err := h.runTurn(id, as, content, job.opts)
-		// Shift regardless of outcome: on success the reply is in the
-		// transcript; on failure the user message was appended in memory (and
-		// remains durable on disk), so the next retry must not re-append it.
+		if errors.Is(err, ErrPermissionPending) {
+			// runTurn refused before appending — leave the message pending
+			// (it stays durable on disk) so it is retried once the session's
+			// permission ask is resolved, instead of shifting it away unturned.
+			h.publishTurnError(id, err, "")
+			return
+		}
+		// Shift regardless of remaining outcomes: on success the reply is in
+		// the transcript; on failure the user message was appended in memory
+		// (and remains durable on disk), so the next retry must not
+		// re-append it.
 		h.sessions.ShiftPending(id)
 		if err != nil {
 			return // runTurn published turn_error

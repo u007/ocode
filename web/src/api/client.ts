@@ -26,12 +26,15 @@ import type {
   CronJobPatchRequest,
   CronJobWriteRequest,
   CronOutboxResponse,
+  CronRunsResponse,
+  CronRun,
   CronTargetsResponse,
   FileChange,
   ChangeDiff,
   SyncStatusResponse,
   SyncLoginStartResponse,
   SyncLoginPollResponse,
+  PermissionDecision,
 } from "./types";
 
 export interface CompactConfig {
@@ -49,6 +52,7 @@ export interface CompactConfig {
 
 export interface AutoPermissionConfig {
   enabled?: boolean;
+  model?: string;
   allow_destructive?: boolean;
   prompt?: string;
   max_context_bytes?: number;
@@ -214,6 +218,19 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
 
+  getPermissionModel: () =>
+    fetchJSON<{ model: string; enabled: boolean }>("/api/config/permission-model"),
+  setPermissionModel: (model: string) =>
+    fetchJSON<{ model: string; enabled: boolean }>("/api/config/permission-model", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
+  setPermissionModelEnabled: (enabled: boolean) =>
+    fetchJSON<{ model: string; enabled: boolean }>("/api/config/permission-model", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+
   // --- New/extended OcodeConfig endpoints (Plan 1: configuration-api-backend) ---
 
   getRecapConfig: () =>
@@ -350,6 +367,10 @@ export const api = {
   getCronOutbox: () => fetchJSON<CronOutboxResponse>("/api/cron/outbox"),
   drainCronOutbox: () =>
     fetchJSON<CronOutboxResponse>("/api/cron/outbox?drain=true"),
+  getCronRuns: (jobId: string, limit = 50, offset = 0) =>
+    fetchJSON<CronRunsResponse>(`/api/cron/${encodeURIComponent(jobId)}/runs?limit=${limit}&offset=${offset}`),
+  getCronRun: (jobId: string, runId: string) =>
+    fetchJSON<CronRun>(`/api/cron/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}`),
   getCronTargets: () => fetchJSON<CronTargetsResponse>("/api/cron/targets"),
   setCronTarget: (workdir: string, chatId: number) =>
     fetchJSON<{ ok: boolean }>("/api/cron/targets", {
@@ -798,18 +819,20 @@ export const api = {
   // ── Agent permission prompts ──
   // Resolve a pending PERMISSION_ASK raised by the agent (headless serve mode).
   // Distinct from the config POST /api/permissions (which sets a tool rule).
-  // Throws on 404/409 so callers can surface the failure and dismiss the dialog.
+  // `decision` is allow | deny | always_rule | always_tool; the legacy boolean
+  // `approved` is still accepted by the server for old clients. Throws on
+  // 404/409 so callers can surface the failure and dismiss the dialog.
   resolvePermission: (
     requestId: string,
     sessionId: string | null,
-    approved: boolean,
+    decision: PermissionDecision,
   ) =>
     fetchJSON<ChatResponse>("/api/permissions/resolve", {
       method: "POST",
       body: JSON.stringify({
         request_id: requestId,
         session_id: sessionId ?? undefined,
-        approved,
+        decision,
       }),
     }),
   // ── Changes tab (session file changes) ──

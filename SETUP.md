@@ -58,7 +58,7 @@ Edit `opencode.json` to add API keys or provider configuration:
 }
 ```
 
-Or use environment variables (ocode respects `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ORCAROUTER_API_KEY`, etc.). OrcaRouter models use the OpenAI-compatible `https://api.orcarouter.ai/v1` endpoint; for example, `orcarouter/auto`.
+Or use environment variables (ocode respects `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ORCAROUTER_API_KEY`, `AIHUBMIX_API_KEY`, etc.). OrcaRouter models use the OpenAI-compatible `https://api.orcarouter.ai/v1` endpoint; for example, `orcarouter/auto`. AIHubMix models use `https://aihubmix.com/v1`; for example, `aihubmix/gpt-4o-mini`.
 
 **Global override:** Set `OPENCODE_AUTH_TOKEN` to use a single token for all providers, bypassing per-provider configuration and stored credentials. This is useful for CI/CD or when using a proxy that handles authentication.
 

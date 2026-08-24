@@ -10,11 +10,10 @@ import (
 // SmallModelPriority is the ordered list of cheap/fast models tried when
 // auto-selecting a small model for lightweight tasks (title generation, etc.).
 // First candidate whose provider has a usable API key wins.
-// "opencode/mimo-v2.5-free" is keyless and serves as a reliable fallback.
+// "opencode/mimo-v2-flash-free" is keyless and serves as a reliable fallback.
 var SmallModelPriority = []string{
-	"opencode-go/deepseek-v4-flash",
-	"opencode/mimo-v2.5-free",
 	"opencode-go/qwen3.5-plus",
+	"opencode/mimo-v2-flash-free",
 	"deepseek/deepseek-chat",
 	"xiaomi-token-plan-sgp/MiMo-V2.5",
 }
@@ -43,10 +42,10 @@ func ResolveSmallModel(cfg *config.Config) string {
 // model. Primary coding agents (build, plan) are excluded to avoid downgrading
 // the main coding loop.
 var smallModelEligibleNames = map[string]bool{
-	"explore":               true,
-	"general":               true,
-	"context":               true,
-	"compaction":            true,
+	"explore":    true,
+	"general":    true,
+	"context":    true,
+	"compaction": true,
 	// orchestrator-planner intentionally excluded: requires reliable JSON output
 	"orchestrator-explorer": true,
 	"doc-sync":              true,

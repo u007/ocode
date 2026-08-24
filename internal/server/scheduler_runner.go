@@ -40,7 +40,16 @@ func (r *schedulerRunner) RunScheduledJob(ctx context.Context, job *scheduler.Jo
 		return "", fmt.Errorf("failed to create LLM client")
 	}
 	tools, lspMgr := tool.LoadBuiltins(cfg, nil)
+	// This agent and its LSP manager are built fresh per firing and used for
+	// exactly one Step call — unlike buildAgentSession's resident, long-lived
+	// agents, nothing else ever reuses or evicts them. Without this cleanup
+	// every firing (success or failure) permanently leaks the agent's doc/
+	// memory maintenance worker goroutines plus the LSP manager's file
+	// watcher goroutine — confirmed live via /debug/pprof/goroutine on a job
+	// that fires every 10s: one full leaked bundle per firing, unbounded.
+	defer lspMgr.Close()
 	ag := agent.NewAgent(client, tools, cfg, lspMgr)
+	defer ag.Shutdown()
 	ag.LoadExternalToolsWithMCP(cfg)
 	ag.SetAdvisorEnabled(false)
 	if job.Payload.PermMode != "" {

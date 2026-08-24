@@ -2,7 +2,7 @@ import { useEffect, useImperativeHandle, useRef, useState, forwardRef, type RefO
 import { Plus, X, Pencil } from "lucide-react";
 import TerminalPanel from "./TerminalPanel";
 import { useTerminalConfig } from "@/hooks/useTerminalConfig";
-import { loadSessionTerminals, saveSessionTerminals } from "./terminalPersistence";
+import { loadProjectTerminals, saveProjectTerminals } from "./terminalPersistence";
 import { ContextMenu } from "@/components/Layout/ContextMenu";
 import {
   DndContext,
@@ -51,8 +51,9 @@ function bumpSeqPast(titles: string[]) {
  *
  * Inactive tabs stay mounted (hidden with `display: none`) so background
  * shells keep running and keep their scrollback. State is local to this
- * component on purpose — it is scoped to the session tab, like the other
- * sub-tab panels, and has no reason to live in the global project store.
+ * component on purpose — it is scoped to the *project* (not the session tab)
+ * so switching chat sessions within the same project never hides or kills the
+ * pty. This matches the server's project-scoped terminal model.
  */
 export interface TerminalTabsHandle {
   openTerminal: () => void;
@@ -152,18 +153,18 @@ function SortableTerminalTab({
   );
 }
 
-const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPath: string; sessionId: string }>(
-  function TerminalTabs({ active, projectPath, sessionId }, ref) {
+const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPath: string }>(
+  function TerminalTabs({ active, projectPath }, ref) {
     const { available, loading, error, scrollbackLines, fontFamily, fontSize } = useTerminalConfig();
     const [terminals, setTerminals] = useState<TerminalInstance[]>([]);
     const [activeId, setActiveId] = useState<string>("");
     const [renamingId, setRenamingId] = useState<string | null>(null);
     const [renameValue, setRenameValue] = useState("");
     const renameInputRef = useRef<HTMLInputElement>(null);
-    // This panel is force-mounted for every session tab (matching LogPanel's
-    // hidden-but-mounted pattern), so the first shell is spawned only once the
-    // Terminal sub-tab is actually opened — otherwise every session tab would
-    // start a pty on page load.
+    // This panel is force-mounted for every project (hidden with `display: none`
+    // when not active) so the first shell is spawned only once the Terminal
+    // sub-tab is actually opened — otherwise every project would start a pty on
+    // page load. Project-scoped so switching chat sessions never kills the pty.
     const autoOpened = useRef(false);
     // Set once a restore (or its no-op fallback) has run, so the persistence
     // effect below never overwrites storage with an empty in-flight state.
@@ -221,14 +222,15 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
       },
     }));
 
-    // Restore this session's previously open terminal tabs (fresh shells, prior
+    // Restore this project's previously open terminal tabs (fresh shells, prior
     // scrollback replayed by TerminalPanel) instead of always starting with one
     // new terminal. Runs once the terminal sub-tab is actually opened, matching
-    // the original lazy-open behaviour.
+    // the original lazy-open behaviour. Project-scoped so switching chat
+    // sessions within the same project never hides or kills the pty.
     useEffect(() => {
       if (!active || !available || autoOpened.current) return;
       autoOpened.current = true;
-      const saved = loadSessionTerminals(sessionId);
+      const saved = loadProjectTerminals(projectPath);
       if (saved) {
         skipNextSave.current = true;
         bumpSeqPast(saved.terminals.map((t) => t.title));
@@ -243,7 +245,7 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
       }
       restored.current = true;
       openTerminal();
-    }, [active, available, sessionId]);
+    }, [active, available, projectPath]);
 
     useEffect(() => {
       if (!restored.current) return;
@@ -251,11 +253,11 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
         skipNextSave.current = false;
         return;
       }
-      saveSessionTerminals(sessionId, terminals, activeId);
-    }, [sessionId, terminals, activeId]);
+      saveProjectTerminals(projectPath, terminals, activeId);
+    }, [projectPath, terminals, activeId]);
 
-    // Keep this session's terminal list in sync across same-origin windows.
-    // When another tab opens or closes a terminal, `saveSessionTerminals`
+    // Keep this project's terminal list in sync across same-origin windows.
+    // When another tab opens or closes a terminal, `saveProjectTerminals`
     // writes to localStorage — the other tab receives a `storage` event.
     const terminalsRef = useRef(terminals);
     const activeIdRef = useRef(activeId);
@@ -265,9 +267,9 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
     }, [terminals, activeId]);
     useEffect(() => {
       const handler = (e: StorageEvent) => {
-        if (e.key !== "ocode.ui.terminals.v1") return;
+        if (e.key !== "ocode.ui.terminals.project.v1") return;
         if (!restored.current) return;
-        const saved = loadSessionTerminals(sessionId);
+        const saved = loadProjectTerminals(projectPath);
         const curTerminals = terminalsRef.current;
         const curActive = activeIdRef.current;
         if (!saved) {
@@ -294,7 +296,7 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
       };
       window.addEventListener("storage", handler);
       return () => window.removeEventListener("storage", handler);
-    }, [sessionId]);
+    }, [projectPath]);
 
     const startRename = (t: TerminalInstance) => {
       setRenameValue(t.title);

@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import { useChatState, useChatDispatch, getSessionSlice } from "../stores/chatStore";
 import { useProjectState, findProjectPathForTab } from "../stores/projectStore";
 import { api } from "../api/client";
-import type { QuestionAnswerPayload } from "../api/types";
+import type { PermissionDecision, QuestionAnswerPayload } from "../api/types";
 
 interface UseChatOptions {
   /** Called when a new session is created (first message from an empty tab). */
@@ -85,12 +85,14 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   // Resolve a pending agent permission ask via the dedicated resolve endpoint
   // (NOT the config POST /api/permissions, which sets a tool rule). Only a
   // confirmed success dismisses the dialog; failures keep it open so the user
-  // can retry.
+  // can retry. Note: the server also broadcasts a permission_resolved SSE
+  // frame as soon as the decision is applied (before the continuation round),
+  // so the dialog closes promptly even while this request is still in flight.
   const resolvePermission = useCallback(
-    async (requestId: string, approved: boolean) => {
+    async (requestId: string, decision: PermissionDecision) => {
       if (!sessionId) return false;
       try {
-        await api.resolvePermission(requestId, sessionId, approved);
+        await api.resolvePermission(requestId, sessionId, decision);
         dispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId });
         return true;
       } catch (err) {

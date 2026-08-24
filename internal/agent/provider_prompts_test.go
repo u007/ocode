@@ -61,9 +61,8 @@ func TestModelFamilyPrompt_ModelIDRouting(t *testing.T) {
 		{"gemini 2", "google", "gemini-2.0-flash", "Gemini"},
 		{"kimi k2", "moonshot", "kimi-k2", "Kimi"},
 		{"copilot provider only", "copilot", "", "Copilot"},
-		{"small model deepseek flash", "opencode-go", "deepseek-v4-flash", "Intent Analysis"},
-		{"small model mimo", "opencode", "mimo-v2.5-free", "Intent Analysis"},
 		{"small model qwen", "opencode-go", "qwen3.5-plus", "Intent Analysis"},
+		{"small model mimo", "opencode", "mimo-v2-flash-free", "Intent Analysis"},
 		{"small model deepseek chat", "deepseek", "deepseek-chat", "Intent Analysis"},
 	}
 	for _, c := range cases {
@@ -136,11 +135,10 @@ func TestIsSmallModel(t *testing.T) {
 	// not the full "provider/model" string. The isSmallModel function should
 	// match on just the model part.
 	yes := []string{
-		"deepseek-v4-flash", // from "opencode-go/deepseek-v4-flash"
-		"mimo-v2.5-free",    // from "opencode/mimo-v2.5-free"
-		"qwen3.5-plus",      // from "opencode-go/qwen3.5-plus"
-		"deepseek-chat",     // from "deepseek/deepseek-chat"
-		"MiMo-V2.5",         // from "xiaomi-token-plan-sgp/MiMo-V2.5"
+		"qwen3.5-plus",       // from "opencode-go/qwen3.5-plus"
+		"mimo-v2-flash-free", // from "opencode/mimo-v2-flash-free"
+		"deepseek-chat",      // from "deepseek/deepseek-chat"
+		"MiMo-V2.5",          // from "xiaomi-token-plan-sgp/MiMo-V2.5"
 	}
 	no := []string{
 		"",
@@ -153,8 +151,8 @@ func TestIsSmallModel(t *testing.T) {
 		"kimi-k2",
 		"o1",
 		"random-model",
-		"opencode-go/deepseek-v4-flash", // Full string should NOT match (model part only)
-		"opencode/mimo-v2.5-free",       // Full string should NOT match
+		"opencode-go/qwen3.5-plus",    // Full string should NOT match (model part only)
+		"opencode/mimo-v2-flash-free", // Full string should NOT match
 	}
 	for _, m := range yes {
 		if !isSmallModel(m) {

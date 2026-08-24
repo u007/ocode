@@ -7,7 +7,8 @@ desktop hang, **not** by reproducing the hang. Two separate defects; only the
 first has confirmed on-disk instances.
 
 - [x] **Duplicate-key tool arguments were executed last-wins, silently**
-  (`duplicateTopLevelKey` in `internal/agent/client.go`). `json.Valid` — the only
+  (`duplicateTopLevelKey` in `internal/agent/client.go`, applied at
+  `handleToolCallWithContext`). `json.Valid` — the only
   argument check — **accepts** duplicate keys, and `encoding/json` resolves them
   last-wins. A model that emits `{"path":"a.py","end_line":120,"path":"b.md"}`
   therefore read `b.md`, silently discarding the rest of what it asked for, with
@@ -34,22 +35,36 @@ first has confirmed on-disk instances.
   being able to express two calls at one index. Residual gap: a provider that
   sends `id` only on a *later* fragment leaves the open call's id empty and will
   not split — the duplicate-key check above is the net for that case.
-  Covered by `TestParseOpenAIChatCompletionsStream_{SplitsParallelCallsSharingAnIndex,RepeatedIDIsOneCall,RejectsDuplicateKeyArguments}`;
+  Covered by `TestParseOpenAIChatCompletionsStream_{SplitsParallelCallsSharingAnIndex,RepeatedIDIsOneCall}`;
   the over-split boundary was sabotage-verified.
   This is the only *lazily* index-keyed tool accumulator. The Anthropic path
   (`client.go:3350`) also keys blocks by index but creates them on the
   protocol-mandated explicit `content_block_start` and **assigns** rather than
   concatenating, so it cannot merge two calls.
 
-- [ ] **DECISION TO REVISIT: duplicate-key arguments are now fatal to the turn.**
-  Chosen deliberately, for consistency with the sibling "invalid tool call
-  arguments" error immediately above it, and because silently running a call the
-  model did not express is worse than a visible failure. But this **will** fire
-  on real traffic (~0.1% of tool calls, concentrated by model), where it
-  previously half-worked. The error also does not reach the model as a tool
-  error — it ends the turn — so the model cannot self-correct. If it proves
-  disruptive, the alternative is a sentinel error added to
-  `isRetryableLLMClientError` so the request is re-rolled.
+- [x] **RESOLVED: duplicate-key arguments skip the call instead of ending the
+  turn.** Making them fatal in the parser was wrong and was reported from real
+  use within hours (`grep`, repeated `output_mode`): the turn died, and because
+  the error matches nothing in `isRetryableLLMClientError` the loop stopped dead
+  with the model never learning what was wrong. The check moved to the dispatch
+  site (`handleToolCallWithContext`, `internal/agent/agent.go`), which is the
+  single funnel every path reaches — parallel, sequential, in-batch DAG, and
+  orphan recovery. The call is skipped, never executed, and the conflict comes
+  back as an ordinary tool result naming the key *and both values*:
+  `arguments set "output_mode" twice, to "content" and then to
+  "files_with_matches". Re-issue this call once, with a single value`. The turn
+  continues and the model re-issues on the next loop.
+  Two properties this must not lose, both pinned by
+  `TestAgentSkipsDuplicateKeyToolArguments`: the tool never runs, and the
+  skipped call still emits a tool result carrying its `tool_call_id` — without
+  the pairing the *next* request 400s, which would have swapped one dead loop
+  for a harder-to-diagnose one.
+  Moving the check off the OpenAI stream parser also widened it: it now covers
+  the Anthropic path, whose `input_json_delta` assembly can produce the same
+  duplicate keys and was never checked at all.
+  The `isRetryableLLMClientError` sentinel noted here previously is **not** the
+  fallback any more — retrying replays the same prefix and tells the model
+  nothing about what was wrong.
 - [ ] **Neither defect explains the 22GB hang.** Both produce one executable
   call; these are correctness bugs, not memory bugs. The hang item below stays
   open and unproven.
@@ -138,6 +153,203 @@ Deferred:
   registers it; token at `cmd/ocode-desktop/main.go`). Discriminating signal: are
   retained bytes under `bytes.Buffer.grow` beneath `io.Copy`? Blocked on the
   durable-desktop-log gap in "Mid-turn failure transcript loss — 2026-08-21".
+
+### Follow-up: chronic climb reported separately from the acute 22GB spike (2026-08-24)
+
+New report: memory "constantly" climbing during ordinary desktop use, not tied to one
+hung tool call — a different signature (sustained drift vs. one acute spike), so
+treat as a separate hypothesis from the item above until proven otherwise.
+
+- Confirmed live on the running desktop app (PID pair: `ocode.app` Go backend +
+  its Wails/WebKit renderer, identified unambiguously via the Networking XPC
+  helper's `ESTABLISHED` loopback connection to the backend's listen port — do
+  not rely on launch-time coincidence to attribute a WebContent XPC pid, there
+  can be several unrelated ones running): backend RSS ~535–590MB and creeping
+  over a few minutes of sampling; renderer RSS swings ±500MB inside 30s windows
+  (938→361→638→500MB observed), which is GC/paint churn, **not** by itself
+  evidence of a leak — a short sample cannot separate "leaking" from "large
+  steady state + noisy GC". A 30-minute background sampler
+  (`ps -o rss=` on both pids, 30s interval) was started to read the actual
+  floor trend; results not yet analyzed — check
+  `/private/tmp/claude-501/-Users-james-www-ocode/66ad6368-bd94-4c9f-9729-d79608ea1624/scratchpad/mem_samples.tsv`
+  from that session, or re-run the same sampling if that scratchpad is gone.
+- [x] **Ruled out: closing a chat session tab does not leak its transcript.**
+  `chatStore.tsx`'s `sessions` map (`Record<string, SessionSlice>`) has a
+  `RESET` action that deletes one session's slice, and all three UI paths that
+  call `closeSessionTab()` (`App.tsx` Cmd/Ctrl+W handler, `OpenSessionBar.tsx`
+  tab-X, `SessionDialog.tsx` picker close) pair it with
+  `chatDispatch({ type: "RESET", sessionId })` immediately after. Go-side
+  `Handler.agents` also has a real eviction path (`SessionManager`'s
+  `onEvict` hook in `internal/server/handler.go`), keyed off idle timeout, that
+  clears `h.agents`, `h.turnLocks`, and calls `agent.Shutdown()`. Neither is
+  the chronic-growth source.
+- [ ] **Prime suspect, not yet fixed: terminal tabs are kept mounted for the
+  app's lifetime, across every project, with no automatic reaping.**
+  `TerminalTabs.tsx` deliberately force-mounts a `TerminalPanel` (hidden via
+  `display:none`, comment: "so background [output] keeps streaming") for every
+  terminal tab ever opened in every project; each is a live `xterm.js`
+  `Terminal` instance plus a WebGL renderer context (`TerminalPanel.tsx:165,189`).
+  These are disposed only when the user explicitly closes that terminal tab —
+  `terminalPersistence.ts`'s orphan-GC (`gcBuffers`/`gcProjectBuffers`) only
+  cleans the *persisted localStorage scrollback strings* for terminals no
+  longer referenced, not any live in-memory instance, and nothing evicts a
+  terminal automatically (by idle time, by project switch, or by a cap on
+  count). This is a deliberate design tradeoff (keep background command output
+  live), not a bug in the traditional sense, but it means normal long-session
+  usage across many projects/terminals is genuinely unbounded — the most
+  concrete "keeps going up, never comes down" candidate found so far. Not
+  fixed here; needs a decision (idle-close policy? hard cap with LRU eviction?
+  explicit "close all terminals" affordance?) before changing behavior.
+- [ ] **Still-open single-call memory bugs from the 2026-08-23 item above,
+  re-verified still present on disk 2026-08-24** (contributors to acute spikes,
+  not the chronic pattern, but real and unaddressed): `ReadTool.Execute`
+  (`internal/tool/file.go:400,414`) still does `os.ReadFile` +
+  `strings.Split(string(content), "\n")`, doubling a large file in memory
+  before `maxReadLines` truncates; `SearchTool` (`internal/tool/search.go`)
+  still reads every matched file whole inside `filepath.Walk` with no cap on
+  total accumulated matches; `imagegen.go:510,604,784` still uses
+  `io.ReadAll(resp.Body)` with no `LimitReader` (unlike `web.go`, which already
+  does this correctly).
+
+### Correction + live repro attempt (2026-08-24, same day)
+
+User corrected the report: this is **not** the chronic terminal-tab pattern
+above — it is the acute one, reproduced with a specific trigger: "when I add a
+2nd message to the chat, it stuck forever" (memory climbing at the same time).
+This matches the "22GB hang" item's shape, now with an actual trigger, so
+treat the terminal-tab item above as a separate, lower-priority finding.
+
+- **Live capture of the actual event**: the background RSS sampler (see the
+  timestamped entry above) caught the desktop backend process jump from
+  683MB → 3.3GB RSS in one 30s window while the user reported this happening,
+  stayed ~3.1–3.3GB for ~60–90s, then the process (`ocode.app`'s Go backend,
+  PID 90842) and its whole WebKit renderer group vanished sometime in the next
+  30s — no crash report, no spin report, no jetsam log; almost certainly a
+  manual force-quit of an unresponsive app, not a signal-generating crash. The
+  live pprof capture the earlier TODO item asks for was not obtained — the
+  process was gone by the time this was noticed.
+- **Clean synthetic repro attempt did NOT reproduce it.** Ran `ocode serve`
+  headless (unauthenticated by default — no username/password configured — so
+  `/api/debug/runtime` and `/debug/pprof/*` are directly reachable without the
+  desktop's random per-boot token; this is the fastest way to get pprof access
+  for future repro attempts, no need to fight the desktop's token). Sequence:
+  POST `/api/chat` with a prompt forcing a 25s `bash sleep`, then while
+  `turn_active:true`, POST `/api/sessions/{id}/message` (a second message —
+  the exact trigger reported). Result: handled correctly end-to-end — the
+  second message went through `tryEnqueueInjection` → `Agent.injectQueue`,
+  drained at the next tool-call boundary (`agent.go:1102`), and got its own
+  reply once the bash call finished. Server heap stayed ~11–25MB and goroutine
+  count stayed ~10–16 throughout; no growth, no hang. So the minimal
+  "inject one message mid-tool-call" path is *not* itself the bug.
+- **False lead, worth recording so it isn't retried:** `GET /api/chat/messages`
+  (`HandleSessionMessages`, `internal/server/handler_sse.go:281`) is an SSE
+  endpoint (`Content-Type: text/event-stream`) that intentionally never closes
+  — it streams the initial history then blocks forever on `<-sub`/`<-ctx.Done()`.
+  A plain `curl` against it (no `-N`, no client timeout) looks exactly like a
+  server hang but isn't one; wasted a background-task timeout confirming this.
+  Use `GET /api/sessions/{id}` for a one-shot transcript fetch instead.
+- **Unexplored, possibly relevant:** the real session's transcript contains
+  `openai_response_items` reasoning blocks with large `encrypted_content`
+  blobs (provider-opaque reasoning-continuation state, thousands of chars
+  each, one or more per assistant turn) that presumably get re-sent on every
+  subsequent request for the life of the conversation. Not shown to cause
+  anything by itself in the short repro above (only 2 turns), but never tested
+  at the length/turn-count where the user actually hit the hang, and never
+  measured for whether it's echoed back (compounding) or just replayed
+  (linear). The repro above also used a different model
+  (`opencode-go/muse-spark-1.2-contributor`) than the user's desktop default
+  (`opencode-go/mimo-v2.5` per `ocodeconfig.json`) — provider/model-specific
+  streaming behavior hasn't been ruled out.
+- **Next repro, if this happens again**: don't wait for the app to be force-quit.
+  While it's stuck, immediately capture (desktop needs its per-boot token —
+  see the original item above for where it lives; `ocode serve` needs none):
+  `GET /debug/pprof/goroutine?debug=2` (full stacks — shows exactly what every
+  goroutine is blocked on, settles the deadlock-vs-runaway-allocation question
+  in one shot) and `GET /debug/pprof/heap?debug=1`, plus `GET
+  /api/debug/runtime` a few times a couple seconds apart to see if heap/goroutine
+  counts are climbing or just large-and-flat.
+- [x] **Diagnostic capture wired for next time**: `internal/desktop/boot.go`
+  now writes `~/.config/opencode/desktop-debug-handle` (0o600, owner-only,
+  overwritten every launch) with the current run's `url=` and `token=` —
+  `saveDebugHandle`, called from `StartServer` right after the listener binds.
+  The token was previously only ever in-memory (by design, security), which
+  made the original item's "capture pprof with the bearer token" step
+  impossible without rebuilding with extra logging *before* a hang happens.
+  Now `cat ~/.config/opencode/desktop-debug-handle` + `curl -H "Authorization:
+  Bearer $token" $url/debug/pprof/...` works immediately. Covered by
+  `TestSaveDebugHandleWritesURLAndToken` in `boot_test.go`. Not read back by
+  the app itself — debug-only, not a stable file format.
+- **User confirmed: happened on a short/fresh session**, not a long one — this
+  weakens (doesn't rule out, but deprioritizes) the `openai_response_items`
+  reasoning-blob-accumulation theory above, since there wasn't much history to
+  accumulate.
+- [x] **Second clean repro attempt, also did NOT reproduce it**, this time
+  matching the user's actual default model (`opencode-go/mimo-v2.5`) and
+  racing message 2 in immediately (167ms after message 1's dispatch, likely
+  *before* message 1's first LLM call even started) rather than during a tool
+  call. Result: no hang. Both user messages landed in the same first LLM call
+  (the injected message spliced in ahead of the first `chatWithDelta`, per
+  `agent.go`'s drain-at-top-of-loop-iteration timing) and got one combined
+  reply — a model-behavior quirk (it answered "also, whats 2+2" and silently
+  ignored "hi", replying just "4"), not a server bug. Heap crept ~20.4MB→21.6MB
+  over 14s idle afterward, consistent with normal Go runtime bookkeeping, not
+  a leak signal at this scale.
+- **Where this leaves the search**: two different injection-timing shapes
+  (mid-tool-call, and racing-the-first-LLM-call) both handled correctly in a
+  fresh headless `ocode serve`, on both the repro's default model and the
+  user's real default model. The bug either needs conditions not yet
+  reproduced (a specific prompt/tool combination, a desktop/Wails-specific
+  interaction the headless server doesn't exercise, a rarer timing window) or
+  a live capture next time it happens — which is now one `curl` away.
+
+### FOUND + FIXED: the "constantly increasing, did nothing" chronic leak (2026-08-24, same day)
+
+Confirmed root cause, not the acute hang above — a **separate bug**, found live
+via the new debug-handle diagnostic on the very first idle-session repro.
+
+- [x] **Root cause: `internal/server/scheduler_runner.go`'s `RunScheduledJob`
+  never released anything.** Every cron/scheduled-job firing built a full
+  `agent.NewAgent` (spawns `docMaintenanceWorker` + `memoryMaintenanceWorker`)
+  and a full `lsp.Manager` via `tool.LoadBuiltins` (spawns a `fileWatcher.loop`
+  goroutine) — and called neither `Agent.Shutdown()` nor `lsp.Manager.Close()`
+  on **any** return path, success or error. Confirmed by two
+  `/debug/pprof/goroutine?debug=2` dumps 2 minutes apart, grouped by
+  normalized stack: `docMaintenanceWorker`, `memoryMaintenanceWorker`, and
+  `lsp.(*fileWatcher).loop` counts went 18→27 in exact lockstep, all
+  `created by internal/agent.NewAgent` / `internal/lsp.newFileWatcher` "in
+  goroutine 40" — one full leaked bundle per firing.
+  Trigger: user's `~/.local/share/opencode/scheduler/<instance>/jobs.json` had
+  a job ("ping") on `every_ms: 10000`, already at **7,465 runs**, every one
+  failing with a 401 (LLM provider key missing the `model.request` scope —
+  a credentials/permissions problem on that key, not an ocode bug; not fixed
+  here, flagged to the user separately). Fires independent of any user
+  interaction — explains "loaded a session, did nothing, memory keeps
+  increasing." **Verified safe to close per-call**: `lsp.NewManagerWithShared`
+  always constructs a fresh `*Manager` (the "shared" flag only affects
+  whether the underlying gopls *process* is brokered, not whether the
+  `*Manager` object or its file watcher are shared) — so this fix cannot
+  affect any other agent's LSP manager.
+  Fix: `defer lspMgr.Close()` + `defer ag.Shutdown()` right after
+  construction in `RunScheduledJob`.
+- [x] **Hardening: `internal/scheduler` now enforces a 30s minimum on
+  `KindEvery` schedules** (`minEveryMs` in `types.go`) — even with the leak
+  fixed, nothing stopped a misconfigured job from rebuilding a full
+  agent+LSP-manager every few seconds forever, which is wasteful regardless
+  of cleanup correctness. `validateSchedule` rejects new/updated jobs below
+  the floor (`TestAddJobRejectsEveryBelowMinInterval`); `computeNextRun`
+  additionally *clamps* (not rejects) already-persisted jobs below the floor,
+  so a job saved before this existed — like the user's real "ping" job — is
+  automatically bounded to 30s without needing manual editing
+  (`TestComputeNextRun`'s new sub-case). KindCron already has an inherent
+  ~1-minute floor (minute-resolution parser, no seconds field) so it needed
+  no change.
+- **Still open, not part of this fix**: the "ping" job's 401 will keep
+  firing (now every 30s instead of 10s) until its underlying API key's scope
+  is fixed or the job is disabled/deleted — that's a credentials issue on the
+  user's provider account, out of scope for a code fix.
+- **Diagnostic-handle addition from earlier today already paid for itself**:
+  found and root-caused this on the very first `cat
+  ~/.config/opencode/desktop-debug-handle` + pprof round-trip, no guessing.
 
 ## `/autocontinue` — general auto-resume (2026-08-23)
 
@@ -683,8 +895,8 @@ Deferred (CocoIndex plugin): see plan `docs/superpowers/plans/2026-05-28-cocoind
 
 ## Server permission-prompt bridge — deferred items
 
-- [ ] Web permission resolution is **approve/deny only** — no "always allow". The web `PermissionDialog` offers two buttons, and rule persistence (the TUI's `a`/`t` choices) pulls in `agent.IsHarmfulRequest` guards, out-of-scope-path handling (`allowOutOfScopePath`), webfetch-domain rules, and `PermissionManager` writes that `HandleResolvePermission` deliberately does not replicate. If always-allow is wanted on the web, add a persist flag to the resolve payload + dialog and route it through the same guarded persist path the TUI uses (from permission bridge: 2026-07-09).
-- [ ] Like the question bridge, permission resolution works only in **headless serve mode**; `/rc` bridge mode returns 409 (the TUI owns the agent + its own permission dialog) (from permission bridge: 2026-07-09).
+- [x] ~~Web permission resolution is **approve/deny only** — no "always allow"~~ — **FIXED 2026-08-24**: `POST /api/permissions/resolve` now accepts `decision: allow | deny | always_rule | always_tool` (legacy `approved` bool still mapped), and the web `PermissionDialog` offers the same four choices as the TUI with a confirm step. Persistence routes through the same guarded path as the TUI: `agent.AlwaysRuleChoiceAvailable` / `AlwaysToolChoiceAvailable` availability gates, `agent.IsHarmfulRequest` refusal, out-of-scope asks persist only the path root to `extra_allowed_paths`, webfetch domains stay session-scoped, and bash-prefix/tool rules land in both the live PermissionManager and ocodeconfig.json. Availability rules live in one place (`internal/agent/permissions.go`) shared by TUI + server; `permission_resolved` is now broadcast **before** the continuation Step so the dialog dismisses instantly instead of lingering for the next model round (the reported "does not auto close" bug). Bridge mode forwards `always_rule`/`always_tool` to the TUI's rcResolve mapping.
+- [ ] Like the question bridge, permission resolution works only in **headless serve mode**; `/rc` bridge mode forwards decisions to the TUI (which owns the agent + its own permission dialog) rather than resolving server-side (from permission bridge: 2026-07-09; updated 2026-08-24 — the 409 note above predates the forwarding path).
 
 ## In-batch task DAG — deferred cross-turn `depends_on` (from PLAN-agent-crew/02-task-dag.md: 2026-08-07)
 
@@ -769,3 +981,27 @@ Follow-up: enrich `TUIStatus` + `buildTUIStatusSnapshot` and render in `CoworkSi
 ## Startup-model diagnostics (2026-08-22, deferred)
 - [ ] If the gpt-4o-mini startup reset EVER recurs on a post-7d3d77a binary: instrument `GetLastModel()` (internal/config/ocodeconfig.go ~2126) with resolved-file-path logging at the READ site.
 - [ ] Behavioral decision pending: `last_model` now overrides a project `.opencode` config `model` value — confirm that precedence is intended.
+
+## Bare (provider-less) model id poisoned `last_model` → resume bootstrap failure (2026-08-23)
+
+A bare `"gpt-4o-mini"` was written to `last_model` in `ocodeconfig.json`
+(21:17:30 snapshot). Any start/resume after that built its client from an
+unresolvable string — `NewClient` guessed `openai`, found no key, refused —
+surfacing as "Could not connect to model" on desktop resume. Fixed at both
+write sites; the read side keeps diagnostic logging.
+
+- [x] `HandleSetModel` (web `PUT /api/config/model`) rejects separator-less
+  model ids with 400 (`internal/server/handler_config.go`)
+- [x] TUI `finishModelSwitch` persists only prefixed ids; bare ids stay
+  session-local with an explanatory message (`internal/tui/model.go`)
+- [x] Regression test `TestHandleSetModelRejectsProviderlessModel`
+- [x] Diagnostic logging: prefix-less heuristic + refusal now log the model
+  string (`internal/agent/client.go`); `SaveLastModel` warns on bare ids
+
+## Cron run history — 2026-08-24 follow-up (deferred granularity)
+
+- [x] **Run history store** — `internal/scheduler/runs.go` `RunHistory` JSONL (`runs.jsonl` alongside `jobs.json`/`deliveries.jsonl`) with `RunRecord` `{started_at, finished_at, duration_ms, status, input, output, error, logs[]}` where each `logs[]` entry is a datetime log (`at` + `level` + `message`). `List(jobID,limit,offset)` newest-first + `Get(jobID,runID)`. Covered by `internal/scheduler/runs_test.go` (append/list/pagination/get + dispatcher integration).
+- [x] **Dispatcher capture** — `internal/scheduler/dispatch.go` `Dispatcher.RunHistory` wired in `host.go:StartForHost`; `OnJob` timestamps `startedAt`/`finishedAt`, computes `durationMs`, builds coarse lifecycle `RunLogEntry`s (started/finished with datetime), appends `RunRecord` with input=`job.Payload.Message`, output/error from `RunScheduledJob`. Survives `nil` RunHistory (tests without host).
+- [x] **Server API** — `internal/server/server.go` + `scheduler.go`: `schedulerRuns *RunHistory` init in `SetScheduler`; `GET /api/cron/{id}/runs?limit=&offset=` + `GET /api/cron/{id}/runs/{runId}` with 404 on missing, capped limit 200. Covered by `internal/server/scheduler_runs_test.go`.
+- [x] **Web UI** — `web/src/api/types.ts` `CronRun*`, `web/src/api/client.ts` `getCronRuns`/`getCronRun`, `web/src/components/Cron/CronHistoryPanel.tsx` per-job panel (rundate, duration, input/output, datetime logs with expand), `CronPanel.tsx` History button + `CronHistoryPanel` integration. Verified via `tsgo --noEmit`, `npm run build`, and live dev-server browser pass (History → View → logs with timestamps).
+- [ ] **Per-tool-call datetime logs (deferred)** — current `logs` are coarse lifecycle entries only (started/finished). Capturing true per-action logs (each tool call, thinking block, output chunk with its own datetime) requires threading a log-collector through `agent.Step` and changing `scheduler.AgentRunner` from `(string,error)` to `(string,[]RunLogEntry,error)` (breaking change to `internal/server/scheduler_runner.go` + 4 tests). No existing per-step callback hook exists (only TUI-scoped `jobEvents`/`retryEvents`). Track as follow-up if user requires fine-grained execution traces; update `runs.go` + `dispatch.go` + `scheduler_runner.go` together.

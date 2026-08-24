@@ -49,6 +49,7 @@ var sessionScopedEvents = map[string]bool{
 	"permission":          true,
 	"permission_resolved": true,
 	"permission_check":    true,
+	"advisor_checkpoint":  true,
 	"error":               true,
 	"runs":                true,
 }

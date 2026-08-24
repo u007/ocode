@@ -71,6 +71,16 @@ describe("routeBusEnvelope", () => {
     expect(getState().sessions["s1"].live).toEqual([]);
   });
 
+  it("advisor_checkpoint surfaces and clears a status live part", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("advisor_checkpoint", { data: { kind: "plan", active: true } }), router);
+    expect(getState().sessions["s1"].live).toEqual([
+      { kind: "status", text: "Advisor plan checkpoint — reviewing…" },
+    ]);
+    routeBusEnvelope(env("advisor_checkpoint", { data: { kind: "plan", active: false } }), router);
+    expect(getState().sessions["s1"].live).toEqual([]);
+  });
+
   it("turn lifecycle drives turn state (streaming flag)", () => {
     const { router, getState } = makeRouter(["s1"]);
     routeBusEnvelope(env("turn_started", { data: { session_id: "s1" } }), router);

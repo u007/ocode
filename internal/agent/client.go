@@ -698,7 +698,7 @@ func isRetryableLLMClientError(err error) bool {
 		return true
 	}
 	lower := strings.ToLower(err.Error())
-	return strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") || strings.Contains(lower, "connection reset") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "eof")
+	return strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") || strings.Contains(lower, "connection reset") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "eof") || strings.Contains(lower, "goaway")
 }
 
 // chatCopilot exchanges the stored GitHub OAuth token (held in APIKey) for a short-lived
@@ -1515,45 +1515,62 @@ type streamToolCall struct {
 }
 
 // duplicateTopLevelKey reports the first repeated top-level object key in a
-// JSON argument string, or "" if there is none.
+// JSON argument string together with the two conflicting values, or ("", "",
+// "") if there is none. The values come back as raw JSON so the caller can
+// quote them back to the model exactly as it wrote them.
 //
-// encoding/json treats duplicate keys as valid (last wins), so this is the only
-// way to detect argument fragments from two different tool calls that were
-// concatenated into one syntactically valid object.
-func duplicateTopLevelKey(args string) string {
+// encoding/json treats duplicate keys as valid and resolves them last-wins, so
+// nothing else in the pipeline notices: json.Valid passes, Unmarshal succeeds,
+// and the tool runs against a value the model never settled on.
+func duplicateTopLevelKey(args string) (key, first, second string) {
 	dec := json.NewDecoder(strings.NewReader(args))
 	tok, err := dec.Token()
 	if err != nil {
-		// Not decodable as a token stream. json.Valid has already passed at the
-		// call site, so this is not a validity check — leave the reporting to it.
-		return ""
+		// Not decodable as a token stream, i.e. not valid JSON. Reporting that
+		// belongs to the caller's own validity check, not here.
+		return "", "", ""
 	}
 	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
-		return "" // not an object; no top-level keys to repeat
+		return "", "", "" // not an object; no top-level keys to repeat
 	}
-	seen := map[string]bool{}
+	seen := map[string]string{}
 	// Decode consumes each value whole, nested objects and arrays included, so
 	// every token read here is a top-level key (or the closing brace, which
 	// ends More()). No depth tracking is needed.
 	for dec.More() {
 		tok, err := dec.Token()
 		if err != nil {
-			return ""
+			return "", "", ""
 		}
-		key, ok := tok.(string)
+		k, ok := tok.(string)
 		if !ok {
-			return ""
+			return "", "", ""
 		}
-		if seen[key] {
-			return key
-		}
-		seen[key] = true
 		var value json.RawMessage
 		if err := dec.Decode(&value); err != nil {
-			return ""
+			return "", "", ""
 		}
+		if prev, dup := seen[k]; dup {
+			return k, prev, string(value)
+		}
+		seen[k] = string(value)
 	}
-	return ""
+	return "", "", ""
+}
+
+// duplicateKeySkipError returns the skip-error for tool-call arguments that
+// repeat a top-level JSON key, or nil when they are clean. Two call sites
+// share it deliberately: handleToolCallWithContext (the funnel every
+// dispatched call reaches) and the in-batch DAG dispatch closure, which must
+// check BEFORE dagContextFrom re-marshals args through taskToolParams —
+// encoding/json resolves duplicate keys last-wins during that round-trip, so
+// an unchecked closure would hand the funnel clean JSON and run a value the
+// model never settled on.
+func duplicateKeySkipError(args json.RawMessage) error {
+	if key, first, second := duplicateTopLevelKey(string(args)); key != "" {
+		return fmt.Errorf("call skipped, nothing ran: arguments set %q twice, to %s and then to %s. Re-issue this call once, with a single value for %q", key, first, second, key)
+	}
+	return nil
 }
 
 // parseOpenAIChatCompletionsStream parses a Server-Sent Events stream in the
@@ -1756,14 +1773,14 @@ func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text st
 			tc.Function.Arguments = "{}"
 		} else if !json.Valid([]byte(tc.Function.Arguments)) {
 			return nil, nil, fmt.Errorf("openai: invalid tool call arguments for %s (id=%s, %d bytes)", tc.Function.Name, tc.ID, len(tc.Function.Arguments))
-		} else if dup := duplicateTopLevelKey(tc.Function.Arguments); dup != "" {
-			// Defense in depth for the index-merge above. json.Valid ACCEPTS
-			// duplicate keys, which is why merged calls executed silently
-			// last-wins instead of erroring. A provider that supplies neither a
-			// usable index nor a changing id can still concatenate fragments;
-			// fail loudly here rather than run a call the model never made.
-			return nil, nil, fmt.Errorf("openai: tool call arguments for %s (id=%s) repeat key %q — two calls were likely merged by the provider stream", tc.Function.Name, tc.ID, dup)
 		}
+		// Duplicate top-level keys are NOT rejected here. json.Valid accepts
+		// them and encoding/json resolves them last-wins, so they do need
+		// catching — but failing the response would end the turn outright (this
+		// error matches nothing in isRetryableLLMClientError), leaving the model
+		// no way to learn what was wrong. The check runs at the dispatch site
+		// instead, where the call can be skipped and the conflict returned as a
+		// tool result the model can act on. See handleToolCallWithContext.
 		msg.ToolCalls = append(msg.ToolCalls, tc)
 	}
 	// Skip empty keep-alive / heartbeat chunks: some providers send a `data:`
@@ -2504,8 +2521,8 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 			input = append(input, map[string]interface{}{"type": "message", "role": m.Role, "content": content})
 		}
 		if m.Role == "assistant" {
-			if len(m.OpenAIResponseItems) > 0 {
-				input = append(input, m.OpenAIResponseItems...)
+			for _, item := range m.OpenAIResponseItems {
+				input = append(input, sanitizeOpenAIResponsesInputItem(item))
 			}
 			presentCallIDs := openAIResponseFunctionCallIDs(m.OpenAIResponseItems)
 			for _, tc := range m.ToolCalls {
@@ -2763,7 +2780,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 				fullText = itemText
 			}
 			if itemType == "reasoning" || itemType == "function_call" {
-				responseItems = append(responseItems, payload.Item)
+				responseItems = append(responseItems, sanitizeOpenAIResponsesInputItem(payload.Item))
 			}
 			if itemType == "function_call" {
 				id, _ := payload.Item["call_id"].(string)
@@ -2858,6 +2875,23 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 		}
 	}
 	return msg, nil
+}
+
+// sanitizeOpenAIResponsesInputItem removes the output-only status field before
+// a Responses item is stored for, or replayed as, a later input. It copies the
+// item so callers retain ownership of the original map.
+func sanitizeOpenAIResponsesInputItem(item map[string]interface{}) map[string]interface{} {
+	if _, ok := item["status"]; !ok {
+		return item
+	}
+
+	sanitized := make(map[string]interface{}, len(item)-1)
+	for key, value := range item {
+		if key != "status" {
+			sanitized[key] = value
+		}
+	}
+	return sanitized
 }
 
 func openAIResponseFunctionCallIDs(items []map[string]interface{}) map[string]struct{} {
@@ -3672,6 +3706,7 @@ var providers = map[string]providerInfo{
 	"anthropic":      {"ANTHROPIC_API_KEY", "https://api.anthropic.com/v1"},
 	"openrouter":     {"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"},
 	"orcarouter":     {"ORCAROUTER_API_KEY", "https://api.orcarouter.ai/v1"},
+	"aihubmix":       {"AIHUBMIX_API_KEY", "https://aihubmix.com/v1"},
 	"google":         {"GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai"},
 	"zai":            {"ZAI_API_KEY", "https://api.z.ai/v1"},
 	"z.ai":           {"ZAI_API_KEY", "https://api.z.ai/v1"},
@@ -3957,8 +3992,14 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 		}
 	}
 
-	// Heuristics for unknown providers
+	// Heuristics for unknown providers. A model string with no recognizable
+	// provider prefix ("gpt-4o-mini" instead of "openai/gpt-4o-mini") lands
+	// here and silently inherits whichever provider the name resembles — a
+	// stored bare model id then surfaces as a baffling "no API key for
+	// provider openai" refusal. Name the offending string in the log so the
+	// source of the bad value is greppable.
 	if provider == "" {
+		emitDebug("AGENT", fmt.Sprintf("NewClient: model %q has no provider prefix; applying name heuristics", model))
 		if strings.HasPrefix(model, "gpt") {
 			provider = "openai"
 		} else if strings.HasPrefix(model, "claude") {
@@ -4006,7 +4047,7 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 	// clear failure instead of a deferred 401 on the first request. Providers in
 	// keyOptionalProviders (local servers, free tiers) are allowed through.
 	if apiKey == "" && provider != "" && !keyOptionalProviders[provider] {
-		emitDebug("AGENT", fmt.Sprintf("NewClient: no API key for provider %q (useOAuth=%v); refusing to build client (would 401)", provider, useOAuth))
+		emitDebug("AGENT", fmt.Sprintf("NewClient: no API key for provider %q (useOAuth=%v, model=%q); refusing to build client (would 401)", provider, useOAuth, model))
 		return nil
 	}
 

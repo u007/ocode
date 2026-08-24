@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -485,6 +486,13 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 			Data:      PermissionCheckEvent{Tool: toolName, Model: modelLabel, Active: active},
 		})
 	}
+	ag.OnAdvisorCheckpoint = func(kind string, running bool) {
+		h.broadcastEvent(SSEEvent{
+			SessionID: sessionID,
+			Event:     "advisor_checkpoint",
+			Data:      AdvisorCheckpointEvent{Kind: kind, Active: running},
+		})
+	}
 	ag.OnMessage = func(m agent.Message) {
 		if m.Role == "user" {
 			// A message injected mid-turn from the session's live queue (see
@@ -676,9 +684,25 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+	} else {
+		// Existing session on the sync path: reconcile a model/profile change
+		// before stepping. HandleSendMessage does this for async web turns;
+		// this covers the non-async existing-session path which previously
+		// skipped reconcile entirely and kept the stale model.
+		if reb, err := h.reconcileProfileAgent(sid, as, model); err != nil {
+			h.publishTurnError(sid, err, "profile")
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
+			return
+		} else {
+			as = reb
+		}
 	}
 
 	content, err := h.runTurn(sid, as, req.Content, opts)
+	if errors.Is(err, ErrPermissionPending) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
 		return
@@ -922,8 +946,16 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	// A profile switch takes effect on the next turn: if the window's active
-	// profile changed since this agent was built, rebuild it on the new profile.
-	if reb, err := h.reconcileProfileAgent(id, as, as.model); err != nil {
+	// A profile or model switch takes effect on the next turn: if the
+	// window's active profile or the configured model changed since this
+	// agent was built, rebuild it before the next turn.
+	desiredModel := ""
+	h.mu.Lock()
+	if h.cfg != nil {
+		desiredModel = h.cfg.Model
+	}
+	h.mu.Unlock()
+	if reb, err := h.reconcileProfileAgent(id, as, desiredModel); err != nil {
 		h.publishTurnError(id, err, "profile")
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
 		return
@@ -943,7 +975,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	// returns; bootstrap (if needed) and the turn run on a per-session
 	// goroutine with events streamed over the unified bus.
 	if req.Async {
-		job, err := h.dispatchTurn(id, "", req.Content, turnOptions{})
+		job, err := h.dispatchTurn(id, desiredModel, req.Content, turnOptions{})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -962,6 +994,10 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	content, err := h.runTurn(id, as, req.Content, turnOptions{})
+	if errors.Is(err, ErrPermissionPending) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
 		return

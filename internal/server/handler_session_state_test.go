@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/session"
 )
@@ -130,5 +131,56 @@ func TestSessionStateAndStatusForBridgedSession(t *testing.T) {
 	}
 	if snap.SessionID != "sess-rc" || snap.CWD != proj {
 		t.Fatalf("bridged snapshot = %+v, want session sess-rc cwd %s", snap, proj)
+	}
+}
+
+// TestPublishTurnStatusSnapshotBroadcastsContext covers the post-turn sidebar
+// refresh: after a headless turn completes, publishTurnStatusSnapshot
+// broadcasts a session-tagged "status" event whose context fields were
+// computed from the just-persisted transcript — so the web Context gauge
+// moves without a tab switch. Regression guard for the bug where every
+// session-tagged status broadcast omitted (and thus zeroed) the context
+// fields.
+func TestPublishTurnStatusSnapshotBroadcastsContext(t *testing.T) {
+	h := NewHandler()
+	if h.cfg != nil {
+		h.cfg.Model = "gpt-4o-mini"
+	}
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	h.sessions.Register(id, proj)
+
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+
+	h.publishTurnStatusSnapshot(id)
+
+	select {
+	case ev := <-sub:
+		if ev.Event != "status" {
+			t.Fatalf("event = %q, want status", ev.Event)
+		}
+		snap, ok := ev.Data.(TUIStatus)
+		if !ok {
+			t.Fatalf("status data type = %T, want TUIStatus", ev.Data)
+		}
+		if snap.SessionID != id {
+			t.Errorf("SessionID = %q, want %q", snap.SessionID, id)
+		}
+		if snap.CWD != proj {
+			t.Errorf("CWD = %q, want owning project %q", snap.CWD, proj)
+		}
+		if snap.ContextCurrentTokens <= 0 {
+			t.Errorf("context_current_tokens = %d, want > 0 from the seeded transcript", snap.ContextCurrentTokens)
+		}
+		if snap.ContextModel != "gpt-4o-mini" {
+			t.Errorf("context_model = %q, want cfg model", snap.ContextModel)
+		}
+		if snap.ContextMaxTokens <= 0 {
+			t.Errorf("context_max_tokens = %d, want model window", snap.ContextMaxTokens)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no status event broadcast")
 	}
 }

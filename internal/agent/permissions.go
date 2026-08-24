@@ -802,6 +802,45 @@ func IsHarmfulRequest(req PermissionRequest) bool {
 	return false
 }
 
+// ShellControlKeywords are bash/sh constructs that are not real commands and
+// make no sense as an "always allow prefix" rule. Shared by every surface
+// that offers an always-allow choice (TUI dialog, web/desktop dialog, remote
+// resolvers) so the availability rules cannot drift.
+var ShellControlKeywords = map[string]bool{
+	"if": true, "else": true, "elif": true, "fi": true,
+	"then": true, "while": true, "do": true, "done": true,
+	"for": true, "case": true, "esac": true, "until": true,
+	"function": true, "select": true, "time": true,
+}
+
+// AlwaysRuleChoiceAvailable reports whether the "always allow this rule"
+// choice may be offered for req. Git mutating subcommands are excluded: a
+// two-word `git <sub>` always-allow would blanket-approve every future
+// invocation of that subcommand (e.g. all `git push ...`), so they must be
+// approved each time. Read-only git is auto-allowed and never reaches the
+// ask path; harmful git already cannot persist. Shell control-flow keywords
+// (if, else, while, …) are also excluded: they are not real commands and an
+// always-allow prefix for them is meaningless.
+func AlwaysRuleChoiceAvailable(req PermissionRequest) bool {
+	if req.ToolName == "bash" && req.Scope == PermissionScopeBashPrefix {
+		if strings.HasPrefix(req.Prefix, "git ") || req.Prefix == "git" {
+			return false
+		}
+		if ShellControlKeywords[req.Prefix] {
+			return false
+		}
+	}
+	return true
+}
+
+// AlwaysToolChoiceAvailable reports whether the "always allow this tool"
+// choice may be offered for req. The bash tool is excluded: a tool-level
+// allow blanket-approves every future shell command from one prompt, which
+// is too broad to surface as a single click.
+func AlwaysToolChoiceAvailable(req PermissionRequest) bool {
+	return req.ToolName != "bash"
+}
+
 func NewPermissionManager() *PermissionManager {
 	pm := &PermissionManager{
 		mode:               PermissionModeNormal,

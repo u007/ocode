@@ -75,6 +75,7 @@ fire unless a long-lived host is running. Document this in user-facing docs.
 - **Local timezone** for cron unless `tz` is set.
 - **One-shot auto-delete** after firing.
 - **7-day recurring expiry** (Claude Code's `/loop` rule).
+- **Minimum `every` interval** — `every` schedules are clamped to ≥30 s (`minEveryMs` in `internal/scheduler/types.go`) so a misconfigured interval (e.g. seconds vs ms) cannot fire forever every few seconds.
 - **Panic isolation** — `executeJob` recovers per-job panics.
 - **External-edit reload** — mtime-based; TUI edits to the store are picked up
   by the host's loop on the next `syncFromDisk` tick (max ≤60s leg).
@@ -92,6 +93,7 @@ fire unless a long-lived host is running. Document this in user-facing docs.
 - `DELETE /api/cron/{id}` — remove
 - `GET  /api/cron/outbox?drain=true&limit=N` — read/clear the JSONL delivery
   log (one entry per executed job; `drain=true` truncates on read)
+- `GET  /api/cron/{id}/runs?limit&offset` — paginated run history for one job (`RunRecord` with `started_at`/`finished_at`/`duration_ms`/`status`/`input`/`output`/`error` + datetime-stamped `logs`); backed by `runs.jsonl` via `RunHistory` in `internal/scheduler/runs.go` and rendered in web by `CronHistoryPanel`
 
 ### Programmatic (`internal/scheduler/scheduler.go`)
 ```go
@@ -134,10 +136,11 @@ resolve)` for hosts that want to forward cron results to a Telegram chat
 |------|---------|
 | `internal/scheduler/types.go`         | Job / Schedule / Payload / Store types + constants |
 | `internal/scheduler/scheduler.go`     | Engine: timer loop, persistence, dispatch, panic recovery |
-| `internal/scheduler/dispatch.go`      | `Dispatcher` headless agent runner (OnJob glue) |
+| `internal/scheduler/dispatch.go`      | `Dispatcher` headless agent runner (OnJob glue) — also appends `RunRecord` to `runs.jsonl` via `RunHistory` |
 | `internal/scheduler/host.go`          | `DefaultStorePath`, `StartForHost` host helpers |
+| `internal/scheduler/runs.go`          | `RunRecord`/`RunLogEntry`/`RunHistory` — persistent per-run history (`runs.jsonl`, paginated `GET /api/cron/{id}/runs`, `CronHistoryPanel`) |
+| `internal/scheduler/types.go`         | Job / Schedule / Payload / Store types + `minEveryMs` (30 s floor) |
 | `internal/scheduler/scheduler.go`     | Engine: timer loop, persistence, dispatch, panic recovery |
-| `internal/scheduler/dispatch.go`      | `Dispatcher` headless agent runner (OnJob glue) |
 | `internal/scheduler/deliver.go`       | `Outbox` JSONL delivery log + Append/Peek/Drain |
 | `internal/scheduler/drainer.go`       | `Drainer` goroutine: polls outbox, hands entries to a host sink |
 | `internal/scheduler/targets.go`       | `Targets` registry: per-project `(workdir → chatID)` JSON, persistent |

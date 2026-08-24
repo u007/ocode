@@ -71,6 +71,16 @@ type PermissionCheckEvent struct {
 	Active bool   `json:"active"`
 }
 
+// AdvisorCheckpointEvent mirrors an OnAdvisorCheckpoint callback: a
+// loop-enforced advisor checkpoint (Kind is "plan" or "done") started
+// (Active true) or finished (Active false). The checkpoint blocks the agent
+// loop on a second model, so without this frame the browser shows no motion
+// for its whole duration.
+type AdvisorCheckpointEvent struct {
+	Kind   string `json:"kind"`
+	Active bool   `json:"active"`
+}
+
 type DoneEvent struct {
 	SessionID string `json:"session_id"`
 	Model     string `json:"model"`

@@ -3,6 +3,7 @@ import { api, type AutoPermissionConfig } from "../../api/client";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
+import ModelDialog from "../Layout/ModelDialog";
 
 const EMPTY_AUTO: AutoPermissionConfig = {
   enabled: false, allow_destructive: false, prompt: "",
@@ -15,6 +16,7 @@ export default function PermissionsForm() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [permDialogOpen, setPermDialogOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -39,7 +41,13 @@ export default function PermissionsForm() {
     setError(null);
     try {
       await api.setYolo(mode);
-      await api.setAutoPermissionConfig(auto);
+      // Model is persisted separately via SavePermissionModel; preserve separation
+      // so setAutoPermissionConfig doesn't clobber the model (it preserves it).
+      const { model, ...rest } = auto;
+      await api.setAutoPermissionConfig(rest as AutoPermissionConfig);
+      if (model !== undefined) {
+        await api.setPermissionModel(model ?? "");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -83,6 +91,26 @@ export default function PermissionsForm() {
           />
           Allow destructive actions
         </label>
+        <div className="space-y-1.5">
+          <label className="text-xs text-zinc-500">Permission model</label>
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={auto.model || undefined}>
+              {auto.model || "(not set — falls back to small model)"}
+            </div>
+            <Button size="sm" variant="outline" type="button" onClick={() => setPermDialogOpen(true)} className="h-8 text-xs">
+              Change…
+            </Button>
+          </div>
+          <ModelDialog
+            open={permDialogOpen}
+            onClose={() => setPermDialogOpen(false)}
+            purpose="permission"
+            currentValues={{ permission: auto.model ?? "" }}
+            onPick={(_, selectedModel) => {
+              setAuto({ ...auto, model: selectedModel });
+            }}
+          />
+        </div>
         <div className="space-y-1.5">
           <label className="text-xs text-zinc-500">Prompt</label>
           <textarea

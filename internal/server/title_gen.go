@@ -131,11 +131,18 @@ func (h *Handler) finishSessionTitle(sessionID, title string) {
 	}
 
 	// Broadcast a status event carrying session_id + session_title so the web
-	// can replace the tab label without polling.
+	// can replace the tab label without polling. Context fields ride along
+	// (via applySessionContext) — this broadcast lands right after the first
+	// turn of a headless session, and a snapshot without them would wipe the
+	// sidebar's Context gauge until the next per-session fetch.
 	snap := h.buildStatusSnapshot()
 	snap.SessionID = sessionID
 	snap.SessionTitle = title
-	h.broadcastEvent(SSEEvent{Event: "status", Data: snap})
+	if entry, err := h.sessions.Resolve(sessionID); err == nil && entry.ProjectRoot != "" {
+		snap.CWD = entry.ProjectRoot
+	}
+	h.applySessionContext(&snap, sessionID)
+	h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "status", Data: snap})
 }
 
 // firstAndLastMessageTexts returns the first user message text and the last

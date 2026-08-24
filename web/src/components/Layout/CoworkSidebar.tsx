@@ -24,7 +24,7 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   activeAgent: string;
-  onModelClick?: (tab: "main" | "small" | "advisor") => void;
+  onModelClick?: (tab: "main" | "small" | "advisor" | "permission") => void;
   // When true the sidebar becomes a fixed overlay (right side) with a backdrop
   // instead of pushing the chat column. Used for the mobile layout (≤767px).
   isMobile?: boolean;
@@ -82,6 +82,7 @@ export default function CoworkSidebar({
   const [gitBranch, setGitBranch] = useState<string>("");
   const [todoItems] = useState<string[]>([]);
   const [yoloLoading, setYoloLoading] = useState(false);
+  const [permLoading, setPermLoading] = useState(false);
   // Locally-tracked active agent. The `activeAgent` prop is fixed by the
   // parent, so switching agents is reflected via this optimistic state.
   const [selectedAgent, setSelectedAgent] = useState<string>(activeAgent);
@@ -213,6 +214,22 @@ export default function CoworkSidebar({
       console.error("toggle yolo error", e);
     } finally {
       setYoloLoading(false);
+    }
+  };
+
+  const togglePermEnabled = async () => {
+    const enabled = !tuiStatus?.permission_auto_allow;
+    setPermLoading(true);
+    try {
+      await api.setPermissionModelEnabled(enabled);
+      if (sessionId) {
+        const status = await api.getSessionStatus(sessionId);
+        dispatch({ type: "SET_TUI_STATUS", sessionId, status });
+      }
+    } catch (e) {
+      console.error("toggle perm enabled error", e);
+    } finally {
+      setPermLoading(false);
     }
   };
 
@@ -351,12 +368,27 @@ export default function CoworkSidebar({
                   className="w-8 h-4 rounded-full appearance-none bg-zinc-700 checked:bg-purple-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
                 />
               </label>
-              <div className="flex items-center justify-between">
+              <label className="flex items-center justify-between cursor-pointer">
                 <span className="text-xs text-zinc-400">Auto-permission</span>
-                <span className={`text-xs px-1.5 py-0.5 rounded ${tuiStatus?.permission_auto_allow ? "bg-emerald-900/50 text-emerald-300" : "bg-zinc-800 text-zinc-500"}`}>
-                  {tuiStatus?.permission_auto_allow ? "on" : "off"}
+                <input
+                  type="checkbox"
+                  checked={Boolean(tuiStatus?.permission_auto_allow)}
+                  disabled={permLoading}
+                  onChange={togglePermEnabled}
+                  className="w-8 h-4 rounded-full appearance-none bg-zinc-700 checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => onModelClick?.("permission")}
+                disabled={!onModelClick}
+                className="flex items-center justify-between w-full text-left rounded px-1 py-1 hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
+              >
+                <span className="text-xs text-zinc-400">Permission model</span>
+                <span className="text-xs font-mono text-zinc-300 truncate max-w-[140px]" title={tuiStatus?.permission_model || "(not set)"}>
+                  {tuiStatus?.permission_model || "(not set)"} {tuiStatus?.permission_auto_allow ? "●" : "○"}
                 </span>
-              </div>
+              </button>
               {tuiStatus?.ide_mode && (
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-zinc-400">IDE</span>

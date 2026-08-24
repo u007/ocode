@@ -2,6 +2,9 @@ package desktop
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,6 +45,25 @@ func TestPortStickinessRoundTrip(t *testing.T) {
 	saveBoundPort("127.0.0.1:45678")
 	if p := loadSavedPort(); p != 45678 {
 		t.Fatalf("expected saved port 45678, got %d", p)
+	}
+}
+
+func TestSaveDebugHandleWritesURLAndToken(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("OPENCODE_CONFIG_DIR", cfgDir)
+
+	saveDebugHandle("http://127.0.0.1:45678", "deadbeef")
+
+	data, err := os.ReadFile(filepath.Join(cfgDir, "desktop-debug-handle"))
+	if err != nil {
+		t.Fatalf("read debug handle file: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "url=http://127.0.0.1:45678") {
+		t.Errorf("expected url in content, got %q", content)
+	}
+	if !strings.Contains(content, "token=deadbeef") {
+		t.Errorf("expected token in content, got %q", content)
 	}
 }
 

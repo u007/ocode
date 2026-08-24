@@ -429,3 +429,34 @@ func TestHandleSetMaskAdvancedRejectsBadFailMode(t *testing.T) {
 		t.Fatalf("status = %d, want 400, body=%s", w.Code, w.Body.String())
 	}
 }
+
+// Regression for the 2026-08-23 resume-bootstrap failure: a bare model id
+// ("gpt-4o-mini" with no provider prefix) persisted as last_model made every
+// later start/resume build its client from an unresolvable string, which
+// NewClient refuses ("no API key for provider openai"). HandleSetModel must
+// reject such ids instead of poisoning persisted state.
+func TestHandleSetModelRejectsProviderlessModel(t *testing.T) {
+	h := testConfigHandler(t)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/model", strings.NewReader(`{"model":"gpt-4o-mini"}`))
+	h.HandleSetModel(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if got := config.GetLastModel(); got != "" {
+		t.Fatalf("last_model = %q, want empty (bare id must not be persisted)", got)
+	}
+	if h.cfg.Model != "" {
+		t.Fatalf("cfg.Model = %q, want unchanged", h.cfg.Model)
+	}
+
+	// A properly prefixed id is still accepted.
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("PUT", "/api/config/model", strings.NewReader(`{"model":"openai/gpt-4o-mini"}`))
+	h.HandleSetModel(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("prefixed id: status = %d, want 200", w2.Code)
+	}
+}

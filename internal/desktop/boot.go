@@ -75,6 +75,7 @@ func StartServer(webFS fs.FS, workDir string) (*Handle, error) {
 	addr := ln.Addr().String()
 	url := fmt.Sprintf("http://%s", addr)
 	saveBoundPort(addr)
+	saveDebugHandle(url, token)
 
 	go func() {
 		log.Printf("desktop: serving on %s", url)
@@ -154,5 +155,24 @@ func saveBoundPort(addr string) {
 	}
 	if err := os.WriteFile(path, []byte(portStr+"\n"), 0o600); err != nil {
 		log.Printf("desktop: save port file %s: %v", path, err)
+	}
+}
+
+// saveDebugHandle writes the current launch's URL and auth token to a local,
+// owner-only file so a stuck/high-memory desktop session can be diagnosed
+// (curl /debug/pprof/heap, /debug/pprof/goroutine, /api/debug/runtime)
+// without needing the process's stdout, which a Finder-launched .app loses.
+// Overwritten on every boot — stale content just means the app isn't
+// running. Not read back by the app itself (unlike desktop-port); failure is
+// non-fatal and logged. Debug-only; do not treat as a stable API.
+func saveDebugHandle(url, token string) {
+	path, err := portFilePath()
+	if err != nil {
+		return
+	}
+	path = filepath.Join(filepath.Dir(path), "desktop-debug-handle")
+	content := fmt.Sprintf("url=%s\ntoken=%s\n", url, token)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		log.Printf("desktop: save debug handle file %s: %v", path, err)
 	}
 }

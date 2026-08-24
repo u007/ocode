@@ -35,6 +35,10 @@ func (h *Handler) buildStatusSnapshot() TUIStatus {
 		snap.SmallModel = h.cfg.Ocode.SmallModel
 		snap.SmallModelOn = h.cfg.Ocode.SmallModelEnabled
 		snap.AdvisorModel = h.cfg.Ocode.Advisor.Model
+		if h.cfg.Ocode.Permissions.Auto != nil {
+			snap.PermissionModel = h.cfg.Ocode.Permissions.Auto.Model
+			snap.PermissionAutoAllow = h.cfg.Ocode.Permissions.Auto.Enabled
+		}
 		snap.ExtraAllowedPaths = h.cfg.Ocode.ExtraAllowedPaths
 		snap.OcrBackend = h.cfg.Ocode.Ocr.Backend
 		if snap.OcrBackend == "" {
@@ -79,6 +83,8 @@ func (h *Handler) pushStatusSnapshot() {
 		cur.SmallModel = snap.SmallModel
 		cur.SmallModelOn = snap.SmallModelOn
 		cur.AdvisorModel = snap.AdvisorModel
+		cur.PermissionModel = snap.PermissionModel
+		cur.PermissionAutoAllow = snap.PermissionAutoAllow
 		cur.UpdatedAt = snap.UpdatedAt
 		h.rc.StatusStore().Set(cur, h.rc)
 		return

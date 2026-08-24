@@ -10,11 +10,14 @@ vi.mock("@xterm/xterm", () => ({
   Terminal: class {
     cols = 80;
     rows = 24;
+    options: Record<string, unknown> = {};
     loadAddon = vi.fn();
     open = vi.fn();
     write = vi.fn();
+    focus = vi.fn();
     onData = vi.fn(() => ({ dispose: vi.fn() }));
     dispose = disposeSpy;
+    attachCustomKeyEventHandler = vi.fn(() => true);
   },
 }));
 vi.mock("@xterm/addon-fit", () => ({
@@ -68,9 +71,9 @@ beforeEach(() => {
   );
 });
 
-async function renderTabs(sessionId = "session-1") {
+async function renderTabs(projectPath = "/project") {
   const { default: TerminalTabs } = await import("./TerminalTabs");
-  render(<TerminalTabs active projectPath="/project" sessionId={sessionId} />);
+  render(<TerminalTabs active projectPath={projectPath} />);
   // First terminal is opened lazily once the panel becomes active.
   await waitFor(() => expect(sockets.length).toBe(1));
 }
@@ -112,7 +115,7 @@ describe("TerminalTabs", () => {
 
   it("restores the same number of terminal tabs (fresh sockets) after remount", async () => {
     const { default: TerminalTabs } = await import("./TerminalTabs");
-    const { unmount } = render(<TerminalTabs active projectPath="/project" sessionId="session-restore" />);
+    const { unmount } = render(<TerminalTabs active projectPath="/project" />);
     await waitFor(() => expect(sockets.length).toBe(1));
     fireEvent.click(screen.getByLabelText("New terminal"));
     await waitFor(() => expect(sockets.length).toBe(2));
@@ -120,7 +123,7 @@ describe("TerminalTabs", () => {
     unmount();
 
     sockets.length = 0;
-    render(<TerminalTabs active projectPath="/project" sessionId="session-restore" />);
+    render(<TerminalTabs active projectPath="/project" />);
 
     await waitFor(() => expect(sockets.length).toBe(2));
     expect(closeButtons()).toHaveLength(2);
