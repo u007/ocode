@@ -162,9 +162,12 @@ describe("chatStore per-session isolation", () => {
   });
 
   it("MERGE_SNAPSHOT does not clobber live parts on an empty-messages slice mid-turn", () => {
-    // Deltas can land before any committed message exists. The unguarded
-    // branch clears `live`, so the guard must treat non-empty live as
-    // protectable state on its own.
+    // Deltas can land before any committed message exists (page reload during
+    // a stream: the mirror reconnects before the history fetch resolves).
+    // `live` is protectable state and must survive the merge — but the disk
+    // snapshot must still populate `messages`: an empty messages array holds
+    // nothing newer than disk, and dropping the snapshot left the reloaded
+    // chat blank (no history, input only) until turn_done.
     let state = initial();
     state = chatReducer(state, {
       type: "LIVE_DELTA",
@@ -176,13 +179,41 @@ describe("chatStore per-session isolation", () => {
     state = chatReducer(state, {
       type: "MERGE_SNAPSHOT",
       sessionId: "a",
-      messages: [{ role: "user", content: "stale" }],
+      messages: [{ role: "user", content: "fix the bug" }],
       total: 1,
     });
     const slice = getSessionSlice(state, "a");
     expect(slice.live).toHaveLength(1);
     expect(slice.live[0]).toMatchObject({ kind: "text", text: "streaming" });
-    expect(slice.messages).toEqual([]);
+    expect(slice.messages).toEqual([{ role: "user", content: "fix the bug" }]);
+    expect(slice.initialized).toBe(true);
+  });
+
+  it("MERGE_SNAPSHOT mid-turn keeps committed messages authoritative over the disk page", () => {
+    // Once the slice holds committed messages (turn-boundary SET_MESSAGES or
+    // a partial commit), a mid-turn disk page is staler than memory and must
+    // not regress them.
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "fix the bug" },
+        { role: "assistant", content: "working on it" },
+      ],
+    });
+    state = chatReducer(state, { type: "SET_TURN_STATE", sessionId: "a", turnActive: true });
+    state = chatReducer(state, {
+      type: "MERGE_SNAPSHOT",
+      sessionId: "a",
+      messages: [{ role: "user", content: "fix the bug" }],
+      total: 1,
+    });
+    const slice = getSessionSlice(state, "a");
+    expect(slice.messages).toEqual([
+      { role: "user", content: "fix the bug" },
+      { role: "assistant", content: "working on it" },
+    ]);
   });
 
   it("MERGE_SNAPSHOT applies fully once the turn ends (recovery after missed turn_done)", () => {

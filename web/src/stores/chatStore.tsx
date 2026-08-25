@@ -493,24 +493,26 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // Mid-turn guard: the server persists a transcript only after the
       // turn's Step returns (runTurn saves post-Step), so a snapshot fetched
       // mid-turn is staler than memory — but only where memory actually
-      // holds newer state. The guard therefore keys off content (committed
-      // messages or live parts), NOT merely turnActive: a freshly-loaded
-      // page reconciles mid-turn with turnActive=true on a virgin slice,
-      // and dropping the snapshot there would leave the tab empty until
-      // turn_done (nothing in memory to protect — disk is strictly newer).
-      // For a populated slice, applying the stale page would regress
-      // `messages` to the pre-turn transcript and wipe the live buffer —
-      // the "chat stuck after some messages" bug. The turn-boundary
-      // `messages` broadcast commits the full transcript when the turn ends.
-      // reconcileOpenSessions dispatches SET_TURN_STATE before this merge,
-      // so a genuinely finished turn whose turn_done was missed flips
-      // turnActive first and still gets the recovery merge below.
+      // holds newer state, and only `messages` counts as that state: a
+      // slice with committed messages must not regress to the pre-turn
+      // page (the "chat stuck after some messages" bug). Live parts alone
+      // do NOT suppress the merge — after a mid-stream page reload the
+      // mirror reconnects before the history fetch resolves, so deltas land
+      // on a virgin slice first; an empty `messages` array holds nothing
+      // newer than disk, and dropping the snapshot left the reloaded chat
+      // blank until turn_done. The merge instead applies the disk page and
+      // preserves the live buffer while the turn is active. The
+      // turn-boundary `messages` broadcast commits the full transcript
+      // (and clears live) when the turn ends. reconcileOpenSessions
+      // dispatches SET_TURN_STATE before this merge, so a genuinely
+      // finished turn whose turn_done was missed flips turnActive first
+      // and still gets the recovery merge below.
       return updateSession(state, action.sessionId, (s) => {
-        if (s.turnActive && (s.messages.length > 0 || s.live.length > 0)) {
+        if (s.turnActive && s.messages.length > 0) {
           return {
             ...s,
             totalMessages: action.total,
-            hasMore: action.messages.length < action.total,
+            hasMore: s.messages.length < action.total,
             initialized: true,
           };
         }
@@ -519,7 +521,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           messages: action.messages,
           totalMessages: action.total,
           hasMore: action.messages.length < action.total,
-          live: [],
+          live: s.turnActive ? s.live : [],
           initialized: true,
         };
       });

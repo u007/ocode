@@ -89,11 +89,11 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
       .getSession(sessionId, { limit: PAGE_SIZE })
       .then((detail) => {
         if (cancelled || generation !== loadGenerationRef.current) return;
-        // A live mirror event may have arrived while the initial history fetch
-        // was in flight. Its in-memory state is newer than disk; do not wipe
-        // it with this older snapshot.
+        // Mirrors MERGE_SNAPSHOT guard in chatStore.tsx — only committed
+        // messages suppress the merge; live alone does not. The reducer
+        // preserves the live buffer mid-turn.
         const current = getSessionSlice(stateRef.current, sessionId);
-        if (current.messages.length > 0 || current.live.length > 0) {
+        if (current.messages.length > 0) {
           // The mirror already populated the slice while the fetch was in
           // flight — its state is newer than disk. Do not wipe it with this
           // older snapshot, but do mark the slice initialized so the tab's

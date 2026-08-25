@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
@@ -162,6 +163,14 @@ func (h *Handler) lspManagerFor(root string) *lsp.Manager {
 		}
 		mgr = lsp.NewManagerWithShared(root, shared)
 		h.lspMgrs[root] = mgr
+		// Mirror the TUI's eager warmup (tui/model.go) so the web/desktop
+		// sidebar shows language servers immediately instead of staying empty
+		// until the agent happens to invoke an LSP tool. Skipped under `go
+		// test` for the same reason the TUI skips it: WarmUp spawns external
+		// servers that race temp-dir cleanup.
+		if !testing.Testing() {
+			go mgr.WarmUp(root)
+		}
 	}
 	return mgr
 }

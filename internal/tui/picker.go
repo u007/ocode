@@ -712,6 +712,8 @@ func (m *model) closePicker() {
 	m.pickerFilter = ""
 	m.pickerFilterPending = ""
 	m.pickerFilterSeq++
+	m.pickerMultiSelect = false
+	m.pickerChecked = nil
 	m.pickerSessionRefs = nil
 	m.pickerSessionPage = 0
 	m.pickerSessionTotal = 0
@@ -949,7 +951,9 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 
 func (m model) renderPicker() string {
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
-	if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "image-model" {
+	if isMultiSelectPickerKind(m.pickerKind) {
+		hintLine = hintStyle.Render("↑/↓ move · Space toggle · Enter confirm · Esc cancel · type to filter")
+	} else if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "image-model" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+f favorite · ctrl+r refresh · Esc cancel · type to filter")
 	} else if m.pickerKind == "advisor" || m.pickerKind == "ocr-model" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+r refresh · Esc cancel · type to filter")
@@ -997,6 +1001,12 @@ func (m model) renderPicker() string {
 	if m.pickerKind == "ocr-model" {
 		title = "Select OCR backend + model"
 	}
+	if m.pickerKind == "localmodel-enable" {
+		title = "Enable local models (Space to toggle, Enter to confirm)"
+	}
+	if m.pickerKind == "localmodel-add" {
+		title = "Add local models (Space to toggle, Enter to confirm)"
+	}
 	header := m.styles.Header.Render(title) + "  " + hintStyle.Render("filter: "+m.pickerFilterPending+"_")
 
 	items, _ := m.pickerVisibleItems()
@@ -1031,15 +1041,28 @@ func (m model) renderPicker() string {
 		for i := start; i < end; i++ {
 			line := items[i]
 			isHeader := !isFiltered && i < len(m.pickerIsHeader) && m.pickerIsHeader[i]
+			displayLine := line
+			if m.pickerMultiSelect && line != "" && !isHeader {
+				// Use pickerValues as checkbox key; skip decoration when
+				// visible items diverge from values (e.g. filtered view).
+				if i < len(m.pickerValues) {
+					val := m.pickerValues[i]
+					prefix := "[ ] "
+					if val != "" && m.pickerChecked != nil && m.pickerChecked[val] {
+						prefix = "[x] "
+					}
+					displayLine = prefix + line
+				}
+			}
 			switch {
 			case line == "":
 				// spacer line
 			case isHeader:
 				body.WriteString(hintStyle.Render("  " + line))
 			case i == m.pickerIndex:
-				body.WriteString(m.styles.Selected.Render(" " + line + " "))
+				body.WriteString(m.styles.Selected.Render(" " + displayLine + " "))
 			default:
-				body.WriteString("  " + line)
+				body.WriteString("  " + displayLine)
 			}
 			body.WriteString("\n")
 		}

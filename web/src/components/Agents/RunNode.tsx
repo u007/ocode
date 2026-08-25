@@ -86,7 +86,7 @@ function messageLine(msg: AgentRunMessage, i: number) {
         </div>
       </div>
       {msg.reasoningContent && (
-        <div className="ml-[1.75rem] rounded-md border border-zinc-700/60 bg-zinc-900/50 px-2 py-1.5">
+        <div className="ml-[1.75rem] max-h-40 overflow-y-auto overscroll-contain rounded-md border border-zinc-700/60 bg-zinc-900/50 px-2 py-1.5">
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
             Thinking
           </div>
@@ -182,12 +182,12 @@ export default function RunNode({ run, depth, onOpenDetail }: RunNodeProps) {
             </div>
           )}
           {run.messages.length > 0 && (
-            <div className="space-y-1.5 rounded-md bg-zinc-900/70 p-2 ring-1 ring-inset ring-zinc-800/80">
+            <div className="max-h-72 overflow-y-auto overscroll-contain space-y-1.5 rounded-md bg-zinc-900/70 p-2 ring-1 ring-inset ring-zinc-800/80">
               {run.messages.map((m, i) => messageLine(m, i))}
             </div>
           )}
           {hasResult && (
-            <div className="rounded-md bg-emerald-950/25 px-2 py-1.5 ring-1 ring-inset ring-emerald-900/30">
+            <div className="max-h-48 overflow-y-auto overscroll-contain rounded-md bg-emerald-950/25 px-2 py-1.5 ring-1 ring-inset ring-emerald-900/30">
               <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-300/75">
                 Result
               </div>

@@ -2,8 +2,10 @@ package server
 
 import (
 	"log"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
@@ -173,4 +175,133 @@ func truncateSessionTitle(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen-3]) + "..."
+}
+
+// lastUserAndLastAssistantTexts returns the last user and last assistant
+// message texts — the inputs for title regeneration (latest task), mirroring
+// the TUI's regenerateTitle which uses lastUserMessageText +
+// lastAssistantContent. Falls through to empty strings when no messages exist.
+func lastUserAndLastAssistantTexts(msgs []agent.Message) (string, string) {
+	var userMsg, assistantMsg string
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if assistantMsg == "" && m.Role == "assistant" && strings.TrimSpace(m.Content) != "" {
+			assistantMsg = m.Content
+		}
+		if userMsg == "" && m.Role == "user" && strings.TrimSpace(m.Content) != "" {
+			userMsg = m.Content
+		}
+		if userMsg != "" && assistantMsg != "" {
+			break
+		}
+	}
+	// If we found no user message in reverse scan (e.g. no assistant yet),
+	// still return the first user prompt so a single-turn session can title.
+	if userMsg == "" {
+		for _, m := range msgs {
+			if m.Role == "user" && strings.TrimSpace(m.Content) != "" {
+				userMsg = m.Content
+				break
+			}
+		}
+	}
+	return userMsg, assistantMsg
+}
+
+// HandleGenerateSessionTitle regenerates the session title from the latest
+// task (last user message + last assistant message), mirroring the TUI
+// sidebar "✦ gen" button. It blocks up to ~20s for the LLM to return a title,
+// persists it, broadcasts a status event, and returns the new title. Returns
+// 409 if a generation is already in flight for this session.
+func (h *Handler) HandleGenerateSessionTitle(w http.ResponseWriter, r *http.Request, id string) {
+	if h.rc != nil {
+		writeError(w, http.StatusConflict, "title generation owned by TUI")
+		return
+	}
+	if !h.tryClaimTitleGen(id) {
+		writeError(w, http.StatusConflict, "title generation already in progress")
+		return
+	}
+	// Ensure we release the claim on every early return; finishSessionTitle
+	// also releases it on success via its own delete.
+	release := func() {
+		h.titleGen.mu.Lock()
+		delete(h.titleGen.active, id)
+		h.titleGen.mu.Unlock()
+	}
+
+	s, err := h.loadSession(id)
+	if err != nil {
+		release()
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	// Prefer live agentSession messages (may include unsaved turn), else use disk.
+	var msgs []agent.Message
+	h.mu.Lock()
+	as := h.agents[id]
+	h.mu.Unlock()
+	if as != nil {
+		as.mu.Lock()
+		msgs = append([]agent.Message(nil), as.messages...)
+		as.mu.Unlock()
+		// Ensure an agent exists to actually generate the title.
+		if as.agent == nil {
+			release()
+			writeError(w, http.StatusServiceUnavailable, "no agent for session")
+			return
+		}
+	} else {
+		msgs = s.Messages
+		// No live agent — try to build one from the session so headless-regenerate works.
+		tmpAS, err := h.getOrCreateAgentSession(id)
+		if err != nil || tmpAS == nil || tmpAS.agent == nil {
+			release()
+			writeError(w, http.StatusServiceUnavailable, "no agent for session")
+			return
+		}
+		as = tmpAS
+	}
+
+	userMsg, assistantMsg := lastUserAndLastAssistantTexts(msgs)
+	if strings.TrimSpace(userMsg) == "" {
+		release()
+		writeError(w, http.StatusBadRequest, "no conversation to title")
+		return
+	}
+
+	// Branch: if we already claimed, finishSessionTitle will delete the entry.
+	// Generate synchronously by waiting on GenerateTitleAsync.
+	done := make(chan string, 1)
+	as.agent.GenerateTitleAsync(userMsg, assistantMsg, func(title string) {
+		done <- title
+	})
+
+	var title string
+	select {
+	case title = <-done:
+	case <-time.After(20 * time.Second):
+		release()
+		writeError(w, http.StatusGatewayTimeout, "title generation timed out")
+		return
+	case <-r.Context().Done():
+		release()
+		return
+	}
+
+	if strings.TrimSpace(title) == "" {
+		release()
+		writeError(w, http.StatusInternalServerError, "title generation returned empty")
+		return
+	}
+	title = truncateSessionTitle(title, maxGeneratedTitleLen)
+
+	// Persist with the current message list and broadcast.
+	// Reuse finishSessionTitle's save+broadcast but avoid double-delete of the
+	// titleGen entry: finishSessionTitle deletes it, so we must NOT have already
+	// deleted. We claimed above and haven't released on success, so let it delete.
+	// To avoid it reading stale msgs, we pass through its normal path which
+	// re-reads the live agentSession.
+	h.finishSessionTitle(id, title)
+	writeJSON(w, http.StatusOK, map[string]string{"title": title})
 }

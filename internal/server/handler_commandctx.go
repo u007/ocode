@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -37,6 +38,22 @@ func (h *Handler) HandleCommandContext(w http.ResponseWriter, r *http.Request, n
 		prompt, err = commandctx.Changes(workDir, h.lspManagerFor(workDir))
 	case "review":
 		prompt, err = commandctx.Review(workDir, args)
+	case "learn":
+		prompt, err = commandctx.Learn(workDir, args)
+	case "doc-sync":
+		mode := "session"
+		if len(args) > 0 {
+			switch strings.ToLower(args[0]) {
+			case "all", "session":
+				mode = strings.ToLower(args[0])
+			default:
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown mode %q — use 'session' or 'all'", args[0]))
+				return
+			}
+		}
+		prompt, err = commandctx.DocSync(workDir, mode)
+	case "mem-update":
+		prompt, err = commandctx.MemUpdate(workDir, args)
 	default:
 		writeError(w, http.StatusNotFound, "unknown command-context: "+name)
 		return

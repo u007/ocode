@@ -153,6 +153,13 @@ func (s *Server) registerRoutes() {
 
 	// TUI status (consolidated snapshot for the web UI status bar)
 	s.mux.HandleFunc("GET /api/tui-status", s.authMiddleware(s.handleGetTUIStatus))
+	s.mux.HandleFunc("GET /api/paths", s.authMiddleware(s.handleGetPathsInfo))
+	s.mux.HandleFunc("GET /api/memory/status", s.authMiddleware(s.handleGetMemoryStatus))
+	s.mux.HandleFunc("GET /api/docs/status", s.authMiddleware(s.handleDocsStatus))
+	s.mux.HandleFunc("POST /api/docs/init", s.authMiddleware(s.handleDocsInit))
+	s.mux.HandleFunc("POST /api/docs/update", s.authMiddleware(s.handleDocsUpdate))
+	s.mux.HandleFunc("POST /api/docs/cleanup", s.authMiddleware(s.handleDocsCleanup))
+	s.mux.HandleFunc("POST /api/auth/connect", s.authMiddleware(s.handleConnectProvider))
 	s.mux.HandleFunc("GET /api/spending", s.authMiddleware(s.handleGetSpending))
 	s.mux.HandleFunc("GET /api/lsp/statuses", s.authMiddleware(s.handleGetLSPStatuses))
 	s.mux.HandleFunc("GET /api/files/modified", s.authMiddleware(s.handleGetModifiedFiles))
@@ -167,6 +174,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/share", s.authMiddleware(s.handleShareSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/btw", s.authMiddleware(s.handleBtw))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/title", s.authMiddleware(s.handleSetSessionTitle))
+	s.mux.HandleFunc("POST /api/sessions/{id}/title/generate", s.authMiddleware(s.handleGenerateSessionTitle))
 	s.mux.HandleFunc("GET /api/sessions/{id}/context", s.authMiddleware(s.handleSessionContext))
 
 	// Files
@@ -205,6 +213,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/imagegen", s.authMiddleware(s.handleSetImageGenConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/paths", s.authMiddleware(s.handleGetPathsConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/paths", s.authMiddleware(s.handleSetPathsConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/autocontinue", s.authMiddleware(s.handleGetAutoContinue))
+	s.mux.HandleFunc("PUT /api/config/ocode/autocontinue", s.authMiddleware(s.handleSetAutoContinue))
 	s.mux.HandleFunc("GET /api/config/ocode/limits", s.authMiddleware(s.handleGetLimitsConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/limits", s.authMiddleware(s.handleSetLimitsConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/features", s.authMiddleware(s.handleGetFeaturesConfig))
@@ -248,6 +258,7 @@ func (s *Server) registerRoutes() {
 	// Permissions
 	s.mux.HandleFunc("GET /api/permissions", s.authMiddleware(s.handleGetPermissions))
 	s.mux.HandleFunc("POST /api/permissions", s.authMiddleware(s.handleSetPermission))
+	s.mux.HandleFunc("POST /api/permissions/bash-rule", s.authMiddleware(s.handleSetBashRule))
 	s.mux.HandleFunc("POST /api/questions", s.authMiddleware(s.handleAnswerQuestion))
 	s.mux.HandleFunc("POST /api/permissions/resolve", s.authMiddleware(s.handleResolvePermission))
 	s.mux.HandleFunc("GET /api/permissions/yolo", s.authMiddleware(s.handleGetYolo))
@@ -826,6 +837,9 @@ func (s *Server) handleBtw(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSetSessionTitle(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetSessionTitle(w, r, r.PathValue("id"))
 }
+func (s *Server) handleGenerateSessionTitle(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGenerateSessionTitle(w, r, r.PathValue("id"))
+}
 func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSessionContext(w, r, r.PathValue("id"))
 }
@@ -945,6 +959,36 @@ func (s *Server) handleGetPathsConfig(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleSetPathsConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetPathsConfig(w, r)
+}
+func (s *Server) handleGetPathsInfo(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPathsInfo(w, r)
+}
+func (s *Server) handleGetMemoryStatus(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetMemoryStatus(w, r)
+}
+func (s *Server) handleDocsStatus(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleDocsStatus(w, r)
+}
+func (s *Server) handleDocsInit(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleDocsInit(w, r)
+}
+func (s *Server) handleDocsUpdate(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleDocsUpdate(w, r)
+}
+func (s *Server) handleDocsCleanup(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleDocsCleanup(w, r)
+}
+func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleConnectProvider(w, r)
+}
+func (s *Server) handleGetAutoContinue(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetAutoContinue(w, r)
+}
+func (s *Server) handleSetAutoContinue(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetAutoContinue(w, r)
+}
+func (s *Server) handleSetBashRule(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetBashRule(w, r)
 }
 func (s *Server) handleGetLimitsConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetLimitsConfig(w, r)

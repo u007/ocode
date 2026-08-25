@@ -330,6 +330,10 @@ func spawnMLXServer(spawn func(cmdline string) error, man ServerManifest, cacheD
 	for i, a := range man.LaunchArgv {
 		a = strings.ReplaceAll(a, "{script}", scriptPath)
 		a = strings.ReplaceAll(a, "{port}", localServerPort)
+		// Resolve python3 via login-shell PATH (see mlxPythonPath doc).
+		if i == 0 {
+			a = mlxPythonBinary()
+		}
 		argv[i] = shellQuote(a)
 	}
 	cmdline := strings.Join(argv, " ")

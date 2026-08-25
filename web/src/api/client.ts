@@ -17,6 +17,7 @@ import type {
   ProjectGroup,
   BrowseResponse,
   PermissionsResponse,
+  MemoryStatusResponse,
   UsageSummary,
   PluginInfo,
   CommandEntry,
@@ -703,6 +704,11 @@ export const api = {
       `/api/sessions/${encodeURIComponent(id)}/title`,
       { method: "PUT", body: JSON.stringify({ title }) },
     ),
+  generateSessionTitle: (id: string) =>
+    fetchJSON<{ title: string }>(
+      `/api/sessions/${encodeURIComponent(id)}/title/generate`,
+      { method: "POST" },
+    ),
   // The server returns raw markdown (text/markdown), not JSON, so this uses a
   // raw fetch and reads the body as text.
   exportSessionMarkdown: async (id: string): Promise<string> => {
@@ -789,6 +795,67 @@ export const api = {
     fetchJSON<{ prompt: string }>(
       `/api/command-context/${encodeURIComponent(name)}${args ? `?args=${encodeURIComponent(args)}` : ""}`,
     ),
+
+  // ── Slash-command parity (/paths, /mem, /ban, /autocontinue, /connect, /docs) ──
+  getPathsInfo: (project?: string) => {
+    const query = project ? `?project=${encodeURIComponent(project)}` : "";
+    return fetchJSON<{
+      work_dir: string;
+      extra_allowed_paths: string[];
+      upload_dir: string;
+      active_opencode_path: string;
+      text: string;
+    }>(`/api/paths${query}`);
+  },
+  getMemoryStatus: (project?: string) => {
+    const query = project ? `?project=${encodeURIComponent(project)}` : "";
+    return fetchJSON<MemoryStatusResponse>(`/api/memory/status${query}`);
+  },
+  setBashRule: (prefix: string, level: "allow" | "deny" | "ask") =>
+    fetchJSON<{ prefix: string; level: string }>("/api/permissions/bash-rule", {
+      method: "POST",
+      body: JSON.stringify({ prefix, level }),
+    }),
+  getAutoContinue: () =>
+    fetchJSON<{ enabled: boolean; model: string }>("/api/config/ocode/autocontinue"),
+  setAutoContinue: (fields: { enabled?: boolean; model?: string; clear?: boolean }) =>
+    fetchJSON<{ enabled: boolean; model: string }>("/api/config/ocode/autocontinue", {
+      method: "PUT",
+      body: JSON.stringify(fields),
+    }),
+  connectProvider: (provider: string, api_key: string) =>
+    fetchJSON<{ provider: string; key: string }>("/api/auth/connect", {
+      method: "POST",
+      body: JSON.stringify({ provider, api_key }),
+    }),
+  getDocsStatus: (project?: string) => {
+    const query = project ? `?project=${encodeURIComponent(project)}` : "";
+    return fetchJSON<{ enabled: boolean; text: string }>(`/api/docs/status${query}`);
+  },
+  docsInit: (project?: string) => {
+    const query = project ? `?project=${encodeURIComponent(project)}` : "";
+    return fetchJSON<{ result: string; annotate_prompt?: string }>(`/api/docs/init${query}`, {
+      method: "POST",
+    });
+  },
+  docsUpdate: (sessionId: string, focus: string, project?: string) => {
+    const params = new URLSearchParams();
+    if (project) params.set("project", project);
+    const query = params.toString();
+    return fetchJSON<{ result: string }>(`/api/docs/update${query ? `?${query}` : ""}`, {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId, focus }),
+    });
+  },
+  docsCleanup: (confirm: boolean, project?: string) => {
+    const params = new URLSearchParams();
+    if (project) params.set("project", project);
+    const query = params.toString();
+    return fetchJSON<{ result: string }>(`/api/docs/cleanup${query ? `?${query}` : ""}`, {
+      method: "POST",
+      body: JSON.stringify({ confirm }),
+    });
+  },
 
   // ── GitHub (backing /github pr|issue) ──
   getGithubPR: (owner: string, repo: string, number: number) =>

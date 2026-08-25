@@ -19,6 +19,7 @@ import {
   AlertTriangle,
   Puzzle,
   FolderTree,
+  Loader2,
 } from "lucide-react";
 
 interface Props {
@@ -103,12 +104,63 @@ export default function CoworkSidebar({
   const [selectedAgent, setSelectedAgent] = useState<string>(activeAgent);
   const [agentBusy, setAgentBusy] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(false);
+  function truncateTitle(s: string, maxLen: number): string {
+    s = s.replace(/\n/g, " ").trim();
+    const runes = Array.from(s);
+    if (runes.length <= maxLen) return s;
+    return runes.slice(0, maxLen - 3).join("") + "...";
+  }
+
+  const [titleGenerating, setTitleGenerating] = useState(false);
   const chatState = useChatState();
   const dispatch = useChatDispatch();
   const { model } = chatState;
   const { activeTabId: sessionId } = projectState;
   const activeProject = projectState.state.activeProject ?? null;
-  const { tuiStatus } = getSessionSlice(chatState, sessionId);
+  const { tuiStatus, messages } = getSessionSlice(chatState, sessionId);
+
+  // ── Session title display — mirrors TUI's sidebarDisplayTitle() ────────────
+  // Priority: explicit session_title → first user prompt (truncated) → "Untitled".
+  // Truncation mirrors the TUI/server's maxGeneratedTitleLen (80 chars) and
+  // collapses newlines so the header stays single-line (web uses line-clamp-3
+  // instead of TUI's wordWrap, but the underlying title string is the same).
+  const displayTitle = (() => {
+    const rawTitle = tuiStatus?.session_title?.trim() || "";
+    if (rawTitle) return truncateTitle(rawTitle, 80);
+    // Fallback: first visible user message
+    for (const m of messages) {
+      if (m.role === "user" && m.content?.trim()) {
+        return truncateTitle(m.content.trim(), 80);
+      }
+    }
+    return "Untitled";
+  })();
+
+  const canGenerateTitle = !!sessionId && !sessionId.startsWith("new-");
+
+  const handleGenerateTitle = async () => {
+    if (!sessionId || titleGenerating) return;
+    setTitleGenerating(true);
+    try {
+      const res = await api.generateSessionTitle(sessionId);
+      if (res?.title) {
+        const newStatus = { ...(tuiStatus || {}), session_title: res.title } as typeof tuiStatus;
+        dispatch({ type: "SET_TUI_STATUS", sessionId, status: newStatus! });
+        projectState.dispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: res.title });
+      } else if (sessionId) {
+        // Fallback: refetch status so the SSE broadcast path still updates the tab
+        const st = await api.getSessionStatus(sessionId).catch(() => null);
+        if (st?.session_title) {
+          dispatch({ type: "SET_TUI_STATUS", sessionId, status: st as any });
+          projectState.dispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: st.session_title });
+        }
+      }
+    } catch (e) {
+      console.error("generate title failed", e);
+    } finally {
+      setTitleGenerating(false);
+    }
+  };
 
   // Git branch comes from `git_status` events on the shared bus (the server's
   // subscriber-aware watcher emits an initial snapshot for viewed projects and
@@ -276,6 +328,35 @@ export default function CoworkSidebar({
         </button>
       </div>
 
+      {/* Session title — mirrors TUI sidebar header (◆ title + ✦ gen) */}
+      <div className="border-b border-zinc-700 px-4 py-3">
+        <div className="flex items-start gap-2">
+          <span className="text-[#7DCFFF] font-bold text-sm leading-5 select-none" aria-hidden>◆</span>
+          <span
+            className="flex-1 text-sm font-medium text-zinc-200 break-words leading-5 line-clamp-3"
+            title={displayTitle}
+          >
+            {displayTitle}
+          </span>
+          <button
+            type="button"
+            onClick={handleGenerateTitle}
+            disabled={!canGenerateTitle || titleGenerating}
+            title={canGenerateTitle ? "Regenerate title from latest task (✦ gen)" : "No session to title"}
+            className="flex-shrink-0 inline-flex items-center gap-1 text-xs font-medium text-[#7DCFFF] hover:text-[#9de2ff] hover:underline disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline px-1 py-0.5 rounded"
+          >
+            {titleGenerating ? (
+              <>
+                <Loader2 className="w-3 h-3 animate-spin" />
+                <span>gen</span>
+              </>
+            ) : (
+              "✦ gen"
+            )}
+          </button>
+        </div>
+      </div>
+
       <div className="flex-1 overflow-y-auto">
         {/* Agent Section */}
         <div className="border-b border-zinc-700">
@@ -326,6 +407,29 @@ export default function CoworkSidebar({
               </div>
             </div>
           )}
+        </div>
+
+        {/* Compact main-model trigger — Small/Advisor/OCR/Permissions moved to
+            the Settings tab (see docs/superpowers/specs/2026-08-11-configuration-ui-design.md).
+            This is the only remaining sidebar entry point for ModelDialog,
+            which stays out of scope for this feature. */}
+        <div className="border-b border-zinc-700 px-4 py-2.5">
+          <button
+            type="button"
+            onClick={() => onModelClick?.("main")}
+            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
+            disabled={!onModelClick}
+          >
+            <div className="text-zinc-500 mb-1">Model</div>
+            <div className="text-zinc-300 font-mono truncate">
+              {model || config.model || "Not set"}
+            </div>
+          </button>
+          {/* Reasoning level selector */}
+          <ReasoningLevelSelector
+            thinkingBudget={tuiStatus?.thinking_budget ?? config.thinkingBudget}
+            disabled={!onModelClick}
+          />
         </div>
 
         {/* Git Section */}
@@ -453,29 +557,6 @@ export default function CoworkSidebar({
               )}
             </div>
           )}
-        </div>
-
-        {/* Compact main-model trigger — Small/Advisor/OCR/Permissions moved to
-            the Settings tab (see docs/superpowers/specs/2026-08-11-configuration-ui-design.md).
-            This is the only remaining sidebar entry point for ModelDialog,
-            which stays out of scope for this feature. */}
-        <div className="border-b border-zinc-700 px-4 py-2.5">
-          <button
-            type="button"
-            onClick={() => onModelClick?.("main")}
-            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
-            disabled={!onModelClick}
-          >
-            <div className="text-zinc-500 mb-1">Model</div>
-            <div className="text-zinc-300 font-mono truncate">
-              {model || config.model || "Not set"}
-            </div>
-          </button>
-          {/* Reasoning level selector */}
-          <ReasoningLevelSelector
-            thinkingBudget={tuiStatus?.thinking_budget ?? config.thinkingBudget}
-            disabled={!onModelClick}
-          />
         </div>
 
         {/* Context Section — real token usage from the TUI status snapshot. */}

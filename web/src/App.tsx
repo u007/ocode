@@ -100,7 +100,7 @@ function HomeApp() {
   const dispatch = useChatDispatch();
   const chatState = useChatState();
   const { state: projectState, tabs, activeTabId, dispatch: projectDispatch, openSessionTab, openNewSessionTab, closeSessionTab } = useProjectState();
-  const { resolvePermission, pendingPermission } = useChat(activeTabId);
+  const { resolvePermission, pendingPermission, sendMessage: sendToActiveSession } = useChat(activeTabId);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [coworkOpen, setCoworkOpen] = useState(true);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -347,7 +347,9 @@ function HomeApp() {
       openNewSessionTab(isNewSessionTabEmpty(activeTabId));
       return true;
     }
-    if (baseCmd === "/model") {
+    // Bare /model opens the model dialog. With a name argument it falls
+    // through to the shared dispatch (TUI /models <name> parity).
+    if (baseCmd === "/model" && !cmd.slice(baseCmd.length).trim()) {
       openModelDialog("main");
       return true;
     }
@@ -384,12 +386,48 @@ function HomeApp() {
         getCronJobs: () => api.listCronJobs().then((r) => r.jobs),
         getSmallModelWithEnabled: () => api.getSmallModelWithEnabled(),
         getAdvisor: () => api.getAdvisor(),
+        getLimitsConfig: () => api.getLimitsConfig(),
+        setLimitsConfig: (fields) => api.setLimitsConfig(fields),
+        getThinkingBudget: () => api.getThinkingBudget(),
+        setThinkingBudget: (budget) => api.setThinkingBudget(budget),
+        listModels: () => api.listModels(),
+        getConfigModel: () => api.getConfigModel(),
+        setConfigModel: (model) => api.setConfigModel(model),
+        getFeaturesConfig: () => api.getFeaturesConfig(),
+        setFeaturesConfig: (memoryEnabled, docPromptEnabled) => api.setFeaturesConfig(memoryEnabled, docPromptEnabled),
+        getPathsInfo: () => api.getPathsInfo(),
+        getPathsConfig: () => api.getPathsConfig(),
+        setPathsConfig: (paths, uploadDir) => api.setPathsConfig(paths, uploadDir),
+        getMemoryStatus: () => api.getMemoryStatus(),
+        setBashRule: (prefix, level) => api.setBashRule(prefix, level),
+        getPermissions: () => api.getPermissions(),
+        getAutoContinue: () => api.getAutoContinue(),
+        setAutoContinue: (fields) => api.setAutoContinue(fields),
+        connectProvider: (provider, apiKey) => api.connectProvider(provider, apiKey),
+        addProject: (path) => api.addProject(path),
+        getDocsStatus: () => api.getDocsStatus(),
+        docsInit: () => api.docsInit(),
+        docsUpdate: (sessionId, focus) => api.docsUpdate(sessionId, focus),
+        docsCleanup: (confirm) => api.docsCleanup(confirm),
+        getImageGenConfig: () => api.getImageGenConfig(),
+        setImageGenConfig: (cfg) => api.setImageGenConfig(cfg),
+        getDiscoveryConfig: () => api.getDiscoveryConfig(),
+        setDiscoveryConfig: (cfg) => api.setDiscoveryConfig(cfg),
+        getLocalModelsConfig: () => api.getLocalModelsConfig(),
+        setLocalModelsConfig: (models) => api.setLocalModelsConfig(models),
+        syncLoginStart: () => api.syncLoginStart(),
+        syncLogout: () => api.syncLogout(),
       },
       getMessages: () => getSessionSlice(chatState, activeTabId).messages,
       getSessionId: () => activeTabId,
     });
 
     if (!result.handled) return false;
+
+    if (result.openModelPicker) {
+      openModelDialog("main");
+      return true;
+    }
 
     // Apply result effects
     if (result.messages) {
@@ -398,6 +436,12 @@ function HomeApp() {
           dispatch({ type: "ADD_MESSAGE", sessionId: activeTabId, message: msg });
         }
       }
+    }
+    if (result.prompt) {
+      // Server-assembled prompt (/standup, /changes, /review, /learn,
+      // /doc-sync, /mem update, /docs init): send through the normal chat
+      // pipeline exactly like the TUI dispatching the same command.
+      sendToActiveSession(result.prompt);
     }
     if (result.sessionId) {
       openSessionTab(result.sessionId, result.sessionId);

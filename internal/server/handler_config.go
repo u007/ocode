@@ -1369,6 +1369,9 @@ func (h *Handler) HandleSetPathsConfig(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Ocode.UploadDir = req.UploadDir
 	}
 	h.mu.Unlock()
+	// Keep the process-global tool allowlist in sync so file tools executed by
+	// the server honor new/removed roots immediately (web /add-dir parity).
+	applyExtraAllowedPathsToRuntime(req.ExtraAllowedPaths)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"extra_allowed_paths": req.ExtraAllowedPaths,
 		"upload_dir":          req.UploadDir,

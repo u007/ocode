@@ -247,7 +247,15 @@ func lockForStart(modelID string) *sync.Mutex {
 // — but with the wrong processID recorded (this call's spawn never
 // succeeded), leaving /localmodel disable unable to find the real process and
 // /localmodel status reading a dead PID for memory.
-func StartModelInstance(spawn func(cmdline string) error, modelID string, port int, maxParallel int, cacheDir string, hfToken string) error {
+// ChatLiveness reports whether a just-spawned chat server process is still
+// running and, once it is not, a short diagnostic (captured output/exit
+// code) for the error message. The spawn callback returns one so
+// waitForChatHealth can notice a dead process immediately instead of polling
+// its dead port for the full timeout budget — see waitForChatHealth's doc
+// comment for the incident that motivated this.
+type ChatLiveness func() (alive bool, detail string)
+
+func StartModelInstance(spawn func(cmdline string) (ChatLiveness, error), modelID string, port int, maxParallel int, cacheDir string, hfToken string) error {
 	lock := lockForStart(modelID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -302,7 +310,10 @@ func StartModelInstance(spawn func(cmdline string) error, modelID string, port i
 		return lockErr
 	}
 	if !acquired {
-		return waitForChatHealth(modelID, base, man)
+		// Another process owns the spawn; this process has no handle on its
+		// child, so it has no way to check liveness — fall back to the plain
+		// HTTP-only poll below.
+		return waitForChatHealth(modelID, base, man, nil)
 	}
 	defer release()
 
@@ -317,12 +328,13 @@ func StartModelInstance(spawn func(cmdline string) error, modelID string, port i
 		return reapErr
 	}
 
+	var alive ChatLiveness
 	var err error
 	switch man.Backend {
 	case BackendMLX:
-		err = spawnMLXChatServer(spawn, man, port, maxParallel, hfToken)
+		alive, err = spawnMLXChatServer(spawn, man, port, maxParallel, hfToken)
 	default:
-		err = spawnLlamaCppChatServer(spawn, man, cacheDir, port, maxParallel)
+		alive, err = spawnLlamaCppChatServer(spawn, man, cacheDir, port, maxParallel)
 	}
 	if err != nil {
 		// A concurrent ocode process may have won the race and bound the port
@@ -341,7 +353,7 @@ func StartModelInstance(spawn func(cmdline string) error, modelID string, port i
 		return err
 	}
 
-	return waitForChatHealth(modelID, base, man)
+	return waitForChatHealth(modelID, base, man, alive)
 }
 
 // waitForChatHealth polls modelID's chat server until it reports healthy or
@@ -349,7 +361,17 @@ func StartModelInstance(spawn func(cmdline string) error, modelID string, port i
 // the outcome. Shared by the process that actually spawned the server and by
 // a relaunched process that lost the start-lock race (see
 // acquireChatStartLock) and is just waiting on someone else's spawn.
-func waitForChatHealth(modelID, base string, man ServerManifest) error {
+//
+// alive, when non-nil, lets this loop notice the spawned process has already
+// exited (bad interpreter PATH, missing dependency, crash) and fail within
+// one poll interval instead of exhausting the full timeout against a port
+// nothing will ever answer on — confirmed live: a bare "python3" resolving to
+// a system Python without mlx_lm caused exactly this, logged as
+// "did not become healthy" only after a 16-minute wait. alive is nil when
+// this call has no process handle to check (waiting on another process's
+// spawn via the cross-process start lock), in which case behavior is
+// unchanged from before this check existed.
+func waitForChatHealth(modelID, base string, man ServerManifest, alive ChatLiveness) error {
 	expect := man.ExpectedServeID()
 	// Weights are already downloaded by the time this poll starts (MLX via
 	// ensureMLXChatModelCached, llama.cpp via EnsureArtifact — both run
@@ -404,6 +426,16 @@ func waitForChatHealth(modelID, base string, man ServerManifest) error {
 			// context for the best-effort warmup.
 			go warmUpChatModel(context.Background(), base, man)
 			return nil
+		}
+		if alive != nil {
+			if ok, detail := alive(); !ok {
+				markInstanceState(modelID, InstanceStopped)
+				chatBreakerRecordFailure(modelID)
+				if detail != "" {
+					return fmt.Errorf("local chat server process for %q exited before becoming healthy: %s", modelID, detail)
+				}
+				return fmt.Errorf("local chat server process for %q exited before becoming healthy", modelID)
+			}
 		}
 		time.Sleep(time.Second)
 	}
@@ -522,11 +554,11 @@ func acquireChatStartLock(cacheDir, modelID string) (acquired bool, release func
 // spawnLlamaCppChatServer mirrors spawnLlamaCppServer (localserver.go) but
 // targets an arbitrary port + parallel-slot count instead of the embedder's
 // fixed port, and skips --embeddings (chat manifests omit it in LaunchArgv).
-func spawnLlamaCppChatServer(spawn func(cmdline string) error, man ServerManifest, cacheDir string, port, maxParallel int) error {
+func spawnLlamaCppChatServer(spawn func(cmdline string) (ChatLiveness, error), man ServerManifest, cacheDir string, port, maxParallel int) (ChatLiveness, error) {
 	binDir := filepath.Join(cacheDir, "local-"+man.OS+"-"+man.Arch)
 	for _, a := range man.Artifacts {
 		if err := EnsureArtifact(a, binDir); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	argv := make([]string, len(man.LaunchArgv))
@@ -550,20 +582,25 @@ func spawnLlamaCppChatServer(spawn func(cmdline string) error, man ServerManifes
 	}
 	cmdline := libEnv + strings.Join(argv, " ")
 	emitUserDiscoveryDebug("DISCOVERY", "spawning local chat server: "+cmdline)
-	if err := spawn(cmdline); err != nil {
-		return fmt.Errorf("spawn local chat server: %w", err)
+	alive, err := spawn(cmdline)
+	if err != nil {
+		return nil, fmt.Errorf("spawn local chat server: %w", err)
 	}
-	return nil
+	return alive, nil
 }
 
 // spawnMLXChatServer spawns mlx_lm.server directly (no bundled script — chat
 // manifests set LaunchArgv[0]="python3", unlike the embedder's MLX path which
 // runs the bundled mlx_embed_server.py via {script}).
-func spawnMLXChatServer(spawn func(cmdline string) error, man ServerManifest, port, maxParallel int, hfToken string) error {
+func spawnMLXChatServer(spawn func(cmdline string) (ChatLiveness, error), man ServerManifest, port, maxParallel int, hfToken string) (ChatLiveness, error) {
 	if err := ensureMLXChatModelCached(man.MLXRepo, hfToken); err != nil {
-		return err
+		return nil, err
 	}
 	argv := filterMLXArgs(man.LaunchArgv, man.MLXRepo, port, maxParallel, mlxServerFlags())
+	// Resolve python3 via login-shell PATH (see mlxPythonPath doc).
+	if len(argv) > 0 {
+		argv[0] = mlxPythonBinaryQuoted()
+	}
 	// Once cached locally, mlx_lm.server still hits the HF Hub API on every
 	// launch to check for repo updates. That check has nothing to do with
 	// whether the model is already running, and fails loudly (404/401) for
@@ -571,10 +608,11 @@ func spawnMLXChatServer(spawn func(cmdline string) error, man ServerManifest, po
 	// model launches without the hub round-trip.
 	cmdline := "HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 " + strings.Join(argv, " ")
 	emitUserDiscoveryDebug("DISCOVERY", "spawning MLX chat server: "+cmdline)
-	if err := spawn(cmdline); err != nil {
-		return fmt.Errorf("spawn MLX chat server: %w", err)
+	alive, err := spawn(cmdline)
+	if err != nil {
+		return nil, fmt.Errorf("spawn MLX chat server: %w", err)
 	}
-	return nil
+	return alive, nil
 }
 
 // ensureMLXChatModelCached runs huggingface_hub's snapshot_download for repo
@@ -591,6 +629,9 @@ func spawnMLXChatServer(spawn func(cmdline string) error, man ServerManifest, po
 // fall back to a real network download if that raises because something is
 // actually missing.
 func ensureMLXChatModelCached(repo, hfToken string) error {
+	if hfToken != "" && (len(hfToken) > 500 || strings.ContainsAny(hfToken, "\n\r\x00=")) {
+		return fmt.Errorf("invalid Hugging Face token: must not contain newlines or '='")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("ensuring MLX model %q is downloaded (no-op if already cached)", repo))
@@ -601,7 +642,7 @@ try:
 except Exception:
     snapshot_download(repo_id=%[1]q)
 `, repo)
-	cmd := exec.CommandContext(ctx, "python3", "-c", script)
+	cmd := exec.CommandContext(ctx, mlxPythonBinary(), "-c", script)
 	if hfToken != "" {
 		cmd.Env = append(os.Environ(), "HF_TOKEN="+hfToken)
 	}
@@ -612,7 +653,12 @@ except Exception:
 	cmd.Stdout = io.MultiWriter(&out, progress)
 	cmd.Stderr = io.MultiWriter(&out, progress)
 	if err := cmd.Run(); err != nil {
-		return mlxDownloadError(repo, err, out.String())
+		outStr := out.String()
+		// Scrub token if the hub ever echoes it back.
+		if hfToken != "" && strings.Contains(outStr, hfToken) {
+			outStr = strings.ReplaceAll(outStr, hfToken, "[REDACTED]")
+		}
+		return mlxDownloadError(repo, err, outStr)
 	}
 	return nil
 }
@@ -726,7 +772,7 @@ func mlxServerFlags() map[string]bool {
 		// runs once per process lifetime (sync.Once).
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, "python3", "-m", "mlx_lm.server", "--help").Output()
+		out, err := exec.CommandContext(ctx, mlxPythonBinary(), "-m", "mlx_lm.server", "--help").Output()
 		if err != nil {
 			emitUserDiscoveryDebug("DISCOVERY", "mlx_lm.server --help failed (keeping all manifest flags): "+err.Error())
 			return // mlxServerFlag stays nil — fail open

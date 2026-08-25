@@ -38,7 +38,7 @@ func TestAssignChatPortRejectsMoreThanRangeSize(t *testing.T) {
 }
 
 func TestStartModelInstanceUnknownManifestErrors(t *testing.T) {
-	spawn := func(string) error { return nil }
+	spawn := func(string) (ChatLiveness, error) { return nil, nil }
 	err := StartModelInstance(spawn, "local/does-not-exist", 19999, 1, t.TempDir(), "")
 	if err == nil {
 		t.Fatal("expected error for a model id with no chat manifest")
@@ -55,6 +55,30 @@ func TestStopModelInstanceNotRunningIsNoop(t *testing.T) {
 	procs := tool.NewProcessRegistry()
 	if err := StopModelInstance(procs, "local/never-started"); err != nil {
 		t.Fatalf("stopping a never-started instance should be a no-op, got: %v", err)
+	}
+}
+
+// TestWaitForChatHealthFailsFastWhenProcessAlreadyExited guards against the
+// 16-minute stall seen in the wild: a spawned server process that died on
+// launch (bad interpreter PATH, missing dependency, ...) must fail within
+// roughly one poll interval, not exhaust the full 900-attempt/15-minute
+// first-start budget polling a port nothing will ever answer on.
+func TestWaitForChatHealthFailsFastWhenProcessAlreadyExited(t *testing.T) {
+	man := ServerManifest{HealthPath: "/v1/models"}
+	dead := func() (bool, string) {
+		return false, "exit code 1: ModuleNotFoundError: No module named 'mlx_lm'"
+	}
+	start := time.Now()
+	err := waitForChatHealth("local/test-dead-proc", "http://127.0.0.1:1", man, dead)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected an error when the spawned process already exited")
+	}
+	if !strings.Contains(err.Error(), "ModuleNotFoundError") {
+		t.Fatalf("error should carry the process's diagnostic, got: %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("expected the liveness check to fail fast, took %s", elapsed)
 	}
 }
 

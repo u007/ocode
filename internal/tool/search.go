@@ -2,6 +2,7 @@ package tool
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,7 +10,95 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/u007/ocode/internal/pathscope"
 )
+
+// resolveSearchRoot anchors a search tool's path parameter on the session's
+// project root (WithWorkDir context) instead of the process cwd. The server
+// hosts sessions for many projects in one process — and the desktop shell
+// launched from Finder has cwd "/" — so "." would walk the wrong tree (or the
+// entire disk). An empty path means the project root itself; a relative path
+// joins onto it; an absolute path is validated against the workDir
+// (via Clean + EvalSymlinks + prefix check, mirroring confinedPath) so a
+// model cannot walk outside the project by passing "/" or "../../". With no
+// workDir in ctx (tests, TUI direct calls) the previous cwd-relative behavior
+// is preserved.
+func resolveSearchRoot(ctx context.Context, path string) (string, error) {
+	wd := workDirFromContext(ctx)
+	cleaned := filepath.Clean(path)
+	if cleaned == "." {
+		cleaned = ""
+	}
+	if cleaned == "" {
+		if wd != "" {
+			return wd, nil
+		}
+		return ".", nil
+	}
+	// No workDir — preserve legacy cwd-relative behavior for tests.
+	if wd == "" {
+		if filepath.IsAbs(cleaned) {
+			return cleaned, nil
+		}
+		return cleaned, nil
+	}
+	expanded := expandTilde(cleaned)
+	var abs string
+	if filepath.IsAbs(expanded) {
+		abs = filepath.Clean(expanded)
+	} else {
+		abs = filepath.Join(wd, expanded)
+	}
+	// Fast path: if Clean already shows it is inside wd, no symlink probe needed.
+	// Still verify via EvalSymlinks to block symlink escapes.
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		dir := filepath.Dir(abs)
+		resolvedDir, dirErr := filepath.EvalSymlinks(dir)
+		if dirErr != nil {
+			return "", fmt.Errorf("path %q is outside the working directory", path)
+		}
+		resolved = filepath.Join(resolvedDir, filepath.Base(abs))
+	}
+	resolved = filepath.Clean(resolved)
+	wdResolved, ok := normalizeRootPath(wd)
+	if !ok {
+		return "", fmt.Errorf("could not resolve working directory")
+	}
+	if pathWithinRoot(resolved, wdResolved) {
+		return resolved, nil
+	}
+	for _, root := range getExtraAllowedRoots() {
+		if nr, ok := normalizeRootPath(root); ok && pathWithinRoot(resolved, nr) {
+			return resolved, nil
+		}
+	}
+	// Allow temp dir walks (tests use TempDir, and /tmp is safe).
+	if pathscope.IsTempDir(resolved) {
+		return resolved, nil
+	}
+	return "", fmt.Errorf("path %q is outside the working directory", path)
+}
+
+// searchDisplayPath converts an absolute walk path under root back to the
+// path the model should see: relative to the search root, re-prefixed with
+// the original (relative) path parameter so results stay resolvable against
+// the project root by the file tools.
+func searchDisplayPath(root, origPath, p string) string {
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return p
+	}
+	if origPath != "" && !filepath.IsAbs(origPath) {
+		return filepath.Join(origPath, rel)
+	}
+	if origPath != "" {
+		// Absolute path param: keep results absolute.
+		return p
+	}
+	return rel
+}
 
 const globMaxResults = 100
 
@@ -45,6 +134,10 @@ type globMatch struct {
 }
 
 func (t GlobTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t GlobTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Pattern string   `json:"pattern"`
 		Path    string   `json:"path"`
@@ -54,15 +147,18 @@ func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	searchDir := "."
-	if params.Path != "" {
-		searchDir = params.Path
+	if len(params.Pattern) > 500 {
+		return "", fmt.Errorf("pattern too long (max 500 characters)")
+	}
+	searchDir, err := resolveSearchRoot(ctx, params.Path)
+	if err != nil {
+		return "", err
 	}
 
 	ign := NewIgnoreMatcher(params.Ignore)
 
 	var matches []globMatch
-	err := filepath.Walk(searchDir, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.Walk(searchDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -91,20 +187,24 @@ func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 		rel = filepath.ToSlash(rel)
 
 		if matchGlob(params.Pattern, rel) {
-			matches = append(matches, globMatch{path: path, mtime: info.ModTime().UnixNano()})
+			matches = append(matches, globMatch{
+				path:  searchDisplayPath(searchDir, params.Path, path),
+				mtime: info.ModTime().UnixNano(),
+			})
 		}
 		return nil
 	})
-	if err != nil {
-		return "", fmt.Errorf("glob failed: %w", err)
+	if walkErr != nil {
+		return "", fmt.Errorf("glob failed: %w", walkErr)
 	}
 
 	sort.Slice(matches, func(i, j int) bool {
 		return matches[i].mtime > matches[j].mtime
 	})
 
+	totalMatches := len(matches)
 	truncated := false
-	if len(matches) > globMaxResults {
+	if totalMatches > globMaxResults {
 		matches = matches[:globMaxResults]
 		truncated = true
 	}
@@ -116,7 +216,7 @@ func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 
 	result := strings.Join(paths, "\n")
 	if truncated {
-		result += fmt.Sprintf("\n\n... (%d+ files matched, showing first %d)", len(matches)+1, globMaxResults)
+		result += fmt.Sprintf("\n\n... (%d files matched, showing first %d)", totalMatches, globMaxResults)
 	}
 
 	if len(paths) == 0 {
@@ -219,6 +319,10 @@ func (t GrepTool) Definition() map[string]interface{} {
 }
 
 func (t GrepTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Pattern    string   `json:"pattern"`
 		Path       string   `json:"path"`
@@ -231,15 +335,18 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	if params.Path == "" {
-		params.Path = "."
+	searchRoot, err := resolveSearchRoot(ctx, params.Path)
+	if err != nil {
+		return "", err
+	}
+	if len(params.Pattern) > 500 {
+		return "", fmt.Errorf("pattern too long (max 500 characters)")
 	}
 	if params.OutputMode == "" {
 		params.OutputMode = "content"
 	}
 
 	var re *regexp.Regexp
-	var err error
 	if params.Multiline {
 		re, err = regexp.Compile(`(?s)` + params.Pattern)
 	} else {
@@ -257,7 +364,7 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 	}
 	var fileResults []fileResult
 
-	walkErr := filepath.Walk(params.Path, func(p string, info os.FileInfo, werr error) error {
+	walkErr := filepath.Walk(searchRoot, func(p string, info os.FileInfo, werr error) error {
 		if werr != nil {
 			return nil
 		}
@@ -274,7 +381,8 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 			return nil
 		}
 
-		if params.Include != "" && !matchGlob(params.Include, filepath.ToSlash(p)) {
+		display := searchDisplayPath(searchRoot, params.Path, p)
+		if params.Include != "" && !matchGlob(params.Include, filepath.ToSlash(display)) {
 			return nil
 		}
 
@@ -286,7 +394,7 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 		if params.Multiline {
 			if re.Match(content) {
 				count := len(re.FindAllIndex(content, -1))
-				fr := fileResult{path: p, count: count}
+				fr := fileResult{path: display, count: count}
 				if params.OutputMode == "content" {
 					for _, match := range re.FindAll(content, -1) {
 						fr.lines = append(fr.lines, string(match))
@@ -296,7 +404,7 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 			}
 		} else {
 			var fr fileResult
-			fr.path = p
+			fr.path = display
 			scanner := bufio.NewScanner(strings.NewReader(string(content)))
 			scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 			lineNum := 1
@@ -370,6 +478,10 @@ func (t ListTool) Definition() map[string]interface{} {
 }
 
 func (t ListTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t ListTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Path    string   `json:"path"`
 		Pattern string   `json:"pattern"`
@@ -379,20 +491,21 @@ func (t ListTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	if params.Path == "" {
-		params.Path = "."
+	listDir, err := resolveSearchRoot(ctx, params.Path)
+	if err != nil {
+		return "", err
 	}
 
 	ign := NewIgnoreMatcher(params.Ignore)
-	entries, err := os.ReadDir(params.Path)
+	entries, err := os.ReadDir(listDir)
 	if err != nil {
-		return "", fmt.Errorf("failed to list directory %s: %w", params.Path, err)
+		return "", fmt.Errorf("failed to list directory %s: %w", listDir, err)
 	}
 
 	var results []string
 	for _, e := range entries {
 		name := e.Name()
-		fullPath := filepath.Join(params.Path, name)
+		fullPath := filepath.Join(listDir, name)
 		if ign.IsIgnored(fullPath, e.IsDir()) {
 			continue
 		}

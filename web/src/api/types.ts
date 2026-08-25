@@ -495,6 +495,22 @@ export interface PermissionsResponse {
   bash_rules: PermissionRule[];
 }
 
+// ── Memory status (GET /api/memory/status, backing /mem) ──
+export interface MemoryScopeInfo {
+  path: string;
+  present: boolean;
+  preview: string;
+}
+
+export interface MemoryStatusResponse {
+  enabled: boolean;
+  scopes: {
+    user: MemoryScopeInfo;
+    project: MemoryScopeInfo;
+    global: MemoryScopeInfo;
+  };
+}
+
 // ── Usage summary (GET /api/usage) ──
 export interface UsageModelSummary {
   model: string;

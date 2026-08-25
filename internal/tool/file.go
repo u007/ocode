@@ -97,6 +97,15 @@ func RemoveExtraAllowedPath(path string) bool {
 	return true
 }
 
+// SetPersistentExtraAllowedPaths replaces the persistent runtime allowlist
+// with the given roots (normalizing each). Used by the web/desktop server so
+// a paths-config write (PUT /api/config/ocode/paths) takes effect immediately
+// for tools executed by the server process — the TUI mutates the same
+// allowlist incrementally via AddExtraAllowedPath/RemoveExtraAllowedPath.
+func SetPersistentExtraAllowedPaths(paths []string) {
+	setExtraAllowedPaths(paths)
+}
+
 // AcquireTemporaryAllowedPath increments a temporary in-memory lease for root.
 // The path remains allowed until a matching ReleaseTemporaryAllowedPath call.
 func AcquireTemporaryAllowedPath(path string) bool {

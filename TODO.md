@@ -1,5 +1,10 @@
 # TODO
 
+## Desktop anchors sessions at home dir when Finder-launched (2026-08-25)
+
+- [x] **Fixed (2026-08-25)**: `glob`/`grep`/`list` now anchor on `WithWorkDir` (`internal/tool/search.go:resolveSearchRoot`) and `MERGE_SNAPSHOT`/`ChatPanel` guard now keys only on `messages.length>0` (see `web/src/stores/chatStore.tsx` and `web/src/components/Chat/ChatPanel.tsx`).
+- [ ] **Deferred**: `cmd/ocode-desktop/main.go:60-68` falls back to `workDir=$HOME` when cwd is `/` — a default `~` project still triggers unbounded `WalkDir` at `internal/agent/md_discovery.go:453`. Fix: don't treat `~` as implicit project; restore last-used or require explicit pick, and/or cap md-discovery when no `.git`/`AGENTS.md` marker.
+
 ## Tool calls with duplicate argument keys executed silently (2026-08-23)
 
 Found by scanning on-disk `.ojsonl` session history while investigating the
@@ -1059,3 +1064,136 @@ consistent with the already-documented pattern).
   capture. If WebContent climbs while backend heap stays flat, stop looking
   at Go code (bash pump, tool_output coalescer server-side) and go straight
   to a renderer heap snapshot.
+- **Correction: `ps`'s RSS overstates this — use `vmmap`'s "Physical
+  footprint" instead.** WebKit's inspector has no Memory/Timelines instrument
+  in this build (a bare-WKWebView limitation, not a Wails bug — Safari's
+  Memory tab requires entitlements a plain `isInspectable` WKWebView doesn't
+  get). Falling back to `vmmap <webcontent-pid>`: while `ps` still showed
+  2.5–3.4GB RSS, `vmmap`'s own header reported **Physical footprint: 195MB,
+  Physical footprint (peak): 1.9GB** — footprint (what Activity Monitor and
+  jetsam actually use) had already dropped back to 195MB by the time this was
+  sampled. The 1.9GB peak lines up with the user's "1+GB, came back down"
+  report, and it DID come back down on its own — WebKit's own reclaim ran
+  successfully this time, unlike yesterday's presumed 20GB force-quit (no
+  jetsam log there either, but never confirmed to have self-resolved before
+  the kill). Net: today's renderer spike looks like a large-but-bounded
+  transient that already released, not an active unbounded leak — RSS alone
+  overstates severity for a WebKit process specifically because of
+  purgeable/shared regions; always cross-check with `vmmap`'s footprint line
+  before treating a `ps` RSS number as the real severity signal.
+- **Separate, independently confirmed root cause found for the same
+  session's turn-level stall — see the "Local model auto-start hang" section
+  immediately below.** That 16-minute stuck permission-consult call is a
+  strong candidate for what actually produced the user-visible "stuck/high
+  memory" perception this time (turn_active spinner for 16 minutes reads as
+  "hung" regardless of what the renderer's heap was doing) — recorded as a
+  plausible contributor, not proven to be the sole explanation of the
+  renderer footprint peak.
+- **New same-day repro with a likely mechanism (still not confirmed via JS
+  heap snapshot — that step is still outstanding).** User reported the window
+  going blank while away mid-chat, then unresponsive to right-click, with
+  `ps` RSS 4.2GB+ and `vmmap` physical footprint climbing to **2.3-2.8GB** on
+  WebContent pid while `pcpu` sat at 99-100%. A `sample <webcontent-pid> 3`
+  taken during an earlier high-CPU spell in this same session (triggered via
+  DevTools, not this chat-driven one, but same process/bundle) found ~98% of
+  samples in one call stack: `serviceRequestAnimationFrameCallbacks` → a JS
+  rAF callback → `WebCore::setJSNode_textContent` →
+  `ContainerNode::stringReplaceAll` → `removeChildren()` →
+  `RenderTreeUpdater::tearDownRenderers` →
+  `RenderTreeBuilder::destroyAndCleanUpAnonymousWrappers` — i.e. something is
+  setting `element.textContent = ...` on every animation frame, and WebKit
+  tears down + rebuilds the render subtree each time. This would explain both
+  symptoms at once: (1) CPU pinned at ~100% since a 60fps teardown/rebuild
+  loop saturates the main thread, and (2) the footprint spike-then-reclaim
+  shape, since each frame's teardown/rebuild is real alloc/free churn. It
+  also explains "unresponsive to right-click, then it showed after several
+  clicks" — input events queue on a saturated run loop rather than being
+  dropped, so it recovers once whatever stops re-triggering the loop.
+  **Not yet found:** the actual JS call site — grepped `web/src` for every
+  `.textContent =` assignment and every `requestAnimationFrame` call and
+  found none that self-reschedule per-frame (ChatPanel/TerminalPanel/LogPanel
+  rAF calls are all one-shot scroll/fit checks). Candidates not yet ruled
+  out: a third-party dependency (xterm.js render path, Monaco) rescheduling
+  itself, or the Web Inspector's own front-end (it runs as its own
+  WKWebView/WebContent process — closing DevTools and seeing if a subsequent
+  spike still happens without it open would isolate this). **Next step
+  unchanged from above: capture a JS heap snapshot / Timeline recording via
+  DevTools while the spike is happening** — that would show the actual
+  looping JS function instead of native WebCore frames only.
+
+## Local model auto-start hang: MLX "python3" resolves to the wrong interpreter on desktop (2026-08-25, FIXED)
+
+Root-caused via the live `/api/logs` snapshot of the session above:
+`local/qwen3-4b-instruct-4bit` (used as the auto-permission-decision model)
+failed its first-ever health poll after **16m9s** (`elapsed=16m9.10659875s`),
+then correctly circuit-broke on every subsequent call. 16 minutes matches
+`waitForChatHealth`'s `chatHealthPollAttemptsFirst = 900` (15min) budget almost
+exactly — the poll ran to completion rather than failing fast.
+
+- [x] **Root cause 1 — PATH: `ocode.app` launched from Finder/Dock inherits
+  launchd's bare `PATH=/usr/bin:/bin:/usr/sbin:/sbin`** (confirmed via `ps eww
+  -p <pid>` on the live process), which never sources shell rc files. Every
+  bare `"python3"` invocation in the MLX backend
+  (`ensureMLXChatModelCached`, `mlxServerFlags`, and `LaunchArgv[0]` in both
+  `spawnMLXChatServer` and `spawnMLXServer`) therefore resolved to
+  `/usr/bin/python3` — the Xcode Command Line Tools stub (3.9.6) — instead of
+  the Framework Python 3.12 `mlx_lm`/`huggingface_hub` were actually
+  pip-installed into. Confirmed directly: `/usr/bin/python3 -c "import
+  mlx_lm"` → `ModuleNotFoundError`. Manually running the correct interpreter
+  launched and passed health in 15s — the model itself was never the problem.
+  **Fix**: new `internal/discovery/python_env.go` — `mlxPythonPATH()` asks the
+  user's own login shell for its real PATH (`$SHELL -ilc`, cached
+  `sync.Once`, marker-delimited to survive MOTD noise, falls back to the
+  process's own PATH on any failure) and `mlxPythonBinary()` searches it for
+  an executable `python3`. Applied at all four call sites — the two direct
+  `exec.CommandContext(ctx, "python3", ...)` calls now pass
+  `mlxPythonBinary()` as argv[0] directly (setting `cmd.Env` alone cannot fix
+  this: Go resolves a bare argv[0] via the *calling* process's
+  `os.Getenv("PATH")` before `cmd.Env` is ever consulted — a real gotcha, not
+  cosmetic), and the two `spawn(cmdline)`-via-`bash -c` paths
+  (`spawnMLXChatServer`, `spawnMLXServer`) substitute the resolved absolute
+  path into `argv[0]` before building the cmdline.
+- [x] **Root cause 2 — no liveness check let one dead-on-arrival process burn
+  the full 15-minute budget.** `waitForChatHealth` polled only the HTTP health
+  endpoint; it had no visibility into whether the process it just spawned was
+  even still running, so a process that crashed with `ModuleNotFoundError`
+  within the first second still wasn't reported as failed until poll attempt
+  900. **Fix**: new exported `discovery.ChatLiveness` type
+  (`func() (alive bool, detail string)`), returned by the `spawn` callback
+  (`internal/agent/local_models.go`) — backed by the existing
+  `tool.Process.SnapshotStatus()` / `ProcessRegistry.Output()` (no new
+  process-tracking machinery needed, just newly exposed to the health-poll
+  loop). `waitForChatHealth` checks it every ~1s iteration, right alongside
+  the HTTP probe, and fails immediately with the captured exit code + last
+  2000 bytes of process output once the process is no longer
+  `tool.ProcRunning`. This is the general fix — it now bounds *any* spawn
+  failure (PATH, missing weights, port conflict, whatever) to about one poll
+  interval instead of the full budget, not just this specific PATH bug.
+  `waitForChatHealth`'s `!acquired` call site (waiting on a *different*
+  process's spawn, per `acquireChatStartLock`) passes `nil` for the liveness
+  check — no local process handle exists there, so behavior for that path is
+  unchanged.
+  Regression test: `TestWaitForChatHealthFailsFastWhenProcessAlreadyExited`
+  (`internal/discovery/instances_test.go`) — asserts both the error message
+  carries the process diagnostic and that failure takes under 2s, not 15min.
+- **Verified**: `go build ./...` clean; `go test ./internal/discovery/...`
+  and `go test ./internal/agent/...` both pass except three pre-existing,
+  unrelated failures confirmed independent of this change (same failures
+  reproduce running each test in isolation) —
+  `TestPermissions_GitMutatingSubcommandsAsk` and
+  `TestGitAlwaysAllowPersistsAtSubcommandGranularity` depend on an external
+  `claude` CLI binary being resolvable (`internal/agent/advisor_tool.go`
+  shells out to it) and get `DENY` instead of `ASK` when it isn't found in
+  *this* environment's PATH — notably the same class of bug as root cause 1
+  above, just in a different subsystem (`internal/agent/permissions.go`),
+  **not fixed here**, out of scope for this pass; `TestTokenUsageSpendUsesRegistryPricing`
+  passes in isolation and only fails under full-package run, a pre-existing
+  test-order/shared-state issue unrelated to any file this change touched.
+- **Not fixed (separate, lower-priority, same bug class)**: the embedder's
+  own health-poll (`EnsureLocalServer` in `localserver.go`, ~60s first-attempt
+  budget) has the identical "no liveness check" gap as
+  `waitForChatHealth` did — much smaller blast radius (60s vs 15min) so not
+  addressed in this pass. The `spawnMLXServer` PATH fix above already covers
+  it independently (same `mlxPythonBinary()` helper), so the embedder can
+  only still hang on a *different* kind of process death (not the PATH bug),
+  for up to 60s.

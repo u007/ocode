@@ -349,6 +349,14 @@ type localModelActionMsg struct {
 	err         error  // non-nil when the operation failed (config map is not updated)
 }
 
+// localModelBulkActionMsg aggregates multiple localModelActionMsg results from
+// a bulk enable operation (sequential spawns inside one tea.Cmd). Handled in
+// Update() by iterating results, applying each config mutation and appending
+// each text line — isolating per-model failures.
+type localModelBulkActionMsg struct {
+	results []localModelActionMsg
+}
+
 // modelSwitchWarmedMsg is emitted when warmLocalModelIfNeededCmd's async
 // spawn+health-poll (restart-recovery: config says a local model is enabled,
 // but this session never started it) completes. On success the Update()
@@ -975,6 +983,8 @@ type model struct {
 	pickerFilter        string
 	pickerFilterPending string
 	pickerFilterSeq     int
+	pickerMultiSelect   bool
+	pickerChecked       map[string]bool
 
 	// Pagination state for the session picker (infinite scroll)
 	pickerSessionRefs    []session.Ref // all loaded session refs
@@ -3087,13 +3097,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, message{role: roleAssistant, text: text})
 		m.rerenderTranscriptAndMaybeScroll()
 	case localModelActionMsg:
-		if msg.err == nil {
-			if m.config.Ocode.LocalModels == nil {
-				m.config.Ocode.LocalModels = map[string]config.LocalModelConfig{}
-			}
-			m.config.Ocode.LocalModels[msg.modelID] = config.LocalModelConfig{Enabled: msg.enabled, MaxParallel: msg.maxParallel}
+		m.applyLocalModelResult(msg)
+		m.rerenderTranscriptAndMaybeScroll()
+	case localModelBulkActionMsg:
+		for _, res := range msg.results {
+			m.applyLocalModelResult(res)
 		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
 		m.rerenderTranscriptAndMaybeScroll()
 	case modelSwitchWarmedMsg:
 		if msg.err != nil {
@@ -4961,7 +4970,33 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 				}
 			}
 			return true, m, nil
+		case " ":
+			if m.pickerMultiSelect {
+				m.togglePickerChecked()
+				return true, m, nil
+			}
+			// For non-multi pickers, Space is filter input; fall through to generic text handling
+			if msg.Text == " " {
+				m.pickerFilterPending += " "
+				m.pickerFilterSeq++
+				seq := m.pickerFilterSeq
+				pending := m.pickerFilterPending
+				return true, m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+					return pickerFilterApplyMsg{seq: seq, filter: pending}
+				})
+			}
+			return true, m, nil
+		case "ctrl+a":
+			if m.pickerMultiSelect {
+				m.togglePickerSelectAll()
+				return true, m, nil
+			}
+			return true, m, nil
 		case "enter":
+			if m.pickerMultiSelect {
+				newM, cmd := m.selectPickerMultiConfirm()
+				return true, newM, cmd
+			}
 			isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 			if !isFiltered && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
 				return true, m, nil
@@ -8831,7 +8866,7 @@ func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 // localModelUsage is the canonical /localmodel usage string, shared between
 // the command-table registration (commands.go) and the in-command
 // help/fallback messages below so the two can't drift.
-const localModelUsage = "/localmodel list|add <name>|enable <name>|disable <name>|limit <name> <1|2>|status [name]|hf-token <token>|help"
+const localModelUsage = "/localmodel list|add <name>...|enable [<name>...]|disable <name>...|limit <name> <1|2>|status [name]|hf-token <token>|help"
 
 func (m *model) handleLocalModelCmd(args []string) tea.Cmd {
 	if len(args) == 0 {
@@ -8848,22 +8883,29 @@ func (m *model) handleLocalModelCmd(args []string) tea.Cmd {
 		m.showLocalModelList()
 	case "add":
 		if len(args) < 2 {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel add <name>"})
-			return nil
+			// No arg: open picker to select one or more catalog entries to add
+			return m.openLocalModelAddPicker()
 		}
-		m.localModelAdd(args[1])
+		m.localModelAddMultiple(args[1:])
 	case "enable":
 		if len(args) < 2 {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel enable <name>"})
-			return nil
+			// No arg: open multi-select picker for disabled registered models
+			return m.openLocalModelEnablePicker()
 		}
-		return m.localModelEnableCmd(args[1])
+		if len(args) == 2 {
+			return m.localModelEnableCmd(args[1])
+		}
+		return m.localModelEnableMultipleCmd(args[1:])
 	case "disable":
 		if len(args) < 2 {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel disable <name>"})
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel disable <name>..."})
 			return nil
 		}
-		m.localModelDisable(args[1])
+		if len(args) == 2 {
+			m.localModelDisable(args[1])
+		} else {
+			m.localModelDisableMultiple(args[1:])
+		}
 	case "limit":
 		if len(args) < 3 {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel limit <name> <1|2>"})
@@ -8985,6 +9027,188 @@ func (m *model) registeredLocalModelIDs() []string {
 	return ids
 }
 
+func (m *model) localModelAddMultiple(names []string) {
+	for _, n := range names {
+		m.localModelAdd(n)
+	}
+}
+
+func (m *model) localModelDisableMultiple(names []string) {
+	for _, n := range names {
+		m.localModelDisable(n)
+	}
+}
+
+func (m *model) openLocalModelEnablePicker() tea.Cmd {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No config loaded"})
+		return nil
+	}
+	ids := []string{}
+	for id, lm := range m.config.Ocode.LocalModels {
+		if !lm.Enabled {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No disabled local models to enable. Register one with /localmodel add <name> or check /localmodel list."})
+		return nil
+	}
+	sort.Strings(ids)
+	m.input.Blur()
+	m.pickerKind = "localmodel-enable"
+	m.pickerItems = make([]string, len(ids))
+	m.pickerValues = make([]string, len(ids))
+	m.pickerIsHeader = make([]bool, len(ids))
+	for i, id := range ids {
+		m.pickerItems[i] = id
+		m.pickerValues[i] = id
+		m.pickerIsHeader[i] = false
+	}
+	m.pickerIndex = 0
+	m.pickerFilter = ""
+	m.pickerFilterPending = ""
+	m.pickerFilterSeq++
+	m.pickerMultiSelect = true
+	m.pickerChecked = map[string]bool{}
+	m.showPicker = true
+	m.pushPickerModal()
+	return nil
+}
+
+func (m *model) openLocalModelAddPicker() tea.Cmd {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No config loaded"})
+		return nil
+	}
+	ids := []string{}
+	for _, man := range discovery.ChatManifestsForHost() {
+		if _, ok := m.config.Ocode.LocalModels[man.ModelID]; !ok {
+			ids = append(ids, man.ModelID)
+		}
+	}
+	if len(ids) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "All catalog local models are already added. Check /localmodel list."})
+		return nil
+	}
+	sort.Strings(ids)
+	m.input.Blur()
+	m.pickerKind = "localmodel-add"
+	m.pickerItems = make([]string, len(ids))
+	m.pickerValues = make([]string, len(ids))
+	m.pickerIsHeader = make([]bool, len(ids))
+	for i, id := range ids {
+		m.pickerItems[i] = id
+		m.pickerValues[i] = id
+		m.pickerIsHeader[i] = false
+	}
+	m.pickerIndex = 0
+	m.pickerFilter = ""
+	m.pickerFilterPending = ""
+	m.pickerFilterSeq++
+	m.pickerMultiSelect = true
+	m.pickerChecked = map[string]bool{}
+	m.showPicker = true
+	m.pushPickerModal()
+	return nil
+}
+
+func (m *model) localModelEnableMultipleCmd(names []string) tea.Cmd {
+	ids := make([]string, 0, len(names))
+	for _, n := range names {
+		ids = append(ids, localModelID(n))
+	}
+	var toEnable []string
+	var already []string
+	var notRegistered []string
+	for _, id := range ids {
+		lm, exists := m.config.Ocode.LocalModels[id]
+		if !exists {
+			notRegistered = append(notRegistered, id)
+			continue
+		}
+		if lm.Enabled {
+			already = append(already, id)
+			continue
+		}
+		toEnable = append(toEnable, id)
+	}
+	for _, id := range notRegistered {
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is not registered. Run /localmodel add " + id + " first"})
+	}
+	for _, id := range already {
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is already enabled"})
+	}
+	if len(toEnable) == 0 {
+		m.rerenderTranscriptAndMaybeScroll()
+		return nil
+	}
+	if m.agent == nil {
+		for _, id := range toEnable {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "No active agent to spawn the local model process for " + id})
+		}
+		m.rerenderTranscriptAndMaybeScroll()
+		return nil
+	}
+	sort.Strings(toEnable)
+	maxParMap := map[string]int{}
+	for _, id := range toEnable {
+		maxParMap[id] = m.config.Ocode.LocalModels[id].MaxParallel
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Starting " + strings.Join(toEnable, ", ") + " (this can take a while on a cold model download)..."})
+	m.rerenderTranscriptAndMaybeScroll()
+	ag := m.agent
+	return func() tea.Msg {
+		var results []localModelActionMsg
+		for _, id := range toEnable {
+			mp := maxParMap[id]
+			if err := startLocalModelInstance(ag, id, mp); err != nil {
+				results = append(results, localModelActionMsg{modelID: id, text: "Error starting " + id + ": " + err.Error(), err: err})
+				continue
+			}
+			if err := config.SaveLocalModelConfig(id, true, mp); err != nil {
+				results = append(results, localModelActionMsg{modelID: id, text: "Error: " + err.Error(), err: err})
+				continue
+			}
+			results = append(results, localModelActionMsg{modelID: id, enabled: true, maxParallel: mp, text: id + ": enabled"})
+		}
+		return localModelBulkActionMsg{results: results}
+	}
+}
+
+func (m *model) selectPickerMultiConfirm() (tea.Model, tea.Cmd) {
+	var selected []string
+	if m.pickerChecked != nil && len(m.pickerChecked) > 0 {
+		for val, checked := range m.pickerChecked {
+			if checked && val != "" {
+				selected = append(selected, val)
+			}
+		}
+	} else {
+		if m.pickerIndex < len(m.pickerValues) && m.pickerIndex < len(m.pickerIsHeader) {
+			if !m.pickerIsHeader[m.pickerIndex] && m.pickerValues[m.pickerIndex] != "" {
+				selected = append(selected, m.pickerValues[m.pickerIndex])
+			}
+		}
+	}
+	sort.Strings(selected)
+	kind := m.pickerKind
+	m.closePicker()
+	if len(selected) == 0 {
+		return m, nil
+	}
+	switch kind {
+	case "localmodel-enable":
+		return m, m.localModelEnableMultipleCmd(selected)
+	case "localmodel-add":
+		m.localModelAddMultiple(selected)
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
 // localModelDisable stops modelID's process (if running) and persists
 // Enabled=false. Synchronous: procs.Kill just signals the process, it doesn't
 // wait minutes for a health check, so this is safe inside Update().
@@ -9023,7 +9247,18 @@ func (m *model) localModelDisable(name string) {
 // auth.OnCredentialsSaved (see internal/sync.StartWatcher), instead of
 // sitting in plaintext inside the general config file. Fast/no spawning
 // involved, so this runs synchronously unlike localModelEnableCmd.
+func isValidHFToken(token string) bool {
+	if token == "" || len(token) > 500 || strings.ContainsAny(token, "\n\r\x00=") {
+		return false
+	}
+	return true
+}
+
 func (m *model) localModelSetHFToken(token string) {
+	if !isValidHFToken(token) {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid Hugging Face token: must not contain newlines or '=' and be under 500 characters"})
+		return
+	}
 	if err := auth.Set("huggingface", auth.Credential{Kind: auth.KindAPIKey, Key: token}); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Error saving Hugging Face token: " + err.Error()})
 		return
@@ -9166,6 +9401,82 @@ func (m *model) showLocalModelStatus(name string) {
 // pid of a server spawned by a different ocode process), and RSSBytes itself
 // can fail (process exited between the status check and the RSS read, or
 // permission denied).
+func (m *model) applyLocalModelResult(r localModelActionMsg) {
+	if r.err == nil {
+		if m.config.Ocode.LocalModels == nil {
+			m.config.Ocode.LocalModels = map[string]config.LocalModelConfig{}
+		}
+		m.config.Ocode.LocalModels[r.modelID] = config.LocalModelConfig{Enabled: r.enabled, MaxParallel: r.maxParallel}
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: r.text})
+}
+
+func (m *model) togglePickerChecked() {
+	if m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
+		return
+	}
+	if m.pickerIndex >= len(m.pickerItems) || m.pickerIndex >= len(m.pickerValues) || m.pickerValues[m.pickerIndex] == "" {
+		return
+	}
+	if m.pickerChecked == nil {
+		m.pickerChecked = map[string]bool{}
+	}
+	val := m.pickerValues[m.pickerIndex]
+	if m.pickerChecked[val] {
+		delete(m.pickerChecked, val)
+	} else {
+		m.pickerChecked[val] = true
+	}
+	// Advance to next selectable row
+	items, values := m.pickerVisibleItems()
+	next := m.pickerIndex + 1
+	for next < len(items) {
+		if next < len(values) && values[next] != "" {
+			if len(m.pickerIsHeader) == 0 || next >= len(m.pickerIsHeader) || !m.pickerIsHeader[next] {
+				m.pickerIndex = next
+				break
+			}
+		}
+		next++
+	}
+}
+
+func (m *model) togglePickerSelectAll() {
+	if m.pickerChecked == nil {
+		m.pickerChecked = map[string]bool{}
+	}
+	allChecked := true
+	for i, v := range m.pickerValues {
+		if v == "" {
+			continue
+		}
+		if i < len(m.pickerIsHeader) && m.pickerIsHeader[i] {
+			continue
+		}
+		if !m.pickerChecked[v] {
+			allChecked = false
+			break
+		}
+	}
+	if allChecked {
+		m.pickerChecked = map[string]bool{}
+	} else {
+		for i, v := range m.pickerValues {
+			if v == "" {
+				continue
+			}
+			if i < len(m.pickerIsHeader) && m.pickerIsHeader[i] {
+				continue
+			}
+			m.pickerChecked[v] = true
+		}
+	}
+}
+
+func isMultiSelectPickerKind(kind string) bool {
+	return kind == "localmodel-enable" || kind == "localmodel-add"
+}
+
 func localModelMemString(info discovery.InstanceInfo) string {
 	if info.PID == 0 {
 		return "unknown (started by another ocode process)"

@@ -324,6 +324,39 @@ var localManifests = []ServerManifest{
 		HealthPath:     "/v1/models",
 		CompletionPath: "/v1/chat/completions",
 	},
+	qwen38Manifest("darwin", "arm64",
+		"https://github.com/ggml-org/llama.cpp/releases/download/b9777/llama-b9777-bin-macos-arm64.tar.gz",
+		"3784919bd0ebde85854d16efbf8b2240403358965d61ae8f7e2743cf4763a818"),
+	qwen38Manifest("darwin", "amd64",
+		"https://github.com/ggml-org/llama.cpp/releases/download/b9777/llama-b9777-bin-macos-x64.tar.gz",
+		"6271bffb4aa142351f63fff1cb8e42bd16e7b9877f2b5bc5e49037f91f3f0897"),
+	qwen38Manifest("linux", "amd64",
+		"https://github.com/ggml-org/llama.cpp/releases/download/b9777/llama-b9777-bin-ubuntu-x64.tar.gz",
+		"f1994e1d9904f318c8347b000e7ef5dfd49fa4a24de044887da85d9bbfe84811"),
+}
+
+// qwen38Manifest builds the per-platform Qwen3.8-4B-Distill manifest (Q4_K_M GGUF).
+// Shared helper so SHA or LaunchArgv bumps require one edit, not three.
+func qwen38Manifest(goos, goarch, llamaURL, llamaSHA string) ServerManifest {
+	return ServerManifest{
+		OS: goos, Arch: goarch,
+		ModelID: "local/qwen3.8-4b-distill", Kind: "chat", Backend: BackendLlamaCpp,
+		Artifacts: []Artifact{
+			{URL: llamaURL, SHA256: llamaSHA, Dest: "llama-server", Exec: true, Archive: ArchiveGZ},
+			{
+				URL:    "https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF/resolve/main/Qwen3.8-4B-Q4_K_M.gguf",
+				SHA256: "dec96e8cf2e11b613bb46513dec485377f9ca5a351e71712ee0e244f287c6790",
+				Dest:   "qwen3.8-4b-distill-q4_k_m.gguf",
+			},
+		},
+		LaunchArgv: []string{"{bin}/llama-b9777/llama-server",
+			"-m", "{bin}/qwen3.8-4b-distill-q4_k_m.gguf",
+			"--port", "{port}",
+			"--parallel", "{parallel}",
+			"--host", "127.0.0.1"},
+		HealthPath:     "/v1/models",
+		CompletionPath: "/v1/chat/completions",
+	}
 }
 
 // CurrentManifest returns the manifest matching the host, if supported.

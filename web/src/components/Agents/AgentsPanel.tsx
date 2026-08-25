@@ -72,7 +72,7 @@ export default function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: A
           <span className={`text-[11px] ${s.text}`}>{selected.status}</span>
           {dur && <span className="font-mono text-[10px] tabular-nums text-zinc-600">{dur}</span>}
         </div>
-        <div className="flex-1 overflow-y-auto p-3">
+        <div className="flex-1 min-h-0 overflow-hidden p-3">
           <RunNode run={selected} depth={0} />
         </div>
       </div>

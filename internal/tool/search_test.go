@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -50,4 +51,75 @@ func TestSearchTools(t *testing.T) {
 
 func contains(s, substr string) bool {
 	return strings.Contains(filepath.ToSlash(s), filepath.ToSlash(substr))
+}
+
+// The server hosts sessions for many projects in one process, so search tools
+// must anchor their default/relative paths on the session's project root
+// (WithWorkDir context), never the process cwd — a desktop app launched from
+// Finder has cwd "/" and a bare glob would otherwise walk the whole disk.
+func TestSearchToolsUseContextWorkDir(t *testing.T) {
+	projDir := t.TempDir()
+	otherDir := t.TempDir() // process cwd during the test — must NOT be searched
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd)
+
+	os.MkdirAll(filepath.Join(projDir, "dir1"), 0755)
+	os.WriteFile(filepath.Join(projDir, "file1.txt"), []byte("apple"), 0644)
+	os.WriteFile(filepath.Join(projDir, "dir1", "file2.txt"), []byte("cherry"), 0644)
+	// Decoy in the cwd: found = tool wrongly searched the process cwd.
+	os.WriteFile(filepath.Join(otherDir, "decoy.txt"), []byte("cherry"), 0644)
+
+	ctx := WithWorkDir(context.Background(), projDir)
+
+	// Glob: default path resolves to the project root, results project-relative.
+	globArgs, _ := json.Marshal(map[string]string{"pattern": "**/*.txt"})
+	res, err := GlobTool{}.ExecuteCtx(ctx, globArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(res, "file1.txt") || !contains(res, "dir1/file2.txt") {
+		t.Errorf("glob did not search project root, got: %s", res)
+	}
+	if contains(res, "decoy.txt") {
+		t.Errorf("glob searched process cwd instead of project root: %s", res)
+	}
+
+	// Glob: relative path param joins onto the project root and prefixes output.
+	globArgs, _ = json.Marshal(map[string]string{"pattern": "*.txt", "path": "dir1"})
+	res, err = GlobTool{}.ExecuteCtx(ctx, globArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(res, "dir1/file2.txt") {
+		t.Errorf("glob relative path param not project-rooted, got: %s", res)
+	}
+
+	// Grep: default path resolves to the project root.
+	grepArgs, _ := json.Marshal(map[string]string{"pattern": "cherry"})
+	res, err = GrepTool{}.ExecuteCtx(ctx, grepArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(res, "dir1/file2.txt:1:cherry") {
+		t.Errorf("grep did not search project root, got: %s", res)
+	}
+	if contains(res, "decoy.txt") {
+		t.Errorf("grep searched process cwd instead of project root: %s", res)
+	}
+
+	// List: default path resolves to the project root.
+	res, err = ListTool{}.ExecuteCtx(ctx, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(res, "file1.txt") || !contains(res, "dir1/") {
+		t.Errorf("list did not read project root, got: %s", res)
+	}
+	if contains(res, "decoy.txt") {
+		t.Errorf("list read process cwd instead of project root: %s", res)
+	}
 }

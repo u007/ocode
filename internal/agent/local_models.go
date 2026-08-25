@@ -31,19 +31,43 @@ func StartLocalModelInstance(ag *Agent, id string, maxParallel int) error {
 	if cred, ok := auth.Get("huggingface"); ok {
 		hfToken = cred.Key
 	}
+	if ag == nil || ag.Procs() == nil {
+		return fmt.Errorf("agent process registry unavailable")
+	}
 	procs := ag.Procs()
-	spawn := func(cmdline string) error {
+	spawn := func(cmdline string) (discovery.ChatLiveness, error) {
 		cmdline = tool.WrapWithParentMonitor(cmdline)
 		p := procs.StartBackground(cmdline)
-		if p != nil && p.SnapshotStatus() == tool.ProcExited {
-			return fmt.Errorf("local chat server process exited immediately on spawn")
+		if p == nil {
+			return nil, fmt.Errorf("failed to start local chat server process")
+		}
+		if p.SnapshotStatus() == tool.ProcExited {
+			return nil, fmt.Errorf("local chat server process exited immediately on spawn")
 		}
 		// Recorded immediately, before StartModelInstance's health-poll loop
 		// runs — a poll timeout must not leave a running process untracked
 		// (see SetModelInstanceProcessID's doc comment).
 		discovery.SetModelInstanceProcessID(id, p.ID)
 		discovery.SetModelInstancePID(id, p.PID)
-		return nil
+		// Lets waitForChatHealth notice the process already died (bad PATH,
+		// missing dependency, crash) instead of polling its dead port for the
+		// full timeout budget — see chatLiveness's doc comment in discovery.
+		alive := func() (bool, string) {
+			if p.SnapshotStatus() == tool.ProcRunning {
+				return true, ""
+			}
+			text, _, exitCode, _ := procs.Output(p.ID)
+			text = strings.TrimSpace(text)
+			const maxDetail = 2000
+			if len(text) > maxDetail {
+				text = "…" + text[len(text)-maxDetail:]
+			}
+			if text == "" {
+				return false, fmt.Sprintf("exit code %d", exitCode)
+			}
+			return false, fmt.Sprintf("exit code %d: %s", exitCode, text)
+		}
+		return alive, nil
 	}
 	if err := discovery.StartModelInstance(spawn, id, port, maxParallel, DiscoveryCacheDir(), hfToken); err != nil {
 		// StartModelInstance can fail after already spawning a process (e.g.
