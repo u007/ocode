@@ -79,6 +79,7 @@ type Server struct {
 	schedulerOutbox  *scheduler.Outbox // optional; set via SetScheduler
 	schedulerRuns    *scheduler.RunHistory
 	schedulerTargets *scheduler.Targets // optional; set via SetScheduler
+	frontendStats    *frontendStatsRing
 	startedAt        time.Time
 
 	// ln and httpServer are populated by Serve so Shutdown can stop accepting
@@ -92,15 +93,16 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 	mux := http.NewServeMux()
 	h := NewHandler()
 	s := &Server{
-		addr:      addr,
-		username:  username,
-		password:  password,
-		rl:        newRateLimiter(),
-		mux:       mux,
-		handler:   h,
-		webFS:     webFS,
-		workDir:   ".",
-		startedAt: time.Now(),
+		addr:          addr,
+		username:      username,
+		password:      password,
+		rl:            newRateLimiter(),
+		mux:           mux,
+		handler:       h,
+		frontendStats: newFrontendStatsRing(),
+		webFS:         webFS,
+		workDir:       ".",
+		startedAt:     time.Now(),
 	}
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
@@ -154,6 +156,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/spending", s.authMiddleware(s.handleGetSpending))
 	s.mux.HandleFunc("GET /api/lsp/statuses", s.authMiddleware(s.handleGetLSPStatuses))
 	s.mux.HandleFunc("GET /api/files/modified", s.authMiddleware(s.handleGetModifiedFiles))
+	s.mux.HandleFunc("POST /api/debug/frontend-stats", s.authMiddleware(s.handlePostFrontendStats))
+	s.mux.HandleFunc("GET /api/debug/frontend-stats", s.authMiddleware(s.handleGetFrontendStats))
 
 	// Session operations
 	s.mux.HandleFunc("POST /api/sessions/{id}/compact", s.authMiddleware(s.handleCompactSession))

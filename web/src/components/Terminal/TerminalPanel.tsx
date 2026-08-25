@@ -6,6 +6,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { apiPath, authHeaders, authToken } from "@/api/client";
 import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
+import { registerTerminal, unregisterTerminal } from "@/lib/debug/terminalRegistry";
 
 /**
  * A single interactive terminal: one xterm.js instance bridged to one
@@ -190,6 +191,7 @@ export default function TerminalPanel({
       term.loadAddon(webgl);
     } catch { /* fall back to DOM renderer */ }
     termRef.current = term;
+    registerTerminal(id, term);
     fitRef.current = fit;
     serializeRef.current = serialize;
 
@@ -344,6 +346,7 @@ export default function TerminalPanel({
       sock.close();
       socketRef.current = null;
       term.dispose();
+      unregisterTerminal(id);
       termRef.current = null;
       fitRef.current = null;
       serializeRef.current = null;

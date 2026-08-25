@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { isDesktopShell } from "@/lib/desktopShell";
 
 interface ShortcutHandlers {
   onNewSession?: () => void;
@@ -17,13 +18,6 @@ interface ShortcutHandlers {
  * tab at the OS level and cannot be intercepted, so binding it would double
  * close (session + browser tab) — the shortcut only makes sense on desktop.
  */
-function isDesktopShell() {
-  return (
-    typeof window !== "undefined" &&
-    typeof (window as unknown as { _wails?: unknown })._wails !== "undefined"
-  );
-}
-
 export function useKeyboard(handlers: ShortcutHandlers) {
   const ref = useRef(handlers);
   ref.current = handlers;

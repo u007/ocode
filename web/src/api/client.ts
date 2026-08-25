@@ -185,7 +185,8 @@ export const api = {
     fetchJSON<AgentRun[]>(
       `/api/agents/runs${session ? `?session=${encodeURIComponent(session)}` : ""}`,
     ),
-  getConfigModel: () => fetchJSON<{ model: string }>("/api/config/model"),
+  getConfigModel: () =>
+    fetchJSON<{ model: string; context_max_tokens?: number }>("/api/config/model"),
   setConfigModel: (model: string) =>
     fetchJSON<{ model: string }>("/api/config/model", {
       method: "PUT",

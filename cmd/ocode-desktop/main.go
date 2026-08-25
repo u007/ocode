@@ -230,6 +230,7 @@ func main() {
 			return
 		}
 		timeout := desktopShutdownTimeout()
+		window.SetTitle("ocode — Waiting for processes to gracefully shut down…")
 		log.Printf("ocode-desktop: graceful shutdown (timeout %s)", timeout)
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()

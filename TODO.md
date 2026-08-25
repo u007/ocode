@@ -1005,3 +1005,57 @@ write sites; the read side keeps diagnostic logging.
 - [x] **Server API** — `internal/server/server.go` + `scheduler.go`: `schedulerRuns *RunHistory` init in `SetScheduler`; `GET /api/cron/{id}/runs?limit=&offset=` + `GET /api/cron/{id}/runs/{runId}` with 404 on missing, capped limit 200. Covered by `internal/server/scheduler_runs_test.go`.
 - [x] **Web UI** — `web/src/api/types.ts` `CronRun*`, `web/src/api/client.ts` `getCronRuns`/`getCronRun`, `web/src/components/Cron/CronHistoryPanel.tsx` per-job panel (rundate, duration, input/output, datetime logs with expand), `CronPanel.tsx` History button + `CronHistoryPanel` integration. Verified via `tsgo --noEmit`, `npm run build`, and live dev-server browser pass (History → View → logs with timestamps).
 - [ ] **Per-tool-call datetime logs (deferred)** — current `logs` are coarse lifecycle entries only (started/finished). Capturing true per-action logs (each tool call, thinking block, output chunk with its own datetime) requires threading a log-collector through `agent.Step` and changing `scheduler.AgentRunner` from `(string,error)` to `(string,[]RunLogEntry,error)` (breaking change to `internal/server/scheduler_runner.go` + 4 tests). No existing per-step callback hook exists (only TUI-scoped `jobEvents`/`retryEvents`). Track as follow-up if user requires fine-grained execution traces; update `runs.go` + `dispatch.go` + `scheduler_runner.go` together.
+
+## Desktop memory: leak isolated to the WebKit renderer, not the Go backend (2026-08-25)
+
+New report (separate from the 22GB / chronic items above, but likely the same
+underlying acute-hang family): "mem hitting 1+GB", trigger described as "just
+plain 1 git commit n push chat" — went up 1GB+ then came back down this time;
+yesterday (2026-08-24) an occurrence of this same shape hung the whole
+machine, reportedly 20GB+, ending in a force-quit (no crash/spin/jetsam log,
+consistent with the already-documented pattern).
+
+- **Binary running today already includes all prior fixes.** `bin/ocode.app`
+  was built 2026-08-25 00:37, after `0fd0323` (scheduler leak fix,
+  2026-08-24 19:36) and `66eb746` (bounded bash output + tool_output
+  streaming, 2026-08-23 18:00). The 1GB+ event happened on this build, so
+  those fixes do not close this report.
+- [x] **Process identity resolved correctly this time, per the 2026-08-24
+  item's own instructions** (`lsof -nP -iTCP -sTCP:ESTABLISHED | grep
+  <backend port>` to find the Networking XPC helper with an ESTABLISHED
+  loopback connection to the backend, then its sibling WebContent pid — not
+  launch-time coincidence): Go backend (pid 677) steady at **147–163MB RSS**;
+  its window's WebKit renderer (WebContent pid 899, sibling of Networking pid
+  898 which held the ESTABLISHED connection to backend port 59654) steady at
+  **3.27–3.43GB RSS** across a 20s/5-sample poll, ~17 minutes after app
+  launch. **This is new: every prior capture in this file measured Go heap
+  only** ("backend RSS ~535–590MB", "683MB → 3.3GB") — the process alleged to
+  be climbing may have been the wrong one all along, or both are implicated
+  independently. 3.27–3.43GB also exceeds the previously-recorded renderer
+  noise band (938→361→638→500MB swings, dismissed as GC/paint churn) by a
+  wide margin — this reading was flat across the 20s sample, not swinging.
+- [x] **Tab-count theory ruled out for this occurrence**: user confirmed only
+  1 terminal/session tab open. This argues against the "terminal tabs never
+  reaped" prime suspect (still real, still unfixed, but not the explanation
+  here) — 3.3GB with a single tab open points at something else: per-turn
+  frontend retention (chat message state, `tool_output` SSE accumulation,
+  xterm scrollback for that one terminal) rather than tab-count accumulation.
+  `TerminalTabs.tsx`'s restore-on-open effect (`useEffect` gated on `active`)
+  only rehydrates a project's saved terminals when that project's Terminal
+  sub-tab is actually opened — not on app boot — so this also isn't
+  explained by silently-restored terminals from a prior session.
+- **Not yet captured: a JS heap snapshot of the renderer.** No tool in this
+  session can drive the Wails-hosted native WebKit window (it isn't a Chrome
+  tab, so `claude-in-chrome` doesn't reach it) or pull a JS heap dump
+  headlessly. Next step is manual: tray → "Open DevTools" (or ⌥⌘I) while
+  memory is elevated, Memory panel → heap snapshot → sort by retained size,
+  report the top retainers. Until that's captured, the frontend suspects
+  above are candidates, not confirmed causes.
+- **Next repro, updated for this finding**: sample **both** pids, not just
+  the backend — `lsof -nP -iTCP -sTCP:ESTABLISHED | grep <port from
+  ~/.config/opencode/desktop-debug-handle>` to get the Networking pid, then
+  its sibling WebContent pid (adjacent PIDs, spawned together) — alongside
+  the existing `/debug/pprof/heap` / `/debug/pprof/goroutine` backend
+  capture. If WebContent climbs while backend heap stays flat, stop looking
+  at Go code (bash pump, tool_output coalescer server-side) and go straight
+  to a renderer heap snapshot.

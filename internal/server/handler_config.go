@@ -22,7 +22,12 @@ func (h *Handler) HandleGetModel(w http.ResponseWriter, r *http.Request) {
 		model = h.cfg.Model
 	}
 	h.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]string{"model": model})
+	// context_max_tokens lets the web sidebar preinit its Context gauge
+	// before any session (and its TUIStatus snapshot) exists.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model":              model,
+		"context_max_tokens": int(agent.ModelWindow(model)),
+	})
 }
 
 func (h *Handler) HandleSetModel(w http.ResponseWriter, r *http.Request) {

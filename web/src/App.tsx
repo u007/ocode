@@ -50,6 +50,7 @@ import { notifyWailsRuntimeReady } from "./lib/wails";
 import { eventBus } from "./lib/eventBus";
 import { useSessionStatus } from "./hooks/useSessionStatus";
 import { useTurnWatchdogAll } from "./hooks/useTurnWatchdog";
+import FrontendMemoryReporter from "./lib/debug/frontendMemoryReporter";
 
 type ModelDialogTab = "main" | "small" | "advisor" | "permission" | "recap" | "ocr" | "mask" | "commit" | "summary";
 
@@ -811,6 +812,7 @@ export default function App() {
     <ErrorBoundary>
       <ChatProvider>
         <ProjectProvider>
+          <FrontendMemoryReporter />
           <StatusMetricsHydrator />
           <Routes>
             <Route path="/session/:id" element={<SessionPage />} />

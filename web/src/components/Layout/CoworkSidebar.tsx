@@ -18,6 +18,7 @@ import {
   AlertCircle,
   AlertTriangle,
   Puzzle,
+  FolderTree,
 } from "lucide-react";
 
 interface Props {
@@ -32,6 +33,19 @@ interface Props {
 
 interface ConfigState {
   model: string;
+  // Process-level defaults for fields that also live on the per-session
+  // TUIStatus snapshot. A brand-new session tab has no snapshot yet (it's
+  // only created once the first message lands), so these preinit the
+  // sidebar instead of it showing blank/"off" until then. tuiStatus, once
+  // present, always wins — see the `tuiStatus?.x ?? config.x` fallbacks below.
+  thinkingBudget?: number;
+  permissionModel?: string;
+  permissionModelEnabled?: boolean;
+  yolo?: boolean;
+  recapModel?: string;
+  recapModelEnabled?: boolean;
+  contextMaxTokens?: number;
+  extraDirs?: string[];
 }
 
 // Expanded/collapsed state of the sidebar sections. Persisted to localStorage
@@ -48,6 +62,7 @@ const DEFAULT_SECTIONS: Record<string, boolean> = {
   todo: false,
   git: true,
   permissions: true,
+  extra_dirs: false,
 };
 
 function loadExpandedSections(): Record<string, boolean> {
@@ -132,13 +147,27 @@ export default function CoworkSidebar({
   useEffect(() => {
     api.listAgents().then(setAgents).catch(console.error);
 
-    // Fetch the main model name for the compact Model trigger.
+    // Fetch the main model name plus the other process-level defaults that
+    // back the pre-session sidebar fallbacks (see ConfigState).
     Promise.all([
-      fetch(apiPath("/api/config/model"), { headers: authHeaders() }).then((r) => r.json()),
+      api.getConfigModel().catch(() => null),
+      api.getThinkingBudget().catch(() => null),
+      api.getPermissionModel().catch(() => null),
+      api.getYolo().catch(() => null),
+      api.getRecapConfig().catch(() => null),
+      api.getPathsConfig().catch(() => null),
     ])
-      .then(([modelRes]) => {
+      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, pathsRes]) => {
         setConfig({
-          model: (modelRes as { model: string }).model || "",
+          model: modelRes?.model || "",
+          thinkingBudget: thinkingRes?.budget,
+          permissionModel: permRes?.model,
+          permissionModelEnabled: permRes?.enabled,
+          yolo: yoloRes?.yolo,
+          recapModel: recapRes?.recap_model,
+          recapModelEnabled: recapRes?.recap_model_enabled,
+          contextMaxTokens: modelRes?.context_max_tokens,
+          extraDirs: pathsRes?.extra_allowed_paths,
         });
       })
       .catch(console.error);
@@ -178,14 +207,15 @@ export default function CoworkSidebar({
   // Context usage from the per-session status snapshot (populated by the
   // fetch-on-activation status fetch and patched by bus `status` events).
   const contextCurrent = tuiStatus?.context_current_tokens ?? 0;
-  const contextMax = tuiStatus?.context_max_tokens ?? 0;
-  const contextModel = tuiStatus?.context_model;
+  const contextMax = tuiStatus?.context_max_tokens ?? config.contextMaxTokens ?? 0;
+  const contextModel = tuiStatus?.context_model || model || config.model;
   const contextPct =
     contextMax > 0
       ? Math.min(100, Math.round((contextCurrent / contextMax) * 100))
       : 0;
   const lspServers: LSPStatus[] = tuiStatus?.lsp_servers ?? [];
   const modifiedFiles = tuiStatus?.modified_files ?? [];
+  const extraDirs: string[] = tuiStatus?.extra_allowed_paths ?? config.extraDirs ?? [];
 
   // On mobile the sidebar is always mounted (so it can slide); when closed it
   // sits off-screen. On desktop it is fully removed when closed so the chat
@@ -194,7 +224,7 @@ export default function CoworkSidebar({
 
 
   const toggleYolo = async () => {
-    const currentMode = tuiStatus?.permission_mode || "";
+    const currentMode = tuiStatus?.permission_mode || (config.yolo ? "yolo" : "");
     const enabled = currentMode !== "yolo";
     setYoloLoading(true);
     try {
@@ -218,7 +248,7 @@ export default function CoworkSidebar({
   };
 
   const togglePermEnabled = async () => {
-    const enabled = !tuiStatus?.permission_auto_allow;
+    const enabled = !(tuiStatus?.permission_auto_allow ?? config.permissionModelEnabled);
     setPermLoading(true);
     try {
       await api.setPermissionModelEnabled(enabled);
@@ -356,13 +386,15 @@ export default function CoworkSidebar({
               )}
               <div className="flex items-center justify-between">
                 <span className="text-xs text-zinc-400">Permission</span>
-                <span className="text-xs font-mono text-zinc-300">{tuiStatus?.permission_mode || "normal"}</span>
+                <span className="text-xs font-mono text-zinc-300">
+                  {tuiStatus?.permission_mode || (config.yolo ? "yolo" : "normal")}
+                </span>
               </div>
               <label className="flex items-center justify-between cursor-pointer">
                 <span className="text-xs text-zinc-400">YOLO (auto-allow all)</span>
                 <input
                   type="checkbox"
-                  checked={tuiStatus?.permission_mode === "yolo"}
+                  checked={(tuiStatus?.permission_mode ?? (config.yolo ? "yolo" : "normal")) === "yolo"}
                   disabled={yoloLoading}
                   onChange={toggleYolo}
                   className="w-8 h-4 rounded-full appearance-none bg-zinc-700 checked:bg-purple-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
@@ -372,7 +404,7 @@ export default function CoworkSidebar({
                 <span className="text-xs text-zinc-400">Auto-permission</span>
                 <input
                   type="checkbox"
-                  checked={Boolean(tuiStatus?.permission_auto_allow)}
+                  checked={Boolean(tuiStatus?.permission_auto_allow ?? config.permissionModelEnabled)}
                   disabled={permLoading}
                   onChange={togglePermEnabled}
                   className="w-8 h-4 rounded-full appearance-none bg-zinc-700 checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
@@ -385,8 +417,12 @@ export default function CoworkSidebar({
                 className="flex items-center justify-between w-full text-left rounded px-1 py-1 hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
               >
                 <span className="text-xs text-zinc-400">Permission model</span>
-                <span className="text-xs font-mono text-zinc-300 truncate max-w-[140px]" title={tuiStatus?.permission_model || "(not set)"}>
-                  {tuiStatus?.permission_model || "(not set)"} {tuiStatus?.permission_auto_allow ? "●" : "○"}
+                <span
+                  className="text-xs font-mono text-zinc-300 truncate max-w-[140px]"
+                  title={tuiStatus?.permission_model || config.permissionModel || "(not set)"}
+                >
+                  {tuiStatus?.permission_model || config.permissionModel || "(not set)"}{" "}
+                  {(tuiStatus?.permission_auto_allow ?? config.permissionModelEnabled) ? "●" : "○"}
                 </span>
               </button>
               {tuiStatus?.ide_mode && (
@@ -397,11 +433,15 @@ export default function CoworkSidebar({
                   </span>
                 </div>
               )}
-              {tuiStatus?.recap_model && (
+              {(tuiStatus?.recap_model || config.recapModel) && (
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-zinc-400">Recap</span>
-                  <span className="text-xs font-mono text-zinc-300 truncate" title={tuiStatus.recap_model}>
-                    {tuiStatus.recap_model} {tuiStatus.recap_model_enabled ? "●" : "○"}
+                  <span
+                    className="text-xs font-mono text-zinc-300 truncate"
+                    title={tuiStatus?.recap_model || config.recapModel}
+                  >
+                    {tuiStatus?.recap_model || config.recapModel}{" "}
+                    {(tuiStatus?.recap_model_enabled ?? config.recapModelEnabled) ? "●" : "○"}
                   </span>
                 </div>
               )}
@@ -433,7 +473,7 @@ export default function CoworkSidebar({
           </button>
           {/* Reasoning level selector */}
           <ReasoningLevelSelector
-            thinkingBudget={tuiStatus?.thinking_budget}
+            thinkingBudget={tuiStatus?.thinking_budget ?? config.thinkingBudget}
             disabled={!onModelClick}
           />
         </div>
@@ -659,6 +699,48 @@ export default function CoworkSidebar({
                     Agent will add items during execution
                   </div>
                 </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Extra Dirs Section — collapsed by default. Lists pre-authorized
+            extra_allowed_paths so the user can see which additional roots the
+            agent may access without re-prompting. */}
+        <div className="border-b border-zinc-700">
+          <button
+            onClick={() => toggleSection("extra_dirs")}
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+          >
+            {expandedSections.extra_dirs ? (
+              <ChevronDown className="w-4 h-4" />
+            ) : (
+              <ChevronRight className="w-4 h-4" />
+            )}
+            <FolderTree className="w-4 h-4 text-teal-400" />
+            Extra Dirs
+            {extraDirs.length > 0 && (
+              <span className="ml-auto text-xs font-mono text-zinc-500">
+                {extraDirs.length}
+              </span>
+            )}
+          </button>
+          {expandedSections.extra_dirs && (
+            <div className="px-4 pb-3">
+              {extraDirs.length > 0 ? (
+                <ul className="space-y-1">
+                  {extraDirs.map((p) => (
+                    <li
+                      key={p}
+                      className="text-xs font-mono text-zinc-400 break-all"
+                      title={p}
+                    >
+                      {p}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="text-xs text-zinc-500">No extra dirs</div>
               )}
             </div>
           )}
