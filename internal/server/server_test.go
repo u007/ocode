@@ -235,12 +235,19 @@ func TestListModels(t *testing.T) {
 	}
 
 	// Registry-known models must carry the models.dev display name (e.g. the
-	// zen codename opencode/x-preview-f-free → "Ox Alpha Free"). Skip quietly
-	// if a future snapshot drops the model rather than failing the suite.
+	// zen codename opencode/x-preview-f-free → "Ox Alpha Free").
+	displayNamePrefix := "Ox Alpha Free"
+	// Exact equality is intentionally not required: upstream models.dev
+	// annotates display names with suffixes ("Ox Alpha Free (Unlimited)")
+	// and can rename again,
+	// so only the codename→display-name mapping is pinned here — the name must
+	// be exactly that mapping or that mapping followed by a space-separated
+	// annotation, never an unrelated label. Skip quietly if a future snapshot
+	// drops the model rather than failing the suite.
 	for _, m := range models {
 		if m.Name == "opencode/x-preview-f-free" {
-			if m.DisplayName != "Ox Alpha Free" {
-				t.Errorf("display_name for %s = %q, want %q", m.Name, m.DisplayName, "Ox Alpha Free")
+			if m.DisplayName != displayNamePrefix && !strings.HasPrefix(m.DisplayName, displayNamePrefix+" ") {
+				t.Errorf("display_name for %s = %q, want %q or %q+annotation", m.Name, m.DisplayName, displayNamePrefix, displayNamePrefix)
 			}
 			return
 		}
