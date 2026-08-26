@@ -193,10 +193,11 @@ func saveJSON(dir, path, id, title string, messages []agent.Message, metadata ma
 		s.Title = title
 		s.TitleGenerated = true
 	} else if s.Title == "" && len(messages) > 0 {
-		// Auto-title from first user message
+		// Auto-title from first non-slash user message (slash commands do not seed titles)
 		for _, m := range messages {
-			if m.Role == "user" {
-				title = m.Content
+			t := strings.TrimSpace(m.Content)
+			if m.Role == "user" && t != "" && !strings.HasPrefix(t, "/") {
+				title = t
 				if len(title) > 40 {
 					title = title[:37] + "..."
 				}
@@ -240,8 +241,8 @@ func saveOjsonl(dir, id, title string, messages []agent.Message, metadata map[st
 		titleGenerated = true
 	} else if !existed && len(messages) > 0 {
 		for _, m := range messages {
-			if m.Role == "user" {
-				t := m.Content
+			t := strings.TrimSpace(m.Content)
+			if m.Role == "user" && t != "" && !strings.HasPrefix(t, "/") {
 				if len(t) > 40 {
 					t = t[:37] + "..."
 				}
@@ -1028,7 +1029,7 @@ func parseClaudeJSONL(r io.Reader, s *Session) error {
 				s.UpdatedAt = parsedTime
 			}
 		}
-		if s.Title == "" && role == "user" {
+		if s.Title == "" && role == "user" && !strings.HasPrefix(strings.TrimSpace(content), "/") {
 			s.Title = titleFromContent(content)
 		}
 		s.Messages = append(s.Messages, agent.Message{Role: role, Content: content, Model: model})

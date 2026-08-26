@@ -9,17 +9,25 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
+	"github.com/u007/ocode/internal/filelock"
 )
 
-// localSlotStaleAfter bounds how long a slot lock file may be held before a
-// contending process treats it as abandoned (crashed holder) and steals it.
-// Set comfortably above llmRequestTimeout so a legitimately slow generation
-// is never stolen out from under it.
-const localSlotStaleAfter = llmRequestTimeout + time.Minute
+// localSlotTouchInterval is how often a holder with an open streaming body
+// refreshes its slot lock file's mtime, proving it is still alive.
+const localSlotTouchInterval = 2 * time.Minute
+
+// localSlotStaleAfter bounds how long a slot lock file may go UNTOUCHED before
+// a contending process treats it as abandoned (crashed holder) and steals it.
+// Live holders touch the lock every localSlotTouchInterval (see
+// slotReleasingBody.touchLoop), so this bound only needs to comfortably exceed
+// the touch cadence — NOT total generation duration, which is unbounded now
+// that streams are no longer killed by a blanket http.Client.Timeout.
+const localSlotStaleAfter = 3*localSlotTouchInterval + time.Minute
 
 // localSlotPollInterval is how often a blocked acquireLocalModelSlot call
 // re-checks for a free slot.
@@ -50,7 +58,7 @@ func (t *localConcurrencyTransport) RoundTrip(req *http.Request) (*http.Response
 	if !ok {
 		return t.next.RoundTrip(req)
 	}
-	release, err := acquireLocalModelSlot(req.Context(), modelID, maxParallel, DiscoveryCacheDir())
+	release, slotPath, err := acquireLocalModelSlot(req.Context(), modelID, maxParallel, DiscoveryCacheDir())
 	if err != nil {
 		return nil, fmt.Errorf("local model %q: %w", modelID, err)
 	}
@@ -59,7 +67,7 @@ func (t *localConcurrencyTransport) RoundTrip(req *http.Request) (*http.Response
 		release()
 		return nil, err
 	}
-	resp.Body = &slotReleasingBody{ReadCloser: resp.Body, release: release}
+	resp.Body = newSlotReleasingBody(resp.Body, release, slotPath)
 	return resp, nil
 }
 
@@ -67,13 +75,51 @@ func (t *localConcurrencyTransport) RoundTrip(req *http.Request) (*http.Response
 // the response body is closed — not when RoundTrip returns, since a
 // streaming chat completion is still generating tokens (and so still
 // occupying the server) for as long as the caller keeps reading the body.
+// While open, a background ticker refreshes the lock file's mtime so a long
+// streaming generation is never mistaken for an abandoned lock by the
+// staleness check in acquireLocalModelSlot.
 type slotReleasingBody struct {
 	io.ReadCloser
-	release func()
-	closed  bool
+	release    func()
+	slotPath   string
+	touchEvery time.Duration // defaults to localSlotTouchInterval; test-overridable
+	closed     bool
+	stopTouch  chan struct{}
+	stopOnce   sync.Once
+}
+
+func newSlotReleasingBody(rc io.ReadCloser, release func(), slotPath string) *slotReleasingBody {
+	b := &slotReleasingBody{
+		ReadCloser: rc,
+		release:    release,
+		slotPath:   slotPath,
+		touchEvery: localSlotTouchInterval,
+		stopTouch:  make(chan struct{}),
+	}
+	go b.touchLoop()
+	return b
+}
+
+func (b *slotReleasingBody) touchLoop() {
+	interval := b.touchEvery
+	if interval <= 0 {
+		interval = localSlotTouchInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-b.stopTouch:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			_ = os.Chtimes(b.slotPath, now, now)
+		}
+	}
 }
 
 func (b *slotReleasingBody) Close() error {
+	b.stopOnce.Do(func() { close(b.stopTouch) })
 	err := b.ReadCloser.Close()
 	if !b.closed {
 		b.closed = true
@@ -114,6 +160,9 @@ func resolveLocalModelForRequest(req *http.Request) (modelID string, maxParallel
 }
 
 // acquireLocalModelSlot blocks until one of modelID's maxParallel slots is
+// free (or ctx is done), then returns the release func (call exactly once to
+// free it) plus the lock file path so holders can keep its mtime fresh via
+// slotReleasingBody.touchLoop.
 // free (or ctx is done), then returns a release func that must be called
 // exactly once to free it. Slots are lock files (O_CREATE|O_EXCL — same
 // primitive as config.lockOcodeConfig) named
@@ -122,10 +171,10 @@ func resolveLocalModelForRequest(req *http.Request) (modelID string, maxParallel
 // processes forever, but since a plain create/remove lock (not flock) has no
 // OS-enforced release, a holder that dies without releasing leaves its file
 // behind — reaped via the mtime staleness check below.
-func acquireLocalModelSlot(ctx context.Context, modelID string, maxParallel int, cacheDir string) (func(), error) {
+func acquireLocalModelSlot(ctx context.Context, modelID string, maxParallel int, cacheDir string) (func(), string, error) {
 	lockDir := filepath.Join(cacheDir, "locks")
 	if err := os.MkdirAll(lockDir, 0755); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	safeID := strings.ReplaceAll(modelID, "/", "_")
 
@@ -136,26 +185,53 @@ func acquireLocalModelSlot(ctx context.Context, modelID string, maxParallel int,
 			slotPath := filepath.Join(lockDir, fmt.Sprintf("%s.slot%d.lock", safeID, i))
 			f, err := os.OpenFile(slotPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 			if err == nil {
-				f.Close()
-				released := false
+				_ = f.Close()
+				guardPath := slotPath + ".guard"
+				guard, lockErr := os.OpenFile(guardPath, os.O_RDWR|os.O_CREATE, 0644)
+				if lockErr != nil {
+					_ = os.Remove(slotPath)
+					continue
+				}
+				unlock, lockErr := filelock.TryLock(guard)
+				if lockErr != nil {
+					// Another contender won the advisory lock between our
+					// exclusive create and this acquisition. The guard, not the
+					// slot path, owns the lease, so remove only our fresh slot.
+					_ = guard.Close()
+					_ = os.Remove(slotPath)
+					continue
+				}
+				var releaseOnce sync.Once
 				return func() {
-					if released {
-						return
-					}
-					released = true
-					os.Remove(slotPath)
-				}, nil
+					releaseOnce.Do(func() {
+						unlock()
+						_ = guard.Close()
+						_ = os.Remove(slotPath)
+					})
+				}, slotPath, nil
 			}
 			if !os.IsExist(err) {
-				return nil, fmt.Errorf("create slot lock %s: %w", slotPath, err)
+				return nil, "", fmt.Errorf("create slot lock %s: %w", slotPath, err)
 			}
 			if info, statErr := os.Stat(slotPath); statErr == nil && time.Since(info.ModTime()) > localSlotStaleAfter {
-				os.Remove(slotPath)
+				// A stale mtime is only a hint. Reclaim the path only when no
+				// live holder owns its advisory lock; this closes the Stat →
+				// Remove race with touchLoop.
+				guardPath := slotPath + ".guard"
+				guard, openErr := os.OpenFile(guardPath, os.O_RDWR|os.O_CREATE, 0644)
+				if openErr == nil {
+					unlock, lockErr := filelock.TryLock(guard)
+					if lockErr == nil {
+						_ = os.Remove(slotPath)
+						unlock()
+					}
+					_ = guard.Close()
+				}
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		case <-ticker.C:
 		}
 	}

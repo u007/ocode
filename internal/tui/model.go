@@ -2341,6 +2341,9 @@ func (m model) Init() tea.Cmd {
 	if strings.HasPrefix(m.currentModelName(), "openrouter/") && !agent.OpenRouterModelsLoaded() {
 		cmds = append(cmds, waitForOpenRouterReady(m.currentModelName()))
 	}
+	// Preload AIHubMix's live /models list in the background so models the
+	// models.dev catalog omits (e.g. "ox-alpha") appear in the picker.
+	agent.PreloadAIHubMixModels()
 	// Start listening for LSP diagnostic changes so the sidebar updates proactively.
 	if m.lspDiagCh != nil {
 		cmds = append(cmds, listenLSPDiags(m.lspDiagCh))
@@ -19127,7 +19130,11 @@ func (m model) renderSidebar() string {
 
 	title := m.sidebarDisplayTitle()
 	var header string
-	if title != "" {
+	// Render header whenever there is a display title, or when the session has
+	// any messages (so the gen button stays visible even for slash-only
+	// sessions where the display title is intentionally empty).
+	shouldRenderHeader := title != "" || len(m.messages) > 0
+	if shouldRenderHeader {
 		// Collapse newlines so a multi-line title wraps cleanly.
 		title = strings.ReplaceAll(title, "\n", " ")
 		innerWidth := sidebarColumnWidth - 4
@@ -19355,8 +19362,13 @@ func (m model) sidebarVisibleScrollLines(data sidebarRenderData, headerHeight in
 // sidebarHeaderHeight returns the number of rows (1..sidebarMaxTitleLines) the
 // sidebarDisplayTitle returns the text shown in the sidebar title row: the
 // session title if set, else the first user prompt as a fallback, else a
-// neutral "Untitled" placeholder so the "✦ gen" button always has a row to
-// attach to (and thus stays visible/clickable even with no title).
+// neutral "Untitled" placeholder only for a genuinely empty session (no
+// messages at all). Slash commands are intentionally excluded from the
+// fallback (see isCommandHistoryMessage) and must NOT produce "Untitled" —
+// once any message exists (even a slash command) the placeholder is
+// suppressed so the title stays empty until a real user prompt or LLM title
+// appears. The "✦ gen" button is preserved independently via
+// sidebarHeaderHeight/renderSidebar even when the title string is empty.
 func (m model) sidebarDisplayTitle() string {
 	title := m.sessionTitle
 	if title == "" {
@@ -19364,23 +19376,25 @@ func (m model) sidebarDisplayTitle() string {
 			title = truncateTitle(prompt, maxExplicitTitleLen)
 		}
 	}
-	// Fall back to a neutral placeholder so the "✦ gen" title button always has
-	// a row to attach to — even for a brand-new session that has no title yet.
-	// This keeps the gen button visible (and clickable) when there is no title,
-	// instead of disappearing entirely.
-	if title == "" {
+	if title == "" && len(m.messages) == 0 {
 		title = "Untitled"
 	}
 	return title
 }
 
-// sidebarHeaderHeight returns the number of rows (0..sidebarMaxTitleLines) the
+// sidebarHeaderHeight returns the number of rows (1..sidebarMaxTitleLines) the
 // wrapped session title occupies in the sidebar header. It mirrors the wrap
 // performed in renderSidebar so layout, the selectable-line map, and the
-// gen-button hit-test all agree on the header's on-screen height.
+// gen-button hit-test all agree on the header's on-screen height. When the
+// display title is empty but the session has messages (e.g. slash-only),
+// a one-row header is still reserved so the "✦ gen" button remains visible
+// and clickable — title text is just empty.
 func (m model) sidebarHeaderHeight() int {
 	title := m.sidebarDisplayTitle()
 	if title == "" {
+		if len(m.messages) > 0 {
+			return 1
+		}
 		return 0
 	}
 	title = strings.ReplaceAll(title, "\n", " ")
@@ -19560,9 +19574,9 @@ func (m model) sidebarCWDForClick(mouse tea.Mouse) (string, bool) {
 
 // sidebarTitleGenForClick returns true when the click lands on the clickable
 // "gen" button rendered at the right edge of the sidebar title's LAST row. The
-// button always renders while the sidebar is up — the title row falls back to a
-// placeholder ("Untitled") when no title exists, so the gen button stays
-// visible (and clickable) even for a session with no title yet.
+// button renders whenever the sidebar has a header — that is, for an empty
+// session via the "Untitled" placeholder, or for slash-only sessions via an
+// empty-title row that still reserves the hitbox.
 func (m model) sidebarTitleGenForClick(mouse tea.Mouse) bool {
 	if !m.mouseOverSidebar(mouse) || m.sidebarHeaderHeight() == 0 {
 		return false

@@ -1,12 +1,15 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"github.com/u007/ocode/internal/knowledge"
+	"github.com/u007/ocode/internal/snapshot"
 )
 
 // doc_search get_top bounds: maximum number of match bodies returned inline,
@@ -283,6 +286,10 @@ func (t *DocWriteTool) Definition() map[string]interface{} {
 }
 
 func (t *DocWriteTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t *DocWriteTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Path        string   `json:"path"`
 		DocType     string   `json:"type"`
@@ -302,8 +309,48 @@ func (t *DocWriteTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("type is required — examples: Decision, Playbook, Schema, Gotcha")
 	}
 
+	// Snapshot before the write so the changes tab and undo_file_change can
+	// track the doc. We backup the primary doc file plus the auto-maintained
+	// log.md and index.md, all under the same tool_call_id so a single
+	// undo_file_change with that tool_call_id restores the trio together
+	// (best-effort sequential restore; see snapshot.UndoByToolCallID for
+	// partial-restore semantics). Failures are best-effort (like write
+	// tools) — a backup error is logged but does not block the write.
+	// Validation mirrors knowledge.validateDocPath so an invalid path
+	// (traversal, reserved file, absolute) does not leave orphan snapshots
+	// for a call that will fail inside Store.Write.
+	root := t.store.BundleRoot()
+	var snapStore *snapshot.Store
+	var tcID string
+	var fullPath, logPath, indexPath string
+	if root != "" && isValidDocPathForSnapshot(params.Path) {
+		fullPath = filepath.Join(root, params.Path)
+		logPath = filepath.Join(root, "log.md")
+		indexPath = filepath.Join(root, "index.md")
+		snapStore = snapshot.FromContext(ctx)
+		tcID = snapshot.ToolCallIDFromContext(ctx)
+		_ = snapStore.Backup(fullPath, tcID)  //nolint:errcheck
+		_ = snapStore.Backup(logPath, tcID)   //nolint:errcheck
+		_ = snapStore.Backup(indexPath, tcID) //nolint:errcheck
+	} else if root != "" {
+		// Still capture store/tcID for the post-write RegisterWrite gate
+		// (will be no-ops for invalid paths since no Backup was created).
+		snapStore = snapshot.FromContext(ctx)
+		tcID = snapshot.ToolCallIDFromContext(ctx)
+		fullPath = filepath.Join(root, params.Path)
+		logPath = filepath.Join(root, "log.md")
+		indexPath = filepath.Join(root, "index.md")
+	}
+
 	if err := t.store.Write(params.Path, params.DocType, params.Title, params.Description, params.Resource, params.Tags, params.Body); err != nil {
 		return "", fmt.Errorf("doc_write: %w", err)
+	}
+	// Only register if we actually backed up (valid path). This avoids
+	// creating a fileWrites entry for a path that never had a snapshot.
+	if snapStore != nil && isValidDocPathForSnapshot(params.Path) {
+		snapStore.RegisterWrite(fullPath, tcID)
+		snapStore.RegisterWrite(logPath, tcID)
+		snapStore.RegisterWrite(indexPath, tcID)
 	}
 	slog.Debug("doc_write: created/updated document", "path", params.Path, "type", params.DocType)
 	return fmt.Sprintf("Document created/updated at `%s`. The index and change log have been updated.", params.Path), nil
@@ -340,6 +387,10 @@ func (t *DocDeprecateTool) Definition() map[string]interface{} {
 }
 
 func (t *DocDeprecateTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t *DocDeprecateTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Path   string `json:"path"`
 		Reason string `json:"reason"`
@@ -354,9 +405,55 @@ func (t *DocDeprecateTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("reason is required")
 	}
 
+	root := t.store.BundleRoot()
+	var snapStore *snapshot.Store
+	var tcID string
+	var fullPath, logPath, indexPath string
+	if root != "" && isValidDocPathForSnapshot(params.Path) {
+		fullPath = filepath.Join(root, params.Path)
+		logPath = filepath.Join(root, "log.md")
+		indexPath = filepath.Join(root, "index.md")
+		snapStore = snapshot.FromContext(ctx)
+		tcID = snapshot.ToolCallIDFromContext(ctx)
+		_ = snapStore.Backup(fullPath, tcID)  //nolint:errcheck
+		_ = snapStore.Backup(logPath, tcID)   //nolint:errcheck
+		_ = snapStore.Backup(indexPath, tcID) //nolint:errcheck
+	} else if root != "" {
+		snapStore = snapshot.FromContext(ctx)
+		tcID = snapshot.ToolCallIDFromContext(ctx)
+		fullPath = filepath.Join(root, params.Path)
+		logPath = filepath.Join(root, "log.md")
+		indexPath = filepath.Join(root, "index.md")
+	}
+
 	if err := t.store.Deprecate(params.Path, params.Reason); err != nil {
 		return "", fmt.Errorf("doc_deprecate: %w", err)
 	}
+	if snapStore != nil && isValidDocPathForSnapshot(params.Path) {
+		snapStore.RegisterWrite(fullPath, tcID)
+		snapStore.RegisterWrite(logPath, tcID)
+		snapStore.RegisterWrite(indexPath, tcID)
+	}
 	slog.Debug("doc_deprecate: deprecated document", "path", params.Path, "reason", params.Reason)
 	return fmt.Sprintf("Document `%s` has been deprecated. Reason: %s. The index and change log have been updated.", params.Path, params.Reason), nil
+}
+
+// isValidDocPathForSnapshot mirrors knowledge.validateDocPath for the
+// snapshot gate: traversal, reserved files, and absolute paths must not
+// create orphan snapshots for calls that Store.Write/Deprecate will reject.
+func isValidDocPathForSnapshot(relPath string) bool {
+	if relPath == "" {
+		return false
+	}
+	if strings.Contains(relPath, "..") {
+		return false
+	}
+	if filepath.IsAbs(relPath) {
+		return false
+	}
+	base := filepath.Base(relPath)
+	if base == "index.md" || base == "log.md" {
+		return false
+	}
+	return true
 }

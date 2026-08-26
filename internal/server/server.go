@@ -596,6 +596,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	// are idempotent and degrade gracefully when the network is unavailable.
 	go agent.PreloadOpenRouterModels()
 	go agent.PreloadNovitaModels()
+	go agent.PreloadAIHubMixModels()
 	log.Printf("serving on %s", s.addr)
 	// Periodically release idle built agents so agent/plugin processes do not
 	// accumulate as projects accumulate. The registry entry and on-disk

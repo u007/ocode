@@ -29,6 +29,17 @@ import (
 )
 
 const (
+	// llmRequestTimeout bounds only the PRE-STREAM phase of each LLM HTTP
+	// request (connect + TLS + waiting for response headers). It deliberately
+	// does NOT cap total streamed-body duration: reasoning models routinely
+	// stream longer than any fixed cap, and a blanket http.Client.Timeout used
+	// to kill such generations mid-flight with "net/http: request canceled
+	// (Client.Timeout or context cancellation while reading body)" — after
+	// deltas were already rendered, so the anti-duplication gate in Chat's
+	// retry loop refused to re-run the turn. Stream stalls are instead caught
+	// by the per-read idle watchdog in llm_stream_idle.go, which surfaces a
+	// RETRYABLE streamStalledError. Whole-call bounds for headless runs remain
+	// available separately via Agent.RequestTimeout.
 	llmRequestTimeout = 5 * time.Minute
 	llmMaxRetries     = 3
 	llmMaxRetries429  = 5
@@ -46,9 +57,13 @@ const (
 	ctxKeyMaxTokens
 )
 
+// llmHTTPClient deliberately sets no Client.Timeout: a blanket deadline covers
+// the streamed response body too, which is how long generations died mid-stream
+// (see llmRequestTimeout). Pre-stream phases are bounded by llmHTTPBaseTransport,
+// and a stalled stream is aborted by idleAbortTransport with a retryable
+// streamStalledError instead of an unretryable mid-body timeout kill.
 var llmHTTPClient = &http.Client{
-	Timeout:   llmRequestTimeout,
-	Transport: &localConcurrencyTransport{next: http.DefaultTransport},
+	Transport: &idleAbortTransport{next: &localConcurrencyTransport{next: llmHTTPBaseTransport}},
 }
 var llmRetryBaseDelay = 500 * time.Millisecond
 
@@ -690,7 +705,7 @@ func isRetryableLLMClientError(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
-	if errors.Is(err, ErrNoResponseFromOpenAIResponses) || errors.Is(err, ErrNoResponseFromProvider) {
+	if errors.Is(err, ErrNoResponseFromOpenAIResponses) || errors.Is(err, ErrNoResponseFromProvider) || errors.Is(err, errStreamStalled) {
 		return true
 	}
 	var netErr net.Error

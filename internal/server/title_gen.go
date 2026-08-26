@@ -149,12 +149,18 @@ func (h *Handler) finishSessionTitle(sessionID, title string) {
 
 // firstAndLastMessageTexts returns the first user message text and the last
 // assistant message text from a message list — the inputs for title
-// generation, mirroring the TUI's usage.
+// generation, mirroring the TUI's usage. User messages starting with "/" are
+// slash commands and are excluded, matching the TUI's isCommandHistoryMessage
+// filter so a slash-only session never seeds a title.
 func firstAndLastMessageTexts(msgs []agent.Message) (string, string) {
 	var userMsg, assistantMsg string
 	for _, m := range msgs {
-		if m.Role == "user" && strings.TrimSpace(m.Content) != "" && userMsg == "" {
-			userMsg = m.Content
+		trimmed := strings.TrimSpace(m.Content)
+		if trimmed == "" {
+			continue
+		}
+		if m.Role == "user" && userMsg == "" && !strings.HasPrefix(trimmed, "/") {
+			userMsg = trimmed
 		}
 		if m.Role == "assistant" && strings.TrimSpace(m.Content) != "" {
 			assistantMsg = m.Content
@@ -181,15 +187,17 @@ func truncateSessionTitle(s string, maxLen int) string {
 // message texts — the inputs for title regeneration (latest task), mirroring
 // the TUI's regenerateTitle which uses lastUserMessageText +
 // lastAssistantContent. Falls through to empty strings when no messages exist.
+// Slash commands ("/" prefix) are excluded, matching the TUI filter.
 func lastUserAndLastAssistantTexts(msgs []agent.Message) (string, string) {
 	var userMsg, assistantMsg string
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
-		if assistantMsg == "" && m.Role == "assistant" && strings.TrimSpace(m.Content) != "" {
+		trimmed := strings.TrimSpace(m.Content)
+		if assistantMsg == "" && m.Role == "assistant" && trimmed != "" {
 			assistantMsg = m.Content
 		}
-		if userMsg == "" && m.Role == "user" && strings.TrimSpace(m.Content) != "" {
-			userMsg = m.Content
+		if userMsg == "" && m.Role == "user" && trimmed != "" && !strings.HasPrefix(trimmed, "/") {
+			userMsg = trimmed
 		}
 		if userMsg != "" && assistantMsg != "" {
 			break
@@ -197,10 +205,12 @@ func lastUserAndLastAssistantTexts(msgs []agent.Message) (string, string) {
 	}
 	// If we found no user message in reverse scan (e.g. no assistant yet),
 	// still return the first user prompt so a single-turn session can title.
+	// Slash commands are excluded here as well.
 	if userMsg == "" {
 		for _, m := range msgs {
-			if m.Role == "user" && strings.TrimSpace(m.Content) != "" {
-				userMsg = m.Content
+			trimmed := strings.TrimSpace(m.Content)
+			if m.Role == "user" && trimmed != "" && !strings.HasPrefix(trimmed, "/") {
+				userMsg = trimmed
 				break
 			}
 		}

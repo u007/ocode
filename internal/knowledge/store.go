@@ -20,6 +20,14 @@ func NewStore(b *Bundle) *Store {
 	return &Store{bundle: b}
 }
 
+// BundleRoot returns the bundle's docs/ directory (as provided to DetectBundle).
+func (s *Store) BundleRoot() string {
+	if s == nil || s.bundle == nil {
+		return ""
+	}
+	return s.bundle.Root
+}
+
 // Get returns one Doc by bundle-relative path. Returns an error if the doc
 // does not exist.
 func (s *Store) Get(relPath string) (*Doc, error) {

@@ -606,6 +606,7 @@ func TestPermissions_FindUnsafeFlagsAsk(t *testing.T) {
 // subcommands are no longer auto-allowed (previously the generic `git `
 // prefix in isSafeBashCommand allowed them all).
 func TestPermissions_GitMutatingSubcommandsAsk(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	pm := NewPermissionManager()
 	pm.SetWorkDir("/Users/test/project")
 

@@ -1062,9 +1062,23 @@ type errReader struct{ err error }
 
 func (e *errReader) Read(p []byte) (int, error) { return 0, e.err }
 
-func TestLLMHTTPClientUsesFiveMinuteTimeout(t *testing.T) {
-	if llmHTTPClient.Timeout != 5*time.Minute {
-		t.Fatalf("expected LLM HTTP timeout to be 5m, got %s", llmHTTPClient.Timeout)
+// TestLLMHTTPClientHasNoBlanketTimeout pins the replacement of the old blanket
+// 5-minute http.Client.Timeout: a total-duration cap covered the streamed
+// response body too, so generations streaming longer than the cap died
+// mid-flight with "net/http: request canceled (Client.Timeout or context
+// cancellation while reading body)" — after deltas were already rendered, so
+// Chat's retry loop refused to re-run. The new invariants: no Client.Timeout
+// (long healthy streams run unbounded), phase bounds via llmHTTPBaseTransport,
+// and stall detection via idleAbortTransport (see llm_stream_idle.go).
+func TestLLMHTTPClientHasNoBlanketTimeout(t *testing.T) {
+	if llmHTTPClient.Timeout != 0 {
+		t.Fatalf("LLM HTTP client must not set a blanket Timeout (got %s); it kills long streaming bodies mid-read", llmHTTPClient.Timeout)
+	}
+	if llmHTTPBaseTransport.ResponseHeaderTimeout != llmRequestTimeout {
+		t.Fatalf("expected response-header timeout %s, got %s", llmRequestTimeout, llmHTTPBaseTransport.ResponseHeaderTimeout)
+	}
+	if llmStreamIdleTimeout <= 0 {
+		t.Fatalf("expected positive stream idle timeout, got %s", llmStreamIdleTimeout)
 	}
 }
 

@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"io"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,7 +23,7 @@ func TestAcquireLocalModelSlotLimitsConcurrency(t *testing.T) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			release, err := acquireLocalModelSlot(ctx, "local/test-model", maxParallel, dir)
+			release, _, err := acquireLocalModelSlot(ctx, "local/test-model", maxParallel, dir)
 			if err != nil {
 				t.Errorf("acquireLocalModelSlot: %v", err)
 				done <- struct{}{}
@@ -53,7 +56,7 @@ func TestAcquireLocalModelSlotReleaseIsIdempotentAndFreesSlot(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	release1, err := acquireLocalModelSlot(ctx, "local/test-model", 1, dir)
+	release1, _, err := acquireLocalModelSlot(ctx, "local/test-model", 1, dir)
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
@@ -61,7 +64,7 @@ func TestAcquireLocalModelSlotReleaseIsIdempotentAndFreesSlot(t *testing.T) {
 	// A second acquire with the single slot held must block until released.
 	acquired := make(chan struct{})
 	go func() {
-		release2, err := acquireLocalModelSlot(context.Background(), "local/test-model", 1, dir)
+		release2, _, err := acquireLocalModelSlot(context.Background(), "local/test-model", 1, dir)
 		if err != nil {
 			t.Errorf("second acquire: %v", err)
 			return
@@ -88,7 +91,7 @@ func TestAcquireLocalModelSlotReleaseIsIdempotentAndFreesSlot(t *testing.T) {
 
 func TestAcquireLocalModelSlotRespectsContextCancellation(t *testing.T) {
 	dir := t.TempDir()
-	release, err := acquireLocalModelSlot(context.Background(), "local/test-model", 1, dir)
+	release, _, err := acquireLocalModelSlot(context.Background(), "local/test-model", 1, dir)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -96,7 +99,50 @@ func TestAcquireLocalModelSlotRespectsContextCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
-	if _, err := acquireLocalModelSlot(ctx, "local/test-model", 1, dir); err == nil {
+	if _, _, err := acquireLocalModelSlot(ctx, "local/test-model", 1, dir); err == nil {
 		t.Fatal("expected context deadline error, got nil")
+	}
+}
+
+func TestSlotReleasingBodyTouchesLockWhileOpen(t *testing.T) {
+	dir := t.TempDir()
+	slotPath := dir + "/local_test-model.slot0.lock"
+	if err := os.WriteFile(slotPath, nil, 0644); err != nil {
+		t.Fatalf("create lock: %v", err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(slotPath, old, old); err != nil {
+		t.Fatalf("backdate lock: %v", err)
+	}
+
+	released := false
+	b := &slotReleasingBody{
+		ReadCloser: io.NopCloser(strings.NewReader("x")),
+		release:    func() { released = true },
+		slotPath:   slotPath,
+		touchEvery: 15 * time.Millisecond,
+		stopTouch:  make(chan struct{}),
+	}
+	go b.touchLoop()
+
+	time.Sleep(80 * time.Millisecond) // several touch ticks must have fired
+	info, err := os.Stat(slotPath)
+	if err != nil {
+		t.Fatalf("stat lock: %v", err)
+	}
+	if !info.ModTime().After(old.Add(30 * time.Minute)) {
+		t.Fatalf("lock mtime not refreshed while body open: mod=%v old=%v", info.ModTime(), old)
+	}
+
+	b.Close()
+	if !released {
+		t.Fatal("Close must release the slot exactly once")
+	}
+	// After Close the ticker is stopped; capture mtime and ensure it stays put.
+	info, _ = os.Stat(slotPath)
+	time.Sleep(40 * time.Millisecond)
+	info2, _ := os.Stat(slotPath)
+	if !info.ModTime().Equal(info2.ModTime()) {
+		t.Fatal("touch loop did not stop after Close")
 	}
 }

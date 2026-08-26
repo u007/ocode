@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -60,4 +61,19 @@ func WithFileLock(lockPath string, fn func() error) (err error) {
 	}()
 
 	return fn()
+}
+
+// TryLock acquires an exclusive advisory lock on an already-open file without
+// waiting. The returned function releases the lock and is safe to call more
+// than once. The caller remains responsible for closing f.
+func TryLock(f *os.File) (func(), error) {
+	if err := tryLockFile(f); err != nil {
+		return nil, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = unlockFile(f)
+		})
+	}, nil
 }

@@ -193,6 +193,7 @@ func TestPermissionPrefixBeatsSafeCommand(t *testing.T) {
 // command auto-allows on the next Decide — without auto-allowing force-push or
 // other harmful git subcommands.
 func TestGitAlwaysAllowPersistsAtSubcommandGranularity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	pm := NewPermissionManager()
 	pm.SetMode(PermissionModeNormal)
 

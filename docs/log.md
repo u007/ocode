@@ -7,6 +7,11 @@
 
 
 
+
+## 2026-08-26
+
+* **Creation**: AIHubMix Test — Global Cache State Leakage ([gotchas/aihubmix-test-cache-leak.md](/gotchas/aihubmix-test-cache-leak.md))
+* **Creation**: Local Model Limiter — Stale-Slot Reclamation Race ([gotchas/local-model-limiter-stale-slot-race.md](/gotchas/local-model-limiter-stale-slot-race.md))
 ## 2026-08-20
 
 * **Creation**: Shared LSP Broker Server-State and Routing Gotchas ([architecture/lsp-broker-shared-server-gotchas.md](/architecture/lsp-broker-shared-server-gotchas.md))

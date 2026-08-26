@@ -127,13 +127,17 @@ export default function CoworkSidebar({
   const displayTitle = (() => {
     const rawTitle = tuiStatus?.session_title?.trim() || "";
     if (rawTitle) return truncateTitle(rawTitle, 80);
-    // Fallback: first visible user message
+    // Fallback: first visible user message, excluding slash commands (mirrors
+    // TUI's isCommandHistoryMessage / firstUserPromptText). Slash-only sessions
+    // intentionally show no title until a real prompt or LLM title exists.
     for (const m of messages) {
-      if (m.role === "user" && m.content?.trim()) {
-        return truncateTitle(m.content.trim(), 80);
+      const text = m.content?.trim() || "";
+      if (m.role === "user" && text && !text.startsWith("/")) {
+        return truncateTitle(text, 80);
       }
     }
-    return "Untitled";
+    if (messages.length === 0) return "Untitled";
+    return "";
   })();
 
   const canGenerateTitle = !!sessionId && !sessionId.startsWith("new-");

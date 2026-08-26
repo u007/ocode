@@ -876,12 +876,19 @@ func novitaLiveModelEntry(name string) (modelEntry, bool) {
 }
 
 // bestPricedEntry searches all providers for a model by bare name and returns
-// the first entry that has non-zero costs. If every match has zero costs it
-// returns the first match anyway (so callers see "found but zero cost").
+// a deterministic entry with non-zero costs. Iteration over the provider map is
+// randomized by Go, so we sort keys to avoid flaky pricing (e.g. gpt-4o exists
+// in many providers with slightly different costs like cortecs vs openai).
 func bestPricedEntry(data map[string]providerEntry, modelID string) (modelEntry, bool) {
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	var fallback modelEntry
 	var haveFallback bool
-	for _, entry := range data {
+	for _, k := range keys {
+		entry := data[k]
 		if m, ok := entry.Models[modelID]; ok {
 			if m.Cost.Input != 0 || m.Cost.Output != 0 || m.Cost.CacheRead != 0 {
 				return m, true
@@ -1048,6 +1055,24 @@ func allProviderModelsFromRegistry(refresh bool) []string {
 	if !containsString(ids, "orcarouter/auto") {
 		ids = append(ids, "orcarouter/auto")
 	}
+	// AIHubMix live models — supplement the snapshot so models the models.dev
+	// catalog omits (e.g. "ox-alpha") appear in the picker. Guarded by refresh (or
+	// a still-fresh cache) to avoid blocking the main loop on a network fetch.
+	if refresh || aiHubMixCacheFresh() {
+		if aiHubMixLive := fetchAIHubMixLiveModels(); len(aiHubMixLive) > 0 {
+			have := make(map[string]bool, len(ids))
+			for _, id := range ids {
+				have[id] = true
+			}
+			for _, key := range aiHubMixLive {
+				id := "aihubmix/" + key
+				if !have[id] {
+					ids = append(ids, id)
+					have[id] = true
+				}
+			}
+		}
+	}
 	if len(ids) == 0 {
 		return nil
 	}
@@ -1116,6 +1141,21 @@ func providerModelsFromRegistry(provider string, refresh bool) []string {
 			}
 		}
 	}
+	if provider == "aihubmix" {
+		// AIHubMix serves models (e.g. "ox-alpha") that the models.dev catalog
+		// has not indexed. Merge the live /models list with the snapshot so the
+		// picker shows everything; pricing/context for known models still resolve
+		// from the snapshot/registry via modelEntryFor.
+		if refresh || aiHubMixCacheFresh() {
+			if live := fetchAIHubMixLiveModels(); len(live) > 0 {
+				snap := providerModelsFromSnapshot(provider)
+				merged := mergeModelIDs(snap, live)
+				sort.Strings(merged)
+				return merged
+			}
+		}
+		return providerModelsFromSnapshot(provider)
+	}
 	ids := providerModelsFromSnapshot(provider)
 	if provider == "orcarouter" && !containsString(ids, "auto") {
 		ids = append(ids, "auto")
@@ -1131,6 +1171,27 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// mergeModelIDs returns the union of two model-ID slices with duplicates removed
+// (order of a preserved first, then new entries from b). Used to combine the
+// models.dev snapshot list with a provider's live /models list.
+func mergeModelIDs(a, b []string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, id := range a {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for _, id := range b {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // providerModelsFromSnapshot loads models for the given provider from the
@@ -1436,6 +1497,112 @@ func fetchNovitaLiveModels() map[string]modelEntry {
 	novitaLiveData.mu.Unlock()
 
 	return models
+}
+
+const aiHubMixCacheTTL = 5 * time.Minute
+
+// aiHubMixLiveData caches the model IDs fetched live from AIHubMix's
+// OpenAI-compatible /models endpoint. AIHubMix serves models (e.g. "ox-alpha")
+// that the models.dev catalog has not indexed, so querying the provider directly
+// surfaces them in the picker. The endpoint only returns IDs (no pricing/
+// context), so we use the live list to *discover* IDs and merge it with the
+// models.dev snapshot, which still supplies pricing/context for known models.
+var aiHubMixLiveData struct {
+	mu        sync.RWMutex
+	models    []string // bare model ids
+	lastFetch time.Time
+}
+
+// fetchAIHubMixLiveModels fetches the model list from AIHubMix's OpenAI-compatible
+// /models endpoint and returns the bare model IDs. Returns nil silently if:
+//   - AIHUBMIX_API_KEY is not set AND no stored credential exists
+//   - The API is unreachable, returns a non-200, or the body is malformed
+//
+// Callers degrade to the models.dev snapshot on a nil result.
+func fetchAIHubMixLiveModels() []string {
+	aiHubMixLiveData.mu.RLock()
+	if aiHubMixLiveData.models != nil && time.Since(aiHubMixLiveData.lastFetch) < aiHubMixCacheTTL {
+		models := aiHubMixLiveData.models
+		aiHubMixLiveData.mu.RUnlock()
+		return models
+	}
+	aiHubMixLiveData.mu.RUnlock()
+
+	key := auth.ResolveKey("aihubmix")
+	if key == "" {
+		return nil
+	}
+
+	base := providers["aihubmix"].baseURL
+	if cred, ok := auth.Get("aihubmix"); ok && cred.BaseURL != "" {
+		base = strings.TrimRight(cred.BaseURL, "/")
+	}
+	modelsURL := strings.TrimRight(base, "/") + "/models"
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, modelsURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return nil
+	}
+	var apiResp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return nil
+	}
+
+	ids := make([]string, 0, len(apiResp.Data))
+	seen := make(map[string]bool, len(apiResp.Data))
+	for _, m := range apiResp.Data {
+		if m.ID == "" || seen[m.ID] {
+			continue
+		}
+		seen[m.ID] = true
+		ids = append(ids, m.ID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	aiHubMixLiveData.mu.Lock()
+	aiHubMixLiveData.models = ids
+	aiHubMixLiveData.lastFetch = time.Now()
+	aiHubMixLiveData.mu.Unlock()
+
+	return ids
+}
+
+// aiHubMixCacheFresh reports whether the AIHubMix live cache is populated AND
+// still within its TTL (so the main loop can consult it without a network call).
+func aiHubMixCacheFresh() bool {
+	aiHubMixLiveData.mu.RLock()
+	defer aiHubMixLiveData.mu.RUnlock()
+	return aiHubMixLiveData.models != nil && time.Since(aiHubMixLiveData.lastFetch) < aiHubMixCacheTTL
+}
+
+// PreloadAIHubMixModels fetches AIHubMix's live model list in the background so
+// models the models.dev catalog omits (e.g. "ox-alpha") are available in the
+// picker as soon as the UI needs them. No-op until the key is configured;
+// degrades gracefully when the network is unavailable.
+func PreloadAIHubMixModels() {
+	go fetchAIHubMixLiveModels()
 }
 
 const openRouterCacheTTL = 30 * time.Second

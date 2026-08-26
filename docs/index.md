@@ -20,7 +20,9 @@ okf_version: 0.1
 
 # gotchas
 
+- [AIHubMix Test — Global Cache State Leakage](gotchas/aihubmix-test-cache-leak.md) - AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures
 - [ChatPanel Autoscroll Bounce/Freeze](gotchas/autoscroll-bounce.md) - Root cause analysis of the autoscroll bounce/freeze bug: smooth-scrolling every live token without at-bottom state tracking causes competing animations that lock up the scroll position.
+- [Local Model Limiter — Stale-Slot Reclamation Race](gotchas/local-model-limiter-stale-slot-race.md) - TOCTOU race in local model slot-lock stale reclamation: reaper can delete a live lock between Stat and Remove, breaking MaxParallel limits
 - [Skill Tool Test Fixture Gap — expectedBuiltinTools Missing load_skill](gotchas/skill-tool-test-fixture-gap.md) - expectedBuiltinTools in tool_test.go only lists "skill" but InitBuiltinTools also registers "load_skill" as a second alias, causing a stale test failure.
 - [Subagent Feedback-Loop Guard (task tool)](gotchas/subagent-feedback-loop-guard.md) - The task/subagent dispatch refuses consecutive same-type launches without new user input to break runaway feedback loops; vary the agent type or wait for user input.
 
@@ -35,8 +37,10 @@ okf_version: 0.1
 - [okf/csharp/derived/csharp.mimo-v2.5.SKILL.md](okf/csharp/derived/csharp.mimo-v2.5.SKILL.md) - Corrective C# knowledge for mimo-v2.5, targeting the nullable-reference/ record-equality and pattern-matching gaps this model showed on the closed-book csharp benchmark (record class mutability, switch expression exhaustiveness, property-pattern syntax, `is` binding scope).
 
 - [okf/csharp/scores/mimo-v2.5.md](okf/csharp/scores/mimo-v2.5.md)
+- [okf/csharp/scores/muse-spark-1.2.md](okf/csharp/scores/muse-spark-1.2.md)
 - [okf/csharp/scores/tencent__hy3.md](okf/csharp/scores/tencent__hy3.md)
 - [okf/dotnet/scores/mimo-v2.5.md](okf/dotnet/scores/mimo-v2.5.md)
+- [okf/dotnet/scores/muse-spark-1.2.md](okf/dotnet/scores/muse-spark-1.2.md)
 - [okf/dotnet/scores/tencent__hy3.md](okf/dotnet/scores/tencent__hy3.md)
 - [okf/elixir/derived/elixir.tencent__hy3.SKILL.md](okf/elixir/derived/elixir.tencent__hy3.SKILL.md) - Corrective Elixir knowledge for tencent/hy3, targeting the pattern-matching gaps this model showed on the closed-book elixir benchmark (guard restrictions, the FunctionClauseError / MatchError failure modes, and the "match is not assignment" framing).
 
@@ -49,9 +53,11 @@ okf_version: 0.1
 - [okf/golang/scores/tencent__hy3.md](okf/golang/scores/tencent__hy3.md)
 - [okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md](okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md) - Corrective NestJS guidance for the exact area mimo-v2.5 tests weak on (shutdown/lifecycle hook order and triggers). Loaded only in NestJS repos when this exact model is active.
 - [okf/nestjs/scores/mimo-v2.5.md](okf/nestjs/scores/mimo-v2.5.md)
+- [okf/nestjs/scores/muse-spark-1.2.md](okf/nestjs/scores/muse-spark-1.2.md)
 - [okf/nestjs/scores/tencent__hy3.md](okf/nestjs/scores/tencent__hy3.md)
 - [okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md](okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md) - Corrective Next.js App Router guidance for the exact area mimo-v2.5 tests weak on (metadata). Loaded only in Next.js repos when this exact model is active.
 - [okf/nextjs/scores/mimo-v2.5.md](okf/nextjs/scores/mimo-v2.5.md)
+- [okf/nextjs/scores/muse-spark-1.2.md](okf/nextjs/scores/muse-spark-1.2.md)
 - [okf/nextjs/scores/tencent__hy3.md](okf/nextjs/scores/tencent__hy3.md)
 - [okf/php/scores/mimo-v2.5.md](okf/php/scores/mimo-v2.5.md)
 - [okf/php/scores/muse-spark-1.2.md](okf/php/scores/muse-spark-1.2.md)
@@ -62,11 +68,14 @@ okf_version: 0.1
 - [okf/react/derived/react.claude-opus-4-8.SKILL.md](okf/react/derived/react.claude-opus-4-8.SKILL.md) - Corrective React guidance for the exact areas claude-opus-4-8 tests weak on (RSC boundaries, Suspense, refs). Loaded only in React repos when this exact model is active.
 - [okf/react/scores/claude-opus-4-8.md](okf/react/scores/claude-opus-4-8.md)
 - [okf/react/scores/mimo-v2.5.md](okf/react/scores/mimo-v2.5.md)
+- [okf/react/scores/muse-spark-1.2.md](okf/react/scores/muse-spark-1.2.md)
 - [okf/react/scores/tencent__hy3.md](okf/react/scores/tencent__hy3.md)
 - [okf/ror/derived/ror.mimo-v2.5.SKILL.md](okf/ror/derived/ror.mimo-v2.5.SKILL.md) - Corrective Rails migrations/schema guidance for the exact gaps mimo-v2.5 tests weak on — the purpose of the schema.rb/structure.sql dump, and the two classic dangerous-migration patterns on large production tables (locking column defaults/NOT NULL, and index builds). Loaded only in Rails repos when this exact model is active.
 - [okf/ror/scores/mimo-v2.5.md](okf/ror/scores/mimo-v2.5.md)
+- [okf/ror/scores/muse-spark-1.2.md](okf/ror/scores/muse-spark-1.2.md)
 - [okf/ror/scores/tencent__hy3.md](okf/ror/scores/tencent__hy3.md)
 - [okf/ruby/scores/mimo-v2.5.md](okf/ruby/scores/mimo-v2.5.md)
+- [okf/ruby/scores/muse-spark-1.2.md](okf/ruby/scores/muse-spark-1.2.md)
 - [okf/ruby/scores/tencent__hy3.md](okf/ruby/scores/tencent__hy3.md)
 - [okf/rust/scores/mimo-v2.5.md](okf/rust/scores/mimo-v2.5.md)
 - [okf/rust/scores/muse-spark-1.2.md](okf/rust/scores/muse-spark-1.2.md)
@@ -121,9 +130,11 @@ okf_version: 0.1
 - [conduct.tencent__hy3.SKILL.md](okf/conduct/derived/conduct.tencent__hy3.SKILL.md)
 - [questions.md](okf/conduct/questions.md)
 - [mimo-v2.5.md](okf/csharp/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/csharp/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/csharp/answers/tencent__hy3.md)
 - [questions.md](okf/csharp/questions.md)
 - [mimo-v2.5.md](okf/dotnet/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/dotnet/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/dotnet/answers/tencent__hy3.md)
 - [questions.md](okf/dotnet/questions.md)
 - [mimo-v2.5.md](okf/elixir/answers/mimo-v2.5.md)
@@ -136,9 +147,11 @@ okf_version: 0.1
 - [tencent__hy3.md](okf/golang/answers/tencent__hy3.md)
 - [questions.md](okf/golang/questions.md)
 - [mimo-v2.5.md](okf/nestjs/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/nestjs/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/nestjs/answers/tencent__hy3.md)
 - [questions.md](okf/nestjs/questions.md)
 - [mimo-v2.5.md](okf/nextjs/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/nextjs/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/nextjs/answers/tencent__hy3.md)
 - [questions.md](okf/nextjs/questions.md)
 - [mimo-v2.5.md](okf/php/answers/mimo-v2.5.md)
@@ -150,13 +163,16 @@ okf_version: 0.1
 - [tencent__hy3.md](okf/python/answers/tencent__hy3.md)
 - [questions.md](okf/python/questions.md)
 - [mimo-v2.5.md](okf/react/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/react/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/react/answers/tencent__hy3.md)
 - [questions.md](okf/react/questions.md)
 - [README.md](okf/react/scores/README.md)
 - [mimo-v2.5.md](okf/ror/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/ror/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/ror/answers/tencent__hy3.md)
 - [questions.md](okf/ror/questions.md)
 - [mimo-v2.5.md](okf/ruby/answers/mimo-v2.5.md)
+- [muse-spark-1.2.md](okf/ruby/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/ruby/answers/tencent__hy3.md)
 - [questions.md](okf/ruby/questions.md)
 - [mimo-v2.5.md](okf/rust/answers/mimo-v2.5.md)
@@ -213,6 +229,7 @@ okf_version: 0.1
 - [2026-08-12-multiproject-event-architecture-design.md](superpowers/specs/2026-08-12-multiproject-event-architecture-design.md)
 - [2026-08-18-debug-helper-design.md](superpowers/specs/2026-08-18-debug-helper-design.md)
 - [2026-08-19-desktop-sharing-design.md](superpowers/specs/2026-08-19-desktop-sharing-design.md)
+- [2026-08-20-desktop-profiles-sparse-design.md](superpowers/specs/2026-08-20-desktop-profiles-sparse-design.md)
 - [2026-08-20-shared-lsp-broker-design.md](superpowers/specs/2026-08-20-shared-lsp-broker-design.md)
 - [telegram-bot.md](telegram-bot.md)
 - [web-desktop-parity-todo.md](web-desktop-parity-todo.md)
