@@ -77,6 +77,88 @@ describe("projectStore tab actions across projects", () => {
     expect(tabs.find((t) => t.id === "sess-real")?.title).toBe("Real title");
     expect(tabs.find((t) => t.id === "new-1")).toBeUndefined();
   });
+
+  it("an auto title (manual: false/omitted) never overwrites a manually renamed tab", async () => {
+    const { result } = setup();
+    await act(async () => {
+      result.current.dispatch({ type: "SET_ACTIVE_PROJECT", project: testProjectA });
+      result.current.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "sess-a", projectPath: "/proj-a", title: "old", activeSubTab: "chat" },
+      });
+      result.current.dispatch({
+        type: "UPDATE_TAB_TITLE",
+        id: "sess-a",
+        title: "My Custom Name",
+        manual: true,
+      });
+      // Simulate a later background status broadcast carrying a generated title.
+      result.current.dispatch({
+        type: "UPDATE_TAB_TITLE",
+        id: "sess-a",
+        title: "LLM generated title",
+      });
+    });
+    await act(async () => {});
+    expect(result.current.state.tabsByProject["/proj-a"][0].title).toBe(
+      "My Custom Name",
+    );
+  });
+
+  it("a second explicit rename (manual: true) can still override a prior manual rename", async () => {
+    const { result } = setup();
+    await act(async () => {
+      result.current.dispatch({ type: "SET_ACTIVE_PROJECT", project: testProjectA });
+      result.current.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "sess-a", projectPath: "/proj-a", title: "old", activeSubTab: "chat" },
+      });
+      result.current.dispatch({
+        type: "UPDATE_TAB_TITLE",
+        id: "sess-a",
+        title: "First rename",
+        manual: true,
+      });
+      result.current.dispatch({
+        type: "UPDATE_TAB_TITLE",
+        id: "sess-a",
+        title: "Second rename",
+        manual: true,
+      });
+    });
+    await act(async () => {});
+    expect(result.current.state.tabsByProject["/proj-a"][0].title).toBe(
+      "Second rename",
+    );
+  });
+
+  it("UPDATE_TAB_ID preserves a manually-renamed temp tab's title instead of the rekey's newTitle", async () => {
+    const { result } = setup();
+    await act(async () => {
+      result.current.dispatch({ type: "SET_ACTIVE_PROJECT", project: testProjectA });
+      result.current.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "new-1", projectPath: "/proj-a", title: "New session", activeSubTab: "chat" },
+      });
+      result.current.dispatch({
+        type: "UPDATE_TAB_TITLE",
+        id: "new-1",
+        title: "Renamed before first message",
+        manual: true,
+      });
+      result.current.dispatch({
+        type: "UPDATE_TAB_ID",
+        oldId: "new-1",
+        newId: "sess-real",
+        newTitle: "New session",
+      });
+    });
+    await act(async () => {});
+    const tabs = result.current.state.tabsByProject["/proj-a"];
+    expect(tabs.find((t) => t.id === "sess-real")?.title).toBe(
+      "Renamed before first message",
+    );
+  });
 });
 
 describe("projectStore session sub-tabs", () => {

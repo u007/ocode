@@ -348,8 +348,12 @@ func TestBashToolForegroundRegistersWithSupervisor(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(sup.Snapshot()) == 0 {
+	records := sup.Snapshot()
+	if len(records) == 0 {
 		t.Fatal("expected foreground bash command to register with supervisor")
+	}
+	if records[0].PID <= 1 {
+		t.Fatalf("foreground supervisor record PID = %d, want a live process", records[0].PID)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

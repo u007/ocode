@@ -10,8 +10,18 @@
 
 ## 2026-08-26
 
+* **Update**: Foreground Bash Commands — Parent-Death Protection Before Start ([gotchas/foreground-bash-parent-death-protection.md](/gotchas/foreground-bash-parent-death-protection.md))
+* **Update**: Foreground Bash Commands — Parent-Death Protection Before Start ([gotchas/foreground-bash-parent-death-protection.md](/gotchas/foreground-bash-parent-death-protection.md))
+* **Update**: Foreground Bash Commands — Parent-Death Protection Before Start ([gotchas/foreground-bash-parent-death-protection.md](/gotchas/foreground-bash-parent-death-protection.md))
+* **Update**: Foreground Bash Commands — Parent-Death Protection Before Start ([gotchas/foreground-bash-parent-death-protection.md](/gotchas/foreground-bash-parent-death-protection.md))
+* **Update**: Foreground Bash Commands — Parent-Death Protection Before Start ([gotchas/foreground-bash-parent-death-protection.md](/gotchas/foreground-bash-parent-death-protection.md))
+* **Creation**: Bubble Tea Cleanup Race — Orphaned Goroutines on Shutdown ([gotchas/bubbletea-cleanup-race.md](/gotchas/bubbletea-cleanup-race.md))
+* **Creation**: Foreground Bash Commands — Parent-Death Protection Before Start ([gotchas/foreground-bash-parent-death-protection.md](/gotchas/foreground-bash-parent-death-protection.md))
+* **Creation**: Agent Replacement — Input Queuing & Stream Event Epochs ([gotchas/agent-replacement-input-queuing.md](/gotchas/agent-replacement-input-queuing.md))
 * **Creation**: AIHubMix Test — Global Cache State Leakage ([gotchas/aihubmix-test-cache-leak.md](/gotchas/aihubmix-test-cache-leak.md))
 * **Creation**: Local Model Limiter — Stale-Slot Reclamation Race ([gotchas/local-model-limiter-stale-slot-race.md](/gotchas/local-model-limiter-stale-slot-race.md))
+* **Creation**: Local Model Auto-Start Hijacks the Controlling Terminal ([gotchas/local-model-tty-hijack.md](/gotchas/local-model-tty-hijack.md))
+* **Creation**: run_in_background Bash Commands Orphaned on Force-Killed ocode ([gotchas/background-bash-orphan-on-force-kill.md](/gotchas/background-bash-orphan-on-force-kill.md))
 ## 2026-08-20
 
 * **Creation**: Shared LSP Broker Server-State and Routing Gotchas ([architecture/lsp-broker-shared-server-gotchas.md](/architecture/lsp-broker-shared-server-gotchas.md))

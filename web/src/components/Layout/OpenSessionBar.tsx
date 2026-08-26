@@ -3,6 +3,7 @@ import { useChatDispatch, useChatState, getSessionSlice } from "../../stores/cha
 import { useProjectState } from "../../stores/projectStore";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
+import { cancelLiveDeltas } from "../../lib/sessionEvents";
 import { api } from "../../api/client";
 import type { SessionSlice } from "../../stores/chatStore";
 import { X, List, Plus, Loader2 } from "lucide-react";
@@ -42,7 +43,7 @@ export default function OpenSessionBar() {
     const title = editValue.trim();
     setEditingTabId(null);
     if (!title) return;
-    projectDispatch({ type: "UPDATE_TAB_TITLE", id: tabId, title });
+    projectDispatch({ type: "UPDATE_TAB_TITLE", id: tabId, title, manual: true });
     // Unsaved ("new-") tabs have no session on the server yet — persist the
     // title locally only; it's sent once the session is created.
     if (tabId.startsWith("new-")) return;
@@ -55,6 +56,7 @@ export default function OpenSessionBar() {
     e.stopPropagation();
     closeSessionTab(tabId);
     chatDispatch({ type: "RESET", sessionId: tabId });
+    cancelLiveDeltas(tabId);
     clearQueue(tabId);
   }, [closeSessionTab, chatDispatch]);
 

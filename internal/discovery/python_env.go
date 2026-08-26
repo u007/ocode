@@ -58,7 +58,9 @@ func mlxPythonPath() string {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		const marker = "__OCODE_PATH__"
-		out, err := exec.CommandContext(ctx, shell, "-ilc", "echo "+marker+"; printf '%s' \"$PATH\"").Output()
+		cmd := exec.CommandContext(ctx, shell, "-ilc", "echo "+marker+"; printf '%s' \"$PATH\"")
+		detachFromControllingTTY(cmd)
+		out, err := cmd.Output()
 		if err != nil {
 			return
 		}

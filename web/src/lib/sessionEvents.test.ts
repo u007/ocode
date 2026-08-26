@@ -3,6 +3,8 @@ import {
   routeBusEnvelope,
   reconcileOpenSessions,
   RECONCILE_PAGE_SIZE,
+  LIVE_DELTA_FLUSH_MS,
+  cancelLiveDeltas,
   type SessionEventRouter,
 } from "./sessionEvents";
 import type { BusEnvelope } from "./eventBus";
@@ -45,14 +47,74 @@ describe("routeBusEnvelope", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("routes chat events to the open session's slice", () => {
+    vi.useFakeTimers();
     const { router, getState } = makeRouter(["s1"]);
     routeBusEnvelope(env("user_message", { data: { content: "hi" } }), router);
     routeBusEnvelope(env("text", { data: { delta: "hel" } }), router);
     routeBusEnvelope(env("text", { data: { delta: "lo" } }), router);
+    // isStreaming flips synchronously; the delta text itself is coalesced.
+    expect(getState().sessions["s1"].isStreaming).toBe(true);
+    vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS);
     const slice = getState().sessions["s1"];
     expect(slice.messages[0]).toMatchObject({ role: "user", content: "hi" });
     expect(slice.live).toEqual([{ kind: "text", text: "hello" }]);
-    expect(slice.isStreaming).toBe(true);
+    vi.useRealTimers();
+  });
+
+  // Guards the fix for the desktop-app CPU spike: a reasoning stream can
+  // emit far more, smaller deltas than plain text — without coalescing, each
+  // one dispatched (and re-rendered) individually. See TODO.md's TUI
+  // precedent for the identical class of bug.
+  describe("thinking/text delta coalescing", () => {
+    afterEach(() => vi.useRealTimers());
+
+    it("coalesces many rapid deltas into a single dispatch per flush interval", () => {
+      vi.useFakeTimers();
+      const { router, actions, getState } = makeRouter(["s1"]);
+      for (let i = 0; i < 50; i++) {
+        routeBusEnvelope(env("thinking", { data: { delta: `${i} ` } }), router);
+      }
+      const liveDeltaCountBeforeFlush = actions.filter((a) => a.type === "LIVE_DELTA").length;
+      expect(liveDeltaCountBeforeFlush).toBe(0);
+      vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS);
+      const liveDeltaCountAfterFlush = actions.filter((a) => a.type === "LIVE_DELTA").length;
+      expect(liveDeltaCountAfterFlush).toBe(1);
+      const expected = Array.from({ length: 50 }, (_, i) => `${i} `).join("");
+      expect(getState().sessions["s1"].live).toEqual([{ kind: "thinking", text: expected }]);
+    });
+
+    it("flushes a pending delta immediately when the turn ends, losing no text", () => {
+      vi.useFakeTimers();
+      const { router, getState } = makeRouter(["s1"]);
+      routeBusEnvelope(env("thinking", { data: { delta: "partial" } }), router);
+      // turn_done fires before the flush timer would have — must not drop it.
+      routeBusEnvelope(env("turn_done", { data: {} }), router);
+      expect(getState().sessions["s1"].live).toEqual([{ kind: "thinking", text: "partial" }]);
+      expect(getState().sessions["s1"].isStreaming).toBe(false);
+    });
+
+    it("flushes a pending delta immediately when a messages snapshot lands", () => {
+      vi.useFakeTimers();
+      const { router, getState } = makeRouter(["s1"]);
+      routeBusEnvelope(env("text", { data: { delta: "partial" } }), router);
+      routeBusEnvelope(env("messages", { data: [{ role: "assistant", content: "final" }] }), router);
+      // The turn-boundary snapshot clears `live` regardless — this asserts the
+      // buffered delta's now-cancelled timer doesn't fire later and resurrect
+      // a stray live block after the snapshot committed.
+      const slice = getState().sessions["s1"];
+      expect(slice.live).toEqual([]);
+      vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS * 2);
+      expect(getState().sessions["s1"].live).toEqual([]);
+    });
+
+    it("cancelLiveDeltas drops a pending buffer without dispatching (tab close)", () => {
+      vi.useFakeTimers();
+      const { router, actions } = makeRouter(["s1"]);
+      routeBusEnvelope(env("thinking", { data: { delta: "x" } }), router);
+      cancelLiveDeltas("s1");
+      vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS * 2);
+      expect(actions.some((a) => a.type === "LIVE_DELTA")).toBe(false);
+    });
   });
 
   it("permission_check surfaces and clears a status live part", () => {

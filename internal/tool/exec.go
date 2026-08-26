@@ -141,7 +141,13 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 		if t.Procs == nil {
 			return "", fmt.Errorf("background execution unavailable: no process registry")
 		}
-		p := t.Procs.StartBackground(params.Command)
+		// Wrapped so the child self-terminates (polling kill -0 on ocode's
+		// PID) if ocode is force-killed and never gets to run its own
+		// graceful-shutdown cleanup — see ParentMonitorWrap's doc comment.
+		// StartBackgroundDisplay keeps bash_output/kill_shell listings
+		// showing the command the caller actually asked for, not the
+		// monitor-wrapper shell around it.
+		p := t.Procs.StartBackgroundDisplay(WrapWithParentMonitor(params.Command), params.Command)
 		return fmt.Sprintf("Started background process %s. Poll with bash_output(id=%q), stop with kill_shell(id=%q).", p.ID, p.ID, p.ID), nil
 	}
 
@@ -165,11 +171,20 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 		}
 	}()
 
+	command := params.Command
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(ctx, "cmd", "/C", params.Command)
 	} else {
-		cmd = exec.CommandContext(ctx, "bash", "-c", params.Command)
+		// Wrap before Start, rather than when the command is promoted. A
+		// foreground command may become a background command after it has
+		// already started; starting the monitor here means both paths retain
+		// the same parent-death protection without interrupting streaming or
+		// replacing the process that the registry and supervisor track.
+		if t.Procs != nil {
+			command = WrapWithParentMonitor(params.Command)
+		}
+		cmd = exec.CommandContext(ctx, "bash", "-c", command)
 		setProcGroup(cmd)
 	}
 

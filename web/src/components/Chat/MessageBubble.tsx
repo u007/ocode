@@ -1,3 +1,4 @@
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message } from "../../api/types";
@@ -124,7 +125,7 @@ export function AssistantText({ content }: { content: string }) {
   );
 }
 
-export default function MessageBubble({ message, highlight = "", toolName = "" }: Props) {
+function MessageBubble({ message, highlight = "", toolName = "" }: Props) {
   // Tool result message (role "tool"): no tool name is carried on the message
   // itself, only tool_call_id — the caller resolves toolName from that.
   if (message.role === "tool") {
@@ -177,3 +178,10 @@ export default function MessageBubble({ message, highlight = "", toolName = "" }
 
   return <AssistantText content={message.content} />;
 }
+
+// Historical messages don't change once committed, but every LIVE_DELTA
+// dispatched during streaming (thinking tokens included) creates a new
+// ChatPanel render pass. Without memo, each of those re-runs ReactMarkdown
+// for every prior bubble in the session — the CPU cost that made "thinking"
+// streams (many more, smaller deltas than plain text) visibly spike CPU.
+export default memo(MessageBubble);

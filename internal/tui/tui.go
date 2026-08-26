@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/mattn/go-isatty"
 )
 
 // RunOptions controls startup behavior of the TUI. Fields are zero-value
@@ -23,7 +24,20 @@ type RunOptions struct {
 	WebFS          fs.FS  // Embedded web assets for /rc command
 }
 
+// errNoTTY is returned when stdin/stdout aren't attached to a terminal.
+// Bubbletea itself detects this too, but only after opening /dev/tty
+// directly and failing with an opaque internal error ("could not open TTY:
+// open /dev/tty: device not configured") that gives the user no indication
+// the TUI simply can't run in their current context (piped output, a
+// script, cron/CI, or another tool's non-interactive shell).
+var errNoTTY = fmt.Errorf("no interactive terminal detected; run ocode from a terminal app (Terminal, iTerm2, etc.), or use `ocode run <prompt>` for non-interactive/headless use")
+
 func Run(opts RunOptions) error {
+	if !isatty.IsTerminal(os.Stdin.Fd()) || !isatty.IsTerminal(os.Stdout.Fd()) {
+		fmt.Fprintf(os.Stderr, "ocode: %v\n", errNoTTY)
+		return errNoTTY
+	}
+
 	// Redirect the standard library logger into the debug panel before anything
 	// runs. Once bubbletea enters the alt-screen, any stray log/os.Stderr write
 	// paints over the frame and corrupts it; routing log here keeps those
@@ -32,6 +46,8 @@ func Run(opts RunOptions) error {
 	log.SetOutput(debugLogWriter{})
 
 	m := newModel(opts)
+
+	reclaimTTYForeground()
 
 	// If an explicitly requested session (-session / -continue) failed to
 	// load, abort before the TUI starts. Continuing here would silently open

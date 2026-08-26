@@ -27,9 +27,15 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/bundled"
 	"github.com/u007/ocode/internal/desktop"
+	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/version"
 	"github.com/u007/ocode/web"
+	// Register provider plugins in the desktop binary as well as the CLI. Without
+	// these side-effect imports, OAuth-backed OpenAI requests fall through to the
+	// API-key endpoint and ChatGPT tokens fail with missing_scope.
+	_ "github.com/u007/ocode/internal/plugin/codex"
+	_ "github.com/u007/ocode/internal/plugin/grok"
 )
 
 //go:embed all:embedded-assets
@@ -39,6 +45,20 @@ var embeddedAssets embed.FS
 var appIcon []byte
 
 func main() {
+	// Hidden subcommand: internal/lsp/manager.go's spawnDaemonProcess re-execs
+	// os.Executable() with "lsp-daemon" to start a detached broker. In this
+	// binary os.Executable() resolves to ocode-desktop itself, so without this
+	// dispatch the child falls straight through to the Wails bootstrap below
+	// and opens a second full desktop window instead of running the daemon.
+	// Mirrors the "lsp-daemon" case in the root cmd/ocode main().
+	if len(os.Args) > 1 && os.Args[1] == "lsp-daemon" {
+		if err := lsp.RunDaemon(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// The desktop shell hosts the web UI, so resume a requested session by
 	// navigating to the same session route used by the web application.
 	var sessionID string

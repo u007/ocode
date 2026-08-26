@@ -34,6 +34,73 @@ export interface SessionEventRouter {
   getState: () => ChatState;
 }
 
+// Coalesces high-frequency "thinking"/"text" deltas into fixed-interval
+// flushes instead of dispatching (and re-rendering the live stream) once per
+// SSE frame. Reasoning streams in particular can emit many small deltas per
+// second; without this, each one forces a full React render + reflow of the
+// growing live block. 90ms mirrors the TUI's own fix for the identical
+// problem (see TODO.md "TUI streaming render: residual O(N) viewport cost" —
+// coalescing its streaming render cadence to 90ms halved in-flight CPU with
+// no perceptible animation loss).
+export const LIVE_DELTA_FLUSH_MS = 90;
+interface PendingDelta {
+  sessionId: string;
+  kind: "thinking" | "text";
+  text: string;
+  timer: ReturnType<typeof setTimeout>;
+}
+const pendingDeltas = new Map<string, PendingDelta>();
+
+function bufferLiveDelta(
+  sessionId: string,
+  kind: "thinking" | "text",
+  delta: string,
+  dispatch: (action: ChatAction) => void,
+): void {
+  const key = `${sessionId}:${kind}`;
+  const existing = pendingDeltas.get(key);
+  if (existing) {
+    existing.text += delta;
+    return;
+  }
+  const buf: PendingDelta = {
+    sessionId,
+    kind,
+    text: delta,
+    timer: setTimeout(() => {
+      pendingDeltas.delete(key);
+      dispatch({ type: "LIVE_DELTA", sessionId, kind, delta: buf.text });
+    }, LIVE_DELTA_FLUSH_MS),
+  };
+  pendingDeltas.set(key, buf);
+}
+
+/** Cancel any buffered thinking/text deltas for a session without flushing
+ *  them. Call when a session's slice is torn down (tab closed) — an
+ *  unflushed buffer's timer would otherwise fire after RESET and recreate a
+ *  phantom slice for a session nothing else references anymore. */
+export function cancelLiveDeltas(sessionId: string): void {
+  for (const [key, buf] of pendingDeltas) {
+    if (buf.sessionId !== sessionId) continue;
+    clearTimeout(buf.timer);
+    pendingDeltas.delete(key);
+  }
+}
+
+/** Flush any buffered thinking/text deltas for a session immediately. Must be
+ *  called before any dispatch that replaces or clears `live` (the "messages"
+ *  turn-boundary snapshot, turn_done, turn_error) — otherwise a buffered
+ *  delta's delayed flush would land after `live` was already reset, briefly
+ *  reintroducing a stray live block after the turn visually completed. */
+function flushLiveDeltas(sessionId: string, dispatch: (action: ChatAction) => void): void {
+  for (const [key, buf] of pendingDeltas) {
+    if (buf.sessionId !== sessionId) continue;
+    clearTimeout(buf.timer);
+    pendingDeltas.delete(key);
+    dispatch({ type: "LIVE_DELTA", sessionId, kind: buf.kind, delta: buf.text });
+  }
+}
+
 /** Session-scoped events that must carry a session id to be routed. */
 const SESSION_SCOPED_EVENTS = new Set([
   "user_message",
@@ -155,12 +222,14 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
   }
   if (event === "turn_done") {
     return routeSessionScoped(r, env, eventSessionId, (sessionId) => {
+      flushLiveDeltas(sessionId, r.dispatch);
       r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
       r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
     });
   }
   if (event === "turn_error") {
     return routeSessionScoped(r, env, eventSessionId, (sessionId) => {
+      flushLiveDeltas(sessionId, r.dispatch);
       r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
       r.dispatch({
         type: "SET_ERROR",
@@ -183,6 +252,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
   routeSessionScoped(r, env, eventSessionId, (sessionId) => {
     switch (event) {
       case "messages": {
+        flushLiveDeltas(sessionId, r.dispatch);
         const snapshot = Array.isArray(data)
           ? (data as Message[])
           : ((data as { messages?: Message[] }).messages ?? []);
@@ -227,22 +297,16 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
         return;
       case "thinking":
-        r.dispatch({
-          type: "LIVE_DELTA",
-          sessionId,
-          kind: "thinking",
-          delta: (data as { delta: string }).delta,
-        });
-        r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
+        bufferLiveDelta(sessionId, "thinking", (data as { delta: string }).delta, r.dispatch);
+        if (!r.getState().sessions[sessionId]?.isStreaming) {
+          r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
+        }
         return;
       case "text":
-        r.dispatch({
-          type: "LIVE_DELTA",
-          sessionId,
-          kind: "text",
-          delta: (data as { delta: string }).delta,
-        });
-        r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
+        bufferLiveDelta(sessionId, "text", (data as { delta: string }).delta, r.dispatch);
+        if (!r.getState().sessions[sessionId]?.isStreaming) {
+          r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
+        }
         return;
       case "tool_start":
         r.dispatch({

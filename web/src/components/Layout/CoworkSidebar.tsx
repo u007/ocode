@@ -18,7 +18,6 @@ import {
   AlertCircle,
   AlertTriangle,
   Puzzle,
-  FolderTree,
   Loader2,
 } from "lucide-react";
 
@@ -46,7 +45,6 @@ interface ConfigState {
   recapModel?: string;
   recapModelEnabled?: boolean;
   contextMaxTokens?: number;
-  extraDirs?: string[];
 }
 
 // Expanded/collapsed state of the sidebar sections. Persisted to localStorage
@@ -63,7 +61,6 @@ const DEFAULT_SECTIONS: Record<string, boolean> = {
   todo: false,
   git: true,
   permissions: true,
-  extra_dirs: false,
 };
 
 function loadExpandedSections(): Record<string, boolean> {
@@ -88,6 +85,7 @@ export default function CoworkSidebar({
   onModelClick,
   isMobile,
 }: Props) {
+  const [titleExpanded, setTitleExpanded] = useState(false);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [config, setConfig] = useState<ConfigState>({
     model: "",
@@ -150,13 +148,13 @@ export default function CoworkSidebar({
       if (res?.title) {
         const newStatus = { ...(tuiStatus || {}), session_title: res.title } as typeof tuiStatus;
         dispatch({ type: "SET_TUI_STATUS", sessionId, status: newStatus! });
-        projectState.dispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: res.title });
+        projectState.dispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: res.title, manual: true });
       } else if (sessionId) {
         // Fallback: refetch status so the SSE broadcast path still updates the tab
         const st = await api.getSessionStatus(sessionId).catch(() => null);
         if (st?.session_title) {
           dispatch({ type: "SET_TUI_STATUS", sessionId, status: st as any });
-          projectState.dispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: st.session_title });
+          projectState.dispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: st.session_title, manual: true });
         }
       }
     } catch (e) {
@@ -211,9 +209,8 @@ export default function CoworkSidebar({
       api.getPermissionModel().catch(() => null),
       api.getYolo().catch(() => null),
       api.getRecapConfig().catch(() => null),
-      api.getPathsConfig().catch(() => null),
     ])
-      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, pathsRes]) => {
+      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes]) => {
         setConfig({
           model: modelRes?.model || "",
           thinkingBudget: thinkingRes?.budget,
@@ -223,7 +220,6 @@ export default function CoworkSidebar({
           recapModel: recapRes?.recap_model,
           recapModelEnabled: recapRes?.recap_model_enabled,
           contextMaxTokens: modelRes?.context_max_tokens,
-          extraDirs: pathsRes?.extra_allowed_paths,
         });
       })
       .catch(console.error);
@@ -271,7 +267,6 @@ export default function CoworkSidebar({
       : 0;
   const lspServers: LSPStatus[] = tuiStatus?.lsp_servers ?? [];
   const modifiedFiles = tuiStatus?.modified_files ?? [];
-  const extraDirs: string[] = tuiStatus?.extra_allowed_paths ?? config.extraDirs ?? [];
 
   // On mobile the sidebar is always mounted (so it can slide); when closed it
   // sits off-screen. On desktop it is fully removed when closed so the chat
@@ -337,8 +332,11 @@ export default function CoworkSidebar({
         <div className="flex items-start gap-2">
           <span className="text-[#7DCFFF] font-bold text-sm leading-5 select-none" aria-hidden>◆</span>
           <span
-            className="flex-1 text-sm font-medium text-zinc-200 break-words leading-5 line-clamp-3"
-            title={displayTitle}
+            className={`flex-1 text-sm font-medium text-zinc-200 break-words leading-5 cursor-pointer ${
+              titleExpanded ? "" : "line-clamp-3"
+            }`}
+            title={titleExpanded ? "Click to collapse" : `${displayTitle}\n\n(click to expand)`}
+            onClick={() => setTitleExpanded((v) => !v)}
           >
             {displayTitle}
           </span>
@@ -784,48 +782,6 @@ export default function CoworkSidebar({
                     Agent will add items during execution
                   </div>
                 </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Extra Dirs Section — collapsed by default. Lists pre-authorized
-            extra_allowed_paths so the user can see which additional roots the
-            agent may access without re-prompting. */}
-        <div className="border-b border-zinc-700">
-          <button
-            onClick={() => toggleSection("extra_dirs")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
-          >
-            {expandedSections.extra_dirs ? (
-              <ChevronDown className="w-4 h-4" />
-            ) : (
-              <ChevronRight className="w-4 h-4" />
-            )}
-            <FolderTree className="w-4 h-4 text-teal-400" />
-            Extra Dirs
-            {extraDirs.length > 0 && (
-              <span className="ml-auto text-xs font-mono text-zinc-500">
-                {extraDirs.length}
-              </span>
-            )}
-          </button>
-          {expandedSections.extra_dirs && (
-            <div className="px-4 pb-3">
-              {extraDirs.length > 0 ? (
-                <ul className="space-y-1">
-                  {extraDirs.map((p) => (
-                    <li
-                      key={p}
-                      className="text-xs font-mono text-zinc-400 break-all"
-                      title={p}
-                    >
-                      {p}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="text-xs text-zinc-500">No extra dirs</div>
               )}
             </div>
           )}

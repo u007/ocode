@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
 
@@ -103,7 +103,12 @@ export function StatusBlock({ text }: { text: string }) {
 
 // ToolBlock renders a single tool call and (optionally) its result. The details
 // are expanded by default so tool output is visible immediately.
-export function ToolBlock({
+//
+// Memoized: in the live stream, every thinking/text delta replaces the whole
+// `live` array reference, which re-renders ChatPanel's `live.map(...)` and
+// would otherwise re-invoke every already-completed ToolBlock in the current
+// turn (each re-running its HighlightedCode effect) on every single token.
+export const ToolBlock = memo(function ToolBlock({
   tool,
   command,
   output,
@@ -194,4 +199,4 @@ export function ToolBlock({
       </div>
     </div>
   );
-}
+});

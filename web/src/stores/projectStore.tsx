@@ -10,6 +10,10 @@ export interface Tab {
   projectPath: string;
   title: string;
   activeSubTab: SessionSubTabId;
+  /** Set once the user explicitly renames this tab (double-click). Guards
+   *  against a later auto-generated title (status SSE broadcast) silently
+   *  overwriting the user's own choice. */
+  titleManual?: boolean;
 }
 
 interface ProjectState {
@@ -40,7 +44,7 @@ export type ProjectAction =
   | { type: "REMOVE_TAB"; id: string }
   | { type: "SET_ACTIVE_TAB"; id: string | null }
   | { type: "SET_TAB_SUB_TAB"; id: string; subTab: SessionSubTabId }
-  | { type: "UPDATE_TAB_TITLE"; id: string; title: string }
+  | { type: "UPDATE_TAB_TITLE"; id: string; title: string; manual?: boolean }
   | { type: "UPDATE_TAB_ID"; oldId: string; newId: string; newTitle?: string }
   | { type: "RESTORE_TABS"; tabsByProject: Record<string, Tab[]>; activeTabByProject: Record<string, string | null> }
   | { type: "SET_SESSION_PICKER"; open: boolean }
@@ -136,9 +140,14 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
     case "UPDATE_TAB_TITLE": {
       const ownerPath = findProjectPathForTab(state, action.id);
       if (!ownerPath) return state;
-      const list = state.tabsByProject[ownerPath].map((t) =>
-        t.id === action.id ? { ...t, title: action.title } : t
-      );
+      // An auto title (e.g. the generated-title status broadcast) must not
+      // clobber a title the user explicitly set — only an explicit rename
+      // (action.manual) may overwrite another manual title.
+      const list = state.tabsByProject[ownerPath].map((t) => {
+        if (t.id !== action.id) return t;
+        if (t.titleManual && !action.manual) return t;
+        return { ...t, title: action.title, titleManual: !!action.manual };
+      });
       return { ...state, tabsByProject: { ...state.tabsByProject, [ownerPath]: list } };
     }
     case "UPDATE_TAB_ID": {
@@ -147,7 +156,11 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
       const list = state.tabsByProject[ownerPath];
       const tab = list.find((t) => t.id === action.oldId);
       if (!tab) return state;
-      const newTab = { ...tab, id: action.newId, title: action.newTitle || tab.title };
+      const newTab = {
+        ...tab,
+        id: action.newId,
+        title: tab.titleManual ? tab.title : action.newTitle || tab.title,
+      };
       return {
         ...state,
         tabsByProject: {

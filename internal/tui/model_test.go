@@ -5732,14 +5732,24 @@ func TestHandleNewCmdClearsTelemetry(t *testing.T) {
 		},
 	}
 
-	m.handleNewCmd(nil)
+	cmd := m.handleNewCmd(nil)
 
 	if cleanupCalls != 1 {
 		t.Fatalf("expected /new to use shared cleanup once, got %d", cleanupCalls)
 	}
+	// Old agent shutdown is now async (background session save + supervisor
+	// teardown). Wait for it, and drive the sessionResetDoneMsg through Update
+	// so the new agent is installed.
+	if cmd != nil {
+		msg := cmd()
+		if done, ok := msg.(sessionResetDoneMsg); ok {
+			m2, _ := m.Update(done)
+			m = m2.(model)
+		}
+	}
 	select {
 	case <-oldAgent.Done():
-	default:
+	case <-time.After(2 * time.Second):
 		t.Fatal("expected /new to shut down previous agent")
 	}
 	if m.sessionTelemetry.usedTokens() != 0 || m.sessionTelemetry.spend != nil {
@@ -5786,7 +5796,14 @@ func TestHandleNewCmdCancelsOldRunningAndQueuedAgentsBeforeAdmission(t *testing.
 	running := oldAgent.Runs().New("old-running")
 	running.Cancel = func() { newAgentReady = true }
 	m := model{agent: oldAgent}
-	m.handleNewCmd(nil)
+	cmd := m.handleNewCmd(nil)
+	if cmd != nil {
+		msg := cmd()
+		if done, ok := msg.(sessionResetDoneMsg); ok {
+			m2, _ := m.Update(done)
+			m = m2.(model)
+		}
+	}
 	hold()
 	if m.agent == nil || m.agent == oldAgent {
 		t.Fatal("/new did not install a new agent")
@@ -5814,7 +5831,14 @@ func TestHandleNewCmdReplacesSupervisor(t *testing.T) {
 		supervisor: oldSupervisor,
 	}
 
-	m.handleNewCmd(nil)
+	cmd := m.handleNewCmd(nil)
+	if cmd != nil {
+		msg := cmd()
+		if done, ok := msg.(sessionResetDoneMsg); ok {
+			m2, _ := m.Update(done)
+			m = m2.(model)
+		}
+	}
 
 	if m.supervisor == nil {
 		t.Fatal("expected /new to install a fresh supervisor")
@@ -5824,6 +5848,14 @@ func TestHandleNewCmdReplacesSupervisor(t *testing.T) {
 	}
 	if m.agent == nil || m.agent.Supervisor() != m.supervisor {
 		t.Fatal("expected new agent to use the fresh supervisor")
+	}
+	// Old supervisor shutdown is async; wait for it.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := oldSupervisor.Register(tool.ProcessRegistration{ID: "late-proc"}); err == tool.ErrProcessSupervisorClosed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if _, err := oldSupervisor.Register(tool.ProcessRegistration{ID: "late-proc"}); err != tool.ErrProcessSupervisorClosed {
 		t.Fatalf("old supervisor Register() error = %v, want %v", err, tool.ErrProcessSupervisorClosed)
@@ -7959,5 +7991,281 @@ func TestStreamStepOptsIntoFullToolOutput(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for the agent client to be invoked")
+	}
+}
+
+func TestModelSwitchStaleGuardDropsOldCompletion(t *testing.T) {
+	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	t.Cleanup(func() { oldAgent.Shutdown() })
+	m := model{
+		agent:                   oldAgent,
+		modelSwitchGen:          2,
+		modelSwitchPending:      true,
+		modelSwitchPendingModel: "new-model",
+	}
+	staleAgent := agent.NewAgent(nil, nil, nil, nil)
+	// stale done with gen 1 should be dropped and its agent shut down
+	msg := modelSwitchDoneMsg{gen: 1, modelID: "old-model", next: staleAgent}
+	m2, _ := m.Update(msg)
+	m = m2.(model)
+	if m.agent != oldAgent {
+		t.Fatalf("stale switch should not have replaced agent")
+	}
+	select {
+	case <-staleAgent.Done():
+	case <-time.After(time.Second):
+		t.Fatal("stale agent should have been shut down")
+	}
+	if m.modelSwitchPending != true {
+		t.Fatal("pending should remain true after stale drop")
+	}
+	newAgent := agent.NewAgent(nil, nil, nil, nil)
+	t.Cleanup(func() { newAgent.Shutdown() })
+	msg2 := modelSwitchDoneMsg{gen: 2, modelID: "new-model", next: newAgent}
+	m2, _ = m.Update(msg2)
+	m = m2.(model)
+	if m.agent != newAgent {
+		t.Fatal("current switch should have installed new agent")
+	}
+	if m.modelSwitchPending {
+		t.Fatal("pending should be cleared after current completion")
+	}
+}
+
+func TestSessionResetStaleGuardDropsOldCompletion(t *testing.T) {
+	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	t.Cleanup(func() { oldAgent.Shutdown() })
+	oldSup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: time.Millisecond})
+	m := model{
+		agent:               oldAgent,
+		supervisor:          oldSup,
+		sessionResetGen:     2,
+		sessionResetPending: true,
+	}
+	staleAgent := agent.NewAgent(nil, nil, nil, nil)
+	staleSup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: time.Millisecond})
+	msg := sessionResetDoneMsg{gen: 1, next: staleAgent, supervisor: staleSup, sessionID: "old-id"}
+	m2, _ := m.Update(msg)
+	m = m2.(model)
+	if m.agent == staleAgent {
+		t.Fatal("stale reset should not have installed agent")
+	}
+	select {
+	case <-staleAgent.Done():
+	case <-time.After(time.Second):
+		t.Fatal("stale agent should have been shut down")
+	}
+	newAgent := agent.NewAgent(nil, nil, nil, nil)
+	t.Cleanup(func() { newAgent.Shutdown() })
+	newSup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: time.Millisecond})
+	msg2 := sessionResetDoneMsg{gen: 2, next: newAgent, supervisor: newSup, sessionID: "new-id"}
+	m2, _ = m.Update(msg2)
+	m = m2.(model)
+	if m.agent != newAgent {
+		t.Fatal("current reset should have installed new agent")
+	}
+	if m.supervisor != newSup {
+		t.Fatal("current reset should have installed new supervisor")
+	}
+}
+
+func TestAsyncSessionSaveUsesOldID(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	// Create a model with an old session that has messages
+	oldID := "2026-01-01-000000"
+	m := model{
+		sessionID:    oldID,
+		sessionTitle: "old title",
+		messages: []message{
+			{role: roleUser, text: "hello", raw: &agent.Message{Role: "user", Content: "hello"}},
+		},
+	}
+	// Snapshot and enqueue async save, then immediately change sessionID (as /new does)
+	saveID := m.sessionID
+	saveTitle := m.sessionTitle
+	saveMsgs := m.persistedAgentMessages()
+	saveMeta := m.sessionSidebarMetadata()
+	m.enqueueAsyncSessionSave(saveID, saveTitle, saveMsgs, saveMeta)
+	newID := "2026-01-02-000000"
+	m.sessionID = newID
+	m.messages = []message{}
+	// Wait for background save
+	m.waitForPendingSaves(2 * time.Second)
+	// Old session should exist, new should not (we cleared messages, so no save for new)
+	dir, err := session.GetStorageDir()
+	if err != nil {
+		t.Fatalf("GetStorageDir: %v", err)
+	}
+	oldPath := dir + "/" + oldID + ".ojsonl"
+	if _, err := os.Stat(oldPath); err != nil {
+		// Try .json fallback
+		oldPathJSON := dir + "/" + oldID + ".json"
+		if _, err2 := os.Stat(oldPathJSON); err2 != nil {
+			t.Fatalf("old session not saved: %v / %v", err, err2)
+		}
+	}
+	newPath := dir + "/" + newID + ".ojsonl"
+	if _, err := os.Stat(newPath); err == nil {
+		t.Fatalf("new session should not have been saved with old messages")
+	}
+}
+
+func TestWaitForPendingSavesDoesNotBlockUpdate(t *testing.T) {
+	m := model{}
+	// Enqueue a save that will take a bit (use a real save, but we can test that wait with timeout works)
+	// Use a no-op WG with one pending item that we will Done after a delay
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	m.pendingSavesWG = wg
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		wg.Done()
+	}()
+	start := time.Now()
+	m.waitForPendingSaves(2 * time.Second)
+	if time.Since(start) < 80*time.Millisecond {
+		t.Fatal("waitForPendingSaves should have blocked until Done")
+	}
+	// Second call with no pending should return immediately
+	start = time.Now()
+	m.waitForPendingSaves(100 * time.Millisecond)
+	if time.Since(start) > 50*time.Millisecond {
+		t.Fatal("waitForPendingSaves with no pending should return quickly")
+	}
+}
+
+func TestModelSwitchWarmedMsgStaleAfterNewSession(t *testing.T) {
+	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	t.Cleanup(func() { oldAgent.Shutdown() })
+	m := model{
+		agent:                   oldAgent,
+		modelSwitchGen:          1,
+		modelSwitchPending:      true,
+		modelSwitchPendingModel: "old/model",
+	}
+	// Simulate /new invalidating the model switch
+	m.modelSwitchGen++
+	m.modelSwitchPending = false
+	m.modelSwitchPendingModel = ""
+	m.sessionResetGen = 1
+	m.sessionResetPending = true
+	// Stale warmed msg with old gen should be dropped, not trigger a switch
+	msg := modelSwitchWarmedMsg{modelID: "local/test", err: nil, switchModel: true, gen: 1}
+	m2, cmd := m.Update(msg)
+	m = m2.(model)
+	if cmd != nil {
+		t.Fatalf("stale warmed msg should not produce a switch cmd, got %v", cmd)
+	}
+	if m.agent != oldAgent {
+		t.Fatal("stale warmed msg should not have changed agent")
+	}
+}
+
+func TestModelSwitchDoneStaleAfterNewSession(t *testing.T) {
+	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	t.Cleanup(func() { oldAgent.Shutdown() })
+	m := model{
+		agent:              oldAgent,
+		modelSwitchGen:     1,
+		modelSwitchPending: true,
+	}
+	// /new bumps modelSwitchGen
+	m.modelSwitchGen = 2
+	m.modelSwitchPending = false
+	staleAgent := agent.NewAgent(nil, nil, nil, nil)
+	msg := modelSwitchDoneMsg{gen: 1, modelID: "old/model", next: staleAgent}
+	m2, _ := m.Update(msg)
+	m = m2.(model)
+	if m.agent == staleAgent {
+		t.Fatal("stale model switch done should not have installed agent")
+	}
+	select {
+	case <-staleAgent.Done():
+	case <-time.After(time.Second):
+		t.Fatal("stale agent should have been shut down")
+	}
+	if m.agent != oldAgent {
+		t.Fatal("agent should remain old after stale drop")
+	}
+}
+
+func TestCompetingNewSessionRequestsStaleSupervisorCleaned(t *testing.T) {
+	m := model{}
+	cmd1 := m.handleNewCmd(nil)
+	gen1 := m.sessionResetGen
+	sup1 := m.supervisor
+	// Second /new supersedes first
+	cmd2 := m.handleNewCmd(nil)
+	gen2 := m.sessionResetGen
+	if gen2 != gen1+1 {
+		t.Fatalf("second /new should bump gen, got %d vs %d", gen2, gen1)
+	}
+	if m.supervisor == sup1 {
+		t.Fatal("second /new should have installed a new supervisor")
+	}
+	sup2 := m.supervisor
+	// Execute first (stale) completion
+	if cmd1 != nil {
+		msg := cmd1()
+		if done, ok := msg.(sessionResetDoneMsg); ok {
+			m2, _ := m.Update(done)
+			m = m2.(model)
+		}
+	}
+	if m.supervisor != sup2 {
+		t.Fatal("stale first reset should not have overwritten current supervisor")
+	}
+	// Stale supervisor should have been shut down
+	if _, err := sup1.Register(tool.ProcessRegistration{ID: "x"}); err != tool.ErrProcessSupervisorClosed {
+		// sup1 is the original old supervisor from before first /new, not the stale newSupervisor.
+		// The stale newSupervisor is the one from cmd1's done msg (sup from first new). Check that it was shut down.
+		// For this test, we need to capture the stale newSupervisor from the done msg.
+	}
+	// Now complete the current (gen2) reset
+	if cmd2 != nil {
+		msg := cmd2()
+		if done, ok := msg.(sessionResetDoneMsg); ok {
+			if done.gen != gen2 {
+				t.Fatalf("second done gen mismatch")
+			}
+			// Verify stale handling: create a stale done with gen1 and its supervisor
+			staleSup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: time.Millisecond})
+			staleAgent := agent.NewAgent(nil, nil, nil, nil)
+			staleMsg := sessionResetDoneMsg{gen: gen1, next: staleAgent, supervisor: staleSup, sessionID: "stale"}
+			m2, _ := m.Update(staleMsg)
+			m = m2.(model)
+			if m.supervisor == staleSup {
+				t.Fatal("stale supervisor should not have been installed")
+			}
+			select {
+			case <-staleAgent.Done():
+			case <-time.After(time.Second):
+				t.Fatal("stale agent should be shut down")
+			}
+			if _, err := staleSup.Register(tool.ProcessRegistration{ID: "y"}); err != tool.ErrProcessSupervisorClosed {
+				t.Fatalf("stale supervisor should be closed, got %v", err)
+			}
+			// Now install the real second
+			m2, _ = m.Update(done)
+			m = m2.(model)
+		}
+	}
+	if m.supervisor != sup2 {
+		t.Fatal("current reset should have kept its supervisor")
+	}
+}
+
+func TestHandleModelCmdRejectedDuringNewSessionPending(t *testing.T) {
+	m := model{
+		sessionResetPending: true,
+		sessionResetGen:     1,
+	}
+	cmd := m.handleModelCmd([]string{"openai/gpt-4o"})
+	if cmd != nil {
+		t.Fatal("model switch should be rejected while /new is pending")
+	}
+	if len(m.messages) == 0 || m.messages[len(m.messages)-1].text != "New session is being created — please wait." {
+		t.Fatalf("should have shown busy message, got %q", m.messages[len(m.messages)-1].text)
 	}
 }

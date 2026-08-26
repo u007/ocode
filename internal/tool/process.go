@@ -242,10 +242,23 @@ func (r *ProcessRegistry) onDoneCallback() func(*Process) {
 
 // StartBackground launches command detached and returns its Process record.
 func (r *ProcessRegistry) StartBackground(command string) *Process {
+	return r.StartBackgroundDisplay(command, command)
+}
+
+// StartBackgroundDisplay is StartBackground with the shown Command text
+// decoupled from the string actually executed — for callers (e.g. the bash
+// tool's run_in_background) that wrap the real command in scaffolding (see
+// WrapWithParentMonitor) but want bash_output/kill_shell listings, and the
+// supervisor's own record, to show the caller's original text. Set once at
+// construction, before p is published to r.procs or the supervisor, so the
+// "write-once, safe to read without holding mu" invariant Command shares
+// with ID and PID (see the Process struct's PID doc comment) still holds —
+// nothing may mutate Command after this point.
+func (r *ProcessRegistry) StartBackgroundDisplay(command, displayCommand string) *Process {
 	r.mu.Lock()
 	id := r.nextIDLocked()
 	supKey := r.supIDLocked(id)
-	p := &Process{ID: id, supKey: supKey, Command: command, Status: ProcRunning, StartedAt: time.Now(), notifyOnExit: true}
+	p := &Process{ID: id, supKey: supKey, Command: displayCommand, Status: ProcRunning, StartedAt: time.Now(), notifyOnExit: true}
 	r.procs[id] = p
 	r.order = append(r.order, id)
 	onDone := r.onDone
@@ -286,7 +299,7 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 	if sup != nil {
 		reg := ProcessRegistration{
 			ID:               supID,
-			Command:          command,
+			Command:          displayCommand,
 			Kind:             ProcessKindBackgroundBash,
 			Cmd:              cmd,
 			OwnsProcessGroup: runtime.GOOS != "windows",
@@ -358,6 +371,10 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 // RegisterForeground adds a running foreground bash command to the registry so
 // the UI can promote it to the background mid-execution.
 func (r *ProcessRegistry) RegisterForeground(command string, cmd *exec.Cmd, startedAt time.Time, waitFn func() error) (*Process, error) {
+	pid := 0
+	if cmd != nil && cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
 	r.mu.Lock()
 	id := r.nextIDLocked()
 	supKey := r.supIDLocked(id)
@@ -367,6 +384,7 @@ func (r *ProcessRegistry) RegisterForeground(command string, cmd *exec.Cmd, star
 		Command:     command,
 		Status:      ProcRunning,
 		StartedAt:   startedAt,
+		PID:         pid,
 		cmd:         cmd,
 		bgRequestCh: make(chan struct{}),
 	}

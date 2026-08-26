@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestBashTool_ForegroundLargeOutput exercises the pump/Wait race fix in
@@ -87,6 +88,55 @@ func TestBashTool_ExecuteStream(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("canonical result missing %q; got %q", want, out)
 		}
+	}
+}
+
+func TestBashTool_ForegroundTimeoutStopsTrackedCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses bash -c")
+	}
+	reg := NewProcessRegistry()
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	args, _ := json.Marshal(map[string]interface{}{"command": "printf 'before\\n'; sleep 30"})
+
+	out, err := (BashTool{Procs: reg}).ExecuteStreamCtx(ctx, args, nil)
+	if err != nil {
+		t.Fatalf("ExecuteStreamCtx returned error: %v", err)
+	}
+	if !strings.Contains(out, "Command timed out after") {
+		t.Fatalf("timeout result = %q", out)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for reg.RunningCount() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if running := reg.RunningCount(); running != 0 {
+		t.Fatalf("timed-out foreground command still running: %d", running)
+	}
+}
+
+func TestBashTool_ForegroundCancellationStopsTrackedCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses bash -c")
+	}
+	reg := NewProcessRegistry()
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	defer cancel()
+	args, _ := json.Marshal(map[string]interface{}{"command": "sleep 30"})
+
+	if _, err := (BashTool{Procs: reg}).ExecuteStreamCtx(ctx, args, nil); err != nil {
+		t.Fatalf("ExecuteStreamCtx returned error: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for reg.RunningCount() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if running := reg.RunningCount(); running != 0 {
+		t.Fatalf("cancelled foreground command still running: %d", running)
 	}
 }
 

@@ -20,9 +20,14 @@ okf_version: 0.1
 
 # gotchas
 
+- [Agent Replacement — Input Queuing & Stream Event Epochs](gotchas/agent-replacement-input-queuing.md) - Architectural decision and solution pattern for queuing user input during agent replacement and using stream event epochs to prevent stale events from mutating the new session.
 - [AIHubMix Test — Global Cache State Leakage](gotchas/aihubmix-test-cache-leak.md) - AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures
+- [Bubble Tea Cleanup Race — Orphaned Goroutines on Shutdown](gotchas/bubbletea-cleanup-race.md) - Bubble Tea runs tea.Cmd in untracked goroutines and does not wait for them during Program.Run shutdown, causing cleanup races with model-switch or /new commands that orphan agents or supervisors.
 - [ChatPanel Autoscroll Bounce/Freeze](gotchas/autoscroll-bounce.md) - Root cause analysis of the autoscroll bounce/freeze bug: smooth-scrolling every live token without at-bottom state tracking causes competing animations that lock up the scroll position.
+- [Foreground Bash Commands — Parent-Death Protection Before Start](gotchas/foreground-bash-parent-death-protection.md) - Foreground POSIX Bash commands must be wrapped with WrapWithParentMonitor before cmd.Start() to ensure promotion to background does not orphan processes; the monitor must be applied at spawn time, not at promotion time.
+- [Local Model Auto-Start Hijacks the Controlling Terminal](gotchas/local-model-tty-hijack.md) - A locally-spawned model server (Setpgid only, same session as ocode) can grab the terminal foreground process group via TIOCSPGRP, crashing the TUI and corrupting the whole shell session
 - [Local Model Limiter — Stale-Slot Reclamation Race](gotchas/local-model-limiter-stale-slot-race.md) - TOCTOU race in local model slot-lock stale reclamation: reaper can delete a live lock between Stat and Remove, breaking MaxParallel limits
+- [run_in_background Bash Commands Orphaned on Force-Killed ocode](gotchas/background-bash-orphan-on-force-kill.md) - Background bash commands started via the bash tool had no self-cleanup and would survive kill -9 on ocode; wrapped in the same parent-monitor mechanism local models already used
 - [Skill Tool Test Fixture Gap — expectedBuiltinTools Missing load_skill](gotchas/skill-tool-test-fixture-gap.md) - expectedBuiltinTools in tool_test.go only lists "skill" but InitBuiltinTools also registers "load_skill" as a second alias, causing a stale test failure.
 - [Subagent Feedback-Loop Guard (task tool)](gotchas/subagent-feedback-loop-guard.md) - The task/subagent dispatch refuses consecutive same-type launches without new user input to break runaway feedback loops; vary the agent type or wait for user input.
 

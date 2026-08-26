@@ -1,7 +1,7 @@
 import { act, render } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { ChatProvider, useChatState } from "../../stores/chatStore";
-import { RECONCILE_PAGE_SIZE, ROUTABLE_EVENTS } from "../../lib/sessionEvents";
+import { RECONCILE_PAGE_SIZE, ROUTABLE_EVENTS, LIVE_DELTA_FLUSH_MS } from "../../lib/sessionEvents";
 import SessionTabSync from "./SessionTabSync";
 
 const mockGetSessionState = vi.fn();
@@ -83,6 +83,7 @@ describe("SessionTabSync", () => {
   });
 
   it("routes a live 'text' envelope into the session's store slice", () => {
+    vi.useFakeTimers();
     tabsByProject = { "/proj": [{ id: "s1", title: "t" }] };
     const { getByTestId } = render(
       <ChatProvider>
@@ -97,8 +98,12 @@ describe("SessionTabSync", () => {
         seq: 1,
         data: { delta: "hello" },
       });
+      // Deltas are coalesced (see LIVE_DELTA_FLUSH_MS) instead of dispatched
+      // per SSE frame — advance past the flush interval to observe it.
+      vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS);
     });
     expect(getByTestId("text").textContent).toBe("hello");
+    vi.useRealTimers();
   });
 
   it("routes events for a tab opened after the initial mount (regression: openSessionIdsRef must not be swapped for a new Set)", () => {
@@ -121,6 +126,7 @@ describe("SessionTabSync", () => {
       </ChatProvider>,
     );
 
+    vi.useFakeTimers();
     act(() => {
       subscribed.get("text")?.({
         event: "text",
@@ -128,8 +134,10 @@ describe("SessionTabSync", () => {
         seq: 1,
         data: { delta: "hello" },
       });
+      vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS);
     });
     expect(getByTestId("text").textContent).toBe("hello");
+    vi.useRealTimers();
   });
 
   it("load-time reconcile fetches state + transcript once restored tabs appear", async () => {

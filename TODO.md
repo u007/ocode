@@ -1,5 +1,28 @@
 # TODO
 
+## Background bash commands promoted mid-flight can still orphan on force-kill (2026-08-26)
+
+Found while fixing the local-model-hijacks-the-tty startup crash
+(`internal/tui/tty_foreground_unix.go`, `internal/tool/proc_unix.go`).
+
+- [x] **Fixed**: `run_in_background: true` bash commands (`internal/tool/exec.go`,
+  `BashTool.ExecuteStreamCtx`) now go through `WrapWithParentMonitor` before
+  `StartBackground`, so they self-terminate (polling `kill -0` on ocode's PID)
+  within ~0.5s even if ocode is killed with SIGKILL and never runs its own
+  `supervisor.Shutdown`/`TerminateAll` cleanup. `p.Command` is reset to the
+  caller's original text afterward so `bash_output`/`kill_shell` listings still
+  show the real command, not the wrapper shell around it. Verified the wrapper
+  mechanism itself with a standalone repro (force-kill a fake parent, confirm
+  the wrapped child dies within ~1s) — see conversation, not committed as a
+  test since it exercises shell polling timing, not ocode code directly.
+- [x] **Fixed**: foreground commands are wrapped with `WrapWithParentMonitor` before
+  `cmd.Start()` in `BashTool.ExecuteStreamCtx`, so a command promoted to
+  background mid-flight retains parent-death protection without changing its
+  streaming pipes, timeout/cancellation path, registry record, supervisor
+  tracking, or process-group ownership. The integration test
+  `TestBashToolForegroundPromotionParentDeath` force-kills a helper process and
+  verifies that both the tracked monitor and promoted command terminate.
+
 ## Desktop anchors sessions at home dir when Finder-launched (2026-08-25)
 
 - [x] **Fixed (2026-08-25)**: `glob`/`grep`/`list` now anchor on `WithWorkDir` (`internal/tool/search.go:resolveSearchRoot`) and `MERGE_SNAPSHOT`/`ChatPanel` guard now keys only on `messages.length>0` (see `web/src/stores/chatStore.tsx` and `web/src/components/Chat/ChatPanel.tsx`).

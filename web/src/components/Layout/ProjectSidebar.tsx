@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useProjectState } from "../../stores/projectStore";
-import { useChatState, getSessionSlice } from "../../stores/chatStore";
+import { useChatState } from "../../stores/chatStore";
 import type { Project, ProjectGroup } from "../../api/types";
 import {
   DndContext,
@@ -423,7 +423,6 @@ interface Props {
 export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
   const {
     state,
-    activeTabId,
     selectProject,
     addProject,
     removeProject,
@@ -440,12 +439,6 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
   const [newPath, setNewPath] = useState("");
   const [browserOpen, setBrowserOpen] = useState(false);
   const [creatingGroup, setCreatingGroup] = useState(false);
-  const [extraDirsExpanded, setExtraDirsExpanded] = useState(false);
-  const chatState = useChatState();
-  const { tuiStatus } = getSessionSlice(chatState, activeTabId ?? undefined);
-  // TUI status is scoped to the active session/project. Do not fall back to
-  // the process-level paths config, which can belong to another project tab.
-  const extraDirs = tuiStatus?.extra_allowed_paths ?? [];
 
   const toggleGroupCollapse = useCallback((name: string, currentlyCollapsed: boolean) => {
     setGroupCollapsed(name, !currentlyCollapsed);
@@ -672,42 +665,6 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
           </DndContext>
         )}
       </ScrollArea>
-
-      {/* Extra Dirs — collapsed by default. Shows pre-authorized extra_allowed_paths */}
-      <div className="border-t border-border">
-        <button
-          onClick={() => setExtraDirsExpanded((v) => !v)}
-          className="flex items-center gap-2 w-full px-4 py-2.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-        >
-          {extraDirsExpanded ? (
-            <ChevronDown className="w-3.5 h-3.5" />
-          ) : (
-            <ChevronRight className="w-3.5 h-3.5" />
-          )}
-          <FolderTree className="w-3.5 h-3.5" />
-          Extra Dirs
-          {extraDirs.length > 0 && (
-            <span className="ml-auto text-[11px] font-mono text-muted-foreground">
-              {extraDirs.length}
-            </span>
-          )}
-        </button>
-        {extraDirsExpanded && (
-          <div className="px-4 pb-3">
-            {extraDirs.length > 0 ? (
-              <ul className="space-y-1">
-                {extraDirs.map((p) => (
-                  <li key={p} className="text-xs font-mono text-muted-foreground break-all" title={p}>
-                    {p}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="text-xs text-muted-foreground">No extra dirs</div>
-            )}
-          </div>
-        )}
-      </div>
 
       {/* Add project */}
       <div className="border-t border-border p-3">

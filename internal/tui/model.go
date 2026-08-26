@@ -368,6 +368,183 @@ type modelSwitchWarmedMsg struct {
 	modelID     string
 	err         error
 	switchModel bool
+	gen         uint64
+}
+
+// modelSwitchDoneMsg is emitted when the background model-switch work
+// (TerminateAll, NewClient OAuth refresh, NewAgent construction, old-agent
+// shutdown) completes. The Update handler installs the new agent only if gen
+// matches the current modelSwitchGen, so stale completions from a superseded
+// switch are dropped and any stale agent is shut down.
+type modelSwitchDoneMsg struct {
+	gen     uint64
+	modelID string
+	next    *agent.Agent
+	err     error
+	run     *replacementRun
+}
+
+// sessionResetDoneMsg is emitted when the background /new work completes.
+// The Update handler installs the new agent/supervisor only if gen matches
+// sessionResetGen.
+type sessionResetDoneMsg struct {
+	gen        uint64
+	next       *agent.Agent
+	supervisor *tool.ProcessSupervisor
+	sessionID  string
+	err        error
+	run        *replacementRun
+}
+
+type replacementRun struct {
+	id          uint64
+	cancel      context.CancelFunc
+	done        chan struct{}
+	next        *agent.Agent
+	supervisor  *tool.ProcessSupervisor
+	cleanup     func()
+	cleanupOnce sync.Once
+}
+
+type replacementTracker struct {
+	mu       sync.Mutex
+	nextID   uint64
+	runs     map[uint64]*replacementRun
+	shutting bool
+}
+
+func (t *replacementTracker) start() (*replacementRun, context.Context) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.nextID++
+	run := &replacementRun{id: t.nextID, cancel: cancel, done: make(chan struct{})}
+	if t.runs == nil {
+		t.runs = make(map[uint64]*replacementRun)
+	}
+	t.runs[run.id] = run
+	return run, ctx
+}
+
+func (t *replacementTracker) complete(run *replacementRun) {
+	if run == nil {
+		return
+	}
+	select {
+	case <-run.done:
+	default:
+		close(run.done)
+	}
+}
+
+func (t *replacementTracker) setResources(run *replacementRun, next *agent.Agent, supervisor *tool.ProcessSupervisor) {
+	if run == nil {
+		return
+	}
+	t.mu.Lock()
+	run.next = next
+	run.supervisor = supervisor
+	shutting := t.shutting
+	t.mu.Unlock()
+	if shutting {
+		t.cleanupRun(run)
+	}
+}
+
+func (t *replacementTracker) setCleanup(run *replacementRun, cleanup func()) {
+	if run == nil {
+		return
+	}
+	t.mu.Lock()
+	run.cleanup = cleanup
+	shutting := t.shutting
+	t.mu.Unlock()
+	if shutting {
+		t.cleanupPrerequisites(run)
+	}
+}
+
+func (t *replacementTracker) cleanupPrerequisites(run *replacementRun) {
+	if run == nil {
+		return
+	}
+	t.mu.Lock()
+	cleanup := run.cleanup
+	t.mu.Unlock()
+	if cleanup != nil {
+		run.cleanupOnce.Do(cleanup)
+	}
+}
+
+func (t *replacementTracker) claim(run *replacementRun) (*agent.Agent, *tool.ProcessSupervisor, bool) {
+	if run == nil {
+		return nil, nil, true
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.shutting {
+		return nil, nil, false
+	}
+	if _, ok := t.runs[run.id]; !ok {
+		return nil, nil, false
+	}
+	delete(t.runs, run.id)
+	next, supervisor := run.next, run.supervisor
+	run.next = nil
+	run.supervisor = nil
+	return next, supervisor, true
+}
+
+func (t *replacementTracker) cleanupRun(run *replacementRun) {
+	if run == nil {
+		return
+	}
+	t.cleanupPrerequisites(run)
+	t.mu.Lock()
+	next, supervisor := run.next, run.supervisor
+	run.next = nil
+	run.supervisor = nil
+	t.mu.Unlock()
+	if next != nil {
+		next.Shutdown()
+	}
+	if supervisor != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = supervisor.Shutdown(ctx)
+		cancel()
+	}
+}
+
+func (t *replacementTracker) shutdown(timeout time.Duration) {
+	t.mu.Lock()
+	if t.shutting {
+		t.mu.Unlock()
+		return
+	}
+	t.shutting = true
+	runs := make([]*replacementRun, 0, len(t.runs))
+	for _, run := range t.runs {
+		runs = append(runs, run)
+		run.cancel()
+	}
+	t.mu.Unlock()
+
+	deadline := time.Now().Add(timeout)
+	for _, run := range runs {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-run.done:
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+	for _, run := range runs {
+		t.cleanupRun(run)
+	}
 }
 
 // syncLoginStartedMsg is emitted when /login has started the device-code flow
@@ -459,6 +636,8 @@ type streamMsgEvent struct {
 	deltaCh chan deltaEvent
 	errCh   chan error
 	cancel  chan struct{}
+	epoch   uint64
+	pending *[]deltaEvent
 }
 
 type ctrlCResetMsg struct{}
@@ -647,10 +826,14 @@ type pluginSyncAllMsg struct{}
 type pluginSyncAllDoneMsg struct {
 	results []plugins.SyncStatusResult
 }
-type streamStartedMsg struct{ cancel chan struct{} }
+type streamStartedMsg struct {
+	cancel chan struct{}
+	epoch  uint64
+}
 
 type streamDoneMsg struct {
-	err error
+	err   error
+	epoch uint64
 }
 
 type compactStartedMsg struct{}
@@ -770,7 +953,17 @@ func (m *model) cleanupAgent(target *agent.Agent) {
 	target.Shutdown()
 }
 
+func (m *model) ensureReplacementTracker() *replacementTracker {
+	if m.replacements == nil {
+		m.replacements = &replacementTracker{}
+	}
+	return m.replacements
+}
+
 func (m *model) cleanupCurrentSession() {
+	if m.replacements != nil {
+		m.replacements.shutdown(5 * time.Second)
+	}
 	// Cancel any running /btw side-query loop so its child agent and
 	// processes die with the session.
 	if m.btwCancel != nil {
@@ -795,6 +988,9 @@ func (m *model) cleanupCurrentSession() {
 		m.ideCancel = nil
 	}
 	m.cleanupAgent(m.agent)
+	// Wait for any background session saves (enqueued by async model
+	// switch or /new) so the process does not exit before they hit disk.
+	m.waitForPendingSaves(5 * time.Second)
 	// Evict stale tool-result cache files (older than 2 days).
 	_ = agent.CleanupToolResults(48 * time.Hour)
 }
@@ -829,8 +1025,70 @@ func (m *model) replaceAgent(next *agent.Agent) tea.Cmd {
 	return m.installAgent(next)
 }
 
+// invalidateAgentEvents makes events emitted by the retiring agent stale
+// before the replacement starts. This matters for /new: that command clears
+// the transcript immediately, so a late old stream event must not repopulate
+// the new session while its agent is being built.
+func (m *model) invalidateAgentEvents() {
+	m.agentEpoch++
+	if m.streaming {
+		if m.cancelStream != nil {
+			select {
+			case <-m.cancelStream:
+			default:
+				close(m.cancelStream)
+			}
+		}
+		m.streaming = false
+		m.cancelStream = nil
+		m.lastActivity = agent.ActivitySnapshot{}
+		m.pendingStreamDeltas = nil
+		m.streamingThinkingIdx = -1
+		m.streamAssistantFinalized = false
+	}
+	if m.agent != nil {
+		m.agent.Cancel()
+		if m.agent.Runs() != nil {
+			m.agent.Runs().CancelAll()
+		}
+	}
+}
+
+func (m *model) currentStreamEpoch(epoch uint64) bool {
+	// Zero keeps hand-built test messages and legacy callers compatible. All
+	// events emitted by streamStep carry a non-zero epoch.
+	return epoch == 0 || epoch == m.agentEpoch
+}
+
+// queueReplacementWork records work that must not run against the retiring
+// agent. The notice is intentionally coalesced so holding Enter or submitting
+// several items does not fill the transcript with identical status messages.
+func (m *model) queueReplacementWork(kind queueItemKind, text string) {
+	m.queuedItems = append(m.queuedItems, queuedItem{kind: kind, text: text})
+	m.holdQueuedWorkForReplacement()
+	m.rerenderTranscriptAndMaybeScroll()
+}
+
+func (m *model) holdQueuedWorkForReplacement() {
+	if len(m.queuedItems) == 0 {
+		return
+	}
+	m.replacementQueuePending = true
+	if !m.replacementNoticeShown {
+		m.replacementNoticeShown = true
+		m.messages = append(m.messages, message{
+			role:      roleAssistant,
+			text:      hintStyle.Render("Queued until the model/session replacement completes."),
+			transient: true,
+		})
+	}
+}
+
 func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	prev := m.agent
+	// Advance before publishing the new agent so any old stream events already
+	// queued in Bubble Tea are rejected immediately.
+	m.agentEpoch++
 	if next != nil && m.advisorEnabledSet {
 		next.SetAdvisorEnabled(m.advisorEnabled)
 	}
@@ -867,12 +1125,38 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	loadCmd := m.startMCPLoad()
 	m.wireCompactCallbacks()
 	if loadCmd == nil {
+		if m.replacementQueuePending {
+			return tea.Batch(listenJobs(m.agent), m.drainReplacementQueueIfReady())
+		}
 		if queued := m.flushQueuedSubmit(); queued != nil {
 			return tea.Batch(listenJobs(m.agent), queued)
 		}
 		return listenJobs(m.agent)
 	}
 	return tea.Batch(listenJobs(m.agent), loadCmd)
+}
+
+// drainReplacementQueueIfReady is called only after the new agent is
+// installed and MCP enumeration has completed. It deliberately does not use
+// the old agent's injection queue: all queued work is dispatched through the
+// current agent/session in the existing unified queue order.
+func (m *model) drainReplacementQueueIfReady() tea.Cmd {
+	if !m.replacementQueuePending || m.modelSwitchPending || m.sessionResetPending ||
+		!m.mcpReady || m.agent == nil || m.streaming {
+		return nil
+	}
+	m.replacementQueuePending = false
+	cmd, drained := m.drainQueuedItems()
+	if len(m.queuedItems) > 0 || m.modelSwitchPending || m.sessionResetPending {
+		m.replacementQueuePending = true
+	}
+	if !drained && len(m.queuedItems) > 0 {
+		m.replacementQueuePending = true
+	}
+	if !m.replacementQueuePending {
+		m.replacementNoticeShown = false
+	}
+	return cmd
 }
 
 func (m *model) clearPendingSubmitOnAgentSwap(prev, next *agent.Agent) {
@@ -951,6 +1235,22 @@ type model struct {
 	autoContinueJudgeForRC bool
 	ocrEnabled             bool // runtime OCR tool state; persisted across agent rebuilds
 	ocrEnabledSet          bool // whether ocrEnabled should be applied to newly installed agents
+	// modelSwitchGen guards async model switches — stale completions are dropped.
+	modelSwitchGen          uint64
+	modelSwitchPending      bool
+	modelSwitchPendingModel string
+	agentEpoch              uint64 // increments whenever the active agent generation changes
+	// replacementQueuePending holds user work until the replacement agent is
+	// installed and its MCP tools are ready. This is separate from the normal
+	// stream queue because the old agent must not receive that work.
+	replacementQueuePending bool
+	replacementNoticeShown  bool
+	// sessionResetGen guards async /new — stale completions are dropped.
+	sessionResetGen     uint64
+	sessionResetPending bool
+	// pendingSavesWG tracks background session saves so exit can wait for them.
+	pendingSavesWG *sync.WaitGroup
+	replacements   *replacementTracker
 	// kaizenAnnounced is the sorted set of digest-contributing Kaizen skill
 	// names last announced in the transcript, so the "directives active" notice
 	// is emitted once per active-model change rather than on every request.
@@ -3108,7 +3408,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rerenderTranscriptAndMaybeScroll()
 	case modelSwitchWarmedMsg:
+		if msg.gen != 0 && msg.gen != m.modelSwitchGen {
+			return m, nil
+		}
 		if msg.err != nil {
+			if msg.gen != 0 {
+				m.modelSwitchPending = false
+				m.modelSwitchPendingModel = ""
+			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Error starting " + msg.modelID + ": " + msg.err.Error()})
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, nil
@@ -3121,9 +3428,77 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, nil
 		}
-		cmd := m.finishModelSwitch(msg.modelID)
+		var cmd tea.Cmd
+		if msg.gen != 0 {
+			cmd = m.finishModelSwitchWithGen(msg.modelID, msg.gen)
+		} else {
+			cmd = m.finishModelSwitch(msg.modelID)
+		}
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, cmd
+	case modelSwitchDoneMsg:
+		if msg.run != nil {
+			next, _, ok := m.ensureReplacementTracker().claim(msg.run)
+			if !ok {
+				return m, nil
+			}
+			msg.next = next
+		}
+		if msg.gen != m.modelSwitchGen {
+			if msg.next != nil {
+				msg.next.Shutdown()
+			}
+			return m, nil
+		}
+		m.modelSwitchPending = false
+		m.modelSwitchPendingModel = ""
+		if msg.err != nil || msg.next == nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Selected model %s, but no API key was found for its provider. Run /connect to add credentials.", msg.modelID)})
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, nil
+		}
+		cmd := m.installAgent(msg.next)
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, cmd
+	case sessionResetDoneMsg:
+		if msg.run != nil {
+			next, supervisor, ok := m.ensureReplacementTracker().claim(msg.run)
+			if !ok {
+				return m, nil
+			}
+			msg.next = next
+			msg.supervisor = supervisor
+		}
+		if msg.gen != m.sessionResetGen {
+			if msg.next != nil {
+				msg.next.Shutdown()
+			}
+			if msg.supervisor != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = msg.supervisor.Shutdown(ctx)
+				cancel()
+			}
+			return m, nil
+		}
+		m.sessionResetPending = false
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create new session: %v", msg.err)})
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, nil
+		}
+		if msg.supervisor != nil {
+			m.supervisor = msg.supervisor
+			if msg.next != nil {
+				msg.next.SetSupervisor(msg.supervisor)
+			}
+		}
+		if msg.next != nil {
+			cmd := m.installAgent(msg.next)
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, cmd
+		}
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
 	case usageSummaryMsg:
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error querying usage: %v", msg.err)})
@@ -3694,6 +4069,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.agent.AddMCPTools(msg.tools)
 		m.agent.AddMCPErrors(msg.errors)
 		m.mcpReady = true
+		if m.replacementQueuePending {
+			return m, m.drainReplacementQueueIfReady()
+		}
 		return m, m.flushQueuedSubmit()
 
 	case ctrlCResetMsg:
@@ -3832,6 +4210,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.broadcastTUIStatus()
 		return m, nil
 	case streamStartedMsg:
+		if !m.currentStreamEpoch(msg.epoch) {
+			return m, nil
+		}
 		m.streaming = true
 		m.cancelStream = msg.cancel
 		m.lastActivity = agent.ActivitySnapshot{LLMRunning: true}
@@ -4116,6 +4497,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Stale/unmatched resolution: keep listening, do not stall the turn.
 		return m, waitForRCResolve(m.rcResolveCh)
 	case streamMsgEvent:
+		if !m.currentStreamEpoch(msg.epoch) {
+			return m, m.continueStreamEvent(msg.epoch, msg.ch, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
+		}
 		if msg.msg.Role == "tool" {
 			if idx := m.findToolMessageIndexByToolID(msg.msg.ToolID); idx >= 0 {
 				// This tool already streamed its output live (e.g. bash). If the
@@ -4215,8 +4599,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.rerenderTranscriptAndMaybeScroll()
 		}
-		return m, m.waitStreamEvent(msg.ch, msg.deltaCh, msg.errCh, msg.cancel)
+		return m, m.continueStreamEvent(msg.epoch, msg.ch, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
 	case streamDoneMsg:
+		if !m.currentStreamEpoch(msg.epoch) {
+			return m, nil
+		}
 		// Continuing a previously-RC(web)-initiated auto-continue chain
 		// (iteration 2+ — no fresh RCRequest arrived this round, so there is
 		// no rc.ResultCh to deliver to; that happened on iteration 1 below).
@@ -4668,21 +5055,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitTitleEvent(m.titleCh)
 	case deltaMsg:
+		if !m.currentStreamEpoch(msg.epoch) {
+			return m, m.continueStreamEvent(msg.epoch, msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
+		}
 		if msg.delta.kind == "tool" {
 			// Live incremental output from a streaming tool (e.g. bash).
 			// Append it to the tool's transcript entry as it arrives.
 			m.appendShellOutput(msg.delta.toolCallID, msg.delta.text)
-			return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
+			return m, m.continueStreamEvent(msg.epoch, msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
 		}
 		if msg.delta.kind == "discovery" {
 			m.appendDiscoveryNotice("Discovered: " + msg.delta.text)
 			m.rerenderTranscriptAndMaybeScroll()
-			return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
+			return m, m.continueStreamEvent(msg.epoch, msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
 		}
 		if msg.delta.kind == "md-indexing" {
 			m.appendDiscoveryNotice("Indexing: " + msg.delta.text)
 			m.rerenderTranscriptAndMaybeScroll()
-			return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
+			return m, m.continueStreamEvent(msg.epoch, msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
 		}
 		if msg.delta.kind == "note" {
 			// Shared-notes bus entry from a parallel agent group.
@@ -4690,7 +5080,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// so the user sees inter-agent notes in real-time.
 			m.appendDiscoveryNotice(msg.delta.text)
 			m.rerenderTranscriptAndMaybeScroll()
-			return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
+			return m, m.continueStreamEvent(msg.epoch, msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
 		}
 		m.applyThinkingDelta(msg.delta.kind, msg.delta.text)
 		// Mirror live token deltas to the /rc web UI.
@@ -4701,8 +5091,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.broadcastRC("text", map[string]string{"delta": msg.delta.text})
 			}
 		}
-		return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
+		return m, m.continueStreamEvent(msg.epoch, msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
 	case usageMsg:
+		if !m.currentStreamEpoch(msg.epoch) {
+			return m, nil
+		}
 		if msg.inputTokens > 0 {
 			m.lastInputTokens = msg.inputTokens
 		}
@@ -5655,6 +6048,12 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 
 		if strings.HasPrefix(text, "!") {
+			if m.modelSwitchPending || m.sessionResetPending || m.replacementQueuePending {
+				m.input.Reset()
+				m.queueReplacementWork(queueItemCommand, text)
+				m.layout()
+				return m, nil
+			}
 			if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 || m.shellStreamCmd != nil {
 				m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemCommand, text: text})
 				m.input.Reset()
@@ -5665,6 +6064,13 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.input.Reset()
 			cmdText := strings.TrimPrefix(text, "!")
 			return m, m.startShellExecution(cmdText)
+		}
+
+		if m.modelSwitchPending || m.sessionResetPending || m.replacementQueuePending {
+			m.input.Reset()
+			m.queueReplacementWork(queueItemInput, text)
+			m.layout()
+			return m, nil
 		}
 
 		if m.streaming {
@@ -5878,7 +6284,8 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 		m.lastActivity = agent.ActivitySnapshot{}
 	}
 	if m.streaming {
-		return m, func() tea.Msg { return streamDoneMsg{err: context.Canceled} }
+		epoch := m.agentEpoch
+		return m, func() tea.Msg { return streamDoneMsg{err: context.Canceled, epoch: epoch} }
 	}
 	if !m.detail.empty() {
 		m.detail.pop()
@@ -7637,6 +8044,14 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	// stays instant (like /agent) while the rewrite is applied after the
 	// queue-decision below.
 	goalAlias := cmd == "/goal"
+	isExitCmd := cmd == "/exit" || cmd == "/quit" || cmd == "/q"
+	if (m.modelSwitchPending || m.sessionResetPending ||
+		(m.replacementQueuePending && cmd != "/model" && cmd != "/new")) && !isExitCmd {
+		m.input.Reset()
+		m.queueReplacementWork(queueItemCommand, text)
+		m.layout()
+		return m, nil
+	}
 
 	// Queue non-exit commands when the agent is busy so they run after the stream ends.
 	// Instant commands are local UI / config / auth actions that never need to
@@ -7649,7 +8064,6 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	// the stream ends — naturally serialized. (Its child agent has its own
 	// client, so unlike the old shared-client version there is no OnDelta
 	// race; queuing is about stream interleaving and UI, not token leakage.)
-	isExitCmd := cmd == "/exit" || cmd == "/quit" || cmd == "/q"
 	isInstantCmd := cmd == "/model" || cmd == "/models" ||
 		cmd == "/help" || cmd == "/thinking" || cmd == "/details" || cmd == "/sound" ||
 		cmd == "/login" ||
@@ -8253,16 +8667,27 @@ func (m *model) compactFileReferencePaths(text string) []string {
 }
 
 func (m *model) handleModelCmd(args []string) tea.Cmd {
+	if m.sessionResetPending {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "New session is being created — please wait."})
+		m.rerenderTranscriptAndMaybeScroll()
+		return nil
+	}
 	if len(args) == 0 {
 		cmd := m.openModelPicker()
 		return cmd
 	}
 	if len(args) > 0 {
 		modelID := args[0]
-		if warmCmd := m.warmLocalModelIfNeededCmd(modelID); warmCmd != nil {
+		m.invalidateAgentEvents()
+		m.modelSwitchGen++
+		gen := m.modelSwitchGen
+		m.modelSwitchPending = true
+		m.modelSwitchPendingModel = modelID
+		m.holdQueuedWorkForReplacement()
+		if warmCmd := m.warmLocalModelIfNeededCmdWithGen(modelID, gen); warmCmd != nil {
 			return warmCmd
 		}
-		return m.finishModelSwitch(modelID)
+		return m.finishModelSwitchWithGen(modelID, gen)
 	}
 	return nil
 }
@@ -8312,6 +8737,10 @@ func (m *model) localModelNeedsWarm(modelID string) bool {
 // non-main-model roles like the auto-permission model). Returns nil when no
 // warm-up is needed (see localModelNeedsWarm).
 func (m *model) startLocalModelCmd(modelID string, switchModel bool) tea.Cmd {
+	return m.startLocalModelCmdWithGen(modelID, switchModel, 0)
+}
+
+func (m *model) startLocalModelCmdWithGen(modelID string, switchModel bool, gen uint64) tea.Cmd {
 	if !m.localModelNeedsWarm(modelID) || m.agent == nil {
 		return nil
 	}
@@ -8321,7 +8750,7 @@ func (m *model) startLocalModelCmd(modelID string, switchModel bool) tea.Cmd {
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Starting " + modelID + " (this can take a while on a cold model download)..."})
 	return func() tea.Msg {
 		err := startLocalModelInstance(ag, modelID, maxParallel)
-		return modelSwitchWarmedMsg{modelID: modelID, err: err, switchModel: switchModel}
+		return modelSwitchWarmedMsg{modelID: modelID, err: err, switchModel: switchModel, gen: gen}
 	}
 }
 
@@ -8340,6 +8769,10 @@ func (m *model) warmLocalModelIfNeededCmd(modelID string) tea.Cmd {
 	return m.startLocalModelCmd(modelID, true)
 }
 
+func (m *model) warmLocalModelIfNeededCmdWithGen(modelID string, gen uint64) tea.Cmd {
+	return m.startLocalModelCmdWithGen(modelID, true, gen)
+}
+
 // warmLocalModelCmd is the warm-only variant of warmLocalModelIfNeededCmd for
 // non-main-model roles: it starts a registered-but-stopped local model's
 // server without touching the active model. Used when setting a /localmodel
@@ -8354,6 +8787,16 @@ func (m *model) warmLocalModelCmd(modelID string) tea.Cmd {
 // handleModelCmd so warmLocalModelIfNeededCmd's async path can defer calling
 // this until a cold local-model instance is confirmed healthy.
 func (m *model) finishModelSwitch(modelID string) tea.Cmd {
+	m.modelSwitchGen++
+	return m.finishModelSwitchWithGen(modelID, m.modelSwitchGen)
+}
+
+func (m *model) finishModelSwitchWithGen(modelID string, gen uint64) tea.Cmd {
+	if !m.modelSwitchPending {
+		m.invalidateAgentEvents()
+	}
+	m.modelSwitchPending = true
+	m.modelSwitchPendingModel = modelID
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", modelID), transient: true})
 	m.activeModel = modelID
 	if m.config != nil {
@@ -8382,34 +8825,62 @@ func (m *model) finishModelSwitch(modelID string) tea.Cmd {
 			log.Printf("save recent model: %v", err)
 		}
 	}
-	var mcpNames []string
-	if m.agent != nil {
-		mcpNames = m.agent.MCPToolNames()
-	}
-	client := agent.NewClient(m.config, modelID)
+	// Snapshot current session for background save before we mutate agent/supervisor.
+	saveID := m.sessionID
+	saveTitle := m.sessionTitle
+	saveMsgs := m.persistedAgentMessages()
+	saveMeta := m.sessionSidebarMetadata()
+	m.enqueueAsyncSessionSave(saveID, saveTitle, saveMsgs, saveMeta)
+
+	prev := m.agent
+	supervisor := m.supervisor
+	cfg := m.config
 	var tools []tool.Tool
 	var lspMgr *lsp.Manager
-	if m.agent != nil {
-		tools = m.agent.GetTools()
-		// Reuse the existing LSP manager so diagnostics already in
-		// the store survive a model switch (a fresh manager would
-		// re-spawn gopls and start with an empty store).
+	var mcpNames []string
+	if prev != nil {
+		tools = prev.GetTools()
 		lspMgr = m.lspMgr
+		mcpNames = prev.MCPToolNames()
 	} else {
 		tools, lspMgr = m.getInitialTools()
 	}
-	if client != nil {
-		next := agent.NewAgent(client, tools, m.config, lspMgr)
-		next.RestoreMCPToolNames(mcpNames)
-		return m.replaceAgent(next)
+	tracker := m.ensureReplacementTracker()
+	run, replacementCtx := tracker.start()
+	return func() tea.Msg {
+		defer tracker.complete(run)
+		if err := replacementCtx.Err(); err != nil {
+			return modelSwitchDoneMsg{gen: gen, modelID: modelID, err: err, run: run}
+		}
+		client := agent.NewClient(cfg, modelID)
+		if client == nil && prev != nil {
+			return modelSwitchDoneMsg{gen: gen, modelID: modelID, next: nil, err: errors.New("no API key for provider"), run: run}
+		}
+		var next *agent.Agent
+		if client != nil {
+			next = agent.NewAgent(client, tools, cfg, lspMgr)
+			next.RestoreMCPToolNames(mcpNames)
+		} else {
+			next = agent.NewAgent(nil, tools, cfg, lspMgr)
+			next.RestoreMCPToolNames(mcpNames)
+		}
+		tracker.setResources(run, next, nil)
+		if err := replacementCtx.Err(); err != nil {
+			return modelSwitchDoneMsg{gen: gen, modelID: modelID, err: err, run: run}
+		}
+		if prev != nil && next != nil {
+			next.SeedProcCounter(prev.ProcCounter())
+		}
+		if supervisor != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = supervisor.TerminateAll(ctx)
+			cancel()
+		}
+		if prev != nil {
+			prev.Shutdown()
+		}
+		return modelSwitchDoneMsg{gen: gen, modelID: modelID, next: next, err: nil, run: run}
 	}
-	if m.agent == nil {
-		next := agent.NewAgent(nil, tools, m.config, lspMgr)
-		next.RestoreMCPToolNames(mcpNames)
-		return m.replaceAgent(next)
-	}
-	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Selected model %s, but no API key was found for its provider. Run /connect to add credentials.", modelID)})
-	return nil
 }
 
 const (
@@ -10040,20 +10511,69 @@ func (m *model) handleExportClaudeCmd(args []string) {
 }
 
 func (m *model) handleNewCmd(args []string) tea.Cmd {
+	// Invalidate old stream events before clearing the transcript. The new
+	// session is visible immediately, while agent construction is asynchronous.
+	m.invalidateAgentEvents()
 	// Cancel any running /btw side-query loop — its child agent and processes
 	// must not outlive the session it was answering for.
 	if m.btwCancel != nil {
 		m.btwCancel()
 		m.btwCancel = nil
 	}
-	// Drop the LSP manager too so the new session starts with no language
-	// servers running. The next query (or /plugin enable ast) will lazily
-	// spin up fresh ones via getInitialTools.
-	if m.lspMgr != nil {
-		m.lspMgr.Close()
+	// Snapshot old session for background save before we mutate m.sessionID/messages.
+	oldSessionID := m.sessionID
+	oldTitle := m.sessionTitle
+	oldMsgs := m.persistedAgentMessages()
+	oldMeta := m.sessionSidebarMetadata()
+	m.enqueueAsyncSessionSave(oldSessionID, oldTitle, oldMsgs, oldMeta)
+
+	// Capture old LSP manager for background close; new session starts with no
+	// language servers (lazily recreated via getInitialTools). The previous
+	// comment about reusing the manager is stale for the /new path — we
+	// intentionally drop it.
+	oldLspMgr := m.lspMgr
+	if oldLspMgr != nil {
 		m.lspMgr = nil
 	}
-	cmd := m.resetSessionAgent()
+	oldSupervisor := m.supervisor
+	newSupervisor := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 5 * time.Second})
+	m.supervisor = newSupervisor
+	tracker := m.ensureReplacementTracker()
+	run, replacementCtx := tracker.start()
+	tracker.setResources(run, nil, newSupervisor)
+	tracker.setCleanup(run, func() {
+		if oldLspMgr != nil {
+			oldLspMgr.Close()
+		}
+		if oldSupervisor != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = oldSupervisor.Shutdown(ctx)
+			cancel()
+		}
+	})
+
+	prev := m.agent
+	// Fire the onCleanup hook synchronously (dedup-guarded) so tests that count
+	// cleanup calls still observe it immediately, even though save/shutdown are async.
+	if prev != nil {
+		state := m.ensureCleanupState()
+		state.mu.Lock()
+		if _, already := state.shutdown[prev]; !already {
+			state.shutdown[prev] = struct{}{}
+			hook := state.onCleanup
+			state.mu.Unlock()
+			if hook != nil {
+				hook()
+			}
+		} else {
+			state.mu.Unlock()
+		}
+		prev.Cancel()
+		if prev.Runs() != nil {
+			prev.Runs().CancelAll()
+		}
+	}
+
 	m.messages = []message{}
 	m.transcriptLines = nil
 	m.rawTranscriptLines = nil
@@ -10064,8 +10584,14 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.pendingCompactUIIdx = nil
 	m.pendingCompactResume = false
 	m.skipCompactPreflight = false
-	m.queuedItems = nil
-	m.sessionID = time.Now().Format("2006-01-02-150405")
+	// Preserve work that was explicitly held behind a failed/in-flight agent
+	// replacement; it belongs on the next usable agent/session. Retain the
+	// historical behavior of clearing ordinary stream-queue input on /new.
+	if !m.replacementQueuePending {
+		m.queuedItems = nil
+	}
+	newSessionID := time.Now().Format("2006-01-02-150405")
+	m.sessionID = newSessionID
 	m.sessionTitle = ""
 	m.titleRequested = false
 	m.titleAttempts = 0
@@ -10096,10 +10622,98 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.recapText = ""
 	m.shellCmdStart = time.Time{}
 	m.shellCmdText = ""
-	// Randomise the themed empty-state art for the new session.
 	m.refreshThemeArt()
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session.", transient: true})
-	return cmd
+
+	// Invalidate any in-flight model switch — its completion must not install
+	// an agent into the new session.
+	m.modelSwitchGen++
+	m.modelSwitchPending = false
+	m.modelSwitchPendingModel = ""
+	m.sessionResetGen++
+	gen := m.sessionResetGen
+	m.sessionResetPending = true
+
+	// Capture values needed to build the new agent in the background without
+	// racing on m. For prev==nil we need a fresh tool set; for prev!=nil we
+	// reuse the previous tools/mode/spec/permissions.
+	cfg := m.config
+	workDir := m.workDir
+	var tools []tool.Tool
+	var mcpNames []string
+	var mode agent.Mode
+	var spec *agent.AgentSpec
+	var permCfg config.PermissionConfig
+	var lspMgrForNew *lsp.Manager
+	if prev == nil {
+		// No previous agent — build a fresh tool set synchronously (fast, no
+		// network) so the background goroutine does not touch m.
+		tools, lspMgrForNew = m.getInitialTools()
+		if m.lspMgr != nil {
+			lspMgrForNew = m.lspMgr
+		}
+	} else {
+		if ptools := prev.GetTools(); len(ptools) > 0 {
+			tools = ptools
+		} else {
+			// No tools to reuse — start fresh but keep LSP dropped for /new.
+			tools = []tool.Tool{}
+			lspMgrForNew = nil
+		}
+		mcpNames = prev.MCPToolNames()
+		mode = prev.Mode()
+		spec = prev.Spec()
+		if prev.Permissions() != nil {
+			permCfg = prev.Permissions().ExportConfig()
+		}
+	}
+	modelName := m.currentModelName()
+	if modelName == "" && cfg != nil {
+		modelName = cfg.Model
+	}
+
+	return func() tea.Msg {
+		defer tracker.complete(run)
+		if err := replacementCtx.Err(); err != nil {
+			return sessionResetDoneMsg{gen: gen, supervisor: newSupervisor, sessionID: newSessionID, err: err, run: run}
+		}
+		tracker.cleanupPrerequisites(run)
+		if prev != nil {
+			prev.Shutdown()
+		}
+		var next *agent.Agent
+		if prev == nil {
+			client := agent.NewClient(cfg, modelName)
+			next = agent.NewAgent(client, tools, cfg, lspMgrForNew)
+			next.SetMode(agent.ModeBuild)
+			if next.Permissions() != nil {
+				next.Permissions().SetWorkDir(workDir)
+			}
+			next.LoadExternalTools(cfg)
+		} else {
+			client := agent.NewClient(cfg, modelName)
+			if client == nil {
+				client = prev.Client()
+			}
+			next = agent.NewAgent(client, tools, cfg, lspMgrForNew)
+			next.SetMode(mode)
+			next.SetSpec(spec)
+			if next.Permissions() != nil {
+				next.Permissions().LoadFromOcode(permCfg)
+				next.Permissions().SetWorkDir(workDir)
+			} else if next.Permissions() != nil {
+				next.Permissions().SetWorkDir(workDir)
+			}
+			if len(mcpNames) > 0 {
+				next.RestoreMCPToolNames(mcpNames)
+			}
+		}
+		tracker.setResources(run, next, newSupervisor)
+		if err := replacementCtx.Err(); err != nil {
+			return sessionResetDoneMsg{gen: gen, supervisor: newSupervisor, sessionID: newSessionID, err: err, run: run}
+		}
+		return sessionResetDoneMsg{gen: gen, next: next, supervisor: newSupervisor, sessionID: newSessionID, err: nil, run: run}
+	}
 }
 
 func (m *model) resetSessionAgent() tea.Cmd {
@@ -12701,6 +13315,45 @@ func (m *model) handleGitHubWorkflow(name string) string {
 	return ghGenerateWorkflow(name, nil)
 }
 
+func (m *model) ensurePendingSavesWG() *sync.WaitGroup {
+	if m.pendingSavesWG == nil {
+		m.pendingSavesWG = &sync.WaitGroup{}
+	}
+	return m.pendingSavesWG
+}
+
+func (m *model) enqueueAsyncSessionSave(id, title string, msgs []agent.Message, meta map[string]any) {
+	if id == "" || len(msgs) == 0 {
+		return
+	}
+	cp := make([]agent.Message, len(msgs))
+	copy(cp, msgs)
+	wg := m.ensurePendingSavesWG()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := session.Save(id, title, cp, meta); err != nil {
+			log.Printf("async save session %s: %v", id, err)
+		}
+	}()
+}
+
+func (m *model) waitForPendingSaves(timeout time.Duration) {
+	if m.pendingSavesWG == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		m.pendingSavesWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		log.Printf("waitForPendingSaves: timed out after %v", timeout)
+	}
+}
+
 func (m *model) saveSession() {
 	// Ensure we have a stable session ID before persisting. When the TUI
 	// starts fresh (no -session flag), sessionID is empty. Previously
@@ -13727,6 +14380,8 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 	deltaCh := make(chan deltaEvent, 256)
 	errCh := make(chan error, 1)
 	a := m.agent
+	epoch := m.agentEpoch
+	pending := []deltaEvent{}
 	go func() {
 		// Panic recovery: if a.Step (or any callback) panics, the goroutine
 		// would otherwise exit without closing msgCh or writing errCh, leaving
@@ -13875,8 +14530,8 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 		errCh <- err
 	}()
 	return tea.Batch(
-		func() tea.Msg { return streamStartedMsg{cancel: cancel} },
-		m.waitStreamEvent(msgCh, deltaCh, errCh, cancel),
+		func() tea.Msg { return streamStartedMsg{cancel: cancel, epoch: epoch} },
+		m.waitStreamEventWithEpoch(msgCh, deltaCh, errCh, cancel, epoch, &pending),
 	)
 }
 
@@ -13928,43 +14583,54 @@ func isRetryableLLMError(err error) bool {
 }
 
 func (m *model) waitStreamEvent(msgCh chan agent.Message, deltaCh chan deltaEvent, errCh chan error, cancel chan struct{}) tea.Cmd {
+	return m.waitStreamEventWithEpoch(msgCh, deltaCh, errCh, cancel, 0, &m.pendingStreamDeltas)
+}
+
+func (m *model) continueStreamEvent(epoch uint64, msgCh chan agent.Message, deltaCh chan deltaEvent, errCh chan error, cancel chan struct{}, pending *[]deltaEvent) tea.Cmd {
+	if pending == nil {
+		return m.waitStreamEvent(msgCh, deltaCh, errCh, cancel)
+	}
+	return m.waitStreamEventWithEpoch(msgCh, deltaCh, errCh, cancel, epoch, pending)
+}
+
+func (m *model) waitStreamEventWithEpoch(msgCh chan agent.Message, deltaCh chan deltaEvent, errCh chan error, cancel chan struct{}, epoch uint64, pending *[]deltaEvent) tea.Cmd {
 	return func() tea.Msg {
-		if len(m.pendingStreamDeltas) > 0 {
+		if len(*pending) > 0 {
 			select {
 			case am, ok := <-msgCh:
 				if ok {
-					return streamMsgEvent{msg: am, ch: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+					return streamMsgEvent{msg: am, ch: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel, epoch: epoch, pending: pending}
 				}
 			default:
-				delta := m.pendingStreamDeltas[0]
-				m.pendingStreamDeltas = m.pendingStreamDeltas[1:]
-				return deltaMsg{delta: delta, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+				delta := (*pending)[0]
+				*pending = (*pending)[1:]
+				return deltaMsg{delta: delta, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel, epoch: epoch, pending: pending}
 			}
 		}
 
 		select {
 		case <-cancel:
-			return streamDoneMsg{err: nil}
+			return streamDoneMsg{err: nil, epoch: epoch}
 		case am, ok := <-msgCh:
 			if !ok {
-				m.pendingStreamDeltas = append(m.pendingStreamDeltas, drainStreamDeltas(deltaCh)...)
-				if len(m.pendingStreamDeltas) > 0 {
-					delta := m.pendingStreamDeltas[0]
-					m.pendingStreamDeltas = m.pendingStreamDeltas[1:]
-					return deltaMsg{delta: delta, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+				*pending = append(*pending, drainStreamDeltas(deltaCh)...)
+				if len(*pending) > 0 {
+					delta := (*pending)[0]
+					*pending = (*pending)[1:]
+					return deltaMsg{delta: delta, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel, epoch: epoch, pending: pending}
 				}
-				return streamDoneMsg{err: <-errCh}
+				return streamDoneMsg{err: <-errCh, epoch: epoch}
 			}
-			return streamMsgEvent{msg: am, ch: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+			return streamMsgEvent{msg: am, ch: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel, epoch: epoch, pending: pending}
 		case delta, ok := <-deltaCh:
 			if !ok {
-				m.pendingStreamDeltas = append(m.pendingStreamDeltas, drainStreamDeltas(deltaCh)...)
-				if len(m.pendingStreamDeltas) > 0 {
-					delta := m.pendingStreamDeltas[0]
-					m.pendingStreamDeltas = m.pendingStreamDeltas[1:]
-					return deltaMsg{delta: delta, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+				*pending = append(*pending, drainStreamDeltas(deltaCh)...)
+				if len(*pending) > 0 {
+					delta := (*pending)[0]
+					*pending = (*pending)[1:]
+					return deltaMsg{delta: delta, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel, epoch: epoch, pending: pending}
 				}
-				return streamDoneMsg{err: <-errCh}
+				return streamDoneMsg{err: <-errCh, epoch: epoch}
 			}
 			// If an assistant/tool message is already buffered, prefer it and
 			// hold this delta until the message queue drains. This preserves the
@@ -13973,19 +14639,19 @@ func (m *model) waitStreamEvent(msgCh chan agent.Message, deltaCh chan deltaEven
 			select {
 			case am, ok := <-msgCh:
 				if ok {
-					m.pendingStreamDeltas = append(m.pendingStreamDeltas, delta)
-					return streamMsgEvent{msg: am, ch: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+					*pending = append(*pending, delta)
+					return streamMsgEvent{msg: am, ch: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel, epoch: epoch, pending: pending}
 				}
-				m.pendingStreamDeltas = append(m.pendingStreamDeltas, delta)
-				m.pendingStreamDeltas = append(m.pendingStreamDeltas, drainStreamDeltas(deltaCh)...)
-				if len(m.pendingStreamDeltas) > 0 {
-					next := m.pendingStreamDeltas[0]
-					m.pendingStreamDeltas = m.pendingStreamDeltas[1:]
-					return deltaMsg{delta: next, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+				*pending = append(*pending, delta)
+				*pending = append(*pending, drainStreamDeltas(deltaCh)...)
+				if len(*pending) > 0 {
+					next := (*pending)[0]
+					*pending = (*pending)[1:]
+					return deltaMsg{delta: next, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel, epoch: epoch, pending: pending}
 				}
-				return streamDoneMsg{err: <-errCh}
+				return streamDoneMsg{err: <-errCh, epoch: epoch}
 			default:
-				return deltaMsg{delta: delta, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+				return deltaMsg{delta: delta, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel, epoch: epoch, pending: pending}
 			}
 		}
 	}
@@ -16360,12 +17026,13 @@ func (m *model) wireCompactCallbacks() {
 		}
 	}
 	usageCh := m.usageCh
+	epoch := m.agentEpoch
 	m.agent.OnUsage = func(inputTokens, outputTokens int64) {
 		if usageCh == nil {
 			return
 		}
 		select {
-		case usageCh <- usageEvent{inputTokens: inputTokens, outputTokens: outputTokens}:
+		case usageCh <- usageEvent{inputTokens: inputTokens, outputTokens: outputTokens, epoch: epoch}:
 		default:
 		}
 	}
@@ -16576,11 +17243,14 @@ type deltaMsg struct {
 	deltaCh chan deltaEvent
 	errCh   chan error
 	cancel  chan struct{}
+	epoch   uint64
+	pending *[]deltaEvent
 }
 
 type usageEvent struct {
 	inputTokens  int64
 	outputTokens int64
+	epoch        uint64
 }
 
 type usageMsg usageEvent
