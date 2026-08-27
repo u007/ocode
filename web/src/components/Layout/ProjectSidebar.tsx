@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useProjectState } from "../../stores/projectStore";
-import { useChatState } from "../../stores/chatStore";
+import { useChatSelector } from "../../stores/chatStore";
 import type { Project, ProjectGroup } from "../../api/types";
 import {
   DndContext,
@@ -47,19 +47,25 @@ type SessionStatus = "none" | "idle" | "running";
 /** Derive per-project session status from open tabs + chat slices. */
 function useProjectSessionStatus(projectPath: string): SessionStatus {
   const { state: projectState } = useProjectState();
-  const chatState = useChatState();
   const tabs = projectState.tabsByProject[projectPath];
+  // A boolean selector: only re-renders when this project's aggregate
+  // streaming state actually flips, not on every streamed token (isStreaming
+  // only changes at turn start/end, unlike `live`/`messages`).
+  const anyStreaming = useChatSelector((s) => {
+    if (!tabs) return false;
+    for (const tab of tabs) {
+      if (tab.id.startsWith("new-")) continue;
+      if (s.sessions[tab.id]?.isStreaming) return true;
+    }
+    return false;
+  });
 
   return useMemo(() => {
     if (!tabs || tabs.length === 0) return "none";
-    for (const tab of tabs) {
-      if (tab.id.startsWith("new-")) continue;
-      const slice = chatState.sessions[tab.id];
-      if (slice?.isStreaming) return "running";
-    }
+    if (anyStreaming) return "running";
     const hasRealSession = tabs.some((t) => !t.id.startsWith("new-"));
     return hasRealSession ? "idle" : "none";
-  }, [tabs, chatState.sessions]);
+  }, [tabs, anyStreaming]);
 }
 
 function SessionDot({ status }: { status: SessionStatus }) {

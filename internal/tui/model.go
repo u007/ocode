@@ -345,6 +345,7 @@ type localModelActionMsg struct {
 	modelID     string
 	enabled     bool
 	maxParallel int
+	contextSize int
 	text        string // result text to display (success or error)
 	err         error  // non-nil when the operation failed (config map is not updated)
 }
@@ -8747,9 +8748,10 @@ func (m *model) startLocalModelCmdWithGen(modelID string, switchModel bool, gen 
 	ag := m.agent
 	lm := m.config.Ocode.LocalModels[modelID]
 	maxParallel := lm.MaxParallel
+	contextSize := lm.ContextSize
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Starting " + modelID + " (this can take a while on a cold model download)..."})
 	return func() tea.Msg {
-		err := startLocalModelInstance(ag, modelID, maxParallel)
+		err := startLocalModelInstance(ag, modelID, maxParallel, contextSize)
 		return modelSwitchWarmedMsg{modelID: modelID, err: err, switchModel: switchModel, gen: gen}
 	}
 }
@@ -9340,7 +9342,7 @@ func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 // localModelUsage is the canonical /localmodel usage string, shared between
 // the command-table registration (commands.go) and the in-command
 // help/fallback messages below so the two can't drift.
-const localModelUsage = "/localmodel list|add <name>...|enable [<name>...]|disable <name>...|limit <name> <1|2>|status [name]|hf-token <token>|help"
+const localModelUsage = "/localmodel list|add <name>...|enable [<name>...]|disable <name>...|limit <name> <1|2>|ctx <name> <tokens|0>|status [name]|hf-token <token>|help"
 
 func (m *model) handleLocalModelCmd(args []string) tea.Cmd {
 	if len(args) == 0 {
@@ -9386,6 +9388,12 @@ func (m *model) handleLocalModelCmd(args []string) tea.Cmd {
 			return nil
 		}
 		return m.localModelLimitCmd(args[1], args[2])
+	case "ctx":
+		if len(args) < 3 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel ctx <name> <tokens|0>\n0 = model's full native trained context (llama.cpp default; can be tens of GB of KV cache)"})
+			return nil
+		}
+		return m.localModelCtxCmd(args[1], args[2])
 	case "status":
 		name := ""
 		if len(args) > 1 {
@@ -9465,7 +9473,7 @@ func (m *model) showLocalModelList() {
 					state = fmt.Sprintf("%s, mem=%s", info.State, localModelMemString(info))
 				}
 			}
-			status = fmt.Sprintf("%s, max_parallel=%d", state, lm.MaxParallel)
+			status = fmt.Sprintf("%s, max_parallel=%d, ctx=%d", state, lm.MaxParallel, lm.ContextSize)
 		}
 		fmt.Fprintf(&b, "  %s (%s)\n", man.ModelID, status)
 	}
@@ -9482,14 +9490,14 @@ func (m *model) localModelAdd(name string) {
 		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is already registered"})
 		return
 	}
-	if err := config.SaveLocalModelConfig(id, false, 1); err != nil {
+	if err := config.SaveLocalModelConfig(id, false, 1, config.DefaultLocalChatContextSize); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
 		return
 	}
 	if m.config.Ocode.LocalModels == nil {
 		m.config.Ocode.LocalModels = map[string]config.LocalModelConfig{}
 	}
-	m.config.Ocode.LocalModels[id] = config.LocalModelConfig{Enabled: false, MaxParallel: 1}
+	m.config.Ocode.LocalModels[id] = config.LocalModelConfig{Enabled: false, MaxParallel: 1, ContextSize: config.DefaultLocalChatContextSize}
 	m.messages = append(m.messages, message{role: roleAssistant, text: id + " registered (disabled). Enable with /localmodel enable " + id})
 }
 
@@ -9626,8 +9634,10 @@ func (m *model) localModelEnableMultipleCmd(names []string) tea.Cmd {
 	}
 	sort.Strings(toEnable)
 	maxParMap := map[string]int{}
+	ctxMap := map[string]int{}
 	for _, id := range toEnable {
 		maxParMap[id] = m.config.Ocode.LocalModels[id].MaxParallel
+		ctxMap[id] = m.config.Ocode.LocalModels[id].ContextSize
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Starting " + strings.Join(toEnable, ", ") + " (this can take a while on a cold model download)..."})
 	m.rerenderTranscriptAndMaybeScroll()
@@ -9636,15 +9646,16 @@ func (m *model) localModelEnableMultipleCmd(names []string) tea.Cmd {
 		var results []localModelActionMsg
 		for _, id := range toEnable {
 			mp := maxParMap[id]
-			if err := startLocalModelInstance(ag, id, mp); err != nil {
+			cs := ctxMap[id]
+			if err := startLocalModelInstance(ag, id, mp, cs); err != nil {
 				results = append(results, localModelActionMsg{modelID: id, text: "Error starting " + id + ": " + err.Error(), err: err})
 				continue
 			}
-			if err := config.SaveLocalModelConfig(id, true, mp); err != nil {
+			if err := config.SaveLocalModelConfig(id, true, mp, cs); err != nil {
 				results = append(results, localModelActionMsg{modelID: id, text: "Error: " + err.Error(), err: err})
 				continue
 			}
-			results = append(results, localModelActionMsg{modelID: id, enabled: true, maxParallel: mp, text: id + ": enabled"})
+			results = append(results, localModelActionMsg{modelID: id, enabled: true, maxParallel: mp, contextSize: cs, text: id + ": enabled"})
 		}
 		return localModelBulkActionMsg{results: results}
 	}
@@ -9704,7 +9715,7 @@ func (m *model) localModelDisable(name string) {
 		}
 	}
 	lm.Enabled = false
-	if err := config.SaveLocalModelConfig(id, false, lm.MaxParallel); err != nil {
+	if err := config.SaveLocalModelConfig(id, false, lm.MaxParallel, lm.ContextSize); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
 		return
 	}
@@ -9763,15 +9774,16 @@ func (m *model) localModelEnableCmd(name string) tea.Cmd {
 	}
 	ag := m.agent
 	maxParallel := lm.MaxParallel
+	contextSize := lm.ContextSize
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Starting " + id + " (this can take a while on a cold model download)..."})
 	return func() tea.Msg {
-		if err := startLocalModelInstance(ag, id, maxParallel); err != nil {
+		if err := startLocalModelInstance(ag, id, maxParallel, contextSize); err != nil {
 			return localModelActionMsg{modelID: id, text: "Error starting " + id + ": " + err.Error(), err: err}
 		}
-		if err := config.SaveLocalModelConfig(id, true, maxParallel); err != nil {
+		if err := config.SaveLocalModelConfig(id, true, maxParallel, contextSize); err != nil {
 			return localModelActionMsg{modelID: id, text: "Error: " + err.Error(), err: err}
 		}
-		return localModelActionMsg{modelID: id, enabled: true, maxParallel: maxParallel, text: id + ": enabled"}
+		return localModelActionMsg{modelID: id, enabled: true, maxParallel: maxParallel, contextSize: contextSize, text: id + ": enabled"}
 	}
 }
 
@@ -9782,8 +9794,8 @@ func (m *model) localModelEnableCmd(name string) tea.Cmd {
 // background goroutine (see localModelEnableCmd/localModelLimitCmd's returned
 // tea.Cmd), so it must not touch *model fields — only ag (an *agent.Agent,
 // safe to use concurrently) and package-level discovery/config functions.
-func startLocalModelInstance(ag *agent.Agent, id string, maxParallel int) error {
-	return agent.StartLocalModelInstance(ag, id, maxParallel)
+func startLocalModelInstance(ag *agent.Agent, id string, maxParallel, contextSize int) error {
+	return agent.StartLocalModelInstance(ag, id, maxParallel, contextSize)
 }
 
 // localModelLimitCmd validates synchronously and, if the model is currently
@@ -9802,11 +9814,11 @@ func (m *model) localModelLimitCmd(name, valueStr string) tea.Cmd {
 		return nil
 	}
 	if !lm.Enabled {
-		if err := config.SaveLocalModelConfig(id, false, value); err != nil {
+		if err := config.SaveLocalModelConfig(id, false, value, lm.ContextSize); err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
 			return nil
 		}
-		m.config.Ocode.LocalModels[id] = config.LocalModelConfig{Enabled: false, MaxParallel: value}
+		m.config.Ocode.LocalModels[id] = config.LocalModelConfig{Enabled: false, MaxParallel: value, ContextSize: lm.ContextSize}
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("%s: max_parallel set to %d", id, value)})
 		return nil
 	}
@@ -9829,13 +9841,65 @@ func (m *model) localModelLimitCmd(name, valueStr string) tea.Cmd {
 		if err := discovery.StopModelInstance(ag.Procs(), id); err != nil {
 			return localModelActionMsg{modelID: id, text: "Error stopping " + id + " to apply new limit: " + err.Error(), err: err}
 		}
-		if err := startLocalModelInstance(ag, id, value); err != nil {
+		if err := startLocalModelInstance(ag, id, value, lm.ContextSize); err != nil {
 			return localModelActionMsg{modelID: id, text: "Error restarting " + id + " with new limit: " + err.Error(), err: err}
 		}
-		if err := config.SaveLocalModelConfig(id, true, value); err != nil {
+		if err := config.SaveLocalModelConfig(id, true, value, lm.ContextSize); err != nil {
 			return localModelActionMsg{modelID: id, text: "Error: " + err.Error(), err: err}
 		}
-		return localModelActionMsg{modelID: id, enabled: true, maxParallel: value, text: fmt.Sprintf("%s: max_parallel set to %d", id, value)}
+		return localModelActionMsg{modelID: id, enabled: true, maxParallel: value, contextSize: lm.ContextSize, text: fmt.Sprintf("%s: max_parallel set to %d", id, value)}
+	}
+}
+
+// localModelCtxCmd validates synchronously and, if the model is currently
+// enabled (so a stop+restart is needed to apply the new ctx-size), returns a
+// tea.Cmd for the slow part — same async rule as localModelLimitCmd. 0 means
+// "no cap" (llama.cpp's own --ctx-size convention: load the model's full
+// native trained context) — see LocalModelConfig.ContextSize's doc comment
+// for why an uncapped default is what makes a long-context GGUF balloon its
+// KV cache to tens of GB on startup.
+func (m *model) localModelCtxCmd(name, valueStr string) tea.Cmd {
+	id := localModelID(name)
+	value, err := strconv.Atoi(valueStr)
+	if err != nil || value < 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid ctx " + valueStr + " — must be a non-negative integer (0 = model's full native context)"})
+		return nil
+	}
+	lm, exists := m.config.Ocode.LocalModels[id]
+	if !exists {
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is not registered. Run /localmodel add " + name + " first"})
+		return nil
+	}
+	if !lm.Enabled {
+		if err := config.SaveLocalModelConfig(id, false, lm.MaxParallel, value); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
+		}
+		m.config.Ocode.LocalModels[id] = config.LocalModelConfig{Enabled: false, MaxParallel: lm.MaxParallel, ContextSize: value}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("%s: ctx set to %d", id, value)})
+		return nil
+	}
+	if m.agent == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No active agent to restart the local model process"})
+		return nil
+	}
+	if info, ok := m.localModelInstanceInfo(id, lm); ok && info.State == discovery.InstanceReady && !discovery.OwnsModelInstance(id) {
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is running under a different ocode process — restart that process (or run /localmodel disable then enable there) to apply the new ctx"})
+		return nil
+	}
+	ag := m.agent
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Restarting %s with ctx=%d...", id, value)})
+	return func() tea.Msg {
+		if err := discovery.StopModelInstance(ag.Procs(), id); err != nil {
+			return localModelActionMsg{modelID: id, text: "Error stopping " + id + " to apply new ctx: " + err.Error(), err: err}
+		}
+		if err := startLocalModelInstance(ag, id, lm.MaxParallel, value); err != nil {
+			return localModelActionMsg{modelID: id, text: "Error restarting " + id + " with new ctx: " + err.Error(), err: err}
+		}
+		if err := config.SaveLocalModelConfig(id, true, lm.MaxParallel, value); err != nil {
+			return localModelActionMsg{modelID: id, text: "Error: " + err.Error(), err: err}
+		}
+		return localModelActionMsg{modelID: id, enabled: true, maxParallel: lm.MaxParallel, contextSize: value, text: fmt.Sprintf("%s: ctx set to %d", id, value)}
 	}
 }
 
@@ -9858,7 +9922,7 @@ func (m *model) showLocalModelStatus(name string) {
 			fmt.Fprintf(&b, "%s: not registered\n", id)
 			continue
 		}
-		fmt.Fprintf(&b, "%s\n  enabled: %v\n  max_parallel: %d\n", id, lm.Enabled, lm.MaxParallel)
+		fmt.Fprintf(&b, "%s\n  enabled: %v\n  max_parallel: %d\n  ctx: %d\n", id, lm.Enabled, lm.MaxParallel, lm.ContextSize)
 		if info, ok := m.localModelInstanceInfo(id, lm); ok {
 			fmt.Fprintf(&b, "  state: %s\n  port: %d\n  base_url: %s\n", info.State, info.Port, info.BaseURL)
 			fmt.Fprintf(&b, "  mem: %s\n", localModelMemString(info))
@@ -9880,7 +9944,7 @@ func (m *model) applyLocalModelResult(r localModelActionMsg) {
 		if m.config.Ocode.LocalModels == nil {
 			m.config.Ocode.LocalModels = map[string]config.LocalModelConfig{}
 		}
-		m.config.Ocode.LocalModels[r.modelID] = config.LocalModelConfig{Enabled: r.enabled, MaxParallel: r.maxParallel}
+		m.config.Ocode.LocalModels[r.modelID] = config.LocalModelConfig{Enabled: r.enabled, MaxParallel: r.maxParallel, ContextSize: r.contextSize}
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: r.text})
 }

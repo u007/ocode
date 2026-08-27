@@ -39,7 +39,7 @@ func TestAssignChatPortRejectsMoreThanRangeSize(t *testing.T) {
 
 func TestStartModelInstanceUnknownManifestErrors(t *testing.T) {
 	spawn := func(string) (ChatLiveness, error) { return nil, nil }
-	err := StartModelInstance(spawn, "local/does-not-exist", 19999, 1, t.TempDir(), "")
+	err := StartModelInstance(spawn, "local/does-not-exist", 19999, 1, 50000, t.TempDir(), "")
 	if err == nil {
 		t.Fatal("expected error for a model id with no chat manifest")
 	}

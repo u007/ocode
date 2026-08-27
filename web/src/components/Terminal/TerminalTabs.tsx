@@ -1,6 +1,7 @@
 import { useEffect, useImperativeHandle, useRef, useState, forwardRef, type RefObject } from "react";
-import { Plus, X, Pencil } from "lucide-react";
+import { Plus, X, Pencil, Gauge } from "lucide-react";
 import TerminalPanel from "./TerminalPanel";
+import ProcessesPanel from "./ProcessesPanel";
 import { useTerminalConfig } from "@/hooks/useTerminalConfig";
 import { loadProjectTerminals, saveProjectTerminals } from "./terminalPersistence";
 import { ContextMenu } from "@/components/Layout/ContextMenu";
@@ -21,6 +22,8 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+
+const PROCESSES_TAB_ID = "processes";
 
 interface TerminalInstance {
   id: string;
@@ -236,7 +239,7 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
         bumpSeqPast(saved.terminals.map((t) => t.title));
         setTerminals(saved.terminals);
         setActiveId(
-          saved.activeId && saved.terminals.some((t) => t.id === saved.activeId)
+          saved.activeId && (saved.activeId === PROCESSES_TAB_ID || saved.terminals.some((t) => t.id === saved.activeId))
             ? saved.activeId
             : saved.terminals[saved.terminals.length - 1].id,
         );
@@ -289,7 +292,7 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
         bumpSeqPast(saved.terminals.map((t) => t.title));
         setTerminals(saved.terminals);
         const nextActive =
-          saved.activeId && saved.terminals.some((t) => t.id === saved.activeId)
+          saved.activeId && (saved.activeId === PROCESSES_TAB_ID || saved.terminals.some((t) => t.id === saved.activeId))
             ? saved.activeId
             : saved.terminals[saved.terminals.length - 1]?.id ?? "";
         setActiveId(nextActive);
@@ -382,6 +385,18 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
           </DndContext>
           <button
             type="button"
+            onClick={() => setActiveId(PROCESSES_TAB_ID)}
+            className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-sm transition-colors ${
+              activeId === PROCESSES_TAB_ID
+                ? "bg-zinc-700 text-white"
+                : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            }`}
+          >
+            <Gauge className="h-4 w-4" />
+            Processes
+          </button>
+          <button
+            type="button"
             onClick={openTerminal}
             aria-label="New terminal"
             title="New terminal"
@@ -392,28 +407,33 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
         </div>
 
         <div className="relative flex-1">
-          {terminals.length === 0 ? (
+          {/* ProcessesPanel is always mounted to preserve WebSocket/PTY state;
+              visibility toggled via CSS hidden class. */}
+          <div className={activeId === PROCESSES_TAB_ID ? "absolute inset-0" : "absolute inset-0 hidden"}>
+            <ProcessesPanel projectPath={projectPath} />
+          </div>
+
+          {/* TerminalPanels are always mounted to preserve WebSocket/PTY state;
+              only the active tab is visible. Empty state shown when no terminals exist. */}
+          {terminals.map((t) => (
+            <div
+              key={t.id}
+              className={t.id === activeId ? "absolute inset-0" : "absolute inset-0 hidden"}
+            >
+              <TerminalPanel
+                id={t.id}
+                active={active && t.id === activeId}
+                scrollbackLines={scrollbackLines}
+                fontFamily={fontFamily}
+                fontSize={fontSize}
+                projectPath={projectPath}
+              />
+            </div>
+          ))}
+          {terminals.length === 0 && activeId !== PROCESSES_TAB_ID && (
             <div className="p-4 text-sm text-zinc-500">
               No terminals open. Use + to start one.
             </div>
-          ) : (
-            terminals.map((t) => (
-              <div
-                key={t.id}
-                className={
-                  t.id === activeId ? "absolute inset-0" : "absolute inset-0 hidden"
-                }
-              >
-                <TerminalPanel
-                  id={t.id}
-                  active={active && t.id === activeId}
-                  scrollbackLines={scrollbackLines}
-                  fontFamily={fontFamily}
-                  fontSize={fontSize}
-                  projectPath={projectPath}
-                />
-              </div>
-            ))
           )}
         </div>
       </div>

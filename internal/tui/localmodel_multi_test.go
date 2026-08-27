@@ -78,9 +78,9 @@ func TestLocalModelEnableMultipleCmdValidation(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	// register two disabled, one enabled
-	_ = config.SaveLocalModelConfig("local/bonsai-8b-1bit", false, 1)
-	_ = config.SaveLocalModelConfig("local/qwen3-4b", false, 1)
-	_ = config.SaveLocalModelConfig("local/enabled-model", true, 1)
+	_ = config.SaveLocalModelConfig("local/bonsai-8b-1bit", false, 1, 50000)
+	_ = config.SaveLocalModelConfig("local/qwen3-4b", false, 1, 50000)
+	_ = config.SaveLocalModelConfig("local/enabled-model", true, 1, 50000)
 	m := model{
 		input: newTestTextarea(),
 		config: &config.Config{Ocode: config.OcodeConfig{LocalModels: map[string]config.LocalModelConfig{

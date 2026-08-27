@@ -154,3 +154,44 @@ declare global {
   }
 }
 window.ocodeDebug = ocodeDebug;
+
+// TEMPORARY diagnostic (2026-08-27): a residual, un-identified
+// Date.prototype.toLocaleString() call keeps showing up in native `sample`
+// profiles during real streaming sessions (icu::DateFormatSymbols /
+// resolveLocale — full ICU formatter construction) after the known
+// StatusBar.tsx hot path was fixed and memoized. Native sampling can't
+// symbolicate the calling JS frame, so this captures the actual call site
+// from inside the JS engine instead: patches toLocaleString once, grabs a
+// stack trace on the first few calls, and ships each one to the backend log
+// via the existing frontend-stats debug pipe (readable through
+// GET /api/logs) — an SSE/console round-trip a DevTools-less Wails window
+// can't otherwise surface. Remove this whole block (and the
+// debug_note field in internal/server/frontend_stats.go) once the call
+// site is found and fixed.
+(() => {
+  const MAX_CAPTURES = 3;
+  let captured = 0;
+  const orig = Date.prototype.toLocaleString;
+  Date.prototype.toLocaleString = function (...args: Parameters<typeof orig>) {
+    if (captured < MAX_CAPTURES) {
+      captured++;
+      const stack = new Error(`toLocaleString call #${captured}`).stack || "(no stack)";
+      // Fire-and-forget; must never throw or block the real call.
+      fetch(apiPath("/api/debug/frontend-stats"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Ocode-Desktop": "1", ...authHeaders() },
+        body: JSON.stringify({
+          window_id: "toLocaleString-probe",
+          terminal_count: 0,
+          terminal_lines: 0,
+          session_count: 0,
+          message_count: 0,
+          message_bytes: 0,
+          dom_node_count: 0,
+          debug_note: stack,
+        }),
+      }).catch(() => {});
+    }
+    return orig.apply(this, args);
+  };
+})();

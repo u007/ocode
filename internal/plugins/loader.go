@@ -24,15 +24,25 @@ type Plugin struct {
 	Instructions string           `json:"instructions"`
 	OnInstall    []string         `json:"on_install"`
 	MCP          *PluginMCPConfig `json:"mcp"`
+	// Dir is the absolute filesystem directory containing plugin.json. Not
+	// persisted in plugin.json; populated by LoadPlugins from the scan.
+	Dir string `json:"-"`
 }
 
 func LoadPlugins(enabled map[string]bool) []Plugin {
+	return LoadPluginsForProject(enabled, "")
+}
+
+// LoadPluginsForProject loads plugins from the standard search paths, using
+// projectRoot for project-scoped discovery instead of os.Getwd(). When
+// projectRoot is empty, falls back to the legacy findProjectRoot() path.
+func LoadPluginsForProject(enabled map[string]bool, projectRoot string) []Plugin {
 	var plugins []Plugin
 	// seen dedupes by plugin name so a disk copy (listed first in
 	// pluginSearchPaths) wins over the bundled/embedded copy.
 	seen := make(map[string]bool)
 
-	for _, dir := range pluginSearchPaths() {
+	for _, dir := range pluginSearchPathsForProject(projectRoot) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -62,6 +72,7 @@ func LoadPlugins(enabled map[string]bool) []Plugin {
 				}
 			}
 			seen[p.Name] = true
+			p.Dir = filepath.Join(dir, e.Name())
 			plugins = append(plugins, p)
 		}
 	}
@@ -70,11 +81,18 @@ func LoadPlugins(enabled map[string]bool) []Plugin {
 }
 
 func pluginSearchPaths() []string {
+	return pluginSearchPathsForProject("")
+}
+
+// pluginSearchPathsForProject returns the plugin search paths, using
+// projectRoot for the project-local .opencode/plugins directory. When
+// projectRoot is empty, falls back to findProjectRoot() (os.Getwd()).
+func pluginSearchPathsForProject(projectRoot string) []string {
 	paths := make([]string, 0, 3)
 	if global := globalPluginSearchPath(); global != "" {
 		paths = append(paths, global)
 	}
-	if project := projectPluginSearchPath(); project != "" {
+	if project := projectPluginSearchPathForRoot(projectRoot); project != "" {
 		paths = append(paths, project)
 	}
 	// Embedded (bundled) plugins — lowest precedence; disk copies above win.
@@ -82,6 +100,51 @@ func pluginSearchPaths() []string {
 		paths = append(paths, bundled.PluginsDir)
 	}
 	return paths
+}
+
+// FindPluginDir returns the directory containing plugin.json for the named
+// plugin, searching the same precedence order as LoadPlugins. Empty if not
+// found.
+func FindPluginDir(name string) string {
+	return FindPluginDirForProject(name, "")
+}
+
+// FindPluginDirForProject returns the directory containing plugin.json for the
+// named plugin, using projectRoot for project-scoped discovery. When
+// projectRoot is empty, falls back to the legacy os.Getwd() path.
+func FindPluginDirForProject(name, projectRoot string) string {
+	for _, dir := range pluginSearchPathsForProject(projectRoot) {
+		candidate := filepath.Join(dir, name, "plugin.json")
+		if _, err := os.Stat(candidate); err == nil {
+			return filepath.Join(dir, name)
+		}
+		// Also handle case where plugin.json's name field differs from dir
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			pluginPath := filepath.Join(dir, e.Name(), "plugin.json")
+			data, err := os.ReadFile(pluginPath)
+			if err != nil {
+				continue
+			}
+			var p Plugin
+			if err := json.Unmarshal(data, &p); err != nil {
+				continue
+			}
+			if p.Name == "" {
+				p.Name = e.Name()
+			}
+			if p.Name == name {
+				return filepath.Join(dir, e.Name())
+			}
+		}
+	}
+	return ""
 }
 
 // LoadBundledPluginAgentsDirPaths returns the agents/ subdirectories for the
@@ -106,7 +169,16 @@ func globalPluginSearchPath() string {
 }
 
 func projectPluginSearchPath() string {
-	projectRoot := findProjectRoot()
+	return projectPluginSearchPathForRoot("")
+}
+
+// projectPluginSearchPathForRoot returns the project-local plugin directory.
+// When projectRoot is non-empty it is used directly; otherwise falls back to
+// findProjectRoot() which uses os.Getwd() (legacy behavior for TUI/tests).
+func projectPluginSearchPathForRoot(projectRoot string) string {
+	if projectRoot == "" {
+		projectRoot = findProjectRoot()
+	}
 	if projectRoot == "" {
 		return ""
 	}

@@ -18,7 +18,7 @@ import (
 // the instance is healthy or the attempt fails (a cold model download can
 // take minutes — see StartModelInstance's chatHealthPollAttempts) — callers
 // on a UI thread must run this off the update loop.
-func StartLocalModelInstance(ag *Agent, id string, maxParallel int) error {
+func StartLocalModelInstance(ag *Agent, id string, maxParallel, contextSize int) error {
 	registeredIDs, err := config.RegisteredLocalModelIDs()
 	if err != nil {
 		return err
@@ -69,7 +69,7 @@ func StartLocalModelInstance(ag *Agent, id string, maxParallel int) error {
 		}
 		return alive, nil
 	}
-	if err := discovery.StartModelInstance(spawn, id, port, maxParallel, DiscoveryCacheDir(), hfToken); err != nil {
+	if err := discovery.StartModelInstance(spawn, id, port, maxParallel, contextSize, DiscoveryCacheDir(), hfToken); err != nil {
 		// StartModelInstance can fail after already spawning a process (e.g.
 		// the health-poll timed out while the server was still loading) — if
 		// this call owns that process, kill it instead of leaving it orphaned
@@ -111,7 +111,7 @@ func EnsureLocalModelRunning(ag *Agent, fullModelID string) error {
 	if !ok || !lm.Enabled {
 		return nil
 	}
-	return StartLocalModelInstance(ag, fullModelID, lm.MaxParallel)
+	return StartLocalModelInstance(ag, fullModelID, lm.MaxParallel, lm.ContextSize)
 }
 
 // autoStartLocalModelsOnce ensures the enabled-local-model auto-start scan
@@ -144,7 +144,7 @@ func autoStartEnabledLocalModels(ag *Agent, cfg *config.Config) {
 		}
 		id, lm := id, lm
 		go func() {
-			if err := StartLocalModelInstance(ag, id, lm.MaxParallel); err != nil {
+			if err := StartLocalModelInstance(ag, id, lm.MaxParallel, lm.ContextSize); err != nil {
 				emitDebug("LOCALMODEL", fmt.Sprintf("auto-start failed for %s: %v", id, err))
 				return
 			}

@@ -46,8 +46,8 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
     // the global live set. Replacing the global map with one project's
     // snapshot clobbers other projects' terminals (flicker in multi-project
     // servers). Merge per-project envelopes; only the global REST snapshot
-    // replaces the whole map. Closed terminals are hidden by the title
-    // filter (titles[s.id] !== undefined) so merged ghosts do not render.
+    // replaces the whole map. Stale entries for terminals no longer in the
+    // snapshot are cleaned up to prevent unbounded memory growth.
     if (mode === "replace") {
       const next: Record<string, TerminalProcessStat> = {};
       for (const row of rows) next[row.id] = row;
@@ -56,6 +56,12 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
       setStats((prev) => {
         const next = { ...prev };
         for (const row of rows) next[row.id] = row;
+        // Remove entries for terminals no longer present in the latest
+        // snapshot. Without this, closed terminals accumulate forever.
+        const liveIds = new Set(rows.map((r) => r.id));
+        for (const id of Object.keys(next)) {
+          if (!liveIds.has(id)) delete next[id];
+        }
         return next;
       });
     }

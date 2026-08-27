@@ -140,6 +140,8 @@ export function saveProjectTerminals(projectPath: string, terminals: PersistedTe
   }
   try {
     window.localStorage.setItem(PROJECT_TABS_KEY, JSON.stringify(file));
+    // Notify same-window listeners (storage event only fires cross-window).
+    window.dispatchEvent(new CustomEvent("ocode:terminals-changed", { detail: { projectPath: key } }));
   } catch (err) {
     console.error("Failed to persist project terminal tabs:", err);
     return;
@@ -154,6 +156,7 @@ export function dropProjectTerminals(projectPath: string) {
   delete file.projects[key];
   try {
     window.localStorage.setItem(PROJECT_TABS_KEY, JSON.stringify(file));
+    window.dispatchEvent(new CustomEvent("ocode:terminals-changed", { detail: { projectPath: key } }));
   } catch (err) {
     console.error("Failed to drop project terminal tabs:", err);
     return;

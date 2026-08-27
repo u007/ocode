@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { useChatDispatch, useChatState, getSessionSlice } from "../../stores/chatStore";
+import { useChatDispatch, useChatSelector, getSessionSlice, type ChatState } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
@@ -19,10 +19,44 @@ function activeProcessLabel(slice: SessionSlice): string | null {
   return "Running…";
 }
 
+interface TabBarDerived {
+  id: string;
+  initialized: boolean;
+  hasPending: boolean;
+  processLabel: string | null;
+}
+
+function tabBarDerivedEqual(a: TabBarDerived[], b: TabBarDerived[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x.id !== y.id || x.initialized !== y.initialized || x.hasPending !== y.hasPending || x.processLabel !== y.processLabel) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export default function OpenSessionBar() {
   const { state: projectState, tabs, activeTabId, openSessionTab, closeSessionTab, toggleSessionPicker, openNewSessionTab, dispatch: projectDispatch } = useProjectState();
-  const chatState = useChatState();
   const chatDispatch = useChatDispatch();
+  // Derived per-tab summary, not the raw slices: re-renders only when one of
+  // these specific fields actually changes for an open tab, not on every
+  // streamed token (which touches `live`/`messages` but rarely these).
+  const tabsDerived = useChatSelector(
+    (s: ChatState): TabBarDerived[] =>
+      tabs.map((tab) => {
+        const slice = getSessionSlice(s, tab.id);
+        return {
+          id: tab.id,
+          initialized: slice.initialized,
+          hasPending: activeTabId !== tab.id && (slice.pendingPermission !== null || slice.pendingQuestion !== null),
+          processLabel: activeProcessLabel(slice),
+        };
+      }),
+    tabBarDerivedEqual,
+  );
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
 
@@ -76,8 +110,8 @@ export default function OpenSessionBar() {
 
   // A real session tab is "loading" while its slice hasn't finished its first
   // fetch yet (ChatPanel's own initial-load effect sets `initialized`).
-  const isLoadingTab = (tabId: string) =>
-    !tabId.startsWith("new-") && !getSessionSlice(chatState, tabId).initialized;
+  const isLoadingTab = (tabId: string, initialized: boolean) =>
+    !tabId.startsWith("new-") && !initialized;
 
   // Always show when a project is active, even with zero tabs
   if (!projectState.activeProject) {
@@ -91,11 +125,11 @@ export default function OpenSessionBar() {
       className="flex items-center h-8 px-2 gap-0.5 bg-zinc-900 border-b border-zinc-700 overflow-x-auto overflow-y-hidden scrollbar-hide flex-nowrap min-w-0 w-full touch-pan-x overscroll-x-contain"
       style={{ WebkitOverflowScrolling: "touch" } as React.CSSProperties}
     >
-      {tabs.map((tab) => {
+      {tabs.map((tab, i) => {
         const isActive = activeTabId === tab.id;
-        const slice = getSessionSlice(chatState, tab.id);
-        const hasPending = !isActive && (slice.pendingPermission !== null || slice.pendingQuestion !== null);
-        const processLabel = activeProcessLabel(slice);
+        const derived = tabsDerived[i];
+        const hasPending = derived.hasPending;
+        const processLabel = derived.processLabel;
         const displayTitle = processLabel ?? (tab.title || tab.id.slice(0, 12));
         const isEditing = editingTabId === tab.id;
         return (
@@ -114,7 +148,7 @@ export default function OpenSessionBar() {
               }
             }}
           >
-            {isLoadingTab(tab.id) && (
+            {isLoadingTab(tab.id, derived.initialized) && (
               <Loader2 className="w-3 h-3 animate-spin shrink-0" />
             )}
             {hasPending && (

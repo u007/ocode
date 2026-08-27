@@ -7,7 +7,7 @@ tags:
   - extensibility
   - mcp
   - architecture
-timestamp: 2026-07-06T08:35:11Z
+timestamp: 2026-08-27T15:04:53Z
 ---
 # Plugin System
 
@@ -47,6 +47,12 @@ A plugin is a directory on disk containing a `plugin.json` manifest file. Plugin
 |---|---|
 | **Global** | `~/.config/opencode/plugins/` (Unix) / `%APPDATA%/opencode/plugins/` (Windows) |
 | **Project-local** | `.opencode/plugins/` (relative to project root) |
+
+Plugins are additionally discovered from a **bundled/embedded** path — plugins
+ships inside the ocode binary (e.g. the `orchestrator` plugin) are extracted to
+the global data dir and treated as the lowest-precedence search path, so any
+disk copy (global or project-local) overrides the embedded copy. All three paths
+are merged when listing or loading plugins.
 
 Each subdirectory inside these paths is treated as a plugin. A typical plugin layout:
 
@@ -159,3 +165,70 @@ The `{plugin_dir}` token is replaced with the absolute path of the installed plu
 ## Managing Plugins
 
 All plugin management happens through the `/plugin` TUI command.
+
+## Web & Desktop UI
+
+The web SPA and desktop shell expose the same plugin management through the
+**Plugins** panel (open via the sidebar) and the `/plugin` chat command:
+
+- The plugin list shows **every plugin discovered on disk** — global,
+  project-local, and bundled/embedded — not only those registered in
+  `external_plugins`. Disk-only plugins (e.g. bundled ones) appear enabled by
+  default and can be toggled; the first toggle auto-creates an `external_plugins`
+  entry so the state persists.
+- A separate **Builtin plugins** section lists opt-in built-in tools. The `ast`
+  plugin (ast-grep structural search/rewrite) is toggled here, mirroring the
+  TUI's `Builtin plugins` section.
+- Bundled/embedded plugins ship inside the binary and are **read-only**: the UI
+  returns an error if you attempt to remove one (removing it would delete the
+  embedded copy). Only installed plugins (global or project-local) can be
+  removed.
+
+The backing REST endpoints are `GET /api/plugins` (merged disk + config list),
+`GET /api/plugins/{name}`, `PUT /api/plugins/{name}/enable|disable`,
+`POST /api/plugins`, and `DELETE /api/plugins/{name}`.
+
+## Architecture Decisions
+
+### Transactional Install with Deferred Rollback
+
+Plugin installation (`POST /api/plugins`) uses a deferred-rollback pattern. After the git clone succeeds, any post-clone step that fails — `RunOnInstall`, `AutoRegisterMCP`, or `SavePlugin` — triggers a rollback that undoes all prior side effects:
+
+1. The cloned directory is removed via `os.RemoveAll`.
+2. If MCP was auto-registered, `UnregisterMCP` cleans up the entry.
+3. The config entry is not persisted.
+
+The rollback is implemented as a `defer` closure gated by a `rollbackClone` flag. On success the flag is cleared, preventing the defer from running. This guarantees the install either fully succeeds (clone + post-clone steps + config + agent refresh) or fully rolls back — no partial state is left behind.
+
+Code reference: `internal/server/handler_plugins.go` — `HandleInstallPlugin` (lines 266–308).
+
+### Agent Session Rebuild After Plugin Lifecycle Changes
+
+Every plugin mutation (install, enable, disable, remove) calls
+`refreshAgentSessionsForPluginChange()` to rebuild resident agent sessions so
+they pick up the new plugin tool set on the next turn.
+
+The rebuild runs outside `Handler.mu` (building an agent session touches the
+filesystem and may spawn plugin/MCP processes). Session IDs are snapshotted
+under `h.mu`, then each session whose project root matches is rebuilt
+individually. Sessions with an active turn are skipped — the in-flight turn
+finishes on the old agent, and the next turn picks up the new plugin set.
+
+Lock order is respected: `agentSession.mu → Handler.mu`, never the reverse.
+
+Code reference: `internal/server/handler_plugins.go` — `refreshAgentSessionsForPluginChange` (lines 394–443).
+
+### Project-Root-Aware Plugin Discovery
+
+`LoadPluginsForProject(enabled, projectRoot)` decouples plugin discovery from
+`os.Getwd()`. When `projectRoot` is provided, project-local plugins are
+discovered relative to that root instead of the process working directory. This
+is critical for the web/desktop server, where a Finder/Launcher-launched
+process may have a CWD of `/` — the project root comes from the session's
+bound project, not the process environment.
+
+`FindPluginDirForProject` follows the same pattern. The legacy `LoadPlugins()`
+and `FindPluginDir()` wrappers pass an empty `projectRoot`, falling back to the
+legacy `findProjectRoot()` path for backward compatibility.
+
+Code reference: `internal/plugins/loader.go` — `LoadPluginsForProject` (lines 36–99), `FindPluginDirForProject` (lines 112–148).

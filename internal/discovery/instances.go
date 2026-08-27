@@ -255,7 +255,7 @@ func lockForStart(modelID string) *sync.Mutex {
 // comment for the incident that motivated this.
 type ChatLiveness func() (alive bool, detail string)
 
-func StartModelInstance(spawn func(cmdline string) (ChatLiveness, error), modelID string, port int, maxParallel int, cacheDir string, hfToken string) error {
+func StartModelInstance(spawn func(cmdline string) (ChatLiveness, error), modelID string, port int, maxParallel, contextSize int, cacheDir string, hfToken string) error {
 	lock := lockForStart(modelID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -334,7 +334,7 @@ func StartModelInstance(spawn func(cmdline string) (ChatLiveness, error), modelI
 	case BackendMLX:
 		alive, err = spawnMLXChatServer(spawn, man, port, maxParallel, hfToken)
 	default:
-		alive, err = spawnLlamaCppChatServer(spawn, man, cacheDir, port, maxParallel)
+		alive, err = spawnLlamaCppChatServer(spawn, man, cacheDir, port, maxParallel, contextSize)
 	}
 	if err != nil {
 		// A concurrent ocode process may have won the race and bound the port
@@ -554,7 +554,7 @@ func acquireChatStartLock(cacheDir, modelID string) (acquired bool, release func
 // spawnLlamaCppChatServer mirrors spawnLlamaCppServer (localserver.go) but
 // targets an arbitrary port + parallel-slot count instead of the embedder's
 // fixed port, and skips --embeddings (chat manifests omit it in LaunchArgv).
-func spawnLlamaCppChatServer(spawn func(cmdline string) (ChatLiveness, error), man ServerManifest, cacheDir string, port, maxParallel int) (ChatLiveness, error) {
+func spawnLlamaCppChatServer(spawn func(cmdline string) (ChatLiveness, error), man ServerManifest, cacheDir string, port, maxParallel, contextSize int) (ChatLiveness, error) {
 	binDir := filepath.Join(cacheDir, "local-"+man.OS+"-"+man.Arch)
 	for _, a := range man.Artifacts {
 		if err := EnsureArtifact(a, binDir); err != nil {
@@ -567,6 +567,7 @@ func spawnLlamaCppChatServer(spawn func(cmdline string) (ChatLiveness, error), m
 		a = strings.ReplaceAll(a, "{bin}", binDir)
 		a = strings.ReplaceAll(a, "{port}", fmt.Sprintf("%d", port))
 		a = strings.ReplaceAll(a, "{parallel}", fmt.Sprintf("%d", maxParallel))
+		a = strings.ReplaceAll(a, "{ctx}", fmt.Sprintf("%d", contextSize))
 		if i == 0 {
 			binPath = a
 		}

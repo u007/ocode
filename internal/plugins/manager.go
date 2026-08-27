@@ -16,6 +16,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
+	"github.com/u007/ocode/internal/bundled"
 	"github.com/u007/ocode/internal/config"
 )
 
@@ -156,10 +157,133 @@ func InstallLocal(srcDir, destDir string) (Plugin, error) {
 
 // Remove deletes a plugin directory from disk.
 func Remove(pluginDir string) error {
-	if err := os.RemoveAll(pluginDir); err != nil {
-		return fmt.Errorf("remove plugin dir %q: %w", pluginDir, err)
+	// Never delete a bundled/embedded plugin directory. These live under the
+	// global data dir's version-scoped `bundled/...` extraction tree; removing
+	// them would delete the embedded copy shipped inside the binary and break
+	// every subsequent run until re-extracted. Installed plugins live under the
+	// global install dir or a project plugin dir, which are always safe to
+	// remove.
+	abs, err := filepath.Abs(pluginDir)
+	if err != nil {
+		return fmt.Errorf("resolve plugin dir: %w", err)
+	}
+	if bundled.PluginsDir != "" {
+		if bp, err := filepath.Abs(bundled.PluginsDir); err == nil && isSubpath(bp, abs) {
+			return fmt.Errorf("cannot remove bundled plugin directory %q", pluginDir)
+		}
+	}
+	if err := os.RemoveAll(abs); err != nil {
+		return fmt.Errorf("remove plugin dir %q: %w", abs, err)
 	}
 	return nil
+}
+
+// isSubpath reports whether child is the same as or nested inside parent.
+// Both paths must already be absolute/cleaned by the caller for reliable
+// comparison.
+func isSubpath(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return !strings.HasPrefix(rel, "..")
+}
+
+// IsBundledPluginDir reports whether dir lies inside the bundled/embedded
+// plugin extraction tree and therefore must not be removed by the user.
+func IsBundledPluginDir(dir string) bool {
+	if bundled.PluginsDir == "" || dir == "" {
+		return false
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	bp, err := filepath.Abs(bundled.PluginsDir)
+	if err != nil {
+		return false
+	}
+	return isSubpath(bp, abs)
+}
+
+// ValidateRemovableDir checks that dir is a safe plugin removal target:
+// it must be an absolute path that resolves to a direct child of one of the
+// known plugin roots (global install dir or project plugin dir), with no
+// symlink escapes or traversal sequences.
+//
+// The check uses EvalSymlinks to resolve the canonical path, ensuring that a
+// symlink pointing outside an approved root is rejected even if the logical
+// path appears contained.
+func ValidateRemovableDir(dir string) error {
+	return ValidateRemovableDirForProject(dir, "")
+}
+
+// ValidateRemovableDirForProject checks that dir is a safe plugin removal
+// target, using projectRoot for project-scoped root resolution. When
+// projectRoot is empty, falls back to the legacy os.Getwd() path.
+func ValidateRemovableDirForProject(dir, projectRoot string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve plugin dir: %w", err)
+	}
+	// Reject if the path contains ".." segments after cleaning.
+	if strings.Contains(abs, "..") {
+		return fmt.Errorf("plugin path contains invalid traversal: %s", dir)
+	}
+
+	// Resolve symlinks to get the canonical path. This catches symlink
+	// escapes where a symlink in the path points outside the approved root.
+	clean := abs
+	if info, err := os.Lstat(abs); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+			clean = resolved
+		} else {
+			return fmt.Errorf("resolve symlinks in %q: %w", dir, err)
+		}
+	} else if err == nil && info.IsDir() {
+		// Even for non-symlink dirs, resolve to canonical form to handle
+		// symlinked parent directories.
+		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+			clean = resolved
+		}
+	}
+
+	// Build the list of approved roots (canonical forms).
+	var approvedRoots []string
+
+	installRoot, err := PluginInstallDir()
+	if err == nil {
+		if absRoot, err := filepath.Abs(installRoot); err == nil {
+			approvedRoots = append(approvedRoots, absRoot)
+		}
+	}
+	for _, candidate := range pluginSearchPathsForProject(projectRoot) {
+		if absRoot, err := filepath.Abs(candidate); err == nil {
+			approvedRoots = append(approvedRoots, absRoot)
+		}
+	}
+	if bundled.PluginsDir != "" {
+		if absRoot, err := filepath.Abs(bundled.PluginsDir); err == nil {
+			approvedRoots = append(approvedRoots, absRoot)
+		}
+	}
+
+	// Check the canonical path against each approved root.
+	for _, root := range approvedRoots {
+		// Always resolve root to canonical form for fair comparison.
+		canonicalRoot := root
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			canonicalRoot = resolved
+		}
+		if isSubpath(canonicalRoot, clean) {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("plugin directory %q is not inside an approved plugin root", dir)
 }
 
 // PluginInstallDir returns the canonical global plugins root directory.

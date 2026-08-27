@@ -1,4 +1,4 @@
-import { useChatState, getSessionSlice } from "../../stores/chatStore";
+import { useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { Button } from "@/components/ui/button";
 import { PanelRight } from "lucide-react";
@@ -26,6 +26,11 @@ function formatUSD(n: number): string {
   return `$${n.toFixed(0)}`;
 }
 
+// Reused across renders: constructing Intl.DateTimeFormat does full ICU locale
+// resolution and is too expensive to redo on every render — this component
+// re-renders once per streamed token while a tool is active.
+const activityTimeFormatter = new Intl.DateTimeFormat([], { hour12: false, timeStyle: "medium" });
+
 // Render one in-flight tool the way the TUI activity row does: `name [HH:MM:SS]`.
 // Long tool names are truncated so the status bar stays readable on one row.
 function toolActivityLabel(t: ToolActivityStatus): string {
@@ -33,7 +38,7 @@ function toolActivityLabel(t: ToolActivityStatus): string {
   if (!t.started_at) return `⚙ ${name}`;
   const started = new Date(t.started_at);
   if (isNaN(started.getTime())) return `⚙ ${name}`;
-  return `⚙ ${name} [${started.toLocaleTimeString([], { hour12: false })}]`;
+  return `⚙ ${name} [${activityTimeFormatter.format(started)}]`;
 }
 
 // Builds the "current running status" segment shown at the bottom, mirroring the
@@ -58,10 +63,11 @@ function runningStatusParts(
 }
 
 export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
-  const chatState = useChatState();
-  const { spendingUSD } = chatState;
   const { activeTabId } = useProjectState();
-  const { isStreaming, error, live, tuiStatus } = getSessionSlice(chatState, activeTabId);
+  const spendingUSD = useChatSelector((s) => s.spendingUSD);
+  // Scoped to the active tab's session: other tabs' streamed tokens don't
+  // re-render this always-mounted status bar.
+  const { isStreaming, error, live, tuiStatus } = useChatSelector((s) => getSessionSlice(s, activeTabId));
 
   // Pull every field from the consolidated snapshot when present; fall back to
   // the per-field store state for older TUI builds that don't push "status".

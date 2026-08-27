@@ -3,6 +3,8 @@ import {
   getQueue,
   pushQueued,
   shiftQueued,
+  shiftUndispatched,
+  removeQueuedItem,
   popLastQueued,
   rekeyQueue,
   clearQueue,
@@ -21,24 +23,34 @@ describe("tabQueue", () => {
     clearQueue("t1");
   });
 
-  it("popLastQueued restores only message items, leaving commands queued", () => {
+  it("popLastQueued restores the last item regardless of kind (LIFO)", () => {
     pushQueued("t2", cmd("/btw aside"));
     pushQueued("t2", msg("follow-up"));
-    // Newest message is restored; the command stays for execution.
+    // Newest item (the message) is restored and removed.
     expect(popLastQueued("t2")).toEqual(msg("follow-up"));
     expect(getQueue("t2")).toEqual([cmd("/btw aside")]);
-    // Only a command remains — nothing is restorable.
-    expect(popLastQueued("t2")).toBeUndefined();
-    expect(getQueue("t2")).toEqual([cmd("/btw aside")]);
+    // The remaining command is also restorable — mirrors the TUI's up-arrow
+    // restore, which recalls the last queued item even when it is a command.
+    expect(popLastQueued("t2")).toEqual(cmd("/btw aside"));
+    expect(getQueue("t2")).toEqual([]);
     clearQueue("t2");
   });
 
-  it("popLastQueued walks backwards past trailing commands to the last message", () => {
-    pushQueued("t3", msg("first"));
+  it("popLastQueued restores a queued command when it is the last item", () => {
+    pushQueued("t2b", msg("first"));
+    pushQueued("t2b", cmd("/sidebar"));
+    // The trailing command (last queued) is restored, not the earlier message.
+    expect(popLastQueued("t2b")).toEqual(cmd("/sidebar"));
+    expect(getQueue("t2b")).toEqual([msg("first")]);
+    clearQueue("t2b");
+  });
+
+  it("popLastQueued restores a command-only queue", () => {
     pushQueued("t3", cmd("/btw c1"));
     pushQueued("t3", cmd("/btw c2"));
-    expect(popLastQueued("t3")).toEqual(msg("first"));
-    expect(getQueue("t3")).toEqual([cmd("/btw c1"), cmd("/btw c2")]);
+    expect(popLastQueued("t3")).toEqual(cmd("/btw c2"));
+    expect(popLastQueued("t3")).toEqual(cmd("/btw c1"));
+    expect(getQueue("t3")).toEqual([]);
     clearQueue("t3");
   });
 
@@ -69,5 +81,51 @@ describe("tabQueue", () => {
     pushQueued("t4", msg("x"));
     clearQueue("t4");
     expect(getQueue("t4")).toEqual([]);
+  });
+
+  it("shiftUndispatched skips dispatched items and returns the next fresh one (FIFO)", () => {
+    pushQueued("t5", { kind: "message", text: "injected", dispatched: true });
+    pushQueued("t5", msg("fresh"));
+    pushQueued("t5", { kind: "message", text: "injected2", dispatched: true });
+    // The dispatched head is dropped; the fresh message is returned.
+    expect(shiftUndispatched("t5")).toEqual(msg("fresh"));
+    // Only the trailing dispatched item remains — it is discarded, not returned.
+    expect(shiftUndispatched("t5")).toBeUndefined();
+    expect(getQueue("t5")).toEqual([]);
+    clearQueue("t5");
+  });
+
+  it("shiftUndispatched discards a queue that is entirely dispatched", () => {
+    pushQueued("t6", { kind: "message", text: "a", dispatched: true });
+    pushQueued("t6", { kind: "message", text: "b", dispatched: true });
+    expect(shiftUndispatched("t6")).toBeUndefined();
+    expect(getQueue("t6")).toEqual([]);
+    clearQueue("t6");
+  });
+
+  it("removeQueuedItem removes by reference and leaves the rest intact", () => {
+    const a = msg("a");
+    const b = msg("b");
+    const c = { kind: "message" as const, text: "c", dispatched: true };
+    pushQueued("t7", a);
+    pushQueued("t7", b);
+    pushQueued("t7", c);
+    // A rejected submit should drop only the phantom dispatched entry.
+    removeQueuedItem("t7", c);
+    expect(getQueue("t7")).toEqual([a, b]);
+    // Removing a non-existent reference is a no-op.
+    removeQueuedItem("t7", { kind: "message", text: "nope" });
+    expect(getQueue("t7")).toEqual([a, b]);
+    clearQueue("t7");
+  });
+
+  it("popLastQueued returns the last item even when dispatched", () => {
+    pushQueued("t8", msg("first"));
+    pushQueued("t8", { kind: "message", text: "live", dispatched: true });
+    // Recall walks to the newest item regardless of its dispatched flag, so a
+    // message typed during streaming is still restorable via up-arrow.
+    expect(popLastQueued("t8")).toEqual({ kind: "message", text: "live", dispatched: true });
+    expect(getQueue("t8")).toEqual([msg("first")]);
+    clearQueue("t8");
   });
 });

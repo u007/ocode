@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
-import { useChatState } from "../../stores/chatStore";
+import { useChatSelector } from "../../stores/chatStore";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
@@ -19,7 +19,7 @@ export default function AdvisorForm() {
   // The advisor model is picked through the ModelDialog (which persists
   // immediately on select); the chat store is the live value, with the
   // API-loaded copy as fallback so the display/save never revert a fresh pick.
-  const { advisorModel } = useChatState();
+  const advisorModel = useChatSelector((s) => s.advisorModel);
   const currentModel = advisorModel || model;
 
   const load = useCallback(async () => {

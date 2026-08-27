@@ -1,4 +1,4 @@
-import { useChatState, getSessionSlice } from "../../stores/chatStore";
+import { useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { api } from "../../api/client";
 import { useEffect, useState } from "react";
@@ -13,10 +13,9 @@ interface Props {
 // the model/session metadata. Opened from the "status" button in the
 // StatusBar so the user can drill in without leaving the chat.
 export default function StatusPanel({ onClose }: Props) {
-  const chatState = useChatState();
-  const { spendingUSD } = chatState;
   const { activeTabId } = useProjectState();
-  const { tuiStatus } = getSessionSlice(chatState, activeTabId);
+  const spendingUSD = useChatSelector((s) => s.spendingUSD);
+  const { tuiStatus } = useChatSelector((s) => getSessionSlice(s, activeTabId));
   const [files, setFiles] = useState<FileStatus[]>([]);
   const [lsps, setLsps] = useState<LSPStatus[]>([]);
   const [spending, setSpending] = useState<{ spending_usd: number; records: number } | null>(null);

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { api } from "../../api/client";
-import { useChatDispatch, useChatState } from "../../stores/chatStore";
+import { useChatDispatch, useChatSelector } from "../../stores/chatStore";
 import type { ModelInfo } from "../../api/types";
 import { advisorSelectionPayload } from "./modelSelection";
 import { Search, Check, X } from "lucide-react";
@@ -49,7 +49,9 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   // cannot silently flip a toggle the user set explicitly.
   const [advisorClaudeCode, setAdvisorClaudeCode] = useState(false);
   const [permissionModelState, setPermissionModelState] = useState("");
-  const { model: activeModel, smallModel, advisorModel } = useChatState();
+  const activeModel = useChatSelector((s) => s.model);
+  const smallModel = useChatSelector((s) => s.smallModel);
+  const advisorModel = useChatSelector((s) => s.advisorModel);
   const dispatch = useChatDispatch();
 
   useEffect(() => {

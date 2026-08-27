@@ -17,7 +17,7 @@ func TestDefaultRedactionBaseURL_LocalModel(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	if err := config.SaveLocalModelConfig("local/bonsai-8b-1bit", true, 1); err != nil {
+	if err := config.SaveLocalModelConfig("local/bonsai-8b-1bit", true, 1, 50000); err != nil {
 		t.Fatalf("SaveLocalModelConfig: %v", err)
 	}
 	// One registered id → first reserved port (11458).
@@ -25,7 +25,7 @@ func TestDefaultRedactionBaseURL_LocalModel(t *testing.T) {
 		t.Errorf("defaultRedactionBaseURL(local) = %q, want %q", got, "http://localhost:11458/v1")
 	}
 	// A second registered id sorts after the first → next port.
-	if err := config.SaveLocalModelConfig("local/zeta-model", true, 1); err != nil {
+	if err := config.SaveLocalModelConfig("local/zeta-model", true, 1, 50000); err != nil {
 		t.Fatalf("SaveLocalModelConfig: %v", err)
 	}
 	if got := defaultRedactionBaseURL("local/zeta-model"); got != "http://localhost:11459/v1" {
@@ -114,10 +114,10 @@ func TestSetRedactionModel_RefreshesAutoAssignedLocalURL(t *testing.T) {
 	t.Setenv("HOME", tmp)
 
 	// Register two local models so each has a deterministic chat port.
-	if err := config.SaveLocalModelConfig("local/bonsai-8b-1bit", true, 1); err != nil {
+	if err := config.SaveLocalModelConfig("local/bonsai-8b-1bit", true, 1, 50000); err != nil {
 		t.Fatalf("SaveLocalModelConfig: %v", err)
 	}
-	if err := config.SaveLocalModelConfig("local/zeta-model", true, 1); err != nil {
+	if err := config.SaveLocalModelConfig("local/zeta-model", true, 1, 50000); err != nil {
 		t.Fatalf("SaveLocalModelConfig: %v", err)
 	}
 

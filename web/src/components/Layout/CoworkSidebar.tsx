@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { api, apiPath, authHeaders } from "../../api/client";
-import { useChatState, useChatDispatch, getSessionSlice } from "../../stores/chatStore";
+import { useChatSelector, useChatDispatch, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { eventBus } from "../../lib/eventBus";
 import type { AgentInfo, LSPStatus } from "../../api/types";
@@ -45,6 +45,10 @@ interface ConfigState {
   recapModel?: string;
   recapModelEnabled?: boolean;
   contextMaxTokens?: number;
+  advisorModel?: string;
+  advisorEnabled?: boolean;
+  smallModel?: string;
+  smallModelEnabled?: boolean;
 }
 
 // Expanded/collapsed state of the sidebar sections. Persisted to localStorage
@@ -97,6 +101,8 @@ export default function CoworkSidebar({
   const [todoItems] = useState<string[]>([]);
   const [yoloLoading, setYoloLoading] = useState(false);
   const [permLoading, setPermLoading] = useState(false);
+  const [advisorLoading, setAdvisorLoading] = useState(false);
+  const [smallLoading, setSmallLoading] = useState(false);
   // Locally-tracked active agent. The `activeAgent` prop is fixed by the
   // parent, so switching agents is reflected via this optimistic state.
   const [selectedAgent, setSelectedAgent] = useState<string>(activeAgent);
@@ -110,12 +116,15 @@ export default function CoworkSidebar({
   }
 
   const [titleGenerating, setTitleGenerating] = useState(false);
-  const chatState = useChatState();
   const dispatch = useChatDispatch();
-  const { model } = chatState;
+  const model = useChatSelector((s) => s.model);
+  const globalAdvisorModel = useChatSelector((s) => s.advisorModel);
+  const globalAdvisorEnabled = useChatSelector((s) => s.advisorEnabled);
+  const globalSmallModel = useChatSelector((s) => s.smallModel);
+  const globalSmallModelEnabled = useChatSelector((s) => s.smallModelEnabled);
   const { activeTabId: sessionId } = projectState;
   const activeProject = projectState.state.activeProject ?? null;
-  const { tuiStatus, messages } = getSessionSlice(chatState, sessionId);
+  const { tuiStatus, messages } = useChatSelector((s) => getSessionSlice(s, sessionId));
 
   // ── Session title display — mirrors TUI's sidebarDisplayTitle() ────────────
   // Priority: explicit session_title → first user prompt (truncated) → "Untitled".
@@ -209,8 +218,11 @@ export default function CoworkSidebar({
       api.getPermissionModel().catch(() => null),
       api.getYolo().catch(() => null),
       api.getRecapConfig().catch(() => null),
+      api.getAdvisor().catch(() => null),
+      api.getAdvisorEnabled().catch(() => null),
+      api.getSmallModelWithEnabled().catch(() => null),
     ])
-      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes]) => {
+      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, advisorRes, advisorEnabledRes, smallRes]) => {
         setConfig({
           model: modelRes?.model || "",
           thinkingBudget: thinkingRes?.budget,
@@ -220,6 +232,10 @@ export default function CoworkSidebar({
           recapModel: recapRes?.recap_model,
           recapModelEnabled: recapRes?.recap_model_enabled,
           contextMaxTokens: modelRes?.context_max_tokens,
+          advisorModel: advisorRes?.model || "",
+          advisorEnabled: advisorEnabledRes?.enabled,
+          smallModel: smallRes?.model || "",
+          smallModelEnabled: smallRes?.enabled,
         });
       })
       .catch(console.error);
@@ -311,6 +327,48 @@ export default function CoworkSidebar({
       console.error("toggle perm enabled error", e);
     } finally {
       setPermLoading(false);
+    }
+  };
+
+  const toggleAdvisor = async () => {
+    const current = tuiStatus?.advisor_enabled ?? config.advisorEnabled ?? globalAdvisorEnabled;
+    const next = !current;
+    setAdvisorLoading(true);
+    dispatch({ type: "SET_ADVISOR_ENABLED", enabled: next });
+    try {
+      await api.setAdvisorEnabled(next);
+      if (sessionId) {
+        const status = await api.getSessionStatus(sessionId);
+        dispatch({ type: "SET_TUI_STATUS", sessionId, status });
+      } else {
+        setConfig((prev) => ({ ...prev, advisorEnabled: next }));
+      }
+    } catch (e) {
+      console.error("toggle advisor error", e);
+      dispatch({ type: "SET_ADVISOR_ENABLED", enabled: current ?? true });
+    } finally {
+      setAdvisorLoading(false);
+    }
+  };
+
+  const toggleSmall = async () => {
+    const current = tuiStatus?.small_model_enabled ?? config.smallModelEnabled ?? globalSmallModelEnabled;
+    const next = !current;
+    setSmallLoading(true);
+    dispatch({ type: "SET_SMALL_MODEL_ENABLED", enabled: next });
+    try {
+      await api.setSmallModelEnabled(next);
+      if (sessionId) {
+        const status = await api.getSessionStatus(sessionId);
+        dispatch({ type: "SET_TUI_STATUS", sessionId, status });
+      } else {
+        setConfig((prev) => ({ ...prev, smallModelEnabled: next }));
+      }
+    } catch (e) {
+      console.error("toggle small model error", e);
+      dispatch({ type: "SET_SMALL_MODEL_ENABLED", enabled: current ?? false });
+    } finally {
+      setSmallLoading(false);
     }
   };
 
@@ -411,11 +469,9 @@ export default function CoworkSidebar({
           )}
         </div>
 
-        {/* Compact main-model trigger — Small/Advisor/OCR/Permissions moved to
-            the Settings tab (see docs/superpowers/specs/2026-08-11-configuration-ui-design.md).
-            This is the only remaining sidebar entry point for ModelDialog,
-            which stays out of scope for this feature. */}
-        <div className="border-b border-zinc-700 px-4 py-2.5">
+        {/* Model configuration — mirrors TUI's pinned topLines (advisor/small/perm/recap)
+            so web/desktop sidebars expose the same selection + toggle controls. */}
+        <div className="border-b border-zinc-700 px-4 py-2.5 space-y-2">
           <button
             type="button"
             onClick={() => onModelClick?.("main")}
@@ -427,6 +483,63 @@ export default function CoworkSidebar({
               {model || config.model || "Not set"}
             </div>
           </button>
+          {/* Advisor — model picker + on/off toggle (mirrors TUI's advisor: ●on/○off <model> row) */}
+          <button
+            type="button"
+            onClick={() => onModelClick?.("advisor")}
+            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
+            disabled={!onModelClick}
+            title="Pick the advisor model"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-zinc-500">Advisor</span>
+              <span className={`font-mono text-[11px] ${(tuiStatus?.advisor_enabled ?? config.advisorEnabled ?? globalAdvisorEnabled) ? "text-emerald-400" : "text-zinc-500"}`}>
+                {(tuiStatus?.advisor_enabled ?? config.advisorEnabled ?? globalAdvisorEnabled) ? "●on" : "○off"}
+              </span>
+            </div>
+            <div className="text-zinc-300 font-mono truncate">
+              {tuiStatus?.advisor_model || config.advisorModel || globalAdvisorModel || "(default)"}
+            </div>
+          </button>
+          <label className="flex items-center justify-between cursor-pointer rounded px-1 py-1 hover:bg-zinc-800">
+            <span className="text-xs text-zinc-400">Advisor enabled</span>
+            <input
+              type="checkbox"
+              checked={Boolean(tuiStatus?.advisor_enabled ?? config.advisorEnabled ?? globalAdvisorEnabled)}
+              disabled={advisorLoading}
+              onChange={toggleAdvisor}
+              className="w-8 h-4 rounded-full appearance-none bg-zinc-700 checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+            />
+          </label>
+          {/* Small model — model picker + on/off toggle (mirrors TUI's small: ●on/○off <model> row) */}
+          <button
+            type="button"
+            onClick={() => onModelClick?.("small")}
+            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
+            disabled={!onModelClick}
+            title="Pick the small model"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-zinc-500">Small</span>
+              <span className={`font-mono text-[11px] ${(tuiStatus?.small_model_enabled ?? config.smallModelEnabled ?? globalSmallModelEnabled) ? "text-emerald-400" : "text-zinc-500"}`}>
+                {(tuiStatus?.small_model_enabled ?? config.smallModelEnabled ?? globalSmallModelEnabled) ? "●on" : "○off"}
+              </span>
+            </div>
+            <div className="text-zinc-300 font-mono truncate">
+              {tuiStatus?.small_model || config.smallModel || globalSmallModel || "(none)"}
+            </div>
+          </button>
+          <label className="flex items-center justify-between cursor-pointer rounded px-1 py-1 hover:bg-zinc-800">
+            <span className="text-xs text-zinc-400">Small model enabled</span>
+            <input
+              type="checkbox"
+              checked={Boolean(tuiStatus?.small_model_enabled ?? config.smallModelEnabled ?? globalSmallModelEnabled)}
+              disabled={smallLoading}
+              onChange={toggleSmall}
+              className="w-8 h-4 rounded-full appearance-none bg-zinc-700 checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+            />
+          </label>
+
           {/* Reasoning level selector */}
           <ReasoningLevelSelector
             thinkingBudget={tuiStatus?.thinking_budget ?? config.thinkingBudget}

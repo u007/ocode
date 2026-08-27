@@ -1,8 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { authedFetch } from "@/api/client";
 import { isDesktopShell } from "@/lib/desktopShell";
 import { terminalRegistrySnapshot } from "@/lib/debug/terminalRegistry";
-import { useChatState } from "@/stores/chatStore";
+import { useChatStateRef } from "@/stores/chatStore";
 import type { ChatState } from "@/stores/chatStore";
 
 const REPORT_INTERVAL_MS = 30_000;
@@ -70,9 +70,10 @@ function estimateChatBytes(sessions: ChatState["sessions"]): { sessionCount: num
  * investigation was missing.
  */
 export default function FrontendMemoryReporter() {
-  const chatState = useChatState();
-  const chatStateRef = useRef(chatState);
-  chatStateRef.current = chatState;
+  // Purely imperative (read every 30s inside the interval tick below), and
+  // this component renders nothing — must not itself re-render (and thus
+  // contribute to) the per-token churn it exists to measure.
+  const chatStateRef = useChatStateRef();
 
   useEffect(() => {
     if (!isDesktopShell()) return;

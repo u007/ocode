@@ -341,11 +341,21 @@ type DiscoveryConfig struct {
 // LocalModelConfig is one user-registered local chat/completion model
 // instance (see internal/discovery/instances.go). MaxParallel is the number
 // of concurrent request slots (1 or 2) the running server process is
-// launched with.
+// launched with. ContextSize is the llama-server --ctx-size passed at
+// launch, in tokens; 0 means "loaded from model" (llama.cpp's own
+// convention), i.e. no cap — the model's full native trained context.
+// Uncapped defaults are what let a long-context GGUF (e.g. a 256k-context
+// model) balloon its KV cache to tens of GB on startup with a single slot.
 type LocalModelConfig struct {
 	Enabled     bool `json:"enabled"`
 	MaxParallel int  `json:"max_parallel"`
+	ContextSize int  `json:"context_size"`
 }
+
+// DefaultLocalChatContextSize is the --ctx-size a newly-registered local
+// chat model gets, bounding KV cache instead of inheriting the model's full
+// native trained context (see LocalModelConfig.ContextSize).
+const DefaultLocalChatContextSize = 20000
 
 type SecurityConfig struct {
 	Redaction RedactionConfig `json:"redaction"`
@@ -2011,14 +2021,15 @@ func SaveLocalModelStatus(status string) error {
 }
 
 // SaveLocalModelConfig persists (creating or updating) one registered local
-// chat model's enabled flag and concurrent-slot limit, using load-modify-write
-// so it cannot clobber a concurrent session's other config.
-func SaveLocalModelConfig(modelID string, enabled bool, maxParallel int) error {
+// chat model's enabled flag, concurrent-slot limit, and context-size cap,
+// using load-modify-write so it cannot clobber a concurrent session's other
+// config.
+func SaveLocalModelConfig(modelID string, enabled bool, maxParallel, contextSize int) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		if cfg.LocalModels == nil {
 			cfg.LocalModels = map[string]LocalModelConfig{}
 		}
-		cfg.LocalModels[modelID] = LocalModelConfig{Enabled: enabled, MaxParallel: maxParallel}
+		cfg.LocalModels[modelID] = LocalModelConfig{Enabled: enabled, MaxParallel: maxParallel, ContextSize: contextSize}
 		return nil
 	})
 }

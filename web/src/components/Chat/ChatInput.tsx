@@ -1,7 +1,7 @@
 import { useState, type KeyboardEvent, useRef, useEffect, useCallback } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
-import { getQueue, pushQueued, shiftQueued, popLastQueued } from "../../lib/tabQueue";
+import { getQueue, pushQueued, shiftUndispatched, popLastQueued, removeQueuedItem, type QueuedItem } from "../../lib/tabQueue";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
@@ -43,6 +43,14 @@ export default function ChatInput({
   const [queueCount, setQueueCount] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const dragCounterRef = useRef(0);
+  // In-flight submission guard: an accidental double-fire of the same physical
+  // submit (duplicate keydown/click, IME confirm + keydown, or a duplicated
+  // synthetic event from the desktop shell) must not send the message twice.
+  // submittingRef is set synchronously at the start of handleSend and cleared
+  // when the send settles, so a duplicate that arrives within the same submit
+  // is dropped — while a later, DISTINCT message (different tick, after the
+  // previous send resolved and busy flipped) is never blocked.
+  const submittingRef = useRef(false);
   const { sendMessage, executeShell, stop, isStreaming, pendingPermission } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
@@ -60,6 +68,40 @@ export default function ChatInput({
     setInput(getDraft(sessionTabId));
     setQueueCount(getQueue(sessionTabId).length);
   }, [sessionTabId]);
+
+  // Auto-drain the queue once the turn (streaming or shell exec) frees up,
+  // in FIFO order — mirrors the TUI's drainQueuedItems. Stops as soon as an
+  // item starts a new turn; the next busy->free transition continues it.
+  //
+  // `shiftUndispatched` is the backstop against double-send: messages typed
+  // while streaming are BOTH injected into the live loop (so they're answered
+  // within the same turn, matching the TUI) and kept in the client queue for
+  // up-arrow recall. Those entries are flagged `dispatched`, so the drain
+  // discards them instead of sending them a second time once the turn ends.
+  //
+  // pendingPermission counts as busy even though the server already marked
+  // the turn inactive (turn_done fires as soon as Step pauses on the
+  // PERMISSION_ASK sentinel) — otherwise the composer unlocks and the queue
+  // drains while the dialog is still up, starting a new turn on top of an
+  // unresolved permission ask.
+  const busy = isStreaming || shellInFlight || !!pendingPermission;
+  const prevBusyRef = useRef(busy);
+  useEffect(() => {
+    if (prevBusyRef.current && !busy) {
+      (async () => {
+        for (;;) {
+          const item = shiftUndispatched(sessionTabId);
+          setQueueCount(getQueue(sessionTabId).length);
+          if (!item) break;
+          const startedTurn =
+            item.kind === "command" ? await dispatchCommand(item.text) : (sendMessage(item.text), true);
+          if (startedTurn) break;
+        }
+      })();
+    }
+    prevBusyRef.current = busy;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, sessionTabId]);
 
   // Dispatch a `/command` or `!shell` command, replaying the same logic used
   // for an immediate send. Returns true if it started a new agent turn
@@ -89,34 +131,6 @@ export default function ChatInput({
     sendMessage(text);
     return true;
   };
-
-  // Auto-drain the queue once the turn (streaming or shell exec) frees up,
-  // in FIFO order — mirrors the TUI's drainQueuedItems. Stops as soon as an
-  // item starts a new turn; the next busy->free transition continues it.
-  //
-  // pendingPermission counts as busy even though the server already marked
-  // the turn inactive (turn_done fires as soon as Step pauses on the
-  // PERMISSION_ASK sentinel) — otherwise the composer unlocks and the queue
-  // drains while the dialog is still up, starting a new turn on top of an
-  // unresolved permission ask.
-  const busy = isStreaming || shellInFlight || !!pendingPermission;
-  const prevBusyRef = useRef(busy);
-  useEffect(() => {
-    if (prevBusyRef.current && !busy) {
-      (async () => {
-        for (;;) {
-          const item = shiftQueued(sessionTabId);
-          setQueueCount(getQueue(sessionTabId).length);
-          if (!item) break;
-          const startedTurn =
-            item.kind === "command" ? await dispatchCommand(item.text) : (sendMessage(item.text), true);
-          if (startedTurn) break;
-        }
-      })();
-    }
-    prevBusyRef.current = busy;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, sessionTabId]);
 
   const updateDraft = (value: string) => {
     setInput(value);
@@ -203,54 +217,85 @@ export default function ChatInput({
   const filteredCount = filteredCommandNames.length;
 
   const handleSend = async () => {
+    // In-flight guard — must run before any async gap and before reading
+    // `input`, so a duplicate physical submit (same tick) is dropped instead of
+    // sending the same text twice. Distinct later submits (different tick, after
+    // this send settles) are never blocked.
+    if (submittingRef.current) return;
     const trimmed = input.trim();
     if (!trimmed) return;
-    setInput("");
-    clearDraft(sessionTabId);
-    setShowSlashMenu(false);
+    submittingRef.current = true;
+    try {
+      setInput("");
+      clearDraft(sessionTabId);
+      setShowSlashMenu(false);
 
     // While a turn is busy (streaming or a shell command in flight), queue
     // instead of blocking — mirrors the TUI's unified queuedItems, drained by
     // the effect above once the turn frees up.
-    if (trimmed.startsWith("/") || trimmed.startsWith("!")) {
-      if (busy) {
-        pushQueued(sessionTabId, { kind: "command", text: trimmed });
-        setQueueCount(getQueue(sessionTabId).length);
+      if (trimmed.startsWith("/") || trimmed.startsWith("!")) {
+        if (busy) {
+          pushQueued(sessionTabId, { kind: "command", text: trimmed });
+          setQueueCount(getQueue(sessionTabId).length);
+          return;
+        }
+        await dispatchCommand(trimmed);
         return;
       }
-      await dispatchCommand(trimmed);
-      return;
-    }
 
     // Build refs: attached files + active editor context. Resolved now (not
     // at drain time) so queueing a message doesn't leave stale attachment
     // chips hanging around in the composer.
-    const refs = attachedFiles.map((n) => `@.ocode/uploads/${n}`).join(" ");
-    const contextRef = activeEditorContext
-      ? activeEditorContext.selection
-        ? `@${activeEditorContext.path}#L${activeEditorContext.selection.startLine}-L${activeEditorContext.selection.endLine}`
-        : `@${activeEditorContext.path}`
-      : "";
+      const refs = attachedFiles.map((n) => `@.ocode/uploads/${n}`).join(" ");
+      const contextRef = activeEditorContext
+        ? activeEditorContext.selection
+          ? `@${activeEditorContext.path}#L${activeEditorContext.selection.startLine}-L${activeEditorContext.selection.endLine}`
+          : `@${activeEditorContext.path}`
+        : "";
 
-    const parts = [contextRef, refs, trimmed].filter(Boolean);
-    const finalMessage = parts.join(" ");
-    setAttachedFiles([]);
+      const parts = [contextRef, refs, trimmed].filter(Boolean);
+      const finalMessage = parts.join(" ");
+      setAttachedFiles([]);
 
-    if (isStreaming) {
-      // A turn is actively running — send now. The server slots this into
-      // the live agent loop at the next tool-call boundary instead of
-      // waiting for the whole (possibly multi-tool-call) turn to finish.
-      sendMessage(finalMessage);
-      return;
+      if (isStreaming) {
+        // A turn is actively running. Mirror the TUI: inject into the live agent
+        // loop at the next tool-call boundary (so it's answered within the same
+        // turn) AND keep a client queue entry flagged `dispatched` so the message
+        // is still recallable via up-arrow before the turn ends. The drain
+        // backstop discards dispatched entries, so it is never sent a second time.
+        const item: QueuedItem = { kind: "message", text: finalMessage, dispatched: true };
+        pushQueued(sessionTabId, item);
+        setQueueCount(getQueue(sessionTabId).length);
+        const ok = await sendMessage(finalMessage);
+        if (!ok) {
+          // Submit was rejected (network/validation) — the message never reached
+          // the live loop, so drop the phantom queue entry instead of letting the
+          // drain backstop silently skip it. The error is already surfaced in the
+          // store for the user to retry.
+          removeQueuedItem(sessionTabId, item);
+          setQueueCount(getQueue(sessionTabId).length);
+        }
+        return;
+      }
+      if (busy) {
+        // Shell command in flight, no agent turn running yet — nothing to
+        // inject into, so queue as before until it frees up.
+        pushQueued(sessionTabId, { kind: "message", text: finalMessage });
+        setQueueCount(getQueue(sessionTabId).length);
+        return;
+      }
+      const ok = await sendMessage(finalMessage);
+      if (!ok) {
+        // Restore the draft so the user can retry without retyping. The
+        // error is already set in the store's SET_ERROR path.
+        setInput(trimmed);
+        setDraft(sessionTabId, trimmed);
+      }
+    } finally {
+      // Release the in-flight guard. The previous send has now settled, so a
+      // subsequent, distinct submit is allowed (even if it repeats the text).
+      submittingRef.current = false;
     }
-    if (busy) {
-      // Shell command in flight, no agent turn running yet — nothing to
-      // inject into, so queue as before until it frees up.
-      pushQueued(sessionTabId, { kind: "message", text: finalMessage });
-      setQueueCount(getQueue(sessionTabId).length);
-      return;
-    }
-    sendMessage(finalMessage);
   };
 
   // Recall the most recently queued item into the input box for editing —
@@ -270,6 +315,11 @@ export default function ChatInput({
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // IME composition Enter should not send — it only confirms the composition.
+    if ((e.nativeEvent as unknown as { isComposing?: boolean }).isComposing) return;
+    // Key repeat from holding Enter would otherwise queue duplicate sends
+    // before isStreaming flips.
+    if (e.repeat) return;
     if (showSlashMenu) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -303,7 +353,7 @@ export default function ChatInput({
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSend();
+      void handleSend();
     }
   };
 

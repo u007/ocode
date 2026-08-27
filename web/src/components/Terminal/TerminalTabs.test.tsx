@@ -31,10 +31,14 @@ vi.mock("@xterm/addon-serialize", () => ({
   },
 }));
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
+vi.mock("@xterm/addon-webgl", () => ({
+  WebglAddon: class { dispose = vi.fn(); },
+}));
 vi.mock("@/api/client", () => ({
   api: {
     getTerminalConfig: () =>
       Promise.resolve({ available: true, scrollback_lines: 9999, work_dir: "/project" }),
+    getTerminalProcesses: () => Promise.resolve([]),
   },
   apiPath: (p: string) => p,
   authToken: () => "tok",

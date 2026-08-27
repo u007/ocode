@@ -1326,7 +1326,7 @@ func TestLocalModelNeedsWarmRetriesAfterStaleStoppedRecord(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	modelID := "local/bonsai-8b-1bit"
-	if err := config.SaveLocalModelConfig(modelID, true, 1); err != nil {
+	if err := config.SaveLocalModelConfig(modelID, true, 1, 50000); err != nil {
 		t.Fatalf("SaveLocalModelConfig: %v", err)
 	}
 	cfg := config.Config{}

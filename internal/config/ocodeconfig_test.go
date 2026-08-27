@@ -1522,7 +1522,7 @@ func TestSaveLocalModelConfigRoundTrips(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	if err := SaveLocalModelConfig("local/bonsai-8b-1bit", true, 2); err != nil {
+	if err := SaveLocalModelConfig("local/bonsai-8b-1bit", true, 2, 50000); err != nil {
 		t.Fatalf("SaveLocalModelConfig: %v", err)
 	}
 	cfg, err := loadFullOcodeConfig()
@@ -1533,8 +1533,8 @@ func TestSaveLocalModelConfigRoundTrips(t *testing.T) {
 	if !ok {
 		t.Fatal("local/bonsai-8b-1bit not present after SaveLocalModelConfig")
 	}
-	if !got.Enabled || got.MaxParallel != 2 {
-		t.Fatalf("got %+v, want Enabled=true MaxParallel=2", got)
+	if !got.Enabled || got.MaxParallel != 2 || got.ContextSize != 50000 {
+		t.Fatalf("got %+v, want Enabled=true MaxParallel=2 ContextSize=50000", got)
 	}
 }
 
@@ -1542,7 +1542,7 @@ func TestDeleteLocalModelConfigRemovesEntry(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	if err := SaveLocalModelConfig("local/bonsai-8b-1bit", false, 1); err != nil {
+	if err := SaveLocalModelConfig("local/bonsai-8b-1bit", false, 1, 0); err != nil {
 		t.Fatalf("SaveLocalModelConfig: %v", err)
 	}
 	if err := DeleteLocalModelConfig("local/bonsai-8b-1bit"); err != nil {

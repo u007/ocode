@@ -713,7 +713,21 @@ func isRetryableLLMClientError(err error) bool {
 		return true
 	}
 	lower := strings.ToLower(err.Error())
-	return strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") || strings.Contains(lower, "connection reset") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "eof") || strings.Contains(lower, "goaway")
+	if strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") || strings.Contains(lower, "connection reset") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "eof") || strings.Contains(lower, "goaway") {
+		return true
+	}
+	// HTTP/2 stream-level resets (golang.org/x/net/http2 StreamError, e.g.
+	// "stream error: stream ID 3; INTERNAL_ERROR; received from peer") were
+	// falling through as non-retryable because their text matches none of the
+	// patterns above. Only the codes below are retried — they indicate a
+	// server/transport-side condition (RFC 7540 §7). PROTOCOL_ERROR,
+	// FRAME_SIZE_ERROR, and COMPRESSION_ERROR are deliberately excluded:
+	// those indicate malformed data from this client, which would just fail
+	// identically on retry.
+	if strings.Contains(lower, "stream error: stream id") {
+		return strings.Contains(lower, "internal_error") || strings.Contains(lower, "refused_stream") || strings.Contains(lower, "enhance_your_calm") || strings.Contains(lower, "connect_error")
+	}
+	return false
 }
 
 // chatCopilot exchanges the stored GitHub OAuth token (held in APIKey) for a short-lived

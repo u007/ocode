@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { useChatState, useChatDispatch, getSessionSlice } from "../stores/chatStore";
+import { useChatSelector, useChatDispatch, getSessionSlice } from "../stores/chatStore";
 import { useProjectState, findProjectPathForTab } from "../stores/projectStore";
 import { api } from "../api/client";
 import type { PermissionDecision, QuestionAnswerPayload } from "../api/types";
@@ -13,10 +13,9 @@ interface UseChatOptions {
 // temporary `new-<ts>` tab id (before the first message creates a session),
 // or null when no tab is active.
 export function useChat(sessionId: string | null, options?: UseChatOptions) {
-  const state = useChatState();
   const dispatch = useChatDispatch();
   const { state: projectState } = useProjectState();
-  const slice = getSessionSlice(state, sessionId);
+  const slice = useChatSelector((s) => getSessionSlice(s, sessionId));
 
   // Submit is fire-and-forget: the message is forwarded to the TUI's agent and
   // ALL rendering (the user echo, live thinking/text tokens, tool activity, and
@@ -24,8 +23,8 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   // SessionTabSync. This keeps a single source of truth and makes the view
   // identical whether the turn was started here or in the TUI.
   const sendMessage = useCallback(
-    (content: string) => {
-      if (!sessionId) return;
+    (content: string): Promise<boolean> => {
+      if (!sessionId) return Promise.resolve(false);
       const isRealSession = !sessionId.startsWith("new-");
       dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
       dispatch({ type: "SET_ERROR", sessionId, error: null });
@@ -48,7 +47,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
           error: "Select a project before starting a chat.",
         });
         dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
-        return;
+        return Promise.resolve(false);
       }
       const submitPromise = isRealSession
         ? api.sendMessage(sessionId, content)
@@ -65,10 +64,16 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       // mirror's `turn_done` (or `error`) frame is the completion signal, and
       // both are handled in SessionTabSync. Only a failed submit is handled
       // here.
-      submitPromise.catch((err) => {
-        dispatch({ type: "SET_ERROR", sessionId, error: err.message || "send failed" });
-        dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
-      });
+      // Resolve true once the server has *dispatched* the turn (202) — this is
+      // the success/acceptance signal. A rejected submit (network/validation)
+      // resolves false so the caller can roll back any queue bookkeeping.
+      return submitPromise
+        .then(() => true)
+        .catch((err) => {
+          dispatch({ type: "SET_ERROR", sessionId, error: err?.message || "send failed" });
+          dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+          return false;
+        });
     },
     [sessionId, dispatch, projectState, options?.onNewSession],
   );

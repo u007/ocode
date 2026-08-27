@@ -9,6 +9,8 @@ import (
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
+
+	"github.com/u007/ocode/internal/bundled"
 )
 
 func TestInstallLocal(t *testing.T) {
@@ -48,6 +50,154 @@ func TestRemovePlugin(t *testing.T) {
 	}
 	if _, err := os.Stat(pluginDir); !os.IsNotExist(err) {
 		t.Error("plugin directory still exists after remove")
+	}
+}
+
+// TestRemoveRejectsBundledDir ensures a bundled/embedded plugin directory is
+// protected from deletion (deleting it would destroy the embedded copy shipped
+// inside the binary).
+func TestRemoveRejectsBundledDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	bundledDir := t.TempDir()
+	pluginDir := filepath.Join(bundledDir, "bundledplugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), []byte(`{"name":"bundledplugin"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := bundled.PluginsDir
+	bundled.PluginsDir = bundledDir
+	defer func() { bundled.PluginsDir = prev }()
+
+	if !IsBundledPluginDir(pluginDir) {
+		t.Fatalf("IsBundledPluginDir(%q) = false, want true", pluginDir)
+	}
+	if err := Remove(pluginDir); err == nil {
+		t.Fatal("Remove on a bundled dir succeeded; want rejection")
+	}
+	// The directory must remain intact.
+	if _, err := os.Stat(pluginDir); err != nil {
+		t.Fatalf("bundled plugin dir was deleted: %v", err)
+	}
+}
+
+// TestIsBundledPluginDirDoesNotMatchSibling verifies the guard uses a real
+// path-prefix check, not a naive string suffix, so a directory named like the
+// bundled root (e.g. "bundledX") is not mistakenly protected.
+func TestIsBundledPluginDirDoesNotMatchSibling(t *testing.T) {
+	bundledDir := filepath.Join(t.TempDir(), "bundled")
+	sibling := filepath.Join(t.TempDir(), "bundledX", "plugin")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := bundled.PluginsDir
+	bundled.PluginsDir = bundledDir
+	defer func() { bundled.PluginsDir = prev }()
+
+	if IsBundledPluginDir(sibling) {
+		t.Fatalf("IsBundledPluginDir(%q) = true for non-bundled sibling; want false", sibling)
+	}
+	// A real nested path under the bundled root is flagged.
+	nested := filepath.Join(bundledDir, "plugin")
+	if !IsBundledPluginDir(nested) {
+		t.Fatalf("IsBundledPluginDir(%q) = false for nested bundled path; want true", nested)
+	}
+}
+
+// TestLoadPluginsPopulatesDir verifies the on-disk directory is surfaced on the
+// returned Plugin so callers (UI, enable/disable, remove) can act on it.
+func TestLoadPluginsPopulatesDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	bundledDir := t.TempDir()
+	pluginDir := filepath.Join(bundledDir, "dirdemo")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), []byte(`{"name":"dirdemo"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := bundled.PluginsDir
+	bundled.PluginsDir = bundledDir
+	defer func() { bundled.PluginsDir = prev }()
+
+	found := false
+	for _, p := range LoadPlugins(nil) {
+		if p.Name == "dirdemo" {
+			found = true
+			if p.Dir != pluginDir {
+				t.Fatalf("Plugin.Dir = %q, want %q", p.Dir, pluginDir)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("dirdemo not returned by LoadPlugins")
+	}
+
+	// FindPluginDir should resolve the same directory by name.
+	if got := FindPluginDir("dirdemo"); got != pluginDir {
+		t.Fatalf("FindPluginDir = %q, want %q", got, pluginDir)
+	}
+	if got := FindPluginDir("does-not-exist"); got != "" {
+		t.Fatalf("FindPluginDir(missing) = %q, want empty", got)
+	}
+}
+
+// TestLoadPluginsPrecedenceAndDedup verifies that when the same plugin name
+// exists in both a global install dir and the bundled tree, the higher-precedence
+// (disk) copy wins and is returned exactly once.
+func TestLoadPluginsPrecedenceAndDedup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+
+	// Global install dir plugin (higher precedence than bundled).
+	globalDir := filepath.Join(home, ".config", "opencode", "plugins", "dup")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "plugin.json"), []byte(`{"name":"dup","description":"from-global"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bundled copy with a different description.
+	bundledDir := t.TempDir()
+	bundledDup := filepath.Join(bundledDir, "dup")
+	if err := os.MkdirAll(bundledDup, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundledDup, "plugin.json"), []byte(`{"name":"dup","description":"from-bundled"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := bundled.PluginsDir
+	bundled.PluginsDir = bundledDir
+	defer func() { bundled.PluginsDir = prev }()
+
+	loaded := LoadPlugins(nil)
+	count := 0
+	var got Plugin
+	for _, p := range loaded {
+		if p.Name == "dup" {
+			count++
+			got = p
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected dup plugin returned once, got %d", count)
+	}
+	if got.Description != "from-global" {
+		t.Errorf("expected higher-precedence global copy, got description %q", got.Description)
+	}
+	if got.Dir != globalDir {
+		t.Errorf("expected Dir to be the global path, got %q", got.Dir)
 	}
 }
 
@@ -160,5 +310,52 @@ func TestCheckSyncAnnotatedTagUsesCommitHash(t *testing.T) {
 	got := CheckSync(clone, "", "v1.0.0")
 	if got.State != SyncUpToDate {
 		t.Fatalf("CheckSync state = %s, want %s (local=%s remote=%s msg=%s)", got.State, SyncUpToDate, got.LocalHash, got.RemoteHash, got.Message)
+	}
+}
+
+func TestValidateRemovableDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+
+	// Valid path under the global install root.
+	validDir := filepath.Join(home, ".config", "opencode", "plugins", "myplugin")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRemovableDir(validDir); err != nil {
+		t.Errorf("ValidateRemovableDir(%q) = %v, want nil", validDir, err)
+	}
+
+	// Absolute path outside any plugin root should be rejected.
+	if err := ValidateRemovableDir("/etc/passwd"); err == nil {
+		t.Error("ValidateRemovableDir(\"/etc/passwd\") = nil, want error")
+	}
+
+	// Path with traversal sequences should be rejected.
+	if err := ValidateRemovableDir(filepath.Join(home, ".config", "opencode", "plugins", "..", "..", "etc", "passwd")); err == nil {
+		t.Error("ValidateRemovableDir with traversal = nil, want error")
+	}
+
+	// Relative path (non-absolute after Abs resolution) that escapes — still
+	// rejected because it resolves outside any plugin root.
+	if err := ValidateRemovableDir("../../../etc/passwd"); err == nil {
+		t.Error("ValidateRemovableDir with relative escape = nil, want error")
+	}
+}
+
+func TestValidateRemovableDirBundledRoot(t *testing.T) {
+	// A path under the bundled plugins root should be accepted.
+	bundledDir := t.TempDir()
+	pluginDir := filepath.Join(bundledDir, "testplugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prev := bundled.PluginsDir
+	bundled.PluginsDir = bundledDir
+	defer func() { bundled.PluginsDir = prev }()
+
+	if err := ValidateRemovableDir(pluginDir); err != nil {
+		t.Errorf("ValidateRemovableDir under bundled root = %v, want nil", err)
 	}
 }

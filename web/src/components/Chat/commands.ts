@@ -967,26 +967,38 @@ async function handlePlugin(args: string): Promise<CommandResult> {
 
   try {
     if (sub === "" || sub === "list") {
-      const plugins = await api.listPlugins();
-      if (plugins.length === 0) {
-        return {
-          handled: true,
-          messages: [{ role: "assistant", content: "No plugins installed." }],
-        };
-      }
-      const lines = plugins.map(
-        (p) => `- **${p.name}** ${p.enabled ? "✅" : "❌"} — ${p.description || p.source}`,
+      const [plugins, enabled] = await Promise.all([
+        api.listPlugins(),
+        api.getPluginsEnabledConfig(),
+      ]);
+      const builtinLines = [
+        `- **ast** ${enabled.ast ? "✅" : "❌"} — ast-grep structural search/rewrite`,
+      ];
+      const installedLines = plugins.map(
+        (p) => `- **${p.name}** ${p.enabled ? "✅" : "❌"} — ${p.description || p.source || "(no description)"}`,
       );
+      const installedSection =
+        plugins.length === 0
+          ? "\n\n_No installed plugins — use `/plugin install <source>` to add one._"
+          : `\n\n**Installed plugins:**\n${installedLines.join("\n")}`;
       return {
         handled: true,
         messages: [{
           role: "assistant",
-          content: `## Plugins\n\n${lines.join("\n")}\n\n\`/plugin enable\\|disable <name>\`, \`/plugin install <source>\`, \`/plugin remove <name>\``,
+          content: `## Plugins\n\n**Builtin plugins:**\n${builtinLines.join("\n")}${installedSection}\n\n\`/plugin enable\\|disable <name>\`, \`/plugin install <source>\`, \`/plugin remove <name>\``,
         }],
       };
     }
 
     if ((sub === "enable" || sub === "disable") && rest) {
+      // Builtin ast is gated via plugins-enabled config, not external_plugins.
+      if (rest.toLowerCase() === "ast") {
+        await api.setPluginsEnabledConfig(sub === "enable");
+        return {
+          handled: true,
+          messages: [{ role: "assistant", content: `Plugin **ast**: ${sub === "enable" ? "enabled" : "disabled"}.` }],
+        };
+      }
       const res = await api.setPluginEnabled(rest, sub === "enable");
       return {
         handled: true,

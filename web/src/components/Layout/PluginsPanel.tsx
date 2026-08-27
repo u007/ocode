@@ -26,14 +26,20 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
   const [source, setSource] = useState("");
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [astEnabled, setAstEnabled] = useState(false);
+  const [astBusy, setAstBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const list = await api.listPlugins();
+      const [list, pluginsEnabled] = await Promise.all([
+        api.listPlugins(),
+        api.getPluginsEnabledConfig(),
+      ]);
       // Sort alphabetically for a stable listing.
       setPlugins(list.slice().sort((a, b) => a.name.localeCompare(b.name)));
+      setAstEnabled(pluginsEnabled.ast);
     } catch (err) {
       console.error("failed to load plugins", err);
       setError(err instanceof Error ? err.message : String(err));
@@ -45,6 +51,20 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
   useEffect(() => {
     if (open) load();
   }, [open, load]);
+
+  const toggleAst = async () => {
+    setAstBusy(true);
+    setError(null);
+    try {
+      await api.setPluginsEnabledConfig(!astEnabled);
+      setAstEnabled(!astEnabled);
+    } catch (err) {
+      console.error("failed to toggle ast plugin", err);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAstBusy(false);
+    }
+  };
 
   const toggle = async (p: PluginInfo) => {
     setBusy(p.name);
@@ -133,7 +153,41 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
           </div>
         )}
 
-        <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1">
+        <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
+          {/* Builtin plugins — mirrors TUI's "Builtin plugins:" section */}
+          <div>
+            <div className="text-xs font-semibold text-muted-foreground mb-2">
+              Builtin plugins
+            </div>
+            <div className="flex items-center justify-between gap-2 py-2 px-3 rounded-md hover:bg-accent/50">
+              <div className="min-w-0">
+                <div className="text-sm text-foreground truncate">ast</div>
+                <div className="text-xs text-muted-foreground truncate">
+                  ast-grep structural search/rewrite (needs the ast-grep CLI on PATH).
+                </div>
+              </div>
+              <Button
+                variant={astEnabled ? "default" : "outline"}
+                size="sm"
+                className="h-7 text-xs min-w-[56px] shrink-0"
+                onClick={toggleAst}
+                disabled={astBusy}
+              >
+                {astBusy ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : astEnabled ? (
+                  "On"
+                ) : (
+                  "Off"
+                )}
+              </Button>
+            </div>
+          </div>
+
+          <div className="border-t border-border pt-3">
+            <div className="text-xs font-semibold text-muted-foreground mb-2">
+              Installed plugins
+            </div>
           {loading ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
@@ -184,6 +238,7 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
               </div>
             ))
           )}
+          </div>
         </div>
       </DialogContent>
     </Dialog>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
-import { useChatState } from "../../stores/chatStore";
+import { useChatSelector } from "../../stores/chatStore";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
@@ -11,7 +11,7 @@ export default function ModelDefaultsForm() {
   // immediately on select), so its value is read from the chat store — seeded
   // at boot, refreshed on every dialog open/select. This form only owns the
   // enabled toggle and the recap config.
-  const { smallModel } = useChatState();
+  const smallModel = useChatSelector((s) => s.smallModel);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [recapDialogOpen, setRecapDialogOpen] = useState(false);
   const [smallModelEnabled, setSmallModelEnabled] = useState(false);

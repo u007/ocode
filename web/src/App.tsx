@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Routes, Route } from "react-router-dom";
 import { PanelLeft, PanelLeftClose, Plus } from "lucide-react";
 import { useIsMobile } from "./hooks/useIsMobile";
-import { ChatProvider, useChatDispatch, useChatState, getSessionSlice } from "./stores/chatStore";
+import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, useProjectState } from "./stores/projectStore";
 import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
@@ -19,7 +19,6 @@ import FileTree from "./components/Files/FileTree";
 import FileEditor from "./components/Files/FileEditor";
 import LogPanel from "./components/Logs/LogPanel";
 import TerminalTabs, { type TerminalTabsHandle } from "./components/Terminal/TerminalTabs";
-import ProcessesPanel from "./components/Terminal/ProcessesPanel";
 import AssetsPanel from "./components/Assets/AssetsPanel";
 import CronPanel from "./components/Cron/CronPanel";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
@@ -45,7 +44,8 @@ import SessionPage from "./pages/SessionPage";
 import FilePicker from "./components/Files/FilePicker";
 import ConfirmCloseDialog from "./components/Files/ConfirmCloseDialog";
 import { isNewSessionTabEmpty, rekeyDraft } from "./lib/tabDrafts";
-import { rekeyQueue } from "./lib/tabQueue";
+import { rekeyQueue, clearQueue } from "./lib/tabQueue";
+import { cancelLiveDeltas } from "./lib/sessionEvents";
 import { notifyWailsRuntimeReady } from "./lib/wails";
 import { eventBus } from "./lib/eventBus";
 import { useSessionStatus } from "./hooks/useSessionStatus";
@@ -98,7 +98,10 @@ function triggerDownload(filename: string, content: string, mimeType: string) {
 
 function HomeApp() {
   const dispatch = useChatDispatch();
-  const chatState = useChatState();
+  // Imperative-only: getMessages() below reads this at call time, not during
+  // render, so HomeApp must not re-render on every dispatch (every streamed
+  // token) just to keep this reference "fresh" — see useChatStateRef's docs.
+  const chatStateRef = useChatStateRef();
   const { state: projectState, tabs, activeTabId, dispatch: projectDispatch, openSessionTab, openNewSessionTab, closeSessionTab } = useProjectState();
   const { resolvePermission, pendingPermission, sendMessage: sendToActiveSession } = useChat(activeTabId);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -134,7 +137,7 @@ function HomeApp() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<
-    "files" | "git" | "cron" | "assets" | "sessions" | "settings"
+    "files" | "git" | "cron" | "assets" | "sessions" | "settings" | "terminal"
   >("sessions");
   useEffect(() => {
     const h = () => setActiveView("settings")
@@ -290,11 +293,10 @@ function HomeApp() {
       openNewSessionTab(isNewSessionTabEmpty(activeTabId));
     },
     onNewTerminal: () => {
-      // Ctrl/Cmd+T: if on terminal sub-tab, open a new terminal instance;
+      // Ctrl/Cmd+T: if on terminal top-level tab, open a new terminal instance;
       // otherwise create a new session tab (same as Ctrl/Cmd+N). Terminal is
       // project-scoped so the handle is keyed by project path.
-      const currentTab = tabs.find((t) => t.id === activeTabId);
-      if (currentTab?.activeSubTab === "terminal") {
+      if (activeView === "terminal") {
         const proj = projectState.activeProject?.path ?? "";
         terminalRefs.current.get(proj)?.openTerminal();
       } else {
@@ -310,10 +312,14 @@ function HomeApp() {
     },
     onCloseSession: () => {
       // Cmd/Ctrl+W: close whatever is frontmost. On the Files view that is
-      // the active editor tab (requestCloseTab handles the unsaved-changes
-      // confirm); on the terminal sub-tab it is the active terminal
-      // instance; otherwise the session tab itself. Mirrors each tab bar's
+      // the active editor tab; on the terminal top-level tab it is the active
+      // terminal instance; otherwise the session tab itself. Mirrors each tab bar's
       // X button.
+      if (activeView === "terminal") {
+        const proj = projectState.activeProject?.path ?? "";
+        if (terminalRefs.current.get(proj)?.closeActiveTerminal()) return;
+        return;
+      }
       if (activeView === "files") {
         if (activeEditorTabId) {
           requestCloseTab(activeEditorTabId);
@@ -321,12 +327,9 @@ function HomeApp() {
         return;
       }
       if (activeView !== "sessions" || !activeTabId) return;
-      const currentTab = tabs.find((t) => t.id === activeTabId);
-      if (currentTab?.activeSubTab === "terminal") {
-        const proj = projectState.activeProject?.path ?? "";
-        if (terminalRefs.current.get(proj)?.closeActiveTerminal()) return;
-      }
       closeSessionTab(activeTabId);
+      cancelLiveDeltas(activeTabId);
+      clearQueue(activeTabId);
       dispatch({ type: "RESET", sessionId: activeTabId });
     },
     onEscape: () => {
@@ -418,7 +421,7 @@ function HomeApp() {
         syncLoginStart: () => api.syncLoginStart(),
         syncLogout: () => api.syncLogout(),
       },
-      getMessages: () => getSessionSlice(chatState, activeTabId).messages,
+      getMessages: () => getSessionSlice(chatStateRef.current, activeTabId).messages,
       getSessionId: () => activeTabId,
     });
 
@@ -522,9 +525,7 @@ function HomeApp() {
         )}
 
         {/* Center content */}
-
         <main className="flex flex-1 flex-col overflow-hidden">
-          {/* Tabs context wraps header triggers + content panels */}
           <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)} className="flex flex-col flex-1 overflow-hidden">
             <div className="flex items-center justify-between gap-2 border-b pr-2">
               <div className="flex-1 min-w-0">
@@ -534,6 +535,45 @@ function HomeApp() {
             </div>
 
             <div className="flex-1 overflow-hidden flex flex-col pb-2">
+              {/* Terminal is project-scoped and must stay mounted even when not visible. It lives inside the Tabs root
+                  so TopTabs (which uses TabsList/TabsTrigger) keeps its Radix context, but outside the non-terminal
+                  content region so switching away never unmounts the WebSocket/pty. Visibility is toggled via CSS only. */}
+              {(() => {
+                const projectPaths = Array.from(
+                  new Set(
+                    [
+                      ...Object.keys(projectState.tabsByProject),
+                      ...(projectState.activeProject ? [projectState.activeProject.path] : []),
+                    ].filter(Boolean) as string[],
+                  ),
+                );
+                const activeProjectPath = projectState.activeProject?.path ?? "";
+                return (
+                  <div className={activeView === "terminal" ? "flex flex-1 overflow-hidden m-0 flex-col" : "hidden"}>
+                    <div className="relative flex-1 min-h-0 overflow-hidden">
+                      {projectPaths.map((pp) => (
+                        <div
+                          key={`${pp}:terminal`}
+                          className={
+                            pp === activeProjectPath ? "absolute inset-0" : "absolute inset-0 hidden"
+                          }
+                        >
+                          <TerminalTabs
+                            ref={(handle) => {
+                              if (handle) terminalRefs.current.set(pp, handle);
+                              else terminalRefs.current.delete(pp);
+                            }}
+                            active={pp === activeProjectPath && activeView === "terminal"}
+                            projectPath={pp}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className={activeView === "terminal" ? "hidden" : "flex flex-1 overflow-hidden flex-col"}>
               <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0 flex">
                 <div
                   className="relative shrink-0 h-full overflow-hidden border-r border-zinc-800 transition-[width] duration-100"
@@ -704,54 +744,6 @@ function HomeApp() {
                         />
                       </div>
                     ))}
-                    {(() => {
-                      // Terminal + Processes are project-scoped (not session-scoped)
-                      // so switching chat sessions within the same project never
-                      // hides or kills the pty. Render one instance per distinct
-                      // project path and keep them mounted hidden for fast switch.
-                      const projectPaths = Array.from(
-                        new Set(
-                          [
-                            ...Object.keys(projectState.tabsByProject),
-                            ...(projectState.activeProject ? [projectState.activeProject.path] : []),
-                          ].filter(Boolean) as string[],
-                        ),
-                      );
-                      const activeProjectPath = projectState.activeProject?.path ?? "";
-                      const terminalActive = activeSessionTab?.activeSubTab === "terminal";
-                      const processesActive = activeSessionTab?.activeSubTab === "processes";
-                      return (
-                        <>
-                          {projectPaths.map((pp) => (
-                            <div
-                              key={`${pp}:terminal`}
-                              className={
-                                pp === activeProjectPath && terminalActive ? "absolute inset-0" : "absolute inset-0 hidden"
-                              }
-                            >
-                              <TerminalTabs
-                                ref={(handle) => {
-                                  if (handle) terminalRefs.current.set(pp, handle);
-                                  else terminalRefs.current.delete(pp);
-                                }}
-                                active={pp === activeProjectPath && terminalActive}
-                                projectPath={pp}
-                              />
-                            </div>
-                          ))}
-                          {projectPaths.map((pp) => (
-                            <div
-                              key={`${pp}:processes`}
-                              className={
-                                pp === activeProjectPath && processesActive ? "absolute inset-0" : "absolute inset-0 hidden"
-                              }
-                            >
-                              <ProcessesPanel projectPath={pp} />
-                            </div>
-                          ))}
-                        </>
-                      );
-                    })()}
                     {allChatTabs.map((tab) => (
                       tab.projectPath === projectState.activeProject?.path &&
                       tab.id === activeTabId &&
@@ -767,6 +759,7 @@ function HomeApp() {
                 </div>
               </TabsContent>
             </div>
+          </div>
           </Tabs>
 
           {/* Status bar — only on chat sub-tab */}

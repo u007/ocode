@@ -351,7 +351,14 @@ export default function TerminalPanel({
       fitRef.current = null;
       serializeRef.current = null;
     };
-  }, [scrollbackLines, projectPath, id]);
+  }, [projectPath, id]);
+
+  // Apply scrollback changes without tearing down the pty.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.scrollback = scrollbackLines;
+  }, [scrollbackLines]);
 
   // Apply font changes to the live terminal in place instead of tearing down
   // the session (which would kill the pty/websocket) whenever settings change.

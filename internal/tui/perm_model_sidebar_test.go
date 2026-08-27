@@ -57,7 +57,7 @@ func TestPermissionModelCmdRegisteredLocalModel(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	if err := config.SaveLocalModelConfig("local/bonsai-8b-1bit", true, 1); err != nil {
+	if err := config.SaveLocalModelConfig("local/bonsai-8b-1bit", true, 1, 50000); err != nil {
 		t.Fatalf("SaveLocalModelConfig: %v", err)
 	}
 	cfg := config.Config{}
@@ -118,7 +118,7 @@ func TestPermissionModelCmdRejectsDisabledLocalModel(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	if err := config.SaveLocalModelConfig("local/bonsai-8b-1bit", false, 1); err != nil {
+	if err := config.SaveLocalModelConfig("local/bonsai-8b-1bit", false, 1, 50000); err != nil {
 		t.Fatalf("SaveLocalModelConfig: %v", err)
 	}
 	cfg := config.Config{}

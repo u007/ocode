@@ -8,6 +8,11 @@
 
 
 
+
+## 2026-08-27
+
+* **Update**: Plugin System ([plugins.md](/plugins.md))
+* **Creation**: Symlink Escape in Plugin Removal Validation ([gotchas/plugin-removal-symlink-escape.md](/gotchas/plugin-removal-symlink-escape.md))
 ## 2026-08-26
 
 * **Update**: Foreground Bash Commands — Parent-Death Protection Before Start ([gotchas/foreground-bash-parent-death-protection.md](/gotchas/foreground-bash-parent-death-protection.md))

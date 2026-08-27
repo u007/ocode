@@ -54,6 +54,8 @@ build_script.sh
 
 # Web UI build artifacts
 web/node_modules/
+# Stray root-level node_modules (e.g. a leftover .vite dir) must never be committed
+node_modules/
 web/dist/assets/
 internal/agent/models-snapshot.json
 ocodeconfig.json

@@ -1,8 +1,10 @@
-import { useLayoutEffect, useRef, useState } from "react";
-import { FolderGit2, GitBranch, Paperclip, CalendarClock, MessageSquare, MoreHorizontal, Settings } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { FolderGit2, GitBranch, Paperclip, CalendarClock, MessageSquare, MoreHorizontal, Settings, Terminal } from "lucide-react";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import SyncStatusWidget from "./SyncStatusWidget";
+import { useProjectState } from "../../stores/projectStore";
+import { loadProjectTerminals } from "../Terminal/terminalPersistence";
 
 interface Props {
   activeTab: string;
@@ -11,6 +13,7 @@ interface Props {
 
 const mainTabs = [
   { id: "sessions", label: "Sessions", icon: MessageSquare },
+  { id: "terminal", label: "Terminal", icon: Terminal },
   { id: "files", label: "Files", icon: FolderGit2 },
   { id: "git", label: "Git", icon: GitBranch },
   { id: "cron", label: "Cron", icon: CalendarClock },
@@ -19,6 +22,37 @@ const mainTabs = [
 ];
 
 export default function TopTabs({ activeTab, onTabSelect }: Props) {
+  const { state: projectState } = useProjectState();
+  const activeProjectPath = projectState.activeProject?.path ?? "";
+  const [terminalCount, setTerminalCount] = useState(() => {
+    try {
+      const saved = loadProjectTerminals(activeProjectPath);
+      return saved?.terminals.length ?? 0;
+    } catch {
+      return 0;
+    }
+  });
+  useEffect(() => {
+    const update = () => {
+      try {
+        const saved = loadProjectTerminals(activeProjectPath);
+        setTerminalCount(saved?.terminals.length ?? 0);
+      } catch {
+        setTerminalCount(0);
+      }
+    };
+    update();
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "ocode.ui.terminals.project.v1") update();
+    };
+    const onCustom = () => update();
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("ocode:terminals-changed", onCustom);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("ocode:terminals-changed", onCustom);
+    };
+  }, [activeProjectPath]);
   const tabsRef = useRef<HTMLDivElement | null>(null);
   const activeRef = useRef<HTMLButtonElement | null>(null);
   const [overflowing, setOverflowing] = useState(false);
@@ -87,6 +121,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
         {mainTabs.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
+          const count = tab.id === "terminal" ? terminalCount : undefined;
           return (
             <TabsTrigger
               key={tab.id}
@@ -96,6 +131,16 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
             >
               <Icon className="w-4 h-4" />
               <span className="hidden sm:inline">{tab.label}</span>
+              {count !== undefined && (
+                <span
+                  className={`inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full text-xs font-semibold leading-none ${
+                    isActive ? "bg-zinc-600 text-white" : "bg-zinc-800 text-zinc-300"
+                  }`}
+                  aria-label={`${tab.label} count ${count}`}
+                >
+                  {count}
+                </span>
+              )}
             </TabsTrigger>
           );
         })}
@@ -114,11 +159,17 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
             <SelectContent align="end" className="max-h-80">
               {mainTabs.map((tab) => {
                 const Icon = tab.icon;
+                const count = tab.id === "terminal" ? terminalCount : undefined;
                 return (
                   <SelectItem key={tab.id} value={tab.id}>
                     <span className="flex items-center gap-2">
                       <Icon className="w-3.5 h-3.5" />
                       {tab.label}
+                      {count !== undefined && (
+                        <span className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-zinc-700 text-[10px] font-semibold text-zinc-200">
+                          {count}
+                        </span>
+                      )}
                     </span>
                   </SelectItem>
                 );

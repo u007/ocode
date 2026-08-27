@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useRef, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, type ReactNode } from "react";
 import { Store, useSelector } from "@tanstack/react-store";
 import type { Message, LivePart, TUIStatus, QuestionPrompt } from "../api/types";
 
@@ -575,6 +575,39 @@ function useChatStore(): Store<ChatState> {
 
 export function useChatState(): ChatState {
   return useSelector(useChatStore());
+}
+
+// Subscribes only to the projection `selector` returns, re-rendering when
+// that specific value changes reference (default Object.is compare) rather
+// than on every dispatch anywhere in the store. Safe to select a session
+// slice via getSessionSlice: updateSession only replaces the touched
+// session's object, so unrelated sessions' dispatches leave the selected
+// reference unchanged and this correctly skips the re-render.
+export function useChatSelector<T>(
+  selector: (state: ChatState) => T,
+  isEqual?: (a: T, b: T) => boolean,
+): T {
+  return useSelector(useChatStore(), selector, isEqual ? { compare: isEqual } : undefined);
+}
+
+// For consumers that only need the latest state for an imperative read
+// (inside a callback, effect, or event handler) and never use it to drive
+// JSX — subscribes to the store without ever triggering a re-render of the
+// calling component. Use this instead of useChatState() whenever the
+// component's own render output doesn't depend on chat state; every
+// dispatch (including one per streamed token) otherwise forces a full
+// re-render of the caller and its entire subtree for no visible reason.
+export function useChatStateRef(): { readonly current: ChatState } {
+  const store = useChatStore();
+  const ref = useRef(store.state);
+  ref.current = store.state;
+  useEffect(() => {
+    const sub = store.subscribe(() => {
+      ref.current = store.state;
+    });
+    return () => sub.unsubscribe();
+  }, [store]);
+  return ref;
 }
 
 export function useChatDispatch(): (action: ChatAction) => void {

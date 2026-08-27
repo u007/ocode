@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { useChatDispatch, useChatState } from "../../stores/chatStore";
+import { useChatDispatch, useChatStateRef } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { eventBus } from "../../lib/eventBus";
 import { api } from "../../api/client";
@@ -31,7 +31,6 @@ import {
  *    guard would arm until the next turn.
  */
 export default function SessionTabSync() {
-  const chatState = useChatState();
   const chatDispatch = useChatDispatch();
   const { state: projectState, dispatch: projectDispatch } = useProjectState();
 
@@ -49,11 +48,12 @@ export default function SessionTabSync() {
   openSessionIdsRef.current.clear();
   liveTabIds.forEach((id) => openSessionIdsRef.current.add(id));
 
-  // The router below is a stable closure (effect deps don't include
-  // chatState); read current slices through this ref so it never sees stale
-  // per-session state from the render that installed the listener.
-  const chatStateRef = useRef(chatState);
-  chatStateRef.current = chatState;
+  // The router below is a stable closure (effect deps don't include chat
+  // state); read current slices through this ref so it never sees stale
+  // per-session state from the render that installed the listener. Also
+  // purely imperative — this component renders nothing (returns null) — so
+  // useChatStateRef must not force a re-render on every dispatch.
+  const chatStateRef = useChatStateRef();
 
   useEffect(() => {
     const router: SessionEventRouter = {

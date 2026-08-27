@@ -16,6 +16,12 @@ export interface QueuedItem {
    *  text (refs/context baked in at queue time), sent as-is. */
   kind: "command" | "message";
   text: string;
+  /** Set when the item was also handed straight to a running agent's live
+   *  loop (e.g. a message typed while streaming, mirrored from the TUI's
+   *  EnqueueInjection). Such items stay in the queue only so they can be
+   *  recalled via up-arrow before the server echoes them back; the auto-drain
+   *  backstop skips them so they are never sent a second time. */
+  dispatched?: boolean;
 }
 
 const queues = new Map<string, QueuedItem[]>();
@@ -40,19 +46,46 @@ export function shiftQueued(tabId: string | null | undefined): QueuedItem | unde
   return list.shift();
 }
 
-/** Pop the most recently queued MESSAGE item (LIFO) — used to recall it into the
- *  input box. Queued commands are skipped: a command is waiting to run, and
- *  recalling it into the input would silently remove it from execution. */
+/** Dequeue the oldest item that has NOT already been handed to the running
+ *  agent's live loop (FIFO). Dispatched items (messages typed while streaming,
+ *  mirrored from the TUI's EnqueueInjection) are silently dropped because the
+ *  server already has them — this is the drain backstop that guarantees a
+ *  dispatched message is never sent a second time. Returns undefined when only
+ *  dispatched items remain (all of which are discarded). */
+export function shiftUndispatched(tabId: string | null | undefined): QueuedItem | undefined {
+  if (!tabId) return undefined;
+  const list = queues.get(tabId);
+  if (!list || list.length === 0) return undefined;
+  while (list.length > 0) {
+    const item = list.shift()!;
+    if (!item.dispatched) return item;
+  }
+  return undefined;
+}
+
+/** Remove a specific queued item by reference (e.g. a dispatched message whose
+ *  submit was rejected, so it never reached the live loop and must not linger
+ *  as a phantom entry the drain would skip). */
+export function removeQueuedItem(tabId: string | null | undefined, item: QueuedItem) {
+  if (!tabId) return;
+  const list = queues.get(tabId);
+  if (!list) return;
+  const idx = list.indexOf(item);
+  if (idx !== -1) list.splice(idx, 1);
+}
+
+/** Pop the most recently queued item (LIFO) — used to recall it into the
+ *  input box via the up-arrow restore. Mirrors the TUI's up-arrow queue
+ *  restore, which restores the last queued item *regardless of kind* (command
+ *  or message) and removes it from the queue so resubmitting the recalled text
+ *  doesn't duplicate it. Restoring a command simply puts its raw text (incl.
+ *  the `/` or `!` prefix) back into the input for editing or re-send, which is
+ *  exactly what the TUI does. */
 export function popLastQueued(tabId: string | null | undefined): QueuedItem | undefined {
   if (!tabId) return undefined;
   const list = queues.get(tabId);
   if (!list || list.length === 0) return undefined;
-  for (let i = list.length - 1; i >= 0; i--) {
-    if (list[i].kind === "message") {
-      return list.splice(i, 1)[0];
-    }
-  }
-  return undefined;
+  return list.splice(list.length - 1, 1)[0];
 }
 
 /** Move a queue from one tab id to another. Used when a temp `new-*` tab becomes

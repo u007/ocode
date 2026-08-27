@@ -30,6 +30,7 @@ okf_version: 0.1
 - [run_in_background Bash Commands Orphaned on Force-Killed ocode](gotchas/background-bash-orphan-on-force-kill.md) - Background bash commands started via the bash tool had no self-cleanup and would survive kill -9 on ocode; wrapped in the same parent-monitor mechanism local models already used
 - [Skill Tool Test Fixture Gap — expectedBuiltinTools Missing load_skill](gotchas/skill-tool-test-fixture-gap.md) - expectedBuiltinTools in tool_test.go only lists "skill" but InitBuiltinTools also registers "load_skill" as a second alias, causing a stale test failure.
 - [Subagent Feedback-Loop Guard (task tool)](gotchas/subagent-feedback-loop-guard.md) - The task/subagent dispatch refuses consecutive same-type launches without new user input to break runaway feedback loops; vary the agent type or wait for user input.
+- [Symlink Escape in Plugin Removal Validation](gotchas/plugin-removal-symlink-escape.md) - Security gotcha: filepath.EvalSymlinks must resolve both the target dir and all approved roots to prevent symlink-based path traversal in plugin removal.
 
 # okf
 

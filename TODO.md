@@ -1144,6 +1144,262 @@ consistent with the already-documented pattern).
   DevTools while the spike is happening** — that would show the actual
   looping JS function instead of native WebCore frames only.
 
+### FOUND + PARTIALLY FIXED: uncached `Intl.DateTimeFormat` construction on the per-token render path (2026-08-27)
+
+New report: "desktop app now hitting 5+Gb mem", live while the app was in
+normal use (not a synthetic repro). Caught it in the act this time.
+
+- [x] **Live-captured the first-ever confirmed WebContent process for this
+  bug**, via the port-matching method this file's own methodology prescribes:
+  `lsof` on the backend's LISTEN port (59657) → its Networking XPC sibling
+  (pid 17125) → adjacent WebContent pid (17129). `vmmap`'s **Physical
+  footprint: 5.5G, peak 6.1G** — not `ps` RSS noise this time; `top -pid
+  17129 -l 3` showed it actively climbing (5537M → 5561M → 5581M over 6s)
+  with %CPU rising 0% → 28% in the same window, i.e. an in-progress event,
+  not a settled/reclaimed transient like the 2026-08-25 captures.
+- [x] **`sample 17129 5` caught the main thread 100% busy for the entire
+  5s window** (3752/3752 samples), plus 3 "JIT Worklist Helper Thread"s also
+  fully saturated. The call graph is unambiguous: `WebCore::EventSource::
+  parseEventStream()` → dispatches the SSE message → `JSEventListener::
+  handleEvent` → microtask → **`JSC::dateProtoFuncToLocaleString` (1138 of
+  3752 main-thread samples, ~30%)** → `JSC::IntlDateTimeFormat::
+  initializeDateTimeFormat` → `udat_open` → a brand-new `icu::
+  SimpleDateFormat` built from scratch every call (full locale/subtag/keyword
+  resolution — `icu::Locale::init`, `ulocimp_getSubtags`,
+  `ulocimp_getKeywords`, `uprv_sortArray`, dozens of sub-frames). This is the
+  JS heap-snapshot-equivalent evidence the 2026-08-25 entries above said was
+  still outstanding — captured via `sample` instead, since DevTools can't
+  reach a Wails-hosted WKWebView.
+- [x] **Traced to source**: the only `toLocaleTimeString`/`toLocaleString`/
+  `Intl.*` call site anywhere in `web/src` that runs on a hot path is
+  `StatusBar.tsx`'s `toolActivityLabel()` — `started.toLocaleTimeString([],
+  { hour12: false })`, called fresh (no formatter reuse) on every render
+  while any tool is active. `StatusBar` reads the per-session `live` buffer
+  (`getSessionSlice`), and `sessionEvents.ts` dispatches a store update for
+  **every** streamed `"text"`/`"thinking"` token delta (`sessionEvents.ts`
+  cases at ~299/305) — so during any streaming turn, `StatusBar` re-renders
+  once per token, and each render pays a full ICU `Intl.DateTimeFormat`
+  construction (`toLocaleTimeString` never memoizes a formatter across
+  calls — this is a well-known JS perf trap). That matches the captured
+  signature exactly: sustained main-thread saturation + allocation churn
+  during ordinary use, not a one-shot spike.
+- [x] **Fix applied**: `StatusBar.tsx` now builds one module-level
+  `Intl.DateTimeFormat` (`activityTimeFormatter`) and calls `.format()` per
+  render instead of constructing a new formatter every time.
+  `web/src: npx tsc --noEmit` clean.
+- [ ] **Not fixed / not yet ruled out**: this closes the one confirmed
+  uncached-formatter hot path, but does not by itself prove it is the
+  *entire* explanation for a sustained 5.5GB physical footprint — repeated
+  ICU/JIT churn from this call site plausibly also inflates JSC's JIT code
+  cache for the hot function (the 3 saturated "JIT Worklist Helper Thread"s),
+  which wouldn't fully explain a footprint that stayed elevated rather than
+  reclaiming (contrast with the 2026-08-25 entries, where WebKit's own
+  reclaim brought footprint back down within the sampling window). Needs a
+  post-fix repro: run a long streaming turn on this build and watch whether
+  `vmmap` footprint on the WebContent pid stays flat instead of climbing
+  unboundedly. If it still climbs, the JS heap snapshot step from the
+  2026-08-25 entries is still the next move — this fix removes the loudest
+  confirmed contributor, not necessarily the only one.
+- **Raw sample data**: saved during this investigation to
+  `/private/tmp/claude-501/-Users-james-www-ocode/434a005f-6c1b-48b5-a833-2bdb5b51fbc0/scratchpad/webcontent_sample.txt`
+  (session-scratch, not repo-committed — re-run `sample <webcontent-pid> 5`
+  during a future repro if this needs re-checking after the scratch dir is
+  gone).
+- [x] **Fix verified live, post-rebuild, same day**: user rebuilt
+  `bin/ocode.app` (2026-08-27 11:02) and relaunched. Confirmed the running
+  entry bundle (`web/dist/assets/index-C3yKAPdk.js`, matched against
+  `index.html`'s `<script src>`) contains the memoized formatter
+  (`Sfe.format(n)`), not a per-call `toLocaleTimeString`. **Peak footprint
+  dropped 11.5GB → 3.8GB** on a comparable streaming session (`vmmap` on the
+  new WebContent pid) — the fix is real and load-bearing, not a no-op.
+- [ ] **Still open: a second, smaller instance of the identical bug.** A
+  fresh `sample <pid> 3` on the *fixed* build, during active streaming (user
+  confirmed: "active chat, streaming a response", no Cron/Session dialogs
+  open), still shows the exact same call graph — `WebCore::EventSource::
+  parseEventStream()` → per-message microtask → `JSC::
+  dateProtoFuncToLocaleString` → full ICU `SimpleDateFormat` construction —
+  just a different call site. Exhausted static search: every
+  `.toLocaleString`/`.toLocaleDateString`/`Intl.*` usage in `web/src` (12
+  sites) is accounted for, and none of the remaining ones
+  (`SessionDialog.tsx:145`, `CronHistoryPanel.tsx:20`, `cronFormat.ts`,
+  `CronOutboxPanel.tsx:38`, `StatusPanel.tsx:170` — the last is
+  `Number.prototype.toLocaleString`, a different native symbol, ruled out)
+  live in an always-mounted, streaming-adjacent component; confirmed the
+  user had none of those panels open during the repro. No third-party
+  date-formatting library in `web/package.json` either. **Blocked the same
+  way the 2026-08-25 entries were**: `sample`'s native stack bottoms out at
+  unsymbolicated `???` frames for the actual JIT-compiled JS caller — only a
+  DevTools JS callstack/heap snapshot would name it, and no tool in this
+  session can attach to a Wails-hosted WKWebView. Proposed unblock: ship a
+  temporary diagnostic (`Date.prototype.toLocaleString` override that logs
+  `new Error().stack` on first call) so the next repro's console names the
+  site without needing DevTools open during the actual spike — not yet
+  applied, pending user go-ahead (would need removing before a real
+  release).
+
+### FOUND + FIXED: full chat-store subscription tree re-rendered on every streamed token (2026-08-27, same investigation)
+
+New report: typing in the chat input lagged badly while a response was
+streaming, on top of the memory spikes above.
+
+- [x] **Root cause: `useChatState()` (`web/src/stores/chatStore.tsx`) had 15
+  call sites across the app, none scoped — every one subscribes to the
+  *entire* store and re-renders on *every* dispatch, including the
+  `"text"`/`"thinking"` per-token deltas `sessionEvents.ts` dispatches for
+  every streamed token.** `HomeApp` (`App.tsx`) calls it directly, and
+  `ChatInput` is rendered deep inside the same component's ~600-line JSX
+  body — so every token forced the *entire app shell* (sidebar, message
+  list, terminal, editor, status bar, chat input) to reconcile, competing
+  with keystrokes for the main thread. `useChat()` (also called directly in
+  `HomeApp`) had the identical unscoped call hidden a layer down — fixing
+  `App.tsx` alone would not have helped.
+- [x] **Fix: two new hooks in `chatStore.tsx`** — `useChatSelector(selector)`
+  (thin wrapper over `@tanstack/react-store`'s `useSelector`, default
+  `Object.is` compare) for components that need reactive but *narrow* state,
+  and `useChatStateRef()` (subscribes via `store.subscribe()`, updates a
+  ref, never triggers a re-render) for components that only read state
+  imperatively (inside a callback/interval, never in JSX). `getSessionSlice`
+  already returns the exact same object reference across dispatches that
+  don't touch that session (`updateSession`'s immutable per-key update), so
+  `useChatSelector(s => getSessionSlice(s, id))` correctly skips re-renders
+  for other tabs' tokens with zero extra plumbing — no custom compare
+  needed except for two aggregate-across-tabs cases (`OpenSessionBar`'s
+  per-tab summary, `ProjectSidebar`'s per-project streaming-boolean).
+  Migrated all 15 consumers: `App.tsx`, `useChat.ts`, `ChatPanel.tsx`,
+  `StatusBar.tsx`, `StatusPanel.tsx`, `CoworkSidebar.tsx`,
+  `ProjectSidebar.tsx`, `OpenSessionBar.tsx`, `SessionSubTabs.tsx`,
+  `SessionTabSync.tsx` (imperative-only — returns `null`, never renders),
+  `useTurnWatchdog.ts` (imperative-only), `frontendMemoryReporter.tsx`
+  (imperative-only — a debug tool that exists to *measure* the leak was
+  itself contributing re-render churn to it), `ModelDialog.tsx`,
+  `ModelDefaultsForm.tsx`, `AdvisorForm.tsx`.
+- [x] **Verified**: `npx tsc --noEmit` clean, full `vitest run` 179/179
+  passing, both before and after the follow-up virtualization change below.
+- [x] **Live-verified impact**: rebuilt, relaunched, `vmmap` peak footprint
+  on a comparable streaming turn dropped from 11.5GB to 3.8GB, then further
+  on repeat tests (see below) — confirms this was a real, load-bearing
+  contributor to both the input lag and the memory churn, not just the
+  `toLocaleString` micro-fix.
+
+### FOUND: HTTP/2 stream errors weren't retried at all (2026-08-27, FIXED, tangential to memory work)
+
+User hit `llm request failed after 1 attempt(s): openai responses stream
+error: stream error: stream ID 3; INTERNAL_ERROR; received from peer` after
+a stalled-then-reset provider connection, and asked why it didn't retry.
+
+- [x] **Root cause**: `isRetryableLLMClientError` (`internal/agent/
+  client.go`) classifies retryability by substring-matching the error text
+  against a fixed list (`timeout`, `connection reset`, `eof`, `goaway`,
+  etc.). An HTTP/2 `StreamError` (`golang.org/x/net/http2`) formats as
+  `"stream error: stream ID %d; %v"` and matched none of them, so
+  `isRetryable` was `false` and the retry loop broke on attempt 1 — never
+  even reaching the separate "already streamed content" duplicate-
+  prevention gate a few lines below.
+- [x] **Fix**: added HTTP/2 stream-error handling — `INTERNAL_ERROR`,
+  `REFUSED_STREAM`, `ENHANCE_YOUR_CALM`, `CONNECT_ERROR` now retry
+  (server/transport-caused per RFC 7540 §7); `PROTOCOL_ERROR`,
+  `FRAME_SIZE_ERROR`, `COMPRESSION_ERROR` deliberately excluded (client-
+  caused — malformed data from this client would fail identically on
+  retry). New test `TestIsRetryableLLMClientError_HTTP2StreamErrors` in
+  `client_test.go` covers both sides. Full `internal/agent` package test
+  suite passes.
+
+### Diagnostic tooling built during this investigation (kept for future repros)
+
+- **`/private/tmp/claude-501/-Users-james-www-ocode/434a005f-6c1b-48b5-a833-2bdb5b51fbc0/scratchpad/mem_watch.sh`**
+  (session-scratch, not repo-committed): polls the WebContent renderer's RSS
+  every 1s via `ps`, auto re-detects the pid across app restarts (backend
+  LISTEN port → Networking XPC sibling via `lsof` → adjacent WebContent pid,
+  the methodology validated earlier in this file), and on any >300MB
+  single-tick jump fires an async `sample <pid> 6` to disk plus a `vmmap`
+  footprint line — solves the "manually catching the burst window" problem
+  that blocked earlier repros (5s `sample` calls timed off a user's "now"
+  message kept landing after the spike had already peaked and started
+  reclaiming). Re-run standalone (`chmod +x` already set) any time a future
+  repro needs it; log at `mem_watch.log` in the same directory, samples as
+  `auto_sample_<unix-ts>.txt`.
+- **`Date.prototype.toLocaleString` call-site probe** (`web/src/debug.ts`,
+  paired with a `debug_note` passthrough field added to
+  `internal/server/frontend_stats.go`'s `POST /api/debug/frontend-stats`):
+  patches `toLocaleString` once at boot, captures `new Error().stack` on the
+  first 3 calls, ships each to the backend log (readable via `GET
+  /api/logs`) — built to get around `sample`'s native stack bottoming out at
+  unsymbolicated `???` for JIT-compiled JS callers. **Inconclusive**: never
+  fired even during a confirmed burst where `dateProtoFuncToLocaleString`
+  was present in the `sample` output (28 hits) — and a live check of the
+  *pre-existing* `frontendMemoryReporter.tsx`'s periodic reporter (same
+  endpoint, been shipping for a while) also showed zero samples ever
+  recorded (`GET /api/debug/frontend-stats` returned empty). Both failing
+  identically points at a connectivity/CORS issue with POSTs from the
+  Wails-hosted WKWebView to this endpoint specifically, not a JIT-inlining
+  bypass of the monkey-patch — **not root-caused**, low priority now that
+  the virtualization fix below addresses the bigger, confirmed contributor.
+  Both the probe and the `debug_note` field are still in the tree; remove
+  once either fixed or abandoned.
+
+### FOUND + FIXED: chat message list was never virtualized — unbounded DOM/heap growth with conversation length (2026-08-27)
+
+The biggest finding of this investigation. User's 1h49m-old session had
+climbed from 3.18GB to 5.15GB in about a minute of streaming; the residual
+`toLocaleString`/ICU signature was still present in samples but looked
+increasingly like a symptom riding along with something bigger, not the
+root cause. User specifically prompted: "i recall virtul list thts
+optimised" / "or maybe tanstack got some kind of virtual list for
+messages" — worth checking since the codebase already uses
+`@tanstack/react-store`.
+
+- [x] **Confirmed there was no virtualization at all.** `grep` for
+  `react-window|react-virtual|Virtuoso|FixedSizeList|VariableSizeList|
+  useVirtualizer` across `web/src` and `web/package.json`: zero hits.
+  `ChatPanel.tsx`'s render was a bare `messages.map((msg, i) => ...)` — every
+  message ever loaded into a session stayed mounted as real DOM (React
+  fiber nodes, markdown/syntax-highlighter output) for the ChatPanel's
+  entire lifetime, and the reducer's `ADD_MESSAGE` just appends forever
+  (`messages: [...s.messages, action.message]`, no upper bound). This
+  scales with *conversation length*, not per-token churn — exactly matching
+  a long-running session's sustained growth pattern rather than the
+  spike-and-reclaim sawtooth from the earlier fixes.
+- [x] **Fix**: added `@tanstack/react-virtual@^3` (same install session hit
+  a broken `pnpm` shell wrapper — a custom function shadowing `pnpm add`/
+  `install`/`i` that calls a missing `_pkg_age_resolve` helper not loaded in
+  a non-interactive shell; bypassed with `command pnpm add ...` rather than
+  touching the user's shell config). `ChatPanel.tsx` now virtualizes the
+  committed `messages` array via `useVirtualizer` (dynamic per-item height
+  via `measureElement`, `estimateSize: 96`, `overscan: 8`); `live` (the
+  in-progress turn) stays rendered as a normal tail below the virtualized
+  window since it's always visible, short-lived, and churns too fast to
+  benefit from virtualization.
+  - A few structural message kinds (`QUESTION_PROMPT:`/`PERMISSION_ASK:`
+    tool messages) are filtered into a `visibleMessages` array *before*
+    virtualizing, with an index map back to the original `messages` array —
+    filtering post-render (returning `null` per item, the old pattern)
+    would leave a blank gap sized by `estimateSize` in a virtualized list
+    instead of collapsing to zero height.
+  - Auto-scroll-to-bottom, scroll-up pagination (load-older-on-
+    `scrollTop < 100`, preserve-position-after-prepend), and the top
+    "Loading older / Beginning of conversation" indicator all needed zero
+    changes — they only ever touched `scrollRef.current.scrollTop`/
+    `scrollHeight`, which virtualization doesn't change the semantics of
+    (still the real scrollable container; the virtualizer just renders a
+    windowed subset inside a full-height spacer).
+  - Search-jump-to-match (`Ctrl/Cmd+F`) *did* need a real change: the old
+    `messageRefs.current[i]?.scrollIntoView()` assumed the target message
+    was already mounted, which isn't true once off-screen matches stop
+    rendering. Replaced with `virtualizer.scrollToIndex(pos, {align:
+    "center", behavior: "smooth"})` keyed through the original-index →
+    visible-position map — handles jumping to an unmeasured/unmounted item
+    and correcting position once it measures.
+- [x] **Verified**: `npx tsc --noEmit` clean, full `vitest run` 188/188
+  passing (up from 179 earlier in this same investigation — the concurrent,
+  unrelated `tabQueue.test.ts` work-in-progress from another session
+  finished and now passes too), `npm run build` (`tsc && vite build`) clean.
+  Rebuilt `bin/ocode.app`, relaunched, `mem_watch.sh` re-armed on the new
+  pid. **Not yet independently confirmed against a long real session** post-
+  fix (that needs the app running for a comparable stretch of time under
+  normal use) — next step is watching whether footprint growth on a long
+  session now tracks bounded/sawtooth instead of climbing with transcript
+  length.
+
 ## Local model auto-start hang: MLX "python3" resolves to the wrong interpreter on desktop (2026-08-25, FIXED)
 
 Root-caused via the live `/api/logs` snapshot of the session above:

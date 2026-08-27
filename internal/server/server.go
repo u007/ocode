@@ -274,12 +274,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/mcp/{name}/disable", s.authMiddleware(s.handleDisableMCP))
 
 	// Plugins
-	s.mux.HandleFunc("GET /api/plugins", s.authMiddleware(s.handleListPlugins))
-	s.mux.HandleFunc("GET /api/plugins/{name}", s.authMiddleware(s.handleGetPlugin))
-	s.mux.HandleFunc("PUT /api/plugins/{name}/enable", s.authMiddleware(s.handleEnablePlugin))
-	s.mux.HandleFunc("PUT /api/plugins/{name}/disable", s.authMiddleware(s.handleDisablePlugin))
-	s.mux.HandleFunc("POST /api/plugins", s.authMiddleware(s.handleInstallPlugin))
-	s.mux.HandleFunc("DELETE /api/plugins/{name}", s.authMiddleware(s.handleRemovePlugin))
+	s.mux.HandleFunc("GET /api/plugins", s.pluginAuthMiddleware(s.handleListPlugins))
+	s.mux.HandleFunc("GET /api/plugins/{name}", s.pluginAuthMiddleware(s.handleGetPlugin))
+	s.mux.HandleFunc("PUT /api/plugins/{name}/enable", s.pluginAuthMiddleware(s.handleEnablePlugin))
+	s.mux.HandleFunc("PUT /api/plugins/{name}/disable", s.pluginAuthMiddleware(s.handleDisablePlugin))
+	s.mux.HandleFunc("POST /api/plugins", s.pluginAuthMiddleware(s.handleInstallPlugin))
+	s.mux.HandleFunc("DELETE /api/plugins/{name}", s.pluginAuthMiddleware(s.handleRemovePlugin))
 
 	// Usage
 	s.mux.HandleFunc("GET /api/usage", s.authMiddleware(s.handleGetUsage))
@@ -405,6 +405,18 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		s.rl.reset(ip)
 		next(w, r)
 	}
+}
+
+// pluginAuthMiddleware never exposes plugin installation and lifecycle
+// endpoints on a remotely reachable unauthenticated server. Loopback remains
+// convenient for local desktop/TUI use.
+func (s *Server) pluginAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	if s.username == "" && s.password == "" && !isLoopbackBind(s.addr) {
+		return func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "plugin management requires authentication on non-loopback servers", http.StatusForbidden)
+		}
+	}
+	return s.authMiddleware(next)
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {

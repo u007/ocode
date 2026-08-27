@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import {
   useChatDispatch,
-  useChatState,
+  useChatStateRef,
   getTurnState,
   type ChatAction,
   type ChatState,
@@ -111,9 +111,9 @@ export function runWatchdogTick(
  */
 export function useTurnWatchdogAll(openSessionIds: ReadonlySet<string>): void {
   const dispatch = useChatDispatch();
-  const chatState = useChatState();
-  const stateRef = useRef(chatState);
-  stateRef.current = chatState;
+  // Purely imperative (read inside the interval tick, not JSX) — must not
+  // re-render this always-mounted hook's owner on every dispatch.
+  const stateRef = useChatStateRef();
   const idsRef = useRef(openSessionIds);
   idsRef.current = openSessionIds;
 

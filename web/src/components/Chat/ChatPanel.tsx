@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useChatState, useChatDispatch, getSessionSlice } from "../../stores/chatStore";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { useChatSelector, useChatDispatch, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { api } from "../../api/client";
 import MessageBubble, { AssistantText } from "./MessageBubble";
@@ -16,17 +17,21 @@ interface ChatPanelProps {
 }
 
 export default function ChatPanel({ sessionId }: ChatPanelProps) {
-  const chatState = useChatState();
+  // Scoped to this tab's own session: getSessionSlice returns the exact same
+  // object reference across dispatches that don't touch this session (see
+  // updateSession's immutable per-key update), so other tabs' streamed
+  // tokens don't re-render this ChatPanel instance.
+  const slice = useChatSelector((s) => getSessionSlice(s, sessionId));
   const dispatch = useChatDispatch();
   const { dispatch: projectDispatch } = useProjectState();
-  const { messages, live, hasMore, loadingMore } = getSessionSlice(chatState, sessionId);
+  const { messages, live, hasMore, loadingMore } = slice;
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const topRef = useRef<HTMLDivElement>(null);
   const [initialized, setInitialized] = useState(false);
   const loadGenerationRef = useRef(0);
-  const stateRef = useRef(chatState);
-  stateRef.current = chatState;
+  const stateRef = useRef(slice);
+  stateRef.current = slice;
   const [reachedTop, setReachedTop] = useState(false);
   // Whether the viewport is pinned to the bottom. Driven by handleScroll and
   // consulted by the auto-scroll effect so we only follow the tail when the
@@ -38,12 +43,55 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [matchCursor, setMatchCursor] = useState(-1);
-  // Per-message DOM refs so the current match can be scrolled into view.
-  const messageRefs = useRef<(HTMLDivElement | null)[]>([]);
   // Set true while a search jump is scrolling so handleScroll doesn't fire the
   // scroll-up pagination loader (which would shift every message index and
   // land the highlight on the wrong bubble).
   const searchJumpRef = useRef(false);
+
+  // A few structural message kinds (question/permission prompts already
+  // rendered by dedicated UI elsewhere) are never shown in the transcript.
+  // Filtered out here, before virtualization, so they never claim a virtual
+  // slot — filtering post-render (returning null per item) would leave a
+  // blank gap sized by estimateSize instead. `i` is the index into the raw
+  // `messages` array — matchIndices/currentMatchMsgIndex/toolNameById all key
+  // on that original index, since search and tool-name resolution reasonably
+  // still consider the full history.
+  const visibleMessages = useMemo(
+    () =>
+      messages
+        .map((msg, i) => ({ msg, i }))
+        .filter(
+          ({ msg }) =>
+            !(
+              msg.role === "tool" &&
+              (msg.content?.startsWith("QUESTION_PROMPT:") || msg.content?.startsWith("PERMISSION_ASK:"))
+            ),
+        ),
+    [messages],
+  );
+  // original message index -> position within visibleMessages, for scrolling
+  // the virtualizer to a search match (which is indexed by original index).
+  const visiblePositionByIndex = useMemo(() => {
+    const map = new Map<number, number>();
+    visibleMessages.forEach(({ i }, pos) => map.set(i, pos));
+    return map;
+  }, [visibleMessages]);
+
+  // Only committed messages are virtualized — a long session's history is
+  // what was growing the DOM (and retained JS heap: fiber nodes, markdown/
+  // syntax-highlighter output) unboundedly, since nothing ever unmounted as
+  // the user scrolled past it. `live` (the in-progress turn) stays rendered
+  // as a normal tail below the virtualized window: it's always visible,
+  // short-lived, and its own size churns too fast for virtualization to help.
+  // estimateSize is deliberately rough (real heights vary a lot — code
+  // blocks vs. one-line replies); measureElement (wired via the ref callback
+  // below) corrects it per item after first paint.
+  const virtualizer = useVirtualizer({
+    count: visibleMessages.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 96,
+    overscan: 8,
+  });
 
   // Match indices: message positions containing the query (case-insensitive).
   // Only loaded messages are searched — the "searching loaded messages" hint
@@ -77,7 +125,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
         cancelled = true;
       };
     }
-    if (getSessionSlice(stateRef.current, sessionId).initialized) {
+    if (stateRef.current.initialized) {
       setInitialized(true);
       return () => {
         cancelled = true;
@@ -92,7 +140,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
         // Mirrors MERGE_SNAPSHOT guard in chatStore.tsx — only committed
         // messages suppress the merge; live alone does not. The reducer
         // preserves the live buffer mid-turn.
-        const current = getSessionSlice(stateRef.current, sessionId);
+        const current = stateRef.current;
         if (current.messages.length > 0) {
           // The mirror already populated the slice while the fetch was in
           // flight — its state is newer than disk. Do not wipe it with this
@@ -176,20 +224,23 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
   }, [matchIndices]);
 
   // Scroll the current match into view. Flag the jump so handleScroll skips the
-  // pagination loader while the smooth scroll settles.
+  // pagination loader while the smooth scroll settles. Unlike a plain DOM
+  // scrollIntoView, this works even when the match isn't currently rendered
+  // (virtualizer.scrollToIndex handles jumping to an unmeasured item and
+  // correcting position once it's measured).
   useEffect(() => {
     if (currentMatchMsgIndex < 0) return;
-    const el = messageRefs.current[currentMatchMsgIndex];
-    if (!el) return;
+    const pos = visiblePositionByIndex.get(currentMatchMsgIndex);
+    if (pos === undefined) return;
     atBottomRef.current = false;
     setShowJumpToBottom(true);
     searchJumpRef.current = true;
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    virtualizer.scrollToIndex(pos, { align: "center", behavior: "smooth" });
     const t = setTimeout(() => {
       searchJumpRef.current = false;
     }, 600);
     return () => clearTimeout(t);
-  }, [currentMatchMsgIndex]);
+  }, [currentMatchMsgIndex, visiblePositionByIndex, virtualizer]);
 
   const gotoNextMatch = useCallback(() => {
     setMatchCursor((c) =>
@@ -331,34 +382,41 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
           </div>
         )}
 
-        {messages.map((msg, i) => {
-          if (
-            msg.role === "tool" &&
-            (msg.content?.startsWith("QUESTION_PROMPT:") ||
-              msg.content?.startsWith("PERMISSION_ASK:"))
-          ) {
-            return null;
-          }
-          return (
-          <div
-            key={`${msg.role}-${i}-${msg.content?.slice(0, 20)}`}
-            ref={(el) => {
-              messageRefs.current[i] = el;
-            }}
-            className={
-              i === currentMatchMsgIndex
-                ? "scroll-mt-16 rounded-lg ring-2 ring-yellow-400/70 ring-offset-2 ring-offset-zinc-950"
-                : "scroll-mt-16"
-            }
-          >
-            <MessageBubble
-              message={msg}
-              highlight={searchOpen ? searchQuery : ""}
-              toolName={msg.tool_call_id ? toolNameById.get(msg.tool_call_id) : undefined}
-            />
+        {visibleMessages.length > 0 && (
+          <div style={{ height: virtualizer.getTotalSize(), width: "100%", position: "relative" }}>
+            {virtualizer.getVirtualItems().map((virtualItem) => {
+              const { msg, i } = visibleMessages[virtualItem.index];
+              return (
+                <div
+                  key={virtualItem.key}
+                  data-index={virtualItem.index}
+                  ref={virtualizer.measureElement}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${virtualItem.start}px)`,
+                  }}
+                >
+                  <div
+                    className={
+                      i === currentMatchMsgIndex
+                        ? "scroll-mt-16 rounded-lg ring-2 ring-yellow-400/70 ring-offset-2 ring-offset-zinc-950"
+                        : "scroll-mt-16"
+                    }
+                  >
+                    <MessageBubble
+                      message={msg}
+                      highlight={searchOpen ? searchQuery : ""}
+                      toolName={msg.tool_call_id ? toolNameById.get(msg.tool_call_id) : undefined}
+                    />
+                  </div>
+                </div>
+              );
+            })}
           </div>
-          );
-        })}
+        )}
 
         {live.map((part, i) => {
           if (part.kind === "thinking")

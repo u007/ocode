@@ -1041,6 +1041,29 @@ func TestEmptyResponsesRetryAfterReasoningDeltas(t *testing.T) {
 	}
 }
 
+func TestIsRetryableLLMClientError_HTTP2StreamErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"internal_error retries", errors.New("openai responses stream error: stream error: stream ID 3; INTERNAL_ERROR; received from peer"), true},
+		{"refused_stream retries", errors.New("stream error: stream ID 5; REFUSED_STREAM"), true},
+		{"enhance_your_calm retries", errors.New("stream error: stream ID 7; ENHANCE_YOUR_CALM"), true},
+		{"connect_error retries", errors.New("stream error: stream ID 9; CONNECT_ERROR"), true},
+		{"protocol_error does not retry (client-caused, would fail identically)", errors.New("stream error: stream ID 3; PROTOCOL_ERROR"), false},
+		{"frame_size_error does not retry (client-caused)", errors.New("stream error: stream ID 3; FRAME_SIZE_ERROR"), false},
+		{"unrelated error does not retry", errors.New("some other failure"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRetryableLLMClientError(tc.err); got != tc.want {
+				t.Errorf("isRetryableLLMClientError(%q) = %v, want %v", tc.err.Error(), got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProviderStatusErrorClassification(t *testing.T) {
 	cases := []struct {
 		code              int

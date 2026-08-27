@@ -1,6 +1,7 @@
 import { useRef } from "react";
-import { MessageSquare, Bot, History, ScrollText, Activity, Terminal as TerminalIcon, Gauge } from "lucide-react";
+import { MessageSquare, Bot, History, ScrollText, Activity } from "lucide-react";
 import { useProjectState, type SessionSubTabId } from "../../stores/projectStore";
+import { getSessionSlice, useChatSelector } from "../../stores/chatStore";
 
 const subTabs: { id: SessionSubTabId; label: string; icon: typeof MessageSquare }[] = [
   { id: "chat", label: "Chat", icon: MessageSquare },
@@ -8,14 +9,15 @@ const subTabs: { id: SessionSubTabId; label: string; icon: typeof MessageSquare 
   { id: "changes", label: "Changes", icon: History },
   { id: "logs", label: "Logs", icon: ScrollText },
   { id: "status", label: "Status", icon: Activity },
-  { id: "terminal", label: "Terminal", icon: TerminalIcon },
-  { id: "processes", label: "Processes", icon: Gauge },
 ];
 
 export default function SessionSubTabs() {
   const { tabs, activeTabId, dispatch } = useProjectState();
-  // The terminal sub-tab is always shown: the interactive terminal is always
-  // enabled, there is no config to hide it.
+  // Selector must run unconditionally (before the early return below), so
+  // it's keyed on activeTabId directly rather than activeSessionTab.id.
+  const chatSlice = useChatSelector((s) => getSessionSlice(s, activeTabId));
+  // The terminal is now a project-level top tab (beside Sessions), not a
+  // session sub-tab.
   const activeSessionTab = tabs.find((t) => t.id === activeTabId);
   const scrollRef = useRef<HTMLDivElement>(null);
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
@@ -32,6 +34,8 @@ export default function SessionSubTabs() {
 
   if (!activeSessionTab) return null;
 
+  const chatCount = chatSlice.totalMessages > 0 ? chatSlice.totalMessages : chatSlice.messages.length;
+
   return (
     <div
       ref={scrollRef}
@@ -42,6 +46,7 @@ export default function SessionSubTabs() {
       {subTabs.map((tab) => {
         const Icon = tab.icon;
         const isActive = activeSessionTab.activeSubTab === tab.id;
+        const count = tab.id === "chat" ? chatCount : undefined;
         return (
           <button
             key={tab.id}
@@ -54,6 +59,16 @@ export default function SessionSubTabs() {
           >
             <Icon className="w-4 h-4" />
             {tab.label}
+            {count !== undefined && (
+              <span
+                className={`inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full text-xs font-semibold leading-none ${
+                  isActive ? "bg-zinc-600 text-white" : "bg-zinc-800 text-zinc-300"
+                }`}
+                aria-label={`${tab.label} count ${count}`}
+              >
+                {count}
+              </span>
+            )}
           </button>
         );
       })}
