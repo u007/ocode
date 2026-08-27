@@ -217,6 +217,11 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 
+	if tailIsPermissionAsk(as.messages) {
+		sendSSE(w, flusher, "error", map[string]string{"error": ErrPermissionPending.Error()})
+		return
+	}
+
 	as.messages = append(as.messages, agent.Message{Role: "user", Content: message})
 	messages := append([]agent.Message(nil), as.messages...)
 	ag := as.agent

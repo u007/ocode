@@ -34,6 +34,12 @@ export interface SessionSlice {
   isStreaming: boolean;
   error: string | null;
   pendingPermission: PermissionRequest | null;
+  // Permission asks superseded by a newer one before being answered — a
+  // single agent round can pause on more than one at once when it dispatches
+  // several tool calls that each need approval. Kept as a stack so answering
+  // the currently-shown dialog resurfaces the next-most-recent one instead of
+  // silently dropping it (which left the turn stuck paused forever).
+  permissionQueue: PermissionRequest[];
   pendingQuestion: QuestionRequest | null;
   totalMessages: number; // total messages on server
   hasMore: boolean; // whether older messages exist
@@ -71,6 +77,7 @@ export const emptySessionSlice: SessionSlice = {
   isStreaming: false,
   error: null,
   pendingPermission: null,
+  permissionQueue: [],
   pendingQuestion: null,
   totalMessages: 0,
   hasMore: false,
@@ -372,23 +379,39 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       });
     }
     case "PERMISSION_REQUEST":
-      return updateSession(state, action.sessionId, (s) => ({
-        ...s,
-        pendingPermission: action.permission,
-      }));
+      return updateSession(state, action.sessionId, (s) => {
+        // A round that dispatched multiple tool calls needing approval can
+        // raise more than one ask before any is answered. The newest still
+        // wins the dialog (matching prior behavior), but the superseded one
+        // is queued instead of dropped — see PERMISSION_RESOLVED, which
+        // resurfaces it once the current dialog is answered.
+        if (!s.pendingPermission || s.pendingPermission.request_id === action.permission.request_id) {
+          return { ...s, pendingPermission: action.permission };
+        }
+        return {
+          ...s,
+          pendingPermission: action.permission,
+          permissionQueue: [...s.permissionQueue, s.pendingPermission],
+        };
+      });
     case "PERMISSION_RESOLVED":
       return updateSession(state, action.sessionId, (s) => {
-        // Only clear pendingPermission if the requestId matches (or if none specified for backward compat).
-        // This prevents a permission_resolved for one request from closing the dialog for a different
-        // (newer) permission ask that arrived during the same Step().
+        // A resolve for an ask that isn't the one currently shown (a stale
+        // dismissal for an older/queued ask) must not close the newer dialog
+        // — just drop it from the queue so it isn't resurfaced later.
         if (
           action.requestId &&
           s.pendingPermission &&
           s.pendingPermission.request_id !== action.requestId
         ) {
-          return s;
+          return {
+            ...s,
+            permissionQueue: s.permissionQueue.filter((p) => p.request_id !== action.requestId),
+          };
         }
-        return { ...s, pendingPermission: null };
+        const queue = [...s.permissionQueue];
+        const next = queue.pop();
+        return { ...s, pendingPermission: next ?? null, permissionQueue: queue };
       });
     case "QUESTION_REQUEST":
       return updateSession(state, action.sessionId, (s) => ({

@@ -34,7 +34,7 @@ func (h *Handler) HandleOpenFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	abs, err := resolveWithinWorkdir(req.Path)
+	abs, err := h.resolveWithinWorkdir(req.Path)
 	if err != nil {
 		log.Printf("[open] rejected path %q: %v", req.Path, err)
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -56,10 +56,23 @@ func (h *Handler) HandleOpenFile(w http.ResponseWriter, r *http.Request) {
 
 // resolveWithinWorkdir cleans path (relative to the server working dir) and
 // confirms the result stays inside that working dir.
-func resolveWithinWorkdir(path string) (string, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("cannot determine working directory: %w", err)
+//
+// Uses h.workDir, not a raw os.Getwd() — a Finder/Dock-launched desktop .app
+// starts with process cwd "/" (see cmd/ocode-desktop/main.go and
+// handler_tui_status.go for the same fallback hazard elsewhere), and "/" as
+// the workdir would make every absolute path pass the "stays inside the
+// working dir" check below, defeating the LFI guard this function exists
+// for. h.workDir is set explicitly by the desktop boot path via SetWorkDir
+// before serving; os.Getwd() is only a fallback for the rare case a Handler
+// is used directly without ever calling SetWorkDir (e.g. some tests).
+func (h *Handler) resolveWithinWorkdir(path string) (string, error) {
+	wd := h.workDir
+	if wd == "" {
+		var err error
+		wd, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("cannot determine working directory: %w", err)
+		}
 	}
 	abs := path
 	if !filepath.IsAbs(abs) {

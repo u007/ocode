@@ -101,6 +101,13 @@ func parsePermissionAsk(content string) (agent.PermissionRequest, bool) {
 	return req, true
 }
 
+// isPermissionAskMsg reports whether a single tool-role message is a pending
+// permission ask, for findPendingSession's per-message search across a
+// trailing round that may contain more than one (see trailingToolRunStart).
+func isPermissionAskMsg(m agent.Message) bool {
+	return m.Role == "tool" && strings.HasPrefix(m.Content, tool.SentinelPermissionAsk)
+}
+
 // HandleResolvePermission resolves a pending PERMISSION_ASK raised by the agent
 // and continues the turn. Body:
 //
@@ -188,16 +195,29 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// Locate the session whose pending permission ask matches request_id. Prefer
 	// the explicit session_id; otherwise scan (tool-call IDs are unique). The
 	// session comes back with its lock held, so the tail cannot be resolved out
-	// from under us by a racing request.
-	as, sessID := h.findPendingSession(bodyReq.SessionID, bodyReq.RequestID, tailIsPermissionAsk)
+	// from under us by a racing request. The match can be anywhere in the
+	// trailing tool-call round, not just the literal last message — a round
+	// that dispatched several tool calls needing approval pauses with more
+	// than one unresolved sentinel at once.
+	as, sessID := h.findPendingSession(bodyReq.SessionID, bodyReq.RequestID, isPermissionAskMsg)
 	if as == nil {
 		writeError(w, http.StatusNotFound, "no pending permission found for request_id")
 		return
 	}
 	defer as.mu.Unlock()
 
-	last := &as.messages[len(as.messages)-1]
-	permReq, ok := parsePermissionAsk(last.Content)
+	askIdx := -1
+	for i := trailingToolRunStart(as.messages); i < len(as.messages); i++ {
+		if as.messages[i].ToolID == bodyReq.RequestID && isPermissionAskMsg(as.messages[i]) {
+			askIdx = i
+			break
+		}
+	}
+	if askIdx < 0 {
+		writeError(w, http.StatusConflict, "pending permission is not a valid ask")
+		return
+	}
+	permReq, ok := parsePermissionAsk(as.messages[askIdx].Content)
 	if !ok {
 		writeError(w, http.StatusConflict, "pending permission is not a valid ask")
 		return
@@ -243,9 +263,29 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		if err != nil {
 			result = "Error: " + err.Error()
 		}
-		working[len(working)-1].Content = agent.TruncateToolResult(bodyReq.RequestID, result)
+		working[askIdx].Content = agent.TruncateToolResult(bodyReq.RequestID, result)
 	} else {
-		working[len(working)-1].Content = "denied: tool " + permReq.ToolName + " denied by user"
+		working[askIdx].Content = "denied: tool " + permReq.ToolName + " denied by user"
+	}
+
+	// The round that raised this ask may have dispatched several tool calls
+	// needing approval at once, each pausing with its own sentinel before the
+	// user answered any of them. Re-Stepping now would feed the model a
+	// mid-transcript tool result that is still raw PERMISSION_ASK: JSON — a
+	// malformed tool-call/tool-result pairing that the model has no good way
+	// to recover from (typically it retries the call, which raises a brand
+	// new ask that looks to the user like the same dialog popping right back
+	// up). Instead, persist just this one resolution and wait for the
+	// remaining ask(s) — the client already has them queued from the earlier
+	// `permission` SSE frames.
+	for i := trailingToolRunStart(as.messages); i < len(as.messages); i++ {
+		if i != askIdx && isPermissionAskMsg(working[i]) {
+			as.messages = working
+			_ = h.saveSession(sessID, "", as.messages, nil)
+			h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
+			writeJSON(w, http.StatusOK, ChatResponse{SessionID: sessID, Model: as.model})
+			return
+		}
 	}
 
 	h.wireHeadlessAgentCallbacks(sessID, as.agent)

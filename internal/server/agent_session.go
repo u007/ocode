@@ -400,17 +400,23 @@ func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 	return as, err
 }
 
-// findPendingSession locates the session whose transcript tail is a pending ask
-// (permission or question) whose tool-call id is requestID. It returns that
-// session **with its lock already held** — the caller must unlock it — so the
-// tail it matched cannot change before the caller acts on it.
+// findPendingSession locates the session whose most recent tool-call round
+// contains a pending ask (permission or question) whose tool-call id is
+// requestID. It returns that session **with its lock already held** — the
+// caller must unlock it — so the matched message cannot change before the
+// caller acts on it.
+//
+// isPendingAsk tests one message, not the whole transcript: a round can pause
+// on more than one unresolved ask at once (see trailingToolRunStart), so the
+// match is searched for across the whole trailing tool-call round rather than
+// assumed to be the literal last message.
 //
 // The candidate list is snapshotted under h.mu and the tails are then inspected
 // under each session's own lock. Reading as.messages under h.mu alone is a data
 // race against a running turn, and taking as.mu while holding h.mu would invert
 // the lock order (a turn holds as.mu and then takes h.mu via the title
 // generator) and deadlock.
-func (h *Handler) findPendingSession(sessionID, requestID string, tailIsAsk func([]agent.Message) bool) (*agentSession, string) {
+func (h *Handler) findPendingSession(sessionID, requestID string, isPendingAsk func(agent.Message) bool) (*agentSession, string) {
 	type candidate struct {
 		id string
 		as *agentSession
@@ -431,7 +437,15 @@ func (h *Handler) findPendingSession(sessionID, requestID string, tailIsAsk func
 
 	for _, c := range candidates {
 		c.as.mu.Lock()
-		if tailIsAsk(c.as.messages) && c.as.messages[len(c.as.messages)-1].ToolID == requestID {
+		matched := false
+		for i := trailingToolRunStart(c.as.messages); i < len(c.as.messages); i++ {
+			m := c.as.messages[i]
+			if m.ToolID == requestID && isPendingAsk(m) {
+				matched = true
+				break
+			}
+		}
+		if matched {
 			return c.as, c.id
 		}
 		c.as.mu.Unlock()

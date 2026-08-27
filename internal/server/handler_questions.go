@@ -67,15 +67,17 @@ func isQuestionAsk(content string) bool {
 		strings.Contains(content, tool.SentinelWaitingForUser)
 }
 
-// tailIsQuestionAsk reports whether the newest message is an unanswered
-// question prompt. Any later message means the ask was resolved. Mirror of
-// tailIsPermissionAsk in run_states.go.
+// tailIsQuestionAsk reports whether the most recent tool-call round still has
+// an unresolved question prompt anywhere in it. Mirror of tailIsPermissionAsk
+// in run_states.go — see trailingToolRunStart for why the whole round (not
+// just the literal last message) must be scanned.
 func tailIsQuestionAsk(msgs []agent.Message) bool {
-	if len(msgs) == 0 {
-		return false
+	for i := trailingToolRunStart(msgs); i < len(msgs); i++ {
+		if isQuestionAsk(msgs[i].Content) {
+			return true
+		}
 	}
-	last := msgs[len(msgs)-1]
-	return last.Role == "tool" && isQuestionAsk(last.Content)
+	return false
 }
 
 // applyQuestionAnswer replaces the pending question prompt (a tool result at the
@@ -151,7 +153,9 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	// explicit session_id; otherwise scan (tool-call IDs are unique). The
 	// session comes back with its lock held, so the tail cannot be answered out
 	// from under us by a racing request.
-	as, sessID := h.findPendingSession(req.SessionID, req.RequestID, tailIsQuestionAsk)
+	as, sessID := h.findPendingSession(req.SessionID, req.RequestID, func(m agent.Message) bool {
+		return m.Role == "tool" && isQuestionAsk(m.Content)
+	})
 	if as == nil {
 		writeError(w, http.StatusNotFound, "no pending question found for request_id")
 		return

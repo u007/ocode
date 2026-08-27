@@ -17,6 +17,8 @@ import (
 	"strings"
 
 	"github.com/u007/ocode/internal/server"
+	"github.com/u007/ocode/internal/paths"
+	"github.com/u007/ocode/internal/projects"
 )
 
 // Handle is the result of a successful server boot.
@@ -175,4 +177,61 @@ func saveDebugHandle(url, token string) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		log.Printf("desktop: save debug handle file %s: %v", path, err)
 	}
+}
+
+// IsUnsafeDesktopRoot reports whether dir is too broad/sensitive to use as the
+// desktop server's default workDir. The Finder/Dock-launched .app starts with
+// cwd "/" and the old fallback used the home directory — both are huge trees
+// that trigger macOS TCC prompts (Documents, Desktop, Downloads, etc.) when the
+// file tree or LSP walker scans them, and the bash change-recorder already
+// skips them via unsafeWalkRoot.
+func IsUnsafeDesktopRoot(dir string) bool {
+	clean := filepath.Clean(dir)
+	if clean == string(filepath.Separator) {
+		return true
+	}
+	if home, err := os.UserHomeDir(); err == nil && clean == filepath.Clean(home) {
+		return true
+	}
+	return false
+}
+
+// ResolveFallbackWorkDir picks a safe workDir when the desktop is launched
+// without a meaningful cwd (Finder/Dock launch with cwd "/" or a bare home
+// directory that is not a project). It prefers the most-recently-used saved
+// project that still exists on disk, so a returning user lands on their last
+// project instead of an empty view. On a fresh install (no saved projects) it
+// falls back to the ocode global data dir (~/.local/share/ocode), a small safe
+// directory that never triggers TCC and is cheap to walk. TempDir is the last
+// resort.
+func ResolveFallbackWorkDir() string {
+	// Try the most-recently-used saved project that still exists.
+	if store, _, err := projects.NewStore(); err == nil && store != nil {
+		list := store.List()
+		var best *projects.Project
+		for i := range list {
+			if list[i].Path == "" {
+				continue
+			}
+			if _, statErr := os.Stat(list[i].Path); statErr != nil {
+				continue
+			}
+			if best == nil || list[i].LastUsedAt.After(best.LastUsedAt) {
+				best = &list[i]
+			}
+		}
+		if best != nil {
+			log.Printf("desktop: Finder launch — using last project %q as workDir (cwd was unsafe)", best.Path)
+			return best.Path
+		}
+	} else if err != nil {
+		log.Printf("desktop: load project store for fallback workDir: %v", err)
+	}
+	if dir, err := paths.OcodeGlobalDataDir(); err == nil && dir != "" {
+		log.Printf("desktop: Finder launch — no saved project, using global data dir %q as safe workDir", dir)
+		return dir
+	}
+	tmp := os.TempDir()
+	log.Printf("desktop: Finder launch — using temp dir %q as safe workDir", tmp)
+	return tmp
 }

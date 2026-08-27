@@ -244,9 +244,22 @@ func (m *SessionManager) IsTurnActive(sessionID string) bool {
 // than the threshold with no active turn. The registry entry and the on-disk
 // session remain; the agent rebuilds on the next message. Returns the ids of
 // the evicted sessions so the caller can drop mirror state.
+//
+// A session paused on an unresolved permission ask is exempt even past the
+// timeout: evicting it would delete it from the handler's session map, so a
+// later resolve request 404s ("no pending permission found") instead of
+// completing, and the dialog is left on screen with no way to actually
+// dismiss it. The turn only "goes idle" (lastActivity stamped, turnActive
+// cleared) the instant it pauses on the sentinel, so a long-unanswered dialog
+// is exactly the case this sweep would otherwise catch.
 func (m *SessionManager) EvictIdle() []string {
-	var evicted []string
+	type candidate struct {
+		id string
+		as *agentSession
+	}
+
 	m.mu.Lock()
+	var candidates []candidate
 	for id, e := range m.entries {
 		if e.agent == nil || e.turnActive {
 			continue
@@ -254,10 +267,34 @@ func (m *SessionManager) EvictIdle() []string {
 		if time.Since(e.lastActivity) <= m.idleTimeout {
 			continue
 		}
-		e.agent = nil
-		evicted = append(evicted, id)
+		// Capture the agent pointer itself while m.mu is held — re-reading
+		// e.agent later, unsynchronized, would race a concurrent setAgent
+		// (e.g. a session rebuild) and could see it go nil, panicking on
+		// as.mu.Lock() below.
+		candidates = append(candidates, candidate{id, e.agent})
 	}
 	m.mu.Unlock()
+
+	// Checking for a pending ask needs the agent session's own lock (as.mu),
+	// not m.mu — the same lock-order hazard findPendingSession documents:
+	// a running turn takes as.mu first and m.mu (via setTurnActive) second,
+	// so this must not hold m.mu while taking as.mu.
+	var evicted []string
+	for _, c := range candidates {
+		c.as.mu.Lock()
+		pending := tailIsPermissionAsk(c.as.messages)
+		c.as.mu.Unlock()
+		if pending {
+			continue
+		}
+
+		m.mu.Lock()
+		if e := m.entries[c.id]; e != nil && e.agent == c.as {
+			e.agent = nil
+			evicted = append(evicted, c.id)
+		}
+		m.mu.Unlock()
+	}
 
 	for _, id := range evicted {
 		log.Printf("session manager: evicting idle agent for session %s", id)

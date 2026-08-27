@@ -75,16 +75,20 @@ func main() {
 	}
 
 	// Resolve the working directory the server anchors relative paths to.
-	// A Finder/Dock-launched .app starts with cwd "/" — fall back to the
-	// user's home directory so session/upload paths never target the root.
+	// A Finder/Dock-launched .app starts with cwd "/"; the old fallback used
+	// $HOME which is a huge tree that triggers macOS TCC prompts (Documents,
+	// Desktop, Downloads) when the file tree or LSP walker scans it. Instead
+	// reuse the most-recent saved project, or a small safe dir
+	// (~/.local/share/ocode) on fresh installs.
 	workDir, err := os.Getwd()
-	if err != nil || workDir == "/" {
-		if home, homeErr := os.UserHomeDir(); homeErr == nil {
-			workDir = home
+	if err != nil || desktop.IsUnsafeDesktopRoot(workDir) {
+		fb := desktop.ResolveFallbackWorkDir()
+		if err != nil {
+			log.Printf("ocode-desktop: cwd error %v, using fallback workDir %q", err, fb)
 		} else {
-			log.Printf("ocode-desktop: resolve home dir (cwd err %v): %v", err, homeErr)
-			workDir = "."
+			log.Printf("ocode-desktop: unsafe cwd %q, using fallback workDir %q", workDir, fb)
 		}
+		workDir = fb
 	}
 
 	// Register the embedded skills/plugins so the server can serve them even

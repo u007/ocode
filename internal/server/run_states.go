@@ -87,33 +87,58 @@ func (s *Server) RunStates() []RunState {
 // PendingPermissionAsks counts sessions currently blocked on a permission
 // prompt: the agent pauses a turn after emitting a PERMISSION_ASK: tool
 // message (see Agent.Step's pauseAfterResults), so a session is pending
-// exactly when its transcript tail is such a message with nothing after it.
+// exactly when its trailing tool-call round still contains one.
+//
+// Each session's messages are read under its own as.mu (not h.mu): a running
+// turn mutates as.messages concurrently, so a snapshot taken under h.mu alone
+// would race — see findPendingSession's comment for the same hazard.
 func (h *Handler) PendingPermissionAsks() int {
 	h.mu.Lock()
-	sessions := make([][]agent.Message, 0, len(h.agents))
+	sessions := make([]*agentSession, 0, len(h.agents))
 	for _, as := range h.agents {
-		sessions = append(sessions, as.messages)
+		sessions = append(sessions, as)
 	}
 	h.mu.Unlock()
 
 	count := 0
-	for _, msgs := range sessions {
-		if tailIsPermissionAsk(msgs) {
+	for _, as := range sessions {
+		as.mu.Lock()
+		pending := tailIsPermissionAsk(as.messages)
+		as.mu.Unlock()
+		if pending {
 			count++
 		}
 	}
 	return count
 }
 
-// tailIsPermissionAsk reports whether the newest message is an unanswered
-// permission ask. Any later message (user answer, assistant follow-up)
-// means the ask was resolved.
-func tailIsPermissionAsk(msgs []agent.Message) bool {
-	if len(msgs) == 0 {
-		return false
+// trailingToolRunStart returns the index of the first message in the run of
+// consecutive tool-role messages at the end of msgs — the results of the
+// most recent assistant tool-call round. A single round can pause on more
+// than one unresolved ask when the model dispatches several tool calls that
+// each require a decision (parallel/group dispatch runs them concurrently
+// before any pause check), so callers must search this whole run instead of
+// assuming the literal last message is the only — or the right — one.
+func trailingToolRunStart(msgs []agent.Message) int {
+	i := len(msgs)
+	for i > 0 && msgs[i-1].Role == "tool" {
+		i--
 	}
-	last := msgs[len(msgs)-1]
-	return last.Role == "tool" && strings.HasPrefix(last.Content, tool.SentinelPermissionAsk)
+	return i
+}
+
+// tailIsPermissionAsk reports whether the most recent tool-call round still
+// has an unresolved permission ask anywhere in it (not just as the literal
+// last message — see trailingToolRunStart). A resolved ask has its sentinel
+// content replaced in place, so once every ask in the round is answered this
+// returns false again.
+func tailIsPermissionAsk(msgs []agent.Message) bool {
+	for i := trailingToolRunStart(msgs); i < len(msgs); i++ {
+		if strings.HasPrefix(msgs[i].Content, tool.SentinelPermissionAsk) {
+			return true
+		}
+	}
+	return false
 }
 
 // PendingPermissionAsks exposes the pending-prompt count at the Server level

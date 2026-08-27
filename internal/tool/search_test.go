@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,60 @@ func TestSearchTools(t *testing.T) {
 
 func contains(s, substr string) bool {
 	return strings.Contains(filepath.ToSlash(s), filepath.ToSlash(substr))
+}
+
+// .gitignore must be read from the resolved search root, not the process
+// cwd — the desktop shell launched from Finder has cwd "/", so a
+// cwd-relative os.ReadFile(".gitignore") silently finds nothing there and
+// every search walks build output/vendor dirs unfiltered.
+func TestIgnoreMatcherUsesSearchRootNotCwd(t *testing.T) {
+	projDir := t.TempDir()
+	otherDir := t.TempDir() // process cwd during the test
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd)
+
+	os.WriteFile(filepath.Join(projDir, ".gitignore"), []byte("ignored.txt\n"), 0644)
+	os.WriteFile(filepath.Join(projDir, "ignored.txt"), []byte("cherry"), 0644)
+	os.WriteFile(filepath.Join(projDir, "kept.txt"), []byte("cherry"), 0644)
+
+	ctx := WithWorkDir(context.Background(), projDir)
+	res, err := GrepTool{}.ExecuteCtx(ctx, json.RawMessage(`{"pattern":"cherry"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(res, "kept.txt") {
+		t.Errorf("grep did not find non-ignored match, got: %s", res)
+	}
+	if contains(res, "ignored.txt") {
+		t.Errorf(".gitignore in project root was not honored (cwd-relative lookup bug), got: %s", res)
+	}
+}
+
+// An unscoped grep (no path, no include) over a tree bigger than
+// maxUnscopedFiles must stop early instead of reading every file — this is
+// the guard against the desktop backend RSS spike traced to an agent issuing
+// repo-wide greps with neither filter set.
+func TestGrepToolUnscopedCap(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(origWd)
+
+	for i := 0; i < maxUnscopedFiles+50; i++ {
+		os.WriteFile(fmt.Sprintf("f%d.txt", i), []byte("unrelated content"), 0644)
+	}
+
+	res, err := GrepTool{}.Execute(json.RawMessage(`{"pattern":"nomatch"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res, fmt.Sprintf("first %d files", maxUnscopedFiles)) {
+		t.Errorf("expected truncation note for unscoped cap, got: %s", res)
+	}
 }
 
 // The server hosts sessions for many projects in one process, so search tools

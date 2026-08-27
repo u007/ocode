@@ -510,6 +510,35 @@ describe("chatStore permission dialog lifecycle", () => {
     expect(getSessionSlice(state, "a").pendingPermission).toBeNull();
   });
 
+  it("resurfaces a queued ask once the currently-shown one is resolved", () => {
+    // Two tool calls in the same round both need approval: call-1 shows
+    // first, call-2 supersedes it as the visible dialog, and answering
+    // call-2 must bring call-1 back instead of leaving the turn stuck.
+    let state = withPendingPermission(); // call-1 shown
+    state = chatReducer(state, {
+      type: "PERMISSION_REQUEST",
+      sessionId: "a",
+      permission: { ...ask, tool: "delete", request_id: "call-2" },
+    });
+    expect(getSessionSlice(state, "a").pendingPermission?.request_id).toBe("call-2");
+    expect(getSessionSlice(state, "a").permissionQueue).toHaveLength(1);
+
+    state = chatReducer(state, {
+      type: "PERMISSION_RESOLVED",
+      sessionId: "a",
+      requestId: "call-2",
+    });
+    expect(getSessionSlice(state, "a").pendingPermission?.request_id).toBe("call-1");
+    expect(getSessionSlice(state, "a").permissionQueue).toHaveLength(0);
+
+    state = chatReducer(state, {
+      type: "PERMISSION_RESOLVED",
+      sessionId: "a",
+      requestId: "call-1",
+    });
+    expect(getSessionSlice(state, "a").pendingPermission).toBeNull();
+  });
+
   it("carries scope/prefix/out_of_scope_path for always-allow availability", () => {
     const slice = getSessionSlice(
       chatReducer(initial(), {

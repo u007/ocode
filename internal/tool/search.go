@@ -2,6 +2,7 @@ package tool
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,11 @@ import (
 
 	"github.com/u007/ocode/internal/pathscope"
 )
+
+// maxUnscopedFiles caps how many files an unscoped grep (no path, no
+// include) will actually open before it stops — see the comment in
+// GrepTool.ExecuteCtx for why unscoped defaults to the whole project root.
+const maxUnscopedFiles = 5000
 
 // resolveSearchRoot anchors a search tool's path parameter on the session's
 // project root (WithWorkDir context) instead of the process cwd. The server
@@ -155,7 +161,7 @@ func (t GlobTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		return "", err
 	}
 
-	ign := NewIgnoreMatcher(params.Ignore)
+	ign := NewIgnoreMatcher(searchDir, params.Ignore)
 
 	var matches []globMatch
 	walkErr := filepath.Walk(searchDir, func(path string, info os.FileInfo, err error) error {
@@ -356,13 +362,28 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		return "", fmt.Errorf("invalid regex: %w", err)
 	}
 
-	ign := NewIgnoreMatcher(params.Ignore)
+	ign := NewIgnoreMatcher(searchRoot, params.Ignore)
 	type fileResult struct {
 		path  string
 		count int
 		lines []string
 	}
 	var fileResults []fileResult
+
+	// Reused across every file in this walk instead of allocating a fresh
+	// 1MB scanner buffer per file — on an unscoped, repo-wide grep that was
+	// the dominant allocation source (thousands of 1MB buffers for one call).
+	scanBuf := make([]byte, 0, 1024*1024)
+
+	// Guard against an unscoped grep (no path, no include) turning into a
+	// full-repo read: without either filter, resolveSearchRoot anchors on
+	// the whole project root, so this is the same blast radius as `find .
+	// -exec cat {} \;` piped to a matcher. Cap the number of files actually
+	// opened and bail out with a note telling the caller to narrow scope,
+	// rather than silently reading tens of thousands of files.
+	unscoped := params.Path == "" && params.Include == ""
+	filesRead := 0
+	truncated := false
 
 	walkErr := filepath.Walk(searchRoot, func(p string, info os.FileInfo, werr error) error {
 		if werr != nil {
@@ -378,6 +399,12 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 			if info.Name() == ".git" || info.Name() == "node_modules" {
 				return filepath.SkipDir
 			}
+			if unscoped {
+				switch info.Name() {
+				case "vendor", "dist", "build", ".next", "target":
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 
@@ -385,6 +412,12 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		if params.Include != "" && !matchGlob(params.Include, filepath.ToSlash(display)) {
 			return nil
 		}
+
+		if unscoped && filesRead >= maxUnscopedFiles {
+			truncated = true
+			return filepath.SkipAll
+		}
+		filesRead++
 
 		content, readErr := os.ReadFile(p)
 		if readErr != nil {
@@ -405,8 +438,8 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		} else {
 			var fr fileResult
 			fr.path = display
-			scanner := bufio.NewScanner(strings.NewReader(string(content)))
-			scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+			scanner := bufio.NewScanner(bytes.NewReader(content))
+			scanner.Buffer(scanBuf, 1024*1024)
 			lineNum := 1
 			for scanner.Scan() {
 				line := scanner.Text()
@@ -429,6 +462,9 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 	}
 
 	if len(fileResults) == 0 {
+		if truncated {
+			return fmt.Sprintf("No matches found in the first %d files (search stopped there — no path/include filter was given for a repo-wide search). Narrow with \"path\" or \"include\" to search the rest.", maxUnscopedFiles), nil
+		}
 		return "No matches found", nil
 	}
 
@@ -449,7 +485,14 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		}
 	}
 
-	return strings.TrimRight(b.String(), "\n"), nil
+	if truncated {
+		b.WriteString(fmt.Sprintf("\n\n[stopped after %d files — no \"path\"/\"include\" filter was given for a repo-wide search; narrow scope to see the rest]", maxUnscopedFiles))
+	}
+
+	// Same output cap the bash tool uses (truncateOutput, exec.go) — bounds
+	// the response even for a properly scoped grep whose pattern matches
+	// pervasively (e.g. a common token across a large "include" set).
+	return truncateOutput(strings.TrimRight(b.String(), "\n")), nil
 }
 
 type ListTool struct{}
@@ -496,7 +539,7 @@ func (t ListTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		return "", err
 	}
 
-	ign := NewIgnoreMatcher(params.Ignore)
+	ign := NewIgnoreMatcher(listDir, params.Ignore)
 	entries, err := os.ReadDir(listDir)
 	if err != nil {
 		return "", fmt.Errorf("failed to list directory %s: %w", listDir, err)

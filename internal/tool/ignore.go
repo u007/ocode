@@ -13,11 +13,16 @@ type IgnoreMatcher struct {
 	matcher gitignore.Matcher
 }
 
-func NewIgnoreMatcher(extraPatterns []string) *IgnoreMatcher {
+// NewIgnoreMatcher loads .gitignore/.ignore from root — the resolved search
+// root, NOT the process cwd. The server hosts sessions for many projects in
+// one process, and the desktop shell launched from Finder has cwd "/", so a
+// cwd-relative read silently finds no .gitignore there and every search
+// walks node_modules/dist/build output unfiltered.
+func NewIgnoreMatcher(root string, extraPatterns []string) *IgnoreMatcher {
 	var patterns []gitignore.Pattern
 
 	// Load .gitignore
-	if data, err := os.ReadFile(".gitignore"); err == nil {
+	if data, err := os.ReadFile(filepath.Join(root, ".gitignore")); err == nil {
 		scanner := bufio.NewScanner(strings.NewReader(string(data)))
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -28,7 +33,7 @@ func NewIgnoreMatcher(extraPatterns []string) *IgnoreMatcher {
 	}
 
 	// Load .ignore (standard for opencode/ripgrep)
-	if data, err := os.ReadFile(".ignore"); err == nil {
+	if data, err := os.ReadFile(filepath.Join(root, ".ignore")); err == nil {
 		scanner := bufio.NewScanner(strings.NewReader(string(data)))
 		for scanner.Scan() {
 			line := scanner.Text()

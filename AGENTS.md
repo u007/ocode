@@ -609,7 +609,19 @@ Rules for anything in `internal/server`:
   session lock while holding `h.mu` deadlocks. To scan sessions for a pending
   ask, snapshot the candidates under `h.mu`, release it, then inspect each
   candidate under its own lock — that is what `findPendingSession` does. Reading
-  `as.messages` under `h.mu` alone is a data race against a running turn.
+  `as.messages` under `h.mu` alone is a data race against a running turn. The
+  same order applies to `SessionManager.mu` vs `agentSession.mu` (e.g.
+  `EvictIdle` checking for a pending ask before releasing an agent).
+- **A tool-call round can pause with more than one unresolved `PERMISSION_ASK`/
+  question sentinel at once**, not just as the literal last message — parallel
+  tool dispatch runs several calls before the pause check, and each one needing
+  approval appends its own sentinel. Never assume "the pending ask" is
+  `messages[len(messages)-1]`; scan the whole trailing tool-call round
+  (`trailingToolRunStart` in `run_states.go`) by `ToolID` instead, and don't
+  re-`Step()` the turn until every ask in that round is resolved — stepping on
+  top of one still-raw sentinel feeds the model a malformed tool result, which
+  it typically "fixes" by retrying the call and raising a brand new ask (looks
+  like the same permission dialog popping back up after being answered).
 - **Do not pin an HTTP connection for the length of a turn.** A browser allows
   only six concurrent connections per origin over HTTP/1.1 (the server is plain
   HTTP, so there is no h2 multiplexing), and the SPA already spends some on the
@@ -642,6 +654,15 @@ the working directory of a session's work. The rules:
   follow the same pattern, not read `h.workDir`.
 - **The TUI RC bridge passes its own workdir** to `RegisterExternalSession`
   explicitly; `h.workDir` is only the empty-root fallback.
+- **Never call `os.Getwd()` directly inside an `internal/server` handler.** A
+  Finder/Dock-launched desktop `.app` starts with process cwd `/`, so a raw
+  `os.Getwd()` silently resolves to the filesystem root instead of the actual
+  project — this has both broken file reads/writes (`HandleInit` writing
+  `AGENTS.md` to `/`) and defeated a path-containment security check
+  (`resolveWithinWorkdir`'s "must stay inside the working dir" guard passes
+  trivially when the working dir is `/`). Always resolve against `h.workDir`
+  (falling back to `os.Getwd()` only if `h.workDir` is itself empty, which in
+  practice it never is once `NewHandler`/`SetWorkDir` have run).
 - The TUI itself is unaffected by any of this: it drives `internal/agent`
   directly with `m.workDir` and only touches `internal/server` for RC bridge
   types.
