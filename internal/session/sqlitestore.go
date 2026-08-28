@@ -173,14 +173,21 @@ func appendSqliteSession(dir, id, title string, messages []agent.Message, metada
 	}
 	defer db.Close()
 
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("session: begin tx %s: %w", id, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
 	var existingTitle string
 	var existingTitleGenerated bool
-	if err := db.QueryRow(`SELECT title, title_generated FROM meta WHERE id = ?`, id).
-		Scan(&existingTitle, &existingTitleGenerated); err != nil {
+	var existingMetaJSON string
+	if err := tx.QueryRow(`SELECT title, title_generated, metadata_json FROM meta WHERE id = ?`, id).
+		Scan(&existingTitle, &existingTitleGenerated, &existingMetaJSON); err != nil {
 		return fmt.Errorf("session: read meta %s: %w", id, err)
 	}
 	var existingCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&existingCount); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&existingCount); err != nil {
 		return fmt.Errorf("session: count messages %s: %w", id, err)
 	}
 
@@ -191,20 +198,23 @@ func appendSqliteSession(dir, id, title string, messages []agent.Message, metada
 		titleGenerated = true
 	}
 
-	metaJSON, err := json.Marshal(metadata)
-	if err != nil {
-		return fmt.Errorf("session: marshal metadata %s: %w", id, err)
+	var metaJSON string
+	if metadata == nil {
+		metaJSON = existingMetaJSON
+		if metaJSON == "" {
+			metaJSON = "{}"
+		}
+	} else {
+		b, err := json.Marshal(metadata)
+		if err != nil {
+			return fmt.Errorf("session: marshal metadata %s: %w", id, err)
+		}
+		metaJSON = string(b)
 	}
-
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("session: begin tx %s: %w", id, err)
-	}
-	defer tx.Rollback() //nolint:errcheck
 
 	if _, err := tx.Exec(
 		`UPDATE meta SET title = ?, title_generated = ?, updated_at = ?, metadata_json = ? WHERE id = ?`,
-		resolvedTitle, titleGenerated, time.Now(), string(metaJSON), id,
+		resolvedTitle, titleGenerated, time.Now(), metaJSON, id,
 	); err != nil {
 		return fmt.Errorf("session: update meta %s: %w", id, err)
 	}

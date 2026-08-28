@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -289,5 +290,85 @@ func TestMergeMetasNoIndexReturnsLegacyUnchanged(t *testing.T) {
 	merged := mergeMetas(legacy, nil)
 	if len(merged) != 1 || merged[0].ID != "ses_a" {
 		t.Fatalf("expected legacy passed through unchanged, got %+v", merged)
+	}
+}
+
+func TestOpenDBWithSpecialCharacters(t *testing.T) {
+	// Paths containing URI-significant characters must still open and create schema.
+	tmp := t.TempDir()
+	dir := filepath.Join(tmp, "proj%name?with#hash")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir special dir: %v", err)
+	}
+	path := sqliteSessionPath(dir, "ses_special1")
+	db, err := openSessionDB(path)
+	if err != nil {
+		t.Fatalf("openSessionDB with special chars: %v", err)
+	}
+	defer db.Close()
+	var name string
+	if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='meta'`).Scan(&name); err != nil {
+		t.Fatalf("meta table not created for special path: %v", err)
+	}
+	// Also verify we can write and read via helpers
+	s := Session{
+		ID:        "ses_special1",
+		Title:     "special",
+		Messages:  []agent.Message{{Role: "user", Content: "hi"}},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Metadata:  map[string]any{"x": float64(1)},
+	}
+	if err := writeSqliteSessionFull(dir, s); err != nil {
+		t.Fatalf("writeSqliteSessionFull special: %v", err)
+	}
+	got, err := readSqliteSession(path)
+	if err != nil {
+		t.Fatalf("readSqliteSession special: %v", err)
+	}
+	if got.Title != "special" || len(got.Messages) != 1 {
+		t.Fatalf("unexpected session for special path: %+v", got)
+	}
+}
+
+func TestAppendPreservesMetadataWhenNil(t *testing.T) {
+	dir := t.TempDir()
+	id := "ses_meta_append"
+	initialMeta := map[string]any{"claude_original_session_id": "orig-123", "keep": float64(1)}
+	if err := writeSqliteSessionFull(dir, Session{
+		ID:        id,
+		Title:     "t",
+		Messages:  []agent.Message{{Role: "user", Content: "hi"}},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Metadata:  initialMeta,
+	}); err != nil {
+		t.Fatalf("writeSqliteSessionFull: %v", err)
+	}
+	// Append with nil metadata — should preserve existing
+	if err := appendSqliteSession(dir, id, "", []agent.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "there"}}, nil); err != nil {
+		t.Fatalf("appendSqliteSession nil meta: %v", err)
+	}
+	got, err := readSqliteSession(sqliteSessionPath(dir, id))
+	if err != nil {
+		t.Fatalf("readSqliteSession: %v", err)
+	}
+	if got.Metadata["claude_original_session_id"] != "orig-123" || got.Metadata["keep"] != float64(1) {
+		t.Fatalf("expected metadata preserved when nil passed, got %+v", got.Metadata)
+	}
+	// Append with new metadata — should replace
+	newMeta := map[string]any{"new": float64(2)}
+	if err := appendSqliteSession(dir, id, "", []agent.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "there"}, {Role: "user", Content: "again"}}, newMeta); err != nil {
+		t.Fatalf("appendSqliteSession new meta: %v", err)
+	}
+	got, err = readSqliteSession(sqliteSessionPath(dir, id))
+	if err != nil {
+		t.Fatalf("readSqliteSession: %v", err)
+	}
+	if got.Metadata["new"] != float64(2) {
+		t.Fatalf("expected new metadata to replace, got %+v", got.Metadata)
+	}
+	if _, ok := got.Metadata["claude_original_session_id"]; ok {
+		t.Fatalf("expected old metadata discarded when new supplied, got %+v", got.Metadata)
 	}
 }

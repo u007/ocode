@@ -1091,7 +1091,7 @@ func TestListRefsForDirIncludesMigratedAndLegacySessions(t *testing.T) {
 	// One migrated (.sqlite) session, one still-legacy (.ojsonl) session.
 	if err := writeSqliteSessionFull(dir, Session{
 		ID: "ses_mixed-sqlite", Title: "sqlite one",
-		Messages: []agent.Message{{Role: "user", Content: "hi"}},
+		Messages:  []agent.Message{{Role: "user", Content: "hi"}},
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("writeSqliteSessionFull: %v", err)

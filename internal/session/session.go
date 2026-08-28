@@ -244,6 +244,9 @@ func migrateToSqlite(dir, id, title string, messages []agent.Message, metadata m
 					s.Title = old.Title
 					s.TitleGenerated = old.TitleGenerated
 				}
+				if s.Metadata == nil && old.Metadata != nil {
+					s.Metadata = old.Metadata
+				}
 			}
 		}
 	} else {
@@ -255,6 +258,13 @@ func migrateToSqlite(dir, id, title string, messages []agent.Message, metadata m
 			if s.Title == "" {
 				s.Title = state.title
 				s.TitleGenerated = state.titleGenerated
+			}
+		}
+		// Preserve legacy metadata when caller supplies nil (e.g. server
+		// compaction path). State does not hold metadata, so load the file.
+		if s.Metadata == nil {
+			if s2, err := loadOjsonlSession(ojsonlPath); err == nil && s2.Metadata != nil {
+				s.Metadata = s2.Metadata
 			}
 		}
 	}
