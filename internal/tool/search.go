@@ -293,7 +293,7 @@ func (t GrepTool) Parallel() bool { return true }
 func (t GrepTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "grep",
-		"description": "Fast plain text/regex search across file contents. Use this for exact strings, logs, config keys, comments, and non-structural matches. For symbol-name semantic queries (references/definition/callers), use the 'ast' tool when enabled.",
+		"description": "Fast plain text/regex search across file contents. Use this for exact strings, logs, config keys, comments, and non-structural matches. For symbol-name semantic queries (references/definition/callers), use the 'ast' tool when enabled. To search for multiple distinct patterns, call this tool once per pattern as separate parallel calls in the same message — do not chain multiple searches in one bash command.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

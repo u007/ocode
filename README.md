@@ -444,6 +444,7 @@ ocode acp                      # ACP server over stdio (Zed)
 ocode mcp [add|list|ls|auth]   # MCP server management
 ocode models                   # list available models
 ocode skills                   # skill management
+ocode debug project-slug [path] # print project root/slug/session storage as JSON
 ocode goal <goal>              # orchestration pipeline
 ocode lsp-daemon               # (internal) LSP broker daemon
 

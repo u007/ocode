@@ -438,6 +438,7 @@ func (h *Handler) refreshAgentSessionsForPluginChange() {
 		if err != nil {
 			continue // best-effort; stale agent is acceptable
 		}
+		newAs.agent.SetParentAdvisorInFlight(as.agent.AdvisorGuard())
 		h.replaceAgentSession(id, newAs)
 	}
 }

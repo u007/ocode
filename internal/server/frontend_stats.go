@@ -74,11 +74,6 @@ func (s *Server) handlePostFrontendStats(w http.ResponseWriter, r *http.Request)
 		MessageCount  int    `json:"message_count"`
 		MessageBytes  int    `json:"message_bytes"`
 		DOMNodeCount  int    `json:"dom_node_count"`
-		// DebugNote is a temporary passthrough for ad-hoc frontend
-		// instrumentation (e.g. capturing a JS call-stack string) — logged,
-		// not persisted in the ring. Remove once the instrumentation that
-		// populates it is removed.
-		DebugNote string `json:"debug_note,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		log.Printf("frontend-stats: decode request: %v", err)
@@ -104,13 +99,6 @@ func (s *Server) handlePostFrontendStats(w http.ResponseWriter, r *http.Request)
 	log.Printf("frontend-stats: window=%s terminals=%d(%d lines) sessions=%d messages=%d(%dB) dom_nodes=%d",
 		sample.WindowID, sample.TerminalCount, sample.TerminalLines, sample.SessionCount,
 		sample.MessageCount, sample.MessageBytes, sample.DOMNodeCount)
-	if in.DebugNote != "" {
-		note := in.DebugNote
-		if len(note) > 4000 {
-			note = note[:4000]
-		}
-		log.Printf("frontend-stats: debug_note window=%s: %s", sample.WindowID, note)
-	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

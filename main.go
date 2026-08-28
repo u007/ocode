@@ -20,11 +20,13 @@ import (
 	// Codex backend.
 	"github.com/u007/ocode/internal/cli"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/debugcli"
 	"github.com/u007/ocode/internal/lsp"
 	_ "github.com/u007/ocode/internal/plugin/codex"
 	_ "github.com/u007/ocode/internal/plugin/grok"
 	"github.com/u007/ocode/internal/runcli"
 	"github.com/u007/ocode/internal/scheduler"
+	"github.com/u007/ocode/internal/secretcli"
 	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tui"
@@ -183,6 +185,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "debug":
+			if err := debugcli.Run(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
 		case "models":
 			if err := models.Run(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
@@ -195,6 +203,12 @@ func main() {
 			// invoked directly by a user. Deliberately absent from
 			// printUsage.
 			if err := lsp.RunDaemon(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "secret":
+			if err := secretcli.Run(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
@@ -288,6 +302,8 @@ func printUsage() {
 	fmt.Println("  mcp              Manage MCP (Model Context Protocol) servers")
 	fmt.Println("  models           List available models")
 	fmt.Println("  skills           Manage skills")
+	fmt.Println("  secret           Encrypt/decrypt project files (init, encrypt, decrypt)")
+	fmt.Println("  debug            Print project-scoping info (slug, data/sessions dirs)")
 	fmt.Println("  version          Show version information")
 	fmt.Println()
 	fmt.Println("TUI Mode (no command):")

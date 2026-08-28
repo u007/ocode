@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useChatSelector, useChatDispatch, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
@@ -48,6 +48,33 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
   // land the highlight on the wrong bubble).
   const searchJumpRef = useRef(false);
 
+  // --- Virtualizer coordinate fix (Finding 2) ---------------------------------
+  // `scrollMargin` is the offset (scroll-surface padding + the variable-height
+  // status/loading header) between the top of the scroll surface and the first
+  // virtualized message. Without it the virtualizer assumes the list starts at
+  // scrollTop 0 and windows the wrong range once the header is present.
+  const listContainerRef = useRef<HTMLDivElement>(null);
+  // Pinned region holding the in-progress turn, rendered OUTSIDE the scrollable
+  // history so it never adds unmodeled height below the virtualized list.
+  const liveRef = useRef<HTMLDivElement>(null);
+  const [listMargin, setListMargin] = useState(0);
+  // `Message` has no stable id, so key virtual items by message-object identity
+  // (referentially stable across prepend pagination) rather than array index,
+  // which would mis-associate measurements after a prepend.
+  const msgKeyMap = useRef(new WeakMap<object, number>());
+  const msgKeyCounter = useRef(0);
+  const visibleMessagesRef = useRef<Array<{ msg: unknown; i: number }>>([]);
+  const getItemKey = useCallback((index: number): number => {
+    const msg = visibleMessagesRef.current[index]?.msg as object | undefined;
+    if (!msg) return index;
+    let id = msgKeyMap.current.get(msg);
+    if (id === undefined) {
+      id = msgKeyCounter.current++;
+      msgKeyMap.current.set(msg, id);
+    }
+    return id;
+  }, []);
+
   // A few structural message kinds (question/permission prompts already
   // rendered by dedicated UI elsewhere) are never shown in the transcript.
   // Filtered out here, before virtualization, so they never claim a virtual
@@ -69,6 +96,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
         ),
     [messages],
   );
+  visibleMessagesRef.current = visibleMessages;
   // original message index -> position within visibleMessages, for scrolling
   // the virtualizer to a search match (which is indexed by original index).
   const visiblePositionByIndex = useMemo(() => {
@@ -91,7 +119,30 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 96,
     overscan: 8,
+    // Coordinate space = scroll surface top + this margin. Measured live (see
+    // effect below) so the header's variable height is always accounted for.
+    scrollMargin: listMargin,
+    getItemKey,
   });
+
+  // Keep `scrollMargin` in sync with the real offset of the virtualized list
+  // (scroll-surface padding + the variable-height status/loading header). The
+  // header's height changes as loading/hasMore/reachedTop flip, so we observe
+  // it (and the scroll surface) and re-measure on any resize.
+  const blockRendered = initialized && messages.length > 0;
+  useLayoutEffect(() => {
+    const measure = () => {
+      const el = listContainerRef.current;
+      const top = el ? el.offsetTop : 0;
+      setListMargin((prev) => (prev === top ? prev : top));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    if (scrollRef.current) ro.observe(scrollRef.current);
+    if (topRef.current) ro.observe(topRef.current);
+    if (listContainerRef.current) ro.observe(listContainerRef.current);
+    return () => ro.disconnect();
+  }, [blockRendered]);
 
   // Match indices: message positions containing the query (case-insensitive).
   // Only loaded messages are searched — the "searching loaded messages" hint
@@ -192,7 +243,14 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
     if (atBottomRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [messages, live, initialized]);
+  }, [messages, initialized]);
+
+  // The in-progress turn lives in its own pinned pane now, so keep it anchored
+  // to the bottom as streamed output grows.
+  useEffect(() => {
+    const el = liveRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [live]);
 
   // Toggle the find bar with Ctrl/Cmd+F. Local to this tab: each ChatPanel
   // instance is only visible while its tab is active (App.tsx CSS-hides the
@@ -332,7 +390,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
   }, [messages]);
 
   return (
-    <div className="relative h-full min-h-0">
+    <div className="relative h-full min-h-0 flex flex-col">
       {searchOpen && (
         <div className="absolute inset-x-0 top-0 z-20">
           <ChatSearchBar
@@ -348,7 +406,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
       )}
       <div
         ref={scrollRef}
-        className="absolute inset-0 overflow-y-auto p-4"
+        className="relative flex-1 min-h-0 overflow-y-auto p-4"
         onScroll={handleScroll}
       >
         {initialized && messages.length > 0 && (
@@ -383,7 +441,10 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
         )}
 
         {visibleMessages.length > 0 && (
-          <div style={{ height: virtualizer.getTotalSize(), width: "100%", position: "relative" }}>
+          <div
+            ref={listContainerRef}
+            style={{ height: virtualizer.getTotalSize(), width: "100%", position: "relative" }}
+          >
             {virtualizer.getVirtualItems().map((virtualItem) => {
               const { msg, i } = visibleMessages[virtualItem.index];
               return (
@@ -396,7 +457,10 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
                     top: 0,
                     left: 0,
                     width: "100%",
-                    transform: `translateY(${virtualItem.start}px)`,
+                    // `start` includes scrollMargin; subtract it so the item is
+                    // positioned relative to the list container (which already
+                    // sits at that offset inside the scroll surface).
+                    transform: `translateY(${virtualItem.start - listMargin}px)`,
                   }}
                 >
                   <div
@@ -410,6 +474,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
                       message={msg}
                       highlight={searchOpen ? searchQuery : ""}
                       toolName={msg.tool_call_id ? toolNameById.get(msg.tool_call_id) : undefined}
+                      sessionId={sessionId}
                     />
                   </div>
                 </div>
@@ -417,24 +482,6 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
             })}
           </div>
         )}
-
-        {live.map((part, i) => {
-          if (part.kind === "thinking")
-            return <ThinkingBlock key={`live-${i}`} text={part.text} />;
-          if (part.kind === "text")
-            return <AssistantText key={`live-${i}`} content={part.text} />;
-          if (part.kind === "status")
-            return <StatusBlock key={`live-${i}`} text={part.text} />;
-          return (
-            <ToolBlock
-              key={`live-${i}`}
-              tool={part.tool}
-              command={part.command}
-              stream={part.stream}
-              output={part.output}
-            />
-          );
-        })}
 
         {loadingMore && messages.length > 0 && (
           <div className="text-center text-zinc-500 text-sm py-2">
@@ -444,6 +491,32 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
 
         <div ref={bottomRef} />
       </div>
+
+      {live.length > 0 && (
+        <div
+          ref={liveRef}
+          className="shrink-0 border-t border-zinc-800 max-h-[40%] overflow-y-auto p-4"
+        >
+          {live.map((part, i) => {
+            if (part.kind === "thinking")
+              return <ThinkingBlock key={`live-${i}`} text={part.text} />;
+            if (part.kind === "text")
+              return <AssistantText key={`live-${i}`} content={part.text} />;
+            if (part.kind === "status")
+              return <StatusBlock key={`live-${i}`} text={part.text} />;
+            return (
+              <ToolBlock
+                key={`live-${i}`}
+                tool={part.tool}
+                command={part.command}
+                stream={part.stream}
+                output={part.output}
+              />
+            );
+          })}
+        </div>
+      )}
+
       {showJumpToBottom && (
         <button
           type="button"

@@ -3,6 +3,8 @@ import type { ChatAction, ChatState } from "../stores/chatStore";
 import type { ProjectAction } from "../stores/projectStore";
 import type { Message, SSEPermissionEvent, TUIStatus } from "../api/types";
 import type { BusEnvelope } from "./eventBus";
+import { rekeyDraft } from "./tabDrafts";
+import { rekeyQueue } from "./tabQueue";
 
 /**
  * sessionEvents — pure routing of bus envelopes into chatStore/projectStore.
@@ -154,6 +156,8 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       !r.openSessionIds.has(eventSessionId)
     ) {
       r.dispatch({ type: "REKEY_SESSION", oldId: started.request_id, newId: eventSessionId });
+      rekeyDraft(started.request_id, eventSessionId);
+      rekeyQueue(started.request_id, eventSessionId);
       r.projectDispatch({
         type: "UPDATE_TAB_ID",
         oldId: started.request_id,

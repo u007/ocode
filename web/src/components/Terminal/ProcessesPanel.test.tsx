@@ -34,6 +34,7 @@ describe("ProcessesPanel", () => {
         ?.forEach((h) =>
           h({
             event: "terminal_processes",
+            project: projectPath,
             seq: 1,
             data: [
               { id: "term-a", pid: 111, cpu_percent: 2.5, mem_bytes: 1024 * 1024 },
@@ -49,5 +50,21 @@ describe("ProcessesPanel", () => {
       expect(rows[0]).toHaveTextContent("87.4%");
       expect(rows[1]).toHaveTextContent("Terminal 1");
     });
+  });
+
+  it("ignores process snapshots for another project", async () => {
+    saveProjectTerminals(projectPath, [{ id: "term-a", title: "Terminal 1" }], "term-a");
+    render(<ProcessesPanel projectPath={projectPath} />);
+
+    act(() => {
+      eventBus["handlers"]
+        .get("terminal_processes")
+        ?.forEach((h) => h({ event: "terminal_processes", project: "/other", seq: 1, data: [
+          { id: "term-a", pid: 111, cpu_percent: 99, mem_bytes: 1024 },
+        ] }));
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("99.0%")).not.toBeInTheDocument();
   });
 });

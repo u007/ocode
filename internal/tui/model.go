@@ -45,6 +45,7 @@ import (
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/rc"
 	"github.com/u007/ocode/internal/redact"
+	"github.com/u007/ocode/internal/secretfile"
 	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/session"
 	shellpkg "github.com/u007/ocode/internal/shell"
@@ -317,9 +318,33 @@ func latestRequestUsage(messages []message) (input, output, total int64) {
 }
 
 func (m *model) currentContextEstimate() (int64, string) {
-	agentMsgs, _ := m.buildAgentMessagesSnapshot()
+	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 	if len(agentMsgs) == 0 {
 		return 0, "empty"
+	}
+	// Live streamed tool output (bash / `!` shell) accumulates UNTRUNCATED
+	// into the provisional raw.Content via appendShellOutput — a multi-MB
+	// `go test` log inflates the estimate's tail until the canonical message
+	// (bounded by agent.TruncateToolResult) replaces it on finalize, which
+	// made the sidebar context gauge spike to hundreds of thousands of
+	// tokens and snap back. The real request never carries the untruncated
+	// buffer, so clamp provisional tool messages to the truncation budget
+	// here (on the estimate's own copy of the messages). `!`-shell results
+	// ("shell-" ToolIDs) are exempt: their full output is what actually gets
+	// sent into the prompt, so it must keep counting.
+	budget := agent.MaxToolResultContentBudget()
+	for i := range agentMsgs {
+		if agentMsgs[i].Role != "tool" || len(agentMsgs[i].Content) <= budget {
+			continue
+		}
+		if strings.HasPrefix(agentMsgs[i].ToolID, "shell-") {
+			continue
+		}
+		if ui := uiIdx[i]; ui >= 0 && m.messages[ui].streamFinalized {
+			continue // already the canonical (bounded) form; should not exceed budget anyway
+		}
+		truncated := agentMsgs[i].Content[:budget]
+		agentMsgs[i].Content = truncated + "\n[live streamed output truncated for estimation]"
 	}
 	tokens, source := agent.CurrentContextEstimate(agentMsgs, m.agent.CharsPerToken())
 	return int64(tokens), source
@@ -1021,6 +1046,7 @@ func (m *model) replaceAgent(next *agent.Agent) tea.Cmd {
 	// fresh supervisor + agent and intentionally does not pass through here.
 	if prev != nil && next != nil {
 		next.SeedProcCounter(prev.ProcCounter())
+		next.SetParentAdvisorInFlight(prev.AdvisorGuard())
 	}
 	m.cleanupAgent(prev)
 	return m.installAgent(next)
@@ -1528,6 +1554,10 @@ type model struct {
 	permDirty            permDirtyFlags // tracks permission fields changed by this session
 	cleanupState         *modelCleanupState
 	supervisor           *tool.ProcessSupervisor
+	// secretSession caches unlocked project keys (internal/secretfile) for
+	// the life of the TUI process, so a passphrase is asked at most once per
+	// project regardless of how many agents get swapped in.
+	secretSession *secretfile.Session
 	// shellStreamCmd is the in-flight streaming `!` shell reader command.
 	// While non-nil a `!` command is actively streaming its output; new `!`
 	// commands are queued rather than run concurrently. It is cleared when the
@@ -2434,6 +2464,7 @@ func newModel(opts ...RunOptions) model {
 		hoverSlashIdx:        -1,
 		hoverTabIdx:          -1,
 		supervisor:           sup,
+		secretSession:        secretfile.NewSession(),
 		hookPipeline:         hp,
 		webFS:                o.WebFS,
 		modalStack:           NewModalStack(),
@@ -2506,26 +2537,11 @@ func newModel(opts ...RunOptions) model {
 		editorMode := cfg.Ocode.EditorMode
 		m.files.SetEditor(editor)
 		m.files.SetEditorMode(editorMode)
-		m.files.SetEditorOpener(createEditorOpener(
-			editor,
-			editorMode,
-			func() int { return m.width },
-			sup,
-		))
+		m.files.SetEditorOpener(m.secretEditorOpener(editor, editorMode))
 		m.git.SetEditor(editor)
-		m.git.SetEditorOpener(createEditorOpener(
-			editor,
-			editorMode,
-			func() int { return m.width },
-			sup,
-		))
+		m.git.SetEditorOpener(m.secretEditorOpener(editor, editorMode))
 		m.changes.editor = editor
-		m.changes.editorOpener = createEditorOpener(
-			editor,
-			editorMode,
-			func() int { return m.width },
-			sup,
-		)
+		m.changes.editorOpener = m.secretEditorOpener(editor, editorMode)
 		m.git.SetEditorOpenerAtLine(createEditorOpenerAtLine(
 			editor,
 			editorMode,
@@ -3457,6 +3473,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Selected model %s, but no API key was found for its provider. Run /connect to add credentials.", msg.modelID)})
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, nil
+		}
+		if m.agent != nil {
+			msg.next.SetParentAdvisorInFlight(m.agent.AdvisorGuard())
 		}
 		cmd := m.installAgent(msg.next)
 		m.rerenderTranscriptAndMaybeScroll()
@@ -10839,6 +10858,9 @@ func (m *model) resetSessionAgent() tea.Cmd {
 			prev.Runs().CancelAll()
 		}
 	}
+	if prev != nil && next != nil {
+		next.SetParentAdvisorInFlight(prev.AdvisorGuard())
+	}
 	if m.supervisor != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -10984,12 +11006,12 @@ func (m *model) refreshEditorOpener() {
 	mode := m.config.Ocode.EditorMode
 	m.files.SetEditor(editor)
 	m.files.SetEditorMode(mode)
-	m.files.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor))
+	m.files.SetEditorOpener(m.secretEditorOpener(editor, mode))
 	m.git.SetEditor(editor)
-	m.git.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor))
+	m.git.SetEditorOpener(m.secretEditorOpener(editor, mode))
 	m.git.SetEditorOpenerAtLine(createEditorOpenerAtLine(editor, mode, func() int { return m.width }, m.supervisor))
 	m.changes.editor = editor
-	m.changes.editorOpener = createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor)
+	m.changes.editorOpener = m.secretEditorOpener(editor, mode)
 }
 
 // startShellExecution begins a shell command execution, recording it in the
@@ -15141,9 +15163,24 @@ func (m *model) collectLSPStatuses() []server.LSPStatus {
 		return nil
 	}
 	active := m.lspMgr.ActiveServers()
+	// Include warming-up servers (binary found, handshake in progress) so the
+	// web/desktop sidebar can show "starting" / indexing alike the TUI's
+	// renderLSPSection which merges ActiveServers + lspServerStartTimes.
+	activeSet := make(map[string]bool, len(active))
+	for _, s := range active {
+		activeSet[s.Cmd] = true
+	}
+	for cmd := range m.lspServerStartTimes {
+		if !activeSet[cmd] {
+			active = append(active, lsp.ServerStatus{Cmd: cmd})
+		}
+	}
 	if len(active) == 0 {
 		return nil
 	}
+	// Deterministic order: ActiveServers is already sorted, but appended
+	// warming-up entries come from map iteration.
+	sort.Slice(active, func(i, j int) bool { return active[i].Cmd < active[j].Cmd })
 	out := make([]server.LSPStatus, 0, len(active))
 
 	// Aggregate diagnostics per owning server so the web can show error/warning
@@ -15164,10 +15201,14 @@ func (m *model) collectLSPStatuses() []server.LSPStatus {
 	}
 
 	for _, s := range active {
+		state := "running"
+		if _, isIndexing := m.lspServerStartTimes[s.Cmd]; isIndexing {
+			state = "starting"
+		}
 		out = append(out, server.LSPStatus{
 			Cmd:                 s.Cmd,
 			LangID:              s.LangID,
-			State:               "running",
+			State:               state,
 			DiagnosticsErrors:   errByCmd[s.Cmd],
 			DiagnosticsWarnings: warnByCmd[s.Cmd],
 		})
@@ -19535,7 +19576,10 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	// ── Line 3: token / context window ──
 	cwdLabel := dimStyle.Render("cwd: ")
 	if ctxTokens > 0 {
-		appendWrapped(&data.topLines, dimStyle.Render(contextLine), outerBodyWidth)
+		// textStyle (theme Text, bright) not sidebarTextStyle (theme Hint, dim):
+		// the context gauge is live session state and should read at the same
+		// brightness as the unstyled usage line at the bottom of the sidebar.
+		appendWrapped(&data.topLines, textStyle.Render(contextLine), outerBodyWidth)
 	}
 	cwdTopIdx := len(data.topLines)
 	cwdMax := sidebarColumnWidth - 4 - lipgloss.Width(cwdLabel)

@@ -15,8 +15,6 @@ import {
   Zap,
   Target,
   GitBranch,
-  AlertCircle,
-  AlertTriangle,
   Puzzle,
   Loader2,
 } from "lucide-react";
@@ -746,49 +744,57 @@ export default function CoworkSidebar({
             <div className="px-4 pb-3">
               {lspServers.length > 0 ? (
                 <div className="space-y-1.5">
-                  {lspServers.map((s) => (
-                    <div key={s.cmd} className="rounded bg-zinc-800 p-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-mono text-zinc-300 truncate">
-                          {s.cmd}
-                        </span>
-                        <span
-                          className={`text-[10px] flex-shrink-0 ${
-                            s.state === "running"
-                              ? "text-emerald-400"
-                              : s.state === "failed"
-                                ? "text-red-400"
-                                : "text-yellow-400"
-                          }`}
-                        >
-                          {s.state}
-                        </span>
+                  {lspServers.map((s) => {
+                    const errs = s.diagnostics_errors ?? 0;
+                    const warns = s.diagnostics_warnings ?? 0;
+                    const isIndexing = s.state === "starting";
+                    const isFailed = s.state === "failed";
+                    let sym = "✓";
+                    let label = "clean";
+                    let color = "text-emerald-400";
+                    if (isFailed) {
+                      sym = "✗";
+                      label = s.detail || "failed";
+                      color = "text-red-400";
+                    } else if (isIndexing) {
+                      sym = "◌";
+                      label = "indexing…";
+                      color = "text-zinc-400";
+                    } else if (errs > 0 && warns > 0) {
+                      sym = "●";
+                      label = `${errs} ${errs === 1 ? "error" : "errors"}, ${warns} ${warns === 1 ? "warning" : "warnings"}`;
+                      color = "text-red-400";
+                    } else if (errs > 0) {
+                      sym = "●";
+                      label = `${errs} ${errs === 1 ? "error" : "errors"}`;
+                      color = "text-red-400";
+                    } else if (warns > 0) {
+                      sym = "△";
+                      label = `${warns} ${warns === 1 ? "warning" : "warnings"}`;
+                      color = "text-yellow-400";
+                    }
+                    return (
+                      <div key={s.cmd} className="rounded bg-zinc-800 p-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-mono text-zinc-400 truncate flex-1">
+                            {s.cmd}
+                          </span>
+                          <span className={`text-xs font-mono flex-shrink-0 ${color}`}>
+                            {sym} {label}
+                          </span>
+                        </div>
+                        {s.lang_id && (
+                          <div className="text-[11px] text-zinc-500 truncate">
+                            {s.lang_id}
+                            {s.root ? ` · ${s.root}` : ""}
+                          </div>
+                        )}
+                        {isFailed && s.detail && (
+                          <div className="text-[11px] text-red-400/70 truncate mt-0.5">{s.detail}</div>
+                        )}
                       </div>
-                      {s.lang_id && (
-                        <div className="text-[11px] text-zinc-500 truncate">
-                          {s.lang_id}
-                          {s.root ? ` · ${s.root}` : ""}
-                        </div>
-                      )}
-                      {(s.diagnostics_errors ?? 0) > 0 ||
-                      (s.diagnostics_warnings ?? 0) > 0 ? (
-                        <div className="flex gap-3 mt-1 text-[11px]">
-                          {(s.diagnostics_errors ?? 0) > 0 && (
-                            <span className="flex items-center gap-1 text-red-400">
-                              <AlertCircle className="w-3 h-3" />
-                              {s.diagnostics_errors}
-                            </span>
-                          )}
-                          {(s.diagnostics_warnings ?? 0) > 0 && (
-                            <span className="flex items-center gap-1 text-yellow-400">
-                              <AlertTriangle className="w-3 h-3" />
-                              {s.diagnostics_warnings}
-                            </span>
-                          )}
-                        </div>
-                      ) : null}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="text-xs text-zinc-500">No LSP servers</div>

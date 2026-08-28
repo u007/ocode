@@ -69,6 +69,11 @@ export interface SessionSlice {
   bootstrapStage: string | null;
   turnStalled: boolean;
   statusLoading: boolean;
+  // True after the user pressed Stop to interrupt a turn. While set, the
+  // auto-drain of queued messages is suppressed (mirrors the TUI's
+  // streamWasInterrupted which prevents drainQueuedItems on cancel). Cleared
+  // when the user resumes or starts a new turn.
+  wasInterrupted: boolean;
 }
 
 export const emptySessionSlice: SessionSlice = {
@@ -90,6 +95,7 @@ export const emptySessionSlice: SessionSlice = {
   bootstrapStage: null,
   turnStalled: false,
   statusLoading: false,
+  wasInterrupted: false,
 };
 
 /** Reads one session's slice, falling back to the shared empty default for a
@@ -189,6 +195,8 @@ export type ChatAction =
   | { type: "SET_TURN_STALLED"; sessionId: string; stalled: boolean }
   | { type: "SET_BOOTSTRAP_STAGE"; sessionId: string; stage: string | null }
   | { type: "SET_TUI_STATUS_READY"; ready: boolean }
+  | { type: "SET_WAS_INTERRUPTED"; sessionId: string; wasInterrupted: boolean }
+  | { type: "INTERRUPT"; sessionId: string }
   | { type: "REKEY_SESSION"; oldId: string; newId: string }
   | { type: "TOGGLE_RUN_COLLAPSED"; sessionId: string; runId: string }
   | { type: "RESET"; sessionId: string };
@@ -485,6 +493,21 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return updateSession(state, action.sessionId, (s) => ({
         ...s,
         bootstrapStage: action.stage,
+      }));
+    case "SET_WAS_INTERRUPTED":
+      return updateSession(state, action.sessionId, (s) => ({ ...s, wasInterrupted: action.wasInterrupted }));
+    case "INTERRUPT":
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        wasInterrupted: true,
+        isStreaming: false,
+        turnActive: false,
+        lastHeartbeatAt: null,
+        turnStalled: false,
+        pendingPermission: null,
+        permissionQueue: [],
+        pendingQuestion: null,
+        live: [],
       }));
     case "SET_TUI_STATUS_READY":
       return { ...state, tuiStatusReady: action.ready };

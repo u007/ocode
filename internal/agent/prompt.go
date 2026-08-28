@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/knowledge"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/skill"
 )
 
@@ -204,17 +205,21 @@ func (a *Agent) notesProtocolPrompt(id string) string {
 		"A lead that turns out to be wrong is normal; correct it in your own report and resolve it on the bus."
 }
 
+func envHash(cwd, root string) string {
+	return strings.Join([]string{cwd, root, os.Getenv("NVM_DIR"), os.Getenv("PYENV_ROOT"), os.Getenv("PATH")}, "|")
+}
+
 func (a *Agent) environmentPrompt() string {
 	today := time.Now().Format("Mon Jan 2 2006")
-	if a.envPromptDate == today && a.envPromptStr != "" {
-		return a.envPromptStr
-	}
 	cwd, _ := os.Getwd()
 	// Use the workDir override if set (e.g., via /cd command)
 	if a.workDir != "" {
 		cwd = a.workDir
 	}
 	root := findWorkspaceRoot(cwd)
+	if a.envPromptDate == today && a.envPromptStr != "" && a.envPromptCwd == cwd && a.envPromptRoot == root && a.envPromptEnvHash == envHash(cwd, root) {
+		return a.envPromptStr
+	}
 	provider, model := "", ""
 	if a.client != nil {
 		provider = a.client.GetProvider()
@@ -259,13 +264,30 @@ func (a *Agent) environmentPrompt() string {
 		fmt.Sprintf("  Global ocode config (permissions, extra paths, settings): %s", globalOcodeCfg),
 		fmt.Sprintf("  Project ocode settings: %s", filepath.Join(root, ".ocode", "settings.json")),
 		fmt.Sprintf("  Project opencode config: %s", filepath.Join(root, "opencode.json")),
-		"  Skills search paths (checked in order):",
 	)
+	// Project slug + session history location, so the model can answer
+	// "where is this session's history stored" without spawning a shell to
+	// recompute the SHA-256 slug hash itself.
+	slug := paths.ProjectSlug(root)
+	if sessionsDir, err := paths.ProjectSessionsDir(slug); err == nil {
+		lines = append(lines, fmt.Sprintf("  Project slug (session storage id): %s", slug))
+		lines = append(lines, fmt.Sprintf("  Session history directory: %s", sessionsDir))
+		if a.sessionID != "" {
+			lines = append(lines, fmt.Sprintf("  Current session file: %s", filepath.Join(sessionsDir, a.sessionID+".ojsonl")))
+		}
+	}
+	lines = append(lines, "  Skills search paths (checked in order):")
 	lines = append(lines, skillDirLines...)
+	if rp := runtimePathsSection(root, cwd); len(rp) > 0 {
+		lines = append(lines, rp...)
+	}
 	lines = append(lines, "</env>")
 	result := strings.Join(lines, "\n")
 	a.envPromptDate = today
 	a.envPromptStr = result
+	a.envPromptCwd = cwd
+	a.envPromptRoot = root
+	a.envPromptEnvHash = envHash(cwd, root)
 	return result
 }
 

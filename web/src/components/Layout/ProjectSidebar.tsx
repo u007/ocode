@@ -41,6 +41,7 @@ import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "../ui/
 import { Separator } from "../ui/separator";
 import DirectoryBrowser from "./DirectoryBrowser";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
+import { computeProjectDrag } from "../../lib/projectDrag";
 
 type SessionStatus = "none" | "idle" | "running";
 
@@ -526,20 +527,20 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
         return;
       }
 
-      // Project reorder — find in the flat sorted items
-      const allProjectPaths = sortedItems
-        .filter((item) => item.type === "project")
-        .map((item) => (item.data as Project).path);
-
-      const oldIndex = allProjectPaths.indexOf(activeId);
-      const newIndex = allProjectPaths.indexOf(overId);
-
-      if (oldIndex !== -1 && newIndex !== -1) {
-        const newOrder = arrayMove(allProjectPaths, oldIndex, newIndex);
-        reorderProjects(newOrder);
+      // Project drop — resolve to a reorder (same bucket) or a cross-bucket
+      // move (group change + position). Dropping on a group header moves the
+      // project into that group.
+      const result = computeProjectDrag(state.projects, state.groups || [], activeId, overId);
+      if (result.type === "reorder") {
+        reorderProjects(result.paths);
+      } else if (result.type === "move") {
+        void (async () => {
+          await setProjectGroup(result.path, result.group);
+          await reorderProjects(result.paths);
+        })();
       }
     },
-    [state.groups, sortedItems, reorderGroups, reorderProjects],
+    [state.groups, state.projects, reorderGroups, reorderProjects, setProjectGroup],
   );
 
   // Unique sortable IDs

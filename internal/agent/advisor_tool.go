@@ -78,8 +78,11 @@ Key heuristics:
 
 Respond in under 300 words. Use enumerated steps. Do NOT write production code — only advise.`
 
-// advisorRecursionGuard prevents nested advisor calls.
-var advisorRecursionGuard atomic.Bool
+// advisorRecursionGuardFallback guards advisor calls made without an owning
+// Agent (mainAgent nil — defensive default; production AdvisorTool instances
+// always carry mainAgent, so real calls use Agent.advisorGuard instead, which
+// is scoped per session rather than process-wide).
+var advisorRecursionGuardFallback atomic.Bool
 
 // advisorAllowedTools lists the tool names the advisor sub-agent may use.
 var advisorAllowedTools = []string{
@@ -180,6 +183,16 @@ func (t AdvisorTool) getAdvisorTools() []tool.Tool {
 	return result
 }
 
+// recursionGuard returns the atomic flag used to serialize advisor calls.
+// When mainAgent is set (the normal case), it resolves to that agent's
+// session-scoped guard; otherwise it falls back to a package-level flag.
+func (t AdvisorTool) recursionGuard() *atomic.Bool {
+	if t.mainAgent != nil {
+		return t.mainAgent.advisorGuard()
+	}
+	return &advisorRecursionGuardFallback
+}
+
 func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 	return t.ExecuteCtx(context.Background(), args)
 }
@@ -200,11 +213,15 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 		return "", fmt.Errorf("advisor prompt is required and must not be empty")
 	}
 
-	// Recursion guard — prevent nested advisor calls.
-	if !advisorRecursionGuard.CompareAndSwap(false, true) {
-		return "", fmt.Errorf("advisor tool cannot be called recursively")
+	// Recursion guard — prevent this session's own agent tree (this agent
+	// plus any of its task-spawned sub-agents) from having two advisor calls
+	// in flight at once. Scoped per session via t.mainAgent.advisorGuard, not
+	// process-wide, so unrelated sessions/agents never block each other here.
+	guard := t.recursionGuard()
+	if !guard.CompareAndSwap(false, true) {
+		return "", fmt.Errorf("advisor is already running for this agent session — wait for it to finish, then call again")
 	}
-	defer advisorRecursionGuard.Store(false)
+	defer guard.Store(false)
 
 	// Claude Code path: use the Claude Code CLI (claude -p) instead of an
 	// LLM API client when the advisor is configured for claude-code.
@@ -275,6 +292,16 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 	}
 
 	advisorAgent := NewAgent(client, advisorTools, t.cfg, t.mainAgent.lspMgr)
+	advisorAgent.SetParentAdvisorInFlight(t.mainAgent.advisorGuard())
+	// This agent is used for one synchronous advisor call and must not retain
+	// its maintenance workers or background shell processes after Step returns.
+	// Keep the parent's shared LSP manager and state intact; the temporary agent
+	// owns this ProcessRegistry, while shutdownTransient tears down its workers
+	// and cancellation state.
+	defer func() {
+		advisorAgent.Procs().KillAll()
+		advisorAgent.shutdownTransient()
+	}()
 
 	// Set the spec with the advisor system prompt and restrict tools to the
 	// exploration set. We set spec directly (not via SetSpec) so the resolved

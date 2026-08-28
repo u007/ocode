@@ -1492,9 +1492,9 @@ func runCdCmd(m *model, args []string) tea.Cmd {
 		editorMode := m.config.Ocode.EditorMode
 		m.files.SetEditor(editor)
 		m.files.SetEditorMode(editorMode)
-		m.files.SetEditorOpener(createEditorOpener(editor, editorMode, func() int { return m.width }, m.supervisor))
+		m.files.SetEditorOpener(m.secretEditorOpener(editor, editorMode))
 		m.git.SetEditor(editor)
-		m.git.SetEditorOpener(createEditorOpener(editor, editorMode, func() int { return m.width }, m.supervisor))
+		m.git.SetEditorOpener(m.secretEditorOpener(editor, editorMode))
 		m.git.generateCommitMsg = m.makeCommitMsgGenerator(m.config)
 	}
 	m.files.SetSaveEditor(config.SaveEditor)

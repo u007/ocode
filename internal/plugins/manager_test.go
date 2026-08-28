@@ -344,6 +344,27 @@ func TestValidateRemovableDir(t *testing.T) {
 	}
 }
 
+func TestValidateRemovableDirRejectsRootAndNestedTargets(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	root := filepath.Join(home, ".config", "opencode", "plugins")
+	nested := filepath.Join(root, "plugin", "private")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ValidateRemovableDir(root); err == nil {
+		t.Fatal("approved plugin root must not be removable")
+	}
+	if err := ValidateRemovableDir(nested); err == nil {
+		t.Fatal("nested path inside a plugin must not be a removal target")
+	}
+	if err := ValidateRemovableDir(filepath.Join(root, "plugin")); err != nil {
+		t.Fatalf("direct plugin child should be removable: %v", err)
+	}
+}
+
 func TestValidateRemovableDirBundledRoot(t *testing.T) {
 	// A path under the bundled plugins root should be accepted.
 	bundledDir := t.TempDir()

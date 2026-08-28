@@ -1,5 +1,150 @@
 # TODO
 
+## Encrypted-file editing (age, per-project passphrase) — TUI done, web/desktop deferred (2026-08-28)
+
+Requested: encrypt a file on disk so ocode's TUI/web/desktop auto-decode it
+for editing (including external editors like vim/nvim) and re-encode on
+save, opaque to the agent (Read/Edit/Write/grep must never see plaintext —
+user-confirmed), with a self-describing header and one passphrase per
+project. Design: `filippo.io/age`, ASCII-armored (files are committed to
+git — user-confirmed), a generated X25519 key per project wrapped under a
+scrypt passphrase (`.ocode/secret.key.age`), so passphrase unlock costs one
+scrypt run per session while per-file encrypt/decrypt is fast
+(ChaCha20-Poly1305, no KDF).
+
+- [x] **`internal/secretfile`** — `GenerateProjectKey`/`UnlockProjectKey`
+  (wrapped project key), `ProjectKey.Encrypt`/`Decrypt`, `IsEncrypted`
+  (armor header check), `WriteFileAtomic` (temp+fsync+rename, preserves
+  mode), `Session` (in-memory per-root key cache). Full test coverage
+  including tamper/wrong-passphrase rejection.
+- [x] **`ocode secret init|encrypt|decrypt`** (`internal/secretcli`,
+  wired in `main.go`) — CLI encrypt/decrypt independent of any UI, useful
+  for CI/scripting and as the thing the TUI/web paths build on.
+- [x] **TUI external-editor integration** (`internal/tui/secret_editor.go`)
+  — `wrapEditorOpenerForSecrets` decorates the existing editor-opener
+  plumbing (`model.go`, `commands.go`, all 3 non-AtLine call sites) so
+  opening an encrypted file decrypts to a private 0700 temp dir, launches
+  the real editor against the temp file, and re-encrypts back over the
+  original path ONLY if the plaintext changed (hash-compared, so `:q`
+  without saving doesn't touch the ciphertext / doesn't dirty git). The
+  passphrase prompt (`golang.org/x/term`, masked) runs inside
+  `secretExecCommand.Run()` — the same window `tea.Exec` has already
+  released the terminal to the external process — never inside a
+  bubbletea Cmd/Update cycle. Verified against real headless `nvim`
+  (`TestSecretExecCommand_Run_WithRealNvim`), not just a fake editor
+  script, so the real swap-file/write path is exercised and contained.
+  Passphrase is cached per project root for the TUI process lifetime
+  (`model.secretSession`), asked once even across agent-swap/session-reset.
+  The passphrase read deliberately does NOT hardcode `os.Stdin`/`os.Stderr`:
+  it reads from whatever `tea.Program.exec` actually assigned via
+  `SetStdin`/`SetStderr` (`secretExecCommand.readPassphrase`), because that
+  is `p.input` — `os.Stdin` in the common case, but a separately-opened tty
+  when stdin isn't a terminal — not necessarily `os.Stdin` itself. Verified
+  by reading `exec.go`'s `Program.exec` and `tea.go`'s `releaseTerminal`
+  (blocks on `waitForReadLoop()` before `Run()` is ever called, so
+  bubbletea's own input reader is confirmed stopped first, no race).
+  **Not yet verified**: an actual interactive TUI session opening an
+  encrypted file end-to-end (this session's environment has no interactive
+  pty to drive one). Everything short of that live click-through is
+  covered: the crypto cycle against real headless nvim, the
+  ExecCommand/stdio wiring logic, and the bubbletea source itself. Do one
+  manual `ocode` → Files tab → open an encrypted file → type passphrase →
+  edit → save before treating this as fully closed.
+- [x] **tmux split/window editor modes now wrapped (2026-08-28).**
+  `wrapEditorOpenerForSecrets` no longer bypasses tmux mode: it now takes
+  `mode`/`getWidth` instead of a `tmuxMode bool`, and `secretExecCommand`
+  gained `buildEditorCmd` — decrypts to the private temp file first (as
+  before), then for tmux modes points `buildTmuxOpenCmd`/pane command at
+  the temp path (never the still-encrypted original), blocks on tmux's
+  own `wait-for` handshake exactly like the non-secret tmux opener, and
+  re-encrypts back over the original path once the pane exits. Covered by
+  `TestWrapEditorOpenerForSecrets_TmuxModeWrapsEncryptedFile` and
+  `TestSecretExecCommand_BuildEditorCmd_TmuxModeTargetsTempFile`; no live
+  tmux session was exercised in this pass (would need a real tmux server),
+  same caveat as the plain external-editor path's outstanding manual
+  check.
+- [ ] **`SetEditorOpenerAtLine`/`createEditorOpenerAtLine` call sites left
+  unwrapped.** Line numbers from jump-to-line (git blame, grep results)
+  are computed against ciphertext-visible content in the first place
+  (consistent with "opaque to agent" — ocode's own search/grep only ever
+  sees armor text for an encrypted file), so a meaningful plaintext line
+  number can't reach this path today. Revisit only if a future feature
+  produces real plaintext line numbers for an encrypted file.
+- [ ] **`files_model.go:openInEditor`'s no-`editorOpener`-set fallback**
+  and **`git_model.go`'s equivalent** build their own bare `exec.Command`
+  and bypass the decorator entirely. Low risk today (`editorOpener` is
+  always set once config loads, so this is a defensive fallback rarely
+  exercised in practice), but if hit against an encrypted file it opens
+  raw ciphertext, not a bug exactly (no plaintext leak) but confusing UX.
+- [ ] **`m.changes.editorOpener` (Changes/diff tab) is wrapped for
+  consistency but diffing armor text is inherently meaningless** — expect
+  the diff view to look broken (all-ciphertext-changed) for an encrypted
+  file regardless of what actually changed in plaintext. Not a bug to fix
+  here; diffing encrypted files would need a design of its own (e.g. diff
+  the decrypted content, which reopens the "diff view sees plaintext"
+  question against the "opaque to agent" decision).
+- [ ] **Inherent external-editor leaks, can't be fixed by the temp-dir
+  containment:** if the user's editor config writes outside the file's
+  own directory (vim `set undofile` → `undodir`, `viminfo`/`shada`
+  recording the edited path), those can retain plaintext fragments
+  outside the private temp dir. Document for users who enable an
+  encrypted-file workflow; not solvable from ocode's side.
+- [ ] **A wrong passphrase surfaces as a plain editor error, no retry
+  prompt** — the user has to reopen the file and try again rather than
+  being re-prompted inline. Fine to ship as-is; worth revisiting if it's
+  annoying in practice.
+- **`.ocode/secret.key.age` being committed to git assumes `.ocode/` isn't
+  gitignored wholesale.** Checked in ocode's own repo: only
+  `.ocode/md-summaries.json` and `.ocode/todo/` are ignored, not the
+  directory itself, so this works here — but another project's
+  `.gitignore` could blanket-ignore `.ocode/`, in which case the key file
+  silently never gets committed and a fresh clone can't decrypt even with
+  the right passphrase. `ocode secret init` doesn't check this; consider
+  having it warn if the key path would be ignored (`git check-ignore`).
+- [ ] **Agent-facing decrypt tool (`secret_read`) — designed, deliberately NOT
+  built this pass.** User asked whether the LLM's own tools should be able to
+  decrypt these files. Investigated and designed: dedicated `secret_read`
+  tool (read-only, no `secret_write`, so the agent can't corrupt/overwrite
+  ciphertext), never accepts a `passphrase` argument (would put it in chat/
+  session history — same reason the TUI prompt reads from the terminal, not
+  the input box), requires the project key already unlocked in-process
+  (unify `model.secretSession` onto a package-level `tool.SecretSession` so
+  the TUI's editor-triggered unlock also serves the tool), and always asks
+  permission even in YOLO/auto-permission mode (`Decide()` special-cased
+  ahead of the YOLO shortcut in `permissions.go`, `IsHarmfulRequest` returns
+  true for it so the auto-permission LLM judge can't silently approve it
+  either — reusing `Permissions.Auto.AllowDestructive` as the escape hatch,
+  not inventing a new tier). None of this is implemented yet.
+  **Blocking finding, not yet resolved:** the original plan was to redact
+  the decrypted content before it lands in persisted session history while
+  still letting the model see the real value for the turn. That promise has
+  nowhere to attach — `internal/redact.Redactor`/`RedactMessage` is fully
+  built but has **zero production callers** (dead code, tests only), and
+  `internal/session.Save`/`saveOjsonl`/`saveJSON` serialize
+  `agent.Message.Content` straight to disk with no transform step — the
+  exact same field the next turn's request is built from. So "real for this
+  turn, placeholder for replay/disk" needs new agent-core plumbing (how tool
+  result messages flow through the turn loop), not a config flag. Given
+  that, **the actual security property of `secret_read` as buildable today
+  would be: a decrypted secret lands in `.ojsonl` in plaintext and gets
+  replayed to the LLM provider on every subsequent turn of that session** —
+  no better than the "transparent decrypt in read/edit/grep" option
+  explicitly rejected earlier for that exact reason. User chose to hold off
+  entirely rather than ship with that property, or accept the cheaper
+  partial mitigation (cap `secret_read` to a byte/line range so a whole
+  secrets file can't dump into permanent history in one call — still no
+  redaction, just bounds the blast radius). Revisit once there's an actual
+  plan for keeping agent-visible secrets out of persisted session history —
+  likely needs `RedactMessage` (or an equivalent) actually wired into the
+  turn loop before this is worth building.
+- [ ] **Web/desktop (`internal/server/handler_files.go`) not started —
+  deliberately, per review.** No terminal and no external-editor window
+  exists there, so this needs its own shape: decrypt-on-read/encrypt-on-
+  write in the file-content handlers, plus an unlock endpoint/flow that
+  feeds a server-side `secretfile.Session` (and answers what its
+  lifetime/scope should be — per HTTP session? per browser tab? timed
+  lock?). Do this as a separate pass, not bolted onto the TUI wiring.
+
 ## Background bash commands promoted mid-flight can still orphan on force-kill (2026-08-26)
 
 Found while fixing the local-model-hijacks-the-tty startup crash
@@ -1332,10 +1477,68 @@ a stalled-then-reset provider connection, and asked why it didn't retry.
   recorded (`GET /api/debug/frontend-stats` returned empty). Both failing
   identically points at a connectivity/CORS issue with POSTs from the
   Wails-hosted WKWebView to this endpoint specifically, not a JIT-inlining
-  bypass of the monkey-patch — **not root-caused**, low priority now that
-  the virtualization fix below addresses the bigger, confirmed contributor.
-  Both the probe and the `debug_note` field are still in the tree; remove
-  once either fixed or abandoned.
+  bypass of the monkey-patch — never root-caused via this path. **Abandoned
+  and removed** (both the probe in `web/src/debug.ts` and the `debug_note`
+  field in `frontend_stats.go`) once the user got real Web Inspector access
+  and a direct cache-based fix (below) made finding the exact call site
+  unnecessary.
+
+### FIXED (2026-08-28): Date.prototype.toLocaleString cached globally instead of finding the one remaining call site
+
+User got DevTools attached to the Wails window (tray → Open DevTools) and
+shared a Timelines recording — the first real JS-level visibility this
+investigation had. Rather than keep hunting the one call site through
+native `sample` profiles (which can't symbolicate JIT-compiled JS frames),
+switched to a global fix that helps *any* caller.
+
+- [x] **Fix**: `web/src/debug.ts` now patches `Date.prototype.toLocaleString`
+  to cache the constructed `Intl.DateTimeFormat` by `(locales, options)` key
+  — the expensive part every sample in this investigation pointed at
+  (`IntlDateTimeFormat::initializeDateTimeFormat` → full ICU locale/pattern
+  generator construction) — instead of reconstructing it every call.
+  **Correctness-scoped deliberately**: only intercepts calls where `options`
+  sets at least one of weekday/year/month/day/hour/minute/second/dateStyle/
+  timeStyle. Per ECMA-402, `Date.prototype.toLocaleString(locales, options)`
+  and `new Intl.DateTimeFormat(locales, options).format(date)` are defined
+  identically once any such field is present — provably safe to cache. A
+  bare `.toLocaleString()` (no options, or an options object with none of
+  those fields — e.g. `{ hour12: false }` alone) triggers *different*
+  spec-mandated default-field injection for `toLocaleString` (both date and
+  time) than for a plain `Intl.DateTimeFormat` constructor call (date only)
+  — reimplementing that exactly is fragile, so that path still calls the
+  native implementation untouched. This trades "might not help the specific
+  unidentified caller if it passes no options" for "cannot silently change
+  what any caller displays" — the latter mattered more given the call site
+  was never pinned down to verify against.
+  - Also removed the now-unused diagnostic probe (`web/src/debug.ts`) and
+    its `debug_note` passthrough field (`internal/server/
+    frontend_stats.go`) from the abandoned-diagnostic entry above.
+- [x] **Correction (2026-08-28)**: the "Verified"/"Rebuilt/relaunched" claims
+  previously recorded here were false — the described code did not exist
+  anywhere in the tree (`grep -rn DateTimeFormat web/src` had zero matches)
+  despite this checklist marking it done. Re-implemented for real this pass:
+  `web/src/debug.ts` now has the caching patch described above, plus a new
+  `web/src/debug.test.ts` (cache reuse on identical options, cache miss on
+  differing options, bare `.toLocaleString()` staying on the native path,
+  output parity with the native formatter — 4/4 passing). `npx tsc --noEmit`
+  clean for this file. Note while redoing this: a second, concurrent ocode
+  session is actively editing this same working tree (touched `ChatPanel`,
+  `ProjectSidebar.tsx`, `SessionSubTabs.tsx`, `FilePicker.tsx` during this
+  pass) and at one point reverted this exact file mid-edit — re-applied and
+  re-verified after.
+- [ ] **`bin/ocode.app` NOT rebuilt/relaunched** — not performed in this
+  review. The web typecheck, focused tests, full web tests, and production web
+  build now pass; rebuilding the desktop bundle remains a separate manual
+  validation step.
+- [ ] **Not yet independently confirmed** whether this closes the residual
+  `EventSource → dateProtoFuncToLocaleString` signature for good — that
+  needs a repro on this build with `sample` (would show near-zero ICU
+  activity if the actual culprit passes options; would show the same
+  signature if it's a bare no-args caller, which this fix deliberately
+  doesn't touch) or, better, a follow-up DevTools flame-graph capture now
+  that the user has Web Inspector access — clicking into one of the purple
+  "JavaScript & Events" spike bars would show the exact function/file
+  either way.
 
 ### FOUND + FIXED: chat message list was never virtualized — unbounded DOM/heap growth with conversation length (2026-08-27)
 

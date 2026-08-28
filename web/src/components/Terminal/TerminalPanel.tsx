@@ -271,16 +271,23 @@ export default function TerminalPanel({
     // Chunk large binary writes to prevent memory spikes from one-shot decode+write.
     const CHUNK_THRESHOLD = 64 * 1024; // 64KB
     const CHUNK_SIZE = 16 * 1024;      // 16KB per chunk
+    const PENDING_CHUNK_CAP = 2 * 1024 * 1024;
     const pendingChunks: string[] = [];
+    let pendingBytes = 0;
+    let outputDropped = false;
     let chunkRafId = 0;
     const flushChunks = () => {
       chunkRafId = 0;
       // Write up to 4 chunks per frame to stay under 16ms.
       for (let i = 0; i < 4 && pendingChunks.length > 0; i++) {
-        term.write(pendingChunks.shift()!);
+        const chunk = pendingChunks.shift()!;
+        pendingBytes -= chunk.length;
+        term.write(chunk);
       }
       if (pendingChunks.length > 0) {
         chunkRafId = requestAnimationFrame(flushChunks);
+      } else {
+        outputDropped = false;
       }
     };
     sock.onmessage = (ev) => {
@@ -295,7 +302,16 @@ export default function TerminalPanel({
       }
       // Split into chunks and schedule incremental writes.
       for (let i = 0; i < decoded.length; i += CHUNK_SIZE) {
-        pendingChunks.push(decoded.slice(i, i + CHUNK_SIZE));
+        const chunk = decoded.slice(i, i + CHUNK_SIZE);
+        if (pendingBytes + chunk.length > PENDING_CHUNK_CAP) {
+          if (!outputDropped) {
+            outputDropped = true;
+            term.write("\r\n\x1b[33m[terminal output truncated while rendering]\x1b[0m\r\n");
+          }
+          break;
+        }
+        pendingChunks.push(chunk);
+        pendingBytes += chunk.length;
       }
       if (chunkRafId === 0) {
         chunkRafId = requestAnimationFrame(flushChunks);

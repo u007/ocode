@@ -117,6 +117,18 @@ func TruncateToolResult(toolUseID, result string) string {
 	return head + notice
 }
 
+// MaxToolResultContentBudget is the hard upper bound on the size of a
+// canonical tool result produced by TruncateToolResult: the bounded head
+// (≤ maxToolResultChars) plus the truncation notice (the notice is a fixed
+// template carrying a state-dir file path, so a few hundred bytes; 2KB of
+// headroom is generous). Consumers that estimate the next request's prompt
+// size use it to clamp live-streamed *provisional* tool output, which
+// temporarily holds the full untruncated stream until the canonical
+// (truncated) message replaces it.
+func MaxToolResultContentBudget() int {
+	return maxToolResultChars + 2048
+}
+
 // CleanupToolResults removes cached tool result files older than maxAge.
 // It is safe to call from any goroutine.
 func CleanupToolResults(maxAge time.Duration) error {

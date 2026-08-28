@@ -34,7 +34,34 @@ export default function SessionSubTabs() {
 
   if (!activeSessionTab) return null;
 
-  const chatCount = chatSlice.totalMessages > 0 ? chatSlice.totalMessages : chatSlice.messages.length;
+  const contextCurrent = chatSlice.tuiStatus?.context_current_tokens ?? 0;
+  const contextMax = chatSlice.tuiStatus?.context_max_tokens ?? 0;
+  const contextPct =
+    contextMax > 0 ? Math.min(100, Math.round((contextCurrent / contextMax) * 100)) : null;
+
+  function formatTokenCount(n: number): string {
+    if (n <= 0) return "0";
+    if (n < 1000) return String(n);
+    if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+    return `${(n / 1_000_000).toFixed(1)}M`;
+  }
+
+  // Human-readable memory usage for the Chat tab badge.
+  // When context window is known: "45%" (with tooltip showing tokens).
+  // When only current tokens known: formatted count e.g. "12.3k".
+  // When nothing known: badge hidden (null).
+  const chatMemoryLabel: string | null =
+    contextPct !== null
+      ? `${contextPct}%`
+      : contextCurrent > 0
+        ? formatTokenCount(contextCurrent)
+        : null;
+  const chatMemoryTooltip =
+    contextMax > 0
+      ? `${formatTokenCount(contextCurrent)} / ${formatTokenCount(contextMax)} tokens${contextPct !== null ? ` (${contextPct}%)` : ""}`
+      : contextCurrent > 0
+        ? `${formatTokenCount(contextCurrent)} tokens`
+        : undefined;
 
   return (
     <div
@@ -46,7 +73,26 @@ export default function SessionSubTabs() {
       {subTabs.map((tab) => {
         const Icon = tab.icon;
         const isActive = activeSessionTab.activeSubTab === tab.id;
-        const count = tab.id === "chat" ? chatCount : undefined;
+        const isChat = tab.id === "chat";
+        const badgeLabel = isChat ? chatMemoryLabel : undefined;
+        const badgeTooltip = isChat ? chatMemoryTooltip : undefined;
+        // Color-code memory pressure similar to CoworkSidebar: green <65%, yellow <85%, red >=85%
+        const memoryBadgeColor =
+          isChat && contextPct !== null
+            ? contextPct >= 85
+              ? isActive
+                ? "bg-red-500 text-white"
+                : "bg-red-900/60 text-red-200"
+              : contextPct >= 65
+                ? isActive
+                  ? "bg-yellow-500 text-zinc-900"
+                  : "bg-yellow-900/60 text-yellow-200"
+                : isActive
+                  ? "bg-zinc-600 text-white"
+                  : "bg-zinc-800 text-zinc-300"
+            : isActive
+              ? "bg-zinc-600 text-white"
+              : "bg-zinc-800 text-zinc-300";
         return (
           <button
             key={tab.id}
@@ -59,14 +105,13 @@ export default function SessionSubTabs() {
           >
             <Icon className="w-4 h-4" />
             {tab.label}
-            {count !== undefined && (
+            {badgeLabel !== undefined && badgeLabel !== null && (
               <span
-                className={`inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full text-xs font-semibold leading-none ${
-                  isActive ? "bg-zinc-600 text-white" : "bg-zinc-800 text-zinc-300"
-                }`}
-                aria-label={`${tab.label} count ${count}`}
+                className={`inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full text-xs font-semibold leading-none ${memoryBadgeColor}`}
+                aria-label={`${tab.label} memory ${badgeLabel}`}
+                title={badgeTooltip}
               >
-                {count}
+                {badgeLabel}
               </span>
             )}
           </button>

@@ -384,6 +384,40 @@ func TestHandleRemovePluginRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestHandleRemovePluginRejectsPluginRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, ".config", "opencode", "plugins")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(root, "keep-me")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler()
+	h.workDir = t.TempDir()
+	h.mu.Lock()
+	h.cfg = &config.Config{
+		Plugins: map[string]config.PluginConfig{
+			"root": {Dir: root, Enabled: true},
+		},
+		Ocode: config.OcodeConfig{},
+	}
+	h.mu.Unlock()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("DELETE", "/api/plugins/root", nil)
+	h.HandleRemovePlugin(w, r, "root")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("plugin root was modified: %v", err)
+	}
+}
+
 // TestHandleInstallPluginRollbackOnFailure verifies that if RunOnInstall
 // or AutoRegisterMCP fails, the cloned directory is cleaned up (transactional).
 func TestHandleInstallPluginRollbackOnFailure(t *testing.T) {

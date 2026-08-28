@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message } from "../../api/types";
@@ -10,6 +10,17 @@ import {
 import { ThinkingBlock, ToolBlock } from "./TurnParts";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
+import { dispatchRestore } from "../../lib/inputRestore";
+import { RotateCcw } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog";
+import { Button } from "../ui/button";
 
 interface Props {
   message: Message;
@@ -20,6 +31,8 @@ interface Props {
   // the preceding assistant message's tool_calls (role "tool" messages carry
   // only tool_call_id, not the name). Used to pick a syntax-highlight language.
   toolName?: string;
+  /** Session/tab id that owns this message — required for restore dispatch validation. */
+  sessionId?: string;
 }
 
 // AssistantText renders markdown assistant output. Shared by committed messages
@@ -125,7 +138,7 @@ export function AssistantText({ content }: { content: string }) {
   );
 }
 
-function MessageBubble({ message, highlight = "", toolName = "" }: Props) {
+function MessageBubble({ message, highlight = "", toolName = "", sessionId }: Props) {
   // Tool result message (role "tool"): no tool name is carried on the message
   // itself, only tool_call_id — the caller resolves toolName from that.
   if (message.role === "tool") {
@@ -164,7 +177,42 @@ function MessageBubble({ message, highlight = "", toolName = "" }: Props) {
 
   if (message.role === "user") {
     return (
-      <div className="flex justify-end mb-3">
+      <UserBubble message={message} highlight={highlight} sessionId={sessionId} />
+    );
+  }
+
+  return <AssistantText content={message.content} />;
+}
+
+function UserBubble({
+  message,
+  highlight,
+  sessionId,
+}: {
+  message: Message;
+  highlight: string;
+  sessionId?: string;
+}) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const handleConfirm = () => {
+    if (!sessionId) return;
+    dispatchRestore(sessionId, message.content);
+    setConfirmOpen(false);
+  };
+
+  return (
+    <>
+      <div className="group flex justify-end mb-3 gap-1 items-start">
+        <button
+          type="button"
+          aria-label="Restore to input"
+          title="Restore to input"
+          onClick={() => setConfirmOpen(true)}
+          className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 shrink-0 mt-1 p-1.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring transition-opacity"
+        >
+          <RotateCcw className="w-3.5 h-3.5" />
+        </button>
         <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-blue-600 text-white">
           <pre className="whitespace-pre-wrap font-sans text-sm">
             {highlight.trim()
@@ -173,10 +221,28 @@ function MessageBubble({ message, highlight = "", toolName = "" }: Props) {
           </pre>
         </div>
       </div>
-    );
-  }
 
-  return <AssistantText content={message.content} />;
+      <Dialog open={confirmOpen} onOpenChange={(o) => !o && setConfirmOpen(false)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Restore message to input?</DialogTitle>
+            <DialogDescription>
+              This will replace the current draft in the input field with the selected message. You can edit it before sending.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-40 overflow-auto rounded bg-zinc-800 p-3 text-sm text-zinc-200 whitespace-pre-wrap">
+            {message.content}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleConfirm}>Restore</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
 }
 
 // Historical messages don't change once committed, but every LIVE_DELTA

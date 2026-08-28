@@ -1,7 +1,7 @@
 import { useState, type KeyboardEvent, useRef, useEffect, useCallback } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
-import { getQueue, pushQueued, shiftUndispatched, popLastQueued, removeQueuedItem, type QueuedItem } from "../../lib/tabQueue";
+import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, type QueuedItem } from "../../lib/tabQueue";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
@@ -9,10 +9,11 @@ import { Paperclip, X } from "lucide-react";
 import { apiPath, authHeaders } from "@/api/client";
 import { useProjectState } from "../../stores/projectStore";
 import EditorContextChip from "./EditorContextChip";
+import { RESTORE_EVENT } from "../../lib/inputRestore";
 
 interface ChatInputProps {
-  /** Called when a slash command is entered. Return true if handled (async). */
-  onSlashCommand?: (command: string) => boolean | Promise<boolean>;
+  /** Called when a slash command is entered. */
+  onSlashCommand?: (command: string, sessionTabId?: string | null) => boolean | SlashCommandResult | Promise<boolean | SlashCommandResult>;
   /** Active editor context (file path + optional selection) to display as a chip
    *  and attach to the outgoing message. When provided, a chip is shown above
    *  the input and the ref is prepended to the message on send. */
@@ -21,6 +22,12 @@ interface ChatInputProps {
   sessionTabId?: string | null;
   /** Called when a temporary tab has been replaced by the real session ID. */
   onSessionCreated?: (tempTabId: string, sessionId: string) => void;
+}
+
+export interface SlashCommandResult {
+  handled: boolean;
+  startedTurn?: boolean;
+  accepted?: boolean;
 }
 
 export default function ChatInput({
@@ -51,7 +58,7 @@ export default function ChatInput({
   // is dropped — while a later, DISTINCT message (different tick, after the
   // previous send resolved and busy flipped) is never blocked.
   const submittingRef = useRef(false);
-  const { sendMessage, executeShell, stop, isStreaming, pendingPermission } = useChat(sessionTabId ?? null, {
+  const { sendMessage, executeShell, stop, resume, wasInterrupted, isStreaming, pendingPermission } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
         onSessionCreated?.(sessionTabId, sessionId);
@@ -67,6 +74,30 @@ export default function ChatInput({
   useEffect(() => {
     setInput(getDraft(sessionTabId));
     setQueueCount(getQueue(sessionTabId).length);
+  }, [sessionTabId]);
+
+  // "Restore older input" — ChatPanel's user bubble dispatches a typed window
+  // event after confirmation. Only the matching sessionTabId applies it, so
+  // hidden tabs don't mutate. Replace semantics: the restored text replaces
+  // the current draft entirely, focus moves to textarea with cursor at end.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent<{ sessionId: string; text: string }>;
+      if (!ce.detail || ce.detail.sessionId !== sessionTabId) return;
+      const text = ce.detail.text ?? "";
+      setInput(text);
+      setDraft(sessionTabId, text);
+      // Focus after state applies; queue microtask to ensure DOM updated.
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (el) {
+          el.focus();
+          el.setSelectionRange(text.length, text.length);
+        }
+      });
+    };
+    window.addEventListener(RESTORE_EVENT, handler as EventListener);
+    return () => window.removeEventListener(RESTORE_EVENT, handler as EventListener);
   }, [sessionTabId]);
 
   // Auto-drain the queue once the turn (streaming or shell exec) frees up,
@@ -85,31 +116,24 @@ export default function ChatInput({
   // drains while the dialog is still up, starting a new turn on top of an
   // unresolved permission ask.
   const busy = isStreaming || shellInFlight || !!pendingPermission;
+  const effectiveBusy = busy || wasInterrupted;
   const prevBusyRef = useRef(busy);
-  useEffect(() => {
-    if (prevBusyRef.current && !busy) {
-      (async () => {
-        for (;;) {
-          const item = shiftUndispatched(sessionTabId);
-          setQueueCount(getQueue(sessionTabId).length);
-          if (!item) break;
-          const startedTurn =
-            item.kind === "command" ? await dispatchCommand(item.text) : (sendMessage(item.text), true);
-          if (startedTurn) break;
-        }
-      })();
-    }
-    prevBusyRef.current = busy;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, sessionTabId]);
+  const prevWasInterruptedRef = useRef(wasInterrupted);
 
   // Dispatch a `/command` or `!shell` command, replaying the same logic used
   // for an immediate send. Returns true if it started a new agent turn
   // (i.e. draining must stop until that turn ends).
-  const dispatchCommand = async (text: string): Promise<boolean> => {
+  const dispatchCommand = async (text: string): Promise<{ startedTurn: boolean; accepted: boolean }> => {
     if (text.startsWith("/") && onSlashCommand) {
-      const handled = await onSlashCommand(text);
-      if (handled) return false;
+      const response = await onSlashCommand(text, sessionTabId);
+      if (typeof response === "boolean") {
+        if (response) return { startedTurn: false, accepted: true };
+      } else if (response.handled) {
+        return {
+          startedTurn: response.startedTurn === true,
+          accepted: response.accepted !== false,
+        };
+      }
     }
     if (text.startsWith("!")) {
       const command = text.slice(1).trim();
@@ -120,17 +144,52 @@ export default function ChatInput({
           const outputMessage = result.exitCode === 0
             ? `Shell command executed successfully:\n\`\`\`\n${result.output}\n\`\`\``
             : `Shell command failed (exit code ${result.exitCode}):\n\`\`\`\n${result.error || result.output}\n\`\`\``;
-          sendMessage(outputMessage);
-          return true;
+          const accepted = await sendMessage(outputMessage);
+          return { startedTurn: true, accepted };
         } finally {
           setShellInFlight(false);
         }
       }
-      return false;
+      return { startedTurn: false, accepted: true };
     }
-    sendMessage(text);
-    return true;
+    const accepted = await sendMessage(text);
+    return { startedTurn: true, accepted };
   };
+
+  const drainQueue = useCallback(async () => {
+    for (;;) {
+      const item = shiftUndispatched(sessionTabId);
+      setQueueCount(getQueue(sessionTabId).length);
+      if (!item) break;
+      const outcome = item.kind === "command"
+        ? await dispatchCommand(item.text)
+        : { startedTurn: true, accepted: await sendMessage(item.text) };
+      if (!outcome.accepted) {
+        unshiftQueued(sessionTabId, item);
+        setQueueCount(getQueue(sessionTabId).length);
+        break;
+      }
+      if (outcome.startedTurn) break;
+    }
+  }, [sessionTabId, sendMessage]);
+
+  useEffect(() => {
+    const wasInterruptedJustCleared = prevWasInterruptedRef.current && !wasInterrupted;
+    prevWasInterruptedRef.current = wasInterrupted;
+    if (wasInterrupted) {
+      prevBusyRef.current = busy;
+      return;
+    }
+    if ((prevBusyRef.current && !busy) || (wasInterruptedJustCleared && !busy)) {
+      void drainQueue();
+    }
+    prevBusyRef.current = busy;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, wasInterrupted, sessionTabId]);
+
+  const handleResume = useCallback(() => {
+    resume();
+  }, [resume]);
 
   const updateDraft = (value: string) => {
     setInput(value);
@@ -230,16 +289,21 @@ export default function ChatInput({
       clearDraft(sessionTabId);
       setShowSlashMenu(false);
 
-    // While a turn is busy (streaming or a shell command in flight), queue
-    // instead of blocking — mirrors the TUI's unified queuedItems, drained by
-    // the effect above once the turn frees up.
+    // While a turn is busy (streaming, shell, permission, or interrupted
+    // barrier), queue instead of blocking — mirrors the TUI's unified
+    // queuedItems, drained by the effect once the turn frees up and the
+    // interrupt barrier is cleared via Resume.
       if (trimmed.startsWith("/") || trimmed.startsWith("!")) {
-        if (busy) {
+        if (effectiveBusy) {
           pushQueued(sessionTabId, { kind: "command", text: trimmed });
           setQueueCount(getQueue(sessionTabId).length);
           return;
         }
-        await dispatchCommand(trimmed);
+        const outcome = await dispatchCommand(trimmed);
+        if (!outcome.accepted) {
+          setInput(trimmed);
+          setDraft(sessionTabId, trimmed);
+        }
         return;
       }
 
@@ -257,6 +321,14 @@ export default function ChatInput({
       const finalMessage = parts.join(" ");
       setAttachedFiles([]);
 
+      if (wasInterrupted) {
+        // Interrupted barrier: queue without dispatched flag so FIFO order is
+        // preserved and nothing is injected into the live agent loop while
+        // paused. Resume will drain in order.
+        pushQueued(sessionTabId, { kind: "message", text: finalMessage });
+        setQueueCount(getQueue(sessionTabId).length);
+        return;
+      }
       if (isStreaming) {
         // A turn is actively running. Mirror the TUI: inject into the live agent
         // loop at the next tool-call boundary (so it's answered within the same
@@ -468,6 +540,16 @@ export default function ChatInput({
             disabled
           >
             Waiting for permission…
+          </Button>
+        ) : wasInterrupted ? (
+          <Button
+            type="button"
+            size="sm"
+            className="shrink-0"
+            onClick={handleResume}
+            title={queueCount > 0 ? `Resume — ${queueCount} queued` : "Resume"}
+          >
+            Resume{queueCount > 0 ? ` (${queueCount})` : ""}
           </Button>
         ) : (
           <Button

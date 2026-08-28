@@ -197,7 +197,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
 
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
-      <DialogContent className="sm:max-w-md bg-zinc-900 border-zinc-700">
+      <DialogContent className="sm:max-w-2xl bg-zinc-900 border-zinc-700">
         <DialogHeader>
           <DialogTitle className="text-zinc-100">{PURPOSE_TITLES[purpose]}</DialogTitle>
         </DialogHeader>
@@ -235,19 +235,19 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
                 <button
                   key={m.name}
                   onClick={() => handleSelect(m)}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 ${
+                  className={`w-full flex items-start justify-between gap-2 px-3 py-2 rounded-md text-sm text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 ${
                     getCurrentModel() === (purpose === "advisor" ? m.model : m.name) || m.active
                       ? "bg-blue-600/20 text-blue-400"
                       : "text-zinc-300 hover:bg-zinc-800"
                   }`}
                 >
-                  <span className="truncate">
+                  <span className="min-w-0 flex-1 whitespace-normal break-words [overflow-wrap:anywhere]">
                     {m.display_name && m.display_name !== m.model
                       ? `${m.display_name} (${m.model})`
                       : m.model}
                   </span>
                   {(getCurrentModel() === (purpose === "advisor" ? m.model : m.name) || m.active) && (
-                    <Check className="h-4 w-4 text-blue-400 flex-shrink-0" />
+                    <Check className="mt-0.5 h-4 w-4 shrink-0 text-blue-400" />
                   )}
                 </button>
               ))}

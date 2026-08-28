@@ -155,43 +155,67 @@ declare global {
 }
 window.ocodeDebug = ocodeDebug;
 
-// TEMPORARY diagnostic (2026-08-27): a residual, un-identified
-// Date.prototype.toLocaleString() call keeps showing up in native `sample`
-// profiles during real streaming sessions (icu::DateFormatSymbols /
-// resolveLocale — full ICU formatter construction) after the known
-// StatusBar.tsx hot path was fixed and memoized. Native sampling can't
-// symbolicate the calling JS frame, so this captures the actual call site
-// from inside the JS engine instead: patches toLocaleString once, grabs a
-// stack trace on the first few calls, and ships each one to the backend log
-// via the existing frontend-stats debug pipe (readable through
-// GET /api/logs) — an SSE/console round-trip a DevTools-less Wails window
-// can't otherwise surface. Remove this whole block (and the
-// debug_note field in internal/server/frontend_stats.go) once the call
-// site is found and fixed.
-(() => {
-  const MAX_CAPTURES = 3;
-  let captured = 0;
+// Cached Date.prototype.toLocaleString — avoids reconstructing
+// Intl.DateTimeFormat on every hot-path status render. Retains native
+// semantics for invalid dates and for calls with no date/time fields.
+// DEV-only: permanent perf patch, gated so production keeps the native
+// prototype (see docs/gotchas/debug-instrumentation-ships-unconditionally.md).
+if (import.meta.env.DEV) {
+  (() => {
   const orig = Date.prototype.toLocaleString;
-  Date.prototype.toLocaleString = function (...args: Parameters<typeof orig>) {
-    if (captured < MAX_CAPTURES) {
-      captured++;
-      const stack = new Error(`toLocaleString call #${captured}`).stack || "(no stack)";
-      // Fire-and-forget; must never throw or block the real call.
-      fetch(apiPath("/api/debug/frontend-stats"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Ocode-Desktop": "1", ...authHeaders() },
-        body: JSON.stringify({
-          window_id: "toLocaleString-probe",
-          terminal_count: 0,
-          terminal_lines: 0,
-          session_count: 0,
-          message_count: 0,
-          message_bytes: 0,
-          dom_node_count: 0,
-          debug_note: stack,
-        }),
-      }).catch(() => {});
-    }
-    return orig.apply(this, args);
+  const cache = new Map<string, Intl.DateTimeFormat>();
+  const DTF_CACHE_MAX = 50;
+  const hasDateField = (opts?: Intl.DateTimeFormatOptions): boolean => {
+    if (!opts) return false;
+    return !!(
+      opts.weekday !== undefined ||
+      opts.era !== undefined ||
+      opts.year !== undefined ||
+      opts.month !== undefined ||
+      opts.day !== undefined ||
+      opts.hour !== undefined ||
+      opts.minute !== undefined ||
+      opts.second !== undefined ||
+      opts.timeZoneName !== undefined ||
+      opts.dayPeriod !== undefined ||
+      opts.dateStyle !== undefined ||
+      opts.timeStyle !== undefined
+    );
   };
-})();
+  const canonicalOptionsKey = (opts: Intl.DateTimeFormatOptions): string => {
+    const keys = Object.keys(opts)
+      .filter((k) => (opts as Record<string, unknown>)[k] !== undefined)
+      .sort();
+    const sorted: Record<string, unknown> = {};
+    for (const k of keys) sorted[k] = (opts as Record<string, unknown>)[k];
+    return JSON.stringify(sorted);
+  };
+  Date.prototype.toLocaleString = function (
+    this: Date,
+    locales?: string | string[],
+    options?: Intl.DateTimeFormatOptions,
+  ): string {
+    // Preserve native behavior for invalid dates and for calls that don't
+    // actually request a date/time formatting (e.g. bare toLocaleString() or
+    // {hour12:false} alone) — those never benefit from the cache.
+    if (isNaN(this.valueOf()) || !hasDateField(options)) {
+      return orig.apply(this, arguments as unknown as Parameters<typeof orig>);
+    }
+    const key = `${JSON.stringify(locales ?? null)}::${canonicalOptionsKey(options!)}`;
+    let fmt = cache.get(key);
+    if (!fmt) {
+      fmt = new Intl.DateTimeFormat(locales, options);
+      if (cache.size >= DTF_CACHE_MAX) {
+        const oldestKey = cache.keys().next().value as string | undefined;
+        if (oldestKey !== undefined) cache.delete(oldestKey);
+      }
+      cache.set(key, fmt);
+    }
+    return fmt.format(this);
+  };
+  // Test hook — lets the suite reset the FIFO cache between cases so
+  // construction counts stay deterministic without reinstalling the patch.
+    (Date.prototype.toLocaleString as unknown as Record<string, unknown>).__resetCacheForTests =
+      () => cache.clear();
+  })();
+}

@@ -6714,6 +6714,67 @@ func TestCurrentContextEstimateExcludesNextInput(t *testing.T) {
 	}
 }
 
+// TestCurrentContextEstimateCapsLiveStreamedToolOutput guards the sidebar
+// context-gauge spike: while a bash tool result is still streaming,
+// appendShellOutput accumulates the FULL untruncated output into the
+// provisional raw.Content. Counting it verbatim made the gauge jump to
+// hundreds of thousands of tokens mid-stream and snap back when the
+// canonical (TruncateToolResult-bounded) message replaced it. The estimate
+// must clamp provisional tool content to the truncation budget.
+func TestCurrentContextEstimateCapsLiveStreamedToolOutput(t *testing.T) {
+	tc := agent.ToolCall{ID: "call-bash-1", Type: "function"}
+	tc.Function.Name = "bash"
+	tc.Function.Arguments = `{"command":"go test ./..."}`
+	live := strings.Repeat("x", 2_000_000)
+	m := model{
+		messages: []message{
+			{role: roleUser, text: "hi", raw: &agent.Message{Role: "user", Content: "hi"}},
+			{role: roleAssistant, text: "run", raw: &agent.Message{
+				Role:      "assistant",
+				ToolCalls: []agent.ToolCall{tc},
+				Usage:     &agent.TokenUsage{PromptTokens: int64Ptr(100_000), CompletionTokens: int64Ptr(50), TotalTokens: int64Ptr(100_050)},
+			}},
+			{role: roleAssistant, raw: &agent.Message{Role: "tool", ToolID: "call-bash-1", Content: live}},
+		},
+	}
+	tokens, _ := m.currentContextEstimate()
+	// base (100_050) + tiny tail; must NOT include the 2MB provisional
+	// stream beyond the truncation budget (~14k chars → few k tokens).
+	if tokens > 110_000 {
+		t.Fatalf("live streamed tool output must not inflate the estimate: got %d tokens", tokens)
+	}
+	if tokens < 100_000 {
+		t.Fatalf("expected at least the actual usage base, got %d", tokens)
+	}
+}
+
+// TestCurrentContextEstimateKeepsBangShellOutput verifies the exemption:
+// full `!`-shell output ("shell-*" ToolIDs) is real prompt content (the
+// snapshot converts the shell pair into a user message verbatim), so it
+// must keep counting — capping it would understate the gauge.
+func TestCurrentContextEstimateKeepsBangShellOutput(t *testing.T) {
+	tc := agent.ToolCall{ID: "shell-1", Type: "function"}
+	tc.Function.Name = "shell"
+	tc.Function.Arguments = `{"command":"make check"}`
+	live := strings.Repeat("y", 2_000_000)
+	m := model{
+		messages: []message{
+			{role: roleUser, text: "!make check", raw: &agent.Message{Role: "user", Content: "!make check"}},
+			{role: roleAssistant, text: "run", raw: &agent.Message{
+				Role:      "assistant",
+				ToolCalls: []agent.ToolCall{tc},
+				Usage:     &agent.TokenUsage{PromptTokens: int64Ptr(100), CompletionTokens: int64Ptr(5), TotalTokens: int64Ptr(105)},
+			}},
+			{role: roleAssistant, raw: &agent.Message{Role: "tool", ToolID: "shell-1", Content: live}},
+		},
+	}
+	tokens, _ := m.currentContextEstimate()
+	// 2MB of `!` output at ~4 chars/token ≈ 500k tokens — uncapped.
+	if tokens < 400_000 {
+		t.Fatalf("`!` shell output is real prompt content and must not be capped: got %d", tokens)
+	}
+}
+
 func TestSidebarContextUsesCurrentEstimateNotCumulativeTotal(t *testing.T) {
 	spend := 0.1
 	m := model{

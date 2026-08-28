@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Dialog,
   DialogContent,
@@ -8,10 +8,11 @@ import {
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { ScrollArea } from "../ui/scroll-area";
-import { Loader2, Folder, ArrowUp, Home } from "lucide-react";
+import { Loader2, Folder, ArrowUp, Home, Search, X } from "lucide-react";
 import { api } from "../../api/client";
 import type { DirectoryEntry } from "../../api/types";
 import { cn } from "../../lib/utils";
+import { parseKeywords, matchesKeywords } from "../../lib/keywordFilter";
 
 interface Props {
   open: boolean;
@@ -26,6 +27,7 @@ export default function DirectoryBrowser({ open, onOpenChange, onSelect }: Props
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [selectedPath, setSelectedPath] = useState("");
+  const [filter, setFilter] = useState("");
 
   const browse = useCallback(async (path?: string) => {
     setLoading(true);
@@ -47,6 +49,7 @@ export default function DirectoryBrowser({ open, onOpenChange, onSelect }: Props
   useEffect(() => {
     if (open) {
       setSelectedPath("");
+      setFilter("");
       browse();
     }
   }, [open, browse]);
@@ -67,6 +70,12 @@ export default function DirectoryBrowser({ open, onOpenChange, onSelect }: Props
     setSelectedPath("");
     browse();
   };
+
+  const keywords = useMemo(() => parseKeywords(filter), [filter]);
+  const filteredDirectories = useMemo(() => {
+    if (keywords.length === 0) return directories;
+    return directories.filter((d) => matchesKeywords(`${d.name} ${d.path}`, keywords));
+  }, [directories, keywords]);
 
   const handleConfirm = () => {
     if (selectedPath) {
@@ -118,6 +127,33 @@ export default function DirectoryBrowser({ open, onOpenChange, onSelect }: Props
           </div>
         </div>
 
+        {/* Keyword filter for directory listing */}
+        <div className="relative">
+          <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground/50 pointer-events-none" />
+          <Input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filter by keywords..."
+            className="h-8 pl-7 pr-7 text-xs"
+          />
+          {filter && (
+            <button
+              type="button"
+              onClick={() => setFilter("")}
+              className="absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
+              aria-label="Clear filter"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+        {filter.trim() && !loading && !error && (
+          <div className="text-[11px] text-muted-foreground">
+            {filteredDirectories.length} match{filteredDirectories.length === 1 ? "" : "es"}
+            {filteredDirectories.length !== directories.length ? ` of ${directories.length}` : ""}
+          </div>
+        )}
+
         {/* Directory listing */}
         <ScrollArea className="h-64 border border-border rounded-md">
           {loading ? (
@@ -132,9 +168,13 @@ export default function DirectoryBrowser({ open, onOpenChange, onSelect }: Props
             <div className="flex items-center justify-center h-full text-xs text-muted-foreground">
               No subdirectories found
             </div>
+          ) : filteredDirectories.length === 0 ? (
+            <div className="flex items-center justify-center h-full text-xs text-muted-foreground">
+              No matching folders
+            </div>
           ) : (
             <div className="py-1">
-              {directories.map((entry) => (
+              {filteredDirectories.map((entry) => (
                 <button
                   key={entry.path}
                   className={cn(

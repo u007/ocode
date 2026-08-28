@@ -235,6 +235,16 @@ func main() {
 		application.NewMenuItem("Open DevTools").OnClick(func(ctx *application.Context) {
 			window.OpenDevTools()
 		}),
+		// The desktop shell runs on WKWebView (macOS)/WebKitGTK (Linux), neither
+		// of which exposes Chrome DevTools Protocol — CDP-based tools (Playwright,
+		// claude-in-chrome, htrcli) cannot attach to this window directly. It
+		// does load a plain HTTP page served by ocode's own server though, so
+		// pointing a real Chromium-based browser at the same URL (token included,
+		// since every /api/* route requires it) gets full CDP support against an
+		// otherwise-identical UI.
+		application.NewMenuItem("Copy Debug URL").OnClick(func(ctx *application.Context) {
+			app.Clipboard.SetText(desktopURL)
+		}),
 		application.NewMenuItemSeparator(),
 		application.NewMenuItem("Quit").OnClick(func(ctx *application.Context) {
 			app.Quit()

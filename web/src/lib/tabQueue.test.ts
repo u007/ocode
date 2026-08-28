@@ -6,6 +6,7 @@ import {
   shiftUndispatched,
   removeQueuedItem,
   popLastQueued,
+  unshiftQueued,
   rekeyQueue,
   clearQueue,
 } from "./tabQueue";
@@ -81,6 +82,14 @@ describe("tabQueue", () => {
     pushQueued("t4", msg("x"));
     clearQueue("t4");
     expect(getQueue("t4")).toEqual([]);
+  });
+
+  it("unshiftQueued restores a failed item ahead of newer work", () => {
+    pushQueued("t4b", msg("newer"));
+    unshiftQueued("t4b", msg("failed"));
+    expect(shiftQueued("t4b")).toEqual(msg("failed"));
+    expect(shiftQueued("t4b")).toEqual(msg("newer"));
+    clearQueue("t4b");
   });
 
   it("shiftUndispatched skips dispatched items and returns the next fresh one (FIFO)", () => {

@@ -187,13 +187,47 @@ func TestAdvisorTool_Execute_EmptyPrompt(t *testing.T) {
 }
 
 func TestAdvisorTool_Execute_RecursionGuard(t *testing.T) {
-	advisorRecursionGuard.Store(true)
-	defer advisorRecursionGuard.Store(false)
+	advisorRecursionGuardFallback.Store(true)
+	defer advisorRecursionGuardFallback.Store(false)
 
 	tool := AdvisorTool{}
 	_, err := tool.Execute(json.RawMessage(`{"prompt":"hello"}`))
-	if err == nil || !strings.Contains(err.Error(), "recursively") {
+	if err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Errorf("expected recursion error, got %v", err)
+	}
+}
+
+func TestAdvisorTool_Execute_RecursionGuard_ScopedPerAgent(t *testing.T) {
+	client := &advisorMockLLMClient{response: "test"}
+	agentA := NewAgent(client, nil, nil, nil)
+	agentB := NewAgent(client, nil, nil, nil)
+	t.Cleanup(agentA.Shutdown)
+	t.Cleanup(agentB.Shutdown)
+
+	toolA := AdvisorTool{mainAgent: agentA}
+	toolB := AdvisorTool{mainAgent: agentB}
+
+	// Simulate toolA's call being in flight.
+	if !toolA.recursionGuard().CompareAndSwap(false, true) {
+		t.Fatal("expected to acquire agentA's guard")
+	}
+	defer toolA.recursionGuard().Store(false)
+
+	// An unrelated agent's advisor call must not be blocked by agentA's.
+	if !toolB.recursionGuard().CompareAndSwap(false, true) {
+		t.Error("agentB's advisor call was blocked by agentA's in-flight call")
+	}
+	toolB.recursionGuard().Store(false)
+
+	// But a second call on the same agent (e.g. a sub-agent sharing the
+	// parent's guard) must still be blocked.
+	subAgent := NewAgent(client, nil, nil, nil)
+	t.Cleanup(subAgent.Shutdown)
+	subAgent.SetParentAdvisorInFlight(agentA.advisorGuard())
+	toolSub := AdvisorTool{mainAgent: subAgent}
+	if toolSub.recursionGuard().CompareAndSwap(false, true) {
+		toolSub.recursionGuard().Store(false)
+		t.Error("expected sub-agent sharing parent's guard to be blocked while parent call is in flight")
 	}
 }
 

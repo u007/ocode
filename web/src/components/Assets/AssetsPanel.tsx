@@ -8,11 +8,15 @@ import {
   FileText,
   Image as ImageIcon,
   AlignLeft,
+  Search,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { apiPath, authHeaders } from "@/api/client";
 import { useProjectState } from "../../stores/projectStore";
+import { parseKeywords, matchesKeywords } from "@/lib/keywordFilter";
 
 interface UploadedFile {
   name: string;
@@ -103,8 +107,10 @@ export default function AssetsPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const loadGeneration = useRef(0);
 
   const projectPath = useProjectState().state.activeProject?.path;
   // Appended to URLs that already carry a query (?name=...).
@@ -120,6 +126,7 @@ export default function AssetsPanel() {
   }, [blobUrl]);
 
   const loadFiles = useCallback(async () => {
+    const generation = ++loadGeneration.current;
     setLoading(true);
     setError(null);
     try {
@@ -130,18 +137,24 @@ export default function AssetsPanel() {
         throw new Error(`list failed: ${r.status} ${r.statusText}`);
       }
       const data: UploadedFile[] = await r.json();
-      setFiles(data);
+      if (generation === loadGeneration.current) setFiles(data);
     } catch (e) {
       console.error("Failed to load uploads:", e);
-      setError(e instanceof Error ? e.message : String(e));
+      if (generation === loadGeneration.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (generation === loadGeneration.current) setLoading(false);
     }
   }, [projectOnlyQuery]);
 
   useEffect(() => {
     void loadFiles();
   }, [loadFiles]);
+
+  const keywords = useMemo(() => parseKeywords(filter), [filter]);
+  const filteredFiles = useMemo(() => {
+    if (keywords.length === 0) return files;
+    return files.filter((f) => matchesKeywords(`${f.name} ${f.mime}`, keywords));
+  }, [files, keywords]);
 
   const uploadFiles = useCallback(
     async (fileList: FileList) => {
@@ -234,6 +247,34 @@ export default function AssetsPanel() {
           </Button>
         </div>
 
+        <div className="px-2 py-2 border-b border-zinc-700">
+          <div className="relative">
+            <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500 pointer-events-none" />
+            <Input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter by keywords..."
+              className="h-7 pl-7 pr-7 text-xs bg-zinc-900 border-zinc-700"
+            />
+            {filter && (
+              <button
+                type="button"
+                onClick={() => setFilter("")}
+                className="absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200"
+                aria-label="Clear filter"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+          {filter.trim() && (
+            <div className="mt-1 text-[11px] text-zinc-500">
+              {filteredFiles.length} match{filteredFiles.length === 1 ? "" : "es"}
+              {filteredFiles.length !== files.length ? ` of ${files.length}` : ""}
+            </div>
+          )}
+        </div>
+
         <div className="flex-1 overflow-y-auto">
           {loading && files.length === 0 ? (
             <div className="p-3 text-xs text-zinc-500">Loading…</div>
@@ -241,8 +282,10 @@ export default function AssetsPanel() {
             <div className="p-3 text-xs text-red-400">Error: {error}</div>
           ) : files.length === 0 ? (
             <div className="p-3 text-xs text-zinc-500">No files yet.</div>
+          ) : filteredFiles.length === 0 ? (
+            <div className="p-3 text-xs text-zinc-500">No matching files</div>
           ) : (
-            files.map((file) => {
+            filteredFiles.map((file) => {
               const Icon = fileIcon(file.mime);
               if (confirmDelete === file.name) {
                 return (

@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- **Version Bump** — 0.8.77 → 0.8.78: encrypted-file editing (age, per-project passphrase), debug CLI, advisor/runtime-path hardening, plugin removal root-deletion guard, auto-permission tightening, web chat/file-picker and session-tab fixes.
 - **Version Bump** — 0.8.75 → 0.8.77: security hardening and deterministic regression coverage for plugin lifecycle, permissions, retries, session tabs, terminals, watchdogs, and navigation.
 - **Version Bump** — 0.8.73 → 0.8.75: background/foreground bash parent-death protection (`WrapWithParentMonitor` + `Setsid`), agent replacement race prevention (input queuing + epoch-tagged stream events), desktop LSP daemon + provider plugin registration, web streaming performance (memoized bubbles + 90ms delta coalescing), process-group hijack fix (`Setsid` replaces `Setpgid`). (`internal/version/version.go`, `internal/tool/exec.go`, `internal/tool/proc_unix.go`, `internal/tui/model.go`, `cmd/ocode-desktop/main.go`, `web/src/lib/sessionEvents.ts`, `web/src/components/Chat/MessageBubble.tsx`, `web/src/components/Chat/TurnParts.tsx`)
 > ⚠️ **0.8.67 was pushed partially committed** — the change set has since been completed and tagged **0.8.69** in the follow-up commit (current HEAD). The 0.8.67 tag is not installable; use 0.8.69 or later.

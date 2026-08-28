@@ -14,9 +14,30 @@ function activeProcessLabel(slice: SessionSlice): string | null {
   if (!slice.turnActive) return null;
   for (let i = slice.live.length - 1; i >= 0; i--) {
     const part = slice.live[i];
-    if (part.kind === "tool") return part.command || part.tool;
+    if (part.kind === "tool") return shortCommandLabel(part.command, part.tool);
   }
   return "Running…";
+}
+
+// part.command is the raw JSON string of tool-call arguments (see
+// ToolStartEvent.Command / tc.Function.Arguments) — TurnParts.tsx renders it
+// verbatim as JSON for the full tool bubble, but a tab title needs a short
+// human string instead of the raw blob.
+function shortCommandLabel(command: string | undefined, tool: string): string {
+  if (!command) return tool;
+  let candidate: string = tool;
+  try {
+    const parsed = JSON.parse(command) as Record<string, unknown>;
+    if (typeof parsed.command === "string") candidate = parsed.command;
+    else if (typeof parsed.description === "string") candidate = parsed.description;
+    else {
+      const firstString = Object.values(parsed).find((v): v is string => typeof v === "string");
+      if (firstString) candidate = firstString;
+    }
+  } catch {
+    // Not valid JSON — fall back to the tool name.
+  }
+  return candidate.length > 40 ? `${candidate.slice(0, 40)}…` : candidate;
 }
 
 interface TabBarDerived {

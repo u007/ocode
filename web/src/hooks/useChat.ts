@@ -16,6 +16,9 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   const dispatch = useChatDispatch();
   const { state: projectState } = useProjectState();
   const slice = useChatSelector((s) => getSessionSlice(s, sessionId));
+  const projectPath = sessionId
+    ? findProjectPathForTab(projectState, sessionId) ?? projectState.activeProject?.path
+    : projectState.activeProject?.path;
 
   // Submit is fire-and-forget: the message is forwarded to the TUI's agent and
   // ALL rendering (the user echo, live thinking/text tokens, tool activity, and
@@ -37,9 +40,6 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       // currently active project — the send may come from a background tab).
       // Without an explicit project_path the server would fall back to its
       // own cwd, which for the desktop app is $HOME.
-      const projectPath =
-        findProjectPathForTab(projectState, sessionId) ??
-        projectState.activeProject?.path;
       if (!isRealSession && !projectPath) {
         dispatch({
           type: "SET_ERROR",
@@ -75,16 +75,22 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
           return false;
         });
     },
-    [sessionId, dispatch, projectState, options?.onNewSession],
+    [sessionId, dispatch, projectPath, options?.onNewSession],
   );
 
   // Local stop: the browser can't cancel the TUI's agent, so this only releases
   // the input and clears the UI streaming state. The turn continues server-side;
   // a later turn_done/turn_error becomes a no-op (turn state already cleared).
+  // Queued messages are preserved and auto-drain is suppressed until the user
+  // resumes, mirroring the TUI's streamWasInterrupted behavior.
   const stop = useCallback(() => {
     if (!sessionId) return;
-    dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
-    dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+    dispatch({ type: "INTERRUPT", sessionId });
+  }, [dispatch, sessionId]);
+
+  const resume = useCallback(() => {
+    if (!sessionId) return;
+    dispatch({ type: "SET_WAS_INTERRUPTED", sessionId, wasInterrupted: false });
   }, [dispatch, sessionId]);
 
   // Resolve a pending agent permission ask via the dedicated resolve endpoint
@@ -142,7 +148,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       command: string,
     ): Promise<{ output: string; exitCode: number; error: string }> => {
       try {
-        return await api.shellCommand(command);
+        return await api.shellCommand(command, projectPath);
       } catch (err) {
         return {
           output: "",
@@ -152,13 +158,15 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
         };
       }
     },
-    [],
+    [projectPath],
   );
 
   return {
     sendMessage,
     executeShell,
     stop,
+    resume,
+    wasInterrupted: slice.wasInterrupted,
     resolvePermission,
     submitQuestionAnswers,
     // isStreaming derives from the per-session turn state (Part 05): set

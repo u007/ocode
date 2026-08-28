@@ -7,8 +7,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ChevronRight, File, Folder, FolderOpen, Loader2 } from "lucide-react";
+import { ChevronRight, File, Folder, FolderOpen, Loader2, Search, X } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { api, apiPath, authHeaders } from "@/api/client";
+import { parseKeywords, matchesKeywords } from "@/lib/keywordFilter";
 
 interface FileNode {
   name: string;
@@ -49,6 +51,7 @@ interface TreeNodeProps {
   selectedPath: string | null;
   onSelect: (path: string) => void;
   projectRoot?: string;
+  forceExpanded?: boolean;
 }
 
 // Tree responses keep paths relative to their selected root so they can be
@@ -61,6 +64,36 @@ export function treePathForRequest(projectRoot: string | undefined, nodePath: st
   const relative = nodePath.replace(/^[\\/]+/, "");
   if (!relative || relative === ".") return projectRoot;
   return `${root}/${relative}`;
+}
+
+function nodeMatchesKeywords(node: FileNode, keywords: string[]): boolean {
+  return matchesKeywords(`${node.name} ${node.path}`, keywords);
+}
+
+function filterTreeNodes(nodes: FileNode[], keywords: string[]): FileNode[] {
+  const out: FileNode[] = [];
+  for (const n of nodes) {
+    const childFiltered = n.children ? filterTreeNodes(n.children, keywords) : [];
+    const selfMatch = nodeMatchesKeywords(n, keywords);
+    if (selfMatch || childFiltered.length > 0) {
+      out.push({
+        ...n,
+        // Only show matching descendants; a matching directory with no matching
+        // children is shown alone so non-matching entries are not leaked.
+        children: childFiltered.length > 0 ? childFiltered : undefined,
+      });
+    }
+  }
+  return out;
+}
+
+function countTreeNodes(nodes: FileNode[]): number {
+  let c = 0;
+  for (const n of nodes) {
+    c += 1;
+    if (n.children) c += countTreeNodes(n.children);
+  }
+  return c;
 }
 
 function FileIcon({ name, isDir, expanded }: { name: string; isDir: boolean; expanded: boolean }) {
@@ -79,8 +112,8 @@ function FileIcon({ name, isDir, expanded }: { name: string; isDir: boolean; exp
   return <File className="w-4 h-4 text-blue-400 shrink-0" />;
 }
 
-function TreeNode({ node, depth, selectedPath, onSelect, projectRoot }: TreeNodeProps) {
-  const [expanded, setExpanded] = useState(false);
+function TreeNode({ node, depth, selectedPath, onSelect, projectRoot, forceExpanded }: TreeNodeProps) {
+  const [expanded, setExpanded] = useState(!!forceExpanded);
   // Lazily fetched immediate children for this directory. null = not fetched
   // yet; the initial tree only carries one level, so every directory below
   // the root fetches its own children on first expand instead of the whole
@@ -89,8 +122,17 @@ function TreeNode({ node, depth, selectedPath, onSelect, projectRoot }: TreeNode
   const [loadingChildren, setLoadingChildren] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
+  // When forceExpanded is set (filtered view), keep the node expanded and
+  // use the pre-filtered children directly without lazy fetching.
   useEffect(() => {
-    if (!node.is_dir || !expanded || children !== null) return;
+    if (forceExpanded) {
+      setExpanded(true);
+      if (node.children !== undefined) setChildren(node.children ?? []);
+    }
+  }, [forceExpanded, node.children]);
+
+  useEffect(() => {
+    if (!node.is_dir || !expanded || children !== null || forceExpanded) return;
     const controller = new AbortController();
     abortRef.current = controller;
     setLoadingChildren(true);
@@ -121,6 +163,7 @@ function TreeNode({ node, depth, selectedPath, onSelect, projectRoot }: TreeNode
   }, [expanded, node.is_dir, node.path]);
 
   const toggle = () => {
+    if (forceExpanded) return;
     if (expanded) {
       // Collapsing cancels any in-flight children fetch for this directory.
       abortRef.current?.abort();
@@ -133,7 +176,7 @@ function TreeNode({ node, depth, selectedPath, onSelect, projectRoot }: TreeNode
     return (
       <div>
         <button
-          className="w-full justify-start h-7 px-2 text-xs gap-1.5 font-normal flex items-center hover:bg-zinc-800 transition-colors"
+          className={`w-full justify-start h-7 px-2 text-xs gap-1.5 font-normal flex items-center hover:bg-zinc-800 transition-colors ${forceExpanded ? "cursor-default" : ""}`}
           style={{ paddingLeft: `${depth * 12 + 8}px` }}
           onClick={toggle}
         >
@@ -157,6 +200,7 @@ function TreeNode({ node, depth, selectedPath, onSelect, projectRoot }: TreeNode
               selectedPath={selectedPath}
               onSelect={onSelect}
               projectRoot={projectRoot}
+              forceExpanded={forceExpanded}
             />
           ))}
       </div>
@@ -185,6 +229,10 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [extraPaths, setExtraPaths] = useState<string[]>([]);
   const [activeRoot, setActiveRoot] = useState<string | undefined>(projectPath);
+  const [keyword, setKeyword] = useState("");
+  const [fullTree, setFullTree] = useState<FileNode[] | null>(null);
+  const [fullTreeLoading, setFullTreeLoading] = useState(false);
+  const [fullTreeTruncated, setFullTreeTruncated] = useState(false);
 
   // The active project is the default root; extra allowed paths (configured
   // in Settings) are additional roots the user can switch the tree to.
@@ -223,23 +271,86 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
       return;
     }
     setLoading(true);
+    const controller = new AbortController();
     (async () => {
       try {
         const query = `path=${encodeURIComponent(root)}&depth=1`;
-        const res = await fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders() });
+        const res = await fetch(apiPath(`/api/files/tree?${query}`), {
+          headers: authHeaders(),
+          signal: controller.signal,
+        });
         if (!res.ok) throw new Error("Failed to load file tree");
         const data: FileTreeResponse = await res.json();
         if (data.truncated) {
           console.warn("File tree truncated at the root; not all entries were loaded");
         }
-        setTree(data.children);
+        if (!controller.signal.aborted) setTree(data.children);
       } catch (err) {
-        console.error("File tree error:", err);
+        if ((err as Error).name !== "AbortError") console.error("File tree error:", err);
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     })();
+    return () => controller.abort();
   }, [activeRoot, projectPath]);
+
+  // Reset full-tree cache when the active root changes so a stale project's
+  // filtered view is not shown.
+  useEffect(() => {
+    setFullTree(null);
+    setFullTreeTruncated(false);
+  }, [activeRoot]);
+
+  // When a keyword filter is active, fetch the full tree (depth=0) so matches
+  // deep in the hierarchy are findable even if the shallow depth=1 root and
+  // unexpanded lazy nodes would otherwise hide them.
+  useEffect(() => {
+    const q = keyword.trim();
+    if (!q) return;
+    const root = activeRoot ?? projectPath;
+    if (!root) return;
+    if (fullTree !== null) return;
+    let cancelled = false;
+    setFullTreeLoading(true);
+    (async () => {
+      try {
+        const query = `path=${encodeURIComponent(root)}&depth=0`;
+        const res = await fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders() });
+        if (!res.ok) throw new Error("Failed to load full file tree for filtering");
+        const data: FileTreeResponse = await res.json();
+        if (data.truncated) {
+          console.warn("File tree truncated for filter; not all files are searchable");
+        }
+        if (!cancelled) {
+          setFullTree(data.children);
+          setFullTreeTruncated(!!data.truncated);
+        }
+      } catch (err) {
+        console.error("Full file tree filter error:", err);
+        if (!cancelled) {
+          setFullTree([]);
+          setFullTreeTruncated(false);
+        }
+      } finally {
+        if (!cancelled) setFullTreeLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [keyword, activeRoot, projectPath, fullTree]);
+
+  const keywords = useMemo(() => parseKeywords(keyword), [keyword]);
+  const isFiltering = keywords.length > 0;
+  const filteredTree = useMemo(() => {
+    if (!isFiltering) return null;
+    const source = fullTree ?? tree;
+    return filterTreeNodes(source, keywords);
+  }, [isFiltering, fullTree, tree, keywords]);
+  const filteredCount = useMemo(
+    () => (filteredTree ? countTreeNodes(filteredTree) : 0),
+    [filteredTree],
+  );
 
   const handleSelect = (path: string) => {
     setSelectedPath(path);
@@ -265,6 +376,34 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
           </Select>
         )}
       </div>
+      <div className="px-2 py-1.5 border-b border-border shrink-0">
+        <div className="relative">
+          <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground/50 pointer-events-none" />
+          <Input
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            placeholder="Filter by keywords..."
+            className="h-7 pl-7 pr-7 text-xs"
+          />
+          {keyword && (
+            <button
+              type="button"
+              onClick={() => setKeyword("")}
+              className="absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
+              aria-label="Clear filter"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+        {isFiltering && (
+          <div className="mt-1 text-[11px] text-muted-foreground truncate">
+            {fullTreeLoading
+              ? "Searching…"
+              : `${filteredCount} match${filteredCount === 1 ? "" : "es"}${fullTreeTruncated ? " — results may be incomplete (truncated)" : ""}`}
+          </div>
+        )}
+      </div>
       <ScrollArea className="flex-1">
         {loading ? (
           <div className="flex items-center justify-center py-12 text-xs text-muted-foreground">
@@ -276,6 +415,31 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
             <p>No project added yet</p>
             <p className="mt-1">Add a project from the sidebar to browse files</p>
           </div>
+        ) : isFiltering ? (
+          fullTreeLoading ? (
+            <div className="flex items-center justify-center py-12 text-xs text-muted-foreground gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Filtering…
+            </div>
+          ) : !filteredTree || filteredTree.length === 0 ? (
+            <div className="px-4 py-12 text-center text-xs text-muted-foreground">
+              No matching files
+            </div>
+          ) : (
+            <div className="py-1">
+              {filteredTree.map((node) => (
+                <TreeNode
+                  key={node.path}
+                  node={node}
+                  depth={0}
+                  selectedPath={selectedPath}
+                  onSelect={handleSelect}
+                  projectRoot={activeRoot}
+                  forceExpanded
+                />
+              ))}
+            </div>
+          )
         ) : tree.length === 0 ? (
           <div className="px-4 py-12 text-center text-xs text-muted-foreground">
             No files

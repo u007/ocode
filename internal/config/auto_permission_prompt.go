@@ -23,7 +23,7 @@ import (
 // This text is intentionally separate from permissions.auto.prompt in
 // ocodeconfig.json: that field is the user's own free-form override and
 // must never be silently overwritten by a bundled update.
-const BundledAutoPermissionPromptVersion = "1.4.0"
+const BundledAutoPermissionPromptVersion = "1.5.0"
 
 // BundledAutoPermissionPromptBody is the shipped default addendum. Bump
 // BundledAutoPermissionPromptVersion whenever this changes.
@@ -39,20 +39,22 @@ const BundledAutoPermissionPromptBody = `Always ALLOW these git commands without
 - "git stash list" — lists stashes; read-only.
 - "git rev-parse" — resolves refs/paths; read-only.
 - "git describe" — describes a commit; read-only.
-- "git fetch" — updates remote-tracking refs only; does not touch the working tree or local branches.
-- "git add" (and "git add -A"/"-p" etc.) — stages changes into the index; does not touch the working tree and is trivially reversible with "git reset".
 - "curl"/"wget"/"http"/"https" targeting localhost, 127.0.0.0/8, or ::1 (any port/path, including with auth headers or request bodies) — loopback-only traffic stays on-host and cannot exfiltrate data off-machine.
 
-Always ALLOW these package-manager and runtime commands — they operate within the project's dependency tree and node_modules, not system-wide:
-- "npm" (subcommands: install, ci, run, test, outdated, audit, list, pack, start, stop, restart, link, unlink, prune, shrinkwrap, version, bin, dedupe, ls, repo, docs, help, view, owner, access, etc.) — project-scoped package manager; never touches system paths outside the workspace.
-- "pnpm" (subcommands: add, install, run, test, exec, store, etc.) — project-scoped package manager; never touches system paths outside the workspace.
-- "bun" (subcommands: install, run, test, add, remove, link, pm, etc.) — project-scoped JavaScript runtime and package runner.
+Always ALLOW only these package-manager inspection commands:
+- "npm --version", "npm version" (without a package argument), "npm ls", "npm list", "npm outdated", and "npm audit" — read-only dependency inspection.
+- "pnpm --version", "pnpm list", and "pnpm outdated" — read-only dependency inspection.
+- "bun --version" and "bun pm ls" — read-only runtime/dependency inspection.
 
-These specific subcommands require human approval — they are NOT auto-allowed:
-- "npm publish" / "pnpm publish" — publishes packages to a remote registry; requires auth and may expose credentials or ship unintended code.
-- "pnpm dlx" / "npx" / "bunx" / "bun x" — runs arbitrary remote packages without local install; equivalent to executing untrusted code.
+All package-manager commands that install, remove, link, execute scripts or
+binaries, run lifecycle hooks, modify package metadata, access registries, or
+publish artifacts require human approval. This includes npm/pnpm/bun install,
+ci, run, test, exec, dlx, add, remove, link, version with a package argument,
+publish, pack, store, owner, and access commands.
 
-Allow reads and writes to any path under the OS temp directory (os.TempDir, $TMPDIR) that is owned by the current user — these are ephemeral scratch spaces. Do NOT auto-allow writes to /tmp paths owned by other users or system-wide shared temp locations.
+Do not auto-allow arbitrary paths under the OS temp directory. Access to
+generic /tmp or $TMPDIR requires human approval; only an explicit project-scoped
+path in the pre-authorized roots may be auto-allowed.
 `
 
 // AutoPermissionPromptStatus mirrors internal/skill's skill status states,

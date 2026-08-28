@@ -63,6 +63,15 @@ export function shiftUndispatched(tabId: string | null | undefined): QueuedItem 
   return undefined;
 }
 
+/** Put a failed item back at the head of its queue so a transient submit
+ * failure cannot silently drop user input. */
+export function unshiftQueued(tabId: string | null | undefined, item: QueuedItem) {
+  if (!tabId) return;
+  const list = queues.get(tabId) ?? [];
+  list.unshift(item);
+  queues.set(tabId, list);
+}
+
 /** Remove a specific queued item by reference (e.g. a dispatched message whose
  *  submit was rejected, so it never reached the live loop and must not linger
  *  as a phantom entry the drain would skip). */

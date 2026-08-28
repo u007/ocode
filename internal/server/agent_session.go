@@ -230,6 +230,7 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 		log.Printf("serve error: rebuild agent for %s (stage %s): %v", id, stage, err)
 		return as, err
 	}
+	newAs.agent.SetParentAdvisorInFlight(as.agent.AdvisorGuard())
 	h.replaceAgentSession(id, newAs)
 	log.Printf("agent: rebuilt session %s (profile %s -> %s, credVersion %d -> %d, model %s -> %s)", id, as.profile, cur, as.credVersion, curCredVersion, as.model, model)
 	return newAs, nil

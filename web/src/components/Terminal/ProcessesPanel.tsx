@@ -87,6 +87,7 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
       });
 
     const off = eventBus.on("terminal_processes", (env) => {
+      if (env.project !== projectPath) return;
       const rows = env.data as TerminalProcessStat[];
       if (!Array.isArray(rows)) return;
       mergeRows(rows);

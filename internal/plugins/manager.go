@@ -278,7 +278,11 @@ func ValidateRemovableDirForProject(dir, projectRoot string) error {
 		if resolved, err := filepath.EvalSymlinks(root); err == nil {
 			canonicalRoot = resolved
 		}
-		if isSubpath(canonicalRoot, clean) {
+		// Removal is limited to a single plugin directory directly under an
+		// approved root. isSubpath also returns true for the root itself and
+		// nested descendants, either of which would make a persisted config
+		// entry capable of deleting more than one plugin.
+		if clean != canonicalRoot && filepath.Dir(clean) == canonicalRoot {
 			return nil
 		}
 	}

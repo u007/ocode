@@ -23,14 +23,24 @@ okf_version: 0.1
 - [Agent Replacement — Input Queuing & Stream Event Epochs](gotchas/agent-replacement-input-queuing.md) - Architectural decision and solution pattern for queuing user input during agent replacement and using stream event epochs to prevent stale events from mutating the new session.
 - [AIHubMix Test — Global Cache State Leakage](gotchas/aihubmix-test-cache-leak.md) - AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures
 - [Bubble Tea Cleanup Race — Orphaned Goroutines on Shutdown](gotchas/bubbletea-cleanup-race.md) - Bubble Tea runs tea.Cmd in untracked goroutines and does not wait for them during Program.Run shutdown, causing cleanup races with model-switch or /new commands that orphan agents or supervisors.
+- [Chat Input — Queued Messages Lost on Submission Failure](gotchas/chat-input-message-loss.md) - Queued messages are lost when submission fails — sendMessage returns false but the message is already shifted from the queue
 - [ChatPanel Autoscroll Bounce/Freeze](gotchas/autoscroll-bounce.md) - Root cause analysis of the autoscroll bounce/freeze bug: smooth-scrolling every live token without at-bottom state tracking causes competing animations that lock up the scroll position.
+- [Debug Instrumentation Ships Unconditionally](gotchas/debug-instrumentation-ships-unconditionally.md) - Process gotcha: temporary Date.prototype instrumentation ships unconditionally in production builds, causing global prototype mutation, altered date behavior, and authenticated network requests.
+- [FilePicker.test.tsx Stale Build Status — Corrected](gotchas/filepicker-stale-todo.md) - Stale TODO item: FilePicker.test.tsx now has no user-event import and build passes
 - [Foreground Bash Commands — Parent-Death Protection Before Start](gotchas/foreground-bash-parent-death-protection.md) - Foreground POSIX Bash commands must be wrapped with WrapWithParentMonitor before cmd.Start() to ensure promotion to background does not orphan processes; the monitor must be applied at spawn time, not at promotion time.
 - [Local Model Auto-Start Hijacks the Controlling Terminal](gotchas/local-model-tty-hijack.md) - A locally-spawned model server (Setpgid only, same session as ocode) can grab the terminal foreground process group via TIOCSPGRP, crashing the TUI and corrupting the whole shell session
 - [Local Model Limiter — Stale-Slot Reclamation Race](gotchas/local-model-limiter-stale-slot-race.md) - TOCTOU race in local model slot-lock stale reclamation: reaper can delete a live lock between Stat and Remove, breaking MaxParallel limits
+- [Plugin Auto-Permission — Arbitrary Execution Risk](gotchas/plugin-auto-permission-security.md) - Security gotcha: auto-permission prompt tightened to read-only inspection only — no package install/run/exec/lifecycle/registry commands, no blanket OS temp access.
+- [Plugin Install Rollback Bug](gotchas/plugin-install-rollback-bug.md) - Security gotcha: failed plugin installs leave stale directories and orphaned MCP registrations due to incorrect path handling in deferred cleanup.
+- [Plugin Removal — Root Directory Deletion Risk](gotchas/plugin-removal-root-deletion.md) - Security gotcha: removal validation must reject deletion of an entire approved plugin root directory, not just validate child paths.
 - [run_in_background Bash Commands Orphaned on Force-Killed ocode](gotchas/background-bash-orphan-on-force-kill.md) - Background bash commands started via the bash tool had no self-cleanup and would survive kill -9 on ocode; wrapped in the same parent-monitor mechanism local models already used
 - [Skill Tool Test Fixture Gap — expectedBuiltinTools Missing load_skill](gotchas/skill-tool-test-fixture-gap.md) - expectedBuiltinTools in tool_test.go only lists "skill" but InitBuiltinTools also registers "load_skill" as a second alias, causing a stale test failure.
 - [Subagent Feedback-Loop Guard (task tool)](gotchas/subagent-feedback-loop-guard.md) - The task/subagent dispatch refuses consecutive same-type launches without new user input to break runaway feedback loops; vary the agent type or wait for user input.
 - [Symlink Escape in Plugin Removal Validation](gotchas/plugin-removal-symlink-escape.md) - Security gotcha: filepath.EvalSymlinks must resolve both the target dir and all approved roots to prevent symlink-based path traversal in plugin removal.
+
+# guides
+
+- [ocode debug CLI Reference](guides/debug-cli.md) - Documentation for the ocode debug CLI subcommand family
 
 # okf
 

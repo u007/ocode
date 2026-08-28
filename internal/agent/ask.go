@@ -174,6 +174,10 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 	child := NewAgent(client, tools, a.config, a.lspMgr)
 	child.SetMaxSteps(maxSteps)
 	child.skipDiscovery = true
+	// Side-query agents belong to the same logical session. Share the root
+	// advisor guard so a /btw query cannot run an advisor concurrently with the
+	// main agent or a task child.
+	child.SetParentAdvisorInFlight(a.advisorGuard())
 	// Enforce the caller's exclusion list on the FINAL tool map: NewAgent
 	// unconditionally registers wait/task/task_status/agent_status/task_cancel
 	// (+ advisor/knowledge_lookup) regardless of the Tools slice, so a side

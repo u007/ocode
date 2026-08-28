@@ -263,6 +263,14 @@ type Agent struct {
 	// own advisorEnabled. Sub-agents set this to point at the parent agent's
 	// advisorEnabled field so mid-run toggles propagate immediately.
 	parentAdvisorEnabled *atomic.Bool
+	// advisorInFlight is the root guard for this logical session. Rebuilt agents
+	// and child agents inherit the root pointer through parentAdvisorInFlight;
+	// unrelated sessions get independent guards.
+	advisorInFlight atomic.Bool
+	// parentAdvisorInFlight, when non-nil, points at the root agent's
+	// advisorInFlight flag (see advisorGuard) so a sub-agent shares its
+	// parent's guard instead of getting its own independent one.
+	parentAdvisorInFlight *atomic.Bool
 	// Runtime overrides for the small-model gate/name and the auto-permission
 	// judge model. Nil means "follow config"; once set, the override is
 	// authoritative for the agent's lifetime, and a non-nil EMPTY string model
@@ -446,6 +454,9 @@ type Agent struct {
 	preloadedModelContextReady bool   // true once ModelContextInfo has been computed
 	envPromptDate              string // date string used to build envPromptStr; stale = rebuild
 	envPromptStr               string // cached result of environmentPrompt()
+	envPromptCwd               string // cwd used to build envPromptStr
+	envPromptRoot              string // workspace root used to build envPromptStr
+	envPromptEnvHash           string // hash of NVM_DIR/PYENV_ROOT/PATH-relevant env for cache invalidation
 	// pipeline, if set, runs in-process hook callbacks for tool calls and chat
 	// requests. Field is named "pipeline" (not "hooks") because the hooks package
 	// is already imported under that name.
@@ -4196,6 +4207,29 @@ func (a *Agent) SetParentAdvisorEnabled(parent *atomic.Bool) {
 	a.parentAdvisorEnabled = parent
 }
 
+// SetParentAdvisorInFlight wires this agent's advisor recursion guard to the
+// parent's atomic flag, so this agent and its ancestor share one guard.
+func (a *Agent) SetParentAdvisorInFlight(parent *atomic.Bool) {
+	a.parentAdvisorInFlight = parent
+}
+
+// AdvisorGuard returns the guard for this logical session. Callers that create
+// a replacement or side-query agent for the same session must pass this to
+// SetParentAdvisorInFlight so advisor calls remain serialized across agents.
+func (a *Agent) AdvisorGuard() *atomic.Bool {
+	return a.advisorGuard()
+}
+
+// advisorGuard returns the atomic flag used to serialize advisor calls within
+// this logical session. Child/replacement agents resolve to the inherited root
+// flag, while unrelated sessions remain independent.
+func (a *Agent) advisorGuard() *atomic.Bool {
+	if a.parentAdvisorInFlight != nil {
+		return a.parentAdvisorInFlight
+	}
+	return &a.advisorInFlight
+}
+
 // AdvisorEnabled reports whether the advisor tool is currently exposed.
 // When a parent pointer is set, it reads from the parent (reactive);
 // otherwise it reads the agent's own static flag.
@@ -4290,6 +4324,9 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 func (a *Agent) clearEnvironmentPromptCache() {
 	a.envPromptDate = ""
 	a.envPromptStr = ""
+	a.envPromptCwd = ""
+	a.envPromptRoot = ""
+	a.envPromptEnvHash = ""
 }
 
 // ModelContextInfo reports where the active model's model-specific context was
@@ -4496,6 +4533,9 @@ func (a *Agent) Shutdown() {
 	}
 	// Shut down doc maintenance worker (drains current item, drops queued).
 	a.docMaintShutdown()
+	// Shut down memory maintenance worker as well. Both workers are started by
+	// NewAgent; leaving this channel open leaks one goroutine per agent.
+	a.memoryMaintShutdown()
 	// Wait for any abandoned orphan-recovery goroutine (see
 	// recoverOneOrphanedToolCall) to finish before resetting shared state
 	// below, so it can't race the reset.

@@ -9,6 +9,20 @@
 
 
 
+
+## 2026-08-28
+
+* **Update**: Plugin Auto-Permission — Arbitrary Execution Risk ([gotchas/plugin-auto-permission-security.md](/gotchas/plugin-auto-permission-security.md))
+* **Creation**: Chat Input — Queued Messages Lost on Submission Failure ([gotchas/chat-input-message-loss.md](/gotchas/chat-input-message-loss.md))
+* **Creation**: ocode debug CLI Reference ([guides/debug-cli.md](/guides/debug-cli.md))
+* **Update**: Plugin Removal — Root Directory Deletion Risk ([gotchas/plugin-removal-root-deletion.md](/gotchas/plugin-removal-root-deletion.md))
+* **Update**: Debug Instrumentation Ships Unconditionally ([gotchas/debug-instrumentation-ships-unconditionally.md](/gotchas/debug-instrumentation-ships-unconditionally.md))
+* **Update**: Plugin Install Rollback Bug ([gotchas/plugin-install-rollback-bug.md](/gotchas/plugin-install-rollback-bug.md))
+* **Creation**: FilePicker.test.tsx Stale Build Status — Corrected ([gotchas/filepicker-stale-todo.md](/gotchas/filepicker-stale-todo.md))
+* **Creation**: Debug Instrumentation Ships Unconditionally ([gotchas/debug-instrumentation-ships-unconditionally.md](/gotchas/debug-instrumentation-ships-unconditionally.md))
+* **Creation**: Plugin Auto-Permission — Arbitrary Execution Risk ([gotchas/plugin-auto-permission-security.md](/gotchas/plugin-auto-permission-security.md))
+* **Creation**: Plugin Removal — Root Directory Deletion Risk ([gotchas/plugin-removal-root-deletion.md](/gotchas/plugin-removal-root-deletion.md))
+* **Creation**: Plugin Install Rollback Bug ([gotchas/plugin-install-rollback-bug.md](/gotchas/plugin-install-rollback-bug.md))
 ## 2026-08-27
 
 * **Update**: Plugin System ([plugins.md](/plugins.md))

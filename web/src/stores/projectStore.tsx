@@ -272,7 +272,7 @@ interface ProjectContextType {
    *  the current running one), unless `reuseIfEmpty` is set and the active tab
    *  is an empty `new-*` tab (no draft, no session), in which case it just
    *  activates it. */
-  openNewSessionTab: (reuseIfEmpty?: boolean) => string | null;
+  openNewSessionTab: (reuseIfEmpty?: boolean, projectPath?: string) => string | null;
   /** Opens a session tab for the active project. If no project is active yet
    *  (boot race), remembers it and applies once a project is selected. */
   openDeepLinkSession: (sessionId: string, sessionTitle?: string) => void;
@@ -556,8 +556,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "SET_SESSION_PICKER", open: !state.sessionPickerOpen });
   }, [state.sessionPickerOpen]);
 
-  const openNewSessionTab = useCallback((reuseIfEmpty = false): string | null => {
-    const path = state.activeProject?.path || "";
+  const openNewSessionTab = useCallback((reuseIfEmpty = false, projectPath?: string): string | null => {
+    const path = projectPath ?? state.activeProject?.path ?? "";
     const activeId = state.activeTabByProject[path] || null;
     // Reuse the active tab when it is a completely empty new-session tab —
     // no point stacking duplicate blank tabs. Otherwise always add a fresh tab

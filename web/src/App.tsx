@@ -3,13 +3,13 @@ import { Routes, Route } from "react-router-dom";
 import { PanelLeft, PanelLeftClose, Plus } from "lucide-react";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
-import { ProjectProvider, useProjectState } from "./stores/projectStore";
+import { ProjectProvider, findProjectPathForTab, useProjectState } from "./stores/projectStore";
 import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ChatPanel from "./components/Chat/ChatPanel";
 import AgentPreview from "./components/Chat/AgentPreview";
 import AgentsPanel from "./components/Agents/AgentsPanel";
-import ChatInput from "./components/Chat/ChatInput";
+import ChatInput, { type SlashCommandResult } from "./components/Chat/ChatInput";
 import StatusBar from "./components/common/StatusBar";
 import StatusPanel from "./components/Status/StatusPanel";
 import CommandPalette from "./components/common/CommandPalette";
@@ -103,7 +103,7 @@ function HomeApp() {
   // token) just to keep this reference "fresh" — see useChatStateRef's docs.
   const chatStateRef = useChatStateRef();
   const { state: projectState, tabs, activeTabId, dispatch: projectDispatch, openSessionTab, openNewSessionTab, closeSessionTab } = useProjectState();
-  const { resolvePermission, pendingPermission, sendMessage: sendToActiveSession } = useChat(activeTabId);
+  const { resolvePermission, pendingPermission } = useChat(activeTabId);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [coworkOpen, setCoworkOpen] = useState(true);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -343,18 +343,57 @@ function HomeApp() {
     setModelDialogOpen(true);
   };
 
-  const handleCommand = async (cmd: string) => {
+  const rekeySession = useCallback((tempTabId: string, sessionId: string) => {
+    dispatch({ type: "REKEY_SESSION", oldId: tempTabId, newId: sessionId });
+    rekeyQueue(tempTabId, sessionId);
+    rekeyDraft(tempTabId, sessionId);
+    projectDispatch({
+      type: "UPDATE_TAB_ID",
+      oldId: tempTabId,
+      newId: sessionId,
+      newTitle: "New session",
+    });
+  }, [dispatch, projectDispatch]);
+
+  // Commands may be drained by a hidden ChatInput belonging to a background
+  // tab. Keep the originating session explicit rather than routing a command
+  // through whichever tab is active when its async work completes.
+  const sendCommandToSession = useCallback(async (sessionId: string | null, content: string): Promise<boolean> => {
+    if (!sessionId) return false;
+    dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
+    dispatch({ type: "SET_ERROR", sessionId, error: null });
+    try {
+      if (sessionId.startsWith("new-")) {
+        const projectPath = findProjectPathForTab(projectState, sessionId) ?? projectState.activeProject?.path;
+        if (!projectPath) throw new Error("Select a project before starting a chat.");
+        const result = await api.chat(content, undefined, undefined, sessionId, projectPath);
+        rekeySession(sessionId, result.sessionId);
+      } else {
+        await api.sendMessage(sessionId, content);
+      }
+      return true;
+    } catch (err) {
+      dispatch({ type: "SET_ERROR", sessionId, error: err instanceof Error ? err.message : "send failed" });
+      dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+      return false;
+    }
+  }, [dispatch, projectState, rekeySession]);
+
+  const handleCommand = async (cmd: string, targetSessionId: string | null = activeTabId): Promise<SlashCommandResult> => {
     const baseCmd = cmd.split(" ")[0];
+    const targetProjectPath = targetSessionId
+      ? findProjectPathForTab(projectState, targetSessionId) ?? projectState.activeProject?.path
+      : projectState.activeProject?.path;
     // Built-in quick actions that don't need the dispatch pipeline
     if (baseCmd === "/clear" || baseCmd === "/new") {
-      openNewSessionTab(isNewSessionTabEmpty(activeTabId));
-      return true;
+      openNewSessionTab(isNewSessionTabEmpty(targetSessionId), targetProjectPath);
+      return { handled: true, accepted: true };
     }
     // Bare /model opens the model dialog. With a name argument it falls
     // through to the shared dispatch (TUI /models <name> parity).
     if (baseCmd === "/model" && !cmd.slice(baseCmd.length).trim()) {
       openModelDialog("main");
-      return true;
+      return { handled: true, accepted: true };
     }
 
     // Delegate to the shared command dispatch
@@ -421,22 +460,22 @@ function HomeApp() {
         syncLoginStart: () => api.syncLoginStart(),
         syncLogout: () => api.syncLogout(),
       },
-      getMessages: () => getSessionSlice(chatStateRef.current, activeTabId).messages,
-      getSessionId: () => activeTabId,
+      getMessages: () => getSessionSlice(chatStateRef.current, targetSessionId).messages,
+      getSessionId: () => targetSessionId,
     });
 
-    if (!result.handled) return false;
+    if (!result.handled) return { handled: false, accepted: true };
 
     if (result.openModelPicker) {
       openModelDialog("main");
-      return true;
+      return { handled: true, accepted: true };
     }
 
     // Apply result effects
     if (result.messages) {
       for (const msg of result.messages) {
-        if (activeTabId) {
-          dispatch({ type: "ADD_MESSAGE", sessionId: activeTabId, message: msg });
+        if (targetSessionId) {
+          dispatch({ type: "ADD_MESSAGE", sessionId: targetSessionId, message: msg });
         }
       }
     }
@@ -444,18 +483,19 @@ function HomeApp() {
       // Server-assembled prompt (/standup, /changes, /review, /learn,
       // /doc-sync, /mem update, /docs init): send through the normal chat
       // pipeline exactly like the TUI dispatching the same command.
-      sendToActiveSession(result.prompt);
+      const accepted = await sendCommandToSession(targetSessionId, result.prompt);
+      return { handled: true, startedTurn: true, accepted };
     }
     if (result.sessionId) {
       openSessionTab(result.sessionId, result.sessionId);
     }
     if (result.newSession) {
-      openNewSessionTab(isNewSessionTabEmpty(activeTabId));
+      openNewSessionTab(isNewSessionTabEmpty(targetSessionId), targetProjectPath);
     }
     if (result.download) {
       triggerDownload(result.download.filename, result.download.content, result.download.mimeType);
     }
-    return true;
+    return { handled: true, accepted: true };
   };
 
   // Direct fallback for the temp-tab → real-session rename: SessionTabSync
@@ -463,15 +503,7 @@ function HomeApp() {
   // arrives first. REKEY_SESSION/UPDATE_TAB_ID are both idempotent (no-op if
   // the old id is already gone), so running this twice is safe.
   const handleSessionCreated = (tempTabId: string, sessionId: string) => {
-    dispatch({ type: "REKEY_SESSION", oldId: tempTabId, newId: sessionId });
-    rekeyQueue(tempTabId, sessionId);
-    rekeyDraft(tempTabId, sessionId);
-    projectDispatch({
-      type: "UPDATE_TAB_ID",
-      oldId: tempTabId,
-      newId: sessionId,
-      newTitle: "New session",
-    });
+    rekeySession(tempTabId, sessionId);
   };
 
   const allChatTabs = Object.values(projectState.tabsByProject).flat();

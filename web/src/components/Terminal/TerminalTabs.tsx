@@ -407,11 +407,13 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
         </div>
 
         <div className="relative flex-1">
-          {/* ProcessesPanel is always mounted to preserve WebSocket/PTY state;
-              visibility toggled via CSS hidden class. */}
-          <div className={activeId === PROCESSES_TAB_ID ? "absolute inset-0" : "absolute inset-0 hidden"}>
-            <ProcessesPanel projectPath={projectPath} />
-          </div>
+          {/* Process telemetry is mounted only for the active project; terminal
+              panels below remain mounted so their WebSockets/PTYs survive tab switches. */}
+          {active && (
+            <div className={activeId === PROCESSES_TAB_ID ? "absolute inset-0" : "absolute inset-0 hidden"}>
+              <ProcessesPanel projectPath={projectPath} />
+            </div>
+          )}
 
           {/* TerminalPanels are always mounted to preserve WebSocket/PTY state;
               only the active tab is visible. Empty state shown when no terminals exist. */}

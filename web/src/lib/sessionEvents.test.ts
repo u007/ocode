@@ -10,6 +10,8 @@ import {
 import type { BusEnvelope } from "./eventBus";
 import type { ChatAction, ChatState } from "../stores/chatStore";
 import { chatReducer, initialState } from "../stores/chatStore";
+import { clearDraft, getDraft, setDraft } from "./tabDrafts";
+import { clearQueue, getQueue, pushQueued } from "./tabQueue";
 
 const mockGetSessionState = vi.fn();
 const mockGetSession = vi.fn();
@@ -182,6 +184,8 @@ describe("routeBusEnvelope", () => {
 
   it("session_started rekeys a new-* tab and keeps the routing set in sync", () => {
     const { router, actions, projectActions } = makeRouter(["new-123"]);
+    setDraft("new-123", "draft");
+    pushQueued("new-123", { kind: "message", text: "queued" });
     routeBusEnvelope(
       env("session_started", { session_id: "s9", data: { session_id: "s9", request_id: "new-123" } }),
       router,
@@ -192,6 +196,12 @@ describe("routeBusEnvelope", () => {
     ]);
     expect(router.openSessionIds.has("new-123")).toBe(false);
     expect(router.openSessionIds.has("s9")).toBe(true);
+    expect(getDraft("new-123")).toBe("");
+    expect(getDraft("s9")).toBe("draft");
+    expect(getQueue("new-123")).toEqual([]);
+    expect(getQueue("s9")).toEqual([{ kind: "message", text: "queued" }]);
+    clearDraft("s9");
+    clearQueue("s9");
   });
 
   it("does not create a slice for a never-opened session (memory-leak guard)", () => {
