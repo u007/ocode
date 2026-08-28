@@ -55,6 +55,55 @@ func TestRecordAndQuery(t *testing.T) {
 	}
 }
 
+// TestQueryPicksUpRecordsAppendedAfterCache verifies the incremental cache
+// (see queryCached) doesn't miss records written between two Query calls —
+// it must re-stat and read only the newly appended bytes, not serve a
+// stale snapshot.
+func TestQueryPicksUpRecordsAppendedAfterCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	origDir := dataDirFn
+	dataDirFn = func() (string, error) {
+		return filepath.Join(tmpDir, "usage"), nil
+	}
+	defer func() { dataDirFn = origDir }()
+
+	now := time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
+
+	if err := RecordUsage(now, "gpt-4o", "openai", 100, 50, 0, 150, 0.001); err != nil {
+		t.Fatalf("RecordUsage failed: %v", err)
+	}
+
+	records, err := Query(time.Time{}, now.Add(3*time.Hour))
+	if err != nil {
+		t.Fatalf("Query failed: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record before second write, got %d", len(records))
+	}
+
+	if err := RecordUsage(now.Add(time.Hour), "gpt-4o-mini", "openai", 200, 100, 0, 300, 0.0002); err != nil {
+		t.Fatalf("RecordUsage failed: %v", err)
+	}
+
+	records, err = Query(time.Time{}, now.Add(3*time.Hour))
+	if err != nil {
+		t.Fatalf("Query failed: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records after second write, got %d", len(records))
+	}
+
+	// A third call with no new writes must return the same data straight
+	// from cache (no error, no duplicates).
+	records, err = Query(time.Time{}, now.Add(3*time.Hour))
+	if err != nil {
+		t.Fatalf("Query failed: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records on cached re-query, got %d", len(records))
+	}
+}
+
 func TestSummarize(t *testing.T) {
 	now := time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
 

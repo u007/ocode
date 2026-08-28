@@ -211,7 +211,9 @@ export default function ChatInput({
         headers: authHeaders(),
         body: fd,
       });
-      const saved: { name: string }[] = await r.json();
+      const raw: unknown = await r.json();
+      const saved: { name: string }[] = Array.isArray(raw) ? (raw as { name: string }[]) : [];
+      if (!Array.isArray(raw)) console.warn("upload response was not an array:", raw);
       setAttachedFiles((prev) => [...prev, ...saved.map((f) => f.name)]);
     } catch (err) {
       console.error("upload failed:", err);

@@ -440,7 +440,12 @@ func (h *Handler) broadcastEvent(ev SSEEvent) {
 	}
 	h.bus.Publish(ev.Event, project, ev.SessionID, ev.Data)
 	if ev.SessionID != "" {
-		h.sessions.SetLastSeq(ev.SessionID, h.bus.LastSeq())
+		seq := h.bus.LastSeq()
+		h.sessions.SetLastSeq(ev.SessionID, seq)
+		// Buffer streaming frames for mid-turn reload replay (session_manager.go
+		// appendLiveFrame) — a no-op for any event type outside liveFrameEvents
+		// or a session with no active turn.
+		h.sessions.appendLiveFrame(ev.SessionID, ev.Event, ev.Data, seq)
 	}
 }
 

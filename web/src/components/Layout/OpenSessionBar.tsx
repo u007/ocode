@@ -8,8 +8,8 @@ import { api } from "../../api/client";
 import type { SessionSlice } from "../../stores/chatStore";
 import { X, List, Plus, Loader2 } from "lucide-react";
 
-// While a tab's session has an in-flight turn, show what it's doing instead
-// of its (possibly stale) title. Reverts to the title once idle.
+// While a tab's session has an in-flight turn, show what it's doing as a
+// badge alongside its title (never replacing the title). Reverts once idle.
 function activeProcessLabel(slice: SessionSlice): string | null {
   if (!slice.turnActive) return null;
   for (let i = slice.live.length - 1; i >= 0; i--) {
@@ -151,7 +151,7 @@ export default function OpenSessionBar() {
         const derived = tabsDerived[i];
         const hasPending = derived.hasPending;
         const processLabel = derived.processLabel;
-        const displayTitle = processLabel ?? (tab.title || tab.id.slice(0, 12));
+        const displayTitle = tab.title || tab.id.slice(0, 12);
         const isEditing = editingTabId === tab.id;
         return (
           <div
@@ -192,9 +192,10 @@ export default function OpenSessionBar() {
                 className="max-w-28 w-24 bg-zinc-950 text-zinc-100 rounded px-1 outline-none border border-blue-500"
               />
             ) : (
+              <>
               <span
-                className="max-w-28 truncate"
-                title={processLabel ? `${displayTitle} (double-click to rename)` : "Double-click to rename"}
+                className="max-w-28 truncate shrink-0"
+                title="Double-click to rename"
                 onDoubleClick={(e) => {
                   e.stopPropagation();
                   startRename(tab.id, tab.title || "");
@@ -202,6 +203,12 @@ export default function OpenSessionBar() {
               >
                 {displayTitle}
               </span>
+              {processLabel && (
+                <span className="max-w-24 truncate text-[10px] leading-none px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0" title={processLabel}>
+                  {processLabel}
+                </span>
+              )}
+              </>
             )}
             <span
               role="button"

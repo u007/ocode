@@ -2,6 +2,98 @@ import { createContext, useCallback, useContext, useEffect, useRef, type ReactNo
 import { Store, useSelector } from "@tanstack/react-store";
 import type { Message, LivePart, TUIStatus, QuestionPrompt } from "../api/types";
 
+// ── Rehydrate pending asks from persisted transcript ──────────────
+// The server persists a permission/question pause as a sentinel in the
+// transcript (tool.SENTINEL_PERMISSION_ASK / QUESTION_PROMPT) but omits
+// `permission`/`question` from liveFrames (session_manager.go). A reload
+// therefore loses the dialog unless we reconstruct it from the messages
+// snapshot. This mirrors the server's tailIsPermissionAsk / tailIsQuestionAsk
+// (trailing tool-role run only).
+export const SENTINEL_PERMISSION_ASK = "PERMISSION_ASK:";
+export const SENTINEL_QUESTION_PROMPT = "QUESTION_PROMPT:";
+export const SENTINEL_WAITING = "WAITING_FOR_USER_RESPONSE";
+
+function trailingToolRunStart(messages: Message[]): number {
+  let i = messages.length;
+  while (i > 0 && messages[i - 1].role === "tool") i--;
+  return i;
+}
+
+function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
+  if (msg.role !== "tool" || !msg.content.startsWith(SENTINEL_PERMISSION_ASK)) return null;
+  const payload = msg.content.slice(SENTINEL_PERMISSION_ASK.length).trim();
+  if (!payload) return null;
+  try {
+    const req = JSON.parse(payload) as Record<string, unknown>;
+    const toolName = (req["tool_name"] as string) || "";
+    if (!toolName) return null;
+    const commandRaw = (req["command"] as string) || "";
+    const argsRaw = req["args"];
+    let command = commandRaw;
+    if (!command && argsRaw != null) {
+      command = typeof argsRaw === "string" ? (argsRaw as string) : JSON.stringify(argsRaw);
+    }
+    const toolCallId = (msg.tool_call_id as string | undefined) ?? "";
+    return {
+      tool: toolName,
+      command: command || undefined,
+      rule: (req["rule"] as string) || undefined,
+      summary: (req["summary"] as string) || undefined,
+      deny_reason: (req["deny_reason"] as string) || undefined,
+      model_unavailable: (req["model_unavailable"] as string) || undefined,
+      request_id: toolCallId || (req["request_id"] as string) || "",
+      scope: (req["scope"] as string) || undefined,
+      prefix: (req["prefix"] as string) || undefined,
+      out_of_scope_path: (req["out_of_scope_path"] as string) || undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseQuestionFromMessage(msg: Message): QuestionRequest | null {
+  if (msg.role !== "tool") return null;
+  const idx = msg.content.indexOf(SENTINEL_QUESTION_PROMPT);
+  if (idx === -1) return null;
+  if (!msg.content.includes(SENTINEL_WAITING)) return null;
+  let payload = msg.content.slice(idx + SENTINEL_QUESTION_PROMPT.length);
+  const waitIdx = payload.indexOf(SENTINEL_WAITING);
+  if (waitIdx !== -1) payload = payload.slice(0, waitIdx);
+  payload = payload.trim();
+  if (!payload) return null;
+  try {
+    const prompts = JSON.parse(payload) as QuestionPrompt[];
+    if (!Array.isArray(prompts) || prompts.length === 0) return null;
+    const toolCallId = (msg.tool_call_id as string | undefined) ?? "";
+    return { request_id: toolCallId || "", questions: prompts };
+  } catch {
+    return null;
+  }
+}
+
+export function extractPendingFromMessages(messages: Message[]): {
+  pendingPermission: PermissionRequest | null;
+  permissionQueue: PermissionRequest[];
+  pendingQuestion: QuestionRequest | null;
+} {
+  const start = trailingToolRunStart(messages);
+  const trailing = messages.slice(start);
+  const asks: PermissionRequest[] = [];
+  let question: QuestionRequest | null = null;
+  for (const msg of trailing) {
+    const perm = parsePermissionFromMessage(msg);
+    if (perm) asks.push(perm);
+    const q = parseQuestionFromMessage(msg);
+    if (q) question = q; // last question wins (at most one pending round)
+  }
+  if (asks.length === 0) {
+    return { pendingPermission: null, permissionQueue: [], pendingQuestion: question };
+  }
+  const pendingPermission = asks[asks.length - 1];
+  const permissionQueue = asks.slice(0, -1);
+  return { pendingPermission, permissionQueue, pendingQuestion: question };
+}
+
 export interface PermissionRequest {
   tool: string;
   command?: string;
@@ -257,12 +349,18 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // the mirror's snapshot is authoritative history, so a tab whose slice
       // was populated by the mirror must not keep its "loading" spinner
       // waiting on a history fetch that is now redundant.
-      return updateSession(state, action.sessionId, (s) => ({
-        ...s,
-        messages: action.messages,
-        live: [],
-        initialized: true,
-      }));
+      return updateSession(state, action.sessionId, (s) => {
+        const pending = extractPendingFromMessages(action.messages);
+        return {
+          ...s,
+          messages: action.messages,
+          live: [],
+          initialized: true,
+          pendingPermission: pending.pendingPermission,
+          permissionQueue: pending.permissionQueue,
+          pendingQuestion: pending.pendingQuestion,
+        };
+      });
     case "MARK_INITIALIZED":
       // Marks a slice as initialized without replacing its content — used when
       // the mirror already populated the slice (messages/live) before the
@@ -562,6 +660,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             initialized: true,
           };
         }
+        const pending = extractPendingFromMessages(action.messages);
         return {
           ...s,
           messages: action.messages,
@@ -569,6 +668,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           hasMore: action.messages.length < action.total,
           live: s.turnActive ? s.live : [],
           initialized: true,
+          pendingPermission: pending.pendingPermission,
+          permissionQueue: pending.permissionQueue,
+          pendingQuestion: pending.pendingQuestion,
         };
       });
     default:

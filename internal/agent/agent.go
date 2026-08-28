@@ -417,7 +417,11 @@ type Agent struct {
 	// each sub-agent's OnPermissionAsk so sub-agent asks reach the TUI.
 	subAgentPermAsker func(PermissionRequest) PermissionResponse
 	// maxSteps limits the number of agentic iterations. 0 = unlimited.
-	maxSteps int
+	// atomic so a concurrent SetMaxSteps (from TUI command or server
+	// HandleSetLimitsConfig) does not race Step's loop read. Step checks
+	// isCancelled() at loop top, so a change mid-turn takes effect on the
+	// next iteration.
+	maxSteps atomic.Int64
 	// stepLimitHit records whether the most recent Step() call was cut off by
 	// maxSteps and forced into the "stop and summarize" branch, rather than
 	// finishing because the model naturally stopped calling tools. Callers
@@ -853,6 +857,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	a.runs = NewAgentRunRegistry()
 	if cfg != nil {
 		a.runs.SetMaxConcurrent(cfg.Ocode.MaxConcurrentAgents)
+		a.maxSteps.Store(int64(cfg.Ocode.MaxSteps))
 	}
 	snapDir := a.projectSnapshotsDir()
 	a.snapshotStore = snapshot.NewStore(snapshot.NewAgentID(), snapDir)
@@ -1125,7 +1130,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		if i == 0 {
 			a.emitDebug("AGENT", fmt.Sprintf("Step: %d msgs (after prompt prep, was %d) with %d tools", len(messages), preLen, len(toolDefs)))
 		}
-		limit := a.maxSteps
+		limit := int(a.maxSteps.Load())
 		if limit <= 0 {
 			limit = 100
 		}
@@ -4253,7 +4258,7 @@ func (a *Agent) SetSpec(spec *AgentSpec) {
 		a.mode = spec.Mode
 	}
 	if spec != nil && spec.MaxSteps > 0 {
-		a.maxSteps = spec.MaxSteps
+		a.maxSteps.Store(int64(spec.MaxSteps))
 	}
 	a.applySpecModel(spec)
 }
@@ -4261,13 +4266,13 @@ func (a *Agent) SetSpec(spec *AgentSpec) {
 // SetMaxSteps overrides the runtime step limit. 0 or negative means unlimited
 // (the step loop applies a default cap of 100).
 func (a *Agent) SetMaxSteps(n int) {
-	a.maxSteps = n
+	a.maxSteps.Store(int64(n))
 }
 
 // GetMaxSteps returns the current runtime step limit. 0 means unlimited
 // (default cap of 100 applies in the step loop).
 func (a *Agent) GetMaxSteps() int {
-	return a.maxSteps
+	return int(a.maxSteps.Load())
 }
 
 // StepLimitHit reports whether the most recently completed Step() call was

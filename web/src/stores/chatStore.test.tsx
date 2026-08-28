@@ -553,3 +553,159 @@ describe("chatStore permission dialog lifecycle", () => {
     expect(slice.pendingPermission?.out_of_scope_path).toBe("/var/log");
   });
 });
+
+describe("chatStore reload rehydration from transcript snapshot", () => {
+  const makeAskMsg = (id: string, toolName = "bash", command = "rm -rf /tmp/x") => ({
+    role: "tool" as const,
+    content:
+      "PERMISSION_ASK:" +
+      JSON.stringify({
+        tool_name: toolName,
+        command,
+        rule: `bash.prefix.${toolName}`,
+        scope: "bash_prefix",
+        prefix: toolName,
+      }),
+    tool_call_id: id,
+  });
+  const makeQuestionMsg = (id: string) => ({
+    role: "tool" as const,
+    content:
+      "QUESTION_PROMPT:" +
+      JSON.stringify([{ header: "h", question: "q?", options: [{ label: "a" }] }]) +
+      "\n\nWAITING_FOR_USER_RESPONSE",
+    tool_call_id: id,
+  });
+
+  it("SET_MESSAGES rehydrates a single pending permission after reload", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "", tool_calls: [{ id: "call-1", type: "function", function: { name: "bash", arguments: "{}" } }] },
+        makeAskMsg("call-1"),
+      ],
+    });
+    const slice = getSessionSlice(state, "a");
+    expect(slice.pendingPermission?.request_id).toBe("call-1");
+    expect(slice.pendingPermission?.tool).toBe("bash");
+    expect(slice.permissionQueue).toHaveLength(0);
+  });
+
+  it("MERGE_SNAPSHOT rehydrates multiple trailing asks with queue ordering", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "MERGE_SNAPSHOT",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: "{}" } }, { id: "c2", type: "function", function: { name: "delete", arguments: "{}" } }] },
+        makeAskMsg("c1", "bash", "rm a"),
+        makeAskMsg("c2", "delete", "delete b"),
+      ],
+      total: 4,
+    });
+    const slice = getSessionSlice(state, "a");
+    expect(slice.pendingPermission?.request_id).toBe("c2");
+    expect(slice.permissionQueue).toHaveLength(1);
+    expect(slice.permissionQueue[0].request_id).toBe("c1");
+    // resolving newest should resurface older
+    state = chatReducer(state, { type: "PERMISSION_RESOLVED", sessionId: "a", requestId: "c2" });
+    expect(getSessionSlice(state, "a").pendingPermission?.request_id).toBe("c1");
+  });
+
+  it("rehydrates a pending question prompt", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "", tool_calls: [{ id: "q1", type: "function", function: { name: "question", arguments: "{}" } }] },
+        makeQuestionMsg("q1"),
+      ],
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q1");
+    expect(getSessionSlice(state, "a").pendingQuestion?.questions[0].question).toBe("q?");
+  });
+
+  it("rehydrates both permission and question when both trail", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: "{}" } }, { id: "q1", type: "function", function: { name: "question", arguments: "{}" } }] },
+        makeAskMsg("c1"),
+        makeQuestionMsg("q1"),
+      ],
+    });
+    expect(getSessionSlice(state, "a").pendingPermission?.request_id).toBe("c1");
+    expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q1");
+  });
+
+  it("ignores malformed sentinel and non-trailing asks", () => {
+    let state = initial();
+    // ask not at trailing run (followed by assistant) + malformed second ask
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "hi" },
+        makeAskMsg("old"),
+        { role: "assistant", content: "done" },
+        { role: "tool", content: "PERMISSION_ASK:not-json", tool_call_id: "bad" },
+      ],
+    });
+    expect(getSessionSlice(state, "a").pendingPermission).toBeNull();
+    expect(getSessionSlice(state, "a").pendingQuestion).toBeNull();
+  });
+
+  it("clears stale pending when snapshot has no sentinel", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "PERMISSION_REQUEST",
+      sessionId: "a",
+      permission: { tool: "bash", command: "rm", request_id: "c1", scope: "bash_prefix", prefix: "rm" },
+    });
+    expect(getSessionSlice(state, "a").pendingPermission?.request_id).toBe("c1");
+    // server resolved it — new snapshot without sentinel should clear
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "done" },
+      ],
+    });
+    expect(getSessionSlice(state, "a").pendingPermission).toBeNull();
+    expect(getSessionSlice(state, "a").permissionQueue).toHaveLength(0);
+  });
+
+  it("MERGE_SNAPSHOT mid-turn guard preserves live and does not clobber pending", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_TURN_STATE", sessionId: "a", turnActive: true });
+    state = chatReducer(state, {
+      type: "PERMISSION_REQUEST",
+      sessionId: "a",
+      permission: { tool: "bash", command: "rm", request_id: "live-c1", scope: "bash_prefix", prefix: "rm" },
+    });
+    // give slice some committed messages so guard triggers
+    state = chatReducer(state, {
+      type: "ADD_MESSAGE",
+      sessionId: "a",
+      message: { role: "user", content: "hi" },
+    });
+    const before = getSessionSlice(state, "a").pendingPermission?.request_id;
+    state = chatReducer(state, {
+      type: "MERGE_SNAPSHOT",
+      sessionId: "a",
+      messages: [{ role: "user", content: "old disk" }],
+      total: 1,
+    });
+    expect(getSessionSlice(state, "a").pendingPermission?.request_id).toBe(before);
+  });
+});

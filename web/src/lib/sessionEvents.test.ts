@@ -5,6 +5,7 @@ import {
   RECONCILE_PAGE_SIZE,
   LIVE_DELTA_FLUSH_MS,
   cancelLiveDeltas,
+  __resetLastAppliedSeqForTests,
   type SessionEventRouter,
 } from "./sessionEvents";
 import type { BusEnvelope } from "./eventBus";
@@ -300,8 +301,8 @@ describe("reconcileOpenSessions", () => {
   it("refetches state + transcript for every real open session, skipping new-* tabs", async () => {
     mockGetSessionState.mockResolvedValue({ bootstrap_stage: "ready", turn_active: false, last_seq: 10 });
     mockGetSession.mockResolvedValue({ messages: [{ role: "assistant", content: "rec" }], total: 1 });
-    const actions: ChatAction[] = [];
-    await reconcileOpenSessions(new Set(["s1", "new-9"]), (a) => actions.push(a));
+    const { router, actions } = makeRouter(["s1"]);
+    await reconcileOpenSessions(new Set(["s1", "new-9"]), router);
 
     expect(mockGetSessionState).toHaveBeenCalledTimes(1);
     expect(mockGetSessionState).toHaveBeenCalledWith("s1");
@@ -318,10 +319,56 @@ describe("reconcileOpenSessions", () => {
     });
     mockGetSession.mockResolvedValue({ messages: [], total: 0 });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const actions: ChatAction[] = [];
-    await reconcileOpenSessions(new Set(["bad", "good"]), (a) => actions.push(a));
+    const { router, actions } = makeRouter(["bad", "good"]);
+    await reconcileOpenSessions(new Set(["bad", "good"]), router);
     expect(actions.filter((a) => a.type === "MERGE_SNAPSHOT").length).toBe(1);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("bad"), expect.any(Error));
+  });
+
+  it("replays buffered live_frames through routeBusEnvelope, deduped against frames already applied live", async () => {
+    __resetLastAppliedSeqForTests();
+    vi.useFakeTimers();
+    const { router, getState } = makeRouter(["s1"]);
+    // A live envelope already landed for seq 1 during the reconnect race
+    // (chatStore.tsx's MERGE_SNAPSHOT comment documents this ordering).
+    routeBusEnvelope(env("text", { session_id: "s1", seq: 1, data: { delta: "hel" } }), router);
+    vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS);
+
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: true,
+      last_seq: 2,
+      live_frames: [
+        { event: "text", seq: 1, data: { delta: "hel" } }, // already applied — must not duplicate
+        { event: "text", seq: 2, data: { delta: "lo" } },
+      ],
+    });
+    mockGetSession.mockResolvedValue({ messages: [], total: 0 });
+
+    await reconcileOpenSessions(new Set(["s1"]), router);
+    vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS);
+    vi.useRealTimers();
+
+    // Deduped: seq 1 skipped, so this is one merged bubble ("hel" + "lo"),
+    // not "hel" replayed again ahead of "lo".
+    expect(getState().sessions["s1"].live).toEqual([{ kind: "text", text: "hello" }]);
+  });
+
+  it("replays a buffered tool_start frame with no prior live activity", async () => {
+    __resetLastAppliedSeqForTests();
+    const { router, getState } = makeRouter(["s1"]);
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: true,
+      last_seq: 1,
+      live_frames: [{ event: "tool_start", seq: 1, data: { tool: "bash", call_id: "c1" } }],
+    });
+    mockGetSession.mockResolvedValue({ messages: [], total: 0 });
+
+    await reconcileOpenSessions(new Set(["s1"]), router);
+
+    const live = getState().sessions["s1"].live;
+    expect(live).toEqual([{ kind: "tool", tool: "bash", callId: "c1", command: undefined }]);
   });
 });
 

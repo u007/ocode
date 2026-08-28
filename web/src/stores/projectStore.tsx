@@ -88,7 +88,7 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
   const path = state.activeProject?.path || "";
   switch (action.type) {
     case "SET_PROJECTS":
-      return { ...state, projects: action.projects, loading: false };
+      return { ...state, projects: Array.isArray(action.projects) ? action.projects : [], loading: false };
     case "SET_LOADING":
       return { ...state, loading: action.loading };
     case "SET_ACTIVE_PROJECT":
@@ -179,7 +179,7 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
     case "RESTORE_TABS":
       return { ...state, tabsByProject: action.tabsByProject, activeTabByProject: action.activeTabByProject, tabsRestored: true };
     case "SET_GROUPS":
-      return { ...state, groups: action.groups };
+      return { ...state, groups: Array.isArray(action.groups) ? action.groups : [] };
     default:
       return state;
   }

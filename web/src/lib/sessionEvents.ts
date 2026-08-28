@@ -132,6 +132,26 @@ const SESSION_SCOPED_EVENTS = new Set([
  *  subscribe to each of these individually; there's no wildcard. */
 export const ROUTABLE_EVENTS = ["session_started", "status", ...SESSION_SCOPED_EVENTS];
 
+/** Highest bus seq already applied per session, via a live envelope or a
+ *  reconcile replay (see reconcileOpenSessions). Lets a mid-turn reload's
+ *  live_frames replay skip anything the live EventSource already delivered
+ *  during the reconnect race — see the MERGE_SNAPSHOT comment in
+ *  chatStore.tsx for why that race exists. */
+const lastAppliedSeq = new Map<string, number>();
+
+function markSeqApplied(sessionId: string, seq: number): void {
+  if (!sessionId || seq == null) return;
+  const prev = lastAppliedSeq.get(sessionId) ?? 0;
+  if (seq > prev) lastAppliedSeq.set(sessionId, seq);
+}
+
+/** Test-only: clear the seq-dedup watermark. lastAppliedSeq is module-level
+ *  (real usage is one page load), so replay tests need to reset it between
+ *  cases that reuse the same session id. */
+export function __resetLastAppliedSeqForTests(): void {
+  lastAppliedSeq.clear();
+}
+
 export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void {
   const { event, session_id: envSessionId, data } = env;
   // The envelope's session_id is authoritative (the server tags at source);
@@ -415,6 +435,11 @@ function routeSessionScoped(
   // for open tabs and already-known sessions — never create one for a
   // never-opened session.
   if (!sessionIsTracked(r, eventSessionId)) return;
+  // Only advance the replay watermark for envelopes actually applied here —
+  // marking it before this gate would let a dropped envelope (tab closed,
+  // e.g.) silently suppress a reconcile replay of a frame the client never
+  // applied. See reconcileOpenSessions.
+  markSeqApplied(eventSessionId, env.seq);
   apply(eventSessionId);
 }
 
@@ -427,13 +452,20 @@ function sessionIsTracked(r: SessionEventRouter, sessionId: string): boolean {
 /**
  * Reconcile on reconnect: for every open tab with a real session id, fetch
  * the session's turn state (GET /api/sessions/:id/state) and refetch its
- * transcript. Placeholder `new-*` tabs are skipped. Recovery after a
- * disconnect is state fetch + transcript refetch, never event replay.
+ * transcript. Placeholder `new-*` tabs are skipped. Recovery for the
+ * persisted transcript is state fetch + transcript refetch; the one
+ * deliberate exception is `live_frames` — whatever streaming text/thinking/
+ * tool activity the server still has buffered from the session's current
+ * turn — which is replayed through routeBusEnvelope (the same reducer path a
+ * live envelope takes) so a mid-turn reload doesn't lose the in-progress
+ * reply while waiting for turn_done. Frames already applied by a live
+ * envelope during the reconnect race are skipped via lastAppliedSeq.
  */
 export async function reconcileOpenSessions(
   openSessionIds: ReadonlySet<string>,
-  dispatch: (action: ChatAction) => void,
+  router: SessionEventRouter,
 ): Promise<void> {
+  const { dispatch } = router;
   const realIds = [...openSessionIds].filter((id) => !id.startsWith("new-"));
   await Promise.all(
     realIds.map(async (sessionId) => {
@@ -448,6 +480,11 @@ export async function reconcileOpenSessions(
           dispatch({ type: "SET_BOOTSTRAP_STAGE", sessionId, stage: state.bootstrap_stage });
         }
         dispatch({ type: "MERGE_SNAPSHOT", sessionId, messages: detail.messages, total: detail.total });
+        const watermark = lastAppliedSeq.get(sessionId) ?? 0;
+        for (const frame of state.live_frames ?? []) {
+          if (frame.seq <= watermark) continue;
+          routeBusEnvelope({ event: frame.event, session_id: sessionId, seq: frame.seq, data: frame.data }, router);
+        }
       } catch (err) {
         console.warn(`eventBus: reconcile failed for session ${sessionId}`, err);
       }

@@ -11,6 +11,129 @@ import (
 	"github.com/u007/ocode/internal/session"
 )
 
+// TestAppendLiveFrameBuffersDuringActiveTurn reproduces the reload-loses-
+// streaming-text bug at the SessionManager layer: while a turn is active,
+// text/thinking/tool_* frames accumulate and come back from State() in order;
+// a non-streaming event type (e.g. "messages") is ignored; and the buffer
+// clears on both the turn-start and turn-end transitions, mirroring
+// broadcastEvent's real call pattern (see handler.go's broadcastEvent, which
+// calls appendLiveFrame after every publish).
+func TestAppendLiveFrameBuffersDuringActiveTurn(t *testing.T) {
+	mgr := NewSessionManager(time.Minute, func() []string { return nil }, nil)
+	id := session.NewSessionID()
+	mgr.Register(id, t.TempDir())
+
+	// No active turn yet: frames are dropped.
+	mgr.appendLiveFrame(id, "text", map[string]string{"delta": "dropped"}, 1)
+	state, ok := mgr.State(id)
+	if !ok {
+		t.Fatal("session not found")
+	}
+	if len(state.LiveFrames) != 0 {
+		t.Fatalf("frame buffered with no active turn: %+v", state.LiveFrames)
+	}
+
+	mgr.setTurnActive(id, true)
+	mgr.appendLiveFrame(id, "text", map[string]string{"delta": "hel"}, 2)
+	mgr.appendLiveFrame(id, "text", map[string]string{"delta": "lo"}, 3)
+	mgr.appendLiveFrame(id, "tool_start", map[string]string{"tool": "bash"}, 4)
+	// Not in liveFrameEvents — must not be buffered.
+	mgr.appendLiveFrame(id, "messages", []string{"final"}, 5)
+
+	state, ok = mgr.State(id)
+	if !ok {
+		t.Fatal("session not found")
+	}
+	if len(state.LiveFrames) != 3 {
+		t.Fatalf("LiveFrames = %d frames, want 3: %+v", len(state.LiveFrames), state.LiveFrames)
+	}
+	wantEvents := []string{"text", "text", "tool_start"}
+	wantSeqs := []uint64{2, 3, 4}
+	for i, f := range state.LiveFrames {
+		if f.Event != wantEvents[i] || f.Seq != wantSeqs[i] {
+			t.Fatalf("frame %d = {%q, seq %d}, want {%q, seq %d}", i, f.Event, f.Seq, wantEvents[i], wantSeqs[i])
+		}
+	}
+
+	// Turn ends: the authoritative `messages` broadcast supersedes the buffer.
+	mgr.setTurnActive(id, false)
+	state, ok = mgr.State(id)
+	if !ok {
+		t.Fatal("session not found")
+	}
+	if len(state.LiveFrames) != 0 {
+		t.Fatalf("LiveFrames not cleared after turn end: %+v", state.LiveFrames)
+	}
+}
+
+// TestAppendLiveFrameClearedWithTurnActive locks down the invariant the fix
+// relies on: liveFrames and turnActive are only ever mutated together, under
+// the same lock (setTurnActive), so State() can never observe a stale buffer
+// alongside turn_active: false — which would replay already-superseded
+// streaming text after the authoritative `messages` broadcast already landed.
+func TestAppendLiveFrameClearedWithTurnActive(t *testing.T) {
+	mgr := NewSessionManager(time.Minute, func() []string { return nil }, nil)
+	id := session.NewSessionID()
+	mgr.Register(id, t.TempDir())
+
+	for i := 0; i < 5; i++ {
+		mgr.setTurnActive(id, true)
+		mgr.appendLiveFrame(id, "text", map[string]string{"delta": "x"}, uint64(i))
+		state, ok := mgr.State(id)
+		if !ok || len(state.LiveFrames) != 1 {
+			t.Fatalf("iteration %d: expected 1 buffered frame while active, got %+v", i, state.LiveFrames)
+		}
+		mgr.setTurnActive(id, false)
+		state, ok = mgr.State(id)
+		if !ok {
+			t.Fatal("session not found")
+		}
+		if state.TurnActive {
+			t.Fatalf("iteration %d: TurnActive still true after setTurnActive(false)", i)
+		}
+		if len(state.LiveFrames) != 0 {
+			t.Fatalf("iteration %d: TurnActive false but LiveFrames non-empty: %+v", i, state.LiveFrames)
+		}
+	}
+}
+
+// TestAppendLiveFrameByteCapTruncatesHead ensures a very long streaming reply
+// (or runaway tool_output) cannot grow a session's buffer unbounded — older
+// frames drop first once liveFramesByteCap is exceeded.
+func TestAppendLiveFrameByteCapTruncatesHead(t *testing.T) {
+	mgr := NewSessionManager(time.Minute, func() []string { return nil }, nil)
+	id := session.NewSessionID()
+	mgr.Register(id, t.TempDir())
+	mgr.setTurnActive(id, true)
+
+	chunk := make([]byte, 1024)
+	for i := range chunk {
+		chunk[i] = 'x'
+	}
+	// Comfortably exceed liveFramesByteCap (256KB) so head frames are evicted.
+	const frames = 300
+	for i := 0; i < frames; i++ {
+		mgr.appendLiveFrame(id, "text", map[string]string{"delta": string(chunk)}, uint64(i))
+	}
+
+	state, ok := mgr.State(id)
+	if !ok {
+		t.Fatal("session not found")
+	}
+	if len(state.LiveFrames) == 0 || len(state.LiveFrames) >= frames {
+		t.Fatalf("expected head-truncation, got %d/%d frames", len(state.LiveFrames), frames)
+	}
+	// The oldest surviving frame must not be seq 0 — that's the head-truncation
+	// contract (drop oldest first), and the newest frame must be the last one
+	// appended (nothing dropped from the tail).
+	if state.LiveFrames[0].Seq == 0 {
+		t.Fatalf("head frame (seq 0) was not truncated")
+	}
+	if last := state.LiveFrames[len(state.LiveFrames)-1].Seq; last != frames-1 {
+		t.Fatalf("tail frame seq = %d, want %d", last, frames-1)
+	}
+}
+
 // saveSessionToDir persists a session into the storage dir for wd, so tests
 // can plant sessions under arbitrary project roots without touching the
 // process-global workdir (the override is reset on test cleanup).

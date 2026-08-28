@@ -1421,6 +1421,7 @@ func (h *Handler) HandleSetLimitsConfig(w http.ResponseWriter, r *http.Request) 
 		h.cfg.Ocode.UndoMaxAgeDelta = req.UndoMaxAgeDelta
 	}
 	h.mu.Unlock()
+	h.applyLimitsToLiveSessions(req.MaxSteps, req.MaxConcurrentAgents)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"max_steps":             req.MaxSteps,
 		"image_max_dim":         req.ImageMaxDim,
@@ -1730,6 +1731,32 @@ func (h *Handler) applyRedactionToLiveSessions(rc config.RedactionConfig) {
 		}
 		as.mu.Lock()
 		h.applyRedactionToAgent(as.agent, rc)
+		as.mu.Unlock()
+	}
+}
+
+// applyLimitsToLiveSessions propagates max-step and max-concurrent limits to
+// every resident agent session so runtime changes via the Settings UI take
+// effect without restarting the server or waiting for the next bootstrap. The
+// h.mu map lock is only held to snapshot ids; per-session updates take
+// as.mu only long enough to call SetMaxSteps / SetMaxConcurrent.
+func (h *Handler) applyLimitsToLiveSessions(maxSteps, maxConcurrent int) {
+	h.mu.Lock()
+	ids := make([]string, 0, len(h.agents))
+	for id := range h.agents {
+		ids = append(ids, id)
+	}
+	h.mu.Unlock()
+	for _, id := range ids {
+		as := h.lookupAgentSession(id)
+		if as == nil || as.agent == nil {
+			continue
+		}
+		as.mu.Lock()
+		as.agent.SetMaxSteps(maxSteps)
+		if as.agent.Runs() != nil {
+			as.agent.Runs().SetMaxConcurrent(maxConcurrent)
+		}
 		as.mu.Unlock()
 	}
 }

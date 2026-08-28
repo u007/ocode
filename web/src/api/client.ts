@@ -466,9 +466,16 @@ export const api = {
   // replay. The watchdog and the reconnect path use this to clear a stuck
   // streaming spinner.
   getSessionState: (id: string) =>
-    fetchJSON<{ bootstrap_stage: string; turn_active: boolean; last_seq: number }>(
-      `/api/sessions/${id}/state`,
-    ),
+    fetchJSON<{
+      bootstrap_stage: string;
+      turn_active: boolean;
+      last_seq: number;
+      // Streaming text/thinking/tool_* frames still buffered from the
+      // session's current turn (see appendLiveFrame server-side), replayed
+      // by reconcileOpenSessions so a mid-turn reload doesn't lose the
+      // in-progress reply. Absent/empty once the turn ends.
+      live_frames?: { event: string; data: unknown; seq: number }[];
+    }>(`/api/sessions/${id}/state`),
   // Per-session status snapshot (Part 03): superset of /api/tui-status with
   // session_id populated and context_* included, so each tab renders its own
   // status without a TUI bridge.

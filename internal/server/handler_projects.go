@@ -20,6 +20,9 @@ func (h *Handler) HandleListProjects(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	list := h.projects.List()
+	if list == nil {
+		list = []projects.Project{}
+	}
 	writeJSON(w, http.StatusOK, list)
 }
 
@@ -339,7 +342,11 @@ func (h *Handler) HandleListGroups(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, []projects.ProjectGroup{})
 		return
 	}
-	writeJSON(w, http.StatusOK, h.projectGroups.ListGroups())
+	groups := h.projectGroups.ListGroups()
+	if groups == nil {
+		groups = []projects.ProjectGroup{}
+	}
+	writeJSON(w, http.StatusOK, groups)
 }
 
 // HandleCreateGroup creates a new project group.

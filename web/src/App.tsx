@@ -508,6 +508,14 @@ function HomeApp() {
 
   const allChatTabs = Object.values(projectState.tabsByProject).flat();
   const activeSessionTab = tabs.find((t) => t.id === activeTabId);
+  // Lazy display:none: keep visited tabs mounted (hidden) so scroll/virtualizer
+  // state survives switches (instant CSS toggle), but avoid mounting all 40
+  // panels eagerly on first load. Only tabs that have been visited once are
+  // kept in the DOM — the rest return null until first activated.
+  const visitedTabsRef = useRef<Set<string>>(new Set());
+  if (activeSessionTab) {
+    visitedTabsRef.current.add(`${activeSessionTab.id}:${activeSessionTab.activeSubTab}`);
+  }
 
   // Refs to TerminalTabs instances so Ctrl/Cmd+T can open a new terminal.
   // Keyed by project path (terminal is project-scoped, not session-scoped,
@@ -574,7 +582,8 @@ function HomeApp() {
                 const projectPaths = Array.from(
                   new Set(
                     [
-                      ...Object.keys(projectState.tabsByProject),
+                      ...((projectState.projects ?? []) as { path: string }[]).map((p) => p.path),
+                      ...Object.keys(projectState.tabsByProject ?? {}),
                       ...(projectState.activeProject ? [projectState.activeProject.path] : []),
                     ].filter(Boolean) as string[],
                   ),
@@ -696,97 +705,64 @@ function HomeApp() {
                           New session
                         </button>
                       </div>
-                    )}
-                    {allChatTabs.map((tab) => (
-                      <div
-                        key={`${tab.id}:chat`}
-                        className={
-                          tab.projectPath === projectState.activeProject?.path &&
-                          tab.id === activeTabId &&
-                          tab.activeSubTab === "chat"
-                            ? "absolute inset-0 flex flex-col"
-                            : "absolute inset-0 hidden"
-                        }
-                      >
-                        <div className="relative flex-1 min-h-0 overflow-hidden">
-                          <ChatPanel sessionId={tab.id} />
+                   )}
+                    {allChatTabs.map((tab) => {
+                      const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "chat";
+                      const key = `${tab.id}:chat`;
+                      if (!visitedTabsRef.current.has(key) && !isActive) return null;
+                      return (
+                        <div
+                          key={key}
+                          className={isActive ? "absolute inset-0 flex flex-col" : "absolute inset-0 hidden"}
+                        >
+                          <div className="relative flex-1 min-h-0 overflow-hidden">
+                            <ChatPanel sessionId={tab.id} />
+                          </div>
+                          <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
+                          <ChatInput onSlashCommand={handleCommand} activeEditorContext={activeEditorContext} sessionTabId={tab.id} onSessionCreated={handleSessionCreated} />
                         </div>
-                        <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
-                        <ChatInput
-                          onSlashCommand={handleCommand}
-                          activeEditorContext={activeEditorContext}
-                          sessionTabId={tab.id}
-                          onSessionCreated={handleSessionCreated}
-                        />
-                      </div>
-                    ))}
-                    {allChatTabs.map((tab) => (
-                      <div
-                        key={`${tab.id}:agents`}
-                        className={
-                          tab.projectPath === projectState.activeProject?.path &&
-                          tab.id === activeTabId &&
-                          tab.activeSubTab === "agents"
-                            ? "absolute inset-0"
-                            : "absolute inset-0 hidden"
-                        }
-                      >
-                        <AgentsPanel
-                          sessionId={tab.id}
-                          selectedRunId={selectedAgentRunId}
-                          onSelectRun={setSelectedAgentRunId}
-                        />
-                      </div>
-                    ))}
-                    {allChatTabs.map((tab) => (
-                      <div
-                        key={`${tab.id}:changes`}
-                        className={
-                          tab.projectPath === projectState.activeProject?.path &&
-                          tab.id === activeTabId &&
-                          tab.activeSubTab === "changes"
-                            ? "absolute inset-0"
-                            : "absolute inset-0 hidden"
-                        }
-                      >
-                        <ChangesPanel
-                          session={tab.id}
-                          active={
-                            tab.projectPath === projectState.activeProject?.path &&
-                            tab.id === activeTabId &&
-                            tab.activeSubTab === "changes"
-                          }
-                        />
-                      </div>
-                    ))}
-                    {allChatTabs.map((tab) => (
-                      <div
-                        key={`${tab.id}:logs`}
-                        className={
-                          tab.projectPath === projectState.activeProject?.path &&
-                          tab.id === activeTabId &&
-                          tab.activeSubTab === "logs"
-                            ? "absolute inset-0"
-                            : "absolute inset-0 hidden"
-                        }
-                      >
-                        <LogPanel
-                          active={tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "logs"}
-                          sessionId={tab.id}
-                        />
-                      </div>
-                    ))}
-                    {allChatTabs.map((tab) => (
-                      tab.projectPath === projectState.activeProject?.path &&
-                      tab.id === activeTabId &&
-                      tab.activeSubTab === "status" ? (
-                        <div key={`${tab.id}:status`} className="absolute inset-0">
-                          <StatusPanel onClose={() =>
-                            projectDispatch({ type: "SET_TAB_SUB_TAB", id: tab.id, subTab: "chat" })
-                          } />
+                      );
+                    })}
+                    {allChatTabs.map((tab) => {
+                      const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "agents";
+                      const key = `${tab.id}:agents`;
+                      if (!visitedTabsRef.current.has(key) && !isActive) return null;
+                      return (
+                        <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
+                          <AgentsPanel sessionId={tab.id} selectedRunId={selectedAgentRunId} onSelectRun={setSelectedAgentRunId} />
                         </div>
-                      ) : null
-                    ))}
+                      );
+                    })}
+                    {allChatTabs.map((tab) => {
+                      const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "changes";
+                      const key = `${tab.id}:changes`;
+                      if (!visitedTabsRef.current.has(key) && !isActive) return null;
+                      return (
+                        <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
+                          <ChangesPanel session={tab.id} active={isActive} />
+                        </div>
+                      );
+                    })}
+                    {allChatTabs.map((tab) => {
+                      const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "logs";
+                      const key = `${tab.id}:logs`;
+                      if (!visitedTabsRef.current.has(key) && !isActive) return null;
+                      return (
+                        <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
+                          <LogPanel active={isActive} sessionId={tab.id} />
+                        </div>
+                      );
+                    })}
+                    {allChatTabs.map((tab) => {
+                      const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "status";
+                      const key = `${tab.id}:status`;
+                      if (!visitedTabsRef.current.has(key) && !isActive) return null;
+                      return (
+                        <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
+                          <StatusPanel onClose={() => projectDispatch({ type: "SET_TAB_SUB_TAB", id: tab.id, subTab: "chat" })} />
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </TabsContent>

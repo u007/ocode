@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"log"
 	"sync"
 	"time"
@@ -87,7 +88,47 @@ type sessionEntry struct {
 	// building is true while a bootstrap goroutine is constructing the agent
 	// for this entry (single-flight per session, Part 03).
 	building bool
+
+	// liveFrames buffers the streaming SSE frames (text/thinking/tool_*)
+	// broadcastEvent emits while turnActive is true, so a client that reloads
+	// mid-turn can replay what already streamed instead of losing it — see
+	// appendLiveFrame and GET /api/sessions/:id/state. Cleared on every
+	// turnActive transition (fresh turn, or turn/continuation finished —
+	// the final `messages` broadcast is authoritative from then on).
+	// liveFramesSize tracks the summed byte length of liveFrames' Data so the
+	// cap below can head-truncate without re-marshaling on every append.
+	liveFrames     []liveFrame
+	liveFramesSize int
 }
+
+// liveFrame is one buffered SSE frame from an in-progress turn. Field names
+// mirror Envelope's wire shape (event_bus.go) so the JSON serializes directly
+// into the frontend's BusEnvelope-shaped replay path.
+type liveFrame struct {
+	Event string          `json:"event"`
+	Data  json.RawMessage `json:"data"`
+	Seq   uint64          `json:"seq"`
+	size  int             // len(Data), cached for the byte-cap sweep below
+}
+
+// liveFrameEvents is the fixed set of event types buffered for mid-turn
+// replay: the token-level streaming activity a reload actually loses.
+// Deliberately excludes question/permission asks — those are written into
+// the persisted transcript as a sentinel before the turn pauses (see
+// tailIsPermissionAsk), so a reload already recovers them from disk.
+var liveFrameEvents = map[string]bool{
+	"text":        true,
+	"thinking":    true,
+	"tool_start":  true,
+	"tool_output": true,
+	"tool_result": true,
+}
+
+// liveFramesByteCap bounds a single session's buffer so a very long reply
+// (or a runaway tool_output stream) can't grow it unbounded; older frames are
+// dropped head-first once the cap is exceeded. Generous for one turn's worth
+// of streaming text.
+const liveFramesByteCap = 256 * 1024
 
 // NewSessionManager builds an empty registry. idleTimeout is the idle-agent
 // eviction threshold; projectRoots returns the candidate project roots for
@@ -219,14 +260,47 @@ func (m *SessionManager) touch(sessionID string) {
 }
 
 // setTurnActive marks whether a turn is currently running on the session.
-// Active turns exempt the entry from idle eviction.
+// Active turns exempt the entry from idle eviction. Clears liveFrames on
+// every transition: turning on starts a fresh turn's buffer, turning off
+// means the turn (or continuation) just finished and the authoritative
+// `messages` broadcast/persisted transcript supersedes whatever was buffered.
 func (m *SessionManager) setTurnActive(sessionID string, active bool) {
 	m.mu.Lock()
 	if e := m.entries[sessionID]; e != nil {
 		e.turnActive = active
 		e.lastActivity = time.Now()
+		e.liveFrames = nil
+		e.liveFramesSize = 0
 	}
 	m.mu.Unlock()
+}
+
+// appendLiveFrame buffers one streaming SSE frame for mid-turn replay if its
+// event type is in liveFrameEvents and the session currently has an active
+// turn. seq is the bus sequence the frame was published at (broadcastEvent
+// passes h.bus.LastSeq() right after publishing), so a client can filter out
+// frames it already received live during a reconnect race.
+func (m *SessionManager) appendLiveFrame(sessionID, event string, data any, seq uint64) {
+	if !liveFrameEvents[event] {
+		return
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("session manager: marshal live frame %q for session %s: %v", event, sessionID, err)
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entries[sessionID]
+	if e == nil || !e.turnActive {
+		return
+	}
+	e.liveFrames = append(e.liveFrames, liveFrame{Event: event, Data: raw, Seq: seq, size: len(raw)})
+	e.liveFramesSize += len(raw)
+	for e.liveFramesSize > liveFramesByteCap && len(e.liveFrames) > 1 {
+		e.liveFramesSize -= e.liveFrames[0].size
+		e.liveFrames = e.liveFrames[1:]
+	}
 }
 
 // IsTurnActive reports whether a turn is currently running on the session.
@@ -467,12 +541,16 @@ func (m *SessionManager) ConsumeSessionStart(sessionID string) (string, bool) {
 // SessionState is the wire shape of GET /api/sessions/:id/state — the
 // reconcile endpoint. The frontend derives streaming state from it
 // (turn_active) and detects events it may have missed via last_seq.
+// LiveFrames carries whatever of the current turn's streaming activity is
+// still buffered (nil/empty once the turn ends), so a client reconnecting
+// mid-turn can replay it instead of only seeing it start from a blank slate.
 type SessionState struct {
-	SessionID      string `json:"session_id"`
-	BootstrapStage string `json:"bootstrap_stage"`
-	BootstrapError string `json:"bootstrap_error,omitempty"`
-	TurnActive     bool   `json:"turn_active"`
-	LastSeq        uint64 `json:"last_seq"`
+	SessionID      string      `json:"session_id"`
+	BootstrapStage string      `json:"bootstrap_stage"`
+	BootstrapError string      `json:"bootstrap_error,omitempty"`
+	TurnActive     bool        `json:"turn_active"`
+	LastSeq        uint64      `json:"last_seq"`
+	LiveFrames     []liveFrame `json:"live_frames,omitempty"`
 }
 
 // State returns the session's reconcile state. The bool reports whether the
@@ -485,11 +563,16 @@ func (m *SessionManager) State(sessionID string) (SessionState, bool) {
 	if e == nil {
 		return SessionState{}, false
 	}
+	var frames []liveFrame
+	if len(e.liveFrames) > 0 {
+		frames = append([]liveFrame(nil), e.liveFrames...)
+	}
 	return SessionState{
 		SessionID:      e.SessionID,
 		BootstrapStage: e.bootstrapStage,
 		BootstrapError: e.bootstrapErr,
 		TurnActive:     e.turnActive,
 		LastSeq:        e.lastSeq,
+		LiveFrames:     frames,
 	}, true
 }

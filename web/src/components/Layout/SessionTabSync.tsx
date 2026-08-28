@@ -68,8 +68,10 @@ export default function SessionTabSync() {
       eventBus.on(event, (env) => routeBusEnvelope(env, router)),
     );
     const offReconnect = eventBus.onReconnect(() => {
-      // Reconcile every open session: turn state + transcript refetch.
-      void reconcileOpenSessions(openSessionIdsRef.current, chatDispatch);
+      // Reconcile every open session: turn state + transcript refetch, plus
+      // a replay of whatever streaming activity is still buffered from an
+      // in-progress turn (see reconcileOpenSessions).
+      void reconcileOpenSessions(openSessionIdsRef.current, router);
     });
     return () => {
       offEnvelope.forEach((off) => off());
@@ -87,7 +89,13 @@ export default function SessionTabSync() {
   useEffect(() => {
     if (didLoadReconcileRef.current || realTabKey === "") return;
     didLoadReconcileRef.current = true;
-    void reconcileOpenSessions(new Set(openSessionIdsRef.current), chatDispatch);
+    const router: SessionEventRouter = {
+      openSessionIds: openSessionIdsRef.current,
+      dispatch: chatDispatch,
+      projectDispatch,
+      getState: () => chatStateRef.current,
+    };
+    void reconcileOpenSessions(new Set(openSessionIdsRef.current), router);
   }, [chatDispatch, realTabKey]);
 
   // Activation state-sync: when the active tab lands on a real session,

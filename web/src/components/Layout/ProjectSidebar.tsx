@@ -517,7 +517,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
 
       // Check if this is a group reorder
       if (activeId.startsWith("group:") && overId.startsWith("group:")) {
-        const groupNames = state.groups.map((g) => g.name);
+        const groupNames = (state.groups ?? []).map((g) => g.name);
         const oldIndex = groupNames.indexOf(activeId.replace("group:", ""));
         const newIndex = groupNames.indexOf(overId.replace("group:", ""));
         if (oldIndex !== -1 && newIndex !== -1) {

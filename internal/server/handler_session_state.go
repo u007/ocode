@@ -11,7 +11,11 @@ import (
 // HandleSessionState is the reconcile endpoint (Part 03). The frontend derives
 // streaming state from it — bootstrap_stage and turn_active — and uses
 // last_seq to detect events it may have missed during a reconnect. Reconcile
-// is state fetch + transcript refetch, never event replay.
+// is state fetch + transcript refetch for the persisted transcript; the one
+// deliberate exception is live_frames, which replays whatever streaming
+// text/thinking/tool activity is still buffered from the current turn (see
+// appendLiveFrame in session_manager.go) so a mid-turn reload doesn't lose the
+// in-progress reply while waiting for turn_done.
 //
 // A session that exists in no registered project 404s; every other session
 // (registered explicitly, resolved from disk, or a bridged TUI session) gets a

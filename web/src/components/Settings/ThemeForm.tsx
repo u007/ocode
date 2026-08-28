@@ -19,8 +19,8 @@ export default function ThemeForm() {
     setError(null);
     try {
       const res = await api.getThemes();
-      setThemes(res.themes);
-      setCurrentTheme(res.current);
+      setThemes(Array.isArray(res.themes) ? res.themes : []);
+      setCurrentTheme(res.current ?? "");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

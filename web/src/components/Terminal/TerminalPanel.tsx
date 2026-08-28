@@ -58,7 +58,13 @@ export default function TerminalPanel({
         headers: authHeaders(),
         body: fd,
       });
-      const saved: { name: string }[] = await r.json();
+      if (!r.ok) {
+        const body: { error?: string } = await r.json().catch(() => ({}));
+        throw new Error(body.error || `upload failed with status ${r.status}`);
+      }
+      const raw: unknown = await r.json();
+      const saved: { name: string }[] = Array.isArray(raw) ? (raw as { name: string }[]) : [];
+      if (!Array.isArray(raw)) console.warn("upload response was not an array:", raw);
       const names = saved.map((f) => f.name);
       if (names.length === 0) return;
       const term = termRef.current;

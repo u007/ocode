@@ -72,7 +72,9 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 
 	// Resolve effective profile per-session when windowId is bound, otherwise
 	// fall back to env > window-state global (v1 global fallback).
+	h.mu.Lock()
 	effCfg := h.cfg
+	h.mu.Unlock()
 	var prof string
 	if entry := h.sessions.Lookup(sessionID); entry != nil {
 		prof = h.resolveSessionProfile(entry)

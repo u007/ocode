@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -107,6 +108,102 @@ var (
 	dataDirFn = defaultDataDir
 )
 
+// Query result cache. records.jsonl is append-only (RecordUsage only ever
+// opens it O_APPEND), so a parsed line never changes — Query only needs to
+// read and parse the bytes appended since its last call, not the whole
+// file. Without this, a poller on a fixed interval (server.watchEmittersLoop
+// calls Query every 60s to compute today's spend) re-parses the entire,
+// ever-growing file every tick: at 170k+ records that was ~10GB of garbage
+// allocated per 100 minutes, which is what actually drove the reported
+// multi-GB memory usage (the live heap was tiny; GC just couldn't keep up
+// with the churn).
+var (
+	queryMu       sync.Mutex
+	cachedPath    string
+	cachedOffset  int64
+	cachedRecords []Record
+)
+
+// queryCached refreshes the cache (reading only newly appended bytes, if
+// any) and returns the records in [from, to]. Filtering happens under
+// queryMu, before the cache is exposed to a caller — cachedRecords keeps
+// growing via append, which can mutate/reuse its backing array in place, so
+// handing the raw slice to a caller outside the lock would race with a
+// concurrent refresh.
+func queryCached(path string, from, to time.Time) ([]Record, error) {
+	queryMu.Lock()
+	defer queryMu.Unlock()
+
+	f, err := os.Open(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("usage: open records file: %w", err)
+		}
+		cachedPath, cachedOffset, cachedRecords = path, 0, nil
+		return filterRecords(nil, from, to), nil
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("usage: stat records file: %w", err)
+	}
+
+	if path != cachedPath || info.Size() < cachedOffset {
+		// First call for this path, or the file shrank underneath us
+		// (shouldn't happen — RecordUsage only appends — but fall back to a
+		// full rescan rather than risk silently dropping records).
+		cachedPath, cachedOffset, cachedRecords = path, 0, nil
+	}
+
+	newSize := info.Size()
+	if newSize > cachedOffset {
+		if _, err := f.Seek(cachedOffset, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("usage: seek records file: %w", err)
+		}
+
+		// Bound the read to the size observed above so a concurrent append
+		// mid-scan can't hand us a torn trailing line; the next call picks
+		// up whatever landed after newSize.
+		scanner := bufio.NewScanner(io.LimitReader(f, newSize-cachedOffset))
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			var rec Record
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				// Skip corrupt lines
+				continue
+			}
+			cachedRecords = append(cachedRecords, rec)
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("usage: scan records file: %w", err)
+		}
+		cachedOffset = newSize
+	}
+
+	return filterRecords(cachedRecords, from, to), nil
+}
+
+// filterRecords copies matching records out of all — always a copy, never
+// the caller's own backing array, since all is (or aliases) the shared
+// cache and must not escape queryMu.
+func filterRecords(all []Record, from, to time.Time) []Record {
+	var records []Record
+	for _, rec := range all {
+		if !from.IsZero() && rec.Timestamp.Before(from) {
+			continue
+		}
+		if rec.Timestamp.After(to) {
+			continue
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
 // defaultDataDir returns the platform-appropriate data directory for usage records.
 func defaultDataDir() (string, error) {
 	return paths.UsageDir()
@@ -190,37 +287,9 @@ func Query(from, to time.Time) ([]Record, error) {
 		return nil, err
 	}
 
-	f, err := os.Open(path)
+	records, err := queryCached(path, from, to)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return []Record{}, nil
-		}
-		return nil, fmt.Errorf("usage: open records file: %w", err)
-	}
-	defer f.Close()
-
-	var records []Record
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var rec Record
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			// Skip corrupt lines
-			continue
-		}
-		if !from.IsZero() && rec.Timestamp.Before(from) {
-			continue
-		}
-		if rec.Timestamp.After(to) {
-			continue
-		}
-		records = append(records, rec)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("usage: scan records: %w", err)
+		return nil, err
 	}
 
 	sort.Slice(records, func(i, j int) bool {

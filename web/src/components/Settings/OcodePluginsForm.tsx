@@ -25,9 +25,9 @@ export default function OcodePluginsForm() {
         api.listPlugins(),
         api.getLocalModelsConfig(),
       ]);
-      setAstEnabled(pluginsEnabled.ast);
-      setPlugins(list.slice().sort((a, b) => a.name.localeCompare(b.name)));
-      setLocalModels(models);
+      setAstEnabled(!!pluginsEnabled?.ast);
+      setPlugins(Array.isArray(list) ? list.slice().sort((a, b) => a.name.localeCompare(b.name)) : []);
+      setLocalModels(models && typeof models === "object" ? models : {});
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
