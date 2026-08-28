@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
 )
@@ -150,7 +151,7 @@ func TestSaveGeneratesCanonicalPrefixedIDWhenBlank(t *testing.T) {
 		t.Fatalf("ReadDir failed: %v", err)
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || entry.Name() == "index.json" {
+		if entry.IsDir() || entry.Name() == "index.json" || entry.Name() == "index.sqlite" {
 			continue
 		}
 		if !strings.HasPrefix(entry.Name(), "ses_") {
@@ -550,26 +551,29 @@ func TestSaveTitleGeneratedFlag(t *testing.T) {
 	}
 }
 
-func TestSaveNewSessionWritesOjsonl(t *testing.T) {
+func TestSaveNewSessionWritesSqlite(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmpDir)
 
-	if err := Save("ses_ojsonl-new", "", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+	if err := Save("ses_sqlite-new", "", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
 	dir, _ := GetStorageDir()
-	if _, err := os.Stat(filepath.Join(dir, "ses_ojsonl-new.ojsonl")); err != nil {
-		t.Fatalf("expected .ojsonl file to exist: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "ses_sqlite-new.sqlite")); err != nil {
+		t.Fatalf("expected .sqlite file to exist: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "ses_ojsonl-new.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "ses_sqlite-new.ojsonl")); !os.IsNotExist(err) {
+		t.Fatalf("expected no .ojsonl file for a new session, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ses_sqlite-new.json")); !os.IsNotExist(err) {
 		t.Fatalf("expected no .json file for a new session, got err=%v", err)
 	}
 }
 
-func TestSaveExistingJSONSessionStaysJSON(t *testing.T) {
+func TestSaveExistingJSONSessionMigratesToSqlite(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
@@ -592,15 +596,21 @@ func TestSaveExistingJSONSessionStaysJSON(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(dir, "ses_legacy-json.ojsonl")); !os.IsNotExist(err) {
-		t.Fatalf("expected no .ojsonl file for an id that already has a .json file, got err=%v", err)
+	if _, err := os.Stat(jsonPath); !os.IsNotExist(err) {
+		t.Fatalf("expected .json file removed after migration, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ses_legacy-json.sqlite")); err != nil {
+		t.Fatalf("expected .sqlite file to exist after migration: %v", err)
 	}
 	sess, err := Load("ses_legacy-json")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(sess.Messages) != 2 {
-		t.Fatalf("expected 2 messages preserved via .json path, got %d", len(sess.Messages))
+		t.Fatalf("expected 2 messages preserved through migration, got %d", len(sess.Messages))
+	}
+	if sess.Title != "old" {
+		t.Fatalf("expected title preserved through migration, got %q", sess.Title)
 	}
 }
 
@@ -614,7 +624,7 @@ func TestDeleteRemovesOjsonlSession(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 	dir, _ := GetStorageDir()
-	path := filepath.Join(dir, "ses_del-a.ojsonl")
+	path := sqliteSessionPath(dir, "ses_del-a")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected file to exist before delete: %v", err)
 	}
@@ -845,13 +855,14 @@ func TestLoadDoesNotFallBackToOtherProjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetStorageDir: %v", err)
 	}
-	seededFile := filepath.Join(seededDir, sessID+".ojsonl")
+	seededFile := filepath.Join(seededDir, sessID+".sqlite")
 	if _, err := os.Stat(seededFile); err != nil {
-		t.Fatalf("expected seeded ojsonl file at %s: %v", seededFile, err)
+		t.Fatalf("expected seeded sqlite file at %s: %v", seededFile, err)
 	}
 	t.Cleanup(func() {
 		os.Remove(seededFile)
 		os.Remove(filepath.Join(seededDir, "index.json"))
+		os.Remove(filepath.Join(seededDir, "index.sqlite"))
 	})
 
 	// Now attempt to load from a different cwd (the "current" project).
@@ -863,5 +874,360 @@ func TestLoadDoesNotFallBackToOtherProjects(t *testing.T) {
 	}
 	if _, err := Load(strings.TrimPrefix(sessID, canonicalSessionPrefix)); err == nil {
 		t.Fatalf("expected Load to fail for a bare-ID session belonging to a different project root")
+	}
+}
+
+func TestSaveToDirNewSessionCreatesSqlite(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := saveToDir(dir, "ses_new1", "", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("saveToDir: %v", err)
+	}
+
+	if !fileExists(sqliteSessionPath(dir, "ses_new1")) {
+		t.Fatalf("expected .sqlite file for a brand-new session")
+	}
+	if fileExists(ojsonlSessionPath(dir, "ses_new1")) {
+		t.Fatalf("did not expect an .ojsonl file for a brand-new session")
+	}
+}
+
+func TestSaveToDirExistingSqliteSessionAppends(t *testing.T) {
+	dir := t.TempDir()
+	id := "ses_appendflow1"
+
+	if err := saveToDir(dir, id, "", []agent.Message{{Role: "user", Content: "one"}}, nil); err != nil {
+		t.Fatalf("saveToDir (create): %v", err)
+	}
+	if err := saveToDir(dir, id, "", []agent.Message{
+		{Role: "user", Content: "one"},
+		{Role: "assistant", Content: "two"},
+	}, nil); err != nil {
+		t.Fatalf("saveToDir (append): %v", err)
+	}
+
+	s, err := readSqliteSession(sqliteSessionPath(dir, id))
+	if err != nil {
+		t.Fatalf("readSqliteSession: %v", err)
+	}
+	if len(s.Messages) != 2 {
+		t.Fatalf("expected 2 messages after append, got %d", len(s.Messages))
+	}
+}
+
+func TestSaveToDirMigratesExistingOjsonlSessionOnWrite(t *testing.T) {
+	dir := t.TempDir()
+	id := "ses_migrateojsonl1"
+
+	// Simulate an existing .ojsonl session (created via the legacy path).
+	if err := saveOjsonl(dir, id, "original title", []agent.Message{{Role: "user", Content: "first"}}, nil); err != nil {
+		t.Fatalf("saveOjsonl (seed legacy session): %v", err)
+	}
+	if !fileExists(ojsonlSessionPath(dir, id)) {
+		t.Fatalf("test setup: expected .ojsonl file to exist")
+	}
+
+	// This session is "loaded into chat" and written to again.
+	if err := saveToDir(dir, id, "", []agent.Message{
+		{Role: "user", Content: "first"},
+		{Role: "assistant", Content: "second"},
+	}, nil); err != nil {
+		t.Fatalf("saveToDir (migrate): %v", err)
+	}
+
+	if fileExists(ojsonlSessionPath(dir, id)) {
+		t.Fatalf("expected .ojsonl file to be removed after migration")
+	}
+	if !fileExists(sqliteSessionPath(dir, id)) {
+		t.Fatalf("expected .sqlite file to exist after migration")
+	}
+
+	s, err := readSqliteSession(sqliteSessionPath(dir, id))
+	if err != nil {
+		t.Fatalf("readSqliteSession: %v", err)
+	}
+	if s.Title != "original title" {
+		t.Fatalf("expected title preserved from .ojsonl, got %q", s.Title)
+	}
+	if len(s.Messages) != 2 || s.Messages[1].Content != "second" {
+		t.Fatalf("expected 2 messages after migration, got %+v", s.Messages)
+	}
+
+	metas, err := queryIndexMetas(dir)
+	if err != nil {
+		t.Fatalf("queryIndexMetas: %v", err)
+	}
+	if len(metas) != 1 || metas[0].ID != id {
+		t.Fatalf("expected migrated session indexed, got %+v", metas)
+	}
+}
+
+func TestSaveToDirMigratesExistingJSONSessionOnWrite(t *testing.T) {
+	dir := t.TempDir()
+	id := "ses_migratejson1"
+	jsonPath := filepath.Join(dir, id+".json")
+
+	createdAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seed := Session{
+		ID:        id,
+		Title:     "legacy json title",
+		Messages:  []agent.Message{{Role: "user", Content: "hi"}},
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
+	}
+	data, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if err := os.WriteFile(jsonPath, data, 0644); err != nil {
+		t.Fatalf("write seed .json: %v", err)
+	}
+
+	if err := saveToDir(dir, id, "", []agent.Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "reply"},
+	}, nil); err != nil {
+		t.Fatalf("saveToDir (migrate): %v", err)
+	}
+
+	if fileExists(jsonPath) {
+		t.Fatalf("expected .json file to be removed after migration")
+	}
+	s, err := readSqliteSession(sqliteSessionPath(dir, id))
+	if err != nil {
+		t.Fatalf("readSqliteSession: %v", err)
+	}
+	if s.Title != "legacy json title" {
+		t.Fatalf("expected title preserved from .json, got %q", s.Title)
+	}
+	if !s.CreatedAt.Equal(createdAt) {
+		t.Fatalf("expected created_at preserved from .json, got %v want %v", s.CreatedAt, createdAt)
+	}
+}
+
+func TestLoadReadsMigratedSqliteSession(t *testing.T) {
+	dir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(dir)
+
+	if err := Save("ses_loadsqlite1", "", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	s, err := Load("ses_loadsqlite1")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(s.Messages) != 1 || s.Messages[0].Content != "hi" {
+		t.Fatalf("unexpected messages: %+v", s.Messages)
+	}
+}
+
+func TestLoadStillReadsUnmigratedLegacySession(t *testing.T) {
+	dir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(dir)
+
+	storageDir, _ := GetStorageDir()
+	if err := saveOjsonl(storageDir, "ses_stilllegacy1", "legacy title", []agent.Message{{Role: "user", Content: "still here"}}, nil); err != nil {
+		t.Fatalf("saveOjsonl: %v", err)
+	}
+
+	s, err := Load("ses_stilllegacy1")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if s.Title != "legacy title" || len(s.Messages) != 1 {
+		t.Fatalf("unexpected session: %+v", s)
+	}
+}
+
+func TestLoadPrefersSqliteAndCleansUpOrphanLegacyFile(t *testing.T) {
+	dir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(dir)
+
+	storageDir, _ := GetStorageDir()
+	id := "ses_orphan1"
+
+	// Simulates a crash between migrateToSqlite writing+verifying the new
+	// .sqlite file and deleting the old .ojsonl file.
+	if err := writeSqliteSessionFull(storageDir, Session{
+		ID:        id,
+		Title:     "sqlite wins",
+		Messages:  []agent.Message{{Role: "user", Content: "from sqlite"}},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("writeSqliteSessionFull: %v", err)
+	}
+	if err := saveOjsonl(storageDir, id, "stale ojsonl", []agent.Message{{Role: "user", Content: "from ojsonl"}}, nil); err != nil {
+		t.Fatalf("saveOjsonl (simulate orphan): %v", err)
+	}
+
+	s, err := Load(id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if s.Title != "sqlite wins" {
+		t.Fatalf("expected .sqlite to win, got %+v", s)
+	}
+
+	if fileExists(ojsonlSessionPath(storageDir, id)) {
+		t.Fatalf("expected orphaned .ojsonl file to be cleaned up after a successful .sqlite Load")
+	}
+}
+
+func TestListRefsForDirIncludesMigratedAndLegacySessions(t *testing.T) {
+	wd := t.TempDir()
+	dir, err := GetStorageDirForPath(wd)
+	if err != nil {
+		t.Fatalf("GetStorageDirForPath: %v", err)
+	}
+
+	// One migrated (.sqlite) session, one still-legacy (.ojsonl) session.
+	if err := writeSqliteSessionFull(dir, Session{
+		ID: "ses_mixed-sqlite", Title: "sqlite one",
+		Messages: []agent.Message{{Role: "user", Content: "hi"}},
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("writeSqliteSessionFull: %v", err)
+	}
+	if err := upsertIndexRow(dir, ocodeMeta{ID: "ses_mixed-sqlite", Title: "sqlite one", CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatalf("upsertIndexRow: %v", err)
+	}
+	if err := saveOjsonl(dir, "ses_mixed-ojsonl", "ojsonl one", []agent.Message{{Role: "user", Content: "hey"}}, nil); err != nil {
+		t.Fatalf("saveOjsonl: %v", err)
+	}
+
+	refs, err := ListRefsForDir(wd)
+	if err != nil {
+		t.Fatalf("ListRefsForDir: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 refs (1 migrated + 1 legacy), got %d: %+v", len(refs), refs)
+	}
+	byID := map[string]Ref{}
+	for _, r := range refs {
+		byID[r.ID] = r
+	}
+	if byID["ses_mixed-sqlite"].Title != "sqlite one" {
+		t.Fatalf("missing/wrong migrated session ref: %+v", refs)
+	}
+	if byID["ses_mixed-ojsonl"].Title != "ojsonl one" {
+		t.Fatalf("missing/wrong legacy session ref: %+v", refs)
+	}
+}
+
+func TestListRefsPaginatedIncludesMigratedSessions(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	if err := Save("ses_paginated-sqlite", "", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	refs, total, err := ListRefsPaginated(0, 0)
+	if err != nil {
+		t.Fatalf("ListRefsPaginated: %v", err)
+	}
+	if total != 1 || len(refs) != 1 || refs[0].ID != "ses_paginated-sqlite" {
+		t.Fatalf("expected the migrated session listed, got total=%d refs=%+v", total, refs)
+	}
+}
+
+func TestListIncludesSqliteSessionFullContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	if err := Save("ses_list-sqlite", "", []agent.Message{{Role: "user", Content: "full content"}}, nil); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	sessions, err := List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(sessions) != 1 || len(sessions[0].Messages) != 1 || sessions[0].Messages[0].Content != "full content" {
+		t.Fatalf("expected sqlite session's full content via List, got %+v", sessions)
+	}
+}
+
+func TestListSkipsIndexSqliteFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	if err := Save("ses_list-skip-index", "", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	sessions, err := List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected index.sqlite to be skipped, not treated as a session, got %d sessions: %+v", len(sessions), sessions)
+	}
+}
+
+func TestDeleteRemovesMigratedSqliteSessionAndIndexRow(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	if err := Save("ses_delete-sqlite1", "", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	dir, _ := GetStorageDir()
+	if !fileExists(sqliteSessionPath(dir, "ses_delete-sqlite1")) {
+		t.Fatalf("test setup: expected .sqlite file to exist")
+	}
+
+	if err := Delete("ses_delete-sqlite1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if fileExists(sqliteSessionPath(dir, "ses_delete-sqlite1")) {
+		t.Fatalf("expected .sqlite file removed")
+	}
+	metas, err := queryIndexMetas(dir)
+	if err != nil {
+		t.Fatalf("queryIndexMetas: %v", err)
+	}
+	for _, m := range metas {
+		if m.ID == "ses_delete-sqlite1" {
+			t.Fatalf("expected index row removed, still present: %+v", m)
+		}
+	}
+}
+
+func TestDeleteStillRemovesLegacyOjsonlSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir, err := GetStorageDirForPath(tmpDir)
+	if err != nil {
+		t.Fatalf("GetStorageDirForPath: %v", err)
+	}
+	if err := saveOjsonl(dir, "ses_delete-legacy1", "", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("saveOjsonl: %v", err)
+	}
+
+	SetWorkDir(tmpDir)
+	defer SetWorkDir("")
+	if err := Delete("ses_delete-legacy1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if fileExists(ojsonlSessionPath(dir, "ses_delete-legacy1")) {
+		t.Fatalf("expected .ojsonl file removed")
 	}
 }

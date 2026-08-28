@@ -157,22 +157,182 @@ func SaveForDir(wd, id string, title string, messages []agent.Message, metadata 
 	return saveToDir(dir, id, title, messages, metadata)
 }
 
-// saveToDir is the shared save core: it resolves the session's storage dir,
-// keeps the legacy JSON format for sessions that already exist as .json, and
-// otherwise appends to the .ojsonl transcript.
+// saveToDir is the shared save core: it resolves the session's storage
+// dir and dispatches on which format already exists for id. New sessions
+// are always created directly as .sqlite. An existing .json or .ojsonl
+// session is migrated to .sqlite — and its old file deleted — the first
+// time it is written to again after being loaded; sessions that are only
+// ever read are left in their original format. See
+// docs/superpowers/plans/2026-08-28-sqlite-session-storage/INDEX.md.
 func saveToDir(dir, id string, title string, messages []agent.Message, metadata map[string]any) error {
 	if id == "" {
 		id = NewSessionID()
 	}
 
-	// Check if a .json file already exists for this id — if so, keep using
-	// the legacy JSON format. Otherwise use the new .ojsonl format.
-	jsonPath := filepath.Join(dir, id+".json")
-	if _, err := os.Stat(jsonPath); err == nil {
-		return saveJSON(dir, jsonPath, id, title, messages, metadata)
+	if fileExists(sqliteSessionPath(dir, id)) {
+		if err := appendSqliteSession(dir, id, title, messages, metadata); err != nil {
+			return err
+		}
+		return refreshIndexRow(dir, id)
 	}
 
-	return saveOjsonl(dir, id, title, messages, metadata)
+	jsonPath := filepath.Join(dir, id+".json")
+	ojsonlPath := ojsonlSessionPath(dir, id)
+	wasJSON := fileExists(jsonPath)
+	if wasJSON || fileExists(ojsonlPath) {
+		return migrateToSqlite(dir, id, title, messages, metadata, wasJSON)
+	}
+
+	// Brand-new session: create directly in sqlite.
+	now := time.Now()
+	// Derive auto-title from first user message when caller didn't supply one,
+	// mirroring saveJSON/saveOjsonl fallback so new sqlite sessions aren't
+	// titleless.
+	resolvedTitle := title
+	titleGenerated := title != ""
+	if resolvedTitle == "" && len(messages) > 0 {
+		for _, m := range messages {
+			t := strings.TrimSpace(m.Content)
+			if m.Role == "user" && t != "" && LooksLikeAutoTitleCandidate(t) {
+				resolvedTitle = t
+				break
+			}
+		}
+	}
+	s := Session{
+		ID:             id,
+		Title:          resolvedTitle,
+		TitleGenerated: titleGenerated,
+		Messages:       messages,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		Metadata:       metadata,
+	}
+	if err := writeSqliteSessionFull(dir, s); err != nil {
+		return err
+	}
+	return refreshIndexRow(dir, id)
+}
+
+// migrateToSqlite converts an existing .json or .ojsonl session to
+// .sqlite on save, preserving created_at (and title/title_generated when
+// this save doesn't set an explicit new title) from the old file. It
+// writes the new file and reads it back to confirm it round-trips before
+// deleting the original — a transcript is never lost to a bad migration.
+// wasJSON selects which legacy format id is currently stored in.
+func migrateToSqlite(dir, id, title string, messages []agent.Message, metadata map[string]any, wasJSON bool) error {
+	now := time.Now()
+	s := Session{
+		ID:             id,
+		Title:          title,
+		TitleGenerated: title != "",
+		Messages:       messages,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		Metadata:       metadata,
+	}
+
+	if wasJSON {
+		jsonPath := filepath.Join(dir, id+".json")
+		if data, err := os.ReadFile(jsonPath); err == nil {
+			var old Session
+			if err := json.Unmarshal(data, &old); err == nil {
+				if !old.CreatedAt.IsZero() {
+					s.CreatedAt = old.CreatedAt
+				}
+				if s.Title == "" {
+					s.Title = old.Title
+					s.TitleGenerated = old.TitleGenerated
+				}
+			}
+		}
+	} else {
+		ojsonlPath := ojsonlSessionPath(dir, id)
+		if state, existed, err := getOjsonlWriteState(ojsonlPath); err == nil && existed {
+			if !state.createdAt.IsZero() {
+				s.CreatedAt = state.createdAt
+			}
+			if s.Title == "" {
+				s.Title = state.title
+				s.TitleGenerated = state.titleGenerated
+			}
+		}
+	}
+
+	if err := writeSqliteSessionFull(dir, s); err != nil {
+		return fmt.Errorf("session: migrate %s to sqlite: %w", id, err)
+	}
+
+	// Verify the new file round-trips before touching the original.
+	if _, err := readSqliteSession(sqliteSessionPath(dir, id)); err != nil {
+		return fmt.Errorf("session: migrated sqlite file for %s failed verification, original left in place: %w", id, err)
+	}
+
+	if err := refreshIndexRow(dir, id); err != nil {
+		log.Printf("session: index upsert for migrated %s failed (non-fatal): %v", id, err)
+	}
+
+	if wasJSON {
+		os.Remove(filepath.Join(dir, id+".json")) //nolint:errcheck
+	} else {
+		ojsonlPath := ojsonlSessionPath(dir, id)
+		os.Remove(ojsonlPath) //nolint:errcheck
+		clearOjsonlWriteState(ojsonlPath)
+	}
+	return nil
+}
+
+// refreshIndexRow reads a just-written .sqlite session's meta straight
+// back out and upserts it into the project's shared index — used after
+// every sqlite write so the index never drifts from the file it mirrors.
+func refreshIndexRow(dir, id string) error {
+	s, err := readSqliteSession(sqliteSessionPath(dir, id))
+	if err != nil {
+		return fmt.Errorf("session: read back %s for index refresh: %w", id, err)
+	}
+	cloneOf := ""
+	if s.Metadata != nil {
+		if v, ok := s.Metadata["claude_original_session_id"].(string); ok {
+			cloneOf = v
+		}
+	}
+	return upsertIndexRow(dir, ocodeMeta{
+		ID:        s.ID,
+		Title:     s.Title,
+		CreatedAt: s.CreatedAt,
+		UpdatedAt: s.UpdatedAt,
+		CloneOf:   cloneOf,
+	})
+}
+
+// LooksLikeAutoTitleCandidate reports whether trimmed user-message content is
+// suitable prose to seed a fallback session title. Slash commands and raw
+// JSON (e.g. a tool-call payload posted directly as a headless prompt, such
+// as `ocode run '{"command":"..."}'`) are excluded — echoing either verbatim
+// produces a garbled tab title instead of no title at all.
+func LooksLikeAutoTitleCandidate(t string) bool {
+	if t == "" || strings.HasPrefix(t, "/") {
+		return false
+	}
+	return !strings.HasPrefix(t, "{") && !strings.HasPrefix(t, "[")
+}
+
+// autoTitleFromMessages derives a fallback session title from the first user
+// message that passes LooksLikeAutoTitleCandidate. Returns "" when no
+// suitable candidate exists, in which case the caller keeps whatever title
+// (possibly none) it already had.
+func autoTitleFromMessages(messages []agent.Message) string {
+	for _, m := range messages {
+		t := strings.TrimSpace(m.Content)
+		if m.Role != "user" || !LooksLikeAutoTitleCandidate(t) {
+			continue
+		}
+		if len(t) > 40 {
+			t = t[:37] + "..."
+		}
+		return t
+	}
+	return ""
 }
 
 // saveJSON is the legacy whole-file-rewrite path, kept for sessions that
@@ -193,17 +353,9 @@ func saveJSON(dir, path, id, title string, messages []agent.Message, metadata ma
 		s.Title = title
 		s.TitleGenerated = true
 	} else if s.Title == "" && len(messages) > 0 {
-		// Auto-title from first non-slash user message (slash commands do not seed titles)
-		for _, m := range messages {
-			t := strings.TrimSpace(m.Content)
-			if m.Role == "user" && t != "" && !strings.HasPrefix(t, "/") {
-				title = t
-				if len(title) > 40 {
-					title = title[:37] + "..."
-				}
-				s.Title = title
-				break
-			}
+		if t := autoTitleFromMessages(messages); t != "" {
+			title = t
+			s.Title = t
 		}
 	}
 
@@ -240,16 +392,7 @@ func saveOjsonl(dir, id, title string, messages []agent.Message, metadata map[st
 	if title != "" {
 		titleGenerated = true
 	} else if !existed && len(messages) > 0 {
-		for _, m := range messages {
-			t := strings.TrimSpace(m.Content)
-			if m.Role == "user" && t != "" && !strings.HasPrefix(t, "/") {
-				if len(t) > 40 {
-					t = t[:37] + "..."
-				}
-				newTitle = t
-				break
-			}
-		}
+		newTitle = autoTitleFromMessages(messages)
 	} else {
 		newTitle = "" // no title change this save; appendOjsonlSession keeps the cached one
 	}
@@ -310,8 +453,38 @@ func Load(id string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	return loadFromDir(dir, id)
+}
 
-	// Check for .ojsonl first (try both the bare id and the canonical prefixed form).
+// LoadForDir loads a session from the storage associated with wd. It is used
+// by multi-project servers; Load continues to use the process/session workdir.
+func LoadForDir(wd, id string) (*Session, error) {
+	dir, err := GetStorageDirForPath(wd)
+	if err != nil {
+		return nil, err
+	}
+	return loadFromDir(dir, id)
+}
+
+// loadFromDir is the shared load core for Load/LoadForDir: try .sqlite
+// first (authoritative once a session has migrated — see saveToDir), then
+// .ojsonl, then fall back to the legacy .json candidates exactly as
+// before.
+func loadFromDir(dir, id string) (*Session, error) {
+	for _, candidate := range sessionCandidateIDs(id) {
+		sqlitePath := sqliteSessionPath(dir, candidate)
+		if !fileExists(sqlitePath) {
+			continue
+		}
+		s, err := readSqliteSession(sqlitePath)
+		if err != nil {
+			return nil, err
+		}
+		s.Messages = removeIncompleteToolRequests(s.Messages)
+		cleanupMigrationOrphans(dir, candidate)
+		return s, nil
+	}
+
 	for _, candidate := range sessionCandidateIDs(id) {
 		ojsonlPath := ojsonlSessionPath(dir, candidate)
 		if !fileExists(ojsonlPath) {
@@ -324,47 +497,39 @@ func Load(id string) (*Session, error) {
 		s.Messages = removeIncompleteToolRequests(s.Messages)
 		return s, nil
 	}
+
 	path, data, err := readSessionFile(dir, id)
 	if err != nil {
 		return nil, err
 	}
-
 	var s Session
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("session file %s is corrupt: %w", path, err)
 	}
 	s.Messages = removeIncompleteToolRequests(s.Messages)
-
 	return &s, nil
 }
 
-// LoadForDir loads a session from the storage associated with wd. It is used
-// by multi-project servers; Load continues to use the process/session workdir.
-func LoadForDir(wd, id string) (*Session, error) {
-	dir, err := GetStorageDirForPath(wd)
-	if err != nil {
-		return nil, err
-	}
-	for _, candidate := range sessionCandidateIDs(id) {
-		if path := ojsonlSessionPath(dir, candidate); fileExists(path) {
-			s, err := loadOjsonlSession(path)
-			if err != nil {
-				return nil, err
-			}
-			s.Messages = removeIncompleteToolRequests(s.Messages)
-			return s, nil
+// cleanupMigrationOrphans removes a leftover .json/.ojsonl file for a
+// session that already has a valid .sqlite file. This can only happen if
+// migrateToSqlite's process was killed after the new file was written and
+// verified but before the old one was removed (see saveToDir). Best-effort:
+// a failure here just means the orphan lingers — harmless, since .sqlite
+// always wins on Load — until the next successful Load of the same id.
+func cleanupMigrationOrphans(dir, id string) {
+	jsonPath := filepath.Join(dir, id+".json")
+	if fileExists(jsonPath) {
+		if err := os.Remove(jsonPath); err != nil {
+			log.Printf("session: cleanup orphan %s: %v", jsonPath, err)
 		}
 	}
-	path, data, err := readSessionFile(dir, id)
-	if err != nil {
-		return nil, err
+	ojsonlPath := ojsonlSessionPath(dir, id)
+	if fileExists(ojsonlPath) {
+		if err := os.Remove(ojsonlPath); err != nil {
+			log.Printf("session: cleanup orphan %s: %v", ojsonlPath, err)
+		}
+		clearOjsonlWriteState(ojsonlPath)
 	}
-	var s Session
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("session file %s is corrupt: %w", path, err)
-	}
-	s.Messages = removeIncompleteToolRequests(s.Messages)
-	return &s, nil
 }
 
 // fileExists reports whether path exists and is readable as a regular
@@ -462,6 +627,39 @@ func isIncompleteToolResult(content string) bool {
 	return strings.Contains(content, tool.SentinelWaitingForUser) || strings.HasPrefix(content, tool.SentinelPermissionAsk)
 }
 
+// legacyOcodeMetas scans dir for un-migrated .json and .ojsonl session
+// files and returns their metadata. Shared by ListRefsForDir and
+// ListRefsPaginated, which previously duplicated this scan verbatim.
+func legacyOcodeMetas(dir string, entries []os.DirEntry) []ocodeMeta {
+	metas := mapDirEntries(dir, entries, ".json", func(path string, e os.DirEntry) (ocodeMeta, bool) {
+		info, err := e.Info()
+		if err != nil {
+			log.Printf("session list: stat %s: %v", e.Name(), err)
+			return ocodeMeta{}, false
+		}
+		meta, err := readOcodeMeta(path, info.ModTime())
+		if err != nil {
+			log.Printf("session list: read meta %s: %v", e.Name(), err)
+			return ocodeMeta{}, false
+		}
+		return meta, true
+	})
+	ojsonlMetas := mapDirEntries(dir, entries, ".ojsonl", func(path string, e os.DirEntry) (ocodeMeta, bool) {
+		info, err := e.Info()
+		if err != nil {
+			log.Printf("session list: stat %s: %v", e.Name(), err)
+			return ocodeMeta{}, false
+		}
+		meta, err := readOjsonlListMeta(path, info.ModTime())
+		if err != nil {
+			log.Printf("session list: read ojsonl meta %s: %v", e.Name(), err)
+			return ocodeMeta{}, false
+		}
+		return meta, true
+	})
+	return append(metas, ojsonlMetas...)
+}
+
 func List() ([]Session, error) {
 	dir, err := GetStorageDir()
 	if err != nil {
@@ -475,13 +673,26 @@ func List() ([]Session, error) {
 
 	var sessions []Session
 	for _, e := range entries {
-		if e.IsDir() || e.Name() == "index.json" {
+		if e.IsDir() || e.Name() == "index.json" || e.Name() == "index.sqlite" {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
 		ext := filepath.Ext(e.Name())
+		id := strings.TrimSuffix(e.Name(), ext)
 		switch ext {
+		case ".sqlite":
+			s, err := readSqliteSession(path)
+			if err == nil {
+				s.Messages = removeIncompleteToolRequests(s.Messages)
+				sessions = append(sessions, *s)
+			}
 		case ".json":
+			// A migrated session's .sqlite is authoritative; a .json left
+			// behind by the narrow migrateToSqlite crash window (see Task
+			// 4/5) would otherwise show up twice.
+			if fileExists(sqliteSessionPath(dir, id)) {
+				continue
+			}
 			data, err := os.ReadFile(path)
 			if err == nil {
 				var s Session
@@ -491,6 +702,9 @@ func List() ([]Session, error) {
 				}
 			}
 		case ".ojsonl":
+			if fileExists(sqliteSessionPath(dir, id)) {
+				continue
+			}
 			s, err := loadOjsonlSession(path)
 			if err == nil {
 				s.Messages = removeIncompleteToolRequests(s.Messages)
@@ -521,33 +735,13 @@ func ListRefsForDir(wd string) ([]Ref, error) {
 		return nil, err
 	}
 
-	metas := mapDirEntries(dir, entries, ".json", func(path string, e os.DirEntry) (ocodeMeta, bool) {
-		info, err := e.Info()
-		if err != nil {
-			log.Printf("session list: stat %s: %v", e.Name(), err)
-			return ocodeMeta{}, false
-		}
-		meta, err := readOcodeMeta(path, info.ModTime())
-		if err != nil {
-			log.Printf("session list: read meta %s: %v", e.Name(), err)
-			return ocodeMeta{}, false
-		}
-		return meta, true
-	})
-	ojsonlMetas := mapDirEntries(dir, entries, ".ojsonl", func(path string, e os.DirEntry) (ocodeMeta, bool) {
-		info, err := e.Info()
-		if err != nil {
-			log.Printf("session list: stat %s: %v", e.Name(), err)
-			return ocodeMeta{}, false
-		}
-		meta, err := readOjsonlListMeta(path, info.ModTime())
-		if err != nil {
-			log.Printf("session list: read ojsonl meta %s: %v", e.Name(), err)
-			return ocodeMeta{}, false
-		}
-		return meta, true
-	})
-	metas = append(metas, ojsonlMetas...)
+	metas := legacyOcodeMetas(dir, entries)
+	indexMetas, err := queryIndexMetas(dir)
+	if err != nil {
+		log.Printf("session list: query index: %v", err)
+		indexMetas = nil
+	}
+	metas = mergeMetas(metas, indexMetas)
 
 	refs := make([]Ref, 0, len(metas))
 	for _, meta := range metas {
@@ -745,33 +939,13 @@ func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
 		return nil, 0, err
 	}
 
-	metas := mapDirEntries(dir, entries, ".json", func(path string, e os.DirEntry) (ocodeMeta, bool) {
-		info, err := e.Info()
-		if err != nil {
-			log.Printf("session list: stat %s: %v", e.Name(), err)
-			return ocodeMeta{}, false
-		}
-		meta, err := readOcodeMeta(path, info.ModTime())
-		if err != nil {
-			log.Printf("session list: read meta %s: %v", e.Name(), err)
-			return ocodeMeta{}, false
-		}
-		return meta, true
-	})
-	ojsonlMetas := mapDirEntries(dir, entries, ".ojsonl", func(path string, e os.DirEntry) (ocodeMeta, bool) {
-		info, err := e.Info()
-		if err != nil {
-			log.Printf("session list: stat %s: %v", e.Name(), err)
-			return ocodeMeta{}, false
-		}
-		meta, err := readOjsonlListMeta(path, info.ModTime())
-		if err != nil {
-			log.Printf("session list: read ojsonl meta %s: %v", e.Name(), err)
-			return ocodeMeta{}, false
-		}
-		return meta, true
-	})
-	metas = append(metas, ojsonlMetas...)
+	metas := legacyOcodeMetas(dir, entries)
+	indexMetas, err := queryIndexMetas(dir)
+	if err != nil {
+		log.Printf("session list: query index: %v", err)
+		indexMetas = nil
+	}
+	metas = mergeMetas(metas, indexMetas)
 
 	allRefs := make([]Ref, 0, len(metas))
 	clonedClaude := make(map[string]struct{})
@@ -823,7 +997,8 @@ func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
 	return allRefs, total, nil
 }
 
-// Delete removes a session file and updates the index.
+// Delete removes a session file and updates the index — whichever
+// on-disk format the session id currently exists in.
 func Delete(id string) error {
 	dir, err := GetStorageDir()
 	if err != nil {
@@ -831,6 +1006,7 @@ func Delete(id string) error {
 	}
 
 	for _, p := range []string{
+		sqliteSessionPath(dir, id),
 		filepath.Join(dir, id+".json"),
 		ojsonlSessionPath(dir, id),
 	} {
@@ -840,7 +1016,12 @@ func Delete(id string) error {
 	}
 	clearOjsonlWriteState(ojsonlSessionPath(dir, id))
 
-	// Update index
+	if err := deleteIndexRow(dir, id); err != nil {
+		log.Printf("session: delete index row for %s: %v", id, err)
+	}
+
+	// Update legacy index.json (write-only today, unused for reads — see
+	// this plan's INDEX.md Global Constraints; kept as-is).
 	indexPath := filepath.Join(dir, "index.json")
 	var idx sessionIndex
 	data, err := os.ReadFile(indexPath)
