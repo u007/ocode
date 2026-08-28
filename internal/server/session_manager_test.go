@@ -154,11 +154,13 @@ func removeSessionFileForDir(t *testing.T, wd, id string) error {
 	if err != nil {
 		return err
 	}
-	for _, suffix := range []string{".ojsonl", ".json"} {
+	for _, suffix := range []string{".sqlite", ".ojsonl", ".json"} {
 		if err := os.Remove(filepath.Join(dir, id+suffix)); err == nil {
 			return nil
 		}
 	}
+	// Also clean up the sqlite index row if present — not required for
+	// Resolve (which scans the directory), but keeps the temp dir tidy.
 	return fmt.Errorf("no session file found for %s under %s", id, wd)
 }
 

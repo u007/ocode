@@ -8158,17 +8158,27 @@ func TestAsyncSessionSaveUsesOldID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetStorageDir: %v", err)
 	}
-	oldPath := dir + "/" + oldID + ".ojsonl"
+	oldPath := dir + "/" + oldID + ".sqlite"
 	if _, err := os.Stat(oldPath); err != nil {
-		// Try .json fallback
+		// Try legacy fallbacks for backwards compat
+		oldPathOjsonl := dir + "/" + oldID + ".ojsonl"
 		oldPathJSON := dir + "/" + oldID + ".json"
-		if _, err2 := os.Stat(oldPathJSON); err2 != nil {
-			t.Fatalf("old session not saved: %v / %v", err, err2)
+		if _, err2 := os.Stat(oldPathOjsonl); err2 != nil {
+			if _, err3 := os.Stat(oldPathJSON); err3 != nil {
+				t.Fatalf("old session not saved: %v / %v / %v", err, err2, err3)
+			}
 		}
 	}
-	newPath := dir + "/" + newID + ".ojsonl"
+	newPath := dir + "/" + newID + ".sqlite"
 	if _, err := os.Stat(newPath); err == nil {
 		t.Fatalf("new session should not have been saved with old messages")
+	}
+	// Also ensure no legacy files were created for new ID
+	if _, err := os.Stat(dir + "/" + newID + ".ojsonl"); err == nil {
+		t.Fatalf("new session should not have been saved with old messages (ojsonl)")
+	}
+	if _, err := os.Stat(dir + "/" + newID + ".json"); err == nil {
+		t.Fatalf("new session should not have been saved with old messages (json)")
 	}
 }
 
