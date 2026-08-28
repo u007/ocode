@@ -189,3 +189,105 @@ func TestAppendSqliteSessionShrinkingMessagesReplacesAll(t *testing.T) {
 		t.Fatalf("expected message set replaced wholesale, got %+v", got.Messages)
 	}
 }
+
+func TestUpsertAndQueryIndexRow(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+
+	if err := upsertIndexRow(dir, ocodeMeta{ID: "ses_idx1", Title: "first", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatalf("upsertIndexRow: %v", err)
+	}
+
+	metas, err := queryIndexMetas(dir)
+	if err != nil {
+		t.Fatalf("queryIndexMetas: %v", err)
+	}
+	if len(metas) != 1 || metas[0].ID != "ses_idx1" || metas[0].Title != "first" {
+		t.Fatalf("expected 1 indexed row, got %+v", metas)
+	}
+
+	// Upsert again with a new title — must update, not duplicate.
+	later := now.Add(time.Hour)
+	if err := upsertIndexRow(dir, ocodeMeta{ID: "ses_idx1", Title: "renamed", CreatedAt: now, UpdatedAt: later}); err != nil {
+		t.Fatalf("upsertIndexRow (update): %v", err)
+	}
+	metas, err = queryIndexMetas(dir)
+	if err != nil {
+		t.Fatalf("queryIndexMetas: %v", err)
+	}
+	if len(metas) != 1 || metas[0].Title != "renamed" || !metas[0].UpdatedAt.Equal(later) {
+		t.Fatalf("expected upsert to update in place, got %+v", metas)
+	}
+}
+
+func TestQueryIndexMetasOnMissingIndexReturnsEmpty(t *testing.T) {
+	dir := t.TempDir() // no index.sqlite ever written here
+	metas, err := queryIndexMetas(dir)
+	if err != nil {
+		t.Fatalf("queryIndexMetas: %v", err)
+	}
+	if len(metas) != 0 {
+		t.Fatalf("expected no rows, got %+v", metas)
+	}
+}
+
+func TestDeleteIndexRow(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	if err := upsertIndexRow(dir, ocodeMeta{ID: "ses_del1", Title: "x", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatalf("upsertIndexRow: %v", err)
+	}
+	if err := deleteIndexRow(dir, "ses_del1"); err != nil {
+		t.Fatalf("deleteIndexRow: %v", err)
+	}
+	metas, err := queryIndexMetas(dir)
+	if err != nil {
+		t.Fatalf("queryIndexMetas: %v", err)
+	}
+	if len(metas) != 0 {
+		t.Fatalf("expected row removed, got %+v", metas)
+	}
+}
+
+func TestDeleteIndexRowOnMissingIndexIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	if err := deleteIndexRow(dir, "ses_never_existed"); err != nil {
+		t.Fatalf("deleteIndexRow on missing index.sqlite should be a no-op, got: %v", err)
+	}
+}
+
+func TestMergeMetasIndexShadowsSameIDLegacyEntry(t *testing.T) {
+	now := time.Now()
+	legacy := []ocodeMeta{
+		{ID: "ses_a", Title: "legacy a", UpdatedAt: now},
+		{ID: "ses_b", Title: "legacy b (stale orphan)", UpdatedAt: now},
+	}
+	indexed := []ocodeMeta{
+		{ID: "ses_b", Title: "migrated b", UpdatedAt: now.Add(time.Minute)},
+	}
+
+	merged := mergeMetas(legacy, indexed)
+
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 merged entries, got %d: %+v", len(merged), merged)
+	}
+	var gotB ocodeMeta
+	found := false
+	for _, m := range merged {
+		if m.ID == "ses_b" {
+			gotB = m
+			found = true
+		}
+	}
+	if !found || gotB.Title != "migrated b" {
+		t.Fatalf("expected indexed entry to shadow legacy entry for ses_b, got %+v", merged)
+	}
+}
+
+func TestMergeMetasNoIndexReturnsLegacyUnchanged(t *testing.T) {
+	legacy := []ocodeMeta{{ID: "ses_a", Title: "a"}}
+	merged := mergeMetas(legacy, nil)
+	if len(merged) != 1 || merged[0].ID != "ses_a" {
+		t.Fatalf("expected legacy passed through unchanged, got %+v", merged)
+	}
+}

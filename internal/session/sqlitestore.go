@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -278,4 +279,95 @@ func readSqliteSession(path string) (*Session, error) {
 	}
 
 	return &s, nil
+}
+
+// upsertIndexRow writes/updates a migrated session's row in the project's
+// shared index.sqlite so listing (queryIndexMetas) can serve migrated
+// sessions from one indexed query instead of opening every session file.
+func upsertIndexRow(dir string, meta ocodeMeta) error {
+	db, err := openIndexDB(dir)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	_, err = db.Exec(
+		`INSERT INTO sessions (id, title, created_at, updated_at, clone_of) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at, clone_of=excluded.clone_of`,
+		meta.ID, meta.Title, meta.CreatedAt, meta.UpdatedAt, meta.CloneOf,
+	)
+	return err
+}
+
+// deleteIndexRow removes a session's row from the project's index.sqlite.
+// A no-op (not an error) if the index file doesn't exist yet — Delete
+// (Task 7) calls this unconditionally regardless of the session's
+// on-disk format, including for projects that have never had a migrated
+// session.
+func deleteIndexRow(dir, id string) error {
+	path := indexDBPath(dir)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+	db, err := openIndexDB(dir)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	_, err = db.Exec(`DELETE FROM sessions WHERE id = ?`, id)
+	return err
+}
+
+// queryIndexMetas returns metadata for every migrated (.sqlite-format)
+// session in dir, from the shared index — no per-session file opens.
+// Returns an empty slice (not an error) if index.sqlite doesn't exist yet
+// (no session in this project has migrated).
+func queryIndexMetas(dir string) ([]ocodeMeta, error) {
+	path := indexDBPath(dir)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, nil
+	}
+	db, err := openIndexDB(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT id, title, created_at, updated_at, clone_of FROM sessions`)
+	if err != nil {
+		return nil, fmt.Errorf("session: query index: %w", err)
+	}
+	defer rows.Close()
+
+	var metas []ocodeMeta
+	for rows.Next() {
+		var m ocodeMeta
+		if err := rows.Scan(&m.ID, &m.Title, &m.CreatedAt, &m.UpdatedAt, &m.CloneOf); err != nil {
+			return nil, fmt.Errorf("session: scan index row: %w", err)
+		}
+		metas = append(metas, m)
+	}
+	return metas, rows.Err()
+}
+
+// mergeMetas combines legacy-format metadata (from a directory scan) with
+// the migrated-session index, letting an index row shadow a same-ID
+// legacy entry. This is belt-and-suspenders for the narrow crash window
+// in migrateToSqlite (Task 4) where a migrated session's old file could
+// momentarily still be on disk — without this, that session would appear
+// twice in a listing until the orphan is cleaned up on next Load.
+func mergeMetas(legacy, indexed []ocodeMeta) []ocodeMeta {
+	if len(indexed) == 0 {
+		return legacy
+	}
+	migrated := make(map[string]struct{}, len(indexed))
+	for _, m := range indexed {
+		migrated[m.ID] = struct{}{}
+	}
+	merged := make([]ocodeMeta, 0, len(legacy)+len(indexed))
+	for _, m := range legacy {
+		if _, ok := migrated[m.ID]; !ok {
+			merged = append(merged, m)
+		}
+	}
+	return append(merged, indexed...)
 }
