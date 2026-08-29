@@ -298,6 +298,8 @@ type Agent struct {
 	// shutdown a discarded sub-agent leaks the goroutine forever. See
 	// memoryMaintShutdown and shutdownTransient.
 	memoryMaintShutdownOnce sync.Once
+	memoryMaintMu           sync.Mutex // guards memoryMaintClosing + the close (mirrors docMaintMu, C4)
+	memoryMaintClosing      bool       // true after shutdown initiated
 	memoryMaintDone         chan struct{}
 	retryEvents             chan *RetryStatusEvent
 	// OnMessage, if set, is invoked for each message produced during Step
@@ -4612,6 +4614,10 @@ func (a *Agent) RearmMaintenance() {
 	a.docMaintMu.Lock()
 	a.docMaintClosing = false
 	a.docMaintMu.Unlock()
+
+	a.memoryMaintMu.Lock()
+	a.memoryMaintClosing = false
+	a.memoryMaintMu.Unlock()
 
 	a.memoryMaintCh = make(chan MemoryMaintenanceRequest, 64)
 	a.docMaintCh = make(chan DocMaintenanceRequest, docMaintChannelCap)

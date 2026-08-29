@@ -54,35 +54,72 @@ var memoryScopeOrder = []struct {
 
 // QueueMemoryMaintenance schedules a maintenance pass after a completed job.
 // It is intentionally non-blocking for the caller; the worker serialises writes.
+//
+// Thread-safe against concurrent memoryMaintShutdown (mirrors C4: OCSEC:31f59a:2
+// in doc_maintenance.go — an async model/session switch can call Shutdown() on
+// this agent while it is still the TUI's live m.agent, racing a job completion
+// that queues maintenance for it).
 func (a *Agent) QueueMemoryMaintenance(req MemoryMaintenanceRequest) {
 	if a == nil || a.memoryMaintCh == nil || !a.MemoryEnabled() || strings.TrimSpace(req.WorkDir) == "" {
 		return
 	}
+
+	a.memoryMaintMu.Lock()
+	defer a.memoryMaintMu.Unlock()
+
+	if a.memoryMaintClosing {
+		a.emitDebug("MEMORY", "shutting down, dropped maintenance request")
+		return
+	}
+
 	select {
 	case a.memoryMaintCh <- req:
 	default:
-		go func() { a.memoryMaintCh <- req }()
+		a.emitDebug("MEMORY", "memory maintenance channel full, dropped request")
 	}
 }
 
 func (a *Agent) memoryMaintenanceWorker() {
 	defer close(a.memoryMaintDone)
 	for req := range a.memoryMaintCh {
+		// Drop queued items after shutdown has been initiated. The channel close
+		// drains remaining items, but we must not process them (mirrors C5).
+		a.memoryMaintMu.Lock()
+		closing := a.memoryMaintClosing
+		a.memoryMaintMu.Unlock()
+		if closing {
+			a.emitDebug("MEMORY", "shutting down, dropping queued maintenance request")
+			continue
+		}
 		a.runMemoryMaintenance(req)
 	}
 }
 
-// memoryMaintShutdown closes the memory-maintenance channel so the worker
-// goroutine exits, then waits (bounded) for it to finish. Idempotent.
-// Mirrors docMaintShutdown. The channel is never sent to by a discarded
-// sub-agent (QueueMemoryMaintenance has no callers on sub-agents), so closing
-// it cannot race a late send.
+// memoryMaintShutdown signals the worker to stop, closes the channel, and
+// waits (bounded) for it to finish. Idempotent. Mirrors docMaintShutdown.
+//
+// Thread-safe: uses memoryMaintMu to coordinate with QueueMemoryMaintenance
+// (C4). A TUI agent can still be the live m.agent when an async model/session
+// switch calls Shutdown() on it, so QueueMemoryMaintenance must never send on
+// a channel this has already closed.
 func (a *Agent) memoryMaintShutdown() {
 	if a.memoryMaintCh == nil {
 		return
 	}
 	a.memoryMaintShutdownOnce.Do(func() {
+		// Set the closing flag and close the channel under the mutex so
+		// concurrent QueueMemoryMaintenance callers see a consistent state
+		// and do not send on a closed channel.
+		a.memoryMaintMu.Lock()
+		a.memoryMaintClosing = true
 		close(a.memoryMaintCh)
+		remaining := len(a.memoryMaintCh)
+		a.memoryMaintMu.Unlock()
+
+		if remaining > 0 {
+			a.emitDebug("MEMORY", fmt.Sprintf("shutdown: %d pending maintenance requests will be dropped", remaining))
+		}
+
 		select {
 		case <-a.memoryMaintDone:
 		case <-time.After(5 * time.Second):

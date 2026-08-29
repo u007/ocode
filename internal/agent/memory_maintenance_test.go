@@ -40,6 +40,33 @@ func (c *memoryMaintenanceStubClient) Chat(messages []Message, tools []map[strin
 func (c *memoryMaintenanceStubClient) GetProvider() string { return "stub" }
 func (c *memoryMaintenanceStubClient) GetModel() string    { return "stub" }
 
+// TestQueueMemoryMaintenanceRaceWithShutdown reproduces a TUI panic
+// ("send on closed channel") that occurred when an async model/session
+// switch called Shutdown() on an agent that was still the live m.agent: a
+// concurrent job completion queuing memory maintenance for it raced
+// memoryMaintShutdown closing memoryMaintCh. Mirrors the fix already applied
+// to doc_maintenance.go (C4: OCSEC:31f59a:2).
+func TestQueueMemoryMaintenanceRaceWithShutdown(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := t.TempDir()
+
+	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a.SetMemoryEnabled(true)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			a.QueueMemoryMaintenance(MemoryMaintenanceRequest{WorkDir: workDir})
+		}
+	}()
+
+	a.memoryMaintShutdown()
+	wg.Wait()
+}
+
 func TestRunMemoryMaintenanceAppliesProjectUpdate(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
