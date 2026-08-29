@@ -43,33 +43,33 @@ export default function ImageGenForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">Image Generation</h2>
+      <h2 className="text-sm font-semibold text-foreground">Image Generation</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input type="checkbox" checked={cfg.enabled} onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} />
         Enabled
       </label>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Provider (gemini / openai / novita / deepinfra)</label>
+        <label className="text-xs text-muted-foreground">Provider (gemini / openai / novita / deepinfra)</label>
         <Input value={cfg.provider} onChange={(e) => setCfg({ ...cfg, provider: e.target.value })} className="h-8 text-xs" />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Model (blank = provider default)</label>
+        <label className="text-xs text-muted-foreground">Model (blank = provider default)</label>
         <Input value={cfg.model} onChange={(e) => setCfg({ ...cfg, model: e.target.value })} className="h-8 text-xs" />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Output path (blank = working directory)</label>
+        <label className="text-xs text-muted-foreground">Output path (blank = working directory)</label>
         <Input value={cfg.output_path ?? ""} onChange={(e) => setCfg({ ...cfg, output_path: e.target.value })} className="h-8 text-xs" />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Timeout (s, 0 = default)</label>
+        <label className="text-xs text-muted-foreground">Timeout (s, 0 = default)</label>
         <Input
           type="number"
           value={cfg.timeout ?? 0}

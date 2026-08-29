@@ -1256,6 +1256,9 @@ async function handleCompact(ctx: CommandContext): Promise<CommandResult> {
 
   try {
     const result = await ctx.api.compactSession(sessionId);
+    try {
+      window.dispatchEvent(new CustomEvent("ocode:compact", { detail: { sessionId, originalLen: result.original_len, compactedLen: result.compacted_len } }));
+    } catch {}
     return {
       handled: true,
       messages: [{

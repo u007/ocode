@@ -6,6 +6,7 @@ import type {
   ModelInfo,
   AgentInfo,
   AgentRun,
+  GitStatus,
   GitDiffFile,
   ThemeResponse,
   TUIStatus,
@@ -138,6 +139,12 @@ export function apiPath(path: string): string {
   return `${BASE}${path}`;
 }
 
+// projQuery appends ?project=<root> for endpoints that select a registered
+// project root via the query string (git + fs mutation endpoints).
+function projQuery(project?: string): string {
+  return project ? `?project=${encodeURIComponent(project)}` : "";
+}
+
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
@@ -180,7 +187,18 @@ export const api = {
       `/api/sessions/${id}${qs ? `?${qs}` : ""}`,
     );
   },
-  listModels: () => fetchJSON<ModelInfo[]>("/api/models"),
+  truncateSession: (id: string, keepUntil: number) =>
+    fetchJSON<SessionDetail>(`/api/sessions/${id}/truncate`, {
+      method: "POST",
+      body: JSON.stringify({ keepUntil }),
+    }),
+  listModels: (opts?: { provider?: string; refresh?: boolean }) => {
+    const params = new URLSearchParams();
+    if (opts?.provider) params.set("provider", opts.provider);
+    if (opts?.refresh) params.set("refresh", "true");
+    const qs = params.toString();
+    return fetchJSON<ModelInfo[]>(`/api/models${qs ? `?${qs}` : ""}`);
+  },
   listAgents: () => fetchJSON<AgentInfo[]>("/api/config/agents"),
   listAgentRuns: (session?: string) =>
     fetchJSON<AgentRun[]>(
@@ -350,6 +368,72 @@ export const api = {
     const query = params.toString();
     return fetchJSON<GitDiffFile[]>(`/api/git/diff${query ? `?${query}` : ""}`);
   },
+
+  // ── Git file actions (driven by the web file-tree context menu) ──
+  // The target project is passed as ?project= (the same convention the GET
+  // git endpoints use); paths/message travel in the JSON body.
+  gitStage: (paths: string[], project?: string) =>
+    fetchJSON<GitStatus>(`/api/git/stage${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }),
+  gitUnstage: (paths: string[], project?: string) =>
+    fetchJSON<GitStatus>(`/api/git/unstage${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }),
+  gitDiscard: (paths: string[], project?: string) =>
+    fetchJSON<GitStatus>(`/api/git/discard${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }),
+  gitStash: (message: string, paths: string[], project?: string) =>
+    fetchJSON<GitStatus>(`/api/git/stash${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ paths, message }),
+    }),
+  gitCommit: (message: string, paths: string[], project?: string) =>
+    fetchJSON<GitStatus>(`/api/git/commit${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ paths, message }),
+    }),
+
+  // ── File-system actions (web file-tree context menu) ──
+  fsCopy: (paths: string[], destDir: string, project?: string) =>
+    fetchJSON<{ success: boolean }>(`/api/fs/copy${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ paths, dest_dir: destDir }),
+    }),
+  fsMove: (paths: string[], destDir: string, project?: string) =>
+    fetchJSON<{ success: boolean }>(`/api/fs/move${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ paths, dest_dir: destDir }),
+    }),
+  fsDelete: (paths: string[], project?: string) =>
+    fetchJSON<{ success: boolean }>(`/api/fs/delete${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }),
+  fsRename: (path: string, newName: string, project?: string) =>
+    fetchJSON<{ success: boolean; path: string }>(`/api/fs/rename${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ path, new_name: newName }),
+    }),
+  fsNewFile: (path: string, project?: string) =>
+    fetchJSON<{ success: boolean; path: string }>(`/api/fs/new-file${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+  fsNewFolder: (path: string, project?: string) =>
+    fetchJSON<{ success: boolean; path: string }>(`/api/fs/new-folder${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+  fsDuplicate: (path: string, project?: string) =>
+    fetchJSON<{ success: boolean; path: string }>(`/api/fs/duplicate${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
   listCronJobs: () => fetchJSON<CronJobsResponse>("/api/cron"),
   getCronJob: (id: string) => fetchJSON<CronJob>(`/api/cron/${id}`),
   addCronJob: (job: CronJobWriteRequest) =>
@@ -929,7 +1013,62 @@ export const api = {
       `/api/changes/undo-block${session ? `?session=${encodeURIComponent(session)}` : ""}`,
       { method: "POST", body: JSON.stringify({ path }) },
     ),
+
+  // ── Secret (age-encrypted file/dir) management ──
+  secretInit: (path: string, passphrase: string, confirmPassphrase: string) =>
+    fetchJSON<{ key_path: string }>("/api/secret/init", {
+      method: "POST",
+      body: JSON.stringify({ path, passphrase, confirm_passphrase: confirmPassphrase }),
+    }),
+  secretScan: (path: string, mode: "encrypt" | "decrypt") =>
+    fetchJSON<SecretScanResponse>(
+      `/api/secret/scan?path=${encodeURIComponent(path)}&mode=${mode}`,
+    ),
+  secretEncrypt: (path: string, passphrase: string, confirmPassphrase: string) =>
+    fetchJSON<SecretTransformResponse>("/api/secret/encrypt", {
+      method: "POST",
+      body: JSON.stringify({ path, passphrase, confirm_passphrase: confirmPassphrase }),
+    }),
+  secretDecrypt: (path: string, passphrase: string) =>
+    fetchJSON<SecretTransformResponse>("/api/secret/decrypt", {
+      method: "POST",
+      body: JSON.stringify({ path, passphrase }),
+    }),
+  secretRekey: (path: string, oldPassphrase: string, newPassphrase: string, confirmNewPassphrase: string) =>
+    fetchJSON<{ key_path: string }>("/api/secret/rekey", {
+      method: "POST",
+      body: JSON.stringify({
+        path,
+        old_passphrase: oldPassphrase,
+        new_passphrase: newPassphrase,
+        confirm_new_passphrase: confirmNewPassphrase,
+      }),
+    }),
+  secretCancel: (jobId: string) =>
+    fetchJSON<{ cancelled: boolean }>("/api/secret/cancel", {
+      method: "POST",
+      body: JSON.stringify({ job_id: jobId }),
+    }),
 };
+
+export interface SecretScanResponse {
+  path: string;
+  is_dir: boolean;
+  file_count?: number;
+}
+
+export interface SecretTransformResponse {
+  status: "done" | "started";
+  job_id?: string;
+  total?: number;
+}
+
+export interface SecretProgressEvent {
+  job_id: string;
+  done: number;
+  total: number;
+  current?: string;
+}
 
 export type SSEEventHandler = (
   event: string,

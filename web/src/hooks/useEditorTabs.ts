@@ -20,8 +20,10 @@ export interface EditorTab {
   /** The file changed (or vanished) on disk outside this app while this tab
    *  held unsaved edits — surfaced as a banner until reloaded or dismissed. */
   externalChange: boolean;
+  /** When true (the default) the opened file is attached to the LLM loop /
+   *  chat context on send. Unchecking excludes it without closing the tab. */
+  includeInContext: boolean;
 }
-
 export interface ActiveEditorContext {
   path: string;
   projectRoot?: string;
@@ -37,6 +39,9 @@ export interface UseEditorTabsResult {
   dismissExternalChange: (id: string) => void;
   handleEditorChange: (id: string, content: string) => void;
   handleSelectionChange: (sel: { startLine: number; endLine: number } | null) => void;
+  toggleIncludeInContext: (id: string) => void;
+  closeTabsForPaths: (paths: string[], projectRoot?: string) => void;
+  renameTabPath: (oldPath: string, newPath: string, projectRoot?: string) => void;
   activeEditorContext: ActiveEditorContext | null;
   requestCloseTab: (id: string) => void;
   saveEditorTab: (id: string) => Promise<void>;
@@ -103,6 +108,7 @@ export function useEditorTabs(): UseEditorTabsResult {
           isDirty: true,
           diffVersion: 0,
           externalChange: draft.baseHash !== hashContent(disk),
+          includeInContext: true,
         };
       } else {
         if (draft) clearEditorDraft(id); // draft matches disk — it was saved elsewhere
@@ -115,6 +121,7 @@ export function useEditorTabs(): UseEditorTabsResult {
           isDirty: false,
           diffVersion: 0,
           externalChange: false,
+          includeInContext: true,
         };
       }
     } catch (err) {
@@ -138,6 +145,7 @@ export function useEditorTabs(): UseEditorTabsResult {
         isDirty: true,
         diffVersion: 0,
         externalChange: true,
+        includeInContext: true,
       };
     }
     // Defensive dedupe: never append a second tab for an id that slipped
@@ -376,6 +384,49 @@ export function useEditorTabs(): UseEditorTabsResult {
     setEditorTabs((prev) => prev.map((t) => (t.id === id ? { ...t, externalChange: false } : t)));
   }, []);
 
+  const closeTabsForPaths = useCallback((paths: string[], projectRoot?: string) => {
+    const norm = (p: string) => p.replace(/\/+$/, "");
+    const targets = paths.map(norm);
+    setEditorTabs((prev) => {
+      const keep = prev.filter((t) => {
+        if ((t.projectRoot ?? "") !== (projectRoot ?? "")) return true;
+        const tp = norm(t.path);
+        for (const del of targets) {
+          if (tp === del || tp.startsWith(del + "/")) return false;
+        }
+        return true;
+      });
+      // Drop orphaned open ids.
+      const keepIds = new Set(keep.map((t) => t.id));
+      for (const id of Array.from(openFileIdsRef.current)) {
+        if (!keepIds.has(id)) openFileIdsRef.current.delete(id);
+      }
+      return keep;
+    });
+    setActiveEditorTabId((prev) => {
+      if (prev && openFileIdsRef.current.has(prev)) return prev;
+      // Active was removed — will be reconciled by render via remaining tabs.
+      return prev;
+    });
+  }, []);
+
+  const renameTabPath = useCallback((oldPath: string, newPath: string, projectRoot?: string) => {
+    const normOld = oldPath.replace(/\/+$/, "");
+    const normNew = newPath.replace(/\/+$/, "");
+    setEditorTabs((prev) =>
+      prev.map((t) => {
+        if ((t.projectRoot ?? "") !== (projectRoot ?? "")) return t;
+        if (t.path === normOld) return { ...t, path: normNew, id: `editor-${projectRoot ? `${projectRoot}::${normNew}` : normNew}` };
+        if (t.path.startsWith(normOld + "/")) {
+          const suffix = t.path.slice(normOld.length);
+          const np = normNew + suffix;
+          return { ...t, path: np, id: `editor-${projectRoot ? `${projectRoot}::${np}` : np}` };
+        }
+        return t;
+      }),
+    );
+  }, []);
+
   // Watch the active tab for modifications made outside the app: re-fetch its
   // content every 10s (and on window focus, the moment users typically come
   // back from an external editor). A clean tab silently follows the disk; a
@@ -422,6 +473,12 @@ export function useEditorTabs(): UseEditorTabsResult {
     };
   }, [activeEditorTabId, fetchFileContent]);
 
+  const toggleIncludeInContext = useCallback((id: string) => {
+    setEditorTabs((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, includeInContext: !t.includeInContext } : t)),
+    );
+  }, []);
+
   return {
     editorTabs,
     activeEditorTabId,
@@ -431,6 +488,9 @@ export function useEditorTabs(): UseEditorTabsResult {
     dismissExternalChange,
     handleEditorChange,
     handleSelectionChange,
+    toggleIncludeInContext,
+    closeTabsForPaths,
+    renameTabPath,
     activeEditorContext,
     requestCloseTab,
     saveEditorTab,

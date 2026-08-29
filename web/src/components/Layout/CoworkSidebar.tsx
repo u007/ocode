@@ -373,22 +373,22 @@ export default function CoworkSidebar({
   const content = (
     <>
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-700">
-        <h2 className="text-sm font-semibold text-zinc-300">Cowork</h2>
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <h2 className="text-sm font-semibold text-foreground">Cowork</h2>
         <button
           onClick={onClose}
-          className="text-zinc-500 hover:text-zinc-300 text-xs"
+          className="text-muted-foreground hover:text-foreground text-xs"
         >
           ✕
         </button>
       </div>
 
       {/* Session title — mirrors TUI sidebar header (◆ title + ✦ gen) */}
-      <div className="border-b border-zinc-700 px-4 py-3">
+      <div className="border-b border-border px-4 py-3">
         <div className="flex items-start gap-2">
           <span className="text-[#7DCFFF] font-bold text-sm leading-5 select-none" aria-hidden>◆</span>
           <span
-            className={`flex-1 text-sm font-medium text-zinc-200 break-words leading-5 cursor-pointer ${
+            className={`flex-1 text-sm font-medium text-foreground break-words leading-5 cursor-pointer ${
               titleExpanded ? "" : "line-clamp-3"
             }`}
             title={titleExpanded ? "Click to collapse" : `${displayTitle}\n\n(click to expand)`}
@@ -417,10 +417,10 @@ export default function CoworkSidebar({
 
       <div className="flex-1 overflow-y-auto">
         {/* Agent Section */}
-        <div className="border-b border-zinc-700">
+        <div className="border-b border-border">
           <button
             onClick={() => toggleSection("agent")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
             {expandedSections.agent ? (
               <ChevronDown className="w-4 h-4" />
@@ -432,17 +432,17 @@ export default function CoworkSidebar({
           </button>
           {expandedSections.agent && (
             <div className="px-4 pb-3">
-              <div className="rounded-md bg-zinc-800 p-3">
-                <div className="text-sm font-medium text-zinc-200">
+              <div className="rounded-md bg-muted p-3">
+                <div className="text-sm font-medium text-foreground">
                   {currentAgent?.name || selectedAgent}
                 </div>
-                <div className="text-xs text-zinc-500 mt-1">
+                <div className="text-xs text-muted-foreground mt-1">
                   {currentAgent?.description || "No description"}
                 </div>
               </div>
               {agents.length > 0 && (
                 <select
-                  className="mt-2 w-full h-8 px-2 text-xs bg-zinc-800 border border-zinc-700 rounded text-zinc-200 disabled:opacity-50"
+                  className="mt-2 w-full h-8 px-2 text-xs bg-muted border border-border rounded text-foreground disabled:opacity-50"
                   value={selectedAgent}
                   disabled={agentBusy}
                   onChange={(e) => switchAgent(e.target.value)}
@@ -460,7 +460,7 @@ export default function CoworkSidebar({
                   ))}
                 </select>
               )}
-              <div className="mt-2 text-xs text-zinc-500">
+              <div className="mt-2 text-xs text-muted-foreground">
                 <div>Session: {sessionId ? sessionId.slice(0, 12) + "..." : "None"}</div>
               </div>
             </div>
@@ -469,15 +469,15 @@ export default function CoworkSidebar({
 
         {/* Model configuration — mirrors TUI's pinned topLines (advisor/small/perm/recap)
             so web/desktop sidebars expose the same selection + toggle controls. */}
-        <div className="border-b border-zinc-700 px-4 py-2.5 space-y-2">
+        <div className="border-b border-border px-4 py-2.5 space-y-2">
           <button
             type="button"
             onClick={() => onModelClick?.("main")}
-            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
+            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-muted disabled:cursor-default disabled:hover:bg-transparent"
             disabled={!onModelClick}
           >
-            <div className="text-zinc-500 mb-1">Model</div>
-            <div className="text-zinc-300 font-mono truncate">
+            <div className="text-muted-foreground mb-1">Model</div>
+            <div className="text-foreground font-mono truncate">
               {model || config.model || "Not set"}
             </div>
           </button>
@@ -485,56 +485,56 @@ export default function CoworkSidebar({
           <button
             type="button"
             onClick={() => onModelClick?.("advisor")}
-            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
+            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-muted disabled:cursor-default disabled:hover:bg-transparent"
             disabled={!onModelClick}
             title="Pick the advisor model"
           >
             <div className="flex items-center justify-between gap-2">
-              <span className="text-zinc-500">Advisor</span>
-              <span className={`font-mono text-[11px] ${(tuiStatus?.advisor_enabled ?? config.advisorEnabled ?? globalAdvisorEnabled) ? "text-emerald-400" : "text-zinc-500"}`}>
+              <span className="text-muted-foreground">Advisor</span>
+              <span className={`font-mono text-[11px] ${(tuiStatus?.advisor_enabled ?? config.advisorEnabled ?? globalAdvisorEnabled) ? "text-emerald-400" : "text-muted-foreground"}`}>
                 {(tuiStatus?.advisor_enabled ?? config.advisorEnabled ?? globalAdvisorEnabled) ? "●on" : "○off"}
               </span>
             </div>
-            <div className="text-zinc-300 font-mono truncate">
+            <div className="text-foreground font-mono truncate">
               {tuiStatus?.advisor_model || config.advisorModel || globalAdvisorModel || "(default)"}
             </div>
           </button>
-          <label className="flex items-center justify-between cursor-pointer rounded px-1 py-1 hover:bg-zinc-800">
-            <span className="text-xs text-zinc-400">Advisor enabled</span>
+          <label className="flex items-center justify-between cursor-pointer rounded px-1 py-1 hover:bg-muted">
+            <span className="text-xs text-muted-foreground">Advisor enabled</span>
             <input
               type="checkbox"
               checked={Boolean(tuiStatus?.advisor_enabled ?? config.advisorEnabled ?? globalAdvisorEnabled)}
               disabled={advisorLoading}
               onChange={toggleAdvisor}
-              className="w-8 h-4 rounded-full appearance-none bg-zinc-700 checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
             />
           </label>
           {/* Small model — model picker + on/off toggle (mirrors TUI's small: ●on/○off <model> row) */}
           <button
             type="button"
             onClick={() => onModelClick?.("small")}
-            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
+            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-muted disabled:cursor-default disabled:hover:bg-transparent"
             disabled={!onModelClick}
             title="Pick the small model"
           >
             <div className="flex items-center justify-between gap-2">
-              <span className="text-zinc-500">Small</span>
-              <span className={`font-mono text-[11px] ${(tuiStatus?.small_model_enabled ?? config.smallModelEnabled ?? globalSmallModelEnabled) ? "text-emerald-400" : "text-zinc-500"}`}>
+              <span className="text-muted-foreground">Small</span>
+              <span className={`font-mono text-[11px] ${(tuiStatus?.small_model_enabled ?? config.smallModelEnabled ?? globalSmallModelEnabled) ? "text-emerald-400" : "text-muted-foreground"}`}>
                 {(tuiStatus?.small_model_enabled ?? config.smallModelEnabled ?? globalSmallModelEnabled) ? "●on" : "○off"}
               </span>
             </div>
-            <div className="text-zinc-300 font-mono truncate">
+            <div className="text-foreground font-mono truncate">
               {tuiStatus?.small_model || config.smallModel || globalSmallModel || "(none)"}
             </div>
           </button>
-          <label className="flex items-center justify-between cursor-pointer rounded px-1 py-1 hover:bg-zinc-800">
-            <span className="text-xs text-zinc-400">Small model enabled</span>
+          <label className="flex items-center justify-between cursor-pointer rounded px-1 py-1 hover:bg-muted">
+            <span className="text-xs text-muted-foreground">Small model enabled</span>
             <input
               type="checkbox"
               checked={Boolean(tuiStatus?.small_model_enabled ?? config.smallModelEnabled ?? globalSmallModelEnabled)}
               disabled={smallLoading}
               onChange={toggleSmall}
-              className="w-8 h-4 rounded-full appearance-none bg-zinc-700 checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
             />
           </label>
 
@@ -546,10 +546,10 @@ export default function CoworkSidebar({
         </div>
 
         {/* Git Section */}
-        <div className="border-b border-zinc-700">
+        <div className="border-b border-border">
           <button
             onClick={() => toggleSection("git")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
             {expandedSections.git ? (
               <ChevronDown className="w-4 h-4" />
@@ -561,11 +561,11 @@ export default function CoworkSidebar({
           </button>
           {expandedSections.git && (
             <div className="px-4 pb-3">
-              <div className="text-sm font-mono text-zinc-300">
+              <div className="text-sm font-mono text-foreground">
                 {gitBranch || "Loading..."}
               </div>
               {tuiStatus?.cwd && (
-                <div className="text-xs text-zinc-500 mt-1 truncate" title={tuiStatus.cwd}>
+                <div className="text-xs text-muted-foreground mt-1 truncate" title={tuiStatus.cwd}>
                   {tuiStatus.cwd}
                 </div>
               )}
@@ -574,10 +574,10 @@ export default function CoworkSidebar({
         </div>
 
         {/* Permissions — mirrors TUI sidebar Allowed section + perm toggle */}
-        <div className="border-b border-zinc-700">
+        <div className="border-b border-border">
           <button
             onClick={() => toggleSection("permissions")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
             {expandedSections.permissions ? (
               <ChevronDown className="w-4 h-4" />
@@ -590,52 +590,52 @@ export default function CoworkSidebar({
           {expandedSections.permissions && (
             <div className="px-4 pb-3 space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-xs text-zinc-400">Mode</span>
-                <span className="text-xs font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-200">
+                <span className="text-xs text-muted-foreground">Mode</span>
+                <span className="text-xs font-mono px-2 py-0.5 rounded bg-muted text-foreground">
                   {tuiStatus?.mode || "—"}
                 </span>
               </div>
               {tuiStatus?.temperature !== undefined && tuiStatus?.temperature !== null && (
                 <div className="flex items-center justify-between">
-                  <span className="text-xs text-zinc-400">Temperature</span>
-                  <span className="text-xs font-mono text-zinc-300">{tuiStatus.temperature}</span>
+                  <span className="text-xs text-muted-foreground">Temperature</span>
+                  <span className="text-xs font-mono text-foreground">{tuiStatus.temperature}</span>
                 </div>
               )}
               <div className="flex items-center justify-between">
-                <span className="text-xs text-zinc-400">Permission</span>
-                <span className="text-xs font-mono text-zinc-300">
+                <span className="text-xs text-muted-foreground">Permission</span>
+                <span className="text-xs font-mono text-foreground">
                   {tuiStatus?.permission_mode || (config.yolo ? "yolo" : "normal")}
                 </span>
               </div>
               <label className="flex items-center justify-between cursor-pointer">
-                <span className="text-xs text-zinc-400">YOLO (auto-allow all)</span>
+                <span className="text-xs text-muted-foreground">YOLO (auto-allow all)</span>
                 <input
                   type="checkbox"
                   checked={(tuiStatus?.permission_mode ?? (config.yolo ? "yolo" : "normal")) === "yolo"}
                   disabled={yoloLoading}
                   onChange={toggleYolo}
-                  className="w-8 h-4 rounded-full appearance-none bg-zinc-700 checked:bg-purple-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+                  className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-purple-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
                 />
               </label>
               <label className="flex items-center justify-between cursor-pointer">
-                <span className="text-xs text-zinc-400">Auto-permission</span>
+                <span className="text-xs text-muted-foreground">Auto-permission</span>
                 <input
                   type="checkbox"
                   checked={Boolean(tuiStatus?.permission_auto_allow ?? config.permissionModelEnabled)}
                   disabled={permLoading}
                   onChange={togglePermEnabled}
-                  className="w-8 h-4 rounded-full appearance-none bg-zinc-700 checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+                  className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
                 />
               </label>
               <button
                 type="button"
                 onClick={() => onModelClick?.("permission")}
                 disabled={!onModelClick}
-                className="flex items-center justify-between w-full text-left rounded px-1 py-1 hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
+                className="flex items-center justify-between w-full text-left rounded px-1 py-1 hover:bg-muted disabled:cursor-default disabled:hover:bg-transparent"
               >
-                <span className="text-xs text-zinc-400">Permission model</span>
+                <span className="text-xs text-muted-foreground">Permission model</span>
                 <span
-                  className="text-xs font-mono text-zinc-300 truncate max-w-[140px]"
+                  className="text-xs font-mono text-foreground truncate max-w-[140px]"
                   title={tuiStatus?.permission_model || config.permissionModel || "(not set)"}
                 >
                   {tuiStatus?.permission_model || config.permissionModel || "(not set)"}{" "}
@@ -644,17 +644,17 @@ export default function CoworkSidebar({
               </button>
               {tuiStatus?.ide_mode && (
                 <div className="flex items-center justify-between">
-                  <span className="text-xs text-zinc-400">IDE</span>
-                  <span className="text-xs text-zinc-300 truncate" title={tuiStatus.ide_status || tuiStatus.ide_mode}>
+                  <span className="text-xs text-muted-foreground">IDE</span>
+                  <span className="text-xs text-foreground truncate" title={tuiStatus.ide_status || tuiStatus.ide_mode}>
                     {tuiStatus.ide_status || tuiStatus.ide_mode}
                   </span>
                 </div>
               )}
               {(tuiStatus?.recap_model || config.recapModel) && (
                 <div className="flex items-center justify-between">
-                  <span className="text-xs text-zinc-400">Recap</span>
+                  <span className="text-xs text-muted-foreground">Recap</span>
                   <span
-                    className="text-xs font-mono text-zinc-300 truncate"
+                    className="text-xs font-mono text-foreground truncate"
                     title={tuiStatus?.recap_model || config.recapModel}
                   >
                     {tuiStatus?.recap_model || config.recapModel}{" "}
@@ -664,7 +664,7 @@ export default function CoworkSidebar({
               )}
               {tuiStatus?.spending_usd !== undefined && tuiStatus.spending_usd > 0 && (
                 <div className="flex items-center justify-between">
-                  <span className="text-xs text-zinc-400">Spending</span>
+                  <span className="text-xs text-muted-foreground">Spending</span>
                   <span className="text-xs font-mono text-amber-300">${tuiStatus.spending_usd.toFixed(4)}</span>
                 </div>
               )}
@@ -673,10 +673,10 @@ export default function CoworkSidebar({
         </div>
 
         {/* Context Section — real token usage from the TUI status snapshot. */}
-        <div className="border-b border-zinc-700">
+        <div className="border-b border-border">
           <button
             onClick={() => toggleSection("context")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
             {expandedSections.context ? (
               <ChevronDown className="w-4 h-4" />
@@ -690,13 +690,13 @@ export default function CoworkSidebar({
             <div className="px-4 pb-3">
               {contextMax > 0 ? (
                 <>
-                  <div className="flex items-center justify-between text-xs text-zinc-500 mb-1">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
                     <span>Used</span>
-                    <span className="font-mono text-zinc-400">
+                    <span className="font-mono text-muted-foreground">
                       {formatTokenCount(contextCurrent)} / {formatTokenCount(contextMax)}
                     </span>
                   </div>
-                  <div className="h-2 w-full rounded bg-zinc-800 overflow-hidden">
+                  <div className="h-2 w-full rounded bg-muted overflow-hidden">
                     <div
                       className={`h-full transition-all ${
                         contextPct > 85
@@ -708,17 +708,17 @@ export default function CoworkSidebar({
                       style={{ width: `${contextPct}%` }}
                     />
                   </div>
-                  <div className="text-right text-[11px] text-zinc-500 mt-1">
+                  <div className="text-right text-[11px] text-muted-foreground mt-1">
                     {contextPct}%
                     {contextModel && (
-                      <span className="ml-2 text-zinc-600 font-mono">
+                      <span className="ml-2 text-foreground font-mono">
                         {contextModel}
                       </span>
                     )}
                   </div>
                 </>
               ) : (
-                <div className="text-xs text-zinc-500">
+                <div className="text-xs text-muted-foreground">
                   No context data yet
                 </div>
               )}
@@ -727,10 +727,10 @@ export default function CoworkSidebar({
         </div>
 
         {/* LSP Statuses Section */}
-        <div className="border-b border-zinc-700">
+        <div className="border-b border-border">
           <button
             onClick={() => toggleSection("lsp")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
             {expandedSections.lsp ? (
               <ChevronDown className="w-4 h-4" />
@@ -759,7 +759,7 @@ export default function CoworkSidebar({
                     } else if (isIndexing) {
                       sym = "◌";
                       label = "indexing…";
-                      color = "text-zinc-400";
+                      color = "text-muted-foreground";
                     } else if (errs > 0 && warns > 0) {
                       sym = "●";
                       label = `${errs} ${errs === 1 ? "error" : "errors"}, ${warns} ${warns === 1 ? "warning" : "warnings"}`;
@@ -774,9 +774,9 @@ export default function CoworkSidebar({
                       color = "text-yellow-400";
                     }
                     return (
-                      <div key={s.cmd} className="rounded bg-zinc-800 p-2">
+                      <div key={s.cmd} className="rounded bg-muted p-2">
                         <div className="flex items-center gap-2">
-                          <span className="text-xs font-mono text-zinc-400 truncate flex-1">
+                          <span className="text-xs font-mono text-muted-foreground truncate flex-1">
                             {s.cmd}
                           </span>
                           <span className={`text-xs font-mono flex-shrink-0 ${color}`}>
@@ -784,7 +784,7 @@ export default function CoworkSidebar({
                           </span>
                         </div>
                         {s.lang_id && (
-                          <div className="text-[11px] text-zinc-500 truncate">
+                          <div className="text-[11px] text-muted-foreground truncate">
                             {s.lang_id}
                             {s.root ? ` · ${s.root}` : ""}
                           </div>
@@ -797,17 +797,17 @@ export default function CoworkSidebar({
                   })}
                 </div>
               ) : (
-                <div className="text-xs text-zinc-500">No LSP servers</div>
+                <div className="text-xs text-muted-foreground">No LSP servers</div>
               )}
             </div>
           )}
         </div>
 
         {/* Modified Files Section */}
-        <div className="border-b border-zinc-700">
+        <div className="border-b border-border">
           <button
             onClick={() => toggleSection("files")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
             {expandedSections.files ? (
               <ChevronDown className="w-4 h-4" />
@@ -824,7 +824,7 @@ export default function CoworkSidebar({
                   {modifiedFiles.map((f) => (
                     <div
                       key={f.path}
-                      className="flex items-center gap-2 text-xs text-zinc-400 p-1.5 rounded hover:bg-zinc-800"
+                      className="flex items-center gap-2 text-xs text-muted-foreground p-1.5 rounded hover:bg-muted"
                     >
                       <span
                         className={`flex-shrink-0 w-4 text-center font-mono ${
@@ -834,7 +834,7 @@ export default function CoworkSidebar({
                               ? "text-emerald-400"
                               : f.status === "D"
                                 ? "text-red-400"
-                                : "text-zinc-500"
+                                : "text-muted-foreground"
                         }`}
                       >
                         {f.status || "?"}
@@ -846,17 +846,17 @@ export default function CoworkSidebar({
                   ))}
                 </div>
               ) : (
-                <div className="text-xs text-zinc-500">No modified files</div>
+                <div className="text-xs text-muted-foreground">No modified files</div>
               )}
             </div>
           )}
         </div>
 
         {/* Plugins Section — opens the full plugin manager dialog. */}
-        <div className="border-b border-zinc-700">
+        <div className="border-b border-border">
           <button
             onClick={() => setPluginsOpen(true)}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
             <ChevronRight className="w-4 h-4" />
             <Puzzle className="w-4 h-4 text-fuchsia-400" />
@@ -867,10 +867,10 @@ export default function CoworkSidebar({
         {/* TODO Section — no live data source is exposed by the backend yet,
             so this shows a stable empty state instead of a list that can never
             update. */}
-        <div className="border-b border-zinc-700">
+        <div className="border-b border-border">
           <button
             onClick={() => toggleSection("todo")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
             {expandedSections.todo ? (
               <ChevronDown className="w-4 h-4" />
@@ -887,7 +887,7 @@ export default function CoworkSidebar({
                   {todoItems.map((item, i) => (
                     <div
                       key={i}
-                      className="flex items-start gap-2 text-xs text-zinc-400 p-1.5 rounded hover:bg-zinc-800"
+                      className="flex items-start gap-2 text-xs text-muted-foreground p-1.5 rounded hover:bg-muted"
                     >
                       <Zap className="w-3 h-3 mt-0.5 flex-shrink-0 text-orange-400" />
                       <span>{item}</span>
@@ -895,9 +895,9 @@ export default function CoworkSidebar({
                   ))}
                 </div>
               ) : (
-                <div className="text-xs text-zinc-500">
+                <div className="text-xs text-muted-foreground">
                   <div>No TODO items</div>
-                  <div className="mt-2 text-zinc-600">
+                  <div className="mt-2 text-foreground">
                     Agent will add items during execution
                   </div>
                 </div>
@@ -923,7 +923,7 @@ export default function CoworkSidebar({
           />
         )}
         <aside
-          className={`fixed inset-y-0 right-0 z-50 w-72 border-l border-zinc-700 bg-zinc-900 flex flex-col overflow-hidden transition-transform duration-200 ${
+          className={`fixed inset-y-0 right-0 z-50 w-72 border-l border-border bg-card flex flex-col overflow-hidden transition-transform duration-200 ${
             isOpen ? "translate-x-0" : "translate-x-full"
           }`}
         >
@@ -934,7 +934,7 @@ export default function CoworkSidebar({
   }
 
   return (
-    <aside className="w-72 flex-shrink-0 border-l border-zinc-700 bg-zinc-900 flex flex-col overflow-hidden">
+    <aside className="w-72 flex-shrink-0 border-l border-border bg-card flex flex-col overflow-hidden">
       {content}
     </aside>
   );

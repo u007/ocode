@@ -56,21 +56,21 @@ export default function DiscoveryForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">Discovery</h2>
+      <h2 className="text-sm font-semibold text-foreground">Discovery</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input type="checkbox" checked={cfg.enabled} onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} />
         Enabled
       </label>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Embedding model</label>
+        <label className="text-xs text-muted-foreground">Embedding model</label>
         <Input
           value={cfg.embedding_model}
           onChange={(e) => setCfg({ ...cfg, embedding_model: e.target.value })}
@@ -78,7 +78,7 @@ export default function DiscoveryForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Embedding backend (http / local)</label>
+        <label className="text-xs text-muted-foreground">Embedding backend (http / local)</label>
         <Input
           value={cfg.embedding_backend}
           onChange={(e) => setCfg({ ...cfg, embedding_backend: e.target.value })}
@@ -86,7 +86,7 @@ export default function DiscoveryForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Local server URL</label>
+        <label className="text-xs text-muted-foreground">Local server URL</label>
         <Input
           value={cfg.local_server_url}
           onChange={(e) => setCfg({ ...cfg, local_server_url: e.target.value })}
@@ -94,11 +94,11 @@ export default function DiscoveryForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Pinned skills (comma-separated)</label>
+        <label className="text-xs text-muted-foreground">Pinned skills (comma-separated)</label>
         <Input value={pinnedText} onChange={(e) => setPinnedText(e.target.value)} className="h-8 text-xs" />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Ignore paths (comma-separated)</label>
+        <label className="text-xs text-muted-foreground">Ignore paths (comma-separated)</label>
         <Input value={ignoreText} onChange={(e) => setIgnoreText(e.target.value)} className="h-8 text-xs" />
       </div>
       <Button size="sm" onClick={save} disabled={saving} className="h-8 text-xs">

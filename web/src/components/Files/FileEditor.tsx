@@ -17,9 +17,11 @@ import { parseDiffPatch, type DiffLine, type Hunk } from "../../lib/parseDiffPat
 
 // Ensure Monaco is configured before any editor mounts.
 import "../../lib/monaco-setup";
+import { consumePendingHighlight, setPendingHighlight } from "../../lib/fileSearchHighlight";
 
 interface FileEditorProps {
   path: string;
+  projectRoot?: string;
   content: string;
   language?: string;
   onChange?: (value: string) => void;
@@ -38,6 +40,8 @@ interface FileEditorProps {
   externalChange?: boolean;
   onReloadFromDisk?: () => void;
   onDismissExternalChange?: () => void;
+  /** Initial highlight to apply (from content search). If provided, highlights all matches after mount. */
+  initialHighlight?: { query: string; line?: number } | null;
 }
 
 import { memo } from "react";
@@ -96,6 +100,7 @@ function isModifiedHunk(hunk: Hunk): boolean {
 
 function FileEditorImpl({
   path,
+  projectRoot,
   content,
   language,
   onChange,
@@ -108,6 +113,7 @@ function FileEditorImpl({
   externalChange = false,
   onReloadFromDisk,
   onDismissExternalChange,
+  initialHighlight,
 }: FileEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   // Store the Monaco API object so it's available in effects that can't reach
@@ -124,6 +130,8 @@ function FileEditorImpl({
   // Refs for diff decoration cleanup
   const decorationIdsRef = useRef<string[]>([]);
   const viewZoneIdsRef = useRef<string[]>([]);
+  const searchDecorationIdsRef = useRef<string[]>([]);
+  const [activeHighlight, setActiveHighlight] = useState<{ query: string; path: string } | null>(null);
 
   // ── Stable callback refs ──
   // The parent recreates onChange / onSelectionChange on every render (App.tsx
@@ -349,6 +357,16 @@ function FileEditorImpl({
     });
 
     monaco.editor.setTheme("ocode-dark");
+    // Inject search highlight style once
+    if (!document.getElementById("ocode-search-highlight-style")) {
+      const style = document.createElement("style");
+      style.id = "ocode-search-highlight-style";
+      style.textContent = `
+        .search-highlight { background-color: rgba(250, 204, 21, 0.35) !important; border: 1px solid rgba(250, 204, 21, 0.6); border-radius: 2px; }
+        .search-highlight-current { background-color: rgba(250, 204, 21, 0.65) !important; }
+      `;
+      document.head.appendChild(style);
+    }
   }, [persistKey, wireSelectionTracking]);
 
   // ── Inline diff decorations ──
@@ -512,6 +530,127 @@ function FileEditorImpl({
     };
   }, [path, session, diffVersion]);
 
+  // ── Search highlight decorations (content search) ──
+  // Single mechanism: pending highlight store keyed by path+projectRoot.
+  // FileTree sets pending before opening; FileEditor consumes it after mount/content load.
+  // Window event is retained for already-mounted editors (e.g., switching tabs).
+  const applyHighlight = (query: string, line?: number) => {
+    const ed = editorRef.current;
+    if (!ed) return;
+    const model = ed.getModel();
+    if (!model) return;
+    if (searchDecorationIdsRef.current.length > 0) {
+      ed.deltaDecorations(searchDecorationIdsRef.current, []);
+      searchDecorationIdsRef.current = [];
+    }
+    const keywords = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (keywords.length === 0) {
+      if (line && line > 0) {
+        ed.revealLineInCenter(line);
+        ed.setPosition({ lineNumber: line, column: 1 });
+      }
+      setActiveHighlight(null);
+      return;
+    }
+    const decorations: import("monaco-editor").editor.IModelDeltaDecoration[] = [];
+    for (const kw of keywords) {
+      const matches = model.findMatches(kw, false, false, false, null, false);
+      for (const m of matches) {
+        decorations.push({
+          range: m.range,
+          options: {
+            inlineClassName: "search-highlight",
+            overviewRuler: { color: "#facc15", position: 4 },
+            minimap: { color: "#facc15", position: 1 },
+          },
+        });
+      }
+    }
+    searchDecorationIdsRef.current = ed.deltaDecorations([], decorations);
+    setActiveHighlight({ query, path });
+    if (line && line > 0) {
+      ed.revealLineInCenter(line);
+      ed.setPosition({ lineNumber: line, column: 1 });
+    } else if (decorations.length > 0) {
+      const first = decorations[0].range;
+      ed.revealLineInCenter(first.startLineNumber);
+    }
+  };
+
+  // Consume pending highlight after mount or when content/path changes
+  useEffect(() => {
+    const pending = consumePendingHighlight(path, projectRoot);
+    const init = pending || (initialHighlight && initialHighlight.query ? { query: initialHighlight.query, line: initialHighlight.line, ts: Date.now() } : null);
+    if (!init) {
+      // Clear stale highlight if path changed
+      if (activeHighlight && activeHighlight.path !== path) {
+        const ed = editorRef.current;
+        if (ed && searchDecorationIdsRef.current.length > 0) {
+          ed.deltaDecorations(searchDecorationIdsRef.current, []);
+          searchDecorationIdsRef.current = [];
+        }
+        setActiveHighlight(null);
+      }
+      return;
+    }
+    // Defer to allow Monaco model to be ready with new content
+    const timer = setTimeout(() => applyHighlight(init.query, init.line), 50);
+    return () => clearTimeout(timer);
+  }, [path, projectRoot, content, initialHighlight]);
+
+  // Also handle window event for already-mounted editors
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { path: string; query: string; line?: number; projectRoot?: string };
+      if (!detail || (!detail.query && !detail.line)) return;
+      if (detail.path !== path) return;
+      // If projectRoot provided, ensure it matches (avoid cross-root collisions)
+      if (detail.projectRoot && projectRoot && detail.projectRoot !== projectRoot) return;
+      const ed = editorRef.current;
+      if (!ed || !ed.getModel()) {
+        // Editor not yet mounted — stash as pending so mount effect will pick it up
+        setPendingHighlight(detail.path, detail.query, detail.line, detail.projectRoot ?? projectRoot);
+        return;
+      }
+      applyHighlight(detail.query || "", detail.line);
+    };
+    window.addEventListener("ocode:highlight" as any, handler);
+    return () => window.removeEventListener("ocode:highlight" as any, handler);
+  }, [path, projectRoot]);
+
+  // Re-apply highlights when content reloads for the same highlighted file
+  useEffect(() => {
+    if (!activeHighlight || activeHighlight.path !== path) return;
+    const ed = editorRef.current;
+    if (!ed) return;
+    const model = ed.getModel();
+    if (!model) return;
+    const timer = setTimeout(() => {
+      const keywords = activeHighlight.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      if (keywords.length === 0) return;
+      if (searchDecorationIdsRef.current.length > 0) {
+        ed.deltaDecorations(searchDecorationIdsRef.current, []);
+        searchDecorationIdsRef.current = [];
+      }
+      const decorations: import("monaco-editor").editor.IModelDeltaDecoration[] = [];
+      for (const kw of keywords) {
+        const matches = model.findMatches(kw, false, false, false, null, false);
+        for (const m of matches) {
+          decorations.push({
+            range: m.range,
+            options: {
+              inlineClassName: "search-highlight",
+              overviewRuler: { color: "#facc15", position: 4 },
+              minimap: { color: "#facc15", position: 1 },
+            },
+          });
+        }
+      }
+      searchDecorationIdsRef.current = ed.deltaDecorations([], decorations);
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [content, path, activeHighlight]);
+
   // Reset editor ref when path changes
   useEffect(() => {
     return () => {
@@ -602,6 +741,7 @@ function FileEditorImpl({
       <div className="flex-1 overflow-hidden">
         <Editor
           key={path}
+          path={path}
           language={lang}
           defaultValue={content}
           onChange={stableOnChange}

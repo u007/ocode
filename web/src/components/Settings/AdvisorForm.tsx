@@ -63,29 +63,29 @@ export default function AdvisorForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">Advisor</h2>
+      <h2 className="text-sm font-semibold text-foreground">Advisor</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
 
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input type="checkbox" checked={runtimeEnabled} onChange={(e) => setRuntimeEnabled(e.target.checked)} />
         Enabled for this session (not persisted)
       </label>
 
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Provider</label>
+        <label className="text-xs text-muted-foreground">Provider</label>
         <Input value={provider} onChange={(e) => setProvider(e.target.value)} className="h-8 text-xs" />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Model</label>
+        <label className="text-xs text-muted-foreground">Model</label>
         <div className="flex items-center gap-2">
-          <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={currentModel || undefined}>
+          <div className="flex-1 h-8 px-3 rounded-md bg-muted border border-border text-xs text-foreground flex items-center truncate" title={currentModel || undefined}>
             {currentModel || "Not set"}
           </div>
           <Button size="sm" variant="outline" type="button" onClick={() => setDialogOpen(true)} className="h-8 text-xs">
@@ -102,15 +102,15 @@ export default function AdvisorForm() {
           }}
         />
       </div>
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input type="checkbox" checked={claudeCode} onChange={(e) => setClaudeCode(e.target.checked)} />
         Use Claude Code CLI as advisor backend
       </label>
 
       <div className="space-y-1.5">
-        <div className="text-xs text-zinc-500">Checkpoints</div>
+        <div className="text-xs text-muted-foreground">Checkpoints</div>
         {["done", "plan"].map((cp) => (
-          <label key={cp} className="flex items-center gap-2 text-xs text-zinc-400">
+          <label key={cp} className="flex items-center gap-2 text-xs text-muted-foreground">
             <input type="checkbox" checked={checkpoints.includes(cp)} onChange={() => toggleCheckpoint(cp)} />
             {cp}
           </label>

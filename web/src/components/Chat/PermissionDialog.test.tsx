@@ -83,4 +83,99 @@ describe("PermissionDialog", () => {
     ).toBeTruthy();
     expect(screen.getByText(/\/var\/log\/system\.log/)).toBeTruthy();
   });
+
+  it("re-enables buttons after a failed onDecide so the user can retry", async () => {
+    const onDecide = vi.fn(async () => false);
+    const { unmount } = render(
+      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+    );
+    const allowBtn = screen.getByText("Allow once") as HTMLButtonElement;
+    fireEvent.click(allowBtn);
+    await waitFor(() => expect(onDecide).toHaveBeenCalledWith("call-1", "allow"));
+    // After failure, loading is cleared — button must be enabled again for retry.
+    await waitFor(() => expect(allowBtn.disabled).toBe(false));
+    expect(screen.getByText("Deny").closest("button")?.disabled).toBe(false);
+    unmount();
+  });
+
+  it("keeps buttons disabled after a successful decision until unmount (single permission)", async () => {
+    const onDecide = vi.fn(async () => true);
+    const { unmount } = render(
+      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+    );
+    const allowBtn = screen.getByText("Allow once") as HTMLButtonElement;
+    fireEvent.click(allowBtn);
+    await waitFor(() => expect(onDecide).toHaveBeenCalled());
+    // Success without a new request keeps the dialog disabled — parent unmounts it.
+    expect(allowBtn.disabled).toBe(true);
+    unmount();
+  });
+
+  it("resets loading when a new requestId arrives while the dialog stays mounted (queued permission)", async () => {
+    const onDecide = vi.fn(async () => true);
+    const { rerender, unmount } = render(
+      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+    );
+    fireEvent.click(screen.getByText("Allow once"));
+    await waitFor(() => expect(onDecide).toHaveBeenCalledWith("call-1", "allow"));
+    // Simulate the queue resurfacing the next ask: same mounted Dialog, new requestId.
+    rerender(
+      <PermissionDialog open={true} tool="bash" command="ls /tmp" requestId="call-2" onDecide={onDecide} />,
+    );
+    // New request must not inherit the previous loading/confirming state.
+    const newAllowBtn = screen.getByText("Allow once") as HTMLButtonElement;
+    expect(newAllowBtn.disabled).toBe(false);
+    expect(screen.getByText("Deny").closest("button")?.disabled).toBe(false);
+    // Second decision must be sent with the new requestId, not the stale one.
+    fireEvent.click(newAllowBtn);
+    await waitFor(() => expect(onDecide).toHaveBeenCalledWith("call-2", "allow"));
+    unmount();
+  });
+
+  it("clears the always-allow confirm UI when requestId changes", async () => {
+    const onDecide = vi.fn(async () => true);
+    const { rerender, unmount } = render(
+      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+    );
+    fireEvent.click(screen.getByText("Always allow rule"));
+    expect(screen.getByText("Confirm")).toBeTruthy();
+    // Queue promotes the next permission — confirm state must clear.
+    rerender(
+      <PermissionDialog open={true} tool="bash" command="ls /tmp" requestId="call-2" onDecide={onDecide} />,
+    );
+    expect(screen.queryByText("Confirm")).toBeNull();
+    expect(screen.getByText("Allow once")).toBeTruthy();
+    unmount();
+  });
+
+  it("dismissing the dialog (close button / Escape / overlay) submits deny when not loading", async () => {
+    const onDecide = vi.fn(async () => true);
+    const { unmount } = render(
+      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+    );
+    // Radix DialogContent includes an accessible Close button (X)
+    const closeBtn = document.querySelector('button[aria-label="Close"]') as HTMLButtonElement | null;
+    // Fallback to the sr-only Close text if aria-label not present in this version
+    const target = closeBtn ?? screen.getByText("Close").closest("button")!;
+    fireEvent.click(target);
+    await waitFor(() => expect(onDecide).toHaveBeenCalledWith("call-1", "deny"));
+    unmount();
+  });
+
+  it("does not submit a dismissal while a decision is in-flight (loading guard)", async () => {
+    // onDecide that never resolves keeps the dialog in loading=true
+    const onDecide = vi.fn(() => new Promise<boolean>(() => {}));
+    const { unmount } = render(
+      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+    );
+    fireEvent.click(screen.getByText("Allow once"));
+    await waitFor(() => expect(onDecide).toHaveBeenCalledWith("call-1", "allow"));
+    onDecide.mockClear();
+    const closeBtn = document.querySelector('button[aria-label="Close"]') as HTMLButtonElement | null;
+    const target = closeBtn ?? screen.getByText("Close").closest("button")!;
+    fireEvent.click(target);
+    // Dismissal is suppressed while loading — no additional deny should be sent
+    expect(onDecide).not.toHaveBeenCalled();
+    unmount();
+  });
 });

@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
-import { api } from "../api/client";
+
+export const OPEN_FILE_EVENT = "ocode:open-file";
+export type OpenFileDetail = { path: string; line?: number };
 
 // Known source-code / config extensions. A bare filename (no slash) is only
 // linkified when it ends in one of these — otherwise prose words like "e.g."
@@ -35,12 +37,8 @@ export function splitPathToken(token: string): { path: string; line?: number } {
   return { path: token };
 }
 
-async function openFile(path: string, line?: number) {
-  try {
-    await api.openFile(path, line);
-  } catch (err) {
-    console.error(`[fileLinks] failed to open ${path}:`, err);
-  }
+function openFile(path: string, line?: number) {
+  window.dispatchEvent(new CustomEvent<OpenFileDetail>(OPEN_FILE_EVENT, { detail: { path, line } }));
 }
 
 function FileLink({ token }: { token: string }) {
@@ -52,12 +50,12 @@ function FileLink({ token }: { token: string }) {
       title={`Open ${path}${line ? `:${line}` : ""}`}
       onClick={(e) => {
         e.stopPropagation();
-        void openFile(path, line);
+        openFile(path, line);
       }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          void openFile(path, line);
+          openFile(path, line);
         }
       }}
       className="cursor-pointer text-sky-400 underline-offset-2 hover:underline"

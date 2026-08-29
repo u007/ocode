@@ -40,6 +40,23 @@ func IsEncrypted(data []byte) bool {
 	return bytes.HasPrefix(data, []byte(Header))
 }
 
+// PeekIsEncrypted reports whether the file at path is age-encrypted,
+// reading only enough bytes to check the armor header.
+func PeekIsEncrypted(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	buf := make([]byte, len(Header))
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return false, err
+	}
+	return IsEncrypted(buf[:n]), nil
+}
+
 // ProjectKey encrypts and decrypts files for one project.
 type ProjectKey struct {
 	identity *age.X25519Identity
@@ -103,6 +120,29 @@ func UnlockProjectKey(keyPath, passphrase string) (*ProjectKey, error) {
 	}
 
 	return &ProjectKey{identity: identity}, nil
+}
+
+// RekeyProjectKey re-wraps the project's existing identity under a new
+// passphrase. The identity itself is unchanged, so files already encrypted
+// with it remain valid ciphertext — only the wrapper protecting the key
+// file at rest is replaced.
+func RekeyProjectKey(keyPath, oldPassphrase, newPassphrase string) error {
+	key, err := UnlockProjectKey(keyPath, oldPassphrase)
+	if err != nil {
+		return err
+	}
+
+	info, err := os.Stat(keyPath)
+	if err != nil {
+		return fmt.Errorf("secretfile: stat key: %w", err)
+	}
+
+	wrapped, err := wrapIdentity(key.identity, newPassphrase)
+	if err != nil {
+		return err
+	}
+
+	return WriteFileAtomic(keyPath, wrapped, info.Mode().Perm())
 }
 
 func wrapIdentity(identity *age.X25519Identity, passphrase string) ([]byte, error) {

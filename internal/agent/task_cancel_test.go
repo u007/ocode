@@ -8,7 +8,7 @@ import (
 
 func TestTaskCancelToolUnknownTask(t *testing.T) {
 	tool := TaskCancelTool{
-		runs: NewAgentRunRegistry(),
+		runs:              NewAgentRunRegistry(),
 		dispatcherForCall: func() string { return "build" },
 	}
 	out, err := tool.Execute([]byte(`{"task_id":"agent-run-999"}`))
@@ -27,7 +27,7 @@ func TestTaskCancelToolNotOwned(t *testing.T) {
 	run.Dispatcher = "build"
 
 	tool := TaskCancelTool{
-		runs: r,
+		runs:              r,
 		dispatcherForCall: func() string { return "attacker" },
 	}
 	_, err := tool.Execute(json.RawMessage(`{"task_id":"` + run.ID + `"}`))
@@ -47,7 +47,7 @@ func TestTaskCancelToolSuccess(t *testing.T) {
 	run.Cancel = func() { cancelled = true }
 
 	tool := TaskCancelTool{
-		runs: r,
+		runs:              r,
 		dispatcherForCall: func() string { return "build" },
 	}
 	out, err := tool.Execute(json.RawMessage(`{"task_id":"` + run.ID + `"}`))
@@ -73,7 +73,7 @@ func TestTaskCancelToolAlreadyFinished(t *testing.T) {
 	origStatus := run.statusValue()
 
 	tool := TaskCancelTool{
-		runs: r,
+		runs:              r,
 		dispatcherForCall: func() string { return "build" },
 	}
 	out, err := tool.Execute(json.RawMessage(`{"task_id":"` + run.ID + `"}`))
@@ -97,7 +97,7 @@ func TestTaskCancelToolEmptyDispatcher(t *testing.T) {
 	run.Cancel = func() { cancelled = true }
 
 	tool := TaskCancelTool{
-		runs: r,
+		runs:              r,
 		dispatcherForCall: func() string { return "" },
 	}
 	out, err := tool.Execute(json.RawMessage(`{"task_id":"` + run.ID + `"}`))
@@ -117,7 +117,7 @@ func TestTaskCancelToolEmptyDispatcher(t *testing.T) {
 
 func TestTaskCancelToolEmptyTaskID(t *testing.T) {
 	tool := TaskCancelTool{
-		runs: NewAgentRunRegistry(),
+		runs:              NewAgentRunRegistry(),
 		dispatcherForCall: func() string { return "build" },
 	}
 	_, err := tool.Execute([]byte(`{"task_id":""}`))
@@ -128,7 +128,7 @@ func TestTaskCancelToolEmptyTaskID(t *testing.T) {
 
 func TestTaskCancelToolNilRegistry(t *testing.T) {
 	tool := TaskCancelTool{
-		runs:             nil,
+		runs:              nil,
 		dispatcherForCall: func() string { return "build" },
 	}
 	_, err := tool.Execute([]byte(`{"task_id":"agent-run-1"}`))

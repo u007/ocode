@@ -1005,6 +1005,48 @@ func TestSaveToDirMigratesExistingJSONSessionOnWrite(t *testing.T) {
 	}
 }
 
+// TestSaveToDirMigrationLeavesOriginalOnWriteFailure verifies migrateToSqlite's
+// write-then-verify-then-delete ordering: a failed .sqlite write must never
+// cost the original .ojsonl file, since deletion only happens after the new
+// file round-trips successfully.
+func TestSaveToDirMigrationLeavesOriginalOnWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	id := "ses_migratefail1"
+
+	if err := saveOjsonl(dir, id, "keep me", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("saveOjsonl (seed legacy session): %v", err)
+	}
+
+	// Make the directory read-only so the new .sqlite file can't be
+	// created — simulates a write failure mid-migration.
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer os.Chmod(dir, 0755) //nolint:errcheck
+
+	err := saveToDir(dir, id, "", []agent.Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "reply"},
+	}, nil)
+	if err == nil {
+		t.Fatalf("expected saveToDir to fail when the .sqlite write fails")
+	}
+
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatalf("chmod restore: %v", err)
+	}
+	if !fileExists(ojsonlSessionPath(dir, id)) {
+		t.Fatalf("expected original .ojsonl file to survive a failed migration")
+	}
+	s, err := loadOjsonlSession(ojsonlSessionPath(dir, id))
+	if err != nil {
+		t.Fatalf("original .ojsonl unreadable after failed migration: %v", err)
+	}
+	if s.Title != "keep me" || len(s.Messages) != 1 {
+		t.Fatalf("original content damaged after failed migration: %+v", s)
+	}
+}
+
 func TestLoadReadsMigratedSqliteSession(t *testing.T) {
 	dir := t.TempDir()
 	origWd, _ := os.Getwd()

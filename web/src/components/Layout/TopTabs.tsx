@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { FolderGit2, GitBranch, Paperclip, CalendarClock, MessageSquare, MoreHorizontal, Settings, Terminal } from "lucide-react";
+import { FolderGit2, GitBranch, Paperclip, CalendarClock, MessageSquare, MoreHorizontal, Settings } from "lucide-react";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import SyncStatusWidget from "./SyncStatusWidget";
@@ -13,7 +13,6 @@ interface Props {
 
 const mainTabs = [
   { id: "sessions", label: "Sessions", icon: MessageSquare },
-  { id: "terminal", label: "Terminal", icon: Terminal },
   { id: "files", label: "Files", icon: FolderGit2 },
   { id: "git", label: "Git", icon: GitBranch },
   { id: "cron", label: "Cron", icon: CalendarClock },
@@ -24,6 +23,7 @@ const mainTabs = [
 export default function TopTabs({ activeTab, onTabSelect }: Props) {
   const { state: projectState } = useProjectState();
   const activeProjectPath = projectState.activeProject?.path ?? "";
+  const sessionsCount = activeProjectPath ? (projectState.tabsByProject[activeProjectPath]?.length ?? 0) : 0;
   const [terminalCount, setTerminalCount] = useState(() => {
     try {
       const saved = loadProjectTerminals(activeProjectPath);
@@ -102,7 +102,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
   };
 
   return (
-    <header className="flex items-center border-b border-zinc-700 bg-zinc-900 h-12 px-4 overflow-hidden">
+    <header className="flex items-center border-b border-border bg-card h-12 px-4 overflow-hidden">
       {/* Left: Logo */}
       <div className="flex items-center gap-2 mr-6 shrink-0">
         <div className="w-6 h-6 rounded bg-blue-600 flex items-center justify-center text-xs font-bold">
@@ -121,20 +121,20 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
         {mainTabs.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
-          const count = tab.id === "terminal" ? terminalCount : undefined;
+          const count = tab.id === "sessions" ? sessionsCount + terminalCount : undefined;
           return (
             <TabsTrigger
               key={tab.id}
               value={tab.id}
               ref={isActive ? activeRef : undefined}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors whitespace-nowrap data-[state=active]:bg-zinc-700 data-[state=active]:text-white data-[state=active]:shadow-none text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 shrink-0"
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors whitespace-nowrap data-[state=active]:bg-accent data-[state=active]:text-accent-foreground data-[state=active]:shadow-none text-muted-foreground hover:text-foreground hover:bg-muted shrink-0"
             >
               <Icon className="w-4 h-4" />
               <span className="hidden sm:inline">{tab.label}</span>
               {count !== undefined && (
                 <span
                   className={`inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full text-xs font-semibold leading-none ${
-                    isActive ? "bg-zinc-600 text-white" : "bg-zinc-800 text-zinc-300"
+                    isActive ? "bg-accent text-accent-foreground" : "bg-muted text-foreground"
                   }`}
                   aria-label={`${tab.label} count ${count}`}
                 >
@@ -152,21 +152,21 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
           <Select value={activeTab} onValueChange={onTabSelect}>
             <SelectTrigger
               aria-label="More tabs"
-              className="h-8 w-8 justify-center border-0 bg-transparent p-0 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 [&>svg:last-child]:hidden"
+              className="h-8 w-8 justify-center border-0 bg-transparent p-0 text-muted-foreground hover:bg-muted hover:text-foreground [&>svg:last-child]:hidden"
             >
               <MoreHorizontal className="h-4 w-4" />
             </SelectTrigger>
             <SelectContent align="end" className="max-h-80">
               {mainTabs.map((tab) => {
                 const Icon = tab.icon;
-                const count = tab.id === "terminal" ? terminalCount : undefined;
+                const count = tab.id === "sessions" ? sessionsCount + terminalCount : undefined;
                 return (
                   <SelectItem key={tab.id} value={tab.id}>
                     <span className="flex items-center gap-2">
                       <Icon className="w-3.5 h-3.5" />
                       {tab.label}
                       {count !== undefined && (
-                        <span className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-zinc-700 text-[10px] font-semibold text-zinc-200">
+                        <span className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-accent text-[10px] font-semibold text-foreground">
                           {count}
                         </span>
                       )}

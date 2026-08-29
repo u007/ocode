@@ -43,20 +43,20 @@ export default function FeaturesForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">Features</h2>
+      <h2 className="text-sm font-semibold text-foreground">Features</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input type="checkbox" checked={memoryEnabled} onChange={(e) => setMemoryEnabled(e.target.checked)} />
         Memory injection enabled
       </label>
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input type="checkbox" checked={docPromptEnabled} onChange={(e) => setDocPromptEnabled(e.target.checked)} />
         Documentation-first prompt enabled
       </label>

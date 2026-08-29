@@ -17,9 +17,11 @@ type KnowledgeLookupTool struct {
 	mainAgent *Agent
 }
 
-func (t *KnowledgeLookupTool) Name() string        { return "knowledge_lookup" }
-func (t *KnowledgeLookupTool) Description() string { return "Look up a question in the project's OKF knowledge bundle. Use this for why/decision/playbook questions before exploring code." }
-func (t *KnowledgeLookupTool) Parallel() bool      { return true }
+func (t *KnowledgeLookupTool) Name() string { return "knowledge_lookup" }
+func (t *KnowledgeLookupTool) Description() string {
+	return "Look up a question in the project's OKF knowledge bundle. Use this for why/decision/playbook questions before exploring code."
+}
+func (t *KnowledgeLookupTool) Parallel() bool { return true }
 
 func (t *KnowledgeLookupTool) Definition() map[string]interface{} {
 	return map[string]interface{}{

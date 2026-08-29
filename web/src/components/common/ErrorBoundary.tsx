@@ -24,10 +24,10 @@ export default class ErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="flex h-screen items-center justify-center bg-zinc-900 text-zinc-100">
+        <div className="flex h-screen items-center justify-center bg-card text-foreground">
           <div className="text-center">
             <h1 className="text-xl font-bold mb-2">Something went wrong</h1>
-            <p className="text-zinc-400 text-sm mb-4">{this.state.error?.message}</p>
+            <p className="text-muted-foreground text-sm mb-4">{this.state.error?.message}</p>
             <Button
               type="button"
               onClick={() => { this.setState({ hasError: false, error: null }); window.location.reload(); }}

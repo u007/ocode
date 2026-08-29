@@ -9,13 +9,15 @@ import (
 // Cooperative — stops at the next step boundary. Use after another
 // racing agent already returned a sufficient answer.
 type TaskCancelTool struct {
-	runs             *AgentRunRegistry
+	runs              *AgentRunRegistry
 	dispatcherForCall func() string
 }
 
-func (t TaskCancelTool) Name() string        { return "task_cancel" }
-func (t TaskCancelTool) Description() string { return "Cancel a background task you dispatched. Cooperative — stops at the next step boundary. Use after another racing agent already returned a sufficient answer." }
-func (t TaskCancelTool) Parallel() bool      { return true }
+func (t TaskCancelTool) Name() string { return "task_cancel" }
+func (t TaskCancelTool) Description() string {
+	return "Cancel a background task you dispatched. Cooperative — stops at the next step boundary. Use after another racing agent already returned a sufficient answer."
+}
+func (t TaskCancelTool) Parallel() bool { return true }
 func (t TaskCancelTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "task_cancel",

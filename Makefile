@@ -344,3 +344,6 @@ build-desktop-all:
 docker-release: build-desktop-all
 
 install-all: install install-desktop
+
+debug-desktop:
+	bash scripts/capture-desktop-hang.sh

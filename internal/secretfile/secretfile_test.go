@@ -98,6 +98,54 @@ func TestUnlockProjectKey_WrongPassphraseFails(t *testing.T) {
 	}
 }
 
+func TestRekeyProjectKey_NewPassphraseUnlocksSameIdentity(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "project.key.age")
+	original, err := GenerateProjectKey(keyPath, "old passphrase")
+	if err != nil {
+		t.Fatalf("GenerateProjectKey: %v", err)
+	}
+	ciphertext, err := original.Encrypt([]byte("secret payload"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	if err := RekeyProjectKey(keyPath, "old passphrase", "new passphrase"); err != nil {
+		t.Fatalf("RekeyProjectKey: %v", err)
+	}
+
+	if _, err := UnlockProjectKey(keyPath, "old passphrase"); err == nil {
+		t.Fatal("expected old passphrase to no longer unlock the key")
+	}
+
+	rekeyed, err := UnlockProjectKey(keyPath, "new passphrase")
+	if err != nil {
+		t.Fatalf("UnlockProjectKey with new passphrase: %v", err)
+	}
+
+	got, err := rekeyed.Decrypt(ciphertext)
+	if err != nil {
+		t.Fatalf("Decrypt ciphertext encrypted before rekey: %v", err)
+	}
+	if string(got) != "secret payload" {
+		t.Fatalf("mismatch: got %q", got)
+	}
+}
+
+func TestRekeyProjectKey_WrongOldPassphraseFails(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "project.key.age")
+	if _, err := GenerateProjectKey(keyPath, "right passphrase"); err != nil {
+		t.Fatalf("GenerateProjectKey: %v", err)
+	}
+
+	if err := RekeyProjectKey(keyPath, "wrong passphrase", "new passphrase"); err == nil {
+		t.Fatal("expected error rekeying with wrong old passphrase")
+	}
+
+	if _, err := UnlockProjectKey(keyPath, "right passphrase"); err != nil {
+		t.Fatalf("expected key to still unlock with original passphrase after failed rekey: %v", err)
+	}
+}
+
 func TestDecrypt_TamperedCiphertextFails(t *testing.T) {
 	key, err := GenerateProjectKey(filepath.Join(t.TempDir(), "project.key.age"), "pw")
 	if err != nil {

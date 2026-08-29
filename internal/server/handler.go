@@ -21,6 +21,7 @@ import (
 	"github.com/u007/ocode/internal/monaco"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/scheduler"
+	"github.com/u007/ocode/internal/secretjob"
 	"github.com/u007/ocode/internal/session"
 	shellpkg "github.com/u007/ocode/internal/shell"
 	ocodesync "github.com/u007/ocode/internal/sync"
@@ -37,6 +38,11 @@ type Handler struct {
 	// lifecycle. Every session-scoped handler resolves through it, so sessions
 	// from any registered project load and run (no more cross-project 404s).
 	sessions *SessionManager
+	// secretJobs runs cancellable, progress-reporting directory-wide
+	// encrypt/decrypt jobs (see handler_secret.go), streaming progress as
+	// secret_progress/secret_done/secret_error/secret_cancelled events on bus.
+	secretJobs *secretjob.Manager
+
 	// bus is the unified tagged event bus (Part 02). Every emitters publishes
 	// envelopes here; /api/events streams them to web clients.
 	bus *EventBus
@@ -275,6 +281,7 @@ func NewHandler() *Handler {
 		bus:               NewEventBus(),
 		terminalProcs:     newTerminalRegistry(),
 		terminalProcsWake: make(chan struct{}, 1),
+		secretJobs:        secretjob.NewManager(),
 	}
 
 	// The session registry is the single authority for session → project root
@@ -824,22 +831,30 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	s, err := session.LoadForDir(entry.ProjectRoot, id)
+	msgs, total, err := session.PaginatedLoad(entry.ProjectRoot, id, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-
-	msgs := paginate(s.Messages)
+	s, _ := session.LoadForDir(entry.ProjectRoot, id)
+	// s may be nil if file vanished between PaginatedLoad and LoadForDir; fall back to msgs metadata.
+	title := ""
+	created := time.Now()
+	updated := time.Now()
+	if s != nil {
+		title = s.Title
+		created = s.CreatedAt
+		updated = s.UpdatedAt
+	}
 	writeJSON(w, http.StatusOK, SessionDetail{
 		SessionInfo: SessionInfo{
-			ID:        s.ID,
-			Title:     s.Title,
-			CreatedAt: s.CreatedAt.Format(time.RFC3339),
-			UpdatedAt: s.UpdatedAt.Format(time.RFC3339),
+			ID:        id,
+			Title:     title,
+			CreatedAt: created.Format(time.RFC3339),
+			UpdatedAt: updated.Format(time.RFC3339),
 		},
 		Messages: msgs,
-		Total:    len(s.Messages),
+		Total:    total,
 	})
 }
 
@@ -1031,14 +1046,78 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 		currentModel = h.cfg.Model
 	}
 
+	// Query params for direct model list retrieval (used by opencode-compatible clients
+	// and for provider-specific live refresh):
+	//   ?provider=groq   — filter to a single provider (provider/model ids)
+	//   ?refresh=true    — force live fetch from provider APIs (may block on network)
+	providerFilter := strings.TrimSpace(r.URL.Query().Get("provider"))
+	refreshParam := strings.TrimSpace(r.URL.Query().Get("refresh"))
+	refresh := refreshParam == "1" || strings.EqualFold(refreshParam, "true")
+
 	// Mirror the TUI model picker ordering (openModelPicker in
-	// internal/tui/picker.go): ★ Favorites first, then Recently Used, then the
+	// internal/tui/picker.go): Recently Used first, then ★ Favorites, then the
 	// remaining registry models grouped alphabetically by provider/model.
 	// Favorites / recents that are not in the registry are still listed, just
 	// like the TUI shows them regardless of registry membership.
 	favorites := config.LoadFavorites()
 	recents := config.LoadRecentModels()
-	registry := agent.AllProviderModelsCached()
+	var registry []string
+	var favSet map[string]bool
+	// Provider-filtered retrieval: return only that provider's models (with live refresh
+	// when requested). This is the direct API for clients that need a provider's live
+	// model list (e.g. GET /api/models?provider=groq&refresh=true).
+	if providerFilter != "" {
+		if refresh {
+			registry = agent.ProviderModels(providerFilter)
+		} else {
+			registry = agent.ProviderModelsCached(providerFilter)
+			if len(registry) == 0 {
+				registry = agent.ProviderModels(providerFilter)
+			}
+		}
+		sort.Strings(registry)
+		favorites = nil
+		favSet = make(map[string]bool)
+		// Return filtered list directly without global favorites ordering.
+		modelsFiltered := make([]ModelInfo, 0, len(registry))
+		seen := make(map[string]bool, len(registry))
+		for _, id := range registry {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			provider, modelName, ok := splitModelID(id)
+			if !ok {
+				provider = providerFilter
+				modelName = id
+			}
+			modelsFiltered = append(modelsFiltered, ModelInfo{
+				Name:        id,
+				Model:       modelName,
+				Provider:    provider,
+				Active:      id == currentModel,
+				DisplayName: agent.ModelDisplayName(id),
+			})
+		}
+		if len(modelsFiltered) == 0 && h.cfg != nil {
+			for name := range h.cfg.Provider {
+				if name == providerFilter {
+					modelsFiltered = append(modelsFiltered, ModelInfo{
+						Name:     name,
+						Model:    name,
+						Provider: name,
+					})
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, modelsFiltered)
+		return
+	}
+	if refresh {
+		registry = agent.AllProviderModels()
+	} else {
+		registry = agent.AllProviderModelsCached()
+	}
 
 	shown := make(map[string]bool)
 	var ordered []string
@@ -1050,14 +1129,16 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 		ordered = append(ordered, id)
 	}
 
-	// 1. Favorites (in saved order), 2. Recently used (in saved order).
-	favSet := make(map[string]bool)
+	// 1. Recently used (in saved order), 2. Favorites (in saved order).
+	recentSet := make(map[string]bool)
+	for _, r := range recents {
+		recentSet[r] = true
+		addModel(r)
+	}
+	favSet = make(map[string]bool)
 	for _, f := range favorites {
 		favSet[f] = true
 		addModel(f)
-	}
-	for _, r := range recents {
-		addModel(r)
 	}
 
 	// 3. Remaining registry models, alphabetically by provider then model
@@ -1087,9 +1168,9 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 			Active:      id == currentModel,
 			DisplayName: agent.ModelDisplayName(id),
 			// A model that is both favorite and recent shows only in the
-			// Favorites section, matching the TUI's dedupe.
-			Favorite: favSet[id],
-			Recent:   !favSet[id] && containsStr(recents, id),
+			// Recently Used section, matching the TUI's dedupe.
+			Recent:   recentSet[id],
+			Favorite: !recentSet[id] && favSet[id],
 		})
 	}
 

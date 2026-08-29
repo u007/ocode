@@ -147,14 +147,14 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
   };
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-zinc-950 text-zinc-100">
-      <div className="flex items-center justify-between gap-4 border-b border-zinc-800 px-4 py-3">
+    <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
+      <div className="flex items-center justify-between gap-4 border-b border-border px-4 py-3">
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold">
             <CalendarClock className="h-4 w-4 text-blue-400" />
             Cron
           </div>
-          <div className="text-xs text-zinc-500">Schedule jobs, manage delivery history, and map Telegram targets.</div>
+          <div className="text-xs text-muted-foreground">Schedule jobs, manage delivery history, and map Telegram targets.</div>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => void refreshJobs()}>
@@ -176,10 +176,10 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
             </div>
           )}
 
-          <div className="overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900/80">
+          <div className="overflow-hidden rounded-lg border border-border bg-card/80">
             <div className="overflow-auto">
               <table className="min-w-full border-collapse text-sm">
-                <thead className="sticky top-0 bg-zinc-900 text-xs uppercase tracking-wide text-zinc-500">
+                <thead className="sticky top-0 bg-card text-xs uppercase tracking-wide text-muted-foreground">
                   <tr>
                     <th className="px-4 py-3 text-left font-medium">Name</th>
                     <th className="px-4 py-3 text-left font-medium">Schedule</th>
@@ -191,16 +191,16 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
                     <th className="px-4 py-3 text-right font-medium">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-zinc-800">
+                <tbody className="divide-y divide-border">
                   {loading ? (
                     <tr>
-                      <td colSpan={9} className="px-4 py-8 text-center text-zinc-500">
+                      <td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">
                         Loading cron jobs…
                       </td>
                     </tr>
                   ) : jobs.length === 0 ? (
                     <tr>
-                      <td colSpan={9} className="px-4 py-8 text-center text-zinc-500">
+                      <td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">
                         No cron jobs yet.
                       </td>
                     </tr>
@@ -212,31 +212,31 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
                           ? "text-red-300"
                           : status === "ok"
                             ? "text-emerald-300"
-                            : "text-zinc-400";
+                            : "text-muted-foreground";
                       return (
                         <tr
                           key={job.id}
-                          className="cursor-pointer bg-zinc-950/40 hover:bg-zinc-800/70"
+                          className="cursor-pointer bg-background/40 hover:bg-muted/70"
                           onClick={() => openEditDialog(job)}
                         >
                           <td className="px-4 py-3 align-top">
-                            <div className="font-medium text-zinc-100">{job.name || job.payload.message}</div>
-                            <div className="mt-1 text-xs text-zinc-500">{job.payload.message}</div>
+                            <div className="font-medium text-foreground">{job.name || job.payload.message}</div>
+                            <div className="mt-1 text-xs text-muted-foreground">{job.payload.message}</div>
                           </td>
-                          <td className="px-4 py-3 align-top text-zinc-300">{describeSchedule(job.schedule)}</td>
-                          <td className="px-4 py-3 align-top text-zinc-300">{nextRunLabel(job.state.next_run_at_ms)}</td>
-                          <td className="px-4 py-3 align-top text-zinc-300">{lastRunLabel(job.state.last_run_at_ms)}</td>
+                          <td className="px-4 py-3 align-top text-foreground">{describeSchedule(job.schedule)}</td>
+                          <td className="px-4 py-3 align-top text-foreground">{nextRunLabel(job.state.next_run_at_ms)}</td>
+                          <td className="px-4 py-3 align-top text-foreground">{lastRunLabel(job.state.last_run_at_ms)}</td>
                           <td className={`px-4 py-3 align-top ${lastStatusClass}`} title={job.state.last_error || undefined}>
                             {status}
                           </td>
-                          <td className="px-4 py-3 align-top text-zinc-300">{job.state.runs ?? 0}</td>
+                          <td className="px-4 py-3 align-top text-foreground">{job.state.runs ?? 0}</td>
                           <td className="px-4 py-3 align-top">
                             <button
                               type="button"
                               className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
                                 job.enabled
                                   ? "border-emerald-700 bg-emerald-950/70 text-emerald-300 hover:bg-emerald-900"
-                                  : "border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800"
+                                  : "border-border bg-card text-muted-foreground hover:bg-muted"
                               }`}
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -252,7 +252,7 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                className="h-8 px-2 text-zinc-400 hover:text-blue-300"
+                                className="h-8 px-2 text-muted-foreground hover:text-blue-300"
                                 title="View run history"
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -264,7 +264,7 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                className="h-8 px-2 text-zinc-400 hover:text-zinc-100"
+                                className="h-8 px-2 text-muted-foreground hover:text-foreground"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   openEditDialog(job);
@@ -275,7 +275,7 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                className="h-8 px-2 text-zinc-400 hover:text-red-300"
+                                className="h-8 px-2 text-muted-foreground hover:text-red-300"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   void deleteJob(job);

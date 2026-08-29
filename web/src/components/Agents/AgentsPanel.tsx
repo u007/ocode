@@ -26,22 +26,22 @@ function AgentListRow({ run, onOpen }: { run: AgentRun; onOpen: () => void }) {
   return (
     <button
       onClick={onOpen}
-      className="group relative flex w-full items-center gap-2 overflow-hidden rounded-md py-2 pl-3 pr-2 text-left text-sm transition-colors hover:bg-zinc-800/70"
+      className="group relative flex w-full items-center gap-2 overflow-hidden rounded-md py-2 pl-3 pr-2 text-left text-sm transition-colors hover:bg-muted/70"
     >
       <span className={`absolute left-0 top-1 bottom-1 w-0.5 rounded-full ${s.bar}`} />
       <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
-      <span className="shrink-0 truncate font-medium text-zinc-100">{run.name}</span>
+      <span className="shrink-0 truncate font-medium text-foreground">{run.name}</span>
       {run.model && (
-        <span className="shrink-0 truncate font-mono text-[11px] text-zinc-500">{run.model}</span>
+        <span className="shrink-0 truncate font-mono text-[11px] text-muted-foreground">{run.model}</span>
       )}
       <span className={`shrink-0 text-[11px] ${s.text}`}>{run.status}</span>
       <span className="ml-auto flex shrink-0 items-center gap-2">
         {summary && (
-          <span className="rounded-full bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-400 ring-1 ring-inset ring-zinc-700/60">
+          <span className="rounded-full bg-muted px-2 py-0.5 font-mono text-[10px] text-muted-foreground ring-1 ring-inset ring-ring/60">
             {summary}
           </span>
         )}
-        {dur && <span className="font-mono text-[10px] tabular-nums text-zinc-600">{dur}</span>}
+        {dur && <span className="font-mono text-[10px] tabular-nums text-foreground">{dur}</span>}
       </span>
     </button>
   );
@@ -56,21 +56,21 @@ export default function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: A
     const dur = elapsed(selected.startedAt, selected.endedAt);
     return (
       <div className="flex h-full flex-col overflow-hidden">
-        <div className="flex shrink-0 items-center gap-2 border-b border-zinc-800 px-4 py-3">
+        <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
           <button
             onClick={() => onSelectRun(null)}
-            className="flex items-center gap-1.5 rounded-md px-2 py-1 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            className="flex items-center gap-1.5 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
           >
             <ArrowLeft className="h-4 w-4" />
             Agents
           </button>
           <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
-          <span className="font-medium text-zinc-100">{selected.name}</span>
+          <span className="font-medium text-foreground">{selected.name}</span>
           {selected.model && (
-            <span className="font-mono text-[11px] text-zinc-500">{selected.model}</span>
+            <span className="font-mono text-[11px] text-muted-foreground">{selected.model}</span>
           )}
           <span className={`text-[11px] ${s.text}`}>{selected.status}</span>
-          {dur && <span className="font-mono text-[10px] tabular-nums text-zinc-600">{dur}</span>}
+          {dur && <span className="font-mono text-[10px] tabular-nums text-foreground">{dur}</span>}
         </div>
         <div className="flex-1 min-h-0 overflow-hidden p-3">
           <RunNode run={selected} depth={0} />
@@ -84,7 +84,7 @@ export default function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: A
   // empty state yet — that would make the click appear to have done nothing.
   if (selectedRunId && !loaded) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 text-zinc-500">
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
         <Bot className="h-8 w-8 animate-pulse" />
         <p className="text-sm">Loading agent run…</p>
       </div>
@@ -96,14 +96,14 @@ export default function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: A
   // instead of silently showing an unrelated list.
   if (selectedRunId && loaded) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 p-4 text-center text-zinc-500">
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-4 text-center text-muted-foreground">
         <Bot className="h-8 w-8" />
         <p className="max-w-sm text-sm">
           This agent run is no longer available in the current session's run list.
         </p>
         <button
           onClick={() => onSelectRun(null)}
-          className="rounded-md bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100"
+          className="rounded-md bg-muted px-3 py-1.5 text-sm text-foreground hover:bg-accent hover:text-foreground"
         >
           Back to all runs
         </button>
@@ -113,7 +113,7 @@ export default function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: A
 
   if (runs.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 text-zinc-500">
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
         <Bot className="h-8 w-8" />
         <p className="text-sm">No agent runs yet in this session.</p>
       </div>

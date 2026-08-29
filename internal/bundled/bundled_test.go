@@ -13,13 +13,13 @@ import (
 // build shape ("embedded-assets/skills/...", "embedded-assets/.opencode/...").
 func TestExtractFromEmbedded(t *testing.T) {
 	src := fstest.MapFS{
-		"skills/foo/SKILL.md":                                 &fstest.MapFile{Data: []byte("foo skill")},
-		"skills/bar/SKILL.md":                                &fstest.MapFile{Data: []byte("bar skill")},
-		".opencode/plugins/orch/plugin.json":                 &fstest.MapFile{Data: []byte(`{"name":"orch"}`)},
-		".opencode/plugins/orch/agents/orch.md":              &fstest.MapFile{Data: []byte("orch agent")},
-		"embedded-assets/skills/baz/SKILL.md":                &fstest.MapFile{Data: []byte("baz skill")},
-		"embedded-assets/.opencode/plugins/x/plugin.json":    &fstest.MapFile{Data: []byte(`{"name":"x"}`)},
-		"embedded-assets/.opencode/plugins/x/agents/x.md":    &fstest.MapFile{Data: []byte("x agent")},
+		"skills/foo/SKILL.md":                             &fstest.MapFile{Data: []byte("foo skill")},
+		"skills/bar/SKILL.md":                             &fstest.MapFile{Data: []byte("bar skill")},
+		".opencode/plugins/orch/plugin.json":              &fstest.MapFile{Data: []byte(`{"name":"orch"}`)},
+		".opencode/plugins/orch/agents/orch.md":           &fstest.MapFile{Data: []byte("orch agent")},
+		"embedded-assets/skills/baz/SKILL.md":             &fstest.MapFile{Data: []byte("baz skill")},
+		"embedded-assets/.opencode/plugins/x/plugin.json": &fstest.MapFile{Data: []byte(`{"name":"x"}`)},
+		"embedded-assets/.opencode/plugins/x/agents/x.md": &fstest.MapFile{Data: []byte("x agent")},
 	}
 
 	skillsTarget := t.TempDir()

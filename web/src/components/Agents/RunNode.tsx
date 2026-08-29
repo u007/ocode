@@ -16,7 +16,7 @@ export function statusStyles(status: string): { dot: string; bar: string; text: 
     case "failed":
       return { dot: "bg-red-400", bar: "bg-red-500/50", text: "text-red-300/90" };
     default:
-      return { dot: "bg-zinc-500", bar: "bg-zinc-700", text: "text-zinc-400" };
+      return { dot: "bg-muted", bar: "bg-accent", text: "text-muted-foreground" };
   }
 }
 
@@ -55,7 +55,7 @@ const roleChip: Record<string, string> = {
   user: "bg-blue-500/15 text-blue-300",
   assistant: "bg-emerald-500/15 text-emerald-300",
   tool: "bg-amber-500/15 text-amber-300",
-  system: "bg-zinc-700/40 text-zinc-400",
+  system: "bg-accent/40 text-muted-foreground",
 };
 
 // messageLine renders one transcript entry as a chip-prefixed row.
@@ -66,31 +66,31 @@ function messageLine(msg: AgentRunMessage, i: number) {
       <div className="flex gap-2">
         <span
           className={`mt-px h-fit shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide ${
-            roleChip[msg.role] ?? "bg-zinc-700/40 text-zinc-400"
+            roleChip[msg.role] ?? "bg-accent/40 text-muted-foreground"
           }`}
         >
           {label}
         </span>
-        <div className="min-w-0 flex-1 text-zinc-300">
+        <div className="min-w-0 flex-1 text-foreground">
           {msg.content && <span className="whitespace-pre-wrap break-words">{msg.content}</span>}
           {msg.toolCalls?.map((tc, j) => (
-            <div key={j} className="font-mono text-[11px] text-zinc-400">
-              <span className="text-zinc-500">→</span> {tc.name}
+            <div key={j} className="font-mono text-[11px] text-muted-foreground">
+              <span className="text-muted-foreground">→</span> {tc.name}
               {tc.arguments ? (
-                <span className="text-zinc-600">({tc.arguments.slice(0, 120)})</span>
+                <span className="text-foreground">({tc.arguments.slice(0, 120)})</span>
               ) : (
-                <span className="text-zinc-600">()</span>
+                <span className="text-foreground">()</span>
               )}
             </div>
           ))}
         </div>
       </div>
       {msg.reasoningContent && (
-        <div className="ml-[1.75rem] max-h-40 overflow-y-auto overscroll-contain rounded-md border border-zinc-700/60 bg-zinc-900/50 px-2 py-1.5">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+        <div className="ml-[1.75rem] max-h-40 overflow-y-auto overscroll-contain rounded-md border border-border/60 bg-card/50 px-2 py-1.5">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
             Thinking
           </div>
-          <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-zinc-400">
+          <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">
             {msg.reasoningContent}
           </pre>
         </div>
@@ -119,17 +119,17 @@ export default function RunNode({ run, depth, onOpenDetail }: RunNodeProps) {
   const dur = elapsed(run.startedAt, run.endedAt);
 
   return (
-    <div className={depth > 0 ? "border-l border-zinc-800/80 pl-2.5" : ""}>
+    <div className={depth > 0 ? "border-l border-border/80 pl-2.5" : ""}>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="group relative flex w-full items-center gap-2 overflow-hidden rounded-md py-1 pl-2.5 pr-2 text-left text-sm transition-colors hover:bg-zinc-800/70"
+        className="group relative flex w-full items-center gap-2 overflow-hidden rounded-md py-1 pl-2.5 pr-2 text-left text-sm transition-colors hover:bg-muted/70"
       >
         {/* status accent bar */}
         <span className={`absolute left-0 top-1 bottom-1 w-0.5 rounded-full ${s.bar}`} />
 
         <ChevronRight
-          className={`h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform ${
-            hasDetail ? "group-hover:text-zinc-400" : "opacity-0"
+          className={`h-3.5 w-3.5 shrink-0 text-foreground transition-transform ${
+            hasDetail ? "group-hover:text-muted-foreground" : "opacity-0"
           } ${open ? "rotate-90" : ""}`}
         />
         <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
@@ -140,15 +140,15 @@ export default function RunNode({ run, depth, onOpenDetail }: RunNodeProps) {
               e.stopPropagation();
               onOpenDetail(run.id);
             }}
-            className="shrink-0 truncate font-medium text-zinc-100 hover:text-blue-400 hover:underline"
+            className="shrink-0 truncate font-medium text-foreground hover:text-blue-400 hover:underline"
           >
             {run.name}
           </span>
         ) : (
-          <span className="shrink-0 truncate font-medium text-zinc-100">{run.name}</span>
+          <span className="shrink-0 truncate font-medium text-foreground">{run.name}</span>
         )}
         {run.model && (
-          <span className="shrink-0 truncate font-mono text-[11px] text-zinc-500">{run.model}</span>
+          <span className="shrink-0 truncate font-mono text-[11px] text-muted-foreground">{run.model}</span>
         )}
         <span className={`shrink-0 text-[11px] ${s.text}`}>{run.status}</span>
         {run.contract && run.contract.checked && !run.contract.satisfied && (
@@ -166,23 +166,23 @@ export default function RunNode({ run, depth, onOpenDetail }: RunNodeProps) {
 
         <span className="ml-auto flex shrink-0 items-center gap-2">
           {summary && (
-            <span className="rounded-full bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-400 ring-1 ring-inset ring-zinc-700/60">
+            <span className="rounded-full bg-muted px-2 py-0.5 font-mono text-[10px] text-muted-foreground ring-1 ring-inset ring-ring/60">
               {summary}
             </span>
           )}
-          {dur && <span className="font-mono text-[10px] tabular-nums text-zinc-600">{dur}</span>}
+          {dur && <span className="font-mono text-[10px] tabular-nums text-foreground">{dur}</span>}
         </span>
       </button>
 
       {open && hasDetail && (
-        <div className="ml-[1.15rem] mt-1 mb-2 space-y-2 border-l border-zinc-800/60 pl-3">
+        <div className="ml-[1.15rem] mt-1 mb-2 space-y-2 border-l border-border/60 pl-3">
           {run.err && (
             <div className="rounded-md bg-red-950/40 px-2 py-1 text-xs text-red-300 ring-1 ring-inset ring-red-900/40">
               {run.err}
             </div>
           )}
           {run.messages.length > 0 && (
-            <div className="max-h-72 overflow-y-auto overscroll-contain space-y-1.5 rounded-md bg-zinc-900/70 p-2 ring-1 ring-inset ring-zinc-800/80">
+            <div className="max-h-72 overflow-y-auto overscroll-contain space-y-1.5 rounded-md bg-card/70 p-2 ring-1 ring-inset ring-ring/80">
               {run.messages.map((m, i) => messageLine(m, i))}
             </div>
           )}

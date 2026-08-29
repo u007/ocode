@@ -111,7 +111,7 @@ export default function OcodePluginsForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
@@ -119,9 +119,9 @@ export default function OcodePluginsForm() {
   return (
     <div className="p-6 max-w-lg space-y-6">
       <div>
-        <h2 className="text-sm font-semibold text-zinc-200 mb-2">Plugins & Local Models</h2>
+        <h2 className="text-sm font-semibold text-foreground mb-2">Plugins & Local Models</h2>
         {error && <div className="text-xs text-red-400 mb-2">{error}</div>}
-        <label className="flex items-center gap-2 text-xs text-zinc-400">
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
           <input
             type="checkbox"
             checked={astEnabled}
@@ -132,8 +132,8 @@ export default function OcodePluginsForm() {
         </label>
       </div>
 
-      <div className="border-t border-zinc-700 pt-4">
-        <div className="text-xs font-semibold text-zinc-300 mb-2">External plugins</div>
+      <div className="border-t border-border pt-4">
+        <div className="text-xs font-semibold text-foreground mb-2">External plugins</div>
         <div className="flex items-center gap-2 mb-3">
           <Input
             value={source}
@@ -150,12 +150,12 @@ export default function OcodePluginsForm() {
           </Button>
         </div>
         {plugins.length === 0 ? (
-          <div className="text-xs text-zinc-500">No plugins installed.</div>
+          <div className="text-xs text-muted-foreground">No plugins installed.</div>
         ) : (
           <div className="space-y-1">
             {plugins.map((p) => (
-              <div key={p.name} className="flex items-center justify-between gap-2 py-2 px-3 rounded-md hover:bg-zinc-800">
-                <div className="min-w-0 text-sm text-zinc-300 truncate">{p.name}</div>
+              <div key={p.name} className="flex items-center justify-between gap-2 py-2 px-3 rounded-md hover:bg-muted">
+                <div className="min-w-0 text-sm text-foreground truncate">{p.name}</div>
                 <div className="flex items-center gap-1.5 shrink-0">
                   <Button
                     variant={p.enabled ? "default" : "outline"}
@@ -169,7 +169,7 @@ export default function OcodePluginsForm() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="h-7 w-7 p-0 text-zinc-500 hover:text-red-400"
+                    className="h-7 w-7 p-0 text-muted-foreground hover:text-red-400"
                     onClick={() => removeExternal(p)}
                     disabled={busy === p.name}
                   >
@@ -182,15 +182,15 @@ export default function OcodePluginsForm() {
         )}
       </div>
 
-      <div className="border-t border-zinc-700 pt-4">
-        <div className="text-xs font-semibold text-zinc-300 mb-2">Local models</div>
+      <div className="border-t border-border pt-4">
+        <div className="text-xs font-semibold text-foreground mb-2">Local models</div>
         {Object.keys(localModels).length === 0 ? (
-          <div className="text-xs text-zinc-500">No local models registered.</div>
+          <div className="text-xs text-muted-foreground">No local models registered.</div>
         ) : (
           <div className="space-y-1">
             {Object.entries(localModels).map(([name, m]) => (
-              <div key={name} className="flex items-center justify-between gap-2 py-2 px-3 rounded-md hover:bg-zinc-800">
-                <div className="min-w-0 text-sm text-zinc-300 truncate font-mono">{name}</div>
+              <div key={name} className="flex items-center justify-between gap-2 py-2 px-3 rounded-md hover:bg-muted">
+                <div className="min-w-0 text-sm text-foreground truncate font-mono">{name}</div>
                 <Button
                   variant={m.enabled ? "default" : "outline"}
                   size="sm"

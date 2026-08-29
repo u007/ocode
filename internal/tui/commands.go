@@ -106,6 +106,7 @@ func init() {
 		{name: "/models", aliases: []string{"/model"}, usage: "/models [name]", help: "List and switch available models", takesModelArg: true, handler: runModelsCmd},
 		{name: "/advisor", usage: "/advisor [provider/model|default]", help: "Set the advisor model (used by the advisor() tool for strategic guidance)", handler: runAdvisorCmd},
 		{name: "/connect", help: "Show/Set provider API keys", handler: runConnectCmd},
+		{name: "/secret", usage: "/secret <init|encrypt|decrypt|rekey> [path]", help: "Encrypt/decrypt a file or dir, or change the project passphrase", handler: runSecretCmd},
 		{name: "/login", help: "Log in and enable encrypted config sync", handler: runSyncLoginCmd},
 		{name: "/logout", aliases: []string{"/sync-logout"}, help: "Log out and stop config sync", handler: runSyncLogoutCmd},
 		{name: "/session", aliases: []string{"/sessions", "/resume"}, usage: "/session [list|load <id>]", help: "Choose a session to resume", handler: runSessionCmd},

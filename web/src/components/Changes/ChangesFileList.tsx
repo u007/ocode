@@ -20,12 +20,12 @@ export default function ChangesFileList({ files, selectedPath, onSelect, onUndoF
   const [expanded, setExpanded] = useState<string | null>(null);
 
   if (files.length === 0) {
-    return <div className="p-3 text-xs text-zinc-600">No changes in this session yet.</div>;
+    return <div className="p-3 text-xs text-foreground">No changes in this session yet.</div>;
   }
 
   return (
     <TooltipProvider>
-      <div className="divide-y divide-zinc-800">
+      <div className="divide-y divide-border">
         {files.map((file) => {
           const badge = STATUS_BADGES[file.status] || STATUS_BADGES.modified;
           const isSelected = selectedPath === file.originalPath;
@@ -34,24 +34,24 @@ export default function ChangesFileList({ files, selectedPath, onSelect, onUndoF
             .map((a) => `${a.agentName} · ${a.changes}`)
             .join(", ");
           return (
-            <div key={file.originalPath} className={isSelected ? "bg-zinc-800" : ""}>
+            <div key={file.originalPath} className={isSelected ? "bg-muted" : ""}>
               <button
                 onClick={() => onSelect(file.originalPath)}
-                className="w-full text-left px-3 py-1.5 flex items-center gap-2 text-sm hover:bg-zinc-800/50"
+                className="w-full text-left px-3 py-1.5 flex items-center gap-2 text-sm hover:bg-muted/50"
               >
                 <span className={`inline-flex items-center justify-center w-5 h-5 rounded text-[10px] font-bold ${badge.color}`}>
                   {badge.label}
                 </span>
-                <span className="font-mono text-zinc-300 truncate flex-1">{file.originalPath}</span>
+                <span className="font-mono text-foreground truncate flex-1">{file.originalPath}</span>
                 {!file.undoable && (
-                  <span className="text-[10px] text-zinc-500 shrink-0">(bash) ⚠</span>
+                  <span className="text-[10px] text-muted-foreground shrink-0">(bash) ⚠</span>
                 )}
               </button>
-              <div className="px-3 pb-1.5 flex items-center gap-3 text-[11px] text-zinc-500">
+              <div className="px-3 pb-1.5 flex items-center gap-3 text-[11px] text-muted-foreground">
                 <span>{authorSummary}</span>
                 <button
                   onClick={() => setExpanded(isExpanded ? null : file.originalPath)}
-                  className="hover:text-zinc-300"
+                  className="hover:text-foreground"
                 >
                   {isExpanded ? "hide details" : "details"}
                 </button>
@@ -63,7 +63,7 @@ export default function ChangesFileList({ files, selectedPath, onSelect, onUndoF
                         <button
                           disabled={!file.undoable}
                           onClick={() => onUndoBlock(file.originalPath)}
-                          className="hover:text-zinc-300 disabled:opacity-40 disabled:hover:text-zinc-500"
+                          className="hover:text-foreground disabled:opacity-40 disabled:hover:text-muted-foreground"
                         >
                           undo last
                         </button>
@@ -81,7 +81,7 @@ export default function ChangesFileList({ files, selectedPath, onSelect, onUndoF
                         <button
                           disabled={!file.undoable}
                           onClick={() => onUndoFile(file.originalPath)}
-                          className="hover:text-zinc-300 disabled:opacity-40 disabled:hover:text-zinc-500"
+                          className="hover:text-foreground disabled:opacity-40 disabled:hover:text-muted-foreground"
                         >
                           undo file
                         </button>
@@ -94,7 +94,7 @@ export default function ChangesFileList({ files, selectedPath, onSelect, onUndoF
                 </TooltipProvider>
               </div>
               {isExpanded && (
-                <div className="px-3 pb-2 text-[11px] text-zinc-500 space-y-0.5">
+                <div className="px-3 pb-2 text-[11px] text-muted-foreground space-y-0.5">
                   <div>{file.changeCount} tool call(s)</div>
                   {file.lastBashCommand && <div className="font-mono">$ {file.lastBashCommand}</div>}
                   <div>created {file.createdAt}</div>

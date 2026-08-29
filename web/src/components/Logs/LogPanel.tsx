@@ -219,19 +219,19 @@ export default function LogPanel({ active, sessionId }: { active: boolean; sessi
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-700 bg-zinc-900">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-card">
         <div className="flex items-center gap-2">
-          <Filter className="w-4 h-4 text-zinc-500" />
+          <Filter className="w-4 h-4 text-muted-foreground" />
           <div className="flex gap-1">
             {KIND_FILTERS.map((kind) => (
               <button
                 key={kind}
                 type="button"
                 onClick={() => setFilter(kind)}
-                className={`px-2 py-1 rounded text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 ${
+                className={`px-2 py-1 rounded text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                   filter === kind
-                    ? "bg-zinc-700 text-white"
-                    : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted"
                 }`}
               >
                 {kind}
@@ -241,7 +241,7 @@ export default function LogPanel({ active, sessionId }: { active: boolean; sessi
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="text-xs text-zinc-500">{filteredLogs.length} entries</span>
+          <span className="text-xs text-muted-foreground">{filteredLogs.length} entries</span>
           <Button
             type="button"
             variant="ghost"
@@ -268,7 +268,7 @@ export default function LogPanel({ active, sessionId }: { active: boolean; sessi
               }
             }}
             title={autoScroll ? "Disable auto-scroll" : "Enable auto-scroll"}
-            className={autoScroll ? "text-blue-400" : "text-zinc-500"}
+            className={autoScroll ? "text-blue-400" : "text-muted-foreground"}
           >
             ↓
           </Button>
@@ -288,28 +288,28 @@ export default function LogPanel({ active, sessionId }: { active: boolean; sessi
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto font-mono text-xs p-4 bg-zinc-950"
+        className="flex-1 overflow-y-auto font-mono text-xs p-4 bg-background"
       >
         {error ? (
           <div className="text-red-400 text-center py-8">{error}</div>
         ) : filteredLogs.length === 0 ? (
-          <div className="text-zinc-500 text-center py-8">
+          <div className="text-muted-foreground text-center py-8">
             {streaming ? "Waiting for logs..." : "No log entries"}
           </div>
         ) : (
           filteredLogs.map((log, i) => (
             <div
               key={i}
-              className="flex items-start gap-3 py-1 hover:bg-zinc-900 rounded"
+              className="flex items-start gap-3 py-1 hover:bg-card rounded"
             >
               <span
                 className={`flex-shrink-0 w-16 text-right ${
-                  KIND_COLORS[log.kind] || "text-zinc-400"
+                  KIND_COLORS[log.kind] || "text-muted-foreground"
                 }`}
               >
                 {log.kind}
               </span>
-              <span className="flex-1 text-zinc-300 whitespace-pre-wrap break-all">
+              <span className="flex-1 text-foreground whitespace-pre-wrap break-all">
                 {log.message}
               </span>
             </div>

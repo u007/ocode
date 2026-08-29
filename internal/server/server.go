@@ -144,12 +144,31 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/changes/undo-block", s.authMiddleware(s.handleUndoChangeBlock))
 	s.mux.HandleFunc("GET /api/git/status", s.authMiddleware(s.handleGitStatus))
 	s.mux.HandleFunc("GET /api/git/diff", s.authMiddleware(s.handleGitDiff))
+	s.mux.HandleFunc("POST /api/git/stage", s.authMiddleware(s.handler.HandleGitStage))
+	s.mux.HandleFunc("POST /api/git/unstage", s.authMiddleware(s.handler.HandleGitUnstage))
+	s.mux.HandleFunc("POST /api/git/discard", s.authMiddleware(s.handler.HandleGitDiscard))
+	s.mux.HandleFunc("POST /api/git/stash", s.authMiddleware(s.handler.HandleGitStash))
+	s.mux.HandleFunc("POST /api/git/commit", s.authMiddleware(s.handler.HandleGitCommit))
 	s.mux.HandleFunc("GET /api/theme", s.authMiddleware(s.handleGetTheme))
 	s.mux.HandleFunc("GET /api/themes", s.authMiddleware(s.handleListThemes))
 	s.mux.HandleFunc("GET /api/files/tree", s.authMiddleware(s.handleFileTree))
+	s.mux.HandleFunc("GET /api/files/search", s.authMiddleware(s.handleFileSearch))
 	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
 	s.mux.HandleFunc("PUT /api/files/content", s.authMiddleware(s.handleSaveFileContent))
 	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
+	s.mux.HandleFunc("POST /api/fs/copy", s.authMiddleware(s.handler.HandleFSCopy))
+	s.mux.HandleFunc("POST /api/fs/move", s.authMiddleware(s.handler.HandleFSMove))
+	s.mux.HandleFunc("POST /api/fs/delete", s.authMiddleware(s.handler.HandleFSDelete))
+	s.mux.HandleFunc("POST /api/fs/rename", s.authMiddleware(s.handler.HandleFSRename))
+	s.mux.HandleFunc("POST /api/fs/new-file", s.authMiddleware(s.handler.HandleFSNewFile))
+	s.mux.HandleFunc("POST /api/fs/new-folder", s.authMiddleware(s.handler.HandleFSNewFolder))
+	s.mux.HandleFunc("POST /api/fs/duplicate", s.authMiddleware(s.handler.HandleFSDuplicate))
+	s.mux.HandleFunc("POST /api/secret/init", s.authMiddleware(s.handleSecretInit))
+	s.mux.HandleFunc("GET /api/secret/scan", s.authMiddleware(s.handleSecretScan))
+	s.mux.HandleFunc("POST /api/secret/encrypt", s.authMiddleware(s.handleSecretEncrypt))
+	s.mux.HandleFunc("POST /api/secret/decrypt", s.authMiddleware(s.handleSecretDecrypt))
+	s.mux.HandleFunc("POST /api/secret/rekey", s.authMiddleware(s.handleSecretRekey))
+	s.mux.HandleFunc("POST /api/secret/cancel", s.authMiddleware(s.handleSecretCancel))
 
 	// TUI status (consolidated snapshot for the web UI status bar)
 	s.mux.HandleFunc("GET /api/tui-status", s.authMiddleware(s.handleGetTUIStatus))
@@ -176,6 +195,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/sessions/{id}/title", s.authMiddleware(s.handleSetSessionTitle))
 	s.mux.HandleFunc("POST /api/sessions/{id}/title/generate", s.authMiddleware(s.handleGenerateSessionTitle))
 	s.mux.HandleFunc("GET /api/sessions/{id}/context", s.authMiddleware(s.handleSessionContext))
+	s.mux.HandleFunc("POST /api/sessions/{id}/truncate", s.authMiddleware(s.handler.HandleTruncateSession))
 
 	// Files
 	s.mux.HandleFunc("POST /api/files/undo", s.authMiddleware(s.handleUndo))
@@ -525,6 +545,10 @@ func (s *Server) handleFileTree(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleFileTree(w, r)
 }
 
+func (s *Server) handleFileSearch(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleFileSearch(w, r)
+}
+
 func (s *Server) handleFileContent(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleFileContent(w, r)
 }
@@ -535,6 +559,30 @@ func (s *Server) handleSaveFileContent(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleOpenFile(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleOpenFile(w, r)
+}
+
+func (s *Server) handleSecretInit(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSecretInit(w, r)
+}
+
+func (s *Server) handleSecretScan(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSecretScan(w, r)
+}
+
+func (s *Server) handleSecretEncrypt(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSecretEncrypt(w, r)
+}
+
+func (s *Server) handleSecretDecrypt(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSecretDecrypt(w, r)
+}
+
+func (s *Server) handleSecretRekey(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSecretRekey(w, r)
+}
+
+func (s *Server) handleSecretCancel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSecretCancel(w, r)
 }
 
 func (s *Server) handleUploads(w http.ResponseWriter, r *http.Request) {
@@ -602,13 +650,14 @@ func (s *Server) SetWorkDir(dir string) {
 
 // Serve serves requests on an already-bound listener.
 func (s *Server) Serve(ln net.Listener) error {
-	// Populate the live model caches (OpenRouter, Novita) in the background so
+	// Populate the live model caches (OpenRouter, Novita, Groq) in the background so
 	// the model-list endpoint can enrich the embedded snapshot with live models
 	// without ever blocking a request on a network fetch. The Preload* helpers
 	// are idempotent and degrade gracefully when the network is unavailable.
 	go agent.PreloadOpenRouterModels()
 	go agent.PreloadNovitaModels()
 	go agent.PreloadAIHubMixModels()
+	go agent.PreloadGroqModels()
 	log.Printf("serving on %s", s.addr)
 	// Periodically release idle built agents so agent/plugin processes do not
 	// accumulate as projects accumulate. The registry entry and on-disk

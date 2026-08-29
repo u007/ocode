@@ -37,4 +37,38 @@ const monacoEnv: monaco.Environment = {
 // which keeps the editor version in lockstep with the `monaco-editor` package.
 loader.config({ monaco });
 
+// Configure TypeScript/JavaScript language services for TSX/JSX.
+// Without this, files like `ChatPanel.tsx` opened as `typescript` get no JSX
+// tokenization and show spurious diagnostics ("Cannot use JSX unless --jsx").
+// `allowNonTsExtensions` lets the TS worker handle .tsx/.jsx URIs, and `jsx`
+// enables JSX emit so the tokenizer recognises `<Tag>` syntax.
+monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
+  target: monaco.languages.typescript.ScriptTarget.Latest,
+  module: monaco.languages.typescript.ModuleKind.ESNext,
+  allowNonTsExtensions: true,
+  allowJs: true,
+  jsx: monaco.languages.typescript.JsxEmit.ReactJSX,
+  jsxFactory: "React.createElement",
+  reactNamespace: "React",
+  esModuleInterop: true,
+  allowSyntheticDefaultImports: true,
+  strict: false,
+  noEmit: true,
+});
+monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
+  target: monaco.languages.typescript.ScriptTarget.Latest,
+  module: monaco.languages.typescript.ModuleKind.ESNext,
+  allowNonTsExtensions: true,
+  allowJs: true,
+  jsx: monaco.languages.typescript.JsxEmit.ReactJSX,
+});
+monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+  noSemanticValidation: false,
+  noSyntaxValidation: false,
+});
+monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+  noSemanticValidation: false,
+  noSyntaxValidation: false,
+});
+
 export { loader, monaco };

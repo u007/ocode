@@ -738,6 +738,12 @@ func AllProviderModelsCached() []string {
 	return allProviderModelsFromRegistry(false)
 }
 
+// ProviderModelsCached returns the same list as ProviderModels but never blocks
+// on a network call: it only consults live caches that are already fresh.
+func ProviderModelsCached(provider string) []string {
+	return providerModelsFromRegistry(provider, false)
+}
+
 // ModelDisplayName returns the human-readable model name from the models.dev
 // registry — e.g. "Ox Alpha Free" for the zen codename "opencode/x-preview-f-free".
 // Returns "" when the registry doesn't know the model or the entry has no name,
@@ -1073,6 +1079,24 @@ func allProviderModelsFromRegistry(refresh bool) []string {
 			}
 		}
 	}
+	// Groq live models — supplement the snapshot so newly released Groq models
+	// appear in the picker even when absent from the models.dev snapshot.
+	// Guarded by refresh (or a still-fresh cache) to avoid blocking the main loop.
+	if refresh || groqCacheFresh() {
+		if groqLive := fetchGroqLiveModels(); len(groqLive) > 0 {
+			have := make(map[string]bool, len(ids))
+			for _, id := range ids {
+				have[id] = true
+			}
+			for _, key := range groqLive {
+				id := "groq/" + key
+				if !have[id] {
+					ids = append(ids, id)
+					have[id] = true
+				}
+			}
+		}
+	}
 	if len(ids) == 0 {
 		return nil
 	}
@@ -1148,6 +1172,19 @@ func providerModelsFromRegistry(provider string, refresh bool) []string {
 		// from the snapshot/registry via modelEntryFor.
 		if refresh || aiHubMixCacheFresh() {
 			if live := fetchAIHubMixLiveModels(); len(live) > 0 {
+				snap := providerModelsFromSnapshot(provider)
+				merged := mergeModelIDs(snap, live)
+				sort.Strings(merged)
+				return merged
+			}
+		}
+		return providerModelsFromSnapshot(provider)
+	}
+	if provider == "groq" {
+		// Groq serves fast inference models (e.g. "llama-3.3-70b-versatile").
+		// Merge live /models list with snapshot so newly released models appear.
+		if refresh || groqCacheFresh() {
+			if live := fetchGroqLiveModels(); len(live) > 0 {
 				snap := providerModelsFromSnapshot(provider)
 				merged := mergeModelIDs(snap, live)
 				sort.Strings(merged)
@@ -1603,6 +1640,118 @@ func aiHubMixCacheFresh() bool {
 // degrades gracefully when the network is unavailable.
 func PreloadAIHubMixModels() {
 	go fetchAIHubMixLiveModels()
+}
+
+const groqCacheTTL = 5 * time.Minute
+
+// groqLiveData caches the model IDs fetched live from Groq's OpenAI-compatible
+// /models endpoint. Groq serves models (e.g. "llama-3.3-70b-versatile",
+// "openai/gpt-oss-120b") that may not yet be in the models.dev snapshot, so
+// querying the provider directly supplements the picker.
+var groqLiveData struct {
+	mu        sync.RWMutex
+	models    []string // bare model ids
+	lastFetch time.Time
+}
+
+// fetchGroqLiveModels fetches the model list from Groq's OpenAI-compatible
+// /models endpoint and returns the bare model IDs. Returns nil silently if:
+//   - GROQ_API_KEY is not set AND no stored credential exists
+//   - The API is unreachable, returns a non-200, or the body is malformed
+//
+// Callers degrade to the models.dev snapshot on a nil result.
+func fetchGroqLiveModels() []string {
+	groqLiveData.mu.RLock()
+	if groqLiveData.models != nil && time.Since(groqLiveData.lastFetch) < groqCacheTTL {
+		models := groqLiveData.models
+		groqLiveData.mu.RUnlock()
+		return models
+	}
+	groqLiveData.mu.RUnlock()
+
+	key := auth.ResolveKey("groq")
+	if key == "" {
+		return nil
+	}
+
+	base := providers["groq"].baseURL
+	if cred, ok := auth.Get("groq"); ok && cred.BaseURL != "" {
+		base = strings.TrimRight(cred.BaseURL, "/")
+	}
+	if b := auth.GetBaseURL("groq"); b != "" {
+		base = strings.TrimRight(b, "/")
+	}
+	modelsURL := strings.TrimRight(base, "/") + "/models"
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, modelsURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return nil
+	}
+	var apiResp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return nil
+	}
+
+	ids := make([]string, 0, len(apiResp.Data))
+	seen := make(map[string]bool, len(apiResp.Data))
+	for _, m := range apiResp.Data {
+		if m.ID == "" || seen[m.ID] {
+			continue
+		}
+		seen[m.ID] = true
+		ids = append(ids, m.ID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	groqLiveData.mu.Lock()
+	groqLiveData.models = ids
+	groqLiveData.lastFetch = time.Now()
+	groqLiveData.mu.Unlock()
+
+	return ids
+}
+
+// groqCacheFresh reports whether the Groq live cache is populated AND
+// still within its TTL (so the main loop can consult it without a network call).
+func groqCacheFresh() bool {
+	groqLiveData.mu.RLock()
+	defer groqLiveData.mu.RUnlock()
+	return groqLiveData.models != nil && time.Since(groqLiveData.lastFetch) < groqCacheTTL
+}
+
+// PreloadGroqModels fetches Groq's live model list in the background so models
+// absent from the snapshot appear in the picker. No-op until the key is configured.
+func PreloadGroqModels() {
+	go fetchGroqLiveModels()
+}
+
+// GroqModelsLoaded reports whether the Groq live cache has been populated.
+func GroqModelsLoaded() bool {
+	groqLiveData.mu.RLock()
+	defer groqLiveData.mu.RUnlock()
+	return groqLiveData.models != nil
 }
 
 const openRouterCacheTTL = 30 * time.Second

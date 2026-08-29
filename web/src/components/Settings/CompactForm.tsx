@@ -62,21 +62,21 @@ export default function CompactForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">Compact</h2>
+      <h2 className="text-sm font-semibold text-foreground">Compact</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
       {FIELDS.map((f) =>
         f.key === "summary_model" ? (
           <div key={f.key} className="space-y-1.5">
-            <label className="text-xs text-zinc-500">{f.label}</label>
+            <label className="text-xs text-muted-foreground">{f.label}</label>
             <div className="flex items-center gap-2">
-              <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={cfg.summary_model || undefined}>
+              <div className="flex-1 h-8 px-3 rounded-md bg-muted border border-border text-xs text-foreground flex items-center truncate" title={cfg.summary_model || undefined}>
                 {cfg.summary_model || "Not set"}
               </div>
               <Button size="sm" variant="outline" type="button" onClick={() => setSummaryDialogOpen(true)} className="h-8 text-xs">
@@ -92,7 +92,7 @@ export default function CompactForm() {
             />
           </div>
         ) : f.type === "checkbox" ? (
-          <label key={f.key} className="flex items-center gap-2 text-xs text-zinc-400">
+          <label key={f.key} className="flex items-center gap-2 text-xs text-muted-foreground">
             <input
               type="checkbox"
               checked={Boolean(cfg[f.key])}
@@ -102,7 +102,7 @@ export default function CompactForm() {
           </label>
         ) : (
           <div key={f.key} className="space-y-1.5">
-            <label className="text-xs text-zinc-500">{f.label}</label>
+            <label className="text-xs text-muted-foreground">{f.label}</label>
             <Input
               type={f.type}
               value={String(cfg[f.key])}

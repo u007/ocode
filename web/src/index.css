@@ -2,13 +2,27 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Color system (two tiers):
+ *  1. THEME TOKENS (bg-background, bg-card, bg-muted, bg-accent, text-foreground,
+ *     text-muted-foreground, border-border, bg-primary, ring-ring, …) are bound to the
+ *     CSS variables set by useTheme()/applyThemeColors() from the server (terminal) theme.
+ *     All chrome — tabs, panels, sidebars, inputs, dialogs, hover/active states — MUST use
+ *     these so the web UI follows the active theme. Do not hard-code zinc/slate/neutral/gray.
+ *  2. STATUS / SEMANTIC COLORS (red/green/yellow/blue/amber/emerald, etc.) used for git &
+ *     file-status badges, success/error indicators, diff markers, and active-process accents
+ *     are INTENTIONALLY FIXED and NOT bound to the theme variables — they convey meaning
+ *     (added / modified / deleted / error / warning), not chrome, so they stay constant
+ *     across themes.
+ */
+
 @layer base {
   :root {
     --background: 240 10% 3.9%;
     --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
+    --card: 240 5.9% 10%;
     --card-foreground: 0 0% 98%;
-    --popover: 240 10% 3.9%;
+    --popover: 240 5.9% 10%;
     --popover-foreground: 0 0% 98%;
     --primary: 0 0% 98%;
     --primary-foreground: 240 5.9% 10%;

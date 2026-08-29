@@ -7,6 +7,9 @@ import "@xterm/xterm/css/xterm.css";
 import { apiPath, authHeaders, authToken } from "@/api/client";
 import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
 import { registerTerminal, unregisterTerminal } from "@/lib/debug/terminalRegistry";
+import { playAlertSound } from "./terminalAlertSound";
+import { useTerminalState } from "../../stores/terminalStore";
+import { registerTerminalFocus, unregisterTerminalFocus } from "./terminalFocus";
 
 /**
  * A single interactive terminal: one xterm.js instance bridged to one
@@ -45,6 +48,18 @@ export default function TerminalPanel({
   const socketRef = useRef<WebSocket | null>(null);
   const dragCounterRef = useRef(0);
   const [isDragging, setIsDragging] = useState(false);
+  // Mirrors `active` so the xterm event handlers (registered once at mount) can
+  // read the live focused state without re-subscribing.
+  const activeRef = useRef(active);
+  // False during the initial scrollback replay; flipped true once the live pty
+  // socket opens so a BEL baked into restored history can't false-alert.
+  const readyRef = useRef(false);
+
+  const { markAlerted } = useTerminalState();
+
+  useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
 
   // Upload dropped files and insert their names into the terminal stdin.
   const uploadAndInsert = useCallback(async (files: File[]) => {
@@ -215,6 +230,32 @@ export default function TerminalPanel({
       return true;
     });
 
+    // Attention signals: the BEL control char and the common notification OSC
+    // sequences (9 = iTerm/most, 777/7777 = urxvt/others, 99 = kitty/notifications).
+    // When the terminal is backgrounded we raise a "unread activity" badge and
+    // (if the user enabled sound) play an alert. readyRef/activeRef keep the
+    // handler stable across re-renders without re-subscribing; they also prevent
+    // alerting for a BEL baked into the restored scrollback, or for a bell fired
+    // while the user is already looking at this terminal.
+    const onAttention = () => {
+      if (!readyRef.current || activeRef.current) return;
+      markAlerted(projectPath, id);
+      playAlertSound();
+    };
+    const bellDisp = term.onBell(onAttention);
+    const osc9Disp = term.parser.registerOscHandler(9, () => {
+      onAttention();
+      return true;
+    });
+    const osc777Disp = term.parser.registerOscHandler(777, () => {
+      onAttention();
+      return true;
+    });
+    const osc99Disp = term.parser.registerOscHandler(99, () => {
+      onAttention();
+      return true;
+    });
+
     if (savedBuffer) {
       term.write(savedBuffer.text);
       term.write("\r\n\x1b[2m── restored, shell disconnected ──\x1b[0m\r\n");
@@ -273,7 +314,10 @@ export default function TerminalPanel({
     socketRef.current = sock;
 
     const decoder = new TextDecoder();
-    sock.onopen = () => fitAndResize.current();
+    sock.onopen = () => {
+      readyRef.current = true;
+      fitAndResize.current();
+    };
     // Chunk large binary writes to prevent memory spikes from one-shot decode+write.
     const CHUNK_THRESHOLD = 64 * 1024; // 64KB
     const CHUNK_SIZE = 16 * 1024;      // 16KB per chunk
@@ -361,6 +405,10 @@ export default function TerminalPanel({
       window.removeEventListener("pagehide", onPageHide);
       observer.disconnect();
       dataSub.dispose();
+      bellDisp.dispose();
+      osc9Disp.dispose();
+      osc777Disp.dispose();
+      osc99Disp.dispose();
       // Cancel any pending chunk writes.
       if (chunkRafId) cancelAnimationFrame(chunkRafId);
       pendingChunks.length = 0;
@@ -402,10 +450,19 @@ export default function TerminalPanel({
     }
   }, [active]);
 
+  // Allow the tab bar to focus this shell on single left-click, even when
+  // `active` does not change (already-active tab). The registry is keyed by
+  // terminal id so UnifiedTabBar can call focus without threading refs through App.
+  useEffect(() => {
+    const doFocus = () => termRef.current?.focus();
+    registerTerminalFocus(id, doFocus);
+    return () => unregisterTerminalFocus(id);
+  }, [id]);
+
   return (
     <div
       ref={containerRef}
-      className="relative h-full w-full bg-zinc-900 p-2"
+      className="relative h-full w-full bg-card p-2"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}

@@ -51,17 +51,17 @@ export default function LimitsForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">Limits</h2>
+      <h2 className="text-sm font-semibold text-foreground">Limits</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Max steps (0 = default cap of 100)</label>
+        <label className="text-xs text-muted-foreground">Max steps (0 = default cap of 100)</label>
         <Input
           type="number"
           value={maxSteps}
@@ -70,7 +70,7 @@ export default function LimitsForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Max image dimension (px)</label>
+        <label className="text-xs text-muted-foreground">Max image dimension (px)</label>
         <Input
           type="number"
           value={maxImageDim}
@@ -79,7 +79,7 @@ export default function LimitsForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Max concurrent agents</label>
+        <label className="text-xs text-muted-foreground">Max concurrent agents</label>
         <Input
           type="number"
           value={maxConcurrentAgents}
@@ -88,7 +88,7 @@ export default function LimitsForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Undo max age delta</label>
+        <label className="text-xs text-muted-foreground">Undo max age delta</label>
         <Input
           type="number"
           value={undoMaxAgeDelta}

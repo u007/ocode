@@ -2661,6 +2661,8 @@ func (m model) Init() tea.Cmd {
 	// Preload AIHubMix's live /models list in the background so models the
 	// models.dev catalog omits (e.g. "ox-alpha") appear in the picker.
 	agent.PreloadAIHubMixModels()
+	// Preload Groq's live /models list so newly released Groq models appear in the picker.
+	agent.PreloadGroqModels()
 	// Start listening for LSP diagnostic changes so the sidebar updates proactively.
 	if m.lspDiagCh != nil {
 		cmds = append(cmds, listenLSPDiags(m.lspDiagCh))
@@ -3698,7 +3700,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "autocontinue-model" && m.pickerKind != "ocr-model" && m.pickerKind != "image-model") {
 			return m, nil
 		}
-		// Append provider sections below the existing favs+recents items.
+		// Append provider sections below the existing recents+favorites items.
 		if len(msg.items) > 0 {
 			m.pickerItems = append(m.pickerItems, msg.items...)
 			m.pickerValues = append(m.pickerValues, msg.values...)
@@ -5193,6 +5195,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.git.statusMsg = "editor closed"
 			return m, m.git.cmdRefresh()
 		}
+	case secretCmdFinishedMsg:
+		m.layout()
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Secret error: %v", msg.err)})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Secret command completed."})
+		}
+		m.rerenderTranscriptAndMaybeScroll()
 	case errorMsg:
 		if msg != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", error(msg))})

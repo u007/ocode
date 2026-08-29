@@ -434,9 +434,15 @@ func (c *GenericClient) samplingTunable() bool {
 // OrcaRouter's named routers use the provider-qualified form (for example,
 // "orcarouter/auto"), while upstream models routed through OrcaRouter already
 // contain their own provider prefix (for example, "anthropic/claude-sonnet").
+// Groq's compound models are similarly qualified as "groq/compound" – the picker
+// stores them as "groq/groq/compound" so that after provider stripping the model
+// remains qualified. Support the short form "groq/compound" typed by users.
 func (c *GenericClient) requestModel() string {
 	if c.Provider == "orcarouter" && !strings.Contains(c.Model, "/") {
 		return "orcarouter/" + c.Model
+	}
+	if c.Provider == "groq" && (c.Model == "compound" || c.Model == "compound-mini") {
+		return "groq/" + c.Model
 	}
 	return c.Model
 }

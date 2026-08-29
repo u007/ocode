@@ -50,9 +50,11 @@ type DocSearchTool struct {
 	store *knowledge.Store
 }
 
-func (t *DocSearchTool) Name() string        { return "doc_search" }
-func (t *DocSearchTool) Description() string { return "Search the project's OKF knowledge bundle for documents matching a query, filtered by tags and/or type. Queries are tokenized into words (ALL must appear somewhere in the doc). Results are ranked by relevance and paginated." }
-func (t *DocSearchTool) Parallel() bool      { return true }
+func (t *DocSearchTool) Name() string { return "doc_search" }
+func (t *DocSearchTool) Description() string {
+	return "Search the project's OKF knowledge bundle for documents matching a query, filtered by tags and/or type. Queries are tokenized into words (ALL must appear somewhere in the doc). Results are ranked by relevance and paginated."
+}
+func (t *DocSearchTool) Parallel() bool { return true }
 
 func (t *DocSearchTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
@@ -169,9 +171,11 @@ type DocGetTool struct {
 	store *knowledge.Store
 }
 
-func (t *DocGetTool) Name() string        { return "doc_get" }
-func (t *DocGetTool) Description() string { return "Retrieve a single knowledge document by its bundle-relative path." }
-func (t *DocGetTool) Parallel() bool      { return true }
+func (t *DocGetTool) Name() string { return "doc_get" }
+func (t *DocGetTool) Description() string {
+	return "Retrieve a single knowledge document by its bundle-relative path."
+}
+func (t *DocGetTool) Parallel() bool { return true }
 
 func (t *DocGetTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
@@ -239,9 +243,11 @@ type DocWriteTool struct {
 	store *knowledge.Store
 }
 
-func (t *DocWriteTool) Name() string        { return "doc_write" }
-func (t *DocWriteTool) Description() string { return "Create or update a knowledge document in the OKF bundle. The store enforces that `type` is present, reserved files cannot be overwritten, and paths are bundle-relative. Index and log are regenerated automatically." }
-func (t *DocWriteTool) Parallel() bool      { return false }
+func (t *DocWriteTool) Name() string { return "doc_write" }
+func (t *DocWriteTool) Description() string {
+	return "Create or update a knowledge document in the OKF bundle. The store enforces that `type` is present, reserved files cannot be overwritten, and paths are bundle-relative. Index and log are regenerated automatically."
+}
+func (t *DocWriteTool) Parallel() bool { return false }
 
 func (t *DocWriteTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
@@ -361,9 +367,11 @@ type DocDeprecateTool struct {
 	store *knowledge.Store
 }
 
-func (t *DocDeprecateTool) Name() string        { return "doc_deprecate" }
-func (t *DocDeprecateTool) Description() string { return "Mark a knowledge document as deprecated. The document stays on disk until /docs cleanup removes it. A reason is required." }
-func (t *DocDeprecateTool) Parallel() bool      { return false }
+func (t *DocDeprecateTool) Name() string { return "doc_deprecate" }
+func (t *DocDeprecateTool) Description() string {
+	return "Mark a knowledge document as deprecated. The document stays on disk until /docs cleanup removes it. A reason is required."
+}
+func (t *DocDeprecateTool) Parallel() bool { return false }
 
 func (t *DocDeprecateTool) Definition() map[string]interface{} {
 	return map[string]interface{}{

@@ -47,8 +47,8 @@ func TestStepKeepsWorkDoneBeforeMidTurnError(t *testing.T) {
 	client := &scriptedClient{
 		msgs: []*Message{
 			{
-				Role:    "assistant",
-				Content: "looking at the diff",
+				Role:      "assistant",
+				Content:   "looking at the diff",
 				ToolCalls: []ToolCall{newToolCall("call-1", "agent_status", "{}")},
 			},
 			nil,

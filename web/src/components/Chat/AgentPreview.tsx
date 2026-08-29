@@ -19,13 +19,13 @@ export default function AgentPreview({ onOpenDetail }: AgentPreviewProps) {
   const running = runs.filter((r) => r.status === "running").length;
 
   return (
-    <div className="max-h-52 shrink-0 overflow-y-auto border-t border-zinc-800 bg-gradient-to-b from-zinc-900 to-zinc-950/80 px-3 py-2">
+    <div className="max-h-52 shrink-0 overflow-y-auto border-t border-border bg-gradient-to-b from-card to-background/80 px-3 py-2">
       <div className="mb-1.5 flex items-center gap-2">
         <Bot className="h-3.5 w-3.5 text-blue-400" />
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
           Agents
         </span>
-        <span className="rounded-full bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 ring-1 ring-inset ring-zinc-700/60">
+        <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground ring-1 ring-inset ring-ring/60">
           {runs.length}
         </span>
         {running > 0 && (

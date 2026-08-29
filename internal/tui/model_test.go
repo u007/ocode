@@ -3047,18 +3047,24 @@ func TestModelPickerShowsFavoritesAndRecentsFirst(t *testing.T) {
 	if len(m.pickerItems) < 4 {
 		t.Fatalf("expected grouped picker items, got %#v", m.pickerItems)
 	}
-	if m.pickerItems[0] != "★ Favorites" {
-		t.Fatalf("expected favorites header first, got %#v", m.pickerItems[:4])
+	if m.pickerItems[0] != "Recently Used" {
+		t.Fatalf("expected recently used header first, got %#v", m.pickerItems[:4])
 	}
-	if !strings.Contains(m.pickerItems[1], "gpt-4o-mini") || m.pickerValues[1] != "openai/gpt-4o-mini" {
-		t.Fatalf("expected favorite model first, got items=%#v values=%#v", m.pickerItems[:4], m.pickerValues[:4])
+	// Most recent is anthropic (saved last, prepended), then the overlapping
+	// openai model appears in Recently Used (not Favorites) — Favorites is
+	// deduped and omitted when empty.
+	if !strings.Contains(m.pickerItems[1], "claude-sonnet") || m.pickerValues[1] != "anthropic/claude-sonnet-4-20250514" {
+		t.Fatalf("expected most-recent model first under Recently Used, got items=%#v values=%#v", m.pickerItems[:4], m.pickerValues[:4])
+	}
+	if !strings.Contains(m.pickerItems[2], "gpt-4o-mini") || m.pickerValues[2] != "openai/gpt-4o-mini" {
+		t.Fatalf("expected overlapping favorite to appear in Recently Used (not Favorites), got items=%#v values=%#v", m.pickerItems[:4], m.pickerValues[:4])
 	}
 	if !containsString(m.pickerItems, "Recently Used") {
 		t.Fatalf("expected recent section, got %#v", m.pickerItems)
 	}
 	for i, value := range m.pickerValues {
-		if value == "openai/gpt-4o-mini" && i != 1 {
-			t.Fatalf("favorite should not be duplicated in recents/providers, got duplicate at %d in %#v", i, m.pickerValues)
+		if value == "openai/gpt-4o-mini" && i != 2 {
+			t.Fatalf("recent should not be duplicated in favorites/providers, got duplicate at %d in %#v", i, m.pickerValues)
 		}
 	}
 }
@@ -3119,8 +3125,8 @@ func TestModelPickerFilterPreservesGrouping(t *testing.T) {
 	if len(items) < 2 {
 		t.Fatalf("expected grouped filtered items, got items=%#v values=%#v", items, values)
 	}
-	if items[0] != "★ Favorites" {
-		t.Fatalf("expected favorites header to be preserved, got %#v", items)
+	if items[0] != "Recently Used" {
+		t.Fatalf("expected recently used header to be preserved, got %#v", items)
 	}
 	if values[0] != "" {
 		t.Fatalf("expected header to remain unselectable, got values=%#v", values)
@@ -3159,8 +3165,8 @@ func TestModelPickerFilterWithSeparatorsEndToEnd(t *testing.T) {
 	if len(items) < 2 {
 		t.Fatalf("expected grouped filtered items, got items=%#v values=%#v", items, values)
 	}
-	if items[0] != "★ Favorites" {
-		t.Fatalf("expected favorites header to be preserved across keyword-splitting path, got %#v", items)
+	if items[0] != "Recently Used" {
+		t.Fatalf("expected recently used header to be preserved across keyword-splitting path, got %#v", items)
 	}
 	if values[0] != "" {
 		t.Fatalf("expected header to remain unselectable, got values=%#v", values)

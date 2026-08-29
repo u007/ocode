@@ -77,7 +77,7 @@ func wrapEditorOpenerForSecrets(
 		tmuxMode = mode
 	}
 	return func(path string) tea.Cmd {
-		encrypted, err := fileIsEncrypted(path)
+		encrypted, err := secretfile.PeekIsEncrypted(path)
 		if err != nil || !encrypted {
 			return inner(path)
 		}
@@ -102,23 +102,6 @@ func wrapEditorOpenerForSecrets(
 		}
 		return tea.Exec(sec, func(err error) tea.Msg { return editorFinishedMsg{err: err} })
 	}
-}
-
-// fileIsEncrypted peeks at the first bytes of path to check for the age
-// armor header without reading the whole file.
-func fileIsEncrypted(path string) (bool, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return false, err
-	}
-	defer f.Close()
-
-	buf := make([]byte, len(secretfile.Header))
-	n, err := io.ReadFull(f, buf)
-	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
-		return false, err
-	}
-	return secretfile.IsEncrypted(buf[:n]), nil
 }
 
 // secretExecCommand implements tea.ExecCommand. Its Run method performs the

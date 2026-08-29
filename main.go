@@ -302,7 +302,7 @@ func printUsage() {
 	fmt.Println("  mcp              Manage MCP (Model Context Protocol) servers")
 	fmt.Println("  models           List available models")
 	fmt.Println("  skills           Manage skills")
-	fmt.Println("  secret           Encrypt/decrypt project files (init, encrypt, decrypt)")
+	fmt.Println("  secret           Encrypt/decrypt project files or dirs (init, encrypt, decrypt, rekey)")
 	fmt.Println("  debug            Print project-scoping info (slug, data/sessions dirs)")
 	fmt.Println("  version          Show version information")
 	fmt.Println()

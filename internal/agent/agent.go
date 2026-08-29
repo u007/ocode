@@ -4018,19 +4018,26 @@ func (a *Agent) GetToolDefinitions() []map[string]interface{} {
 		}
 		names = append(names, name)
 	}
-	if exists := a.tools["ocr"] != nil; exists {
-		exposed := false
-		for _, name := range names {
-			if name == "ocr" {
-				exposed = true
-				break
+	// Only emit OCR diagnostics when OCR is actually enabled. When disabled
+	// (the default), the tool is either absent from sub-agent allowlists
+	// (explore/context/scout) or intentionally filtered — emitting on every
+	// GetToolDefinitions call spams the log with "ocr not exposed: missing
+	// from a.tools" on every turn.
+	if a.config != nil && a.config.Ocode.Ocr.Enabled {
+		if exists := a.tools["ocr"] != nil; exists {
+			exposed := false
+			for _, name := range names {
+				if name == "ocr" {
+					exposed = true
+					break
+				}
 			}
+			if !exposed {
+				a.emitDebug("TOOLS", fmt.Sprintf("ocr not exposed: exists=%v allowed=%v discovery=%v specTools=%d deniedTools=%d", exists, a.isToolAllowed("ocr"), a.discoveryAllows("ocr"), len(getSpecTools(a.spec)), len(getDeniedSpecTools(a.spec))))
+			}
+		} else {
+			a.emitDebug("TOOLS", "ocr not exposed: missing from a.tools")
 		}
-		if !exposed {
-			a.emitDebug("TOOLS", fmt.Sprintf("ocr not exposed: exists=%v allowed=%v discovery=%v specTools=%d deniedTools=%d", exists, a.isToolAllowed("ocr"), a.discoveryAllows("ocr"), len(getSpecTools(a.spec)), len(getDeniedSpecTools(a.spec))))
-		}
-	} else {
-		a.emitDebug("TOOLS", "ocr not exposed: missing from a.tools")
 	}
 	// Deterministic order keeps the provider tool-cache prefix stable across
 	// turns (a.tools is a map → random iteration would bust the cache and

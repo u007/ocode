@@ -3,36 +3,24 @@ import {
   useChatDispatch,
   useChatStateRef,
   getTurnState,
+  getSessionSlice,
+  extractPendingFromMessages,
   type ChatAction,
   type ChatState,
 } from "../stores/chatStore";
 import { api } from "../api/client";
-import { RECONCILE_PAGE_SIZE } from "../lib/sessionEvents";
+import { RECONCILE_PAGE_SIZE, applyReconcileState } from "../lib/sessionEvents";
+
+// `applyReconcileState` lives in lib/sessionEvents (the routing/reconcile
+// module) and is re-exported here so existing unit tests keep importing it
+// from this path without creating an import cycle.
+export { applyReconcileState };
 
 /** Stall threshold: no turn_heartbeat for this long while a turn is active
  *  means the stream (or the turn) is stuck. */
 export const STALL_THRESHOLD_MS = 30_000;
 /** How often the watchdog re-checks. */
 const WATCHDOG_INTERVAL_MS = 5_000;
-
-/**
- * applyReconcileState — pure application of a GET /api/sessions/:id/state
- * snapshot to the store. Exported for unit tests.
- */
-export function applyReconcileState(
-  dispatch: (a: ChatAction) => void,
-  sessionId: string,
-  state: { bootstrap_stage: string; turn_active: boolean; last_seq: number },
-): void {
-  if (!state.turn_active) {
-    // Server-side turn is done — clear streaming + turn state.
-    dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
-    dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
-    dispatch({ type: "SET_TURN_STALLED", sessionId, stalled: false });
-  } else if (state.bootstrap_stage) {
-    dispatch({ type: "SET_BOOTSTRAP_STAGE", sessionId, stage: state.bootstrap_stage });
-  }
-}
 
 async function reconcileSession(
   dispatch: (a: ChatAction) => void,
@@ -42,14 +30,28 @@ async function reconcileSession(
   try {
     const wasActive = getTurnState(getState(), sessionId).turnActive;
     const state = await api.getSessionState(sessionId);
-    applyReconcileState(dispatch, sessionId, state);
-    if (!state.turn_active && wasActive) {
+    // Fetch the transcript whenever the server reports the turn inactive: that
+    // is the case where the turn may have actually finished OR merely paused on
+    // a pending permission/question whose sentinel lives in the transcript.
+    let detail: Awaited<ReturnType<typeof api.getSession>> | null = null;
+    if (!state.turn_active) {
+      detail = await api.getSession(sessionId, { limit: RECONCILE_PAGE_SIZE });
+    }
+    const slice = getSessionSlice(getState(), sessionId);
+    const transcriptPending = detail ? extractPendingFromMessages(detail.messages) : null;
+    const hasPendingAsk = !!(
+      slice.pendingPermission ||
+      slice.pendingQuestion ||
+      transcriptPending?.pendingPermission ||
+      transcriptPending?.pendingQuestion
+    );
+    applyReconcileState(dispatch, sessionId, state, hasPendingAsk, wasActive);
+    if (!state.turn_active && wasActive && detail) {
       // The turn finished server-side but its terminal events were lost
       // (missed turn_done + turn-boundary messages broadcast). Recovery is
       // refetch, never replay: pull the committed transcript. The merge is
       // dispatched after SET_TURN_STATE flipped turnActive, so the reducer's
       // mid-turn guard does not hold it back.
-      const detail = await api.getSession(sessionId, { limit: RECONCILE_PAGE_SIZE });
       dispatch({
         type: "MERGE_SNAPSHOT",
         sessionId,

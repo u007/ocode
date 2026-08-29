@@ -45,19 +45,19 @@ export default function CommitMsgForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">Commit Message</h2>
+      <h2 className="text-sm font-semibold text-foreground">Commit Message</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Model</label>
+        <label className="text-xs text-muted-foreground">Model</label>
         <div className="flex items-center gap-2">
-          <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={model || undefined}>
+          <div className="flex-1 h-8 px-3 rounded-md bg-muted border border-border text-xs text-foreground flex items-center truncate" title={model || undefined}>
             {model || "Not set"}
           </div>
           <Button size="sm" variant="outline" type="button" onClick={() => setModelDialogOpen(true)} className="h-8 text-xs">
@@ -73,12 +73,12 @@ export default function CommitMsgForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Prompt</label>
+        <label className="text-xs text-muted-foreground">Prompt</label>
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           rows={4}
-          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200"
+          className="w-full rounded-md border border-border bg-muted px-2 py-1.5 text-xs text-foreground"
         />
       </div>
       <Button size="sm" onClick={save} disabled={saving} className="h-8 text-xs">

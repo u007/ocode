@@ -33,6 +33,8 @@ func TestCredential(ctx context.Context, id string) error {
 			return fmt.Errorf("no credential")
 		}
 		return probeBearer(ctx, "https://generativelanguage.googleapis.com/v1beta/openai/models", k)
+	case "groq":
+		return probeBearer(ctx, "https://api.groq.com/openai/v1/models", ResolveKey(id))
 	case "copilot":
 		cred, ok := Get(id)
 		if !ok || cred.AccessToken == "" {

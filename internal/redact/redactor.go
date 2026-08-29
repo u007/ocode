@@ -12,9 +12,9 @@ type Scanner interface {
 
 // RedactorConfig holds the redaction configuration.
 type RedactorConfig struct {
-	Enabled    bool
-	Model      string
-	FailMode   string // "block" or "warn"
+	Enabled     bool
+	Model       string
+	FailMode    string // "block" or "warn"
 	CustomWords []string
 }
 
@@ -29,7 +29,7 @@ type Redactor struct {
 // NewRedactor creates a new Redactor with the given config.
 func NewRedactor(config RedactorConfig, vaultPath string, scanner Scanner) *Redactor {
 	return &Redactor{
-		config:   config,
+		config: config,
 		vault: func() string {
 			return vaultPath
 		},
@@ -64,7 +64,7 @@ func (r *Redactor) RedactChat(text string) (string, error) {
 		return text, nil
 	}
 
-	// Tier-1: known format + keyword/entropy detection
+	// Tier-1: known format + assignment-style env-var + keyword/entropy detection
 	spans := Detect(text, r.config.CustomWords, DetectOpts{FileContent: false})
 
 	// Register detected secrets
@@ -99,13 +99,17 @@ func (r *Redactor) RedactChat(text string) (string, error) {
 	return masked, nil
 }
 
-// RedactFile performs file-mode redaction: detect known formats only + register + substitute.
+// RedactFile performs file-mode redaction: known formats + assignment-style
+// env-var secrets + custom words. The generic keyword+entropy heuristic is
+// disabled (FileContent: true) to avoid false positives on arbitrary file
+// content, but env-var assignment detection still runs because config files
+// are a primary secret-hiding spot.
 func (r *Redactor) RedactFile(text string) (string, error) {
 	if !r.config.Enabled || r.registry == nil {
 		return text, nil
 	}
 
-	// Tier-1: file mode (no keyword/entropy heuristics)
+	// Tier-1: file mode (no generic keyword/entropy heuristic)
 	spans := Detect(text, r.config.CustomWords, DetectOpts{FileContent: true})
 
 	// Register detected secrets
@@ -174,9 +178,9 @@ func IsScannerUnavailable(err error) bool {
 
 // SecretRef represents a secret used in a tool call.
 type SecretRef struct {
-	Index  int
-	Kind   string
-	Value  string // masked preview
+	Index int
+	Kind  string
+	Value string // masked preview
 }
 
 // MaskedPreview returns a masked preview of a value (first 3 + last 2 chars).

@@ -21,6 +21,25 @@ export default function StatusPanel({ onClose }: Props) {
   const [spending, setSpending] = useState<{ spending_usd: number; records: number } | null>(null);
   const [mcp, setMcp] = useState<MCPStatus[]>([]);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
+  // TEMP DIAGNOSTIC (memory investigation) — remove once ocode.app memory
+  // growth is confirmed/ruled out as unbounded messages[] growth (paired with
+  // the console logging in chatStore.tsx's ADD_MESSAGE case).
+  const memSessions = useChatSelector((s) => s.sessions);
+  const [memSizeKB, setMemSizeKB] = useState<Record<string, number> | null>(null);
+  const [memTotalKB, setMemTotalKB] = useState<number | null>(null);
+  const memSessionIds = Object.keys(memSessions);
+  const memTotalMsgs = memSessionIds.reduce((n, id) => n + memSessions[id].messages.length, 0);
+  const computeMemSize = () => {
+    const perSession: Record<string, number> = {};
+    let totalBytes = 0;
+    for (const id of memSessionIds) {
+      const bytes = JSON.stringify(memSessions[id].messages).length;
+      perSession[id] = Math.round(bytes / 1024);
+      totalBytes += bytes;
+    }
+    setMemSizeKB(perSession);
+    setMemTotalKB(Math.round(totalBytes / 1024));
+  };
 
   // Fetch the dedicated file/lsp/spending endpoints when the panel opens and
   // whenever the active session changes — these are cheaper than re-fetching
@@ -98,14 +117,14 @@ export default function StatusPanel({ onClose }: Props) {
   const spendUSD = spendingUSD ?? spending?.spending_usd ?? snap?.spending_usd ?? null;
 
   return (
-    <div className="flex flex-col h-full overflow-auto bg-zinc-950 text-zinc-200">
-      <div className="flex items-center justify-between border-b border-zinc-700 px-4 py-3 sticky top-0 bg-zinc-950 z-10">
+    <div className="flex flex-col h-full overflow-auto bg-background text-foreground">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3 sticky top-0 bg-background z-10">
         <h2 className="text-lg font-semibold">TUI status</h2>
         {onClose && (
           <button
             type="button"
             onClick={onClose}
-            className="text-zinc-500 hover:text-zinc-300 px-2"
+            className="text-muted-foreground hover:text-foreground px-2"
             title="Close"
           >
             ✕
@@ -116,7 +135,7 @@ export default function StatusPanel({ onClose }: Props) {
       <div className="px-4 py-4 space-y-6 text-sm">
         {/* Session */}
         <section>
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500 mb-2">
+          <h3 className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
             Session
           </h3>
           <Row k="Title" v={sessionTitle} />
@@ -127,9 +146,41 @@ export default function StatusPanel({ onClose }: Props) {
           )}
         </section>
 
+        {/* TEMP DIAGNOSTIC — memory investigation, remove once ocode.app
+            memory growth is confirmed/ruled out as unbounded messages[]
+            growth. */}
+        <section>
+          <h3 className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
+            Memory (diag)
+          </h3>
+          <Row k="Sessions" v={String(memSessionIds.length)} mono />
+          <Row k="Total msgs" v={String(memTotalMsgs)} mono />
+          <button
+            type="button"
+            onClick={computeMemSize}
+            className="mt-1 text-xs text-muted-foreground hover:text-foreground underline"
+          >
+            {memTotalKB === null ? "Compute size (JSON approx)" : `Recompute (~${memTotalKB}KB total)`}
+          </button>
+          {memSizeKB && (
+            <ul className="mt-2 space-y-0.5 font-mono text-xs">
+              {memSessionIds.map((id) => (
+                <li key={id} className="flex justify-between gap-2">
+                  <span className="truncate" title={id}>
+                    {id}
+                  </span>
+                  <span className="shrink-0">
+                    {memSessions[id].messages.length} msgs · ~{memSizeKB[id]}KB
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
         {/* Models */}
         <section>
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500 mb-2">
+          <h3 className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
             Models
           </h3>
           <Row k="Main" v={mainModel || "(none)"} />
@@ -150,7 +201,7 @@ export default function StatusPanel({ onClose }: Props) {
 
         {/* IDE */}
         <section>
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500 mb-2">
+          <h3 className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
             IDE
           </h3>
           <Row k="Status" v={ideStatus} />
@@ -159,7 +210,7 @@ export default function StatusPanel({ onClose }: Props) {
 
         {/* Context */}
         <section>
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500 mb-2">
+          <h3 className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
             Context window
           </h3>
           {ctxMax > 0 ? (
@@ -169,7 +220,7 @@ export default function StatusPanel({ onClose }: Props) {
                 v={`${ctxCur.toLocaleString()} / ${ctxMax.toLocaleString()} tokens`}
                 mono
               />
-              <div className="mt-2 h-2 bg-zinc-800 rounded overflow-hidden">
+              <div className="mt-2 h-2 bg-muted rounded overflow-hidden">
                 <div
                   className="h-full bg-emerald-500"
                   style={{
@@ -186,7 +237,7 @@ export default function StatusPanel({ onClose }: Props) {
 
         {/* Spending */}
         <section>
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500 mb-2">
+          <h3 className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
             Spending
           </h3>
           {spending ? (
@@ -208,11 +259,11 @@ export default function StatusPanel({ onClose }: Props) {
 
         {/* Modified files */}
         <section>
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500 mb-2">
+          <h3 className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
             Modified files ({modified.length})
           </h3>
           {modified.length === 0 ? (
-            <p className="text-zinc-600">(none)</p>
+            <p className="text-foreground">(none)</p>
           ) : (
             <ul className="space-y-1 font-mono text-xs">
               {modified.map((f) => (
@@ -225,7 +276,7 @@ export default function StatusPanel({ onClose }: Props) {
                           ? "text-emerald-400 w-3"
                           : f.status === "D"
                             ? "text-red-400 w-3"
-                            : "text-zinc-500 w-3"
+                            : "text-muted-foreground w-3"
                     }
                     title={f.status || "?"}
                   >
@@ -242,11 +293,11 @@ export default function StatusPanel({ onClose }: Props) {
 
         {/* LSP servers */}
         <section>
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500 mb-2">
+          <h3 className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
             LSP servers ({lsp.length})
           </h3>
           {lsp.length === 0 ? (
-            <p className="text-zinc-600">(none running)</p>
+            <p className="text-foreground">(none running)</p>
           ) : (
             <ul className="space-y-1">
               {lsp.map((s) => (
@@ -264,10 +315,10 @@ export default function StatusPanel({ onClose }: Props) {
                   </span>
                   <span className="font-mono">{s.cmd}</span>
                   {s.lang_id && (
-                    <span className="text-zinc-500">({s.lang_id})</span>
+                    <span className="text-muted-foreground">({s.lang_id})</span>
                   )}
                   {s.root && (
-                    <span className="text-zinc-500 truncate" title={s.root}>
+                    <span className="text-muted-foreground truncate" title={s.root}>
                       {s.root}
                     </span>
                   )}
@@ -279,11 +330,11 @@ export default function StatusPanel({ onClose }: Props) {
 
         {/* MCP servers */}
         <section>
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500 mb-2">
+          <h3 className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
             MCP servers ({mcp.length})
           </h3>
           {mcp.length === 0 ? (
-            <p className="text-zinc-600">(none)</p>
+            <p className="text-foreground">(none)</p>
           ) : (
             <ul className="space-y-1">
               {mcp.map((m) => (
@@ -291,7 +342,7 @@ export default function StatusPanel({ onClose }: Props) {
                   <span className="font-mono text-xs truncate" title={m.name}>
                     {m.name}
                     {m.type ? (
-                      <span className="text-zinc-600"> · {m.type}</span>
+                      <span className="text-foreground"> · {m.type}</span>
                     ) : null}
                   </span>
                   <button
@@ -302,13 +353,13 @@ export default function StatusPanel({ onClose }: Props) {
                     title={m.enabled ? "Disable MCP server" : "Enable MCP server"}
                   >
                     <span
-                      className={`text-[10px] ${m.enabled ? "text-emerald-400" : "text-zinc-500"}`}
+                      className={`text-[10px] ${m.enabled ? "text-emerald-400" : "text-muted-foreground"}`}
                     >
                       {m.enabled ? "on" : "off"}
                     </span>
                     <span
                       className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
-                        m.enabled ? "bg-emerald-500/80" : "bg-zinc-600"
+                        m.enabled ? "bg-emerald-500/80" : "bg-accent"
                       }`}
                     >
                       <span
@@ -326,11 +377,11 @@ export default function StatusPanel({ onClose }: Props) {
 
         {/* Extra allowed paths */}
         <section>
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500 mb-2">
+          <h3 className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
             Extra allowed paths ({extraPaths.length})
           </h3>
           {extraPaths.length === 0 ? (
-            <p className="text-zinc-600">(none)</p>
+            <p className="text-foreground">(none)</p>
           ) : (
             <ul className="space-y-1 font-mono text-xs">
               {extraPaths.map((p) => (
@@ -349,8 +400,8 @@ export default function StatusPanel({ onClose }: Props) {
 function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (
     <div className="flex items-baseline gap-3 py-0.5">
-      <span className="text-zinc-500 w-24 shrink-0">{k}</span>
-      <span className={mono ? "font-mono text-zinc-300 break-all" : "text-zinc-200 break-all"}>
+      <span className="text-muted-foreground w-24 shrink-0">{k}</span>
+      <span className={mono ? "font-mono text-foreground break-all" : "text-foreground break-all"}>
         {v}
       </span>
     </div>

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -93,6 +93,15 @@ export default function PermissionDialog({
   );
   const canAlwaysTool = useMemo(() => alwaysToolAvailable(tool), [tool]);
 
+  // When a new permission request arrives while the dialog is still mounted
+  // (the queue resurfaces the next ask after the previous one resolves), the
+  // previous decision's loading/confirming state must not carry over — it
+  // left the buttons disabled and the confirm UI stale for the new request.
+  useEffect(() => {
+    setLoading(false);
+    setConfirming(null);
+  }, [requestId, open]);
+
   const handleResponse = async (decision: PermissionDecision) => {
     setLoading(true);
     try {
@@ -177,9 +186,9 @@ export default function PermissionDialog({
         }
       }}
     >
-      <DialogContent className="sm:max-w-md bg-zinc-900 border-zinc-700">
+      <DialogContent className="sm:max-w-md bg-card border-border">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-zinc-100">
+          <DialogTitle className="flex items-center gap-2 text-foreground">
             {confirming ? (
               <ShieldCheck className="w-5 h-5 text-yellow-400" />
             ) : (
@@ -207,30 +216,30 @@ export default function PermissionDialog({
               )}
 
               {summary && (
-                <div className="rounded-lg border border-zinc-700 bg-zinc-800/60 p-3 text-sm text-zinc-300">
-                  <div className="font-medium text-zinc-200">Model summary:</div>
+                <div className="rounded-lg border border-border bg-muted/60 p-3 text-sm text-foreground">
+                  <div className="font-medium text-foreground">Model summary:</div>
                   <div className="mt-1">{summary}</div>
                 </div>
               )}
 
               {rule && (
-                <div className="text-xs text-zinc-500">
+                <div className="text-xs text-muted-foreground">
                   Permission rule: <span className="font-mono">{rule}</span>
                 </div>
               )}
 
-              <div className="flex items-center gap-3 p-3 rounded-lg bg-zinc-800 border border-zinc-700">
+              <div className="flex items-center gap-3 p-3 rounded-lg bg-muted border border-border">
                 {(() => {
                   const Icon = toolIcon;
                   return <Icon className="w-5 h-5 text-blue-400 flex-shrink-0" />;
                 })()}
                 <div className="min-w-0">
-                  <div className="text-sm font-medium text-zinc-200">
+                  <div className="text-sm font-medium text-foreground">
                     The agent wants to use{" "}
                     <span className="font-mono text-blue-400">{tool}</span>
                   </div>
                   {command && (
-                    <div className="mt-2 text-xs text-zinc-400 font-mono bg-zinc-900 p-2 rounded overflow-x-auto max-h-32">
+                    <div className="mt-2 text-xs text-muted-foreground font-mono bg-card p-2 rounded overflow-x-auto max-h-32">
                       {command}
                     </div>
                   )}
@@ -240,7 +249,7 @@ export default function PermissionDialog({
           )}
 
           {confirming && (
-            <div className="rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-sm text-zinc-300">
+            <div className="rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-sm text-foreground">
               {confirmExplanation}
             </div>
           )}

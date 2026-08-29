@@ -61,9 +61,9 @@ export default function ReasoningLevelSelector({ thinkingBudget, disabled }: Pro
   const getLevelColor = (level: ReasoningLevel): string => {
     switch (level) {
       case "off":
-        return "text-zinc-500";
+        return "text-muted-foreground";
       case "low":
-        return "text-zinc-400";
+        return "text-muted-foreground";
       case "med":
         return "text-blue-400";
       case "high":
@@ -73,7 +73,7 @@ export default function ReasoningLevelSelector({ thinkingBudget, disabled }: Pro
       case "max":
         return "text-amber-400";
       default:
-        return "text-zinc-400";
+        return "text-muted-foreground";
     }
   };
 
@@ -83,32 +83,32 @@ export default function ReasoningLevelSelector({ thinkingBudget, disabled }: Pro
         type="button"
         onClick={() => !disabled && setIsOpen(!isOpen)}
         disabled={disabled}
-        className="w-full flex items-center gap-2 px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent rounded"
+        className="w-full flex items-center gap-2 px-1 py-1 text-left text-xs transition-colors hover:bg-muted disabled:cursor-default disabled:hover:bg-transparent rounded"
       >
         <Brain className={`w-3 h-3 ${getLevelColor(currentLevel)}`} />
-        <span className="text-zinc-500">Reason:</span>
+        <span className="text-muted-foreground">Reason:</span>
         <span className={`font-medium ${getLevelColor(currentLevel)}`}>
           {currentLevel.toUpperCase()}
         </span>
       </button>
 
       {isOpen && !disabled && (
-        <div className="absolute left-0 top-full mt-1 w-32 bg-zinc-800 border border-zinc-700 rounded-md shadow-lg z-50">
+        <div className="absolute left-0 top-full mt-1 w-32 bg-muted border border-border rounded-md shadow-lg z-50">
           {REASONING_LEVELS.map((level) => (
             <button
               key={level}
               type="button"
               onClick={() => handleLevelChange(level)}
-              className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-zinc-700 ${
-                level === currentLevel ? "bg-zinc-700" : ""
+              className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-accent ${
+                level === currentLevel ? "bg-accent" : ""
               }`}
             >
               <Brain className={`w-3 h-3 ${getLevelColor(level)}`} />
-              <span className={level === currentLevel ? "font-medium text-zinc-200" : "text-zinc-400"}>
+              <span className={level === currentLevel ? "font-medium text-foreground" : "text-muted-foreground"}>
                 {level.toUpperCase()}
               </span>
               {level === currentLevel && (
-                <span className="ml-auto text-zinc-500">✓</span>
+                <span className="ml-auto text-muted-foreground">✓</span>
               )}
             </button>
           ))}

@@ -46,7 +46,7 @@ function toolActivityLabel(t: ToolActivityStatus): string {
 // activity snapshot (RC-bridge mode); falls back to the per-session streaming
 // state + in-flight live tool for headless/desktop mode where no TUI is attached.
 function runningStatusParts(
-  isStreaming: boolean,
+  isRunning: boolean,
   snap: import("../../api/types").TUIStatus | null,
   liveToolName: string | undefined,
 ): string[] {
@@ -55,9 +55,10 @@ function runningStatusParts(
   for (const agent of snap?.active_agents ?? []) parts.push(`@ ${agent}`);
   for (const t of snap?.active_tools ?? []) parts.push(toolActivityLabel(t));
   if (parts.length > 0) return parts;
-  // No TUI activity snapshot (headless/desktop mode, or the TUI reports idle):
-  // derive from the per-session stream state instead.
-  if (isStreaming) parts.push("streaming");
+  // Authoritative liveness: while a turn is active, always surface at least a
+  // base "running" indicator so the row never looks idle during the silent
+  // gaps of a turn when no deltas flow and the TUI snapshot reports nothing.
+  if (parts.length === 0 && isRunning) parts.push("running…");
   if (liveToolName) parts.push(`⚙ ${liveToolName.length > 24 ? liveToolName.slice(0, 21) + "…" : liveToolName}`);
   return parts;
 }
@@ -67,7 +68,8 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const spendingUSD = useChatSelector((s) => s.spendingUSD);
   // Scoped to the active tab's session: other tabs' streamed tokens don't
   // re-render this always-mounted status bar.
-  const { isStreaming, error, live, tuiStatus } = useChatSelector((s) => getSessionSlice(s, activeTabId));
+  const { isStreaming, error, live, tuiStatus, turnActive } = useChatSelector((s) => getSessionSlice(s, activeTabId));
+  const isRunning = isStreaming || turnActive;
 
   // Pull every field from the consolidated snapshot when present; fall back to
   // the per-field store state for older TUI builds that don't push "status".
@@ -80,7 +82,7 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
       (p): p is Extract<import("../../api/types").LivePart, { kind: "tool" }> =>
         p.kind === "tool" && p.output === undefined,
     )?.tool;
-  const runningParts = runningStatusParts(isStreaming, snap, liveToolName);
+  const runningParts = runningStatusParts(isRunning, snap, liveToolName);
   const ideStatus = snap?.ide_status || "";
   const sessionTitle = snap?.session_title || "";
   const sessionId = snap?.session_id || "";
@@ -109,17 +111,17 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
     : cwd;
 
   return (
-    <div className="flex flex-col border-t border-zinc-700 px-4 py-1.5 text-xs text-zinc-500 gap-0.5">
+    <div className="flex flex-col border-t border-border px-4 py-1.5 text-xs text-muted-foreground gap-0.5">
       {/* Row 1: IDE, subagent, streaming */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3 min-w-0 flex-wrap">
           {ideStatus && (
-            <span className="text-zinc-500" title="IDE integration">
+            <span className="text-muted-foreground" title="IDE integration">
               · {ideStatus}
             </span>
           )}
           {subagent && (
-            <span className="text-zinc-600" title="Active subagent model">
+            <span className="text-foreground" title="Active subagent model">
               · subagent: {subagent}
             </span>
           )}
@@ -165,17 +167,17 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
       <div className="flex items-center justify-between gap-3 min-w-0 flex-wrap">
         <div className="flex items-center gap-3 min-w-0 flex-wrap">
           {sessionTitle && (
-            <span className="text-zinc-400 truncate max-w-[16rem]" title={sessionTitle}>
+            <span className="text-muted-foreground truncate max-w-[16rem]" title={sessionTitle}>
               {sessionTitle}
             </span>
           )}
           {sessionId && (
-            <span className="text-zinc-600" title="Session ID">
+            <span className="text-foreground" title="Session ID">
               {sessionId}
             </span>
           )}
           {displayCwd && (
-            <span className="text-zinc-600 truncate max-w-[18rem]" title={cwd}>
+            <span className="text-foreground truncate max-w-[18rem]" title={cwd}>
               cwd: {displayCwd}
             </span>
           )}
@@ -183,7 +185,7 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
         <div className="flex items-center gap-3">
           {(ctxCur > 0 || ctxMax > 0) && (
             <span
-              className="text-zinc-500"
+              className="text-muted-foreground"
               title={`Context: ${ctxCur} / ${ctxMax} tokens`}
             >
               ctx: {formatTok(ctxCur)}/{formatTok(ctxMax)}
@@ -191,7 +193,7 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
           )}
           {spending > 0 && (
             <span
-              className="text-zinc-500"
+              className="text-muted-foreground"
               title="USD spent on this session (today)"
             >
               ${formatUSD(spending)}
@@ -207,7 +209,7 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
           )}
           {lspCount > 0 && (
             <span
-              className="text-zinc-500"
+              className="text-muted-foreground"
               title="Active LSP servers"
             >
               lsp: {lspCount}
@@ -215,7 +217,7 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
           )}
           {extraPathsCount > 0 && (
             <span
-              className="text-zinc-500"
+              className="text-muted-foreground"
               title="Extra paths the user has pre-authorized"
             >
               paths: {extraPathsCount}

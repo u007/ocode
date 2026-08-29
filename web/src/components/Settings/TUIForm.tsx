@@ -54,20 +54,20 @@ export default function TUIForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">TUI</h2>
+      <h2 className="text-sm font-semibold text-foreground">TUI</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Theme</label>
+        <label className="text-xs text-muted-foreground">Theme</label>
         <Input value={cfg.theme} onChange={(e) => setCfg({ ...cfg, theme: e.target.value })} className="h-8 text-xs" />
       </div>
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input
           type="checkbox"
           checked={Boolean(cfg.mouse)}
@@ -76,7 +76,7 @@ export default function TUIForm() {
         Mouse support
       </label>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Scroll speed</label>
+        <label className="text-xs text-muted-foreground">Scroll speed</label>
         <Input
           type="number"
           value={cfg.scroll_speed}
@@ -85,7 +85,7 @@ export default function TUIForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Leader key timeout (ms)</label>
+        <label className="text-xs text-muted-foreground">Leader key timeout (ms)</label>
         <Input
           type="number"
           value={cfg.leader_timeout}
@@ -93,7 +93,7 @@ export default function TUIForm() {
           className="h-8 text-xs w-32"
         />
       </div>
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input
           type="checkbox"
           checked={cfg.branchless}
@@ -102,12 +102,12 @@ export default function TUIForm() {
         Branchless mode
       </label>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Keybinds (JSON)</label>
+        <label className="text-xs text-muted-foreground">Keybinds (JSON)</label>
         <textarea
           value={keybindsText}
           onChange={(e) => setKeybindsText(e.target.value)}
           rows={6}
-          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 font-mono"
+          className="w-full rounded-md border border-border bg-muted px-2 py-1.5 text-xs text-foreground font-mono"
         />
       </div>
       <Button size="sm" onClick={save} disabled={saving} className="h-8 text-xs">

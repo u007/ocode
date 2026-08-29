@@ -4,6 +4,7 @@ import { PanelLeft, PanelLeftClose, Plus } from "lucide-react";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, findProjectPathForTab, useProjectState } from "./stores/projectStore";
+import { TerminalProvider } from "./stores/terminalStore";
 import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ChatPanel from "./components/Chat/ChatPanel";
@@ -28,7 +29,7 @@ import SettingsPanel from "./components/Settings/SettingsPanel";
 import EditorTabBar from "./components/Layout/EditorTabBar";
 import ProjectSidebar from "./components/Layout/ProjectSidebar";
 import SessionDialog from "./components/Layout/SessionDialog";
-import OpenSessionBar from "./components/Layout/OpenSessionBar";
+import UnifiedTabBar from "./components/Layout/UnifiedTabBar";
 import SessionSubTabs from "./components/Layout/SessionSubTabs";
 import SessionTabSync from "./components/Layout/SessionTabSync";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
@@ -47,7 +48,9 @@ import { isNewSessionTabEmpty, rekeyDraft } from "./lib/tabDrafts";
 import { rekeyQueue, clearQueue } from "./lib/tabQueue";
 import { cancelLiveDeltas } from "./lib/sessionEvents";
 import { notifyWailsRuntimeReady } from "./lib/wails";
+import { setPendingHighlight, peekPendingHighlight } from "./lib/fileSearchHighlight";
 import { eventBus } from "./lib/eventBus";
+import { OPEN_FILE_EVENT } from "./lib/fileLinks";
 import { useSessionStatus } from "./hooks/useSessionStatus";
 import { useTurnWatchdogAll } from "./hooks/useTurnWatchdog";
 import FrontendMemoryReporter from "./lib/debug/frontendMemoryReporter";
@@ -137,8 +140,14 @@ function HomeApp() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<
-    "files" | "git" | "cron" | "assets" | "sessions" | "settings" | "terminal"
+    "files" | "git" | "cron" | "assets" | "sessions" | "settings"
   >("sessions");
+  // Which half of the merged Sessions tab (chat vs terminal) is currently
+  // shown. Resets to chat on project switch — no per-project memory (v1).
+  const [focusedKind, setFocusedKind] = useState<"chat" | "terminal">("chat");
+  useEffect(() => {
+    setFocusedKind("chat");
+  }, [projectState.activeProject?.path]);
   useEffect(() => {
     const h = () => setActiveView("settings")
     window.addEventListener("ocode:open-settings-profiles", h)
@@ -153,6 +162,9 @@ function HomeApp() {
     handleSelectionChange,
     activeEditorContext,
     requestCloseTab,
+    toggleIncludeInContext,
+    closeTabsForPaths,
+    renameTabPath,
     pendingClose,
     confirmSaveAndClose,
     confirmDiscardAndClose,
@@ -163,15 +175,78 @@ function HomeApp() {
     dismissExternalChange,
   } = useEditorTabs();
 
+  // Editor tabs opted into the LLM loop, preserving their project root so we
+  // can filter per session-tab and avoid leaking files across projects. Omit
+  // `includeInContext` (pre-feature) defaults to true.
+  const contextFileEntries = useMemo(
+    () => editorTabs.filter((t) => t.includeInContext !== false).map((t) => ({ path: t.path, projectRoot: t.projectRoot })),
+    [editorTabs],
+  );
+
+  useEffect(() => {
+    const onDelete = (e: Event) => {
+      const d = (e as CustomEvent).detail as { paths: string[]; projectRoot?: string };
+      if (d?.paths?.length) closeTabsForPaths(d.paths, d.projectRoot);
+    };
+    const onRename = (e: Event) => {
+      const d = (e as CustomEvent).detail as { oldPath: string; newPath: string; projectRoot?: string };
+      if (d?.oldPath && d?.newPath) renameTabPath(d.oldPath, d.newPath, d.projectRoot);
+    };
+    window.addEventListener("ocode:fs-delete", onDelete as EventListener);
+    window.addEventListener("ocode:fs-rename", onRename as EventListener);
+    return () => {
+      window.removeEventListener("ocode:fs-delete", onDelete as EventListener);
+      window.removeEventListener("ocode:fs-rename", onRename as EventListener);
+    };
+  }, [closeTabsForPaths, renameTabPath]);
+
   // Opening a file from anywhere (tree, git diff, file picker) shows the
-  // Files view and selects the editor tab.
+  // Files view and selects the editor tab. When line/query are provided (content search),
+  // highlight is set via pending store (for newly mounted editors) and via event
+  // (for already-mounted editors) with bounded retry.
   const openFileAndShow = useCallback(
-    async (path: string, projectRoot?: string) => {
+    async (path: string, projectRoot?: string, line?: number, query?: string) => {
+      if (query && query.trim()) {
+        setPendingHighlight(path, query.trim(), line, projectRoot);
+      } else if (line && line > 0) {
+        // Line-only highlight (from chat file links) still needs dispatch
+        setPendingHighlight(path, "", line, projectRoot);
+      }
       await handleOpenFile(path, projectRoot);
       setActiveView("files");
+      if ((query && query.trim()) || (line && line > 0)) {
+        const detail = { path, query: query?.trim() ?? "", line, projectRoot };
+        // Immediate dispatch for already-mounted editors
+        window.dispatchEvent(new CustomEvent("ocode:highlight", { detail }));
+        // Bounded retry for mount race: try a few times until editor consumes pending or timeout
+        let attempts = 0;
+        const retry = () => {
+          attempts++;
+          if (attempts > 10) return;
+          // If pending still exists, editor hasn't mounted/consumed yet; retry dispatch
+          const stillPending = !!peekPendingHighlight(path, projectRoot);
+          if (stillPending) {
+            window.dispatchEvent(new CustomEvent("ocode:highlight", { detail }));
+            setTimeout(retry, 150);
+          }
+        };
+        setTimeout(retry, 100);
+      }
     },
     [handleOpenFile],
   );
+
+  // File links in chat (markdown + plain text) dispatch this event.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { path: string; line?: number };
+      if (!detail?.path) return;
+      const projectRoot = projectState.activeProject?.path;
+      void openFileAndShow(detail.path, projectRoot, detail.line);
+    };
+    window.addEventListener(OPEN_FILE_EVENT, handler as EventListener);
+    return () => window.removeEventListener(OPEN_FILE_EVENT, handler as EventListener);
+  }, [openFileAndShow, projectState.activeProject?.path]);
 
   useEffect(() => {
     setSelectedAgentRunId(null);
@@ -293,10 +368,13 @@ function HomeApp() {
       openNewSessionTab(isNewSessionTabEmpty(activeTabId));
     },
     onNewTerminal: () => {
-      // Ctrl/Cmd+T: if on terminal top-level tab, open a new terminal instance;
-      // otherwise create a new session tab (same as Ctrl/Cmd+N). Terminal is
-      // project-scoped so the handle is keyed by project path.
-      if (activeView === "terminal") {
+      // Ctrl/Cmd+T: on the merged sessions tab, always opens a new terminal
+      // for the active project (terminal pills are reachable there
+      // regardless of whether a chat or terminal tab currently has focus);
+      // elsewhere it creates a new chat session (same as Ctrl/Cmd+N).
+      // Terminal is project-scoped so the handle is keyed by project path.
+      if (activeView === "sessions") {
+        setFocusedKind("terminal");
         const proj = projectState.activeProject?.path ?? "";
         terminalRefs.current.get(proj)?.openTerminal();
       } else {
@@ -312,10 +390,10 @@ function HomeApp() {
     },
     onCloseSession: () => {
       // Cmd/Ctrl+W: close whatever is frontmost. On the Files view that is
-      // the active editor tab; on the terminal top-level tab it is the active
-      // terminal instance; otherwise the session tab itself. Mirrors each tab bar's
-      // X button.
-      if (activeView === "terminal") {
+      // the active editor tab; on the merged sessions tab it is the active
+      // terminal instance or the active chat tab, depending on which
+      // currently has focus. Mirrors each tab bar's X button.
+      if (activeView === "sessions" && focusedKind === "terminal") {
         const proj = projectState.activeProject?.path ?? "";
         if (terminalRefs.current.get(proj)?.closeActiveTerminal()) return;
         return;
@@ -326,7 +404,7 @@ function HomeApp() {
         }
         return;
       }
-      if (activeView !== "sessions" || !activeTabId) return;
+      if (activeView !== "sessions" || focusedKind !== "chat" || !activeTabId) return;
       closeSessionTab(activeTabId);
       cancelLiveDeltas(activeTabId);
       clearQueue(activeTabId);
@@ -523,7 +601,7 @@ function HomeApp() {
   const terminalRefs = useRef<Map<string, TerminalTabsHandle>>(new Map());
 
   return (
-    <div className="flex flex-col h-screen bg-zinc-950">
+    <div className="flex flex-col h-screen bg-background">
       <SessionTabSync />
 
       {/* Main content area */}
@@ -589,8 +667,9 @@ function HomeApp() {
                   ),
                 );
                 const activeProjectPath = projectState.activeProject?.path ?? "";
+                const terminalFocused = activeView === "sessions" && focusedKind === "terminal";
                 return (
-                  <div className={activeView === "terminal" ? "flex flex-1 overflow-hidden m-0 flex-col" : "hidden"}>
+                  <div className={terminalFocused ? "flex flex-1 overflow-hidden m-0 flex-col" : "hidden"}>
                     <div className="relative flex-1 min-h-0 overflow-hidden">
                       {projectPaths.map((pp) => (
                         <div
@@ -604,7 +683,7 @@ function HomeApp() {
                               if (handle) terminalRefs.current.set(pp, handle);
                               else terminalRefs.current.delete(pp);
                             }}
-                            active={pp === activeProjectPath && activeView === "terminal"}
+                            active={pp === activeProjectPath && terminalFocused}
                             projectPath={pp}
                           />
                         </div>
@@ -614,10 +693,10 @@ function HomeApp() {
                 );
               })()}
 
-              <div className={activeView === "terminal" ? "hidden" : "flex flex-1 overflow-hidden flex-col"}>
+              <div className={activeView === "sessions" && focusedKind === "terminal" ? "hidden" : "flex flex-1 overflow-hidden flex-col"}>
               <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0 flex">
                 <div
-                  className="relative shrink-0 h-full overflow-hidden border-r border-zinc-800 transition-[width] duration-100"
+                  className="relative shrink-0 h-full overflow-hidden border-r border-border transition-[width] duration-100"
                   style={{ width: fileTreePane.collapsed ? 0 : fileTreePane.width }}
                 >
                   <div className="absolute inset-0" style={{ width: fileTreePane.width }}>
@@ -629,26 +708,32 @@ function HomeApp() {
                     ref={fileTreePane.handleRef}
                     onPointerDown={fileTreePane.onPointerDown}
                     onDoubleClick={fileTreePane.resetToDefault}
-                    className="w-1 shrink-0 cursor-col-resize hover:bg-zinc-700 active:bg-zinc-600"
+                    className="w-1 shrink-0 cursor-col-resize hover:bg-accent active:bg-accent"
                   />
                 )}
                 <button
                   onClick={fileTreePane.toggleCollapsed}
                   title={fileTreePane.collapsed ? "Show file tree" : "Hide file tree"}
-                  className="shrink-0 self-start mt-1 p-0.5 rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300"
+                  className="shrink-0 self-start mt-1 p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
                 >
                   {fileTreePane.collapsed ? <PanelLeft className="w-3.5 h-3.5" /> : <PanelLeftClose className="w-3.5 h-3.5" />}
                 </button>
                 <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
                   <EditorTabBar
-                    editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path, isDirty: t.isDirty }))}
+                    editorTabs={editorTabs.map((t) => ({
+                      id: t.id,
+                      path: t.path,
+                      isDirty: t.isDirty,
+                      includeInContext: t.includeInContext,
+                    }))}
                     activeEditorTabId={activeEditorTabId}
                     onSelectTab={setActiveEditorTabId}
                     onCloseTab={requestCloseTab}
+                    onToggleInclude={toggleIncludeInContext}
                   />
                   <div className="relative flex-1 overflow-hidden">
                     {editorTabs.length === 0 && (
-                      <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500">
+                      <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
                         No file open
                       </div>
                     )}
@@ -659,6 +744,7 @@ function HomeApp() {
                       >
                         <FileEditor
                           path={et.path}
+                          projectRoot={et.projectRoot}
                           persistKey={et.id}
                           content={et.content}
                           onChange={(value) => handleEditorChange(et.id, value)}
@@ -691,15 +777,16 @@ function HomeApp() {
 
               <TabsContent value="sessions" forceMount className="flex-1 overflow-hidden m-0">
                 <div className="flex flex-col h-full">
-                  <OpenSessionBar />
+                  <UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={setFocusedKind} />
+                  <div className={focusedKind === "chat" ? "flex flex-col flex-1 min-h-0" : "hidden"}>
                   <SessionSubTabs />
                   <div className="relative flex-1 min-h-0 overflow-hidden">
                     {tabs.length === 0 && (
-                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-zinc-500">
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-muted-foreground">
                         <p className="text-sm">No open sessions for this project</p>
                         <button
                           onClick={() => openNewSessionTab(false)}
-                          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted hover:text-foreground transition-colors"
                         >
                           <Plus className="w-3.5 h-3.5" />
                           New session
@@ -719,7 +806,15 @@ function HomeApp() {
                             <ChatPanel sessionId={tab.id} />
                           </div>
                           <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
-                          <ChatInput onSlashCommand={handleCommand} activeEditorContext={activeEditorContext} sessionTabId={tab.id} onSessionCreated={handleSessionCreated} />
+                          <ChatInput
+                            onSlashCommand={handleCommand}
+                            activeEditorContext={
+                              activeEditorContext && (activeEditorContext.projectRoot ?? "") === (tab.projectPath ?? "") ? activeEditorContext : null
+                            }
+                            contextFilePaths={contextFileEntries.filter((e) => (e.projectRoot ?? "") === (tab.projectPath ?? "")).map((e) => e.path)}
+                            sessionTabId={tab.id}
+                            onSessionCreated={handleSessionCreated}
+                          />
                         </div>
                       );
                     })}
@@ -763,6 +858,7 @@ function HomeApp() {
                         </div>
                       );
                     })}
+                  </div>
                   </div>
                 </div>
               </TabsContent>
@@ -857,12 +953,14 @@ export default function App() {
     <ErrorBoundary>
       <ChatProvider>
         <ProjectProvider>
-          <FrontendMemoryReporter />
-          <StatusMetricsHydrator />
-          <Routes>
-            <Route path="/session/:id" element={<SessionPage />} />
-            <Route path="*" element={<HomeApp />} />
-          </Routes>
+          <TerminalProvider>
+            <FrontendMemoryReporter />
+            <StatusMetricsHydrator />
+            <Routes>
+              <Route path="/session/:id" element={<SessionPage />} />
+              <Route path="*" element={<HomeApp />} />
+            </Routes>
+          </TerminalProvider>
         </ProjectProvider>
       </ChatProvider>
     </ErrorBoundary>

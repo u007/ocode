@@ -69,13 +69,13 @@ export default function CronHistoryPanel({
   const hasMore = runs.length < total;
 
   return (
-    <section className="rounded-lg border border-zinc-700 bg-zinc-900/80 p-4">
+    <section className="rounded-lg border border-border bg-card/80 p-4">
       <div className="mb-4 flex items-center justify-between gap-4">
         <div className="flex items-center gap-2">
           <Clock className="h-4 w-4 text-blue-400" />
           <div>
-            <h2 className="text-sm font-semibold text-zinc-100">Run history — {jobName}</h2>
-            <p className="text-xs text-zinc-500">
+            <h2 className="text-sm font-semibold text-foreground">Run history — {jobName}</h2>
+            <p className="text-xs text-muted-foreground">
               {total} run{total !== 1 ? "s" : ""} · rundate, duration, input/output & datetime logs
             </p>
           </div>
@@ -98,9 +98,9 @@ export default function CronHistoryPanel({
       )}
 
       {loading ? (
-        <div className="py-8 text-center text-sm text-zinc-500">Loading run history…</div>
+        <div className="py-8 text-center text-sm text-muted-foreground">Loading run history…</div>
       ) : runs.length === 0 ? (
-        <div className="rounded-md border border-dashed border-zinc-700 px-3 py-6 text-center text-sm text-zinc-500">
+        <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
           No runs recorded for this job yet. Runs appear after the scheduler fires the job.
         </div>
       ) : (
@@ -110,24 +110,24 @@ export default function CronHistoryPanel({
             const statusColor =
               run.status === "error" ? "text-red-300 border-red-800 bg-red-950/40" : "text-emerald-300 border-emerald-800 bg-emerald-950/40";
             return (
-              <div key={run.id} className="rounded-md border border-zinc-700 bg-zinc-950/70 p-3 text-sm">
+              <div key={run.id} className="rounded-md border border-border bg-background/70 p-3 text-sm">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs ${statusColor}`}>
                         {run.status}
                       </span>
-                      <span className="text-xs text-zinc-400">id {run.id}</span>
-                      <span className="text-xs text-zinc-500">· {formatDuration(run.duration_ms)}</span>
+                      <span className="text-xs text-muted-foreground">id {run.id}</span>
+                      <span className="text-xs text-muted-foreground">· {formatDuration(run.duration_ms)}</span>
                     </div>
-                    <div className="mt-1 text-xs text-zinc-400">
-                      <span className="font-medium text-zinc-300">Rundate:</span> {formatDateTime(run.started_at)} → {formatDateTime(run.finished_at)}
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      <span className="font-medium text-foreground">Rundate:</span> {formatDateTime(run.started_at)} → {formatDateTime(run.finished_at)}
                     </div>
                   </div>
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="h-7 px-2 text-xs text-zinc-400 hover:text-zinc-100"
+                    className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
                     onClick={() => setExpandedId(isExpanded ? null : run.id)}
                   >
                     {isExpanded ? <ChevronUp className="mr-1 h-3.5 w-3.5" /> : <ChevronDown className="mr-1 h-3.5 w-3.5" />}
@@ -137,19 +137,19 @@ export default function CronHistoryPanel({
 
                 {/* Preview when collapsed */}
                 {!isExpanded && (
-                  <div className="mt-2 text-xs text-zinc-500 truncate">Input: {run.input.slice(0, 80)}{run.input.length > 80 ? "…" : ""}</div>
+                  <div className="mt-2 text-xs text-muted-foreground truncate">Input: {run.input.slice(0, 80)}{run.input.length > 80 ? "…" : ""}</div>
                 )}
 
                 {/* Expanded detail */}
                 {isExpanded && (
-                  <div className="mt-3 space-y-3 border-t border-zinc-800 pt-3">
+                  <div className="mt-3 space-y-3 border-t border-border pt-3">
                     <div>
-                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">Input</div>
-                      <div className="whitespace-pre-wrap rounded bg-zinc-900 p-2 text-xs text-zinc-200">{run.input || "—"}</div>
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Input</div>
+                      <div className="whitespace-pre-wrap rounded bg-card p-2 text-xs text-foreground">{run.input || "—"}</div>
                     </div>
                     <div>
-                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">Output</div>
-                      <div className="whitespace-pre-wrap rounded bg-zinc-900 p-2 text-xs text-zinc-200">{run.output || "—"}</div>
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Output</div>
+                      <div className="whitespace-pre-wrap rounded bg-card p-2 text-xs text-foreground">{run.output || "—"}</div>
                     </div>
                     {run.error && (
                       <div>
@@ -158,19 +158,19 @@ export default function CronHistoryPanel({
                       </div>
                     )}
                     <div>
-                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">Logs (datetime)</div>
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Logs (datetime)</div>
                       {run.logs && run.logs.length > 0 ? (
-                        <div className="space-y-1 rounded bg-zinc-900 p-2">
+                        <div className="space-y-1 rounded bg-card p-2">
                           {run.logs.map((log, idx) => (
                             <div key={idx} className="flex gap-2 text-xs">
-                              <span className="whitespace-nowrap font-mono text-zinc-400">{formatDateTime(log.at)}</span>
-                              <span className={log.level === "error" ? "text-red-300" : "text-zinc-500"}>[{log.level || "info"}]</span>
-                              <span className="text-zinc-200">{log.message}</span>
+                              <span className="whitespace-nowrap font-mono text-muted-foreground">{formatDateTime(log.at)}</span>
+                              <span className={log.level === "error" ? "text-red-300" : "text-muted-foreground"}>[{log.level || "info"}]</span>
+                              <span className="text-foreground">{log.message}</span>
                             </div>
                           ))}
                         </div>
                       ) : (
-                        <div className="rounded bg-zinc-900 p-2 text-xs text-zinc-500">No logs</div>
+                        <div className="rounded bg-card p-2 text-xs text-muted-foreground">No logs</div>
                       )}
                     </div>
                   </div>

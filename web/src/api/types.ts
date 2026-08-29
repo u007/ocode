@@ -313,6 +313,13 @@ export interface ChangeDiff {
   patch: string;
 }
 
+export interface GitStatus {
+  branch: string;
+  staged_files: string[];
+  changed_files: string[];
+  has_changes: boolean;
+}
+
 export interface GitDiffFile {
   path: string;
   status: string;

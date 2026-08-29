@@ -33,15 +33,32 @@ describe("applyReconcileState", () => {
     ]);
   });
 
-  it("records the bootstrap stage when the turn is still active", () => {
+  it("does not reset turn state when already active and the server reports active", () => {
+    // wasActive=true: an already-running turn must not be re-armed (that would
+    // reset lastHeartbeatAt and clear a genuine stall the watchdog is still
+    // waiting to confirm with a real heartbeat).
     const actions: unknown[] = [];
-    applyReconcileState((a) => actions.push(a), "s1", {
-      bootstrap_stage: "mcp",
-      turn_active: true,
-      last_seq: 3,
-    });
+    applyReconcileState((a) => actions.push(a), "s1", { bootstrap_stage: "mcp", turn_active: true, last_seq: 3 }, false, true);
     expect(actions).toEqual([
       { type: "SET_BOOTSTRAP_STAGE", sessionId: "s1", stage: "mcp" },
+    ]);
+  });
+
+  it("arms SET_TURN_STATE(true) on fresh activation (client was inactive) when the server is active", () => {
+    const actions: unknown[] = [];
+    applyReconcileState((a) => actions.push(a), "s1", { bootstrap_stage: "mcp", turn_active: true, last_seq: 3 }, false, false);
+    expect(actions).toEqual([
+      { type: "SET_TURN_STATE", sessionId: "s1", turnActive: true },
+      { type: "SET_BOOTSTRAP_STAGE", sessionId: "s1", stage: "mcp" },
+    ]);
+  });
+
+  it("preserves the running state when paused on a pending ask (server reports turn_active=false)", () => {
+    const actions: unknown[] = [];
+    applyReconcileState((a) => actions.push(a), "s1", { bootstrap_stage: "", turn_active: false, last_seq: 4 }, true, true);
+    expect(actions).toEqual([
+      { type: "SET_TURN_STATE", sessionId: "s1", turnActive: true },
+      { type: "SET_TURN_STALLED", sessionId: "s1", stalled: false },
     ]);
   });
 });

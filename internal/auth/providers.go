@@ -143,6 +143,7 @@ var Providers = []Provider{
 	{ID: "chutes", Label: "Chutes", EnvVar: "CHUTES_API_KEY"},
 	{ID: "deepseek", Label: "DeepSeek", EnvVar: "DEEPSEEK_API_KEY"},
 	{ID: "grok", Label: "Grok (xAI)", EnvVar: "XAI_API_KEY"},
+	{ID: "groq", Label: "Groq", EnvVar: "GROQ_API_KEY"},
 	{ID: "novita-ai", Label: "Novita AI", EnvVar: "NOVITA_API_KEY"},
 	{ID: "requesty", Label: "Requesty", EnvVar: "REQUESTY_API_KEY"},
 	{ID: "deepinfra", Label: "DeepInfra", EnvVar: "DEEPINFRA_API_KEY"},

@@ -18,6 +18,9 @@ interface ChatInputProps {
    *  and attach to the outgoing message. When provided, a chip is shown above
    *  the input and the ref is prepended to the message on send. */
   activeEditorContext?: { path: string; selection?: { startLine: number; endLine: number } } | null;
+  /** Paths of opened editor tabs opted into the chat/LLM loop. Each is attached
+   *  as an `@path` ref on send (unless it duplicates the active editor context). */
+  contextFilePaths?: string[];
   /** Temporary session tab ID that should be remapped once the first message creates a real session. */
   sessionTabId?: string | null;
   /** Called when a temporary tab has been replaced by the real session ID. */
@@ -33,6 +36,7 @@ export interface SlashCommandResult {
 export default function ChatInput({
   onSlashCommand,
   activeEditorContext,
+  contextFilePaths,
   sessionTabId,
   onSessionCreated,
 }: ChatInputProps) {
@@ -309,9 +313,9 @@ export default function ChatInput({
         return;
       }
 
-    // Build refs: attached files + active editor context. Resolved now (not
-    // at drain time) so queueing a message doesn't leave stale attachment
-    // chips hanging around in the composer.
+    // Build refs: attached files + active editor context + opened files opted
+    // into the LLM loop. Resolved now (not at drain time) so queueing a message
+    // doesn't leave stale attachment chips hanging around in the composer.
       const refs = attachedFiles.map((n) => `@.ocode/uploads/${n}`).join(" ");
       const contextRef = activeEditorContext
         ? activeEditorContext.selection
@@ -319,7 +323,17 @@ export default function ChatInput({
           : `@${activeEditorContext.path}`
         : "";
 
-      const parts = [contextRef, refs, trimmed].filter(Boolean);
+      // Opened editor tabs opted into the chat context: attach each as an
+      // @path ref, skipping the active editor (already covered by contextRef)
+      // and de-duplicating against uploaded refs.
+      const seen = new Set<string>();
+      if (contextRef) seen.add(activeEditorContext!.path);
+      const contextRefs = (contextFilePaths ?? [])
+        .filter((p) => !seen.has(p))
+        .map((p) => `@${p}`)
+        .join(" ");
+
+      const parts = [contextRef, contextRefs, refs, trimmed].filter(Boolean);
       const finalMessage = parts.join(" ");
       setAttachedFiles([]);
 
@@ -433,7 +447,7 @@ export default function ChatInput({
 
   return (
     <div
-      className={`border-t border-zinc-700 p-4 relative transition-colors ${
+      className={`border-t border-border p-4 relative transition-colors ${
         isDragging ? "bg-blue-500/10 border-blue-500" : ""
       }`}
       onDragEnter={handleDragEnter}
@@ -458,13 +472,13 @@ export default function ChatInput({
         {attachedFiles.map((name) => (
           <span
             key={name}
-            className="inline-flex items-center gap-1 text-xs bg-zinc-700 text-zinc-300 rounded px-2 py-0.5"
+            className="inline-flex items-center gap-1 text-xs bg-accent text-foreground rounded px-2 py-0.5"
           >
             {name}
             <button
               type="button"
               onClick={() => setAttachedFiles((prev) => prev.filter((n) => n !== name))}
-              className="text-zinc-500 hover:text-zinc-300"
+              className="text-muted-foreground hover:text-foreground"
             >
               <X className="w-3 h-3" />
             </button>
@@ -478,7 +492,7 @@ export default function ChatInput({
         )}
       </div>
       {queueCount > 0 && (
-        <div className="text-xs text-zinc-500 mb-1">
+        <div className="text-xs text-muted-foreground mb-1">
           {queueCount} queued — press ↑ in an empty box to edit the last one
         </div>
       )}
@@ -493,14 +507,14 @@ export default function ChatInput({
         <button
           type="button"
           onClick={() => attachRef.current?.click()}
-          className="shrink-0 p-1.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700"
+          className="shrink-0 p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent"
           title="Attach files"
         >
           <Paperclip className="w-4 h-4" />
         </button>
         <textarea
           ref={textareaRef}
-          className="flex-1 resize-none rounded-lg border border-zinc-600 bg-zinc-800 p-3 text-sm text-zinc-100 placeholder-zinc-500 focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
+          className="flex-1 resize-none rounded-lg border border-border bg-muted p-3 text-sm text-foreground placeholder-muted-foreground focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           rows={2}
           placeholder="Type a message... (Enter to send, Shift+Enter for newline, / for commands, ! for shell)"
           value={input}

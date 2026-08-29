@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bufio"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -11,10 +14,11 @@ import (
 )
 
 type FileNode struct {
-	Name     string     `json:"name"`
-	Path     string     `json:"path"`
-	IsDir    bool       `json:"is_dir"`
-	Children []FileNode `json:"children,omitempty"`
+	Name      string     `json:"name"`
+	Path      string     `json:"path"`
+	IsDir     bool       `json:"is_dir"`
+	Children  []FileNode `json:"children,omitempty"`
+	GitStatus string     `json:"git_status,omitempty"`
 }
 
 func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
@@ -92,9 +96,20 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 	if node.Children == nil {
 		node.Children = []FileNode{}
 	}
+	// Annotate with git status badges (M/?/A/D/R) when this is a repo.
+	if m := gitStatusMapForDir(anchor); len(m) > 0 {
+		annotateFileTreeGitStatus(&node, anchor, m)
+	}
+	// Use git itself so worktrees and non-standard layouts are recognised,
+	// not just a literal ".git" directory entry.
+	isGitRepo := false
+	if out, err := exec.Command("git", "-C", anchor, "rev-parse", "--is-inside-work-tree").Output(); err == nil && strings.TrimSpace(string(out)) == "true" {
+		isGitRepo = true
+	}
 	writeJSON(w, http.StatusOK, FileTreeResponse{
 		Children:  node.Children,
 		Truncated: count >= maxTreeNodes,
+		IsGitRepo: isGitRepo,
 	})
 }
 
@@ -102,9 +117,286 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 // Truncated is true when buildFileTree hit maxTreeNodes and stopped walking
 // before covering the whole tree, so the frontend can warn instead of
 // silently rendering an incomplete tree as if it were complete.
+// IsGitRepo reports whether anchor is inside a git working tree, so the
+// frontend can enable/disable git actions in the file-tree context menu.
 type FileTreeResponse struct {
 	Children  []FileNode `json:"children"`
 	Truncated bool       `json:"truncated"`
+	IsGitRepo bool       `json:"is_git_repo"`
+}
+
+// gitStatusMapForDir runs `git status --short` in dir and returns a map
+// of relative path -> badge (M/?/A/D/R), mirroring the TUI's
+// parseGitStatusShort. Returns nil for non-repos or on error. Uses git
+// plumbing so worktrees (where .git is a file) are handled.
+func gitStatusMapForDir(dir string) map[string]string {
+	if out, err := exec.Command("git", "-C", dir, "rev-parse", "--is-inside-work-tree").Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
+		return nil
+	}
+	out, err := exec.Command("git", "-c", "core.quotepath=false", "-C", dir, "status", "--short").Output()
+	if err != nil {
+		return nil
+	}
+	m := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		code := strings.TrimSpace(line[:2])
+		p := strings.TrimSpace(line[3:])
+		if idx := strings.LastIndex(p, " -> "); idx >= 0 {
+			p = p[idx+4:]
+		}
+		badge := "M"
+		if strings.Contains(code, "?") {
+			badge = "?"
+		} else if strings.Contains(code, "A") {
+			badge = "A"
+		} else if strings.Contains(code, "D") {
+			badge = "D"
+		} else if strings.Contains(code, "R") {
+			badge = "R"
+		}
+		m[p] = badge
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+func annotateFileTreeGitStatus(node *FileNode, anchor string, m map[string]string) {
+	if !node.IsDir {
+		if badge, ok := m[node.Path]; ok {
+			node.GitStatus = badge
+		} else {
+			norm := filepath.ToSlash(node.Path)
+			if badge, ok := m[norm]; ok {
+				node.GitStatus = badge
+			}
+		}
+	}
+	for i := range node.Children {
+		annotateFileTreeGitStatus(&node.Children[i], anchor, m)
+	}
+}
+
+// FileSearchResult is one matching line for the content search endpoint.
+type FileSearchResult struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+type FileSearchResponse struct {
+	Results   []FileSearchResult `json:"results"`
+	Truncated bool               `json:"truncated"`
+	Total     int                `json:"total"`
+	HasMore   bool               `json:"has_more"`
+	Capped    bool               `json:"capped,omitempty"`
+}
+
+// HandleFileSearch searches file contents for keywords (whitespace-AND,
+// case-insensitive) within the anchored project root. Query param `q`
+// holds the keywords; `path` selects the project root (same anchoring as
+// HandleFileTree). It walks the tree similarly to buildFileTree but
+// inspects file contents line-by-line.
+func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		query = strings.TrimSpace(r.URL.Query().Get("query"))
+	}
+	if query == "" {
+		writeJSON(w, http.StatusOK, FileSearchResponse{Results: []FileSearchResult{}})
+		return
+	}
+	root := r.URL.Query().Get("path")
+	if root == "" {
+		root = h.workDir
+	}
+	if root == "" {
+		root = "."
+	}
+	if !filepath.IsAbs(root) && h.workDir != "" {
+		root = filepath.Join(h.workDir, root)
+	}
+	matchedRoot := h.workDir
+	if r.URL.Query().Get("path") != "" {
+		if h.workDir == "" {
+			writeError(w, http.StatusBadRequest, "server has no working directory configured; explicit path not allowed")
+			return
+		}
+		dir, ok := h.fileTreeRootFor(root)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "path outside working directory")
+			return
+		}
+		matchedRoot = dir
+	}
+	base, err := filepath.Abs(root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	anchor := base
+	if matchedRoot != "" {
+		if abs, err := filepath.Abs(matchedRoot); err == nil {
+			anchor = abs
+		}
+	}
+	keywords := strings.Fields(strings.ToLower(query))
+	if len(keywords) == 0 {
+		writeJSON(w, http.StatusOK, FileSearchResponse{Results: []FileSearchResult{}})
+		return
+	}
+	var exts []string
+	if raw := r.URL.Query().Get("exts"); raw != "" {
+		for _, p := range strings.Split(raw, ",") {
+			p = strings.TrimSpace(strings.ToLower(p))
+			p = strings.TrimPrefix(p, "*.")
+			p = strings.TrimPrefix(p, ".")
+			p = strings.TrimPrefix(p, "*")
+			if p != "" {
+				exts = append(exts, p)
+			}
+		}
+	}
+	// Pagination: infinite scroll support via offset/limit
+	offset := 0
+	limit := 50
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 100 {
+			limit = v
+		}
+	}
+	const maxFileSize = 1 << 20
+	const maxTotal = 5000
+	allResults := make([]FileSearchResult, 0, 512)
+	hasMoreDueToCap := false
+	_ = filepath.WalkDir(anchor, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == "node_modules" || name == "vendor" || name == "target" || name == ".history" {
+				return filepath.SkipDir
+			}
+			if strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), ".") {
+			return nil
+		}
+		if len(exts) > 0 {
+			ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(path), "."))
+			matched := false
+			for _, e := range exts {
+				if ext == e {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return nil
+			}
+		}
+		info, err := d.Info()
+		if err != nil || info.Size() > maxFileSize {
+			return nil
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		buf := make([]byte, 8000)
+		n, _ := f.Read(buf)
+		f.Close()
+		for i := 0; i < n; i++ {
+			if buf[i] == 0 {
+				return nil
+			}
+		}
+		rel, _ := filepath.Rel(anchor, path)
+		file, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		scanner := bufio.NewScanner(file)
+		// 1 MiB token limit to preserve exact long lines
+		scanner.Buffer(make([]byte, 0, 4096), 1<<20)
+		lineNum := 0
+		for scanner.Scan() {
+			lineNum++
+			if len(allResults) >= maxTotal {
+				hasMoreDueToCap = true
+				break
+			}
+			line := scanner.Text()
+			lower := strings.ToLower(line)
+			ok := true
+			for _, kw := range keywords {
+				if !strings.Contains(lower, kw) {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				// Preserve exact line; cap by runes to avoid splitting UTF-8 and bound payload
+				const maxRunes = 2000
+				if len([]rune(line)) > maxRunes {
+					runes := []rune(line)
+					line = string(runes[:maxRunes])
+				}
+				allResults = append(allResults, FileSearchResult{
+					Path: rel,
+					Line: lineNum,
+					Text: line,
+				})
+				if len(allResults) >= maxTotal {
+					hasMoreDueToCap = true
+					break
+				}
+			}
+		}
+		file.Close()
+		if hasMoreDueToCap {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	totalCollected := len(allResults)
+	hasMore := hasMoreDueToCap || totalCollected > offset+limit
+	if offset >= totalCollected {
+		writeJSON(w, http.StatusOK, FileSearchResponse{
+			Results:   []FileSearchResult{},
+			Truncated: hasMoreDueToCap,
+			Total:     totalCollected,
+			HasMore:   false,
+			Capped:    hasMoreDueToCap,
+		})
+		return
+	}
+	end := offset + limit
+	if end > totalCollected {
+		end = totalCollected
+		hasMore = hasMoreDueToCap
+	}
+	page := allResults[offset:end]
+	writeJSON(w, http.StatusOK, FileSearchResponse{
+		Results:   page,
+		Truncated: hasMoreDueToCap || hasMore,
+		Total:     totalCollected,
+		HasMore:   hasMore,
+		Capped:    hasMoreDueToCap,
+	})
 }
 
 // fileTreeRootFor reports whether root may be browsed by HandleFileTree —

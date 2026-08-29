@@ -8,7 +8,7 @@
  * surface as crashes, wrong containment, lost scroll position, or broken
  * search/prepend behavior. The coordinate math itself is verified against the
  * locked TanStack source and by the structural assertions below (the live tail
- * must live outside the scrollable history).
+ * is inline inside the scroll container, visually merged with history).
  */
 import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from "vitest";
 import { render, screen, fireEvent, act, within, cleanup } from "@testing-library/react";
@@ -218,7 +218,7 @@ describe("ChatPanel", () => {
     expect(screen.getByText(/Start a conversation/i)).toBeInTheDocument();
   });
 
-  it("renders the live tail OUTSIDE the scrollable history container (Finding 2)", async () => {
+  it("renders the live tail INSIDE the scrollable history container (visually merged)", async () => {
     const { container } = render(
       <ChatProvider>
         <LiveSeed
@@ -232,10 +232,10 @@ describe("ChatPanel", () => {
     await tick();
     const scrollEl = scrollElOf(container);
     expect(scrollEl).toBeTruthy();
-    // The live text must NOT live inside the scroll container.
-    expect(within(scrollEl).queryByText("streaming output")).toBeNull();
-    // It must still be present in the document — in the pinned pane.
-    expect(screen.getByText("streaming output")).toBeInTheDocument();
+    // Live tail is an inline continuation of history — same scroll, same p-4
+    // rhythm, not a separate pinned pane. No split-screen border/max-h.
+    expect(within(scrollEl).getByText("streaming output")).toBeInTheDocument();
+    expect(container.querySelector(".shrink-0.border-t")).toBeNull();
   });
 
   it("scrolls to the bottom on initial load (real fetch path) with the header present", async () => {
@@ -342,7 +342,7 @@ describe("ChatPanel", () => {
     expect(screen.queryByText("partial output")).toBeNull();
   });
 
-  it("appends live parts during streaming and keeps the pinned pane scrolled to bottom", async () => {
+  it("appends live parts during streaming and keeps the scroll container at bottom (inline, not pinned pane)", async () => {
     let captured: ((a: unknown) => void) | null = null;
     const { container } = render(
       <ChatProvider>
@@ -354,8 +354,8 @@ describe("ChatPanel", () => {
     await tick();
     expect(captured).toBeTruthy();
 
-    const livePane = container.querySelector(".shrink-0") as HTMLElement;
-    expect(livePane).toBeTruthy();
+    // No separate pinned pane — live is inline inside the same scroll.
+    expect(container.querySelector(".shrink-0.border-t")).toBeNull();
 
     act(() => {
       captured!({ type: "LIVE_DELTA", sessionId: "sess-stream", kind: "text", delta: " second chunk" });
@@ -364,9 +364,8 @@ describe("ChatPanel", () => {
 
     expect(screen.getByText(/first chunk/)).toBeInTheDocument();
     expect(screen.getByText(/second chunk/)).toBeInTheDocument();
-    // Pinned pane remains a sibling of the scroll container (not nested inside it).
-    expect(container.querySelector(".shrink-0")).toBeTruthy();
-    expect(container.querySelector(".overflow-y-auto")?.contains(screen.getByText(/second chunk/))).toBe(false);
+    // Inline tail must be inside the scroll container.
+    expect(container.querySelector(".overflow-y-auto")?.contains(screen.getByText(/second chunk/))).toBe(true);
   });
 
   it("prepends older messages while preserving the visible scroll position", async () => {
@@ -505,5 +504,92 @@ describe("ChatPanel", () => {
     const firstItem = container.querySelector('[data-index="0"]');
     expect(firstItem).toBeTruthy();
     expect(firstItem!.getAttribute("style")).toContain("translateY");
+  });
+
+  it("groups tool results into parent assistant request (two consecutive reads)", async () => {
+    const msgs: Message[] = [
+      mk("user", "please read both files"),
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "call-1", function: { name: "read", arguments: '{"path":"a.go"}' } },
+          { id: "call-2", function: { name: "read", arguments: '{"path":"b.go"}' } },
+        ],
+      },
+      { role: "tool", content: "content of a.go", tool_call_id: "call-1" },
+      { role: "tool", content: "content of b.go", tool_call_id: "call-2" },
+    ];
+    const { container } = render(
+      <ChatProvider>
+        <LiveSeed sessionId="sess-grouped" messages={msgs} />
+        <ChatPanel sessionId="sess-grouped" />
+      </ChatProvider>,
+    );
+    await tick();
+    await flushRAF();
+    // Each tool call and its result should appear together inside the same bubble.
+    // Two 🔧 blocks, not four detached ones.
+    const toolHeaders = Array.from(container.querySelectorAll("*")).filter((el) =>
+      el.textContent?.includes("🔧 read"),
+    );
+    // The grouped rendering creates exactly 2 tool blocks (one per call).
+    expect(container.textContent).toContain('a.go');
+    expect(container.textContent).toContain('content of a.go');
+    expect(container.textContent).toContain('b.go');
+    expect(container.textContent).toContain('content of b.go');
+    // The virtualized list should have collapsed 1 assistant + 2 tool messages into 1 group + 1 user = 2 entries.
+    const items = container.querySelectorAll('[data-index]');
+    expect(items.length).toBe(2);
+    // Ensure a.go and its result appear in the same virtual item (the grouped one, index 1).
+    const groupedItem = container.querySelector('[data-index="1"]');
+    expect(groupedItem?.textContent).toContain('a.go');
+    expect(groupedItem?.textContent).toContain('content of a.go');
+    expect(groupedItem?.textContent).toContain('b.go');
+    expect(toolHeaders.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("renders orphan tool result as single when parent not loaded", async () => {
+    const msgs: Message[] = [
+      mk("user", "hello"),
+      { role: "tool", content: "orphan content of c.go", tool_call_id: "orphan-1" },
+    ];
+    const { container } = render(
+      <ChatProvider>
+        <LiveSeed sessionId="sess-orphan" messages={msgs} />
+        <ChatPanel sessionId="sess-orphan" />
+      </ChatProvider>,
+    );
+    await tick();
+    await flushRAF();
+    expect(container.textContent).toContain('orphan content of c.go');
+    // Should be 2 virtual items: user + orphan tool single.
+    const items = container.querySelectorAll('[data-index]');
+    expect(items.length).toBe(2);
+  });
+
+  it("search highlights grouped result content and jumps to its parent group", async () => {
+    const msgs: Message[] = [
+      { role: "assistant", content: "", tool_calls: [{ id: "call-s1", function: { name: "read", arguments: '{"path":"a.go"}' } }] },
+      { role: "tool", content: "UNIQUE_SEARCH_TOKEN_abc123 in a.go result", tool_call_id: "call-s1" },
+      mk("assistant", "some other message without token"),
+    ];
+    render(
+      <ChatProvider>
+        <LiveSeed sessionId="sess-search-grouped" messages={msgs} />
+        <ChatPanel sessionId="sess-search-grouped" />
+      </ChatProvider>,
+    );
+    await tick();
+    fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+    await tick();
+    const input = screen.getByPlaceholderText(/Find in chat/i) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "UNIQUE_SEARCH_TOKEN_abc123" } });
+    await tick();
+    expect(screen.getByText("1/1")).toBeInTheDocument();
+    // The grouped entry containing the token should be highlighted (ring).
+    const ring = document.querySelector(".ring-2");
+    expect(ring).toBeTruthy();
+    expect(ring?.textContent).toContain("UNIQUE_SEARCH_TOKEN_abc123");
   });
 });

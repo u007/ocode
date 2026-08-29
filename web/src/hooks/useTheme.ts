@@ -43,6 +43,10 @@ export function applyThemeColors(colors: ThemeColors) {
   set("--foreground", colors.text);
   set("--primary", colors.user);
   set("--accent", colors.accent);
+  set("--accent-foreground", colors.text);
+  set("--primary-foreground", colors.text);
+  set("--destructive-foreground", colors.text);
+  set("--input", colors.dim);
   set("--border", colors.border);
   set("--destructive", colors.error);
   set("--muted", colors.dim);

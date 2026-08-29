@@ -1,5 +1,5 @@
 import { api } from "../api/client";
-import type { ChatAction, ChatState } from "../stores/chatStore";
+import { getSessionSlice, extractPendingFromMessages, type ChatAction, type ChatState } from "../stores/chatStore";
 import type { ProjectAction } from "../stores/projectStore";
 import type { Message, SSEPermissionEvent, TUIStatus } from "../api/types";
 import type { BusEnvelope } from "./eventBus";
@@ -474,11 +474,24 @@ export async function reconcileOpenSessions(
           api.getSessionState(sessionId),
           api.getSession(sessionId, { limit: RECONCILE_PAGE_SIZE }),
         ]);
-        // Turn state from the authoritative server snapshot.
-        dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: state.turn_active });
-        if (state.bootstrap_stage) {
-          dispatch({ type: "SET_BOOTSTRAP_STAGE", sessionId, stage: state.bootstrap_stage });
-        }
+        // Turn state from the authoritative server snapshot. Preserve the
+        // client's running state when the turn is merely paused on a pending
+        // permission/question (server reports turn_active=false then).
+        const slice = getSessionSlice(router.getState(), sessionId);
+        // A turn paused on a pending permission/question reports
+        // turn_active=false server-side. The sentinel lives in the fetched
+        // transcript, which may be the only signal after a reload/reconnect
+        // that missed the ask event — derive the pending-ask status from the
+        // transcript, not just the current (possibly empty) client slice.
+        const transcriptPending = extractPendingFromMessages(detail.messages);
+        const hasPendingAsk = !!(
+          slice.pendingPermission ||
+          slice.pendingQuestion ||
+          transcriptPending.pendingPermission ||
+          transcriptPending.pendingQuestion
+        );
+        const wasActive = slice.turnActive;
+        applyReconcileState(dispatch, sessionId, state, hasPendingAsk, wasActive);
         dispatch({ type: "MERGE_SNAPSHOT", sessionId, messages: detail.messages, total: detail.total });
         const watermark = lastAppliedSeq.get(sessionId) ?? 0;
         for (const frame of state.live_frames ?? []) {
@@ -492,4 +505,60 @@ export async function reconcileOpenSessions(
   );
 }
 
-export const RECONCILE_PAGE_SIZE = 50;
+export const RECONCILE_PAGE_SIZE = 100;
+
+/**
+ * applyReconcileState — pure application of a GET /api/sessions/:id/state
+ * snapshot to the store. Exported for unit tests and reused by the
+ * activation/load/reconnect reconcile (reconcileOpenSessions) so every
+ * reconcile path shares one turn-state policy.
+ *
+ * `hasPendingAsk` preserves the client's running state when the turn is merely
+ * paused on a permission/question ask: the server reports `turn_active: false`
+ * then (runTurn has returned and is awaiting the answer), but the turn is NOT
+ * finished. Clearing the client's turn state would make the running indicator
+ * flicker to "stopped" during the pause — the pending dialog is still up, so we
+ * keep the turn alive and only drop the stall marker.
+ *
+ * `wasActive` is the client's current turn-active flag. When the server reports
+ * active but the client was inactive (fresh activation / missed turn_started),
+ * we arm SET_TURN_STATE(true) so MERGE_SNAPSHOT preserves the in-flight live
+ * buffer. When the client is already active we must NOT re-dispatch it — that
+ * reducer action resets lastHeartbeatAt and clears turnStalled, which would
+ * mask a genuine stall the watchdog is still waiting to confirm with a real
+ * heartbeat.
+ */
+export function applyReconcileState(
+  dispatch: (a: ChatAction) => void,
+  sessionId: string,
+  state: { bootstrap_stage: string; turn_active: boolean; last_seq: number },
+  hasPendingAsk = false,
+  wasActive = false,
+): void {
+  if (!state.turn_active) {
+    if (hasPendingAsk) {
+      // Paused on a pending ask — OR a reload/reconnect that missed the ask
+      // event but whose persisted transcript carries the sentinel. The turn is
+      // still running, so arm the indicator (never let it look stopped) and
+      // keep the stall cleared; MERGE_SNAPSHOT will surface the dialog.
+      dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: true });
+      dispatch({ type: "SET_TURN_STALLED", sessionId, stalled: false });
+      return;
+    }
+    // Server-side turn is done — clear streaming + turn state.
+    dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
+    dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+    dispatch({ type: "SET_TURN_STALLED", sessionId, stalled: false });
+  } else {
+    // Turn active server-side. Only arm the running state when the client was
+    // inactive (fresh activation / missed turn_started); when already active,
+    // leave turn state alone so a pending stall survives until a real
+    // heartbeat clears it.
+    if (!wasActive) {
+      dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: true });
+    }
+    if (state.bootstrap_stage) {
+      dispatch({ type: "SET_BOOTSTRAP_STAGE", sessionId, stage: state.bootstrap_stage });
+    }
+  }
+}

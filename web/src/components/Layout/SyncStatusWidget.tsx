@@ -107,13 +107,13 @@ export default function SyncStatusWidget() {
     <>
       <button
         onClick={() => setOpen(true)}
-        className="relative flex items-center justify-center w-8 h-8 rounded-md text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors shrink-0"
+        className="relative flex items-center justify-center w-8 h-8 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
         title={loggedIn ? "Config sync active" : "Sync not connected"}
       >
         <CloudCog className="w-4 h-4" />
         <span
           className={`absolute top-1 right-1 w-1.5 h-1.5 rounded-full ${
-            loggedIn ? "bg-emerald-500" : "bg-zinc-600"
+            loggedIn ? "bg-emerald-500" : "bg-accent"
           }`}
         />
       </button>
@@ -128,9 +128,9 @@ export default function SyncStatusWidget() {
           }
         }}
       >
-        <DialogContent className="sm:max-w-md bg-zinc-900 border-zinc-700">
+        <DialogContent className="sm:max-w-md bg-card border-border">
           <DialogHeader>
-            <DialogTitle className="text-zinc-100">Account Sync</DialogTitle>
+            <DialogTitle className="text-foreground">Account Sync</DialogTitle>
             <DialogDescription>
               Encrypted config sync across your machines.
             </DialogDescription>
@@ -138,7 +138,7 @@ export default function SyncStatusWidget() {
 
           {!loggedIn && loginState.phase === "idle" && (
             <div className="space-y-3">
-              <p className="text-sm text-zinc-400">
+              <p className="text-sm text-muted-foreground">
                 Log in to sync your settings and provider credentials to other
                 machines.
               </p>
@@ -149,15 +149,15 @@ export default function SyncStatusWidget() {
           )}
 
           {loginState.phase === "starting" && (
-            <p className="text-sm text-zinc-400">Starting login…</p>
+            <p className="text-sm text-muted-foreground">Starting login…</p>
           )}
 
           {loginState.phase === "waiting" && (
             <div className="space-y-3 text-center">
-              <p className="text-sm text-zinc-400">
+              <p className="text-sm text-muted-foreground">
                 A browser tab opened — enter this code to authorize:
               </p>
-              <div className="font-mono text-lg tracking-widest bg-zinc-800 rounded-md py-3">
+              <div className="font-mono text-lg tracking-widest bg-muted rounded-md py-3">
                 {loginState.userCode}
               </div>
               <a
@@ -168,7 +168,7 @@ export default function SyncStatusWidget() {
               >
                 {loginState.verifyUrl}
               </a>
-              <p className="text-xs text-zinc-500">Waiting for approval…</p>
+              <p className="text-xs text-muted-foreground">Waiting for approval…</p>
             </div>
           )}
 
@@ -184,7 +184,7 @@ export default function SyncStatusWidget() {
           {loggedIn && loginState.phase === "idle" && status && (
             <div className="space-y-4">
               <div className="space-y-2 text-sm">
-                <div className="flex justify-between text-zinc-400">
+                <div className="flex justify-between text-muted-foreground">
                   <span>Settings</span>
                   <span>
                     {status.config.synced
@@ -192,7 +192,7 @@ export default function SyncStatusWidget() {
                       : "not synced yet"}
                   </span>
                 </div>
-                <div className="flex justify-between text-zinc-400">
+                <div className="flex justify-between text-muted-foreground">
                   <span>Credentials</span>
                   <span>
                     {status.auth.synced

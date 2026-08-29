@@ -44,8 +44,8 @@ export default function LogsForm() {
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">Logs</h2>
-      <p className="text-xs text-zinc-500">
+      <h2 className="text-sm font-semibold text-foreground">Logs</h2>
+      <p className="text-xs text-muted-foreground">
         Per-session Logs tab behavior. Stored in this browser only — no server round-trip.
       </p>
 
@@ -57,8 +57,8 @@ export default function LogsForm() {
           className="mt-0.5"
         />
         <span>
-          <span className="block text-xs text-zinc-300">Buffer logs in background tabs</span>
-          <span className="block text-xs text-zinc-500 mt-0.5">
+          <span className="block text-xs text-foreground">Buffer logs in background tabs</span>
+          <span className="block text-xs text-muted-foreground mt-0.5">
             Keep collecting log entries for hidden session tabs. Off (recommended) drops live
             entries while a tab is hidden and refetches recent history when it is reopened —
             bounded memory in long sessions. On keeps complete history in every tab at the cost of
@@ -68,7 +68,7 @@ export default function LogsForm() {
       </label>
 
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">
+        <label className="text-xs text-muted-foreground">
           Retained entries per tab ({LOG_PREFS_MIN_ENTRIES.toLocaleString()}–
           {LOG_PREFS_MAX_ENTRIES.toLocaleString()})
         </label>
@@ -84,7 +84,7 @@ export default function LogsForm() {
           }}
           className="h-8 text-xs w-40"
         />
-        <p className="text-xs text-zinc-600">
+        <p className="text-xs text-foreground">
           Oldest entries are dropped first once the cap is reached. Default{" "}
           {LOG_PREFS_DEFAULT_ENTRIES.toLocaleString()}.
         </p>

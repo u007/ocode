@@ -151,7 +151,10 @@ func (h *Handler) finishSessionTitle(sessionID, title string) {
 // assistant message text from a message list — the inputs for title
 // generation, mirroring the TUI's usage. User messages starting with "/" are
 // slash commands and are excluded, matching the TUI's isCommandHistoryMessage
-// filter so a slash-only session never seeds a title.
+// filter so a slash-only session never seeds a title. Raw JSON (e.g. a
+// tool-call payload posted directly as a headless prompt) is excluded too,
+// via the same predicate the fallback-title path uses, so it never seeds
+// title generation either.
 func firstAndLastMessageTexts(msgs []agent.Message) (string, string) {
 	var userMsg, assistantMsg string
 	for _, m := range msgs {
@@ -159,7 +162,7 @@ func firstAndLastMessageTexts(msgs []agent.Message) (string, string) {
 		if trimmed == "" {
 			continue
 		}
-		if m.Role == "user" && userMsg == "" && !strings.HasPrefix(trimmed, "/") {
+		if m.Role == "user" && userMsg == "" && session.LooksLikeAutoTitleCandidate(trimmed) {
 			userMsg = trimmed
 		}
 		if m.Role == "assistant" && strings.TrimSpace(m.Content) != "" {
@@ -196,7 +199,7 @@ func lastUserAndLastAssistantTexts(msgs []agent.Message) (string, string) {
 		if assistantMsg == "" && m.Role == "assistant" && trimmed != "" {
 			assistantMsg = m.Content
 		}
-		if userMsg == "" && m.Role == "user" && trimmed != "" && !strings.HasPrefix(trimmed, "/") {
+		if userMsg == "" && m.Role == "user" && session.LooksLikeAutoTitleCandidate(trimmed) {
 			userMsg = trimmed
 		}
 		if userMsg != "" && assistantMsg != "" {
@@ -205,11 +208,11 @@ func lastUserAndLastAssistantTexts(msgs []agent.Message) (string, string) {
 	}
 	// If we found no user message in reverse scan (e.g. no assistant yet),
 	// still return the first user prompt so a single-turn session can title.
-	// Slash commands are excluded here as well.
+	// Slash commands and raw JSON are excluded here as well.
 	if userMsg == "" {
 		for _, m := range msgs {
 			trimmed := strings.TrimSpace(m.Content)
-			if m.Role == "user" && trimmed != "" && !strings.HasPrefix(trimmed, "/") {
+			if m.Role == "user" && session.LooksLikeAutoTitleCandidate(trimmed) {
 				userMsg = trimmed
 				break
 			}

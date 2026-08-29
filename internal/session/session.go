@@ -157,6 +157,36 @@ func SaveForDir(wd, id string, title string, messages []agent.Message, metadata 
 	return saveToDir(dir, id, title, messages, metadata)
 }
 
+// PaginatedLoad returns a window of messages for id, most-recent-first paging
+// (offset = skip this many from the tail, limit = max from end-offset). It is
+// the single pagination helper shared by server and TUI so the slice logic
+// does not drift. limit<=0 means return all up to the offset point.
+func PaginatedLoad(wd, id string, limit, offset int) (msgs []agent.Message, total int, err error) {
+	sess, err := LoadForDir(wd, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	total = len(sess.Messages)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	end := total - offset
+	if end < 0 {
+		end = 0
+	}
+	if limit <= 0 || limit >= end {
+		return sess.Messages[:end], total, nil
+	}
+	start := end - limit
+	if start < 0 {
+		start = 0
+	}
+	return sess.Messages[start:end], total, nil
+}
+
 // saveToDir is the shared save core: it resolves the session's storage
 // dir and dispatches on which format already exists for id. New sessions
 // are always created directly as .sqlite. An existing .json or .ojsonl

@@ -67,17 +67,17 @@ export function ThinkingBlock({
   if (!text) return null;
   return (
     <div className="mb-3 flex justify-start">
-      <div className="max-w-[95%] md:max-w-[80%] w-full rounded-lg border border-zinc-700/60 bg-zinc-900/40 px-3 py-2">
+      <div className="max-w-[95%] md:max-w-[80%] w-full rounded-lg border border-border/60 bg-card/40 px-3 py-2">
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="flex items-center gap-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200"
+          className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
         >
           <span>{open ? "▾" : "▸"}</span>
           <span>🧠 Thinking</span>
         </button>
         {open && (
-          <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-zinc-400">
+          <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-muted-foreground">
             {highlight.trim() ? highlightMatches(text, highlight) : text}
           </pre>
         )}
@@ -93,8 +93,8 @@ export function StatusBlock({ text }: { text: string }) {
   if (!text) return null;
   return (
     <div className="mb-3 flex justify-start">
-      <div className="flex items-center gap-1.5 rounded-lg border border-zinc-700/60 bg-zinc-900/40 px-3 py-2 text-xs text-zinc-400">
-        <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-500" />
+      <div className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-card/40 px-3 py-2 text-xs text-muted-foreground">
+        <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-muted" />
         <span>{text}</span>
       </div>
     </div>
@@ -151,7 +151,7 @@ export const ToolBlock = memo(function ToolBlock({
         {open && (
           <div className="mt-2 space-y-2">
             {command && (
-              <pre className="whitespace-pre-wrap break-words rounded bg-zinc-900/70 p-2 font-mono text-[11px] text-zinc-300">
+              <pre className="whitespace-pre-wrap break-words rounded bg-card/70 p-2 font-mono text-[11px] text-foreground">
                 {highlight.trim() ? (
                   highlightMatches(command, highlight)
                 ) : (
@@ -160,15 +160,15 @@ export const ToolBlock = memo(function ToolBlock({
               </pre>
             )}
             {pending && stream && (
-              <div className="rounded bg-zinc-900/70 p-2">
-                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-zinc-400">
+              <div className="rounded bg-card/70 p-2">
+                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">
                   {stream.split("\n").slice(-TOOL_OUTPUT_PREVIEW_LINES).join("\n")}
                 </pre>
               </div>
             )}
             {output !== undefined && output !== "" && (
-              <div className="rounded bg-zinc-900/70 p-2">
-                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-zinc-400">
+              <div className="rounded bg-card/70 p-2">
+                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">
                   {highlight.trim() ? (
                     highlightMatches(visibleOutput ?? "", highlight)
                   ) : (
@@ -185,7 +185,7 @@ export const ToolBlock = memo(function ToolBlock({
                   <button
                     type="button"
                     onClick={() => setExpanded((v) => !v)}
-                    className="mt-1 text-[11px] text-zinc-500 hover:text-zinc-300"
+                    className="mt-1 text-[11px] text-muted-foreground hover:text-foreground"
                   >
                     {expanded
                       ? "▲ click to collapse"

@@ -33,6 +33,8 @@ interface Props {
   toolName?: string;
   /** Session/tab id that owns this message — required for restore dispatch validation. */
   sessionId?: string;
+  /** Absolute index in the messages array for restore-to-input truncation (messages[:index]). */
+  messageIndex?: number;
 }
 
 // AssistantText renders markdown assistant output. Shared by committed messages
@@ -40,7 +42,7 @@ interface Props {
 export function AssistantText({ content }: { content: string }) {
   return (
     <div className="flex justify-start mb-3">
-      <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-zinc-800 text-zinc-100">
+      <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-muted text-foreground">
         <div className="prose prose-invert prose-sm max-w-none text-sm">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
@@ -49,7 +51,7 @@ export function AssistantText({ content }: { content: string }) {
               // @ts-expect-error custom hast element produced by rehypeFileLinks
               filelink: FileLinkFromNode,
               pre: ({ children }) => (
-                <pre className="rounded-md bg-zinc-900 p-3 overflow-x-auto text-xs">
+                <pre className="rounded-md bg-card p-3 overflow-x-auto text-xs">
                   {children}
                 </pre>
               ),
@@ -58,7 +60,7 @@ export function AssistantText({ content }: { content: string }) {
                 if (isInline) {
                   return (
                     <code
-                      className="rounded bg-zinc-700 px-1.5 py-0.5 text-xs"
+                      className="rounded bg-accent px-1.5 py-0.5 text-xs"
                       {...props}
                     >
                       {children}
@@ -96,7 +98,7 @@ export function AssistantText({ content }: { content: string }) {
                 <h3 className="text-sm font-bold mb-2">{children}</h3>
               ),
               blockquote: ({ children }) => (
-                <blockquote className="border-l-4 border-zinc-600 pl-3 italic text-zinc-400 mb-2">
+                <blockquote className="border-l-4 border-border pl-3 italic text-muted-foreground mb-2">
                   {children}
                 </blockquote>
               ),
@@ -116,14 +118,14 @@ export function AssistantText({ content }: { content: string }) {
                 </div>
               ),
               th: ({ children }) => (
-                <th className="border border-zinc-600 px-2 py-1 text-left bg-zinc-700">
+                <th className="border border-border px-2 py-1 text-left bg-accent">
                   {children}
                 </th>
               ),
               td: ({ children }) => (
-                <td className="border border-zinc-600 px-2 py-1">{children}</td>
+                <td className="border border-border px-2 py-1">{children}</td>
               ),
-              hr: () => <hr className="border-zinc-600 my-3" />,
+              hr: () => <hr className="border-border my-3" />,
               strong: ({ children }) => (
                 <strong className="font-bold">{children}</strong>
               ),
@@ -138,7 +140,7 @@ export function AssistantText({ content }: { content: string }) {
   );
 }
 
-function MessageBubble({ message, highlight = "", toolName = "", sessionId }: Props) {
+function MessageBubble({ message, highlight = "", toolName = "", sessionId, messageIndex }: Props) {
   // Tool result message (role "tool"): no tool name is carried on the message
   // itself, only tool_call_id — the caller resolves toolName from that.
   if (message.role === "tool") {
@@ -177,7 +179,7 @@ function MessageBubble({ message, highlight = "", toolName = "", sessionId }: Pr
 
   if (message.role === "user") {
     return (
-      <UserBubble message={message} highlight={highlight} sessionId={sessionId} />
+      <UserBubble message={message} highlight={highlight} sessionId={sessionId} messageIndex={messageIndex} />
     );
   }
 
@@ -188,16 +190,19 @@ function UserBubble({
   message,
   highlight,
   sessionId,
+  messageIndex,
 }: {
   message: Message;
   highlight: string;
   sessionId?: string;
+  messageIndex?: number;
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const handleConfirm = () => {
     if (!sessionId) return;
-    dispatchRestore(sessionId, message.content);
+    // Guard: don't restore while streaming — matches TUI blocking during active turn
+    dispatchRestore(sessionId, message.content, messageIndex);
     setConfirmOpen(false);
   };
 
@@ -209,11 +214,11 @@ function UserBubble({
           aria-label="Restore to input"
           title="Restore to input"
           onClick={() => setConfirmOpen(true)}
-          className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 shrink-0 mt-1 p-1.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring transition-opacity"
+          className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 shrink-0 mt-1 p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring transition-opacity"
         >
           <RotateCcw className="w-3.5 h-3.5" />
         </button>
-        <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-blue-600 text-white">
+        <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-primary text-primary-foreground">
           <pre className="whitespace-pre-wrap font-sans text-sm">
             {highlight.trim()
               ? highlightMatches(message.content, highlight)
@@ -227,10 +232,10 @@ function UserBubble({
           <DialogHeader>
             <DialogTitle>Restore message to input?</DialogTitle>
             <DialogDescription>
-              This will replace the current draft in the input field with the selected message. You can edit it before sending.
+              This will replace the current draft with this message and remove it and all following messages from history (like re-editing). You can edit and resend.
             </DialogDescription>
           </DialogHeader>
-          <div className="max-h-40 overflow-auto rounded bg-zinc-800 p-3 text-sm text-zinc-200 whitespace-pre-wrap">
+          <div className="max-h-40 overflow-auto rounded bg-muted p-3 text-sm text-foreground whitespace-pre-wrap">
             {message.content}
           </div>
           <DialogFooter>

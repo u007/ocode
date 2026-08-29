@@ -120,12 +120,23 @@ func TestNetHookKeywordEntropyNotApplied(t *testing.T) {
 	reg := NewRegistry("a3f9c2")
 	nh := NetHookEnabled(reg)
 
-	// Keyword+entropy should NOT be detected in net mode (file mode only)
-	text := "password = AbC123456789012345678901234567890"
+	// The generic keyword+entropy heuristic must NOT run in net (file) mode.
+	// `authorization: Bearer ...` is only caught by that heuristic (not by the
+	// name-gated env-var detector, since "authorization" is not a secret-name
+	// token), so it must survive net mode untouched.
+	bearer := hiEntropy(24)
+	text := "authorization: Bearer " + bearer
 	result := nh.ScanText(text)
-
-	// Should NOT be modified (keyword+entropy not detected in file mode)
 	if result != text {
-		t.Error("Keyword+entropy should not be detected in net mode")
+		t.Error("generic keyword+entropy should not be detected in net mode")
+	}
+
+	// Name-gated env-var assignments (e.g. password=) ARE redacted in net mode
+	// because they are unambiguous secrets, not noise-prone entropy guesses.
+	pw := hiEntropy(20)
+	text2 := "password = " + pw
+	result2 := nh.ScanText(text2)
+	if result2 == text2 {
+		t.Error("env-var assignment (password=) should be redacted in net mode")
 	}
 }

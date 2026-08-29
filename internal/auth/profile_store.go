@@ -31,7 +31,8 @@ func ProfileCredentialVersion() int64 {
 }
 
 // ProfileAuthPath returns the ocode-only sidecar path for per-profile credentials:
-//   <OcodeGlobalDataDir>/auth.profiles.json  (0600)
+//
+//	<OcodeGlobalDataDir>/auth.profiles.json  (0600)
 func ProfileAuthPath() (string, error) {
 	base, err := paths.OcodeGlobalDataDir()
 	if err != nil {

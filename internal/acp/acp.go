@@ -21,7 +21,7 @@ import (
 
 // JSON-RPC error codes.
 const (
-	errParse         = -32700
+	errParse          = -32700
 	errMethodNotFound = -32601
 	errInvalidParams  = -32602
 	errInternal       = -32603
@@ -332,9 +332,9 @@ func (s *server) writeJSON(v interface{}) {
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	s.writer.Write(data)  //nolint:errcheck
+	s.writer.Write(data)     //nolint:errcheck
 	s.writer.WriteByte('\n') //nolint:errcheck
-	s.writer.Flush()      //nolint:errcheck
+	s.writer.Flush()         //nolint:errcheck
 }
 
 func printUsage() {

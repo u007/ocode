@@ -179,7 +179,7 @@ export default function QuestionDialog({
     const multiple = !!q.multiple;
     return (
       <div className="space-y-3">
-        <p className="text-sm text-zinc-200">{q.question}</p>
+        <p className="text-sm text-foreground">{q.question}</p>
         <div className="space-y-1">
           {optionsPerQuestion[qi].map((opt) => {
             const checked = s.selected.has(opt.label);
@@ -199,18 +199,18 @@ export default function QuestionDialog({
                   className={`flex w-full items-start gap-2 rounded-md border p-2 text-left transition-colors ${
                     checked
                       ? "border-blue-500 bg-blue-500/10"
-                      : "border-zinc-700 bg-zinc-800 hover:bg-zinc-750"
+                      : "border-border bg-muted hover:bg-muted"
                   }`}
                 >
                   <Icon
-                    className={`mt-0.5 h-4 w-4 flex-shrink-0 ${checked ? "text-blue-400" : "text-zinc-500"}`}
+                    className={`mt-0.5 h-4 w-4 flex-shrink-0 ${checked ? "text-blue-400" : "text-muted-foreground"}`}
                   />
                   <span className="min-w-0">
-                    <span className="block text-sm text-zinc-100">
+                    <span className="block text-sm text-foreground">
                       {opt.label}
                     </span>
                     {opt.description && (
-                      <span className="block text-xs text-zinc-400">
+                      <span className="block text-xs text-muted-foreground">
                         {opt.description}
                       </span>
                     )}
@@ -223,7 +223,7 @@ export default function QuestionDialog({
                     onChange={(e) => setCustomText(qi, e.target.value)}
                     placeholder="Type your answer…"
                     disabled={loading}
-                    className="ml-6 bg-zinc-900 text-zinc-100"
+                    className="ml-6 bg-card text-foreground"
                   />
                 )}
               </div>
@@ -239,11 +239,11 @@ export default function QuestionDialog({
     // so the dialog stays until Submit resolves it server-side.
     <Dialog open={open}>
       <DialogContent
-        className="sm:max-w-lg bg-zinc-900 border-zinc-700"
+        className="sm:max-w-lg bg-card border-border"
         onInteractOutside={(e) => e.preventDefault()}
       >
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-zinc-100">
+          <DialogTitle className="flex items-center gap-2 text-foreground">
             <HelpCircle className="w-5 h-5 text-blue-400" />
             {questions.length === 1
               ? questions[0].header || "Question"

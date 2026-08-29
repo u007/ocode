@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"log"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/process"
@@ -235,6 +237,7 @@ type terminalProcessStat struct {
 	PID        int32   `json:"pid"`
 	CPUPercent float64 `json:"cpu_percent"`
 	MemBytes   uint64  `json:"mem_bytes"`
+	Command    string  `json:"command"`
 }
 
 // startTerminalProcessesEmitter launches the terminal CPU/mem poller once per
@@ -263,9 +266,92 @@ func gatherProcessStats(entries map[string]terminalProcEntry, cache map[int32]*p
 	stats := make([]terminalProcessStat, 0, len(entries))
 	for id, entry := range entries {
 		cpu, mem := sumProcessTree(entry.PID, cache, touched)
-		stats = append(stats, terminalProcessStat{ID: id, PID: entry.PID, CPUPercent: cpu, MemBytes: mem})
+		cmd := terminalCommand(entry.PID, cache)
+		stats = append(stats, terminalProcessStat{ID: id, PID: entry.PID, CPUPercent: cpu, MemBytes: mem, Command: cmd})
 	}
 	return stats
+}
+
+// shellNames are base executable names we treat as the interactive shell itself
+// rather than a command the user is actively running.
+var shellNames = map[string]bool{
+	"zsh": true, "bash": true, "sh": true, "fish": true, "dash": true,
+	"ksh": true, "tcsh": true, "csh": true, "powershell": true, "pwsh": true,
+	"cmd": true, "login": true, "tmux": true, "screen": true,
+}
+
+// isInteractiveShell reports whether cl looks like a shell started with only
+// login/interactive flags (e.g. "zsh -i -l") rather than running a command.
+func isInteractiveShell(cl string) bool {
+	fields := strings.Fields(cl)
+	if len(fields) == 0 {
+		return false
+	}
+	// A leading dash (e.g. "-zsh") marks a login shell in process listings.
+	base := strings.TrimPrefix(filepath.Base(fields[0]), "-")
+	if !shellNames[base] {
+		return false
+	}
+	for _, f := range fields[1:] {
+		if !strings.HasPrefix(f, "-") {
+			return false
+		}
+	}
+	return true
+}
+
+// collectCmdlines walks pid and its descendants, returning every non-empty
+// command line in the tree (depth-first). touched guards against cycles and the
+// shared cache of process handles is populated as we descend.
+func collectCmdlines(p *process.Process, cache map[int32]*process.Process, touched map[int32]bool) []string {
+	if touched[p.Pid] {
+		return nil
+	}
+	touched[p.Pid] = true
+	var out []string
+	if cl, err := p.Cmdline(); err == nil && cl != "" {
+		out = append(out, cl)
+	}
+	children, err := p.Children()
+	if err != nil {
+		return out
+	}
+	for _, c := range children {
+		cache[c.Pid] = c
+		out = append(out, collectCmdlines(c, cache, touched)...)
+	}
+	return out
+}
+
+// terminalCommand returns a best-effort human-readable command for a terminal's
+// process tree. It prefers a descendant that is actually running something
+// (e.g. "npm run dev") over the interactive shell itself, and falls back to the
+// shell's bare name when the terminal is idle (no current command). The walk
+// reuses the shared handle cache but its own touched set so it never disturbs
+// the CPU/mem cycle guard in sumProcessTree.
+func terminalCommand(pid int32, cache map[int32]*process.Process) string {
+	root, ok := cache[pid]
+	if !ok {
+		np, err := process.NewProcess(pid)
+		if err != nil {
+			return ""
+		}
+		root = np
+		cache[pid] = root
+	}
+	touched := make(map[int32]bool)
+	cmdlines := collectCmdlines(root, cache, touched)
+	for _, cl := range cmdlines {
+		if cl != "" && !isInteractiveShell(cl) {
+			return cl
+		}
+	}
+	// Idle: only the shell is present — report its bare name, not its argv
+	// (e.g. "zsh", never "zsh -i -l").
+	if name, err := root.Name(); err == nil && name != "" {
+		return name
+	}
+	return ""
 }
 
 func (h *Handler) terminalProcessesEmitterLoop() {

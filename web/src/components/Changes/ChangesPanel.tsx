@@ -63,13 +63,13 @@ export default function ChangesPanel({ session, active = true }: Props) {
   }, [pendingUndo, session, refresh]);
 
   if (loading && files.length === 0) {
-    return <div className="p-3 text-xs text-zinc-500">Loading changes…</div>;
+    return <div className="p-3 text-xs text-muted-foreground">Loading changes…</div>;
   }
 
   return (
     <div className="flex flex-col h-full">
-      <div className="p-3 border-b border-zinc-700">
-        <label className="text-xs text-zinc-500 uppercase tracking-wider">Changes</label>
+      <div className="p-3 border-b border-border">
+        <label className="text-xs text-muted-foreground uppercase tracking-wider">Changes</label>
         {error && <div className="mt-1 text-xs text-red-400">{error}</div>}
       </div>
       <div className="flex-1 overflow-y-auto">
@@ -82,7 +82,7 @@ export default function ChangesPanel({ session, active = true }: Props) {
         />
       </div>
       {selectedPath && (
-        <div className="border-t border-zinc-700 max-h-[40vh] overflow-y-auto">
+        <div className="border-t border-border max-h-[40vh] overflow-y-auto">
           <ChangesDiffView session={session} path={selectedPath} />
         </div>
       )}

@@ -49,17 +49,17 @@ export default function ThemeForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">Theme</h2>
+      <h2 className="text-sm font-semibold text-foreground">Theme</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
       {themes.length === 0 ? (
-        <div className="text-xs text-zinc-500">No themes available.</div>
+        <div className="text-xs text-muted-foreground">No themes available.</div>
       ) : (
         <div className="grid grid-cols-3 gap-1.5">
           {themes.map((t) => (
@@ -70,7 +70,7 @@ export default function ThemeForm() {
               className={`text-xs rounded px-2 py-1.5 truncate transition-colors ${
                 currentTheme === t.name
                   ? "bg-emerald-600/30 text-emerald-300 border border-emerald-600/50"
-                  : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+                  : "bg-muted text-muted-foreground hover:bg-accent"
               }`}
               title={t.name}
             >

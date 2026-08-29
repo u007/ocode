@@ -146,7 +146,7 @@ function renderGroup(id: SettingsGroupId) {
       );
     default:
       return (
-        <div className="text-sm text-zinc-500 p-6">
+        <div className="text-sm text-muted-foreground p-6">
           {OCODE_GROUPS.concat(OPENCODE_GROUPS).find((g) => g.id === id)?.label} — coming soon.
         </div>
       );
@@ -166,7 +166,7 @@ function NavSection({
 }) {
   return (
     <div className="mb-4">
-      <div className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+      <div className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         {title}
       </div>
       {groups.map((g) => (
@@ -176,8 +176,8 @@ function NavSection({
           onClick={() => onSelect(g.id)}
           className={`w-full text-left px-3 py-1.5 text-sm rounded-md transition-colors ${
             active === g.id
-              ? "bg-zinc-700 text-white"
-              : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+              ? "bg-accent text-accent-foreground"
+              : "text-muted-foreground hover:bg-muted hover:text-foreground"
           }`}
         >
           {g.label}
@@ -196,8 +196,8 @@ export default function SettingsPanel() {
   }, [])
 
   return (
-    <div className="flex flex-1 overflow-hidden bg-zinc-900">
-      <nav className="w-64 shrink-0 overflow-y-auto border-r border-zinc-700 py-3">
+    <div className="flex flex-1 overflow-hidden bg-card">
+      <nav className="w-64 shrink-0 overflow-y-auto border-r border-border py-3">
         <NavSection title="ocode" groups={OCODE_GROUPS} active={active} onSelect={setActive} />
         <NavSection title="opencode" groups={OPENCODE_GROUPS} active={active} onSelect={setActive} />
       </nav>

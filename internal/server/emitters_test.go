@@ -197,3 +197,58 @@ func makeGitRepo(t *testing.T, dir string) {
 	_ = os.WriteFile(filepath.Join(dir, "new.txt"), []byte("new\n"), 0o644)
 	run("add", "new.txt")
 }
+
+// TestTerminalProcessStatIncludesCommand: the emitted stat carries a non-empty
+// Command derived from the live process tree (here, the test binary itself), so
+// the Processes tab has something to render even when no child command runs.
+func TestTerminalProcessStatIncludesCommand(t *testing.T) {
+	h := NewHandler()
+	ch := h.bus.Subscribe([]string{"/proj/cmd"})
+	defer h.bus.Unsubscribe(ch)
+
+	h.terminalProcs.register("term-cmd", terminalProcEntry{Project: "/proj/cmd", PID: int32(os.Getpid())})
+	h.startTerminalProcessesEmitter()
+
+	for i := 0; i < 50; i++ {
+		select {
+		case env := <-ch:
+			if env.Event != "terminal_processes" {
+				continue
+			}
+			stats, ok := env.Data.([]terminalProcessStat)
+			if !ok || len(stats) != 1 {
+				t.Fatalf("terminal_processes data = %#v, want one terminalProcessStat", env.Data)
+			}
+			if stats[0].Command == "" {
+				t.Fatalf("stat.Command = %q, want non-empty command line", stats[0].Command)
+			}
+			if isInteractiveShell(stats[0].Command) {
+				t.Fatalf("stat.Command = %q, must not be reported as an idle interactive shell", stats[0].Command)
+			}
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatal("no terminal_processes envelope within 5s")
+}
+
+// TestIsInteractiveShell: only login/interactive shells are skipped when picking
+// the "running command"; a shell actually executing a script is not.
+func TestIsInteractiveShell(t *testing.T) {
+	cases := map[string]bool{
+		"zsh":                 true,
+		"zsh -i -l":           true,
+		"-zsh":                true,
+		"bash -l":             true,
+		"bash run.sh":         false,
+		"npm run dev":         false,
+		"node server.js":      false,
+		"/usr/bin/fish":       true,
+		"/usr/bin/fish -c ls": false,
+	}
+	for cl, want := range cases {
+		if got := isInteractiveShell(cl); got != want {
+			t.Errorf("isInteractiveShell(%q) = %v, want %v", cl, got, want)
+		}
+	}
+}

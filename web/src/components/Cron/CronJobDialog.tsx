@@ -149,17 +149,17 @@ export default function CronJobDialog({ open, job, onOpenChange, onSave }: Props
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto bg-zinc-900 border-zinc-700 text-zinc-100">
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto bg-card border-border text-foreground">
         <DialogHeader>
           <DialogTitle>{job ? "Edit cron job" : "Add cron job"}</DialogTitle>
-          <DialogDescription className="text-zinc-400">
+          <DialogDescription className="text-muted-foreground">
             Schedule a prompt to run later, repeat on an interval, or execute on a cron expression.
           </DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-4 md:grid-cols-2">
           <label className="grid gap-2 text-sm">
-            <span className="text-zinc-400">Name</span>
+            <span className="text-muted-foreground">Name</span>
             <Input
               value={state.name}
               onChange={(e) => setState((prev) => ({ ...prev, name: e.target.value }))}
@@ -167,13 +167,13 @@ export default function CronJobDialog({ open, job, onOpenChange, onSave }: Props
             />
           </label>
           <label className="grid gap-2 text-sm">
-            <span className="text-zinc-400">Permission mode</span>
+            <span className="text-muted-foreground">Permission mode</span>
             <select
               value={state.permMode}
               onChange={(e) =>
                 setState((prev) => ({ ...prev, permMode: e.target.value as CronPermissionMode }))
               }
-              className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100"
+              className="h-10 rounded-md border border-border bg-background px-3 text-sm text-foreground"
             >
               <option value="normal">normal</option>
               <option value="yolo">yolo</option>
@@ -181,27 +181,27 @@ export default function CronJobDialog({ open, job, onOpenChange, onSave }: Props
             </select>
           </label>
           <label className="grid gap-2 text-sm md:col-span-2">
-            <span className="text-zinc-400">Message</span>
+            <span className="text-muted-foreground">Message</span>
             <textarea
               value={state.message}
               onChange={(e) => setState((prev) => ({ ...prev, message: e.target.value }))}
               rows={5}
-              className="min-h-28 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500"
+              className="min-h-28 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
               placeholder="The prompt to run"
             />
           </label>
           <label className="grid gap-2 text-sm md:col-span-2">
-            <span className="text-zinc-400">Notes</span>
+            <span className="text-muted-foreground">Notes</span>
             <textarea
               value={state.notes}
               onChange={(e) => setState((prev) => ({ ...prev, notes: e.target.value }))}
               rows={3}
-              className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500"
+              className="rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
               placeholder="Optional description"
             />
           </label>
           <label className="grid gap-2 text-sm">
-            <span className="text-zinc-400">Owner / workdir</span>
+            <span className="text-muted-foreground">Owner / workdir</span>
             <Input
               value={state.owner}
               onChange={(e) => setState((prev) => ({ ...prev, owner: e.target.value }))}
@@ -209,7 +209,7 @@ export default function CronJobDialog({ open, job, onOpenChange, onSave }: Props
             />
           </label>
           <label className="grid gap-2 text-sm">
-            <span className="text-zinc-400">Deliver to</span>
+            <span className="text-muted-foreground">Deliver to</span>
             <Input
               value={state.deliverTo}
               onChange={(e) => setState((prev) => ({ ...prev, deliverTo: e.target.value }))}
@@ -218,16 +218,16 @@ export default function CronJobDialog({ open, job, onOpenChange, onSave }: Props
           </label>
         </div>
 
-        <div className="grid gap-4 rounded-lg border border-zinc-700 bg-zinc-950/60 p-4">
+        <div className="grid gap-4 rounded-lg border border-border bg-background/60 p-4">
           <div className="flex items-center justify-between gap-4">
             <div>
-              <div className="text-sm font-medium text-zinc-100">Schedule</div>
-              <div className="text-xs text-zinc-500">Choose when the job should fire.</div>
+              <div className="text-sm font-medium text-foreground">Schedule</div>
+              <div className="text-xs text-muted-foreground">Choose when the job should fire.</div>
             </div>
             <select
               value={state.scheduleKind}
               onChange={(e) => setState((prev) => ({ ...prev, scheduleKind: e.target.value as CronScheduleKind }))}
-              className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100"
+              className="h-10 rounded-md border border-border bg-background px-3 text-sm text-foreground"
             >
               <option value="at">once</option>
               <option value="every">every</option>
@@ -237,7 +237,7 @@ export default function CronJobDialog({ open, job, onOpenChange, onSave }: Props
 
           {state.scheduleKind === "at" && (
             <label className="grid gap-2 text-sm">
-              <span className="text-zinc-400">Run at</span>
+              <span className="text-muted-foreground">Run at</span>
               <Input
                 type="datetime-local"
                 value={state.atValue}
@@ -248,7 +248,7 @@ export default function CronJobDialog({ open, job, onOpenChange, onSave }: Props
 
           {state.scheduleKind === "every" && (
             <label className="grid gap-2 text-sm">
-              <span className="text-zinc-400">Interval (ms)</span>
+              <span className="text-muted-foreground">Interval (ms)</span>
               <Input
                 type="number"
                 min={1}
@@ -262,7 +262,7 @@ export default function CronJobDialog({ open, job, onOpenChange, onSave }: Props
           {state.scheduleKind === "cron" && (
             <div className="grid gap-4 md:grid-cols-2">
               <label className="grid gap-2 text-sm md:col-span-2">
-                <span className="text-zinc-400">Cron expression</span>
+                <span className="text-muted-foreground">Cron expression</span>
                 <Input
                   value={state.expr}
                   onChange={(e) => setState((prev) => ({ ...prev, expr: e.target.value }))}
@@ -270,7 +270,7 @@ export default function CronJobDialog({ open, job, onOpenChange, onSave }: Props
                 />
               </label>
               <label className="grid gap-2 text-sm md:col-span-2">
-                <span className="text-zinc-400">Timezone</span>
+                <span className="text-muted-foreground">Timezone</span>
                 <Input
                   value={state.tz}
                   onChange={(e) => setState((prev) => ({ ...prev, tz: e.target.value }))}
@@ -281,9 +281,9 @@ export default function CronJobDialog({ open, job, onOpenChange, onSave }: Props
           )}
         </div>
 
-        <details className="rounded-lg border border-zinc-700 bg-zinc-950/60 p-4">
-          <summary className="cursor-pointer text-sm font-medium text-zinc-200">Raw JSON preview</summary>
-          <pre className="mt-3 overflow-auto text-xs text-zinc-300">{preview}</pre>
+        <details className="rounded-lg border border-border bg-background/60 p-4">
+          <summary className="cursor-pointer text-sm font-medium text-foreground">Raw JSON preview</summary>
+          <pre className="mt-3 overflow-auto text-xs text-foreground">{preview}</pre>
         </details>
 
         {error && <div className="rounded-md border border-red-900 bg-red-950/60 px-3 py-2 text-sm text-red-200">{error}</div>}

@@ -76,7 +76,7 @@ function SessionDot({ status }: { status: SessionStatus }) {
       className={`shrink-0 h-2 w-2 rounded-full ${
         status === "running"
           ? "bg-blue-500 animate-pulse"
-          : "bg-zinc-500"
+          : "bg-muted"
       }`}
     />
   );

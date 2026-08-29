@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { useChatDispatch, useChatStateRef } from "../../stores/chatStore";
+import { useChatDispatch, useChatStateRef, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { eventBus } from "../../lib/eventBus";
 import { api } from "../../api/client";
@@ -116,7 +116,11 @@ export default function SessionTabSync() {
     api
       .getSessionState(activeTabId)
       .then((state) => {
-        if (!cancelled) applyReconcileState(chatDispatch, activeTabId, state);
+        if (!cancelled) {
+          const slice = getSessionSlice(chatStateRef.current, activeTabId);
+          const hasPendingAsk = !!(slice.pendingPermission || slice.pendingQuestion);
+          applyReconcileState(chatDispatch, activeTabId, state, hasPendingAsk, slice.turnActive);
+        }
       })
       .catch(() => {
         // Server unreachable / session gone — the watchdog retries while the

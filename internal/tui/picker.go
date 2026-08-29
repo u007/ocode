@@ -198,7 +198,7 @@ func refreshModelsCacheCmd() tea.Cmd {
 	}
 }
 
-// openModelPicker opens the model picker showing favorites and recently used
+// openModelPicker opens the model picker showing recently used and favorites
 // models immediately, then loads the full provider model list in the background.
 // Returns a tea.Cmd for the async load so the caller can return it from Update.
 func (m *model) openModelPicker() tea.Cmd {
@@ -242,14 +242,6 @@ func (m *model) openModelPicker() tea.Cmd {
 		shown[value] = true
 	}
 
-	if len(favorites) > 0 {
-		appendHeader("★ Favorites")
-		for _, f := range favorites {
-			appendModel("  ★ "+modelPickerLabel(f), f)
-		}
-		appendHeader("")
-	}
-
 	var recentModels []string
 	for _, r := range recents {
 		if !shown[r] {
@@ -260,6 +252,20 @@ func (m *model) openModelPicker() tea.Cmd {
 		appendHeader("Recently Used")
 		for _, r := range recentModels {
 			appendModel("  "+modelPickerLabel(r), r)
+		}
+		appendHeader("")
+	}
+
+	var favModels []string
+	for _, f := range favorites {
+		if !shown[f] {
+			favModels = append(favModels, f)
+		}
+	}
+	if len(favModels) > 0 {
+		appendHeader("★ Favorites")
+		for _, f := range favModels {
+			appendModel("  ★ "+modelPickerLabel(f), f)
 		}
 		appendHeader("")
 	}
@@ -357,7 +363,7 @@ func loadFullModelPickerCmd(shown map[string]bool, imageOnly bool) tea.Cmd {
 }
 
 // buildFullModelPickerItems rebuilds the model picker items synchronously with
-// the full model list (favorites + recents + all provider sections). Used by
+// the full model list (recents + favorites + all provider sections). Used by
 // refreshModelPickerItems when the cache has just been refreshed and data is
 // already in memory.
 func (m *model) buildFullModelPickerItems() {
@@ -403,14 +409,6 @@ func (m *model) buildFullModelPickerItems() {
 		shown[value] = true
 	}
 
-	if len(favorites) > 0 {
-		appendHeader("★ Favorites")
-		for _, f := range favorites {
-			appendModel("  ★ "+modelPickerLabel(f), f)
-		}
-		appendHeader("")
-	}
-
 	var recentModels []string
 	for _, r := range recents {
 		if !shown[r] {
@@ -421,6 +419,20 @@ func (m *model) buildFullModelPickerItems() {
 		appendHeader("Recently Used")
 		for _, r := range recentModels {
 			appendModel("  "+modelPickerLabel(r), r)
+		}
+		appendHeader("")
+	}
+
+	var favModels []string
+	for _, f := range favorites {
+		if !shown[f] {
+			favModels = append(favModels, f)
+		}
+	}
+	if len(favModels) > 0 {
+		appendHeader("★ Favorites")
+		for _, f := range favModels {
+			appendModel("  ★ "+modelPickerLabel(f), f)
 		}
 		appendHeader("")
 	}

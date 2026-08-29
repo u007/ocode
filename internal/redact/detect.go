@@ -16,8 +16,12 @@ type Span struct {
 
 // DetectOpts controls detector behavior.
 type DetectOpts struct {
-	// FileContent disables keyword+entropy heuristics and restricts
-	// detection to known-format matches and custom words only.
+	// FileContent disables the generic keyword+entropy heuristic (which is
+	// prone to false positives on arbitrary file content) and restricts that
+	// family to known-format matches and custom words only. Assignment-style
+	// env-var detection (addSpansFromEnvMatches) runs in BOTH modes, because
+	// config files (.env, YAML) are a primary secret-hiding spot and the
+	// detection is name-gated (low false-positive).
 	FileContent bool
 }
 
@@ -58,7 +62,58 @@ var (
 
 	// Base64 image chunk
 	base64ImageRe = regexp.MustCompile(`[a-zA-Z0-9+/]{100,}=`)
+
+	// Env-var / assignment-style secrets (both modes). Line-anchored so the
+	// match is an actual `KEY = value` assignment, not a substring inside prose.
+	// Group 1 = variable name. The value is captured without its surrounding
+	// quotes (so quotes survive in the redacted output) via one of three
+	// alternatives: double-quoted inner (group 2), single-quoted inner (group 3),
+	// or an unquoted run (group 4) that stops at whitespace — so a trailing
+	// `# comment` is excluded and the value can contain `:@/#$%=+` and env
+	// interpolation (`${OTHER}`). Unquoted values need >=4 chars to align with the
+	// strong-name minimum; quoted values may be any non-empty length.
+	envAssignRe = regexp.MustCompile(`(?im)^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|([^\s"']{4,}))`)
 )
+
+// envSecretTokens are trailing underscore-delimited name segments that mark a
+// variable as a secret. A name matches if it equals a token exactly OR ends in
+// `_<TOKEN>` (so `MONKEY` does NOT match `KEY`, but `ENCRYPTION_KEY` and
+// `AWS_SECRET_ACCESS_KEY` do). This mirrors the suffix families already
+// recognized by gate.sensitivePrefixRe so tier-1 redaction aligns with the
+// tier-2 scan trigger.
+var envSecretTokens = []string{
+	"SECRET", "SECRET_KEY", "PRIVATE", "PRIVATE_KEY", "PASSWORD", "PASSWD",
+	"PWD", "PASSPHRASE", "TOKEN", "CREDENTIAL", "CREDENTIALS", "ENCRYPTION",
+	"ENCRYPTION_KEY", "AUTH", "AUTH_TOKEN", "AUTH_KEY", "CLIENT_SECRET",
+	"SESSION", "SESSION_SECRET", "ACCESS_TOKEN", "ACCESS_KEY", "API_KEY",
+	"APIKEY", "KEY", "SALT",
+}
+
+// envSecretWeakTokens are trailing segments that may hold a secret but also
+// commonly hold low-entropy identifiers (PROJECT_ID, ACCOUNT_ID, CLIENT_ID).
+// These are only redacted when the value is high-entropy, to avoid masking
+// ordinary identifiers.
+var envSecretWeakTokens = []string{
+	"ID",
+}
+
+// isEnvSecretName reports whether a variable name looks secret. matched is true
+// when the (uppercased) name equals a token or ends in `_<TOKEN>`; strong is
+// true for the high-confidence tokens (redact regardless of value entropy).
+func isEnvSecretName(name string) (matched, strong bool) {
+	u := strings.ToUpper(name)
+	for _, tok := range envSecretWeakTokens {
+		if u == tok || strings.HasSuffix(u, "_"+tok) {
+			return true, false
+		}
+	}
+	for _, tok := range envSecretTokens {
+		if u == tok || strings.HasSuffix(u, "_"+tok) {
+			return true, true
+		}
+	}
+	return false, false
+}
 
 // keyword-adjacent entropy patterns (chat mode only)
 var keywordRe *regexp.Regexp
@@ -110,6 +165,9 @@ func Detect(text string, customWords []string, opts DetectOpts) []Span {
 		}
 	}
 
+	// Assignment-style env-var secrets (both modes)
+	addSpansFromEnvMatches(&spans, text, envAssignRe.FindAllStringSubmatchIndex(text, -1))
+
 	// Chat mode: keyword+entropy heuristics
 	if !opts.FileContent {
 		addSpansFromKeywordMatches(&spans, text, keywordRe.FindAllStringSubmatchIndex(text, -1))
@@ -151,6 +209,60 @@ func addSpansFromKeywordMatches(spans *[]Span, text string, matches [][]int) {
 	}
 }
 
+// addSpansFromEnvMatches appends spans for env-var/assignment-detected secrets.
+// The variable name is gated by isEnvSecretName; the *value* is what gets
+// redacted. The value arrives in one of three capture groups (see envAssignRe):
+// group 2 = double-quoted inner, group 3 = single-quoted inner, group 4 =
+// unquoted run. Strong names (e.g. *_SECRET, *_KEY, *_TOKEN) are redacted
+// whenever the value is non-trivial (len >= 4). Weak names (e.g. *_ID) are only
+// redacted when the value is high-entropy, to avoid masking ordinary identifiers
+// like PROJECT_ID / ACCOUNT_ID / CLIENT_ID.
+func addSpansFromEnvMatches(spans *[]Span, text string, matches [][]int) {
+	for _, m := range matches {
+		if len(m) < 10 {
+			continue
+		}
+		// m[0]:m[1] = full match, m[2]:m[3] = name, value in groups 2/3/4.
+		name := text[m[2]:m[3]]
+
+		// Pick the value group that actually matched (others are -1).
+		valStart, valEnd := -1, -1
+		switch {
+		case m[4] >= 0 && m[5] >= 0:
+			valStart, valEnd = m[4], m[5] // double-quoted inner
+		case m[6] >= 0 && m[7] >= 0:
+			valStart, valEnd = m[6], m[7] // single-quoted inner
+		case m[8] >= 0 && m[9] >= 0:
+			valStart, valEnd = m[8], m[9] // unquoted run
+		}
+		if valStart < 0 {
+			continue
+		}
+		value := text[valStart:valEnd]
+
+		matched, strong := isEnvSecretName(name)
+		if !matched {
+			continue
+		}
+		if strong {
+			if len(value) < 4 {
+				continue
+			}
+		} else {
+			// Weak name (e.g. *_ID): only redact genuinely secret-looking
+			// values. Require length, high entropy, AND at least one letter so
+			// purely-numeric identifiers (CLIENT_ID=1234567890,
+			// PROJECT_ID=prod) are not masked — numeric strings have entropy
+			// ~3.32 which would otherwise clear the entropy bar.
+			if len(value) < 12 || perCharEntropy(value) < 3.0 || !hasLetter(value) {
+				continue
+			}
+		}
+
+		*spans = append(*spans, Span{Start: valStart, End: valEnd, Kind: "env_secret: " + name})
+	}
+}
+
 // filterFalsePositives removes spans that are known-safe patterns.
 func filterFalsePositives(spans []Span, text string) []Span {
 	// Collect safe spans to exclude
@@ -173,9 +285,17 @@ func filterFalsePositives(spans []Span, text string) []Span {
 		return spans
 	}
 
-	// Filter out any span contained within a safe span
+	// Filter out any span contained within a safe span. Name-gated
+	// env-var assignment spans (env_secret: *) are never discarded: a long
+	// base64/hex secret assigned to e.g. ENCRYPTION_KEY can coincidentally
+	// resemble a Git SHA or base64 image chunk, but the name gate already
+	// validated it as a secret, so the safe-pattern guard must not override it.
 	var filtered []Span
 	for _, s := range spans {
+		if strings.HasPrefix(s.Kind, "env_secret:") {
+			filtered = append(filtered, s)
+			continue
+		}
 		excluded := false
 		for _, safe := range safeSpans {
 			if s.Start >= safe.Start && s.End <= safe.End {
@@ -230,6 +350,40 @@ func shannonEntropy(s string) float64 {
 	}
 
 	return entropy * float64(utf8.RuneCountInString(s))
+}
+
+// perCharEntropy returns the Shannon entropy per character of s (0-8 range for
+// the observed alphabet), independent of string length. Used by the env-var
+// detector's weak-name gate, where the length-scaled shannonEntropy would make
+// any multi-character string clear a fixed threshold.
+func perCharEntropy(s string) float64 {
+	if s == "" {
+		return 0
+	}
+	freq := make(map[rune]float64)
+	for _, r := range s {
+		freq[r]++
+	}
+	var e float64
+	n := float64(len(s))
+	for _, c := range freq {
+		p := c / n
+		e -= p * math.Log2(p)
+	}
+	return e
+}
+
+// hasLetter reports whether s contains at least one ASCII letter. Used to keep
+// purely-numeric identifiers (CLIENT_ID=1234567890) from being masked by the
+// weak-name gate.
+func hasLetter(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return true
+		}
+	}
+	return false
 }
 
 // entropyThreshold returns the minimum entropy for a candidate of given length.

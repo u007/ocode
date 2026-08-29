@@ -67,7 +67,7 @@ export default function SessionSubTabs() {
     <div
       ref={scrollRef}
       onWheel={handleWheel}
-      className="flex items-center h-9 px-2 gap-1 bg-zinc-900 border-b border-zinc-700 overflow-x-auto overflow-y-hidden scrollbar-hide flex-nowrap min-w-0 w-full touch-pan-x overscroll-x-contain"
+      className="flex items-center h-9 px-2 gap-1 bg-card border-b border-border overflow-x-auto overflow-y-hidden scrollbar-hide flex-nowrap min-w-0 w-full touch-pan-x overscroll-x-contain"
       style={{ WebkitOverflowScrolling: "touch" } as React.CSSProperties}
     >
       {subTabs.map((tab) => {
@@ -85,22 +85,22 @@ export default function SessionSubTabs() {
                 : "bg-red-900/60 text-red-200"
               : contextPct >= 65
                 ? isActive
-                  ? "bg-yellow-500 text-zinc-900"
+                  ? "bg-yellow-500 text-foreground"
                   : "bg-yellow-900/60 text-yellow-200"
                 : isActive
-                  ? "bg-zinc-600 text-white"
-                  : "bg-zinc-800 text-zinc-300"
+                  ? "bg-accent text-accent-foreground"
+                  : "bg-muted text-foreground"
             : isActive
-              ? "bg-zinc-600 text-white"
-              : "bg-zinc-800 text-zinc-300";
+              ? "bg-accent text-accent-foreground"
+              : "bg-muted text-foreground";
         return (
           <button
             key={tab.id}
             onClick={() => dispatch({ type: "SET_TAB_SUB_TAB", id: activeSessionTab.id, subTab: tab.id })}
             className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
               isActive
-                ? "bg-zinc-700 text-white"
-                : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+                ? "bg-accent text-accent-foreground"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted"
             }`}
           >
             <Icon className="w-4 h-4" />

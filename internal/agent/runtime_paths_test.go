@@ -190,7 +190,7 @@ func TestRuntimePathsSection_Cap(t *testing.T) {
 	}
 	// Instead create 15 distinct versions
 	for i := 0; i < 15; i++ {
-		bin := filepath.Join(nvm, "versions", "node", strings.Join([]string{"v1", strings.Repeat("0", 1) + string(rune('0' + i))}, "."), "bin")
+		bin := filepath.Join(nvm, "versions", "node", strings.Join([]string{"v1", strings.Repeat("0", 1) + string(rune('0'+i))}, "."), "bin")
 		if err := os.MkdirAll(bin, 0755); err != nil {
 			t.Fatal(err)
 		}

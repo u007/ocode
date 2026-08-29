@@ -28,14 +28,14 @@ export default function ChangesDiffView({ session, path }: Props) {
   }, [session, path]);
 
   if (error) return <div className="p-2 text-xs text-red-400">{error}</div>;
-  if (patch === null) return <div className="p-2 text-xs text-zinc-500">Loading diff…</div>;
+  if (patch === null) return <div className="p-2 text-xs text-muted-foreground">Loading diff…</div>;
 
   return (
     <div className="p-2">
-      <div className="text-xs text-zinc-500 mb-2 font-mono">{path}</div>
+      <div className="text-xs text-muted-foreground mb-2 font-mono">{path}</div>
       <pre className="text-xs font-mono whitespace-pre-wrap">
         {patch.split("\n").map((line, i) => {
-          let color = "text-zinc-400";
+          let color = "text-muted-foreground";
           if (line.startsWith("+") && !line.startsWith("+++")) color = "text-green-400";
           else if (line.startsWith("-") && !line.startsWith("---")) color = "text-red-400";
           else if (line.startsWith("@@")) color = "text-blue-400";

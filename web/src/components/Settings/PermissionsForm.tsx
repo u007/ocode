@@ -58,24 +58,24 @@ export default function PermissionsForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">Permissions</h2>
+      <h2 className="text-sm font-semibold text-foreground">Permissions</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
 
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input type="checkbox" checked={mode} onChange={(e) => setMode(e.target.checked)} />
         Yolo mode (auto-approve all tool calls)
       </label>
 
-      <div className="border-t border-zinc-700 pt-4 space-y-4">
-        <div className="text-xs font-semibold text-zinc-300">Auto-approval (LLM-assisted)</div>
-        <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <div className="border-t border-border pt-4 space-y-4">
+        <div className="text-xs font-semibold text-foreground">Auto-approval (LLM-assisted)</div>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
           <input
             type="checkbox"
             checked={Boolean(auto.enabled)}
@@ -83,7 +83,7 @@ export default function PermissionsForm() {
           />
           Enabled
         </label>
-        <label className="flex items-center gap-2 text-xs text-zinc-400">
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
           <input
             type="checkbox"
             checked={Boolean(auto.allow_destructive)}
@@ -92,9 +92,9 @@ export default function PermissionsForm() {
           Allow destructive actions
         </label>
         <div className="space-y-1.5">
-          <label className="text-xs text-zinc-500">Permission model</label>
+          <label className="text-xs text-muted-foreground">Permission model</label>
           <div className="flex items-center gap-2">
-            <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={auto.model || undefined}>
+            <div className="flex-1 h-8 px-3 rounded-md bg-muted border border-border text-xs text-foreground flex items-center truncate" title={auto.model || undefined}>
               {auto.model || "(not set — falls back to small model)"}
             </div>
             <Button size="sm" variant="outline" type="button" onClick={() => setPermDialogOpen(true)} className="h-8 text-xs">
@@ -112,17 +112,17 @@ export default function PermissionsForm() {
           />
         </div>
         <div className="space-y-1.5">
-          <label className="text-xs text-zinc-500">Prompt</label>
+          <label className="text-xs text-muted-foreground">Prompt</label>
           <textarea
             value={auto.prompt ?? ""}
             onChange={(e) => setAuto({ ...auto, prompt: e.target.value })}
             rows={3}
-            className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200"
+            className="w-full rounded-md border border-border bg-muted px-2 py-1.5 text-xs text-foreground"
           />
         </div>
         <div className="grid grid-cols-3 gap-2">
           <div className="space-y-1.5">
-            <label className="text-xs text-zinc-500">Max context bytes</label>
+            <label className="text-xs text-muted-foreground">Max context bytes</label>
             <Input
               type="number"
               value={auto.max_context_bytes ?? 0}
@@ -131,7 +131,7 @@ export default function PermissionsForm() {
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-xs text-zinc-500">Max sources</label>
+            <label className="text-xs text-muted-foreground">Max sources</label>
             <Input
               type="number"
               value={auto.max_context_sources ?? 0}
@@ -140,7 +140,7 @@ export default function PermissionsForm() {
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-xs text-zinc-500">Max lines/source</label>
+            <label className="text-xs text-muted-foreground">Max lines/source</label>
             <Input
               type="number"
               value={auto.max_context_lines_per_source ?? 0}

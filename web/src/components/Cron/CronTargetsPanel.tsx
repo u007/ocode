@@ -51,11 +51,11 @@ export default function CronTargetsPanel({ targets, onSave }: Props) {
   };
 
   return (
-    <section className="rounded-lg border border-zinc-700 bg-zinc-900/80 p-4">
+    <section className="rounded-lg border border-border bg-card/80 p-4">
       <div className="mb-4 flex items-center justify-between gap-4">
         <div>
-          <h2 className="text-sm font-semibold text-zinc-100">Targets</h2>
-          <p className="text-xs text-zinc-500">Map project workdirs to Telegram chat IDs.</p>
+          <h2 className="text-sm font-semibold text-foreground">Targets</h2>
+          <p className="text-xs text-muted-foreground">Map project workdirs to Telegram chat IDs.</p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => setRows((prev) => [...prev, { workdir: "", chatId: "" }])}>
@@ -69,12 +69,12 @@ export default function CronTargetsPanel({ targets, onSave }: Props) {
 
       <div className="space-y-2">
         {rows.length === 0 ? (
-          <div className="rounded-md border border-dashed border-zinc-700 px-3 py-6 text-sm text-zinc-500">
+          <div className="rounded-md border border-dashed border-border px-3 py-6 text-sm text-muted-foreground">
             No targets configured.
           </div>
         ) : (
           rows.map((row, idx) => (
-            <div key={`${row.workdir}-${idx}`} className="grid gap-2 md:grid-cols-[minmax(0,1fr)_160px_auto] items-center rounded-md border border-zinc-700 bg-zinc-950/70 p-2">
+            <div key={`${row.workdir}-${idx}`} className="grid gap-2 md:grid-cols-[minmax(0,1fr)_160px_auto] items-center rounded-md border border-border bg-background/70 p-2">
               <Input
                 value={row.workdir}
                 onChange={(e) =>
@@ -102,10 +102,10 @@ export default function CronTargetsPanel({ targets, onSave }: Props) {
         )}
       </div>
 
-      <div className="mt-3 text-xs text-zinc-500">
+      <div className="mt-3 text-xs text-muted-foreground">
         Blank rows are ignored on save. Non-zero chat IDs are persisted; missing rows remove existing mappings.
       </div>
-      <div className="mt-1 text-xs text-zinc-600">
+      <div className="mt-1 text-xs text-foreground">
         Saving {Object.keys(preview).length} target{Object.keys(preview).length === 1 ? "" : "s"}.
       </div>
       {error && <div className="mt-3 rounded-md border border-red-900 bg-red-950/60 px-3 py-2 text-sm text-red-200">{error}</div>}

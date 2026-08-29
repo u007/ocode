@@ -45,16 +45,16 @@ export default function OcrForm() {
   if (loading || !cfg) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">OCR</h2>
+      <h2 className="text-sm font-semibold text-foreground">OCR</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input
           type="checkbox"
           checked={Boolean(cfg.enabled)}
@@ -63,7 +63,7 @@ export default function OcrForm() {
         Enabled
       </label>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Backend</label>
+        <label className="text-xs text-muted-foreground">Backend</label>
         <Input
           value={String(cfg.backend ?? "")}
           onChange={(e) => setCfg({ ...cfg, backend: e.target.value as OcrConfig["backend"] })}
@@ -71,7 +71,7 @@ export default function OcrForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">OpenAI base URL</label>
+        <label className="text-xs text-muted-foreground">OpenAI base URL</label>
         <Input
           value={String(cfg.openai?.base_url ?? "")}
           onChange={(e) => setCfg({ ...cfg, openai: { ...cfg.openai, base_url: e.target.value } })}
@@ -79,9 +79,9 @@ export default function OcrForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">OpenAI model</label>
+        <label className="text-xs text-muted-foreground">OpenAI model</label>
         <div className="flex items-center gap-2">
-          <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={cfg.openai?.model || undefined}>
+          <div className="flex-1 h-8 px-3 rounded-md bg-muted border border-border text-xs text-foreground flex items-center truncate" title={cfg.openai?.model || undefined}>
             {cfg.openai?.model || "Not set"}
           </div>
           <Button size="sm" variant="outline" type="button" onClick={() => setOcrDialogOpen(true)} className="h-8 text-xs">
@@ -97,7 +97,7 @@ export default function OcrForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Paddle endpoint</label>
+        <label className="text-xs text-muted-foreground">Paddle endpoint</label>
         <Input
           value={String(cfg.paddle?.endpoint ?? "")}
           onChange={(e) => setCfg({ ...cfg, paddle: { ...cfg.paddle, endpoint: e.target.value } })}
@@ -105,7 +105,7 @@ export default function OcrForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Paddle variant</label>
+        <label className="text-xs text-muted-foreground">Paddle variant</label>
         <Input
           value={String(cfg.paddle?.variant ?? "")}
           onChange={(e) => setCfg({ ...cfg, paddle: { ...cfg.paddle, variant: e.target.value } })}

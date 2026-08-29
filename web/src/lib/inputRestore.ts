@@ -19,12 +19,14 @@ export const RESTORE_EVENT = "ocode:restore-draft";
 export interface RestoreDetail {
   sessionId: string;
   text: string;
+  /** Index in the messages array of the restored message. Truncation keeps messages[0 .. index-1]. */
+  index?: number;
 }
 
-export function dispatchRestore(sessionId: string, text: string) {
+export function dispatchRestore(sessionId: string, text: string, index?: number) {
   window.dispatchEvent(
     new CustomEvent<RestoreDetail>(RESTORE_EVENT, {
-      detail: { sessionId, text },
+      detail: { sessionId, text, index },
     }),
   );
 }

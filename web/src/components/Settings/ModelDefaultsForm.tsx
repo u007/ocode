@@ -60,20 +60,20 @@ export default function ModelDefaultsForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">Model Defaults & Recap</h2>
+      <h2 className="text-sm font-semibold text-foreground">Model Defaults & Recap</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
 
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Small model</label>
+        <label className="text-xs text-muted-foreground">Small model</label>
         <div className="flex items-center gap-2">
-          <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={smallModel || undefined}>
+          <div className="flex-1 h-8 px-3 rounded-md bg-muted border border-border text-xs text-foreground flex items-center truncate" title={smallModel || undefined}>
             {smallModel || "Not set"}
           </div>
           <Button size="sm" variant="outline" type="button" onClick={() => setDialogOpen(true)} className="h-8 text-xs">
@@ -82,15 +82,15 @@ export default function ModelDefaultsForm() {
         </div>
         <ModelDialog open={dialogOpen} onClose={() => setDialogOpen(false)} purpose="small" />
       </div>
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input type="checkbox" checked={smallModelEnabled} onChange={(e) => setSmallModelEnabled(e.target.checked)} />
         Small model enabled
       </label>
 
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Recap model</label>
+        <label className="text-xs text-muted-foreground">Recap model</label>
         <div className="flex items-center gap-2">
-          <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={recapModel || undefined}>
+          <div className="flex-1 h-8 px-3 rounded-md bg-muted border border-border text-xs text-foreground flex items-center truncate" title={recapModel || undefined}>
             {recapModel || "Not set"}
           </div>
           <Button size="sm" variant="outline" type="button" onClick={() => setRecapDialogOpen(true)} className="h-8 text-xs">
@@ -105,12 +105,12 @@ export default function ModelDefaultsForm() {
           currentValues={{ recap: recapModel }}
         />
       </div>
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input type="checkbox" checked={recapEnabled} onChange={(e) => setRecapEnabled(e.target.checked)} />
         Recap model enabled
       </label>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Recap timeout (seconds)</label>
+        <label className="text-xs text-muted-foreground">Recap timeout (seconds)</label>
         <Input
           type="number"
           value={recapTimeout}

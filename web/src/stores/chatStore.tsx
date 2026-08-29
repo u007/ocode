@@ -291,7 +291,8 @@ export type ChatAction =
   | { type: "INTERRUPT"; sessionId: string }
   | { type: "REKEY_SESSION"; oldId: string; newId: string }
   | { type: "TOGGLE_RUN_COLLAPSED"; sessionId: string; runId: string }
-  | { type: "RESET"; sessionId: string };
+  | { type: "RESET"; sessionId: string }
+  | { type: "TRUNCATE_MESSAGES"; sessionId: string; keepUntil: number };
 
 export const initialState: ChatState = {
   sessions: {},
@@ -338,11 +339,26 @@ function findPendingToolIndex(live: LivePart[], callId?: string): number {
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
-    case "ADD_MESSAGE":
-      return updateSession(state, action.sessionId, (s) => ({
+    case "ADD_MESSAGE": {
+      const next = updateSession(state, action.sessionId, (s) => ({
         ...s,
         messages: [...s.messages, action.message],
       }));
+      // TEMP DIAGNOSTIC (memory investigation) — remove once ocode.app
+      // memory growth is confirmed/ruled out as unbounded messages[] growth.
+      const diagMsgs = next.sessions[action.sessionId]?.messages;
+      if (diagMsgs && diagMsgs.length % 25 === 0) {
+        const approxKB = Math.round(JSON.stringify(diagMsgs).length / 1024);
+        let totalKB = 0;
+        for (const sid in next.sessions) {
+          totalKB += JSON.stringify(next.sessions[sid].messages).length / 1024;
+        }
+        console.log(
+          `[mem-diag] session ${action.sessionId}: ${diagMsgs.length} msgs, ~${approxKB}KB | all sessions ~${Math.round(totalKB)}KB`,
+        );
+      }
+      return next;
+    }
     case "SET_MESSAGES":
       // Authoritative snapshot lands at a turn boundary — commit it and clear
       // the live buffer it supersedes. It also marks the slice initialized:
@@ -671,6 +687,21 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           pendingPermission: pending.pendingPermission,
           permissionQueue: pending.permissionQueue,
           pendingQuestion: pending.pendingQuestion,
+        };
+      });
+    case "TRUNCATE_MESSAGES":
+      return updateSession(state, action.sessionId, (s) => {
+        const keep = Math.max(0, Math.min(action.keepUntil, s.messages.length));
+        if (keep === s.messages.length) return s;
+        return {
+          ...s,
+          messages: s.messages.slice(0, keep),
+          totalMessages: keep,
+          hasMore: false,
+          live: [],
+          pendingPermission: null,
+          permissionQueue: [],
+          pendingQuestion: null,
         };
       });
     default:

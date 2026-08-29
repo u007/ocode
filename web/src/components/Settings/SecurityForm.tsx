@@ -64,28 +64,28 @@ export default function SecurityForm() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-zinc-200">Security & Redaction</h2>
+      <h2 className="text-sm font-semibold text-foreground">Security & Redaction</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
 
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
         Enabled
       </label>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Mode (lenient / full)</label>
+        <label className="text-xs text-muted-foreground">Mode (lenient / full)</label>
         <Input value={mode} onChange={(e) => setMode(e.target.value)} className="h-8 text-xs" />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Model</label>
+        <label className="text-xs text-muted-foreground">Model</label>
         <div className="flex items-center gap-2">
-          <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={model || undefined}>
+          <div className="flex-1 h-8 px-3 rounded-md bg-muted border border-border text-xs text-foreground flex items-center truncate" title={model || undefined}>
             {model || "Not set"}
           </div>
           <Button size="sm" variant="outline" type="button" onClick={() => setModelDialogOpen(true)} className="h-8 text-xs">
@@ -109,25 +109,111 @@ export default function SecurityForm() {
         />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Base URL</label>
+        <label className="text-xs text-muted-foreground">Base URL</label>
         <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} className="h-8 text-xs" />
       </div>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Fail mode (block / warn)</label>
+        <label className="text-xs text-muted-foreground">Fail mode (block / warn)</label>
         <Input value={failMode} onChange={(e) => setFailMode(e.target.value)} className="h-8 text-xs" />
       </div>
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input type="checkbox" checked={allowRemoteTier2} onChange={(e) => setAllowRemoteTier2(e.target.checked)} />
         Allow remote tier-2 scanner endpoints
       </label>
       <div className="space-y-1.5">
-        <label className="text-xs text-zinc-500">Custom words (comma-separated)</label>
+        <label className="text-xs text-muted-foreground">Custom words (comma-separated)</label>
         <Input value={customWords} onChange={(e) => setCustomWords(e.target.value)} className="h-8 text-xs" />
       </div>
 
       <Button size="sm" onClick={save} disabled={saving} className="h-8 text-xs">
         {saving && <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />}
         Save
+      </Button>
+
+      <RekeySection />
+    </div>
+  );
+}
+
+// RekeySection changes the passphrase protecting the project's age key
+// (internal/secretfile.RekeyProjectKey re-wraps the same key, so files
+// already encrypted with it stay valid without needing to be re-encrypted).
+function RekeySection() {
+  const [oldPassphrase, setOldPassphrase] = useState("");
+  const [newPassphrase, setNewPassphrase] = useState("");
+  const [confirmPassphrase, setConfirmPassphrase] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState(false);
+
+  const submit = async () => {
+    if (!oldPassphrase || !newPassphrase) return;
+    if (newPassphrase !== confirmPassphrase) {
+      setError("Passphrases did not match");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    setSuccess(false);
+    try {
+      await api.secretRekey("", oldPassphrase, newPassphrase, confirmPassphrase);
+      setOldPassphrase("");
+      setNewPassphrase("");
+      setConfirmPassphrase("");
+      setSuccess(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="pt-4 mt-4 border-t border-border space-y-3">
+      <h2 className="text-sm font-semibold text-foreground">Project Passphrase</h2>
+      <p className="text-xs text-muted-foreground">
+        Change the passphrase protecting this project's encrypted-file key. Files already
+        encrypted stay valid — only the passphrase changes.
+      </p>
+      {error && <div className="text-xs text-red-400">{error}</div>}
+      {success && <div className="text-xs text-emerald-400">Passphrase updated.</div>}
+      <div className="space-y-1.5">
+        <label className="text-xs text-muted-foreground">Current passphrase</label>
+        <Input
+          type="password"
+          value={oldPassphrase}
+          onChange={(e) => setOldPassphrase(e.target.value)}
+          className="h-8 text-xs"
+        />
+      </div>
+      <div className="space-y-1.5">
+        <label className="text-xs text-muted-foreground">New passphrase</label>
+        <Input
+          type="password"
+          value={newPassphrase}
+          onChange={(e) => setNewPassphrase(e.target.value)}
+          className="h-8 text-xs"
+        />
+      </div>
+      <div className="space-y-1.5">
+        <label className="text-xs text-muted-foreground">Confirm new passphrase</label>
+        <Input
+          type="password"
+          value={confirmPassphrase}
+          onChange={(e) => setConfirmPassphrase(e.target.value)}
+          className="h-8 text-xs"
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+        />
+      </div>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={submit}
+        disabled={saving || !oldPassphrase || !newPassphrase || !confirmPassphrase}
+        className="h-8 text-xs"
+      >
+        {saving && <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />}
+        Change Passphrase
       </Button>
     </div>
   );

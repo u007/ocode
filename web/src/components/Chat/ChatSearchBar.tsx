@@ -38,7 +38,7 @@ export function highlightMatches(text: string, query: string): ReactNode {
     parts.push(
       <mark
         key={idx}
-        className="rounded-sm bg-yellow-400/80 text-zinc-900"
+        className="rounded-sm bg-yellow-400/80 text-foreground"
       >
         {text.slice(idx, idx + needle.length)}
       </mark>,
@@ -90,7 +90,7 @@ export default function ChatSearchBar({
         : `${current + 1}/${matchCount}`;
 
   return (
-    <div className="flex items-center gap-2 border-b border-zinc-800 bg-zinc-900 px-3 py-2">
+    <div className="flex items-center gap-2 border-b border-border bg-card px-3 py-2">
       <Input
         ref={inputRef}
         value={query}
@@ -106,13 +106,13 @@ export default function ChatSearchBar({
           }
         }}
         placeholder="Find in chat…"
-        className="h-8 flex-1 bg-zinc-950 text-sm"
+        className="h-8 flex-1 bg-background text-sm"
       />
       <span
         className={`min-w-[4.5rem] text-center text-xs tabular-nums ${
           query.trim() !== "" && matchCount === 0
             ? "text-red-400"
-            : "text-zinc-400"
+            : "text-muted-foreground"
         }`}
       >
         {counter}
@@ -121,7 +121,7 @@ export default function ChatSearchBar({
         type="button"
         variant="ghost"
         size="icon"
-        className="h-7 w-7 text-zinc-400 hover:text-zinc-100"
+        className="h-7 w-7 text-muted-foreground hover:text-foreground"
         onClick={onPrev}
         disabled={matchCount === 0}
         title="Previous match (Shift+Enter)"
@@ -133,7 +133,7 @@ export default function ChatSearchBar({
         type="button"
         variant="ghost"
         size="icon"
-        className="h-7 w-7 text-zinc-400 hover:text-zinc-100"
+        className="h-7 w-7 text-muted-foreground hover:text-foreground"
         onClick={onNext}
         disabled={matchCount === 0}
         title="Next match (Enter)"
@@ -141,14 +141,14 @@ export default function ChatSearchBar({
       >
         <ChevronDown className="h-4 w-4" />
       </Button>
-      <span className="hidden text-[11px] text-zinc-600 sm:inline">
+      <span className="hidden text-[11px] text-foreground sm:inline">
         searching loaded messages
       </span>
       <Button
         type="button"
         variant="ghost"
         size="icon"
-        className="h-7 w-7 text-zinc-400 hover:text-zinc-100"
+        className="h-7 w-7 text-muted-foreground hover:text-foreground"
         onClick={onClose}
         title="Close (Esc)"
         aria-label="Close search"

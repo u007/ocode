@@ -70,6 +70,34 @@ func (h *Handler) isRegisteredProjectRoot(p string) bool {
 	return false
 }
 
+// mutationProjectDir resolves the target project for the new file/git mutation
+// endpoints. It accepts the server workDir, any registered project root, or any
+// configured extra allowed path (snapshot under h.mu). Unlike fileTreeRootFor it
+// requires an exact match to an allowed root — it does not accept arbitrary
+// subpaths — and does not broaden the shared gitProjectDir used by uploads.
+func (h *Handler) mutationProjectDir(r *http.Request) (string, bool) {
+	dir := h.workDir
+	if p := r.URL.Query().Get("project"); p != "" && p != h.workDir {
+		if h.isRegisteredProjectRoot(p) {
+			return p, true
+		}
+		// Snapshot extra paths under lock to avoid races on h.cfg.
+		h.mu.Lock()
+		var extras []string
+		if h.cfg != nil {
+			extras = append([]string(nil), h.cfg.Ocode.ExtraAllowedPaths...)
+		}
+		h.mu.Unlock()
+		for _, extra := range extras {
+			if extra != "" && p == extra {
+				return p, true
+			}
+		}
+		return "", false
+	}
+	return dir, true
+}
+
 // gitStatusForDir computes the working-tree status of the repo at dir. It is
 // shared by the legacy GET endpoint (with the server's workdir) and the
 // subscriber-aware server-push git watcher (per project root). A non-repo or
