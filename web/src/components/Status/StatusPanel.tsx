@@ -21,25 +21,6 @@ export default function StatusPanel({ onClose }: Props) {
   const [spending, setSpending] = useState<{ spending_usd: number; records: number } | null>(null);
   const [mcp, setMcp] = useState<MCPStatus[]>([]);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
-  // TEMP DIAGNOSTIC (memory investigation) — remove once ocode.app memory
-  // growth is confirmed/ruled out as unbounded messages[] growth (paired with
-  // the console logging in chatStore.tsx's ADD_MESSAGE case).
-  const memSessions = useChatSelector((s) => s.sessions);
-  const [memSizeKB, setMemSizeKB] = useState<Record<string, number> | null>(null);
-  const [memTotalKB, setMemTotalKB] = useState<number | null>(null);
-  const memSessionIds = Object.keys(memSessions);
-  const memTotalMsgs = memSessionIds.reduce((n, id) => n + memSessions[id].messages.length, 0);
-  const computeMemSize = () => {
-    const perSession: Record<string, number> = {};
-    let totalBytes = 0;
-    for (const id of memSessionIds) {
-      const bytes = JSON.stringify(memSessions[id].messages).length;
-      perSession[id] = Math.round(bytes / 1024);
-      totalBytes += bytes;
-    }
-    setMemSizeKB(perSession);
-    setMemTotalKB(Math.round(totalBytes / 1024));
-  };
 
   // Fetch the dedicated file/lsp/spending endpoints when the panel opens and
   // whenever the active session changes — these are cheaper than re-fetching
@@ -143,38 +124,6 @@ export default function StatusPanel({ onClose }: Props) {
           <Row k="CWD" v={cwd} mono />
           {snap?.updated_at && (
             <Row k="Last update" v={snap.updated_at} mono />
-          )}
-        </section>
-
-        {/* TEMP DIAGNOSTIC — memory investigation, remove once ocode.app
-            memory growth is confirmed/ruled out as unbounded messages[]
-            growth. */}
-        <section>
-          <h3 className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
-            Memory (diag)
-          </h3>
-          <Row k="Sessions" v={String(memSessionIds.length)} mono />
-          <Row k="Total msgs" v={String(memTotalMsgs)} mono />
-          <button
-            type="button"
-            onClick={computeMemSize}
-            className="mt-1 text-xs text-muted-foreground hover:text-foreground underline"
-          >
-            {memTotalKB === null ? "Compute size (JSON approx)" : `Recompute (~${memTotalKB}KB total)`}
-          </button>
-          {memSizeKB && (
-            <ul className="mt-2 space-y-0.5 font-mono text-xs">
-              {memSessionIds.map((id) => (
-                <li key={id} className="flex justify-between gap-2">
-                  <span className="truncate" title={id}>
-                    {id}
-                  </span>
-                  <span className="shrink-0">
-                    {memSessions[id].messages.length} msgs · ~{memSizeKB[id]}KB
-                  </span>
-                </li>
-              ))}
-            </ul>
           )}
         </section>
 

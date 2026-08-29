@@ -754,7 +754,9 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
           if (!res.ok) throw new Error("Content search failed");
           const data: FileSearchResponse = await res.json();
           if (controller.signal.aborted || gen !== searchGenRef.current) return;
-          setContentResults(append ? [...(contentResults ?? []), ...data.results] : data.results);
+          setContentResults((prev) =>
+            append ? [...(prev ?? []), ...data.results] : data.results,
+          );
           setContentHasMore(!!data.has_more);
           setContentTotal(data.total ?? null);
         } catch (err) {
@@ -767,7 +769,7 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
         }
       })();
     },
-    [activeRoot, projectPath, contentQuery, contentResults],
+    [activeRoot, projectPath, contentQuery],
   );
 
   useEffect(() => {

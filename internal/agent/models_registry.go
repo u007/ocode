@@ -1089,7 +1089,10 @@ func allProviderModelsFromRegistry(refresh bool) []string {
 				have[id] = true
 			}
 			for _, key := range groqLive {
-				id := "groq/" + key
+				id := key
+				if !strings.HasPrefix(key, "groq/") {
+					id = "groq/" + key
+				}
 				if !have[id] {
 					ids = append(ids, id)
 					have[id] = true
@@ -1186,7 +1189,15 @@ func providerModelsFromRegistry(provider string, refresh bool) []string {
 		if refresh || groqCacheFresh() {
 			if live := fetchGroqLiveModels(); len(live) > 0 {
 				snap := providerModelsFromSnapshot(provider)
-				merged := mergeModelIDs(snap, live)
+				prefixed := make([]string, 0, len(live))
+				for _, k := range live {
+					if strings.HasPrefix(k, "groq/") {
+						prefixed = append(prefixed, k)
+					} else {
+						prefixed = append(prefixed, "groq/"+k)
+					}
+				}
+				merged := mergeModelIDs(snap, prefixed)
 				sort.Strings(merged)
 				return merged
 			}

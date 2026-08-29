@@ -760,7 +760,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		m.previewPendingScroll = 0
 		m.statusMsg = "file tree refreshed"
 		return m, m.refreshPreviewCmd()
-	case "ctrl+g", "ctrl+p":
+	case "ctrl+g":
 			m.mode = filesModeFuzzy
 			m.fuzzyQuery = ""
 			m.fuzzyResults = nil
@@ -2033,7 +2033,7 @@ func (m filesModel) helpView(w, h int, styles Styles) string {
 		"",
 		styles.Header.Render("  Open / Search") + "		" + styles.Hint.Render("ctrl+e  open in editor    ctrl+v  pick editor"),
 			"			" + styles.Hint.Render("ctrl+o  reveal in finder    ctrl+f  content search"),
-			"			" + styles.Hint.Render("ctrl+g / ctrl+p  fuzzy find"),
+			"			" + styles.Hint.Render("ctrl+g  fuzzy find"),
 			"",
 			styles.Header.Render("  Other") + "		" + styles.Hint.Render("ctrl+h  toggle hidden files"),
 		"			" + styles.Hint.Render("ctrl+u  refresh file tree    ?  this help"),
@@ -2325,7 +2325,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		)
 	} else {
 			statusStr = hintStyle.Width(w - 2).MaxHeight(1).Render(
-				"ctrl+h hidden  ctrl+f search  ctrl+g/ctrl+p fuzzy  space select  tab jump  ctrl+l edit  ctrl+o open  ctrl+n new file  ctrl+b new folder  ctrl+r rename  ctrl+d delete  ctrl+y path  ctrl+e editor",
+				"ctrl+h hidden  ctrl+f search  ctrl+g fuzzy  space select  tab jump  ctrl+l edit  ctrl+o open  ctrl+n new file  ctrl+b new folder  ctrl+r rename  ctrl+d delete  ctrl+y path  ctrl+e editor",
 			)
 		}
 		parts := []string{renderedHeader, row, statusStr}

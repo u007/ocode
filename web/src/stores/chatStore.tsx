@@ -339,26 +339,11 @@ function findPendingToolIndex(live: LivePart[], callId?: string): number {
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
-    case "ADD_MESSAGE": {
-      const next = updateSession(state, action.sessionId, (s) => ({
+    case "ADD_MESSAGE":
+      return updateSession(state, action.sessionId, (s) => ({
         ...s,
         messages: [...s.messages, action.message],
       }));
-      // TEMP DIAGNOSTIC (memory investigation) — remove once ocode.app
-      // memory growth is confirmed/ruled out as unbounded messages[] growth.
-      const diagMsgs = next.sessions[action.sessionId]?.messages;
-      if (diagMsgs && diagMsgs.length % 25 === 0) {
-        const approxKB = Math.round(JSON.stringify(diagMsgs).length / 1024);
-        let totalKB = 0;
-        for (const sid in next.sessions) {
-          totalKB += JSON.stringify(next.sessions[sid].messages).length / 1024;
-        }
-        console.log(
-          `[mem-diag] session ${action.sessionId}: ${diagMsgs.length} msgs, ~${approxKB}KB | all sessions ~${Math.round(totalKB)}KB`,
-        );
-      }
-      return next;
-    }
     case "SET_MESSAGES":
       // Authoritative snapshot lands at a turn boundary — commit it and clear
       // the live buffer it supersedes. It also marks the slice initialized:
