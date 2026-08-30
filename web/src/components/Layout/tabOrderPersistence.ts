@@ -1,9 +1,9 @@
-// Persists the merged (chat session + terminal) tab order per project, so
-// drag-reordering the unified tab bar survives reloads. Only stores an
-// ordering of composite keys — never the tabs' own data (title, etc.),
-// which stays owned by projectStore/terminalStore.
+// Persists the merged (chat session + terminal + browser) tab order per
+// project, so drag-reordering the unified tab bar survives reloads. Only
+// stores an ordering of composite keys — never the tabs' own data (title,
+// etc.), which stays owned by projectStore/terminalStore/browserTabsStore.
 
-export type UnifiedTabKey = `chat:${string}` | `term:${string}`;
+export type UnifiedTabKey = `chat:${string}` | `term:${string}` | `browser:${string}`;
 
 const ORDER_KEY = "ocode.ui.tabOrder.v1";
 
@@ -47,15 +47,19 @@ export function saveTabOrder(projectPath: string, order: UnifiedTabKey[]) {
 
 /** Reconciles a saved order against the live id sets: drops stale keys, and
  *  appends any live id missing from the saved order (new tabs created since
- *  last save) at the end, in the order they appear in chatIds/terminalIds. */
+ *  last save) at the end, in the order they appear in
+ *  chatIds/terminalIds/browserIds. Legacy saved orders (pre-browser) reconcile
+ *  cleanly — unknown/absent kinds are simply appended, so no version bump. */
 export function reconcileTabOrder(
   saved: UnifiedTabKey[],
   chatIds: string[],
   terminalIds: string[],
+  browserIds: string[] = [],
 ): UnifiedTabKey[] {
   const liveKeys: UnifiedTabKey[] = [
     ...chatIds.map((id): UnifiedTabKey => `chat:${id}`),
     ...terminalIds.map((id): UnifiedTabKey => `term:${id}`),
+    ...browserIds.map((id): UnifiedTabKey => `browser:${id}`),
   ];
   const liveKeySet = new Set(liveKeys);
   const kept = saved.filter((k) => liveKeySet.has(k));

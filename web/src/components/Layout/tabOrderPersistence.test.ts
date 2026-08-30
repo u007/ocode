@@ -37,4 +37,21 @@ describe("reconcileTabOrder", () => {
   it("appends new live ids missing from the saved order, at the end", () => {
     expect(reconcileTabOrder(["chat:c1"], ["c1", "c2"], ["t1"])).toEqual(["chat:c1", "chat:c2", "term:t1"]);
   });
+
+  it("keeps saved interleaving of chat, term, and browser keys", () => {
+    const saved = ["term:t1", "browser:b1", "chat:c1"];
+    expect(reconcileTabOrder(saved, ["c1"], ["t1"], ["b1"])).toEqual(["term:t1", "browser:b1", "chat:c1"]);
+  });
+
+  it("appends new browser ids missing from a legacy saved order", () => {
+    expect(reconcileTabOrder(["chat:c1"], ["c1"], [], ["b1", "b2"])).toEqual([
+      "chat:c1",
+      "browser:b1",
+      "browser:b2",
+    ]);
+  });
+
+  it("drops stale browser keys whose id is gone", () => {
+    expect(reconcileTabOrder(["browser:gone", "chat:c1"], ["c1"], [], [])).toEqual(["chat:c1"]);
+  });
 });
