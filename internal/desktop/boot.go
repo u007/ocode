@@ -16,9 +16,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/projects"
+	"github.com/u007/ocode/internal/server"
 )
 
 // Handle is the result of a successful server boot.
@@ -78,6 +78,14 @@ func StartServer(webFS fs.FS, workDir string) (*Handle, error) {
 	url := fmt.Sprintf("http://%s", addr)
 	saveBoundPort(addr)
 	saveDebugHandle(url, token)
+
+	// Browse origin: a second loopback listener, isolated from the SPA
+	// origin, backing the embedded browser panel. Failing to bind it means
+	// the panel cannot work at all, so boot fails loudly rather than
+	// silently serving a half-functional UI.
+	if err := server.StartBrowse(srv, token); err != nil {
+		return nil, fmt.Errorf("desktop: %w", err)
+	}
 
 	go func() {
 		log.Printf("desktop: serving on %s", url)

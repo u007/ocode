@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/browse"
 	"github.com/u007/ocode/internal/scheduler"
 )
 
@@ -82,6 +83,13 @@ type Server struct {
 	schedulerTargets *scheduler.Targets // optional; set via SetScheduler
 	frontendStats    *frontendStatsRing
 	startedAt        time.Time
+
+	// browse is the isolated browse-origin server backing the embedded
+	// browser panel; browseBase is its loopback base URL as advertised to
+	// the SPA by /api/browse/config. Both are set exactly once, via
+	// EnableBrowse, before the server starts serving.
+	browse     *browse.Server
+	browseBase string
 
 	// ln and httpServer are populated by Serve so Shutdown can stop accepting
 	// new connections and drain in-flight ones. Guarded by shutdownMu.
@@ -448,6 +456,65 @@ func (s *Server) pluginAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 	}
 	return s.authMiddleware(next)
+}
+
+// EnableBrowse records the browse-origin base URL and registers the SPA-facing
+// config + grant endpoints. Called from the desktop/CLI boot after the browse
+// listener is up (see StartBrowse). Must be called exactly once per Server,
+// before Serve starts; a second call would panic on the duplicate mux entry,
+// which is intentional — a double-boot is a wiring bug, not something to
+// paper over.
+func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
+	s.browseBase = baseURL
+	s.browse = bs
+	s.mux.HandleFunc("GET /api/browse/config", s.authMiddleware(s.handleBrowseConfig))
+	s.mux.HandleFunc("POST /api/browse/grant", s.authMiddleware(s.handleBrowseGrant))
+}
+
+// StartBrowse stands up the isolated browse origin: a second loopback
+// listener serving proxied page content cross-origin from the SPA. It binds
+// 127.0.0.1:0, registers the SPA-facing endpoints on srv, and serves in a
+// background goroutine. token is the main-origin API token, handed to the
+// browse server for future grant-validation needs (never exposed on browse
+// responses). Callers: desktop boot and the CLI serve path.
+func StartBrowse(srv *Server, token string) error {
+	bs := browse.New(token, log.Default())
+	bln, bBase, err := bs.Listen("127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("browse listen: %w", err)
+	}
+	// Register endpoints before serving so a startup wiring mistake surfaces
+	// synchronously instead of as a 404 at first panel open.
+	srv.EnableBrowse(bBase, bs)
+	go func() {
+		if err := http.Serve(bln, bs.Handler()); err != nil {
+			log.Printf("browse: serve on %s exited: %v", bBase, err)
+		}
+	}()
+	log.Printf("browse: origin listening on %s", bBase)
+	return nil
+}
+
+func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"base_url": s.browseBase})
+}
+
+func (s *Server) handleBrowseGrant(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		StateKey string `json:"state_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("browse grant: decode request body: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.StateKey == "" {
+		log.Printf("browse grant: missing state_key")
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	grant := s.browse.MintGrant(req.StateKey)
+	writeJSON(w, http.StatusOK, map[string]string{"grant": grant})
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -835,6 +902,14 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	ln, err := srv.Listen()
 	if err != nil {
 		return err
+	}
+
+	// Browse origin for the embedded browser panel. The panel is additive:
+	// a bind failure is logged loudly but does not kill the main server.
+	// password doubles as the main-origin API token here (empty when the
+	// serve process runs unauthenticated).
+	if err := StartBrowse(srv, password); err != nil {
+		log.Printf("server: browse origin unavailable, browser panel disabled: %v", err)
 	}
 
 	if setup != nil {
