@@ -15,6 +15,7 @@ import (
 //	*.pfx, *.p12
 //	.npmrc, .netrc
 //	*credentials*, secrets.*, .pgpass
+//	auth.json, ocodeconfig.json, opencode.json
 func IsSensitiveFile(path string) bool {
 	if path == "" {
 		return false
@@ -61,6 +62,15 @@ func IsSensitiveFile(path string) bool {
 
 	// .pgpass
 	if base == ".pgpass" {
+		return true
+	}
+
+	// ocode's own config/credential stores. The global config and data dirs are
+	// pre-authorized roots in the permission layer (auto-allowed without a
+	// prompt), so reads of these files via agent tools must still route through
+	// secret masking — the directory allow-list intentionally does not carry a
+	// name-based sensitive-path veto that would re-introduce prompts.
+	if base == "auth.json" || base == "ocodeconfig.json" || base == "opencode.json" {
 		return true
 	}
 

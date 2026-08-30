@@ -49,9 +49,13 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
         dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
         return Promise.resolve(false);
       }
+      // A draft tab's locally-picked model (sidebar Model picker) rides along
+      // with the first message; the server persists it as the new session's
+      // model. Undefined when the tab never changed the model (server falls
+      // back to the global config default).
       const submitPromise = isRealSession
         ? api.sendMessage(sessionId, content)
-        : api.chat(content, undefined, undefined, sessionId, projectPath).then((res) => {
+        : api.chat(content, undefined, slice.model, sessionId, projectPath).then((res) => {
             options?.onNewSession?.(res.sessionId);
             return res;
           });
@@ -75,7 +79,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
           return false;
         });
     },
-    [sessionId, dispatch, projectPath, options?.onNewSession],
+    [sessionId, dispatch, projectPath, options?.onNewSession, slice.model],
   );
 
   // Local stop: the browser can't cancel the TUI's agent, so this only releases

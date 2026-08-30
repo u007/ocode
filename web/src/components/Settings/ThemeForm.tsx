@@ -70,7 +70,7 @@ export default function ThemeForm() {
               className={`text-xs rounded px-2 py-1.5 truncate transition-colors ${
                 currentTheme === t.name
                   ? "bg-emerald-600/30 text-emerald-300 border border-emerald-600/50"
-                  : "bg-muted text-muted-foreground hover:bg-accent"
+                  : "bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground"
               }`}
               title={t.name}
             >

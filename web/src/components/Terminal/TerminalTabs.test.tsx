@@ -49,6 +49,7 @@ vi.mock("@/api/client", () => ({
     getTerminalProcesses: () => Promise.resolve([]),
   },
   apiPath: (p: string) => p,
+  apiWsPath: (p: string) => `ws://localhost${p}`,
   authToken: () => "tok",
 }));
 

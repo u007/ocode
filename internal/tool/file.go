@@ -344,6 +344,16 @@ func confinedPath(ctx context.Context, p string) (string, error) {
 			return resolved, nil
 		}
 	}
+	// Allow access to ocode's global config dir (opencode.json, ocodeconfig.json,
+	// skills, plugins). The auto-LLM permission layer pre-authorizes this root
+	// (PermissionManager.AllowedRoots); confinement must agree or an auto-grant
+	// would hard-error at execution. pathWithinRoot is prefix-boundary safe, so
+	// the parent ~/.config and sibling dirs stay confined.
+	if configDir, err := paths.GlobalConfigDir(); err == nil {
+		if configResolved, ok := normalizeRootPath(configDir); ok && pathWithinRoot(resolved, configResolved) {
+			return resolved, nil
+		}
+	}
 	return "", fmt.Errorf("path %q is outside the working directory", p)
 }
 

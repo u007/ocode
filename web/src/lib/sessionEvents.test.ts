@@ -224,7 +224,7 @@ describe("routeBusEnvelope", () => {
     expect(getState().sessions["old"]?.turnActive).toBe(false);
   });
 
-  it("status events do not create a slice for an unknown session but still patch globals", () => {
+  it("status events do not create a slice for an unknown session but still patch process-level globals — and never the global model", () => {
     const { router, getState } = makeRouter(["s1"]);
     routeBusEnvelope(
       env("status", { session_id: "ghost", data: { advisor_enabled: true, main_model: "m" } }),
@@ -232,7 +232,11 @@ describe("routeBusEnvelope", () => {
     );
     expect(getState().sessions["ghost"]).toBeUndefined();
     expect(getState().advisorEnabled).toBe(true);
-    expect(getState().model).toBe("m");
+    // A status snapshot's main_model is that session's effective model (which
+    // may be a per-session override). Feeding it into the global model is what
+    // made one tab's model leak across every tab — the global stays at its
+    // startup (config) value.
+    expect(getState().model).toBeNull();
   });
 
   it("warns for a session-scoped event without any session id", () => {
@@ -242,8 +246,8 @@ describe("routeBusEnvelope", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("without a session id"));
   });
 
-  it("status events patch the open session's slice and update global fields", () => {
-    const { router, getState } = makeRouter(["s1"]);
+  it("status events patch the open session's slice (per-session model included) and update global fields", () => {
+    const { router, getState, actions } = makeRouter(["s1"]);
     routeBusEnvelope(
       env("status", {
         session_id: "s1",
@@ -253,7 +257,11 @@ describe("routeBusEnvelope", () => {
     );
     const slice = getState().sessions["s1"];
     expect(slice.tuiStatus?.session_title).toBe("T");
-    expect(getState().model).toBe("m1");
+    // Per-session model lives on the slice snapshot only — no global SET_MODEL
+    // is dispatched, so a model change on s1 never appears on other tabs.
+    expect(slice.tuiStatus?.main_model).toBe("m1");
+    expect(getState().model).toBeNull();
+    expect(actions.some((a) => a.type === "SET_MODEL")).toBe(false);
     expect(getState().smallModel).toBe("sm");
   });
 

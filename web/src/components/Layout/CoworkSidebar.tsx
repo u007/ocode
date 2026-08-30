@@ -115,14 +115,21 @@ export default function CoworkSidebar({
 
   const [titleGenerating, setTitleGenerating] = useState(false);
   const dispatch = useChatDispatch();
-  const model = useChatSelector((s) => s.model);
   const globalAdvisorModel = useChatSelector((s) => s.advisorModel);
   const globalAdvisorEnabled = useChatSelector((s) => s.advisorEnabled);
   const globalSmallModel = useChatSelector((s) => s.smallModel);
   const globalSmallModelEnabled = useChatSelector((s) => s.smallModelEnabled);
   const { activeTabId: sessionId } = projectState;
   const activeProject = projectState.state.activeProject ?? null;
-  const { tuiStatus, messages } = useChatSelector((s) => getSessionSlice(s, sessionId));
+  // `sessionModel` is the per-session slice field — a draft tab's locally-picked
+  // model before the session exists server-side (see SessionSlice.model). The
+  // authoritative model for a real session is `tuiStatus.main_model`, which is
+  // that tab's own status snapshot (per-session since the multiproject event
+  // work), so switching tabs shows each session's own model, not one global.
+  const { tuiStatus, messages, model: sessionModel } = useChatSelector((s) =>
+    getSessionSlice(s, sessionId),
+  );
+  const effectiveModel = tuiStatus?.main_model || sessionModel || "";
 
   // ── Session title display — mirrors TUI's sidebarDisplayTitle() ────────────
   // Priority: explicit session_title → first user prompt (truncated) → "Untitled".
@@ -274,7 +281,7 @@ export default function CoworkSidebar({
   // fetch-on-activation status fetch and patched by bus `status` events).
   const contextCurrent = tuiStatus?.context_current_tokens ?? 0;
   const contextMax = tuiStatus?.context_max_tokens ?? config.contextMaxTokens ?? 0;
-  const contextModel = tuiStatus?.context_model || model || config.model;
+  const contextModel = tuiStatus?.context_model || effectiveModel || config.model;
   const contextPct =
     contextMax > 0
       ? Math.min(100, Math.round((contextCurrent / contextMax) * 100))
@@ -477,8 +484,8 @@ export default function CoworkSidebar({
             disabled={!onModelClick}
           >
             <div className="text-muted-foreground mb-1">Model</div>
-            <div className="text-foreground font-mono truncate">
-              {model || config.model || "Not set"}
+            <div className="text-foreground font-mono truncate" title={effectiveModel || undefined}>
+              {effectiveModel || config.model || "Not set"}
             </div>
           </button>
           {/* Advisor — model picker + on/off toggle (mirrors TUI's advisor: ●on/○off <model> row) */}

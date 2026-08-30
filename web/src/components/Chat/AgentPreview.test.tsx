@@ -34,6 +34,22 @@ describe("AgentPreview", () => {
     expect(onOpenDetail).toHaveBeenCalledWith("run-1");
   });
 
+  it("renders spawned runs collapsed until the user expands a row", () => {
+    mockUseAgentRuns.mockReturnValue({
+      runs: [{ ...runningRun, messages: [{ role: "assistant", content: "agent thinking out loud" }] }],
+      loaded: true,
+    });
+    const { container } = render(<AgentPreview onOpenDetail={vi.fn()} />);
+
+    // the rail shows the summary row but not the transcript by default
+    expect(screen.getByText("code-reviewer")).toBeInTheDocument();
+    expect(container.textContent).not.toContain("agent thinking out loud");
+
+    // clicking the row's status area (not the name link) expands it
+    fireEvent.click(screen.getByText("running"));
+    expect(screen.getByText("agent thinking out loud")).toBeInTheDocument();
+  });
+
   it("renders nothing when there are no runs", () => {
     mockUseAgentRuns.mockReturnValue({ runs: [], loaded: true });
     const { container } = render(<AgentPreview onOpenDetail={vi.fn()} />);

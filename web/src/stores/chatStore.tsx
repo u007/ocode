@@ -166,6 +166,13 @@ export interface SessionSlice {
   // streamWasInterrupted which prevents drainQueuedItems on cancel). Cleared
   // when the user resumes or starts a new turn.
   wasInterrupted: boolean;
+  // Main model picked for a draft ("new-*") tab before the session exists
+  // server-side. The sidebar shows it optimistically and the first message
+  // sends it so the session starts with the chosen model; once the real
+  // session id is known it is persisted as a per-session override and this
+  // local value is no longer consulted (tuiStatus.main_model wins for real
+  // sessions). Undefined = no pick yet.
+  model?: string;
 }
 
 export const emptySessionSlice: SessionSlice = {
@@ -188,6 +195,7 @@ export const emptySessionSlice: SessionSlice = {
   turnStalled: false,
   statusLoading: false,
   wasInterrupted: false,
+  model: undefined,
 };
 
 /** Reads one session's slice, falling back to the shared empty default for a
@@ -248,6 +256,9 @@ export type ChatAction =
   | { type: "SET_MESSAGES"; sessionId: string; messages: Message[] }
   | { type: "MARK_INITIALIZED"; sessionId: string }
   | { type: "SET_MODEL"; model: string }
+  // Per-session main model pick for a draft ("new-*") tab — see
+  // SessionSlice.model. Does NOT touch the global s.model.
+  | { type: "SET_SESSION_MODEL"; sessionId: string; model: string | undefined }
   | { type: "SET_SMALL_MODEL"; model: string }
   | { type: "SET_SMALL_MODEL_ENABLED"; enabled: boolean }
   | { type: "SET_ADVISOR_MODEL"; model: string }
@@ -373,6 +384,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }));
     case "SET_MODEL":
       return { ...state, model: action.model };
+    case "SET_SESSION_MODEL":
+      return updateSession(state, action.sessionId, (s) => ({ ...s, model: action.model }));
     case "SET_SMALL_MODEL":
       return { ...state, smallModel: action.model };
     case "SET_SMALL_MODEL_ENABLED":

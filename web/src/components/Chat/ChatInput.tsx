@@ -472,7 +472,7 @@ export default function ChatInput({
         {attachedFiles.map((name) => (
           <span
             key={name}
-            className="inline-flex items-center gap-1 text-xs bg-accent text-foreground rounded px-2 py-0.5"
+            className="inline-flex items-center gap-1 text-xs bg-accent text-accent-foreground rounded px-2 py-0.5"
           >
             {name}
             <button
@@ -507,7 +507,7 @@ export default function ChatInput({
         <button
           type="button"
           onClick={() => attachRef.current?.click()}
-          className="shrink-0 p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent"
+          className="shrink-0 p-1.5 rounded text-muted-foreground hover:text-accent-foreground hover:bg-accent"
           title="Attach files"
         >
           <Paperclip className="w-4 h-4" />

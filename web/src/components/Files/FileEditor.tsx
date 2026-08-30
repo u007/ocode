@@ -131,6 +131,8 @@ function FileEditorImpl({
   const decorationIdsRef = useRef<string[]>([]);
   const viewZoneIdsRef = useRef<string[]>([]);
   const searchDecorationIdsRef = useRef<string[]>([]);
+  const selectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
+  const scrollDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const [activeHighlight, setActiveHighlight] = useState<{ query: string; path: string } | null>(null);
 
   // ── Stable callback refs ──
@@ -263,15 +265,27 @@ function FileEditorImpl({
     }
   }, [content]);
 
+  // Cleanup Monaco disposables on unmount.
+  useEffect(() => {
+    return () => {
+      selectionDisposableRef.current?.dispose();
+      scrollDisposableRef.current?.dispose();
+      selectionDisposableRef.current = null;
+      scrollDisposableRef.current = null;
+    };
+  }, []);
+
   // ── Selection tracking ──
   // Wired inside handleEditorMount (where the editor instance is guaranteed
   // non-null) and forwarded through a ref so we never tear down the Monaco
   // listener on parent renders. The previous empty-deps effect read
   // editorRef.current during the first commit — always null, because Monaco
   // is created asynchronously by @monaco-editor/loader AFTER effects run — so
-  // the subscription silently never attached.
+  // the subscription silently never attached. Disposables are tracked so they
+  // can be cleaned up on unmount.
   const wireSelectionTracking = useCallback((ed: editor.IStandaloneCodeEditor) => {
-    ed.onDidChangeCursorSelection((e) => {
+    selectionDisposableRef.current?.dispose();
+    const d = ed.onDidChangeCursorSelection((e) => {
       const cb = onSelectionChangeRef.current;
       if (!cb) return;
       const sel = e.selection;
@@ -284,6 +298,8 @@ function FileEditorImpl({
         });
       }
     });
+    selectionDisposableRef.current = d;
+    return d;
   }, []);
 
   const handleEditorMount: OnMount = useCallback((ed, monaco) => {
@@ -310,12 +326,14 @@ function FileEditorImpl({
     if (persistKey) {
       const savedTop = loadEditorScroll(persistKey);
       if (savedTop > 0) ed.setScrollTop(savedTop);
-      ed.onDidScrollChange(() => {
+      scrollDisposableRef.current?.dispose();
+      const scrollDisp = ed.onDidScrollChange(() => {
         if (scrollSaveTimer.current !== null) window.clearTimeout(scrollSaveTimer.current);
         scrollSaveTimer.current = window.setTimeout(() => {
           saveEditorScroll(persistKey, ed.getScrollTop());
         }, 300);
       });
+      scrollDisposableRef.current = scrollDisp;
     }
 
     // Match the shadcn dark theme

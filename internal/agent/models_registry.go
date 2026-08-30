@@ -1204,6 +1204,9 @@ func providerModelsFromRegistry(provider string, refresh bool) []string {
 		}
 		return providerModelsFromSnapshot(provider)
 	}
+	// Fallback for providers without a live fetcher: refresh is ignored and the
+	// static snapshot is returned. Providers with live support (openrouter,
+	// groq, aihubmix, orcarouter, etc.) handled above already honor refresh.
 	ids := providerModelsFromSnapshot(provider)
 	if provider == "orcarouter" && !containsString(ids, "auto") {
 		ids = append(ids, "auto")

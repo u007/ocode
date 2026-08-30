@@ -330,6 +330,28 @@ describe("chatStore Part 05 turn/status state", () => {
     expect(state.tuiStatusReady).toBe(true);
   });
 
+  it("SET_SESSION_MODEL is per-session, never touches the global model", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_MODEL", model: "openai/global" });
+    state = chatReducer(state, { type: "SET_SESSION_MODEL", sessionId: "a", model: "anthropic/pick" });
+    expect(getSessionSlice(state, "a").model).toBe("anthropic/pick");
+    // Other tabs keep no pick (undefined → fall back to the global default),
+    // and the global model is untouched.
+    expect(getSessionSlice(state, "b").model).toBeUndefined();
+    expect(state.model).toBe("openai/global");
+    // Clearing the draft pick returns the slice to "no pick".
+    state = chatReducer(state, { type: "SET_SESSION_MODEL", sessionId: "a", model: undefined });
+    expect(getSessionSlice(state, "a").model).toBeUndefined();
+  });
+
+  it("REKEY_SESSION carries a draft tab's model pick to the real session id", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_SESSION_MODEL", sessionId: "new-9", model: "anthropic/pick" });
+    state = chatReducer(state, { type: "REKEY_SESSION", oldId: "new-9", newId: "ses_real" });
+    expect(getSessionSlice(state, "ses_real").model).toBe("anthropic/pick");
+    expect(getSessionSlice(state, "new-9").model).toBeUndefined();
+  });
+
   it("SET_STATUS_LOADING is per-session", () => {
     let state = initial();
     state = chatReducer(state, { type: "SET_STATUS_LOADING", sessionId: "a", loading: true });

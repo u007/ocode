@@ -761,22 +761,22 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		m.statusMsg = "file tree refreshed"
 		return m, m.refreshPreviewCmd()
 	case "ctrl+g":
-			m.mode = filesModeFuzzy
-			m.fuzzyQuery = ""
-			m.fuzzyResults = nil
-			m.fuzzyCursor = 0
-			m.buildAllPaths()
-			m.statusMsg = ""
+		m.mode = filesModeFuzzy
+		m.fuzzyQuery = ""
+		m.fuzzyResults = nil
+		m.fuzzyCursor = 0
+		m.buildAllPaths()
+		m.statusMsg = ""
 	case "ctrl+f":
-			m.mode = filesModeContentSearch
-			m.contentSearchQuery = ""
-			m.contentSearchExts = ""
-			m.contentSearchResults = nil
-			m.contentSearchCursor = 0
-			m.contentSearchPanel = filesContentSearchQuery
-			m.contentSearchLoading = false
-			m.contentSearchDone = false
-			m.statusMsg = "content search: type query, Tab to switch filter, Enter to search"
+		m.mode = filesModeContentSearch
+		m.contentSearchQuery = ""
+		m.contentSearchExts = ""
+		m.contentSearchResults = nil
+		m.contentSearchCursor = 0
+		m.contentSearchPanel = filesContentSearchQuery
+		m.contentSearchLoading = false
+		m.contentSearchDone = false
+		m.statusMsg = "content search: type query, Tab to switch filter, Enter to search"
 	case "ctrl+h":
 		m.showHidden = !m.showHidden
 		m.nodes, m.nodesErr = loadDirChildren(m.workDir, 0, m.showHidden)
@@ -2032,10 +2032,10 @@ func (m filesModel) helpView(w, h int, styles Styles) string {
 		"			" + styles.Hint.Render("ctrl+l  inline edit    ctrl+y  copy path"),
 		"",
 		styles.Header.Render("  Open / Search") + "		" + styles.Hint.Render("ctrl+e  open in editor    ctrl+v  pick editor"),
-			"			" + styles.Hint.Render("ctrl+o  reveal in finder    ctrl+f  content search"),
-			"			" + styles.Hint.Render("ctrl+g  fuzzy find"),
-			"",
-			styles.Header.Render("  Other") + "		" + styles.Hint.Render("ctrl+h  toggle hidden files"),
+		"			" + styles.Hint.Render("ctrl+o  reveal in finder    ctrl+f  content search"),
+		"			" + styles.Hint.Render("ctrl+g  fuzzy find"),
+		"",
+		styles.Header.Render("  Other") + "		" + styles.Hint.Render("ctrl+h  toggle hidden files"),
 		"			" + styles.Hint.Render("ctrl+u  refresh file tree    ?  this help"),
 		"",
 		styles.Hint.Render("  Press esc, ?, or q to close"),
@@ -2324,11 +2324,11 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 			"ctrl+n/ctrl+p next/prev  enter done  esc cancel  keep typing to search",
 		)
 	} else {
-			statusStr = hintStyle.Width(w - 2).MaxHeight(1).Render(
-				"ctrl+h hidden  ctrl+f search  ctrl+g fuzzy  space select  tab jump  ctrl+l edit  ctrl+o open  ctrl+n new file  ctrl+b new folder  ctrl+r rename  ctrl+d delete  ctrl+y path  ctrl+e editor",
-			)
-		}
-		parts := []string{renderedHeader, row, statusStr}
+		statusStr = hintStyle.Width(w - 2).MaxHeight(1).Render(
+			"ctrl+h hidden  ctrl+f search  ctrl+g fuzzy  space select  tab jump  ctrl+l edit  ctrl+o open  ctrl+n new file  ctrl+b new folder  ctrl+r rename  ctrl+d delete  ctrl+y path  ctrl+e editor",
+		)
+	}
+	parts := []string{renderedHeader, row, statusStr}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 

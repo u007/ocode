@@ -103,7 +103,7 @@ export default function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: A
         </p>
         <button
           onClick={() => onSelectRun(null)}
-          className="rounded-md bg-muted px-3 py-1.5 text-sm text-foreground hover:bg-accent hover:text-foreground"
+          className="rounded-md bg-muted px-3 py-1.5 text-sm text-foreground hover:bg-accent hover:text-accent-foreground"
         >
           Back to all runs
         </button>

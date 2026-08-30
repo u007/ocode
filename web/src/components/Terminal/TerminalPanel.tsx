@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
-import { apiPath, authHeaders, authToken } from "@/api/client";
+import { apiPath, apiWsPath, authHeaders, authToken } from "@/api/client";
 import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
 import { registerTerminal, unregisterTerminal } from "@/lib/debug/terminalRegistry";
 import { playAlertSound } from "./terminalAlertSound";
@@ -294,7 +294,6 @@ export default function TerminalPanel({
     document.addEventListener("visibilitychange", onPageHide);
     window.addEventListener("pagehide", onPageHide);
 
-    const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
     const token = authToken();
     const params = new URLSearchParams();
     if (token) params.set("token", token);
@@ -304,11 +303,10 @@ export default function TerminalPanel({
     if (projectPath) params.set("project_path", projectPath);
     params.set("terminal_id", id);
     const query = params.toString();
-    // apiPath() keeps the tailscale --set-path prefix, without which the proxy
-    // routes the socket to whichever session owns the root path.
-    const url = `${scheme}//${window.location.host}${apiPath("/api/terminal/ws")}${
-      query ? `?${query}` : ""
-    }`;
+    // apiWsPath keeps the tailscale --set-path prefix and respects the
+    // configured backend origin (same-origin vs hub). Handles ws/wss
+    // conversion for absolute backend URLs.
+    const url = apiWsPath(`/api/terminal/ws${query ? `?${query}` : ""}`);
     const sock = new WebSocket(url);
     sock.binaryType = "arraybuffer";
     socketRef.current = sock;
@@ -421,6 +419,9 @@ export default function TerminalPanel({
       fitRef.current = null;
       serializeRef.current = null;
     };
+    // Backend switches intentionally do NOT restart existing terminals:
+    // the PTY is host-local and would be lost. New terminals after a switch
+    // use the new apiWsPath; a full reload migrates all.
   }, [projectPath, id]);
 
   // Apply scrollback changes without tearing down the pty.

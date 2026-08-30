@@ -99,8 +99,8 @@ export default function ReasoningLevelSelector({ thinkingBudget, disabled }: Pro
               key={level}
               type="button"
               onClick={() => handleLevelChange(level)}
-              className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-accent ${
-                level === currentLevel ? "bg-accent" : ""
+              className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-accent hover:text-accent-foreground ${
+                level === currentLevel ? "bg-accent text-accent-foreground" : ""
               }`}
             >
               <Brain className={`w-3 h-3 ${getLevelColor(level)}`} />

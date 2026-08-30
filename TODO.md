@@ -1540,6 +1540,68 @@ switched to a global fix that helps *any* caller.
   "JavaScript & Events" spike bars would show the exact function/file
   either way.
 
+### FOUND + FIXED (2026-08-30): the 2026-08-28 cache fix never shipped to production — gated behind `import.meta.env.DEV`
+
+User reported "mem is up" (not hung this time) with the desktop app live and
+running (4hr-old session, 4 chat tabs, 3 terminals). Caught it live:
+`GET /api/debug/frontend-stats` (the reporter from the 2026-08-25 entry
+below — turned out to be working fine; the 08-28 "zero samples ever
+recorded" report was the abandoned probe's separate endpoint issue, not this
+one) showed `dom_node_count` swinging noisily (257 → 53k transient spikes on
+tab-open → steady few-thousand) without correlating to session/message
+growth. `vmmap <webcontent-pid> | grep "Physical footprint"` (the
+established RSS-overstates-it correction from 2026-08-25) sampled 3x over
+90s: 1.2G → 766M → 2.4G — a fast sawtooth, not a monotonic climb, but a big
+one. A `sample <pid> 8` caught an in-progress jump (744M → 1.3G during the
+capture) with **194 of 216 frames** inside
+`JSC::dateProtoFuncToLocaleString` → `IntlDateTimeFormat::
+initializeDateTimeFormat` → full `icu::SimpleDateFormat` construction — the
+exact signature the 08-27/08-28 entries above chased and believed fixed.
+
+- [x] **Root cause**: `web/src/debug.ts`'s caching patch was wrapped in
+  `if (import.meta.env.DEV) { ... }`, added (per its own comment) by
+  over-applying the lesson from
+  `docs/gotchas/debug-instrumentation-ships-unconditionally.md` — a gotcha
+  about a *different*, unsafe probe (network calls, altered semantics) that
+  rightly needed a dev gate. This cache patch has neither property (no
+  network calls, provably semantics-preserving per its own scoping comment)
+  and is described in its own comment as a "permanent perf patch" —
+  self-contradictory with being dev-only. Net effect: `bin/ocode.app`,
+  rebuilt fresh at 08:37 this morning, still shipped the *unpatched* native
+  `Date.prototype.toLocaleString` in production, so the 08-28 fix had zero
+  effect on any real user session.
+- [x] **Fix**: removed the `import.meta.env.DEV` gate in `web/src/debug.ts`
+  so the cache patch ships in every build. `npx tsgo --noEmit` clean,
+  `vitest run` 355/355 passing, `npm run build` clean, confirmed
+  `canonicalOptionsKey`/`__resetCacheForTests` present in the built
+  `web/dist/assets/index-*.js` bundle (previously would have been dead-code
+  eliminated by the `DEV` check). Rebuilt `bin/ocode.app` via
+  `make desktop-app`.
+- [ ] **Still not found: the actual bare-`.toLocaleString()` hot-path
+  caller** (or a caller passing options, which this fix now helps in
+  production for the first time — can't yet tell which from a native
+  `sample` alone). Grepped all of `web/src` for `.toLocaleString(`: every
+  app-code call site is either `Number.prototype.toLocaleString` (StatusPanel
+  token counts — unrelated overload, not ICU date formatting) or a
+  low-frequency UI path (Cron panels, SessionDialog, LogsForm settings copy,
+  slash-command output) — none plausibly fire every ~30-40s in the
+  background while idle, which is what the live sawtooth timing implies.
+  `web/package.json` has no date-formatting dependency (no dayjs/moment/
+  date-fns/luxon/timeago), so the caller is most likely JIT-inlined library
+  code inside a transitive `node_modules` dependency, invisible to both grep
+  and native `sample` symbolication. **Next step unchanged from the 08-28
+  entry**: a DevTools flame-graph capture (tray → Open DevTools → Timelines,
+  or JS Profiler) during a live spike, clicking into the hot frame, would
+  show the exact file/function — still requires the user's manual Web
+  Inspector access, no tool here can drive the native WKWebView.
+- **Not yet re-verified against a long session on the fixed build** — the
+  data above is all from the *pre-fix* binary; the rebuilt app needs a
+  comparable multi-hour idle stretch to confirm the sawtooth amplitude
+  actually shrinks now that production gets the cache. If it doesn't shrink
+  materially, that's strong evidence the dominant caller is the
+  still-unfound bare-`.toLocaleString()` path this fix deliberately doesn't
+  touch.
+
 ### FOUND + FIXED: chat message list was never virtualized — unbounded DOM/heap growth with conversation length (2026-08-27)
 
 The biggest finding of this investigation. User's 1h49m-old session had

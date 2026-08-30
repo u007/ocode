@@ -1,10 +1,14 @@
 package server
 
 import (
+	"fmt"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/session"
 )
 
@@ -48,6 +52,18 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 	}
 
 	snap := h.buildStatusSnapshot()
+	// Per-session model override takes precedence over the process-wide config
+	// model, so each chat tab shows and runs its own model instead of a single
+	// global value reflected across every open session.
+	snap.MainModel = h.effectiveSessionModel(id)
+	// The bridged TUI session is driven by the TUI itself: its live snapshot
+	// wins over the persisted/default model so the web mirrors what the TUI is
+	// actually running right now.
+	if rc := h.RCBridge(); rc != nil && rc.SessionID == id {
+		if live := rc.TUIStatus(); live.MainModel != "" {
+			snap.MainModel = live.MainModel
+		}
+	}
 	snap.SessionID = id
 	if entry.ProjectRoot != "" {
 		snap.CWD = entry.ProjectRoot
@@ -97,7 +113,7 @@ func (h *Handler) applySessionContext(snap *TUIStatus, id string) {
 		}
 	}
 	if model == "" && h.cfg != nil {
-		model = h.cfg.Model
+		model = h.effectiveSessionModel(id)
 	}
 	if maxTokens == 0 {
 		maxTokens = int(agent.ModelWindow(model))
@@ -123,6 +139,134 @@ func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 		snap.CWD = entry.ProjectRoot
 	}
 	h.applySessionContext(&snap, sessionID)
+	// Reflect the session's effective (override-or-default) model so the
+	// sidebar's Context gauge and Model row stay in sync per session.
+	snap.MainModel = h.effectiveSessionModel(sessionID)
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "status", Data: snap})
+}
+
+// effectiveSessionModel returns the model that should drive the agent for the
+// given session. A per-session override persisted in the session transcript's
+// metadata (metadata["model"]) wins over the process-wide config model, which
+// is the fallback for sessions that have never picked their own. This is what
+// makes the sidebar's model a per-chat-session setting rather than one global
+// value mirrored across every open tab.
+func (h *Handler) effectiveSessionModel(id string) string {
+	if id != "" {
+		if entry, err := h.sessions.Resolve(id); err == nil {
+			if s, err := session.LoadForDir(entry.ProjectRoot, id); err == nil && s.Metadata != nil {
+				if m, ok := s.Metadata["model"].(string); ok && m != "" {
+					return m
+				}
+			}
+		}
+	}
+	if h.cfg != nil {
+		return h.cfg.Model
+	}
+	return ""
+}
+
+// setSessionModelOverride persists (or clears, when model == "") a per-session
+// model override in the session transcript metadata, then re-saves the
+// transcript so the choice survives restart and resume. It returns the model
+// that is now in effect for the session.
+func (h *Handler) setSessionModelOverride(id, model string) (string, error) {
+	entry, err := h.sessions.Resolve(id)
+	if err != nil {
+		return "", err
+	}
+	s, err := session.LoadForDir(entry.ProjectRoot, id)
+	if err != nil {
+		return "", err
+	}
+	if s.Metadata == nil {
+		s.Metadata = map[string]any{}
+	}
+	if model == "" {
+		delete(s.Metadata, "model")
+	} else {
+		s.Metadata["model"] = model
+	}
+	if err := session.SaveForDir(entry.ProjectRoot, id, s.Title, s.Messages, s.Metadata); err != nil {
+		return "", err
+	}
+	return h.effectiveSessionModel(id), nil
+}
+
+// pushSessionStatusSnapshot broadcasts a session-tagged status snapshot whose
+// model reflects the session's effective (override-or-default) model. Used
+// after a web-initiated per-session model change so that tab's sidebar updates
+// immediately without touching any other session. Skipped only for the
+// bridged TUI's own session — the TUI owns that session's status feed and
+// would clobber a web override on its next snapshot; every other session
+// (which gets no TUI-side snapshots) relies on this push to update live.
+func (h *Handler) pushSessionStatusSnapshot(id string) {
+	if rc := h.RCBridge(); rc != nil && rc.SessionID == id {
+		return
+	}
+	snap := h.buildStatusSnapshot()
+	snap.SessionID = id
+	snap.MainModel = h.effectiveSessionModel(id)
+	if entry, err := h.sessions.Resolve(id); err == nil && entry.ProjectRoot != "" {
+		snap.CWD = entry.ProjectRoot
+	}
+	h.applySessionContext(&snap, id)
+	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	h.broadcastEvent(SSEEvent{SessionID: id, Event: "status", Data: snap})
+}
+
+// HandleSetSessionModel sets a per-session model override for id. It validates
+// the model id the same way the global config-model setter does (a bare id
+// without a provider prefix can't be resolved back to a provider), persists
+// it in the session transcript metadata, and pushes a fresh per-session status
+// snapshot so the web sidebar updates at once.
+func (h *Handler) HandleSetSessionModel(w http.ResponseWriter, r *http.Request, id string) {
+	var req struct {
+		Model string `json:"model"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !strings.Contains(req.Model, "/") && !strings.Contains(req.Model, ":") {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("model %q has no provider prefix; use a \"provider/model\" id", req.Model))
+		return
+	}
+	h.mu.Lock()
+	cfgNil := h.cfg == nil
+	h.mu.Unlock()
+	if cfgNil {
+		writeError(w, http.StatusInternalServerError, "config not loaded")
+		return
+	}
+	effective, err := h.setSessionModelOverride(id, req.Model)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	// Mirror the TUI's finishModelSwitch and the global config-model setter
+	// (handler_config.go): every model pick lands in the shared recent list so
+	// the picker's "Recently Used" section stays in sync across TUI, web and
+	// desktop regardless of which surface made the switch.
+	if strings.Contains(req.Model, "/") {
+		if err := config.SaveRecentModel(req.Model); err != nil {
+			log.Printf("save recent model: %v", err)
+		}
+	}
+	h.pushSessionStatusSnapshot(id)
+	writeJSON(w, http.StatusOK, map[string]string{"model": effective, "session_id": id})
+}
+
+// HandleClearSessionModel removes a per-session model override for id, so the
+// session falls back to the process-wide config model again.
+func (h *Handler) HandleClearSessionModel(w http.ResponseWriter, r *http.Request, id string) {
+	effective, err := h.setSessionModelOverride(id, "")
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	h.pushSessionStatusSnapshot(id)
+	writeJSON(w, http.StatusOK, map[string]string{"model": effective, "session_id": id})
 }

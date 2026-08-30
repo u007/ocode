@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -1579,6 +1580,174 @@ func TestAskPermissionModelIncludesAllowedRootsInPrompt(t *testing.T) {
 	if !strings.Contains(prompt, "Pre-authorized paths") {
 		t.Errorf("prompt does not contain 'Pre-authorized paths' section\nprompt:\n%s", prompt)
 	}
+}
+
+// isolateConfigHome points HOME/USERPROFILE at a temp dir so
+// paths.GlobalConfigDir() resolves to <home>/.config/opencode without ever
+// touching the developer's live config. t.Setenv restores the environment.
+//
+// TMPDIR is then re-pointed at a sibling dir: temp dirs are themselves
+// pre-authorized roots, so a test home under the default $TMPDIR would make
+// every path under it (including the boundary cases) vacuously in-scope.
+func isolateConfigHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("TMPDIR", t.TempDir())
+}
+
+func TestAllowedRootsIncludesGlobalConfigDir(t *testing.T) {
+	isolateConfigHome(t)
+	cfgDir, err := paths.GlobalConfigDir()
+	if err != nil {
+		t.Fatalf("GlobalConfigDir() error: %v", err)
+	}
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+
+	for _, child := range []string{
+		filepath.Join(cfgDir, "opencode.json"),
+		filepath.Join(cfgDir, "ocodeconfig.json"),
+		filepath.Join(cfgDir, "skills", "demo", "SKILL.md"),
+	} {
+		if !pm.IsPathWithinAllowedRoots(child) {
+			t.Fatalf("expected %s within allowed roots (auto-LLM permission must allow ~/.config/opencode)", child)
+		}
+	}
+
+	// Scope must stay EXACTLY at ~/.config/opencode: the parent ~/.config
+	// itself and sibling dirs under it remain out of scope.
+	parent := filepath.Dir(cfgDir)
+	sibling := filepath.Join(parent, "opencode-evil")
+	other := filepath.Join(parent, "other-app")
+	for _, d := range []string{sibling, other} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{parent, filepath.Join(sibling, "file"), filepath.Join(other, "file")} {
+		if pm.IsPathWithinAllowedRoots(p) {
+			t.Errorf("path %q must stay OUTSIDE allowed roots (scope leak beyond ~/.config/opencode)", p)
+		}
+	}
+
+	// The auto-grant verifier's sensitive-path veto must not fire on ocode's
+	// own config files — that would force human Ask and defeat the allow.
+	// (Secret CONTENTS are handled by the redaction gate, redact.IsSensitiveFile.)
+	if isSensitivePath(filepath.Join(cfgDir, "ocodeconfig.json")) {
+		t.Error("isSensitivePath must not veto ocode's own config files")
+	}
+}
+
+func TestAskPermissionModelPromptIncludesGlobalConfigDir(t *testing.T) {
+	isolateConfigHome(t)
+	cfgDir, err := paths.GlobalConfigDir()
+	if err != nil {
+		t.Fatalf("GlobalConfigDir() error: %v", err)
+	}
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// AllowedRoots symlink-resolves its entries (macOS temp dirs live under
+	// /var -> /private/var), so compare against the resolved form.
+	resolvedCfg, err := filepath.EvalSymlinks(cfgDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wd := t.TempDir()
+	cfg := &config.Config{}
+	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "test-model"}
+	a := NewAgent(nil, nil, cfg, nil)
+	a.permissions.SetWorkDir(wd)
+
+	capture := &scriptedCaptureClient{Responses: []string{"ALLOW: safe"}}
+	prevClientFn := newClientFn
+	t.Cleanup(func() { newClientFn = prevClientFn })
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		return capture
+	}
+
+	cmd := "cat " + filepath.Join(resolvedCfg, "opencode.json")
+	req := &PermissionRequest{
+		ToolName: "bash",
+		Command:  cmd,
+		Rule:     "bash.prefix.cat",
+		Scope:    PermissionScopeBashPrefix,
+	}
+	args, _ := json.Marshal(map[string]string{"command": cmd})
+	a.askPermissionModel("bash", args, req)
+
+	if len(capture.Prompts) == 0 {
+		t.Fatal("expected LLM to be called with a prompt")
+	}
+	if !strings.Contains(capture.Prompts[0], resolvedCfg) {
+		t.Errorf("prompt does not list the global config dir as pre-authorized\nprompt:\n%s", capture.Prompts[0])
+	}
+}
+
+// TestVerifyAutoGrantAcceptsGlobalConfigDir exercises the full auto-LLM tier:
+// a scripted ALLOW verdict must auto-grant writes inside ~/.config/opencode,
+// while the deterministic verifier must still bounce sibling paths to human
+// Ask (defense in depth — the judge can never widen scope on its own word).
+func TestVerifyAutoGrantAcceptsGlobalConfigDir(t *testing.T) {
+	isolateConfigHome(t)
+	cfgDir, err := paths.GlobalConfigDir()
+	if err != nil {
+		t.Fatalf("GlobalConfigDir() error: %v", err)
+	}
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	newJudge := func(t *testing.T) *Agent {
+		t.Helper()
+		cfg := &config.Config{}
+		cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "test-model"}
+		a := NewAgent(nil, nil, cfg, nil)
+		a.permissions.SetWorkDir(t.TempDir())
+		prevClientFn := newClientFn
+		t.Cleanup(func() { newClientFn = prevClientFn })
+		newClientFn = func(_ *config.Config, _ string) LLMClient {
+			return &scriptedCaptureClient{Responses: []string{"ALLOW: ocode configuration update"}}
+		}
+		return a
+	}
+
+	t.Run("config dir child auto-grants", func(t *testing.T) {
+		a := newJudge(t)
+		target := filepath.Join(cfgDir, "ocodeconfig.json")
+		args, _ := json.Marshal(map[string]string{"file_path": target, "content": "{}"})
+		req := &PermissionRequest{ToolName: "write", Args: args, Scope: PermissionScopeTool, Rule: "tool.write"}
+		allowed, reason, consulted := a.askPermissionModel("write", args, req)
+		if !consulted || !allowed {
+			t.Fatalf("expected auto-grant for %s, got allowed=%v consulted=%v reason=%q", target, allowed, consulted, reason)
+		}
+	})
+
+	t.Run("sibling stays out of scope", func(t *testing.T) {
+		a := newJudge(t)
+		sibling := filepath.Join(filepath.Dir(cfgDir), "other-app")
+		if err := os.MkdirAll(sibling, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(sibling, "config.json")
+		args, _ := json.Marshal(map[string]string{"file_path": target, "content": "{}"})
+		req := &PermissionRequest{ToolName: "write", Args: args, Scope: PermissionScopeTool, Rule: "tool.write"}
+		allowed, _, consulted := a.askPermissionModel("write", args, req)
+		if !consulted {
+			t.Fatal("expected the judge to be consulted")
+		}
+		if allowed {
+			t.Errorf("path %q must NOT auto-grant: the allow covers ~/.config/opencode exactly", target)
+		}
+	})
 }
 
 func TestWebfetchLocalhostAutoAllow(t *testing.T) {

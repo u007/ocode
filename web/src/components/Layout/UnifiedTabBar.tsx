@@ -145,8 +145,8 @@ function TabPill({
           onClick({ button: 0, detail: 1 } as unknown as React.MouseEvent);
         }
       }}
-      className={`relative flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
-        isActive ? "bg-muted text-foreground border-t border-t-blue-500" : "text-muted-foreground hover:text-foreground hover:bg-muted/60"
+      className={`relative flex items-center gap-1 px-2 py-1 rounded-md text-xs cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring border ${
+        isActive ? "bg-muted text-foreground border-border border-t-blue-500" : "bg-card/20 text-muted-foreground border-border hover:text-foreground hover:bg-muted/60"
       }`}
     >
       {hasAlert && (
@@ -203,7 +203,7 @@ function TabPill({
         tabIndex={0}
         aria-label={`Close ${displayTitle}`}
         title={`Close ${displayTitle}`}
-        className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors shrink-0"
+        className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors shrink-0"
         onClick={onClose}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -273,10 +273,24 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
 
   const chatIds = useMemo(() => chatTabs.map((t) => t.id), [chatTabs]);
   const terminalIds = useMemo(() => terminals.map((t) => t.id), [terminals]);
-  const order = useMemo(
-    () => reconcileTabOrder(loadTabOrder(activeProjectPath), chatIds, terminalIds),
-    [activeProjectPath, chatIds, terminalIds],
+
+  // Persisted merged tab order. Seeded from localStorage and re-synced whenever
+  // the live tab set or active project changes (tabs added/removed, project
+  // switch). Drag-reorder updates this state *and* localStorage so the move
+  // registers immediately instead of snapping back — previously `order` was a
+  // memo derived from localStorage, so a drag that only wrote localStorage
+  // never re-rendered the bar into its new order.
+  const [order, setOrder] = useState<UnifiedTabKey[]>(() =>
+    reconcileTabOrder(loadTabOrder(activeProjectPath), chatIds, terminalIds),
   );
+  const orderRef = useRef(order);
+
+  useEffect(() => {
+    const next = reconcileTabOrder(loadTabOrder(activeProjectPath), chatIds, terminalIds);
+    if (next.join("") === orderRef.current.join("")) return;
+    orderRef.current = next;
+    setOrder(next);
+  }, [activeProjectPath, chatIds, terminalIds]);
 
   const dndSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -287,12 +301,17 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     (event: DragEndEvent) => {
       const { active, over } = event;
       if (!over || active.id === over.id) return;
-      const oldIndex = order.indexOf(active.id as UnifiedTabKey);
-      const newIndex = order.indexOf(over.id as UnifiedTabKey);
-      if (oldIndex === -1 || newIndex === -1) return;
-      saveTabOrder(activeProjectPath, arrayMove(order, oldIndex, newIndex));
+      setOrder((prev) => {
+        const oldIndex = prev.indexOf(active.id as UnifiedTabKey);
+        const newIndex = prev.indexOf(over.id as UnifiedTabKey);
+        if (oldIndex === -1 || newIndex === -1) return prev;
+        const next = arrayMove(prev, oldIndex, newIndex);
+        orderRef.current = next;
+        saveTabOrder(activeProjectPath, next);
+        return next;
+      });
     },
-    [order, activeProjectPath],
+    [activeProjectPath],
   );
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -458,7 +477,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         onClick={handleNewChat}
         aria-label="New chat session"
         title="New chat session"
-        className="flex shrink-0 items-center gap-0.5 px-2 py-1 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+        className="flex shrink-0 items-center gap-0.5 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors border border-border"
       >
         <span aria-hidden>💬</span>
         <Plus className="w-3 h-3" />
@@ -469,7 +488,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           onClick={handleNewTerminal}
           aria-label="New terminal"
           title="New terminal"
-          className="flex shrink-0 items-center gap-0.5 px-2 py-1 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          className="flex shrink-0 items-center gap-0.5 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors border border-border"
         >
           <span aria-hidden>⌨️</span>
           <Plus className="w-3 h-3" />
@@ -482,10 +501,10 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
             onFocusKindChange("terminal");
             setActiveTerminalId(activeProjectPath, PROCESSES_TAB_ID);
           }}
-          className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+          className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors border ${
             focusedKind === "terminal" && activeTerminalId === PROCESSES_TAB_ID
-              ? "bg-accent text-accent-foreground"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              ? "bg-accent text-accent-foreground border-border"
+              : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
           }`}
         >
           Processes
@@ -494,7 +513,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
 
       <button
         onClick={toggleSessionPicker}
-        className="flex items-center gap-1 px-2 py-1 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+        className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0 border border-border"
         title="Browse all sessions"
       >
         <List className="w-3.5 h-3.5" />

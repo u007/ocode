@@ -82,10 +82,10 @@ export default function EditorTabBar({
             </button>
             <button
               onClick={() => onSelectTab(et.id)}
-              className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+              className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 border ${
                 isActive
-                  ? "bg-blue-600/20 text-blue-400"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                  ? "bg-blue-600/20 text-blue-400 border-blue-500/30"
+                  : "border-border text-muted-foreground hover:text-foreground hover:bg-muted"
               }`}
               title={et.path}
             >
@@ -100,7 +100,7 @@ export default function EditorTabBar({
                 e.stopPropagation();
                 onCloseTab(et.id);
               }}
-              className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+              className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors"
               title="Close"
             >
               <X className="w-3 h-3" />

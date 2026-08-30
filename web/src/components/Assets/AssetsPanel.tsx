@@ -54,8 +54,8 @@ function fileAPIURL(name: string, projectQuery: string): string {
   return apiPath(`/api/uploads/file?name=${encodeURIComponent(name)}${projectQuery}`);
 }
 
-async function fetchBlob(name: string, projectQuery: string): Promise<string> {
-  const r = await fetch(fileAPIURL(name, projectQuery), { headers: authHeaders() });
+async function fetchBlob(name: string, projectQuery: string, signal?: AbortSignal): Promise<string> {
+  const r = await fetch(fileAPIURL(name, projectQuery), { headers: authHeaders(), signal });
   if (!r.ok) throw new Error(`fetch failed: ${r.status}`);
   return URL.createObjectURL(await r.blob());
 }
@@ -111,6 +111,8 @@ export default function AssetsPanel() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadGeneration = useRef(0);
+  const blobGeneration = useRef(0);
+  const previewAbortRef = useRef<AbortController | null>(null);
 
   const projectPath = useProjectState().state.activeProject?.path;
   // Appended to URLs that already carry a query (?name=...).
@@ -124,6 +126,15 @@ export default function AssetsPanel() {
       if (blobUrl) URL.revokeObjectURL(blobUrl);
     };
   }, [blobUrl]);
+
+  // Invalidate and abort preview work before unmount so a late response cannot
+  // create an object URL after the blobUrl cleanup effect has run.
+  useEffect(() => {
+    return () => {
+      blobGeneration.current++;
+      previewAbortRef.current?.abort();
+    };
+  }, []);
 
   const loadFiles = useCallback(async () => {
     const generation = ++loadGeneration.current;
@@ -200,22 +211,43 @@ export default function AssetsPanel() {
   );
 
   const handleSelect = useCallback(async (file: UploadedFile) => {
+    const gen = ++blobGeneration.current;
+    previewAbortRef.current?.abort();
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
     setSelected(file);
     setConfirmDelete(null);
     setPreviewText(null);
-    setBlobUrl(null);
+    setBlobUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
     if (file.mime.startsWith("text/")) {
       try {
-        const r = await fetch(fileAPIURL(file.name, projectQuery), { headers: authHeaders() });
+        const r = await fetch(fileAPIURL(file.name, projectQuery), {
+          headers: authHeaders(),
+          signal: controller.signal,
+        });
+        if (gen !== blobGeneration.current) return;
         setPreviewText(r.ok ? await r.text() : `(failed to load preview: ${r.status})`);
       } catch (e) {
+        if (gen !== blobGeneration.current) return;
         console.error("Preview load failed:", e);
         setPreviewText(`(failed to load preview: ${e instanceof Error ? e.message : String(e)})`);
       }
     } else {
       try {
-        setBlobUrl(await fetchBlob(file.name, projectQuery));
+        const url = await fetchBlob(file.name, projectQuery, controller.signal);
+        if (controller.signal.aborted || gen !== blobGeneration.current) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        setBlobUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return url;
+        });
       } catch (e) {
+        if (gen !== blobGeneration.current) return;
         console.error("Blob load failed:", e);
       }
     }

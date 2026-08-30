@@ -1319,6 +1319,19 @@ func (pm *PermissionManager) AllowedRoots() []string {
 	if dataDir, err := paths.GlobalDataDir(); err == nil {
 		add(dataDir)
 	}
+	// Ocode's global config dir (~/.config/opencode; %APPDATA%\opencode on
+	// Windows) holds opencode.json, ocodeconfig.json, the auto-permission
+	// prompts, skills/, and plugins/. The auto-LLM permission layer must be
+	// able to read/write ocode's own configuration without falling back to a
+	// human prompt, so it joins the shared allowed-root model exactly like the
+	// data dir above. The addition is prefix-boundary safe (pathUnderRoot), so
+	// only paths under the expanded home-dir config root are in scope —
+	// $HOME/.config itself and sibling directories stay out of scope. Sensitive
+	// *contents* are handled separately by the redaction gate (see
+	// redact.IsSensitiveFile), which masks secrets when these files are read.
+	if configDir, err := paths.GlobalConfigDir(); err == nil {
+		add(configDir)
+	}
 	// Language dependency cache/registry directories (Go module cache, npm
 	// cache, cargo registry, pip cache, Maven/Gradle caches, etc.). These are
 	// content-addressed or append-only stores; read-only access is always safe,

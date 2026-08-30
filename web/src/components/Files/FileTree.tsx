@@ -210,7 +210,7 @@ function GitBadge({ status }: { status: string }) {
     D: { label: "D", cls: "bg-red-500/20 text-red-400 border-red-500/30" },
     R: { label: "R", cls: "bg-purple-500/20 text-purple-400 border-purple-500/30" },
   };
-  const cfg = map[status] || { label: status, cls: "bg-accent text-foreground border-border" };
+  const cfg = map[status] || { label: status, cls: "bg-accent text-accent-foreground border-border" };
   const title =
     status === "?"
       ? "Untracked (new)"
@@ -401,7 +401,7 @@ function TreeNode({
     forceExpanded ? "cursor-default" : ""
   }`;
   const rowState = selected
-    ? "bg-accent text-foreground"
+    ? "bg-accent text-accent-foreground"
     : selectedPath === node.path
       ? "bg-muted text-foreground"
       : "text-muted-foreground hover:bg-muted";
@@ -604,6 +604,7 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
   const searchGenRef = useRef(0);
+  const fullTreeAbortRef = useRef<AbortController | null>(null);
   const [fullTree, setFullTree] = useState<FileNode[] | null>(null);
   const [fullTreeLoading, setFullTreeLoading] = useState(false);
   const [fullTreeTruncated, setFullTreeTruncated] = useState(false);
@@ -703,12 +704,14 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
     const root = activeRoot ?? projectPath;
     if (!root) return;
     if (fullTree !== null) return;
-    let cancelled = false;
+    const controller = new AbortController();
+    fullTreeAbortRef.current?.abort();
+    fullTreeAbortRef.current = controller;
     setFullTreeLoading(true);
     (async () => {
       try {
         const query = `path=${encodeURIComponent(root)}&depth=0`;
-        const res = await fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders() });
+        const res = await fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders(), signal: controller.signal });
         if (!res.ok) throw new Error("Failed to load full file tree for filtering");
         const data: FileTreeResponse = await res.json();
         if (data.truncated) {
@@ -716,16 +719,15 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
           setFullTreeTruncated(true);
         }
         if (data.is_git_repo) setIsGitRepo(true);
-        if (!cancelled) setFullTree(data.children);
+        if (controller.signal.aborted) return;
+        setFullTree(data.children);
       } catch (err) {
         if ((err as Error).name !== "AbortError") console.error("Full tree error:", err);
       } finally {
-        if (!cancelled) setFullTreeLoading(false);
+        if (!controller.signal.aborted) setFullTreeLoading(false);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, [keyword, activeRoot, projectPath, fullTree]);
 
   const fetchContentPage = useCallback(
@@ -1042,7 +1044,7 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
   return (
     <div className="flex flex-col h-full">
       {notice && (
-        <div className="px-3 py-1 text-[11px] bg-accent text-foreground border-b border-border shrink-0">
+        <div className="px-3 py-1 text-[11px] bg-accent text-accent-foreground border-b border-border shrink-0">
           {notice}
         </div>
       )}
@@ -1080,8 +1082,8 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
             onClick={() => setSearchMode(searchMode === "content" ? "path" : "content")}
             className={`shrink-0 h-7 px-2 text-[11px] font-medium rounded border transition-colors ${
               searchMode === "content"
-                ? "bg-accent text-foreground border-border"
-                : "bg-transparent text-muted-foreground border-border hover:bg-accent"
+                ? "bg-accent text-accent-foreground border-border"
+                : "bg-transparent text-muted-foreground border-border hover:bg-accent hover:text-accent-foreground"
             }`}
             title={searchMode === "content" ? "Searching file contents (click for path filter)" : "Filtering by path (click for content search)"}
           >
@@ -1100,7 +1102,7 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
               <button
                 type="button"
                 onClick={() => (searchMode === "path" ? setKeyword("") : setContentQuery(""))}
-                className="absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
+                className="absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-accent text-muted-foreground hover:text-accent-foreground"
                 aria-label="Clear filter"
               >
                 <X className="w-3.5 h-3.5" />

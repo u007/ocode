@@ -9,9 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/pathscope"
 )
 
@@ -19,6 +22,20 @@ import (
 // include) will actually open before it stops — see the comment in
 // GrepTool.ExecuteCtx for why unscoped defaults to the whole project root.
 const maxUnscopedFiles = 5000
+
+// maybeFreeOSMemory returns freed-but-retained heap pages to the OS after a
+// large tree walk. Glob/grep over a big tree can spike the heap by gigabytes
+// of short-lived allocations; Go's background scavenger returns those pages
+// over minutes, so RSS otherwise sits inflated long after the call finishes.
+// The forced GC only runs when the runtime is holding >512MB of idle heap,
+// so steady-state calls never pay its cost.
+func maybeFreeOSMemory() {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	if ms.HeapIdle-ms.HeapReleased > 512<<20 {
+		debug.FreeOSMemory()
+	}
+}
 
 // resolveSearchRoot anchors a search tool's path parameter on the session's
 // project root (WithWorkDir context) instead of the process cwd. The server
@@ -84,6 +101,15 @@ func resolveSearchRoot(ctx context.Context, path string) (string, error) {
 	if pathscope.IsTempDir(resolved) {
 		return resolved, nil
 	}
+	// Allow walks inside ocode's global config dir (skills/, plugins/, config
+	// files). It is a pre-authorized root in the permission layer, so grep/glob/
+	// list must be able to scope there too. pathWithinRoot is prefix-boundary
+	// safe: the parent ~/.config and sibling dirs stay out of scope.
+	if configDir, err := paths.GlobalConfigDir(); err == nil {
+		if cfgResolved, ok := normalizeRootPath(configDir); ok && pathWithinRoot(resolved, cfgResolved) {
+			return resolved, nil
+		}
+	}
 	return "", fmt.Errorf("path %q is outside the working directory", path)
 }
 
@@ -144,6 +170,7 @@ func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 }
 
 func (t GlobTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
+	defer maybeFreeOSMemory()
 	var params struct {
 		Pattern string   `json:"pattern"`
 		Path    string   `json:"path"`
@@ -162,6 +189,7 @@ func (t GlobTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 	}
 
 	ign := NewIgnoreMatcher(searchDir, params.Ignore)
+	gm := newGlobMatcher(params.Pattern)
 
 	var matches []globMatch
 	walkErr := filepath.Walk(searchDir, func(path string, info os.FileInfo, err error) error {
@@ -192,7 +220,7 @@ func (t GlobTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		}
 		rel = filepath.ToSlash(rel)
 
-		if matchGlob(params.Pattern, rel) {
+		if gm.matches(rel) {
 			matches = append(matches, globMatch{
 				path:  searchDisplayPath(searchDir, params.Path, path),
 				mtime: info.ModTime().UnixNano(),
@@ -232,21 +260,41 @@ func (t GlobTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 	return result, nil
 }
 
-func matchGlob(pattern, path string) bool {
-	pattern = filepath.ToSlash(pattern)
+// globMatcher holds a glob pattern compiled once so per-file matching inside
+// a filepath.Walk never recompiles. A ** pattern previously went through
+// regexp.MatchString on every visited file, which recompiled the regex per
+// file and dominated allocation on large trees.
+type globMatcher struct {
+	pattern string
+	re      *regexp.Regexp // non-nil only for ** patterns that compiled
+}
 
+func newGlobMatcher(pattern string) *globMatcher {
+	pattern = filepath.ToSlash(pattern)
+	m := &globMatcher{pattern: pattern}
 	if strings.Contains(pattern, "**") {
-		re := globToRegex(pattern)
-		matched, _ := regexp.MatchString("^"+re+"$", path)
-		return matched
+		re, err := regexp.Compile("^" + globToRegex(pattern) + "$")
+		if err != nil {
+			// intentionally not logged: matches prior regexp.MatchString
+			// behavior where an uncompilable pattern simply matched nothing
+			return m
+		}
+		m.re = re
+	}
+	return m
+}
+
+func (m *globMatcher) matches(path string) bool {
+	if strings.Contains(m.pattern, "**") {
+		return m.re != nil && m.re.MatchString(path)
 	}
 
-	matched, _ := filepath.Match(pattern, path)
+	matched, _ := filepath.Match(m.pattern, path)
 	if matched {
 		return true
 	}
 
-	matched, _ = filepath.Match(pattern, "./"+path)
+	matched, _ = filepath.Match(m.pattern, "./"+path)
 	return matched
 }
 
@@ -329,6 +377,7 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 }
 
 func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
+	defer maybeFreeOSMemory()
 	var params struct {
 		Pattern    string   `json:"pattern"`
 		Path       string   `json:"path"`
@@ -384,6 +433,10 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 	unscoped := params.Path == "" && params.Include == ""
 	filesRead := 0
 	truncated := false
+	var includeMatcher *globMatcher
+	if params.Include != "" {
+		includeMatcher = newGlobMatcher(params.Include)
+	}
 
 	walkErr := filepath.Walk(searchRoot, func(p string, info os.FileInfo, werr error) error {
 		if werr != nil {
@@ -409,7 +462,7 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		}
 
 		display := searchDisplayPath(searchRoot, params.Path, p)
-		if params.Include != "" && !matchGlob(params.Include, filepath.ToSlash(display)) {
+		if includeMatcher != nil && !includeMatcher.matches(filepath.ToSlash(display)) {
 			return nil
 		}
 

@@ -395,10 +395,7 @@ func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("session not found: %w", err)
 	}
-	model := ""
-	if h.cfg != nil {
-		model = h.cfg.Model
-	}
+	model := h.effectiveSessionModel(id)
 	as, _, err := h.ensureAgentSession(id, model, s.Messages, entry.ProjectRoot)
 	return as, err
 }
@@ -748,11 +745,7 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 	// and the profile hasn't changed.
 	reconcileModel := job.model
 	if reconcileModel == "" {
-		h.mu.Lock()
-		if h.cfg != nil {
-			reconcileModel = h.cfg.Model
-		}
-		h.mu.Unlock()
+		reconcileModel = h.effectiveSessionModel(id)
 	}
 	if reb, err := h.reconcileProfileAgent(id, as, reconcileModel); err != nil {
 		log.Printf("serve error: reconcile profile for %s: %v", id, err)
@@ -793,8 +786,8 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 // still pending (persisted but not yet turned — runTurn re-appends them at
 // turn time). Emits session_bootstrap stage events via buildAgentSession.
 func (h *Handler) bootstrapEntryAgent(entry *sessionEntry, model string) (*agentSession, string, error) {
-	if model == "" && h.cfg != nil {
-		model = h.cfg.Model
+	if model == "" {
+		model = h.effectiveSessionModel(entry.SessionID)
 	}
 	var history []agent.Message
 	if s, err := session.LoadForDir(entry.ProjectRoot, entry.SessionID); err == nil {

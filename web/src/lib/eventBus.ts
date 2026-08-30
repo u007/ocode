@@ -127,6 +127,21 @@ class EventBus {
     this.reconnectDelay = RECONNECT_BASE_MS;
   }
 
+  /** Restart the SSE stream to pick up a new backend origin (apiPath).
+   *  Preserves subscriptions and project list; fires reconnect handlers
+   *  like setProjects does. No-op when not yet started — next start()
+   *  will use the new apiPath automatically. */
+  restart(): void {
+    if (!this.started) return;
+    this.closeStream();
+    if (this.reconnectTimer !== undefined) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    this.reconnectDelay = RECONNECT_BASE_MS;
+    this.openStream();
+  }
+
   private openStream(): void {
     if (this.es || !this.started) return;
     const params = new URLSearchParams();
@@ -137,6 +152,7 @@ class EventBus {
     this.es = es;
 
     es.addEventListener("open", () => {
+      if (this.es !== es) return;
       this.reconnectDelay = RECONNECT_BASE_MS;
       this.lastSeq = 0; // fresh stream — no gap warnings for the first frames
       if (this.hasOpenedOnce) {
@@ -147,6 +163,7 @@ class EventBus {
 
     // The server sends every envelope as `event: envelope\ndata: <json>`.
     es.addEventListener("envelope", (e) => {
+      if (this.es !== es) return;
       const raw = (e as MessageEvent).data;
       let env: BusEnvelope;
       try {
@@ -173,10 +190,9 @@ class EventBus {
       // Transport error: close and retry with backoff. EventSource would
       // auto-reconnect, but we manage the retry ourselves so the URL carries
       // the current project list and so reconnect handlers fire on success.
-      if (this.es) {
-        this.es.close();
-        this.es = null;
-      }
+      if (this.es !== es) return;
+      this.es.close();
+      this.es = null;
       if (!this.started) return;
       const delay = this.reconnectDelay;
       this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);

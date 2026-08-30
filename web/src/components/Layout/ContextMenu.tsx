@@ -77,7 +77,7 @@ export function ContextMenu({ items, children, onOpen }: ContextMenuProps) {
                   className={`w-full flex items-center gap-2 px-3 py-1.5 text-sm text-left ${
                     item.destructive
                       ? "text-destructive hover:bg-destructive/10"
-                      : "text-foreground hover:bg-accent"
+                      : "text-foreground hover:bg-accent hover:text-accent-foreground"
                   } ${item.disabled ? "opacity-50 pointer-events-none" : ""}`}
                   onClick={() => {
                     item.onClick();

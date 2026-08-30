@@ -136,3 +136,57 @@ func TestProjectSlugFollowsSymlink(t *testing.T) {
 		t.Fatalf("symlink slug mismatch: target=%q link=%q", gotTarget, gotLink)
 	}
 }
+
+func TestGlobalConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	var want string
+	switch runtime.GOOS {
+	case "windows":
+		appdata := filepath.Join(home, "AppData", "Roaming")
+		t.Setenv("APPDATA", appdata)
+		want = filepath.Join(appdata, AppName)
+	default:
+		// macOS ignores XDG_CONFIG_HOME (mirrors the darwin branch of
+		// GlobalDataDir). Linux XDG handling is covered below.
+		t.Setenv("XDG_CONFIG_HOME", "")
+		want = filepath.Join(home, ".config", AppName)
+	}
+
+	dir, err := GlobalConfigDir()
+	if err != nil {
+		t.Fatalf("GlobalConfigDir() error: %v", err)
+	}
+	if dir != want {
+		t.Fatalf("GlobalConfigDir() = %q, want %q", dir, want)
+	}
+	// Must be side-effect free: the permission/confinement layers probe this on
+	// every decision, and a probe must never create directories.
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("GlobalConfigDir() must not create %q (stat err = %v)", dir, err)
+	}
+
+	if runtime.GOOS == "windows" {
+		// Unset APPDATA is a hard error — no silent join onto an empty base
+		// (the old ad-hoc resolvers produced a relative "opencode/..." path).
+		t.Setenv("APPDATA", "")
+		if _, err := GlobalConfigDir(); err == nil {
+			t.Fatal("GlobalConfigDir() should error when APPDATA is unset")
+		}
+		return
+	}
+	if runtime.GOOS != "linux" && runtime.GOOS != "freebsd" {
+		return
+	}
+	xdg := filepath.Join(home, "xdg-config")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	dir, err = GlobalConfigDir()
+	if err != nil {
+		t.Fatalf("GlobalConfigDir(XDG) error: %v", err)
+	}
+	if want := filepath.Join(xdg, AppName); dir != want {
+		t.Fatalf("GlobalConfigDir(XDG) = %q, want %q", dir, want)
+	}
+}

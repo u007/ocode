@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -460,6 +460,11 @@ type OcodeConfig struct {
 	// /api/uploads endpoints. When empty, files are stored under
 	// <workDir>/.ocode/uploads.
 	UploadDir string `json:"upload_dir,omitempty"`
+	// BackendURL overrides the API backend the web frontend connects to.
+	// Empty means same-origin (existing behavior). Allowed values are
+	// empty, http://localhost[:port], http://127.0.0.1[:port], or
+	// https://hub.mercstudio.com (optional trailing slash normalized away).
+	BackendURL string `json:"backend_url,omitempty"`
 	// Ocr holds the OCR tool configuration (backend, model, endpoint).
 	// Backend accepts openai-compat, paddle, and the lmstudio alias.
 	Ocr      ocr.OcrConfig           `json:"ocr"`
@@ -677,6 +682,7 @@ type ocodeConfigFile struct {
 	MaxSteps                int                         `json:"max_steps,omitempty"`
 	MaxImageDim             int                         `json:"image_max_dim,omitempty"`
 	UploadDir               string                      `json:"upload_dir,omitempty"`
+	BackendURL              string                      `json:"backend_url,omitempty"`
 	Ocr                     *ocr.OcrConfig              `json:"ocr,omitempty"`
 	ImageGen                *ImageGenConfig             `json:"imagegen,omitempty"`
 	Profiles                map[string]ProfileDelta     `json:"profiles,omitempty"`
@@ -1189,6 +1195,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "upload_dir")
 	}
 
+	if _, ok := raw["backend_url"]; ok {
+		if normalized, err := NormalizeBackendURL(file.BackendURL); err == nil {
+			cfg.BackendURL = normalized
+		}
+		delete(raw, "backend_url")
+	}
+
 	if rawOcr, ok := raw["ocr"]; ok && rawOcr != nil {
 		var ocrCfg ocr.OcrConfig
 		if data, err := json.Marshal(rawOcr); err == nil {
@@ -1661,6 +1674,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.UploadDir != "" {
 		payload["upload_dir"] = cfg.UploadDir
 	}
+	if cfg.BackendURL != "" {
+		payload["backend_url"] = cfg.BackendURL
+	}
 	if len(cfg.Profiles) > 0 {
 		payload["profiles"] = cfg.Profiles
 	}
@@ -1983,6 +1999,99 @@ func SaveUploadDir(dir string) error {
 	})
 }
 
+// NormalizeBackendURL validates and normalizes a backend URL. Allowed values
+// are empty (same-origin), http://localhost[:port], http://127.0.0.1[:port],
+// or https://hub.mercstudio.com (optional trailing slash normalized away).
+// It rejects credentials, paths, query strings, fragments, wrong schemes,
+// host-subdomain tricks, and malformed ports.
+func NormalizeBackendURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	// Trim single trailing slash for normalization (but keep root slash handling below).
+	if strings.HasSuffix(trimmed, "/") && trimmed != "/" {
+		trimmed = strings.TrimSuffix(trimmed, "/")
+	}
+	// For hub URL, string comparison is easiest and safest.
+	if trimmed == "https://hub.mercstudio.com" {
+		return trimmed, nil
+	}
+	// Use net/url parsing for localhost variants.
+	u, err := parseBackendURL(trimmed)
+	if err != nil {
+		return "", err
+	}
+	// Only http scheme for localhost.
+	if u.Scheme != "http" {
+		return "", fmt.Errorf("backend_url must be http for localhost, got %q", u.Scheme)
+	}
+	// Reject userinfo.
+	if u.User != nil {
+		return "", fmt.Errorf("backend_url must not contain credentials")
+	}
+	// Reject path, query, fragment.
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("backend_url must not contain a path")
+	}
+	if u.RawQuery != "" {
+		return "", fmt.Errorf("backend_url must not contain a query string")
+	}
+	if u.Fragment != "" {
+		return "", fmt.Errorf("backend_url must not contain a fragment")
+	}
+	// Host must be exactly localhost or 127.0.0.1 with optional port.
+	hostname := u.Hostname()
+	port := u.Port()
+	if hostname != "localhost" && hostname != "127.0.0.1" {
+		return "", fmt.Errorf("backend_url host must be localhost, 127.0.0.1, or https://hub.mercstudio.com")
+	}
+	// Validate port if present.
+	if port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return "", fmt.Errorf("backend_url has invalid port %q", port)
+		}
+	}
+	// Reconstruct normalized URL without path.
+	if port != "" {
+		return fmt.Sprintf("http://%s:%s", hostname, port), nil
+	}
+	return fmt.Sprintf("http://%s", hostname), nil
+}
+
+func parseBackendURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid backend_url %q: %w", raw, err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("backend_url must be an absolute URL, got %q", raw)
+	}
+	if strings.Contains(raw, "@") {
+		return nil, fmt.Errorf("backend_url must not contain credentials")
+	}
+	return u, nil
+}
+
+// ValidateBackendURL is a convenience wrapper that only checks validity.
+func ValidateBackendURL(raw string) error {
+	_, err := NormalizeBackendURL(raw)
+	return err
+}
+
+// SaveBackendURL persists the backend_url field after validation/normalization.
+func SaveBackendURL(raw string) error {
+	normalized, err := NormalizeBackendURL(raw)
+	if err != nil {
+		return err
+	}
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.BackendURL = normalized
+		return nil
+	})
+}
+
 // SaveDiscoveryEnabled persists only the discovery.enabled flag using
 // load-modify-write so it cannot clobber a concurrent session's other config.
 func SaveDiscoveryEnabled(enabled bool) error {
@@ -2121,14 +2230,11 @@ func init() {
 }
 
 func getGlobalOcodeConfigPath() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := GlobalConfigDir()
 	if err != nil {
 		return "", err
 	}
-	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("APPDATA"), "opencode", "ocodeconfig.json"), nil
-	}
-	return filepath.Join(home, ".config", "opencode", "ocodeconfig.json"), nil
+	return filepath.Join(dir, "ocodeconfig.json"), nil
 }
 
 func getProjectOcodeConfigPath() (string, error) {

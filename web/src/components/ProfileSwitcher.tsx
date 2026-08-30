@@ -56,7 +56,7 @@ export function ProfileSwitcher() {
     <div className="relative inline-flex">
       <button
         onClick={()=>setOpen(!open)}
-        className="rounded-full border bg-muted px-3 py-1 text-xs hover:bg-accent"
+        className="rounded-full border bg-muted px-3 py-1 text-xs hover:bg-accent hover:text-accent-foreground"
         title={active ? `Profile ${active}` : `Default (base config)`}
       >
         {label} ▾
@@ -64,11 +64,11 @@ export function ProfileSwitcher() {
       {open && (
         <div className="absolute right-0 top-8 z-50 w-56 rounded-md border bg-popover p-2 shadow">
           <div className="mb-1 text-xs text-muted-foreground">Active profile for this window</div>
-          <button onClick={async()=>{ await authedFetch(`/api/window/${encodeURIComponent(windowId)}/activeProfile`, {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({profile:""})}); setActive(""); setOpen(false)}} className={`flex w-full items-center justify-between rounded px-2 py-1 text-sm hover:bg-accent ${active===""?"bg-accent":""}`}>
+          <button onClick={async()=>{ await authedFetch(`/api/window/${encodeURIComponent(windowId)}/activeProfile`, {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({profile:""})}); setActive(""); setOpen(false)}} className={`flex w-full items-center justify-between rounded px-2 py-1 text-sm hover:bg-accent hover:text-accent-foreground ${active===""?"bg-accent text-accent-foreground":""}`}>
             <span>Default (base)</span>{active===""&&<span>✓</span>}
           </button>
           {profiles.map(p=>(
-            <button key={p.name} onClick={async()=>{ await authedFetch(`/api/window/${encodeURIComponent(windowId)}/activeProfile`, {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({profile:p.name})}); setActive(p.name); setOpen(false)}} className={`flex w-full items-center justify-between rounded px-2 py-1 text-sm hover:bg-accent ${active===p.name?"bg-accent":""}`}>
+            <button key={p.name} onClick={async()=>{ await authedFetch(`/api/window/${encodeURIComponent(windowId)}/activeProfile`, {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({profile:p.name})}); setActive(p.name); setOpen(false)}} className={`flex w-full items-center justify-between rounded px-2 py-1 text-sm hover:bg-accent hover:text-accent-foreground ${active===p.name?"bg-accent text-accent-foreground":""}`}>
               <span>{p.name} •{p.overrideCount}</span>{active===p.name&&<span>✓</span>}
             </button>
           ))}

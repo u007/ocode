@@ -186,7 +186,7 @@ export default function PermissionDialog({
         }
       }}
     >
-      <DialogContent className="sm:max-w-md bg-card border-border">
+      <DialogContent className="max-h-[calc(100vh-2rem)] w-[calc(100%-2rem)] overflow-x-clip overflow-y-auto sm:max-w-2xl bg-card border-border">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-foreground">
             {confirming ? (
@@ -202,44 +202,45 @@ export default function PermissionDialog({
           {!confirming && (
             <>
               {denyReason && (
-                <div className="rounded-lg border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-200">
+                <div className="max-w-full rounded-lg border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-200">
                   <div className="font-medium">Auto-denied by LLM permission model:</div>
-                  <div className="mt-1">{denyReason}</div>
+                  <div className="mt-1 break-words [overflow-wrap:anywhere]">{denyReason}</div>
                 </div>
               )}
 
               {modelUnavailable && (
-                <div className="rounded-lg border border-yellow-900/60 bg-yellow-950/30 p-3 text-sm text-yellow-200">
+                <div className="max-w-full rounded-lg border border-yellow-900/60 bg-yellow-950/30 p-3 text-sm text-yellow-200">
                   <div className="font-medium">Permission model unavailable — asking you instead:</div>
-                  <div className="mt-1">{modelUnavailable}</div>
+                  <div className="mt-1 break-words [overflow-wrap:anywhere]">{modelUnavailable}</div>
                 </div>
               )}
 
               {summary && (
-                <div className="rounded-lg border border-border bg-muted/60 p-3 text-sm text-foreground">
+                <div className="max-w-full rounded-lg border border-border bg-muted/60 p-3 text-sm text-foreground">
                   <div className="font-medium text-foreground">Model summary:</div>
-                  <div className="mt-1">{summary}</div>
+                  <div className="mt-1 break-words [overflow-wrap:anywhere]">{summary}</div>
                 </div>
               )}
 
               {rule && (
-                <div className="text-xs text-muted-foreground">
-                  Permission rule: <span className="font-mono">{rule}</span>
+                <div className="max-w-full text-xs text-muted-foreground">
+                  Permission rule:{" "}
+                  <span className="font-mono break-words [overflow-wrap:anywhere]">{rule}</span>
                 </div>
               )}
 
-              <div className="flex items-center gap-3 p-3 rounded-lg bg-muted border border-border">
+              <div className="flex max-w-full items-center gap-3 rounded-lg border border-border bg-muted p-3">
                 {(() => {
                   const Icon = toolIcon;
                   return <Icon className="w-5 h-5 text-blue-400 flex-shrink-0" />;
                 })()}
-                <div className="min-w-0">
+                <div className="min-w-0 max-w-full">
                   <div className="text-sm font-medium text-foreground">
                     The agent wants to use{" "}
-                    <span className="font-mono text-blue-400">{tool}</span>
+                    <span className="font-mono break-words [overflow-wrap:anywhere] text-blue-400">{tool}</span>
                   </div>
                   {command && (
-                    <div className="mt-2 text-xs text-muted-foreground font-mono bg-card p-2 rounded overflow-x-auto max-h-32">
+                    <div className="mt-2 max-h-32 overflow-y-auto rounded bg-card p-2 font-mono text-xs whitespace-pre-wrap break-words text-muted-foreground [overflow-wrap:anywhere]">
                       {command}
                     </div>
                   )}
@@ -249,13 +250,13 @@ export default function PermissionDialog({
           )}
 
           {confirming && (
-            <div className="rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-sm text-foreground">
+            <div className="max-w-full rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-sm break-words text-foreground [overflow-wrap:anywhere]">
               {confirmExplanation}
             </div>
           )}
 
           {confirming ? (
-            <div className="flex justify-end gap-3">
+            <div className="flex flex-wrap justify-end gap-3">
               <Button
                 type="button"
                 variant="outline"

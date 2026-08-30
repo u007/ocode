@@ -602,8 +602,8 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	model := req.Model
-	if model == "" && h.cfg != nil {
-		model = h.cfg.Model
+	if model == "" {
+		model = h.effectiveSessionModel(req.SessionID)
 	}
 
 	sid := req.SessionID
@@ -650,6 +650,18 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		sid = session.NewSessionID()
 		createdSession = true
 		entry = h.sessions.RegisterWithWindow(sid, projectRoot, windowID)
+		// Persist an explicitly-requested model as this session's override at
+		// creation time (before any turn), so a "new chat with model X" pick
+		// survives resume/restart instead of silently falling back to the
+		// global config default. Later saves pass nil metadata and the sqlite
+		// append preserves this row. Sessions created without an explicit
+		// model get no override and keep following the global default.
+		if req.Model != "" {
+			if err := h.saveSession(sid, "", nil, map[string]any{"model": req.Model}); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
 	}
 
 	opts := turnOptions{sessionStarted: createdSession, requestID: req.RequestID}
@@ -955,10 +967,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 
-		model := ""
-		if h.cfg != nil {
-			model = h.cfg.Model
-		}
+		model := h.effectiveSessionModel(id)
 		if model == "" {
 			writeError(w, http.StatusBadRequest, "no model configured")
 			return
@@ -978,12 +987,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	// A profile or model switch takes effect on the next turn: if the
 	// window's active profile or the configured model changed since this
 	// agent was built, rebuild it before the next turn.
-	desiredModel := ""
-	h.mu.Lock()
-	if h.cfg != nil {
-		desiredModel = h.cfg.Model
-	}
-	h.mu.Unlock()
+	desiredModel := h.effectiveSessionModel(id)
 	if reb, err := h.reconcileProfileAgent(id, as, desiredModel); err != nil {
 		h.publishTurnError(id, err, "profile")
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
@@ -1167,10 +1171,12 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 			Provider:    provider,
 			Active:      id == currentModel,
 			DisplayName: agent.ModelDisplayName(id),
-			// A model that is both favorite and recent shows only in the
-			// Recently Used section, matching the TUI's dedupe.
+			// Raw membership flags: a model that is both favorite and recent is
+			// placed in the Recently Used section by the consumer (the TUI's
+			// dedupe), but Favorite stays true so the UI's favorite toggle
+			// reflects IsFavorite, mirroring ctrl+f in the TUI.
 			Recent:   recentSet[id],
-			Favorite: !recentSet[id] && favSet[id],
+			Favorite: favSet[id],
 		})
 	}
 
@@ -1451,8 +1457,8 @@ func (h *Handler) HandleSessionContext(w http.ResponseWriter, r *http.Request, i
 			maxTokens = live.ContextMaxTokens
 		}
 	}
-	if model == "" && h.cfg != nil {
-		model = h.cfg.Model
+	if model == "" {
+		model = h.effectiveSessionModel(id)
 	}
 	if maxTokens == 0 {
 		maxTokens = int(agent.ModelWindow(model))

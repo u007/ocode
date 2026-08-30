@@ -178,4 +178,78 @@ describe("PermissionDialog", () => {
     expect(onDecide).not.toHaveBeenCalled();
     unmount();
   });
+
+  it("renders a wide dialog with wrapped, bounded content for long unbreakable text", () => {
+    const longToken =
+      "curl -X POST https://example.com/a/very/long/path/that/never/breaks/across-spaces/segment-9f8e7d6c5b4a3210deadbeef -d " +
+      "x".repeat(240);
+    const { unmount } = renderDialog({
+      command: longToken,
+      rule: "bash.prefix.a/very/long/unbreakable/rule/token/".repeat(6),
+      summary: "summary with a long token " + "y".repeat(200),
+      denyReason: "denied because " + "z".repeat(200),
+    });
+
+    const content = screen
+      .getByText("Permission Required")
+      .closest('[role="dialog"]') as HTMLElement | null;
+    expect(content).toBeTruthy();
+    // Width expanded beyond the old narrow max-w-md, with a viewport gutter so
+    // the dialog can never paint past the window edge.
+    expect(content!.className).toContain("sm:max-w-2xl");
+    expect(content!.className).not.toContain("max-w-md");
+    expect(content!.className).toContain("w-[calc(100%-2rem)]");
+    // Tall content stays bounded vertically inside the dialog, and horizontal
+    // overflow from any descendant is explicitly clipped (no sideways scroll
+    // past the dialog edge).
+    expect(content!.className).toContain("max-h-[calc(100vh-2rem)]");
+    expect(content!.className).toContain("overflow-y-auto");
+    expect(content!.className).toContain("overflow-x-clip");
+
+    // The command block wraps instead of scrolling sideways.
+    const commandBlock = screen.getByText(longToken) as HTMLElement;
+    expect(commandBlock.className).toContain("whitespace-pre-wrap");
+    expect(commandBlock.className).toContain("break-words");
+    expect(commandBlock.className).toContain("[overflow-wrap:anywhere]");
+    expect(commandBlock.className).toContain("max-h-32");
+    expect(commandBlock.className).not.toContain("overflow-x-auto");
+
+    // Dynamic text regions carry wrapping classes so long unbreakable tokens
+    // cannot push content past the dialog bounds.
+    const ruleSpan = screen.getByText(/bash\.prefix\./) as HTMLElement;
+    expect(ruleSpan.className).toContain("[overflow-wrap:anywhere]");
+    const summaryBlock = screen.getByText(/summary with a long token/) as HTMLElement;
+    expect(summaryBlock.className).toContain("[overflow-wrap:anywhere]");
+    const denyBlock = screen.getByText(/denied because/) as HTMLElement;
+    expect(denyBlock.className).toContain("[overflow-wrap:anywhere]");
+
+    unmount();
+  });
+
+  it("keeps the confirmation explanation bounded and wrapped for long dynamic tokens", () => {
+    const longPrefix = "very_long_command_name_with_no_spaces_".repeat(6);
+    const first = renderDialog({ scope: "bash_prefix", prefix: longPrefix });
+
+    // Always-rule confirmation step echoes the (unbreakable) bash prefix.
+    fireEvent.click(screen.getByText("Always allow rule"));
+    expect(screen.getByText("Confirm")).toBeTruthy();
+    const prefixExplanation = screen.getByText(/Persist a bash-prefix rule/) as HTMLElement;
+    expect(prefixExplanation.className).toContain("max-w-full");
+    expect(prefixExplanation.className).toContain("break-words");
+    expect(prefixExplanation.className).toContain("[overflow-wrap:anywhere]");
+    expect(prefixExplanation.textContent).toContain(longPrefix);
+    first.unmount();
+
+    const longTool = "extremely_long_tool_name_without_spaces_".repeat(6);
+    const second = renderDialog({ tool: longTool, scope: "tool" });
+
+    // Always-tool confirmation step echoes the tool name.
+    fireEvent.click(screen.getByText("Always allow tool"));
+    const toolExplanation = screen.getByText(/always allow ALL uses of the/) as HTMLElement;
+    expect(toolExplanation.className).toContain("max-w-full");
+    expect(toolExplanation.className).toContain("break-words");
+    expect(toolExplanation.className).toContain("[overflow-wrap:anywhere]");
+    expect(toolExplanation.textContent).toContain(longTool);
+    second.unmount();
+  });
 });

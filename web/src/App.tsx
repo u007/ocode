@@ -33,6 +33,7 @@ import UnifiedTabBar from "./components/Layout/UnifiedTabBar";
 import SessionSubTabs from "./components/Layout/SessionSubTabs";
 import SessionTabSync from "./components/Layout/SessionTabSync";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
+import { shouldRenderCoworkSidebar } from "./components/Layout/coworkSidebarVisibility";
 import ModelDialog from "./components/Layout/ModelDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
 import { useKeyboard } from "./hooks/useKeyboard";
@@ -218,12 +219,14 @@ function HomeApp() {
         const detail = { path, query: query?.trim() ?? "", line, projectRoot };
         // Immediate dispatch for already-mounted editors
         window.dispatchEvent(new CustomEvent("ocode:highlight", { detail }));
-        // Bounded retry for mount race: try a few times until editor consumes pending or timeout
+        // Bounded retry for mount race: FileEditor consumes the pending highlight on mount
+        // via consumePendingHighlight. If peek still returns a value for this path,
+        // the editor hasn't mounted yet, so re-dispatch. Caps at 10 attempts (~1.6s)
+        // to avoid indefinite retries if the file fails to open.
         let attempts = 0;
         const retry = () => {
           attempts++;
           if (attempts > 10) return;
-          // If pending still exists, editor hasn't mounted/consumed yet; retry dispatch
           const stillPending = !!peekPendingHighlight(path, projectRoot);
           if (stillPending) {
             window.dispatchEvent(new CustomEvent("ocode:highlight", { detail }));
@@ -653,6 +656,12 @@ function HomeApp() {
             </div>
 
             <div className="flex-1 overflow-hidden flex flex-col pb-2">
+              {/* The unified tab bar must live outside both the terminal container and the
+                  chat content wrapper: each of those is hidden when the other kind is focused,
+                  so a bar nested in either would vanish with it. */}
+              {activeView === "sessions" && (
+                <UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={setFocusedKind} />
+              )}
               {/* Terminal is project-scoped and must stay mounted even when not visible. It lives inside the Tabs root
                   so TopTabs (which uses TabsList/TabsTrigger) keeps its Radix context, but outside the non-terminal
                   content region so switching away never unmounts the WebSocket/pty. Visibility is toggled via CSS only. */}
@@ -771,13 +780,12 @@ function HomeApp() {
               <TabsContent value="assets" forceMount className="flex-1 overflow-hidden m-0">
                 <AssetsPanel />
               </TabsContent>
-              <TabsContent value="settings" forceMount className="flex-1 overflow-hidden m-0">
+              <TabsContent value="settings" forceMount className="relative flex-1 min-h-0 overflow-hidden m-0">
                 <SettingsPanel />
               </TabsContent>
 
               <TabsContent value="sessions" forceMount className="flex-1 overflow-hidden m-0">
                 <div className="flex flex-col h-full">
-                  <UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={setFocusedKind} />
                   <div className={focusedKind === "chat" ? "flex flex-col flex-1 min-h-0" : "hidden"}>
                   <SessionSubTabs />
                   <div className="relative flex-1 min-h-0 overflow-hidden">
@@ -885,8 +893,13 @@ function HomeApp() {
           )}
         </main>
 
-        {/* Right sidebar - cowork panel (only on Sessions view with the active session's sub-tab on Chat) */}
-        {activeView === "sessions" && activeSessionTab?.activeSubTab === "chat" && (
+        {/* Right sidebar - cowork panel (only on Sessions view with the active session's sub-tab on Chat).
+            Hidden while the terminal is focused so the right rail doesn't crowd the shell. */}
+        {shouldRenderCoworkSidebar({
+          activeView,
+          activeSubTab: activeSessionTab?.activeSubTab,
+          focusedKind,
+        }) && (
           <CoworkSidebar
             isOpen={coworkOpen}
             onClose={() => setCoworkOpen(false)}
@@ -908,6 +921,7 @@ function HomeApp() {
         open={modelDialogOpen}
         onClose={() => setModelDialogOpen(false)}
         purpose={modelDialogTab}
+        sessionId={activeTabId ?? undefined}
       />
 
       {/* Permission Dialog */}

@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, act } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+
 import { ChatProvider } from "../../stores/chatStore";
 import { TerminalProvider, useTerminalState } from "../../stores/terminalStore";
 import UnifiedTabBar from "./UnifiedTabBar";

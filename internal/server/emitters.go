@@ -263,13 +263,38 @@ func (h *Handler) startTerminalProcessesEmitter() {
 // per-tick/per-request dedup for pid reuse and the cycle guard — it must be
 // shared across all terminals in a single snapshot to avoid double-counting.
 func gatherProcessStats(entries map[string]terminalProcEntry, cache map[int32]*process.Process, touched map[int32]bool) []terminalProcessStat {
+	childPids := processChildrenSnapshot()
 	stats := make([]terminalProcessStat, 0, len(entries))
 	for id, entry := range entries {
-		cpu, mem := sumProcessTree(entry.PID, cache, touched)
-		cmd := terminalCommand(entry.PID, cache)
+		cpu, mem := sumProcessTree(entry.PID, cache, touched, childPids)
+		cmd := terminalCommand(entry.PID, cache, childPids)
 		stats = append(stats, terminalProcessStat{ID: id, PID: entry.PID, CPUPercent: cpu, MemBytes: mem, Command: cmd})
 	}
 	return stats
+}
+
+// processChildrenSnapshot reads the process table once and returns a
+// ppid → child-pids map. gopsutil's Children() re-reads the entire process
+// table on every call (SysctlKinfoProcSlice on darwin), and the tree walks
+// below called it once per node per tick — the second-largest allocation
+// source in the server. One snapshot per gatherProcessStats call replaces
+// all of those reads.
+func processChildrenSnapshot() map[int32][]int32 {
+	procs, err := process.Processes()
+	if err != nil {
+		log.Printf("terminal processes: list process table: %v", err)
+		return nil
+	}
+	childPids := make(map[int32][]int32, len(procs))
+	for _, p := range procs {
+		ppid, err := p.Ppid()
+		if err != nil {
+			// intentionally not logged: pid exited between listing and lookup
+			continue
+		}
+		childPids[ppid] = append(childPids[ppid], p.Pid)
+	}
+	return childPids
 }
 
 // shellNames are base executable names we treat as the interactive shell itself
@@ -302,8 +327,9 @@ func isInteractiveShell(cl string) bool {
 
 // collectCmdlines walks pid and its descendants, returning every non-empty
 // command line in the tree (depth-first). touched guards against cycles and the
-// shared cache of process handles is populated as we descend.
-func collectCmdlines(p *process.Process, cache map[int32]*process.Process, touched map[int32]bool) []string {
+// shared cache of process handles is populated as we descend. childPids is the
+// per-call process-table snapshot from processChildrenSnapshot.
+func collectCmdlines(p *process.Process, cache map[int32]*process.Process, touched map[int32]bool, childPids map[int32][]int32) []string {
 	if touched[p.Pid] {
 		return nil
 	}
@@ -312,13 +338,18 @@ func collectCmdlines(p *process.Process, cache map[int32]*process.Process, touch
 	if cl, err := p.Cmdline(); err == nil && cl != "" {
 		out = append(out, cl)
 	}
-	children, err := p.Children()
-	if err != nil {
-		return out
-	}
-	for _, c := range children {
-		cache[c.Pid] = c
-		out = append(out, collectCmdlines(c, cache, touched)...)
+	for _, cpid := range childPids[p.Pid] {
+		c, ok := cache[cpid]
+		if !ok {
+			nc, err := process.NewProcess(cpid)
+			if err != nil {
+				// intentionally not logged: pid exited between snapshot and walk
+				continue
+			}
+			c = nc
+			cache[cpid] = c
+		}
+		out = append(out, collectCmdlines(c, cache, touched, childPids)...)
 	}
 	return out
 }
@@ -329,7 +360,7 @@ func collectCmdlines(p *process.Process, cache map[int32]*process.Process, touch
 // shell's bare name when the terminal is idle (no current command). The walk
 // reuses the shared handle cache but its own touched set so it never disturbs
 // the CPU/mem cycle guard in sumProcessTree.
-func terminalCommand(pid int32, cache map[int32]*process.Process) string {
+func terminalCommand(pid int32, cache map[int32]*process.Process, childPids map[int32][]int32) string {
 	root, ok := cache[pid]
 	if !ok {
 		np, err := process.NewProcess(pid)
@@ -340,7 +371,7 @@ func terminalCommand(pid int32, cache map[int32]*process.Process) string {
 		cache[pid] = root
 	}
 	touched := make(map[int32]bool)
-	cmdlines := collectCmdlines(root, cache, touched)
+	cmdlines := collectCmdlines(root, cache, touched, childPids)
 	for _, cl := range cmdlines {
 		if cl != "" && !isInteractiveShell(cl) {
 			return cl
@@ -419,8 +450,9 @@ func (h *Handler) terminalProcessesEmitterLoop() {
 // a prior sample to diff against; touched records every pid visited this
 // tick so the caller can prune cache entries for processes that exited. A
 // pid that has already exited (or was never valid) contributes zero rather
-// than erroring the whole terminal's row.
-func sumProcessTree(pid int32, cache map[int32]*process.Process, touched map[int32]bool) (cpuPercent float64, memBytes uint64) {
+// than erroring the whole terminal's row. childPids is the per-call
+// process-table snapshot from processChildrenSnapshot.
+func sumProcessTree(pid int32, cache map[int32]*process.Process, touched map[int32]bool, childPids map[int32][]int32) (cpuPercent float64, memBytes uint64) {
 	if touched[pid] {
 		return 0, 0 // cycle guard; process trees are acyclic in practice
 	}
@@ -443,12 +475,8 @@ func sumProcessTree(pid int32, cache map[int32]*process.Process, touched map[int
 		memBytes += mi.RSS
 	}
 
-	children, err := p.Children()
-	if err != nil {
-		return cpuPercent, memBytes
-	}
-	for _, c := range children {
-		childCPU, childMem := sumProcessTree(c.Pid, cache, touched)
+	for _, cpid := range childPids[pid] {
+		childCPU, childMem := sumProcessTree(cpid, cache, touched, childPids)
 		cpuPercent += childCPU
 		memBytes += childMem
 	}

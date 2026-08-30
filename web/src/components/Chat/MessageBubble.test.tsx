@@ -47,3 +47,36 @@ describe("MessageBubble memoization", () => {
     expect(renderSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+// The web theme mapping is contrast-safe (see useTheme.computeThemeVars):
+// foregrounds on colored surfaces must come from the paired *-foreground
+// token, never the inherited foreground. These tests pin the class selection
+// for the surfaces the LCARS gray-on-orange fix touched, so a refactor can't
+// silently reintroduce text-foreground on bg-primary/bg-accent.
+describe("MessageBubble theme-surface classes", () => {
+  it("renders user messages on the primary surface with text-primary-foreground", () => {
+    const { container } = render(
+      <MessageBubble message={{ role: "user", content: "change.\nsecond line" }} />,
+    );
+    const bubble = container.querySelector("div.bg-primary");
+    expect(bubble).not.toBeNull();
+    expect(bubble!.className).toContain("text-primary-foreground");
+    expect(bubble!.className).not.toContain("text-muted-foreground");
+    // Content is shown verbatim and wraps (multiline + long text).
+    expect(bubble!.textContent).toContain("change.");
+    expect(bubble!.textContent).toContain("second line");
+    const pre = bubble!.querySelector("pre");
+    expect(pre).not.toBeNull();
+    expect(pre!.className).toContain("whitespace-pre-wrap");
+  });
+
+  it("renders assistant text on the muted surface with the foreground token", () => {
+    const { container } = render(
+      <MessageBubble message={{ role: "assistant", content: "hello world" }} />,
+    );
+    const bubble = container.querySelector("div.bg-muted");
+    expect(bubble).not.toBeNull();
+    expect(bubble!.className).toContain("text-foreground");
+    expect(bubble!.textContent).toContain("hello world");
+  });
+});

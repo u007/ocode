@@ -106,12 +106,17 @@ interface RunNodeProps {
   // element that opens a full transcript view instead of just toggling
   // this row's inline expand/collapse.
   onOpenDetail?: (runId: string) => void;
+  // defaultOpen controls the row's initial expand state; it propagates to
+  // nested children. The chat-bottom AgentPreview rail passes false so a
+  // spawned agent starts as one compact summary row until the user expands
+  // it; detail views (AgentsPanel) keep the expanded default.
+  defaultOpen?: boolean;
 }
 
 // RunNode is one run row, individually expandable to reveal its messages and
 // nested sub-agent runs (recursively).
-export default function RunNode({ run, depth, onOpenDetail }: RunNodeProps) {
-  const [open, setOpen] = useState(true);
+export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true }: RunNodeProps) {
+  const [open, setOpen] = useState(defaultOpen);
   const summary = childSummary(run.children);
   const hasResult = Boolean(run.result?.trim());
   const hasDetail = run.messages.length > 0 || run.children.length > 0 || hasResult;
@@ -197,7 +202,7 @@ export default function RunNode({ run, depth, onOpenDetail }: RunNodeProps) {
             </div>
           )}
           {run.children.map((child) => (
-            <RunNode key={child.id} run={child} depth={depth + 1} />
+            <RunNode key={child.id} run={child} depth={depth + 1} defaultOpen={defaultOpen} />
           ))}
         </div>
       )}

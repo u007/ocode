@@ -166,7 +166,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
                       <Icon className="w-3.5 h-3.5" />
                       {tab.label}
                       {count !== undefined && (
-                        <span className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-accent text-[10px] font-semibold text-foreground">
+                        <span className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-accent text-[10px] font-semibold text-accent-foreground">
                           {count}
                         </span>
                       )}

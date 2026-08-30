@@ -47,6 +47,39 @@ describe("RunNode", () => {
     expect(screen.getByText("looks good")).toBeInTheDocument();
   });
 
+  it("starts collapsed with defaultOpen={false} and reveals messages on row click", () => {
+    render(<RunNode run={baseRun} depth={0} defaultOpen={false} />);
+    expect(screen.getByText("code-reviewer")).toBeInTheDocument();
+    expect(screen.queryByText("looks good")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("code-reviewer"));
+    expect(screen.getByText("looks good")).toBeInTheDocument();
+  });
+
+  it("propagates defaultOpen={false} to nested child runs", () => {
+    const child: AgentRun = {
+      ...baseRun,
+      id: "run-2",
+      name: "sub-agent",
+      messages: [{ role: "assistant", content: "child says hi" }],
+    };
+    const withChild: AgentRun = { ...baseRun, children: [child] };
+    render(<RunNode run={withChild} depth={0} defaultOpen={false} />);
+
+    // parent collapsed: neither parent nor child details are visible
+    expect(screen.queryByText("looks good")).not.toBeInTheDocument();
+    expect(screen.queryByText("sub-agent")).not.toBeInTheDocument();
+
+    // expand the parent: the child row appears but is itself collapsed
+    fireEvent.click(screen.getByText("code-reviewer"));
+    expect(screen.getByText("sub-agent")).toBeInTheDocument();
+    expect(screen.queryByText("child says hi")).not.toBeInTheDocument();
+
+    // expand the child independently
+    fireEvent.click(screen.getByText("sub-agent"));
+    expect(screen.getByText("child says hi")).toBeInTheDocument();
+  });
+
   it("badges a run whose output contract was checked and not satisfied", () => {
     const contractFailed: AgentRun = {
       ...baseRun,

@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 )
@@ -96,13 +95,9 @@ func (s AutoPermissionPromptStatus) String() string {
 // AutoPermissionPromptFilePath returns the path to the installed
 // auto-permission-prompt.md override, alongside ocodeconfig.json.
 func AutoPermissionPromptFilePath() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := GlobalConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve home directory: %w", err)
-	}
-	dir := filepath.Join(home, ".config", "opencode")
-	if runtime.GOOS == "windows" {
-		dir = filepath.Join(os.Getenv("APPDATA"), "opencode")
+		return "", fmt.Errorf("resolve config directory: %w", err)
 	}
 	return filepath.Join(dir, "auto-permission-prompt.md"), nil
 }
@@ -114,13 +109,9 @@ func AutoPermissionPromptFilePath() (string, error) {
 // the bundled file, which would otherwise mark it CustomModified and block
 // future auto-upgrades of the bundled content (see LoadAutoPermissionPromptBody).
 func CustomAutoPermissionPromptFilePath() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := GlobalConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve home directory: %w", err)
-	}
-	dir := filepath.Join(home, ".config", "opencode")
-	if runtime.GOOS == "windows" {
-		dir = filepath.Join(os.Getenv("APPDATA"), "opencode")
+		return "", fmt.Errorf("resolve config directory: %w", err)
 	}
 	return filepath.Join(dir, "auto-permission-prompt.local.md"), nil
 }

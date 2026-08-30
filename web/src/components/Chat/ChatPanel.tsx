@@ -25,7 +25,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
   const slice = useChatSelector((s) => getSessionSlice(s, sessionId));
   const dispatch = useChatDispatch();
   const { dispatch: projectDispatch } = useProjectState();
-  const { messages, live, hasMore, loadingMore, isStreaming, turnActive } = slice;
+  const { messages, live, hasMore, loadingMore } = slice;
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const topRef = useRef<HTMLDivElement>(null);
@@ -694,12 +694,10 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
           </div>
         )}
 
-        {(isStreaming || turnActive) && (
-          <div className="flex items-center gap-2 py-1 pl-1 text-sm text-muted-foreground">
-            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-blue-400" />
-            <span>Working…</span>
-          </div>
-        )}
+        {/* The session-wide "working" indicator lives in the bottom StatusBar
+            (components/common/StatusBar.tsx), driven by the same
+            isStreaming || turnActive signal — kept here only as a comment so
+            nobody re-adds a duplicate label in the transcript. */}
 
         <div ref={bottomRef} />
       </div>
@@ -708,7 +706,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
         <button
           type="button"
           onClick={() => scrollToBottom(true)}
-          className="absolute bottom-4 right-4 z-10 flex h-9 w-9 items-center justify-center rounded-full bg-accent text-foreground shadow-lg transition-colors hover:bg-accent"
+          className="absolute bottom-4 right-4 z-10 flex h-9 w-9 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg transition-colors hover:bg-accent"
           title="Scroll to bottom"
           aria-label="Scroll to bottom"
         >

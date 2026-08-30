@@ -158,10 +158,15 @@ window.ocodeDebug = ocodeDebug;
 // Cached Date.prototype.toLocaleString — avoids reconstructing
 // Intl.DateTimeFormat on every hot-path status render. Retains native
 // semantics for invalid dates and for calls with no date/time fields.
-// DEV-only: permanent perf patch, gated so production keeps the native
-// prototype (see docs/gotchas/debug-instrumentation-ships-unconditionally.md).
-if (import.meta.env.DEV) {
-  (() => {
+// Ships in every build (not gated behind import.meta.env.DEV): unlike the
+// diagnostic probe docs/gotchas/debug-instrumentation-ships-unconditionally.md
+// warns about (which made network calls and altered behavior), this patch is
+// semantics-preserving and side-effect-free, so restricting it to dev builds
+// only meant the production desktop app — where the memory growth this fixes
+// was actually observed — never got the fix (confirmed live 2026-08-30: a
+// fresh production build still showed dateProtoFuncToLocaleString/ICU
+// construction dominating a `sample` capture during a footprint spike).
+(() => {
   const orig = Date.prototype.toLocaleString;
   const cache = new Map<string, Intl.DateTimeFormat>();
   const DTF_CACHE_MAX = 50;
@@ -215,7 +220,6 @@ if (import.meta.env.DEV) {
   };
   // Test hook — lets the suite reset the FIFO cache between cases so
   // construction counts stay deterministic without reinstalling the patch.
-    (Date.prototype.toLocaleString as unknown as Record<string, unknown>).__resetCacheForTests =
-      () => cache.clear();
-  })();
-}
+  (Date.prototype.toLocaleString as unknown as Record<string, unknown>).__resetCacheForTests =
+    () => cache.clear();
+})();

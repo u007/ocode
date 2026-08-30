@@ -60,7 +60,7 @@ export function AssistantText({ content }: { content: string }) {
                 if (isInline) {
                   return (
                     <code
-                      className="rounded bg-accent px-1.5 py-0.5 text-xs"
+                      className="rounded bg-accent text-accent-foreground px-1.5 py-0.5 text-xs"
                       {...props}
                     >
                       {children}
@@ -118,7 +118,7 @@ export function AssistantText({ content }: { content: string }) {
                 </div>
               ),
               th: ({ children }) => (
-                <th className="border border-border px-2 py-1 text-left bg-accent">
+                <th className="border border-border px-2 py-1 text-left bg-accent text-accent-foreground">
                   {children}
                 </th>
               ),
@@ -214,7 +214,7 @@ function UserBubble({
           aria-label="Restore to input"
           title="Restore to input"
           onClick={() => setConfirmOpen(true)}
-          className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 shrink-0 mt-1 p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring transition-opacity"
+          className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 shrink-0 mt-1 p-1.5 rounded text-muted-foreground hover:text-accent-foreground hover:bg-accent focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring transition-opacity"
         >
           <RotateCcw className="w-3.5 h-3.5" />
         </button>

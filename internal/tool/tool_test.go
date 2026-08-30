@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/u007/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/paths"
 )
 
 // expectedBuiltinTools lists the canonical tool names in the order they
@@ -640,5 +641,85 @@ func TestConfinedPathExpandsTildeToToolResults(t *testing.T) {
 	want := filepath.Join(home, ".local", "state", "opencode", "tool-results")
 	if got != want {
 		t.Errorf("confinedPath(%q) = %q, want %q", p, got, want)
+	}
+}
+
+// isolateConfigHome points HOME at a temp dir so paths.GlobalConfigDir()
+// resolves to <home>/.config/opencode without touching the live config.
+//
+// TMPDIR is then re-pointed at a sibling dir: temp roots are pre-authorized
+// in confinement/scope checks, so a test home under the default $TMPDIR would
+// make every path under it (including the boundary cases) vacuously allowed.
+func isolateConfigHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("TMPDIR", t.TempDir())
+}
+
+func TestConfinedPathAllowsGlobalConfigDir(t *testing.T) {
+	isolateConfigHome(t)
+	cfgDir, err := paths.GlobalConfigDir()
+	if err != nil {
+		t.Fatalf("GlobalConfigDir() error: %v", err)
+	}
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Children of the config dir must pass confinement — the auto-LLM
+	// permission layer pre-authorizes this root, so a hard "outside the
+	// working directory" error here would make the grant unexecutable.
+	target := filepath.Join(cfgDir, "ocodeconfig.json")
+	got, err := confinedPath(context.Background(), target)
+	if err != nil {
+		t.Fatalf("confinedPath(%q) error: %v", target, err)
+	}
+	if filepath.Base(got) != "ocodeconfig.json" {
+		t.Fatalf("confinedPath(%q) = %q", target, got)
+	}
+
+	// Boundary: the parent ~/.config itself and sibling dirs stay confined.
+	parent := filepath.Dir(cfgDir)
+	sibling := filepath.Join(parent, "other-app")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{filepath.Join(parent, "secrets"), filepath.Join(sibling, "conf")} {
+		if _, err := confinedPath(context.Background(), p); err == nil {
+			t.Errorf("confinedPath(%q) must fail: scope leak beyond ~/.config/opencode", p)
+		}
+	}
+}
+
+func TestResolveSearchRootAllowsGlobalConfigDir(t *testing.T) {
+	isolateConfigHome(t)
+	cfgDir, err := paths.GlobalConfigDir()
+	if err != nil {
+		t.Fatalf("GlobalConfigDir() error: %v", err)
+	}
+	skills := filepath.Join(cfgDir, "skills")
+	if err := os.MkdirAll(skills, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := WithWorkDir(context.Background(), t.TempDir())
+	got, err := resolveSearchRoot(ctx, skills)
+	if err != nil {
+		t.Fatalf("resolveSearchRoot(%q) error: %v", skills, err)
+	}
+	want, err := filepath.EvalSymlinks(skills)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(got) != filepath.Clean(want) {
+		t.Fatalf("resolveSearchRoot(%q) = %q, want %q", skills, got, want)
+	}
+
+	// The parent ~/.config itself must stay outside search scope.
+	if _, err := resolveSearchRoot(ctx, filepath.Dir(cfgDir)); err == nil {
+		t.Errorf("resolveSearchRoot(%q) must fail: only ~/.config/opencode is pre-authorized", filepath.Dir(cfgDir))
 	}
 }

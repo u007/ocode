@@ -9,7 +9,9 @@ interface AgentPreviewProps {
 
 // AgentPreview is the live "agent preview" rail above the chat input: top-level
 // agent runs, each clickable to expand its messages and nested sub-agents
-// inline. Renders nothing when no runs are active.
+// inline. Runs start collapsed to a single summary row (the rail must not
+// balloon when a sub-agent spawns); clicking a row/chevron expands it. Renders
+// nothing when no runs are active.
 export default function AgentPreview({ onOpenDetail }: AgentPreviewProps) {
   const { activeTabId: sessionId } = useProjectState();
   const { runs } = useAgentRuns(sessionId);
@@ -37,7 +39,7 @@ export default function AgentPreview({ onOpenDetail }: AgentPreviewProps) {
       </div>
       <div className="space-y-0.5">
         {runs.map((run) => (
-          <RunNode key={run.id} run={run} depth={0} onOpenDetail={onOpenDetail} />
+          <RunNode key={run.id} run={run} depth={0} onOpenDetail={onOpenDetail} defaultOpen={false} />
         ))}
       </div>
     </div>

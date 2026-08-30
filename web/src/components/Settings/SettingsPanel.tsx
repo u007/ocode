@@ -21,8 +21,10 @@ import OpencodeMcpForm from "./OpencodeMcpForm";
 import OpencodeReadOnlyForm from "./OpencodeReadOnlyForm";
 import ProfilesManager from "./ProfilesManager";
 import ProfileDebugForm from "./ProfileDebugForm";
+import BackendForm from "./BackendForm";
 
 export type SettingsGroupId =
+  | "backend"
   | "profiles"
   | "profile-debug"
   | "model-defaults"
@@ -53,6 +55,7 @@ interface GroupDef {
 }
 
 const OCODE_GROUPS: GroupDef[] = [
+  { id: "backend", label: "Backend" },
   { id: "profiles", label: "Profiles" },
   { id: "profile-debug", label: "Profile Debug" },
   { id: "model-defaults", label: "Model Defaults & Recap" },
@@ -86,6 +89,8 @@ const OPENCODE_GROUPS: GroupDef[] = [
 // so each task's diff is a localized one-case addition.
 function renderGroup(id: SettingsGroupId) {
   switch (id) {
+    case "backend":
+      return <BackendForm />;
     case "profiles":
       return <ProfilesManager />;
     case "profile-debug":
@@ -196,7 +201,7 @@ export default function SettingsPanel() {
   }, [])
 
   return (
-    <div className="flex flex-1 overflow-hidden bg-card">
+    <div className="absolute inset-0 flex overflow-hidden bg-card">
       <nav className="w-64 shrink-0 overflow-y-auto border-r border-border py-3">
         <NavSection title="ocode" groups={OCODE_GROUPS} active={active} onSelect={setActive} />
         <NavSection title="opencode" groups={OPENCODE_GROUPS} active={active} onSelect={setActive} />

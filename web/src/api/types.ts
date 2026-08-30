@@ -68,6 +68,11 @@ export interface ModelInfo {
   active: boolean;
   /** Human-readable name from the models.dev registry (e.g. "Ox Alpha Free" for codename ids). Absent when unknown. */
   display_name?: string;
+  /** Raw membership in the shared favorites list (TUI picker ctrl+f). A model
+   *  can be both favorite and recent; section placement then favors "recent". */
+  favorite?: boolean;
+  /** Raw membership in the shared recently-used list. */
+  recent?: boolean;
 }
 
 export interface AgentInfo {

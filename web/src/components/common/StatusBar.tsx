@@ -42,26 +42,39 @@ function toolActivityLabel(t: ToolActivityStatus): string {
 }
 
 // Builds the "current running status" segment shown at the bottom, mirroring the
-// TUI's activity row (⟳ LLM · ⚙ tool · @ agent). Prefers the consolidated TUI
-// activity snapshot (RC-bridge mode); falls back to the per-session streaming
-// state + in-flight live tool for headless/desktop mode where no TUI is attached.
+// TUI's activity row (⟳ LLM · ⚙ tool · @ agent). Presence is driven solely by
+// the per-session turn state (isStreaming || turnActive) — the same signal the
+// chat "Working…" label used before it was removed — so the status bar is the
+// single synchronized working indicator. Within a running turn, details prefer
+// the consolidated TUI activity snapshot (RC-bridge mode) and fall back to the
+// in-flight live tool, then to a base "working…" label for headless/desktop
+// mode where no TUI is attached.
 function runningStatusParts(
   isRunning: boolean,
   snap: import("../../api/types").TUIStatus | null,
   liveToolName: string | undefined,
 ): string[] {
+  // Stale or late "status" snapshots must not resurrect the indicator after
+  // turn_done/turn_error, so everything below is gated on the authoritative
+  // per-session liveness flag.
+  if (!isRunning) return [];
   const parts: string[] = [];
   if (snap?.llm_running) parts.push("⟳ llm");
   for (const agent of snap?.active_agents ?? []) parts.push(`@ ${agent}`);
   for (const t of snap?.active_tools ?? []) parts.push(toolActivityLabel(t));
+  if (parts.length === 0 && liveToolName) {
+    parts.push(`⚙ ${liveToolName.length > 24 ? liveToolName.slice(0, 21) + "…" : liveToolName}`);
+  }
   if (parts.length > 0) return parts;
-  // Authoritative liveness: while a turn is active, always surface at least a
-  // base "running" indicator so the row never looks idle during the silent
-  // gaps of a turn when no deltas flow and the TUI snapshot reports nothing.
-  if (parts.length === 0 && isRunning) parts.push("running…");
-  if (liveToolName) parts.push(`⚙ ${liveToolName.length > 24 ? liveToolName.slice(0, 21) + "…" : liveToolName}`);
-  return parts;
+  // While a turn is active, always surface at least a base "working" indicator
+  // so the row never looks idle during the silent gaps of a turn when no
+  // deltas flow and the TUI snapshot reports nothing.
+  return ["working…"];
 }
+
+// Exported for unit tests (StatusBar.test.ts) — the component keeps using the
+// local function directly.
+export const runningStatusPartsForTests = runningStatusParts;
 
 export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const { activeTabId } = useProjectState();

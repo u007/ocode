@@ -219,9 +219,11 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
     if (status.ocr_backend !== undefined) {
       r.dispatch({ type: "SET_OCR_BACKEND", backend: status.ocr_backend || "openai-compat" });
     }
-    if (status.main_model) {
-      r.dispatch({ type: "SET_MODEL", model: status.main_model });
-    }
+    // NOTE: deliberately NOT dispatching the global SET_MODEL here. A status
+    // snapshot's main_model is the *effective model of that one session*
+    // (which may be a per-session override); seeding the process-global model
+    // from it is what made one tab's model show up on every other tab. The
+    // global fallback is seeded once from /api/config/model at startup.
     if (status.ocr_enabled !== undefined) {
       r.dispatch({ type: "SET_OCR_ENABLED", enabled: !!status.ocr_enabled });
     }

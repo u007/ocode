@@ -9,10 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/u007/ocode/internal/paths"
 )
 
 // workDirOverride overrides os.Getwd() for project config resolution in
@@ -424,15 +425,21 @@ func saveJSONFile(path string, value any) error {
 	return os.Rename(tmp, path)
 }
 
+// GlobalConfigDir returns ocode's global configuration directory
+// (opencode.json, ocodeconfig.json, skills/, plugins/). It is a thin re-export
+// of paths.GlobalConfigDir so that every config-path resolver in this package
+// shares one resolution with the permission and tool-confinement layers —
+// drift here would desync the auto-permission allowed-root model.
+func GlobalConfigDir() (string, error) {
+	return paths.GlobalConfigDir()
+}
+
 func getGlobalConfigPath() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := GlobalConfigDir()
 	if err != nil {
 		return "", err
 	}
-	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("APPDATA"), "opencode", "opencode.json"), nil
-	}
-	return filepath.Join(home, ".config", "opencode", "opencode.json"), nil
+	return filepath.Join(dir, "opencode.json"), nil
 }
 
 func getProjectConfigPath() (string, error) {

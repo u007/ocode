@@ -1760,3 +1760,46 @@ func (h *Handler) applyLimitsToLiveSessions(maxSteps, maxConcurrent int) {
 		as.mu.Unlock()
 	}
 }
+
+// HandleGetBackendConfig reports the backend URL configuration.
+func (h *Handler) HandleGetBackendConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	backendURL := ""
+	if h.cfg != nil {
+		backendURL = h.cfg.Ocode.BackendURL
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"backend_url": backendURL,
+	})
+}
+
+// HandleSetBackendConfig persists the backend URL configuration.
+// Allowed values are empty (same-origin), http://localhost[:port],
+// http://127.0.0.1[:port], or https://hub.mercstudio.com.
+func (h *Handler) HandleSetBackendConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BackendURL string `json:"backend_url"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	normalized, err := config.NormalizeBackendURL(req.BackendURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := config.SaveBackendURL(normalized); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.BackendURL = normalized
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"backend_url": normalized,
+	})
+}

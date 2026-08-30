@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -134,8 +135,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.authMiddleware(s.handleGetSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/state", s.authMiddleware(s.handleSessionState))
 	s.mux.HandleFunc("GET /api/sessions/{id}/status", s.authMiddleware(s.handleSessionStatus))
+	s.mux.HandleFunc("PUT /api/sessions/{id}/model", s.authMiddleware(s.handleSetSessionModel))
+	s.mux.HandleFunc("DELETE /api/sessions/{id}/model", s.authMiddleware(s.handleClearSessionModel))
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.authMiddleware(s.handleSendMessage))
 	s.mux.HandleFunc("GET /api/models", s.authMiddleware(s.handleListModels))
+	// Model favorites toggle (web/desktop parity with the TUI's ctrl+f). The
+	// model id rides in the JSON body because "provider/model" ids contain "/".
+	s.mux.HandleFunc("PUT /api/models/favorite", s.authMiddleware(s.handler.HandleAddFavoriteModel))
+	s.mux.HandleFunc("DELETE /api/models/favorite", s.authMiddleware(s.handler.HandleRemoveFavoriteModel))
 	s.mux.HandleFunc("GET /api/agents/runs", s.authMiddleware(s.handleListRuns))
 	s.mux.HandleFunc("GET /api/agents/runs/stream", s.authMiddleware(s.handleRunsStream))
 	s.mux.HandleFunc("GET /api/changes", s.authMiddleware(s.handleListChanges))
@@ -360,6 +367,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/monaco/extensions", s.authMiddleware(s.handleListMonacoExtensions))
 	s.mux.HandleFunc("PUT /api/monaco/extensions/{name}/toggle", s.authMiddleware(s.handleToggleMonacoExtension))
 
+	// Backend URL (hub/localhost switchable)
+	s.mux.HandleFunc("GET /api/config/ocode/backend", s.authMiddleware(s.handler.HandleGetBackendConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/backend", s.authMiddleware(s.handler.HandleSetBackendConfig))
+
 	// Uploads (assets)
 	s.mux.HandleFunc("/api/uploads", s.authMiddleware(s.handleUploads))
 	s.mux.HandleFunc("/api/uploads/file", s.authMiddleware(s.handleUploadFile))
@@ -460,6 +471,16 @@ func (s *Server) handleSessionState(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSessionStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.handler.HandleSessionStatus(w, r, id)
+}
+
+func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleSetSessionModel(w, r, id)
+}
+
+func (s *Server) handleClearSessionModel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleClearSessionModel(w, r, id)
 }
 
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
@@ -674,10 +695,21 @@ func (s *Server) Serve(ln net.Listener) error {
 	// and any caller that wires it up).
 	s.shutdownMu.Lock()
 	s.ln = ln
-	s.httpServer = &http.Server{Handler: s.mux}
+	// Apply CORS at the serving boundary, after all routes (including
+	// scheduler routes attached after New) have been registered. Wrapping a
+	// ServeMux with a less-specific "/" route would let method-specific
+	// routes bypass the middleware.
+	s.httpServer = &http.Server{Handler: s.serveHandler()}
 	s.shutdownMu.Unlock()
 
 	return s.httpServer.Serve(ln)
+}
+
+// serveHandler is the final HTTP boundary for the route registry. Keeping the
+// CORS wrapper here ensures routes registered after New (for example, optional
+// scheduler routes) cannot bypass it through a more-specific ServeMux pattern.
+func (s *Server) serveHandler() http.Handler {
+	return http.HandlerFunc(corsMiddleware(s.mux.ServeHTTP))
 }
 
 // Shutdown gracefully stops the server within ctx. It first tears down agent
@@ -856,15 +888,60 @@ func readBodyJSON(r *http.Request, v interface{}) error {
 
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next(w, r)
+			return
+		}
+		origin := r.Header.Get("Origin")
+		if origin != "" && !allowedCORSOrigin(origin) {
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			next(w, r)
+			return
+		}
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+		w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next(w, r)
 	}
+}
+
+// allowedCORSOrigin is deliberately narrower than a general CORS policy. The
+// web UI only needs the local development origins and the production hub; an
+// arbitrary Origin must not be reflected into Access-Control-Allow-Origin.
+func allowedCORSOrigin(origin string) bool {
+	if origin == "https://hub.mercstudio.com" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Scheme != "http" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "localhost" && host != "127.0.0.1" {
+		return false
+	}
+	if u.Port() == "" {
+		return strings.EqualFold(u.Host, host)
+	}
+	port, err := strconv.Atoi(u.Port())
+	return err == nil && port >= 1 && port <= 65535 && strings.HasPrefix(strings.ToLower(u.Host), host+":")
+}
+
+func apiCORS(next http.HandlerFunc) http.HandlerFunc {
+	return corsMiddleware(next)
 }
 
 func (s *Server) WithCORS() *Server {
@@ -1372,7 +1449,9 @@ type ModelInfo struct {
 	DisplayName string `json:"display_name,omitempty"`
 	// Favorite and Recent mirror the TUI model picker's priority sections
 	// (★ Favorites / Recently Used): the web and desktop selectors surface
-	// these first, sorted exactly like the TUI.
+	// these first, sorted exactly like the TUI. Both are raw membership
+	// flags — a model can be both; consumers place it in Recently Used only
+	// (matching the TUI's dedupe) while still showing it as favorited.
 	Favorite bool `json:"favorite,omitempty"`
 	Recent   bool `json:"recent,omitempty"`
 }

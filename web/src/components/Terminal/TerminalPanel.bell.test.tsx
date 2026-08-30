@@ -50,6 +50,7 @@ vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { dispose = vi.fn(); on
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 vi.mock("@/api/client", () => ({
   apiPath: (p: string) => p,
+  apiWsPath: (p: string) => `ws://localhost${p}`,
   authToken: () => "tok",
   authHeaders: () => ({}),
 }));

@@ -140,7 +140,7 @@ export default function DirectoryBrowser({ open, onOpenChange, onSelect }: Props
             <button
               type="button"
               onClick={() => setFilter("")}
-              className="absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
+              className="absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-accent text-muted-foreground hover:text-accent-foreground"
               aria-label="Clear filter"
             >
               <X className="w-3.5 h-3.5" />
@@ -178,7 +178,7 @@ export default function DirectoryBrowser({ open, onOpenChange, onSelect }: Props
                 <button
                   key={entry.path}
                   className={cn(
-                    "w-full flex items-center gap-3 px-3 py-2 text-sm text-left hover:bg-accent transition-colors",
+                    "w-full flex items-center gap-3 px-3 py-2 text-sm text-left hover:bg-accent hover:text-accent-foreground transition-colors",
                     selectedPath === entry.path && "bg-accent text-accent-foreground",
                   )}
                   onClick={() => setSelectedPath(entry.path)}

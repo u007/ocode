@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -31,7 +32,8 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 		root = h.workDir
 	}
 	if root == "" {
-		root = "."
+		writeError(w, http.StatusBadRequest, "server has no working directory configured")
+		return
 	}
 	// Resolve relative roots against the anchored workDir so they are stable
 	// regardless of the process CWD, and confine an explicit ?path= to the
@@ -179,6 +181,17 @@ func annotateFileTreeGitStatus(node *FileNode, anchor string, m map[string]strin
 	for i := range node.Children {
 		annotateFileTreeGitStatus(&node.Children[i], anchor, m)
 	}
+	// Propagate child git status to parent directories so a folder containing
+	// only untracked/modified files still shows a badge, rather than appearing
+	// clean while its children are dirty.
+	if node.IsDir && node.GitStatus == "" {
+		for _, child := range node.Children {
+			if child.GitStatus != "" {
+				node.GitStatus = child.GitStatus
+				break
+			}
+		}
+	}
 }
 
 // FileSearchResult is one matching line for the content search endpoint.
@@ -215,7 +228,8 @@ func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
 		root = h.workDir
 	}
 	if root == "" {
-		root = "."
+		writeError(w, http.StatusBadRequest, "server has no working directory configured")
+		return
 	}
 	if !filepath.IsAbs(root) && h.workDir != "" {
 		root = filepath.Join(h.workDir, root)
@@ -318,18 +332,18 @@ func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		buf := make([]byte, 8000)
 		n, _ := f.Read(buf)
-		f.Close()
 		for i := 0; i < n; i++ {
 			if buf[i] == 0 {
+				f.Close()
 				return nil
 			}
 		}
 		rel, _ := filepath.Rel(anchor, path)
-		file, err := os.Open(path)
-		if err != nil {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			f.Close()
 			return nil
 		}
-		scanner := bufio.NewScanner(file)
+		scanner := bufio.NewScanner(f)
 		// 1 MiB token limit to preserve exact long lines
 		scanner.Buffer(make([]byte, 0, 4096), 1<<20)
 		lineNum := 0
@@ -366,7 +380,7 @@ func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		file.Close()
+		f.Close()
 		if hasMoreDueToCap {
 			return filepath.SkipAll
 		}

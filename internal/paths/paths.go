@@ -24,9 +24,10 @@ const AppName = "opencode"
 const OcodeAppName = "ocode"
 
 // OcodeGlobalDataDir returns the ocode-specific global data dir:
-//   macOS: ~/.local/share/ocode
-//   Linux: $XDG_DATA_HOME/ocode or ~/.local/share/ocode
-//   Windows: %LOCALAPPDATA%/ocode
+//
+//	macOS: ~/.local/share/ocode
+//	Linux: $XDG_DATA_HOME/ocode or ~/.local/share/ocode
+//	Windows: %LOCALAPPDATA%/ocode
 func OcodeGlobalDataDir() (string, error) {
 	if runtime.GOOS == "darwin" {
 		home, err := os.UserHomeDir()
@@ -143,6 +144,40 @@ func GlobalDataDir() (string, error) {
 		}
 		return ensureDir(filepath.Join(home, ".local", "share", AppName))
 	}
+}
+
+// GlobalConfigDir returns the cross-platform global configuration directory
+// that holds opencode.json, ocodeconfig.json, auto-permission prompts, skills,
+// and plugins.
+//
+// Resolution order:
+//  1. Windows:  %APPDATA%\opencode
+//  2. macOS:    ~/.config/opencode
+//  3. Linux/other (XDG): $XDG_CONFIG_HOME/opencode  (falls back to ~/.config/opencode)
+//
+// Deliberately side-effect-free (no ensureDir): the permission and tool
+// confinement layers call this on every decision to test whether a path is
+// inside ocode's own config tree, and a scope probe must not create
+// directories. Consumers that need to write there MkdirAll themselves (the
+// config save paths already do).
+func GlobalConfigDir() (string, error) {
+	if runtime.GOOS == "windows" {
+		base := os.Getenv("APPDATA")
+		if base == "" {
+			return "", fmt.Errorf("APPDATA not set")
+		}
+		return filepath.Join(base, AppName), nil
+	}
+	if runtime.GOOS != "darwin" {
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			return filepath.Join(xdg, AppName), nil
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", AppName), nil
 }
 
 // ProjectSessionsDir returns the per-project sessions directory under the

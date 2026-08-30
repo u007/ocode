@@ -104,6 +104,45 @@ export const _basePath = (() => {
 })();
 const BASE = _basePath;
 
+// Configurable backend origin (same-origin by default). When set via
+// /api/config/ocode/backend, all API/SSE calls are routed to that origin.
+// Empty means same-origin (existing behavior). Allowed values are
+// http://localhost[:port], http://127.0.0.1[:port], or https://hub.mercstudio.com.
+let backendBase: string | null = null;
+
+export function getApiBackendBase(): string | null {
+  return backendBase;
+}
+
+export function setApiBackendBase(url: string | null): void {
+  if (!url || url.trim() === "") {
+    backendBase = null;
+    return;
+  }
+  backendBase = url.trim().replace(/\/+$/, "");
+}
+
+export async function initBackendBase(): Promise<string | null> {
+  try {
+    // Fetch via same-origin (backendBase is still null here) to discover the
+    // configured backend without creating a circular dependency on the switch.
+    const headers = new Headers();
+    headers.set("Content-Type", "application/json");
+    for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
+    const res = await fetch(`${BASE}/api/config/ocode/backend`, { headers });
+    if (!res.ok) return backendBase;
+    const data = (await res.json()) as { backend_url?: string };
+    if (data.backend_url) {
+      setApiBackendBase(data.backend_url);
+    } else {
+      setApiBackendBase(null);
+    }
+    return backendBase;
+  } catch {
+    return backendBase;
+  }
+}
+
 // Auth token embedded in URL by /rc command (?token=...). Stored at load time
 // so navigation or hash changes don't lose it.
 const _token = new URLSearchParams(window.location.search).get("token") ?? "";
@@ -134,9 +173,30 @@ export async function authedFetch(path: string, init: RequestInit = {}): Promise
   return fetch(apiPath(path), { ...init, headers });
 }
 
-/** Prepends the current SPA base path to an API or SSE path. */
+/** Prepends the current SPA base path to an API or SSE path.
+ *  When a backend origin is configured, the absolute origin is prepended
+ *  (e.g. https://hub.mercstudio.com/api/...), otherwise same-origin relative.
+ *  SSE/EventSource URLs and upload URLs all flow through here. */
 export function apiPath(path: string): string {
-  return `${BASE}${path}`;
+  const withBase = `${BASE}${path}`;
+  if (backendBase) {
+    return `${backendBase}${withBase}`;
+  }
+  return withBase;
+}
+
+/** Returns a WebSocket URL for the given API path, respecting the configured
+ *  backend origin. Handles both same-origin (uses window.location.host) and
+ *  absolute backendBase (derives host/protocol from the backend URL). */
+export function apiWsPath(path: string): string {
+  const httpUrl = apiPath(path);
+  if (httpUrl.startsWith("http://") || httpUrl.startsWith("https://")) {
+    const u = new URL(httpUrl);
+    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+    return u.toString();
+  }
+  const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${scheme}//${window.location.host}${httpUrl}`;
 }
 
 // projQuery appends ?project=<root> for endpoints that select a registered
@@ -211,6 +271,33 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
+  // Per-session model override (Part: per-chat-session model). Sets the model
+  // for one session only — persisted in its transcript metadata and reflected
+  // in that session's status snapshot — without touching the global config
+  // model or any other session.
+  setSessionModel: (sessionId: string, model: string) =>
+    fetchJSON<{ model: string; session_id: string }>(
+      `/api/sessions/${sessionId}/model`,
+      { method: "PUT", body: JSON.stringify({ model }) },
+    ),
+  // Clears a session's per-session model override so it falls back to the
+  // global config model.
+  clearSessionModel: (sessionId: string) =>
+    fetchJSON<{ model: string; session_id: string }>(
+      `/api/sessions/${sessionId}/model`,
+      { method: "DELETE" },
+    ),
+  // Add/remove a "provider/model" from the favorites list shared with the
+  // TUI model picker (ctrl+f). Idempotent; responds with the full favorites
+  // list so the dialog can resync star states without a model refetch.
+  setModelFavorite: (model: string, favorited: boolean) =>
+    fetchJSON<{ model: string; favorite: boolean; favorites: string[] }>(
+      "/api/models/favorite",
+      {
+        method: favorited ? "PUT" : "DELETE",
+        body: JSON.stringify({ model }),
+      },
+    ),
   // Extended-thinking (reasoning effort) budget for the main model. budget 0 =
   // off; levels list the canonical off/low/med/high/xhigh/max options shared
   // with the TUI's /effort command.
@@ -360,6 +447,13 @@ export const api = {
     fetchJSON<Record<string, { enabled: boolean; max_parallel: number }>>("/api/config/ocode/local-models", {
       method: "PUT",
       body: JSON.stringify(models),
+    }),
+
+  getBackendConfig: () => fetchJSON<{ backend_url: string }>("/api/config/ocode/backend"),
+  setBackendConfig: (backend_url: string) =>
+    fetchJSON<{ backend_url: string }>("/api/config/ocode/backend", {
+      method: "PUT",
+      body: JSON.stringify({ backend_url }),
     }),
   getGitDiff: (path?: string, project?: string) => {
     const params = new URLSearchParams();
@@ -645,11 +739,6 @@ export const api = {
       }),
     })
   },
-  openFile: (path: string, line?: number) =>
-    fetchJSON<{ path: string; status: string }>("/api/files/open", {
-      method: "POST",
-      body: JSON.stringify({ path, line }),
-    }),
   shellCommand: (command: string, workDir?: string) =>
     fetchJSON<{ output: string; exitCode: number; error: string }>("/api/shell", {
       method: "POST",

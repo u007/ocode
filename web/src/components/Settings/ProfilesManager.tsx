@@ -131,7 +131,7 @@ export default function ProfilesManager() {
             <div className="font-medium text-sm">Default (base)</div>
             <div className="text-xs text-muted-foreground">No profile — inherits base config only</div>
           </div>
-          <button onClick={()=>setActiveProfile("")} className={`rounded px-3 py-1 text-xs ${active==="" ? "bg-primary text-primary-foreground":"border border-border hover:bg-accent"}`}>{active===""?"✓ Active":"Activate"}</button>
+          <button onClick={()=>setActiveProfile("")} className={`rounded px-3 py-1 text-xs ${active==="" ? "bg-primary text-primary-foreground":"border border-border hover:bg-accent hover:text-accent-foreground"}`}>{active===""?"✓ Active":"Activate"}</button>
         </div>
         {profiles.map(p=>(
           <div key={p.name} className={`rounded border ${active===p.name?"border-primary bg-muted":"border-border bg-muted/50"}`}>
@@ -146,8 +146,8 @@ export default function ProfilesManager() {
                 {p.displayName && <div className="text-xs text-muted-foreground">{p.displayName}</div>}
               </div>
               <div className="flex gap-1 shrink-0">
-                <button onClick={()=>setActiveProfile(p.name)} className={`rounded px-2 py-1 text-xs ${active===p.name?"bg-primary text-primary-foreground":"border border-border hover:bg-accent"}`}>{active===p.name?"✓":"Activate"}</button>
-                <button onClick={()=>rename(p.name)} className="rounded border border-border px-2 py-1 text-xs hover:bg-accent">Rename</button>
+                <button onClick={()=>setActiveProfile(p.name)} className={`rounded px-2 py-1 text-xs ${active===p.name?"bg-primary text-primary-foreground":"border border-border hover:bg-accent hover:text-accent-foreground"}`}>{active===p.name?"✓":"Activate"}</button>
+                <button onClick={()=>rename(p.name)} className="rounded border border-border px-2 py-1 text-xs hover:bg-accent hover:text-accent-foreground">Rename</button>
                 <button onClick={()=>remove(p.name, p.credentialCount, p.overrideCount)} className="rounded border border-red-700 text-red-300 px-2 py-1 text-xs hover:bg-red-900/30">Delete</button>
               </div>
             </div>
@@ -190,7 +190,7 @@ export default function ProfilesManager() {
                               <div key={`provider.${pid}`} className="flex items-center justify-between rounded bg-muted px-2 py-1 text-xs">
                                 <span className="font-mono">provider.{pid}</span>
                                 <span className="text-amber-300">● overridden</span>
-                                <button onClick={()=>resetField(p.name, `provider.${pid}`)} className="rounded border border-border px-2 py-0.5 hover:bg-accent">Reset to base</button>
+                                <button onClick={()=>resetField(p.name, `provider.${pid}`)} className="rounded border border-border px-2 py-0.5 hover:bg-accent hover:text-accent-foreground">Reset to base</button>
                               </div>
                             ))
                           }
@@ -199,7 +199,7 @@ export default function ProfilesManager() {
                               <div key={`mcp.${mid}`} className="flex items-center justify-between rounded bg-muted px-2 py-1 text-xs">
                                 <span className="font-mono">mcp.{mid}</span>
                                 <span className="text-amber-300">● overridden</span>
-                                <button onClick={()=>resetField(p.name, `mcp.${mid}`)} className="rounded border border-border px-2 py-0.5 hover:bg-accent">Reset to base</button>
+                                <button onClick={()=>resetField(p.name, `mcp.${mid}`)} className="rounded border border-border px-2 py-0.5 hover:bg-accent hover:text-accent-foreground">Reset to base</button>
                               </div>
                             ))
                           }
@@ -207,7 +207,7 @@ export default function ProfilesManager() {
                             <div key={k} className="flex items-center justify-between rounded bg-muted px-2 py-1 text-xs">
                               <span className="font-mono">{k}</span>
                               <span className="text-amber-300">● overridden</span>
-                              <button onClick={()=>resetField(p.name, k)} className="rounded border border-border px-2 py-0.5 hover:bg-accent">Reset to base</button>
+                              <button onClick={()=>resetField(p.name, k)} className="rounded border border-border px-2 py-0.5 hover:bg-accent hover:text-accent-foreground">Reset to base</button>
                             </div>
                           )
                         })}
