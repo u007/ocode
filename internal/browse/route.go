@@ -66,17 +66,32 @@ func hostIsLiteralPrivate(host string) bool {
 	return isPrivateIP(addr)
 }
 
-// isPrivateIP is the enumerated private-range check. Part 02 tests it
-// exhaustively; defined here so Part 01 compiles and routes correctly.
+// browseBlockedPrefixes is the enumerated SSRF block list from the design
+// spec. Kept as explicit prefixes (rather than only stdlib Is* helpers) so
+// the list is auditable against the spec and testable range by range.
+var browseBlockedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("127.0.0.0/8"),    // loopback
+	netip.MustParsePrefix("10.0.0.0/8"),     // RFC1918
+	netip.MustParsePrefix("172.16.0.0/12"),  // RFC1918
+	netip.MustParsePrefix("192.168.0.0/16"), // RFC1918
+	netip.MustParsePrefix("100.64.0.0/10"),  // CGNAT
+	netip.MustParsePrefix("169.254.0.0/16"), // link-local incl. metadata 169.254.169.254
+	netip.MustParsePrefix("0.0.0.0/32"),     // unspecified v4
+	netip.MustParsePrefix("::1/128"),        // loopback v6
+	netip.MustParsePrefix("fc00::/7"),       // ULA
+	netip.MustParsePrefix("fe80::/10"),      // link-local v6
+	netip.MustParsePrefix("::/128"),         // unspecified v6
+}
+
+// isPrivateIP reports whether ip falls in any blocked range. IPv4-mapped
+// IPv6 addresses (::ffff:a.b.c.d) are unmapped first so they classify by
+// their embedded IPv4 address. Non-canonical literal encodings (decimal,
+// octal) never reach this function: classification happens on the resolved
+// netip.Addr at connect time, not on user-supplied text.
 func isPrivateIP(ip netip.Addr) bool {
 	ip = ip.Unmap()
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() || ip.IsUnspecified() {
-		return true
-	}
-	// CGNAT 100.64.0.0/10.
-	if ip.Is4() {
-		b := ip.As4()
-		if b[0] == 100 && b[1] >= 64 && b[1] <= 127 {
+	for _, p := range browseBlockedPrefixes {
+		if p.Contains(ip) {
 			return true
 		}
 	}
