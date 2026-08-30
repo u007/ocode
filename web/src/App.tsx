@@ -5,7 +5,10 @@ import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, findProjectPathForTab, useProjectState } from "./stores/projectStore";
 import { TerminalProvider } from "./stores/terminalStore";
-import { BrowserTabsProvider } from "./stores/browserTabsStore";
+import { BrowserTabsProvider, useBrowserTabs } from "./stores/browserTabsStore";
+import { BrowserPanel } from "./components/Browser/BrowserPanel";
+import { useBrowserStore, browserActions, type StateKey } from "./lib/browserStore";
+import type { FocusedKind } from "./lib/viewPersistence";
 import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ChatPanel from "./components/Chat/ChatPanel";
@@ -153,7 +156,16 @@ function HomeApp() {
   >("sessions");
   // Which half of the merged Sessions tab (chat vs terminal) is currently
   // shown. Resets to chat on project switch — no per-project memory (v1).
-  const [focusedKind, setFocusedKind] = useState<"chat" | "terminal">("chat");
+  const [focusedKind, setFocusedKind] = useState<FocusedKind>("chat");
+  const activeProjectPath = projectState.activeProject?.path ?? "";
+  const { activeId: activeBrowserId } = useBrowserTabs(activeProjectPath);
+  // The side browser panel accompanies chat/terminal focus (never the
+  // full-width browser *tab*, which has its own `tab:` state surface).
+  const sidePanelKind = focusedKind === "terminal" ? "term" : "chat";
+  const sideStateKey: StateKey | null =
+    activeTabId && focusedKind !== "browser" ? `side:${sidePanelKind}:${activeTabId}` : null;
+  const sideTabState = useBrowserStore(sideStateKey ?? ("side:chat:" as StateKey));
+  const browserOpen = !!sideStateKey && !!sideTabState?.panelOpen;
   useEffect(() => {
     setFocusedKind("chat");
   }, [projectState.activeProject?.path]);
@@ -668,7 +680,25 @@ function HomeApp() {
                   chat content wrapper: each of those is hidden when the other kind is focused,
                   so a bar nested in either would vanish with it. */}
               {activeView === "sessions" && (
-                <UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={setFocusedKind} />
+                <div className="flex items-center">
+                  <div className="flex-1 min-w-0">
+                    <UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={setFocusedKind} />
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="Toggle browser panel"
+                    title="Toggle browser panel"
+                    disabled={focusedKind === "browser" || !sideStateKey}
+                    onClick={() => {
+                      if (!sideStateKey) return;
+                      if (browserOpen) browserActions.close(sideStateKey);
+                      else browserActions.open(sideStateKey);
+                    }}
+                    className="mx-1 flex shrink-0 items-center rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors border border-border disabled:opacity-40"
+                  >
+                    🌐
+                  </button>
+                </div>
               )}
               {/* Terminal is project-scoped and must stay mounted even when not visible. It lives inside the Tabs root
                   so TopTabs (which uses TabsList/TabsTrigger) keeps its Radix context, but outside the non-terminal
@@ -876,6 +906,11 @@ function HomeApp() {
                     })}
                   </div>
                   </div>
+                  {focusedKind === "browser" && activeBrowserId && (
+                    <div className="flex flex-col flex-1 min-h-0">
+                      <BrowserPanel stateKey={`tab:${activeBrowserId}`} mode="full" />
+                    </div>
+                  )}
                 </div>
               </TabsContent>
             </div>
