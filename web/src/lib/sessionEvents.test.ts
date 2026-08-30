@@ -13,6 +13,7 @@ import type { ChatAction, ChatState } from "../stores/chatStore";
 import { chatReducer, initialState } from "../stores/chatStore";
 import { clearDraft, getDraft, setDraft } from "./tabDrafts";
 import { clearQueue, getQueue, pushQueued } from "./tabQueue";
+import { browserStore } from "./browserStore";
 
 const mockGetSessionState = vi.fn();
 const mockGetSession = vi.fn();
@@ -506,5 +507,33 @@ describe("tool output streaming events", () => {
     const live = getState().sessions["s1"].live;
     expect(live[0]).toMatchObject({ callId: "c1", output: "done" });
     expect((live[1] as { output?: string }).output).toBeUndefined();
+  });
+});
+
+describe("browse_nav routing (Part 07/08 contract)", () => {
+  it("routes browse_nav into the browser store", () => {
+    browserStore.setState(() => ({
+      byKey: {
+        "tab:x": {
+          url: "", status: 0, loading: true, mode: null, error: null,
+          history: [], historyIndex: -1, panelOpen: true, collapsed: false,
+          consoleEvents: [], networkEvents: [],
+        },
+      },
+    }));
+    const { router } = makeRouter(["s1"]);
+    // browse_nav is global-scoped: empty session_id/project must still route.
+    routeBusEnvelope(
+      env("browse_nav", {
+        project: "",
+        session_id: "",
+        data: { state_key: "tab:x", url: "https://done.com/", status: 200, mode: "proxied" },
+      }),
+      router,
+    );
+    expect(browserStore.state.byKey["tab:x"].url).toBe("https://done.com/");
+    expect(browserStore.state.byKey["tab:x"].status).toBe(200);
+    expect(browserStore.state.byKey["tab:x"].loading).toBe(false);
+    browserStore.setState(() => ({ byKey: {} }));
   });
 });

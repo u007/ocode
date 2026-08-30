@@ -5,6 +5,7 @@ import type { Message, SSEPermissionEvent, TUIStatus } from "../api/types";
 import type { BusEnvelope } from "./eventBus";
 import { rekeyDraft } from "./tabDrafts";
 import { rekeyQueue } from "./tabQueue";
+import { browserActions, type NavEvent } from "./browserStore";
 
 /**
  * sessionEvents — pure routing of bus envelopes into chatStore/projectStore.
@@ -137,7 +138,7 @@ const SESSION_SCOPED_EVENTS = new Set([
  *  (`session_started`, `status`) plus every session-scoped event above. The
  *  bus dispatches per-event-type (see eventBus.ts), so a consumer must
  *  subscribe to each of these individually; there's no wildcard. */
-export const ROUTABLE_EVENTS = ["session_started", "status", ...SESSION_SCOPED_EVENTS];
+export const ROUTABLE_EVENTS = ["session_started", "status", "browse_nav", ...SESSION_SCOPED_EVENTS];
 
 /** Highest bus seq already applied per session, via a live envelope or a
  *  reconcile replay (see reconcileOpenSessions). Lets a mid-turn reload's
@@ -236,6 +237,21 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
     }
     if (status.ocr_model !== undefined) {
       r.dispatch({ type: "SET_OCR_MODEL", model: status.ocr_model || "" });
+    }
+    return;
+  }
+
+  // Server-authoritative browser navigation (browse panel, Part 07). Global
+  // (no session id — keyed by payload state_key inside browserStore), so it
+  // is handled BEFORE the session-scoped gate and is never added to
+  // SESSION_SCOPED_EVENTS. The address bar renders ONLY these events, never
+  // page-reported URLs (spoofing defense).
+  if (event === "browse_nav") {
+    const nav = data as NavEvent;
+    if (nav && nav.state_key) {
+      browserActions.applyNavEvent(nav.state_key, nav);
+    } else {
+      console.error("browse_nav event missing state_key:", data);
     }
     return;
   }

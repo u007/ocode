@@ -469,6 +469,7 @@ func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 	s.browse = bs
 	s.mux.HandleFunc("GET /api/browse/config", s.authMiddleware(s.handleBrowseConfig))
 	s.mux.HandleFunc("POST /api/browse/grant", s.authMiddleware(s.handleBrowseGrant))
+	s.mux.HandleFunc("POST /api/browse/revoke", s.authMiddleware(s.handleBrowseRevoke))
 	// Bridge server-authoritative nav events onto the SSE bus. The first
 	// publisher arg (stateKey) is redundant with ev.StateKey — ignore it and
 	// treat ev.StateKey as the single source of truth so the SPA and the bus
@@ -536,6 +537,26 @@ func (s *Server) handleBrowseGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	grant := s.browse.MintGrant(req.StateKey)
 	writeJSON(w, http.StatusOK, map[string]string{"grant": grant})
+}
+
+// handleBrowseRevoke tears down the browse session for a stateKey (panel
+// close). Idempotent: revoking an unknown key is a no-op on the browse side.
+func (s *Server) handleBrowseRevoke(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		StateKey string `json:"state_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("browse revoke: decode request body: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.StateKey == "" {
+		log.Printf("browse revoke: missing state_key")
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	s.browse.Revoke(req.StateKey)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {

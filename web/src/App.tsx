@@ -55,6 +55,13 @@ import { OPEN_FILE_EVENT } from "./lib/fileLinks";
 import { useSessionStatus } from "./hooks/useSessionStatus";
 import { useTurnWatchdogAll } from "./hooks/useTurnWatchdog";
 import FrontendMemoryReporter from "./lib/debug/frontendMemoryReporter";
+import { __setRevoker } from "./lib/browserStore";
+import { revokeBrowseSession } from "./api/client";
+
+// Browse panel close → revoke the server-side browse session. Wired here
+// (module scope, once) rather than inside browserStore.ts to avoid a
+// client→store→client import cycle.
+__setRevoker(revokeBrowseSession);
 
 type ModelDialogTab = "main" | "small" | "advisor" | "permission" | "recap" | "ocr" | "mask" | "commit" | "summary";
 

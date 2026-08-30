@@ -1168,3 +1168,64 @@ export type SSEEventHandler = (
 // The legacy per-session SSE connectors (connectSessionMirror,
 // connectAgentRunsSSE) were deleted in Part 04: every event type they carried
 // now flows over the single /api/events stream consumed by `lib/eventBus`.
+
+// ---- Embedded browser (see internal/browse) --------------------------------
+
+let _browseBase: string | null = null;
+
+/** Test-only: clear the cached browse base URL. */
+export function __resetBrowseBaseCache(): void {
+  _browseBase = null;
+}
+
+/** Fetches (once, then cached) the browse-origin base URL from the main
+ *  server. The browse origin is a SEPARATE loopback listener so proxied pages
+ *  are cross-origin to this SPA. */
+export async function getBrowseBase(): Promise<string> {
+  if (_browseBase) return _browseBase;
+  const res = await authedFetch("/api/browse/config", { method: "GET" });
+  if (!res.ok) throw new Error(`browse config: ${res.status}`);
+  const body = (await res.json()) as { base_url: string };
+  _browseBase = body.base_url;
+  return _browseBase;
+}
+
+/** Mints a one-time grant for a stateKey; the first iframe navigation carries
+ *  it and the browse origin exchanges it for an HttpOnly cookie. */
+export async function mintBrowseGrant(stateKey: string): Promise<string> {
+  const res = await authedFetch("/api/browse/grant", {
+    method: "POST",
+    body: JSON.stringify({ state_key: stateKey }),
+  });
+  if (!res.ok) throw new Error(`browse grant: ${res.status}`);
+  const body = (await res.json()) as { grant: string };
+  return body.grant;
+}
+
+/** Best-effort revoke of a browse session (called on panel close). */
+export async function revokeBrowseSession(stateKey: string): Promise<void> {
+  const res = await authedFetch("/api/browse/revoke", {
+    method: "POST",
+    body: JSON.stringify({ state_key: stateKey }),
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`browse revoke: ${res.status}`);
+  }
+}
+
+/** Builds the iframe src pointing at the browse origin's stateless route:
+ *  {base}/b/{stateKey}/{scheme}/{host}/{path}?{query}[&__grant=...].
+ *  Only http/https targets are supported. */
+export function browseSrc(base: string, grant: string | null, stateKey: string, url: string): string {
+  const u = new URL(url);
+  const scheme = u.protocol.replace(":", "");
+  const host = u.host; // host:port
+  const path = u.pathname === "/" ? "/" : u.pathname;
+  let out = `${base}/b/${stateKey}/${scheme}/${host}${path}`;
+  const params = u.search ? u.search.slice(1) : "";
+  const parts: string[] = [];
+  if (params) parts.push(params);
+  if (grant) parts.push(`__grant=${encodeURIComponent(grant)}`);
+  if (parts.length) out += `?${parts.join("&")}`;
+  return out;
+}
