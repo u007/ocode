@@ -183,13 +183,8 @@ func copyHeader(dst, src http.Header) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// PROVIDED BY PART 05 — remove this shim when implementing the capture script.
-// Identity passthrough so Part 03/04 compile and their tests pass before the
-// capture script exists.
-// ----------------------------------------------------------------------------
-
-func injectCapture(html []byte, _ string, _ string) []byte { return html }
+// (Part 05) injectCapture now lives in capture.go; (Part 04) rewriteHTML /
+// rewriteCSS live in rewrite.go.
 
 // ----------------------------------------------------------------------------
 // PROVIDED BY PART 06 — remove when implementing local mode.

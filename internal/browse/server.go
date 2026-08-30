@@ -47,6 +47,7 @@ func New(apiToken string, logger *log.Logger) *Server {
 	s.transport = newSafeTransport(false) // external mode: private IPs blocked
 	s.jar = newCookieJar()
 	s.mux.HandleFunc("/b/", s.handleBrowse)
+	s.mux.HandleFunc("GET /__ocode_capture.js", s.serveCapture)
 	return s
 }
 
