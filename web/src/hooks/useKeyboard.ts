@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { isDesktopShell } from "@/lib/desktopShell";
+import type { FocusedKind } from "../lib/viewPersistence";
 
 interface ShortcutHandlers {
   onNewSession?: () => void;
@@ -9,6 +10,13 @@ interface ShortcutHandlers {
   onSave?: () => void;
   onEscape?: () => void;
   onCloseSession?: () => void;
+  /** Which tab kind is frontmost on the merged sessions bar. When "browser"
+   *  (and activeBrowserId is set) Cmd/Ctrl+W closes the browser tab instead
+   *  of the session tab. */
+  focusedKind?: FocusedKind;
+  /** The focused browser tab's id, when a browser tab is focused. */
+  activeBrowserId?: string | null;
+  onCloseBrowserTab?: (id: string) => void;
 }
 
 /**
@@ -52,7 +60,12 @@ export function useKeyboard(handlers: ShortcutHandlers) {
         const target = e.target as Element | null;
         if (!e.metaKey && target instanceof Element && target.closest(".xterm")) return;
         e.preventDefault();
-        ref.current.onCloseSession?.();
+        const h = ref.current;
+        if (h.focusedKind === "browser" && h.activeBrowserId) {
+          h.onCloseBrowserTab?.(h.activeBrowserId);
+        } else {
+          h.onCloseSession?.();
+        }
       }
       if (e.key === "Escape") {
         ref.current.onEscape?.();

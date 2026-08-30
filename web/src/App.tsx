@@ -158,7 +158,12 @@ function HomeApp() {
   // shown. Resets to chat on project switch — no per-project memory (v1).
   const [focusedKind, setFocusedKind] = useState<FocusedKind>("chat");
   const activeProjectPath = projectState.activeProject?.path ?? "";
-  const { activeId: activeBrowserId } = useBrowserTabs(activeProjectPath);
+  const { activeId: activeBrowserId, closeBrowserTab } = useBrowserTabs(activeProjectPath);
+  // Closing the last browser tab (X button or Cmd+W) must not leave the
+  // center region blank while "browser" is still the focused kind.
+  useEffect(() => {
+    if (focusedKind === "browser" && !activeBrowserId) setFocusedKind("chat");
+  }, [focusedKind, activeBrowserId]);
   // The side browser panel accompanies chat/terminal focus (never the
   // full-width browser *tab*, which has its own `tab:` state surface).
   const sidePanelKind = focusedKind === "terminal" ? "term" : "chat";
@@ -394,6 +399,13 @@ function HomeApp() {
   const [filePickerOpen, setFilePickerOpen] = useState(false);
 
   useKeyboard({
+    focusedKind,
+    activeBrowserId,
+    onCloseBrowserTab: (id) => {
+      // Mirrors the browser pill's X: strip identity + page state + session.
+      closeBrowserTab(id);
+      browserActions.close(`tab:${id}`);
+    },
     onNewSession: () => {
       openNewSessionTab(isNewSessionTabEmpty(activeTabId));
     },
