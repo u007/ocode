@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sync"
 )
 
 // NavEvent is the server-authoritative address-bar / status update. The SPA
@@ -37,6 +38,11 @@ type Server struct {
 	// spaOrigin is the main (SPA) origin, set via EnableBrowse wiring; used
 	// as the exact postMessage targetOrigin by the capture script (Part 05).
 	spaOrigin string
+
+	// localTransport caches the allowPrivate transport used ONLY by
+	// handleLocal (Part 06). Guarded by Once; never used for external mode.
+	localTransportOnce sync.Once
+	localTransportVal  *http.Transport
 }
 
 func New(apiToken string, logger *log.Logger) *Server {

@@ -25,7 +25,7 @@ func upstreamOrigin(t target) string { return t.Scheme + "://" + t.Host }
 func (s *Server) handleExternal(w http.ResponseWriter, r *http.Request, t target) {
 	// Block service-worker registration before any upstream contact: a SW
 	// scoped to /b/ on the browse origin would persist site-controlled code.
-	if strings.EqualFold(r.Header.Get("Sec-Fetch-Dest"), "serviceworker") {
+	if isServiceWorkerRequest(r) {
 		http.Error(w, "browse: service workers are blocked", http.StatusForbidden)
 		return
 	}
@@ -184,12 +184,4 @@ func copyHeader(dst, src http.Header) {
 }
 
 // (Part 05) injectCapture now lives in capture.go; (Part 04) rewriteHTML /
-// rewriteCSS live in rewrite.go.
-
-// ----------------------------------------------------------------------------
-// PROVIDED BY PART 06 — remove when implementing local mode.
-// ----------------------------------------------------------------------------
-
-func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
-	s.handleExternal(w, r, t) // temporary: treat local like external
-}
+// rewriteCSS live in rewrite.go; (Part 06) handleLocal lives in local.go.

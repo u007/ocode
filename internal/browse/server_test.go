@@ -36,15 +36,22 @@ func navAndServe(t *testing.T, s *Server, stateKey, path string) *httptest.Respo
 }
 
 // TestAuthenticatedNavigationProxiesExternal replaces the Part-01 stub
-// assertion: an authenticated navigation must now reach handleBrowse's real
-// dispatch. The loopback httptest upstream parses as Local, so this also
-// exercises the (Part-06-shimmed) local branch end to end through the mux.
+// assertion: an authenticated navigation must reach handleBrowse's real
+// dispatch. The loopback httptest upstream parses as Local, so this exercises
+// the Part-06 local branch end to end through the mux: transparent streaming
+// (body intact, upstream headers NOT surgically stripped — that is external
+// mode's contract, covered by external_test.go against handleExternal with an
+// allowPrivate transport override).
 func TestAuthenticatedNavigationProxiesExternal(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/foo" {
 			t.Errorf("upstream saw path %q, want /foo", r.URL.Path)
 		}
-		w.Header().Set("X-Frame-Options", "DENY") // must not survive proxying
+		// Local mode must never forward the browse session cookie upstream.
+		if c := r.Header.Get("Cookie"); strings.Contains(c, browseCookie) {
+			t.Errorf("browse session cookie leaked upstream: %q", c)
+		}
+		w.Header().Set("X-Frame-Options", "DENY") // local mode passes it through untouched
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("browse ok: proxied"))
 	}))
@@ -59,9 +66,6 @@ func TestAuthenticatedNavigationProxiesExternal(t *testing.T) {
 	}
 	if body := w.Body.String(); !strings.HasPrefix(body, "browse ok: proxied") {
 		t.Fatalf("unexpected proxied body %q", body)
-	}
-	if w.Header().Get("X-Frame-Options") != "" {
-		t.Errorf("X-Frame-Options leaked through dispatch: %q", w.Header().Get("X-Frame-Options"))
 	}
 }
 
