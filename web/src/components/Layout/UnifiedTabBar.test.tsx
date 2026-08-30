@@ -4,6 +4,8 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 import { ChatProvider } from "../../stores/chatStore";
 import { TerminalProvider, useTerminalState } from "../../stores/terminalStore";
+import { BrowserTabsProvider } from "../../stores/browserTabsStore";
+import type { FocusedKind } from "../../lib/viewPersistence";
 import UnifiedTabBar from "./UnifiedTabBar";
 
 vi.mock("@/hooks/useTerminalConfig", () => ({
@@ -38,12 +40,14 @@ vi.mock("../../stores/projectStore", () => ({
   }),
 }));
 
-function renderBar(focusedKind: "chat" | "terminal" = "chat") {
+function renderBar(focusedKind: FocusedKind = "chat") {
   const onFocusKindChange = vi.fn();
   const utils = render(
     <ChatProvider>
       <TerminalProvider>
-        <UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={onFocusKindChange} />
+        <BrowserTabsProvider>
+          <UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={onFocusKindChange} />
+        </BrowserTabsProvider>
       </TerminalProvider>
     </ChatProvider>,
   );
@@ -68,6 +72,14 @@ describe("UnifiedTabBar", () => {
   it("renders a chat pill with the chat emoji", () => {
     renderBar();
     expect(screen.getByText("Chat One")).toBeTruthy();
+  });
+
+  it("renders a Browser add button and opens a browser pill", () => {
+    const { onFocusKindChange } = renderBar();
+    const addBrowser = screen.getByRole("button", { name: /new browser tab/i });
+    fireEvent.click(addBrowser);
+    expect(onFocusKindChange).toHaveBeenCalledWith("browser");
+    expect(screen.getByRole("tab", { name: /new tab/i })).toBeInTheDocument();
   });
 
   it("lists a persisted-but-never-activated terminal as a pill (peek, no pty)", () => {
@@ -145,16 +157,18 @@ describe("terminal alert badge auto-clear timer", () => {
     return null;
   }
 
-  function renderFocused(initial: "chat" | "terminal" = "terminal") {
+  function renderFocused(initial: FocusedKind = "terminal") {
     function Wrapper() {
-      const [kind, setKind] = useState<"chat" | "terminal">(initial);
+      const [kind, setKind] = useState<FocusedKind>(initial);
       return <UnifiedTabBar focusedKind={kind} onFocusKindChange={setKind} />;
     }
     const utils = render(
       <ChatProvider>
         <TerminalProvider>
-          <SeedHarness />
-          <Wrapper />
+          <BrowserTabsProvider>
+            <SeedHarness />
+            <Wrapper />
+          </BrowserTabsProvider>
         </TerminalProvider>
       </ChatProvider>,
     );

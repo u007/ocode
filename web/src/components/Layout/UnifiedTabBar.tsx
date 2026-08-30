@@ -21,6 +21,9 @@ import { useChatDispatch, useChatSelector, getSessionSlice, type ChatState, type
 import { useProjectState } from "../../stores/projectStore";
 import { useTerminalConfig } from "@/hooks/useTerminalConfig";
 import { useTerminalState, getProjectTerminals, PROCESSES_TAB_ID } from "../../stores/terminalStore";
+import { useBrowserTabs } from "../../stores/browserTabsStore";
+import { browserActions } from "../../lib/browserStore";
+import type { FocusedKind } from "../../lib/viewPersistence";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
 import { cancelLiveDeltas } from "../../lib/sessionEvents";
@@ -220,8 +223,8 @@ function TabPill({
 }
 
 interface Props {
-  focusedKind: "chat" | "terminal";
-  onFocusKindChange: (kind: "chat" | "terminal") => void;
+  focusedKind: FocusedKind;
+  onFocusKindChange: (kind: FocusedKind) => void;
 }
 
 export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props) {
@@ -241,6 +244,14 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   const { state: terminalState, openTerminal, closeTerminal, setActiveId: setActiveTerminalId, renameTerminal, clearAlert } =
     useTerminalState();
   const { terminals, activeId: activeTerminalId } = getProjectTerminals(terminalState, activeProjectPath);
+  const {
+    tabs: browserTabs,
+    activeId: activeBrowserId,
+    openBrowserTab,
+    closeBrowserTab,
+    renameBrowserTab,
+    activateBrowserTab,
+  } = useBrowserTabs(activeProjectPath);
 
   const chatDerived = useChatSelector(
     (s: ChatState): ChatDerived[] =>
@@ -256,7 +267,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     chatDerivedEqual,
   );
 
-  const [editing, setEditing] = useState<{ kind: "chat" | "terminal"; id: string } | null>(null);
+  const [editing, setEditing] = useState<{ kind: FocusedKind; id: string } | null>(null);
   const [editValue, setEditValue] = useState("");
 
   // When a backgrounded terminal is focused (clicked), keep its "unread
@@ -273,6 +284,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
 
   const chatIds = useMemo(() => chatTabs.map((t) => t.id), [chatTabs]);
   const terminalIds = useMemo(() => terminals.map((t) => t.id), [terminals]);
+  const browserIds = useMemo(() => browserTabs.map((t) => t.id), [browserTabs]);
 
   // Persisted merged tab order. Seeded from localStorage and re-synced whenever
   // the live tab set or active project changes (tabs added/removed, project
@@ -281,16 +293,16 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   // memo derived from localStorage, so a drag that only wrote localStorage
   // never re-rendered the bar into its new order.
   const [order, setOrder] = useState<UnifiedTabKey[]>(() =>
-    reconcileTabOrder(loadTabOrder(activeProjectPath), chatIds, terminalIds),
+    reconcileTabOrder(loadTabOrder(activeProjectPath), chatIds, terminalIds, browserIds),
   );
   const orderRef = useRef(order);
 
   useEffect(() => {
-    const next = reconcileTabOrder(loadTabOrder(activeProjectPath), chatIds, terminalIds);
+    const next = reconcileTabOrder(loadTabOrder(activeProjectPath), chatIds, terminalIds, browserIds);
     if (next.join("") === orderRef.current.join("")) return;
     orderRef.current = next;
     setOrder(next);
-  }, [activeProjectPath, chatIds, terminalIds]);
+  }, [activeProjectPath, chatIds, terminalIds, browserIds]);
 
   const dndSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -353,7 +365,32 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     [activeProjectPath, setActiveTerminalId, onFocusKindChange, focusedKind, activeTerminalId],
   );
 
-  const startRename = useCallback((kind: "chat" | "terminal", id: string, currentTitle: string) => {
+  const handleBrowserClick = useCallback(
+    (e: React.MouseEvent, id: string) => {
+      if (e.button !== 0) return;
+      onFocusKindChange("browser");
+      activateBrowserTab(id);
+    },
+    [onFocusKindChange, activateBrowserTab],
+  );
+
+  const handleCloseBrowser = useCallback(
+    (e: React.MouseEvent, id: string) => {
+      e.stopPropagation();
+      closeBrowserTab(id);
+      // Drop the tab's page state (URL/history/console) and revoke its server
+      // browse session — browserTabsStore owns only the strip identity.
+      browserActions.close(`tab:${id}`);
+    },
+    [closeBrowserTab],
+  );
+
+  const handleNewBrowser = useCallback(() => {
+    openBrowserTab();
+    onFocusKindChange("browser");
+  }, [openBrowserTab, onFocusKindChange]);
+
+  const startRename = useCallback((kind: FocusedKind, id: string, currentTitle: string) => {
     setEditing({ kind, id });
     setEditValue(currentTitle);
   }, []);
@@ -371,10 +408,12 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           console.error("failed to save renamed tab title", err);
         });
       }
+    } else if (target.kind === "browser") {
+      renameBrowserTab(target.id, title);
     } else {
       renameTerminal(activeProjectPath, target.id, title);
     }
-  }, [editing, editValue, projectDispatch, renameTerminal, activeProjectPath]);
+  }, [editing, editValue, projectDispatch, renameTerminal, renameBrowserTab, activeProjectPath]);
 
   const handleCloseChat = useCallback(
     (e: React.MouseEvent, id: string) => {
@@ -448,6 +487,28 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
                 />
               );
             }
+            if (key.startsWith("browser:")) {
+              const id = key.slice("browser:".length);
+              const tab = browserTabs.find((t) => t.id === id);
+              if (!tab) return null;
+              return (
+                <TabPill
+                  key={key}
+                  sortId={key}
+                  emoji="🌐"
+                  title={tab.title}
+                  isActive={focusedKind === "browser" && activeBrowserId === id}
+                  isEditing={editing?.kind === "browser" && editing.id === id}
+                  editValue={editValue}
+                  onEditValueChange={setEditValue}
+                  onClick={(e) => handleBrowserClick(e, id)}
+                  onStartRename={() => startRename("browser", id, tab.title)}
+                  onCommitRename={commitRename}
+                  onCancelRename={() => setEditing(null)}
+                  onClose={(e) => handleCloseBrowser(e, id)}
+                />
+              );
+            }
             const id = key.slice("term:".length);
             const term = terminalById.get(id);
             if (!term) return null;
@@ -480,6 +541,16 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         className="flex shrink-0 items-center gap-0.5 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors border border-border"
       >
         <span aria-hidden>💬</span>
+        <Plus className="w-3 h-3" />
+      </button>
+
+      <button
+        onClick={handleNewBrowser}
+        aria-label="New browser tab"
+        title="New browser tab"
+        className="flex shrink-0 items-center gap-0.5 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors border border-border"
+      >
+        <span aria-hidden>🌐</span>
         <Plus className="w-3 h-3" />
       </button>
 

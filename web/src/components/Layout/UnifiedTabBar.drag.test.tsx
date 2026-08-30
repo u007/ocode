@@ -19,6 +19,7 @@ if (typeof window.PointerEvent === "undefined") {
 
 import { ChatProvider } from "../../stores/chatStore";
 import { TerminalProvider } from "../../stores/terminalStore";
+import { BrowserTabsProvider } from "../../stores/browserTabsStore";
 import UnifiedTabBar from "./UnifiedTabBar";
 
 vi.mock("@/hooks/useTerminalConfig", () => ({
@@ -58,7 +59,9 @@ function renderBar(focusedKind: "chat" | "terminal" = "chat") {
   const utils = render(
     <ChatProvider>
       <TerminalProvider>
-        <UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={onFocusKindChange} />
+        <BrowserTabsProvider>
+          <UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={onFocusKindChange} />
+        </BrowserTabsProvider>
       </TerminalProvider>
     </ChatProvider>,
   );

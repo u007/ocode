@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { loadTabOrder, saveTabOrder, reconcileTabOrder } from "./tabOrderPersistence";
+import { loadTabOrder, saveTabOrder, reconcileTabOrder, type UnifiedTabKey } from "./tabOrderPersistence";
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -39,7 +39,7 @@ describe("reconcileTabOrder", () => {
   });
 
   it("keeps saved interleaving of chat, term, and browser keys", () => {
-    const saved = ["term:t1", "browser:b1", "chat:c1"];
+    const saved: UnifiedTabKey[] = ["term:t1", "browser:b1", "chat:c1"];
     expect(reconcileTabOrder(saved, ["c1"], ["t1"], ["b1"])).toEqual(["term:t1", "browser:b1", "chat:c1"]);
   });
 

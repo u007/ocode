@@ -1,5 +1,5 @@
 export type ActiveView = "files" | "git" | "cron" | "assets" | "sessions" | "settings";
-export type FocusedKind = "chat" | "terminal";
+export type FocusedKind = "chat" | "terminal" | "browser";
 
 const STORAGE_KEY = "ocode.ui.view-state.v1";
 
@@ -9,7 +9,7 @@ interface PersistedViewState {
 }
 
 const validViews: Set<ActiveView> = new Set(["files", "git", "cron", "assets", "sessions", "settings"]);
-const validKinds: Set<FocusedKind> = new Set(["chat", "terminal"]);
+const validKinds: Set<FocusedKind> = new Set(["chat", "terminal", "browser"]);
 
 function isValidView(v: unknown): v is ActiveView {
   return typeof v === "string" && validViews.has(v as ActiveView);

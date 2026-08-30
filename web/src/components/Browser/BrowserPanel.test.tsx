@@ -1,4 +1,4 @@
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { render, waitFor, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const state = {
@@ -20,7 +20,7 @@ const actions = {
   setCollapsed: vi.fn(), close: vi.fn(),
 };
 vi.mock("../../lib/browserStore", () => ({
-  useBrowserStore: (key: string) => ({ ...state }),
+  useBrowserStore: (_key: string) => ({ ...state }),
   useBrowserActions: () => actions,
 }));
 vi.mock("../../api/client", () => ({
