@@ -5,6 +5,7 @@ import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, findProjectPathForTab, useProjectState } from "./stores/projectStore";
 import { TerminalProvider } from "./stores/terminalStore";
+import { BrowserTabsProvider } from "./stores/browserTabsStore";
 import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ChatPanel from "./components/Chat/ChatPanel";
@@ -975,12 +976,14 @@ export default function App() {
       <ChatProvider>
         <ProjectProvider>
           <TerminalProvider>
-            <FrontendMemoryReporter />
-            <StatusMetricsHydrator />
-            <Routes>
-              <Route path="/session/:id" element={<SessionPage />} />
-              <Route path="*" element={<HomeApp />} />
-            </Routes>
+            <BrowserTabsProvider>
+              <FrontendMemoryReporter />
+              <StatusMetricsHydrator />
+              <Routes>
+                <Route path="/session/:id" element={<SessionPage />} />
+                <Route path="*" element={<HomeApp />} />
+              </Routes>
+            </BrowserTabsProvider>
           </TerminalProvider>
         </ProjectProvider>
       </ChatProvider>
