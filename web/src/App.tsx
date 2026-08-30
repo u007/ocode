@@ -166,6 +166,13 @@ function HomeApp() {
     activeTabId && focusedKind !== "browser" ? `side:${sidePanelKind}:${activeTabId}` : null;
   const sideTabState = useBrowserStore(sideStateKey ?? ("side:chat:" as StateKey));
   const browserOpen = !!sideStateKey && !!sideTabState?.panelOpen;
+  const browserPane = useResizableSidebar({
+    storageKey: "ocode.ui.browser_width",
+    defaultWidth: 480,
+    minWidth: 320,
+    maxWidth: 1400,
+    collapsible: true,
+  });
   useEffect(() => {
     setFocusedKind("chat");
   }, [projectState.activeProject?.path]);
@@ -667,6 +674,7 @@ function HomeApp() {
 
         {/* Center content */}
         <main className="flex flex-1 flex-col overflow-hidden">
+         <div className="flex flex-1 min-h-0">
           <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)} className="flex flex-col flex-1 overflow-hidden">
             <div className="flex items-center justify-between gap-2 border-b pr-2">
               <div className="flex-1 min-w-0">
@@ -916,6 +924,47 @@ function HomeApp() {
             </div>
           </div>
           </Tabs>
+
+          {/* Side browser panel — resizable/collapsible, accompanies the focused
+              chat/terminal session (never the full-width browser tab). Its live
+              page state lives in browserStore under the side: stateKey. */}
+          {sideStateKey && browserOpen && (
+            <>
+              <div
+                ref={browserPane.handleRef}
+                role="separator"
+                aria-orientation="vertical"
+                aria-valuemin={browserPane.minWidth}
+                aria-valuemax={browserPane.maxWidth}
+                aria-valuenow={browserPane.width}
+                aria-label="Resize browser panel"
+                tabIndex={0}
+                className="w-1 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/60 transition-colors"
+                onPointerDown={browserPane.onPointerDown}
+                onDoubleClick={browserPane.resetToDefault}
+                onKeyDown={(e) => {
+                  const step = e.shiftKey ? 50 : 10;
+                  if (e.key === "ArrowLeft") {
+                    e.preventDefault();
+                    browserPane.setWidth(browserPane.width - step);
+                  } else if (e.key === "ArrowRight") {
+                    e.preventDefault();
+                    browserPane.setWidth(browserPane.width + step);
+                  } else if (e.key === "Home") {
+                    e.preventDefault();
+                    browserPane.resetToDefault();
+                  }
+                }}
+              />
+              <div
+                style={{ width: browserPane.width }}
+                className="flex-shrink-0 h-full min-h-0 flex flex-col border-l border-border"
+              >
+                <BrowserPanel stateKey={sideStateKey} mode="side" />
+              </div>
+            </>
+          )}
+          </div>
 
           {/* Status bar — only on chat sub-tab; hidden when terminal is focused */}
           {activeView === "sessions" && activeSessionTab?.activeSubTab === "chat" && focusedKind === "chat" && (

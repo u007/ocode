@@ -117,4 +117,26 @@ describe("App browser wiring", () => {
     expect(panel).toHaveAttribute("data-mode", "full");
     expect(panel.getAttribute("data-key")).toMatch(/^tab:/);
   });
+
+  it("toggles the side browser panel open beside a chat session", async () => {
+    renderApp();
+    // The toggle needs a focused chat session (side panel keys by its tab).
+    fireEvent.click(await screen.findByRole("button", { name: /new chat session/i }));
+    const toggle = await screen.findByRole("button", { name: /toggle browser panel/i });
+    expect(toggle).toBeEnabled();
+    fireEvent.click(toggle);
+    const panels = await screen.findAllByTestId("browser-panel");
+    const side = panels.find((p) => p.getAttribute("data-mode") === "side");
+    expect(side).toBeTruthy();
+    expect(side!.getAttribute("data-key")).toMatch(/^side:chat:/);
+  });
+
+  it("disables the side-panel toggle while a full-width browser tab is focused", async () => {
+    renderApp();
+    const toggle = await screen.findByRole("button", { name: /toggle browser panel/i });
+    // No chat tab yet → nothing for the side panel to accompany.
+    expect(toggle).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /new browser tab/i }));
+    expect(toggle).toBeDisabled();
+  });
 });
