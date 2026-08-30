@@ -157,11 +157,11 @@ var bashAlwaysAllow = buildBashAlwaysAllow(runtime.GOOS)
 // arbitrary path and write to it (e.g. `git apply`, `git checkout --`).
 var bashSubcommandAllow = map[string]bool{
 	// git — read-only subcommands only (no push/reset/checkout/clean/apply).
-	// The "git -c <key>=<value>" wrapper is transparently stripped before
-	// matching, so e.g. "git -c core.quotepath=false status" is treated as
-	// "git status" and auto-allowed when the underlying subcommand is read-only.
-	// Harmful wrappers like "git -c ... reset --hard" remain blocked via
-	// IsHarmfulBashCommand's own -c-aware check.
+	// NOTE: "git -c <key>=<value>" wrappers are NOT auto-allowed via the code
+	// allowlist — they are evaluated by the auto-permission LLM (see
+	// BundledAutoPermissionPromptBody) based on the underlying subcommand's
+	// read-only nature. Dangerous -c keys are marked harmful via
+	// isDangerousGitConfigKey / hasDangerousGitConfig.
 	"git status":       true,
 	"git diff":         true,
 	"git log":          true,
@@ -180,15 +180,6 @@ var bashSubcommandAllow = map[string]bool{
 	"git grep":         true,
 	"git name-rev":     true,
 	"git for-each-ref": true,
-	// Additional read-only git subcommands that are always safe (no destructive
-	// flag variant). Branch/tag/remote/config/worktree/notes are intentionally
-	// NOT added as blanket allows — e.g. `git branch -D`, `git tag -d`,
-	// `git remote remove`, `git config --unset`, `git worktree remove`, and
-	// `git notes add` would otherwise be auto-allowed. They require
-	// argument-aware matching or explicit user approval.
-	"git help":    true,
-	"git version": true,
-	"git var":     true,
 	// Intentionally NOT in the list: branch, tag, remote, stash, worktree,
 	// submodule, notes, config, fetch, pull, push,
 	// reset, checkout, clean, apply, am, cherry-pick, rebase, revert, restore,
@@ -336,10 +327,10 @@ func gitSubcommandIndex(fields []string) int {
 	i := 1
 	for i < len(fields) {
 		f := fields[i]
-		// "-c" wrappers are NOT transparent for the code allowlist — they
-		// must be evaluated by the LLM (read-only underlying subcommand → ALLOW).
-		// Returning -1 forces matchSubcommandAllow/IsHarmfulBashCommand to
-		// treat the command as non-allowlisted/non-harmful and fall through.
+		// "-c" wrappers are NOT transparent for the code allowlist — they must
+		// be evaluated by the LLM. Returning -1 prevents auto-allow via
+		// matchSubcommandAllow. Dangerous keys are handled separately in
+		// IsHarmfulBashCommand via hasDangerousGitConfig.
 		if f == "-c" || (strings.HasPrefix(f, "-c") && len(f) > 2) {
 			return -1
 		}
@@ -380,6 +371,114 @@ func gitSubcommandIndex(fields []string) int {
 			continue
 		}
 		// First non-flag token after `git` and its global options → subcommand.
+			return i
+		}
+		return -1
+	}
+
+// isDangerousGitConfigKey reports whether a git -c key can enable code
+// execution or credential/path hijacking. These must never be auto-allowed
+// and are marked harmful so they require human approval.
+func isDangerousGitConfigKey(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	if k == "" {
+		return false
+	}
+	if strings.HasPrefix(k, "protocol.") && strings.HasSuffix(k, ".allow") {
+		return true
+	}
+	if k == "core.sshcommand" || k == "core.pager" || k == "core.editor" || k == "core.hookspath" {
+		return true
+	}
+	if strings.HasPrefix(k, "filter.") {
+		return true
+	}
+	if strings.HasPrefix(k, "url.") && strings.HasSuffix(k, ".insteadof") {
+		return true
+	}
+	if k == "credential.helper" || strings.HasPrefix(k, "credential.") {
+		return true
+	}
+	return false
+}
+
+// hasDangerousGitConfig scans git fields for "-c <key>=<value>" wrappers
+// whose key is dangerous per isDangerousGitConfigKey. Handles both
+// "-c key=value" and glued "-ckey=value" forms.
+func hasDangerousGitConfig(fields []string) bool {
+	for i := 1; i < len(fields); i++ {
+		f := fields[i]
+		var kv string
+		if f == "-c" && i+1 < len(fields) {
+			kv = fields[i+1]
+			i++
+		} else if strings.HasPrefix(f, "-c") && len(f) > 2 {
+			kv = strings.TrimPrefix(f, "-c")
+		} else {
+			continue
+		}
+		key := kv
+		if idx := strings.Index(kv, "="); idx != -1 {
+			key = kv[:idx]
+		}
+		if isDangerousGitConfigKey(key) {
+			return true
+		}
+	}
+	return false
+}
+
+// gitSubcommandIndexSkippingC returns the index of the git subcommand while
+// transparently skipping "-c" wrappers — used only for harmful detection so
+// "git -c k=v reset --hard" is still recognized as harmful.
+func gitSubcommandIndexSkippingC(fields []string) int {
+	if len(fields) == 0 || fields[0] != "git" {
+		return -1
+	}
+	i := 1
+	for i < len(fields) {
+		f := fields[i]
+		if f == "-c" {
+			if i+1 < len(fields) {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(f, "-c") && len(f) > 2 {
+			i++
+			continue
+		}
+		if gitGlobalArgsWithValue[f] {
+			if i+1 < len(fields) {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(f, "--git-dir=") || strings.HasPrefix(f, "--work-tree=") ||
+			strings.HasPrefix(f, "--namespace=") || strings.HasPrefix(f, "--super-prefix=") {
+			i++
+			continue
+		}
+		if f == "--exec-path" {
+			if i+1 < len(fields) && !strings.HasPrefix(fields[i+1], "-") {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(f, "--exec-path=") {
+			i++
+			continue
+		}
+		if strings.HasPrefix(f, "-") {
+			i++
+			continue
+		}
 		return i
 	}
 	return -1
@@ -855,10 +954,18 @@ func IsHarmfulBashCommand(command string) bool {
 	}
 
 	// --- Git destructive commands ---
-	// Transparent to `git -c` / `git --no-pager` wrappers: `git -c k=v reset`
-	// must be as harmful as `git reset`.
+	// Dangerous "-c" config overrides (protocol.ext.allow, core.sshCommand,
+	// etc.) are always harmful — they can enable code execution even on
+	// read-only subcommands like ls-remote.
+	if fields[0] == "git" && hasDangerousGitConfig(fields) {
+		return true
+	}
+	// Transparent to wrappers like `git --no-pager` and `git -C /tmp` (but
+	// NOT "-c" for the allowlist — see gitSubcommandIndex). For harmful
+	// detection we DO skip "-c" so "git -c k=v reset --hard" is still
+	// recognized as harmful.
 	if fields[0] == "git" {
-		idx := gitSubcommandIndex(fields)
+		idx := gitSubcommandIndexSkippingC(fields)
 		if idx != -1 && idx+1 <= len(fields) {
 			sub := fields[idx]
 			prefix := "git " + sub
@@ -867,20 +974,6 @@ func IsHarmfulBashCommand(command string) bool {
 			}
 			if flags, ok := harmfulBashForceFlags[prefix]; ok {
 				for _, part := range fields[idx+1:] {
-					if flags[part] {
-						return true
-					}
-				}
-			}
-		} else if idx == -1 {
-			// Fallback for bare `git <sub>` without wrappers: keep original
-			// two-field check for backwards compat when wrapper parsing fails.
-			prefix := fields[0] + " " + fields[1]
-			if harmfulBashPrefixes[prefix] {
-				return true
-			}
-			if flags, ok := harmfulBashForceFlags[prefix]; ok {
-				for _, part := range fields[2:] {
 					if flags[part] {
 						return true
 					}
