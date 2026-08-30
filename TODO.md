@@ -1775,3 +1775,14 @@ exactly — the poll ran to completion rather than failing fast.
   the external fetch path without it (transport idle-pool only). Needs an
   owner (likely Part 06 local mode or a follow-up) before the panel ships.
   (from: part 03 implementation, 2026-08-31)
+
+## Embedded browser panel — v1 non-goals (deferred)
+
+Shipped in the 2026-08-30 embedded-browser-panel plan; these are explicitly NOT built in v1:
+- Agent/tool access to the embedded browser (reading pages, driving clicks).
+- Screenshots / recordings of the browser panel.
+- Cookie/auth session persistence across ocode server restarts (the browse
+  cookie jar is in-memory; restart drops sessions).
+- Multiple browser sub-tabs inside a single panel.
+- Promoting a side panel to a standalone browser tab (side panel and browser
+  tab keep independent state).
