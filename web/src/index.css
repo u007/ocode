@@ -14,6 +14,9 @@
  *     are INTENTIONALLY FIXED and NOT bound to the theme variables — they convey meaning
  *     (added / modified / deleted / error / warning), not chrome, so they stay constant
  *     across themes.
+ *     Exception: --link (text-link) is an INTERACTION token derived from the palette in
+ *     useTheme.computeThemeVars — link color carries no fixed status meaning, and a
+ *     hard-coded blue is illegible on light themes (see the all-palette contrast test).
  */
 
 @layer base {
@@ -37,6 +40,7 @@
     --border: 240 3.7% 15.9%;
     --input: 240 3.7% 15.9%;
     --ring: 240 4.9% 83.9%;
+    --link: 199 89% 60%;
     --radius: 0.5rem;
     --chart-1: 220 70% 50%;
     --chart-2: 160 60% 45%;

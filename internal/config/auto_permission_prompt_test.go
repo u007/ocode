@@ -193,3 +193,79 @@ func TestAutoPermissionPromptStatusString(t *testing.T) {
 		}
 	}
 }
+
+func TestPruneAutoPermissionPromptBackups(t *testing.T) {
+	dir := t.TempDir()
+	const base = "auto-permission-prompt.md"
+	// Create more backups than the retention cap, with sortable timestamps.
+	stamps := []string{
+		"20260101T000000Z", "20260102T000000Z", "20260103T000000Z",
+		"20260104T000000Z", "20260105T000000Z", "20260106T000000Z",
+		"20260107T000000Z", "20260108T000000Z",
+	}
+	for _, ts := range stamps {
+		p := filepath.Join(dir, base+".bak."+ts)
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+
+	pruneAutoPermissionPromptBackups(dir, base)
+
+	left, err := filepath.Glob(filepath.Join(dir, base+".bak.*"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(left) != maxAutoPermissionPromptBackups {
+		t.Fatalf("got %d backups after prune, want %d: %v", len(left), maxAutoPermissionPromptBackups, left)
+	}
+	// The survivors must be the NEWEST ones.
+	for _, p := range left {
+		if strings.HasSuffix(p, "20260101T000000Z") || strings.HasSuffix(p, "20260102T000000Z") || strings.HasSuffix(p, "20260103T000000Z") {
+			t.Fatalf("old backup survived prune: %s", p)
+		}
+	}
+
+	// Under-cap dir is untouched.
+	pruneAutoPermissionPromptBackups(dir, base)
+	left2, _ := filepath.Glob(filepath.Join(dir, base+".bak.*"))
+	if len(left2) != maxAutoPermissionPromptBackups {
+		t.Fatalf("second prune changed count: %d", len(left2))
+	}
+}
+
+func TestBackupAutoPermissionPromptFilePrunes(t *testing.T) {
+	setupAutoPermPromptHome(t)
+	path, err := AutoPermissionPromptFilePath()
+	if err != nil {
+		t.Fatalf("AutoPermissionPromptFilePath: %v", err)
+	}
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Pre-seed cap-many old backups; a new backup should push one out.
+	for _, ts := range []string{"20260101T000000Z", "20260102T000000Z", "20260103T000000Z", "20260104T000000Z", "20260105T000000Z"} {
+		if err := os.WriteFile(filepath.Join(dir, base+".bak."+ts), []byte("old"), 0o644); err != nil {
+			t.Fatalf("seed backup: %v", err)
+		}
+	}
+	if err := os.WriteFile(path, []byte("current"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	if err := backupAutoPermissionPromptFile(path); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+
+	left, _ := filepath.Glob(filepath.Join(dir, base+".bak.*"))
+	if len(left) != maxAutoPermissionPromptBackups {
+		t.Fatalf("got %d backups after backup+prune, want %d: %v", len(left), maxAutoPermissionPromptBackups, left)
+	}
+	for _, p := range left {
+		if strings.HasSuffix(p, "20260101T000000Z") {
+			t.Fatalf("oldest backup should have been pruned: %v", left)
+		}
+	}
+}

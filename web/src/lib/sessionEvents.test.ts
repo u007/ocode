@@ -118,6 +118,89 @@ describe("routeBusEnvelope", () => {
       vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS * 2);
       expect(actions.some((a) => a.type === "LIVE_DELTA")).toBe(false);
     });
+
+    // Regression for the split-bubble bug: the model streams "…and d", the
+    // 90ms flush lands it, then "esktop." is buffered just as tool_start
+    // arrives. Without flushing before part-appending dispatches, the tail
+    // flushed after the tool block and rendered as a separate bubble below
+    // the tools (text | bash | grep | "esktop.").
+    it("flushes a pending text tail into the bubble above an incoming tool part", () => {
+      vi.useFakeTimers();
+      const { router, getState } = makeRouter(["s1"]);
+      routeBusEnvelope(env("text", { data: { delta: "…and d" } }), router);
+      vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS); // first segment lands
+      routeBusEnvelope(env("text", { data: { delta: "esktop." } }), router);
+      // tool_start lands while "esktop." is still buffered:
+      routeBusEnvelope(
+        env("tool_start", { data: { tool: "bash", call_id: "c1", command: "ls" } }),
+        router,
+      );
+      // Order must already be correct without waiting for the flush timer.
+      expect(getState().sessions["s1"].live).toEqual([
+        { kind: "text", text: "…and desktop." },
+        { kind: "tool", tool: "bash", callId: "c1", command: "ls" },
+      ]);
+      vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS * 2);
+      expect(getState().sessions["s1"].live).toEqual([
+        { kind: "text", text: "…and desktop." },
+        { kind: "tool", tool: "bash", callId: "c1", command: "ls" },
+      ]);
+    });
+
+    it("keeps genuinely post-tool text in a new part below the tool block", () => {
+      vi.useFakeTimers();
+      const { router, getState } = makeRouter(["s1"]);
+      routeBusEnvelope(
+        env("tool_start", { data: { tool: "bash", call_id: "c1" } }),
+        router,
+      );
+      routeBusEnvelope(env("text", { data: { delta: "after the tool" } }), router);
+      vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS);
+      expect(getState().sessions["s1"].live).toEqual([
+        { kind: "tool", tool: "bash", callId: "c1" },
+        { kind: "text", text: "after the tool" },
+      ]);
+    });
+
+    it("flushes pending deltas before an active permission_check / advisor_checkpoint status part", () => {
+      vi.useFakeTimers();
+      const { router, getState } = makeRouter(["s1"]);
+      routeBusEnvelope(env("text", { data: { delta: "tail" } }), router);
+      routeBusEnvelope(
+        env("permission_check", { data: { tool: "bash", model: "m", active: true } }),
+        router,
+      );
+      routeBusEnvelope(env("thinking", { data: { delta: "t2" } }), router);
+      routeBusEnvelope(
+        env("advisor_checkpoint", { data: { kind: "pre", active: true } }),
+        router,
+      );
+      expect(getState().sessions["s1"].live).toEqual([
+        { kind: "text", text: "tail" },
+        { kind: "status", text: "Checking permission for bash (m)…" },
+        { kind: "thinking", text: "t2" },
+        { kind: "status", text: "Advisor pre checkpoint — reviewing…" },
+      ]);
+    });
+
+    it("does not flush on inactive permission_check (removes a part, appends none)", () => {
+      vi.useFakeTimers();
+      const { router, actions, getState } = makeRouter(["s1"]);
+      routeBusEnvelope(
+        env("permission_check", { data: { tool: "bash", model: "m", active: true } }),
+        router,
+      );
+      routeBusEnvelope(env("text", { data: { delta: "buf" } }), router);
+      routeBusEnvelope(
+        env("permission_check", { data: { tool: "bash", model: "m", active: false } }),
+        router,
+      );
+      // The status part removal must not have dragged the buffered text out
+      // early — it lands only when its own flush timer fires.
+      expect(actions.filter((a) => a.type === "LIVE_DELTA")).toHaveLength(0);
+      vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS);
+      expect(getState().sessions["s1"].live).toEqual([{ kind: "text", text: "buf" }]);
+    });
   });
 
   it("permission_check surfaces and clears a status live part", () => {

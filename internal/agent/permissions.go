@@ -156,7 +156,12 @@ var bashAlwaysAllow = buildBashAlwaysAllow(runtime.GOOS)
 // here is allowed regardless of args. Do not add subcommands that take an
 // arbitrary path and write to it (e.g. `git apply`, `git checkout --`).
 var bashSubcommandAllow = map[string]bool{
-	// git — read-only subcommands only (no push/reset/checkout/clean/apply)
+	// git — read-only subcommands only (no push/reset/checkout/clean/apply).
+	// The "git -c <key>=<value>" wrapper is transparently stripped before
+	// matching, so e.g. "git -c core.quotepath=false status" is treated as
+	// "git status" and auto-allowed when the underlying subcommand is read-only.
+	// Harmful wrappers like "git -c ... reset --hard" remain blocked via
+	// IsHarmfulBashCommand's own -c-aware check.
 	"git status":       true,
 	"git diff":         true,
 	"git log":          true,
@@ -175,12 +180,20 @@ var bashSubcommandAllow = map[string]bool{
 	"git grep":         true,
 	"git name-rev":     true,
 	"git for-each-ref": true,
+	// Additional read-only git subcommands that are always safe (no destructive
+	// flag variant). Branch/tag/remote/config/worktree/notes are intentionally
+	// NOT added as blanket allows — e.g. `git branch -D`, `git tag -d`,
+	// `git remote remove`, `git config --unset`, `git worktree remove`, and
+	// `git notes add` would otherwise be auto-allowed. They require
+	// argument-aware matching or explicit user approval.
+	"git help":    true,
+	"git version": true,
+	"git var":     true,
 	// Intentionally NOT in the list: branch, tag, remote, stash, worktree,
-	// submodule, config, fetch, pull, push, reset, checkout, clean, apply,
-	// am, cherry-pick, rebase, revert, restore, switch, merge, init, add,
-	// commit. Some of these are read-only without args but become destructive
-	// with flags (e.g. `git branch -D`, `git tag -d`). Require explicit user
-	// approval.
+	// submodule, notes, config, fetch, pull, push,
+	// reset, checkout, clean, apply, am, cherry-pick, rebase, revert, restore,
+	// switch, merge, init, add, commit. Some of these are read-only without
+	// args but become destructive with flags. Require explicit user approval.
 	// gh CLI — viewing only (intentionally omits `gh api` which can POST)
 	"gh pr":       true,
 	"gh issue":    true,
@@ -297,6 +310,79 @@ var findUnsafeFlags = map[string]bool{
 // fdUnsafeFlags are flags on `fd` that can execute subprocesses.
 var fdUnsafeFlags = map[string]bool{
 	"-x": true, "--exec": true, "-X": true, "--exec-batch": true,
+}
+
+// gitGlobalArgsWithValue are git global options that take a separate value
+// argument. They must be stripped along with that value when locating the
+// real subcommand (e.g. `git -c k=v -C /tmp status` → subcommand is `status`).
+// Note: "-c" is intentionally NOT included here — "git -c <key>=<value>"
+// wrappers are NOT transparently stripped for the code allowlist/deny lists.
+// They are routed to the auto-permission LLM which evaluates the underlying
+// subcommand's read-only nature (see BundledAutoPermissionPromptBody).
+var gitGlobalArgsWithValue = map[string]bool{
+	"-C": true,
+	"--git-dir": true, "--work-tree": true, "--namespace": true, "--super-prefix": true,
+}
+
+// gitSubcommandIndex returns the index in fields of the git subcommand,
+// transparently skipping global wrappers like `git -C /tmp`, `git --no-pager`,
+// `git --bare`, etc. Returns -1 if no subcommand can be found (e.g. bare
+// `git` or `git -c k=v` with no following word). "-c" wrappers are NOT
+// skipped — they are handled by the LLM prompt, not the code allowlist.
+func gitSubcommandIndex(fields []string) int {
+	if len(fields) == 0 || fields[0] != "git" {
+		return -1
+	}
+	i := 1
+	for i < len(fields) {
+		f := fields[i]
+		// "-c" wrappers are NOT transparent for the code allowlist — they
+		// must be evaluated by the LLM (read-only underlying subcommand → ALLOW).
+		// Returning -1 forces matchSubcommandAllow/IsHarmfulBashCommand to
+		// treat the command as non-allowlisted/non-harmful and fall through.
+		if f == "-c" || (strings.HasPrefix(f, "-c") && len(f) > 2) {
+			return -1
+		}
+		if gitGlobalArgsWithValue[f] {
+			// Takes a value: skip flag + value (if present).
+			if i+1 < len(fields) {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(f, "--git-dir=") || strings.HasPrefix(f, "--work-tree=") ||
+			strings.HasPrefix(f, "--namespace=") || strings.HasPrefix(f, "--super-prefix=") {
+			i++
+			continue
+		}
+		if f == "--exec-path" {
+			// --exec-path optionally takes a value; consume it if the next token
+			// does not look like a flag or subcommand.
+			if i+1 < len(fields) && !strings.HasPrefix(fields[i+1], "-") {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(f, "--exec-path=") {
+			i++
+			continue
+		}
+		if strings.HasPrefix(f, "-") {
+			// Any other dashed global flag before the subcommand (e.g.
+			// --no-pager, --no-replace-objects, --bare, --literal-pathspecs,
+			// --paginate, --no-optional-locks). Stripping it here is what makes
+			// `git --no-pager log` correctly map to `git log`.
+			i++
+			continue
+		}
+		// First non-flag token after `git` and its global options → subcommand.
+		return i
+	}
+	return -1
 }
 
 // pathScopedTools are file tools whose decision depends on the target path
@@ -763,21 +849,41 @@ func isExfiltrationRiskCommand(command string) bool {
 // persisted as "always allow" rules.
 func IsHarmfulBashCommand(command string) bool {
 	cmd := strings.TrimSpace(command)
-	parts := strings.Fields(cmd)
-	if len(parts) < 2 {
+	fields := splitShellFields(cmd)
+	if len(fields) < 2 {
 		return false
 	}
 
 	// --- Git destructive commands ---
-	if parts[0] == "git" {
-		prefix := parts[0] + " " + parts[1]
-		if harmfulBashPrefixes[prefix] {
-			return true
-		}
-		if flags, ok := harmfulBashForceFlags[prefix]; ok {
-			for _, part := range parts[2:] {
-				if flags[part] {
-					return true
+	// Transparent to `git -c` / `git --no-pager` wrappers: `git -c k=v reset`
+	// must be as harmful as `git reset`.
+	if fields[0] == "git" {
+		idx := gitSubcommandIndex(fields)
+		if idx != -1 && idx+1 <= len(fields) {
+			sub := fields[idx]
+			prefix := "git " + sub
+			if harmfulBashPrefixes[prefix] {
+				return true
+			}
+			if flags, ok := harmfulBashForceFlags[prefix]; ok {
+				for _, part := range fields[idx+1:] {
+					if flags[part] {
+						return true
+					}
+				}
+			}
+		} else if idx == -1 {
+			// Fallback for bare `git <sub>` without wrappers: keep original
+			// two-field check for backwards compat when wrapper parsing fails.
+			prefix := fields[0] + " " + fields[1]
+			if harmfulBashPrefixes[prefix] {
+				return true
+			}
+			if flags, ok := harmfulBashForceFlags[prefix]; ok {
+				for _, part := range fields[2:] {
+					if flags[part] {
+						return true
+					}
 				}
 			}
 		}
@@ -1681,9 +1787,11 @@ func extractPathFromArgs(toolName string, args json.RawMessage) string {
 
 // matchSubcommandAllow returns true when the command matches an entry in
 // bashSubcommandAllow at the longest possible token length (3 → 2 → 1).
-// Leading dashed flags on the command itself (e.g. `git --no-pager log`)
-// would not match — that's intentional: we accept a small loss of coverage
-// in exchange for not having to parse every tool's option grammar.
+// For `git`, leading global wrappers like `-c`, `-C`, `--no-pager`, etc. are
+// transparently stripped so `git -c k=v status` and `git --no-pager log`
+// correctly map to their underlying `git status` / `git log` allowlist entries.
+// Harmful wrappers like `git -c ... reset` are NOT matched here because
+// IsHarmfulBashCommand / decideSingleCommand's harmful check runs first.
 func matchSubcommandAllow(command string) bool {
 	fields := splitShellFields(command)
 	if len(fields) == 0 {
@@ -1693,29 +1801,41 @@ func matchSubcommandAllow(command string) bool {
 	if runnerInvokedSafeTool(fields) {
 		return true
 	}
+	// Normalize `git` wrappers: `git -c k=v -C /tmp --no-pager <sub> ...`
+	// should match the subcommand-pinned allowlist as `git <sub>`.
+	normalized := fields
+	if fields[0] == "git" {
+		if idx := gitSubcommandIndex(fields); idx != -1 {
+			// Rebuild as ["git", subcommand, ...remaining args]
+			n := make([]string, 0, len(fields)-idx+1)
+			n = append(n, "git", fields[idx])
+			n = append(n, fields[idx+1:]...)
+			normalized = n
+		}
+	}
 	// Three-word match (e.g. "docker compose ps").
-	if len(fields) >= 3 {
-		key := fields[0] + " " + fields[1] + " " + fields[2]
+	if len(normalized) >= 3 {
+		key := normalized[0] + " " + normalized[1] + " " + normalized[2]
 		if bashSubcommandAllow[key] {
 			return true
 		}
 	}
 	// Two-word match (e.g. "git status").
-	if len(fields) >= 2 {
-		key := fields[0] + " " + fields[1]
+	if len(normalized) >= 2 {
+		key := normalized[0] + " " + normalized[1]
 		if bashSubcommandAllow[key] {
 			// `bun run` guard: unlike `npm/pnpm/yarn run` (which only execute a
 			// named package.json script), `bun run <path>` executes an arbitrary
 			// file. A path-like run target must not auto-allow — drop to Ask so the
 			// interpreter verifier (or a human) sees it.
-			if key == "bun run" && len(fields) >= 3 && isPathLikeScript(fields[2]) {
+			if key == "bun run" && len(normalized) >= 3 && isPathLikeScript(normalized[2]) {
 				return false
 			}
 			return true
 		}
 	}
 	// Single-word match (e.g. "make", "tsc"). These accept any args.
-	return bashSubcommandAllow[fields[0]]
+	return bashSubcommandAllow[normalized[0]]
 }
 
 // runnerSafeTools are inert, project-trusted tools (type-checkers, linters,
@@ -3660,9 +3780,15 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// so a rule can be persisted without blanket-allowing every git subcommand —
 	// a blanket "git" allow is deliberately rejected by SetBashPrefixRule, which
 	// would otherwise leave the permission dialog looping forever.
+	// Transparent to `git -c` / `--no-pager` wrappers: the prefix is the
+	// underlying subcommand, not the wrapper flag.
 	rulePrefix := prefix
-	if prefix == "git" && len(cmd.cmdWords) >= 2 {
-		rulePrefix = prefix + " " + cmd.cmdWords[1]
+	if prefix == "git" {
+		if idx := gitSubcommandIndex(cmd.cmdWords); idx != -1 {
+			rulePrefix = "git " + cmd.cmdWords[idx]
+		} else if len(cmd.cmdWords) >= 2 {
+			rulePrefix = prefix + " " + cmd.cmdWords[1]
+		}
 	}
 
 	// Explicit user bans win over the hardcoded "harmful" ask-list below — a

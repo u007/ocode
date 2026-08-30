@@ -16,6 +16,10 @@ const TEXT_PAIRS: Array<[string, string]> = [
   ["--secondary", "--secondary-foreground"],
   ["--muted", "--muted-foreground"],
   ["--background", "--muted-foreground"],
+  // Prose links (file-path links, markdown anchors) render on the assistant
+  // muted bubble and on plain page-colored surfaces (card/popover = background).
+  ["--muted", "--link"],
+  ["--background", "--link"],
 ];
 
 describe("computeThemeVars contrast", () => {
@@ -28,6 +32,12 @@ describe("computeThemeVars contrast", () => {
           ratio,
           `${name}: ${fgVar} (${vars[fgVar]}) on ${bgVar} (${vars[bgVar]}) = ${ratio.toFixed(2)}:1`,
         ).toBeGreaterThanOrEqual(AA);
+      }
+      // Every derived value must be a valid hex — applyThemeColors silently
+      // skips invalid ones, which would leave stale values from the previous
+      // theme on screen.
+      for (const [varName, value] of Object.entries(vars)) {
+        expect(value, `${name}: ${varName} must be #rrggbb`).toMatch(/^#[0-9a-f]{6}$/i);
       }
     });
   }
@@ -42,6 +52,28 @@ describe("computeThemeVars contrast", () => {
     expect(contrastRatio(vars["--primary"], vars["--primary-foreground"])).toBeGreaterThanOrEqual(AA);
     // Muted surface (sidebar cards, chat input) must not leave hint text stranded.
     expect(contrastRatio(vars["--muted"], vars["--muted-foreground"])).toBeGreaterThanOrEqual(AA);
+  });
+
+  it("derives a readable --link even when no theme candidate clears AA", () => {
+    // Mid-gray user/header/accent fail AA on both surfaces; the derivation
+    // must blend the best candidate toward the page polarity until readable.
+    const colors = {
+      ...builtinPalettes.tokyonight,
+      user: "#808080",
+      header: "#7a7a7a",
+      accent: "#858585",
+    };
+    const vars = computeThemeVars(colors);
+    expect(contrastRatio(vars["--muted"], vars["--link"])).toBeGreaterThanOrEqual(AA);
+    expect(contrastRatio(vars["--background"], vars["--link"])).toBeGreaterThanOrEqual(AA);
+    expect(vars["--link"]).toMatch(/^#[0-9a-f]{6}$/i);
+  });
+
+  it("prefers the theme's own link-ish color when it already reads (theme character)", () => {
+    // github-dark ships #58a6ff as `user` — AA-safe on its muted/background,
+    // so --link must be that exact color, not a blend or a black/white swap.
+    const vars = computeThemeVars(builtinPalettes["github-dark"]);
+    expect(vars["--link"]).toBe(builtinPalettes["github-dark"].user);
   });
 
   it("leaves already-readable mappings untouched (theme character)", () => {
@@ -59,5 +91,34 @@ describe("computeThemeVars contrast", () => {
     expect(vars["--primary-foreground"]).toBe(colors.text);
     expect(vars["--muted"]).toBe(colors.dim);
     expect(vars["--muted-foreground"]).toBe(colors.hint);
+  });
+});
+
+describe("computeThemeVars tolerates malformed palettes", () => {
+  const base = builtinPalettes.tokyonight;
+
+  it("does not throw when a link color field is missing", () => {
+    // A custom/legacy palette (ThemeForm, cached JSON) can omit a field the
+    // link derivation reads. hexToRgb must reject it rather than crash.
+    const colors = { ...base, accent: undefined as unknown as string };
+    expect(() => computeThemeVars(colors)).not.toThrow();
+    const vars = computeThemeVars(colors);
+    expect(vars["--link"]).toMatch(/^#[0-9a-f]{6}$/i);
+  });
+
+  it("falls back to a readable --link when no link candidate is valid", () => {
+    // All three link-ish candidates invalid → linkCandidates is empty and the
+    // reduce must not run; it should fall back to black/white by page polarity.
+    const colors = {
+      ...base,
+      user: "not-a-color",
+      header: "",
+      accent: "#zzzzzz",
+    };
+    expect(() => computeThemeVars(colors)).not.toThrow();
+    const vars = computeThemeVars(colors);
+    expect(vars["--link"]).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(contrastRatio(vars["--muted"], vars["--link"])).toBeGreaterThanOrEqual(AA);
+    expect(contrastRatio(vars["--background"], vars["--link"])).toBeGreaterThanOrEqual(AA);
   });
 });

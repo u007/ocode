@@ -228,8 +228,9 @@ export default function AssetsPanel() {
           headers: authHeaders(),
           signal: controller.signal,
         });
-        if (gen !== blobGeneration.current) return;
-        setPreviewText(r.ok ? await r.text() : `(failed to load preview: ${r.status})`);
+        const text = await r.text();
+        if (controller.signal.aborted || gen !== blobGeneration.current) return;
+        setPreviewText(r.ok ? text : `(failed to load preview: ${r.status})`);
       } catch (e) {
         if (gen !== blobGeneration.current) return;
         console.error("Preview load failed:", e);

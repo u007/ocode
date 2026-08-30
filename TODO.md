@@ -1,5 +1,31 @@
 # TODO
 
+## Snapshot journal — deferred follow-ups (2026-08-30)
+
+The per-project snapshot journal (`snapshots.sqlite` in
+`project/<slug>/snapshots/`) now persists file-edit backups metadata and
+rehydrates the changes tab on session resume. Deliberately left out of the
+first pass:
+
+- **Bash-only change entries are not persisted.** The changes registry's
+  bash pre/post stat-walk entries (`Registry.NotifyBashWrite`) live only in
+  memory; after a resume, files touched only by bash commands vanish from
+  the changes tab. They carry no backup and are not undoable, so the loss
+  is cosmetic, but journal rows for them would restore full fidelity.
+- **Sub-agent attribution is lost on rehydrate.** Journal rows record the
+  writing store's `agent_id` (random hex), but rehydrate replays every
+  session row into the MAIN agent's store, so the changes tab shows "main"
+  as the author for pre-restart sub-agent edits.
+- **No divergence marking.** A rehydrated snapshot can be undone even if a
+  LATER session (or the user by hand) modified the file since — the
+  process-local cross-agent write registry cannot see pre-restart writes.
+  Storing a content hash per journal row would let the changes tab flag
+  "diverged since" rows and warn before undo.
+- **Legacy session JSON bulk migration.** `.json`/`.ojsonl` sessions only
+  migrate to `.sqlite` on their next save; ~3.8k dormant legacy files
+  remain per heavy project. A one-shot background sweep (or `ocode
+  sessions migrate` command) would finish the migration.
+
 ## Encrypted-file editing (age, per-project passphrase) — TUI done, web/desktop deferred (2026-08-28)
 
 Requested: encrypt a file on disk so ocode's TUI/web/desktop auto-decode it

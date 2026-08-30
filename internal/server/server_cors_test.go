@@ -1,10 +1,13 @@
 package server
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/scheduler"
 )
@@ -99,5 +102,56 @@ func TestCORSPolicyAuthAndNonAPIHandling(t *testing.T) {
 	}
 	if got := res.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Fatalf("non-API Access-Control-Allow-Origin = %q, want empty", got)
+	}
+}
+
+func TestServeUsesCORSForLateSchedulerRoutes(t *testing.T) {
+	srv := New("127.0.0.1:0", "", "", nil)
+	svc := scheduler.NewService(filepath.Join(t.TempDir(), "jobs.json"))
+	srv.SetScheduler(svc)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ln) }()
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+		select {
+		case err := <-serveDone:
+			if err != nil && err != http.ErrServerClosed {
+				t.Errorf("serve: %v", err)
+			}
+		case <-ctx.Done():
+			t.Errorf("serve did not stop: %v", ctx.Err())
+		}
+	})
+
+	client := &http.Client{Timeout: 200 * time.Millisecond}
+	var res *http.Response
+	for range 50 {
+		req, reqErr := http.NewRequest(http.MethodGet, "http://"+ln.Addr().String()+"/api/cron", nil)
+		if reqErr != nil {
+			t.Fatal(reqErr)
+		}
+		req.Header.Set("Origin", "http://localhost:5173")
+		res, err = client.Do(req)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer res.Body.Close()
+	if got := res.Header.Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want allowed origin", got)
 	}
 }

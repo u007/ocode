@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,6 +49,7 @@ type Store struct {
 	step      int
 	agentID   string
 	baseDir   string // where backup files are written; empty => legacy ".opencode/snapshots"
+	sessionID string // "" => backups are not journaled (e.g. global store)
 }
 
 // NewStore creates a Store for one agent. agentID must be unique across all
@@ -61,6 +63,56 @@ func NewStore(agentID, baseDir string) *Store {
 func (s *Store) SetBaseDir(dir string) {
 	s.mu.Lock()
 	s.baseDir = dir
+	s.mu.Unlock()
+}
+
+// SetSessionID tags the store with the owning session so every Backup is
+// journaled to <baseDir>/snapshots.sqlite under that session, and
+// Rehydrate can replay them after an agent rebuild. An empty id disables
+// journaling (the global store and tests stay unjournaled).
+func (s *Store) SetSessionID(sessionID string) {
+	s.mu.Lock()
+	s.sessionID = sessionID
+	s.mu.Unlock()
+}
+
+// Rehydrate loads this store's session's journaled snapshots from the
+// journal in baseDir. It only fills an EMPTY store (a rebuilt agent);
+// a store that already holds in-process snapshots is left untouched so
+// live history is never reordered. Rehydrated snapshots have WriteSeq 0 —
+// the cross-agent write registry is process-local and gone with the old
+// process, so cross-agent conflict checks don't apply to them.
+func (s *Store) Rehydrate() {
+	s.mu.Lock()
+	sessionID, baseDir, empty := s.sessionID, s.baseDir, len(s.snapshots) == 0
+	s.mu.Unlock()
+	if sessionID == "" || baseDir == "" || !empty {
+		return
+	}
+	j := journalFor(baseDir)
+	if j == nil {
+		return
+	}
+	snaps, err := j.loadSession(sessionID)
+	if err != nil {
+		log.Printf("snapshot: rehydrate session %s: %v", sessionID, err)
+		return
+	}
+	// Drop rows whose backup file has since been GC'd or hand-deleted —
+	// an undo through them could not restore anything.
+	kept := snaps[:0]
+	for _, snap := range snaps {
+		if snap.BackupPath != "" {
+			if _, err := os.Stat(snap.BackupPath); err != nil {
+				continue // intentionally not logged: expected after GC
+			}
+		}
+		kept = append(kept, snap)
+	}
+	s.mu.Lock()
+	if len(s.snapshots) == 0 { // re-check under lock
+		s.snapshots = append(s.snapshots, kept...)
+	}
 	s.mu.Unlock()
 }
 
@@ -243,16 +295,29 @@ func (s *Store) backupAtDir(path, toolCallID, baseDir string) error {
 		}
 	}
 
-	s.mu.Lock()
-	s.snapshots = append(s.snapshots, Snapshot{
+	snap := Snapshot{
 		OriginalPath: path,
 		BackupPath:   backupPath,
 		BaseDir:      dir,
 		Timestamp:    time.Now(),
 		ToolCallID:   toolCallID,
-		AgentStep:    s.step,
-	})
+	}
+	s.mu.Lock()
+	snap.AgentStep = s.step
+	s.snapshots = append(s.snapshots, snap)
+	sessionID := s.sessionID
 	s.mu.Unlock()
+
+	// Journal the snapshot so a rebuilt agent (resume, idle eviction,
+	// restart) can Rehydrate the changes tab. Best-effort: an index
+	// failure must never fail the write that triggered the backup.
+	if sessionID != "" {
+		if j := journalFor(dir); j != nil {
+			if err := j.append(sessionID, s.agentID, snap); err != nil {
+				log.Printf("snapshot: journal append for %s: %v", path, err)
+			}
+		}
+	}
 	return nil
 }
 

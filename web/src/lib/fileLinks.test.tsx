@@ -71,6 +71,42 @@ describe("fileLinks", () => {
       window.removeEventListener(OPEN_FILE_EVENT, handler as EventListener);
     });
 
+    it("file links carry the stable `file-link` class (surface-override hook)", () => {
+      const nodes = linkifyPlainText("see src/app.ts:10");
+      const { container } = render(<div>{nodes}</div>);
+      const link = container.querySelector('[role="link"]') as HTMLElement;
+      // The class is what colored surfaces (inline-code chips, user bubbles)
+      // target to swap text-link for their own foreground token.
+      expect(link.className).toContain("file-link");
+      expect(link.className).toContain("text-link");
+    });
+
+    it("linkifies .ocode/uploads paths containing spaces (incl. U+202F)", () => {
+      const handler = vi.fn();
+      window.addEventListener(OPEN_FILE_EVENT, handler as EventListener);
+      // Exact shape of a macOS screenshot name: regular spaces plus a
+      // narrow no-break space (U+202F) before "PM".
+      const name = "Screenshot 2026-08-30 at 1.58.00\u202fPM.png";
+      const nodes = linkifyPlainText(`uploaded .ocode/uploads/${name} to show`);
+      const { container } = render(<div>{nodes}</div>);
+      const link = container.querySelector('[role="link"]') as HTMLElement;
+      expect(link).toBeTruthy();
+      expect(link.textContent).toBe(`.ocode/uploads/${name}`);
+      fireEvent.click(link);
+      expect(handler).toHaveBeenCalledTimes(1);
+      const detail = (handler.mock.calls[0][0] as CustomEvent).detail;
+      expect(detail).toEqual({ path: `.ocode/uploads/${name}`, line: undefined });
+      window.removeEventListener(OPEN_FILE_EVENT, handler as EventListener);
+    });
+
+    it("does not linkify image extensions outside the uploads anchor", () => {
+      // Image extensions are matched only by the .ocode/uploads branch, so
+      // bare prose like "world.png" must NOT become a link.
+      const nodes = linkifyPlainText("see hello world.png here");
+      const { container } = render(<div>{nodes}</div>);
+      expect(container.querySelectorAll('[role="link"]')).toHaveLength(0);
+    });
+
     it("handler in App would switch Files tab - event contract", async () => {
       // Simulate the App listener: on event, it calls openFileAndShow which sets activeView="files"
       let activeView = "sessions";

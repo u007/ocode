@@ -39,6 +39,7 @@ export default {
           DEFAULT: "hsl(var(--card) / <alpha-value>)",
           foreground: "hsl(var(--card-foreground) / <alpha-value>)",
         },
+        link: "hsl(var(--link) / <alpha-value>)",
       },
       borderRadius: {
         lg: "var(--radius)",

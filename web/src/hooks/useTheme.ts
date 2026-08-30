@@ -4,7 +4,8 @@ import type { ThemeColors } from "@/api/types";
 
 // ── Color helpers ──
 
-function hexToRgb(hex: string): [number, number, number] | null {
+function hexToRgb(hex: unknown): [number, number, number] | null {
+  if (typeof hex !== "string") return null;
   const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
   if (!m) return null;
   const n = parseInt(m[1], 16);
@@ -78,7 +79,10 @@ const AA_NORMAL = 4.5;
 // character); fall back to pure black/white when no theme color passes.
 function pickReadableFg(bg: string, candidates: string[]): string {
   for (const c of candidates) {
-    if (contrastRatio(bg, c) >= AA_NORMAL) return c;
+    // contrastRatio returns 21 for invalid hex — without this guard a
+    // malformed candidate would be "accepted" and then silently skipped by
+    // applyThemeColors, leaving the previous theme's value in place.
+    if (hexToRgb(c) !== null && contrastRatio(bg, c) >= AA_NORMAL) return c;
   }
   return contrastRatio(bg, "#ffffff") >= contrastRatio(bg, "#000000")
     ? "#ffffff"
@@ -141,6 +145,31 @@ export function computeThemeVars(colors: ThemeColors): Record<string, string> {
   let mutedFg = ensureContrast(colors.hint, [muted, colors.background], colors.text);
   mutedFg = ensureContrast(mutedFg, [muted, colors.background], pageIsLight ? "#000000" : "#ffffff");
 
+  // Prose link color (chat file-path links, markdown anchors). Must clear AA
+  // on both the muted assistant bubble and the page background. Prefer the
+  // theme's own link-ish colors (user/header/accent — e.g. the github-*
+  // palettes ship a proper link blue there); if none clears on both surfaces,
+  // start from the best of them and blend toward the page polarity. Invalid
+  // hex is filtered out: contrastRatio treats it as 21:1, which would let a
+  // malformed candidate win and then get skipped in applyThemeColors.
+  const linkCandidates = [colors.user, colors.header, colors.accent].filter(
+    (c) => hexToRgb(c) !== null,
+  );
+  const minLinkContrast = (c: string) =>
+    Math.min(contrastRatio(c, muted), contrastRatio(c, colors.background));
+  const bestLink = linkCandidates.length
+    ? linkCandidates.reduce((a, b) =>
+        minLinkContrast(b) > minLinkContrast(a) ? b : a,
+      )
+    : pageIsLight
+      ? "#000000"
+      : "#ffffff";
+  const link = ensureContrast(
+    bestLink,
+    [muted, colors.background],
+    pageIsLight ? "#000000" : "#ffffff",
+  );
+
   return {
     "--background": colors.background,
     "--foreground": colors.text,
@@ -166,6 +195,7 @@ export function computeThemeVars(colors: ThemeColors): Record<string, string> {
       ...fgCandidates,
     ]),
     "--ring": colors.user,
+    "--link": link,
   };
 }
 

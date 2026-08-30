@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -22,7 +24,7 @@ import (
 // This text is intentionally separate from permissions.auto.prompt in
 // ocodeconfig.json: that field is the user's own free-form override and
 // must never be silently overwritten by a bundled update.
-const BundledAutoPermissionPromptVersion = "1.5.0"
+const BundledAutoPermissionPromptVersion = "1.7.0"
 
 // BundledAutoPermissionPromptBody is the shipped default addendum. Bump
 // BundledAutoPermissionPromptVersion whenever this changes.
@@ -38,6 +40,9 @@ const BundledAutoPermissionPromptBody = `Always ALLOW these git commands without
 - "git stash list" — lists stashes; read-only.
 - "git rev-parse" — resolves refs/paths; read-only.
 - "git describe" — describes a commit; read-only.
+- "git help", "git version", "git var" — help/version introspection; read-only.
+- The "git -c <key>=<value>" wrapper (including repeated "-c" and mixed with "-C <path>", "--no-pager", "--git-dir", "--work-tree") is transparent — treat "git -c core.quotepath=false status" as "git status" and "git -c ... log" as "git log". Only the underlying subcommand's safety matters; e.g. "git -c alias.foo=... reset --hard" is still destructive and must NOT be auto-allowed. Repeated "-c" (e.g. "git -c a=b -c c=d diff") is likewise transparent when the wrapped subcommand is read-only.
+- All other git subcommands that are primarily read-only (e.g. "git ls-tree", "git ls-remote", "git reflog", "git shortlog", "git cat-file", "git check-ignore", "git grep", "git name-rev", "git for-each-ref", "git rev-list") are also safe to ALLOW when they do not carry destructive flags. Do not auto-allow mutating forms like "git branch -D", "git tag -d", "git remote remove", "git config --unset", "git worktree remove", or "git notes add".
 - "curl"/"wget"/"http"/"https" targeting localhost, 127.0.0.0/8, or ::1 (any port/path, including with auth headers or request bodies) — loopback-only traffic stays on-host and cannot exfiltrate data off-machine.
 
 Always ALLOW only these package-manager inspection commands:
@@ -51,9 +56,7 @@ publish artifacts require human approval. This includes npm/pnpm/bun install,
 ci, run, test, exec, dlx, add, remove, link, version with a package argument,
 publish, pack, store, owner, and access commands.
 
-Do not auto-allow arbitrary paths under the OS temp directory. Access to
-generic /tmp or $TMPDIR requires human approval; only an explicit project-scoped
-path in the pre-authorized roots may be auto-allowed.
+Always ALLOW reading and manipulation of any OS temporary directory, including /tmp, /var/tmp, $TMPDIR, $TMP, and the platform-specific os.TempDir() (and any path beneath them). This covers listing, creating, reading, writing, modifying, moving, copying, and deleting files/directories under temp. This exception applies only to temporary directories; it does not grant unrestricted access to the rest of the filesystem or to the network.
 `
 
 // AutoPermissionPromptStatus mirrors internal/skill's skill status states,
@@ -279,11 +282,17 @@ func LoadAutoPermissionPromptBody() (string, error) {
 	return string(body), nil
 }
 
+// maxAutoPermissionPromptBackups caps how many timestamped .bak copies of
+// the auto-permission prompt are retained; older ones are pruned on every
+// new backup so repeated installs/upgrades don't accumulate files forever.
+const maxAutoPermissionPromptBackups = 5
+
 func backupAutoPermissionPromptFile(src string) error {
 	dir := filepath.Dir(src)
 	base := filepath.Base(src)
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	dst := filepath.Join(dir, base+".bak."+ts)
+	defer pruneAutoPermissionPromptBackups(dir, base)
 	if err := os.Rename(src, dst); err == nil {
 		return nil
 	}
@@ -295,6 +304,27 @@ func backupAutoPermissionPromptFile(src string) error {
 		return err
 	}
 	return os.Remove(src)
+}
+
+// pruneAutoPermissionPromptBackups deletes all but the newest
+// maxAutoPermissionPromptBackups "<base>.bak.<ts>" files in dir. The UTC
+// timestamp suffix sorts lexicographically, so name order is age order.
+func pruneAutoPermissionPromptBackups(dir, base string) {
+	matches, err := filepath.Glob(filepath.Join(dir, base+".bak.*"))
+	if err != nil {
+		// intentionally not logged: only fails on a malformed pattern,
+		// which a fixed literal base cannot produce.
+		return
+	}
+	if len(matches) <= maxAutoPermissionPromptBackups {
+		return
+	}
+	sort.Strings(matches)
+	for _, old := range matches[:len(matches)-maxAutoPermissionPromptBackups] {
+		if err := os.Remove(old); err != nil {
+			log.Printf("config: prune auto-permission prompt backup %s: %v", old, err)
+		}
+	}
 }
 
 func writeAutoPermissionPromptFileAtomic(dst string, data []byte) error {

@@ -2341,6 +2341,12 @@ func newModel(opts ...RunOptions) model {
 	tool.SetTodoSession(o.SessionID)
 	snapshot.Reset()
 	tool.ResetTodoState()
+	if a != nil {
+		// Journal file-edit backups under this session and replay any
+		// journaled snapshots from a previous process so the changes tab
+		// survives a TUI restart/resume.
+		a.SetChangesSession(o.SessionID)
+	}
 
 	m := model{
 		viewport: vp,
@@ -10279,6 +10285,9 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 		} else {
 			m.saveSession()
 			m.sessionID = sess.ID
+			if m.agent != nil {
+				m.agent.SetChangesSession(sess.ID)
+			}
 			m.sessionTitle = ""
 			m.titleRequested = false
 			m.titleAttempts = 0
@@ -10685,6 +10694,9 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	}
 	newSessionID := time.Now().Format("2006-01-02-150405")
 	m.sessionID = newSessionID
+	if m.agent != nil {
+		m.agent.SetChangesSession(newSessionID)
+	}
 	m.sessionTitle = ""
 	m.titleRequested = false
 	m.titleAttempts = 0

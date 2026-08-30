@@ -28,6 +28,8 @@ okf_version: 0.1
 - [Debug Instrumentation Ships Unconditionally](gotchas/debug-instrumentation-ships-unconditionally.md) - Process gotcha: temporary Date.prototype instrumentation ships unconditionally in production builds, causing global prototype mutation, altered date behavior, and authenticated network requests.
 - [FilePicker.test.tsx Stale Build Status — Corrected](gotchas/filepicker-stale-todo.md) - Stale TODO item: FilePicker.test.tsx now has no user-event import and build passes
 - [Foreground Bash Commands — Parent-Death Protection Before Start](gotchas/foreground-bash-parent-death-protection.md) - Foreground POSIX Bash commands must be wrapped with WrapWithParentMonitor before cmd.Start() to ensure promotion to background does not orphan processes; the monitor must be applied at spawn time, not at promotion time.
+- [Git ext:: Transport Auto-Permission Bypass](gotchas/git-ext-transport-auto-allow-bypass.md) - Critical security gotcha: transparent stripping of git -c config overrides in IsHarmfulBashCommand allows ext:: transport to bypass auto-permission allowlist, enabling arbitrary shell command execution via read-only git subcommands like ls-remote.
+- [Journal DB Connection Pool Leak](gotchas/journal-db-connection-pool-leak.md) - Architectural gotcha: journal.go caches *sql.DB connection pools in a module-global journalCache but never closes them, causing a slow connection-pool leak per distinct project dir in long-running processes.
 - [Local Model Auto-Start Hijacks the Controlling Terminal](gotchas/local-model-tty-hijack.md) - A locally-spawned model server (Setpgid only, same session as ocode) can grab the terminal foreground process group via TIOCSPGRP, crashing the TUI and corrupting the whole shell session
 - [Local Model Limiter — Stale-Slot Reclamation Race](gotchas/local-model-limiter-stale-slot-race.md) - TOCTOU race in local model slot-lock stale reclamation: reaper can delete a live lock between Stat and Remove, breaking MaxParallel limits
 - [Plugin Auto-Permission — Arbitrary Execution Risk](gotchas/plugin-auto-permission-security.md) - Security gotcha: auto-permission prompt tightened to read-only inspection only — no package install/run/exec/lifecycle/registry commands, no blanket OS temp access.
@@ -224,6 +226,27 @@ okf_version: 0.1
 - [05-frontend-status-streaming.md](superpowers/plans/2026-08-12-multiproject-event-architecture/05-frontend-status-streaming.md)
 - [06-rc-first-class-cleanup.md](superpowers/plans/2026-08-12-multiproject-event-architecture/06-rc-first-class-cleanup.md)
 - [INDEX.md](superpowers/plans/2026-08-12-multiproject-event-architecture/INDEX.md)
+- [01-schema-and-connection-helpers.md](superpowers/plans/2026-08-28-sqlite-session-storage/01-schema-and-connection-helpers.md)
+- [02-session-read-write-core.md](superpowers/plans/2026-08-28-sqlite-session-storage/02-session-read-write-core.md)
+- [03-shared-project-index.md](superpowers/plans/2026-08-28-sqlite-session-storage/03-shared-project-index.md)
+- [04-write-path-and-migration.md](superpowers/plans/2026-08-28-sqlite-session-storage/04-write-path-and-migration.md)
+- [05-read-path.md](superpowers/plans/2026-08-28-sqlite-session-storage/05-read-path.md)
+- [06-listing-path.md](superpowers/plans/2026-08-28-sqlite-session-storage/06-listing-path.md)
+- [07-delete-path.md](superpowers/plans/2026-08-28-sqlite-session-storage/07-delete-path.md)
+- [08-verification-and-rollout.md](superpowers/plans/2026-08-28-sqlite-session-storage/08-verification-and-rollout.md)
+- [INDEX.md](superpowers/plans/2026-08-28-sqlite-session-storage/INDEX.md)
+- [2026-08-29-unified-session-terminal-tabs.md](superpowers/plans/2026-08-29-unified-session-terminal-tabs.md)
+- [01-browse-server-scaffold.md](superpowers/plans/2026-08-30-embedded-browser-panel/01-browse-server-scaffold.md)
+- [02-ssrf-dialer.md](superpowers/plans/2026-08-30-embedded-browser-panel/02-ssrf-dialer.md)
+- [03-external-fetch-headers-cookiejar.md](superpowers/plans/2026-08-30-embedded-browser-panel/03-external-fetch-headers-cookiejar.md)
+- [04-html-css-rewrite.md](superpowers/plans/2026-08-30-embedded-browser-panel/04-html-css-rewrite.md)
+- [05-capture-script.md](superpowers/plans/2026-08-30-embedded-browser-panel/05-capture-script.md)
+- [06-local-mode-ws.md](superpowers/plans/2026-08-30-embedded-browser-panel/06-local-mode-ws.md)
+- [07-nav-events-sse.md](superpowers/plans/2026-08-30-embedded-browser-panel/07-nav-events-sse.md)
+- [08-frontend-store-client.md](superpowers/plans/2026-08-30-embedded-browser-panel/08-frontend-store-client.md)
+- [09-browser-panel-component.md](superpowers/plans/2026-08-30-embedded-browser-panel/09-browser-panel-component.md)
+- [10-unified-tabbar-app-wiring.md](superpowers/plans/2026-08-30-embedded-browser-panel/10-unified-tabbar-app-wiring.md)
+- [INDEX.md](superpowers/plans/2026-08-30-embedded-browser-panel/INDEX.md)
 - [2026-07-08-global-runtime-artifacts-design.md](superpowers/specs/2026-07-08-global-runtime-artifacts-design.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [2026-07-11-model-stack-benchmark-design.md](superpowers/specs/2026-07-11-model-stack-benchmark-design.md)
@@ -247,6 +270,13 @@ okf_version: 0.1
 - [2026-08-19-desktop-sharing-design.md](superpowers/specs/2026-08-19-desktop-sharing-design.md)
 - [2026-08-20-desktop-profiles-sparse-design.md](superpowers/specs/2026-08-20-desktop-profiles-sparse-design.md)
 - [2026-08-20-shared-lsp-broker-design.md](superpowers/specs/2026-08-20-shared-lsp-broker-design.md)
+- [01-architecture.md](superpowers/specs/2026-08-29-remote-ssh/01-architecture.md)
+- [02-phase1-connect.md](superpowers/specs/2026-08-29-remote-ssh/02-phase1-connect.md)
+- [03-phase2-web.md](superpowers/specs/2026-08-29-remote-ssh/03-phase2-web.md)
+- [04-phase3-wsl.md](superpowers/specs/2026-08-29-remote-ssh/04-phase3-wsl.md)
+- [INDEX.md](superpowers/specs/2026-08-29-remote-ssh/INDEX.md)
+- [2026-08-29-unified-session-terminal-tabs-design.md](superpowers/specs/2026-08-29-unified-session-terminal-tabs-design.md)
+- [2026-08-30-embedded-browser-panel-design.md](superpowers/specs/2026-08-30-embedded-browser-panel-design.md)
 - [telegram-bot.md](telegram-bot.md)
 - [web-desktop-parity-todo.md](web-desktop-parity-todo.md)
 

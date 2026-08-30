@@ -1,4 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import {
+  Copy,
+  ClipboardPaste,
+  CopyPlus,
+  Trash2,
+  RotateCcw,
+  ArrowUpToLine,
+  ArrowDownToLine,
+  Search,
+  Plus,
+  X,
+} from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
@@ -48,6 +61,8 @@ export default function TerminalPanel({
   const socketRef = useRef<WebSocket | null>(null);
   const dragCounterRef = useRef(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; hasSelection: boolean } | null>(null);
+  const ctxMenuRef = useRef<HTMLDivElement>(null);
   // Mirrors `active` so the xterm event handlers (registered once at mount) can
   // read the live focused state without re-subscribing.
   const activeRef = useRef(active);
@@ -55,7 +70,7 @@ export default function TerminalPanel({
   // socket opens so a BEL baked into restored history can't false-alert.
   const readyRef = useRef(false);
 
-  const { markAlerted } = useTerminalState();
+  const { markAlerted, openTerminal, closeTerminal } = useTerminalState();
 
   useEffect(() => {
     activeRef.current = active;
@@ -97,6 +112,124 @@ export default function TerminalPanel({
       console.error("terminal: file upload failed:", err);
     }
   }, [projectPath]);
+
+  // ── Context menu (right-click) — Supacode-style ────────────────
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const sel = termRef.current?.getSelection() ?? "";
+    setCtxMenu({ x: e.clientX, y: e.clientY, hasSelection: sel.length > 0 });
+  }, []);
+
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (ctxMenuRef.current && !ctxMenuRef.current.contains(e.target as Node)) setCtxMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCtxMenu(null);
+    };
+    const onScroll = () => setCtxMenu(null);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
+    };
+  }, [ctxMenu]);
+
+  const handleCopy = useCallback(async () => {
+    const term = termRef.current;
+    if (!term) return;
+    const sel = term.getSelection();
+    if (!sel) return;
+    try {
+      await navigator.clipboard.writeText(sel);
+    } catch {
+      // Fallback: use the async clipboard fallback via execCommand on a temp textarea
+      const ta = document.createElement("textarea");
+      ta.value = sel;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch { /* ignore */ }
+      ta.remove();
+    }
+    setCtxMenu(null);
+  }, []);
+
+  const handlePaste = useCallback(async () => {
+    const sock = socketRef.current;
+    // Prefer async clipboard; fall back to letting the browser handle paste if denied.
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text && sock && sock.readyState === WebSocket.OPEN) sock.send(text);
+      else if (text) termRef.current?.paste(text);
+    } catch {
+      // Clipboard read requires a secure context / permission; hint the user.
+      // As a fallback we focus the terminal so Ctrl+V / Cmd+V still works.
+      termRef.current?.focus();
+    }
+    setCtxMenu(null);
+  }, []);
+
+  const handleSelectAll = useCallback(() => {
+    termRef.current?.selectAll();
+    setCtxMenu(null);
+  }, []);
+
+  const handleClear = useCallback(() => {
+    termRef.current?.clear();
+    // Persist the cleared state so the empty buffer survives reload — reuse
+    // the existing serialize path immediately instead of waiting for the idle save.
+    if (serializeRef.current && termRef.current) {
+      saveTerminalBuffer(id, serializeRef.current.serialize({ scrollback: scrollbackLines }), termRef.current.cols, termRef.current.rows);
+    }
+    setCtxMenu(null);
+  }, [id, scrollbackLines]);
+
+  const handleReset = useCallback(() => {
+    termRef.current?.reset();
+    if (serializeRef.current && termRef.current) {
+      saveTerminalBuffer(id, serializeRef.current.serialize({ scrollback: scrollbackLines }), termRef.current.cols, termRef.current.rows);
+    }
+    setCtxMenu(null);
+  }, [id, scrollbackLines]);
+
+  const handleScrollTop = useCallback(() => {
+    termRef.current?.scrollToTop();
+    setCtxMenu(null);
+  }, []);
+
+  const handleScrollBottom = useCallback(() => {
+    termRef.current?.scrollToBottom();
+    setCtxMenu(null);
+  }, []);
+
+  const handleFind = useCallback(() => {
+    // xterm.js has no built-in find UI; trigger the browser find as a best-effort.
+    // Consumers that load the search addon can intercept this via a custom event.
+    window.dispatchEvent(new CustomEvent("ocode:terminal-find", { detail: { id } }));
+    // Fallback: open browser find (works in most browsers when the terminal is focused)
+    // by dispatching the keyboard shortcut is unreliable, so just focus and hint.
+    termRef.current?.focus();
+    setCtxMenu(null);
+  }, [id]);
+
+  const handleNewTerminal = useCallback(() => {
+    openTerminal(projectPath);
+    setCtxMenu(null);
+  }, [openTerminal, projectPath]);
+
+  const handleCloseTerminal = useCallback(() => {
+    closeTerminal(projectPath, id);
+    setCtxMenu(null);
+  }, [closeTerminal, projectPath, id]);
 
   // Drag-and-drop handlers — follow the same counter-based pattern used by
   // ChatInput to correctly handle nested dragenter/dragleave from child
@@ -460,10 +593,44 @@ export default function TerminalPanel({
     return () => unregisterTerminalFocus(id);
   }, [id]);
 
+  // Clamp menu to viewport (same strategy as Layout/ContextMenu)
+  const clampedMenuPos = ctxMenu
+    ? {
+        x: Math.min(ctxMenu.x, typeof window !== "undefined" ? window.innerWidth - 220 : ctxMenu.x),
+        y: Math.min(ctxMenu.y, typeof window !== "undefined" ? window.innerHeight - 360 : ctxMenu.y),
+      }
+    : null;
+
+  const menuItems: Array<{
+    label: string;
+    icon: React.ReactNode;
+    onClick: () => void;
+    disabled?: boolean;
+    separator?: boolean;
+    destructive?: boolean;
+  }> = ctxMenu
+    ? [
+        { label: "Copy", icon: <Copy className="h-4 w-4" />, onClick: handleCopy, disabled: !ctxMenu.hasSelection },
+        { label: "Paste", icon: <ClipboardPaste className="h-4 w-4" />, onClick: handlePaste },
+        { label: "Select All", icon: <CopyPlus className="h-4 w-4" />, onClick: handleSelectAll },
+        { label: "", icon: null as unknown as React.ReactNode, onClick: () => {}, separator: true },
+        { label: "Clear Terminal", icon: <Trash2 className="h-4 w-4" />, onClick: handleClear },
+        { label: "Reset Terminal", icon: <RotateCcw className="h-4 w-4" />, onClick: handleReset },
+        { label: "Scroll to Top", icon: <ArrowUpToLine className="h-4 w-4" />, onClick: handleScrollTop },
+        { label: "Scroll to Bottom", icon: <ArrowDownToLine className="h-4 w-4" />, onClick: handleScrollBottom },
+        { label: "", icon: null as unknown as React.ReactNode, onClick: () => {}, separator: true },
+        { label: "Find…", icon: <Search className="h-4 w-4" />, onClick: handleFind },
+        { label: "", icon: null as unknown as React.ReactNode, onClick: () => {}, separator: true },
+        { label: "New Terminal", icon: <Plus className="h-4 w-4" />, onClick: handleNewTerminal },
+        { label: "Close Terminal", icon: <X className="h-4 w-4" />, onClick: handleCloseTerminal, destructive: true },
+      ]
+    : [];
+
   return (
     <div
       ref={containerRef}
       className="relative h-full w-full bg-card p-2"
+      onContextMenu={handleContextMenu}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -474,6 +641,38 @@ export default function TerminalPanel({
           <span className="text-sm font-medium text-blue-300">Drop files here</span>
         </div>
       )}
+      {ctxMenu &&
+        clampedMenuPos &&
+        createPortal(
+          <div
+            ref={ctxMenuRef}
+            role="menu"
+            className="fixed z-50 min-w-[200px] bg-popover border border-border rounded-md shadow-md py-1 animate-in fade-in-0 zoom-in-95"
+            style={{ left: clampedMenuPos.x, top: clampedMenuPos.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {menuItems.map((item, i) => {
+              if (item.separator) return <div key={i} className="h-px bg-border my-1" />;
+              return (
+                <button
+                  key={i}
+                  role="menuitem"
+                  disabled={!!item.disabled}
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-sm text-left ${
+                    item.destructive
+                      ? "text-destructive hover:bg-destructive/10"
+                      : "text-foreground hover:bg-accent hover:text-accent-foreground"
+                  } ${item.disabled ? "opacity-50 pointer-events-none" : ""}`}
+                  onClick={item.onClick}
+                >
+                  {item.icon && <span className="w-4 h-4 shrink-0 flex items-center justify-center">{item.icon}</span>}
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

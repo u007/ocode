@@ -851,7 +851,7 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	}
 
 	log.Printf("serving on %s", srv.addr)
-	return http.Serve(ln, srv.mux)
+	return srv.Serve(ln)
 }
 
 func openURL(url string) {
@@ -938,20 +938,6 @@ func allowedCORSOrigin(origin string) bool {
 	}
 	port, err := strconv.Atoi(u.Port())
 	return err == nil && port >= 1 && port <= 65535 && strings.HasPrefix(strings.ToLower(u.Host), host+":")
-}
-
-func apiCORS(next http.HandlerFunc) http.HandlerFunc {
-	return corsMiddleware(next)
-}
-
-func (s *Server) WithCORS() *Server {
-	original := s.mux
-	wrapped := http.NewServeMux()
-	wrapped.HandleFunc("/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		original.ServeHTTP(w, r)
-	}))
-	s.mux = wrapped
-	return s
 }
 
 // Session shims

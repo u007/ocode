@@ -93,7 +93,14 @@ export function cancelLiveDeltas(sessionId: string): void {
  *  called before any dispatch that replaces or clears `live` (the "messages"
  *  turn-boundary snapshot, turn_done, turn_error) — otherwise a buffered
  *  delta's delayed flush would land after `live` was already reset, briefly
- *  reintroducing a stray live block after the turn visually completed. */
+ *  reintroducing a stray live block after the turn visually completed.
+ *
+ *  Also required before any dispatch that APPENDS a new part to `live`
+ *  (LIVE_TOOL_START, and the active variants of LIVE_PERMISSION_CHECK /
+ *  LIVE_ADVISOR_CHECKPOINT): the reducer only continues the last part when
+ *  kinds match, so a still-buffered text tail flushed after a tool block was
+ *  appended renders as a separate bubble *below* the tools — splitting the
+ *  sentence mid-word ("…and d" [tools] "esktop."). */
 function flushLiveDeltas(sessionId: string, dispatch: (action: ChatAction) => void): void {
   for (const [key, buf] of pendingDeltas) {
     if (buf.sessionId !== sessionId) continue;
@@ -335,6 +342,10 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         }
         return;
       case "tool_start":
+        // Flush first: LIVE_TOOL_START appends a part, and a buffered text
+        // tail (the end of the sentence that introduced the call) must land
+        // in the text bubble above it, not in a new one below.
+        flushLiveDeltas(sessionId, r.dispatch);
         r.dispatch({
           type: "LIVE_TOOL_START",
           sessionId,
@@ -389,6 +400,9 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       }
       case "permission_check": {
         const evData = data as { tool: string; model: string; active: boolean };
+        // active=true appends a status part — flush buffered deltas first so
+        // pending text isn't orphaned below it (same race as tool_start).
+        if (evData.active) flushLiveDeltas(sessionId, r.dispatch);
         r.dispatch({
           type: "LIVE_PERMISSION_CHECK",
           sessionId,
@@ -400,6 +414,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       }
       case "advisor_checkpoint": {
         const evData = data as { kind: string; active: boolean };
+        if (evData.active) flushLiveDeltas(sessionId, r.dispatch);
         r.dispatch({
           type: "LIVE_ADVISOR_CHECKPOINT",
           sessionId,

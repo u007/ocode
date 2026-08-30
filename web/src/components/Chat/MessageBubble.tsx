@@ -60,7 +60,10 @@ export function AssistantText({ content }: { content: string }) {
                 if (isInline) {
                   return (
                     <code
-                      className="rounded bg-accent text-accent-foreground px-1.5 py-0.5 text-xs"
+                      // File links inside a chip must use the chip's own
+                      // foreground token — FileLink's prose default text-link
+                      // is illegible on the solid accent surface (github-dark).
+                      className="rounded bg-accent text-accent-foreground px-1.5 py-0.5 text-xs [&_.file-link]:text-accent-foreground [&_.file-link]:underline"
                       {...props}
                     >
                       {children}
@@ -107,7 +110,7 @@ export function AssistantText({ content }: { content: string }) {
                   href={href}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-blue-400 hover:underline"
+                  className="text-link hover:underline"
                 >
                   {children}
                 </a>
@@ -118,7 +121,7 @@ export function AssistantText({ content }: { content: string }) {
                 </div>
               ),
               th: ({ children }) => (
-                <th className="border border-border px-2 py-1 text-left bg-accent text-accent-foreground">
+                <th className="border border-border px-2 py-1 text-left bg-accent text-accent-foreground [&_.file-link]:text-accent-foreground [&_.file-link]:underline">
                   {children}
                 </th>
               ),
@@ -218,7 +221,7 @@ function UserBubble({
         >
           <RotateCcw className="w-3.5 h-3.5" />
         </button>
-        <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-primary text-primary-foreground">
+        <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-primary text-primary-foreground [&_.file-link]:text-primary-foreground [&_.file-link]:underline">
           <pre className="whitespace-pre-wrap font-sans text-sm">
             {highlight.trim()
               ? highlightMatches(message.content, highlight)

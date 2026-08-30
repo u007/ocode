@@ -406,6 +406,48 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
     }
   }, [messages, live, initialized]);
 
+  // Re-pin when this panel transitions from hidden back to visible. Inactive
+  // tabs (and the Chat→Files/Git view switch, and terminal focus in App.tsx)
+  // are CSS-hidden with display:none rather than unmounted, so the scroll
+  // container loses its layout box: while hidden scrollHeight reads 0 (the
+  // auto-scroll effect above can't follow the tail, and the browser discards
+  // the scroll offset), and on re-show scrollTop is 0. If no new store event
+  // arrives after returning — e.g. the stream finished while the tab was in
+  // the background — the [messages, live] effect never re-runs and a user who
+  // was at the bottom lands at the top instead. A ResizeObserver on the scroll
+  // element catches the 0 → >0 height transition regardless of which wrapper
+  // hid the panel; the follow-up rAF re-pin rides out the virtualizer
+  // re-windowing and measurement corrections after the jump.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let prevHeight = -1; // unknown until the first observation callback
+    let raf = 0;
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0]?.contentRect;
+      const height = cr ? cr.height : el.clientHeight;
+      // prevHeight === -1 covers a panel whose very first observation already
+      // arrives while visible (e.g. the effect re-created when `initialized`
+      // flipped); pinning then matches the initial-load-to-bottom behavior.
+      if (height > 0 && (prevHeight === 0 || prevHeight === -1) && atBottomRef.current && initialized) {
+        el.scrollTop = el.scrollHeight;
+        setShowJumpToBottom(false);
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(() => {
+          if (atBottomRef.current) {
+            el.scrollTop = el.scrollHeight;
+          }
+        });
+      }
+      prevHeight = height;
+    });
+    ro.observe(el);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  }, [initialized]);
+
   // Toggle the find bar with Ctrl/Cmd+F. Local to this tab: each ChatPanel
   // instance is only visible while its tab is active (App.tsx CSS-hides the
   // rest), so this window listener would fire for every open tab — guard on

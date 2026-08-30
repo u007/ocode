@@ -43,9 +43,15 @@ vi.mock("../../stores/projectStore", () => ({
 import { api } from "../../api/client";
 
 // --- Layout shims so @tanstack/react-virtual can compute a window in jsdom.
+// Instances are registered while observed so tests can drive size changes
+// (e.g. the display:none → visible transition of a CSS-hidden tab).
+const roInstances: ResizeObserverMock[] = [];
 class ResizeObserverMock {
+  el: Element | null = null;
   constructor(private cb: (entries: unknown[]) => void) {}
   observe(el: Element) {
+    this.el = el;
+    roInstances.push(this);
     const rect = (el as HTMLElement).getBoundingClientRect();
     this.cb([
       {
@@ -56,7 +62,21 @@ class ResizeObserverMock {
     ]);
   }
   unobserve() {}
-  disconnect() {}
+  disconnect() {
+    const i = roInstances.indexOf(this);
+    if (i >= 0) roInstances.splice(i, 1);
+  }
+  /** Fire the callback with a fake content-box of the given height. */
+  fire(height: number) {
+    const rect = makeRect(400, height);
+    this.cb([
+      {
+        target: this.el,
+        contentRect: rect,
+        borderBoxSize: [{ inlineSize: rect.width, blockSize: rect.height }],
+      },
+    ]);
+  }
 }
 
 let originalGBCR: typeof HTMLElement.prototype.getBoundingClientRect;
@@ -142,6 +162,7 @@ afterEach(() => {
   vi.clearAllMocks();
   // Prevent a pending getSession promise from one test leaking into the next.
   hoisted.resolve.current = (() => {}) as (v: unknown) => void;
+  roInstances.length = 0;
 });
 
 // --- Helpers ---------------------------------------------------------------
@@ -202,9 +223,50 @@ function flushRAF() {
   });
 }
 
+/** Advance a real animation frame. jsdom (vitest's pretendToBeVisual jsdom)
+ *  services rAF on its own ~16ms clock, so the setTimeout(0) flushRAF above
+ *  does NOT run pending rAF callbacks — tests that assert rAF work must await
+ *  an actual frame. */
+function advanceFrame() {
+  return act(async () => {
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+  });
+}
+
 /** The scroll container inside a rendered ChatPanel. */
 function scrollElOf(container: HTMLElement): HTMLElement {
   return container.querySelector(".overflow-y-auto") as HTMLElement;
+}
+
+/** The live ResizeObserver instance watching the rendered ChatPanel's scroll
+ *  container (older instances unregister themselves on disconnect). */
+function scrollObserverFor(container: HTMLElement): ResizeObserverMock {
+  const el = scrollElOf(container);
+  const obs = roInstances.filter((o) => o.el === el);
+  return obs[obs.length - 1];
+}
+
+/** jsdom has no layout: fake scrollHeight/clientHeight and capture writes to
+ *  scrollTop so scroll assertions are meaningful. Returns a handle to read or
+ *  programmatically move the offset (simulating the browser's reset to 0
+ *  while display:none). */
+function fakeScroll(el: HTMLElement, initialTop: number, scrollHeight = 5000) {
+  let value = initialTop;
+  Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => scrollHeight });
+  Object.defineProperty(el, "clientHeight", { configurable: true, get: () => 600 });
+  Object.defineProperty(el, "scrollTop", {
+    configurable: true,
+    get: () => value,
+    set: (v: number) => {
+      value = v;
+    },
+  });
+  return {
+    get: () => value,
+    set: (v: number) => {
+      value = v;
+    },
+  };
 }
 
 describe("ChatPanel", () => {
@@ -281,6 +343,86 @@ describe("ChatPanel", () => {
     });
     await flushRAF();
     expect(scrollTopValue).toBe(1234);
+  });
+
+  describe("hidden → visible re-pin (tab switched away in App.tsx)", () => {
+    async function renderSeeded(sessionId: string) {
+      const utils = render(
+        <ChatProvider>
+          <LiveSeed
+            sessionId={sessionId}
+            messages={[mk("user", "a"), mk("assistant", "b")]}
+            hasMore
+          />
+          <ChatPanel sessionId={sessionId} />
+        </ChatProvider>,
+      );
+      await tick();
+      // Drain the mount-time rAFs (initial-load pin, observer follow-up)
+      // BEFORE the fake scroll overrides are installed, so their writes to
+      // the plain jsdom scrollTop are no-ops and don't pollute assertions.
+      await advanceFrame();
+      await advanceFrame();
+      return utils;
+    }
+
+    it("re-pins to the bottom when a pinned panel becomes visible again", async () => {
+      const { container } = await renderSeeded("sess-vis-repin");
+      const el = scrollElOf(container);
+      const obs = scrollObserverFor(container);
+      const f = fakeScroll(el, 5000); // user was pinned at the bottom
+      // The turn finished while the tab was hidden; nothing else fires a
+      // store update. Simulate the display:none → shown height transition.
+      act(() => obs.fire(0)); // hidden: browser resets the offset to 0
+      f.set(0);
+      act(() => obs.fire(600)); // shown
+      expect(f.get()).toBe(5000); // immediate re-pin
+      await advanceFrame();
+      expect(f.get()).toBe(5000); // follow-up rAF keeps it pinned
+    });
+
+    it("does NOT move a user who had scrolled up before switching away", async () => {
+      const { container } = await renderSeeded("sess-vis-away-up");
+      const el = scrollElOf(container);
+      const obs = scrollObserverFor(container);
+      const f = fakeScroll(el, 0); // user read from the top of the viewport
+      // Scroll event with a bottom far away → handleScroll unpins the panel.
+      fireEvent.scroll(el);
+      await advanceFrame();
+      act(() => obs.fire(0));
+      f.set(0);
+      act(() => obs.fire(600));
+      await advanceFrame();
+      expect(f.get()).toBe(0); // must not be yanked to the bottom
+    });
+
+    it("does NOT force-scroll on ordinary resizes while visible", async () => {
+      const { container } = await renderSeeded("sess-vis-resize");
+      const el = scrollElOf(container);
+      const obs = scrollObserverFor(container);
+      const f = fakeScroll(el, 5000);
+      f.set(1234); // user parked mid-scroll (still "at bottom" per ref)
+      act(() => obs.fire(650)); // window grew by 50px
+      expect(f.get()).toBe(1234); // no jump
+      await advanceFrame();
+      expect(f.get()).toBe(1234);
+    });
+
+    it("does NOT re-pin when the user had scrolled up (unpinned) after streaming resumed", async () => {
+      // Guard interaction: streaming continues while the panel is shown, but
+      // the user scrolled up mid-stream — subsequent growth must not re-pin.
+      const { container } = await renderSeeded("sess-vis-unpin-midstream");
+      const el = scrollElOf(container);
+      const obs = scrollObserverFor(container);
+      const f = fakeScroll(el, 0);
+      // Unpin via a real scroll event, then a hidden→visible cycle arrives.
+      fireEvent.scroll(el);
+      await advanceFrame();
+      act(() => obs.fire(0));
+      act(() => obs.fire(600));
+      await advanceFrame();
+      expect(f.get()).toBe(0);
+    });
   });
 
   it("jumps to a match that is NOT yet rendered (unmeasured item)", async () => {

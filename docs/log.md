@@ -10,6 +10,11 @@
 
 
 
+
+## 2026-08-30
+
+* **Creation**: Journal DB Connection Pool Leak ([gotchas/journal-db-connection-pool-leak.md](/gotchas/journal-db-connection-pool-leak.md))
+* **Creation**: Git ext:: Transport Auto-Permission Bypass ([gotchas/git-ext-transport-auto-allow-bypass.md](/gotchas/git-ext-transport-auto-allow-bypass.md))
 ## 2026-08-28
 
 * **Update**: Plugin Auto-Permission — Arbitrary Execution Risk ([gotchas/plugin-auto-permission-security.md](/gotchas/plugin-auto-permission-security.md))

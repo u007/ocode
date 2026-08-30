@@ -118,6 +118,28 @@ func (a *Agent) SetSessionID(sessionID string) {
 	if gc, ok := a.client.(*GenericClient); ok {
 		gc.sessionID = sessionID
 	}
+	// Tag the snapshot store so backups are journaled under this session,
+	// then replay any journaled snapshots from a previous process into the
+	// (empty) store — this is what keeps the changes tab populated across
+	// agent rebuilds (idle eviction, restart, resume). Rehydrate is a no-op
+	// for brand-new sessions and for stores that already hold snapshots.
+	if a.snapshotStore != nil && sessionID != "" {
+		a.snapshotStore.SetSessionID(sessionID)
+		a.snapshotStore.Rehydrate()
+	}
+}
+
+// SetChangesSession tags only the snapshot store with a session id (so
+// backups journal under it) and rehydrates journaled snapshots for it.
+// The TUI uses this instead of SetSessionID because its debug-log entries
+// must stay untagged (process-global, single-session-per-process model);
+// the server path gets the same wiring via SetSessionID.
+func (a *Agent) SetChangesSession(sessionID string) {
+	if a.snapshotStore == nil || sessionID == "" {
+		return
+	}
+	a.snapshotStore.SetSessionID(sessionID)
+	a.snapshotStore.Rehydrate()
 }
 
 // emitDebug appends a debug-log entry tagged with this agent's session id.

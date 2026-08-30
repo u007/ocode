@@ -10,16 +10,29 @@ const EXT =
   "tsx?|jsx?|go|py|rs|rb|java|kt|swift|c|cc|cpp|cxx|h|hh|hpp|cs|php|scala|sh|bash|zsh|sql|json|jsonc|ya?ml|toml|ini|md|mdx|txt|csv|css|scss|sass|less|html?|xml|vue|svelte|lua|dart|ex|exs|erl|clj|hs|ml|proto|gradle|dockerfile|mod|sum|lock";
 
 // A path token is either:
-//   1. anchored by a leading ./  ../  or /  (clearly a path), or
-//   2. a (possibly nested) path whose final segment ends in a code extension.
+//   1. an `.ocode/uploads/`-anchored path (see UPLOAD_SOURCE below), or
+//   2. anchored by a leading ./  ../  or /  (clearly a path), or
+//   3. a (possibly nested) path whose final segment ends in a code extension.
 // Each may carry a trailing :line or :line:col suffix (e.g. handler.go:42).
 // GUARD prevents starting mid-token or inside a URL ("https://host/path"); the
 // extension guard (?!\w) forces the longest extension (package.json, not .js).
 const LINE = "(?::\\d+(?::\\d+)?)?";
 const GUARD = "(?<![\\w:/.\\-])";
+
+// Uploads are referenced in chat by the relative path `.ocode/uploads/<name>`
+// (see AGENTS.md "Web/Desktop Server"), and macOS screenshot names contain
+// spaces — even a narrow no-break space (U+202F). This branch allows spaces
+// ONLY inside an `.ocode/uploads/`-anchored path with an image/media
+// extension, so ordinary prose with spaces never becomes link-like. Image
+// extensions live here, NOT in the general EXT list: a bare "shot.png" in
+// prose must not turn into a link.
+const UPLOAD_EXT = "png|jpe?g|gif|webp|bmp|tiff?|svg|pdf";
+const UPLOAD_SOURCE =
+  `\\.ocode/uploads/[\\w.\\-]+(?:[ \\u00A0\\u202F]+[\\w.\\-]+)*\\.(?:${UPLOAD_EXT})(?![\\w])${LINE}`;
 const PATH_SOURCE =
   `${GUARD}(?:` +
-  `(?:\\.{1,2}/|/)[\\w.\\-]+(?:/[\\w.\\-]+)*${LINE}` +
+  UPLOAD_SOURCE +
+  `|(?:\\.{1,2}/|/)[\\w.\\-]+(?:/[\\w.\\-]+)*${LINE}` +
   `|[\\w.\\-]+(?:/[\\w.\\-]+)*\\.(?:${EXT})(?![\\w])${LINE}` +
   `)`;
 
@@ -58,7 +71,13 @@ function FileLink({ token }: { token: string }) {
           openFile(path, line);
         }
       }}
-      className="cursor-pointer text-sky-400 underline-offset-2 hover:underline"
+      // `file-link` is the stable hook colored surfaces (inline-code chips,
+      // user bubbles) use to override the link color with their own foreground
+      // token — a prose-safe link color is still illegible/indistinguishable
+      // on a solid accent/primary surface (e.g. github-dark accent #58a6ff).
+      // See MessageBubble.tsx. `text-link` is palette-derived (useTheme
+      // computeThemeVars), AA-checked on muted + background for every theme.
+      className="file-link cursor-pointer text-link underline-offset-2 hover:underline"
     >
       {token}
     </span>

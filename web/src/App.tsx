@@ -874,8 +874,8 @@ function HomeApp() {
           </div>
           </Tabs>
 
-          {/* Status bar — only on chat sub-tab */}
-          {activeView === "sessions" && activeSessionTab?.activeSubTab === "chat" && (
+          {/* Status bar — only on chat sub-tab; hidden when terminal is focused */}
+          {activeView === "sessions" && activeSessionTab?.activeSubTab === "chat" && focusedKind === "chat" && (
             <StatusBar
               onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
               onStatusClick={() => {
