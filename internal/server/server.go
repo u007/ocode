@@ -469,6 +469,23 @@ func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 	s.browse = bs
 	s.mux.HandleFunc("GET /api/browse/config", s.authMiddleware(s.handleBrowseConfig))
 	s.mux.HandleFunc("POST /api/browse/grant", s.authMiddleware(s.handleBrowseGrant))
+	// Bridge server-authoritative nav events onto the SSE bus. The first
+	// publisher arg (stateKey) is redundant with ev.StateKey — ignore it and
+	// treat ev.StateKey as the single source of truth so the SPA and the bus
+	// never disagree.
+	bs.SetNavPublisher(func(_ string, ev browse.NavEvent) {
+		s.publishBrowseNav(ev)
+	})
+}
+
+// publishBrowseNav fans a browse NavEvent onto the unified bus as a
+// project/global-scoped event. The stateKey rides inside ev.Data — it is NOT
+// the bus session id, so "browse_nav" must never be added to
+// sessionScopedEvents. The SPA's existing EventSource picks it up and routes
+// by data.state_key (see web browserStore.applyNavEvent, Part 08).
+// SSE payload shape: event "browse_nav", data {state_key, url, status, mode, error?}.
+func (s *Server) publishBrowseNav(ev browse.NavEvent) {
+	s.handler.bus.Publish("browse_nav", "", "", ev)
 }
 
 // StartBrowse stands up the isolated browse origin: a second loopback

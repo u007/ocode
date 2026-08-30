@@ -57,15 +57,22 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
 		ModifyResponse: func(resp *http.Response) error {
 			// Never let the dev server install a service worker via header.
 			resp.Header.Del("Service-Worker-Allowed")
+			// Terminal nav event for the top-level document (Part 07: one
+			// loading + one terminal per navigation, never per subresource).
+			if isDocumentRequest(r) {
+				s.emitNav(NavEvent{StateKey: t.StateKey, URL: t.Scheme + "://" + t.Host + t.Path, Status: resp.StatusCode, Mode: "local"})
+			}
 			ct := resp.Header.Get("Content-Type")
 			if !strings.HasPrefix(ct, "text/html") {
 				return nil // stream everything non-HTML untouched
 			}
 			return s.injectCaptureIntoResponse(resp, t.StateKey)
 		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			s.log.Printf("browse local: proxy error for %s://%s%s: %v", t.Scheme, t.Host, t.Path, err)
-			s.emitNav(NavEvent{StateKey: t.StateKey, URL: upstream.String() + t.Path, Status: http.StatusBadGateway, Mode: "local", Error: err.Error()})
+			if isDocumentRequest(r) {
+				s.emitNav(NavEvent{StateKey: t.StateKey, URL: upstream.String() + t.Path, Status: http.StatusBadGateway, Mode: "local", Error: err.Error()})
+			}
 			http.Error(w, "browse: upstream unreachable", http.StatusBadGateway)
 		},
 	}

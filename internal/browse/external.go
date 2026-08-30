@@ -33,11 +33,18 @@ func (s *Server) handleExternal(w http.ResponseWriter, r *http.Request, t target
 	origin := upstreamOrigin(t)
 	upURL := &url.URL{Scheme: t.Scheme, Host: t.Host, Path: t.Path, RawQuery: t.RawQuery}
 
+	// Loading nav event for top-level document navigations only, before any
+	// upstream round-trip, so the SPA shows "navigating" even if the fetch
+	// later fails (Part 07: exactly one loading + one terminal per nav).
+	if isDocumentRequest(r) {
+		s.emitNav(NavEvent{StateKey: t.StateKey, URL: origin + t.Path, Status: 0, Mode: "proxied"})
+	}
+
 	body := r.Body // streamed through for POST/PUT/etc.
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, upURL.String(), body)
 	if err != nil {
 		s.log.Printf("browse: build upstream request %s: %v", upURL, err)
-		s.failNav(w, t, "bad upstream request")
+		s.failNav(w, r, t, "bad upstream request")
 		return
 	}
 	// Copy safe request headers, then sanitize.
@@ -53,7 +60,7 @@ func (s *Server) handleExternal(w http.ResponseWriter, r *http.Request, t target
 	resp, err := client.Do(req)
 	if err != nil {
 		s.log.Printf("browse: upstream fetch %s failed: %v", upURL, err)
-		s.failNav(w, t, classifyFetchError(err))
+		s.failNav(w, r, t, classifyFetchError(err))
 		return
 	}
 	defer resp.Body.Close()
@@ -70,7 +77,7 @@ func (s *Server) handleExternal(w http.ResponseWriter, r *http.Request, t target
 		gz, gerr := gzip.NewReader(resp.Body)
 		if gerr != nil {
 			s.log.Printf("browse: gzip reader for %s: %v", upURL, gerr)
-			s.failNav(w, t, "decode error")
+			s.failNav(w, r, t, "decode error")
 			return
 		}
 		defer gz.Close()
@@ -85,8 +92,11 @@ func (s *Server) handleExternal(w http.ResponseWriter, r *http.Request, t target
 	isHTML := strings.Contains(ct, "text/html")
 	isCSS := strings.Contains(ct, "text/css")
 
-	// Emit the authoritative nav event for the top-level document only.
-	if isHTML && r.Header.Get("Sec-Fetch-Dest") != "image" {
+	// Emit the authoritative terminal nav event for the top-level document
+	// only (Part 07 guard: never per-subresource, never for image/script/
+	// style/font/fetch dests). Emitted for any Content-Type so a download or
+	// JSON doc still closes the loading event.
+	if isDocumentRequest(r) {
 		s.emitNav(NavEvent{StateKey: t.StateKey, URL: origin + t.Path, Status: resp.StatusCode, Mode: "proxied"})
 	}
 
@@ -105,7 +115,7 @@ func (s *Server) handleExternal(w http.ResponseWriter, r *http.Request, t target
 	buf, err := io.ReadAll(limited)
 	if err != nil {
 		s.log.Printf("browse: read body %s: %v", upURL, err)
-		s.failNav(w, t, "read error")
+		s.failNav(w, r, t, "read error")
 		return
 	}
 	if len(buf) > maxRewriteBytes {
@@ -138,8 +148,13 @@ func (s *Server) handleExternal(w http.ResponseWriter, r *http.Request, t target
 	}
 }
 
-func (s *Server) failNav(w http.ResponseWriter, t target, reason string) {
-	s.emitNav(NavEvent{StateKey: t.StateKey, URL: upstreamOrigin(t) + t.Path, Mode: "proxied", Error: reason})
+// failNav emits the terminal nav event for a failed navigation — but only
+// for top-level document requests (Part 07 guard): a failed subresource must
+// not rewrite the address bar. The HTTP error response is sent either way.
+func (s *Server) failNav(w http.ResponseWriter, r *http.Request, t target, reason string) {
+	if isDocumentRequest(r) {
+		s.emitNav(NavEvent{StateKey: t.StateKey, URL: upstreamOrigin(t) + t.Path, Status: http.StatusBadGateway, Mode: "proxied", Error: reason})
+	}
 	http.Error(w, "browse: "+reason, http.StatusBadGateway)
 }
 
