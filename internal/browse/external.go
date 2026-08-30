@@ -184,14 +184,12 @@ func copyHeader(dst, src http.Header) {
 }
 
 // ----------------------------------------------------------------------------
-// PROVIDED BY PARTS 04/05 — remove these shims when implementing those parts.
-// Identity passthrough so Part 03 compiles and its tests (headers/cookies/SW/
-// caps/nav) pass before the rewrite engine and capture script exist.
+// PROVIDED BY PART 05 — remove this shim when implementing the capture script.
+// Identity passthrough so Part 03/04 compile and their tests pass before the
+// capture script exists.
 // ----------------------------------------------------------------------------
 
-func rewriteHTML(body []byte, _ target, _ string) ([]byte, error) { return body, nil }
-func rewriteCSS(body []byte, _ target) []byte                     { return body }
-func injectCapture(html []byte, _ string, _ string) []byte        { return html }
+func injectCapture(html []byte, _ string, _ string) []byte { return html }
 
 // ----------------------------------------------------------------------------
 // PROVIDED BY PART 06 — remove when implementing local mode.
