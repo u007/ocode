@@ -25,6 +25,18 @@ type Server struct {
 	log      *log.Logger
 	mux      *http.ServeMux
 	publish  func(stateKey string, ev NavEvent)
+
+	// transport is the guarded upstream transport. External mode constructs
+	// it with allowPrivate=false (Part 02 dialer re-validates every connect,
+	// including redirect hops). Tests override it with allowPrivate=true to
+	// reach httptest loopback upstreams.
+	transport *http.Transport
+	// jar holds upstream cookies server-side, keyed by (stateKey, origin);
+	// site cookies never reach the browser (see cookiejar.go).
+	jar *cookieJar
+	// spaOrigin is the main (SPA) origin, set via EnableBrowse wiring; used
+	// as the exact postMessage targetOrigin by the capture script (Part 05).
+	spaOrigin string
 }
 
 func New(apiToken string, logger *log.Logger) *Server {
@@ -32,9 +44,16 @@ func New(apiToken string, logger *log.Logger) *Server {
 		logger = log.Default()
 	}
 	s := &Server{apiToken: apiToken, auth: newAuthStore(), log: logger, mux: http.NewServeMux()}
+	s.transport = newSafeTransport(false) // external mode: private IPs blocked
+	s.jar = newCookieJar()
 	s.mux.HandleFunc("/b/", s.handleBrowse)
 	return s
 }
+
+// SetSPAOrigin records the main (SPA) origin so proxied HTML can carry the
+// exact postMessage targetOrigin for capture-script telemetry (Part 05).
+// Called once from the main server's EnableBrowse wiring at boot.
+func (s *Server) SetSPAOrigin(o string) { s.spaOrigin = o }
 
 func (s *Server) Handler() http.Handler { return s.mux }
 
@@ -83,10 +102,9 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "browse: state key mismatch", http.StatusForbidden)
 		return
 	}
-	// Stub until Part 03/06. Parts 03/06 replace this with real external/local
-	// proxying; emitNav stays unwired here because the SSE publisher arrives
-	// with Part 07's navevents.go.
-	w.Header().Set("Content-Type", "text/plain")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("browse ok: " + t.Scheme + "://" + t.Host + t.Path))
+	if t.Local {
+		s.handleLocal(w, r, t) // provided by Part 06 (shimmed to external for now)
+		return
+	}
+	s.handleExternal(w, r, t)
 }

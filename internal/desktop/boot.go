@@ -83,7 +83,7 @@ func StartServer(webFS fs.FS, workDir string) (*Handle, error) {
 	// origin, backing the embedded browser panel. Failing to bind it means
 	// the panel cannot work at all, so boot fails loudly rather than
 	// silently serving a half-functional UI.
-	if err := server.StartBrowse(srv, token); err != nil {
+	if err := server.StartBrowse(srv, token, url); err != nil {
 		return nil, fmt.Errorf("desktop: %w", err)
 	}
 

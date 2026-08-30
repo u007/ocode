@@ -476,9 +476,13 @@ func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 // 127.0.0.1:0, registers the SPA-facing endpoints on srv, and serves in a
 // background goroutine. token is the main-origin API token, handed to the
 // browse server for future grant-validation needs (never exposed on browse
-// responses). Callers: desktop boot and the CLI serve path.
-func StartBrowse(srv *Server, token string) error {
+// responses). spaOrigin is the main server's actual bound origin (e.g.
+// "http://127.0.0.1:4096") — callers must pass the address from their bound
+// listener, not srv.Addr(), which keeps the literal ":0" when the port was
+// requested as random. Callers: desktop boot and the CLI serve path.
+func StartBrowse(srv *Server, token string, spaOrigin string) error {
 	bs := browse.New(token, log.Default())
+	bs.SetSPAOrigin(spaOrigin)
 	bln, bBase, err := bs.Listen("127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("browse listen: %w", err)
@@ -907,8 +911,9 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	// Browse origin for the embedded browser panel. The panel is additive:
 	// a bind failure is logged loudly but does not kill the main server.
 	// password doubles as the main-origin API token here (empty when the
-	// serve process runs unauthenticated).
-	if err := StartBrowse(srv, password); err != nil {
+	// serve process runs unauthenticated). The SPA origin comes from the
+	// bound listener — with -port 0 the requested addr is not the real one.
+	if err := StartBrowse(srv, password, "http://"+ln.Addr().String()); err != nil {
 		log.Printf("server: browse origin unavailable, browser panel disabled: %v", err)
 	}
 

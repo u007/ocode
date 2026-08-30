@@ -35,14 +35,33 @@ func navAndServe(t *testing.T, s *Server, stateKey, path string) *httptest.Respo
 	return w2
 }
 
-func TestAuthenticatedNavigationReturnsStub(t *testing.T) {
+// TestAuthenticatedNavigationProxiesExternal replaces the Part-01 stub
+// assertion: an authenticated navigation must now reach handleBrowse's real
+// dispatch. The loopback httptest upstream parses as Local, so this also
+// exercises the (Part-06-shimmed) local branch end to end through the mux.
+func TestAuthenticatedNavigationProxiesExternal(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/foo" {
+			t.Errorf("upstream saw path %q, want /foo", r.URL.Path)
+		}
+		w.Header().Set("X-Frame-Options", "DENY") // must not survive proxying
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("browse ok: proxied"))
+	}))
+	defer upstream.Close()
+
 	s := New("apitoken", nil)
-	w := navAndServe(t, s, "tab:abc", "/b/tab:abc/https/example.com/foo")
+	s.transport = newSafeTransport(true) // loopback upstream reachable in tests
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	w := navAndServe(t, s, "tab:abc", "/b/tab:abc/http/"+host+"/foo")
 	if w.Code != http.StatusOK {
-		t.Fatalf("stub nav: got %d want 200", w.Code)
+		t.Fatalf("proxied nav: got %d want 200", w.Code)
 	}
-	if body := w.Body.String(); !strings.HasPrefix(body, "browse ok: https://example.com/foo") {
-		t.Fatalf("unexpected stub body %q", body)
+	if body := w.Body.String(); !strings.HasPrefix(body, "browse ok: proxied") {
+		t.Fatalf("unexpected proxied body %q", body)
+	}
+	if w.Header().Get("X-Frame-Options") != "" {
+		t.Errorf("X-Frame-Options leaked through dispatch: %q", w.Header().Get("X-Frame-Options"))
 	}
 }
 
