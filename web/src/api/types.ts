@@ -331,6 +331,33 @@ export interface GitDiffFile {
   patch: string;
 }
 
+/** One commit in the Git tab's commit list. */
+export interface GitCommit {
+  hash: string;
+  short: string;
+  message: string;
+  author: string;
+  email: string;
+  /** ISO-8601 timestamp from git (--date=iso-strict). */
+  date: string;
+}
+
+/** Full SourceTree-style snapshot: status + staged diffs + unstaged diffs. */
+export interface GitWorkspace {
+  status: GitStatus;
+  staged: GitDiffFile[];
+  unstaged: GitDiffFile[];
+}
+
+export type GitHunkAction = "stage" | "unstage" | "discard";
+
+export interface GitHunkRequest {
+  path: string;
+  hunk_index: number;
+  action: GitHunkAction;
+  staged: boolean;
+}
+
 export interface ThemeColors {
   user: string;
   assistant: string;

@@ -60,10 +60,12 @@ export function AssistantText({ content }: { content: string }) {
                 if (isInline) {
                   return (
                     <code
-                      // File links inside a chip must use the chip's own
-                      // foreground token — FileLink's prose default text-link
-                      // is illegible on the solid accent surface (github-dark).
-                      className="rounded bg-accent text-accent-foreground px-1.5 py-0.5 text-xs [&_.file-link]:text-accent-foreground [&_.file-link]:underline"
+                      // Same surface as fenced blocks: bg-card is the page
+                      // background, so chips read as a dark inset on dark
+                      // themes (bg-accent is the palette's highlight colour —
+                      // solid white on github-dark). text-link is contrast-
+                      // checked against background, so file links keep it.
+                      className="rounded border border-border bg-card text-foreground px-1.5 py-0.5 text-xs [&_.file-link]:underline"
                       {...props}
                     >
                       {children}
@@ -121,7 +123,7 @@ export function AssistantText({ content }: { content: string }) {
                 </div>
               ),
               th: ({ children }) => (
-                <th className="border border-border px-2 py-1 text-left bg-accent text-accent-foreground [&_.file-link]:text-accent-foreground [&_.file-link]:underline">
+                <th className="border border-border px-2 py-1 text-left font-semibold bg-card text-foreground [&_.file-link]:underline">
                   {children}
                 </th>
               ),

@@ -4115,7 +4115,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case dotTickMsg:
 		if m.streaming || m.lastActivity.LLMRunning || m.compacting || m.cmdRunning() || len(m.lastActivity.ActiveTools) > 0 || !m.detail.empty() || time.Now().Before(m.tokenBlinkUntil) || m.titleRegenerating || m.agent != nil && (m.agent.Procs() != nil && m.agent.Procs().RunningCount() > 0 || m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0) {
-			m.dotFrame = (m.dotFrame + 1) % 4
+			m.dotFrame = (m.dotFrame + 1) % len(spinnerFrames)
 			// Refresh live detail view content.
 			if !m.detail.empty() {
 				m.refreshTopDetailView()
@@ -17906,7 +17906,8 @@ func (m model) renderActivityRow() string {
 	}
 	var parts []string
 	if snap.LLMRunning {
-		parts = append(parts, "⟳ LLM")
+		frame := spinnerFrames[m.dotFrame%len(spinnerFrames)]
+		parts = append(parts, fmt.Sprintf("%s LLM", frame))
 	}
 	if m.retryInfo != nil {
 		// Truncate long error messages to keep the activity row single-line.
@@ -18933,8 +18934,7 @@ func (m *model) renderStatus() string {
 	}
 	llmState := "○ idle"
 	if m.streaming || m.lastActivity.LLMRunning || m.cmdRunning() {
-		dots := [4]string{"●○○", "●●○", "●●●", "○●●"}
-		llmState = dots[m.dotFrame]
+		llmState = spinnerFrames[m.dotFrame%len(spinnerFrames)]
 		if !m.streamStartedAt.IsZero() {
 			elapsed := time.Since(m.streamStartedAt).Round(time.Second)
 			tokStr := ""
@@ -18984,8 +18984,8 @@ func (m *model) renderStatus() string {
 	}
 	compactState := ""
 	if m.compacting {
-		dots := []string{".  ", ".. ", "...", " ..", "  ."}
-		compactState = fmt.Sprintf(" | ▣ compacting%s", dots[m.dotFrame%len(dots)])
+		frame := spinnerFrames[m.dotFrame%len(spinnerFrames)]
+		compactState = fmt.Sprintf(" | %s compacting", frame)
 	}
 	jobState := ""
 	if jc := m.renderJobCounts(); jc != "" {

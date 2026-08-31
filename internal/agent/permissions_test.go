@@ -1794,3 +1794,31 @@ func TestAnnotatePermissionReadResult(t *testing.T) {
 		}
 	}
 }
+
+func TestGitCDangerousConfigHandling(t *testing.T) {
+	cases := []struct {
+		cmd         string
+		wantHarmful bool
+		wantAllow   bool
+	}{
+		{"git status", false, true},
+		{"git ls-remote", false, true},
+		{"git --no-pager log", false, true},
+		{"git -c core.quotepath=false status", false, false},
+		{"git -c protocol.ext.allow=always ls-remote \"ext::echo pwned\"", true, false},
+		{"git -c core.sshCommand='touch /tmp/x' ls-remote ssh://host/repo", true, false},
+		{"git -c a=b -c c=d diff", false, false},
+		{"git -cprotocol.ext.allow=always ls-remote \"ext::echo hi\"", true, false},
+		{"git -c a=b reset --hard", true, false},
+		{"git -c filter.lfs.process=\"echo pwned\" status", true, false},
+		{"git -c url.https://evil.com/.insteadOf=https://github.com/ ls-remote https://github.com/foo", true, false},
+	}
+	for _, tc := range cases {
+		if got := IsHarmfulBashCommand(tc.cmd); got != tc.wantHarmful {
+			t.Errorf("IsHarmfulBashCommand(%q)=%v want %v", tc.cmd, got, tc.wantHarmful)
+		}
+		if got := matchSubcommandAllow(tc.cmd); got != tc.wantAllow {
+			t.Errorf("matchSubcommandAllow(%q)=%v want %v", tc.cmd, got, tc.wantAllow)
+		}
+	}
+}

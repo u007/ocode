@@ -12,13 +12,14 @@ import MessageBubble, { AssistantText } from "./MessageBubble";
 // contract MessageBubble.test.tsx uses for theme-surface classes.
 
 describe("FileLink surface overrides", () => {
-  it("inline-code chips override the link color with the accent foreground", () => {
+  it("inline-code chips sit on the card surface (never the accent highlight) and keep text-link", () => {
     const { container } = render(<AssistantText content={"edit `web/src/App.tsx` now"} />);
     const chip = container.querySelector("code");
     expect(chip).not.toBeNull();
-    expect(chip!.className).toContain("bg-accent");
-    expect(chip!.className).toContain("text-accent-foreground");
-    expect(chip!.className).toContain("[&_.file-link]:text-accent-foreground");
+    expect(chip!.className).toContain("bg-card");
+    expect(chip!.className).toContain("text-foreground");
+    expect(chip!.className).not.toContain("bg-accent");
+    expect(chip!.className).not.toContain("[&_.file-link]:text-accent-foreground");
     expect(chip!.className).toContain("[&_.file-link]:underline");
     const link = chip!.querySelector('[role="link"]') as HTMLElement;
     expect(link).not.toBeNull();
@@ -52,12 +53,13 @@ describe("FileLink surface overrides", () => {
     expect(link.className).toContain("text-link");
   });
 
-  it("table header cells override the link color with the accent foreground", () => {
+  it("table header cells sit on the card surface and keep text-link", () => {
     const { container } = render(
       <AssistantText content={"| File |\n| --- |\n| `web/src/App.tsx` |"} />,
     );
     const th = container.querySelector("th");
     expect(th).not.toBeNull();
-    expect(th!.className).toContain("[&_.file-link]:text-accent-foreground");
+    expect(th!.className).toContain("bg-card");
+    expect(th!.className).not.toContain("bg-accent");
   });
 });

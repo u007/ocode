@@ -40,6 +40,19 @@ func (s *Server) handleExternal(w http.ResponseWriter, r *http.Request, t target
 		s.emitNav(NavEvent{StateKey: t.StateKey, URL: origin + t.Path, Status: 0, Mode: "proxied"})
 	}
 
+	// Per-stateKey upstream concurrency cap (spec § External mode limits).
+	// The slot is held for the whole handler — through resp.Body consumption
+	// — so slow-streaming bodies keep counting against the cap, which is what
+	// "concurrent upstream connections" means. The queue wait is bounded (see
+	// upstreamSlotWait); a client disconnect while queued abandons cleanly.
+	release, cerr := s.conns.acquire(r.Context(), t.StateKey)
+	if cerr != nil {
+		s.log.Printf("browse: upstream cap hit for %s %s: %v", t.StateKey, upURL, cerr)
+		s.failBusy(w, r, t, "proxied")
+		return
+	}
+	defer release()
+
 	body := r.Body // streamed through for POST/PUT/etc.
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, upURL.String(), body)
 	if err != nil {

@@ -101,6 +101,20 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
 		})
 	}
 
+	// Per-stateKey upstream concurrency cap (spec § External mode limits,
+	// extended to local mode — same upstream resource). ReverseProxy.ServeHTTP
+	// blocks for the whole exchange, including a hijacked WebSocket tunnel
+	// (handleUpgradeResponse waits for both copy directions to finish), so the
+	// slot is held for the connection's full lifetime and a long-lived WS
+	// counts against the 32 — exactly what the cap is meant to bound.
+	release, cerr := s.conns.acquire(r.Context(), t.StateKey)
+	if cerr != nil {
+		s.log.Printf("browse local: upstream cap hit for %s://%s%s: %v", t.Scheme, t.Host, t.Path, cerr)
+		s.failBusy(w, r, t, "local")
+		return
+	}
+	defer release()
+
 	proxy.ServeHTTP(w, r)
 }
 

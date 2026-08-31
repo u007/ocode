@@ -539,6 +539,62 @@ interface PromptState {
   onConfirm: (value: string) => void;
 }
 
+// In-app replacement for window.confirm(): native JS dialogs are not supported
+// in the Wails/WKWebView desktop webview (confirm() silently returns false), so
+// the delete flow must use a rendered dialog like every other confirmation.
+function ConfirmDeleteDialog({
+  paths,
+  onCancel,
+  onConfirm,
+}: {
+  paths: string[];
+  onCancel: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [deleting, setDeleting] = useState(false);
+  const shown = paths.slice(0, 5);
+  const rest = paths.length - shown.length;
+  return (
+    <Dialog open onOpenChange={(o) => !o && !deleting && onCancel()}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle className="text-sm">
+            Delete {paths.length} item{paths.length === 1 ? "" : "s"}?
+          </DialogTitle>
+        </DialogHeader>
+        <p className="text-xs text-muted-foreground">This cannot be undone.</p>
+        <ul className="mt-2 space-y-0.5 max-h-36 overflow-y-auto rounded border border-border p-2">
+          {shown.map((p) => (
+            <li key={p} className="font-mono text-[11px] text-foreground truncate" title={p}>
+              {p}
+            </li>
+          ))}
+          {rest > 0 && <li className="text-[11px] text-muted-foreground/70">…and {rest} more</li>}
+        </ul>
+        <div className="flex justify-end gap-2 mt-3">
+          <Button variant="ghost" onClick={onCancel} disabled={deleting}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            disabled={deleting}
+            onClick={async () => {
+              setDeleting(true);
+              try {
+                await onConfirm();
+              } finally {
+                setDeleting(false);
+              }
+            }}
+          >
+            {deleting ? "Deleting…" : "Delete"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function PromptDialog({ state, onCancel }: { state: PromptState | null; onCancel: () => void }) {
   const [value, setValue] = useState("");
   useEffect(() => {
@@ -615,6 +671,10 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
     mode: SecretMode;
   } | null>(null);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
+  // Snapshot of paths awaiting delete confirmation. Native window.confirm() is
+  // unsupported in the Wails/WKWebView desktop webview, so deletion goes through
+  // a rendered dialog (ConfirmDeleteDialog) instead.
+  const [pendingDelete, setPendingDelete] = useState<string[] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -913,17 +973,41 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
   );
 
   const runFs = useCallback(
-    async (fn: () => Promise<unknown>) => {
+    async (fn: () => Promise<unknown>): Promise<boolean> => {
       try {
         await fn();
         showNotice("Done");
         refresh();
+        return true;
       } catch (err) {
         showNotice(`Error: ${(err as Error).message}`);
+        return false;
       }
     },
     [refresh, showNotice],
   );
+
+  const confirmDelete = useCallback(async () => {
+    const paths = pendingDelete;
+    if (!paths || paths.length === 0) return;
+    const ok = await runFs(async () => {
+      await api.fsDelete(paths, activeRoot);
+      window.dispatchEvent(
+        new CustomEvent("ocode:fs-delete", { detail: { paths, projectRoot: activeRoot } }),
+      );
+    });
+    // Close and prune the selection only on success; on failure keep the dialog
+    // open so the user can retry after seeing the error notice.
+    if (ok) {
+      setPendingDelete(null);
+      setSelectedPaths((prev) => {
+        if (prev.size === 0) return prev;
+        const next = new Set(prev);
+        for (const p of paths) next.delete(p);
+        return next;
+      });
+    }
+  }, [pendingDelete, activeRoot, runFs]);
 
   const menu: FileMenuActions = {
     isGitRepo,
@@ -962,11 +1046,8 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
       });
     },
     remove: (paths) => {
-      if (!confirm(`Delete ${paths.length} item(s)? This cannot be undone.`)) return;
-      runFs(async () => {
-        await api.fsDelete(paths, activeRoot);
-        window.dispatchEvent(new CustomEvent("ocode:fs-delete", { detail: { paths, projectRoot: activeRoot } }));
-      });
+      // Snapshot into dialog state; selection can change while the dialog is open.
+      setPendingDelete(paths);
     },
     rename: (path) => {
       const name = path.split("/").pop() || "";
@@ -1240,6 +1321,13 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
         />
       )}
       <PromptDialog state={prompt} onCancel={() => setPrompt(null)} />
+      {pendingDelete && (
+        <ConfirmDeleteDialog
+          paths={pendingDelete}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDelete}
+        />
+      )}
     </div>
   );
 }

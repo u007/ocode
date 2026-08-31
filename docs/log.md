@@ -11,6 +11,17 @@
 
 
 
+
+## 2026-08-31
+
+* **Update**: V1 Connection Cap Exclusion — Embedded Browser Panel ([architecture/v1-connection-cap-exclusion.md](/architecture/v1-connection-cap-exclusion.md))
+* **Update**: V1 Connection Cap Exclusion — Embedded Browser Panel ([architecture/v1-connection-cap-exclusion.md](/architecture/v1-connection-cap-exclusion.md))
+* **Update**: V1 Connection Cap Exclusion — Embedded Browser Panel ([architecture/v1-connection-cap-exclusion.md](/architecture/v1-connection-cap-exclusion.md))
+* **Update**: V1 Connection Cap Exclusion — Embedded Browser Panel ([architecture/v1-connection-cap-exclusion.md](/architecture/v1-connection-cap-exclusion.md))
+* **Update**: V1 Connection Cap Exclusion — Embedded Browser Panel ([architecture/v1-connection-cap-exclusion.md](/architecture/v1-connection-cap-exclusion.md))
+* **Creation**: Auto-Permission — Interpreter Scripts in Compound Commands ([gotchas/auto-permission-interpreter-scripts-in-compound-commands.md](/gotchas/auto-permission-interpreter-scripts-in-compound-commands.md))
+* **Creation**: Embedded Browser — WebSocket Proxy 404 ([gotchas/embedded-browser-websocket-proxy-404.md](/gotchas/embedded-browser-websocket-proxy-404.md))
+* **Creation**: V1 Connection Cap Exclusion — Embedded Browser Panel ([architecture/v1-connection-cap-exclusion.md](/architecture/v1-connection-cap-exclusion.md))
 ## 2026-08-30
 
 * **Creation**: Journal DB Connection Pool Leak ([gotchas/journal-db-connection-pool-leak.md](/gotchas/journal-db-connection-pool-leak.md))

@@ -79,4 +79,76 @@ describe("useSessionStatus", () => {
     expect(warn.mock.calls[0][0]).toContain("s1");
     warn.mockRestore();
   });
+
+  // ── Context-field contract ────────────────────────────────────────────
+  // TUIStatus uses `json:"context_current_tokens,omitempty"` etc., so 0 is
+  // *omitted* (absent) on the wire, never `null` and never `0` (omitempty
+  // drops 0). `/api/sessions/{id}/context` instead always writes numeric
+  // zeros: `estimated_tokens: totalChars/4` (0 for empty transcript).
+  it("propagates context_current_tokens / context_max_tokens when present", async () => {
+    mockGetSessionStatus.mockResolvedValue({
+      session_id: "s1",
+      context_current_tokens: 96352,
+      context_max_tokens: 1048576,
+      context_model: "opencode-go/muse-spark-1.2-contributor",
+    });
+    renderHook(() => useSessionStatus("s1"), { wrapper: Wrapper });
+    await waitFor(() => expect(mockGetSessionStatus).toHaveBeenCalledTimes(1));
+    expect(mockGetSessionStatus).toHaveBeenCalledWith("s1");
+  });
+
+  it("handles empty-message transcript (0 tokens omitted, not null)", async () => {
+    // Empty session: HandleSessionContext returns estimated_tokens: 0, max_tokens: window;
+    // HandleSessionStatus omits context_current_tokens/context_max_tokens when 0
+    // (omitempty) — never `null`.
+    mockGetSessionStatus.mockResolvedValue({
+      session_id: "empty",
+      context_max_tokens: 1048576,
+      context_model: "opencode-go/muse-spark-1.2-contributor",
+      // context_current_tokens intentionally absent — not `null`, not `0`
+    });
+    renderHook(() => useSessionStatus("empty"), { wrapper: Wrapper });
+    await waitFor(() => expect(mockGetSessionStatus).toHaveBeenCalledTimes(1));
+    expect(mockGetSessionStatus).toHaveBeenCalledWith("empty");
+  });
+
+  // ── Cross-process staleness: 15s poll + visibility ─────────────────────
+  it("polls every 15s to recover from cross-process staleness (TUI vs desktop headless)", async () => {
+    vi.useFakeTimers();
+    mockGetSessionStatus.mockResolvedValue({ session_id: "s1" });
+    renderHook(() => useSessionStatus("s1"), { wrapper: Wrapper });
+    expect(mockGetSessionStatus).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(mockGetSessionStatus).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(mockGetSessionStatus).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+  });
+
+  it("refreshes on visibilitychange when document becomes visible", async () => {
+    // visibility listener is added in the effect; dispatching the event
+    // should trigger a background refetch (fetchStatus(false)).
+    mockGetSessionStatus.mockResolvedValue({ session_id: "s1" });
+    renderHook(() => useSessionStatus("s1"), { wrapper: Wrapper });
+    expect(mockGetSessionStatus).toHaveBeenCalledTimes(1);
+    Object.defineProperty(document, "visibilityState", { value: "visible", writable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(mockGetSessionStatus).toHaveBeenCalledTimes(2));
+  });
+
+  it("cleans up interval and visibility listener on unmount", async () => {
+    vi.useFakeTimers();
+    mockGetSessionStatus.mockResolvedValue({ session_id: "s1" });
+    const { unmount } = renderHook(() => useSessionStatus("s1"), { wrapper: Wrapper });
+    expect(mockGetSessionStatus).toHaveBeenCalledTimes(1);
+    unmount();
+    await vi.advanceTimersByTimeAsync(15000);
+    // No extra fetch after unmount — interval was cleared.
+    expect(mockGetSessionStatus).toHaveBeenCalledTimes(1);
+    Object.defineProperty(document, "visibilityState", { value: "visible", writable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(mockGetSessionStatus).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
 });

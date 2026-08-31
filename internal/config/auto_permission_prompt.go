@@ -24,7 +24,7 @@ import (
 // This text is intentionally separate from permissions.auto.prompt in
 // ocodeconfig.json: that field is the user's own free-form override and
 // must never be silently overwritten by a bundled update.
-const BundledAutoPermissionPromptVersion = "1.7.0"
+const BundledAutoPermissionPromptVersion = "1.8.0"
 
 // BundledAutoPermissionPromptBody is the shipped default addendum. Bump
 // BundledAutoPermissionPromptVersion whenever this changes.
@@ -41,7 +41,7 @@ const BundledAutoPermissionPromptBody = `Always ALLOW these git commands without
 - "git rev-parse" — resolves refs/paths; read-only.
 - "git describe" — describes a commit; read-only.
 - "git help", "git version", "git var" — help/version introspection; read-only.
-- The "git -c <key>=<value>" wrapper (including repeated "-c" and mixed with "-C <path>", "--no-pager", "--git-dir", "--work-tree") is transparent — treat "git -c core.quotepath=false status" as "git status" and "git -c ... log" as "git log". Only the underlying subcommand's safety matters; e.g. "git -c alias.foo=... reset --hard" is still destructive and must NOT be auto-allowed. Repeated "-c" (e.g. "git -c a=b -c c=d diff") is likewise transparent when the wrapped subcommand is read-only.
+- Commands using "git -c <key>=<value>" (including repeated "-c" and mixed with "-C <path>", "--no-pager", "--git-dir", "--work-tree") are NOT auto-allowed by the code allowlist — you must evaluate them. If the underlying subcommand is read-only (e.g. "git status", "git log", "git diff" with a safe key like "core.quotepath"), the wrapper does not make it mutating and it is safe to ALLOW. Do NOT ALLOW if the -c key is security-sensitive — "protocol.*.allow" (enables ext::), "core.sshCommand", "core.pager", "core.editor", "core.hooksPath", "filter.*", "url.*.insteadOf", "credential.helper" — even when the underlying subcommand is read-only; those require human approval. Repeated "-c" is handled the same way.
 - All other git subcommands that are primarily read-only (e.g. "git ls-tree", "git ls-remote", "git reflog", "git shortlog", "git cat-file", "git check-ignore", "git grep", "git name-rev", "git for-each-ref", "git rev-list") are also safe to ALLOW when they do not carry destructive flags. Do not auto-allow mutating forms like "git branch -D", "git tag -d", "git remote remove", "git config --unset", "git worktree remove", or "git notes add".
 - "curl"/"wget"/"http"/"https" targeting localhost, 127.0.0.0/8, or ::1 (any port/path, including with auth headers or request bodies) — loopback-only traffic stays on-host and cannot exfiltrate data off-machine.
 

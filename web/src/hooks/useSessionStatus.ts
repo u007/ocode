@@ -49,9 +49,25 @@ export function useSessionStatus(sessionId: string | null): void {
     fetchStatus(true);
     // Refresh on reconnect so status recovers after a disconnect.
     const offReconnect = eventBus.onReconnect(() => fetchStatus(false));
+    // Cross-process staleness: a TUI-driven session can grow on a different
+    // server process (the TUI's RC bridge) without the desktop's headless
+    // server broadcasting a `status` event. The desktop's estimate is then
+    // stale (e.g. 200 tokens while the TUI shows 130k). A lightweight poll
+    // while the tab is active keeps the gauge in sync without requiring a
+    // file watcher on the backend. 15s is a balance between freshness and
+    // load; the fetch is a single cheap `LoadForDir` + chars/4.
+    const interval = window.setInterval(() => fetchStatus(false), 15000);
+    // Also refresh when the tab becomes visible again (user switches back
+    // from another browser tab or the desktop window regains focus).
+    const onVisible = () => {
+      if (document.visibilityState === "visible") fetchStatus(false);
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       offReconnect();
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [sessionId, dispatch]);
 }

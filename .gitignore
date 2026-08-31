@@ -56,7 +56,9 @@ build_script.sh
 web/node_modules/
 # Stray root-level node_modules (e.g. a leftover .vite dir) must never be committed
 node_modules/
-web/dist/assets/
+web/dist/*
+!web/dist/.gitkeep
+*.tsbuildinfo
 internal/agent/models-snapshot.json
 ocodeconfig.json
 .opencode/snapshots
@@ -77,4 +79,7 @@ cmd/ocode-desktop/embedded-assets/skills/
 cmd/ocode-desktop/embedded-assets/.opencode/
 cmd/ocode-desktop/embedded-assets/*.OCODE.md
 /*.log
+
+# Superpowers brainstorm runtime state (generated)
+.superpowers/
 

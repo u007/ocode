@@ -1786,3 +1786,7 @@ Shipped in the 2026-08-30 embedded-browser-panel plan; these are explicitly NOT 
 - Multiple browser sub-tabs inside a single panel.
 - Promoting a side panel to a standalone browser tab (side panel and browser
   tab keep independent state).
+- Per-stateKey concurrent upstream connection cap (32, spec § External mode
+  limits): explicitly EXCLUDED from v1 acceptance — no plan part owned it.
+  Needs a follow-up that adds a semaphore around handleExternal/handleLocal
+  upstream work.

@@ -8,6 +8,9 @@ import type {
   AgentRun,
   GitStatus,
   GitDiffFile,
+  GitCommit,
+  GitWorkspace,
+  GitHunkRequest,
   ThemeResponse,
   TUIStatus,
   LSPStatus,
@@ -455,13 +458,36 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ backend_url }),
     }),
-  getGitDiff: (path?: string, project?: string) => {
+  getGitDiff: (path?: string, project?: string, staged?: boolean) => {
     const params = new URLSearchParams();
     if (path) params.set("path", path);
     if (project) params.set("project", project);
+    if (staged) params.set("staged", "true");
     const query = params.toString();
     return fetchJSON<GitDiffFile[]>(`/api/git/diff${query ? `?${query}` : ""}`);
   },
+
+  /** One-shot SourceTree-style snapshot: status + staged + unstaged diffs. */
+  getGitWorkspace: (project?: string) =>
+    fetchJSON<GitWorkspace>(`/api/git/workspace${projQuery(project)}`),
+
+  /** Recent commits, newest first. */
+  gitLog: (project?: string, limit = 50) =>
+    fetchJSON<GitCommit[]>(`/api/git/log${projQuery(project)}${project ? "&" : "?"}limit=${limit}`),
+
+  /** Diff of a single commit (for the commit detail pane). */
+  gitShow: (commit: string, project?: string) => {
+    const params = new URLSearchParams({ commit });
+    if (project) params.set("project", project);
+    return fetchJSON<GitDiffFile[]>(`/api/git/show?${params.toString()}`);
+  },
+
+  /** Stage / unstage / discard a single hunk; returns the refreshed workspace. */
+  gitHunk: (req: GitHunkRequest, project?: string) =>
+    fetchJSON<GitWorkspace>(`/api/git/hunk${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
 
   // ── Git file actions (driven by the web file-tree context menu) ──
   // The target project is passed as ?project= (the same convention the GET

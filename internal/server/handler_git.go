@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -134,63 +135,208 @@ func gitStatusForDir(dir string) GitStatus {
 }
 
 // HandleGitDiff returns the unified diff for the working tree.
-// Supports ?path= filter for a single file.
+// Supports ?path= filter for a single file and ?staged=true for the index.
 func (h *Handler) HandleGitDiff(w http.ResponseWriter, r *http.Request) {
 	pathFilter := r.URL.Query().Get("path")
+	staged := r.URL.Query().Get("staged") == "true" || r.URL.Query().Get("staged") == "1"
 	dir, ok := h.gitProjectDir(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
 		return
 	}
-	runGit := func(args ...string) (string, error) {
-		return gitRunInDir(dir, args...)
-	}
 
 	// Check if we're in a git repo
-	if _, err := runGit("rev-parse", "--git-dir"); err != nil {
+	if _, err := gitRunInDir(dir, "rev-parse", "--git-dir"); err != nil {
 		writeJSON(w, http.StatusOK, []GitDiffFile{})
 		return
+	}
+
+	writeJSON(w, http.StatusOK, diffFilesForDir(dir, staged, pathFilter))
+}
+
+// GitWorkspace is the full SourceTree-style snapshot of a repo's uncommitted
+// state: branch + status, the staged (index) file diffs, and the unstaged
+// (working-tree + untracked) file diffs. Returned as one payload so the Git
+// tab can render both panes and refresh atomically after every mutation.
+type GitWorkspace struct {
+	Status   GitStatus     `json:"status"`
+	Staged   []GitDiffFile `json:"staged"`
+	Unstaged []GitDiffFile `json:"unstaged"`
+}
+
+// HandleGitWorkspace returns status + staged + unstaged diffs in one request.
+func (h *Handler) HandleGitWorkspace(w http.ResponseWriter, r *http.Request) {
+	dir, ok := h.gitProjectDir(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
+		return
+	}
+	writeJSON(w, http.StatusOK, gitWorkspaceForDir(dir))
+}
+
+// gitWorkspaceForDir computes the full workspace snapshot for dir. A non-repo
+// dir yields an empty, no-changes snapshot (same contract as gitStatusForDir).
+func gitWorkspaceForDir(dir string) GitWorkspace {
+	ws := GitWorkspace{
+		Status:   gitStatusForDir(dir),
+		Staged:   []GitDiffFile{},
+		Unstaged: []GitDiffFile{},
+	}
+	// A non-repo dir: gitStatusForDir already returned an empty status; bail
+	// before the git diff calls emit errors.
+	if ws.Status.Branch == "" && !ws.Status.HasChanges {
+		if _, err := gitRunInDir(dir, "rev-parse", "--git-dir"); err != nil {
+			return ws
+		}
+	}
+	ws.Staged = diffFilesForDir(dir, true, "")
+	ws.Unstaged = diffFilesForDir(dir, false, "")
+	return ws
+}
+
+// diffFilesForDir returns the parsed unified diff of the repo at dir — the
+// index (staged=true) or the working tree plus untracked files (staged=false).
+// A pathFilter (repo-relative) narrows the result to one path. Non-repo or
+// erroring dirs yield an empty slice, never null (the frontend reads .length).
+func diffFilesForDir(dir string, staged bool, pathFilter string) []GitDiffFile {
+	run := func(args ...string) (string, error) {
+		return gitRunInDir(dir, args...)
 	}
 
 	files := make([]GitDiffFile, 0)
 
 	// Get modified/added/deleted files from git diff
 	diffArgs := []string{"diff", "--no-color", "-u"}
+	if staged {
+		diffArgs = append(diffArgs, "--cached")
+	}
 	if pathFilter != "" {
 		diffArgs = append(diffArgs, "--", pathFilter)
 	}
-	if diffOut, err := runGit(diffArgs...); err == nil && diffOut != "" {
+	if diffOut, err := run(diffArgs...); err == nil && diffOut != "" {
 		files = append(files, parseUnifiedDiff(diffOut)...)
 	}
 
-	// Get untracked files
-	statusArgs := []string{"status", "--porcelain", "-u"}
-	if pathFilter != "" {
-		statusArgs = append(statusArgs, "--", pathFilter)
-	}
-	if statusOut, err := runGit(statusArgs...); err == nil {
-		for _, line := range strings.Split(statusOut, "\n") {
-			if len(line) < 4 {
-				continue
-			}
-			statusCode := line[:2]
-			filePath := line[3:]
-			if strings.Contains(statusCode, "?") {
-				// Untracked file — get its content as patch
-				patch := ""
-				if content, err := runGit("diff", "--no-index", "/dev/null", filePath); err != nil {
-					patch = content
+	// The index cannot hold untracked files; only the working-tree diff needs
+	// the untracked pass.
+	if !staged {
+		statusArgs := []string{"status", "--porcelain", "-u"}
+		if pathFilter != "" {
+			statusArgs = append(statusArgs, "--", pathFilter)
+		}
+		if statusOut, err := run(statusArgs...); err == nil {
+			for _, line := range strings.Split(statusOut, "\n") {
+				if len(line) < 4 {
+					continue
 				}
-				files = append(files, GitDiffFile{
-					Path:   filePath,
-					Status: "untracked",
-					Patch:  patch,
-				})
+				statusCode := line[:2]
+				filePath := line[3:]
+				if strings.Contains(statusCode, "?") {
+					// Untracked file — get its content as patch. `git diff
+					// --no-index` exits 1 even on success, so use output only.
+					patch := ""
+					if content, _ := run("diff", "--no-index", "/dev/null", filePath); content != "" {
+						patch = content
+					}
+					files = append(files, GitDiffFile{
+						Path:   filePath,
+						Status: "untracked",
+						Patch:  patch,
+					})
+				}
 			}
 		}
 	}
 
-	writeJSON(w, http.StatusOK, files)
+	return files
+}
+
+// GitCommit describes a single commit for the SourceTree-style log view.
+type GitCommit struct {
+	Hash    string `json:"hash"`
+	Short   string `json:"short"`
+	Message string `json:"message"`
+	Author  string `json:"author"`
+	Email   string `json:"email"`
+	Date    string `json:"date"`
+}
+
+// HandleGitLog returns recent commit history, newest first. Supports
+// ?limit= (clamped to 1..200, default 50) and ?project=.
+func (h *Handler) HandleGitLog(w http.ResponseWriter, r *http.Request) {
+	dir, ok := h.gitProjectDir(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	out, err := gitRunInDir(dir, "log",
+		"-n", strconv.Itoa(limit),
+		"--pretty=format:%H%x00%h%x00%an%x00%ae%x00%aI%x00%s")
+	if err != nil {
+		// Not a repo or no commits yet → empty list (never null).
+		writeJSON(w, http.StatusOK, []GitCommit{})
+		return
+	}
+	commits := make([]GitCommit, 0, limit)
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Split(line, "\x00")
+		if len(fields) < 6 {
+			continue
+		}
+		commits = append(commits, GitCommit{
+			Hash:    fields[0],
+			Short:   fields[1],
+			Author:  fields[2],
+			Email:   fields[3],
+			Date:    fields[4],
+			Message: fields[5],
+		})
+	}
+	writeJSON(w, http.StatusOK, commits)
+}
+
+// HandleGitShow returns the diff of a single commit (?commit=<rev>), parsed
+// through the same unified-diff pipeline as the working-tree diff.
+func (h *Handler) HandleGitShow(w http.ResponseWriter, r *http.Request) {
+	rev := strings.TrimSpace(r.URL.Query().Get("commit"))
+	dir, ok := h.gitProjectDir(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
+		return
+	}
+	if rev == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "commit is required"})
+		return
+	}
+	// Resolve to a concrete object id first so the subsequent `git show` can't
+	// be aimed at refs, ranges, or ambiguous abbreviations.
+	resolved, err := gitRunInDir(dir, "rev-parse", "--verify", rev+"^{commit}")
+	if err != nil || resolved == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown commit"})
+		return
+	}
+	out, err := gitRunInDir(dir, "show", "--no-color", "--format=", resolved)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if out == "" {
+		writeJSON(w, http.StatusOK, []GitDiffFile{})
+		return
+	}
+	writeJSON(w, http.StatusOK, parseUnifiedDiff(out))
 }
 
 // parseUnifiedDiff parses a unified diff output into GitDiffFile entries.

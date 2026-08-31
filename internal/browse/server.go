@@ -43,6 +43,12 @@ type Server struct {
 	// handleLocal (Part 06). Guarded by Once; never used for external mode.
 	localTransportOnce sync.Once
 	localTransportVal  *http.Transport
+
+	// conns enforces the per-stateKey concurrent upstream connection cap
+	// (spec § External mode limits: 32). External and local traffic for one
+	// stateKey share a single semaphore — they consume the same upstream
+	// resource, so the cap is per-stateKey, not per-mode.
+	conns *connLimiter
 }
 
 func New(apiToken string, logger *log.Logger) *Server {
@@ -52,6 +58,7 @@ func New(apiToken string, logger *log.Logger) *Server {
 	s := &Server{apiToken: apiToken, auth: newAuthStore(), log: logger, mux: http.NewServeMux()}
 	s.transport = newSafeTransport(false) // external mode: private IPs blocked
 	s.jar = newCookieJar()
+	s.conns = newConnLimiter(maxUpstreamConnsPerKey)
 	s.mux.HandleFunc("/b/", s.handleBrowse)
 	s.mux.HandleFunc("GET /__ocode_capture.js", s.serveCapture)
 	return s

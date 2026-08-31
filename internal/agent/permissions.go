@@ -311,7 +311,7 @@ var fdUnsafeFlags = map[string]bool{
 // They are routed to the auto-permission LLM which evaluates the underlying
 // subcommand's read-only nature (see BundledAutoPermissionPromptBody).
 var gitGlobalArgsWithValue = map[string]bool{
-	"-C": true,
+	"-C":        true,
 	"--git-dir": true, "--work-tree": true, "--namespace": true, "--super-prefix": true,
 }
 
@@ -320,6 +320,13 @@ var gitGlobalArgsWithValue = map[string]bool{
 // `git --bare`, etc. Returns -1 if no subcommand can be found (e.g. bare
 // `git` or `git -c k=v` with no following word). "-c" wrappers are NOT
 // skipped — they are handled by the LLM prompt, not the code allowlist.
+var gitRecognizedGlobalFlags = map[string]bool{
+	"--paginate": true, "--no-pager": true, "--no-replace-objects": true,
+	"--bare": true, "--no-optional-locks": true, "--literal-pathspecs": true,
+	"--glob-pathspecs": true, "--noglob-pathspecs": true, "--icase-pathspecs": true,
+	"-p": true,
+}
+
 func gitSubcommandIndex(fields []string) int {
 	if len(fields) == 0 || fields[0] != "git" {
 		return -1
@@ -362,19 +369,20 @@ func gitSubcommandIndex(fields []string) int {
 			i++
 			continue
 		}
-		if strings.HasPrefix(f, "-") {
-			// Any other dashed global flag before the subcommand (e.g.
-			// --no-pager, --no-replace-objects, --bare, --literal-pathspecs,
-			// --paginate, --no-optional-locks). Stripping it here is what makes
-			// `git --no-pager log` correctly map to `git log`.
+		if gitRecognizedGlobalFlags[f] {
 			i++
 			continue
 		}
-		// First non-flag token after `git` and its global options → subcommand.
-			return i
+		if strings.HasPrefix(f, "-") {
+			// Unknown dashed flag before subcommand — fail closed. Do not
+			// infer subcommand after untrusted option/value.
+			return -1
 		}
-		return -1
+		// First non-flag token after `git` and its global options → subcommand.
+		return i
 	}
+	return -1
+}
 
 // isDangerousGitConfigKey reports whether a git -c key can enable code
 // execution or credential/path hijacking. These must never be auto-allowed
@@ -475,9 +483,12 @@ func gitSubcommandIndexSkippingC(fields []string) int {
 			i++
 			continue
 		}
-		if strings.HasPrefix(f, "-") {
+		if gitRecognizedGlobalFlags[f] {
 			i++
 			continue
+		}
+		if strings.HasPrefix(f, "-") {
+			return -1
 		}
 		return i
 	}
@@ -1880,11 +1891,11 @@ func extractPathFromArgs(toolName string, args json.RawMessage) string {
 
 // matchSubcommandAllow returns true when the command matches an entry in
 // bashSubcommandAllow at the longest possible token length (3 → 2 → 1).
-// For `git`, leading global wrappers like `-c`, `-C`, `--no-pager`, etc. are
-// transparently stripped so `git -c k=v status` and `git --no-pager log`
-// correctly map to their underlying `git status` / `git log` allowlist entries.
-// Harmful wrappers like `git -c ... reset` are NOT matched here because
-// IsHarmfulBashCommand / decideSingleCommand's harmful check runs first.
+// For `git`, leading global wrappers like `-C`, `--no-pager`, etc. are
+// transparently stripped so `git --no-pager log` correctly maps to
+// `git log`. "-c" wrappers are NOT stripped — they are evaluated by the LLM
+// (read-only underlying subcommand → ALLOW, dangerous keys → DENY) and must
+// not be auto-allowed via the code allowlist.
 func matchSubcommandAllow(command string) bool {
 	fields := splitShellFields(command)
 	if len(fields) == 0 {
@@ -1894,7 +1905,18 @@ func matchSubcommandAllow(command string) bool {
 	if runnerInvokedSafeTool(fields) {
 		return true
 	}
-	// Normalize `git` wrappers: `git -c k=v -C /tmp --no-pager <sub> ...`
+	// Any "-c" wrapper forces LLM evaluation, not code allowlist. This
+	// satisfies "no whitelisting for git -c" — the LLM prompt knows a
+	// read-only underlying subcommand is still read-only and will ALLOW it,
+	// while dangerous keys are marked harmful via hasDangerousGitConfig.
+	if fields[0] == "git" {
+		for _, f := range fields {
+			if f == "-c" || (len(f) > 2 && f[:2] == "-c") {
+				return false
+			}
+		}
+	}
+	// Normalize `git` wrappers: `git -C /tmp --no-pager <sub> ...`
 	// should match the subcommand-pinned allowlist as `git <sub>`.
 	normalized := fields
 	if fields[0] == "git" {

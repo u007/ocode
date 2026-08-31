@@ -80,7 +80,7 @@ web/
         │   ├── FileTree.tsx        # Project file browser
         │   └── FileEditor.tsx      # Monaco editor (tabbed, multi-language)
         ├── Git/
-        │   └── GitPanel.tsx        # Git status, diff viewer
+        │   └── GitPanel.tsx        # SourceTree-style: staged/unstaged panes, hunk actions, commit log, commit box
         ├── Logs/
         │   └── LogPanel.tsx        # Server logs with SSE stream, filtering
         ├── Assets/
