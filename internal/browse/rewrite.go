@@ -12,13 +12,15 @@ import (
 )
 
 // LIMITATION: this file rewrites only URLs that appear literally in the HTML/CSS
-// byte stream. URLs constructed at runtime by page JavaScript — fetch(),
-// XMLHttpRequest, dynamic import(), new WebSocket(), Worker() — are invisible
-// here and are rerouted client-side by the injected capture script (Part 05).
-// Some exotic loaders and cross-origin API calls from workers will still escape
-// both layers; those land in the Network console as visible errors, and the
-// site is flagged "degraded" in the status row. This is by design (spec:
-// external mode is best-effort).
+// byte stream, and is used in local mode only (Chrome mode renders via CDP
+// and needs no rewriting). URLs constructed at runtime by page JavaScript —
+// fetch(), XMLHttpRequest, dynamic import(), new WebSocket(), Worker() — are
+// invisible here and are rerouted client-side by the injected capture script
+// (local mode, Part 05). Some exotic loaders and cross-origin API calls from
+// workers will still escape both layers; those land in the Network console as
+// visible errors, and the site is flagged "degraded" in the status row. This
+// is by design (spec: local mode is best-effort for subresources outside the
+// wrapper's reach).
 
 // untouchedScheme reports schemes/targets that must never be rewritten.
 func untouchedScheme(raw string) bool {

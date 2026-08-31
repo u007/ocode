@@ -1,6 +1,9 @@
 package browse
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -99,4 +102,36 @@ func isPrivateIP(ip netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// upstreamOrigin returns scheme://host for nav reporting.
+func upstreamOrigin(t target) string { return t.Scheme + "://" + t.Host }
+
+// classifyFetchError maps an upstream client error to a short nav-event
+// reason. Kept for the local-mode error path and for cdp egress tests; the
+// external HTML-rewriting proxy that previously consumed it has been removed
+// (Part 05).
+func classifyFetchError(err error) string {
+	if errors.Is(err, errPrivateAddr) {
+		return "blocked: private address"
+	}
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		var unknownAuthority x509.UnknownAuthorityError
+		if errors.As(certErr, &unknownAuthority) {
+			return "TLS certificate not trusted"
+		}
+		return "TLS certificate verification failed"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline"):
+		return "timeout"
+	case strings.Contains(msg, "no such host"):
+		return "dns error"
+	case strings.Contains(msg, "connection refused"):
+		return "connection refused"
+	default:
+		return "fetch error"
+	}
 }

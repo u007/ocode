@@ -12,6 +12,13 @@ import (
 	"time"
 )
 
+// newTestServer builds a browse Server for limiter tests.
+func newTestServer(t *testing.T) *Server {
+	t.Helper()
+	s := New("apitoken", nil)
+	return s
+}
+
 // fastLimiter builds a limiter with a tiny queue deadline so failure paths
 // resolve in milliseconds.
 func fastLimiter(limit int) *connLimiter {
@@ -121,6 +128,7 @@ func TestConnLimiterStateKeysAreIndependent(t *testing.T) {
 // TestExternalHoldsSlotThroughBodyStream proves the cap covers live upstream
 // connections, not request starts: the slot stays held while a slow body
 // streams, so the next same-key request 503s until the first completes.
+// Updated for chrome removal: verifies the same guarantee via handleLocal.
 func TestExternalHoldsSlotThroughBodyStream(t *testing.T) {
 	gotHeaders := make(chan struct{})
 	releaseBody := make(chan struct{})
@@ -139,17 +147,25 @@ func TestExternalHoldsSlotThroughBodyStream(t *testing.T) {
 	s := newTestServer(t)
 	s.conns = fastLimiter(1)
 	host := strings.TrimPrefix(upstream.URL, "http://")
-	tgt := target{StateKey: "tab:slow", Scheme: "http", Host: host, Path: "/"}
+	tgt := target{StateKey: "tab:slow", Scheme: "http", Host: host, Path: "/", Local: true}
+	// Need a live session for local mode gate.
+	grant := s.MintGrant("tab:slow", "")
+	cookieVal, _, _ := s.auth.redeem(grant, true)
+	cookie := &http.Cookie{Name: browseCookie, Value: cookieVal}
 
 	first := httptest.NewRecorder()
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		s.handleExternal(first, httptest.NewRequest("GET", "/b/tab:slow/http/"+host+"/", nil), tgt)
+		req := httptest.NewRequest("GET", "/b/tab:slow/http/"+host+"/", nil)
+		req.AddCookie(cookie)
+		s.handleLocal(first, req, tgt)
 	})
 
 	<-gotHeaders // first request is mid-stream
 	second := httptest.NewRecorder()
-	s.handleExternal(second, httptest.NewRequest("GET", "/b/tab:slow/http/"+host+"/", nil), tgt)
+	req2 := httptest.NewRequest("GET", "/b/tab:slow/http/"+host+"/", nil)
+	req2.AddCookie(cookie)
+	s.handleLocal(second, req2, tgt)
 	if second.Code != http.StatusServiceUnavailable {
 		t.Errorf("over-cap status = %d, want 503", second.Code)
 	}
@@ -160,7 +176,9 @@ func TestExternalHoldsSlotThroughBodyStream(t *testing.T) {
 	close(releaseBody)
 	wg.Wait()
 	third := httptest.NewRecorder()
-	s.handleExternal(third, httptest.NewRequest("GET", "/b/tab:slow/http/"+host+"/", nil), tgt)
+	req3 := httptest.NewRequest("GET", "/b/tab:slow/http/"+host+"/", nil)
+	req3.AddCookie(cookie)
+	s.handleLocal(third, req3, tgt)
 	if third.Code != http.StatusOK {
 		t.Errorf("post-release status = %d, want 200 (slot was returned)", third.Code)
 	}
@@ -208,22 +226,24 @@ func TestExternalBusyClosesNavPair(t *testing.T) {
 	release, _ := s.conns.acquire(t.Context(), "tab:nav")
 	defer release()
 
+	// Use a local target (handleLocal) to exercise the limiter; chrome mode
+	// no longer uses the limiter, but local still does.
 	w := httptest.NewRecorder()
-	s.handleExternal(w, httptest.NewRequest("GET", "/b/tab:nav/http/example.com/", nil),
-		target{StateKey: "tab:nav", Scheme: "http", Host: "example.com", Path: "/"})
+	req := httptest.NewRequest("GET", "/b/tab:nav/http/127.0.0.1:9/", nil)
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	s.handleLocal(w, req, target{StateKey: "tab:nav", Scheme: "http", Host: "127.0.0.1:9", Path: "/", Local: true})
 	if len(navs) != 2 {
-		t.Fatalf("navs = %d, want the loading+terminal pair for a document 503", len(navs))
+		t.Fatalf("navs = %d, want loading+503 pair, got %+v", len(navs), navs)
 	}
-	if navs[0].Status != 0 || navs[1].Status != http.StatusServiceUnavailable || navs[1].Error != "upstream busy" {
-		t.Errorf("nav pair = %+v, want loading(0) + 503 busy", navs)
+	if navs[0].Status != 0 || navs[1].Status != http.StatusServiceUnavailable || navs[1].Error != "upstream busy" || navs[1].Mode != "local" {
+		t.Errorf("nav pair = %+v, want loading(0) + 503 busy local", navs)
 	}
-
+	before := len(navs)
 	// A failed SUBRESOURCE must stay silent on the address bar (Part 07).
-	sub := httptest.NewRequest("GET", "/b/tab:nav/http/example.com/i.png", nil)
+	sub := httptest.NewRequest("GET", "/b/tab:nav/http/127.0.0.1:9/i.png", nil)
 	sub.Header.Set("Sec-Fetch-Dest", "image")
-	s.handleExternal(httptest.NewRecorder(), sub,
-		target{StateKey: "tab:nav", Scheme: "http", Host: "example.com", Path: "/i.png"})
-	if len(navs) != 2 {
-		t.Errorf("subresource busy emitted navs (total %d), want 0", len(navs))
+	s.handleLocal(httptest.NewRecorder(), sub, target{StateKey: "tab:nav", Scheme: "http", Host: "127.0.0.1:9", Path: "/i.png", Local: true})
+	if len(navs) != before {
+		t.Errorf("subresource busy emitted navs (total %d), want %d", len(navs), before)
 	}
 }

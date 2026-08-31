@@ -1,6 +1,7 @@
 package browse
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -57,9 +58,15 @@ func newSafeDialer(allowPrivate bool) *net.Dialer {
 // newSafeTransport wires the guarded dialer into an http.Transport for the
 // upstream client. Proxy is explicitly nil: honoring HTTP_PROXY/HTTPS_PROXY
 // would route dials through a proxy host and bypass the connect-time guard.
-// No TLSClientConfig override — certificate verification stays on.
+// When allowPrivate is true (local mode: loopback / RFC1918 dev servers) TLS
+// verification is disabled so that https://localhost:<port> with a self-signed
+// dev certificate (vite, next, mkcert, etc.) just works — the same way a
+// real browser's "proceed anyway" or a local curl -k would. The transport is
+// ONLY ever used for private-literal targets (t.Local gate in server.go), so
+// skipping verification here never weakens verification for public internet
+// hosts, which are fetched via Chrome's egress proxy in external mode.
 func newSafeTransport(allowPrivate bool) *http.Transport {
-	return &http.Transport{
+	tr := &http.Transport{
 		Proxy:                 nil,
 		DialContext:           newSafeDialer(allowPrivate).DialContext,
 		ForceAttemptHTTP2:     true,
@@ -68,4 +75,8 @@ func newSafeTransport(allowPrivate bool) *http.Transport {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
+	if allowPrivate {
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	return tr
 }

@@ -41,12 +41,6 @@ func navAndServe(t *testing.T, s *Server, stateKey, path string) *httptest.Respo
 // — it emits a chrome nav event and answers 204 with no upstream fetch.
 func TestAuthenticatedNavigationProxiesExternal(t *testing.T) {
 	s := New("apitoken", nil)
-	// Use a dialer that would fail the test if any upstream fetch were attempted.
-	origTransport := s.transport
-	s.transport = newSafeTransport(false)
-	// Ensure the test would fail if transport were used for a private host?
-	// We use an external host (example.com) which would be blocked by the safe
-	// dialer, but handleBrowse should not even try to dial — it hands off to chrome.
 	var got NavEvent
 	s.SetNavPublisher(func(_ string, ev NavEvent) { got = ev })
 	w := navAndServe(t, s, "tab:abc", "/b/tab:abc/https/example.com/")
@@ -59,9 +53,6 @@ func TestAuthenticatedNavigationProxiesExternal(t *testing.T) {
 	if got.StateKey != "tab:abc" {
 		t.Fatalf("nav stateKey = %q want tab:abc", got.StateKey)
 	}
-	// Restore for other tests (not strictly needed as s is local).
-	s.transport = origTransport
-	_ = io.Discard
 }
 
 func TestAuthenticatedNavigationProxiesExternalLocalStillProxies(t *testing.T) {
@@ -79,7 +70,6 @@ func TestAuthenticatedNavigationProxiesExternalLocalStillProxies(t *testing.T) {
 	defer upstream.Close()
 
 	s := New("apitoken", nil)
-	s.transport = newSafeTransport(true)
 	host := strings.TrimPrefix(upstream.URL, "http://")
 	w := navAndServe(t, s, "tab:abc", "/b/tab:abc/http/"+host+"/foo")
 	if w.Code != http.StatusOK {

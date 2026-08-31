@@ -3,13 +3,13 @@ package browse
 // handleLocal serves loopback/RFC1918 upstreams as a streaming reverse proxy.
 // It is reachable only for targets whose host literal is
 // private (parseTarget sets t.Local); an external page's rewritten links
-// always carry an external host and therefore route to handleExternal. A
+// always carry a non-private host and therefore route to Chrome via CDP. A
 // private host can only have been reached via a user-initiated address-bar
 // navigation (which minted the __grant); subresources ride the /b/ cookie.
 // We deliberately do NOT add a per-request "user-initiated" flag — reaching a
 // private host at all already required the user path, and the cookie is
-// confined to /b/. newSafeTransport(true) is used ONLY here; handleExternal
-// always uses the guarded newSafeTransport(false).
+// confined to /b/. This transport uses allowPrivate=true and is the only
+// place private upstreams are dialed.
 //
 // Deviation from the spec's "only transformation: inject the capture script"
 // (found by live QA 2026-08-31): HTML responses are ALSO URL-rewritten via

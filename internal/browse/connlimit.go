@@ -8,10 +8,10 @@ import (
 	"time"
 )
 
-// Spec § External mode limits (2026-08-30 design doc line ~142): "per-stateKey
+// Spec § Browser limits (2026-08-30 design): "per-stateKey
 // concurrent upstream connection cap 32". v1 shipped without it (see
 // docs/architecture/v1-connection-cap-exclusion.md); this is the prescribed
-// follow-up semaphore around handleExternal/handleLocal upstream work.
+// follow-up semaphore around handleLocal and related upstream work.
 const (
 	maxUpstreamConnsPerKey = 32
 	// upstreamSlotWait bounds how long an over-limit request queues before
@@ -36,9 +36,8 @@ type upstreamSlots struct {
 	refs int
 }
 
-// connLimiter holds the per-stateKey semaphores. External and local traffic
-// for one stateKey share a single semaphore — they consume the same upstream
-// resource and the spec's "32" is per-stateKey, not per-mode.
+// connLimiter holds the per-stateKey semaphores. All browse traffic
+// for one stateKey shares a single semaphore — it caps the upstream resource per panel.
 type connLimiter struct {
 	mu    sync.Mutex
 	keys  map[string]*upstreamSlots

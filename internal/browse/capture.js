@@ -1,9 +1,13 @@
-// ocode browse capture script — dependency-free, injected into every proxied
-// HTML document. Runs first in <head> so it wraps console/fetch before page
+// ocode browse capture script — dependency-free, injected into every local
+// HTML document (local mode only). Runs first in <head> so it wraps console/fetch before page
 // code loads. All telemetry is posted to the SPA origin ONLY (never "*").
+// Chrome (external) mode does not use this script; it receives console/network
+// via CDP.
 //
-// Coverage honesty: this reroutes URLs that flow through fetch/XHR/WebSocket
-// and the constructors we can wrap. It CANNOT reach:
+// Coverage honesty: this reroutes URLs that flow through fetch/XHR/WebSocket,
+// the constructors we can wrap, and runtime-injected <script>/<link> elements
+// (webpack/Next.js lazy chunks — hooked via the src/href property setters).
+// It CANNOT reach:
 //   - requests issued from a Web Worker / Service Worker (separate global;
 //     Service Workers are blocked at the proxy in Part 06 anyway),
 //   - URLs already baked into <img>/<script> markup (those are rewritten
@@ -173,6 +177,46 @@
     Wrapped.CONNECTING = OrigWS.CONNECTING; Wrapped.OPEN = OrigWS.OPEN;
     Wrapped.CLOSING = OrigWS.CLOSING; Wrapped.CLOSED = OrigWS.CLOSED;
     window.WebSocket = Wrapped;
+  }
+
+  // --- runtime-injected <script>/<link> reroute (webpack/Next.js lazy chunks) ---
+  // Lazy chunks never appear in the initial HTML, so the server-side rewrite
+  // (Part 04) cannot see them: webpack assigns script.src / link.href at
+  // runtime with root-relative or absolute URLs that would resolve against the
+  // browse origin ROOT and 404 (ChunkLoadError, blank SPA). Hook the DOM
+  // properties so every assignment flows through reroute(). Parsed markup does
+  // not invoke the JS setters, so server-rewritten tags are untouched; native
+  // dynamic import() remains uncatchable here (documented at the top).
+  function hookURLProp(proto, prop) {
+    var desc = Object.getOwnPropertyDescriptor(proto, prop);
+    if (!desc || !desc.set) return;
+    Object.defineProperty(proto, prop, {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get: desc.get,
+      set: function (v) {
+        return desc.set.call(this, reroute(v));
+      }
+    });
+  }
+  try {
+    hookURLProp(HTMLScriptElement.prototype, "src");
+    hookURLProp(HTMLLinkElement.prototype, "href");
+  } catch (e) {
+    // Old engine without element prototypes: chunks are best-effort anyway.
+    // intentionally not logged: benign fallback
+  }
+  // setAttribute bypasses the property setters; cover the script/link exotic
+  // path too so no injected chunk URL escapes the /b/ route.
+  if (Element && Element.prototype && Element.prototype.setAttribute) {
+    var origSetAttr = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function (name, value) {
+      var low = String(name).toLowerCase();
+      if ((low === "src" || low === "href") && (this instanceof HTMLScriptElement || this instanceof HTMLLinkElement)) {
+        value = reroute(value);
+      }
+      return origSetAttr.call(this, name, value);
+    };
   }
 
   // --- navigation hint (DISPLAY-UNTRUSTED) ---

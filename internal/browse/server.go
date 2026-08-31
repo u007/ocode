@@ -101,14 +101,6 @@ type Server struct {
 	mux      *http.ServeMux
 	publish  func(stateKey string, ev NavEvent)
 
-	// transport is the guarded upstream transport. External mode constructs
-	// it with allowPrivate=false (Part 02 dialer re-validates every connect,
-	// including redirect hops). Tests override it with allowPrivate=true to
-	// reach httptest loopback upstreams.
-	transport *http.Transport
-	// jar holds upstream cookies server-side, keyed by (stateKey, origin);
-	// site cookies never reach the browser (see cookiejar.go).
-	jar *cookieJar
 	// spaOrigin is the main (SPA) origin, set via EnableBrowse wiring; the
 	// server-wide default postMessage targetOrigin for the capture script.
 	// Real traffic uses the per-stateKey origin recorded at grant mint
@@ -137,8 +129,6 @@ func New(apiToken string, logger *log.Logger, opts ...Options) *Server {
 		logger = log.Default()
 	}
 	s := &Server{apiToken: apiToken, auth: newAuthStore(), log: logger, mux: http.NewServeMux(), cdpSocks: make(map[string]*cdpSocketEntry)}
-	s.transport = newSafeTransport(false) // external mode: private IPs blocked
-	s.jar = newCookieJar()
 	s.conns = newConnLimiter(maxUpstreamConnsPerKey)
 	s.mux.HandleFunc("/b/", s.handleBrowse)
 	s.mux.HandleFunc("GET /__ocode_capture.js", s.serveCapture)
@@ -176,8 +166,8 @@ func (s *Server) Configure(opts Options) { s.initManager(opts) }
 // SetCDPManager installs a fake manager for tests.
 func (s *Server) SetCDPManager(m chromeManager) { s.cdp = m }
 
-// SetSPAOrigin records the main (SPA) origin so proxied HTML can carry the
-// exact postMessage targetOrigin for capture-script telemetry (Part 05).
+// SetSPAOrigin records the main (SPA) origin so local HTML can carry the
+// exact postMessage targetOrigin for capture-script telemetry.
 // Called once from the main server's EnableBrowse wiring at boot.
 func (s *Server) SetSPAOrigin(o string) { s.spaOrigin = o }
 
@@ -202,7 +192,6 @@ func (s *Server) MintGrant(stateKey, spaOrigin string) string {
 
 func (s *Server) Revoke(stateKey string) {
 	s.auth.revoke(stateKey)
-	s.jar.Revoke(stateKey)
 	if s.cdp != nil {
 		s.cdp.Revoke(stateKey)
 	}
