@@ -153,3 +153,68 @@ func TestDoneOnPeerEOFAndInflightCallClosed(t *testing.T) {
 		t.Fatal("Done() not closed after peer EOF")
 	}
 }
+
+func TestCallReturnsCDPError(t *testing.T) {
+	p := newFakePeer(t)
+	done := make(chan error, 1)
+	go func() { done <- p.conn.Call(context.Background(), "", "Target.attachToTarget", map[string]any{"targetId": "x"}, nil) }()
+	_ = p.next()
+	p.respond(`{"id":1,"error":{"code":-32000,"message":"No target"}}`)
+	err := <-done
+	cdpErr, ok := err.(*CDPError)
+	if !ok {
+		t.Fatalf("err type = %T, want *CDPError (got %v)", err, err)
+	}
+	if cdpErr.Code != -32000 || cdpErr.Message != "No target" || cdpErr.Method != "Target.attachToTarget" {
+		t.Fatalf("CDPError = %+v", cdpErr)
+	}
+}
+
+func TestCallContextCancelledAndLateReplyDiscarded(t *testing.T) {
+	p := newFakePeer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.conn.Call(ctx, "", "Foo.bar", nil, nil) }()
+	_ = p.next()
+	cancel()
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Fatalf("Call err = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Call did not cancel")
+	}
+	// Late reply for the now-removed id must not panic or corrupt state.
+	p.respond(`{"id":1,"result":{"ok":true}}`)
+	time.Sleep(50 * time.Millisecond)
+	// A subsequent call works with a fresh id (2, not 1 again).
+	done2 := make(chan error, 1)
+	go func() { done2 <- p.conn.Call(context.Background(), "", "Foo.bar", nil, nil) }()
+	c := p.next()
+	if c.id != 2 {
+		t.Fatalf("second call id = %d, want 2", c.id)
+	}
+	p.respond(`{"id":2,"result":{}}`)
+	if err := <-done2; err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+}
+
+func TestCloseSemantics(t *testing.T) {
+	p := newFakePeer(t)
+	if err := p.conn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := p.conn.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	start := time.Now()
+	err := p.conn.Call(context.Background(), "", "Foo.bar", nil, nil)
+	if err != ErrConnClosed {
+		t.Fatalf("Call after Close = %v, want ErrConnClosed", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("Call after Close blocked")
+	}
+}
