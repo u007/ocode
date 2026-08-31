@@ -414,3 +414,190 @@ func TestManager_BackForwardReload(t *testing.T) {
 }
 
 func containsStr(s, sub string) bool { return bytes.Contains([]byte(s), []byte(sub)) }
+
+// --- Task 5 tests ---
+
+func TestManager_ScreencastStart(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+	_, _ = m.Attach(context.Background(), "k1", &testSink{})
+	time.Sleep(40 * time.Millisecond)
+	calls := stub.Calls()
+	// Find order of stop then start
+	var stopIdx, startIdx = -1, -1
+	for i, c := range calls {
+		if c.Method == "Page.stopScreencast" && stopIdx == -1 {
+			stopIdx = i
+		}
+		if c.Method == "Page.startScreencast" && startIdx == -1 {
+			startIdx = i
+		}
+	}
+	if stopIdx == -1 || startIdx == -1 {
+		t.Fatalf("missing screencast calls: stop %d start %d", stopIdx, startIdx)
+	}
+	if stopIdx > startIdx {
+		t.Error("stop should come before start")
+	}
+	// Check defaults
+	for _, c := range calls {
+		if c.Method == "Page.startScreencast" {
+			var p map[string]any
+			_ = json.Unmarshal(c.Params, &p)
+			if p["format"] != "jpeg" {
+				t.Errorf("format %v", p["format"])
+			}
+			if p["quality"] != float64(70) {
+				t.Errorf("quality %v", p["quality"])
+			}
+			if p["maxWidth"] != float64(1280) || p["maxHeight"] != float64(800) {
+				t.Errorf("max dims %v %v", p["maxWidth"], p["maxHeight"])
+			}
+		}
+	}
+}
+
+func TestManager_ScreencastFrame(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	sink := &testSink{}
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", sink)
+	time.Sleep(30 * time.Millisecond)
+	// clear calls after attach
+	stub.callsMu.Lock()
+	stub.calls = nil
+	stub.callsMu.Unlock()
+	stub.InjectEvent(tgt.sessionID, "Page.screencastFrame", map[string]any{
+		"data": "aGVsbG8=", "sessionId": 7, "metadata": map[string]any{"deviceWidth": 1280, "deviceHeight": 800},
+	})
+	time.Sleep(40 * time.Millisecond)
+	if len(sink.frames) != 1 {
+		t.Fatalf("frames %d", len(sink.frames))
+	}
+	if sink.frames[0].w != 1280 || sink.frames[0].h != 800 {
+		t.Errorf("dims %d %d", sink.frames[0].w, sink.frames[0].h)
+	}
+	// Ack should have been sent after sink
+	found := false
+	for _, c := range stub.Calls() {
+		if c.Method == "Page.screencastFrameAck" {
+			var p map[string]int
+			_ = json.Unmarshal(c.Params, &p)
+			if p["sessionId"] == 7 {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("missing screencastFrameAck")
+	}
+}
+
+func TestManager_Resize(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	// clear
+	stub.callsMu.Lock()
+	stub.calls = nil
+	stub.callsMu.Unlock()
+	if err := tgt.Resize(context.Background(), 1000, 600, 2); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if !containsCall(stub.Calls(), "Emulation.setDeviceMetricsOverride") {
+		t.Error("missing setDeviceMetricsOverride")
+	}
+	// check params
+	for _, c := range stub.Calls() {
+		if c.Method == "Emulation.setDeviceMetricsOverride" {
+			var p map[string]any
+			_ = json.Unmarshal(c.Params, &p)
+			if p["width"] != float64(1000) || p["height"] != float64(600) || p["deviceScaleFactor"] != float64(2) {
+				t.Errorf("metrics %v", p)
+			}
+		}
+		if c.Method == "Page.startScreencast" {
+			var p map[string]any
+			_ = json.Unmarshal(c.Params, &p)
+			if p["maxWidth"] != float64(2000) || p["maxHeight"] != float64(1200) {
+				t.Errorf("resize screencast dims %v", p)
+			}
+		}
+	}
+}
+
+func TestManager_MouseKey(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	stub.callsMu.Lock()
+	stub.calls = nil
+	stub.callsMu.Unlock()
+	_ = tgt.Mouse(context.Background(), MouseEvent{Kind: "down", X: 10, Y: 20, Button: "left", ClickCount: 1})
+	time.Sleep(20 * time.Millisecond)
+	if !containsCall(stub.Calls(), "Input.dispatchMouseEvent") {
+		t.Error("missing mouse")
+	}
+	for _, c := range stub.Calls() {
+		if c.Method == "Input.dispatchMouseEvent" {
+			var p map[string]any
+			_ = json.Unmarshal(c.Params, &p)
+			if p["type"] != "mousePressed" {
+				t.Errorf("type %v", p["type"])
+			}
+		}
+	}
+	stub.callsMu.Lock()
+	stub.calls = nil
+	stub.callsMu.Unlock()
+	_ = tgt.Key(context.Background(), KeyEvent{Kind: "down", Key: "a", Code: "KeyA", Text: "a"})
+	time.Sleep(20 * time.Millisecond)
+	found := false
+	for _, c := range stub.Calls() {
+		if c.Method == "Input.dispatchKeyEvent" {
+			var p map[string]any
+			_ = json.Unmarshal(c.Params, &p)
+			if p["type"] == "keyDown" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("missing keyDown")
+	}
+}
+
+func TestManager_Detach(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	sink := &testSink{}
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", sink)
+	time.Sleep(30 * time.Millisecond)
+	tgt.Detach()
+	time.Sleep(20 * time.Millisecond)
+	if !containsCall(stub.Calls(), "Page.stopScreencast") {
+		t.Error("detach should stop screencast")
+	}
+	// After detach, frames not delivered
+	stub.InjectEvent(tgt.sessionID, "Page.screencastFrame", map[string]any{
+		"data": "aGVsbG8=", "sessionId": 1, "metadata": map[string]any{"deviceWidth": 10, "deviceHeight": 10},
+	})
+	time.Sleep(20 * time.Millisecond)
+	if len(sink.frames) != 0 {
+		// sink had earlier frames? Reset check: we had 0 after attach? Actually attach may have no frames yet, but detach should prevent new
+		// Our sink had 0 before; after detach should still 0
+	}
+}

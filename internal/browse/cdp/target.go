@@ -453,14 +453,9 @@ func (t *Target) Detach() {
 	sink := t.sink
 	t.sink = nil
 	t.mu.Unlock()
-	// Stop screencast if we had a sink
 	if sink != nil {
 		_ = t.conn.Call(context.Background(), t.sessionID, "Page.stopScreencast", nil, nil)
 	}
-	for _, fn := range t.cancels {
-		fn()
-	}
-	t.cancels = nil
 }
 
 func (t *Target) restartScreencast(ctx context.Context) error {
