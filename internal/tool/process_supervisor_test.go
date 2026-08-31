@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"os/exec"
 	"testing"
 	"time"
 )
@@ -248,5 +249,118 @@ func TestProcessSupervisorRetainsFinishedRecordsForSession(t *testing.T) {
 	}
 	if !snapshot[0].Retained {
 		t.Fatal("expected terminal record retention for full session")
+	}
+}
+
+func TestStartSupervisedRegistersBrowserRecord(t *testing.T) {
+	t.Parallel()
+
+	s := NewProcessSupervisor(ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+
+	cmd := exec.Command("/bin/sleep", "30")
+	reg := ProcessRegistration{
+		ID:                    "browser-1",
+		Name:                  "chrome",
+		Command:               "/bin/sleep 30",
+		Kind:                  ProcessKindBrowser,
+		AllowGracefulShutdown: true,
+	}
+
+	rec, err := StartSupervised(s, cmd, reg)
+	if err != nil {
+		t.Fatalf("StartSupervised() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+
+	if rec.Kind != ProcessKindBrowser {
+		t.Fatalf("rec.Kind = %q, want %q", rec.Kind, ProcessKindBrowser)
+	}
+	if rec.PID <= 0 {
+		t.Fatalf("rec.PID = %d, want > 0", rec.PID)
+	}
+	if !rec.OwnsProcessGroup {
+		t.Fatal("expected OwnsProcessGroup to be true")
+	}
+	if cmd.SysProcAttr == nil {
+		t.Fatal("expected SysProcAttr to be set")
+	}
+	if !cmd.SysProcAttr.Setsid {
+		t.Fatalf("expected Setsid process group setup, got %#v", cmd.SysProcAttr)
+	}
+
+	// The record must be visible in Snapshot().
+	snap := s.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot len = %d, want 1", len(snap))
+	}
+	if snap[0].ID != "browser-1" || snap[0].PID != rec.PID {
+		t.Fatalf("unexpected snapshot record: %+v", snap[0])
+	}
+}
+
+func TestStartSupervisedShutdownKillsChild(t *testing.T) {
+	t.Parallel()
+
+	s := NewProcessSupervisor(ProcessSupervisorOptions{GracePeriod: 5 * time.Second})
+
+	cmd := exec.Command("/bin/sleep", "30")
+	reg := ProcessRegistration{
+		ID:                    "browser-1",
+		Name:                  "chrome",
+		Command:               "/bin/sleep 30",
+		Kind:                  ProcessKindBrowser,
+		AllowGracefulShutdown: true,
+	}
+	if _, err := StartSupervised(s, cmd, reg); err != nil {
+		t.Fatalf("StartSupervised() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+
+	// The manager owns Wait: reaping here confirms the child was terminated
+	// (via graceful SIGTERM to its process group) within the grace period.
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("expected the child to be terminated with a signal")
+	}
+	snap := s.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot len = %d, want 1", len(snap))
+	}
+	if snap[0].Status != ProcKilled {
+		t.Fatalf("status = %q, want %q", snap[0].Status, ProcKilled)
+	}
+}
+
+func TestStartSupervisedFailedToStart(t *testing.T) {
+	t.Parallel()
+
+	s := NewProcessSupervisor(ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+
+	cmd := exec.Command("/nonexistent/definitely/not/a/binary")
+	reg := ProcessRegistration{
+		ID:   "browser-fail",
+		Name: "chrome",
+		Kind: ProcessKindBrowser,
+	}
+
+	_, err := StartSupervised(s, cmd, reg)
+	if err == nil {
+		t.Fatal("expected StartSupervised() to return an error for a missing binary")
+	}
+
+	snap := s.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot len = %d, want 1 (failed start must be visible)", len(snap))
+	}
+	if snap[0].Status != ProcFailedToStart {
+		t.Fatalf("status = %q, want %q", snap[0].Status, ProcFailedToStart)
 	}
 }

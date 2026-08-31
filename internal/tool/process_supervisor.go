@@ -18,6 +18,7 @@ const (
 	ProcessKindSubagentBash     ProcessKind = "subagent_bash"
 	ProcessKindInteractiveShell ProcessKind = "interactive_shell"
 	ProcessKindEditor           ProcessKind = "editor"
+	ProcessKindBrowser          ProcessKind = "browser"
 )
 
 var ErrProcessSupervisorClosed = errors.New("process supervisor is shutting down")
@@ -115,6 +116,58 @@ func (s *ProcessSupervisor) Register(spec ProcessRegistration) (ProcessRecord, e
 	s.records[spec.ID] = child
 	s.order = append(s.order, spec.ID)
 	return child.snapshot(), nil
+}
+
+// StartSupervised starts a command under sup's supervision, placing it in its
+// own process group (via setProcGroup, same as the bash paths) and registering
+// a browser process record. The caller must set reg.ID (and may set reg.Name,
+// reg.Command); Kind defaults to ProcessKindBrowser if left empty. reg.Cmd is
+// set to cmd, reg.PID and reg.StartedAt are filled from the started process,
+// and reg.OwnsProcessGroup is set true. The registration is marked
+// AllowGracefulShutdown so Shutdown sends SIGTERM to the process group (so the
+// manager's own shutdown hook, e.g. a CDP Browser.close, runs first and the
+// default graceful/force steps then terminate the group).
+//
+// StartSupervised does NOT call cmd.Wait: the caller manages Wait and must call
+// sup.MarkExited (or MarkKilled) once Wait returns. To keep the supervisor from
+// reaping the process itself (which would race the caller's Wait), the
+// registration's waitFn is set to a no-op that returns nil; graceful/force
+// termination still signal the group as usual.
+//
+// If cmd.Start fails, the process is still registered (so the failure is
+// visible in Snapshot()) and then marked ProcFailedToStart; the Start error is
+// returned to the caller.
+func StartSupervised(sup *ProcessSupervisor, cmd *exec.Cmd, reg ProcessRegistration) (ProcessRecord, error) {
+	setProcGroup(cmd)
+
+	reg.Cmd = cmd
+	reg.OwnsProcessGroup = true
+	reg.AllowGracefulShutdown = true
+	if reg.Kind == "" {
+		reg.Kind = ProcessKindBrowser
+	}
+	if reg.StartedAt.IsZero() {
+		reg.StartedAt = time.Now()
+	}
+	// The manager owns Wait; a no-op keeps the supervisor from racing it.
+	reg.waitFn = func() error { return nil }
+
+	if err := cmd.Start(); err != nil {
+		if _, rerr := sup.Register(reg); rerr != nil {
+			// Even if registration fails (supervisor already closed), surface
+			// the original Start error.
+			return ProcessRecord{}, err
+		}
+		sup.MarkFailedToStart(reg.ID, err)
+		return ProcessRecord{}, err
+	}
+
+	reg.PID = cmd.Process.Pid
+	record, err := sup.Register(reg)
+	if err != nil {
+		return ProcessRecord{}, err
+	}
+	return record, nil
 }
 
 func (s *ProcessSupervisor) RegisterShutdownCallback(fn func()) error {

@@ -14,6 +14,9 @@
 
 ## 2026-08-31
 
+* **Creation**: Auto-Permission — Judge Must See the Session WorkDir, Not the Process CWD ([gotchas/auto-permission-judge-process-cwd.md](/gotchas/auto-permission-judge-process-cwd.md))
+* **Update**: Plugin Auto-Permission — Arbitrary Execution Risk ([gotchas/plugin-auto-permission-security.md](/gotchas/plugin-auto-permission-security.md))
+* **Creation**: Desktop Single Instance Lock ([architecture/desktop-single-instance.md](/architecture/desktop-single-instance.md))
 * **Creation**: Terminal Shells Survive Page Reload (Detach / Reattach) ([architecture/terminal-detach-reattach.md](/architecture/terminal-detach-reattach.md))
 * **Update**: V1 Connection Cap Exclusion — Embedded Browser Panel ([architecture/v1-connection-cap-exclusion.md](/architecture/v1-connection-cap-exclusion.md))
 * **Update**: V1 Connection Cap Exclusion — Embedded Browser Panel ([architecture/v1-connection-cap-exclusion.md](/architecture/v1-connection-cap-exclusion.md))

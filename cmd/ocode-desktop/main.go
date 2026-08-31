@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -61,7 +62,6 @@ func main() {
 
 	// The desktop shell hosts the web UI, so resume a requested session by
 	// navigating to the same session route used by the web application.
-	var sessionID string
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "-session", "--session":
@@ -69,10 +69,51 @@ func main() {
 				log.Printf("ocode-desktop: %s requires a session ID", os.Args[i])
 				os.Exit(2)
 			}
-			sessionID = os.Args[i+1]
 			i++
 		}
 	}
+	sessionID := sessionIDFromArgs(os.Args)
+
+	// Only one desktop instance may run: it owns the in-process API server,
+	// the terminal ptys, and the per-window profile state, so a second copy
+	// would silently fork all of that. application.New acquires the instance
+	// lock and, for a second launch, forwards its argv to the first instance
+	// and exits — which is why the app is created *before* the server boots
+	// below, so the loser never starts a second server. The first instance
+	// reacts by raising its window (and jumping to a requested --session).
+	// The callback runs on Wails' listener goroutine and the window does not
+	// exist yet, so it reads the window through an atomic set after creation;
+	// nil means a second launch raced our own startup and is simply dropped.
+	var mainWin atomic.Pointer[desktopWindow]
+	dockSvc := dock.New()
+	services := []application.Service{application.NewService(dockSvc)}
+	var notifier *notifications.NotificationService
+	if notificationsSupported() {
+		notifier = notifications.New()
+		services = append(services, application.NewService(notifier))
+	}
+	app := application.New(application.Options{
+		Name:        "ocode",
+		Description: "AI coding agent",
+		Icon:        appIcon,
+		Services:    services,
+		SingleInstance: &application.SingleInstanceOptions{
+			UniqueID: "com.ocode.desktop",
+			OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
+				log.Printf("ocode-desktop: second instance launch blocked (args %q), focusing existing window", data.Args)
+				dw := mainWin.Load()
+				if dw == nil {
+					return
+				}
+				if id := sessionIDFromArgs(data.Args); id != "" {
+					dw.window.SetURL(dw.sessionURL(id))
+				}
+				dw.window.UnMinimise()
+				dw.window.Show()
+				dw.window.Focus()
+			},
+		},
+	})
 
 	// Resolve the working directory the server anchors relative paths to.
 	// A Finder/Dock-launched .app starts with cwd "/"; the old fallback used
@@ -121,23 +162,10 @@ func main() {
 		desktop.AttachScheduler(handle.Srv, workDir)
 	}
 
-	// Create the Wails application with the badge + notification services.
-	// The notifier is only created when supported: on macOS, touching
+	// The Wails app (badge + notification services) was created above, ahead
+	// of the server boot, so the single-instance check runs first. The
+	// notifier is only created when supported: on macOS, touching
 	// UNUserNotificationCenter from a non-.app binary aborts the process.
-	dockSvc := dock.New()
-	services := []application.Service{application.NewService(dockSvc)}
-	var notifier *notifications.NotificationService
-	if notificationsSupported() {
-		notifier = notifications.New()
-		services = append(services, application.NewService(notifier))
-	}
-	app := application.New(application.Options{
-		Name:        "ocode",
-		Description: "AI coding agent",
-		Icon:        appIcon,
-		Services:    services,
-	})
-
 	if bootErr != nil {
 		// Native dialog so a double-clicked .app surfaces the failure.
 		app.Dialog.Error().
@@ -156,8 +184,11 @@ func main() {
 	// Build the webview URL with the auth token (same ?token= param the TUI /rc
 	// command and EventSource use) and the stable windowId.
 	appURL := fmt.Sprintf("%s/?token=%s&windowId=%s", handle.URL, handle.Token, desktopWindowName)
+	sessionURL := func(id string) string {
+		return fmt.Sprintf("%s/session/%s?token=%s&windowId=%s", handle.URL, url.PathEscape(id), handle.Token, desktopWindowName)
+	}
 	if sessionID != "" {
-		appURL = fmt.Sprintf("%s/session/%s?token=%s&windowId=%s", handle.URL, url.PathEscape(sessionID), handle.Token, desktopWindowName)
+		appURL = sessionURL(sessionID)
 	}
 
 	// Determine desktop URL via env override (for dev hot-reload).
@@ -203,6 +234,8 @@ func main() {
 			Icon: appIcon,
 		},
 	})
+
+	mainWin.Store(&desktopWindow{window: window, sessionURL: sessionURL})
 
 	// Set up the application menu. The Wails default binds CmdOrCtrl+W to
 	// "Close Window" (which on this single-window shell quits the whole app)
@@ -275,6 +308,32 @@ func main() {
 	if err := app.Run(); err != nil {
 		log.Printf("ocode-desktop: app run error: %v", err)
 	}
+}
+
+// desktopWindow is what the single-instance callback needs from the first
+// instance once its window exists: the window to raise and how to build a
+// session URL for a forwarded --session argument.
+type desktopWindow struct {
+	window     *application.WebviewWindow
+	sessionURL func(id string) string
+}
+
+// sessionIDFromArgs extracts the -session/--session value from an argv (the
+// last one wins). Shared by the first launch and the second-instance forward,
+// so both resolve the requested session identically. Missing/empty values
+// yield ""; the first launch separately rejects those with a usage error.
+func sessionIDFromArgs(args []string) string {
+	var id string
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "-session", "--session":
+			if i+1 < len(args) && args[i+1] != "" {
+				id = args[i+1]
+			}
+			i++
+		}
+	}
+	return id
 }
 
 // desktopShutdownTimeout returns the maximum time the desktop app waits for a
