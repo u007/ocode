@@ -2,10 +2,13 @@ package cdp
 
 import (
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/tool"
 )
 
 func TestFindChrome_ConfiguredExists(t *testing.T) {
@@ -142,5 +145,50 @@ func TestFindChrome_NoSandboxNoPort(t *testing.T) {
 	}
 	if strings.Contains(s, "--remote-debugging-port") {
 		t.Error("launch.go must not contain --remote-debugging-port")
+	}
+}
+
+func TestLaunchChrome_Gated(t *testing.T) {
+	chromePath := os.Getenv("OCODE_CHROME_PATH")
+	if chromePath == "" {
+		t.Skip("OCODE_CHROME_PATH not set — gated test")
+	}
+	if _, err := os.Stat(chromePath); err != nil {
+		t.Skipf("chrome not found at %s: %v", chromePath, err)
+	}
+	ctx := t.Context()
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{})
+	lg := log.New(os.Stderr, "", 0)
+	conn, exited, cleanup, err := launchChrome(ctx, chromePath, sup, lg)
+	if err != nil {
+		t.Fatalf("launchChrome failed: %v", err)
+	}
+	defer cleanup()
+	var ver struct {
+		Product string `json:"product"`
+	}
+	if err := conn.Call(ctx, "", "Browser.getVersion", nil, &ver); err != nil {
+		t.Fatalf("Browser.getVersion: %v", err)
+	}
+	if ver.Product == "" {
+		t.Error("expected product string")
+	}
+	found := false
+	for _, rec := range sup.Snapshot() {
+		if rec.ID == "browse-chrome" {
+			found = true
+			if rec.Kind != "browser" {
+				t.Errorf("kind %q want browser", rec.Kind)
+			}
+		}
+	}
+	if !found {
+		t.Error("supervisor missing browse-chrome record")
+	}
+	cleanup()
+	select {
+	case <-exited:
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for exit")
 	}
 }
