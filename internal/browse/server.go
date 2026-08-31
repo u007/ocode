@@ -1,10 +1,15 @@
 package browse
 
 import (
+	"context"
 	"log"
 	"net"
 	"net/http"
 	"sync"
+	"time"
+
+	"github.com/u007/ocode/internal/browse/cdp"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // NavEvent is the server-authoritative address-bar / status update. The SPA
@@ -15,6 +20,75 @@ type NavEvent struct {
 	Status   int    `json:"status"`
 	Mode     string `json:"mode"` // "local" | "chrome"
 	Error    string `json:"error,omitempty"`
+}
+
+// Options configures the headless Chrome subsystem. ChromePath overrides
+// discovery; IdleTimeout is how long the shared Chrome process idles before
+// shutdown. Supervisor is the server-owned process supervisor.
+type Options struct {
+	ChromePath  string
+	IdleTimeout time.Duration
+	Supervisor  *tool.ProcessSupervisor
+}
+
+// chromeTarget is the subset of cdp.Target used by the browse WS. Defined
+// as an interface so tests can inject a fake without a real Chrome.
+type chromeTarget interface {
+	Navigate(ctx context.Context, url string) error
+	Back(ctx context.Context) error
+	Forward(ctx context.Context) error
+	Reload(ctx context.Context) error
+	Resize(ctx context.Context, w, h int, dpr float64) error
+	Mouse(ctx context.Context, ev cdp.MouseEvent) error
+	Key(ctx context.Context, ev cdp.KeyEvent) error
+	Detach()
+}
+
+// chromeManager is the subset of cdp.Manager used by the browse server.
+type chromeManager interface {
+	Attach(ctx context.Context, stateKey string, sink cdp.FrameSink) (chromeTarget, error)
+	Revoke(stateKey string)
+	Close(ctx context.Context) error
+}
+
+// realManagerAdapter wraps *cdp.Manager to satisfy chromeManager.
+type realManagerAdapter struct{ *cdp.Manager }
+
+func (r *realManagerAdapter) Attach(ctx context.Context, stateKey string, sink cdp.FrameSink) (chromeTarget, error) {
+	t, err := r.Manager.Attach(ctx, stateKey, sink)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// wsOut is one outbound WS message queued to the single writer goroutine.
+type wsOut struct {
+	isBinary bool
+	data     []byte
+	closeCode int
+	closeText string
+	isClose  bool
+}
+
+// cdpSocketEntry tracks one active __cdp WebSocket per stateKey.
+type cdpSocketEntry struct {
+	// send is the writer channel (frames + JSON). Closing it signals the
+	// writer to exit.
+	send chan wsOut
+	// wsConn is the underlying gorilla connection (for pings and direct closes).
+	wsConn interface{ Close() error }
+	closeFn func(code int, text string) error
+}
+
+func (e *cdpSocketEntry) connClose(code int, text string) error {
+	if e.closeFn != nil {
+		return e.closeFn(code, text)
+	}
+	if e.wsConn != nil {
+		return e.wsConn.Close()
+	}
+	return nil
 }
 
 // Server is the isolated browse origin. Proxied content is served only here,
@@ -52,20 +126,55 @@ type Server struct {
 	// stateKey share a single semaphore — they consume the same upstream
 	// resource, so the cap is per-stateKey, not per-mode.
 	conns *connLimiter
+
+	cdp     chromeManager
+	cdpMu   sync.Mutex
+	cdpSocks map[string]*cdpSocketEntry
 }
 
-func New(apiToken string, logger *log.Logger) *Server {
+func New(apiToken string, logger *log.Logger, opts ...Options) *Server {
 	if logger == nil {
 		logger = log.Default()
 	}
-	s := &Server{apiToken: apiToken, auth: newAuthStore(), log: logger, mux: http.NewServeMux()}
+	s := &Server{apiToken: apiToken, auth: newAuthStore(), log: logger, mux: http.NewServeMux(), cdpSocks: make(map[string]*cdpSocketEntry)}
 	s.transport = newSafeTransport(false) // external mode: private IPs blocked
 	s.jar = newCookieJar()
 	s.conns = newConnLimiter(maxUpstreamConnsPerKey)
 	s.mux.HandleFunc("/b/", s.handleBrowse)
 	s.mux.HandleFunc("GET /__ocode_capture.js", s.serveCapture)
+	s.mux.HandleFunc("GET /b/{stateKey}/__cdp", s.handleCDP)
+	if len(opts) > 0 {
+		s.initManager(opts[0])
+	}
 	return s
 }
+
+// initManager creates the CDP manager from Options. No-op if manager already set
+// (tests inject a fake). Called from New and from Configure.
+func (s *Server) initManager(opts Options) {
+	if s.cdp != nil {
+		return
+	}
+	mgrOpts := cdp.ManagerOptions{
+		ChromePath:  opts.ChromePath,
+		IdleTimeout: opts.IdleTimeout,
+		Supervisor:  opts.Supervisor,
+		Dialer:      NewSafeDialer(false),
+		Log:         s.log,
+		EmitNav: func(ev cdp.NavEvent) {
+			s.emitNav(NavEvent{StateKey: ev.StateKey, URL: ev.URL, Status: ev.Status, Mode: "chrome", Error: ev.Error})
+		},
+	}
+	m := cdp.NewManager(mgrOpts)
+	s.cdp = &realManagerAdapter{Manager: m}
+}
+
+// Configure installs or replaces the CDP manager options after construction.
+// Used by StartBrowse when opts are known after New.
+func (s *Server) Configure(opts Options) { s.initManager(opts) }
+
+// SetCDPManager installs a fake manager for tests.
+func (s *Server) SetCDPManager(m chromeManager) { s.cdp = m }
 
 // SetSPAOrigin records the main (SPA) origin so proxied HTML can carry the
 // exact postMessage targetOrigin for capture-script telemetry (Part 05).
@@ -94,6 +203,23 @@ func (s *Server) MintGrant(stateKey, spaOrigin string) string {
 func (s *Server) Revoke(stateKey string) {
 	s.auth.revoke(stateKey)
 	s.jar.Revoke(stateKey)
+	if s.cdp != nil {
+		s.cdp.Revoke(stateKey)
+	}
+	// Close any active __cdp socket for this stateKey.
+	s.cdpMu.Lock()
+	if e, ok := s.cdpSocks[stateKey]; ok {
+		_ = e.connClose(1011, "revoked")
+		delete(s.cdpSocks, stateKey)
+	}
+	s.cdpMu.Unlock()
+}
+
+func (s *Server) Close(ctx context.Context) error {
+	if s.cdp != nil {
+		return s.cdp.Close(ctx)
+	}
+	return nil
 }
 
 func (s *Server) SetNavPublisher(fn func(stateKey string, ev NavEvent)) { s.publish = fn }

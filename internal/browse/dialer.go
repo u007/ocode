@@ -21,6 +21,10 @@ var errPrivateAddr = errors.New("browse: connection to private address blocked")
 // IP is re-validated automatically.
 const maxRedirects = 10
 
+// NewSafeDialer is the exported wrapper of newSafeDialer, used by the cdp
+// egress proxy tests and the browse supervisor wiring (Task 05).
+func NewSafeDialer(allowPrivate bool) *net.Dialer { return newSafeDialer(allowPrivate) }
+
 // newSafeDialer returns a net.Dialer whose Control hook validates the
 // RESOLVED IP the socket is about to connect to. This is the authoritative
 // SSRF guard: it runs after DNS resolution, at connect time, so DNS
