@@ -22094,6 +22094,20 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		if err != nil {
 			return message{role: roleAssistant, text: fmt.Sprintf("Failed to start remote control server: %v", err)}
 		}
+		// The RC server uses the same SPA and browser panel as the normal
+		// server path. Start its isolated browse origin before serving the
+		// main listener; this also keeps local-dev navigation working when
+		// the UI is opened through /rc. Chrome options come from the ocode
+		// config; a load failure keeps defaults.
+		rcBrowseOpts := &server.BrowseOptions{Supervisor: srv.ProcessSupervisor()}
+		if ocfg, err := config.LoadOcodeConfigCopy(); err == nil && ocfg != nil {
+			rcBrowseOpts.ChromePath = ocfg.Browser.ChromePath
+			rcBrowseOpts.IdleTimeoutMinutes = ocfg.Browser.IdleTimeoutMinutes
+		}
+		if err := server.StartBrowse(srv, token, "http://"+ln.Addr().String(), rcBrowseOpts); err != nil {
+			_ = ln.Close()
+			return message{role: roleAssistant, text: fmt.Sprintf("Failed to start remote control browser: %v", err)}
+		}
 
 		// Store the server and listener for later cleanup (/rc off).
 		m.rcSrv = srv

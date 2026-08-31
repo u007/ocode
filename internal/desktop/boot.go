@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/server"
@@ -82,8 +83,17 @@ func StartServer(webFS fs.FS, workDir string) (*Handle, error) {
 	// Browse origin: a second loopback listener, isolated from the SPA
 	// origin, backing the embedded browser panel. Failing to bind it means
 	// the panel cannot work at all, so boot fails loudly rather than
-	// silently serving a half-functional UI.
-	if err := server.StartBrowse(srv, token, url); err != nil {
+	// silently serving a half-functional UI. Chrome-mode options come from
+	// the ocode config (chrome_path, idle_timeout_minutes); a load failure
+	// keeps defaults rather than blocking boot.
+	browseOpts := &server.BrowseOptions{Supervisor: srv.ProcessSupervisor()}
+	if ocfg, err := config.LoadOcodeConfigCopy(); err == nil && ocfg != nil {
+		browseOpts.ChromePath = ocfg.Browser.ChromePath
+		browseOpts.IdleTimeoutMinutes = ocfg.Browser.IdleTimeoutMinutes
+	} else if err != nil {
+		log.Printf("desktop: load ocode config for chrome options: %v (using defaults)", err)
+	}
+	if err := server.StartBrowse(srv, token, url, browseOpts); err != nil {
 		return nil, fmt.Errorf("desktop: %w", err)
 	}
 

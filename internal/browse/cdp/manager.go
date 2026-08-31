@@ -48,24 +48,24 @@ type FrameSink interface {
 
 // MouseEvent describes a mouse action.
 type MouseEvent struct {
-	Kind       string // move|down|up|wheel
-	X, Y       float64
-	Button     string
-	ClickCount int
+	Kind           string // move|down|up|wheel
+	X, Y           float64
+	Button         string
+	ClickCount     int
 	DeltaX, DeltaY float64
-	Modifiers  int
+	Modifiers      int
 }
 
 // KeyEvent describes a keyboard action.
 type KeyEvent struct {
-	Kind      string // down|up|char
+	Kind            string // down|up|char
 	Key, Code, Text string
-	Modifiers int
+	Modifiers       int
 }
 
 var (
-	ErrBadScheme           = errors.New("unsupported URL scheme")
-	ErrChromeNotFound2     = ErrChromeNotFound
+	ErrBadScheme            = errors.New("unsupported URL scheme")
+	ErrChromeNotFound2      = ErrChromeNotFound
 	ErrUnsupportedPlatform2 = ErrUnsupportedPlatform
 )
 
@@ -262,9 +262,9 @@ func (m *Manager) startBrowserHandlersLocked() {
 func (m *Manager) handleTargetCrashed(ch <-chan json.RawMessage, conn *Conn) {
 	for raw := range ch {
 		var ev struct {
-			TargetID string `json:"targetId"`
-			Status   string `json:"status"`
-			ErrorCode int   `json:"errorCode"`
+			TargetID  string `json:"targetId"`
+			Status    string `json:"status"`
+			ErrorCode int    `json:"errorCode"`
 		}
 		_ = json.Unmarshal(raw, &ev)
 		m.mu.Lock()
@@ -522,6 +522,12 @@ func (m *Manager) emitNav(ev NavEvent) {
 		m.opts.EmitNav(ev)
 	}
 }
+
+// EmitNavForTest fires the configured EmitNav closure exactly as emitNav
+// would. Package consumers (internal/browse) use it to pin the adapter
+// contract — payload passthrough plus the chrome-mode stamp — without
+// launching Chrome.
+func (m *Manager) EmitNavForTest(ev NavEvent) { m.emitNav(ev) }
 
 // isHTTPSScheme checks http/https
 func isHTTPSScheme(u string) bool {

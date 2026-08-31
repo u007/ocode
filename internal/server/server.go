@@ -23,6 +23,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/browse"
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
@@ -234,6 +235,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/title/generate", s.authMiddleware(s.handleGenerateSessionTitle))
 	s.mux.HandleFunc("GET /api/sessions/{id}/context", s.authMiddleware(s.handleSessionContext))
 	s.mux.HandleFunc("POST /api/sessions/{id}/truncate", s.authMiddleware(s.handler.HandleTruncateSession))
+	s.mux.HandleFunc("POST /api/sessions/{id}/cancel", s.authMiddleware(s.handleCancelSession))
 
 	// Files
 	s.mux.HandleFunc("POST /api/files/undo", s.authMiddleware(s.handleUndo))
@@ -494,6 +496,7 @@ func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 	s.mux.HandleFunc("GET /api/browse/config", s.authMiddleware(s.handleBrowseConfig))
 	s.mux.HandleFunc("POST /api/browse/grant", s.authMiddleware(s.handleBrowseGrant))
 	s.mux.HandleFunc("POST /api/browse/revoke", s.authMiddleware(s.handleBrowseRevoke))
+	s.mux.HandleFunc("POST /api/browse/bypass", s.authMiddleware(s.handleBrowseBypass))
 	// Bridge server-authoritative nav events onto the SSE bus. The first
 	// publisher arg (stateKey) is redundant with ev.StateKey — ignore it and
 	// treat ev.StateKey as the single source of truth so the SPA and the bus
@@ -513,17 +516,40 @@ func (s *Server) publishBrowseNav(ev browse.NavEvent) {
 	s.handler.bus.Publish("browse_nav", "", "", ev)
 }
 
+// BrowseOptions carries the headless-Chrome configuration for the browse
+// origin. ChromePath overrides binary discovery; IdleTimeoutMinutes is how
+// long the shared Chrome process idles before shutdown (0 → package default);
+// Supervisor is the server-owned process supervisor Chrome is launched
+// through (srv.ProcessSupervisor()).
+type BrowseOptions struct {
+	ChromePath         string
+	IdleTimeoutMinutes int
+	Supervisor         *tool.ProcessSupervisor
+}
+
 // StartBrowse stands up the isolated browse origin: a second loopback
-// listener serving proxied page content cross-origin from the SPA. It binds
+// listener serving local page content cross-origin from the SPA (external
+// URLs are rendered by headless Chrome via CDP, not proxied). It binds
 // 127.0.0.1:0, registers the SPA-facing endpoints on srv, and serves in a
 // background goroutine. token is the main-origin API token, handed to the
 // browse server for future grant-validation needs (never exposed on browse
 // responses). spaOrigin is the main server's actual bound origin (e.g.
 // "http://127.0.0.1:4096") — callers must pass the address from their bound
 // listener, not srv.Addr(), which keeps the literal ":0" when the port was
-// requested as random. Callers: desktop boot and the CLI serve path.
-func StartBrowse(srv *Server, token string, spaOrigin string) error {
-	bs := browse.New(token, log.Default())
+// requested as random. opts carries the chrome-mode configuration; a nil
+// opts uses defaults (chrome discovered from env/platform, supervisor
+// omitted — chrome mode then reports "not configured" on first use).
+// Callers: desktop boot, the CLI serve path, and the TUI /rc server.
+func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOptions) error {
+	var bOpts browse.Options
+	if opts != nil {
+		bOpts = browse.Options{
+			ChromePath:  opts.ChromePath,
+			IdleTimeout: time.Duration(opts.IdleTimeoutMinutes) * time.Minute,
+			Supervisor:  opts.Supervisor,
+		}
+	}
+	bs := browse.New(token, log.Default(), bOpts)
 	bs.SetSPAOrigin(spaOrigin)
 	bln, bBase, err := bs.Listen("127.0.0.1:0")
 	if err != nil {
@@ -601,6 +627,32 @@ func (s *Server) handleBrowseRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.browse.Revoke(req.StateKey)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleBrowseBypass(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		StateKey string `json:"state_key"`
+		Host     string `json:"host"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("browse bypass: decode request body: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.StateKey == "" || req.Host == "" {
+		http.Error(w, "state_key and host required", http.StatusBadRequest)
+		return
+	}
+	// Frontend is untrusted — canonicalize and validate that the host is
+	// actually a private/loopback literal. Public hosts must never be
+	// bypassable, even if the SPA is compromised.
+	host := strings.TrimSpace(req.Host)
+	if !browse.IsPrivateHost(host) {
+		http.Error(w, "bypass only allowed for private hosts", http.StatusBadRequest)
+		return
+	}
+	s.browse.AllowBypass(req.StateKey, host)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -892,10 +944,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if ln != nil {
 		_ = ln.Close()
 	}
-	// Tear down the supervised children (headless Chrome etc.) before closing
-	// the browse HTTP server: a graceful Browser.close installed as a shutdown
-	// callback needs its CDP pipe still alive. Log the error, never abort
-	// shutdown.
+	// Tear down the browse CDP manager (graceful Browser.close over the CDP
+	// pipe) and then the supervised children (headless Chrome etc.) before
+	// closing the browse HTTP server: both need the pipe/listener alive to
+	// drain. Log the error, never abort shutdown.
+	if s.browse != nil {
+		if err := s.browse.Close(ctx); err != nil {
+			log.Printf("server: shutdown browse cdp manager: %v", err)
+		}
+	}
 	if s.procSup != nil {
 		if err := s.procSup.Shutdown(ctx); err != nil {
 			log.Printf("server: shutdown process supervisor: %v", err)
@@ -1025,7 +1082,16 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	// password doubles as the main-origin API token here (empty when the
 	// serve process runs unauthenticated). The SPA origin comes from the
 	// bound listener — with -port 0 the requested addr is not the real one.
-	if err := StartBrowse(srv, password, "http://"+ln.Addr().String()); err != nil {
+	// Chrome-mode options come from the ocode config; a load failure keeps
+	// defaults rather than blocking serve.
+	browseOpts := &BrowseOptions{Supervisor: srv.ProcessSupervisor()}
+	if ocfg, err := config.LoadOcodeConfigCopy(); err == nil && ocfg != nil {
+		browseOpts.ChromePath = ocfg.Browser.ChromePath
+		browseOpts.IdleTimeoutMinutes = ocfg.Browser.IdleTimeoutMinutes
+	} else if err != nil {
+		log.Printf("server: load ocode config for chrome options: %v (using defaults)", err)
+	}
+	if err := StartBrowse(srv, password, "http://"+ln.Addr().String(), browseOpts); err != nil {
 		log.Printf("server: browse origin unavailable, browser panel disabled: %v", err)
 	}
 
@@ -1159,6 +1225,9 @@ func (s *Server) handleGenerateSessionTitle(w http.ResponseWriter, r *http.Reque
 }
 func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSessionContext(w, r, r.PathValue("id"))
+}
+func (s *Server) handleCancelSession(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleCancelSession(w, r, r.PathValue("id"))
 }
 
 // File shims
@@ -1635,6 +1704,13 @@ type ModelInfo struct {
 	// (matching the TUI's dedupe) while still showing it as favorited.
 	Favorite bool `json:"favorite,omitempty"`
 	Recent   bool `json:"recent,omitempty"`
+	// HasModelPrompt flags models with an injectable model-specific custom
+	// prompt ({model}.OCODE.md on disk or the embedded fallback) — the web
+	// model picker badges them, mirroring the TUI's "◆ Model prompt" row.
+	HasModelPrompt bool `json:"has_model_prompt,omitempty"`
+	// HasKaizen flags models with at least one force-injected Kaizen tuning
+	// directive (digest-bearing conduct skill) admitted for this project.
+	HasKaizen bool `json:"has_kaizen,omitempty"`
 }
 
 func printServeUsage() {

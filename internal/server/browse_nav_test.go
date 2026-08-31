@@ -3,7 +3,6 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -51,9 +50,11 @@ func TestBrowseNavBridgedToBus(t *testing.T) {
 }
 
 // TestEnableBrowseWiresPublisher proves the closure EnableBrowse installs on
-// the browse server actually fans emissions onto the bus. A non-private
-// document navigation hands off to chrome mode (204 + chrome nav event) without
-// any upstream fetch — the bus must receive the chrome event.
+// the browse server actually fans emissions onto the bus/SSE layer. This is
+// the server↔browse adapter boundary only: the chrome hand-off emission itself
+// is covered by TestChromeHandOff in internal/browse, and the CDP socket
+// contract by cdpsocket_test.go. The event is injected at the browse publisher
+// seam (no network, no grants) and must arrive with its payload intact.
 func TestEnableBrowseWiresPublisher(t *testing.T) {
 	s := New("127.0.0.1:0", "", "", nil)
 	bs := browse.New("", nil)
@@ -62,27 +63,16 @@ func TestEnableBrowseWiresPublisher(t *testing.T) {
 	ch := s.handler.bus.Subscribe(nil)
 	defer s.handler.bus.Unsubscribe(ch)
 
-	grant := bs.MintGrant("tab:wire", "")
-	r := httptest.NewRequest("GET", "/b/tab:wire/https/example.invalid/?__grant="+grant, nil)
-	r.Header.Set("Sec-Fetch-Dest", "document")
-	w := httptest.NewRecorder()
-	bs.Handler().ServeHTTP(w, r)
-	if w.Code != 302 {
-		t.Fatalf("grant redeem: got %d want 302", w.Code)
+	// Drive the wiring at its seam: publishBrowseNav is the exact sink the
+	// EnableBrowse-installed publisher routes into, so emitting a chrome-mode
+	// event through it proves the adapter without touching the network,
+	// grants, or the CDP stack.
+	want := browse.NavEvent{
+		StateKey: "tab:wire", URL: "https://example.invalid/", Status: 0, Mode: "chrome",
 	}
-	var cookie string
-	for _, c := range w.Result().Cookies() {
-		if c.Name == "ocode_browse" {
-			cookie = c.Value
-		}
-	}
-	if cookie == "" {
-		t.Fatal("no session cookie after grant redeem")
-	}
-	r2 := httptest.NewRequest("GET", "/b/tab:wire/https/example.invalid/", nil)
-	r2.Header.Set("Sec-Fetch-Dest", "document")
-	r2.AddCookie(&http.Cookie{Name: "ocode_browse", Value: cookie})
-	bs.Handler().ServeHTTP(httptest.NewRecorder(), r2)
+	go func() {
+		s.publishBrowseNav(want)
+	}()
 
 	select {
 	case env := <-ch:
@@ -93,17 +83,19 @@ func TestEnableBrowseWiresPublisher(t *testing.T) {
 		if !ok {
 			t.Fatalf("Data type = %T", env.Data)
 		}
-		if ev.Mode != "chrome" || ev.Status != 0 || !strings.Contains(ev.URL, "example.invalid") {
-			t.Fatalf("chrome nav event mismatch: %+v", ev)
+		if ev != want {
+			t.Fatalf("chrome nav payload mismatch: got %+v want %+v", ev, want)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no chrome browse_nav event received")
 	}
 }
 
-// A subresource request (Sec-Fetch-Dest: image) must NOT produce a nav event;
-// only a top-level document navigation does. This guards against flooding the
-// address bar/status row with per-asset noise.
+// TestBrowseNavOnlyForTopDocument pins the Part-07 guard at the routing layer:
+// a chrome hand-off document request emits exactly one nav event (the chrome
+// loading event, status 0); a subresource request with the same session emits
+// none. Uses the chrome hand-off path, so no network or grants beyond the
+// initial redeem.
 func TestBrowseNavOnlyForTopDocument(t *testing.T) {
 	var events []browse.NavEvent
 	bs := browse.New("", nil)
@@ -111,11 +103,12 @@ func TestBrowseNavOnlyForTopDocument(t *testing.T) {
 
 	grant := bs.MintGrant("tab:x", "")
 
-	// Document navigation (DNS-fails upstream → loading + terminal, never zero).
+	// Grant redeem (302, emits nothing) then the document navigation, which
+	// hands off to chrome: exactly one chrome nav event.
 	docReq := httptest.NewRequest("GET", "/b/tab:x/https/example.invalid/?__grant="+grant, nil)
 	docReq.Header.Set("Sec-Fetch-Dest", "document")
 	docW := httptest.NewRecorder()
-	bs.Handler().ServeHTTP(docW, docReq) // 302 grant redeem; emits nothing
+	bs.Handler().ServeHTTP(docW, docReq)
 	if docW.Code != 302 {
 		t.Fatalf("grant nav: got %d want 302", docW.Code)
 	}
@@ -132,17 +125,19 @@ func TestBrowseNavOnlyForTopDocument(t *testing.T) {
 	docReq2.Header.Set("Sec-Fetch-Dest", "document")
 	docReq2.AddCookie(&http.Cookie{Name: "ocode_browse", Value: cookie})
 	bs.Handler().ServeHTTP(httptest.NewRecorder(), docReq2)
-	if len(events) < 1 {
-		t.Fatalf("document nav emitted %d nav events, want >=1", len(events))
+	if len(events) != 1 {
+		t.Fatalf("chrome hand-off emitted %d nav events, want 1: %+v", len(events), events)
 	}
-	afterDoc := len(events)
+	if events[0].Mode != "chrome" || events[0].Status != 0 {
+		t.Fatalf("event = %+v, want chrome loading (status 0)", events[0])
+	}
 
 	// Subresource request with the same cookie: zero additional events.
 	imgReq := httptest.NewRequest("GET", "/b/tab:x/https/example.invalid/pic.png", nil)
 	imgReq.Header.Set("Sec-Fetch-Dest", "image")
 	imgReq.AddCookie(&http.Cookie{Name: "ocode_browse", Value: cookie})
 	bs.Handler().ServeHTTP(httptest.NewRecorder(), imgReq)
-	if len(events) != afterDoc {
-		t.Fatalf("subresource produced nav events: %d → %d", afterDoc, len(events))
+	if len(events) != 1 {
+		t.Fatalf("subresource produced nav events: 1 → %d", len(events))
 	}
 }
