@@ -304,8 +304,17 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		s.auth.setLocalDoc(cookieVal, false)
 	}
 	if t.Local {
-		s.handleLocal(w, r, t) // provided by Part 06 (shimmed to external for now)
+		s.handleLocal(w, r, t)
 		return
 	}
-	s.handleExternal(w, r, t)
+	// Non-local (chrome) mode: never proxy. The SPA switches to ChromeViewport
+	// and the target navigates via the CDP socket. No upstream fetch happens here.
+	urlStr := t.Scheme + "://" + t.Host + t.Path
+	if t.RawQuery != "" {
+		urlStr += "?" + t.RawQuery
+	}
+	if isDocumentRequest(r) {
+		s.emitNav(NavEvent{StateKey: t.StateKey, URL: urlStr, Status: 0, Mode: "chrome"})
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

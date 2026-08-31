@@ -63,6 +63,38 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
 			req.Header.Del("X-Ocode-Grant")
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			// Local → Chrome hand-off: if a document request received a 3xx
+			// whose Location resolves to a non-private host, do not follow it
+			// inside the iframe (it would die on X-Frame-Options). Instead
+			// replace with 204 and emit a chrome nav event. The SPA will switch
+			// viewport and the chrome target will navigate there.
+			if isDocumentRequest(r) && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+				loc := resp.Header.Get("Location")
+				if loc != "" {
+					if parsed, err := url.Parse(loc); err == nil {
+						base := &url.URL{Scheme: t.Scheme, Host: t.Host, Path: t.Path}
+						resolved := base.ResolveReference(parsed)
+						if resolved.Host != "" && !hostIsLiteralPrivate(resolved.Host) {
+							// Hand off to chrome.
+							s.emitNav(NavEvent{StateKey: t.StateKey, URL: resolved.String(), Status: 0, Mode: "chrome"})
+							// Drain and close original body.
+							if resp.Body != nil {
+								_, _ = io.Copy(io.Discard, resp.Body)
+								_ = resp.Body.Close()
+							}
+							resp.Body = io.NopCloser(bytes.NewReader(nil))
+							resp.StatusCode = http.StatusNoContent
+							resp.Status = http.StatusText(http.StatusNoContent)
+							resp.Header.Del("Location")
+							resp.Header.Del("Content-Length")
+							resp.Header.Del("Content-Type")
+							resp.Header.Del("Content-Encoding")
+							resp.ContentLength = 0
+							return nil
+						}
+					}
+				}
+			}
 			// Never let the dev server install a service worker via header.
 			resp.Header.Del("Service-Worker-Allowed")
 			ct := resp.Header.Get("Content-Type")
@@ -152,7 +184,7 @@ func (s *Server) rewriteAndInjectResponse(resp *http.Response, t target) error {
 		s.log.Printf("browse local: rewriteHTML for %s: %v — serving unrewritten", resp.Request.URL, rerr)
 		injected = raw // fail open to raw HTML rather than blank page
 	}
-	injected = injectCapture(injected, t.StateKey, s.spaOrigin)
+	injected = injectCapture(injected, t.StateKey, s.spaOriginFor(t.StateKey))
 
 	resp.Body = io.NopCloser(bytes.NewReader(injected))
 	// We always emit identity-encoded HTML after injection.

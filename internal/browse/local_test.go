@@ -15,8 +15,10 @@ import (
 func newLocalTestServer(t *testing.T, stateKey string) (*Server, *http.Cookie) {
 	t.Helper()
 	s := New("apitoken", nil)
-	grant := s.MintGrant(stateKey)
-	cookieVal, _, ok := s.auth.redeem(grant)
+	grant := s.MintGrant(stateKey, "")
+	// Local-mode tests exercise private-loopback upstreams; mark the session
+	// local so the server-authoritative gate admits them.
+	cookieVal, _, ok := s.auth.redeem(grant, true)
 	if !ok {
 		t.Fatal("could not redeem grant in test setup")
 	}
@@ -257,5 +259,76 @@ func TestHandleLocalUpgradeEmitsNoNavEvent(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("upgrade request emitted %d nav events: %+v", len(got), got)
+	}
+}
+
+func TestHandleLocalRedirectToExternalHandsOff(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://accounts.example.com/x", http.StatusFound)
+	}))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	s, cookie := newLocalTestServer(t, "tab:hand1")
+	var got []NavEvent
+	s.SetNavPublisher(func(_ string, ev NavEvent) { got = append(got, ev) })
+	r := httptest.NewRequest("GET", "/b/tab:hand1/http/"+host+"/", nil)
+	r.Header.Set("Sec-Fetch-Dest", "document")
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d want 204, body=%q headers=%v", w.Code, w.Body.String(), w.Header())
+	}
+	if loc := w.Header().Get("Location"); loc != "" {
+		t.Fatalf("Location header should be stripped, got %q", loc)
+	}
+	found := false
+	for _, ev := range got {
+		if ev.Mode == "chrome" && ev.URL == "https://accounts.example.com/x" && ev.Status == 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no chrome nav event for external redirect, got %+v", got)
+	}
+}
+
+func TestHandleLocalRedirectToRelativePasses(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/relative", http.StatusFound)
+	}))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	s, cookie := newLocalTestServer(t, "tab:hand2")
+	r := httptest.NewRequest("GET", "/b/tab:hand2/http/"+host+"/", nil)
+	r.Header.Set("Sec-Fetch-Dest", "document")
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusFound {
+		t.Fatalf("relative redirect should pass through as 302, got %d", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc == "" {
+		t.Fatalf("Location should be preserved for private redirect")
+	}
+}
+
+func TestHandleLocalRedirectSubresourcePasses(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://accounts.example.com/x", http.StatusFound)
+	}))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	s, cookie := newLocalTestServer(t, "tab:hand3")
+	r := httptest.NewRequest("GET", "/b/tab:hand3/http/"+host+"/sub.js", nil)
+	r.Header.Set("Sec-Fetch-Dest", "script")
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusFound {
+		t.Fatalf("subresource redirect should pass through, got %d", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc == "" {
+		t.Fatalf("Location should be preserved for subresource")
 	}
 }

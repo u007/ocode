@@ -24,7 +24,7 @@ func TestBrowseNavBridgedToBus(t *testing.T) {
 	// Simulate emission through the publisher wired by EnableBrowse: drive
 	// browse's own emit path by publishing via the helper the closure uses.
 	s.publishBrowseNav(browse.NavEvent{
-		StateKey: "tab:abc", URL: "https://example.com/", Status: 200, Mode: "proxied",
+		StateKey: "tab:abc", URL: "https://example.com/", Status: 200, Mode: "chrome",
 	})
 
 	select {
@@ -42,7 +42,7 @@ func TestBrowseNavBridgedToBus(t *testing.T) {
 		if !ok {
 			t.Fatalf("Data type = %T, want browse.NavEvent", env.Data)
 		}
-		if ev.StateKey != "tab:abc" || ev.URL != "https://example.com/" || ev.Status != 200 || ev.Mode != "proxied" {
+		if ev.StateKey != "tab:abc" || ev.URL != "https://example.com/" || ev.Status != 200 || ev.Mode != "chrome" {
 			t.Fatalf("payload round-trip mismatch: %+v", ev)
 		}
 	case <-time.After(time.Second):
@@ -51,9 +51,9 @@ func TestBrowseNavBridgedToBus(t *testing.T) {
 }
 
 // TestEnableBrowseWiresPublisher proves the closure EnableBrowse installs on
-// the browse server actually fans emissions onto the bus (not just the
-// helper). A real document navigation whose DNS fails still emits a terminal
-// event with an Error, so the SPA can never sit on a silent loading state.
+// the browse server actually fans emissions onto the bus. A non-private
+// document navigation hands off to chrome mode (204 + chrome nav event) without
+// any upstream fetch — the bus must receive the chrome event.
 func TestEnableBrowseWiresPublisher(t *testing.T) {
 	s := New("127.0.0.1:0", "", "", nil)
 	bs := browse.New("", nil)
@@ -62,18 +62,17 @@ func TestEnableBrowseWiresPublisher(t *testing.T) {
 	ch := s.handler.bus.Subscribe(nil)
 	defer s.handler.bus.Unsubscribe(ch)
 
-	grant := bs.MintGrant("tab:wire")
+	grant := bs.MintGrant("tab:wire", "")
 	r := httptest.NewRequest("GET", "/b/tab:wire/https/example.invalid/?__grant="+grant, nil)
 	r.Header.Set("Sec-Fetch-Dest", "document")
 	w := httptest.NewRecorder()
-	// Redeem grant (302), grab cookie, then re-request as the SPA would.
 	bs.Handler().ServeHTTP(w, r)
 	if w.Code != 302 {
 		t.Fatalf("grant redeem: got %d want 302", w.Code)
 	}
 	var cookie string
 	for _, c := range w.Result().Cookies() {
-		if c.Name == "ocode_browse" { // browse's unexported browseCookie const
+		if c.Name == "ocode_browse" {
 			cookie = c.Value
 		}
 	}
@@ -85,37 +84,20 @@ func TestEnableBrowseWiresPublisher(t *testing.T) {
 	r2.AddCookie(&http.Cookie{Name: "ocode_browse", Value: cookie})
 	bs.Handler().ServeHTTP(httptest.NewRecorder(), r2)
 
-	// Expect a loading event and a terminal event (with Error: DNS failure)
-	// to arrive on the bus via the wired publisher.
-	var events []browse.NavEvent
-	for {
-		select {
-		case env := <-ch:
-			if env.Event != "browse_nav" {
-				continue
-			}
-			ev, ok := env.Data.(browse.NavEvent)
-			if !ok {
-				t.Fatalf("Data type = %T", env.Data)
-			}
-			events = append(events, ev)
-			if ev.Error != "" {
-				goto done
-			}
-		case <-time.After(3 * time.Second):
-			t.Fatalf("timed out; events so far: %+v", events)
+	select {
+	case env := <-ch:
+		if env.Event != "browse_nav" {
+			t.Fatalf("event = %q want browse_nav", env.Event)
 		}
-	}
-done:
-	if len(events) < 2 {
-		t.Fatalf("want >=2 events (loading + terminal), got %d: %+v", len(events), events)
-	}
-	if events[0].Status != 0 || events[0].Error != "" {
-		t.Fatalf("first event should be loading (status 0, no error): %+v", events[0])
-	}
-	last := events[len(events)-1]
-	if last.Error == "" || !strings.Contains(last.URL, "example.invalid") {
-		t.Fatalf("terminal event should carry DNS error + upstream URL: %+v", last)
+		ev, ok := env.Data.(browse.NavEvent)
+		if !ok {
+			t.Fatalf("Data type = %T", env.Data)
+		}
+		if ev.Mode != "chrome" || ev.Status != 0 || !strings.Contains(ev.URL, "example.invalid") {
+			t.Fatalf("chrome nav event mismatch: %+v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no chrome browse_nav event received")
 	}
 }
 
@@ -127,7 +109,7 @@ func TestBrowseNavOnlyForTopDocument(t *testing.T) {
 	bs := browse.New("", nil)
 	bs.SetNavPublisher(func(_ string, ev browse.NavEvent) { events = append(events, ev) })
 
-	grant := bs.MintGrant("tab:x")
+	grant := bs.MintGrant("tab:x", "")
 
 	// Document navigation (DNS-fails upstream → loading + terminal, never zero).
 	docReq := httptest.NewRequest("GET", "/b/tab:x/https/example.invalid/?__grant="+grant, nil)
