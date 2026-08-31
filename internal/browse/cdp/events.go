@@ -29,9 +29,9 @@ func (s *EventSub) Dropped() int64 {
 	return s.dropped
 }
 
-// push delivers one event, dropping the oldest if the channel is full.
-// Only the reader goroutine calls it; sub.close is the only concurrent writer,
-// so a send never races a channel close under s.mu.
+// push delivers one event, dropping the oldest if the channel is full. It is
+// called from the reader goroutine; the mutex serializes it against close() so
+// a send never races a channel close (dispatch skips closed subs via s.closed).
 func (s *EventSub) push(ev json.RawMessage) {
 	s.mu.Lock()
 	if s.closed {
@@ -54,6 +54,8 @@ func (s *EventSub) push(ev json.RawMessage) {
 	s.mu.Unlock()
 }
 
+// close is idempotent: closing an already-closed (or an EventSub never added)
+// channel is a no-op.
 func (s *EventSub) close() {
 	s.mu.Lock()
 	if !s.closed {
@@ -70,6 +72,16 @@ type subKey struct {
 	method    string
 }
 
+// finished reports whether the connection has shut down (done closed).
+func (c *Conn) finished() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // Subscribe delivers raw event params for (sessionID, method) on a buffered
 // channel. "" sessionID subscribes to browser-level events. cancel() removes
 // the subscription and closes its channel; Conn.Close does the same for all
@@ -78,6 +90,17 @@ func (c *Conn) Subscribe(sessionID, method string) (<-chan json.RawMessage, func
 	s := &EventSub{ch: make(chan json.RawMessage, subBufSize)}
 	k := subKey{sessionID, method}
 	c.subsMu.Lock()
+	// A subscription fabricated after Close/EOF would never be closed (the
+	// closeSubscriptions pass has already run) and leak an open channel. Detect
+	// that under subsMu (the same lock serializing the close pass) and hand
+	// back an already-closed channel with a no-op cancel; it never enters c.subs,
+	// so it cannot be closed twice.
+	if c.finished() {
+		c.subsMu.Unlock()
+		close(s.ch)
+		var noop sync.Once
+		return s.C(), func() { noop.Do(func() {}) }
+	}
 	c.subs[k] = append(c.subs[k], s)
 	c.subsMu.Unlock()
 
@@ -114,10 +137,13 @@ func (c *Conn) Dropped(sessionID, method string) int64 {
 	return n
 }
 
-// dispatchEvent fans a sessionId+method event out to matching subscribers.
+// dispatchEvent fans a sessionId+method event out to matching subscribers. It
+// copies the subscriber pointers while holding the read lock, then releases it
+// before the (non-blocking) sends, so a concurrent cancel mutating the registry
+// cannot race the iteration over the backing array.
 func (c *Conn) dispatchEvent(m wireMessage) {
 	c.subsMu.RLock()
-	subs := c.subs[subKey{m.SessionID, m.Method}]
+	subs := append([]*EventSub(nil), c.subs[subKey{m.SessionID, m.Method}]...)
 	c.subsMu.RUnlock()
 	for _, s := range subs {
 		s.push(m.Params)

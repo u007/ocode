@@ -348,3 +348,79 @@ func TestSubscribeCancelAndClose(t *testing.T) {
 		t.Fatal("evs2 still open after Conn.Close")
 	}
 }
+
+func TestSubscribeMultipleSubscribers(t *testing.T) {
+	p := newFakePeer(t)
+	a, ca := p.conn.Subscribe("", "Ev.m")
+	defer ca()
+	b, cb := p.conn.Subscribe("", "Ev.m")
+	defer cb()
+	p.respond(`{"method":"Ev.m","params":{"n":1}}`)
+	for name, ch := range map[string]<-chan json.RawMessage{"a": a, "b": b} {
+		select {
+		case ev := <-ch:
+			if !bytes.Contains(ev, []byte("1")) {
+				t.Fatalf("%s got %s", name, ev)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s missed event", name)
+		}
+	}
+}
+
+func TestSubscribeAfterCloseReturnsClosedChannel(t *testing.T) {
+	p := newFakePeer(t)
+	p.conn.Close()
+	evs, cancel := p.conn.Subscribe("", "Ev.m")
+	select {
+	case _, ok := <-evs:
+		if ok {
+			t.Fatal("channel should be already closed after Conn.Close")
+		}
+	default:
+		t.Fatal("subscribe-after-close must return a closed channel, not block")
+	}
+	// No-op cancel must not panic.
+	cancel()
+	cancel()
+}
+
+func TestSubscribeCancelIdempotent(t *testing.T) {
+	p := newFakePeer(t)
+	evs, cancel := p.conn.Subscribe("", "Ev.m")
+	// No event yet; verify cancel twice never closes or panics.
+	cancel()
+	cancel()
+	select {
+	case _, ok := <-evs:
+		if ok {
+			t.Fatal("expected closed channel after cancel")
+		}
+	default:
+		t.Fatal("channel not closed after cancel")
+	}
+}
+
+func TestConcurrentDispatchAndCancelNoRaceOrPanic(t *testing.T) {
+	p := newFakePeer(t)
+	done := make(chan error, 1)
+	go func() {
+		var err error
+		for i := 0; i < 2000; i++ {
+			if _, werr := p.respW.Write([]byte(`{"method":"Ev.m","params":{"n":1}}` + nul)); werr != nil {
+				err = werr
+				break
+			}
+		}
+		done <- err
+	}()
+
+	var cancel func()
+	var evs <-chan json.RawMessage
+	for i := 0; i < 2000; i++ {
+		evs, cancel = p.conn.Subscribe("", "Ev.m")
+		cancel()
+		_ = evs
+	}
+	_ = <-done
+}
