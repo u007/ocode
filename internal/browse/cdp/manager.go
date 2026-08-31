@@ -244,23 +244,22 @@ func (m *Manager) handleChromeExit() {
 }
 
 func (m *Manager) startBrowserHandlersLocked() {
-	// Subscribe to Target.targetCrashed and attachedToTarget at browser level.
 	if m.conn == nil {
 		return
 	}
-	ch1, cancel1 := m.conn.Subscribe("", "Target.targetCrashed")
-	ch2, cancel2 := m.conn.Subscribe("", "Target.attachedToTarget")
+	conn := m.conn
+	ch1, cancel1 := conn.Subscribe("", "Target.targetCrashed")
+	ch2, cancel2 := conn.Subscribe("", "Target.attachedToTarget")
 	m.browserCancel = append(m.browserCancel, cancel1, cancel2)
-	go m.handleTargetCrashed(ch1)
-	go m.handleAttachedToTarget(ch2)
-	// Also watch chrome Done channel to trigger exit handling if pipe closes without exited signal.
-	go func() {
-		<-m.conn.Done()
+	go m.handleTargetCrashed(ch1, conn)
+	go m.handleAttachedToTarget(ch2, conn)
+	go func(c *Conn) {
+		<-c.Done()
 		m.handleChromeExit()
-	}()
+	}(conn)
 }
 
-func (m *Manager) handleTargetCrashed(ch <-chan json.RawMessage) {
+func (m *Manager) handleTargetCrashed(ch <-chan json.RawMessage, conn *Conn) {
 	for raw := range ch {
 		var ev struct {
 			TargetID string `json:"targetId"`
@@ -269,7 +268,6 @@ func (m *Manager) handleTargetCrashed(ch <-chan json.RawMessage) {
 		}
 		_ = json.Unmarshal(raw, &ev)
 		m.mu.Lock()
-		// Find target by targetId
 		var matched *Target
 		var key string
 		for k, t := range m.targets {
@@ -290,24 +288,21 @@ func (m *Manager) handleTargetCrashed(ch <-chan json.RawMessage) {
 			m.mu.Lock()
 			delete(m.targets, key)
 			m.mu.Unlock()
-			// Best effort close target via CDP if connection still alive
-			if m.conn != nil {
-				_ = m.conn.Call(context.Background(), "", "Target.closeTarget", map[string]string{"targetId": ev.TargetID}, nil)
-				_ = m.conn.Call(context.Background(), "", "Target.disposeBrowserContext", map[string]string{"browserContextId": matched.browserContextID}, nil)
-			}
+			_ = conn.Call(context.Background(), "", "Target.closeTarget", map[string]string{"targetId": ev.TargetID}, nil)
+			_ = conn.Call(context.Background(), "", "Target.disposeBrowserContext", map[string]string{"browserContextId": matched.browserContextID}, nil)
 		}
 	}
 }
 
-func (m *Manager) handleAttachedToTarget(ch <-chan json.RawMessage) {
+func (m *Manager) handleAttachedToTarget(ch <-chan json.RawMessage, conn *Conn) {
 	for raw := range ch {
 		var ev struct {
 			SessionID          string `json:"sessionId"`
 			WaitingForDebugger bool   `json:"waitingForDebugger"`
 		}
 		_ = json.Unmarshal(raw, &ev)
-		if ev.WaitingForDebugger && m.conn != nil {
-			_ = m.conn.Call(context.Background(), ev.SessionID, "Runtime.runIfWaitingForDebugger", nil, nil)
+		if ev.WaitingForDebugger {
+			_ = conn.Call(context.Background(), ev.SessionID, "Runtime.runIfWaitingForDebugger", nil, nil)
 		}
 	}
 }
@@ -454,20 +449,21 @@ func (m *Manager) Revoke(stateKey string) {
 		timeout := m.opts.IdleTimeout
 		m.idleTimer = time.AfterFunc(timeout, func() {
 			m.mu.Lock()
-			if len(m.targets) == 0 && m.conn != nil {
-				if m.cleanup != nil {
-					cfn := m.cleanup
-					m.cleanup = nil
-					m.mu.Unlock()
-					cfn()
-					m.mu.Lock()
-					// Need to also call Browser.close if possible before cleanup
-					// cleanup already handles conn close
-					m.conn = nil
-					m.exited = nil
-				}
+			conn := m.conn
+			cfn := m.cleanup
+			should := len(m.targets) == 0 && m.conn != nil && m.cleanup != nil
+			if should {
+				m.cleanup = nil
+				m.conn = nil
+				m.exited = nil
 			}
 			m.mu.Unlock()
+			if should {
+				bctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				_ = conn.Call(bctx, "", "Browser.close", nil, nil)
+				cancel()
+				cfn()
+			}
 		})
 	}
 	m.mu.Unlock()

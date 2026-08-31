@@ -5,22 +5,76 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // testSink records calls.
 type testSink struct {
+	mu       sync.Mutex
 	frames []struct{ w, h uint32; data []byte }
 	consoles []ConsoleEvent
 	networks []NetworkEvent
 	errors   []string
 }
 
-func (s *testSink) Frame(w, h uint32, jpeg []byte) { s.frames = append(s.frames, struct{ w, h uint32; data []byte }{w, h, jpeg}) }
-func (s *testSink) Console(e ConsoleEvent)       { s.consoles = append(s.consoles, e) }
-func (s *testSink) Network(e NetworkEvent)       { s.networks = append(s.networks, e) }
-func (s *testSink) Error(msg string)             { s.errors = append(s.errors, msg) }
+func (s *testSink) Frame(w, h uint32, jpeg []byte) {
+	s.mu.Lock()
+	s.frames = append(s.frames, struct{ w, h uint32; data []byte }{w, h, jpeg})
+	s.mu.Unlock()
+}
+func (s *testSink) Console(e ConsoleEvent) {
+	s.mu.Lock()
+	s.consoles = append(s.consoles, e)
+	s.mu.Unlock()
+}
+func (s *testSink) Network(e NetworkEvent) {
+	s.mu.Lock()
+	s.networks = append(s.networks, e)
+	s.mu.Unlock()
+}
+func (s *testSink) Error(msg string) {
+	s.mu.Lock()
+	s.errors = append(s.errors, msg)
+	s.mu.Unlock()
+}
+func (s *testSink) getErrors() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]string, len(s.errors))
+	copy(cp, s.errors)
+	return cp
+}
+func (s *testSink) getFrames() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.frames)
+}
+func (s *testSink) getConsoles() []ConsoleEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]ConsoleEvent, len(s.consoles))
+	copy(cp, s.consoles)
+	return cp
+}
+
+type navCollector struct {
+	mu sync.Mutex
+	v  []NavEvent
+}
+func (n *navCollector) emit(e NavEvent) { n.mu.Lock(); n.v = append(n.v, e); n.mu.Unlock() }
+func (n *navCollector) get() []NavEvent { n.mu.Lock(); defer n.mu.Unlock(); cp := make([]NavEvent, len(n.v)); copy(cp, n.v); return cp }
+func (n *navCollector) reset() { n.mu.Lock(); n.v = nil; n.mu.Unlock() }
+
+func (s *testSink) getNetworks() []NetworkEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]NetworkEvent, len(s.networks))
+	copy(cp, s.networks)
+	return cp
+}
 
 func newTestManager(t *testing.T, stub *stubChrome, emit func(NavEvent), lg *log.Logger) *Manager {
 	t.Helper()
@@ -35,9 +89,9 @@ func newTestManager(t *testing.T, stub *stubChrome, emit func(NavEvent), lg *log
 func TestManager_LazyLaunch(t *testing.T) {
 	stub := newStubChrome()
 	defer stub.Close()
-	var navs []NavEvent
+	var nc navCollector
 	lg := log.New(&bytes.Buffer{}, "", 0)
-	m := newTestManager(t, stub, func(e NavEvent) { navs = append(navs, e) }, lg)
+	m := newTestManager(t, stub, nc.emit, lg)
 	defer m.Close(context.Background())
 
 	// NewManager should not have launched (no calls yet)
@@ -133,11 +187,17 @@ func TestManager_SecondAttachSameKeyReplacesSink(t *testing.T) {
 		"data": "aGVsbG8=", "sessionId": 1, "metadata": map[string]any{"deviceWidth": 10, "deviceHeight": 20},
 	})
 	time.Sleep(30 * time.Millisecond)
-	if len(sink1.frames) != 0 {
+	sink1.mu.Lock()
+	f1 := len(sink1.frames)
+	sink1.mu.Unlock()
+	if f1 != 0 {
 		t.Error("old sink should not receive frames")
 	}
-	if len(sink2.frames) != 1 {
-		t.Errorf("new sink frames %d want 1", len(sink2.frames))
+	sink2.mu.Lock()
+	f2 := len(sink2.frames)
+	sink2.mu.Unlock()
+	if f2 != 1 {
+		t.Errorf("new sink frames %d want 1", f2)
 	}
 }
 
@@ -178,8 +238,8 @@ func TestManager_Revoke(t *testing.T) {
 func TestManager_FindChromeFailure(t *testing.T) {
 	var buf bytes.Buffer
 	lg := log.New(&buf, "", 0)
-	var navs []NavEvent
-	m := NewManager(ManagerOptions{EmitNav: func(e NavEvent) { navs = append(navs, e) }, Log: lg})
+	var nc navCollector
+	m := NewManager(ManagerOptions{EmitNav: nc.emit, Log: lg})
 	m.SetLauncher(func(ctx context.Context) (*Conn, <-chan int, func(), error) {
 		return nil, nil, nil, ErrChromeNotFound
 	})
@@ -188,7 +248,7 @@ func TestManager_FindChromeFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !containsNavError(navs, "k1") {
+	if !containsNavError(nc.get(), "k1") {
 		t.Error("expected EmitNav for k1")
 	}
 	// Second attach should not log second line
@@ -221,8 +281,8 @@ func containsNavError(navs []NavEvent, key string) bool {
 func TestManager_Navigate(t *testing.T) {
 	stub := newStubChrome()
 	defer stub.Close()
-	var navs []NavEvent
-	m := newTestManager(t, stub, func(e NavEvent) { navs = append(navs, e) }, nil)
+	var nc navCollector
+	m := newTestManager(t, stub, nc.emit, nil)
 	defer m.Close(context.Background())
 	ctx := context.Background()
 	tgt, err := m.Attach(ctx, "k1", &testSink{})
@@ -230,7 +290,7 @@ func TestManager_Navigate(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(40 * time.Millisecond)
-	navs = nil
+	nc.reset()
 	if err := tgt.Navigate(ctx, "https://example.com/"); err != nil {
 		t.Fatalf("Navigate: %v", err)
 	}
@@ -240,16 +300,16 @@ func TestManager_Navigate(t *testing.T) {
 	}
 	// Immediate nav Status 0
 	found := false
-	for _, n := range navs {
+	for _, n := range nc.get() {
 		if n.URL == "https://example.com/" && n.Status == 0 {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected immediate nav Status 0, got %v", navs)
+		t.Errorf("expected immediate nav Status 0, got %v", nc.get())
 	}
 	// Simulate responseReceived for main document
-	navs = nil
+	nc.reset()
 	// Need main frame id; use target's mainFrameID or inject with any frame
 	mm := tgt
 	mm.mu.Lock()
@@ -268,21 +328,21 @@ func TestManager_Navigate(t *testing.T) {
 	})
 	time.Sleep(30 * time.Millisecond)
 	found = false
-	for _, n := range navs {
+	for _, n := range nc.get() {
 		if n.URL == "https://example.com/" && n.Status == 200 {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected nav 200 after responseReceived, got %v", navs)
+		t.Errorf("expected nav 200 after responseReceived, got %v", nc.get())
 	}
 }
 
 func TestManager_LoadingFailed(t *testing.T) {
 	stub := newStubChrome()
 	defer stub.Close()
-	var navs []NavEvent
-	m := newTestManager(t, stub, func(e NavEvent) { navs = append(navs, e) }, nil)
+	var nc navCollector
+	m := newTestManager(t, stub, nc.emit, nil)
 	defer m.Close(context.Background())
 	ctx := context.Background()
 	tgt, _ := m.Attach(ctx, "k1", &testSink{})
@@ -291,25 +351,25 @@ func TestManager_LoadingFailed(t *testing.T) {
 	tgt.mu.Lock()
 	tgt.mainFrameID = "mf1"
 	tgt.mu.Unlock()
-	navs = nil
+	nc.reset()
 	stub.InjectEvent(tgt.sessionID, "Network.loadingFailed", map[string]any{
 		"requestId": "r1", "type": "Document", "frameId": "mf1", "errorText": "net::ERR_NAME_NOT_RESOLVED",
 	})
 	time.Sleep(30 * time.Millisecond)
-	if len(navs) == 0 || navs[0].Error == "" {
-		t.Fatalf("expected nav error, got %v", navs)
+	if len(nc.get()) == 0 || nc.get()[0].Error == "" {
+		t.Fatalf("expected nav error, got %v", nc.get())
 	}
-	if !containsStr(navs[0].Error, "ERR_NAME_NOT_RESOLVED") {
-		t.Errorf("error %q", navs[0].Error)
+	if !containsStr(nc.get()[0].Error, "ERR_NAME_NOT_RESOLVED") {
+		t.Errorf("error %q", nc.get()[0].Error)
 	}
 	// Tunnel error maps to not reachable
-	navs = nil
+	nc.reset()
 	stub.InjectEvent(tgt.sessionID, "Network.loadingFailed", map[string]any{
 		"requestId": "r2", "type": "Document", "frameId": "mf1", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED",
 	})
 	time.Sleep(30 * time.Millisecond)
-	if len(navs) == 0 || !containsStr(navs[0].Error, "not reachable from Chrome mode") {
-		t.Errorf("expected tunnel mapping, got %v", navs)
+	if len(nc.get()) == 0 || !containsStr(nc.get()[0].Error, "not reachable from Chrome mode") {
+		t.Errorf("expected tunnel mapping, got %v", nc.get())
 	}
 }
 
@@ -334,8 +394,8 @@ func TestManager_NavigateBadScheme(t *testing.T) {
 func TestManager_FrameNavigatedBadScheme(t *testing.T) {
 	stub := newStubChrome()
 	defer stub.Close()
-	var navs []NavEvent
-	m := newTestManager(t, stub, func(e NavEvent) { navs = append(navs, e) }, nil)
+	var nc navCollector
+	m := newTestManager(t, stub, nc.emit, nil)
 	defer m.Close(context.Background())
 	tgt, _ := m.Attach(context.Background(), "k1", &testSink{})
 	time.Sleep(30 * time.Millisecond)
@@ -351,7 +411,7 @@ func TestManager_FrameNavigatedBadScheme(t *testing.T) {
 	}
 	// Check that nav error emitted
 	found := false
-	for _, n := range navs {
+	for _, n := range nc.get() {
 		if n.Error != "" {
 			found = true
 		}
@@ -364,8 +424,8 @@ func TestManager_FrameNavigatedBadScheme(t *testing.T) {
 func TestManager_NavigatedWithinDocument(t *testing.T) {
 	stub := newStubChrome()
 	defer stub.Close()
-	var navs []NavEvent
-	m := newTestManager(t, stub, func(e NavEvent) { navs = append(navs, e) }, nil)
+	var nc navCollector
+	m := newTestManager(t, stub, nc.emit, nil)
 	defer m.Close(context.Background())
 	tgt, _ := m.Attach(context.Background(), "k1", &testSink{})
 	time.Sleep(30 * time.Millisecond)
@@ -377,13 +437,13 @@ func TestManager_NavigatedWithinDocument(t *testing.T) {
 	})
 	time.Sleep(30 * time.Millisecond)
 	found := false
-	for _, n := range navs {
+	for _, n := range nc.get() {
 		if n.URL == "https://example.com/#hash" && n.Status == 200 {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected navigatedWithinDocument nav, got %v", navs)
+		t.Errorf("expected navigatedWithinDocument nav, got %v", nc.get())
 	}
 }
 
@@ -475,11 +535,14 @@ func TestManager_ScreencastFrame(t *testing.T) {
 		"data": "aGVsbG8=", "sessionId": 7, "metadata": map[string]any{"deviceWidth": 1280, "deviceHeight": 800},
 	})
 	time.Sleep(40 * time.Millisecond)
-	if len(sink.frames) != 1 {
-		t.Fatalf("frames %d", len(sink.frames))
+	sink.mu.Lock()
+	f := append([]struct{w,h uint32; data []byte}(nil), sink.frames...)
+	sink.mu.Unlock()
+	if len(f) != 1 {
+		t.Fatalf("frames %d", len(f))
 	}
-	if sink.frames[0].w != 1280 || sink.frames[0].h != 800 {
-		t.Errorf("dims %d %d", sink.frames[0].w, sink.frames[0].h)
+	if f[0].w != 1280 || f[0].h != 800 {
+		t.Errorf("dims %d %d", f[0].w, f[0].h)
 	}
 	// Ack should have been sent after sink
 	found := false
@@ -596,8 +659,234 @@ func TestManager_Detach(t *testing.T) {
 		"data": "aGVsbG8=", "sessionId": 1, "metadata": map[string]any{"deviceWidth": 10, "deviceHeight": 10},
 	})
 	time.Sleep(20 * time.Millisecond)
-	if len(sink.frames) != 0 {
-		// sink had earlier frames? Reset check: we had 0 after attach? Actually attach may have no frames yet, but detach should prevent new
-		// Our sink had 0 before; after detach should still 0
+	sink.mu.Lock()
+	fc := len(sink.frames)
+	sink.mu.Unlock()
+	if fc != 0 {
+		t.Errorf("frames after detach %d", fc)
 	}
+}
+
+// --- Task 6 tests ---
+
+func TestManager_Console(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	sink := &testSink{}
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", sink)
+	time.Sleep(30 * time.Millisecond)
+	stub.InjectEvent(tgt.sessionID, "Runtime.consoleAPICalled", map[string]any{
+		"type": "warning", "args": []any{map[string]any{"value": "x"}, map[string]any{"description": "Object"}}, "timestamp": 1234,
+	})
+	time.Sleep(30 * time.Millisecond)
+	sink.mu.Lock()
+	cc := append([]ConsoleEvent(nil), sink.consoles...)
+	sink.mu.Unlock()
+	if len(cc) != 1 || cc[0].Level != "warn" {
+		t.Fatalf("console %v", cc)
+	}
+	if len(cc[0].Args) != 2 || cc[0].Args[0] != "x" {
+		t.Errorf("args %v", cc[0].Args)
+	}
+	// exception
+	stub.InjectEvent(tgt.sessionID, "Runtime.exceptionThrown", map[string]any{
+		"exceptionDetails": map[string]any{"text": "oops", "url": "https://x.com/app.js", "lineNumber": 10},
+		"timestamp": 1235,
+	})
+	time.Sleep(30 * time.Millisecond)
+	sink.mu.Lock()
+	cc2 := append([]ConsoleEvent(nil), sink.consoles...)
+	sink.mu.Unlock()
+	if len(cc2) != 2 || cc2[1].Level != "error" {
+		t.Fatalf("exception %v", cc2)
+	}
+	if !containsStr(cc2[1].Args[0], "oops") {
+		t.Errorf("exception text %v", sink.consoles[1].Args)
+	}
+}
+
+func TestManager_NetworkTelemetry(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	sink := &testSink{}
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", sink)
+	time.Sleep(30 * time.Millisecond)
+	stub.InjectEvent(tgt.sessionID, "Network.requestWillBeSent", map[string]any{
+		"requestId": "r1", "request": map[string]any{"url": "https://example.com/a", "method": "GET"},
+	})
+	time.Sleep(20 * time.Millisecond)
+	stub.InjectEvent(tgt.sessionID, "Network.responseReceived", map[string]any{
+		"requestId": "r1", "type": "Other", "frameId": "f1",
+		"response": map[string]any{"url": "https://example.com/a", "status": 200},
+	})
+	time.Sleep(30 * time.Millisecond)
+	sink.mu.Lock()
+	nn := append([]NetworkEvent(nil), sink.networks...)
+	sink.mu.Unlock()
+	if len(nn) < 2 {
+		t.Fatalf("networks %d", len(nn))
+	}
+	found := false
+	for _, n := range nn {
+		if n.URL == "https://example.com/a" && n.Status == 200 {
+			if n.DurationMs < 0 {
+				t.Error("duration negative")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Error("missing network 200")
+	}
+	// loadingFailed tunnel → blocked
+	stub.InjectEvent(tgt.sessionID, "Network.loadingFailed", map[string]any{
+		"requestId": "r2", "type": "Other", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED",
+	})
+	time.Sleep(30 * time.Millisecond)
+	sink.mu.Lock()
+	nn2 := append([]NetworkEvent(nil), sink.networks...)
+	sink.mu.Unlock()
+	found = false
+	for _, n := range nn2 {
+		if n.Blocked == "private address" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected blocked private address, got %v", nn2)
+	}
+}
+
+func TestManager_AutoAttach(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+	_, _ = m.Attach(context.Background(), "k1", &testSink{})
+	time.Sleep(40 * time.Millisecond)
+	// Inject attachedToTarget waitingForDebugger
+	stub.InjectEvent("", "Target.attachedToTarget", map[string]any{
+		"sessionId": "W1", "waitingForDebugger": true,
+	})
+	time.Sleep(40 * time.Millisecond)
+	if !containsCall(stub.Calls(), "Runtime.runIfWaitingForDebugger") {
+		t.Error("missing runIfWaitingForDebugger")
+	}
+}
+
+func TestManager_TargetCrashed(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	var nc navCollector
+	sink := &testSink{}
+	m := newTestManager(t, stub, nc.emit, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", sink)
+	time.Sleep(30 * time.Millisecond)
+	stub.InjectEvent("", "Target.targetCrashed", map[string]any{
+		"targetId": tgt.targetID, "status": "crashed",
+	})
+	time.Sleep(40 * time.Millisecond)
+	sink.mu.Lock()
+	errCopy := append([]string(nil), sink.errors...)
+	sink.mu.Unlock()
+	if len(errCopy) == 0 || errCopy[0] != "target crashed" {
+		t.Errorf("sink errors %v", errCopy)
+	}
+	ng := nc.get()
+	if len(ng) == 0 || ng[len(ng)-1].Error != "target crashed" {
+		t.Errorf("navs %v", ng)
+	}
+	// Next attach for same key should create fresh target
+	before := len(stub.CallsFor("Target.createBrowserContext"))
+	_, _ = m.Attach(context.Background(), "k1", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	after := len(stub.CallsFor("Target.createBrowserContext"))
+	if after != before+1 {
+		t.Errorf("expected fresh context after crash: before %d after %d", before, after)
+	}
+}
+
+func TestManager_ChromeExit(t *testing.T) {
+	stub1 := newStubChrome()
+	stub2 := newStubChrome()
+	var launchCount int
+	var currentStub *stubChrome = stub1
+	m := NewManager(ManagerOptions{EmitNav: func(e NavEvent) {}, Log: log.New(&bytes.Buffer{}, "", 0)})
+	exited := make(chan int)
+	m.SetLauncher(func(ctx context.Context) (*Conn, <-chan int, func(), error) {
+		launchCount++
+		if launchCount == 1 {
+			currentStub = stub1
+		} else {
+			currentStub = stub2
+			exited = make(chan int)
+		}
+		return currentStub.Conn(), exited, func() {}, nil
+	})
+	// Attach two keys via first stub
+	sink1 := &testSink{}
+	sink2 := &testSink{}
+	_, _ = m.Attach(context.Background(), "k1", sink1)
+	_, _ = m.Attach(context.Background(), "k2", sink2)
+	time.Sleep(40 * time.Millisecond)
+	// Simulate exit by closing conn and firing exited
+	_ = stub1.Conn().Close()
+	close(exited)
+	time.Sleep(60 * time.Millisecond)
+	sink1.mu.Lock()
+	e1 := append([]string(nil), sink1.errors...)
+	sink1.mu.Unlock()
+	if len(e1) == 0 || e1[0] != "chrome exited" {
+		t.Errorf("sink1 %v", e1)
+	}
+	sink2.mu.Lock()
+	e2 := append([]string(nil), sink2.errors...)
+	sink2.mu.Unlock()
+	if len(e2) == 0 {
+		t.Errorf("sink2 %v", e2)
+	}
+	// Next attach should relaunch (launcher called twice)
+	_, _ = m.Attach(context.Background(), "k3", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	if launchCount != 2 {
+		t.Errorf("launchCount %d want 2", launchCount)
+	}
+	_ = m.Close(context.Background())
+	stub1.Close()
+	stub2.Close()
+}
+
+func TestManager_IdleReaper(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := NewManager(ManagerOptions{IdleTimeout: 50 * time.Millisecond, Log: log.New(&bytes.Buffer{}, "", 0)})
+	exited := make(chan int)
+	var cleanupCalled atomic.Bool
+	m.SetLauncher(func(ctx context.Context) (*Conn, <-chan int, func(), error) {
+		return stub.Conn(), exited, func() { cleanupCalled.Store(true) }, nil
+	})
+	_, _ = m.Attach(context.Background(), "k1", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	m.Revoke("k1")
+	time.Sleep(120 * time.Millisecond)
+	if !cleanupCalled.Load() {
+		t.Error("expected cleanup after idle timeout")
+	}
+	// Next attach should relaunch
+	stub2 := newStubChrome()
+	defer stub2.Close()
+	exited2 := make(chan int)
+	m.SetLauncher(func(ctx context.Context) (*Conn, <-chan int, func(), error) {
+		return stub2.Conn(), exited2, func() {}, nil
+	})
+	_, err := m.Attach(context.Background(), "k2", &testSink{})
+	if err != nil {
+		t.Fatalf("relaunch after idle: %v", err)
+	}
+	_ = m.Close(context.Background())
 }
