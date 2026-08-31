@@ -51,7 +51,10 @@ vi.mock("@/api/client", () => ({
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
   authToken: () => "tok",
+  authedFetch: (...args: unknown[]) => authedFetchMock(...args),
 }));
+
+const authedFetchMock = vi.fn((..._args: unknown[]) => Promise.resolve({ ok: true, status: 204 }));
 
 const sockets: MockSocket[] = [];
 
@@ -122,6 +125,10 @@ describe("TerminalTabs", () => {
 
     expect(closed).toBe(true);
     await waitFor(() => expect(secondSocket.close).toHaveBeenCalled());
+    // Closing the socket only detaches the shell; an explicit tab close must
+    // also kill it server-side.
+    const secondId = new URL(secondSocket.url).searchParams.get("terminal_id");
+    expect(authedFetchMock).toHaveBeenCalledWith(`/api/terminal/${secondId}`, { method: "DELETE" });
   });
 
   it("closeActiveTerminal() returns false once no terminal remains", async () => {

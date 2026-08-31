@@ -81,6 +81,9 @@ type Handler struct {
 	// terminalProcs tracks the pid of every open terminal pty, read by the
 	// terminal-processes emitter to report per-terminal CPU/mem.
 	terminalProcs *terminalRegistry
+	// terminalSessions owns the live pty shells so a reconnecting socket can
+	// reattach to its shell after a page reload instead of respawning it.
+	terminalSessions *terminalSessionTable
 	// terminalProcsWake is a one-slot wake signal for the
 	// terminal-processes emitter so a newly opened terminal pushes its
 	// memory footprint immediately instead of waiting for the next ticker
@@ -280,6 +283,7 @@ func NewHandler() *Handler {
 		titleGen:          newTitleGenState(),
 		bus:               NewEventBus(),
 		terminalProcs:     newTerminalRegistry(),
+		terminalSessions:  newTerminalSessionTable(),
 		terminalProcsWake: make(chan struct{}, 1),
 		secretJobs:        secretjob.NewManager(),
 	}

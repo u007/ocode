@@ -129,6 +129,11 @@ func TestTerminalWSReadLimit(t *testing.T) {
 		t.Fatalf("write oversized frame: %v", err)
 	}
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	// The first frame is always the attach control message; the oversized
+	// client frame must then close the socket.
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("expected attach frame before close: %v", err)
+	}
 	if _, _, err := conn.ReadMessage(); err == nil {
 		t.Fatal("expected oversized websocket frame to close the terminal")
 	}

@@ -21,6 +21,18 @@ vi.mock("@/api/client", async () => {
   };
 });
 
+// The real shadcn Dialog (Radix portal + focus guards) deadlocks jsdom/React 18
+// in an infinite microtask loop (known React-jsdom issue when opening a Radix
+// dialog inside a test container). The dialog here is stock shadcn UI; what we
+// test is FileTree's delete wiring, so render the dialog body inline.
+vi.mock("@/components/ui/dialog", () => ({
+  Dialog: ({ open, children }: { open?: boolean; children?: React.ReactNode }) =>
+    open ? <>{children}</> : null,
+  DialogContent: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
+  DialogHeader: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
+  DialogTitle: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
+}));
+
 const TREE = {
   children: [
     { name: "a.ts", path: "src/a.ts", is_dir: false },
@@ -45,7 +57,7 @@ function mockTree() {
   );
 }
 
-// Radix context-menu/dialog primitives and the ScrollArea need these in jsdom.
+// The Radix context menu and ScrollArea need these in jsdom.
 beforeAll(() => {
   if (!(globalThis as any).PointerEvent) {
     (globalThis as any).PointerEvent = MouseEvent;
@@ -76,7 +88,6 @@ describe("FileTree delete flow (replaces window.confirm, unsupported in Wails we
   async function openRowMenu(rowName: string) {
     const row = screen.getByText(rowName);
     fireEvent.contextMenu(row);
-    // The context menu portals to body; item labels appear once opened.
     await screen.findByRole("menuitem", { name: "Delete" });
   }
 
@@ -107,7 +118,9 @@ describe("FileTree delete flow (replaces window.confirm, unsupported in Wails we
     const cancelBtn = await screen.findByRole("button", { name: "Cancel" });
     fireEvent.click(cancelBtn);
 
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument(),
+    );
     expect(mocks.fsDelete).not.toHaveBeenCalled();
   });
 
@@ -126,7 +139,9 @@ describe("FileTree delete flow (replaces window.confirm, unsupported in Wails we
       expect.objectContaining({ detail: { paths: ["src/a.ts"], projectRoot: "/proj" } }),
     );
     // Dialog closes on success.
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument(),
+    );
     window.removeEventListener("ocode:fs-delete", onDelete);
   });
 
@@ -145,7 +160,9 @@ describe("FileTree delete flow (replaces window.confirm, unsupported in Wails we
     expect(screen.getByText("src/b.ts")).toBeInTheDocument();
 
     await confirmDeleteDialog();
-    await waitFor(() => expect(mocks.fsDelete).toHaveBeenCalledWith(["src/a.ts", "src/b.ts"], "/proj"));
+    await waitFor(() =>
+      expect(mocks.fsDelete).toHaveBeenCalledWith(["src/a.ts", "src/b.ts"], "/proj"),
+    );
   });
 
   it("right-clicking an unselected node narrows the target to that node only", async () => {

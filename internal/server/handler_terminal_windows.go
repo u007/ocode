@@ -20,3 +20,14 @@ func (h *Handler) HandleTerminalProcesses(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode([]any{})
 }
+
+// HandleTerminalKill mirrors the Unix stub: there is no shell to kill.
+func (h *Handler) HandleTerminalKill(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotImplemented, "interactive terminal is not supported on Windows")
+}
+
+// terminalSession is only ever constructed by the Unix pty bridge; the type
+// exists here so terminalSessionTable compiles on Windows.
+type terminalSession struct {
+	resumable bool
+}

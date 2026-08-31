@@ -27,6 +27,7 @@ import {
   Check,
   ChevronRight,
   Clipboard,
+  Columns2,
   Copy,
   File,
   FilePlus2,
@@ -36,6 +37,7 @@ import {
   FolderPlus,
   GitCommit,
   Link2,
+  List,
   Loader2,
   Lock,
   Pencil,
@@ -48,6 +50,7 @@ import {
 import { api, apiPath, authHeaders } from "@/api/client";
 import { parseKeywords, matchesKeywords } from "@/lib/keywordFilter";
 import SecretActionDialog from "./SecretActionDialog";
+import { loadFileTreeView, saveFileTreeView, type FileTreeViewMode } from "./fileTreeViewPersistence";
 
 // Suppress unused-import errors for in-progress secret/file-tree work (dirty
 // working tree from parallel feature). The build is strict (`noUnusedLocals`).
@@ -678,6 +681,18 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Miller-columns view (macOS Finder-style) — persisted view mode
+  const [viewMode, setViewMode] = useState<FileTreeViewMode>(() => loadFileTreeView());
+  type ColumnEntry = { path: string; nodes: FileNode[] | null; loading: boolean; error?: string | null };
+  const [columns, setColumns] = useState<ColumnEntry[]>([]);
+  const [columnSelections, setColumnSelections] = useState<(string | null)[]>([]);
+  const columnScrollRef = useRef<HTMLDivElement | null>(null);
+  const columnFetchSeq = useRef(0);
+
+  useEffect(() => {
+    saveFileTreeView(viewMode);
+  }, [viewMode]);
+
   const keywords = useMemo(() => parseKeywords(keyword), [keyword]);
   const contentKeywords = useMemo(() => parseKeywords(contentQuery), [contentQuery]);
 
@@ -789,6 +804,122 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
     })();
     return () => controller.abort();
   }, [keyword, activeRoot, projectPath, fullTree]);
+
+  // ---- Miller-columns state sync ----
+  useEffect(() => {
+    if (viewMode !== "columns") return;
+    const rootPath = activeRoot ?? projectPath ?? "";
+    setColumns((prev) => {
+      if (prev.length === 0) return [{ path: rootPath, nodes: tree, loading }];
+      const next = [...prev];
+      next[0] = { ...next[0], path: rootPath, nodes: tree, loading, error: null };
+      return next;
+    });
+  }, [tree, loading, activeRoot, projectPath, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== "columns") return;
+    const rootPath = activeRoot ?? projectPath ?? "";
+    setColumns((prev) => {
+      if (prev.length === 0 || prev[0].path !== rootPath) {
+        return [{ path: rootPath, nodes: tree, loading, error: null }];
+      }
+      return prev;
+    });
+    setColumnSelections((prev) => {
+      if (prev.length === 0) return prev;
+      const rootPath2 = activeRoot ?? projectPath ?? "";
+      if (columns.length > 0 && columns[0]?.path !== rootPath2) return [];
+      return prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRoot, projectPath, viewMode]);
+
+  const fetchColumnChildren = useCallback(
+    async (dirPath: string, seq: number): Promise<FileNode[] | null> => {
+      const root = activeRoot ?? projectPath ?? "";
+      const reqPath = treePathForRequest(root || undefined, dirPath);
+      try {
+        const query = `path=${encodeURIComponent(reqPath)}&depth=1`;
+        const res = await fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders() });
+        if (!res.ok) throw new Error("Failed to load directory");
+        if (columnFetchSeq.current !== seq) return null;
+        const data: FileTreeResponse = await res.json();
+        return data.children;
+      } catch (err) {
+        if (columnFetchSeq.current !== seq) return null;
+        throw err;
+      }
+    },
+    [activeRoot, projectPath],
+  );
+
+  const handleColumnSelect = useCallback(
+    async (colIdx: number, node: FileNode) => {
+      setSelectedPath(node.path);
+      setSelectedPaths(new Set([node.path]));
+      setLastClickedPath(node.path);
+
+      setColumnSelections((prev) => {
+        const next = prev.slice(0, colIdx + 1);
+        while (next.length <= colIdx) next.push(null);
+        next[colIdx] = node.path;
+        return next;
+      });
+
+      if (!node.is_dir) {
+        setColumns((prev) => prev.slice(0, colIdx + 1));
+        if (searchMode === "content" && contentQuery.trim()) {
+          onOpenFile(node.path, activeRoot, undefined, contentQuery.trim());
+        } else {
+          onOpenFile(node.path, activeRoot);
+        }
+        return;
+      }
+
+      const targetDepth = colIdx + 1;
+      const seq = ++columnFetchSeq.current;
+      setColumns((prev) => {
+        const base = prev.slice(0, targetDepth);
+        if (base.length > targetDepth && base[targetDepth]?.path === node.path) return base;
+        return [...base, { path: node.path, nodes: null, loading: true, error: null }];
+      });
+      setColumnSelections((prev) => {
+        const next = prev.slice(0, targetDepth);
+        while (next.length < targetDepth) next.push(null);
+        return next;
+      });
+
+      try {
+        const children = await fetchColumnChildren(node.path, seq);
+        if (children === null) return;
+        setColumns((prev) => {
+          if (columnFetchSeq.current !== seq) return prev;
+          const at = prev.findIndex((c) => c.path === node.path && c.loading);
+          const idx = at >= 0 ? at : targetDepth;
+          if (idx >= prev.length) return prev;
+          const next = [...prev];
+          next[idx] = { ...next[idx], nodes: children, loading: false, error: null };
+          return next;
+        });
+        requestAnimationFrame(() => {
+          const sc = columnScrollRef.current;
+          if (sc) sc.scrollLeft = sc.scrollWidth;
+        });
+      } catch (err) {
+        if (columnFetchSeq.current !== seq) return;
+        setColumns((prev) => {
+          const idx = prev.findIndex((c) => c.path === node.path && c.loading);
+          const at = idx >= 0 ? idx : targetDepth;
+          if (at >= prev.length) return prev;
+          const next = [...prev];
+          next[at] = { ...next[at], nodes: [], loading: false, error: (err as Error).message };
+          return next;
+        });
+      }
+    },
+    [activeRoot, contentQuery, fetchColumnChildren, onOpenFile, searchMode],
+  );
 
   const fetchContentPage = useCallback(
     (offset: number, append: boolean) => {
@@ -1129,7 +1260,7 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
           {notice}
         </div>
       )}
-      <div className="flex items-center justify-between px-3 h-9 border-b border-border shrink-0 gap-2">
+      <div className="flex items-center px-3 h-9 border-b border-border shrink-0 gap-2">
         <h3 className="text-xs font-medium text-muted-foreground shrink-0">Files</h3>
         {selectedPaths.size > 0 && (
           <button
@@ -1143,7 +1274,7 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
         )}
         {rootOptions.length > 1 && (
           <Select value={activeRoot} onValueChange={setActiveRoot}>
-            <SelectTrigger className="h-6 w-auto min-w-0 max-w-[60%] text-xs px-2 gap-1 border-none bg-transparent">
+            <SelectTrigger className="h-6 w-auto min-w-0 max-w-[45%] text-xs px-2 gap-1 border-none bg-transparent">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -1155,6 +1286,29 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
             </SelectContent>
           </Select>
         )}
+        <div className="flex-1" />
+        <div className="flex items-center rounded-md border border-border overflow-hidden shrink-0" role="group" aria-label="View mode">
+          <button
+            type="button"
+            title="List view"
+            aria-label="List view"
+            aria-pressed={viewMode === "tree"}
+            onClick={() => setViewMode("tree")}
+            className={`p-1.5 transition-colors ${viewMode === "tree" ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
+          >
+            <List className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            title="Column view"
+            aria-label="Column view"
+            aria-pressed={viewMode === "columns"}
+            onClick={() => setViewMode("columns")}
+            className={`p-1.5 transition-colors ${viewMode === "columns" ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
+          >
+            <Columns2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
       <div className="px-2 py-1.5 border-b border-border shrink-0 space-y-1.5">
         <div className="flex items-center gap-1">
@@ -1292,6 +1446,156 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
           )
         ) : tree.length === 0 ? (
           <div className="px-4 py-12 text-center text-xs text-muted-foreground">No files</div>
+        ) : viewMode === "columns" ? (
+          <div className="flex flex-1 overflow-hidden min-h-0">
+            <div ref={columnScrollRef} className="flex flex-1 overflow-x-auto overflow-y-hidden">
+              {columns.length === 0 ? (
+                <div className="flex items-center justify-center flex-1 text-xs text-muted-foreground">Loading…</div>
+              ) : (
+                columns.map((col, colIdx) => {
+                  const colSelected = columnSelections[colIdx] ?? null;
+                  return (
+                    <div
+                      key={`${col.path}-${colIdx}`}
+                      className="w-[200px] min-w-[180px] max-w-[260px] shrink-0 border-r border-border flex flex-col overflow-hidden bg-background"
+                    >
+                      <div
+                        className="px-2 py-1.5 text-[11px] font-medium text-muted-foreground border-b border-border bg-muted/30 truncate shrink-0 flex items-center gap-1"
+                        title={col.path || "/"}
+                      >
+                        <span className="truncate flex-1">
+                          {colIdx === 0 ? (activeRoot?.split("/").pop() || col.path?.split("/").pop() || "Root") : col.path.split("/").pop() || col.path}
+                        </span>
+                        {col.loading && <Loader2 className="w-3 h-3 shrink-0 animate-spin" />}
+                      </div>
+                      <div className="flex-1 overflow-y-auto overflow-x-hidden">
+                        {col.loading && !col.nodes ? (
+                          <div className="flex items-center justify-center py-8 text-xs text-muted-foreground gap-1.5">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading…
+                          </div>
+                        ) : col.error ? (
+                          <div className="px-3 py-4 text-xs text-red-400 text-center">{col.error}</div>
+                        ) : !col.nodes || col.nodes.length === 0 ? (
+                          <div className="px-3 py-8 text-center text-xs text-muted-foreground">Empty folder</div>
+                        ) : (
+                          <div className="py-1">
+                            {col.nodes.map((node) => {
+                              const isSelected = colSelected === node.path;
+                              const isActiveFile = selectedPath === node.path && !node.is_dir;
+                              const rowBase = "flex items-center gap-1.5 px-2 py-1 text-xs w-full text-left truncate transition-colors";
+                              const rowState = isSelected || isActiveFile ? "bg-accent text-accent-foreground" : "hover:bg-muted text-foreground";
+                              const isDir = node.is_dir;
+                              return (
+                                <ContextMenu
+                                  key={node.path}
+                                  onOpenChange={(open) => {
+                                    if (open) {
+                                      if (!selectedPaths.has(node.path)) {
+                                        setSelectedPaths(new Set([node.path]));
+                                        setSelectedPath(node.path);
+                                      }
+                                    }
+                                  }}
+                                >
+                                  <ContextMenuTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleColumnSelect(colIdx, node)}
+                                      className={`${rowBase} ${rowState}`}
+                                      title={node.path}
+                                    >
+                                      <FileIcon name={node.name} isDir={isDir} expanded={isSelected && isDir} />
+                                      <span className="truncate flex-1 min-w-0">{node.name}</span>
+                                      {isDir ? (
+                                        <ChevronRight className={`w-3 h-3 shrink-0 ${isSelected ? "text-accent-foreground" : "text-muted-foreground"}`} />
+                                      ) : (
+                                        node.git_status && <GitBadge status={node.git_status} />
+                                      )}
+                                    </button>
+                                  </ContextMenuTrigger>
+                                  <ContextMenuContent>
+                                    {(() => {
+                                      const effectivePaths = selectedPaths.has(node.path)
+                                        ? Array.from(selectedPaths)
+                                        : [node.path];
+                                      const flags = gitFlags(node.git_status);
+                                      const stageEnabled = isDir || flags.working;
+                                      const unstageEnabled = isDir || flags.staged;
+                                      const discardEnabled = isDir || (flags.working && flags.tracked);
+                                      const requestPath = treePathForRequest(activeRoot, node.path);
+                                      return (
+                                        <>
+                                          <ContextMenuItem onSelect={() => menu.open(node.path)}>
+                                            <File className="w-3.5 h-3.5 mr-2" /> Open
+                                          </ContextMenuItem>
+                                          <ContextMenuItem onSelect={() => menu.copyPath(requestPath)}>
+                                            <Link2 className="w-3.5 h-3.5 mr-2" /> Copy path
+                                          </ContextMenuItem>
+                                          <ContextMenuSeparator />
+                                          <ContextMenuItem onSelect={() => menu.copy(effectivePaths)}>
+                                            <Copy className="w-3.5 h-3.5 mr-2" /> Copy
+                                          </ContextMenuItem>
+                                          <ContextMenuItem onSelect={() => menu.cut(effectivePaths)}>
+                                            <Scissors className="w-3.5 h-3.5 mr-2" /> Cut
+                                          </ContextMenuItem>
+                                          {menu.clipboard && (
+                                            <ContextMenuItem disabled={!isDir} onSelect={() => isDir && menu.paste(node.path)}>
+                                              <Clipboard className="w-3.5 h-3.5 mr-2" /> Paste
+                                            </ContextMenuItem>
+                                          )}
+                                          <ContextMenuSeparator />
+                                          <ContextMenuItem onSelect={() => menu.newFile(isDir ? node.path : parentDir(node.path))}>
+                                            <FilePlus2 className="w-3.5 h-3.5 mr-2" /> New file…
+                                          </ContextMenuItem>
+                                          <ContextMenuItem onSelect={() => menu.newFolder(isDir ? node.path : parentDir(node.path))}>
+                                            <FolderPlus className="w-3.5 h-3.5 mr-2" /> New folder…
+                                          </ContextMenuItem>
+                                          <ContextMenuItem onSelect={() => menu.rename(node.path)}>
+                                            <Pencil className="w-3.5 h-3.5 mr-2" /> Rename…
+                                          </ContextMenuItem>
+                                          <ContextMenuItem onSelect={() => menu.duplicate(node.path)}>
+                                            <Files className="w-3.5 h-3.5 mr-2" /> Duplicate
+                                          </ContextMenuItem>
+                                          <ContextMenuSeparator />
+                                          {menu.isGitRepo && (
+                                            <>
+                                              <ContextMenuItem disabled={!stageEnabled} onSelect={() => stageEnabled && menu.gitStage(effectivePaths)}>
+                                                <GitCommit className="w-3.5 h-3.5 mr-2" /> Stage
+                                              </ContextMenuItem>
+                                              <ContextMenuItem disabled={!unstageEnabled} onSelect={() => unstageEnabled && menu.gitUnstage(effectivePaths)}>
+                                                <GitCommit className="w-3.5 h-3.5 mr-2" /> Unstage
+                                              </ContextMenuItem>
+                                              <ContextMenuItem disabled={!discardEnabled} onSelect={() => discardEnabled && menu.gitDiscard(effectivePaths)}>
+                                                <Trash2 className="w-3.5 h-3.5 mr-2" /> Discard
+                                              </ContextMenuItem>
+                                              <ContextMenuItem onSelect={() => menu.gitStash(effectivePaths)}>
+                                                <Archive className="w-3.5 h-3.5 mr-2" /> Stash
+                                              </ContextMenuItem>
+                                              <ContextMenuItem onSelect={() => menu.gitCommit(effectivePaths)}>
+                                                <GitCommit className="w-3.5 h-3.5 mr-2" /> Commit…
+                                              </ContextMenuItem>
+                                              <ContextMenuSeparator />
+                                            </>
+                                          )}
+                                          <ContextMenuItem onSelect={() => menu.remove(effectivePaths)} className="text-red-400 focus:text-red-300">
+                                            <Trash2 className="w-3.5 h-3.5 mr-2" /> Delete
+                                          </ContextMenuItem>
+                                        </>
+                                      );
+                                    })()}
+                                  </ContextMenuContent>
+                                </ContextMenu>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
         ) : (
           <div className="py-1" key={refreshKey}>
             {tree.map((node) => (

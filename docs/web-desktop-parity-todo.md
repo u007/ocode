@@ -45,7 +45,7 @@ below apply to both.
 
 ### 7. Other achieved items
 
-- **Terminal tabs:** WebSocket + xterm.js (`web/src/components/Terminal/`).
+- **Terminal tabs:** WebSocket + xterm.js (`web/src/components/Terminal/`); shells survive reload via detach/reattach (`docs/architecture/terminal-detach-reattach.md`).
 - **Settings:** 20-section overlay (`web/src/components/Settings/`).
 - **Git panel:** `GitPanel` (`web/src/components/Git/`).
 - **Logs panel:** `LogPanel` + `LogsForm` (`web/src/components/Logs/`).

@@ -14,6 +14,7 @@
 
 ## 2026-08-31
 
+* **Creation**: Terminal Shells Survive Page Reload (Detach / Reattach) ([architecture/terminal-detach-reattach.md](/architecture/terminal-detach-reattach.md))
 * **Update**: V1 Connection Cap Exclusion — Embedded Browser Panel ([architecture/v1-connection-cap-exclusion.md](/architecture/v1-connection-cap-exclusion.md))
 * **Update**: V1 Connection Cap Exclusion — Embedded Browser Panel ([architecture/v1-connection-cap-exclusion.md](/architecture/v1-connection-cap-exclusion.md))
 * **Update**: V1 Connection Cap Exclusion — Embedded Browser Panel ([architecture/v1-connection-cap-exclusion.md](/architecture/v1-connection-cap-exclusion.md))

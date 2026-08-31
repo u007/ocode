@@ -17,6 +17,7 @@ okf_version: 0.1
 
 - [Shared LSP Broker Server-State and Routing Gotchas](architecture/lsp-broker-shared-server-gotchas.md) - Updated with confirmed spec violations from 2026-08-21 review: Manager sharing enabled by default, docs map unbounded/didClose absent, conflicting didOpen/didChange overwrites, daemon inherits terminal fds
 - [Sidebar TUI/Web Parity Gaps](architecture/sidebar-tui-parity-gaps.md) - Gap analysis of web frontend sidebar features missing relative to the TUI sidebar, covering backend fields not consumed and missing TS types.
+- [Terminal Shells Survive Page Reload (Detach / Reattach)](architecture/terminal-detach-reattach.md) - Pty shells are keyed by terminal_id and outlive their websocket: reload detaches (30 min TTL, 256KB replay), same id reattaches, DELETE /api/terminal/{id} is the explicit kill.
 - [V1 Connection Cap Exclusion — Embedded Browser Panel](architecture/v1-connection-cap-exclusion.md) - Decision to exclude the per-stateKey concurrent upstream connection cap (32) from v1 embedded browser panel. The exclusion applied at v1 ship; the follow-up implementation has since landed.
 
 # gotchas

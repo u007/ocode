@@ -26,18 +26,20 @@ import { registerTerminalFocus, unregisterTerminalFocus } from "./terminalFocus"
 
 /**
  * A single interactive terminal: one xterm.js instance bridged to one
- * pty-backed shell over /api/terminal/ws. Each panel owns its own WebSocket,
- * so the backend stays stateless per connection and multiplicity is purely a
- * frontend concern (see TerminalTabs).
+ * pty-backed shell over /api/terminal/ws. Each panel owns its own WebSocket;
+ * the server keys the shell by `id`, so a socket drop (reload, remount) only
+ * detaches the shell and the next socket with the same id resumes it.
  *
  * `active` mirrors LogPanel's prop: the panel stays mounted while its tab is
  * backgrounded (so the shell keeps running and scrollback survives), but a
  * `display: none` container measures 0x0, so fitting is deferred until the tab
  * is visible again.
  *
- * `id` identifies this terminal for scrollback persistence: on mount, text
- * saved under this id (if any) is replayed before the fresh pty connects, so
- * a reload shows what happened last time even though the shell itself is new.
+ * `id` is also the scrollback persistence key: on mount, text saved under it
+ * (if any) is painted first so a reload shows something immediately. When the
+ * server reports the shell was resumed, that local copy is replaced by the
+ * server's replay of the live shell's recent output; when the shell is gone
+ * (server restarted, detach TTL expired) the local copy stays as history.
  */
 export default function TerminalPanel({
   id,
@@ -473,7 +475,19 @@ export default function TerminalPanel({
     };
     sock.onmessage = (ev) => {
       if (typeof ev.data === "string") {
-        term.write(ev.data);
+        // The only text frame the server sends is the attach control message
+        // (everything else is binary pty output). resumed=true means the
+        // shell survived the disconnect and a replay of its recent output
+        // follows — drop the locally restored scrollback so it isn't shown
+        // twice.
+        let msg: { type?: string; resumed?: boolean };
+        try {
+          msg = JSON.parse(ev.data);
+        } catch (err) {
+          console.error("terminal: unparseable control frame", ev.data, err);
+          return;
+        }
+        if (msg.type === "attach" && msg.resumed) term.reset();
         return;
       }
       const decoded = decoder.decode(new Uint8Array(ev.data as ArrayBuffer), { stream: true });
@@ -543,7 +557,9 @@ export default function TerminalPanel({
       // Cancel any pending chunk writes.
       if (chunkRafId) cancelAnimationFrame(chunkRafId);
       pendingChunks.length = 0;
-      // Closing the socket is what kills the pty process server-side.
+      // Closing the socket only detaches the shell server-side: it survives
+      // for the detach TTL so a reload/remount reattaches to it. Explicit tab
+      // close kills it via DELETE /api/terminal/{id} in the terminal store.
       sock.close();
       socketRef.current = null;
       term.dispose();

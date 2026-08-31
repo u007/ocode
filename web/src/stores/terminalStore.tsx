@@ -1,5 +1,6 @@
 import { createContext, useContext, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { Store, useSelector } from "@tanstack/react-store";
+import { authedFetch } from "@/api/client";
 import { loadProjectTerminals, saveProjectTerminals } from "../components/Terminal/terminalPersistence";
 
 export const PROCESSES_TAB_ID = "processes";
@@ -39,6 +40,19 @@ type TerminalAction =
 const initialState: TerminalStoreState = { byProject: {} };
 
 let nextTerminalSeq = 1;
+
+/** Kills the server-side shell behind a closed tab. Unmounting the panel only
+ *  detaches the shell (so reloads can resume it); an explicit close is the one
+ *  place the process must actually die. 404 means it already exited. */
+function killTerminalShell(id: string) {
+  authedFetch(`/api/terminal/${encodeURIComponent(id)}`, { method: "DELETE" })
+    .then((res) => {
+      if (!res.ok && res.status !== 404) {
+        console.error(`terminal: failed to kill shell ${id}: HTTP ${res.status}`);
+      }
+    })
+    .catch((err) => console.error(`terminal: failed to kill shell ${id}:`, err));
+}
 
 function newTerminal(): TerminalInstance {
   const n = nextTerminalSeq++;
@@ -226,6 +240,7 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
       const cur = store.state.byProject[projectPath];
       if (!cur?.live || !cur.terminals.some((t) => t.id === id)) return false;
       dispatch({ type: "CLOSE_TERMINAL", projectPath, id });
+      killTerminalShell(id);
       return true;
     },
     [store, dispatch],

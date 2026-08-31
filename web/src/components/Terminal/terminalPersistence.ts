@@ -1,8 +1,9 @@
 // Persists which terminal tabs were open per session tab (legacy) and per
 // project (current), and each terminal's rendered scrollback text, across
-// page reloads. Terminal *processes* are never resumed (a fresh pty is spawned
-// on restore) — only the tab layout and visible text survive, so the user can
-// see what happened before reload.
+// page reloads. The terminal id is also the server's reattach key: while the
+// server is still running, restoring a tab resumes its live shell (and the
+// server replays recent output over the saved text). The saved text is what
+// survives when the shell is gone — server restart or detach TTL expired.
 // The project-scoped key is the current source of truth: terminals survive
 // switching chat sessions within the same project. The session-scoped key is
 // retained for backward compat and GC.

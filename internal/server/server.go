@@ -269,6 +269,7 @@ func (s *Server) registerRoutes() {
 	// authMiddleware's ?token= support.
 	s.mux.HandleFunc("GET /api/terminal/ws", s.authMiddleware(s.handleTerminalWS))
 	s.mux.HandleFunc("GET /api/terminal/processes", s.authMiddleware(s.handleTerminalProcesses))
+	s.mux.HandleFunc("DELETE /api/terminal/{id}", s.authMiddleware(s.handleTerminalKill))
 	s.mux.HandleFunc("GET /api/config/advisor", s.authMiddleware(s.handleGetAdvisor))
 	s.mux.HandleFunc("PUT /api/config/advisor", s.authMiddleware(s.handleSetAdvisor))
 	s.mux.HandleFunc("GET /api/config/advisor-enabled", s.authMiddleware(s.handleGetAdvisorEnabled))
@@ -1272,6 +1273,9 @@ func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleTerminalProcesses(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleTerminalProcesses(w, r)
+}
+func (s *Server) handleTerminalKill(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleTerminalKill(w, r)
 }
 func (s *Server) handleGetAdvisor(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetAdvisor(w, r)

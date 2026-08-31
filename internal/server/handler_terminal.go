@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
@@ -80,13 +79,16 @@ type terminalResizeMsg struct {
 // else is rejected, so this never becomes "spawn a shell in an arbitrary
 // directory". Absent means the server workdir, preserving the old contract.
 //
-// The handler is stateless per connection: one websocket == one pty == one
-// shell process. Multiple terminal tabs in the UI simply open multiple
-// connections, so there is no server-side session registry to keep in sync.
+// Shells outlive sockets. Each pty is a terminalSession keyed by the
+// frontend's terminal_id; when the socket drops (page reload, network blip)
+// the shell is detached and kept for terminalDetachTTL, and the next socket
+// with the same id reattaches and gets the recent output replayed. Explicit
+// tab close goes through DELETE /api/terminal/{id} (HandleTerminalKill).
 //
 // Framing: client -> server frames are raw keystrokes unless they start with
 // `{"type":"resize"`, in which case they are parsed as a resize control
-// message. Server -> client frames are always binary pty output.
+// message. Server -> client: one text frame `{"type":"attach","resumed":bool}`
+// first, then binary pty output only.
 func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	workDir := h.workDir
@@ -152,102 +154,123 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// terminal_id (the frontend's TerminalPanel `id`) lets the terminal-
-	// processes emitter correlate a pid with the tab the browser shows it
-	// under. Registration is best-effort: an old/other client that omits it
-	// just doesn't show up in the Processes tab.
+	// terminal_id (the frontend's TerminalPanel `id`) is the reattach key: a
+	// reload or socket drop detaches the shell, and the next socket carrying
+	// the same id resumes it. It also lets the terminal-processes emitter
+	// correlate a pid with the tab the browser shows it under. An empty id
+	// (old/other clients) gets a shell that dies with its socket, as before.
 	terminalID := r.URL.Query().Get("terminal_id")
+	if existing := h.terminalSessions.lookup(terminalID); existing != nil {
+		if existing.project != workDir {
+			log.Printf("terminal %s: rejected reattach from project %q (owned by %q)", terminalID, workDir, existing.project)
+			writeError(w, http.StatusConflict, "terminal_id belongs to a different project")
+			return
+		}
+		ws, err := terminalUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("terminal %s: websocket upgrade for reattach failed: %v", terminalID, err)
+			return
+		}
+		ws.SetReadLimit(terminalMaxMessageSize)
+		if !existing.attach(ws, true) {
+			// Shell exited between lookup and attach; the client will retry and
+			// get a fresh shell.
+			log.Printf("terminal %s: shell exited before reattach completed", terminalID)
+			if err := ws.Close(); err != nil {
+				log.Printf("terminal %s: failed to close websocket: %v", terminalID, err)
+			}
+			return
+		}
+		log.Printf("terminal %s: reattached (pid %d)", terminalID, existing.pid())
+		h.serveTerminalSocket(existing, ws)
+		return
+	}
+
+	sess := newTerminalSession(terminalID, workDir, cmd, ptmx, h.terminalSessions.detachTTL, h.terminalExited)
+	h.terminalSessions.put(sess.id, sess)
 	h.terminalProcs.register(terminalID, terminalProcEntry{Project: workDir, PID: int32(cmd.Process.Pid)})
 	h.notifyTerminalProcsChanged()
+	go sess.readLoop()
 
 	ws, err := terminalUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		// Upgrade already wrote an error response; tear the pty back down so
-		// a failed handshake doesn't leak a shell process.
+		// Upgrade already wrote an error response; tear the shell back down so
+		// a failed handshake doesn't leak a process until the detach TTL.
 		log.Printf("terminal: websocket upgrade failed: %v", err)
-		h.terminalProcs.unregister(terminalID)
-		if killErr := cmd.Process.Kill(); killErr != nil {
-			log.Printf("terminal: failed to kill pty shell after upgrade failure: %v", killErr)
-		}
-		_ = cmd.Wait()
-		if closeErr := ptmx.Close(); closeErr != nil {
-			log.Printf("terminal: failed to close pty after upgrade failure: %v", closeErr)
-		}
+		sess.kill()
 		return
 	}
 	ws.SetReadLimit(terminalMaxMessageSize)
-
-	// Both the reader goroutine and the writer loop can fail at once, so
-	// teardown runs exactly once: kill the shell, reap it (Kill alone leaves a
-	// zombie), close the pty fd, close the socket.
-	var closeOnce sync.Once
-	shutdown := func() {
-		closeOnce.Do(func() {
-			h.terminalProcs.unregister(terminalID)
-			if err := cmd.Process.Kill(); err != nil && !isProcessDone(err) {
-				log.Printf("terminal: failed to kill pty shell: %v", err)
-			}
-			_ = cmd.Wait()
-			if err := ptmx.Close(); err != nil {
-				log.Printf("terminal: failed to close pty: %v", err)
-			}
-			if err := ws.Close(); err != nil {
-				log.Printf("terminal: failed to close websocket: %v", err)
-			}
-		})
-	}
-	defer shutdown()
-
-	// pty output -> websocket
-	go func() {
-		defer shutdown()
-		buf := make([]byte, 4096)
-		for {
-			n, err := ptmx.Read(buf)
-			if n > 0 {
-				if werr := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); werr != nil {
-					// Normal when the browser tab closes; log at the same
-					// level as any other write failure so it is never silent.
-					log.Printf("terminal: websocket write failed, closing session: %v", werr)
-					return
-				}
-			}
-			if err != nil {
-				// EOF here means the shell exited (user typed `exit`).
-				log.Printf("terminal: pty read ended: %v", err)
-				return
-			}
+	if !sess.attach(ws, false) {
+		if err := ws.Close(); err != nil {
+			log.Printf("terminal %s: failed to close websocket: %v", sess.id, err)
 		}
-	}()
+		return
+	}
+	h.serveTerminalSocket(sess, ws)
+}
 
-	// websocket -> pty stdin (plus resize control frames)
+// serveTerminalSocket runs the websocket -> pty direction (raw keystrokes plus
+// resize control frames) until the socket goes away, then detaches the shell.
+// The pty -> websocket direction lives in the session's own read loop, which
+// outlives any single socket.
+func (h *Handler) serveTerminalSocket(sess *terminalSession, ws *websocket.Conn) {
+	defer sess.detach(ws)
 	for {
 		_, data, err := ws.ReadMessage()
 		if err != nil {
 			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				log.Printf("terminal: websocket read failed, closing session: %v", err)
+				log.Printf("terminal %s: websocket read failed, detaching: %v", sess.id, err)
 			}
 			return
 		}
 		if bytes.HasPrefix(bytes.TrimSpace(data), resizePrefix) {
 			var msg terminalResizeMsg
 			if err := json.Unmarshal(bytes.TrimSpace(data), &msg); err != nil {
-				log.Printf("terminal: failed to parse resize control frame: %v", err)
+				log.Printf("terminal %s: failed to parse resize control frame: %v", sess.id, err)
 				continue
 			}
 			if msg.Cols == 0 || msg.Rows == 0 {
 				continue
 			}
-			if err := pty.Setsize(ptmx, &pty.Winsize{Cols: msg.Cols, Rows: msg.Rows}); err != nil {
-				log.Printf("terminal: failed to resize pty to %dx%d: %v", msg.Cols, msg.Rows, err)
+			if err := pty.Setsize(sess.ptmx, &pty.Winsize{Cols: msg.Cols, Rows: msg.Rows}); err != nil {
+				log.Printf("terminal %s: failed to resize pty to %dx%d: %v", sess.id, msg.Cols, msg.Rows, err)
 			}
 			continue
 		}
-		if _, err := ptmx.Write(data); err != nil {
-			log.Printf("terminal: failed to write to pty stdin: %v", err)
+		if _, err := sess.ptmx.Write(data); err != nil {
+			log.Printf("terminal %s: failed to write to pty stdin: %v", sess.id, err)
 			return
 		}
 	}
+}
+
+// terminalExited is the session exit hook: drop the shell from the reattach
+// table and the processes registry once its pty read loop has reaped it.
+func (h *Handler) terminalExited(s *terminalSession) {
+	h.terminalSessions.remove(s.id, s)
+	if s.resumable {
+		h.terminalProcs.unregister(s.id)
+		h.notifyTerminalProcsChanged()
+	}
+}
+
+// HandleTerminalKill is the explicit close for a terminal tab. Because a
+// dropped socket only detaches the shell, the frontend must call this when
+// the user actually closes the tab; otherwise the shell would linger until
+// the detach TTL.
+func (h *Handler) HandleTerminalKill(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess := h.terminalSessions.lookup(id)
+	if sess == nil {
+		writeError(w, http.StatusNotFound, "no such terminal")
+		return
+	}
+	log.Printf("terminal %s: kill requested (pid %d)", id, sess.pid())
+	// terminateProcessTree waits up to the grace period for the shell to
+	// exit; don't hold the HTTP response for that.
+	go sess.kill()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // terminalShellCommand starts the configured Unix shell as a login shell so
