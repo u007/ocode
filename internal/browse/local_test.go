@@ -191,3 +191,71 @@ func TestHandleLocalWebSocketPassthrough(t *testing.T) {
 		t.Fatalf("websocket echo failed: got %q", echo)
 	}
 }
+
+// TestHandleLocalRewritesHTMLURLs pins the live-QA fix: dev servers reference
+// assets root-relative ("/pic.svg"); without the static rewrite those resolve
+// against the browse origin root and 404 out of the stateless route. Local
+// HTML must therefore go through rewriteHTML as well as injectCapture.
+func TestHandleLocalRewritesHTMLURLs(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<html><head><title>dev</title></head><body><img src="/pic.svg"><a href="/next">n</a></body></html>`)
+		default:
+			_, _ = io.WriteString(w, "asset")
+		}
+	}))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	s, cookie := newLocalTestServer(t, "tab:rw")
+
+	r := httptest.NewRequest("GET", "/b/tab:rw/http/"+host+"/", nil)
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+
+	body := w.Body.String()
+	for _, want := range []string{"/b/tab:rw/http/" + host + "/pic.svg", "/b/tab:rw/http/" + host + "/next"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("root-relative URL not rewritten to %q in:\n%s", want, body)
+		}
+	}
+	if !strings.Contains(body, "__ocode_capture.js") {
+		t.Errorf("capture script missing after rewrite:\n%s", body)
+	}
+}
+
+// TestHandleLocalUpgradeEmitsNoNavEvent pins the second live-QA fix: Chromium
+// may omit Sec-Fetch-Dest on the WebSocket handshake, and a missing header
+// used to be treated as a document navigation — the resulting nav event would
+// hijack the address bar (and iframe) onto the ws route. Upgrades must never
+// emit nav events.
+func TestHandleLocalUpgradeEmitsNoNavEvent(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Plain (non-upgrading) response to a handshake attempt: no nav events.
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "no upgrade")
+	}))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	s, cookie := newLocalTestServer(t, "tab:up")
+
+	var got []NavEvent
+	s.SetNavPublisher(func(_ string, ev NavEvent) { got = append(got, ev) })
+
+	r := httptest.NewRequest("GET", "/b/tab:up/http/"+host+"/ws", nil)
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Upgrade", "websocket")
+	r.Header.Set("Sec-WebSocket-Version", "13")
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d want 200", w.Code)
+	}
+	if len(got) != 0 {
+		t.Fatalf("upgrade request emitted %d nav events: %+v", len(got), got)
+	}
+}

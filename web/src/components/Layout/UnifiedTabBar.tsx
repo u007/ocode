@@ -386,7 +386,9 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   );
 
   const handleNewBrowser = useCallback(() => {
-    openBrowserTab();
+    const id = openBrowserTab();
+    // The panel renders nothing without a store slice — open it up front.
+    browserActions.open(`tab:${id}`);
     onFocusKindChange("browser");
   }, [openBrowserTab, onFocusKindChange]);
 

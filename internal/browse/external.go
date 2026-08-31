@@ -130,7 +130,11 @@ func (s *Server) handleExternal(w http.ResponseWriter, r *http.Request, t target
 
 	var out []byte
 	if isHTML {
-		rewritten, rerr := rewriteHTML(buf, t, s.spaOrigin)
+		// base is the resolution base for relative URLs: "" means "resolve
+		// against the document target" (the rewriteHTML contract). Passing
+		// spaOrigin here (an earlier draft) would route root-relative asset
+		// URLs at the SPA server instead of the upstream — live QA caught it.
+		rewritten, rerr := rewriteHTML(buf, t, "")
 		if rerr != nil {
 			s.log.Printf("browse: rewriteHTML %s: %v", upURL, rerr)
 			rewritten = buf // fail open to raw HTML rather than blank page

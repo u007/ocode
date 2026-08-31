@@ -5,6 +5,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { ChatProvider } from "../../stores/chatStore";
 import { TerminalProvider, useTerminalState } from "../../stores/terminalStore";
 import { BrowserTabsProvider } from "../../stores/browserTabsStore";
+import { browserStore } from "../../lib/browserStore";
 import type { FocusedKind } from "../../lib/viewPersistence";
 import UnifiedTabBar from "./UnifiedTabBar";
 
@@ -56,6 +57,9 @@ function renderBar(focusedKind: FocusedKind = "chat") {
 
 beforeEach(() => {
   window.localStorage.clear();
+  // browserStore is a module singleton; without this a leaked tab: slice from
+  // an earlier case could satisfy the open-slice assertion by accident.
+  browserStore.setState(() => ({ byKey: {} }));
   openSessionTab.mockClear();
   closeSessionTab.mockClear();
   openNewSessionTab.mockClear();
@@ -80,6 +84,12 @@ describe("UnifiedTabBar", () => {
     fireEvent.click(addBrowser);
     expect(onFocusKindChange).toHaveBeenCalledWith("browser");
     expect(screen.getByRole("tab", { name: /new tab/i })).toBeInTheDocument();
+    // A new browser tab must also open its live page-state slice, or the
+    // full-width BrowserPanel renders nothing. Exactly one slice, freshly
+    // created (beforeEach cleared the store).
+    const keys = Object.keys(browserStore.state.byKey).filter((k) => k.startsWith("tab:"));
+    expect(keys).toHaveLength(1);
+    expect(browserStore.state.byKey[keys[0]].panelOpen).toBe(true);
   });
 
   it("lists a persisted-but-never-activated terminal as a pill (peek, no pty)", () => {

@@ -147,3 +147,35 @@ func TestExternalSSRFBlockedClassifiesNav(t *testing.T) {
 		t.Errorf("nav error = %q, want %q", gotNav.Error, "blocked: private address")
 	}
 }
+
+// TestExternalRewriteResolvesAgainstDocumentNotSPAOrigin pins the QA-caught
+// misuse where spaOrigin was passed as the rewriteHTML resolution base:
+// root-relative asset URLs then mapped onto the SPA server (cross-origin
+// misroute + privacy leak of the panel's activity to the main origin) instead
+// of the document's upstream host.
+func TestExternalRewriteResolvesAgainstDocumentNotSPAOrigin(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, `<html><head><link rel="stylesheet" href="/theme.css"></head><body>ok</body></html>`)
+	}))
+	defer upstream.Close()
+
+	s := newTestServer(t)
+	s.SetSPAOrigin("http://spa.invalid:9999") // resolution base must ignore this
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	tgt := target{StateKey: "tab:ext", Scheme: "http", Host: host, Path: "/"}
+	w := httptest.NewRecorder()
+	s.handleExternal(w, httptest.NewRequest("GET", "/b/tab:ext/http/"+host+"/", nil), tgt)
+
+	body := w.Body.String()
+	if !strings.Contains(body, `href="/b/tab:ext/http/`+host+`/theme.css"`) {
+		t.Errorf("root-relative URL not rewritten to the upstream host:\n%s", body)
+	}
+	// The bootstrap script legitimately carries spaOrigin (the capture script
+	// postMessages to the parent SPA window). The leak this test pins is the
+	// SPA origin ending up inside a *mapped route* — i.e. a rewritten asset
+	// URL pointing back at the SPA server instead of the upstream.
+	if strings.Contains(body, "/b/tab:ext/http/spa.invalid") {
+		t.Errorf("spaOrigin leaked into a rewritten route:\n%s", body)
+	}
+}

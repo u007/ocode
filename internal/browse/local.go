@@ -1,7 +1,7 @@
 package browse
 
-// handleLocal serves loopback/RFC1918 upstreams as a transparent streaming
-// reverse proxy. It is reachable only for targets whose host literal is
+// handleLocal serves loopback/RFC1918 upstreams as a streaming reverse proxy.
+// It is reachable only for targets whose host literal is
 // private (parseTarget sets t.Local); an external page's rewritten links
 // always carry an external host and therefore route to handleExternal. A
 // private host can only have been reached via a user-initiated address-bar
@@ -10,6 +10,14 @@ package browse
 // private host at all already required the user path, and the cookie is
 // confined to /b/. newSafeTransport(true) is used ONLY here; handleExternal
 // always uses the guarded newSafeTransport(false).
+//
+// Deviation from the spec's "only transformation: inject the capture script"
+// (found by live QA 2026-08-31): HTML responses are ALSO URL-rewritten via
+// rewriteHTML, because dev servers (Vite et al.) reference nearly all of
+// their assets root-relative ("/src/main.js", "/@vite/client"); without the
+// static rewrite those requests hit the browse origin root, drop out of the
+// stateless route, and 404. Non-HTML bodies (JS/CSS/images/WS) still stream
+// byte-for-byte untouched.
 
 import (
 	"bytes"
@@ -57,16 +65,20 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
 		ModifyResponse: func(resp *http.Response) error {
 			// Never let the dev server install a service worker via header.
 			resp.Header.Del("Service-Worker-Allowed")
-			// Terminal nav event for the top-level document (Part 07: one
-			// loading + one terminal per navigation, never per subresource).
-			if isDocumentRequest(r) {
+			ct := resp.Header.Get("Content-Type")
+			isHTML := strings.HasPrefix(ct, "text/html")
+			// Terminal nav event for HTML document loads only (Part 07:
+			// one loading + one terminal per navigation). Gating on the
+			// response type as well as the request protects against
+			// header-less subresources (WS handshakes, EventSource) being
+			// misclassified as documents and hijacking the address bar.
+			if isHTML && isDocumentRequest(r) {
 				s.emitNav(NavEvent{StateKey: t.StateKey, URL: t.Scheme + "://" + t.Host + t.Path, Status: resp.StatusCode, Mode: "local"})
 			}
-			ct := resp.Header.Get("Content-Type")
-			if !strings.HasPrefix(ct, "text/html") {
+			if !isHTML {
 				return nil // stream everything non-HTML untouched
 			}
-			return s.injectCaptureIntoResponse(resp, t.StateKey)
+			return s.rewriteAndInjectResponse(resp, t)
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			s.log.Printf("browse local: proxy error for %s://%s%s: %v", t.Scheme, t.Host, t.Path, err)
@@ -92,10 +104,12 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
 	proxy.ServeHTTP(w, r)
 }
 
-// injectCaptureIntoResponse reads the (possibly gzipped) HTML body, injects the
-// capture script, and rewrites the body + Content-Length/Content-Encoding.
-// Only HTML documents reach here, so buffering is bounded by page size.
-func (s *Server) injectCaptureIntoResponse(resp *http.Response, stateKey string) error {
+// rewriteAndInjectResponse reads the (possibly gzipped) HTML body, rewrites
+// its URLs into the stateless route (root-relative dev-server assets stay on
+// the route), injects the capture script, and rewrites the body +
+// Content-Length/Content-Encoding. Only HTML documents reach here, so
+// buffering is bounded by page size.
+func (s *Server) rewriteAndInjectResponse(resp *http.Response, t target) error {
 	var reader io.Reader = resp.Body
 	gzipped := strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip")
 	if gzipped {
@@ -117,7 +131,14 @@ func (s *Server) injectCaptureIntoResponse(resp *http.Response, stateKey string)
 	if err != nil {
 		return err
 	}
-	injected := injectCapture(raw, stateKey, s.spaOrigin)
+	// base "" = resolve relative URLs against the document target (see the
+	// rewriteHTML contract); the SPA origin is only for capture injection.
+	injected, rerr := rewriteHTML(raw, t, "")
+	if rerr != nil {
+		s.log.Printf("browse local: rewriteHTML for %s: %v — serving unrewritten", resp.Request.URL, rerr)
+		injected = raw // fail open to raw HTML rather than blank page
+	}
+	injected = injectCapture(injected, t.StateKey, s.spaOrigin)
 
 	resp.Body = io.NopCloser(bytes.NewReader(injected))
 	// We always emit identity-encoded HTML after injection.
@@ -134,7 +155,20 @@ func isServiceWorkerRequest(r *http.Request) bool {
 		r.Header.Get("Service-Worker") != ""
 }
 
+// isUpgradeRequest reports whether this is a protocol-upgrade attempt
+// (WebSocket handshake et al.). Upgrades are never top-level navigations —
+// and Chromium may omit Sec-Fetch-Dest on them, which would otherwise make
+// isDocumentRequest misclassify the handshake as a navigation and hijack the
+// address bar / iframe onto the websocket route.
+func isUpgradeRequest(r *http.Request) bool {
+	return r.Header.Get("Sec-WebSocket-Version") != "" ||
+		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
+
 func isDocumentRequest(r *http.Request) bool {
+	if isUpgradeRequest(r) {
+		return false
+	}
 	d := r.Header.Get("Sec-Fetch-Dest")
 	return d == "" || strings.EqualFold(d, "document") || strings.EqualFold(d, "iframe")
 }

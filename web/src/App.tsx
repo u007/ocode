@@ -928,7 +928,12 @@ function HomeApp() {
                   </div>
                   {focusedKind === "browser" && activeBrowserId && (
                     <div className="flex flex-col flex-1 min-h-0">
-                      <BrowserPanel stateKey={`tab:${activeBrowserId}`} mode="full" />
+                      {/* key forces remount per tab: the browse session cookie
+                          is per-stateKey (same name, same /b/ path — the
+                          browser can only hold one), so each surface switch
+                          must re-mint its grant. Switching tabs reloads the
+                          page — the spec's accepted cost of per-tab isolation. */}
+                      <BrowserPanel key={`tab:${activeBrowserId}`} stateKey={`tab:${activeBrowserId}`} mode="full" />
                     </div>
                   )}
                 </div>
@@ -972,7 +977,7 @@ function HomeApp() {
                 style={{ width: browserPane.width }}
                 className="flex-shrink-0 h-full min-h-0 flex flex-col border-l border-border"
               >
-                <BrowserPanel stateKey={sideStateKey} mode="side" />
+                <BrowserPanel key={sideStateKey} stateKey={sideStateKey} mode="side" />
               </div>
             </>
           )}

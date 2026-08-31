@@ -35,16 +35,32 @@
     return m ? m[0] : "/b/" + encodeURIComponent(stateKey);
   }
 
-  // Map an absolute URL to /b/{stateKey}/{scheme}/{host}/{path...}. Returns the
-  // input unchanged for relative URLs (already correctly scoped) and for URLs
-  // already under the browse base.
+  // Full route prefix of the current document, e.g. "/b/tab:abc/http/localhost:3000".
+  // Root-relative ("/x") URLs must be re-prefixed with this, because the
+  // browser would otherwise resolve them against the browse origin ROOT and
+  // drop out of the stateless route.
+  function routeBase() {
+    var m = location.pathname.match(/^\/b\/[^/]+\/[^/]+\/[^/]+/);
+    return m ? m[0] : browseBase();
+  }
+
+  // Map an absolute or root-relative URL to /b/{stateKey}/{scheme}/{host}/{path...}.
+  // Returns the input unchanged for bare-relative URLs (they already resolve
+  // under the current /b/ route). Protocol-relative "//host/..." is completed
+  // with the page protocol. (ws:/wss: are mapped onto the http/https route
+  // scheme by the WebSocket wrapper below.)
   function reroute(raw) {
     if (typeof raw !== "string") {
       try { raw = String(raw); } catch (e) { return raw; }
     }
-    if (!/^https?:\/\//i.test(raw)) return raw; // relative — leave as-is.
+    if (/^\/\//.test(raw)) raw = (location.protocol === "https:" ? "https:" : "http:") + raw; // protocol-relative
+    var rootRel = /^\/(?!\/)/.test(raw);
+    if (!rootRel && !/^https?:\/\//i.test(raw)) return raw; // bare relative — leave as-is.
     var base = browseBase();
     if (raw.indexOf(location.origin + base + "/") === 0) return raw;
+    if (rootRel) {
+      return location.origin + routeBase() + raw;
+    }
     var u;
     try { u = new URL(raw); } catch (e) { return raw; }
     var scheme = u.protocol.replace(":", "");
@@ -134,6 +150,12 @@
   }
 
   // --- WebSocket (reroute ws/wss to the browse origin) ---
+  // The route carries the upstream's HTTP-equivalent scheme (ws→http, wss→https)
+  // because parseTarget only accepts http/https; the browser still dials the
+  // browse origin over ws/wss per page protocol. handleLocal passes the 101
+  // upgrade through untouched (HMR works). External wss endpoints route to
+  // external mode, which streams HTTP — such sockets fail visibly in the
+  // console (v1 limitation).
   var OrigWS = window.WebSocket;
   if (OrigWS) {
     var Wrapped = function (url, protocols) {
@@ -141,7 +163,7 @@
       if (/^wss?:\/\//i.test(url)) {
         try {
           var u = new URL(url);
-          var scheme = u.protocol.replace(":", "");
+          var scheme = u.protocol === "wss:" ? "https" : "http";
           routed = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + browseBase() + "/" + scheme + "/" + u.host + u.pathname + u.search;
         } catch (e) { routed = url; }
       }

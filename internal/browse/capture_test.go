@@ -57,3 +57,21 @@ func TestServeCaptureBundle(t *testing.T) {
 		t.Fatal("served bundle missing console event type")
 	}
 }
+
+// TestCaptureBundleRerouteRules pins the two reroute invariants that live QA
+// (2026-08-31) proved easy to regress: root-relative "/x" URLs must be
+// re-prefixed with the 3-segment route base (origin-root would drop out of
+// the stateless route), and the WebSocket wrapper must map ws:/wss: onto the
+// http/https scheme segment — parseTarget rejects "/b/{key}/ws/..." outright.
+func TestCaptureBundleRerouteRules(t *testing.T) {
+	js := string(captureJS)
+	if !strings.Contains(js, `location.origin + routeBase() + raw`) {
+		t.Error("capture.js lost the root-relative re-prefix in reroute()")
+	}
+	if !strings.Contains(js, `/^\/b\/[^/]+\/[^/]+\/[^/]+/`) {
+		t.Error("capture.js lost the 3-segment routeBase regex")
+	}
+	if !strings.Contains(js, `u.protocol === "wss:" ? "https" : "http"`) {
+		t.Error("capture.js WebSocket wrapper must map ws/wss to http/https route schemes")
+	}
+}

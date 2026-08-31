@@ -28,22 +28,37 @@ func injectCapture(html []byte, stateKey, spaOrigin string) []byte {
 	snippet := []byte(b.String())
 
 	lower := bytes.ToLower(html)
-	if i := bytes.Index(lower, []byte("<head>")); i != -1 {
-		at := i + len("<head>")
-		return concat(html[:at], snippet, html[at:])
-	}
-	// Head with attributes: <head ...>
-	if i := bytes.Index(lower, []byte("<head")); i != -1 {
-		if end := bytes.IndexByte(html[i:], '>'); end != -1 {
-			at := i + end + 1
-			return concat(html[:at], snippet, html[at:])
+	// Prefer insertion as the FIRST child of <head> (spec § capture script):
+	// wrapping must precede inline <body> scripts that a deferred parser may
+	// execute before the trailing </head> insert point is reached.
+	head := bytes.Index(lower, []byte("<head>"))
+	if head == -1 {
+		if i := bytes.Index(lower, []byte("<head")); i != -1 {
+			if end := bytes.IndexByte(html[i:], '>'); end != -1 && end < len(html)-i {
+				// Only treat it as the open tag when it terminates (avoids a
+				// bogus match on "<headless-thing").
+				head = i + end + 1
+			}
 		}
+	}
+	if head != -1 {
+		at := head
+		if bytes.Equal(lower[head:head+6], []byte("<head>")) {
+			at = head + len("<head>")
+		}
+		return concat(html[:at], snippet, html[at:])
 	}
 	if i := bytes.Index(lower, []byte("</head>")); i != -1 {
 		return concat(html[:i], snippet, html[i:])
 	}
 	if i := bytes.Index(lower, []byte("<body")); i != -1 {
 		return concat(html[:i], snippet, html[i:])
+	}
+	if i := bytes.Index(lower, []byte("<html")); i != -1 {
+		if end := bytes.IndexByte(html[i:], '>'); end != -1 {
+			at := i + end + 1
+			return concat(html[:at], snippet, html[at:])
+		}
 	}
 	return concat(html, snippet, nil)
 }
