@@ -1,10 +1,18 @@
 ---
 type: Decision
 title: V1 Connection Cap Exclusion — Embedded Browser Panel
-description: 'Decision to exclude the per-stateKey concurrent upstream connection cap (32) from v1 embedded browser panel, with follow-up note for semaphore around handleExternal/handleLocal. Updated 2026-08-31 to reflect scaffold landing.'
+description: 'Decision to exclude the per-stateKey concurrent upstream connection cap (32) from v1 embedded browser panel. The exclusion applied at v1 ship; the follow-up implementation has since landed.'
 tags: [architecture, browse, decision, v1, external-mode]
-timestamp: 2026-08-31T05:41:38Z
+timestamp: 2026-08-31T07:07:13Z
 ---
+# V1 Connection Cap Exclusion — Embedded Browser Panel
+
+**Type:** Decision  
+**Description:** Decision to exclude the per-stateKey concurrent upstream connection cap (32) from v1 embedded browser panel. The exclusion applied at v1 ship; the follow-up implementation has since landed.  
+**Tags:** architecture, browse, decision, v1, external-mode  
+
+---
+
 ## Decision
 
 The per-stateKey concurrent upstream connection cap (32, spec § External mode limits) is **excluded from v1 acceptance** of the embedded browser panel.
@@ -31,9 +39,9 @@ The v1 non-goals list (`TODO.md:1789–1792`) explicitly marks this:
 
 A future change should add a **semaphore-based concurrency cap** around `handleExternal`/`handleLocal` upstream work, keyed per-stateKey, to bound concurrent connections. The natural owner is a follow-up after the v1 browser panel ships, or the local-mode part if revisited.
 
-### Status (2026-08-31)
+## Status (2026-08-31)
 
-The follow-up is **done** as of 2026-08-31. The per-stateKey concurrent upstream connection cap (32) is fully implemented and wired:
+The follow-up has **landed** (repo HEAD `2ad684f`). The per-stateKey concurrent upstream connection cap is fully implemented and wired:
 
 - **`connLimiter`** (`internal/browse/connlimit.go`): per-stateKey counting semaphore shared by external + local traffic. `acquire()` blocks up to 5 s (`upstreamSlotWait`) before returning `errUpstreamBusy`; entry cleanup at `refs==0` (no TTL sweep needed — closed tabs leave nothing behind). `Server.failBusy` responds with 503 + `Retry-After: 1` and closes the loading nav event for document requests (Part 07 contract).
 - **Instantiation** (`internal/browse/server.go:61`): `s.conns = newConnLimiter(maxUpstreamConnsPerKey)` in `New()`.
@@ -41,7 +49,7 @@ The follow-up is **done** as of 2026-08-31. The per-stateKey concurrent upstream
 - **Local mode** (`internal/browse/local.go:110–116`): `handleLocal` calls `s.conns.acquire(r.Context(), t.StateKey)`, routes errors to `s.failBusy(w, r, t, "local")`, and defers `release()`. The slot is held for the full connection lifetime, including hijacked WebSocket tunnels.
 - **Tests** (`internal/browse/connlimit_test.go`): waiter-wakes-on-release, cancellation/timeout no-ref-leak, per-stateKey independence.
 
-The historical decision to exclude the cap from v1 acceptance remains accurate — the cap was indeed absent at v1 ship time. This Status section records that the prescribed follow-up has been completed.
+The historical decision to exclude the cap from v1 acceptance remains accurate — the cap was indeed absent at v1 ship time. This Status section records that the prescribed follow-up has been completed and the exclusion is no longer current.
 
 ## References
 

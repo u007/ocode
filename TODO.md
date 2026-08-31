@@ -1768,13 +1768,12 @@ exactly — the poll ran to completion rather than failing fast.
   only still hang on a *different* kind of process death (not the PATH bug),
   for up to 60s.
 
-- [ ] Embedded browser panel: spec § External mode limits include a "per-stateKey
-  concurrent upstream connection cap 32" (design doc line ~142). It is not
-  assigned to any part file of
-  `docs/superpowers/plans/2026-08-30-embedded-browser-panel/` — Part 03 ships
-  the external fetch path without it (transport idle-pool only). Needs an
-  owner (likely Part 06 local mode or a follow-up) before the panel ships.
-  (from: part 03 implementation, 2026-08-31)
+- [x] Embedded browser panel: spec § External mode limits include a "per-stateKey
+  concurrent upstream connection cap 32" (design doc line ~142). At
+  implementation time, no part file of
+  `docs/superpowers/plans/2026-08-30-embedded-browser-panel/` owned it — Part
+  03 shipped the external fetch path without it (transport idle-pool only).
+  → **Landed 2026-08-31** (`internal/browse/connlimit.go`, wired in `server.go`/`external.go`/`local.go`, tests in `connlimit_test.go`, commit `2ad684f`; status in `docs/architecture/v1-connection-cap-exclusion.md`). (from: part 03 implementation, 2026-08-31)
 
 ## Embedded browser panel — v1 non-goals (deferred)
 
