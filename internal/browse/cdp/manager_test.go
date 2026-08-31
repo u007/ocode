@@ -215,3 +215,202 @@ func containsNavError(navs []NavEvent, key string) bool {
 	}
 	return false
 }
+
+// --- Task 4 tests ---
+
+func TestManager_Navigate(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	var navs []NavEvent
+	m := newTestManager(t, stub, func(e NavEvent) { navs = append(navs, e) }, nil)
+	defer m.Close(context.Background())
+	ctx := context.Background()
+	tgt, err := m.Attach(ctx, "k1", &testSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	navs = nil
+	if err := tgt.Navigate(ctx, "https://example.com/"); err != nil {
+		t.Fatalf("Navigate: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if !containsCall(stub.Calls(), "Page.navigate") {
+		t.Error("expected Page.navigate")
+	}
+	// Immediate nav Status 0
+	found := false
+	for _, n := range navs {
+		if n.URL == "https://example.com/" && n.Status == 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected immediate nav Status 0, got %v", navs)
+	}
+	// Simulate responseReceived for main document
+	navs = nil
+	// Need main frame id; use target's mainFrameID or inject with any frame
+	mm := tgt
+	mm.mu.Lock()
+	mf := mm.mainFrameID
+	mm.mu.Unlock()
+	if mf == "" {
+		mf = "frame-main"
+		// set it so handler matches
+		mm.mu.Lock()
+		mm.mainFrameID = mf
+		mm.mu.Unlock()
+	}
+	stub.InjectEvent(tgt.sessionID, "Network.responseReceived", map[string]any{
+		"requestId": "r1", "type": "Document", "frameId": mf,
+		"response": map[string]any{"url": "https://example.com/", "status": 200},
+	})
+	time.Sleep(30 * time.Millisecond)
+	found = false
+	for _, n := range navs {
+		if n.URL == "https://example.com/" && n.Status == 200 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected nav 200 after responseReceived, got %v", navs)
+	}
+}
+
+func TestManager_LoadingFailed(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	var navs []NavEvent
+	m := newTestManager(t, stub, func(e NavEvent) { navs = append(navs, e) }, nil)
+	defer m.Close(context.Background())
+	ctx := context.Background()
+	tgt, _ := m.Attach(ctx, "k1", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	// set main frame
+	tgt.mu.Lock()
+	tgt.mainFrameID = "mf1"
+	tgt.mu.Unlock()
+	navs = nil
+	stub.InjectEvent(tgt.sessionID, "Network.loadingFailed", map[string]any{
+		"requestId": "r1", "type": "Document", "frameId": "mf1", "errorText": "net::ERR_NAME_NOT_RESOLVED",
+	})
+	time.Sleep(30 * time.Millisecond)
+	if len(navs) == 0 || navs[0].Error == "" {
+		t.Fatalf("expected nav error, got %v", navs)
+	}
+	if !containsStr(navs[0].Error, "ERR_NAME_NOT_RESOLVED") {
+		t.Errorf("error %q", navs[0].Error)
+	}
+	// Tunnel error maps to not reachable
+	navs = nil
+	stub.InjectEvent(tgt.sessionID, "Network.loadingFailed", map[string]any{
+		"requestId": "r2", "type": "Document", "frameId": "mf1", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED",
+	})
+	time.Sleep(30 * time.Millisecond)
+	if len(navs) == 0 || !containsStr(navs[0].Error, "not reachable from Chrome mode") {
+		t.Errorf("expected tunnel mapping, got %v", navs)
+	}
+}
+
+func TestManager_NavigateBadScheme(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	before := len(stub.Calls())
+	for _, url := range []string{"file:///etc/passwd", "javascript:1", "data:text/html,hi", "chrome://settings"} {
+		if err := tgt.Navigate(context.Background(), url); err == nil {
+			t.Errorf("expected ErrBadScheme for %q", url)
+		}
+	}
+	if len(stub.Calls()) != before {
+		t.Error("bad scheme should not call CDP")
+	}
+}
+
+func TestManager_FrameNavigatedBadScheme(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	var navs []NavEvent
+	m := newTestManager(t, stub, func(e NavEvent) { navs = append(navs, e) }, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	tgt.mu.Lock()
+	tgt.mainFrameID = "mf1"
+	tgt.mu.Unlock()
+	stub.InjectEvent(tgt.sessionID, "Page.frameNavigated", map[string]any{
+		"frame": map[string]any{"id": "mf1", "url": "file:///etc/passwd"},
+	})
+	time.Sleep(40 * time.Millisecond)
+	if !containsCall(stub.Calls(), "Page.navigate") {
+		t.Error("expected navigate to about:blank")
+	}
+	// Check that nav error emitted
+	found := false
+	for _, n := range navs {
+		if n.Error != "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected nav error for bad scheme")
+	}
+}
+
+func TestManager_NavigatedWithinDocument(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	var navs []NavEvent
+	m := newTestManager(t, stub, func(e NavEvent) { navs = append(navs, e) }, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	tgt.mu.Lock()
+	tgt.mainFrameID = "mf1"
+	tgt.mu.Unlock()
+	stub.InjectEvent(tgt.sessionID, "Page.navigatedWithinDocument", map[string]any{
+		"frameId": "mf1", "url": "https://example.com/#hash",
+	})
+	time.Sleep(30 * time.Millisecond)
+	found := false
+	for _, n := range navs {
+		if n.URL == "https://example.com/#hash" && n.Status == 200 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected navigatedWithinDocument nav, got %v", navs)
+	}
+}
+
+func TestManager_BackForwardReload(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	// Our stub for getNavigationHistory returns empty; Back should not error
+	if err := tgt.Back(context.Background()); err != nil {
+		t.Fatalf("Back: %v", err)
+	}
+	if err := tgt.Forward(context.Background()); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if err := tgt.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	// Check calls
+	if !containsCall(stub.Calls(), "Page.getNavigationHistory") {
+		t.Error("missing getNavigationHistory")
+	}
+	if !containsCall(stub.Calls(), "Page.reload") {
+		t.Error("missing reload")
+	}
+}
+
+func containsStr(s, sub string) bool { return bytes.Contains([]byte(s), []byte(sub)) }
