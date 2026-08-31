@@ -65,14 +65,17 @@ type pendingResp struct {
 type Conn struct {
 	r       io.Reader
 	w       io.Writer
-	wmu     sync.Mutex             // serializes writes
-	pmu     sync.Mutex             // guards id and pending
-	id      int64                  // next command id (start at 1)
+	wmu     sync.Mutex // serializes writes
+	pmu     sync.Mutex // guards id and pending
+	id      int64      // next command id (start at 1)
 	pending map[int64]chan *pendingResp
 
 	done     chan struct{}
 	doneOnce sync.Once
 	closed   sync.Once
+
+	subsMu sync.RWMutex
+	subs   map[subKey][]*EventSub
 }
 
 // NewConn starts a Conn over the given pipe ends and begins reading frames in
@@ -84,6 +87,7 @@ func NewConn(r io.Reader, w io.Writer) *Conn {
 		w:       w,
 		pending: make(map[int64]chan *pendingResp),
 		done:    make(chan struct{}),
+		subs:    make(map[subKey][]*EventSub),
 	}
 	go c.readLoop()
 	return c
@@ -119,6 +123,7 @@ func (c *Conn) finish(err error) {
 			delete(c.pending, id)
 		}
 		c.pmu.Unlock()
+		c.closeSubscriptions()
 	})
 }
 
@@ -189,6 +194,8 @@ func (c *Conn) readLoop() {
 		}
 		if m.ID != nil {
 			c.dispatchResponse(m)
+		} else if m.Method != "" {
+			c.dispatchEvent(m)
 		}
 	}
 }

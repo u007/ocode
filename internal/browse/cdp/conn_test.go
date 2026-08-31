@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -111,7 +112,9 @@ func TestCallLargeResponseNoScannerCap(t *testing.T) {
 	for i := range target {
 		target[i] = byte('A' + i%26)
 	}
-	var got struct{ Data string `json:"data"` }
+	var got struct {
+		Data string `json:"data"`
+	}
 	done := make(chan error, 1)
 	go func() { done <- p.conn.Call(context.Background(), "", "Foo.bar", nil, &got) }()
 	_ = p.next()
@@ -157,7 +160,9 @@ func TestDoneOnPeerEOFAndInflightCallClosed(t *testing.T) {
 func TestCallReturnsCDPError(t *testing.T) {
 	p := newFakePeer(t)
 	done := make(chan error, 1)
-	go func() { done <- p.conn.Call(context.Background(), "", "Target.attachToTarget", map[string]any{"targetId": "x"}, nil) }()
+	go func() {
+		done <- p.conn.Call(context.Background(), "", "Target.attachToTarget", map[string]any{"targetId": "x"}, nil)
+	}()
 	_ = p.next()
 	p.respond(`{"id":1,"error":{"code":-32000,"message":"No target"}}`)
 	err := <-done
@@ -216,5 +221,130 @@ func TestCloseSemantics(t *testing.T) {
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("Call after Close blocked")
+	}
+}
+
+func TestCallIncludesSessionID(t *testing.T) {
+	p := newFakePeer(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- p.conn.Call(context.Background(), "S1", "Page.navigate", map[string]any{"url": "https://x"}, nil)
+	}()
+	c := p.next()
+	if c.sessionID != "S1" {
+		t.Fatalf("sessionId = %q, want S1", c.sessionID)
+	}
+	p.respond(`{"id":1,"result":{}}`)
+	if err := <-done; err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+}
+
+func TestSubscribeFiltersBySessionAndMethod(t *testing.T) {
+	p := newFakePeer(t)
+	evS1, cancelS1 := p.conn.Subscribe("S1", "Page.screencastFrame")
+	defer cancelS1()
+	evBrowser, cancelB := p.conn.Subscribe("", "Target.attachedToTarget")
+	defer cancelB()
+
+	p.respond(`{"method":"Page.screencastFrame","params":{"f":1},"sessionId":"S1"}`)
+	select {
+	case ev := <-evS1:
+		var m map[string]any
+		if err := json.Unmarshal(ev, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if m["f"] != float64(1) {
+			t.Fatalf("S1 event params = %s", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("S1 event not delivered")
+	}
+
+	p.respond(`{"method":"Target.attachedToTarget","params":{"t":2}}`)
+	select {
+	case ev := <-evBrowser:
+		var m map[string]any
+		if err := json.Unmarshal(ev, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if m["t"] != float64(2) {
+			t.Fatalf("browser event params = %s", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("browser-level event not delivered")
+	}
+
+	// The S1 subscription must not have received the sessionless event.
+	select {
+	case ev := <-evS1:
+		t.Fatalf("S1 sub received browser event: %s", ev)
+	default:
+	}
+}
+
+func TestSubscribeDropOldest(t *testing.T) {
+	p := newFakePeer(t)
+	evs, _ := p.conn.Subscribe("", "Ev.method")
+	for i := 0; i < 70; i++ {
+		p.respond(`{"method":"Ev.method","params":{"n":` + strconv.Itoa(i) + `}}`)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for p.conn.Dropped("", "Ev.method") != 6 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := p.conn.Dropped("", "Ev.method"); got != 6 {
+		t.Fatalf("Dropped = %d, want 6", got)
+	}
+	for i := 0; i < 64; i++ {
+		select {
+		case ev := <-evs:
+			var m map[string]any
+			if err := json.Unmarshal(ev, &m); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if n := int(m["n"].(float64)); n != 6+i {
+				t.Fatalf("event %d has n=%d, want %d", i, n, 6+i)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("missing event %d", 6+i)
+		}
+	}
+}
+
+func TestSubscribeCancelAndClose(t *testing.T) {
+	p := newFakePeer(t)
+	evs, cancel := p.conn.Subscribe("", "Ev.method")
+	cancel()
+	select {
+	case _, ok := <-evs:
+		if ok {
+			t.Fatal("channel not closed after cancel")
+		}
+	default:
+		t.Fatal("channel not closed after cancel")
+	}
+
+	// A new subscriber on the same key still receives events.
+	evs2, _ := p.conn.Subscribe("", "Ev.method")
+	p.respond(`{"method":"Ev.method","params":{}}`)
+	select {
+	case _, ok := <-evs2:
+		if !ok {
+			t.Fatal("new sub channel already closed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("new sub missed event")
+	}
+
+	// Conn.Close closes remaining subscription channels.
+	p.conn.Close()
+	select {
+	case _, ok := <-evs2:
+		if ok {
+			t.Fatal("evs2 not closed by Conn.Close")
+		}
+	default:
+		t.Fatal("evs2 still open after Conn.Close")
 	}
 }
