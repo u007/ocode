@@ -24,6 +24,8 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/browse"
 	"github.com/u007/ocode/internal/scheduler"
+	"github.com/u007/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/tool"
 )
 
 type rlEntry struct {
@@ -91,11 +93,20 @@ type Server struct {
 	browse     *browse.Server
 	browseBase string
 
+	// procSup supervises long-lived child processes owned by the server (e.g.
+	// the headless Chrome backing the browser panel). Created in New, shut
+	// down in Shutdown before the browse server closes so a graceful
+	// Browser.close (installed as a shutdown callback) can run over a live
+	// CDP pipe. Exposed via ProcessSupervisor() for the browse subsystem.
+	procSup *tool.ProcessSupervisor
+
 	// ln and httpServer are populated by Serve so Shutdown can stop accepting
 	// new connections and drain in-flight ones. Guarded by shutdownMu.
-	shutdownMu sync.Mutex
-	ln         net.Listener
-	httpServer *http.Server
+	shutdownMu       sync.Mutex
+	ln               net.Listener
+	httpServer       *http.Server
+	browseLn         net.Listener
+	browseHTTPServer *http.Server
 }
 
 func New(addr, username, password string, webFS fs.FS) *Server {
@@ -111,11 +122,18 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 		frontendStats: newFrontendStatsRing(),
 		webFS:         webFS,
 		workDir:       ".",
+		procSup:       tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 3 * time.Second}),
 		startedAt:     time.Now(),
 	}
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
 	return s
+}
+
+// ProcessSupervisor returns the server's process supervisor, used by the browse
+// subsystem to supervise long-lived child processes (e.g. headless Chrome).
+func (s *Server) ProcessSupervisor() *tool.ProcessSupervisor {
+	return s.procSup
 }
 
 func isLoopbackBind(addr string) bool {
@@ -172,6 +190,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/themes", s.authMiddleware(s.handleListThemes))
 	s.mux.HandleFunc("GET /api/files/tree", s.authMiddleware(s.handleFileTree))
 	s.mux.HandleFunc("GET /api/files/search", s.authMiddleware(s.handleFileSearch))
+	s.mux.HandleFunc("GET /api/files/search/stream", s.authMiddleware(s.handleFileSearchStream))
 	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
 	s.mux.HandleFunc("PUT /api/files/content", s.authMiddleware(s.handleSaveFileContent))
 	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
@@ -513,8 +532,13 @@ func StartBrowse(srv *Server, token string, spaOrigin string) error {
 	// Register endpoints before serving so a startup wiring mistake surfaces
 	// synchronously instead of as a 404 at first panel open.
 	srv.EnableBrowse(bBase, bs)
+	bhs := &http.Server{Handler: bs.Handler()}
+	srv.shutdownMu.Lock()
+	srv.browseLn = bln
+	srv.browseHTTPServer = bhs
+	srv.shutdownMu.Unlock()
 	go func() {
-		if err := http.Serve(bln, bs.Handler()); err != nil {
+		if err := bhs.Serve(bln); err != nil {
 			log.Printf("browse: serve on %s exited: %v", bBase, err)
 		}
 	}()
@@ -540,8 +564,24 @@ func (s *Server) handleBrowseGrant(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	grant := s.browse.MintGrant(req.StateKey)
+	grant := s.browse.MintGrant(req.StateKey, requestOrigin(r))
 	writeJSON(w, http.StatusOK, map[string]string{"grant": grant})
+}
+
+// requestOrigin returns the origin the SPA page was loaded from, as the
+// browser reports it: the Origin header (always sent on POST fetches), else
+// reconstructed from the request scheme + Host. This — not the server's
+// bound listener address — is the only value the capture script's
+// postMessage(targetOrigin) will match.
+func requestOrigin(r *http.Request) string {
+	if o := r.Header.Get("Origin"); o != "" && o != "null" {
+		return o
+	}
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
 }
 
 // handleBrowseRevoke tears down the browse session for a stateKey (panel
@@ -682,6 +722,10 @@ func (s *Server) handleFileTree(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFileSearch(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleFileSearch(w, r)
+}
+
+func (s *Server) handleFileSearchStream(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleFileSearchStream(w, r)
 }
 
 func (s *Server) handleFileContent(w http.ResponseWriter, r *http.Request) {
@@ -848,6 +892,31 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if ln != nil {
 		_ = ln.Close()
 	}
+	// Tear down the supervised children (headless Chrome etc.) before closing
+	// the browse HTTP server: a graceful Browser.close installed as a shutdown
+	// callback needs its CDP pipe still alive. Log the error, never abort
+	// shutdown.
+	if s.procSup != nil {
+		if err := s.procSup.Shutdown(ctx); err != nil {
+			log.Printf("server: shutdown process supervisor: %v", err)
+		}
+	}
+	s.shutdownMu.Lock()
+	bhs := s.browseHTTPServer
+	bln := s.browseLn
+	s.shutdownMu.Unlock()
+	if bhs != nil {
+		if err := bhs.Shutdown(ctx); err != nil {
+			// A browse iframe may hold a long-lived WebSocket/HMR connection.
+			// Do not let it keep journal pools alive after shutdown's deadline;
+			// force-close any remaining browse connections.
+			_ = bhs.Close()
+		}
+	}
+	if bln != nil {
+		_ = bln.Close()
+	}
+	snapshot.CloseAllJournals()
 	return nil
 }
 
