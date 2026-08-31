@@ -13,7 +13,7 @@ type NavEvent struct {
 	StateKey string `json:"state_key"`
 	URL      string `json:"url"`
 	Status   int    `json:"status"`
-	Mode     string `json:"mode"` // "local" | "proxied"
+	Mode     string `json:"mode"` // "local" | "chrome"
 	Error    string `json:"error,omitempty"`
 }
 
@@ -35,8 +35,11 @@ type Server struct {
 	// jar holds upstream cookies server-side, keyed by (stateKey, origin);
 	// site cookies never reach the browser (see cookiejar.go).
 	jar *cookieJar
-	// spaOrigin is the main (SPA) origin, set via EnableBrowse wiring; used
-	// as the exact postMessage targetOrigin by the capture script (Part 05).
+	// spaOrigin is the main (SPA) origin, set via EnableBrowse wiring; the
+	// server-wide default postMessage targetOrigin for the capture script.
+	// Real traffic uses the per-stateKey origin recorded at grant mint
+	// (see spaOriginFor) — the bound address ("127.0.0.1:4096") is not
+	// necessarily the origin the user opened ("localhost:4096").
 	spaOrigin string
 
 	// localTransport caches the allowPrivate transport used ONLY by
@@ -69,11 +72,29 @@ func New(apiToken string, logger *log.Logger) *Server {
 // Called once from the main server's EnableBrowse wiring at boot.
 func (s *Server) SetSPAOrigin(o string) { s.spaOrigin = o }
 
+// spaOriginFor returns the postMessage targetOrigin for stateKey's capture
+// script: the SPA origin recorded when its grant was minted, or the
+// server-wide default when no grant has recorded one.
+func (s *Server) spaOriginFor(stateKey string) string {
+	if o, ok := s.auth.originFor(stateKey); ok {
+		return o
+	}
+	return s.spaOrigin
+}
+
 func (s *Server) Handler() http.Handler { return s.mux }
 
-func (s *Server) MintGrant(stateKey string) string { return s.auth.mint(stateKey) }
+// MintGrant issues a one-time grant for stateKey. spaOrigin is the origin
+// of the SPA page requesting it (its Origin header); "" keeps the
+// server-wide default from SetSPAOrigin.
+func (s *Server) MintGrant(stateKey, spaOrigin string) string {
+	return s.auth.mint(stateKey, spaOrigin)
+}
 
-func (s *Server) Revoke(stateKey string) { s.auth.revoke(stateKey) }
+func (s *Server) Revoke(stateKey string) {
+	s.auth.revoke(stateKey)
+	s.jar.Revoke(stateKey)
+}
 
 func (s *Server) SetNavPublisher(fn func(stateKey string, ev NavEvent)) { s.publish = fn }
 
@@ -115,6 +136,46 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		// Cookie belongs to a different panel; never cross state keys.
 		http.Error(w, "browse: state key mismatch", http.StatusForbidden)
 		return
+	}
+	// Authenticate has already validated the session against this request, so
+	// the cookie is present unless this is the grant-redeem request (which
+	// redirects above before the gate runs). Guard nonetheless.
+	cookieVal := ""
+	if c, err := r.Cookie(browseCookie); err == nil {
+		cookieVal = c.Value
+	}
+	// Server-authoritative local-mode gate (spec § Local mode). External pages
+	// must never navigate (or fetch) the panel into local mode: local upstreams
+	// are only reachable while this session is marked local, and a session is
+	// only ever marked local by a fresh SPA grant whose target was a private
+	// upstream (see auth.authenticate). The gate keys off session state, NOT
+	// the Referer header — a suppressed, missing, or malicious Referer must not
+	// widen the surface. It applies to ALL local-mode requests, documents and
+	// subresources alike, so an external page cannot probe the local network
+	// through <img>/<script>/fetch either.
+	if t.Local {
+		if !s.auth.sessionLocalDoc(cookieVal) {
+			// Entering local mode requires a fresh grant minted by the
+			// authenticated SPA (typed / back-forward / /rc address-bar
+			// navigation). Without one, the session is either brand new (no
+			// earlier local document) or sat on an external document — both
+			// mean an external page could be driving this request.
+			s.emitNav(NavEvent{
+				StateKey: t.StateKey,
+				URL:      upstreamOrigin(t) + t.Path,
+				Status:   http.StatusForbidden,
+				Mode:     "local",
+				Error:    "local navigation requires user action",
+			})
+			http.Error(w, "browse: local navigation requires user action", http.StatusForbidden)
+			return
+		}
+	} else if isDocumentRequest(r) {
+		// Serving an external document moves the session BACK out of local
+		// mode: the next local-mode request from this session is refused until
+		// a fresh local grant re-enters it. Subresources do not flip the mode —
+		// an external <img> on a local page is still local traffic.
+		s.auth.setLocalDoc(cookieVal, false)
 	}
 	if t.Local {
 		s.handleLocal(w, r, t) // provided by Part 06 (shimmed to external for now)

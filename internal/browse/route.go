@@ -49,14 +49,17 @@ func parseTarget(urlPath, rawQuery string) (target, error) {
 
 // hostIsLiteralPrivate reports whether host is an IP literal in a private
 // range (best-effort literal check for routing mode only; the authoritative
-// SSRF guard runs at dial time in Part 02). Hostnames return false here.
+// SSRF guard runs at dial time in Part 02). Hostnames return false here,
+// except for "localhost" and "*.localhost" which are treated as local by
+// spec § Mode routing.
 func hostIsLiteralPrivate(host string) bool {
 	h := host
 	if i := strings.LastIndex(h, ":"); i != -1 && !strings.Contains(h[i+1:], "]") {
 		h = h[:i]
 	}
 	h = strings.Trim(h, "[]")
-	if h == "localhost" {
+	lower := strings.ToLower(h)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
 		return true
 	}
 	addr, err := netip.ParseAddr(h)

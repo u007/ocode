@@ -2,6 +2,29 @@ package browse
 
 import "testing"
 
+func TestHostIsLiteralPrivateLocalhostSubdomain(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"app.localhost", true},
+		{"a.b.localhost:3000", true},
+		{"localhost", true},
+		{"localhost.evil.com", false},
+		{"example.com", false},
+		{"127.0.0.1", true},
+		{"192.168.1.1", true},
+		{"a.localhost.", false},
+		{"LOCALHOST", true},
+		{"APP.LOCALHOST", true},
+	}
+	for _, c := range cases {
+		if got := hostIsLiteralPrivate(c.host); got != c.want {
+			t.Errorf("hostIsLiteralPrivate(%q)=%v want %v", c.host, got, c.want)
+		}
+	}
+}
+
 func TestParseTarget(t *testing.T) {
 	cases := []struct {
 		name    string
