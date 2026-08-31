@@ -275,6 +275,15 @@ type CompactConfig struct {
 	MaxSummaryInputTokens int     `json:"max_summary_input_tokens"`
 }
 
+// BrowserConfig configures the embedded headless-Chrome browser mode
+// (internal/browse/cdp). ChromePath is an optional explicit path to the Chrome
+// binary; IdleTimeoutMinutes is how long the shared Chrome process stays
+// alive with zero active targets before it is reaped and relaunched lazily.
+type BrowserConfig struct {
+	ChromePath         string `json:"chrome_path"`
+	IdleTimeoutMinutes int    `json:"idle_timeout_minutes"`
+}
+
 const (
 	EditorModeExternal   = "external"
 	EditorModeTmuxSplit  = "tmux-split"
@@ -378,6 +387,7 @@ type OcodeConfig struct {
 	Advisor     AdvisorConfig
 	Permissions PermissionConfig
 	Plugins     PluginsConfig
+	Browser     BrowserConfig
 	// ExternalPlugins holds installable/loadable plugin packages (source,
 	// dir, ref, enabled) such as the "orchestrator" plugin. Distinct from
 	// PluginsConfig, which only gates built-in opt-in tools. Persisted under
@@ -647,11 +657,20 @@ type discoveryConfigFile struct {
 	IgnorePaths      []string `json:"ignore_paths,omitempty"`
 }
 
+// browserConfigFile is the on-disk mirror of BrowserConfig. Extensions is read
+// purely to detect (and reject) the reserved-but-unimplemented key.
+type browserConfigFile struct {
+	ChromePath         string          `json:"chrome_path,omitempty"`
+	IdleTimeoutMinutes *int            `json:"idle_timeout_minutes,omitempty"`
+	Extensions         json.RawMessage `json:"extensions,omitempty"`
+}
+
 type ocodeConfigFile struct {
 	Compact                 compactConfigFile           `json:"compact"`
 	Advisor                 advisorConfigFile           `json:"advisor"`
 	Permissions             permissionConfigFile        `json:"permissions"`
 	Plugins                 pluginsConfigFile           `json:"plugins"`
+	Browser                 browserConfigFile           `json:"browser"`
 	ExternalPlugins         map[string]PluginConfig     `json:"external_plugins,omitempty"`
 	LocalModels             map[string]LocalModelConfig `json:"local_models,omitempty"`
 	Security                securityConfigFile          `json:"security"`
@@ -730,6 +749,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Compact:                 defaultCompactConfig(),
 		Advisor:                 defaultAdvisorConfig(),
 		Permissions:             defaultPermissionConfig(),
+		Browser:                 BrowserConfig{IdleTimeoutMinutes: 10},
 		MemoryEnabled:           true,
 		SmallModelEnabled:       true,
 		RecapModelEnabled:       false,
@@ -1022,6 +1042,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["discovery"]; ok {
 		applyDiscoveryConfig(&cfg.Discovery, file.Discovery)
 		delete(raw, "discovery")
+	}
+
+	if _, ok := raw["browser"]; ok {
+		if err := applyBrowserConfig(&cfg.Browser, file.Browser); err != nil {
+			return fmt.Errorf("browser: %w", err)
+		}
+		delete(raw, "browser")
 	}
 
 	if _, ok := raw["extra_allowed_paths"]; ok {
@@ -1469,6 +1496,26 @@ func applyDiscoveryConfig(dst *DiscoveryConfig, src discoveryConfigFile) {
 	}
 }
 
+func applyBrowserConfig(dst *BrowserConfig, src browserConfigFile) error {
+	if len(src.Extensions) != 0 {
+		return fmt.Errorf("browser.extensions is not supported yet")
+	}
+	if src.ChromePath != "" {
+		dst.ChromePath = src.ChromePath
+	}
+	if src.IdleTimeoutMinutes != nil {
+		if *src.IdleTimeoutMinutes < 0 {
+			return fmt.Errorf("browser.idle_timeout_minutes must be >= 0, got %d", *src.IdleTimeoutMinutes)
+		}
+		// Explicit 0 keeps the default (10) in dst — it does not mean "reap
+		// immediately".
+		if *src.IdleTimeoutMinutes > 0 {
+			dst.IdleTimeoutMinutes = *src.IdleTimeoutMinutes
+		}
+	}
+	return nil
+}
+
 func mergeDiscoveryIgnorePaths(base, extra []string) []string {
 	seen := make(map[string]struct{}, len(base)+len(extra))
 	out := make([]string, 0, len(base)+len(extra))
@@ -1595,6 +1642,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		"permissions": cfg.Permissions,
 		"security":    cfg.Security,
 		"discovery":   discoveryMap,
+		"browser":     cfg.Browser,
 	}
 	if cfg.Plugins.AST {
 		payload["plugins"] = cfg.Plugins

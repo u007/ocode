@@ -232,3 +232,27 @@ and `FindPluginDir()` wrappers pass an empty `projectRoot`, falling back to the
 legacy `findProjectRoot()` path for backward compatibility.
 
 Code reference: `internal/plugins/loader.go` — `LoadPluginsForProject` (lines 36–99), `FindPluginDirForProject` (lines 112–148).
+
+## Browser Configuration (`browser.*`)
+
+The embedded browser panel's headless-Chrome (CDP) mode reads its settings
+from the top-level `browser` section of `ocodeconfig.json`:
+
+```jsonc
+"browser": {
+  "chrome_path": "",          // optional explicit Chrome/Chromium binary
+  "idle_timeout_minutes": 10  // reap the shared Chrome process after N idle minutes
+}
+```
+
+- `browser.chrome_path` — when empty, discovery probes `OCODE_CHROME_PATH`,
+  then platform defaults (macOS `.app` paths, Linux `$PATH` names).
+- `browser.idle_timeout_minutes` — how long the Chrome process stays alive
+  after the last browser surface closes, before it is reaped and relaunched
+  lazily on the next navigation. Absent or `0` keeps the default `10`.
+- `browser.extensions` is **reserved** and rejected at load time
+  (`browser.extensions is not supported yet`) — load fails rather than
+  silently ignoring it.
+
+Private / loopback hosts never use Chrome mode; they keep the local-mode
+iframe reverse proxy.

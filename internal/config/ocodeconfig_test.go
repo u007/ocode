@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -1685,5 +1686,117 @@ func TestSaveAndGetLastThinkingBudgetRoundTrip(t *testing.T) {
 	}
 	if got := GetLastThinkingBudget(); got != 0 {
 		t.Fatalf("GetLastThinkingBudget = %d, want 0 after saving off", got)
+	}
+}
+
+func TestBrowserConfigLoadAppliesFields(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initial := `{"browser":{"chrome_path":"/x/chrome","idle_timeout_minutes":3}}`
+	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	if cfg.Ocode.Browser.ChromePath != "/x/chrome" {
+		t.Fatalf("ChromePath = %q, want /x/chrome", cfg.Ocode.Browser.ChromePath)
+	}
+	if cfg.Ocode.Browser.IdleTimeoutMinutes != 3 {
+		t.Fatalf("IdleTimeoutMinutes = %d, want 3", cfg.Ocode.Browser.IdleTimeoutMinutes)
+	}
+	if _, ok := cfg.Ocode.Extra["browser"]; ok {
+		t.Fatalf("browser leaked into Extra: %v", cfg.Ocode.Extra["browser"])
+	}
+}
+
+func TestBrowserConfigDefaultWhenAbsent(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	if cfg.Ocode.Browser.IdleTimeoutMinutes != 10 {
+		t.Fatalf("default IdleTimeoutMinutes = %d, want 10", cfg.Ocode.Browser.IdleTimeoutMinutes)
+	}
+	if cfg.Ocode.Browser.ChromePath != "" {
+		t.Fatalf("default ChromePath = %q, want empty", cfg.Ocode.Browser.ChromePath)
+	}
+}
+
+func TestBrowserConfigRejectsExtensions(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initial := `{"browser":{"extensions":[{"path":"/x","enabled":true}]}}`
+	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	err := LoadOcodeConfig(&cfg)
+	if err == nil {
+		t.Fatal("expected error for browser.extensions")
+	}
+	if !strings.Contains(err.Error(), "browser.extensions is not supported yet") {
+		t.Fatalf("error = %v, want containing 'browser.extensions is not supported yet'", err)
+	}
+}
+
+func TestBrowserConfigRejectsNegativeIdleTimeout(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initial := `{"browser":{"idle_timeout_minutes":-1}}`
+	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err == nil {
+		t.Fatal("expected error for negative idle_timeout_minutes")
+	}
+}
+
+func TestBrowserConfigExplicitZeroKeepsDefault(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Explicit 0 must not mean "reap immediately".
+	initial := `{"browser":{"idle_timeout_minutes":0}}`
+	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	if cfg.Ocode.Browser.IdleTimeoutMinutes != 10 {
+		t.Fatalf("explicit-0 IdleTimeoutMinutes = %d, want default 10", cfg.Ocode.Browser.IdleTimeoutMinutes)
 	}
 }

@@ -245,7 +245,14 @@ type agentSession struct {
 }
 
 func NewHandler() *Handler {
-	cfg, _ := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		// A malformed ocodeconfig (e.g. the reserved browser.extensions key)
+		// must not be silently ignored; surface it on the desktop/web boot path
+		// that browser-mode consumers ride on. Other load sites (TUI, auth)
+		// may still swallow; this is the one serving path that must not.
+		log.Printf("config: load ocode config: %v", err)
+	}
 	agent.ApplyAgentConfig(cfg)
 	advisorEnabled := cfg == nil || cfg.Ocode.Advisor.Enabled
 	// Direct Handler users (including tests) still need a useful project root.
