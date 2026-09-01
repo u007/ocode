@@ -19,11 +19,11 @@
 - Consumes: `agent.PermissionModeSandbox`, `Permissions().SetMode/Mode()`.
 - Produces: click cycle including Sandbox; `/sandbox on|off|status`; `SANDBOX` label; non-persisted default.
 
-- [ ] **Step 1:** Write failing tests: `TestPermClickCycleIncludesSandbox` (cycle reaches `sandbox` in the defined order, returns to `normal`); `TestSandboxCommandSetsMode` (`/sandbox on` ⇒ `Mode()==sandbox`; `/sandbox off` ⇒ `normal`); `TestSandboxNotPersistedAsDefault` (live mode sandbox ⇒ the persisted config mode is `normal`); `TestShiftTabStillCyclesAgentMode` (regression: `shift+tab` still calls `cycleAgentMode`, unaffected).
-- [ ] **Step 2:** Run; expect FAIL.
-- [ ] **Step 3:** Implement the cycle insertion (both sites), the `/sandbox` command + instant-allowlist entry, the indicator label, and the persist clamp. Keep YOLO/Locked/auto-permission behavior intact.
-- [ ] **Step 4:** Run tests + full `internal/tui` suite; expect PASS.
-- [ ] **Step 5:** Commit: `feat(tui): sandbox in permission cycle + /sandbox (non-persisted)`.
+- [x] **Step 1:** Write failing tests: `TestPermClickCycleIncludesSandbox` (cycle reaches `sandbox` in the defined order, returns to `normal`); `TestSandboxCommandSetsMode` (`/sandbox on` ⇒ `Mode()==sandbox`; `/sandbox off` ⇒ `normal`); `TestSandboxNotPersistedAsDefault` (live mode sandbox ⇒ the persisted config mode is `normal`); `TestShiftTabStillCyclesAgentMode` (regression: `shift+tab` still calls `cycleAgentMode`, unaffected).
+- [x] **Step 2:** Run; expect FAIL.
+- [x] **Step 3:** Implement the cycle insertion (both sites), the `/sandbox` command + instant-allowlist entry, the indicator label, and the persist clamp. Keep YOLO/Locked/auto-permission behavior intact.
+- [x] **Step 4:** Run tests + full `internal/tui` suite; expect PASS.
+- [x] **Step 5:** Commit: `feat(tui): sandbox in permission cycle + /sandbox (non-persisted)`.
 
 ---
 

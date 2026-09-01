@@ -7036,7 +7036,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 			if m.sidebarAllowedHeaderForClick(mouse) && m.agent != nil {
 				perm := m.agent.Permissions()
-				// Cycle: normal → normal·auto → yolo → locked → normal
+				// Cycle: normal → normal·auto → yolo → locked → sandbox → normal
 				switch {
 				case perm.Mode() == agent.PermissionModeNormal && !perm.AutoPermissionEnabled():
 					perm.SetAutoPermissionEnabled(true)
@@ -7048,6 +7048,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 					m.permDirty.mode = true
 				case perm.Mode() == agent.PermissionModeYOLO:
 					perm.SetMode(agent.PermissionModeLocked)
+					m.permDirty.mode = true
+				case perm.Mode() == agent.PermissionModeLocked:
+					perm.SetMode(agent.PermissionModeSandbox)
 					m.permDirty.mode = true
 				default:
 					perm.SetMode(agent.PermissionModeNormal)
@@ -7203,7 +7206,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		statusTop := m.statusBarTopY()
 		if mouse.Y >= statusTop && mouse.Y < statusTop+2 && mouse.X >= m.statusPermColStart && mouse.X < m.statusPermColEnd && mouse.Y == statusTop && m.agent != nil {
 			perm := m.agent.Permissions()
-			// Cycle: normal → normal·auto → yolo → locked → normal
+			// Cycle: normal → normal·auto → yolo → locked → sandbox → normal
 			switch {
 			case perm.Mode() == agent.PermissionModeNormal && !perm.AutoPermissionEnabled():
 				perm.SetAutoPermissionEnabled(true)
@@ -7215,6 +7218,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.permDirty.mode = true
 			case perm.Mode() == agent.PermissionModeYOLO:
 				perm.SetMode(agent.PermissionModeLocked)
+				m.permDirty.mode = true
+			case perm.Mode() == agent.PermissionModeLocked:
+				perm.SetMode(agent.PermissionModeSandbox)
 				m.permDirty.mode = true
 			default:
 				perm.SetMode(agent.PermissionModeNormal)
@@ -8136,6 +8142,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/sidebar" || cmd == "/commands" || cmd == "/permissions" ||
 		cmd == "/ban" ||
 		cmd == "/yolo" || cmd == "/small-model" || cmd == "/editor" ||
+		cmd == "/sandbox" ||
 		cmd == "/editor-mode" || cmd == "/themes" || cmd == "/theme" ||
 		cmd == "/lsp" || cmd == "/usage" || cmd == "/share" ||
 		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp" ||
@@ -14268,7 +14275,15 @@ func (m *model) persistPermissions() {
 		}
 	}
 	if m.permDirty.mode {
-		if err := config.SavePermissionModeSwitch(string(pm.Mode())); err != nil {
+		persistMode := string(pm.Mode())
+		if pm.Mode() == agent.PermissionModeSandbox {
+			// Sandbox is a deliberate per-session opt-in (Decision 2): it must
+			// never be written as the durable default. The live agent stays
+			// sandboxed; only the on-disk mode field is clamped to normal so a
+			// restart / fresh agent / cron job starts unconfined.
+			persistMode = string(agent.PermissionModeNormal)
+		}
+		if err := config.SavePermissionModeSwitch(persistMode); err != nil {
 			errs = append(errs, "mode: "+err.Error())
 		} else {
 			m.permDirty.mode = false
@@ -19048,6 +19063,8 @@ func (m *model) renderStatus() string {
 			permissionMode = " | YOLO permissions"
 		case agent.PermissionModeLocked:
 			permissionMode = " | locked permissions"
+		case agent.PermissionModeSandbox:
+			permissionMode = " | sandbox permissions"
 		}
 		if m.agent.Permissions().AutoPermissionEnabled() {
 			if permissionMode == "" {
