@@ -361,6 +361,79 @@ func resolvedForScopeCheckPath(p string) string {
 	return filepath.Clean(p)
 }
 
+// TestDecideSandboxAutoAllowsPlainCommand locks the core sandbox behavior:
+// a plain command auto-allows (promptless) when the backend is supported.
+func TestDecideSandboxAutoAllowsPlainCommand(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetMode(PermissionModeSandbox)
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"echo hi"}`))
+	if dec.Level != PermissionAllow {
+		t.Fatalf("sandbox plain command = %s, want Allow", dec.Level)
+	}
+}
+
+// TestDecideSandboxHardDenyStillWins confirms the runaway guard stays
+// authoritative: sandbox never auto-allows a hard-blocked command.
+func TestDecideSandboxHardDenyStillWins(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetMode(PermissionModeSandbox)
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"rm -rf /"}`))
+	if dec.Level != PermissionDeny || !dec.HardDeny {
+		t.Fatalf("sandbox hard-blocked = %+v, want HardDeny", dec)
+	}
+}
+
+// TestDecideSandboxDangerousRmStillAsks confirms the dangerous-rm heuristic
+// stays belt-and-suspenders: an out-of-scope rm -rf asks even under sandbox.
+func TestDecideSandboxDangerousRmStillAsks(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetMode(PermissionModeSandbox)
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"rm -rf /Users/test/other-project"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("sandbox dangerous-rm = %s, want Ask", dec.Level)
+	}
+}
+
+// TestDecideSandboxBypassesInterpreterPrompt confirms the OS write-confinement
+// replaces the LLM interpreter ask: a python -c inline eval auto-allows in
+// sandbox (supported OS) but asks in normal mode.
+func TestDecideSandboxBypassesInterpreterPrompt(t *testing.T) {
+	args := json.RawMessage(`{"command":"python3 -c 'print(1)'"}`)
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	dec := pm.Decide("bash", args)
+	if dec.Level != PermissionAsk {
+		t.Fatalf("normal interpreter = %s, want Ask", dec.Level)
+	}
+
+	pm.SetMode(PermissionModeSandbox)
+	dec = pm.Decide("bash", args)
+	if dec.Level != PermissionAllow {
+		t.Fatalf("sandbox interpreter = %s, want Allow (OS confines writes)", dec.Level)
+	}
+}
+
+// TestDecideSandboxDegradesOnUnsupportedOS confirms the Windows/unsupported
+// contract: with no backend, sandbox mode behaves exactly like normal (asks —
+// no silent promptless execution).
+func TestDecideSandboxDegradesOnUnsupportedOS(t *testing.T) {
+	orig := sandboxSupported
+	sandboxSupported = func() bool { return false }
+	t.Cleanup(func() { sandboxSupported = orig })
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetMode(PermissionModeSandbox)
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"python3 -c 'print(1)'"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("unsupported-OS sandbox interpreter = %s, want Ask (behaves like normal)", dec.Level)
+	}
+}
+
 // TestPermissions_YOLO_RmInScope_StillAllowed confirms the new dangerous-rm
 // guard doesn't regress the common case: recursive/force rm targeting a path
 // inside the workdir stays a plain YOLO allow.

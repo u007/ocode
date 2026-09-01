@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/hooks"
+	"github.com/u007/ocode/internal/shell/sandbox"
 )
 
 // TestBuildBashCmdUnixShape locks the Unix shape of the unified builder:
@@ -18,7 +20,10 @@ func TestBuildBashCmdUnixShape(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix shape only")
 	}
-	cmd := buildBashCmd(nil, "echo hi", "")
+	cmd, err := buildBashCmd(nil, "echo hi", "", nil, sandbox.RootSet{}, false)
+	if err != nil {
+		t.Fatalf("build error: %v", err)
+	}
 	if len(cmd.Args) != 3 || cmd.Args[0] != "bash" || cmd.Args[1] != "-c" || cmd.Args[2] != "echo hi" {
 		t.Fatalf("Args = %v, want [bash -c echo hi]", cmd.Args)
 	}
@@ -30,11 +35,17 @@ func TestBuildBashCmdUnixShape(t *testing.T) {
 // TestBuildBashCmdSetsDir locks the session-workdir wiring: a non-empty dir
 // lands in cmd.Dir; an empty one leaves it untouched (inherit process cwd).
 func TestBuildBashCmdSetsDir(t *testing.T) {
-	cmd := buildBashCmd(nil, "pwd", "/tmp/session-root")
+	cmd, err := buildBashCmd(nil, "pwd", "/tmp/session-root", nil, sandbox.RootSet{}, false)
+	if err != nil {
+		t.Fatalf("build error: %v", err)
+	}
 	if cmd.Dir != "/tmp/session-root" {
 		t.Fatalf("Dir = %q, want /tmp/session-root", cmd.Dir)
 	}
-	cmd = buildBashCmd(nil, "pwd", "")
+	cmd, err = buildBashCmd(nil, "pwd", "", nil, sandbox.RootSet{}, false)
+	if err != nil {
+		t.Fatalf("build error: %v", err)
+	}
 	if cmd.Dir != "" {
 		t.Fatalf("Dir = %q, want empty (inherit cwd)", cmd.Dir)
 	}
@@ -47,8 +58,14 @@ func TestBuildBashCmdNilCtxMatchesPlainCommand(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix semantics check")
 	}
-	cmd := buildBashCmd(nil, "true", "")
-	ctxCmd := buildBashCmd(context.Background(), "true", "")
+	cmd, err := buildBashCmd(nil, "true", "", nil, sandbox.RootSet{}, false)
+	if err != nil {
+		t.Fatalf("build error: %v", err)
+	}
+	ctxCmd, err := buildBashCmd(context.Background(), "true", "", nil, sandbox.RootSet{}, false)
+	if err != nil {
+		t.Fatalf("build error: %v", err)
+	}
 	if cmd.Path == "" || cmd.Path != ctxCmd.Path {
 		t.Fatalf("plain cmd path %q != background ctx cmd path %q", cmd.Path, ctxCmd.Path)
 	}
@@ -107,6 +124,99 @@ func TestBashUsesSessionWorkdirNotProcessCwd(t *testing.T) {
 	if _, err := os.Getwd(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestBuildBashCmdSkipsWhenInactive locks the inactive branch: plain cmd,
+// nil error, wrapper never consulted.
+func TestBuildBashCmdSkipsWhenInactive(t *testing.T) {
+	w := &stubSandboxWrapper{available: false} // must not be consulted
+	cmd, err := buildBashCmd(nil, "echo hi", "", w, sandbox.RootSet{WritableRoots: []string{"/tmp"}}, false)
+	if err != nil {
+		t.Fatalf("inactive build error: %v", err)
+	}
+	if len(cmd.Args) != 3 || cmd.Args[0] != "bash" {
+		t.Fatalf("inactive cmd Args = %v, want plain bash -c", cmd.Args)
+	}
+	if w.wrapCalls != 0 {
+		t.Fatalf("wrapper consulted %d times while inactive, want 0", w.wrapCalls)
+	}
+}
+
+// TestBuildBashCmdWrapsWhenActive locks the active branch: available wrapper
+// rewrites the cmd and receives the RootSet.
+func TestBuildBashCmdWrapsWhenActive(t *testing.T) {
+	wrapped := exec.Command("wrapped", "echo hi")
+	w := &stubSandboxWrapper{available: true, wrapped: wrapped}
+	roots := sandbox.RootSet{WritableRoots: []string{"/Users/test/project", "/tmp"}}
+	cmd, err := buildBashCmd(nil, "echo hi", "", w, roots, true)
+	if err != nil {
+		t.Fatalf("active build error: %v", err)
+	}
+	if cmd != wrapped {
+		t.Fatal("Wrap result not returned, want wrapped cmd")
+	}
+	if w.wrapCalls != 1 {
+		t.Fatalf("wrapper consulted %d times, want 1", w.wrapCalls)
+	}
+	if len(w.gotRoots.WritableRoots) != 2 {
+		t.Fatalf("wrapper received roots %v, want both writable roots", w.gotRoots.WritableRoots)
+	}
+}
+
+// TestBuildBashCmdFailsClosedForeground locks fail-closed on the foreground
+// path: active + unavailable backend ⇒ error and NO cmd (the caller must not
+// run unconfined).
+func TestBuildBashCmdFailsClosedForeground(t *testing.T) {
+	w := &stubSandboxWrapper{available: false}
+	cmd, err := buildBashCmd(nil, "echo hi", "", w, sandbox.RootSet{}, true)
+	if err == nil {
+		t.Fatal("active + unavailable backend must error (fail-closed)")
+	}
+	if cmd != nil {
+		t.Fatalf("failed wrap returned a cmd %v, want nil", cmd.Args)
+	}
+}
+
+// TestBuildBashCmdFailsClosedBackgroundNoRecord locks fail-closed on the
+// background path through the registry: a wrap failure must not leave any
+// ProcessRegistry record behind.
+func TestBuildBashCmdFailsClosedBackgroundNoRecord(t *testing.T) {
+	reg := NewProcessRegistry()
+	w := &stubSandboxWrapper{available: false}
+	p, err := reg.StartBackgroundSandbox("echo hi", "echo hi", "", w, sandbox.RootSet{}, true)
+	if err == nil {
+		t.Fatal("background wrap failure must error")
+	}
+	if p != nil {
+		t.Fatalf("wrap failure returned a process record %s, want nil", p.ID)
+	}
+	if n := reg.Counter(); n != 0 {
+		t.Fatalf("registry has %d records after failed wrap, want 0", n)
+	}
+}
+
+// stubSandboxWrapper is a controllable Wrapper for fail-closed tests.
+type stubSandboxWrapper struct {
+	available      bool
+	wrapped        *exec.Cmd
+	wrapErr        error
+	wrapCalls      int
+	gotRoots       sandbox.RootSet
+	availableCalls int
+}
+
+func (s *stubSandboxWrapper) Wrap(cmd *exec.Cmd, roots sandbox.RootSet) (*exec.Cmd, error) {
+	s.wrapCalls++
+	s.gotRoots = roots
+	if s.wrapped != nil {
+		return s.wrapped, s.wrapErr
+	}
+	return cmd, s.wrapErr
+}
+
+func (s *stubSandboxWrapper) Available() bool {
+	s.availableCalls++
+	return s.available
 }
 
 // jsonRaw builds tool arguments inline.

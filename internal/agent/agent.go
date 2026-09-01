@@ -24,6 +24,7 @@ import (
 	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/redact"
+	"github.com/u007/ocode/internal/shell/sandbox"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -934,6 +935,22 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	a.tools["bash"] = &tool.BashTool{
 		Procs:    a.procs,
 		Recorder: changes.NewStatBashRecorder(workDir, a.changes),
+		// Sandbox backend + live per-command state. The provider reads the
+		// agent's PermissionManager fresh on every invocation so mode changes
+		// (normal→sandbox) and extra_allowed_paths edits take effect
+		// immediately; Active additionally requires a backed OS so Windows
+		// degrades to normal prompting in Decide.
+		SandboxWrapper: sandbox.New(),
+		SandboxState: func() tool.SandboxState {
+			pm := a.Permissions()
+			if pm == nil || pm.Mode() != PermissionModeSandbox || !sandbox.Supported() {
+				return tool.SandboxState{}
+			}
+			return tool.SandboxState{
+				Active: true,
+				Roots:  sandbox.NewRootSet(pm.AllowedRootsClassified()),
+			}
+		},
 	}
 	a.tools["bash_output"] = tool.BashOutputTool{Procs: a.procs}
 	a.tools["kill_shell"] = tool.KillShellTool{Procs: a.procs}

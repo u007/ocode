@@ -41,6 +41,12 @@ const (
 	PermissionModeSandbox PermissionMode = "sandbox"
 )
 
+// sandboxSupported reports whether this OS has a real confinement backend.
+// Production value is sandbox.Supported(); it is a package var (not called
+// inline) so cross-platform tests can simulate an unsupported OS and then
+// restore the original.
+var sandboxSupported = sandbox.Supported
+
 type PermissionScope string
 
 const (
@@ -1209,6 +1215,15 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		}
 		if pm.mode == PermissionModeYOLO {
 			pm.emitDebug("perm", "Decide ALLOW (yolo): tool=bash")
+			return PermissionDecision{Level: PermissionAllow}
+		}
+		// Sandbox = YOLO's prompt-bypass plus OS write-confinement: allow
+		// (the bash builder wraps the command so writes outside the writable
+		// roots fail at the OS level). Hard blocks and dangerous-rm still win,
+		// having returned above. Only when the OS has a backend — on Windows
+		// sandbox degrades to normal (asks).
+		if pm.mode == PermissionModeSandbox && sandboxSupported() {
+			pm.emitDebug("perm", "Decide ALLOW (sandbox, OS-wrapped): tool=bash")
 			return PermissionDecision{Level: PermissionAllow}
 		}
 

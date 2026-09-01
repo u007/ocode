@@ -2,8 +2,11 @@ package tool
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"runtime"
+
+	"github.com/u007/ocode/internal/shell/sandbox"
 )
 
 // bashInvocation returns the platform shell argv for a bash-tool command:
@@ -17,7 +20,8 @@ func bashInvocation(command string) (string, []string) {
 
 // buildBashCmd is the single bash-command construction site for both the
 // foreground (exec.go) and background (process.go) paths. It encapsulates the
-// GOOS branch and the session-workdir wiring.
+// GOOS branch, the session-workdir wiring, and — when active — the sandbox
+// wrap.
 //
 // A non-nil ctx is honored via exec.CommandContext so a foreground timeout can
 // kill the child (and, via setProcGroup, its whole process group); a nil ctx —
@@ -26,8 +30,12 @@ func bashInvocation(command string) (string, []string) {
 //
 // dir sets cmd.Dir when non-empty (the session project root), so relative
 // commands resolve against the session, not the process working directory.
-// Part 02 of the shell-sandbox plan extends this with the sandbox wrap.
-func buildBashCmd(ctx context.Context, command, dir string) *exec.Cmd {
+//
+// Sandbox semantics (fail-closed): when active, the command MUST be confined.
+// If the backend is not Available(), an error is returned and cmd is nil — the
+// caller must never run the plain command unconfined. When inactive, the cmd
+// is returned plain and the wrapper is never consulted.
+func buildBashCmd(ctx context.Context, command, dir string, w sandbox.Wrapper, roots sandbox.RootSet, active bool) (*exec.Cmd, error) {
 	shell, args := bashInvocation(command)
 	var cmd *exec.Cmd
 	if ctx != nil {
@@ -41,5 +49,11 @@ func buildBashCmd(ctx context.Context, command, dir string) *exec.Cmd {
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	return cmd
+	if !active {
+		return cmd, nil
+	}
+	if w == nil || !w.Available() {
+		return nil, fmt.Errorf("sandbox mode active but backend unavailable: refusing to run unconfined command %q", command)
+	}
+	return w.Wrap(cmd, roots)
 }

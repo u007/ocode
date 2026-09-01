@@ -44,12 +44,12 @@
 
 Rationale: sandbox = YOLO's prompt-bypass **plus** OS write-confinement. Hard blocks and dangerous-`rm` remain authoritative as belt-and-suspenders. Sensitive-path *read* prompts are intentionally bypassed (write-integrity only).
 
-- [ ] **Step 1:** Write failing builder tests: `TestBuildBashCmdFailsClosedForeground` (active + stub `Available()==false` ⇒ error, no cmd); `TestBuildBashCmdFailsClosedBackgroundNoRecord` (bg path: wrap failure ⇒ error **and** `ProcessRegistry` has no record for it); `TestBuildBashCmdWrapsWhenActive` / `TestBuildBashCmdSkipsWhenInactive`.
-- [ ] **Step 2:** Write failing `Decide` tests: `TestDecideSandboxAutoAllowsPlainCommand`; `TestDecideSandboxHardDenyStillWins` (`rm -rf /`); `TestDecideSandboxDangerousRmStillAsks`; `TestDecideSandboxBypassesInterpreterPrompt` (a `python -c` heredoc auto-allows in sandbox but the same in normal asks); `TestDecideSandboxDegradesOnUnsupportedOS` (mode sandbox, `Supported()==false` ⇒ behaves like normal).
-- [ ] **Step 3:** Run; expect FAIL.
-- [ ] **Step 4:** Implement the fail-closed builder (fg+bg, pre-Start/pre-register), the `BashTool` provider wiring, and the `Decide` matrix branch.
-- [ ] **Step 5:** Run all + full `internal/tool` + `internal/agent`; expect PASS.
-- [ ] **Step 6:** Commit: `feat(shell/sandbox): fail-closed wrap (fg+bg) + Decide sandbox matrix`.
+- [x] **Step 1:** Write failing builder tests: `TestBuildBashCmdFailsClosedForeground` (active + stub `Available()==false` ⇒ error, no cmd); `TestBuildBashCmdFailsClosedBackgroundNoRecord` (bg path: wrap failure ⇒ error **and** `ProcessRegistry` has no record for it); `TestBuildBashCmdWrapsWhenActive` / `TestBuildBashCmdSkipsWhenInactive`.
+- [x] **Step 2:** Write failing `Decide` tests: `TestDecideSandboxAutoAllowsPlainCommand`; `TestDecideSandboxHardDenyStillWins` (`rm -rf /`); `TestDecideSandboxDangerousRmStillAsks`; `TestDecideSandboxBypassesInterpreterPrompt` (a `python -c` heredoc auto-allows in sandbox but the same in normal asks); `TestDecideSandboxDegradesOnUnsupportedOS` (mode sandbox, `Supported()==false` ⇒ behaves like normal).
+- [x] **Step 3:** Run; expect FAIL.
+- [x] **Step 4:** Implement the fail-closed builder (fg+bg, pre-Start/pre-register), the `BashTool` provider wiring, and the `Decide` matrix branch.
+- [x] **Step 5:** Run all + full `internal/tool` + `internal/agent`; expect PASS.
+- [x] **Step 6:** Commit: `feat(shell/sandbox): fail-closed wrap (fg+bg) + Decide sandbox matrix`.
 
 ---
 

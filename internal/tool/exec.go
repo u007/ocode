@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/u007/ocode/internal/shell/sandbox"
 	"github.com/u007/ocode/internal/snapshot"
 )
 
@@ -41,9 +42,35 @@ type BashRecorder interface {
 	Post(command string, exitCode int)
 }
 
+// SandboxState is the per-command sandbox decision resolved by a provider
+// closure: Active means the command must be OS-confined (mode == sandbox AND a
+// backend is supported on this OS); Roots is the compiled write boundary.
+// Inactive commands are never wrapped and never consult the backend.
+type SandboxState struct {
+	Active bool
+	Roots  sandbox.RootSet
+}
+
 type BashTool struct {
 	Procs    *ProcessRegistry
 	Recorder BashRecorder
+	// SandboxWrapper is the per-GOOS confinement backend, resolved once at
+	// tool construction (sandbox.New()). Nil keeps the tool legacy-behavior
+	// (never confined) for non-agent callers and unit tests.
+	SandboxWrapper sandbox.Wrapper
+	// SandboxState resolves the live per-command sandbox state fresh for every
+	// invocation (mode + capability-classified roots from the owning agent's
+	// PermissionManager), so permission-mode and extra_allowed_paths changes
+	// apply immediately. Nil provider ⇒ never sandboxed.
+	SandboxState func() SandboxState
+}
+
+// sandboxState returns the provider's state, nil-safe.
+func (t BashTool) sandboxState() SandboxState {
+	if t.SandboxState != nil {
+		return t.SandboxState()
+	}
+	return SandboxState{}
 }
 
 func (t BashTool) Name() string        { return "bash" }
@@ -147,8 +174,14 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 		// showing the command the caller actually asked for, not the
 		// monitor-wrapper shell around it. The session workdir rides along so
 		// the background cmd.Dir and its process-hole cwd are the session
-		// root, not the process cwd.
-		p := t.Procs.StartBackgroundDisplayDir(WrapWithParentMonitor(params.Command), params.Command, workDirFromContext(ctx))
+		// root, not the process cwd. The fail-closed entry wraps BEFORE any
+		// registry record exists, so a wrap failure leaves no phantom process
+		// and surfaces as an error.
+		state := t.sandboxState()
+		p, err := t.Procs.StartBackgroundSandbox(WrapWithParentMonitor(params.Command), params.Command, workDirFromContext(ctx), t.SandboxWrapper, state.Roots, state.Active)
+		if err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("Started background process %s. Poll with bash_output(id=%q), stop with kill_shell(id=%q).", p.ID, p.ID, p.ID), nil
 	}
 
@@ -181,10 +214,15 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 	if t.Procs != nil {
 		command = WrapWithParentMonitor(params.Command)
 	}
-	// Unified construction: GOOS branch + session-workdir cmd.Dir. The
-	// timeout ctx keeps CommandContext kill behavior (whole process group via
-	// setProcGroup); sandbox wrap lands here in Part 02.
-	cmd := buildBashCmd(ctx, command, workDirFromContext(ctx))
+	// Unified construction: GOOS branch + session-workdir cmd.Dir + the
+	// sandbox wrap. The timeout ctx keeps CommandContext kill behavior (whole
+	// process group via setProcGroup). A wrap failure (sandbox active, backend
+	// unavailable) fails the command BEFORE Start — fail-closed.
+	sandboxState := t.sandboxState()
+	cmd, buildErr := buildBashCmd(ctx, command, workDirFromContext(ctx), t.SandboxWrapper, sandboxState.Roots, sandboxState.Active)
+	if buildErr != nil {
+		return fmt.Sprintf("Command failed: %v", buildErr), nil
+	}
 
 	// streaming gates live emission. Once the command is moved to the
 	// background we stop emitting so the transcript keeps the output produced

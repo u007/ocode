@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/hooks"
+	"github.com/u007/ocode/internal/shell/sandbox"
 )
 
 type processOutputWriter struct{ p *Process }
@@ -242,7 +243,8 @@ func (r *ProcessRegistry) onDoneCallback() func(*Process) {
 
 // StartBackground launches command detached and returns its Process record.
 func (r *ProcessRegistry) StartBackground(command string) *Process {
-	return r.StartBackgroundDisplayDir(command, command, "")
+	p, _ := r.startBackground(command, command, "", nil, sandbox.RootSet{}, false)
+	return p
 }
 
 // StartBackgroundDisplay is StartBackground with the shown Command text
@@ -256,7 +258,8 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 // nothing may mutate Command after this point. The background cmd inherits
 // the process cwd.
 func (r *ProcessRegistry) StartBackgroundDisplay(command, displayCommand string) *Process {
-	return r.StartBackgroundDisplayDir(command, displayCommand, "")
+	p, _ := r.startBackground(command, displayCommand, "", nil, sandbox.RootSet{}, false)
+	return p
 }
 
 // StartBackgroundDisplayDir is StartBackgroundDisplay with an explicit
@@ -266,6 +269,34 @@ func (r *ProcessRegistry) StartBackgroundDisplay(command, displayCommand string)
 // background commands run in the project even when the process cwd differs
 // (desktop/.app launches with cwd "/").
 func (r *ProcessRegistry) StartBackgroundDisplayDir(command, displayCommand, dir string) *Process {
+	p, _ := r.startBackground(command, displayCommand, dir, nil, sandbox.RootSet{}, false)
+	return p
+}
+
+// StartBackgroundSandbox is the fail-closed background entry used by the bash
+// tool: the command is built AND sandbox-wrapped before any registry record
+// exists, so a wrap failure (sandbox active, backend unavailable) returns an
+// error and leaves no phantom process. dir is the session workdir; w/roots are
+// the confinement backend and compiled write boundary; active selects whether
+// confinement is required at all.
+func (r *ProcessRegistry) StartBackgroundSandbox(command, displayCommand, dir string, w sandbox.Wrapper, roots sandbox.RootSet, active bool) (*Process, error) {
+	return r.startBackground(command, displayCommand, dir, w, roots, active)
+}
+
+// startBackground builds the command (and, when active, sandbox-wraps it)
+// BEFORE publishing any ProcessRegistry record, so a wrap failure can never
+// leave a phantom process. Inactive builds never consult the backend.
+func (r *ProcessRegistry) startBackground(command, displayCommand, dir string, w sandbox.Wrapper, roots sandbox.RootSet, active bool) (*Process, error) {
+	cwd := dir
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	cmd, err := buildBashCmd(nil, command, cwd, w, roots, active)
+	if err != nil {
+		return nil, err
+	}
+
+	// Only now — after a successful build/wrap — create the process record.
 	r.mu.Lock()
 	id := r.nextIDLocked()
 	supKey := r.supIDLocked(id)
@@ -276,15 +307,6 @@ func (r *ProcessRegistry) StartBackgroundDisplayDir(command, displayCommand, dir
 	sup := r.sup
 	r.mu.Unlock()
 
-	cwd := dir
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	// Unified construction: GOOS branch + cmd.Dir. The wrap happens here in
-	// Part 02 (fail-closed, before any registry record exists — the record is
-	// created above, so the Part 02 call site must validate availability
-	// before invoking this method or roll back the record).
-	cmd := buildBashCmd(nil, command, cwd)
 	processHooksMu.RLock()
 	ph := processHooks
 	processHooksMu.RUnlock()
@@ -322,7 +344,7 @@ func (r *ProcessRegistry) StartBackgroundDisplayDir(command, displayCommand, dir
 			p.appendOutput([]byte("failed to start: " + err.Error()))
 			finishProcess(p, 1, ProcExited, onDone)
 			sup.MarkFailedToStart(supID, err)
-			return p
+			return p, nil
 		}
 	}
 
@@ -335,7 +357,7 @@ func (r *ProcessRegistry) StartBackgroundDisplayDir(command, displayCommand, dir
 		if sup != nil {
 			sup.MarkFailedToStart(supID, err)
 		}
-		return p
+		return p, nil
 	}
 	p.PID = cmd.Process.Pid
 
@@ -377,7 +399,7 @@ func (r *ProcessRegistry) StartBackgroundDisplayDir(command, displayCommand, dir
 			}
 		}
 	}()
-	return p
+	return p, nil
 }
 
 // RegisterForeground adds a running foreground bash command to the registry so
