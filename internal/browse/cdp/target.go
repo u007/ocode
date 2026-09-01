@@ -183,8 +183,9 @@ func (t *Target) handleResponseReceived(ch <-chan json.RawMessage) {
 			Type      string `json:"type"`
 			FrameID   string `json:"frameId"`
 			Response  struct {
-				URL    string `json:"url"`
-				Status int    `json:"status"`
+				URL     string            `json:"url"`
+				Status  int               `json:"status"`
+				Headers map[string]string `json:"headers"`
 			} `json:"response"`
 		}
 		_ = json.Unmarshal(raw, &ev)
@@ -213,11 +214,21 @@ func (t *Target) handleResponseReceived(ch <-chan json.RawMessage) {
 		sink := t.sink
 		t.mu.Unlock()
 		if sink != nil {
+			// An egress-proxy policy 403 identifies itself via X-Ocode-Blocked
+			// (CDP sees response headers even when CORS hides them from page JS).
+			blocked := ""
+			for k, v := range ev.Response.Headers {
+				if strings.EqualFold(k, "X-Ocode-Blocked") {
+					blocked = v
+					break
+				}
+			}
 			sink.Network(NetworkEvent{
 				URL:        ev.Response.URL,
 				Status:     ev.Response.Status,
 				DurationMs: dur,
 				TS:         time.Now().UnixMilli(),
+				Blocked:    blocked,
 			})
 		}
 	}

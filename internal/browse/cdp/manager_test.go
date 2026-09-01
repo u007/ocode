@@ -973,3 +973,52 @@ func TestManager_IdleReaper(t *testing.T) {
 	}
 	_ = m.Close(context.Background())
 }
+
+
+// A policy 403 from the egress proxy carries X-Ocode-Blocked (readable by
+// CDP even though CORS hides it from page JS for cross-origin fetches with
+// ACAO:*): the network drawer row must surface it as Blocked.
+func TestNetworkRowMarksProxyBlockedResponses(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+
+	sink := &testSink{}
+	tgt, err := m.Attach(context.Background(), "tab:blk", sink)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	stub.InjectEvent(tgt.sessionID, "Network.requestWillBeSent", map[string]any{
+		"requestId": "R1", "request": map[string]any{"url": "http://10.0.0.1/", "method": "GET"},
+	})
+	stub.InjectEvent(tgt.sessionID, "Network.responseReceived", map[string]any{
+		"requestId": "R1", "type": "Fetch",
+		"response": map[string]any{
+			"url": "http://10.0.0.1/", "status": 403,
+			"headers": map[string]any{"X-Ocode-Blocked": "private address"},
+		},
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var got *NetworkEvent
+		for _, n := range sink.getNetworks() {
+			if n.URL == "http://10.0.0.1/" && n.Status == 403 {
+				nn := n
+				got = &nn
+				break
+			}
+		}
+		if got != nil {
+			if got.Blocked != "private address" {
+				t.Fatalf("Blocked = %q, want %q; ev=%+v", got.Blocked, "private address", *got)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no 403 network row for http://10.0.0.1/; rows=%+v", sink.getNetworks())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

@@ -75,6 +75,21 @@ func proxyAuthHeader(cred string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(cred))
 }
 
+
+// authedProxyURL rebuilds the proxy URL with userinfo for Go test clients
+// (http.Transport only sends Proxy-Authorization when the proxy URL carries
+// credentials; Chrome gets them via Fetch.authRequired instead).
+func authedProxyURL(t *testing.T, p *EgressProxy) *url.URL {
+	t.Helper()
+	u, err := url.Parse(p.ProxyServerURL())
+	if err != nil {
+		t.Fatalf("ProxyServerURL parse: %v", err)
+	}
+	user, pass := p.UserPass()
+	u.User = url.UserPassword(user, pass)
+	return u
+}
+
 func mustProxyURL(t *testing.T, s string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(s)
@@ -158,7 +173,7 @@ func TestEgress_ProxyAuthOKForwards(t *testing.T) {
 	}
 	defer proxy.Close()
 
-	proxyURL := mustProxyURL(t, proxy.ProxyServerURL())
+	proxyURL := authedProxyURL(t, proxy)
 	client := &http.Client{
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 		Timeout:   5 * time.Second,
@@ -184,6 +199,9 @@ func TestEgress_ProxyServerURLCredential(t *testing.T) {
 	}
 	defer proxy.Close()
 
+	// Chrome does not honor userinfo embedded in proxyServer URLs; credentials
+	// are supplied out-of-band via Fetch.authRequired (UserPass). The URL must
+	// therefore carry NO userinfo.
 	u, err := url.Parse(proxy.ProxyServerURL())
 	if err != nil {
 		t.Fatalf("ProxyServerURL parse: %v", err)
@@ -191,24 +209,17 @@ func TestEgress_ProxyServerURLCredential(t *testing.T) {
 	if u.Scheme != "http" {
 		t.Fatalf("scheme = %q, want http", u.Scheme)
 	}
-	user := u.User.Username()
-	pass, hasPass := u.User.Password()
-	if !hasPass {
-		t.Fatalf("ProxyServerURL missing password userinfo")
+	if u.User != nil {
+		t.Fatalf("ProxyServerURL must not embed userinfo, got %q", u.User)
 	}
-	cred := user + ":" + pass
-	if cred != proxy.Credential() {
-		t.Fatalf("user-info %q != Credential() %q", cred, proxy.Credential())
+	user, pass := proxy.UserPass()
+	if user == "" || pass == "" {
+		t.Fatal("UserPass returned empty credentials")
 	}
-	// Host should match Addr()
-	if u.Host != proxy.Addr() {
-		t.Fatalf("host %q != Addr() %q", u.Host, proxy.Addr())
+	if got := user + ":" + pass; got != proxy.Credential() {
+		t.Fatalf("UserPass %q != Credential %q", got, proxy.Credential())
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Task 2 — Plain forward requests
-// ---------------------------------------------------------------------------
 
 func TestEgress_PlainForwardStripsHopByHop(t *testing.T) {
 	var captured struct {
@@ -331,7 +342,7 @@ func TestEgress_UpgradeWebSocket(t *testing.T) {
 	}
 	defer proxy.Close()
 
-	proxyURL := mustProxyURL(t, proxy.ProxyServerURL())
+	proxyURL := authedProxyURL(t, proxy)
 	dialer := websocket.Dialer{
 		Proxy:            http.ProxyURL(proxyURL),
 		HandshakeTimeout: 5 * time.Second,
@@ -373,6 +384,12 @@ func TestEgress_PlainBlockedReturns403(t *testing.T) {
 	raw := fmt.Sprintf("GET http://%s/ HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\nConnection: close\r\n\r\n",
 		upURL.Host, upURL.Host, proxyAuthHeader(proxy.Credential()))
 	resp, body := dialProxyRaw(t, proxy.Addr(), raw)
+	if got := resp.Header.Get("X-Ocode-Blocked"); got != "private address" {
+		t.Fatalf("X-Ocode-Blocked = %q, want %q", got, "private address")
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want * (page must be able to read the block)", got)
+	}
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d body %q", resp.StatusCode, body)
 	}

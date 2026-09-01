@@ -208,6 +208,12 @@ func (p *EgressProxy) handlePlain(w http.ResponseWriter, r *http.Request) {
 // block (ErrBlocked), 502 otherwise.
 func (p *EgressProxy) classifyDialErr(w http.ResponseWriter, err error) {
 	if errors.Is(err, ErrBlocked) {
+		// Readable by the page (ACAO:*) and by CDP Network.responseReceived:
+		// the static body/headers carry only the block verdict, nothing from
+		// the refused upstream. Without ACAO the page sees an opaque CORS
+		// failure (net::ERR_FAILED) and the drawer cannot attribute the block.
+		w.Header().Set("X-Ocode-Blocked", "private address")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		http.Error(w, "blocked: private address", http.StatusForbidden)
 		return
 	}
