@@ -22,7 +22,10 @@ func TestStartServerServesAuthedAPI(t *testing.T) {
 		t.Fatal("expected non-empty URL")
 	}
 
-	client := &http.Client{Timeout: 2 * time.Second}
+	// 15s: the first /api/models synchronously annotates every catalog model
+	// (custom-prompt stat + Kaizen admission check per model), which under
+	// -race can exceed a 2s budget. This is a boot test, not a latency test.
+	client := &http.Client{Timeout: 15 * time.Second}
 
 	// Authed request succeeds.
 	req, _ := http.NewRequest("GET", h.URL+"/api/models", nil)
