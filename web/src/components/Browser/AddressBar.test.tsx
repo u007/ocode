@@ -5,7 +5,7 @@ import { AddressBar } from "./AddressBar";
 const base = {
   url: "https://example.com/",
   status: 200,
-  mode: "proxied" as const,
+  mode: "chrome" as const,
   error: "",
   canBack: false,
   canForward: false,
@@ -36,6 +36,13 @@ describe("AddressBar", () => {
     render(<AddressBar {...base} mode="local" status={304} />);
     expect(screen.getByText(/local/i)).toBeInTheDocument();
     expect(screen.getByText("304")).toBeInTheDocument();
+  });
+
+  it("renders the CHROME chip for chrome mode", () => {
+    render(<AddressBar {...base} mode="chrome" />);
+    // css text-transform:uppercase is not applied by jsdom — match the raw
+    // text; the class carries the uppercasing.
+    expect(screen.getByText(/^chrome$/i)).toBeInTheDocument();
   });
 
   it("shows an error badge when nav failed", () => {

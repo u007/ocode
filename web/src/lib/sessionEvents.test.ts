@@ -527,7 +527,7 @@ describe("browse_nav routing (Part 07/08 contract)", () => {
       env("browse_nav", {
         project: "",
         session_id: "",
-        data: { state_key: "tab:x", url: "https://done.com/", status: 200, mode: "proxied" },
+        data: { state_key: "tab:x", url: "https://done.com/", status: 200, mode: "chrome" },
       }),
       router,
     );

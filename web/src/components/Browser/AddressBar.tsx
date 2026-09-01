@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
+import type { BrowseMode } from "../../lib/browserStore";
 
 export interface AddressBarProps {
   url: string;
   status: number; // 0 = loading/no response yet
-  mode: "local" | "proxied" | null; // null before the first server nav event
+  mode: BrowseMode | null; // null before the first server nav event
   error: string;
   canBack: boolean;
   canForward: boolean;
@@ -15,7 +16,8 @@ export interface AddressBarProps {
 }
 
 // The displayed URL is authoritative store state (fed by server nav events),
-// never a value reported by the proxied page — page JS could spoof it.
+// never a value reported by the proxied page or the screencast — page JS
+// could spoof it.
 export function AddressBar(props: AddressBarProps) {
   const { url, status, mode, error, canBack, canForward } = props;
   const [draft, setDraft] = useState(url);

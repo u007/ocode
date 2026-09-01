@@ -1,4 +1,29 @@
 import { Store, useSelector } from "@tanstack/react-store";
+import { normalizeBrowseURL } from "./browseURL";
+// Same function the client's browseSrc uses, so stored URLs and proxied URLs
+// never diverge. Re-exported for existing importers of browserStore.
+export { normalizeBrowseURL };
+
+/** Routing predicate shared with the Go `hostIsLiteralPrivate`: the host of a
+ *  URL is local (reverse-proxy iframe) when it is a loopback/RFC1918/CGNAT
+ *  literal or a `*.localhost` name. Single-label names like "mybox" are
+ *  hostnames — they route to Chrome and are blocked at egress if they resolve
+ *  private (same as the Go router). Expects the host WITH its `:port` suffix
+ *  and IPv6 brackets intact, exactly as `new URL(u).host` yields. */
+export function isPrivateHost(host: string): boolean {
+  const h = host.toLowerCase();
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h === "[::1]") return true;
+  // Strip a port suffix: "127.0.0.1:80" → "127.0.0.1". IPv6 with port keeps
+  // its brackets ("[::1]:5173" → "[::1]"); bare "::1" handled above and by
+  // the bracket forms in PRIVATE_HOST_RE.
+  const bare = h.replace(/:\d+$/, "");
+  return privateHostRe.test(bare);
+}
+
+// Mirrors browseURL's PRIVATE_HOST_RE but accepts the port-stripped bare host.
+const privateHostRe =
+  /^(localhost|[^/]*\.localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}|\[::1\]|\[[^\]]*\])$/;
 
 /** Composite key identifying one browser surface's state. Side panels are
  *  keyed by their host chat/terminal tab; standalone browser tabs by their
@@ -26,15 +51,19 @@ export interface NavEvent {
   state_key: string;
   url: string;
   status: number;
-  mode: "local" | "proxied";
+  mode: BrowseMode;
   error?: string;
 }
+
+/** Rendering mode for one browser surface: local = reverse-proxy iframe
+ *  (private hosts), chrome = headless-Chrome screencast (public hosts). */
+export type BrowseMode = "local" | "chrome";
 
 export interface BrowserTabState {
   url: string; // authoritative current URL (server-driven once loaded)
   status: number; // last HTTP status (0 = loading)
   loading: boolean;
-  mode: "local" | "proxied" | null;
+  mode: BrowseMode | null;
   error: string | null;
   history: string[];
   historyIndex: number;
@@ -57,6 +86,7 @@ export const NETWORK_CAP = 1000;
 export const browserStore = new Store<BrowserState>({ byKey: {} });
 
 function defaultTab(persistedUrl = ""): BrowserTabState {
+  persistedUrl = normalizeBrowseURL(persistedUrl);
   return {
     url: persistedUrl,
     status: 0,
@@ -111,6 +141,7 @@ export const browserActions = {
   },
 
   navigate(key: StateKey, url: string) {
+    url = normalizeBrowseURL(url);
     mutate(key, (t) => {
       const trimmed = t.history.slice(0, t.historyIndex + 1);
       trimmed.push(url);
@@ -140,6 +171,10 @@ export const browserActions = {
 
   clearNetwork(key: StateKey) {
     mutate(key, (t) => ({ ...t, networkEvents: [] }));
+  },
+
+  setError(key: StateKey, error: string) {
+    mutate(key, (t) => ({ ...t, loading: false, error }));
   },
 
   applyNavEvent(key: string, ev: NavEvent) {
