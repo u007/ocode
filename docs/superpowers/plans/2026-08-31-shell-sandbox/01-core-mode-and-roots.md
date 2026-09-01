@@ -13,11 +13,11 @@
 **Interfaces:**
 - Produces: `PermissionModeSandbox PermissionMode = "sandbox"`, accepted by `SetMode`.
 
-- [ ] **Step 1:** Write failing tests: `TestSetModeSandboxAccepted` (`SetMode(PermissionModeSandbox)` ⇒ `Mode()=="sandbox"`); `TestSetModeInvalidLeavesModeUnchanged` (set to `sandbox`, then `SetMode("bogus")` ⇒ mode still `sandbox` — documents the silent-no-op contract); `TestSetModeSandboxKeepsAutoPermission` (auto-permission enabled before ⇒ still enabled after entering sandbox).
-- [ ] **Step 2:** Run; expect FAIL (constant undefined).
-- [ ] **Step 3:** Add the constant + `SetMode` case (no auto-permission mutation). No `Decide` behavior change yet (Part 02 Task 2).
-- [ ] **Step 4:** Run tests + full `internal/agent` permissions suite; expect PASS.
-- [ ] **Step 5:** Commit: `feat(permissions): add sandbox permission mode`.
+- [x] **Step 1:** Write failing tests: `TestSetModeSandboxAccepted` (`SetMode(PermissionModeSandbox)` ⇒ `Mode()=="sandbox"`); `TestSetModeInvalidLeavesModeUnchanged` (set to `sandbox`, then `SetMode("bogus")` ⇒ mode still `sandbox` — documents the silent-no-op contract); `TestSetModeSandboxKeepsAutoPermission` (auto-permission enabled before ⇒ still enabled after entering sandbox).
+- [x] **Step 2:** Run; expect FAIL (constant undefined).
+- [x] **Step 3:** Add the constant + `SetMode` case (no auto-permission mutation). No `Decide` behavior change yet (Part 02 Task 2).
+- [x] **Step 4:** Run tests + full `internal/agent` permissions suite; expect PASS.
+- [x] **Step 5:** Commit: `feat(permissions): add sandbox permission mode`.
 
 ---
 

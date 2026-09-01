@@ -33,6 +33,11 @@ const (
 	PermissionModeNormal PermissionMode = "normal"
 	PermissionModeYOLO   PermissionMode = "yolo"
 	PermissionModeLocked PermissionMode = "locked"
+	// PermissionModeSandbox runs bash without prompts but confines OS-level
+	// writes to the classified allowed roots (write-integrity only: reads,
+	// exec, and network egress stay open). It never outlives the session —
+	// the persist path clamps it back to normal.
+	PermissionModeSandbox PermissionMode = "sandbox"
 )
 
 type PermissionScope string
@@ -2611,7 +2616,7 @@ func (pm *PermissionManager) SetBashPrefixMode(prefix, mode string) bool {
 
 func (pm *PermissionManager) SetMode(mode PermissionMode) {
 	switch mode {
-	case PermissionModeNormal, PermissionModeYOLO, PermissionModeLocked:
+	case PermissionModeNormal, PermissionModeYOLO, PermissionModeLocked, PermissionModeSandbox:
 		pm.mode = mode
 		if mode == PermissionModeYOLO {
 			// YOLO is a hard bypass: it must not retain or re-enable the

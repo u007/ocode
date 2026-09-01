@@ -163,6 +163,71 @@ func TestPermissions_YOLO_DangerousRmOutOfScope_StillAsks(t *testing.T) {
 	}
 }
 
+// TestSetModeSandboxAccepted confirms the fourth permission mode is accepted
+// by SetMode exactly like normal/yolo/locked.
+func TestSetModeSandboxAccepted(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetMode(PermissionModeSandbox)
+	if pm.Mode() != PermissionModeSandbox {
+		t.Fatalf("SetMode(sandbox) => Mode()=%q, want %q", pm.Mode(), PermissionModeSandbox)
+	}
+}
+
+// TestSetModeInvalidLeavesModeUnchanged documents the silent no-op contract:
+// an invalid mode string must leave the current mode untouched (here, sandbox).
+func TestSetModeInvalidLeavesModeUnchanged(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetMode(PermissionModeSandbox)
+	pm.SetMode(PermissionMode("bogus"))
+	if pm.Mode() != PermissionModeSandbox {
+		t.Fatalf("SetMode(bogus) after sandbox => Mode()=%q, want sandbox unchanged", pm.Mode())
+	}
+}
+
+// TestSetModeSandboxKeepsAutoPermission confirms sandbox does NOT force-disable
+// the LLM auto-permission layer (unlike YOLO): its prompt-bypass lives in
+// Decide, not by killing the LLM layer.
+func TestSetModeSandboxKeepsAutoPermission(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetAutoPermissionEnabled(true)
+	pm.SetMode(PermissionModeSandbox)
+	if !pm.AutoPermissionEnabled() {
+		t.Fatal("entering sandbox must not disable auto-permission")
+	}
+}
+
+// TestSetModeSandboxTransitions covers every existing mode -> sandbox and
+// sandbox -> every mode, plus the idempotent sandbox -> sandbox case, so the
+// TUI click-cycle never depends on accidental state behavior.
+func TestSetModeSandboxTransitions(t *testing.T) {
+	fromModes := []PermissionMode{
+		PermissionModeNormal, PermissionModeYOLO, PermissionModeLocked, PermissionModeSandbox,
+	}
+	for _, from := range fromModes {
+		t.Run("to-sandbox-from-"+string(from), func(t *testing.T) {
+			pm := NewPermissionManager()
+			pm.SetMode(from)
+			pm.SetMode(PermissionModeSandbox)
+			if pm.Mode() != PermissionModeSandbox {
+				t.Fatalf("SetMode(sandbox) from %q => Mode()=%q", from, pm.Mode())
+			}
+		})
+	}
+	toModes := []PermissionMode{
+		PermissionModeNormal, PermissionModeYOLO, PermissionModeLocked,
+	}
+	for _, to := range toModes {
+		t.Run("from-sandbox-to-"+string(to), func(t *testing.T) {
+			pm := NewPermissionManager()
+			pm.SetMode(PermissionModeSandbox)
+			pm.SetMode(to)
+			if pm.Mode() != to {
+				t.Fatalf("SetMode(%q) from sandbox => Mode()=%q", to, pm.Mode())
+			}
+		})
+	}
+}
+
 // TestPermissions_YOLO_RmInScope_StillAllowed confirms the new dangerous-rm
 // guard doesn't regress the common case: recursive/force rm targeting a path
 // inside the workdir stays a plain YOLO allow.
