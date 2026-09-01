@@ -33,6 +33,11 @@ type GitStatus struct {
 	StagedFiles  []string `json:"staged_files"`
 	ChangedFiles []string `json:"changed_files"`
 	HasChanges   bool     `json:"has_changes"`
+	// IsRepo distinguishes "clean repository" from "not a repository": both
+	// yield empty StagedFiles/ChangedFiles and no changes, but the web editor's
+	// unstaged-change decorations must NOT fall back to session diffs in a
+	// clean repo the way it does outside a repo.
+	IsRepo bool `json:"is_repo"`
 }
 
 // HandleGitStatus returns the working-tree status. By default it reports the
@@ -131,6 +136,13 @@ func gitStatusForDir(dir string) GitStatus {
 		}
 	}
 	status.HasChanges = len(status.StagedFiles) > 0 || len(status.ChangedFiles) > 0
+	// Same dir handling as the run closure above (empty dir = server workdir).
+	repoCmd := exec.Command("git", "rev-parse", "--git-dir")
+	if dir != "" {
+		repoCmd.Dir = dir
+	}
+	_, err := repoCmd.Output()
+	status.IsRepo = err == nil
 	return status
 }
 

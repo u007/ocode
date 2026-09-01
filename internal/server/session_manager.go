@@ -379,6 +379,62 @@ func (m *SessionManager) EvictIdle() []string {
 	return evicted
 }
 
+// ReleaseAgent releases the built agent for one session immediately,
+// regardless of idle time — the explicit counterpart of EvictIdle for the
+// session-close path (web/desktop UI closing a session tab). Like EvictIdle,
+// it never releases an agent while a turn is active, and a session paused on
+// an unanswered permission/question ask is exempt (releasing it would make
+// the pending resolve 404). The registry entry and the on-disk session
+// remain; a later message rebuilds the agent. Returns true when a resident
+// agent was released.
+//
+// Lock order mirrors EvictIdle: m.mu is never held while taking as.mu. A
+// running turn takes as.mu first and then m.mu (via setTurnActive), so
+// holding both in the opposite order here would deadlock a close racing a
+// turn start. The pending-ask check happens under as.mu alone, after
+// releasing m.mu; the entry is then re-verified under m.mu before clearing.
+func (m *SessionManager) ReleaseAgent(sessionID string) bool {
+	// Phase 1: snapshot under m.mu only. Capture the agent pointer itself —
+	// re-reading e.agent later, unsynchronized, would race a concurrent
+	// setAgent (e.g. a session rebuild) and could see it go nil.
+	m.mu.Lock()
+	e := m.entries[sessionID]
+	if e == nil || e.agent == nil || e.turnActive {
+		m.mu.Unlock()
+		return false
+	}
+	as := e.agent
+	release := false
+	m.mu.Unlock()
+
+	// Phase 2: permission/question-ask check under the session lock (as.mu),
+	// not m.mu — the same lock-order hazard findPendingSession documents.
+	// Exempting unresolved asks mirrors EvictIdle: releasing here would 404
+	// the pending resolve and strand the dialog.
+	as.mu.Lock()
+	pending := tailIsPermissionAsk(as.messages)
+	as.mu.Unlock()
+	if pending {
+		return false
+	}
+
+	// Phase 3: re-verify under m.mu that the entry still owns this exact
+	// agent (a rebuild or new turn may have raced in) and that no turn
+	// started since the snapshot, then detach it. onEvict runs outside m.mu.
+	m.mu.Lock()
+	if e2 := m.entries[sessionID]; e2 != nil && e2.agent == as && !e2.turnActive {
+		e2.agent = nil
+		e2.lastActivity = time.Now()
+		release = true
+	}
+	m.mu.Unlock()
+
+	if release && m.onEvict != nil {
+		m.onEvict(sessionID)
+	}
+	return release
+}
+
 // Snapshot returns a copy of the current entries for diagnostics/tests.
 func (m *SessionManager) Snapshot() []*sessionEntry {
 	m.mu.Lock()

@@ -407,3 +407,70 @@ func TestLoadContext_KaizenDigestInjected(t *testing.T) {
 		t.Fatalf("non-matching model got a digest block (prefix drift):\n%s", nonMatch)
 	}
 }
+
+// TestLoadModelContextWithSourceAt_AnchoredAtRootNotCwd proves the root-anchored
+// loader resolves {model}.OCODE.md from the supplied root even when the process
+// cwd is somewhere else entirely (the desktop shell boots with cwd "/"). The
+// cwd-anchored loader must in turn find nothing — otherwise the redirect would
+// be untestable.
+func TestLoadModelContextWithSourceAt_AnchoredAtRootNotCwd(t *testing.T) {
+	isolateHome(t)
+	root := gitInit(t, map[string]string{"deepseek-v4-flash.OCODE.md": "ROOT_BODY\n"})
+	// Move the cwd away from the repo: root-anchored must still find the file.
+	other := t.TempDir()
+	t.Chdir(other)
+	res := LoadModelContextWithSourceAt(root, "opencode-go/deepseek-v4-flash")
+	if res.Kind != "file" || !strings.Contains(res.Content, "ROOT_BODY") {
+		t.Fatalf("root-anchored lookup failed: %+v", res)
+	}
+	if cwd := LoadModelContextWithSource("opencode-go/deepseek-v4-flash"); cwd.Kind != "" {
+		t.Fatalf("cwd-anchored lookup unexpectedly found %q (root=%s cwd=%s)", cwd.Path, root, other)
+	}
+}
+
+// TestLoadModelContextWithSourceAt_DirtyTrackedUsesRepoHead proves the
+// root-anchored variant's git commands are dir-correct: a tracked file with
+// unstaged edits resolves to that repo's HEAD version, never the dirty copy
+// (edits must be committed to take effect).
+func TestLoadModelContextWithSourceAt_DirtyTrackedUsesRepoHead(t *testing.T) {
+	isolateHome(t)
+	root := gitInit(t, map[string]string{"deepseek-v4-flash.OCODE.md": "COMMITTED_BODY\n"})
+	if err := os.WriteFile(filepath.Join(root, "deepseek-v4-flash.OCODE.md"), []byte("WORKING_EDITS\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	res := LoadModelContextWithSourceAt(root, "deepseek-v4-flash")
+	if res.Kind != "file" || !strings.Contains(res.Content, "COMMITTED_BODY") {
+		t.Fatalf("expected HEAD body via root-anchored git lookup, got %+v", res)
+	}
+	if strings.Contains(res.Content, "WORKING_EDITS") {
+		t.Fatalf("dirty working tree leaked into root-anchored output: %q", res.Content)
+	}
+}
+
+// TestLoadModelContextWithSourceAt_RootWinsOverOpencodeDir keeps the
+// root > root/.opencode precedence intact for the root-anchored search.
+func TestLoadModelContextWithSourceAt_RootWinsOverOpencodeDir(t *testing.T) {
+	isolateHome(t)
+	root := gitInit(t, map[string]string{"deepseek-v4-flash.OCODE.md": "ROOT_WINS\n"})
+	if err := os.MkdirAll(filepath.Join(root, ".opencode"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".opencode", "deepseek-v4-flash.OCODE.md"), []byte("OPCODE_DIR\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	res := LoadModelContextWithSourceAt(root, "deepseek-v4-flash")
+	if !strings.Contains(res.Content, "ROOT_WINS") || strings.Contains(res.Content, "OPCODE_DIR") {
+		t.Fatalf("precedence violated: %+v", res)
+	}
+}
+
+// TestLoadModelContextWithSourceAt_WildcardMatch proves wildcard stems
+// (minimax-m*.OCODE.md) still match in the root-anchored search.
+func TestLoadModelContextWithSourceAt_WildcardMatch(t *testing.T) {
+	isolateHome(t)
+	root := gitInit(t, map[string]string{"minimax-m*.OCODE.md": "WILDCARD_BODY\n"})
+	res := LoadModelContextWithSourceAt(root, "opencode-go/minimax-m2.5:free")
+	if res.Kind != "file" || !strings.Contains(res.Content, "WILDCARD_BODY") {
+		t.Fatalf("wildcard root-anchored lookup failed: %+v", res)
+	}
+}

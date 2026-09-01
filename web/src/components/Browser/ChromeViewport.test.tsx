@@ -222,4 +222,13 @@ describe("ChromeViewport", () => {
     rerender(<ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://b.com/" />);
     expect(mockApi.send).toHaveBeenCalledWith({ t: "nav", url: "https://b.com/" });
   });
+
+  it("navigates on FIRST mount (iframe → chrome escape hatch)", () => {
+    // A surface mounted directly onto its final URL (e.g. switching a
+    // dev-server page from local proxy to Chrome/CDP mode) must still issue
+    // an initial {t:"nav"}; otherwise the CDP target sits on the initial
+    // page and renders blank.
+    render(<ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://dev.local/admin" />);
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "nav", url: "https://dev.local/admin" });
+  });
 });

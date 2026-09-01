@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +67,17 @@ var llmHTTPClient = &http.Client{
 	Transport: &idleAbortTransport{next: &localConcurrencyTransport{next: llmHTTPBaseTransport}},
 }
 var llmRetryBaseDelay = 500 * time.Millisecond
+
+// llmRetryWait is the injectable wait used between retries. Overridden in tests
+// to avoid real sleeps and to verify cancellation interrupts without waiting.
+var llmRetryWait = func(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
 
 // ErrNoResponseFromOpenAIResponses is returned when the OpenAI Responses API
 // returns an empty response (no text content and no tool calls).
@@ -628,22 +640,21 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 		}
 
 		if is429 {
-			// Linear backoff: 3s → 5s across 6 retries.
-			// attempt=0 → 3.0s, 1 → 3.4s, … 5 → 5.0s.
-			delay := 3*time.Second + time.Duration(attempt)*400*time.Millisecond
-			if delay > 5*time.Second {
-				delay = 5 * time.Second
-			}
+			delay := retryDelayFor429(lastErr, attempt)
 			if c.RetryNotifier != nil {
 				c.RetryNotifier(attempt, maxRetries, delay, lastErr)
 			}
-			time.Sleep(delay)
+			if !llmRetryWait(ctx, delay) {
+				break
+			}
 		} else {
 			delay := time.Duration(attempt+1) * llmRetryBaseDelay
 			if c.RetryNotifier != nil {
 				c.RetryNotifier(attempt, maxRetries, delay, lastErr)
 			}
-			time.Sleep(delay)
+			if !llmRetryWait(ctx, delay) {
+				break
+			}
 		}
 	}
 	return nil, fmt.Errorf("llm request failed after %d attempt(s): %w", attempts, lastErr)
@@ -653,13 +664,116 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 // retry classification can key on the status code instead of substring-matching
 // the formatted message (whose body text previously influenced behavior).
 type providerStatusError struct {
-	Provider string // exact literal used in today's message prefix
-	Code     int
-	Body     string
+	Provider   string // exact literal used in today's message prefix
+	Code       int
+	Body       string
+	RetryAfter time.Duration // parsed from Retry-After header, 0 if absent/invalid
 }
 
 func (e *providerStatusError) Error() string {
 	return fmt.Sprintf("%s error (%d): %s", e.Provider, e.Code, e.Body)
+}
+
+// newProviderStatusError constructs a providerStatusError capturing Retry-After.
+func newProviderStatusError(provider string, code int, body string, header http.Header) *providerStatusError {
+	var ra time.Duration
+	if header != nil {
+		ra = parseRetryAfter(header.Get("Retry-After"))
+	}
+	return &providerStatusError{Provider: provider, Code: code, Body: body, RetryAfter: ra}
+}
+
+// parseRetryAfter parses a Retry-After header value. It supports both
+// delta-seconds (integer seconds per RFC 7231, strict digits-only) and HTTP-date
+// (e.g. "Fri, 31 Dec 1999 23:59:59 GMT").
+// Returns 0 for empty, malformed, negative, past dates, or overflow.
+func parseRetryAfter(s string) time.Duration {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	// Strict digits-only per RFC 7231 Section 7.1.3: delta-seconds = 1*DIGIT
+	isDigits := len(s) > 0
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			isDigits = false
+			break
+		}
+	}
+	if isDigits {
+		secs, err := strconv.ParseInt(s, 10, 64)
+		if err == nil {
+			// Overflow guard: time.Duration is int64 nanoseconds; secs*1e9 must fit.
+			const maxSecs = int64(1<<63-1) / int64(time.Second)
+			if secs > maxSecs {
+				return 60 * time.Second
+			}
+			if secs < 0 {
+				return 0
+			}
+			d := time.Duration(secs) * time.Second
+			return d
+		}
+		// Digits-only but ParseInt overflowed int64 -> cap to max useful backoff.
+		return 60 * time.Second
+	}
+	if t, err := http.ParseTime(s); err == nil {
+		d := time.Until(t)
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+	return 0
+}
+
+// isHostedSaturatedError reports whether err is the runinfra
+// hosted_saturated_large_prompt concurrency deferral. The provider body
+// contains "hosted_saturated_large_prompt" (or the shorter
+// "hosted_saturated" prefix). Both typed and untyped errors are checked.
+func isHostedSaturatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *providerStatusError
+	if errors.As(err, &se) {
+		lower := strings.ToLower(se.Body)
+		if strings.Contains(lower, "hosted_saturated_large_prompt") || strings.Contains(lower, "hosted_saturated") {
+			return true
+		}
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "hosted_saturated_large_prompt") || strings.Contains(lower, "hosted_saturated")
+}
+
+// retryDelayFor429 returns the backoff for a 429 error on the given attempt.
+// Priority: Retry-After header > hosted_saturated exponential > normal linear.
+// Hosted-saturated uses exponential doubling (3s * 2^attempt, capped 60s) to
+// relieve the shared 64-concurrency saturation. Normal 429s keep the existing
+// linear 3s→5s ramp.
+func retryDelayFor429(err error, attempt int) time.Duration {
+	var se *providerStatusError
+	if errors.As(err, &se) && se.RetryAfter > 0 {
+		d := se.RetryAfter
+		if d > 60*time.Second {
+			d = 60 * time.Second
+		}
+		return d
+	}
+	// Also check untyped errors that may carry a Retry-After-like hint in body
+	// is not possible without header, so only hosted_saturated fallback here.
+	if isHostedSaturatedError(err) {
+		delay := 3 * time.Second * time.Duration(1<<attempt) // 3s,6s,12s,24s,48s
+		if delay > 60*time.Second {
+			delay = 60 * time.Second
+		}
+		return delay
+	}
+	delay := 3*time.Second + time.Duration(attempt)*400*time.Millisecond
+	if delay > 5*time.Second {
+		delay = 5 * time.Second
+	}
+	return delay
 }
 
 // isRateLimitError returns true when err is an HTTP 429 (Too Many Requests)
@@ -789,7 +903,7 @@ func (c *GenericClient) chatCopilot(ctx context.Context, messages []Message, too
 		body, _ := io.ReadAll(resp.Body)
 		msg := fmt.Sprintf("copilot error (%d): %s", resp.StatusCode, string(body))
 		c.emitDebug("error", msg)
-		return nil, &providerStatusError{Provider: "copilot", Code: resp.StatusCode, Body: string(body)}
+		return nil, newProviderStatusError("copilot", resp.StatusCode, string(body), resp.Header)
 	}
 	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
 	if err != nil {
@@ -890,7 +1004,7 @@ func (c *GenericClient) chatGrokSubscription(ctx context.Context, messages []Mes
 			return nil, fmt.Errorf("Grok subscription session expired — run /connect to re-authenticate")
 		}
 		c.emitDebug("ERROR", fmt.Sprintf("chatGrokSubscription: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
-		return nil, &providerStatusError{Provider: c.Provider, Code: resp.StatusCode, Body: string(body)}
+		return nil, newProviderStatusError(c.Provider, resp.StatusCode, string(body), resp.Header)
 	}
 
 	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
@@ -992,7 +1106,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		c.emitDebug("ERROR", fmt.Sprintf("chatOpenAI: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
-		return nil, &providerStatusError{Provider: c.Provider, Code: resp.StatusCode, Body: string(body)}
+		return nil, newProviderStatusError(c.Provider, resp.StatusCode, string(body), resp.Header)
 	}
 
 	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
@@ -1095,7 +1209,7 @@ func (c *GenericClient) chatGoogle(ctx context.Context, messages []Message, tool
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		c.emitDebug("ERROR", fmt.Sprintf("chatGoogle: status=%d url=%s", resp.StatusCode, url))
-		return nil, &providerStatusError{Provider: c.Provider, Code: resp.StatusCode, Body: string(body)}
+		return nil, newProviderStatusError(c.Provider, resp.StatusCode, string(body), resp.Header)
 	}
 
 	msg, usageRaw, err := parseGoogleInteractionsStream(resp.Body, c.onDelta(), c.onUsage())
@@ -2726,7 +2840,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 		}
 		msg := fmt.Sprintf("openai responses error (%d): %s", resp.StatusCode, string(body))
 		c.emitDebug("error", msg)
-		return nil, &providerStatusError{Provider: "openai responses", Code: resp.StatusCode, Body: string(body)}
+		return nil, newProviderStatusError("openai responses", resp.StatusCode, string(body), resp.Header)
 	}
 
 	// Parse SSE stream to accumulate the full response.
@@ -3287,7 +3401,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 		body, _ := io.ReadAll(resp.Body)
 		msg := fmt.Sprintf("anthropic error (%d): %s", resp.StatusCode, string(body))
 		c.emitDebug("error", msg)
-		return nil, &providerStatusError{Provider: "anthropic", Code: resp.StatusCode, Body: string(body)}
+		return nil, newProviderStatusError("anthropic", resp.StatusCode, string(body), resp.Header)
 	}
 
 	// Streaming parser. Anthropic emits one of:
@@ -3754,6 +3868,7 @@ var providers = map[string]providerInfo{
 	"minimax":        {"MINIMAX_API_KEY", "https://api.minimax.chat/v1"},
 	"requesty":       {"REQUESTY_API_KEY", "https://router.requesty.ai/v1"},
 	"deepinfra":      {"DEEPINFRA_API_KEY", "https://api.deepinfra.com/v1/openai"},
+	"runinfra":       {"RUNINFRA_GATEWAY_KEY", "https://api.runinfra.ai/v1"},
 	"nvidia":         {"NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1"},
 	"302ai":          {"302AI_API_KEY", "https://api.302.ai/v1"},
 	"deepseek":       {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
@@ -4361,7 +4476,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		c.emitDebug("ERROR", fmt.Sprintf("chatOpenAIHTTP: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
-		return nil, &providerStatusError{Provider: c.Provider, Code: resp.StatusCode, Body: string(body)}
+		return nil, newProviderStatusError(c.Provider, resp.StatusCode, string(body), resp.Header)
 	}
 
 	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())

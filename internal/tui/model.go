@@ -1281,11 +1281,17 @@ type model struct {
 	// kaizenAnnounced is the sorted set of digest-contributing Kaizen skill
 	// names last announced in the transcript, so the "directives active" notice
 	// is emitted once per active-model change rather than on every request.
-	kaizenAnnounced   string
-	config            *config.Config
-	sessionID         string
-	sessionTitle      string
-	titleRegenerating bool // true while a manual title regeneration (gen button) is in flight
+	kaizenAnnounced string
+	// modelPromptInfoKey/Val memoize the status-snapshot ModelPrompt payload
+	// per (model, workDir): broadcastTUIStatus fires on every state change
+	// (per-token during turns), and recomputing stack detection + the prompt
+	// lookup each push would be wasteful.
+	modelPromptInfoKey string
+	modelPromptInfoVal *server.ModelPromptInfo
+	config             *config.Config
+	sessionID          string
+	sessionTitle       string
+	titleRegenerating  bool // true while a manual title regeneration (gen button) is in flight
 	// sessionLoadErr records a failure to load an explicitly requested
 	// session (via -session or -continue). When set, Run aborts before the
 	// TUI starts instead of silently continuing with a placeholder file.
@@ -6767,21 +6773,43 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	}
 	if pressed && m.activeTab == tabFiles {
 		treeW := filesTreeWidth(m.width)
-		// Handle content search input field focus (click on query/ext line)
+		// Handle content search controls. Search results remain owned by the
+		// files model even when the user changes tabs; mouse input is only
+		// possible here while Files is visible.
 		if m.files.mode == filesModeContentSearch {
 			previewLeft := treeW + 2
 			if mouse.X >= previewLeft {
 				previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
 				clickLine := mouse.Y - previewBodyTop
-				if clickLine == 0 {
+				switch clickLine {
+				case 0:
 					m.files.contentSearchPanel = filesContentSearchQuery
 					return m, nil, true
-				}
-				if clickLine == 1 {
+				case 1:
 					m.files.contentSearchPanel = filesContentSearchExtFilter
 					return m, nil, true
-				}
-				if clickLine == 2 {
+				case 2:
+					m.files.contentSearchPanel = filesContentSearchMatchField
+					m.files.markContentSearchDirty()
+					if m.files.contentSearchMatch == filesContentSearchLiteral {
+						m.files.contentSearchMatch = filesContentSearchRegex
+					} else {
+						m.files.contentSearchMatch = filesContentSearchLiteral
+					}
+					return m, nil, true
+				case 3:
+					m.files.contentSearchPanel = filesContentSearchCase
+					m.files.markContentSearchDirty()
+					m.files.contentSearchCaseSensitive = !m.files.contentSearchCaseSensitive
+					return m, nil, true
+				case 4:
+					m.files.contentSearchPanel = filesContentSearchWholeWord
+					m.files.markContentSearchDirty()
+					m.files.contentSearchWholeWord = !m.files.contentSearchWholeWord
+					return m, nil, true
+				case 5:
+					m.files.contentSearchPanel = filesContentSearchIgnore
+					m.files.markContentSearchDirty()
 					m.files.contentSearchIncludeIgnored = !m.files.contentSearchIncludeIgnored
 					return m, nil, true
 				}
@@ -6792,12 +6820,11 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			previewLeft := treeW + 2
 			previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
 			if mouse.X >= previewLeft && mouse.Y >= previewBodyTop {
-				// Calculate which result was clicked
+				// Calculate which result was clicked.
 				clickIndex := mouse.Y - previewBodyTop
-				// Adjust for header lines in the content view (query, ext, hints, blank)
-				headerLines := 5 // query, ext, ignore toggle, blank, hint
-				resultIndex := clickIndex - headerLines
-				if resultIndex >= 0 && resultIndex < len(m.files.contentSearchResults) {
+				start, end := m.files.contentSearchResultWindow(contentSearchPaneHeight(m.height))
+				resultIndex := start + clickIndex - contentSearchResultsStartLine
+				if clickIndex >= contentSearchResultsStartLine && resultIndex >= start && resultIndex < end {
 					m.files.contentSearchCursor = resultIndex
 					m.files.navigateToSearchResult(m.files.contentSearchResults[resultIndex])
 					return m, nil, true
@@ -12857,12 +12884,15 @@ func (m *model) handleContextCmd(args []string) {
 	if m.agent.Client() != nil {
 		mcModel = m.agent.Client().GetModel()
 	}
-	if res := agent.LoadModelContextWithSource(mcModel); res.Kind != "" {
-		mcTok := estimateTok(res.Content)
+	// Prefer the agent's cached, workdir-anchored result so the inspector can
+	// never disagree with (or diverge in root from) the [ocode:model_context]
+	// message actually injected via BasePromptMessages.
+	if kind, path := m.agent.ModelContextInfo(); kind != "" {
+		mcTok := estimateTok(m.agent.ModelContextContent())
 		baseTotal += mcTok
-		source := "embedded:" + res.Path
-		if res.Kind == "file" {
-			source = "disk:" + res.Path
+		source := "embedded:" + path
+		if kind == "file" {
+			source = "disk:" + path
 		}
 		fmt.Fprintf(&b, "  Model ctx  %-20s ~%s tok (%s)\n", mcModel, formatTok(mcTok), source)
 	}
@@ -15152,7 +15182,52 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 	// Modified files + LSP servers come from the embedded helpers.
 	snap.ModifiedFiles = m.collectModifiedFiles()
 	snap.LSPServers = m.collectLSPStatuses()
+	// Model-prompt banner mirror: the same data the TUI's "◆ Model prompt"
+	// chrome row renders (custom {model}.OCODE.md + force-injected Kaizen
+	// directives), memoized per (model, workDir) — see modelPromptInfoKey.
+	if m.agent != nil && m.agent.Client() != nil {
+		key := m.agent.Client().GetModel() + "\x00" + m.workDir
+		if key != m.modelPromptInfoKey {
+			m.modelPromptInfoKey = key
+			m.modelPromptInfoVal = m.computeModelPromptInfo()
+		}
+		snap.ModelPrompt = m.modelPromptInfoVal
+	}
 	return snap
+}
+
+// computeModelPromptInfo assembles the ModelPrompt status payload for the
+// bridged web UI, mirroring the server-side buildModelPromptInfo but sourced
+// from the live agent's cached model-context (so it can never disagree with the
+// banner or the injected [ocode:model_context] system message).
+func (m *model) computeModelPromptInfo() *server.ModelPromptInfo {
+	if m.agent == nil || m.agent.Client() == nil {
+		return nil
+	}
+	info := &server.ModelPromptInfo{}
+	kind, path := m.agent.ModelContextInfo()
+	if content := m.agent.ModelContextContent(); content != "" {
+		info.Tokens = estimateTok(content)
+	}
+	if kind != "" {
+		info.Kind = kind
+		info.Path = path
+	}
+	mcModel := m.agent.Client().GetModel()
+	for _, s := range skill.KaizenSkillsForModel(m.workDir, mcModel) {
+		if s.Digest == "" {
+			continue // only digest-bearing skills are force-injected
+		}
+		info.Kaizen = append(info.Kaizen, server.KaizenDirectiveInfo{
+			Name:     s.Name,
+			TunedFor: s.TunedFor,
+			Stack:    s.Stack,
+		})
+	}
+	if info.Kind == "" && len(info.Kaizen) == 0 {
+		return nil
+	}
+	return info
 }
 
 // collectModifiedFiles returns the session's modified files with their git

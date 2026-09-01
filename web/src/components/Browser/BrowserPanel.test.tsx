@@ -1,4 +1,4 @@
-import { render, waitFor, act } from "@testing-library/react";
+import { render, waitFor, act, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockBypass = vi.hoisted(() => vi.fn(async () => {}));
@@ -11,6 +11,7 @@ const state = {
   collapsed: false,
   status: 200,
   mode: "chrome" as const,
+  userMode: null as "local" | "chrome" | null,
   error: "",
   consoleEvents: [],
   networkEvents: [],
@@ -20,7 +21,7 @@ const actions = {
   pushConsole: vi.fn(), pushNetwork: vi.fn(),
   clearConsole: vi.fn(), clearNetwork: vi.fn(),
   setCollapsed: vi.fn(), close: vi.fn(),
-  setError: vi.fn(),
+  setError: vi.fn(), setUserMode: vi.fn(),
 };
 vi.mock("../../lib/browserStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/browserStore")>();
@@ -57,6 +58,7 @@ describe("BrowserPanel", () => {
     state.url = "https://example.com/";
     state.status = 200;
     (state as unknown as Record<string, unknown>).mode = "chrome";
+    (state as unknown as Record<string, unknown>).userMode = null;
     (state as unknown as Record<string, unknown>).collapsed = false;
   });
 
@@ -181,5 +183,69 @@ describe("BrowserPanel", () => {
       }));
     });
     expect(actions.pushConsole).toHaveBeenCalledTimes(1); // foreign origin dropped
+  });
+
+  it("shows the dev-server banner when error carries the module-graph token, and offers Chrome mode", async () => {
+    (state as unknown as Record<string, unknown>).mode = "local";
+    state.url = "https://localhost:3510/admin";
+    state.error = "dev-server-module-graph: this dev server's module graph can't be served by the embedded proxy — open externally or switch to Chrome mode";
+    const { container, getByTestId } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    await waitFor(() => expect(getByTestId("dev-server-banner")).toBeTruthy());
+    expect(container.textContent).toContain("Dev server can't render in the embedded proxy");
+    fireEvent.click(getByTestId("dev-server-banner").querySelector("button")!);
+    expect(actions.setUserMode).toHaveBeenCalledWith("tab:abc", "chrome");
+  });
+
+  it("does not show the dev-server banner for unrelated errors", async () => {
+    state.error = "TLS certificate not trusted — x509: self-signed";
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    expect(container.querySelector("[data-testid='dev-server-banner']")).toBeNull();
+  });
+
+  it("shows the chrome-mode banner with an exit when userMode is chrome", async () => {
+    (state as unknown as Record<string, unknown>).userMode = "chrome";
+    const { getByTestId } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    await waitFor(() => expect(getByTestId("chrome-mode-banner")).toBeTruthy());
+    fireEvent.click(getByTestId("chrome-mode-banner").querySelector("button")!);
+    expect(actions.setUserMode).toHaveBeenCalledWith("tab:abc", null);
+  });
+
+  it("userMode chrome forces the chrome viewport even for a private-host URL", async () => {
+    (state as unknown as Record<string, unknown>).mode = "local";
+    (state as unknown as Record<string, unknown>).userMode = "chrome";
+    state.url = "https://localhost:3510/admin";
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    await waitFor(() => expect(container.querySelector("[data-testid='chrome-viewport']")).toBeTruthy());
+    expect(container.querySelector("iframe")).toBeNull();
+  });
+
+  it("returns to the local iframe (with src) after exiting Chrome mode, even after CDP nav events set mode=chrome", async () => {
+    // local dev error → Open in Chrome → CDP target emits server nav events
+    // with mode=chrome → user exits the override → the private-host rule must
+    // flip the surface back to the local proxy AND the remounted iframe must
+    // actually get a src (not mount blank).
+    state.url = "https://localhost:3510/admin";
+    (state as unknown as Record<string, unknown>).mode = "local";
+    (state as unknown as Record<string, unknown>).userMode = null;
+    const tree = () => <BrowserPanel stateKey={"tab:abc" as any} mode="full" />;
+    const { container, rerender } = render(tree());
+    await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
+
+    // User opens Chrome mode → CDP canvas mounts, iframe unmounts.
+    (state as unknown as Record<string, unknown>).userMode = "chrome";
+    rerender(tree());
+    await waitFor(() => expect(container.querySelector("[data-testid='chrome-viewport']")).toBeTruthy());
+    expect(container.querySelector("iframe")).toBeNull();
+
+    // The CDP target announces its navigation with mode=chrome (server event).
+    (state as unknown as Record<string, unknown>).mode = "chrome";
+
+    // User exits the override.
+    (state as unknown as Record<string, unknown>).userMode = null;
+    rerender(tree());
+    await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
+    expect(container.querySelector("[data-testid='chrome-viewport']")).toBeNull();
+    // The remounted iframe got its src re-issued (not blank).
+    expect((container.querySelector("iframe") as HTMLIFrameElement).src).toContain("/b/tab:abc/");
   });
 });

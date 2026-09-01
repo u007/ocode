@@ -1,8 +1,9 @@
 import { useCallback } from "react";
 import { useChatSelector, useChatDispatch, getSessionSlice } from "../stores/chatStore";
 import { useProjectState, findProjectPathForTab } from "../stores/projectStore";
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
 import type { PermissionDecision, QuestionAnswerPayload } from "../api/types";
+import type { PermissionDecideResult } from "../components/Chat/PermissionDialog";
 
 interface UseChatOptions {
   /** Called when a new session is created (first message from an empty tab). */
@@ -82,14 +83,22 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     [sessionId, dispatch, projectPath, options?.onNewSession, slice.model],
   );
 
-  // Local stop: the browser can't cancel the TUI's agent, so this only releases
-  // the input and clears the UI streaming state. The turn continues server-side;
-  // a later turn_done/turn_error becomes a no-op (turn state already cleared).
-  // Queued messages are preserved and auto-drain is suppressed until the user
-  // resumes, mirroring the TUI's streamWasInterrupted behavior.
+  // Stop: optimistically clears local streaming state and queues, then asks
+  // the server to cancel the in-flight turn (Agent.Cancel). Queued messages
+  // are preserved and auto-drain is suppressed until Resume, mirroring the
+  // TUI's streamWasInterrupted behavior. The server's eventual turn_done or
+  // turn_error becomes a no-op for UI state (already cleared) but still
+  // syncs the persisted transcript.
   const stop = useCallback(() => {
     if (!sessionId) return;
     dispatch({ type: "INTERRUPT", sessionId });
+    // Don't block UI on the cancel RPC; fire and forget. If the session is
+    // a temp `new-*` id with no server session yet, skip the call.
+    if (!sessionId.startsWith("new-")) {
+      api.cancelSession(sessionId).catch((err) => {
+        console.warn("cancel session failed", err);
+      });
+    }
   }, [dispatch, sessionId]);
 
   const resume = useCallback(() => {
@@ -98,26 +107,32 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   }, [dispatch, sessionId]);
 
   // Resolve a pending agent permission ask via the dedicated resolve endpoint
-  // (NOT the config POST /api/permissions, which sets a tool rule). Only a
-  // confirmed success dismisses the dialog; failures keep it open so the user
-  // can retry. Note: the server also broadcasts a permission_resolved SSE
-  // frame as soon as the decision is applied (before the continuation round),
-  // so the dialog closes promptly even while this request is still in flight.
+  // (NOT the config POST /api/permissions, which sets a tool rule). A confirmed
+  // success dismisses the dialog; a retryable failure (network, 5xx) keeps it
+  // open with the error shown so the user can retry. A 404/409 means the
+  // server no longer holds this ask (the agent was released or the server
+  // restarted — the persisted transcript drops the sentinel on reload — or
+  // the ask was already answered elsewhere): retrying can never succeed, so
+  // the dialog is dismissed instead of staying stuck open. Note: the server
+  // also broadcasts a permission_resolved SSE frame as soon as the decision is
+  // applied (before the continuation round), so the dialog closes promptly
+  // even while this request is still in flight.
   const resolvePermission = useCallback(
-    async (requestId: string, decision: PermissionDecision) => {
-      if (!sessionId) return false;
+    async (requestId: string, decision: PermissionDecision): Promise<PermissionDecideResult> => {
+      if (!sessionId) return { ok: false, error: "no active session" };
       try {
         await api.resolvePermission(requestId, sessionId, decision);
         dispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId });
-        return true;
+        return { ok: true };
       } catch (err) {
         console.error("Failed to resolve permission:", err);
-        dispatch({
-          type: "SET_ERROR",
-          sessionId,
-          error: err instanceof Error ? err.message : "permission resolve failed",
-        });
-        return false;
+        const message = err instanceof Error ? err.message : "permission resolve failed";
+        const stale = err instanceof ApiError && (err.status === 404 || err.status === 409);
+        if (stale) {
+          dispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId });
+        }
+        dispatch({ type: "SET_ERROR", sessionId, error: message });
+        return { ok: false, error: message };
       }
     },
     [dispatch, sessionId],

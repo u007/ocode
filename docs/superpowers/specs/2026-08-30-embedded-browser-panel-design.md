@@ -71,7 +71,12 @@ a standalone browser tab.
   validated by that cookie. `Referer` is stripped before going
   upstream; a fixed User-Agent is sent.
 - **postMessage.** Capture-script events post to the SPA with
-  `targetOrigin` = SPA origin; the SPA accepts only
+  `targetOrigin` = SPA origin. That origin is recorded **per stateKey
+  at grant mint** from the grant request's `Origin` header (fallback:
+  scheme + `Host`), never from the server's bound listener address —
+  `http://127.0.0.1:4096` ≠ `http://localhost:4096`, and a mismatched
+  `targetOrigin` makes the browser drop every console/network message
+  silently. The SPA accepts only
   `event.origin === browseOrigin` and treats every field as untrusted
   telemetry (display/console only — never navigation authority).
 - **Address bar is server-authoritative.** On every HTML document
@@ -125,11 +130,15 @@ partitions cookie jars and event routing.
   referenced resource is proxied (rewritten CSS/JS bytes can no longer
   match hashes).
 - **Unrewritable, patched client-side:** the capture script
-  monkey-patches `fetch`, `XMLHttpRequest`, `WebSocket`, and dynamic
-  `import()` to reroute absolute URLs through `/b/{stateKey}/...`
-  (partial coverage — hardcoded cross-origin API calls from workers or
-  exotic loaders will still fail; that lands in the Network console as
-  a visible error).
+  monkey-patches `fetch`, `XMLHttpRequest`, `WebSocket`, and runtime
+  `<script src>` / `<link href>` assignment (webpack/Next.js lazy
+  chunks are injected by page JS and never appear in the initial HTML,
+  so the server rewrite cannot see them — hooking the DOM setters
+  reroutes them through `/b/{stateKey}/...`). Native dynamic
+  `import()` of a literal absolute URL, hardcoded cross-origin API
+  calls from workers, and exotic loaders will still fail; that lands
+  in the Network console as a visible error (partial coverage by
+  design).
 - **Cookies:** kept in a **server-side jar keyed by
   `(stateKey, upstream origin)`**, in-memory, never forwarded to the
   browser. `Set-Cookie` from upstream is absorbed into the jar;
@@ -171,10 +180,14 @@ hook's 500 px default is too narrow) and a small drag handle for
 console drawer height.
 
 - `BrowserPanel.tsx` — shared surface, host mode `side` | `full`:
-  address bar row (URL input, back/forward/reload, open-external),
+  address bar row (URL input, back/forward/reload, open-external;
+  scheme-less input is normalized by `normalizeBrowseURL` — loopback /
+  `*.localhost` / RFC1918 / IPv6-literal hosts get `http://`, anything
+  else `https://`),
   status row (spinner / HTTP status / error badge / mode chip),
   viewport (sandboxed cross-origin iframe), dev console drawer with
-  **Console** and **Network** sub-tabs (text filter, clear).
+  **Console** and **Network** sub-tabs (text filter, clear). Drawer is
+  collapsed by default (header bar only); toggle expands it to `h-48`.
 - `browserStore.ts` — store keyed by `stateKey`
   (`side:{chat|term}:{tabId}` or `tab:{browserTabId}`):
   `{ url, history, historyIndex, panelOpen, collapsed,

@@ -12,8 +12,18 @@
 
 
 
+
+## 2026-09-01
+
+* **Creation**: Shell Sandbox Is Write-Integrity Only, Not Confidentiality ([architecture/shell-sandbox-integrity-only-mode.md](/architecture/shell-sandbox-integrity-only-mode.md))
+* **Creation**: PATH Shadowing Can Bypass Sandbox Discovery ([gotchas/shell-sandbox-path-shadowing.md](/gotchas/shell-sandbox-path-shadowing.md))
+* **Creation**: Shell Execution Must Set cmd.Dir to Agent Workdir ([gotchas/shell-sandbox-working-directory-not-set.md](/gotchas/shell-sandbox-working-directory-not-set.md))
+* **Creation**: BashTool Dynamic Permission Manager Resolution ([gotchas/shell-sandbox-dynamic-bash-permissions.md](/gotchas/shell-sandbox-dynamic-bash-permissions.md))
+* **Creation**: Writable-Root Validation Prevents Confinement Defeat ([gotchas/shell-sandbox-writable-root-validation.md](/gotchas/shell-sandbox-writable-root-validation.md))
+* **Creation**: Shell Sandbox Backend Availability Status ([architecture/shell-sandbox-backend-status.md](/architecture/shell-sandbox-backend-status.md))
 ## 2026-08-31
 
+* **Creation**: Concurrent File Editing Risk — Multiple Writers in Same Checkout ([gotchas/concurrent-file-editing-risk.md](/gotchas/concurrent-file-editing-risk.md))
 * **Creation**: Auto-Permission — Judge Must See the Session WorkDir, Not the Process CWD ([gotchas/auto-permission-judge-process-cwd.md](/gotchas/auto-permission-judge-process-cwd.md))
 * **Update**: Plugin Auto-Permission — Arbitrary Execution Risk ([gotchas/plugin-auto-permission-security.md](/gotchas/plugin-auto-permission-security.md))
 * **Creation**: Desktop Single Instance Lock ([architecture/desktop-single-instance.md](/architecture/desktop-single-instance.md))

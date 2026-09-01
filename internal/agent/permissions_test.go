@@ -827,6 +827,39 @@ func TestPermissions_BashBanMatchesInsideLoopAndConditionalBodies(t *testing.T) 
 	}
 }
 
+func TestPermissions_ShellKeywordsNeverBecomePrefixes(t *testing.T) {
+	cmds, err := parseShellCommandLine(`if [ "$code" -ne 0 ]; then tail -20 /tmp/x.log; fi`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, c := range cmds {
+		if len(c.cmdWords) > 0 && ShellControlKeywords[c.cmdWords[0]] {
+			t.Fatalf("shell keyword %q surfaced as a command fragment", c.cmdWords[0])
+		}
+	}
+	if len(cmds) == 0 || cmds[0].cmdWords[0] != "[" {
+		t.Fatalf("expected first fragment to be the [ condition, got %v", cmds)
+	}
+}
+
+func TestPermissions_BashConditionalHarnessAutoAllowed(t *testing.T) {
+	pm := NewPermissionManager()
+
+	cases := []string{
+		`if true; then echo hi; fi`,
+		`if [ "$code" -ne 0 ]; then echo failed; fi`,
+		`while [ -f lock ]; do echo waiting; done`,
+		`test -f go.mod && echo yes`,
+		`[[ -n "$x" ]] && echo set`,
+	}
+	for _, c := range cases {
+		dec := pm.Decide("bash", json.RawMessage(`{"command":`+strconv.Quote(c)+`}`))
+		if dec.Level != PermissionAllow {
+			t.Fatalf("expected allow for %q, got level=%s", c, dec.Level)
+		}
+	}
+}
+
 func TestPermissions_AdvancedBashFeatures(t *testing.T) {
 	workDir := t.TempDir()
 	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)

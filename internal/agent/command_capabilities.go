@@ -76,7 +76,7 @@ var commandCapabilities = []commandCapability{
 	{
 		ID:             "shell.introspection",
 		Behavior:       commandAlwaysAllow,
-		Aliases:        []string{"pwd", "whoami", "hostname", "uname", "id", "tty", "date", "true", "false", ":", "echo", "printf", "which", "locale", "tput", "groups", "users", "uptime", "arch"},
+		Aliases:        []string{"pwd", "whoami", "hostname", "uname", "id", "tty", "date", "true", "false", ":", "echo", "printf", "which", "locale", "tput", "groups", "users", "uptime", "arch", "test", "[", "[["},
 		UnixAliases:    []string{"type"},
 		WindowsAliases: []string{"cls", "ver", "where"},
 	},

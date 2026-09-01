@@ -90,6 +90,22 @@ export function cancelLiveDeltas(sessionId: string): void {
   }
 }
 
+/** Terminate the backend for a chat session the user closed (session tab X,
+ *  Cmd+W, SessionDialog close, project removal closing its tabs). Fire-and-
+ *  forget: tells the server to cancel any in-flight turn/sub-agents AND
+ *  release the resident agent, so a closed session is not left running
+ *  server-side (burning tokens / executing tools) with no UI attached. The
+ *  server no-ops on idle sessions, so calling unconditionally for real
+ *  session ids is safe. Draft tabs (`new-*`) have no server session yet and
+ *  are skipped. The session transcript persists server-side and can be
+ *  reopened; its agent rebuilds on the next turn. */
+export function closeSessionBackend(sessionId: string): void {
+  if (!sessionId || sessionId.startsWith("new-")) return;
+  api.closeSession(sessionId).catch((err) => {
+    console.warn("close session backend failed", err);
+  });
+}
+
 /** Flush any buffered thinking/text deltas for a session immediately. Must be
  *  called before any dispatch that replaces or clears `live` (the "messages"
  *  turn-boundary snapshot, turn_done, turn_error) — otherwise a buffered
@@ -199,6 +215,16 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       // message of a session is dropped at the routing gate below.
       r.openSessionIds.delete(started.request_id);
       r.openSessionIds.add(eventSessionId);
+      // Fetch authoritative title for the new session so the "New session"
+      // placeholder is replaced even when no LLM-generated status arrives yet
+      // (auto fallback title derived from first user message). Use
+      // Promise.resolve to tolerate mocked sync returns in tests.
+      void Promise.resolve(api.getSession(eventSessionId)).then((detail: any) => {
+        const t = detail?.title?.trim() || "";
+        if (t && t !== "New session") {
+          r.projectDispatch({ type: "UPDATE_TAB_TITLE", id: eventSessionId, title: t });
+        }
+      }).catch(() => {});
     }
     return;
   }

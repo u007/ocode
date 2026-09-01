@@ -283,3 +283,55 @@ func TestEvictIdleNotifiesHandler(t *testing.T) {
 		t.Fatalf("onEvict got %v, want [%s]", evicted, id)
 	}
 }
+
+// TestReleaseAgentReleasesImmediately verifies ReleaseAgent tears down a
+// resident agent on demand (not gated on idle time), keeps the registry
+// entry, and notifies the handler via onEvict.
+func TestReleaseAgentReleasesImmediately(t *testing.T) {
+	var evicted []string
+	mgr := NewSessionManager(30*time.Minute, func() []string { return nil }, func(id string) {
+		evicted = append(evicted, id)
+	})
+	id := session.NewSessionID()
+	entry := mgr.Register(id, t.TempDir())
+	mgr.setAgent(id, &agentSession{})
+
+	if released := mgr.ReleaseAgent(id); !released {
+		t.Fatal("ReleaseAgent should report release of a resident agent")
+	}
+	if entry.agent != nil {
+		t.Fatal("ReleaseAgent left the resident agent attached")
+	}
+	if len(evicted) != 1 || evicted[0] != id {
+		t.Fatalf("onEvict got %v, want [%s]", evicted, id)
+	}
+	// A second release on the now-agentless entry is a no-op.
+	if released := mgr.ReleaseAgent(id); released {
+		t.Fatal("ReleaseAgent should no-op for an agentless entry")
+	}
+}
+
+// TestReleaseAgentSkipsActiveTurn verifies ReleaseAgent does not tear down an
+// agent while its turn is running (the cancel handler aborts the turn; idle
+// eviction reclaims the agent afterwards).
+func TestReleaseAgentSkipsActiveTurn(t *testing.T) {
+	mgr := NewSessionManager(30*time.Minute, func() []string { return nil }, nil)
+	id := session.NewSessionID()
+	entry := mgr.Register(id, t.TempDir())
+	mgr.setAgent(id, &agentSession{})
+	mgr.setTurnActive(id, true)
+
+	if released := mgr.ReleaseAgent(id); released {
+		t.Fatal("ReleaseAgent must not release an agent with an active turn")
+	}
+	if entry.agent == nil {
+		t.Fatal("active-turn entry lost its agent")
+	}
+	mgr.setTurnActive(id, false)
+	if released := mgr.ReleaseAgent(id); !released {
+		t.Fatal("ReleaseAgent should release after the turn unwinds")
+	}
+	if entry.agent != nil {
+		t.Fatal("agent still attached after post-turn release")
+	}
+}

@@ -163,11 +163,49 @@ func StartSupervised(sup *ProcessSupervisor, cmd *exec.Cmd, reg ProcessRegistrat
 	}
 
 	reg.PID = cmd.Process.Pid
-	record, err := sup.Register(reg)
-	if err != nil {
-		return ProcessRecord{}, err
+	// Fast path: try normal registration.
+	if record, err := sup.Register(reg); err == nil {
+		return record, nil
+	} else {
+		// Register failed — check if it's a duplicate terminal browser record
+		// that can be safely replaced. This allows Chrome to be relaunched after
+		// exit/crash without leaking the supervisor ID. For non-browser or
+		// still-running records we must not replace; instead we clean up the
+		// just-started child to avoid an unmanaged leaked process.
+		sup.mu.Lock()
+		existing, exists := sup.records[reg.ID]
+		if !exists {
+			sup.mu.Unlock()
+			// Lost race — retry once.
+			if record, rerr := sup.Register(reg); rerr == nil {
+				return record, nil
+			}
+			// Still failed after retry — leak-prevent kill.
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return ProcessRecord{}, err
+		}
+		recSnap := existing.snapshot()
+		isTerminal := recSnap.Status != ProcRunning
+		// Only allow automatic replacement for the stable browser ID or other
+		// browser-kind records; generic proc-N collisions remain errors as
+		// documented in process_test.go:NoPrefix_CollidesInSupervisor.
+		canReplace := isTerminal && (reg.ID == "browse-chrome" || reg.Kind == ProcessKindBrowser || recSnap.Kind == ProcessKindBrowser)
+		if !canReplace {
+			sup.mu.Unlock()
+			// Duplicate running (or non-browser terminal) — kill leaked child.
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return ProcessRecord{}, err
+		}
+		// Replace terminal browser record atomically. Preserve ordering.
+		child := newSupervisedProcess(reg)
+		sup.records[reg.ID] = child
+		// order already contains ID; do not append again.
+		snap := child.snapshot()
+		sup.mu.Unlock()
+		return snap, nil
 	}
-	return record, nil
 }
 
 func (s *ProcessSupervisor) RegisterShutdownCallback(fn func()) error {
@@ -219,6 +257,51 @@ func (s *ProcessSupervisor) MarkKilled(id string, exitCode int) bool {
 		return false
 	}
 	return child.markTerminal(ProcKilled, exitCode, "")
+}
+
+// MarkExitedPID marks the record as exited only if the PID matches the
+// expected value. This makes Wait completion generation-aware: after a Chrome
+// crash and relaunch the old waiter holds the old PID and will not clobber the
+// new browser record.
+func (s *ProcessSupervisor) MarkExitedPID(id string, pid int, exitCode int) bool {
+	child, ok := s.child(id)
+	if !ok {
+		return false
+	}
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	if child.record.PID != pid {
+		return false
+	}
+	if child.record.Status != ProcRunning {
+		return false
+	}
+	child.record.Status = ProcExited
+	child.record.ExitCode = exitCode
+	child.record.EndedAt = time.Now()
+	child.record.Retained = true
+	return true
+}
+
+// MarkKilledPID is the PID-qualified variant of MarkKilled.
+func (s *ProcessSupervisor) MarkKilledPID(id string, pid int, exitCode int) bool {
+	child, ok := s.child(id)
+	if !ok {
+		return false
+	}
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	if child.record.PID != pid {
+		return false
+	}
+	if child.record.Status != ProcRunning {
+		return false
+	}
+	child.record.Status = ProcKilled
+	child.record.ExitCode = exitCode
+	child.record.EndedAt = time.Now()
+	child.record.Retained = true
+	return true
 }
 
 func (s *ProcessSupervisor) MarkFailedToStart(id string, err error) bool {

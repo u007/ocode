@@ -126,11 +126,12 @@ func launchChrome(ctx context.Context, chromePath string, sup *tool.ProcessSuper
 	}
 
 	// Start via supervisor.
-	if _, err := tool.StartSupervised(sup, cmd, tool.ProcessRegistration{
+	rec, err := tool.StartSupervised(sup, cmd, tool.ProcessRegistration{
 		ID:   "browse-chrome",
 		Name: "headless chrome",
 		Kind: tool.ProcessKindBrowser,
-	}); err != nil {
+	})
+	if err != nil {
 		_ = r3Read.Close()
 		_ = r3Write.Close()
 		_ = r4Read.Close()
@@ -141,6 +142,13 @@ func launchChrome(ctx context.Context, chromePath string, sup *tool.ProcessSuper
 	// Parent no longer needs the child ends.
 	_ = r3Read.Close()
 	_ = r4Write.Close()
+
+	// Capture PID for generation-aware exit marking. After a crash/relaunch
+	// the old waiter must not clobber the new browser record.
+	browserPID := rec.PID
+	if browserPID == 0 && cmd.Process != nil {
+		browserPID = cmd.Process.Pid
+	}
 
 	exited := make(chan int, 1)
 	go func() {
@@ -153,7 +161,15 @@ func launchChrome(ctx context.Context, chromePath string, sup *tool.ProcessSuper
 				code = 1
 			}
 		}
-		sup.MarkExited("browse-chrome", code)
+		if sup != nil && browserPID != 0 {
+			if !sup.MarkExitedPID("browse-chrome", browserPID, code) {
+				// PID mismatch means this is a stale waiter from a previous
+				// Chrome generation that has already been replaced; do not
+				// clobber the new record.
+			}
+		} else if sup != nil {
+			sup.MarkExited("browse-chrome", code)
+		}
 		select {
 		case exited <- code:
 		default:

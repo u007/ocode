@@ -199,11 +199,14 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 				messages = s.Messages
 			}
 		}
+		if projectRoot == "" {
+			projectRoot = h.workDir
+		}
 
 		// Built with no handler lock held — see agent_session.go. The resolved
 		// project root keeps the agent bound to the session's owning project;
 		// a brand-new (unresolvable) session on this legacy endpoint binds to
-		// the process workdir as before.
+		// the server's project dir (h.workDir), never the process cwd.
 		var err error
 		var stage string
 		as, stage, err = h.ensureAgentSession(sessionID, model, messages, projectRoot)

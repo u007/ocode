@@ -270,6 +270,59 @@ function fakeScroll(el: HTMLElement, initialTop: number, scrollHeight = 5000) {
 }
 
 describe("ChatPanel", () => {
+  it("seeds tuiStatus.model_prompt and renders the model-prompt row above the input", async () => {
+    function StatusSeed({ sessionId }: { sessionId: string }) {
+      const dispatch = useChatDispatch();
+      useLayoutEffect(() => {
+        dispatch({
+          type: "SET_TUI_STATUS",
+          sessionId,
+          status: {
+            main_model: "opencode-go/deepseek-v4-flash",
+            model_prompt: {
+              kind: "file",
+              path: "/Users/james/www/ocode/deepseek-v4-flash.OCODE.md",
+              tokens: 4129,
+              kaizen: [
+                { name: "conduct-tuning-deepseek-v4-flash", tuned_for: "deepseek-v4-flash", stack: "conduct" },
+              ],
+            },
+          },
+        });
+      }, []);
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <StatusSeed sessionId="sess-banner" />
+        <ChatPanel sessionId="sess-banner" />
+      </ChatProvider>,
+    );
+    await tick();
+    const row = await screen.findByTestId("model-prompt-row");
+    expect(row.textContent).toContain("◆ Model prompt");
+    expect(row.textContent).toContain("deepseek-v4-flash.OCODE.md (file)");
+    expect(row.textContent).toContain("~4.1k tok");
+    expect(row.textContent).toContain("Kaizen directives active (force-injected)");
+  });
+
+  it("renders no model-prompt row when the status carries none", async () => {
+    function EmptyStatusSeed({ sessionId }: { sessionId: string }) {
+      const dispatch = useChatDispatch();
+      useLayoutEffect(() => {
+        dispatch({ type: "SET_TUI_STATUS", sessionId, status: { main_model: "openai/gpt-4o-mini" } });
+      }, []);
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <EmptyStatusSeed sessionId="sess-no-banner" />
+        <ChatPanel sessionId="sess-no-banner" />
+      </ChatProvider>,
+    );
+    await tick();
+    expect(screen.queryByTestId("model-prompt-row")).toBeNull();
+  });
   it("shows the empty state for a new (unsaved) session", async () => {
     render(
       <ChatProvider>

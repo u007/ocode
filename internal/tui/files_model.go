@@ -96,6 +96,17 @@ type filesContentSearchPanel int
 const (
 	filesContentSearchQuery filesContentSearchPanel = iota
 	filesContentSearchExtFilter
+	filesContentSearchMatchField
+	filesContentSearchCase
+	filesContentSearchWholeWord
+	filesContentSearchIgnore
+)
+
+type filesContentSearchMode int
+
+const (
+	filesContentSearchLiteral filesContentSearchMode = iota
+	filesContentSearchRegex
 )
 
 type fileNode struct {
@@ -173,7 +184,13 @@ type filesModel struct {
 	contentSearchLoading        bool
 	contentSearchDone           bool          // true once search completed
 	contentSearchCancel         chan struct{} // non-nil while a streaming search is running
+	contentSearchGeneration     uint64        // identifies the active search generation
 	contentSearchIncludeIgnored bool          // true = search everything, false = skip .gitignore + hidden
+	contentSearchError          string
+	contentSearchMatch          filesContentSearchMode
+	contentSearchCaseSensitive  bool
+	contentSearchWholeWord      bool
+	contentSearchDirty          bool // true when inputs changed since the last run
 
 	// In-file search fields
 	inFileSearchQuery   string  // current search query
@@ -591,21 +608,22 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (out filesModel, cmd tea.Cmd) 
 		return m, nil
 	case filesContentSearchBatchMsg:
 		// Discard stale messages from a previous (cancelled) search.
-		if msg.cancel != m.contentSearchCancel {
+		if msg.cancel != m.contentSearchCancel || msg.generation != m.contentSearchGeneration {
 			return m, nil
 		}
 		m.contentSearchResults = append(m.contentSearchResults, msg.batch...)
 		m.contentSearchCursor = 0
 		m.statusMsg = fmt.Sprintf("Searching... %d results", msg.totalSoFar)
-		return m, waitSearchEvent(msg.ch, msg.cancel)
+		return m, waitSearchEventWithGeneration(msg.ch, msg.cancel, msg.generation)
 	case filesContentSearchDoneMsg:
-		if msg.cancel != m.contentSearchCancel {
+		if msg.cancel != m.contentSearchCancel || msg.generation != m.contentSearchGeneration {
 			return m, nil
 		}
 		m.contentSearchLoading = false
 		m.contentSearchDone = true
 		m.contentSearchCancel = nil
 		if msg.err != nil {
+			m.contentSearchError = msg.err.Error()
 			m.statusMsg = "search error: " + msg.err.Error()
 		} else if len(m.contentSearchResults) == 0 {
 			m.statusMsg = "no results found"
@@ -769,6 +787,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		m.statusMsg = ""
 	case "ctrl+f":
 		m.mode = filesModeContentSearch
+		m.contentSearchGeneration++
 		m.contentSearchQuery = ""
 		m.contentSearchExts = ""
 		m.contentSearchResults = nil
@@ -776,6 +795,11 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		m.contentSearchPanel = filesContentSearchQuery
 		m.contentSearchLoading = false
 		m.contentSearchDone = false
+		m.contentSearchError = ""
+		m.contentSearchMatch = filesContentSearchLiteral
+		m.contentSearchCaseSensitive = false
+		m.contentSearchWholeWord = false
+		m.contentSearchDirty = false
 		m.statusMsg = "content search: type query, Tab to switch filter, Enter to search"
 	case "ctrl+h":
 		m.showHidden = !m.showHidden
@@ -2282,7 +2306,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		deleteLines = append(deleteLines, "", lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Hint.Render("press y to confirm, esc/n to cancel")))
 		previewContent = strings.Join(deleteLines, "\n")
 	} else if m.mode == filesModeContentSearch {
-		previewContent = m.contentView(previewW-4, h, styles)
+		previewContent = m.contentView(previewW-4, contentSearchPaneHeight(h), styles)
 	} else if m.mode == filesModeInFileSearch {
 		// Search bar below the preview content
 		searchStr := "/" + m.inFileSearchQuery

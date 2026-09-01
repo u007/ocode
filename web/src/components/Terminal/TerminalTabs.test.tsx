@@ -54,6 +54,23 @@ vi.mock("@/api/client", () => ({
   authedFetch: (...args: unknown[]) => authedFetchMock(...args),
 }));
 
+// ProcessesPanel (rendered inside TerminalTabs) reads the session/browser
+// tab stores and subscribes to the event bus for its local estimate rows.
+// Static no-op stubs keep this terminal-focused test self-contained; the
+// real providers live in the app's composition root (see App.tsx).
+vi.mock("../../stores/projectStore", () => ({
+  useProjectState: () => ({ state: { tabsByProject: {}, activeTabByProject: {} } }),
+}));
+vi.mock("../../stores/browserTabsStore", () => ({
+  useBrowserTabs: () => ({ tabs: [] }),
+}));
+vi.mock("../../stores/chatStore", () => ({
+  useChatStateRef: () => ({ current: { sessions: {} } }),
+}));
+vi.mock("@/lib/eventBus", () => ({
+  eventBus: { on: () => () => {}, handlers: new Map() },
+}));
+
 const authedFetchMock = vi.fn((..._args: unknown[]) => Promise.resolve({ ok: true, status: 204 }));
 
 const sockets: MockSocket[] = [];

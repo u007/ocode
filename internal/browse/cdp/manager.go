@@ -84,6 +84,11 @@ type Manager struct {
 	opts ManagerOptions
 
 	mu sync.Mutex
+	// launchMu serializes concurrent ensureChrome callers so two Attach
+	// requests that both find m.conn == nil do not launch two unmanaged
+	// Chrome processes. The second caller blocks until the first launch
+	// completes, then reuses the newly-established connection.
+	launchMu sync.Mutex
 
 	// Chrome process state
 	conn    *Conn
@@ -126,6 +131,9 @@ func (m *Manager) SetLauncher(fn func(context.Context) (*Conn, <-chan int, func(
 
 // ensureChrome launches Chrome if not already running.
 func (m *Manager) ensureChrome(ctx context.Context) error {
+	m.launchMu.Lock()
+	defer m.launchMu.Unlock()
+
 	m.mu.Lock()
 	if m.conn != nil {
 		// Check if conn is still alive (Done not closed)
@@ -332,11 +340,15 @@ func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (
 	}
 	m.mu.Unlock()
 
-	// Create new target: need proxyServer URL
+	// Create new target: need proxyServer URL. Chrome does not honor userinfo
+	// in proxyServer, so the Fetch.authRequired handler (startHandlers) answers
+	// 407 challenges with these credentials.
 	m.mu.Lock()
 	proxyURL := ""
+	var proxyUser, proxyPass string
 	if m.proxy != nil {
 		proxyURL = m.proxy.ProxyServerURL()
+		proxyUser, proxyPass = m.proxy.UserPass()
 	}
 	conn := m.conn
 	m.mu.Unlock()
@@ -397,6 +409,8 @@ func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (
 	t := &Target{
 		manager:          m,
 		stateKey:         stateKey,
+		proxyUser:        proxyUser,
+		proxyPass:        proxyPass,
 		browserContextID: bcID,
 		targetID:         targetID,
 		sessionID:        sessionID,

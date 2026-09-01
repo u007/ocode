@@ -2,6 +2,7 @@ import { fireEvent, render, screen, act } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
+import { api } from "../../api/client";
 import { ChatProvider } from "../../stores/chatStore";
 import { TerminalProvider, useTerminalState } from "../../stores/terminalStore";
 import { BrowserTabsProvider } from "../../stores/browserTabsStore";
@@ -14,7 +15,7 @@ vi.mock("@/hooks/useTerminalConfig", () => ({
 }));
 
 vi.mock("../../api/client", () => ({
-  api: { setSessionTitle: vi.fn().mockResolvedValue(undefined) },
+  api: { setSessionTitle: vi.fn().mockResolvedValue(undefined), closeSession: vi.fn().mockResolvedValue({ cancelled: true }) },
 }));
 
 let projectFake: {
@@ -106,6 +107,16 @@ describe("UnifiedTabBar", () => {
     fireEvent.click(screen.getByLabelText("New chat session"));
     expect(openNewSessionTab).toHaveBeenCalledTimes(1);
     expect(onFocusKindChange).toHaveBeenCalledWith("chat");
+  });
+
+  it("X on a chat tab closes it AND terminates the backend session", () => {
+    renderBar();
+    fireEvent.click(screen.getByLabelText("Close Chat One"));
+    expect(closeSessionTab).toHaveBeenCalledWith("s1");
+    // The closed session's backend must be released (cancel + agent teardown),
+    // not just hidden — otherwise the server keeps running the turn nobody is
+    // viewing. Mock api.closeSession asserts the fire-and-forget call.
+    expect(api.closeSession).toHaveBeenCalledWith("s1");
   });
 
   it("⌨️+ creates a new terminal (visible as a pill) and switches focus to terminal", () => {

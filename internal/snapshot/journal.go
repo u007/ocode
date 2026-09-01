@@ -35,8 +35,10 @@ const journalFileName = "snapshots.sqlite"
 // for concurrent use (sql.DB serializes; WAL + busy_timeout handle
 // cross-process access from TUI/desktop/web against the same file).
 type Journal struct {
-	db  *sql.DB
-	dir string
+	db        *sql.DB
+	dir       string
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // journalCache shares one Journal per base dir across every Store in the
@@ -68,6 +70,41 @@ func journalFor(dir string) *Journal {
 	journalCache[dir] = j
 	go j.gc(time.Now().Add(-journalRetention))
 	return j
+}
+
+// Close closes a journal's database pool. It is idempotent so shutdown and
+// test cleanup can safely call it more than once.
+func (j *Journal) Close() error {
+	if j == nil || j.db == nil {
+		return nil
+	}
+	j.closeOnce.Do(func() {
+		j.closeErr = j.db.Close()
+	})
+	return j.closeErr
+}
+
+// CloseAllJournals closes every cached project journal and clears the cache.
+// It is called after the server has stopped accepting/drained HTTP work; the
+// cache is cleared before closing so a later cleanup cannot retain a closed
+// journal. Closing outside journalCacheMu avoids holding the cache lock while
+// database/sql waits for in-flight queries to finish.
+func CloseAllJournals() {
+	journals := make([]*Journal, 0)
+	journalCacheMu.Lock()
+	for _, j := range journalCache {
+		if j != nil {
+			journals = append(journals, j)
+		}
+	}
+	clear(journalCache)
+	journalCacheMu.Unlock()
+
+	for _, j := range journals {
+		if err := j.Close(); err != nil {
+			log.Printf("snapshot: close journal in %s: %v", j.dir, err)
+		}
+	}
 }
 
 // openJournal opens (creating if needed) dir's snapshots.sqlite.

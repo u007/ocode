@@ -13,8 +13,11 @@ import (
 
 // testSink records calls.
 type testSink struct {
-	mu       sync.Mutex
-	frames []struct{ w, h uint32; data []byte }
+	mu     sync.Mutex
+	frames []struct {
+		w, h uint32
+		data []byte
+	}
 	consoles []ConsoleEvent
 	networks []NetworkEvent
 	errors   []string
@@ -22,7 +25,10 @@ type testSink struct {
 
 func (s *testSink) Frame(w, h uint32, jpeg []byte) {
 	s.mu.Lock()
-	s.frames = append(s.frames, struct{ w, h uint32; data []byte }{w, h, jpeg})
+	s.frames = append(s.frames, struct {
+		w, h uint32
+		data []byte
+	}{w, h, jpeg})
 	s.mu.Unlock()
 }
 func (s *testSink) Console(e ConsoleEvent) {
@@ -64,8 +70,15 @@ type navCollector struct {
 	mu sync.Mutex
 	v  []NavEvent
 }
+
 func (n *navCollector) emit(e NavEvent) { n.mu.Lock(); n.v = append(n.v, e); n.mu.Unlock() }
-func (n *navCollector) get() []NavEvent { n.mu.Lock(); defer n.mu.Unlock(); cp := make([]NavEvent, len(n.v)); copy(cp, n.v); return cp }
+func (n *navCollector) get() []NavEvent {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	cp := make([]NavEvent, len(n.v))
+	copy(cp, n.v)
+	return cp
+}
 func (n *navCollector) reset() { n.mu.Lock(); n.v = nil; n.mu.Unlock() }
 
 func (s *testSink) getNetworks() []NetworkEvent {
@@ -421,6 +434,73 @@ func TestManager_FrameNavigatedBadScheme(t *testing.T) {
 	}
 }
 
+// Chrome renders its internal navigation-error page at
+// chrome-error://chromewebdata/ when a load fails (proxy/TLS/DNS error). That
+// must NOT be treated as an unsupported user scheme: the real error is already
+// emitted via Network.loadingFailed, and blanking the page would hide it.
+// Covers both event orderings (loadingFailed before/after frameNavigated)
+// since CDP does not guarantee their relative arrival order.
+func TestManager_FrameNavigatedChromeError(t *testing.T) {
+	tryOrder := func(t *testing.T, loadingFailedFirst bool) {
+		t.Helper()
+		stub := newStubChrome()
+		defer stub.Close()
+		var nc navCollector
+		m := newTestManager(t, stub, nc.emit, nil)
+		defer m.Close(context.Background())
+		tgt, _ := m.Attach(context.Background(), "k1", &testSink{})
+		time.Sleep(30 * time.Millisecond)
+		tgt.mu.Lock()
+		tgt.mainFrameID = "mf1"
+		tgt.mu.Unlock()
+		if err := tgt.Navigate(context.Background(), "https://yahoo.com"); err != nil {
+			t.Fatalf("Navigate: %v", err)
+		}
+		navBefore := len(stub.CallsFor("Page.navigate"))
+
+		loadingFailed := func() {
+			stub.InjectEvent(tgt.sessionID, "Network.loadingFailed", map[string]any{
+				"requestId": "r1", "type": "Document", "frameId": "mf1", "errorText": "net::ERR_PROXY_CONNECTION_FAILED",
+			})
+		}
+		frameNavigated := func() {
+			stub.InjectEvent(tgt.sessionID, "Page.frameNavigated", map[string]any{
+				"frame": map[string]any{"id": "mf1", "url": "chrome-error://chromewebdata/"},
+			})
+		}
+		if loadingFailedFirst {
+			loadingFailed()
+			frameNavigated()
+		} else {
+			frameNavigated()
+			loadingFailed()
+		}
+		time.Sleep(40 * time.Millisecond)
+
+		if got := len(stub.CallsFor("Page.navigate")); got != navBefore {
+			t.Errorf("chrome-error page must not be blanked via Page.navigate: got %d calls, want %d", got, navBefore)
+		}
+		for _, n := range nc.get() {
+			if containsStr(n.Error, "unsupported URL scheme") {
+				t.Errorf("chrome-error page must not emit unsupported URL scheme, got error %q", n.Error)
+			}
+		}
+		// The genuine loadingFailed error must still be observable.
+		found := false
+		for _, n := range nc.get() {
+			if containsStr(n.Error, "ERR_PROXY_CONNECTION_FAILED") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected real loadingFailed error to survive, got %v", nc.get())
+		}
+	}
+
+	t.Run("loadingFailed_first", func(t *testing.T) { tryOrder(t, true) })
+	t.Run("frameNavigated_first", func(t *testing.T) { tryOrder(t, false) })
+}
+
 func TestManager_NavigatedWithinDocument(t *testing.T) {
 	stub := newStubChrome()
 	defer stub.Close()
@@ -536,7 +616,10 @@ func TestManager_ScreencastFrame(t *testing.T) {
 	})
 	time.Sleep(40 * time.Millisecond)
 	sink.mu.Lock()
-	f := append([]struct{w,h uint32; data []byte}(nil), sink.frames...)
+	f := append([]struct {
+		w, h uint32
+		data []byte
+	}(nil), sink.frames...)
 	sink.mu.Unlock()
 	if len(f) != 1 {
 		t.Fatalf("frames %d", len(f))
@@ -693,7 +776,7 @@ func TestManager_Console(t *testing.T) {
 	// exception
 	stub.InjectEvent(tgt.sessionID, "Runtime.exceptionThrown", map[string]any{
 		"exceptionDetails": map[string]any{"text": "oops", "url": "https://x.com/app.js", "lineNumber": 10},
-		"timestamp": 1235,
+		"timestamp":        1235,
 	})
 	time.Sleep(30 * time.Millisecond)
 	sink.mu.Lock()

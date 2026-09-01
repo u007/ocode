@@ -86,6 +86,28 @@ func TestKaizenStackGating(t *testing.T) {
 	}
 }
 
+// TestKaizenDigestAdmittedForModels exercises the batch admission map used by
+// the web model picker badge: stack detected once, digest-bearing conduct
+// skills admitted per model (provider-stripped matching), mismatched models
+// excluded.
+func TestKaizenDigestAdmittedForModels(t *testing.T) {
+	root := repoRoot()
+	models := []string{"opencode-go/deepseek-v4-flash", "anthropic/claude-opus-4-8", "novita-ai/tencent/hy3"}
+	m := KaizenDigestAdmittedForModels(root, models)
+	if !m["opencode-go/deepseek-v4-flash"] {
+		t.Fatal("deepseek-v4-flash must be admitted (conduct digest present)")
+	}
+	if !m["novita-ai/tencent/hy3"] {
+		t.Fatal("tencent/hy3 must be admitted (conduct digest present)")
+	}
+	if m["anthropic/claude-opus-4-8"] {
+		t.Fatal("claude-opus-4-8 must NOT be admitted (no conduct tuning for it)")
+	}
+	if got := KaizenDigestAdmittedForModels(root, nil); len(got) != 0 {
+		t.Fatalf("expected empty map for nil models, got %v", got)
+	}
+}
+
 func TestExtractDigest(t *testing.T) {
 	cases := []struct {
 		name, in, want string

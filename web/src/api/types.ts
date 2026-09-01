@@ -73,6 +73,14 @@ export interface ModelInfo {
   favorite?: boolean;
   /** Raw membership in the shared recently-used list. */
   recent?: boolean;
+  /** True when a model-specific custom prompt ({model}.OCODE.md or the
+   *  embedded fallback) is injectable for this model — the picker badges it,
+   *  mirroring the TUI's "◆ Model prompt" row. */
+  has_model_prompt?: boolean;
+  /** True when at least one force-injected Kaizen tuning directive
+   *  (digest-bearing conduct skill) is admitted for this model in the current
+   *  project. */
+  has_kaizen?: boolean;
 }
 
 export interface AgentInfo {
@@ -323,6 +331,10 @@ export interface GitStatus {
   staged_files: string[];
   changed_files: string[];
   has_changes: boolean;
+  /** True when the directory is inside a git repo — even a clean one. The web
+   *  editor uses this to distinguish "no unstaged changes" (repo, show no
+   *  decorations) from "not a repo" (fall back to session diffs). */
+  is_repo: boolean;
 }
 
 export interface GitDiffFile {
@@ -470,7 +482,29 @@ export interface TUIStatus {
   modified_files?: FileStatus[];
   lsp_servers?: LSPStatus[];
   extra_allowed_paths?: string[];
+  // Model-prompt indicator (mirror of the TUI "◆ Model prompt" row): which
+  // model-specific custom prompt is active plus the force-injected Kaizen
+  // directives. Absent when the active model has neither.
+  model_prompt?: ModelPromptInfo;
   updated_at?: string;
+}
+
+// Model-prompt indicator payload (TUIStatus.model_prompt). Kind is "file"
+// (on-disk {model}.OCODE.md) or "embedded" (bundled fallback). Path is the
+// absolute file path for "file", the embedded filename for "embedded". Tokens
+// is the estimated prompt length (len/4, same as the TUI's estimateTok).
+// Kaizen lists the force-injected tuning directives ("conduct-tuning-X → Y").
+export interface ModelPromptInfo {
+  kind?: string;
+  path?: string;
+  tokens?: number;
+  kaizen?: KaizenDirective[];
+}
+
+export interface KaizenDirective {
+  name: string;
+  tuned_for: string;
+  stack?: string;
 }
 
 export interface FileStatus {

@@ -24,6 +24,7 @@ import (
 	"github.com/u007/ocode/internal/secretjob"
 	"github.com/u007/ocode/internal/session"
 	shellpkg "github.com/u007/ocode/internal/shell"
+	"github.com/u007/ocode/internal/skill"
 	ocodesync "github.com/u007/ocode/internal/sync"
 	"github.com/u007/ocode/internal/tabs"
 )
@@ -107,6 +108,34 @@ type Handler struct {
 	// sessions run in parallel; turns on one session are strictly ordered.
 	turnMu    sync.Mutex
 	turnLocks map[string]*sync.Mutex
+	// cancelMu guards pendingCancel, the per-session cancellation flags for
+	// HandleCancelSession. A cancel that arrives before the agent is registered
+	// (e.g. during bootstrap) is held here so executeTurnJob can observe it.
+	cancelMu      sync.Mutex
+	pendingCancel map[string]bool
+	// turnInFlight counts dispatched turn jobs that have not finished yet
+	// (registered by dispatchTurn before the job goroutine starts, released
+	// by the job's deferred completion). A cancel arriving between dispatch
+	// and the job's first pendingCancel check must still be honored, so
+	// HandleCancelSession treats a session with an in-flight job as active.
+	// A counter (not a bool) is required: multiple async sends can dispatch
+	// concurrently, and one job clearing a bool would hide a still-queued job
+	// from cancellation.
+	turnInFlight map[string]int
+
+	// closePending marks sessions whose HandleCloseSession release could not
+	// run immediately (an active turn held the agent). executeTurnJob drains
+	// the marker after the turn (or bootstrap) finishes and releases the
+	// agent then, so closing a session while it is running still tears the
+	// backend down promptly instead of waiting for the idle eviction loop.
+	// Guarded by cancelMu.
+	closePending map[string]bool
+	// saveMu guards saveLocks, the per-path file-save serialization mutexes.
+	// Concurrent PUT /api/files/content for the same realTarget are
+	// serialized so the compare-and-write 409 check is not TOCTOU-racy
+	// against other ocode saves (external editors remain uncooperative).
+	saveMu    sync.Mutex
+	saveLocks map[string]*sync.Mutex
 	// turnHeartbeatInterval is the turn_heartbeat period (10s default; tests
 	// shorten it). It must be set before any turn starts for that handler.
 	turnHeartbeatInterval time.Duration
@@ -293,6 +322,10 @@ func NewHandler() *Handler {
 		terminalSessions:  newTerminalSessionTable(),
 		terminalProcsWake: make(chan struct{}, 1),
 		secretJobs:        secretjob.NewManager(),
+		saveLocks:         make(map[string]*sync.Mutex),
+		pendingCancel:     make(map[string]bool),
+		turnInFlight:      make(map[string]int),
+		closePending:      make(map[string]bool),
 	}
 
 	// The session registry is the single authority for session → project root
@@ -743,6 +776,10 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	content, err := h.runTurn(sid, as, req.Content, opts)
+	// A close that arrived while this synchronous turn was running could not
+	// release the agent mid-turn; drain the close-pending marker now that the
+	// turn has unwound (runTurn set turnActive=false before returning).
+	h.drainPendingClose(sid)
 	if errors.Is(err, ErrPermissionPending) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -1038,6 +1075,10 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	content, err := h.runTurn(id, as, req.Content, turnOptions{})
+	// A close that arrived while this synchronous turn was running could not
+	// release the agent mid-turn; drain the close-pending marker now that the
+	// turn has unwound (runTurn set turnActive=false before returning).
+	h.drainPendingClose(id)
 	if errors.Is(err, ErrPermissionPending) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -1125,6 +1166,7 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		h.annotateModelFlags(h.workDir, modelsFiltered)
 		writeJSON(w, http.StatusOK, modelsFiltered)
 		return
 	}
@@ -1210,10 +1252,31 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.annotateModelFlags(h.workDir, models)
 	writeJSON(w, http.StatusOK, models)
 }
 
-// containsStr reports whether s is present in xs.
+// annotateModelFlags computes, for every listed model, whether an injectable
+// model-specific custom prompt exists ({model}.OCODE.md via the root-anchored
+// loader) and whether a force-injected Kaizen tuning directive is admitted for
+// it in this project. The Kaizen stack is detected ONCE for all models; the
+// custom-prompt check reads only matching files. Root is the server's anchored
+// workdir — never the process cwd (desktop boots with cwd "/").
+func (h *Handler) annotateModelFlags(root string, models []ModelInfo) {
+	ids := make([]string, 0, len(models))
+	for _, m := range models {
+		ids = append(ids, m.Name)
+	}
+	kaizen := skill.KaizenDigestAdmittedForModels(root, ids)
+	for i := range models {
+		if kaizen[models[i].Name] {
+			models[i].HasKaizen = true
+		}
+		if res := agent.LoadModelContextWithSourceAt(root, models[i].Name); res.Kind != "" {
+			models[i].HasModelPrompt = true
+		}
+	}
+}
 func containsStr(xs []string, s string) bool {
 	for _, x := range xs {
 		if x == s {

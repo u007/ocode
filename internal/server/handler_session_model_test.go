@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/u007/ocode/internal/session"
@@ -17,6 +18,43 @@ func setSessionModel(t *testing.T, h *Handler, id, model string) *httptest.Respo
 	rec := httptest.NewRecorder()
 	h.HandleSetSessionModel(rec, httptest.NewRequest("PUT", "/api/sessions/"+id+"/model", bytes.NewReader(raw)), id)
 	return rec
+}
+
+// TestEffectiveSessionModelFallbackConfigReplacement exercises the synchronized
+// config replacement path concurrently with fallback model reads. A plain
+// expected-value assertion would not catch the h.cfg pointer race that this
+// protects against.
+func TestEffectiveSessionModelFallbackConfigReplacement(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	h.mu.Lock()
+	cfg := h.cfg
+	h.mu.Unlock()
+	if cfg == nil {
+		t.Skip("no config loaded")
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 20 {
+			// Mirror the synchronized h.cfg replacement performed by
+			// SetWorkDir without concurrently changing h.workDir, which is
+			// intentionally outside this regression's scope.
+			h.mu.Lock()
+			h.cfg = cfg
+			h.mu.Unlock()
+		}
+	})
+	wg.Go(func() {
+		for range 200 {
+			_ = h.effectiveSessionModel(id)
+		}
+	})
+	wg.Wait()
 }
 
 // sessionStatusMainModel fetches the per-session status snapshot and returns

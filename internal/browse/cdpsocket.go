@@ -16,22 +16,22 @@ import (
 
 // clientMsg is the inbound JSON from the browser panel.
 type clientMsg struct {
-	T         string  `json:"t"`
-	URL       string  `json:"url,omitempty"`
-	W         int     `json:"w,omitempty"`
-	H         int     `json:"h,omitempty"`
-	DPR       float64 `json:"dpr,omitempty"`
-	Kind      string  `json:"kind,omitempty"`
-	X         float64 `json:"x,omitempty"`
-	Y         float64 `json:"y,omitempty"`
-	Button    string  `json:"button,omitempty"`
-	ClickCount int    `json:"clickCount,omitempty"`
-	DeltaX    float64 `json:"deltaX,omitempty"`
-	DeltaY    float64 `json:"deltaY,omitempty"`
-	Modifiers int     `json:"modifiers,omitempty"`
-	Key       string  `json:"key,omitempty"`
-	Code      string  `json:"code,omitempty"`
-	Text      string  `json:"text,omitempty"`
+	T          string  `json:"t"`
+	URL        string  `json:"url,omitempty"`
+	W          int     `json:"w,omitempty"`
+	H          int     `json:"h,omitempty"`
+	DPR        float64 `json:"dpr,omitempty"`
+	Kind       string  `json:"kind,omitempty"`
+	X          float64 `json:"x,omitempty"`
+	Y          float64 `json:"y,omitempty"`
+	Button     string  `json:"button,omitempty"`
+	ClickCount int     `json:"clickCount,omitempty"`
+	DeltaX     float64 `json:"deltaX,omitempty"`
+	DeltaY     float64 `json:"deltaY,omitempty"`
+	Modifiers  int     `json:"modifiers,omitempty"`
+	Key        string  `json:"key,omitempty"`
+	Code       string  `json:"code,omitempty"`
+	Text       string  `json:"text,omitempty"`
 }
 
 // cdpSink implements cdp.FrameSink by forwarding to the single writer channel.

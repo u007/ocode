@@ -128,13 +128,11 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 		msgs = append(msgs, Message{Role: "system", Content: promptContextMarker + "\nContext and rules:\n" + ctx})
 	}
 	if a.client != nil {
-		if !a.preloadedModelContextReady {
-			res := LoadModelContextWithSource(a.client.GetModel())
-			a.preloadedModelContext = res.Content
-			a.preloadedModelContextKind = res.Kind
-			a.preloadedModelContextPath = res.Path
-			a.preloadedModelContextReady = true
-		}
+		// Anchor the search at the agent's workDir (the real project) — the
+		// process cwd can be "/" for desktop/web launches and would silently
+		// find nothing (or the wrong project's file). Cache shared with
+		// ModelContextInfo/ModelContextContent.
+		a.loadModelContextCached()
 		if a.preloadedModelContext != "" {
 			msgs = append(msgs, Message{Role: "system", Content: promptModelCtxMarker + "\nModel-specific context:\n" + a.preloadedModelContext})
 		}

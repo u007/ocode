@@ -18,8 +18,18 @@ describe("DevConsole", () => {
     onClearNetwork: vi.fn(),
   };
 
+  it("starts collapsed and expands on toggle", () => {
+    render(<DevConsole {...base} />);
+    expect(screen.queryByText(/hello world/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Expand console"));
+    expect(screen.getByText(/hello world/)).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Collapse console"));
+    expect(screen.queryByText(/hello world/)).not.toBeInTheDocument();
+  });
+
   it("filters console entries", () => {
     render(<DevConsole {...base} />);
+    fireEvent.click(screen.getByLabelText("Expand console"));
     expect(screen.getByText(/hello world/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Filter"), { target: { value: "boom" } });
     expect(screen.queryByText(/hello world/)).not.toBeInTheDocument();
@@ -35,6 +45,7 @@ describe("DevConsole", () => {
 
   it("switches to the Network tab", () => {
     render(<DevConsole {...base} />);
+    fireEvent.click(screen.getByLabelText("Expand console"));
     fireEvent.click(screen.getByRole("tab", { name: /network/i }));
     expect(screen.getByText("https://a.dev/x")).toBeInTheDocument();
   });

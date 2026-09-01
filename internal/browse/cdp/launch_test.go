@@ -70,7 +70,10 @@ func TestFindChrome_ProbeOrder(t *testing.T) {
 			}
 			return nil, os.ErrNotExist
 		}
-		chromeLookPath = func(string) (string, error) { t.Fatal("lookPath should not be called on darwin"); return "", errors.New("no") }
+		chromeLookPath = func(string) (string, error) {
+			t.Fatal("lookPath should not be called on darwin")
+			return "", errors.New("no")
+		}
 		t.Setenv("OCODE_CHROME_PATH", "")
 		got, err := FindChrome("")
 		if err != nil {

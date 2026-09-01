@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Routes, Route } from "react-router-dom";
-import { PanelLeft, PanelLeftClose, Plus } from "lucide-react";
+import { PanelLeft, PanelLeftClose, PanelRight, PanelRightClose, Plus, X } from "lucide-react";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, findProjectPathForTab, useProjectState } from "./stores/projectStore";
@@ -51,7 +51,7 @@ import FilePicker from "./components/Files/FilePicker";
 import ConfirmCloseDialog from "./components/Files/ConfirmCloseDialog";
 import { isNewSessionTabEmpty, rekeyDraft } from "./lib/tabDrafts";
 import { rekeyQueue, clearQueue } from "./lib/tabQueue";
-import { cancelLiveDeltas } from "./lib/sessionEvents";
+import { cancelLiveDeltas, closeSessionBackend } from "./lib/sessionEvents";
 import { notifyWailsRuntimeReady } from "./lib/wails";
 import { setPendingHighlight, peekPendingHighlight } from "./lib/fileSearchHighlight";
 import { eventBus } from "./lib/eventBus";
@@ -204,6 +204,7 @@ function HomeApp() {
     cancelClose,
     saveError,
     saveEditorTab,
+    forceSaveEditorTab,
     reloadTabFromDisk,
     dismissExternalChange,
   } = useEditorTabs();
@@ -215,6 +216,19 @@ function HomeApp() {
     () => editorTabs.filter((t) => t.includeInContext !== false).map((t) => ({ path: t.path, projectRoot: t.projectRoot })),
     [editorTabs],
   );
+
+  // Effective active editor context respects the include toggle. Unchecking
+  // the file in the preview (EditorTabBar) must immediately remove it from
+  // the chat attachment, otherwise the next send still includes it via
+  // ChatInput's `activeEditorContext` even though the tab is excluded.
+  const effectiveActiveEditorContext = useMemo(() => {
+    if (!activeEditorContext) return null;
+    const tab = editorTabs.find(
+      (t) => t.path === activeEditorContext.path && (t.projectRoot ?? "") === (activeEditorContext.projectRoot ?? ""),
+    );
+    if (tab && tab.includeInContext === false) return null;
+    return activeEditorContext;
+  }, [activeEditorContext, editorTabs]);
 
   useEffect(() => {
     const onDelete = (e: Event) => {
@@ -272,11 +286,12 @@ function HomeApp() {
   );
 
   // File links in chat (markdown + plain text) dispatch this event.
+  // Also handles editor link clicks (which carry projectRoot).
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { path: string; line?: number };
+      const detail = (e as CustomEvent).detail as { path: string; line?: number; projectRoot?: string };
       if (!detail?.path) return;
-      const projectRoot = projectState.activeProject?.path;
+      const projectRoot = detail.projectRoot ?? projectState.activeProject?.path;
       void openFileAndShow(detail.path, projectRoot, detail.line);
     };
     window.addEventListener(OPEN_FILE_EVENT, handler as EventListener);
@@ -447,6 +462,7 @@ function HomeApp() {
         return;
       }
       if (activeView !== "sessions" || focusedKind !== "chat" || !activeTabId) return;
+      closeSessionBackend(activeTabId);
       closeSessionTab(activeTabId);
       cancelLiveDeltas(activeTabId);
       clearQueue(activeTabId);
@@ -473,6 +489,17 @@ function HomeApp() {
       newId: sessionId,
       newTitle: "New session",
     });
+    // Replace the placeholder with the authoritative session title once the
+    // server has persisted it (auto title from first message). This covers
+    // the race where the api.chat() 202 response wins before the
+    // session_started SSE event's own fetch. Wrap in Promise.resolve for
+    // test mocks that may return synchronously.
+    void Promise.resolve(api.getSession(sessionId)).then((detail: any) => {
+      const t = detail?.title?.trim() || "";
+      if (t && t !== "New session") {
+        projectDispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: t });
+      }
+    }).catch(() => {});
   }, [dispatch, projectDispatch]);
 
   // Commands may be drained by a hidden ChatInput belonging to a background
@@ -700,7 +727,7 @@ function HomeApp() {
                   chat content wrapper: each of those is hidden when the other kind is focused,
                   so a bar nested in either would vanish with it. */}
               {activeView === "sessions" && (
-                <div className="flex items-center">
+                <div className="flex items-center p-1">
                   <div className="flex-1 min-w-0">
                     <UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={setFocusedKind} />
                   </div>
@@ -767,7 +794,7 @@ function HomeApp() {
                   style={{ width: fileTreePane.collapsed ? 0 : fileTreePane.width }}
                 >
                   <div className="absolute inset-0" style={{ width: fileTreePane.width }}>
-                    <FileTree onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} />
+                    <FileTree onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} includedPaths={contextFileEntries.filter((e) => (e.projectRoot ?? "") === (projectState.activeProject?.path ?? "")).map((e) => e.path)} />
                   </div>
                 </div>
                 {!fileTreePane.collapsed && (
@@ -822,6 +849,7 @@ function HomeApp() {
                           externalChange={et.externalChange}
                           onReloadFromDisk={() => reloadTabFromDisk(et.id)}
                           onDismissExternalChange={() => dismissExternalChange(et.id)}
+                          onForceSave={() => forceSaveEditorTab(et.id)}
                         />
                       </div>
                     ))}
@@ -875,7 +903,7 @@ function HomeApp() {
                           <ChatInput
                             onSlashCommand={handleCommand}
                             activeEditorContext={
-                              activeEditorContext && (activeEditorContext.projectRoot ?? "") === (tab.projectPath ?? "") ? activeEditorContext : null
+                              effectiveActiveEditorContext && (effectiveActiveEditorContext.projectRoot ?? "") === (tab.projectPath ?? "") ? effectiveActiveEditorContext : null
                             }
                             contextFilePaths={contextFileEntries.filter((e) => (e.projectRoot ?? "") === (tab.projectPath ?? "")).map((e) => e.path)}
                             sessionTabId={tab.id}
@@ -944,41 +972,83 @@ function HomeApp() {
 
           {/* Side browser panel — resizable/collapsible, accompanies the focused
               chat/terminal session (never the full-width browser tab). Its live
-              page state lives in browserStore under the side: stateKey. */}
+              page state lives in browserStore under the side: stateKey.
+              Collapse keeps the surface mounted (BrowserPanel suppresses the
+              iframe while `collapsed`, so the browse grant/session survives);
+              close deletes the state and revokes the server session. */}
           {sideStateKey && browserOpen && (
             <>
-              <div
-                ref={browserPane.handleRef}
-                role="separator"
-                aria-orientation="vertical"
-                aria-valuemin={browserPane.minWidth}
-                aria-valuemax={browserPane.maxWidth}
-                aria-valuenow={browserPane.width}
-                aria-label="Resize browser panel"
-                tabIndex={0}
-                className="w-1 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/60 transition-colors"
-                onPointerDown={browserPane.onPointerDown}
-                onDoubleClick={browserPane.resetToDefault}
-                onKeyDown={(e) => {
-                  const step = e.shiftKey ? 50 : 10;
-                  if (e.key === "ArrowLeft") {
-                    e.preventDefault();
-                    browserPane.setWidth(browserPane.width - step);
-                  } else if (e.key === "ArrowRight") {
-                    e.preventDefault();
-                    browserPane.setWidth(browserPane.width + step);
-                  } else if (e.key === "Home") {
-                    e.preventDefault();
-                    browserPane.resetToDefault();
-                  }
-                }}
-              />
-              <div
-                style={{ width: browserPane.width }}
-                className="flex-shrink-0 h-full min-h-0 flex flex-col border-l border-border"
-              >
-                <BrowserPanel key={sideStateKey} stateKey={sideStateKey} mode="side" />
-              </div>
+              {sideTabState?.collapsed ? (
+                <button
+                  type="button"
+                  onClick={() => browserActions.setCollapsed(sideStateKey, false)}
+                  title="Show browser panel"
+                  aria-label="Show browser panel"
+                  className="flex shrink-0 items-center justify-center self-stretch w-7 border-l border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                >
+                  <PanelRight className="w-4 h-4" />
+                </button>
+              ) : (
+                <>
+                  <div
+                    ref={browserPane.handleRef}
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-valuemin={browserPane.minWidth}
+                    aria-valuemax={browserPane.maxWidth}
+                    aria-valuenow={browserPane.width}
+                    aria-label="Resize browser panel"
+                    tabIndex={0}
+                    className="w-1 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/60 transition-colors"
+                    onPointerDown={browserPane.onPointerDown}
+                    onDoubleClick={browserPane.resetToDefault}
+                    onKeyDown={(e) => {
+                      const step = e.shiftKey ? 50 : 10;
+                      if (e.key === "ArrowLeft") {
+                        e.preventDefault();
+                        browserPane.setWidth(browserPane.width - step);
+                      } else if (e.key === "ArrowRight") {
+                        e.preventDefault();
+                        browserPane.setWidth(browserPane.width + step);
+                      } else if (e.key === "Home") {
+                        e.preventDefault();
+                        browserPane.resetToDefault();
+                      }
+                    }}
+                  />
+                  <div
+                    style={{ width: browserPane.width }}
+                    className="flex-shrink-0 h-full min-h-0 flex flex-col border-l border-border"
+                  >
+                    <div className="flex shrink-0 items-center justify-between h-8 pl-3 pr-1.5 border-b border-border">
+                      <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">Browser</span>
+                      <div className="flex shrink-0 items-center gap-0.5">
+                        <button
+                          type="button"
+                          onClick={() => browserActions.setCollapsed(sideStateKey, true)}
+                          title="Collapse browser panel"
+                          aria-label="Collapse browser panel"
+                          className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                          <PanelRightClose className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => browserActions.close(sideStateKey)}
+                          title="Close browser panel"
+                          aria-label="Close browser panel"
+                          className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex-1 min-h-0">
+                      <BrowserPanel key={sideStateKey} stateKey={sideStateKey} mode="side" />
+                    </div>
+                  </div>
+                </>
+              )}
             </>
           )}
           </div>

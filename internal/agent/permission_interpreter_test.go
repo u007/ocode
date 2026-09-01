@@ -444,7 +444,7 @@ func TestMatchInterpreterGrant(t *testing.T) {
 	if pm.MatchInterpreterGrant(ie, "abc", true) {
 		t.Fatal("no grant should match")
 	}
-	pm.AddAutoGrant(config.AutoGrant{Kind: "interpreter_exact", Language: "python", SourceMode: "script_file", NormalizedCommand: normalizeGrantCommand(cmd), EntrypointPath: grantPath, EntrypointSHA256: "abc", CWD: safeGetwd()})
+	pm.AddAutoGrant(config.AutoGrant{Kind: "interpreter_exact", Language: "python", SourceMode: "script_file", NormalizedCommand: normalizeGrantCommand(cmd), EntrypointPath: grantPath, EntrypointSHA256: "abc", CWD: pm.effectiveWorkDir()})
 	if !pm.MatchInterpreterGrant(ie, "abc", true) {
 		t.Fatal("expected matching grant")
 	}
@@ -459,7 +459,7 @@ func TestMatchInterpreterGrant(t *testing.T) {
 	}
 
 	// Destructive grant: must NOT match when allowDestructive is false.
-	pm.AddAutoGrant(config.AutoGrant{Kind: "interpreter_exact", Language: "python", SourceMode: "script_file", NormalizedCommand: normalizeGrantCommand(cmd), EntrypointPath: grantPath, EntrypointSHA256: "def", CWD: safeGetwd(), Destructive: true})
+	pm.AddAutoGrant(config.AutoGrant{Kind: "interpreter_exact", Language: "python", SourceMode: "script_file", NormalizedCommand: normalizeGrantCommand(cmd), EntrypointPath: grantPath, EntrypointSHA256: "def", CWD: pm.effectiveWorkDir(), Destructive: true})
 	destructIE := &InterpreterExec{Language: "python", SourceMode: "script_file", Entrypoint: grantPath, RawCommand: cmd}
 	if pm.MatchInterpreterGrant(destructIE, "def", false) {
 		t.Fatal("destructive grant must not match when allowDestructive is false")
@@ -768,6 +768,7 @@ func TestRunPermissionModelLoopCancelledShortCircuits(t *testing.T) {
 		nil,
 		"fake-model",
 		"bash",
+		"",
 		nil,
 	)
 	if gotFinal {

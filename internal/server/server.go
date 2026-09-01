@@ -236,6 +236,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/context", s.authMiddleware(s.handleSessionContext))
 	s.mux.HandleFunc("POST /api/sessions/{id}/truncate", s.authMiddleware(s.handler.HandleTruncateSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/cancel", s.authMiddleware(s.handleCancelSession))
+	s.mux.HandleFunc("POST /api/sessions/{id}/close", s.authMiddleware(s.handleCloseSession))
 
 	// Files
 	s.mux.HandleFunc("POST /api/files/undo", s.authMiddleware(s.handleUndo))
@@ -1228,6 +1229,10 @@ func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleCancelSession(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleCancelSession(w, r, r.PathValue("id"))
+}
+
+func (s *Server) handleCloseSession(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleCloseSession(w, r, r.PathValue("id"))
 }
 
 // File shims

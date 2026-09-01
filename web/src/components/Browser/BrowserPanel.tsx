@@ -35,19 +35,25 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
 
   const showIframe = !!s && s.panelOpen && !s.collapsed;
 
-  // Surface selection: the server nav event's mode is authoritative once one
-  // has arrived; before that (mode null, first mount) fall back to the host
-  // predicate — the same rule the Go router uses, so the SPA mounts the right
-  // viewport before the first browse_nav lands.
+  // Surface selection: for private hosts the local proxy is ALWAYS the right
+  // surface unless the user explicitly overrode it via userMode — the CDP
+  // target's nav events otherwise pin mode to "chrome" after the user exits
+  // the override and the panel would stay stuck on the Chrome canvas. For
+  // public hosts the server nav event's mode is authoritative once one has
+  // arrived; before that (mode null) the host predicate decides (the same
+  // rule the Go router uses).
   const effectiveMode: "local" | "chrome" = (() => {
     if (!s) return "local";
-    if (s.mode) return s.mode;
+    if (s.userMode) return s.userMode;
+    let privateHost = false;
     try {
-      const u = new URL(normalizeBrowseURL(s.url));
-      return isPrivateHost(u.host) ? "local" : "chrome";
+      privateHost = isPrivateHost(new URL(normalizeBrowseURL(s.url)).host);
     } catch {
-      return "chrome";
+      // Unparseable URL: trust the server navigation mode.
+      return s.mode ?? "chrome";
     }
+    if (privateHost) return "local";
+    return s.mode ?? "chrome";
   })();
 
   // Every top-level iframe load carries a fresh grant. Besides authenticating
@@ -71,8 +77,10 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
     if (!s) return;
     const iframe = iframeRef.current;
     if (showIframe && iframe && base) void loadInto(iframe, s.url);
-    // Re-run on url change (navigate/back/forward/reload set a new s.url or bump a nonce).
-  }, [showIframe, base, s?.url, s?.historyIndex, loadInto]);
+    // Re-run on url change (navigate/back/forward/reload set a new s.url or
+    // bump a nonce) and on surface flips: an iframe remounted after a
+    // chrome→local switch needs its src (re)issued, or it mounts blank.
+  }, [showIframe, base, s?.url, s?.historyIndex, effectiveMode, loadInto]);
 
   // Reset the dismiss flag on navigation.
   useEffect(() => {
@@ -171,6 +179,32 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
             className="ml-auto text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 px-1"
           >
             ×
+          </button>
+        </div>
+      )}
+      {s.userMode === "chrome" && (
+        <div className="px-3 py-1.5 bg-sky-50/70 dark:bg-sky-950/50 border-b border-sky-200/50 dark:border-sky-800/50 text-xs flex items-center gap-2" role="status" data-testid="chrome-mode-banner">
+          <span className="text-sky-700 dark:text-sky-300 font-medium">Rendering in real Chrome (CDP)</span>
+          <span className="text-neutral-600 dark:text-neutral-400">— this page loads natively, outside the embedded proxy.</span>
+          <button
+            onClick={() => actions.setUserMode(stateKey, null)}
+            className="ml-auto rounded bg-sky-600 hover:bg-sky-700 text-white px-2 py-0.5 text-xs font-medium"
+          >
+            Exit Chrome mode
+          </button>
+        </div>
+      )}
+      {s.error?.startsWith("dev-server-module-graph") && s.userMode !== "chrome" && (
+        <div className="px-3 py-2 bg-indigo-50 dark:bg-indigo-950 border-b border-indigo-200 dark:border-indigo-800 text-sm flex items-center gap-3" role="alert" data-testid="dev-server-banner">
+          <span className="flex-1">
+            <span className="font-medium">Dev server can't render in the embedded proxy</span>
+            <span className="text-neutral-600 dark:text-neutral-400"> — {s.error.replace(/^dev-server-module-graph:\s*/, "")}</span>
+          </span>
+          <button
+            onClick={() => actions.setUserMode(stateKey, "chrome")}
+            className="shrink-0 rounded bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1 text-xs font-medium"
+          >
+            Open in Chrome mode
           </button>
         </div>
       )}

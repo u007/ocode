@@ -1,5 +1,29 @@
 # TODO
 
+## Pending permission asks do not survive a server restart (2026-08-31)
+
+`session.LoadForDir` runs `removeIncompleteToolRequests`, which strips
+`PERMISSION_ASK:` / waiting-for-user sentinels (and the tool call that raised
+them) from every loaded transcript. Several server comments assume the
+opposite ("the sentinel lives in the persisted transcript, so a reload already
+recovers it" — session_manager.go `liveFrameEvents`, sessionEvents.ts
+reconcile). Consequences:
+
+- After `ocode serve` / the desktop restarts, a session paused on a permission
+  ask cannot be resolved: `findPendingSession` only searches resident agents
+  and the reloaded transcript no longer contains the ask, so
+  `POST /api/permissions/resolve` returns 404. A still-open browser tab keeps
+  the dialog from its in-memory slice; the web client now dismisses it on
+  404/409 and shows why (useChat.resolvePermission) instead of leaving it
+  stuck, but the ask itself is lost — the user has to re-prompt.
+- The first-page history fetch (`GET /api/sessions/:id`) never carries the
+  sentinel either, so a reload during a pause shows no dialog at all.
+
+Fix direction: keep trailing-round pending asks when loading (server + TUI
+resume both know how to re-surface them — `tailIsPermissionAsk`,
+`parsePermissionRequest`), and let `findPendingSession` load a non-resident
+session via `getOrCreateAgentSession` before scanning.
+
 ## Snapshot journal — deferred follow-ups (2026-08-30)
 
 The per-project snapshot journal (`snapshots.sqlite` in

@@ -23,6 +23,10 @@ export interface EditorTab {
   /** When true (the default) the opened file is attached to the LLM loop /
    *  chat context on send. Unchecking excludes it without closing the tab. */
   includeInContext: boolean;
+  /** Hash of the disk content at the last accepted point (load or successful
+   *  save). Used as the expected_hash for the save guard; not rebased on
+   *  external-change detection for dirty tabs so a normal save correctly 409s. */
+  baseHash: string;
 }
 export interface ActiveEditorContext {
   path: string;
@@ -44,7 +48,8 @@ export interface UseEditorTabsResult {
   renameTabPath: (oldPath: string, newPath: string, projectRoot?: string) => void;
   activeEditorContext: ActiveEditorContext | null;
   requestCloseTab: (id: string) => void;
-  saveEditorTab: (id: string) => Promise<void>;
+  saveEditorTab: (id: string, opts?: { force?: boolean }) => Promise<void>;
+  forceSaveEditorTab: (id: string) => Promise<void>;
   pendingClose: { id: string; path: string } | null;
   confirmSaveAndClose: () => Promise<void>;
   confirmDiscardAndClose: () => void;
@@ -99,6 +104,9 @@ export function useEditorTabs(): UseEditorTabsResult {
         // Unsaved edits survive the reload. If the on-disk content no longer
         // matches what the draft was edited against, the file moved under the
         // draft — flag it so the tab shows a conflict banner.
+        // Keep baseHash as the old draft base so the save guard still 409s
+        // until the user reloads or force-saves; originalContent reflects
+        // the current disk for diff display.
         tab = {
           id,
           path,
@@ -109,6 +117,7 @@ export function useEditorTabs(): UseEditorTabsResult {
           diffVersion: 0,
           externalChange: draft.baseHash !== hashContent(disk),
           includeInContext: true,
+          baseHash: draft.baseHash,
         };
       } else {
         if (draft) clearEditorDraft(id); // draft matches disk — it was saved elsewhere
@@ -122,6 +131,7 @@ export function useEditorTabs(): UseEditorTabsResult {
           diffVersion: 0,
           externalChange: false,
           includeInContext: true,
+          baseHash: hashContent(disk),
         };
       }
     } catch (err) {
@@ -146,6 +156,7 @@ export function useEditorTabs(): UseEditorTabsResult {
         diffVersion: 0,
         externalChange: true,
         includeInContext: true,
+        baseHash: draft.baseHash,
       };
     }
     // Defensive dedupe: never append a second tab for an id that slipped
@@ -207,7 +218,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     const tab = editorTabsRef.current.find((t) => t.id === id);
     if (!tab) return;
     if (tab.isDirty) {
-      saveEditorDraft(id, { content: tab.content, baseHash: hashContent(tab.originalContent) });
+      saveEditorDraft(id, { content: tab.content, baseHash: tab.baseHash });
     } else {
       clearEditorDraft(id);
     }
@@ -311,26 +322,38 @@ export function useEditorTabs(): UseEditorTabsResult {
   );
 
   const saveEditorTab = useCallback(
-    async (id: string) => {
+    async (id: string, opts?: { force?: boolean }) => {
       const tab = editorTabs.find((t) => t.id === id);
       if (!tab) return;
       try {
-        await api.saveFileContent(tab.path, tab.content, tab.projectRoot);
+        const expectedHash = tab.baseHash;
+        await api.saveFileContent(tab.path, tab.content, tab.projectRoot, expectedHash, opts?.force);
         setSaveError(null);
         clearEditorDraft(id);
         setEditorTabs((prev) =>
           prev.map((t) =>
             t.id === id
-              ? { ...t, originalContent: t.content, isDirty: false, diffVersion: t.diffVersion + 1, externalChange: false }
+              ? { ...t, originalContent: t.content, isDirty: false, diffVersion: t.diffVersion + 1, externalChange: false, baseHash: hashContent(t.content) }
               : t,
           ),
         );
       } catch (err) {
-        setSaveError(err instanceof Error ? err.message : "Failed to save file");
+        const isConflict = err instanceof Error && (err as any).status === 409;
+        if (isConflict) {
+          setEditorTabs((prev) => prev.map((t) => (t.id === id ? { ...t, externalChange: true } : t)));
+          setSaveError("File changed on disk since you opened it — reload from disk or force-save to overwrite.");
+        } else {
+          setSaveError(err instanceof Error ? err.message : "Failed to save file");
+        }
         throw err;
       }
     },
     [editorTabs],
+  );
+
+  const forceSaveEditorTab = useCallback(
+    async (id: string) => saveEditorTab(id, { force: true }),
+    [saveEditorTab],
   );
 
   const confirmSaveAndClose = useCallback(async () => {
@@ -369,7 +392,7 @@ export function useEditorTabs(): UseEditorTabsResult {
         setEditorTabs((prev) =>
           prev.map((t) =>
             t.id === id
-              ? { ...t, content: disk, originalContent: disk, isDirty: false, diffVersion: t.diffVersion + 1, externalChange: false }
+              ? { ...t, content: disk, originalContent: disk, isDirty: false, diffVersion: t.diffVersion + 1, externalChange: false, baseHash: hashContent(disk) }
               : t,
           ),
         );
@@ -427,49 +450,106 @@ export function useEditorTabs(): UseEditorTabsResult {
     );
   }, []);
 
-  // Watch the active tab for modifications made outside the app: re-fetch its
-  // content every 10s (and on window focus, the moment users typically come
-  // back from an external editor). A clean tab silently follows the disk; a
-  // dirty tab keeps the user's edits, rebases originalContent onto the new
-  // disk state, and raises the externalChange banner.
+  // Watch all open tabs for modifications made outside the app: re-fetch
+  // each file every 10s (and on window focus / visibility, the moment
+  // users typically come back from an external editor). A clean tab
+  // silently follows the disk; a dirty tab keeps the user's edits,
+  // rebases originalContent onto the new disk state, and raises the
+  // externalChange banner. This covers inactive tabs too, so switching
+  // back never shows stale content.
   useEffect(() => {
-    if (!activeEditorTabId) return;
     let cancelled = false;
 
-    const check = async () => {
-      if (document.hidden) return;
-      const tab = editorTabsRef.current.find((t) => t.id === activeEditorTabId);
-      if (!tab) return;
+    const checkOne = async (tab: EditorTab) => {
       try {
         const disk = await fetchFileContent(tab.path, tab.projectRoot);
-        if (cancelled || disk === tab.originalContent) return;
+        if (cancelled) return;
+        // Use baseHash for change detection so dirty tabs that haven't rebased
+        // don't compare against a stale originalContent that was already
+        // updated to the new disk.
+        const diskHash = hashContent(disk);
+        if (diskHash === tab.baseHash) return;
         setEditorTabs((prev) =>
           prev.map((t) => {
-            if (t.id !== tab.id || t.originalContent === disk) return t;
+            if (t.id !== tab.id || hashContent(disk) === t.baseHash) return t;
             if (!t.isDirty) {
-              return { ...t, content: disk, originalContent: disk, diffVersion: t.diffVersion + 1 };
+              return { ...t, content: disk, originalContent: disk, baseHash: diskHash, diffVersion: t.diffVersion + 1 };
             }
-            return { ...t, originalContent: disk, isDirty: t.content !== disk, externalChange: t.content !== disk };
+            // Dirty: if external edit happens to match the buffer, resolve
+            // to clean; otherwise keep the user's edits and flag conflict
+            // without rebasing baseHash/originalContent so the save guard 409s.
+            if (t.content === disk) {
+              return { ...t, originalContent: disk, baseHash: diskHash, isDirty: false, externalChange: false, diffVersion: t.diffVersion + 1 };
+            }
+            return { ...t, externalChange: true };
           }),
         );
       } catch (err) {
-        // The file disappeared out from under an open tab. Flag rather than
-        // spam: the banner covers "modified or deleted outside the app".
         console.error("External-change check failed (file unreadable):", err);
         if (!cancelled) {
           setEditorTabs((prev) =>
-            prev.map((t) => (t.id === activeEditorTabId && t.isDirty ? { ...t, externalChange: true } : t)),
+            prev.map((t) => (t.id === tab.id && t.isDirty ? { ...t, externalChange: true } : t)),
           );
         }
       }
     };
 
-    const interval = window.setInterval(check, 10_000);
-    window.addEventListener("focus", check);
+    const checkAll = async () => {
+      if (document.hidden) return;
+      const tabs = editorTabsRef.current;
+      if (tabs.length === 0) return;
+      // Sequential to avoid thundering reads; parallel is fine too but
+      // sequential keeps server contention low when many tabs are open.
+      for (const tab of tabs) {
+        if (cancelled) break;
+        // eslint-disable-next-line no-await-in-loop
+        await checkOne(tab);
+      }
+    };
+
+    const interval = window.setInterval(checkAll, 10_000);
+    window.addEventListener("focus", checkAll);
+    document.addEventListener("visibilitychange", checkAll);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
-      window.removeEventListener("focus", check);
+      window.removeEventListener("focus", checkAll);
+      document.removeEventListener("visibilitychange", checkAll);
+    };
+  }, [fetchFileContent]);
+
+  // Also re-check the newly activated tab immediately when switching,
+  // so the user never briefly sees stale content before the next poll.
+  useEffect(() => {
+    if (!activeEditorTabId) return;
+    let cancelled = false;
+    (async () => {
+      if (document.hidden) return;
+      const tab = editorTabsRef.current.find((t) => t.id === activeEditorTabId);
+      if (!tab) return;
+      try {
+        const disk = await fetchFileContent(tab.path, tab.projectRoot);
+        if (cancelled) return;
+        const diskHash = hashContent(disk);
+        if (diskHash === tab.baseHash) return;
+        setEditorTabs((prev) =>
+          prev.map((t) => {
+            if (t.id !== tab.id || hashContent(disk) === t.baseHash) return t;
+            if (!t.isDirty) {
+              return { ...t, content: disk, originalContent: disk, baseHash: diskHash, diffVersion: t.diffVersion + 1 };
+            }
+            if (t.content === disk) {
+              return { ...t, originalContent: disk, baseHash: diskHash, isDirty: false, externalChange: false, diffVersion: t.diffVersion + 1 };
+            }
+            return { ...t, externalChange: true };
+          }),
+        );
+      } catch {
+        // Swallow; the periodic check will flag if needed.
+      }
+    })();
+    return () => {
+      cancelled = true;
     };
   }, [activeEditorTabId, fetchFileContent]);
 
@@ -494,6 +574,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     activeEditorContext,
     requestCloseTab,
     saveEditorTab,
+    forceSaveEditorTab,
     pendingClose,
     confirmSaveAndClose,
     confirmDiscardAndClose,

@@ -2,8 +2,8 @@ import { useEffect } from "react";
 import { authedFetch } from "@/api/client";
 import { isDesktopShell } from "@/lib/desktopShell";
 import { terminalRegistrySnapshot } from "@/lib/debug/terminalRegistry";
+import { estimateChatBytes } from "@/lib/memoryEstimate";
 import { useChatStateRef } from "@/stores/chatStore";
-import type { ChatState } from "@/stores/chatStore";
 
 const REPORT_INTERVAL_MS = 30_000;
 
@@ -15,47 +15,6 @@ function windowId(): string {
   } catch {
     return "";
   }
-}
-
-// Sums string-valued fields likely to hold large content (message text,
-// provider reasoning-continuation blobs, tool call/output text) across every
-// open session. Not a precise byte count — a cheap proxy to see whether this
-// grows unbounded over a session's lifetime, which JSON.stringify-ing
-// everything every 30s would too, at real CPU cost for large histories.
-type ChatStats = { messageCount: number; bytes: number };
-
-const sliceStats = new Map<string, { slice: ChatState["sessions"][string]; stats: ChatStats }>();
-
-function estimateChatBytes(sessions: ChatState["sessions"]): { sessionCount: number; messageCount: number; bytes: number } {
-  let messageCount = 0;
-  let bytes = 0;
-  const sessionIds = Object.keys(sessions);
-  for (const id of sessionIds) {
-    const slice = sessions[id];
-    let stats = sliceStats.get(id);
-    if (!stats || stats.slice !== slice) {
-      let sliceBytes = 0;
-      for (const m of slice.messages) {
-        sliceBytes += m.content.length + (m.reasoning_content?.length ?? 0);
-        if (m.tool_calls) {
-          for (const tc of m.tool_calls) sliceBytes += tc.function.arguments.length;
-        }
-      }
-      for (const part of slice.live) {
-        if (part.kind === "thinking" || part.kind === "text" || part.kind === "status") {
-          sliceBytes += part.text.length;
-        } else if (part.kind === "tool") {
-          sliceBytes += (part.stream?.length ?? 0) + (part.output?.length ?? 0);
-        }
-      }
-      stats = { slice, stats: { messageCount: slice.messages.length, bytes: sliceBytes } };
-      sliceStats.set(id, stats);
-    }
-    messageCount += stats.stats.messageCount;
-    bytes += stats.stats.bytes;
-  }
-  for (const id of sliceStats.keys()) if (!(id in sessions)) sliceStats.delete(id);
-  return { sessionCount: sessionIds.length, messageCount, bytes };
 }
 
 /**

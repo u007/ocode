@@ -7,9 +7,13 @@ import {
   Trash2,
   ExternalLink,
   GitCommitVertical,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
+import { ContextMenu } from "@/components/Layout/ContextMenu";
+import type { ContextMenuItem } from "@/components/Layout/ContextMenu";
 import type {
   GitCommit,
   GitDiffFile,
@@ -18,6 +22,34 @@ import type {
 } from "@/api/types";
 
 const REFRESH_INTERVAL = 10000;
+
+// Expanded/collapsed state of the Git panel's three left-side sections.
+// Persisted to localStorage (versioned key, same pattern as CoworkSidebar's
+// "ocode.ui.sidebar.v2") so the layout survives reloads.
+const GIT_PANEL_SECTIONS_KEY = "ocode.ui.git-panel.v1";
+
+interface PanelSections {
+  staged: boolean;
+  unstaged: boolean;
+  commits: boolean;
+}
+
+const DEFAULT_SECTIONS: PanelSections = { staged: true, unstaged: true, commits: true };
+
+function loadPanelSections(): PanelSections {
+  try {
+    const raw = window.localStorage.getItem(GIT_PANEL_SECTIONS_KEY);
+    if (!raw) return { ...DEFAULT_SECTIONS };
+    const parsed = JSON.parse(raw) as Partial<PanelSections>;
+    return {
+      staged: typeof parsed.staged === "boolean" ? parsed.staged : true,
+      unstaged: typeof parsed.unstaged === "boolean" ? parsed.unstaged : true,
+      commits: typeof parsed.commits === "boolean" ? parsed.commits : true,
+    };
+  } catch {
+    return { ...DEFAULT_SECTIONS };
+  }
+}
 
 const STATUS_BADGES: Record<string, { label: string; color: string }> = {
   modified: { label: "M", color: "bg-yellow-500/20 text-yellow-400" },
@@ -88,6 +120,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [sections, setSections] = useState<PanelSections>(loadPanelSections);
 
   const load = useCallback(async () => {
     setRefreshing(true);
@@ -100,13 +133,18 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
       setWorkspace(ws);
       setCommits(log);
       // Selected file may have moved between panes or disappeared (discard):
-      // re-resolve against the fresh snapshot.
+      // re-resolve against the fresh snapshot. Keep the viewed pane when the
+      // file is still there; flip only when it moved to the other list.
       setSelection((sel) => {
         if (!sel || sel.kind === "commit") return sel;
         const inStaged = ws.staged.some((f) => f.path === sel.path);
         const inUnstaged = ws.unstaged.some((f) => f.path === sel.path);
         if (!inStaged && !inUnstaged) return null;
-        return { kind: "file", path: sel.path, staged: inStaged };
+        return {
+          kind: "file",
+          path: sel.path,
+          staged: sel.staged ? inStaged : !inUnstaged ? inStaged : false,
+        };
       });
     } catch (e) {
       setError(
@@ -123,6 +161,19 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
     const interval = setInterval(load, REFRESH_INTERVAL);
     return () => clearInterval(interval);
   }, [load, active]);
+
+  // Persist the section expanded/collapsed layout across reloads.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(GIT_PANEL_SECTIONS_KEY, JSON.stringify(sections));
+    } catch {
+      // localStorage unavailable (private mode etc.) — collapse still works
+      // for the current session.
+    }
+  }, [sections]);
+
+  const toggleSection = (key: keyof PanelSections) =>
+    setSections((s) => ({ ...s, [key]: !s[key] }));
 
   // The server pushes git_status bus events whenever the repo changes (also
   // after the TUI or the file-tree context menu mutate it) — stay fresh.
@@ -165,6 +216,47 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
     runMutation(() => api.gitStage(paths, projectPath));
   const unstageAll = (paths: string[]) =>
     runMutation(() => api.gitUnstage(paths, projectPath));
+
+  // Right-click menu per file row. Actions mirror the row's hover buttons
+  // (plus "Open in editor"); the set depends on which pane was clicked —
+  // a partially staged file's menu follows the clicked pane.
+  const fileMenuItems = useCallback(
+    (f: GitDiffFile, stagedPane: boolean): ContextMenuItem[] => {
+      const openItem: ContextMenuItem | null = onOpenFile
+        ? {
+            label: "Open in editor",
+            icon: <ExternalLink className="w-3.5 h-3.5" />,
+            onClick: () => onOpenFile(f.path, projectPath),
+          }
+        : null;
+      if (stagedPane) {
+        return [
+          {
+            label: "Unstage file",
+            icon: <ArrowDownToLine className="w-3.5 h-3.5" />,
+            onClick: () => unstageFile(f.path),
+          },
+          ...(openItem ? [openItem] : []),
+        ];
+      }
+      const untracked = f.status === "untracked";
+      return [
+        {
+          label: "Stage file",
+          icon: <ArrowUpToLine className="w-3.5 h-3.5" />,
+          onClick: () => stageFile(f.path),
+        },
+        {
+          label: untracked ? "Delete untracked file" : "Discard changes",
+          icon: <Trash2 className="w-3.5 h-3.5" />,
+          destructive: true,
+          onClick: () => discardFile(f.path, untracked),
+        },
+        ...(openItem ? [openItem] : []),
+      ];
+    },
+    [onOpenFile, projectPath, stageFile, unstageFile, discardFile],
+  );
 
   const hunkAction = useCallback(
     async (file: GitDiffFile, hunkIndex: number, action: GitHunkAction, staged: boolean) => {
@@ -235,18 +327,29 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
   const unstagedFiles = workspace.unstaged ?? [];
   const status = workspace.status;
 
-  // Which diff is shown in the right pane?
+  // Which diff is shown in the right pane? Resolution is pane-aware: a
+  // partially staged file appears in both lists, and clicking the row in the
+  // Staged pane should show the staged diff (not always default to unstaged).
+  // If the file vanished from the clicked pane (e.g. just unstaged/restaged),
+  // fall back to the other list so the selection does not disappear.
   let shownFile: GitDiffFile | null = null;
   let shownStaged = false;
   if (selection && selection.kind === "file") {
-    shownFile =
-      unstagedFiles.find((f) => f.path === selection.path) ??
-      stagedFiles.find((f) => f.path === selection.path) ??
-      null;
-    shownStaged =
-      shownFile !== null &&
-      stagedFiles.some((f) => f.path === (shownFile as GitDiffFile).path);
+    const primary = selection.staged ? stagedFiles : unstagedFiles;
+    const fallback = selection.staged ? unstagedFiles : stagedFiles;
+    const primaryHas = primary.some((f) => f.path === selection.path);
+    const source = primaryHas ? primary : fallback;
+    shownFile = source.find((f) => f.path === selection.path) ?? null;
+    // "Staged" describes which version is displayed, not merely that the file
+    // exists in the index — a partially staged file is in both lists.
+    shownStaged = selection.staged === primaryHas;
   }
+  // The file exists in both the index and the working tree — offer a toggle
+  // between its two diffs.
+  const showBoth =
+    selection?.kind === "file" &&
+    stagedFiles.some((f) => f.path === selection.path) &&
+    unstagedFiles.some((f) => f.path === selection.path);
 
   return (
     <div className="flex flex-col h-full">
@@ -293,6 +396,9 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
             selected={selection}
             busy={busy}
             onSelect={(f) => selectFile(f, true)}
+            collapsed={!sections.staged}
+            onToggle={() => toggleSection("staged")}
+            menuItems={(f) => fileMenuItems(f, true)}
             onSectionAction={
               stagedFiles.length > 1
                 ? { label: "Unstage all", fn: () => unstageAll(stagedFiles.map((f) => f.path)) }
@@ -320,6 +426,9 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
             selected={selection}
             busy={busy}
             onSelect={(f) => selectFile(f, false)}
+            collapsed={!sections.unstaged}
+            onToggle={() => toggleSection("unstaged")}
+            menuItems={(f) => fileMenuItems(f, false)}
             onSectionAction={
               unstagedFiles.length > 1
                 ? { label: "Stage all", fn: () => stageAll(unstagedFiles.map((f) => f.path)) }
@@ -354,56 +463,108 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
           />
 
           {/* Commits */}
-          <div className="flex-1 min-h-0 flex flex-col border-t border-border">
-            <div className="px-3 py-1.5 text-xs uppercase tracking-wider text-muted-foreground flex items-center justify-between">
-              <span>Commits</span>
+          <div
+            className={`min-h-0 flex flex-col border-t border-border ${
+              sections.commits ? "flex-1" : "shrink-0"
+            }`}
+          >
+            <button
+              onClick={() => toggleSection("commits")}
+              title={sections.commits ? "Collapse commits" : "Expand commits"}
+              className="px-3 py-1.5 text-xs uppercase tracking-wider text-muted-foreground flex items-center justify-between hover:bg-muted/40 hover:text-foreground cursor-pointer text-left"
+            >
+              <span className="flex items-center gap-1">
+                {sections.commits ? (
+                  <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5 shrink-0" />
+                )}
+                Commits
+              </span>
               <span className="text-muted-foreground/60 normal-case">{commits.length}</span>
-            </div>
-            <div className="flex-1 overflow-y-auto divide-y divide-border">
-              {commits.length === 0 ? (
-                <div className="px-3 py-2 text-xs text-muted-foreground/70 italic">
-                  No commits yet
-                </div>
-              ) : (
-                commits.map((c) => {
-                  const isSelected =
-                    selection?.kind === "commit" && selection.hash === c.hash;
-                  return (
-                    <button
-                      key={c.hash}
-                      onClick={() => selectCommit(c)}
-                      className={`w-full text-left px-3 py-2 hover:bg-muted/50 ${
-                        isSelected ? "bg-muted" : ""
-                      }`}
-                    >
-                      <div className="flex items-center gap-1.5 text-xs font-mono text-foreground truncate">
-                        <GitCommitVertical className="w-3 h-3 shrink-0 text-muted-foreground" />
-                        <span className="text-blue-400 shrink-0">{c.short}</span>
-                        <span className="truncate">{c.message}</span>
-                      </div>
-                      <div className="pl-5 text-[11px] text-muted-foreground truncate">
-                        {c.author} · {timeAgo(c.date)}
-                      </div>
-                    </button>
-                  );
-                })
-              )}
-            </div>
+            </button>
+            {sections.commits && (
+              <div className="flex-1 overflow-y-auto divide-y divide-border">
+                {commits.length === 0 ? (
+                  <div className="px-3 py-2 text-xs text-muted-foreground/70 italic">
+                    No commits yet
+                  </div>
+                ) : (
+                  commits.map((c) => {
+                    const isSelected =
+                      selection?.kind === "commit" && selection.hash === c.hash;
+                    return (
+                      <button
+                        key={c.hash}
+                        onClick={() => selectCommit(c)}
+                        className={`w-full text-left px-3 py-2 hover:bg-muted/50 ${
+                          isSelected ? "bg-muted" : ""
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5 text-xs font-mono text-foreground truncate">
+                          <GitCommitVertical className="w-3 h-3 shrink-0 text-muted-foreground" />
+                          <span className="text-blue-400 shrink-0">{c.short}</span>
+                          <span className="truncate">{c.message}</span>
+                        </div>
+                        <div className="pl-5 text-[11px] text-muted-foreground truncate">
+                          {c.author} · {timeAgo(c.date)}
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            )}
           </div>
         </div>
 
         {/* Right: diff pane */}
-        <div className="flex-1 min-h-0 overflow-y-auto">
+        <div className="flex-1 min-h-0 flex flex-col">
           {selection?.kind === "commit" && commitDiff ? (
             <CommitDiff files={commitDiff} />
           ) : shownFile ? (
-            <FileDiff
-              file={shownFile}
-              staged={shownStaged}
-              busy={busy}
-              onHunk={(i, a) => hunkAction(shownFile, i, a, shownStaged)}
-              onOpen={onOpenFile ? () => onOpenFile(shownFile!.path, projectPath) : undefined}
-            />
+            <>
+              {showBoth && (
+                <div className="px-3 py-1.5 border-b border-border flex items-center gap-1 shrink-0">
+                  <span className="text-[11px] uppercase tracking-wider text-muted-foreground mr-1">
+                    Diff
+                  </span>
+                  <button
+                    onClick={() =>
+                      setSelection({ kind: "file", path: shownFile!.path, staged: false })
+                    }
+                    className={`px-2 py-0.5 rounded text-xs ${
+                      shownStaged
+                        ? "text-muted-foreground hover:bg-muted/60"
+                        : "bg-primary text-primary-foreground"
+                    }`}
+                  >
+                    Working tree
+                  </button>
+                  <button
+                    onClick={() =>
+                      setSelection({ kind: "file", path: shownFile!.path, staged: true })
+                    }
+                    className={`px-2 py-0.5 rounded text-xs ${
+                      shownStaged
+                        ? "bg-primary text-primary-foreground"
+                        : "text-muted-foreground hover:bg-muted/60"
+                    }`}
+                  >
+                    Staged
+                  </button>
+                </div>
+              )}
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <FileDiff
+                  file={shownFile}
+                  staged={shownStaged}
+                  busy={busy}
+                  onHunk={(i, a) => hunkAction(shownFile, i, a, shownStaged)}
+                  onOpen={onOpenFile ? () => onOpenFile(shownFile!.path, projectPath) : undefined}
+                />
+              </div>
+            </>
           ) : (
             <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
               {selection?.kind === "commit"
@@ -448,6 +609,9 @@ function FileSection({
   onSelect,
   onSectionAction,
   rowActions,
+  collapsed,
+  onToggle,
+  menuItems,
 }: {
   title: string;
   stagedPane: boolean;
@@ -457,14 +621,34 @@ function FileSection({
   onSelect: (f: GitDiffFile) => void;
   onSectionAction?: { label: string; fn: () => void };
   rowActions?: (f: GitDiffFile) => React.ReactNode;
+  collapsed?: boolean;
+  onToggle?: () => void;
+  menuItems?: (f: GitDiffFile) => ContextMenuItem[];
 }) {
   return (
     <div className="shrink-0 max-h-[34%] min-h-0 flex flex-col">
       <div className="px-3 py-1.5 text-xs uppercase tracking-wider text-muted-foreground flex items-center justify-between">
-        <span>
-          {title} <span className="text-foreground/50">({files.length})</span>
-        </span>
-        {onSectionAction && (
+        {onToggle ? (
+          <button
+            onClick={onToggle}
+            title={collapsed ? `Expand ${title}` : `Collapse ${title}`}
+            className="flex items-center gap-1 min-w-0 text-left cursor-pointer hover:text-foreground"
+          >
+            {collapsed ? (
+              <ChevronRight className="w-3.5 h-3.5 shrink-0" />
+            ) : (
+              <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+            )}
+            <span className="truncate">
+              {title} <span className="text-foreground/50">({files.length})</span>
+            </span>
+          </button>
+        ) : (
+          <span>
+            {title} <span className="text-foreground/50">({files.length})</span>
+          </span>
+        )}
+        {!collapsed && onSectionAction && (
           <button
             onClick={onSectionAction.fn}
             disabled={busy}
@@ -475,42 +659,50 @@ function FileSection({
           </button>
         )}
       </div>
-      <div className="overflow-y-auto min-h-0">
-        {files.length === 0 ? (
-          <div className="px-3 py-1 text-xs text-muted-foreground/60 italic">
-            Nothing to show
-          </div>
-        ) : (
-          <div className="divide-y divide-border/60">
-            {files.map((f) => {
-              const badge = STATUS_BADGES[f.status] || STATUS_BADGES.modified;
-              const isSelected =
-                selected?.kind === "file" &&
-                selected.path === f.path &&
-                selected.staged === stagedPane;
-              return (
-                <div
-                  key={f.path}
-                  onClick={() => onSelect(f)}
-                  className={`group flex items-center gap-1.5 pl-2 pr-1.5 py-1 text-sm cursor-pointer hover:bg-muted/50 ${
-                    isSelected ? "bg-muted" : ""
-                  }`}
-                >
-                  <span
-                    className={`inline-flex items-center justify-center w-5 h-5 shrink-0 rounded text-[10px] font-bold ${badge.color}`}
+      {!collapsed && (
+        <div className="overflow-y-auto min-h-0">
+          {files.length === 0 ? (
+            <div className="px-3 py-1 text-xs text-muted-foreground/60 italic">
+              Nothing to show
+            </div>
+          ) : (
+            <div className="divide-y divide-border/60">
+              {files.map((f) => {
+                const badge = STATUS_BADGES[f.status] || STATUS_BADGES.modified;
+                const isSelected =
+                  selected?.kind === "file" &&
+                  selected.path === f.path &&
+                  selected.staged === stagedPane;
+                const row = (
+                  <div
+                    onClick={() => onSelect(f)}
+                    className={`group flex items-center gap-1.5 pl-2 pr-1.5 py-1 text-sm cursor-pointer hover:bg-muted/50 ${
+                      isSelected ? "bg-muted" : ""
+                    }`}
                   >
-                    {badge.label}
-                  </span>
-                  <span className="font-mono text-foreground truncate flex-1">
-                    {f.path}
-                  </span>
-                  {rowActions?.(f)}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+                    <span
+                      className={`inline-flex items-center justify-center w-5 h-5 shrink-0 rounded text-[10px] font-bold ${badge.color}`}
+                    >
+                      {badge.label}
+                    </span>
+                    <span className="font-mono text-foreground truncate flex-1">
+                      {f.path}
+                    </span>
+                    {rowActions?.(f)}
+                  </div>
+                );
+                return menuItems ? (
+                  <ContextMenu key={f.path} items={menuItems(f)}>
+                    {row}
+                  </ContextMenu>
+                ) : (
+                  row
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

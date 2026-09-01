@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -22,13 +21,47 @@ type filesContentSearchBatchMsg struct {
 	totalSoFar int
 	ch         chan filesContentSearchBatchMsg
 	cancel     chan struct{}
+	generation uint64
+	err        error
 }
 
 // filesContentSearchDoneMsg signals that the search walk has finished.
 type filesContentSearchDoneMsg struct {
-	total  int
-	err    error
-	cancel chan struct{}
+	total      int
+	err        error
+	cancel     chan struct{}
+	generation uint64
+}
+
+type filesContentSearchOptions struct {
+	matchMode     filesContentSearchMode
+	caseSensitive bool
+	wholeWord     bool
+	generation    uint64
+}
+
+// contentSearchResultsStartLine is the first line occupied by a result in
+// contentView. Keep this shared with the mouse hit-testing in model.go.
+const contentSearchResultsStartLine = 9
+
+// compileContentSearchPattern preserves the historical default (a
+// case-insensitive literal substring search) while allowing the search UI to
+// opt into regular expressions, case sensitivity, and whole-word matching.
+func compileContentSearchPattern(query string, options filesContentSearchOptions) (*regexp.Regexp, error) {
+	pattern := query
+	if options.matchMode != filesContentSearchRegex {
+		pattern = regexp.QuoteMeta(pattern)
+	}
+	if options.wholeWord {
+		// Treat Unicode letters/numbers and underscore as word characters. The
+		// standard regexp \b is ASCII-oriented and makes non-ASCII identifiers
+		// behave unexpectedly.
+		pattern = `(?:^|[^\pL\pN_])(?:` + pattern + `)(?:$|[^\pL\pN_])`
+	}
+	if !options.caseSensitive {
+		pattern = `(?i:` + pattern + `)`
+	}
+	return regexp.Compile(pattern)
 }
 
 // startContentSearchCmd launches a background goroutine that walks the
@@ -44,6 +77,10 @@ type filesContentSearchDoneMsg struct {
 // When includeIgnored is false, hidden files/dirs, common ignore dirs, and
 // paths matched by .gitignore / .ignore are skipped.
 func startContentSearchCmd(workDir, query, exts string, includeIgnored bool) (tea.Cmd, chan struct{}) {
+	return startContentSearchCmdWithOptions(workDir, query, exts, includeIgnored, filesContentSearchOptions{})
+}
+
+func startContentSearchCmdWithOptions(workDir, query, exts string, includeIgnored bool, options filesContentSearchOptions) (tea.Cmd, chan struct{}) {
 	if query == "" {
 		return nil, nil
 	}
@@ -54,10 +91,13 @@ func startContentSearchCmd(workDir, query, exts string, includeIgnored bool) (te
 	go func() {
 		defer close(ch)
 
-		// Build the regex from the query (case-insensitive).
-		re, err := regexp.Compile(`(?i)` + regexp.QuoteMeta(query))
+		re, err := compileContentSearchPattern(query, options)
 		if err != nil {
-			re = regexp.MustCompile(`(?i)` + regexp.QuoteMeta(query))
+			select {
+			case ch <- filesContentSearchBatchMsg{ch: ch, cancel: cancel, generation: options.generation, err: err}:
+			case <-cancel:
+			}
+			return
 		}
 
 		// Parse extension filter: "*.go,*.ts" → ["go", "ts"]
@@ -91,15 +131,13 @@ func startContentSearchCmd(workDir, query, exts string, includeIgnored bool) (te
 		}
 
 		const (
-			maxResults    = 500
-			batchSize     = 10
-			flushInterval = 100 * time.Millisecond
+			maxResults = 500
+			batchSize  = 10
 		)
 
 		var (
 			buf   []filesContentSearchResult
 			total int
-			timer *time.Timer
 		)
 
 		flush := func() {
@@ -110,14 +148,10 @@ func startContentSearchCmd(workDir, query, exts string, includeIgnored bool) (te
 			sent := make([]filesContentSearchResult, len(buf))
 			copy(sent, buf)
 			select {
-			case ch <- filesContentSearchBatchMsg{batch: sent, totalSoFar: total, ch: ch, cancel: cancel}:
+			case ch <- filesContentSearchBatchMsg{batch: sent, totalSoFar: total, ch: ch, cancel: cancel, generation: options.generation}:
 			case <-cancel:
 			}
 			buf = buf[:0]
-			if timer != nil {
-				timer.Stop()
-				timer = nil
-			}
 		}
 
 		_ = filepath.WalkDir(workDir, func(path string, d fs.DirEntry, err error) error {
@@ -174,6 +208,11 @@ func startContentSearchCmd(workDir, query, exts string, includeIgnored bool) (te
 			lines := strings.Split(string(data), "\n")
 			rel, _ := filepath.Rel(workDir, path)
 			for i, line := range lines {
+				select {
+				case <-cancel:
+					return filepath.SkipAll
+				default:
+				}
 				if re.MatchString(line) {
 					buf = append(buf, filesContentSearchResult{
 						path:    path,
@@ -190,10 +229,6 @@ func startContentSearchCmd(workDir, query, exts string, includeIgnored bool) (te
 					}
 				}
 			}
-			// Start flush timer on first buffered result.
-			if len(buf) > 0 && timer == nil {
-				timer = time.NewTimer(flushInterval)
-			}
 			return nil
 		})
 
@@ -201,18 +236,25 @@ func startContentSearchCmd(workDir, query, exts string, includeIgnored bool) (te
 		flush()
 	}()
 
-	return waitSearchEvent(ch, cancel), cancel
+	return waitSearchEventWithGeneration(ch, cancel, options.generation), cancel
 }
 
 // waitSearchEvent reads the next batch from the search channel.
 func waitSearchEvent(ch chan filesContentSearchBatchMsg, cancel chan struct{}) tea.Cmd {
+	return waitSearchEventWithGeneration(ch, cancel, 0)
+}
+
+func waitSearchEventWithGeneration(ch chan filesContentSearchBatchMsg, cancel chan struct{}, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case <-cancel:
-			return filesContentSearchDoneMsg{err: nil, cancel: cancel}
+			return filesContentSearchDoneMsg{cancel: cancel, generation: generation}
 		case batch, ok := <-ch:
 			if !ok {
-				return filesContentSearchDoneMsg{cancel: cancel}
+				return filesContentSearchDoneMsg{cancel: cancel, generation: generation}
+			}
+			if batch.err != nil {
+				return filesContentSearchDoneMsg{err: batch.err, cancel: cancel, generation: batch.generation}
 			}
 			return batch
 		}
@@ -255,51 +297,93 @@ func matchesExtFilter(path string, exts []string) bool {
 	return false
 }
 
+func (m *filesModel) cancelContentSearch() {
+	if m.contentSearchCancel == nil {
+		return
+	}
+	select {
+	case <-m.contentSearchCancel:
+		// Already closed.
+	default:
+		close(m.contentSearchCancel)
+	}
+	m.contentSearchCancel = nil
+}
+
+func (m *filesModel) markContentSearchDirty() {
+	m.cancelContentSearch()
+	m.contentSearchGeneration++
+	m.contentSearchLoading = false
+	m.contentSearchDone = false
+	m.contentSearchError = ""
+	m.contentSearchResults = nil
+	m.contentSearchCursor = 0
+	m.contentSearchDirty = true
+}
+
+func (m filesModel) startContentSearch() (filesModel, tea.Cmd) {
+	m.cancelContentSearch()
+	m.contentSearchGeneration++
+	m.contentSearchLoading = true
+	m.contentSearchDone = false
+	m.contentSearchError = ""
+	m.contentSearchDirty = false
+	m.contentSearchResults = nil
+	m.contentSearchCursor = 0
+	m.statusMsg = "searching..."
+	cmd, cancel := startContentSearchCmdWithOptions(
+		m.workDir,
+		m.contentSearchQuery,
+		m.contentSearchExts,
+		m.contentSearchIncludeIgnored,
+		filesContentSearchOptions{
+			matchMode:     m.contentSearchMatch,
+			caseSensitive: m.contentSearchCaseSensitive,
+			wholeWord:     m.contentSearchWholeWord,
+			generation:    m.contentSearchGeneration,
+		},
+	)
+	m.contentSearchCancel = cancel
+	return m, cmd
+}
+
+func (m *filesModel) cycleContentSearchPanel(backward bool) {
+	const panelCount = int(filesContentSearchIgnore) + 1
+	panel := int(m.contentSearchPanel)
+	if backward {
+		panel = (panel - 1 + panelCount) % panelCount
+	} else {
+		panel = (panel + 1) % panelCount
+	}
+	m.contentSearchPanel = filesContentSearchPanel(panel)
+}
+
 // updateContentSearch handles key presses in content search mode.
 func (m filesModel) updateContentSearch(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 	key := msg.String()
 	switch key {
 	case "esc":
-		// Cancel any running search.
-		if m.contentSearchCancel != nil {
-			close(m.contentSearchCancel)
-			m.contentSearchCancel = nil
-		}
+		m.cancelContentSearch()
 		m.mode = filesModeNormal
 		m.contentSearchLoading = false
 		m.statusMsg = ""
 		return m, nil
-	case "tab":
-		// Toggle between query and ext filter inputs.
-		if m.contentSearchPanel == filesContentSearchQuery {
-			m.contentSearchPanel = filesContentSearchExtFilter
-		} else {
-			m.contentSearchPanel = filesContentSearchQuery
-		}
+	case "tab", "shift+tab":
+		m.cycleContentSearchPanel(key == "shift+tab")
 		return m, nil
 	case "ctrl+l":
 		// Toggle include-ignored and re-run search if there's a query.
 		m.contentSearchIncludeIgnored = !m.contentSearchIncludeIgnored
 		if m.contentSearchQuery != "" {
-			// Cancel any existing search.
-			if m.contentSearchCancel != nil {
-				close(m.contentSearchCancel)
-			}
-			m.contentSearchLoading = true
-			m.contentSearchDone = false
-			m.contentSearchResults = nil
-			m.contentSearchCursor = 0
-			m.statusMsg = "searching..."
-			cmd, cancel := startContentSearchCmd(m.workDir, m.contentSearchQuery, m.contentSearchExts, m.contentSearchIncludeIgnored)
-			m.contentSearchCancel = cancel
-			return m, cmd
+			return m.startContentSearch()
 		}
+		m.markContentSearchDirty()
 		return m, nil
 	case "enter", "ctrl+j", "ctrl+m":
 		if m.contentSearchLoading {
 			return m, nil
 		}
-		if m.contentSearchDone && len(m.contentSearchResults) > 0 {
+		if m.contentSearchDone && !m.contentSearchDirty && len(m.contentSearchResults) > 0 {
 			// Navigate to the selected result.
 			m.navigateToSearchResult(m.contentSearchResults[m.contentSearchCursor])
 			return m, nil
@@ -308,19 +392,7 @@ func (m filesModel) updateContentSearch(msg tea.KeyPressMsg) (filesModel, tea.Cm
 			m.statusMsg = "type a query first"
 			return m, nil
 		}
-		// Start a new search.
-		// Cancel any existing search.
-		if m.contentSearchCancel != nil {
-			close(m.contentSearchCancel)
-		}
-		m.contentSearchLoading = true
-		m.contentSearchDone = false
-		m.contentSearchResults = nil
-		m.contentSearchCursor = 0
-		m.statusMsg = "searching..."
-		cmd, cancel := startContentSearchCmd(m.workDir, m.contentSearchQuery, m.contentSearchExts, m.contentSearchIncludeIgnored)
-		m.contentSearchCancel = cancel
-		return m, cmd
+		return m.startContentSearch()
 	case "ctrl+n", "down":
 		if len(m.contentSearchResults) > 0 && m.contentSearchCursor < len(m.contentSearchResults)-1 {
 			m.contentSearchCursor++
@@ -332,18 +404,41 @@ func (m filesModel) updateContentSearch(msg tea.KeyPressMsg) (filesModel, tea.Cm
 	case "backspace":
 		if m.contentSearchPanel == filesContentSearchQuery {
 			if len(m.contentSearchQuery) > 0 {
+				m.markContentSearchDirty()
 				m.contentSearchQuery = m.contentSearchQuery[:len(m.contentSearchQuery)-1]
 			}
-		} else {
+		} else if m.contentSearchPanel == filesContentSearchExtFilter {
 			if len(m.contentSearchExts) > 0 {
+				m.markContentSearchDirty()
 				m.contentSearchExts = m.contentSearchExts[:len(m.contentSearchExts)-1]
 			}
+		}
+	case "space", "left", "right":
+		switch m.contentSearchPanel {
+		case filesContentSearchMatchField:
+			m.markContentSearchDirty()
+			if m.contentSearchMatch == filesContentSearchLiteral {
+				m.contentSearchMatch = filesContentSearchRegex
+			} else {
+				m.contentSearchMatch = filesContentSearchLiteral
+			}
+		case filesContentSearchCase:
+			m.markContentSearchDirty()
+			m.contentSearchCaseSensitive = !m.contentSearchCaseSensitive
+		case filesContentSearchWholeWord:
+			m.markContentSearchDirty()
+			m.contentSearchWholeWord = !m.contentSearchWholeWord
+		case filesContentSearchIgnore:
+			m.markContentSearchDirty()
+			m.contentSearchIncludeIgnored = !m.contentSearchIncludeIgnored
 		}
 	default:
 		if len(msg.Text) > 0 {
 			if m.contentSearchPanel == filesContentSearchQuery {
+				m.markContentSearchDirty()
 				m.contentSearchQuery += msg.Text
-			} else {
+			} else if m.contentSearchPanel == filesContentSearchExtFilter {
+				m.markContentSearchDirty()
 				m.contentSearchExts += msg.Text
 			}
 		}
@@ -405,6 +500,7 @@ func (m *filesModel) navigateToSearchResult(result filesContentSearchResult) {
 func (m filesModel) handlePasteMsg(msg tea.PasteMsg) (filesModel, tea.Cmd) {
 	switch m.mode {
 	case filesModeContentSearch:
+		m.markContentSearchDirty()
 		if m.contentSearchPanel == filesContentSearchQuery {
 			m.contentSearchQuery += msg.Content
 		} else {
@@ -446,6 +542,9 @@ func (m filesModel) contentView(width, height int, styles Styles) string {
 	// Search inputs
 	queryLabel := "Search: "
 	extLabel := "Exts: "
+	matchLabel := "Match: "
+	caseLabel := "Case: "
+	wholeLabel := "Word: "
 
 	queryVal := m.contentSearchQuery
 	if m.contentSearchPanel == filesContentSearchQuery {
@@ -464,57 +563,64 @@ func (m filesModel) contentView(width, height int, styles Styles) string {
 	extLine := styles.Hint.Render(extLabel) + styles.Selected.Width(width-len(extLabel)).Render(extVal)
 	extLine = lipgloss.NewStyle().Width(width).MaxHeight(1).Render(extLine)
 
-	// Ignore toggle
-	ignoreIcon := "●"
-	ignoreLabel := "Skip .gitignore+hidden"
-	if m.contentSearchIncludeIgnored {
-		ignoreIcon = "○"
-		ignoreLabel = "Skip .gitignore+hidden"
+	matchVal := "literal"
+	if m.contentSearchMatch == filesContentSearchRegex {
+		matchVal = "regex"
 	}
-	ignoreLine := styles.Hint.Render("  " + ignoreIcon + " " + ignoreLabel + "  (ctrl+l toggle)")
+	caseVal := "insensitive"
+	if m.contentSearchCaseSensitive {
+		caseVal = "sensitive"
+	}
+	wholeVal := "off"
+	if m.contentSearchWholeWord {
+		wholeVal = "on"
+	}
+	fieldLine := func(label, value string, panel filesContentSearchPanel) string {
+		style := styles.Hint
+		if m.contentSearchPanel == panel {
+			style = styles.Selected
+		}
+		line := style.Render(label) + styles.Selected.Render(value)
+		return lipgloss.NewStyle().Width(width).MaxHeight(1).Render(line)
+	}
+
+	matchLine := fieldLine(matchLabel, matchVal, filesContentSearchMatchField)
+	caseLine := fieldLine(caseLabel, caseVal, filesContentSearchCase)
+	wholeLine := fieldLine(wholeLabel, wholeVal, filesContentSearchWholeWord)
+
+	// Ignore toggle
+	ignoreVal := "excluded"
+	if m.contentSearchIncludeIgnored {
+		ignoreVal = "included"
+	}
+	ignoreStyle := styles.Hint
+	if m.contentSearchPanel == filesContentSearchIgnore {
+		ignoreStyle = styles.Selected
+	}
+	ignoreLine := ignoreStyle.Render("Ignored: " + ignoreVal + "  (Ctrl+L toggle)")
 	ignoreLine = lipgloss.NewStyle().Width(width).MaxHeight(1).Render(ignoreLine)
 
-	lines = append(lines, queryLine, extLine, ignoreLine, "")
+	lines = append(lines, queryLine, extLine, matchLine, caseLine, wholeLine, ignoreLine, "")
 
 	// Hints
 	if m.contentSearchLoading {
 		lines = append(lines, lipgloss.NewStyle().Width(width).MaxHeight(1).Render(styles.Hint.Render(fmt.Sprintf("Searching... %d results so far", len(m.contentSearchResults)))))
 	} else if m.contentSearchDone {
-		if len(m.contentSearchResults) == 0 {
+		if m.contentSearchError != "" {
+			lines = append(lines, lipgloss.NewStyle().Width(width).MaxHeight(1).Render(styles.Error.Render("Search error: "+m.contentSearchError)))
+		} else if len(m.contentSearchResults) == 0 {
 			lines = append(lines, lipgloss.NewStyle().Width(width).MaxHeight(1).Render(styles.Hint.Render("No results found")))
 		} else {
 			lines = append(lines, lipgloss.NewStyle().Width(width).MaxHeight(1).Render(styles.Hint.Render(fmt.Sprintf("%d results — ctrl+n/ctrl+p navigate  enter open  esc back", len(m.contentSearchResults)))))
 		}
 	} else {
-		lines = append(lines, lipgloss.NewStyle().Width(width).MaxHeight(1).Render(styles.Hint.Render("Tab switch query/ext  Enter run  esc cancel")))
+		lines = append(lines, lipgloss.NewStyle().Width(width).MaxHeight(1).Render(styles.Hint.Render("Tab/Shift+Tab focus  Space toggle  Enter run  Esc back")))
 	}
 
 	lines = append(lines, "")
 
 	// Results
-	visibleResults := height - len(lines) - 2
-	if visibleResults < 1 {
-		visibleResults = 1
-	}
-	if visibleResults > len(m.contentSearchResults) {
-		visibleResults = len(m.contentSearchResults)
-	}
-
-	// Show a window of results around the cursor
-	start := 0
-	if len(m.contentSearchResults) > visibleResults {
-		start = m.contentSearchCursor - visibleResults/2
-		if start < 0 {
-			start = 0
-		}
-		if start > len(m.contentSearchResults)-visibleResults {
-			start = len(m.contentSearchResults) - visibleResults
-		}
-	}
-	end := start + visibleResults
-	if end > len(m.contentSearchResults) {
-		end = len(m.contentSearchResults)
-	}
+	start, end := m.contentSearchResultWindow(height)
 
 	for i := start; i < end; i++ {
 		r := m.contentSearchResults[i]
@@ -540,4 +646,29 @@ func (m filesModel) contentView(width, height int, styles Styles) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+func (m filesModel) contentSearchResultWindow(height int) (start, end int) {
+	visibleResults := height - contentSearchResultsStartLine - 2
+	if visibleResults < 1 {
+		visibleResults = 1
+	}
+	if visibleResults > len(m.contentSearchResults) {
+		visibleResults = len(m.contentSearchResults)
+	}
+	if len(m.contentSearchResults) > visibleResults {
+		start = m.contentSearchCursor - visibleResults/2
+		if start < 0 {
+			start = 0
+		}
+		if start > len(m.contentSearchResults)-visibleResults {
+			start = len(m.contentSearchResults) - visibleResults
+		}
+	}
+	end = min(start+visibleResults, len(m.contentSearchResults))
+	return start, end
+}
+
+func contentSearchPaneHeight(terminalHeight int) int {
+	return max(1, terminalHeight-6)
 }

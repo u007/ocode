@@ -43,7 +43,10 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
   const { send, status, error, onFrame } = useCdpSocket(stateKey, browseBase, true);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [hasFrame, setHasFrame] = useState(false);
-  const lastUrlRef = useRef(url);
+  // Start empty so the FIRST mount always navigates (iframe → chrome switches,
+  // e.g. the dev-server escape hatch, would otherwise mount a target sitting
+  // on the initial URL with no nav command and render blank).
+  const lastUrlRef = useRef("");
   // Pending pointermove, coalesced to one per animation frame (~16ms).
   const pendingMove = useRef<{ x: number; y: number; mods: number } | null>(null);
   const moveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);

@@ -45,6 +45,60 @@ import { computeProjectDrag } from "../../lib/projectDrag";
 
 type SessionStatus = "none" | "idle" | "running";
 
+type ProjectSidebarItem = {
+  type: "group" | "project";
+  data: Project | ProjectGroup;
+  groupProjects?: Project[];
+};
+
+export function buildProjectSidebarOrder(
+  projects: Project[],
+  groups: ProjectGroup[],
+): { orderedProjects: Project[]; visibleItems: ProjectSidebarItem[] } {
+  // Keep the input order within each group. It is the persisted project order
+  // used by the expanded sidebar and must not be replaced with a name sort.
+  const sortedGroups = [...groups].sort((a, b) => a.order - b.order);
+  const projectsByGroup: Record<string, Project[]> = {};
+  for (const project of projects) {
+    const key = project.group || "";
+    if (!projectsByGroup[key]) projectsByGroup[key] = [];
+    projectsByGroup[key].push(project);
+  }
+
+  const orderedProjects: Project[] = [];
+  const visibleItems: ProjectSidebarItem[] = [];
+
+  for (const group of sortedGroups) {
+    const groupProjects = projectsByGroup[group.name] || [];
+    orderedProjects.push(...groupProjects);
+    visibleItems.push({ type: "group", data: group, groupProjects });
+    if (!group.collapsed) {
+      for (const project of groupProjects) {
+        visibleItems.push({ type: "project", data: project });
+      }
+    }
+  }
+
+  // Ungrouped projects remain after all groups, matching the expanded view.
+  const ungrouped = projectsByGroup[""] || [];
+  orderedProjects.push(...ungrouped);
+  for (const project of ungrouped) {
+    visibleItems.push({ type: "project", data: project });
+  }
+
+  // Keep orphaned projects in the collapsed rail. The expanded view has
+  // historically omitted them because there is no group header to render
+  // them under, but the old collapsed rail still included every project.
+  const knownGroups = new Set(groups.map((group) => group.name));
+  for (const project of projects) {
+    if (project.group && !knownGroups.has(project.group)) {
+      orderedProjects.push(project);
+    }
+  }
+
+  return { orderedProjects, visibleItems };
+}
+
 /** Derive per-project session status from open tabs + chat slices. */
 function useProjectSessionStatus(projectPath: string): SessionStatus {
   const { state: projectState } = useProjectState();
@@ -460,41 +514,8 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
   };
 
   // Build the sorted list: groups first (in group order), then ungrouped projects
-  const sortedItems = useMemo(() => {
-    const groups = state.groups || [];
-    const projects = state.projects || [];
-
-    // Sort groups by order
-    const sortedGroups = [...groups].sort((a, b) => a.order - b.order);
-
-    // Group projects by their group name
-    const projectsByGroup: Record<string, Project[]> = {};
-    for (const p of projects) {
-      const key = p.group || "";
-      if (!projectsByGroup[key]) projectsByGroup[key] = [];
-      projectsByGroup[key].push(p);
-    }
-
-    // Build flat list: group headers + their projects, then ungrouped
-    const items: Array<{ type: "group" | "project"; data: Project | ProjectGroup; groupProjects?: Project[] }> = [];
-
-    for (const g of sortedGroups) {
-      const groupProjects = projectsByGroup[g.name] || [];
-      items.push({ type: "group", data: g, groupProjects });
-      if (!g.collapsed) {
-        for (const p of groupProjects) {
-          items.push({ type: "project", data: p });
-        }
-      }
-    }
-
-    // Ungrouped projects
-    const ungrouped = projectsByGroup[""] || [];
-    for (const p of ungrouped) {
-      items.push({ type: "project", data: p });
-    }
-
-    return items;
+  const { orderedProjects, visibleItems: sortedItems } = useMemo(() => {
+    return buildProjectSidebarOrder(state.projects || [], state.groups || []);
   }, [state.projects, state.groups]);
 
   // DnD sensors
@@ -576,12 +597,13 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
           <Separator className="my-2 w-6" />
           {state.projects.length > 0 && (
             <div className="flex flex-col gap-1">
-              {state.projects.slice(0, 5).map((p) => (
+              {orderedProjects.slice(0, 5).map((p) => (
                 <Tooltip key={p.path}>
                   <TooltipTrigger asChild>
                     <Button
                       variant="ghost"
                       size="sm"
+                      aria-label={p.name}
                       className={`p-2 h-9 w-9 ${
                         state.activeProject?.path === p.path
                           ? "bg-primary/15 text-primary"

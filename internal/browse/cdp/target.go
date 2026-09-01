@@ -29,6 +29,11 @@ type Target struct {
 	// main frame tracking
 	mainFrameID string
 
+	// proxy credentials for Fetch.authRequired (Chrome does not honor userinfo
+	// in Target.createBrowserContext proxyServer).
+	proxyUser string
+	proxyPass string
+
 	// request timing for Network telemetry
 	reqStart map[string]time.Time
 	reqMu    sync.Mutex
@@ -50,7 +55,9 @@ func (t *Target) startHandlers() {
 	chReq, c6 := t.conn.Subscribe(t.sessionID, "Network.requestWillBeSent")
 	chConsole, c7 := t.conn.Subscribe(t.sessionID, "Runtime.consoleAPICalled")
 	chExc, c8 := t.conn.Subscribe(t.sessionID, "Runtime.exceptionThrown")
-	t.cancels = append(t.cancels, c1, c2, c3, c4, c5, c6, c7, c8)
+	chAuth, c9 := t.conn.Subscribe(t.sessionID, "Fetch.authRequired")
+	chPaused, c10 := t.conn.Subscribe(t.sessionID, "Fetch.requestPaused")
+	t.cancels = append(t.cancels, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10)
 	t.reqStart = make(map[string]time.Time)
 
 	go t.handleScreencast(chFrame)
@@ -61,6 +68,14 @@ func (t *Target) startHandlers() {
 	go t.handleRequestWillBeSent(chReq)
 	go t.handleConsole(chConsole)
 	go t.handleException(chExc)
+	go t.handleAuthRequired(chAuth)
+	go t.handleRequestPaused(chPaused)
+
+	// Enable Fetch auth handling (proxy 407). Must be after the subscriptions
+	// above so no auth challenge is missed before the handler is live. Also
+	// handle requestPaused for any patterns Chrome may emit (the handler just
+	// continues the request).
+	_ = t.conn.Call(context.Background(), t.sessionID, "Fetch.enable", map[string]any{"handleAuthRequests": true}, nil)
 
 	// Learn main frame via getFrameTree async
 	go func() {
@@ -130,8 +145,12 @@ func (t *Target) handleFrameNavigated(ch <-chan json.RawMessage) {
 			if !isMainKnown {
 				continue
 			}
-			// Check scheme
-			if ev.Frame.URL != "" && !isHTTPSScheme(ev.Frame.URL) && !strings.HasPrefix(ev.Frame.URL, "about:") {
+			// Check scheme. Allow Chrome's internal navigation-error page
+			// (chrome-error://chromewebdata/) through: it is what Chrome renders
+			// when a load fails (proxy/TLS/DNS error). The real error is already
+			// emitted via Network.loadingFailed; blanking the page here would
+			// both hide that error and misreport it as "unsupported URL scheme".
+			if ev.Frame.URL != "" && !isHTTPSScheme(ev.Frame.URL) && !strings.HasPrefix(ev.Frame.URL, "about:") && !strings.HasPrefix(ev.Frame.URL, "chrome-error://") {
 				// Navigate to about:blank and emit error
 				_ = t.conn.Call(context.Background(), t.sessionID, "Page.navigate", map[string]string{"url": "about:blank"}, nil)
 				t.manager.emitNav(NavEvent{StateKey: t.stateKey, Error: "unsupported URL scheme"})
@@ -207,12 +226,12 @@ func (t *Target) handleResponseReceived(ch <-chan json.RawMessage) {
 func (t *Target) handleLoadingFailed(ch <-chan json.RawMessage) {
 	for raw := range ch {
 		var ev struct {
-			RequestID  string `json:"requestId"`
-			Type       string `json:"type"`
-			FrameID    string `json:"frameId"`
-			ErrorText  string `json:"errorText"`
+			RequestID     string `json:"requestId"`
+			Type          string `json:"type"`
+			FrameID       string `json:"frameId"`
+			ErrorText     string `json:"errorText"`
 			BlockedReason string `json:"blockedReason"`
-			Canceled   bool   `json:"canceled"`
+			Canceled      bool   `json:"canceled"`
 		}
 		_ = json.Unmarshal(raw, &ev)
 		// Main document error → nav error
@@ -343,6 +362,43 @@ func (t *Target) handleException(ch <-chan json.RawMessage) {
 	}
 }
 
+func (t *Target) handleAuthRequired(ch <-chan json.RawMessage) {
+	for raw := range ch {
+		var ev struct {
+			RequestID     string `json:"requestId"`
+			AuthChallenge struct {
+				Source string `json:"source"` // "Server" | "Proxy"
+			} `json:"authChallenge"`
+		}
+		_ = json.Unmarshal(raw, &ev)
+		if ev.AuthChallenge.Source == "Proxy" && t.proxyUser != "" {
+			_ = t.conn.Call(context.Background(), t.sessionID, "Fetch.continueWithAuth", map[string]any{
+				"requestId": ev.RequestID,
+				"authChallengeResponse": map[string]string{
+					"response": "ProvideCredentials",
+					"username": t.proxyUser,
+					"password": t.proxyPass,
+				},
+			}, nil)
+		} else {
+			_ = t.conn.Call(context.Background(), t.sessionID, "Fetch.continueWithAuth", map[string]any{
+				"requestId":             ev.RequestID,
+				"authChallengeResponse": map[string]string{"response": "Default"},
+			}, nil)
+		}
+	}
+}
+
+func (t *Target) handleRequestPaused(ch <-chan json.RawMessage) {
+	for raw := range ch {
+		var ev struct {
+			RequestID string `json:"requestId"`
+		}
+		_ = json.Unmarshal(raw, &ev)
+		_ = t.conn.Call(context.Background(), t.sessionID, "Fetch.continueRequest", map[string]string{"requestId": ev.RequestID}, nil)
+	}
+}
+
 // Navigation and input methods
 
 func (t *Target) Navigate(ctx context.Context, url string) error {
@@ -366,7 +422,7 @@ func (t *Target) Forward(ctx context.Context) error {
 func (t *Target) navHistory(ctx context.Context, delta int) error {
 	var res struct {
 		CurrentIndex int `json:"currentIndex"`
-		Entries []struct {
+		Entries      []struct {
 			ID  int    `json:"id"`
 			URL string `json:"url"`
 		} `json:"entries"`

@@ -59,12 +59,7 @@ func (a *Agent) resolveCustomScript(candidate string) string {
 	if filepath.IsAbs(candidate) {
 		abs = filepath.Clean(candidate)
 	} else {
-		wd, err := os.Getwd()
-		if err != nil {
-			return ""
-		}
-		abs = filepath.Join(wd, candidate)
-		abs = filepath.Clean(abs)
+		abs = filepath.Clean(filepath.Join(a.effectiveWorkDir(), candidate))
 	}
 	info, err := os.Stat(abs)
 	if err != nil || info.IsDir() || !info.Mode().IsRegular() {
@@ -75,12 +70,10 @@ func (a *Agent) resolveCustomScript(candidate string) string {
 			return ""
 		}
 	} else {
-		wd, _ := os.Getwd()
-		if wd != "" {
-			underWd := abs == wd || strings.HasPrefix(abs, filepath.Clean(wd)+string(filepath.Separator))
-			if !underWd {
-				return ""
-			}
+		wd := a.effectiveWorkDir()
+		underWd := abs == wd || strings.HasPrefix(abs, filepath.Clean(wd)+string(filepath.Separator))
+		if !underWd {
+			return ""
 		}
 	}
 	return abs

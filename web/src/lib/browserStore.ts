@@ -64,6 +64,10 @@ export interface BrowserTabState {
   status: number; // last HTTP status (0 = loading)
   loading: boolean;
   mode: BrowseMode | null;
+  /** User-forced viewport override (e.g. dev-server pages → Chrome/CDP).
+   *  Server nav events keep updating `mode`; this only biases which surface
+   *  renders until the user exits the override. */
+  userMode: BrowseMode | null;
   error: string | null;
   history: string[];
   historyIndex: number;
@@ -92,6 +96,7 @@ function defaultTab(persistedUrl = ""): BrowserTabState {
     status: 0,
     loading: false,
     mode: null,
+    userMode: null,
     error: null,
     history: persistedUrl ? [persistedUrl] : [],
     historyIndex: persistedUrl ? 0 : -1,
@@ -138,6 +143,10 @@ export const browserActions = {
 
   setCollapsed(key: StateKey, collapsed: boolean) {
     mutate(key, (t) => ({ ...t, collapsed }));
+  },
+
+  setUserMode(key: StateKey, mode: BrowseMode | null) {
+    mutate(key, (t) => ({ ...t, userMode: mode }));
   },
 
   navigate(key: StateKey, url: string) {

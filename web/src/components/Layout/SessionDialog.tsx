@@ -3,7 +3,7 @@ import { useChatDispatch } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
-import { cancelLiveDeltas } from "../../lib/sessionEvents";
+import { cancelLiveDeltas, closeSessionBackend } from "../../lib/sessionEvents";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -52,6 +52,7 @@ export default function SessionDialog() {
   // Close a session tab
   const handleCloseTab = useCallback((e: React.MouseEvent, tabId: string) => {
     e.stopPropagation();
+    closeSessionBackend(tabId);
     closeSessionTab(tabId);
     cancelLiveDeltas(tabId);
     chatDispatch({ type: "RESET", sessionId: tabId });

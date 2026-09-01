@@ -155,6 +155,89 @@ declare global {
 }
 window.ocodeDebug = ocodeDebug;
 
+/**
+ * TEMPORARY DIAGNOSTIC — remove once the root cause of the reported
+ * "model dialog / any dialog popup auto-closes while chat is streaming"
+ * bug is identified (see CHANGES.md entry + web/src/dialogStreaming.test.tsx:
+ * the full-app streaming regression test proves the dispatch path cannot
+ * close Radix modals; the remaining triggers are Escape, outside
+ * pointerdown, or a parent remount — all event/environment-level). This
+ * monitor logs whichever of those actually fires while a dialog is open, so
+ * a single live repro names the cause from the console.
+ *
+ * Cost: three document-level capture listeners plus one MutationObserver.
+ * Every handler does a single cheap `querySelector` (no array allocation)
+ * and bails immediately when no dialog is open — bounded, non-polling.
+ */
+export function installDialogCloseMonitor(): () => void {
+  let openCount = 0; // our view of open [role="dialog"][data-state="open"]
+  let observer: MutationObserver | null = null;
+
+  const dialogIsOpen = () =>
+    document.querySelector('[role="dialog"][data-state="open"]') !== null;
+
+  const sync = () => {
+    const n = document.querySelectorAll('[role="dialog"][data-state="open"]').length;
+    if (n === openCount) return;
+    if (n < openCount) {
+      // No Escape / outside-pointer/click was logged for this drop (they log
+      // above as they happen) — so it was a parent-state close or remount.
+      console.warn("[dialog-close] dialog count fell (no Escape/outside-click logged)", {
+        before: openCount,
+        after: n,
+      });
+    }
+    openCount = n;
+    if (openCount === 0 && observer) {
+      observer.disconnect();
+      observer = null;
+    }
+    if (openCount > 0 && !observer) {
+      // While any dialog is open, watch both DOM structure (unmount/remount)
+      // and data-state attribute flips (Radix open→closed without an event).
+      observer = new MutationObserver(sync);
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["data-state"],
+      });
+    }
+  };
+
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key !== "Escape" || openCount === 0) return;
+    console.warn("[dialog-close] Escape keydown while dialog open", { target: e.target });
+  };
+  const onPointer = (e: PointerEvent) => {
+    if (openCount === 0) return;
+    const target = e.target as Element | null;
+    if (target && !target.closest('[role="dialog"]')) {
+      console.warn("[dialog-close] pointerdown OUTSIDE dialog while open", { target });
+    }
+  };
+  const onFocus = () => {
+    if (openCount === 0 && dialogIsOpen()) sync();
+  };
+
+  document.addEventListener("keydown", onKey, true);
+  document.addEventListener("pointerdown", onPointer, true);
+  document.addEventListener("focusin", onFocus, true);
+  sync();
+
+  return () => {
+    observer?.disconnect();
+    observer = null;
+    document.removeEventListener("keydown", onKey, true);
+    document.removeEventListener("pointerdown", onPointer, true);
+    document.removeEventListener("focusin", onFocus, true);
+  };
+}
+
+// Auto-installed at boot: console-only, no behavior change. Remove together
+// with the function above once the reported dialog-close bug is root-caused.
+installDialogCloseMonitor();
+
 // Cached Date.prototype.toLocaleString — avoids reconstructing
 // Intl.DateTimeFormat on every hot-path status render. Retains native
 // semantics for invalid dates and for calls with no date/time fields.

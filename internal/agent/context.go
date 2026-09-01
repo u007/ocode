@@ -46,13 +46,14 @@ func loadBundledModelContext(modelName string) string {
 	return "\n--- " + name + " ---\n" + string(content) + "\n"
 }
 
-// gitShowHead reads a file from the git HEAD revision. Returns empty string if
-// the file is not tracked by git or if the repo is unavailable.
-func gitShowHead(path string) string {
-	if _, err := os.Stat(filepath.Join(".git")); os.IsNotExist(err) {
-		return "" // not a git repo
-	}
+// gitShowHeadAt reads a file from the git HEAD revision of the repo containing
+// root ("" = process cwd). Availability is decided by git itself (root may be a
+// worktree, a subdirectory of a repo, or a repo whose `.git` is a file, not a
+// dir), so any failure — untracked file, no repo, git missing — just returns ""
+// and the caller falls back to the working tree.
+func gitShowHeadAt(root, path string) string {
 	cmd := exec.Command("git", "show", "HEAD:"+path)
+	cmd.Dir = root // "" inherits the process cwd
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -60,27 +61,54 @@ func gitShowHead(path string) string {
 	return string(out)
 }
 
-// hasUnstagedChanges returns true if the file has unstaged changes compared to
-// the git index (i.e. modifications not yet staged).
-func hasUnstagedChanges(path string) bool {
+// gitShowHead reads a file from the git HEAD revision anchored at the process
+// cwd. Returns empty string if the file is not tracked or the repo is
+// unavailable.
+func gitShowHead(path string) string {
+	return gitShowHeadAt("", path)
+}
+
+// hasUnstagedChangesAt returns true if the file has unstaged changes compared
+// to the git index (i.e. modifications not yet staged), for the repo anchored
+// at root ("" = process cwd).
+func hasUnstagedChangesAt(root, path string) bool {
 	cmd := exec.Command("git", "diff", "--exit-code", "--", path)
+	cmd.Dir = root // "" inherits the process cwd
 	// Exit code 0 = no diff, 1 = diff found, other = error
 	return cmd.Run() != nil
 }
 
-// readContextFile reads the best available version of a context file:
+// hasUnstagedChanges returns true if the file has unstaged changes compared to
+// the git index (i.e. modifications not yet staged), anchored at the process
+// cwd.
+func hasUnstagedChanges(path string) bool {
+	return hasUnstagedChangesAt("", path)
+}
+
+// readContextFileAt reads the best available version of a context file
+// (relative to root, "" = process cwd):
 //  1. If the file has no unstaged changes OR is untracked, read from the working tree.
 //  2. If the file has unstaged changes, read from git HEAD (stable committed version).
 //
 // This ensures that local edits to AGENTS.md, CLAUDE.md, etc. do not silently
 // alter the base context sent to the LLM. The user can commit the changes to
 // make them effective.
-func readContextFile(path string) (string, bool) {
+func readContextFileAt(root, path string) (string, bool) {
 	// First check if the file is tracked by git and has unstaged changes.
 	// If gitShowHead succeeds the file IS tracked; if hasUnstagedChanges
-	// returns true there are working-tree modifications.
-	if head := gitShowHead(path); head != "" {
-		if hasUnstagedChanges(path) {
+	// returns true there are working-tree modifications. The git commands run
+	// with Dir=root, so path must be relative to root (matched paths from the
+	// root-based search are; paths outside the repo fall through to the
+	// working-tree read below, which is the correct behavior for e.g. files in
+	// the global config dir).
+	rel := path
+	if root != "" {
+		if rp, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(rp, "..") {
+			rel = rp
+		}
+	}
+	if head := gitShowHeadAt(root, rel); head != "" {
+		if hasUnstagedChangesAt(root, rel) {
 			// File tracked by git AND has unstaged changes — use HEAD version.
 			emitDebug("CONTEXT", fmt.Sprintf("using HEAD version of %s due to unstaged changes", path))
 			return head, true
@@ -94,6 +122,12 @@ func readContextFile(path string) (string, bool) {
 		return "", false
 	}
 	return string(content), true
+}
+
+// readContextFile reads the best available version of a context file anchored
+// at the process cwd (see readContextFileAt).
+func readContextFile(path string) (string, bool) {
+	return readContextFileAt("", path)
 }
 
 // LoadContext assembles the pre-cached system-prompt context. When discoveryOn
@@ -258,9 +292,14 @@ type ModelContextResult struct {
 	Path    string
 }
 
-// LoadModelContextWithSource is like LoadModelContext but also reports the
-// source of the loaded context (disk path or embedded fallback).
-func LoadModelContextWithSource(modelName string) ModelContextResult {
+// loadModelContextWithSource implements model-context resolution anchored at a
+// project root instead of the process cwd (the desktop shell boots with cwd "/"
+// while the anchored workDir is the real project; the TUI chdirs to workDir so
+// "" → "." keeps those call sites byte-identical). Search dirs are root,
+// root/.opencode, then the global config dir, with the same per-directory
+// exact-beats-wildcard and cross-directory first-match-wins precedence as the
+// original cwd-based loader.
+func loadModelContextWithSource(root, modelName string) ModelContextResult {
 	res := ModelContextResult{}
 	if modelName == "" {
 		return res
@@ -308,7 +347,10 @@ func LoadModelContextWithSource(modelName string) ModelContextResult {
 		return false, false
 	}
 
-	searchDirs := []string{".", filepath.Join(".", ".opencode")}
+	if root == "" {
+		root = "."
+	}
+	searchDirs := []string{root, filepath.Join(root, ".opencode")}
 	if gd := globalOcodeDir(); gd != "" {
 		searchDirs = append(searchDirs, gd)
 	}
@@ -371,7 +413,7 @@ func LoadModelContextWithSource(modelName string) ModelContextResult {
 		} else {
 			res.Path = matched
 		}
-		if content, ok := readContextFile(matched); ok {
+		if content, ok := readContextFileAt(root, matched); ok {
 			// Match the framing the original LoadModelContext produced so
 			// callers that only read .Content see identical output.
 			res.Content = "\n--- " + filepath.Base(matched) + " ---\n" + content + "\n"
@@ -390,6 +432,22 @@ func LoadModelContextWithSource(modelName string) ModelContextResult {
 		res.Path = bareLower + ".OCODE.md"
 	}
 	return res
+}
+
+// LoadModelContextWithSourceAt is like LoadModelContextWithSource but anchors
+// the project search at root (project root and root/.opencode) instead of the
+// process cwd. The server/desktop use this because their anchored workDir is
+// the real project while the process cwd can be "/" or anywhere else. root ""
+// falls back to "." (the original behavior).
+func LoadModelContextWithSourceAt(root, modelName string) ModelContextResult {
+	return loadModelContextWithSource(root, modelName)
+}
+
+// LoadModelContextWithSource is like LoadModelContext but also reports the
+// source of the loaded context (disk path or embedded fallback). Anchored at
+// the process cwd; see LoadModelContextWithSourceAt for a root-anchored search.
+func LoadModelContextWithSource(modelName string) ModelContextResult {
+	return loadModelContextWithSource("", modelName)
 }
 
 // LoadModelContext loads model-specific OCODE.md files from the project root,

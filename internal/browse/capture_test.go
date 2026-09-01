@@ -75,3 +75,24 @@ func TestCaptureBundleRerouteRules(t *testing.T) {
 		t.Error("capture.js WebSocket wrapper must map ws/wss to http/https route schemes")
 	}
 }
+
+// TestCaptureBundleRuntimeURLHooks pins the runtime-injected <script>/<link>
+// reroute (webpack/Next.js lazy chunks). Lazy chunk URLs never appear in the
+// initial HTML, so the Part 04 server rewrite cannot see them and they would
+// otherwise resolve against the browse origin ROOT and 404 (ChunkLoadError →
+// blank SPA). The hooks must stay wired through reroute().
+func TestCaptureBundleRuntimeURLHooks(t *testing.T) {
+	js := string(captureJS)
+	if !strings.Contains(js, `hookURLProp(HTMLScriptElement.prototype, "src")`) {
+		t.Error("capture.js lost the script.src runtime reroute hook")
+	}
+	if !strings.Contains(js, `hookURLProp(HTMLLinkElement.prototype, "href")`) {
+		t.Error("capture.js lost the link.href runtime reroute hook")
+	}
+	if !strings.Contains(js, `desc.set.call(this, reroute(v))`) {
+		t.Error("capture.js runtime URL hooks must pipe through reroute()")
+	}
+	if !strings.Contains(js, `Element.prototype.setAttribute`) {
+		t.Error("capture.js lost the setAttribute(src/href) reroute path")
+	}
+}

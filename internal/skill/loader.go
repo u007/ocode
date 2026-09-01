@@ -172,6 +172,35 @@ func LoadSkillsForModel(root, activeModel string) []Skill {
 	return out
 }
 
+// KaizenDigestAdmittedForModels reports, for each given model id, whether at
+// least one Kaizen tuning skill carrying a force-injected digest
+// (`<!-- kaizen:digest -->`) is admitted for that model in root. The repo stack
+// is detected ONCE per call, so a UI can badge every listed model (the web
+// model picker) without paying stack detection per model. Skill loading is
+// served by the cached loader; matching rules stay encapsulated in the private
+// helpers above. A model not present in the map is simply not admitted.
+func KaizenDigestAdmittedForModels(root string, models []string) map[string]bool {
+	out := make(map[string]bool, len(models))
+	if len(models) == 0 {
+		return out
+	}
+	detected := stackdetect.Detect(root)
+	for _, s := range LoadSkillsForRoot(root) {
+		if s.TunedFor == "" || s.Digest == "" {
+			continue
+		}
+		for _, id := range models {
+			if out[id] {
+				continue
+			}
+			if kaizenAdmitted(s, id, detected) {
+				out[id] = true
+			}
+		}
+	}
+	return out
+}
+
 // KaizenSkillsForModel returns ONLY the Kaizen (per-model tuned) skills admitted
 // for the active model + detected stack — normal skills are excluded (use
 // LoadSkills for those). The discovery corpus calls this so a gated tuning skill

@@ -155,9 +155,7 @@ func (a *Agent) acquireInterpreterSource(ie *InterpreterExec) (source, sha strin
 		}
 		full := ie.Entrypoint
 		if !filepath.IsAbs(full) {
-			if wd, err := os.Getwd(); err == nil {
-				full = filepath.Join(wd, full)
-			}
+			full = filepath.Join(a.effectiveWorkDir(), full)
 		}
 		data, err := os.ReadFile(full)
 		if err != nil {
@@ -238,7 +236,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 		"language":          ie.Language,
 		"source_mode":       ie.SourceMode,
 		"command":           command,
-		"cwd":               safeGetwd(),
+		"cwd":               a.effectiveWorkDir(),
 		"entrypoint_path":   ie.Entrypoint,
 		"allowed_roots":     roots,
 		"allow_destructive": allowDestructive,
@@ -318,7 +316,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	}
 
 	messages := []Message{{Role: "user", Content: prompt}}
-	finalText, gotFinal, failReason := runPermissionModelLoop(a.StopCh(), client, messages, []map[string]interface{}{permissionReadFileTool()}, modelLabel, "bash", a.RecordSideUsageFromMessage, roots)
+	finalText, gotFinal, failReason := runPermissionModelLoop(a.StopCh(), client, messages, []map[string]interface{}{permissionReadFileTool()}, modelLabel, "bash", a.effectiveWorkDir(), a.RecordSideUsageFromMessage, roots)
 	if !gotFinal {
 		return false, failReason, "", false
 	}
@@ -330,7 +328,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 		messages = append(messages,
 			Message{Role: "assistant", Content: finalText},
 			Message{Role: "user", Content: buildPermissionInterpreterRetryPrompt(err, finalText)})
-		retryText, gotRetry, _ := runPermissionModelLoop(a.StopCh(), client, messages, nil, modelLabel, "bash", a.RecordSideUsageFromMessage, roots)
+		retryText, gotRetry, _ := runPermissionModelLoop(a.StopCh(), client, messages, nil, modelLabel, "bash", a.effectiveWorkDir(), a.RecordSideUsageFromMessage, roots)
 		if !gotRetry {
 			return false, "interpreter effect summary was not valid JSON", "", false
 		}
@@ -479,9 +477,9 @@ func (a *Agent) persistInterpreterGrant(ie *InterpreterExec, sha, command string
 			Language:          ie.Language,
 			SourceMode:        ie.SourceMode,
 			NormalizedCommand: normalizeGrantCommand(command),
-			EntrypointPath:    resolvedInterpreterEntrypoint(ie),
+			EntrypointPath:    resolvedInterpreterEntrypoint(ie, a.effectiveWorkDir()),
 			EntrypointSHA256:  sha,
-			CWD:               safeGetwd(),
+			CWD:               a.effectiveWorkDir(),
 			Destructive:       destructive,
 		}
 	default:

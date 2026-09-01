@@ -2,9 +2,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import PermissionDialog from "./PermissionDialog";
 import type { PermissionDecision } from "@/api/types";
+import type { PermissionDecideResult } from "./PermissionDialog";
 
 function renderDialog(overrides: Partial<Parameters<typeof PermissionDialog>[0]> = {}) {
-  const onDecide = vi.fn(async (_id: string, _d: PermissionDecision) => true);
+  const onDecide = vi.fn(async (_id: string, _d: PermissionDecision): Promise<PermissionDecideResult> => ({ ok: true }));
   const props: Parameters<typeof PermissionDialog>[0] = {
     open: true,
     tool: "bash",
@@ -85,7 +86,7 @@ describe("PermissionDialog", () => {
   });
 
   it("re-enables buttons after a failed onDecide so the user can retry", async () => {
-    const onDecide = vi.fn(async () => false);
+    const onDecide = vi.fn(async (): Promise<PermissionDecideResult> => ({ ok: false, error: "resolve failed: boom" }));
     const { unmount } = render(
       <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );
@@ -95,11 +96,31 @@ describe("PermissionDialog", () => {
     // After failure, loading is cleared — button must be enabled again for retry.
     await waitFor(() => expect(allowBtn.disabled).toBe(false));
     expect(screen.getByText("Deny").closest("button")?.disabled).toBe(false);
+    // The failure is never silent: the reason is shown inline.
+    expect(screen.getByRole("alert").textContent).toContain("resolve failed: boom");
+    unmount();
+  });
+
+  it("clears the inline error on the next attempt and when a new request arrives", async () => {
+    const onDecide = vi
+      .fn<(id: string, d: PermissionDecision) => Promise<PermissionDecideResult>>()
+      .mockResolvedValueOnce({ ok: false, error: "first failed" })
+      .mockResolvedValue({ ok: true });
+    const { rerender, unmount } = render(
+      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+    );
+    fireEvent.click(screen.getByText("Allow once"));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("first failed"));
+    // A new ask promoted from the queue must not show the previous ask's error.
+    rerender(
+      <PermissionDialog open={true} tool="bash" command="ls /tmp" requestId="call-2" onDecide={onDecide} />,
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
     unmount();
   });
 
   it("keeps buttons disabled after a successful decision until unmount (single permission)", async () => {
-    const onDecide = vi.fn(async () => true);
+    const onDecide = vi.fn(async (): Promise<PermissionDecideResult> => ({ ok: true }));
     const { unmount } = render(
       <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );
@@ -112,7 +133,7 @@ describe("PermissionDialog", () => {
   });
 
   it("resets loading when a new requestId arrives while the dialog stays mounted (queued permission)", async () => {
-    const onDecide = vi.fn(async () => true);
+    const onDecide = vi.fn(async (): Promise<PermissionDecideResult> => ({ ok: true }));
     const { rerender, unmount } = render(
       <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );
@@ -133,7 +154,7 @@ describe("PermissionDialog", () => {
   });
 
   it("clears the always-allow confirm UI when requestId changes", async () => {
-    const onDecide = vi.fn(async () => true);
+    const onDecide = vi.fn(async (): Promise<PermissionDecideResult> => ({ ok: true }));
     const { rerender, unmount } = render(
       <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );
@@ -149,7 +170,7 @@ describe("PermissionDialog", () => {
   });
 
   it("dismissing the dialog (close button / Escape / overlay) submits deny when not loading", async () => {
-    const onDecide = vi.fn(async () => true);
+    const onDecide = vi.fn(async (): Promise<PermissionDecideResult> => ({ ok: true }));
     const { unmount } = render(
       <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );
@@ -164,7 +185,7 @@ describe("PermissionDialog", () => {
 
   it("does not submit a dismissal while a decision is in-flight (loading guard)", async () => {
     // onDecide that never resolves keeps the dialog in loading=true
-    const onDecide = vi.fn(() => new Promise<boolean>(() => {}));
+    const onDecide = vi.fn(() => new Promise<PermissionDecideResult>(() => {}));
     const { unmount } = render(
       <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );

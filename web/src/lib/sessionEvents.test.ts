@@ -5,6 +5,7 @@ import {
   RECONCILE_PAGE_SIZE,
   LIVE_DELTA_FLUSH_MS,
   cancelLiveDeltas,
+  closeSessionBackend,
   __resetLastAppliedSeqForTests,
   type SessionEventRouter,
 } from "./sessionEvents";
@@ -17,10 +18,12 @@ import { browserStore } from "./browserStore";
 
 const mockGetSessionState = vi.fn();
 const mockGetSession = vi.fn();
+const mockCloseSession = vi.fn();
 vi.mock("../api/client", () => ({
   api: {
     getSessionState: (...a: unknown[]) => mockGetSessionState(...a),
     getSession: (...a: unknown[]) => mockGetSession(...a),
+    closeSession: (...a: unknown[]) => mockCloseSession(...a),
   },
 }));
 
@@ -384,6 +387,29 @@ describe("routeBusEnvelope", () => {
   });
 });
 
+describe("closeSessionBackend", () => {
+  beforeEach(() => {
+    mockCloseSession.mockReset();
+    mockCloseSession.mockResolvedValue({ cancelled: true });
+  });
+
+  it("calls the backend close endpoint for a real session id", () => {
+    closeSessionBackend("sess-123");
+    expect(mockCloseSession).toHaveBeenCalledWith("sess-123");
+  });
+
+  it("skips new-* draft tabs that have no server session yet", () => {
+    closeSessionBackend("new-9");
+    expect(mockCloseSession).not.toHaveBeenCalled();
+  });
+
+  it("skips empty ids and swallows backend failures (fire-and-forget)", () => {
+    mockCloseSession.mockRejectedValue(new Error("boom"));
+    closeSessionBackend("sess-123");
+    expect(mockCloseSession).toHaveBeenCalledWith("sess-123");
+  });
+});
+
 describe("reconcileOpenSessions", () => {
   beforeEach(() => {
     mockGetSessionState.mockReset();
@@ -515,7 +541,7 @@ describe("browse_nav routing (Part 07/08 contract)", () => {
     browserStore.setState(() => ({
       byKey: {
         "tab:x": {
-          url: "", status: 0, loading: true, mode: null, error: null,
+          url: "", status: 0, loading: true, mode: null, userMode: null, error: null,
           history: [], historyIndex: -1, panelOpen: true, collapsed: false,
           consoleEvents: [], networkEvents: [],
         },

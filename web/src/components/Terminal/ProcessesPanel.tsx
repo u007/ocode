@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Gauge } from "lucide-react";
 import { eventBus } from "@/lib/eventBus";
 import { api } from "@/api/client";
+import { browserStore } from "@/lib/browserStore";
+import { estimateBrowseSurfaceBytes, estimateSessionSliceBytes } from "@/lib/memoryEstimate";
+import { useBrowserTabs } from "@/stores/browserTabsStore";
+import { useChatStateRef } from "@/stores/chatStore";
+import { useProjectState } from "@/stores/projectStore";
 import { loadProjectTerminals } from "./terminalPersistence";
 
 interface TerminalProcessStat {
@@ -14,10 +19,31 @@ interface TerminalProcessStat {
   command?: string;
 }
 
+/**
+ * A frontend-attributed row for a surface that has no OS process of its own
+ * (the chat session and each browser tab live in the same renderer as the
+ * whole SPA). `bytes` is an estimate of the surface's retained JS state — see
+ * memoryEstimate.ts for what each estimate covers and its caveats. These rows
+ * are appended after the CPU-sorted terminal rows; `subLabel` is the muted
+ * second line shown under the Name.
+ */
+interface LocalFootprintRow {
+  id: string;
+  name: string;
+  subLabel: string;
+  command: string;
+  bytes: number;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+// How often the local estimate rows (chat session, browser tabs) re-sample.
+// Terminal rows ride the server's 1.5s `terminal_processes` SSE ticks; the
+// local estimators are cache-backed (see memoryEstimate.ts) so 2s is cheap.
+const localFootprintInterval = 2000;
 
 type ColumnKey = "name" | "command" | "pid" | "cpu" | "mem";
 
@@ -44,6 +70,14 @@ const MAX_WIDTH = 600;
  * localStorage-persisted terminal list TerminalTabs itself reads (now
  * project-scoped so the view survives session switches). The live command comes
  * from the envelope's `command` field (best-effort process-tree command line).
+ *
+ * Below the terminal rows, the panel appends frontend-attributed rows for the
+ * surfaces that have no OS process of their own — every open chat session for
+ * this project and each open browser tab. Their Memory values are estimates of
+ * the retained JS state each surface owns (see memoryEstimate.ts), computed
+ * locally on a 2s ticker and labeled `est.`; PID/CPU show "—" because there is
+ * no process to measure. Browser rows cover the standalone `tab:` surfaces
+ * (side panels are excluded).
  */
 export default function ProcessesPanel({ projectPath }: { projectPath: string }) {
   const [stats, setStats] = useState<Record<string, TerminalProcessStat>>({});
@@ -53,6 +87,104 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
     return Object.fromEntries(saved.terminals.map((t) => [t.id, t.title]));
   });
   const { widths, startResize } = useColumnWidths(projectPath);
+
+  const { state: projectState } = useProjectState();
+  const projectTabs = projectState.tabsByProject[projectPath] ?? [];
+  const activeTabId = projectState.activeTabByProject[projectPath] ?? null;
+
+  // Standalone browser tabs of this project (tab: stateKeys — side panels are
+  // excluded). Titles live in the tab strip store; per-tab state lives in
+  // browserStore (a module singleton, read directly in the ticker below).
+  const { tabs: rawBrowserTabs } = useBrowserTabs(projectPath);
+  const chatStateRef = useChatStateRef();
+
+  // Both tab arrays fall back to a fresh `?? []` when the project has no
+  // tabs yet, so their identities are unstable across renders — never use
+  // them as effect dependencies. The `*Key` strings are stable content
+  // signatures. Refs keep the ticker reading the latest value without
+  // re-subscribing on every render.
+  const browserTabsRef = useRef(rawBrowserTabs);
+  browserTabsRef.current = rawBrowserTabs;
+  const browserTabsKey = rawBrowserTabs.map((t) => `${t.id}:${t.title}`).join("|");
+  const chatTabsRef = useRef(projectTabs);
+  chatTabsRef.current = projectTabs;
+  const chatTabsKey = projectTabs.map((t) => `${t.id}:${t.title}`).join("|");
+  const activeTabRef = useRef(activeTabId);
+  activeTabRef.current = activeTabId;
+
+  const [localRows, setLocalRows] = useState<LocalFootprintRow[]>([]);
+  const lastRowsJson = useRef("");
+
+  // Reset estimated rows when switching projects so stale rows from the
+  // previous project don't flash before the next tick, and identical
+  // snapshots still trigger a render for the new project.
+  useEffect(() => {
+    lastRowsJson.current = "";
+    setLocalRows([]);
+  }, [projectPath]);
+
+  useEffect(() => {
+    const tick = () => {
+      const rows: LocalFootprintRow[] = [];
+      for (const tab of chatTabsRef.current) {
+        const slice = chatStateRef.current.sessions[tab.id];
+        if (!slice) {
+          const isActive = tab.id === activeTabRef.current;
+          rows.push({
+            id: `chat:${tab.id}`,
+            name: tab.title || "Chat session",
+            subLabel: isActive ? "not loaded yet · active" : "not loaded yet",
+            command: "—",
+            bytes: 0,
+          });
+        } else {
+          const stats_ = estimateSessionSliceBytes(tab.id, slice);
+          const isActive = tab.id === activeTabRef.current;
+          rows.push({
+            id: `chat:${tab.id}`,
+            name: tab.title || "Chat session",
+            subLabel: `${stats_.messageCount} message${stats_.messageCount === 1 ? "" : "s"} · est.${isActive ? " · active" : ""}`,
+            command: "—",
+            bytes: stats_.bytes,
+          });
+        }
+      }
+      for (const tab of browserTabsRef.current) {
+        const surface = browserStore.state.byKey[`tab:${tab.id}`];
+        if (!surface) {
+          rows.push({
+            id: `browser:${tab.id}`,
+            name: tab.title,
+            subLabel: "not loaded yet",
+            command: "—",
+            bytes: 0,
+          });
+          continue;
+        }
+        const est = estimateBrowseSurfaceBytes(surface);
+        rows.push({
+          id: `browser:${tab.id}`,
+          name: tab.title,
+          subLabel: est.bytes > 0 ? `${est.consoleCount} console · ${est.networkCount} network · est.` : "not loaded yet",
+          command: surface.url || "—",
+          bytes: est.bytes,
+        });
+      }
+      // The estimates change rarely; skip the re-render when the snapshot is
+      // byte-identical so a hidden Processes panel stays quiet between ticks.
+      const json = JSON.stringify(rows);
+      if (json !== lastRowsJson.current) {
+        lastRowsJson.current = json;
+        setLocalRows(rows);
+      }
+    };
+    tick();
+    const interval = setInterval(tick, localFootprintInterval);
+    return () => clearInterval(interval);
+    // chatStateRef is intentionally not a dependency: it is a stable ref in
+    // production (useChatStateRef returns the same object forever) and
+    // depending on it would re-subscribe the ticker on every render.
+  }, [projectPath, chatTabsKey, browserTabsKey]);
 
   function refreshTitles() {
     const saved = loadProjectTerminals(projectPath);
@@ -133,7 +265,7 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
         Processes
       </div>
       <div className="flex-1 overflow-auto">
-        {rows.length === 0 ? (
+        {rows.length === 0 && localRows.length === 0 ? (
           <div className="p-4 text-sm text-muted-foreground">
             No terminal process data yet. Open a terminal to see it here.
           </div>
@@ -181,6 +313,36 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
                     {row.cpu_percent.toFixed(1)}%
                   </td>
                   <td className="px-3 py-2 tabular-nums">{formatBytes(row.mem_bytes)}</td>
+                </tr>
+              ))}
+              {localRows.length > 0 && (
+                <tr key="__frontend-header" className="bg-muted/30">
+                  <td colSpan={5} className="px-3 py-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Frontend surfaces (estimated) — ~ memory, same renderer
+                  </td>
+                </tr>
+              )}
+              {localRows.map((row) => (
+                <tr key={row.id} className="border-b border-border/50 text-foreground">
+                  <td className="px-3 py-2">
+                    <div className="truncate" title={row.name}>
+                      {row.name}
+                    </div>
+                    <div className="truncate text-xs text-muted-foreground" title={row.subLabel}>
+                      {row.subLabel}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs">
+                    <div className="truncate" title={row.command}>
+                      {row.command}
+                    </div>
+                  </td>
+                  {/* No OS process: PID/CPU are not applicable to these rows. */}
+                  <td className="px-3 py-2 text-muted-foreground">—</td>
+                  <td className="px-3 py-2 text-muted-foreground">—</td>
+                  <td className="px-3 py-2 tabular-nums text-muted-foreground">
+                    {row.bytes > 0 ? `~${formatBytes(row.bytes)}` : "—"}
+                  </td>
                 </tr>
               ))}
             </tbody>

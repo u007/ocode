@@ -72,6 +72,11 @@ func hostIsLiteralPrivate(host string) bool {
 	return isPrivateIP(addr)
 }
 
+// IsPrivateHost is the exported wrapper for hostIsLiteralPrivate, used by
+// the main server's bypass validation to ensure only private/loopback hosts
+// can be bypassed.
+func IsPrivateHost(host string) bool { return hostIsLiteralPrivate(host) }
+
 // browseBlockedPrefixes is the enumerated SSRF block list from the design
 // spec. Kept as explicit prefixes (rather than only stdlib Is* helpers) so
 // the list is auditable against the spec and testable range by range.

@@ -2668,15 +2668,13 @@ func normalizeGrantCommand(command string) string {
 // resolvedInterpreterEntrypoint returns the absolute, symlink-resolved path for
 // a classified interpreter execution's source file, or "" when no path can be
 // resolved.
-func resolvedInterpreterEntrypoint(ie *InterpreterExec) string {
+func resolvedInterpreterEntrypoint(ie *InterpreterExec, workDir string) string {
 	if ie == nil || ie.Entrypoint == "" {
 		return ""
 	}
 	full := ie.Entrypoint
-	if !filepath.IsAbs(full) {
-		if wd, err := os.Getwd(); err == nil {
-			full = filepath.Join(wd, full)
-		}
+	if !filepath.IsAbs(full) && workDir != "" {
+		full = filepath.Join(workDir, full)
 	}
 	if resolved, err := filepath.EvalSymlinks(full); err == nil {
 		full = resolved
@@ -2701,8 +2699,8 @@ func (pm *PermissionManager) MatchInterpreterGrant(ie *InterpreterExec, sourceHa
 		return false
 	}
 	normalizedCommand := normalizeGrantCommand(ie.RawCommand)
-	resolvedPath := resolvedInterpreterEntrypoint(ie)
-	cwd := safeGetwd()
+	cwd := pm.effectiveWorkDir()
+	resolvedPath := resolvedInterpreterEntrypoint(ie, cwd)
 	for _, g := range pm.autoGrants {
 		if g.Kind != "interpreter_exact" || g.Language != ie.Language || g.SourceMode != ie.SourceMode {
 			continue
@@ -2732,6 +2730,16 @@ func (pm *PermissionManager) MatchInterpreterGrant(ie *InterpreterExec, sourceHa
 func (pm *PermissionManager) SetWorkDir(path string) {
 	pm.workDir = filepath.Clean(path)
 	pm.LoadClaudePermissions(pm.workDir)
+}
+
+// effectiveWorkDir is the session working directory (SetWorkDir) or, when none
+// was set, the process cwd. Desktop/web sessions never chdir the process, so
+// anything cwd-relative in the permission path must go through this.
+func (pm *PermissionManager) effectiveWorkDir() string {
+	if pm.workDir != "" {
+		return pm.workDir
+	}
+	return safeGetwd()
 }
 
 func (pm *PermissionManager) SetWebfetchDomain(domain string, level PermissionLevel) {
@@ -3365,12 +3373,18 @@ func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
 
 	// Shell reserved words that introduce a new command body without an
 	// intervening operator token (e.g. "do rm -rf /" inside a for/while
-	// loop, or "then rm -rf /" inside an if). Without splitting here, the
-	// banned command becomes a trailing word of the keyword's own fragment
-	// instead of a fragment's leading word, so matchBashPrefixRule never
-	// sees it and the deny short-circuit is skipped.
+	// loop, "then rm -rf /" inside an if, or the condition command after
+	// if/elif/while/until). Without splitting here, the banned command
+	// becomes a trailing word of the keyword's own fragment instead of a
+	// fragment's leading word, so matchBashPrefixRule never sees it and
+	// the deny short-circuit is skipped. Block terminators (fi/done/esac)
+	// and leading "!" negation are dropped the same way so they never
+	// surface as bogus command prefixes that trigger permission asks.
 	bodyIntroKeywords := map[string]bool{
 		"do": true, "then": true, "else": true, "elif": true,
+		"if": true, "while": true, "until": true,
+		"fi": true, "done": true, "esac": true,
+		"!": true,
 	}
 
 	for _, tok := range tokens {

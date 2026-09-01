@@ -184,6 +184,10 @@ func pathWithinRoot(path, root string) bool {
 		return true
 	}
 	rootWithSep := root + string(filepath.Separator)
+	if root == string(filepath.Separator) {
+		// A bare "/" root would otherwise become "//" and match nothing.
+		rootWithSep = root
+	}
 	return strings.HasPrefix(path, rootWithSep)
 }
 

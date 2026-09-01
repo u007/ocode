@@ -47,10 +47,11 @@ import {
   Unlock,
   X,
 } from "lucide-react";
-import { api, apiPath, authHeaders } from "@/api/client";
+import { api, apiPath, authHeaders, readSSEStream } from "@/api/client";
 import { parseKeywords, matchesKeywords } from "@/lib/keywordFilter";
 import SecretActionDialog from "./SecretActionDialog";
 import { loadFileTreeView, saveFileTreeView, type FileTreeViewMode } from "./fileTreeViewPersistence";
+import { loadFileSearchFilters, saveFileSearchFilters } from "./fileSearchFiltersPersistence";
 
 // Suppress unused-import errors for in-progress secret/file-tree work (dirty
 // working tree from parallel feature). The build is strict (`noUnusedLocals`).
@@ -75,14 +76,6 @@ interface FileSearchResult {
   path: string;
   line: number;
   text: string;
-}
-
-interface FileSearchResponse {
-  results: FileSearchResult[];
-  truncated: boolean;
-  total: number;
-  has_more?: boolean;
-  capped?: boolean;
 }
 
 type SecretMode = "encrypt" | "decrypt";
@@ -117,6 +110,8 @@ interface FileMenuActions {
 interface FileTreeProps {
   onOpenFile: (path: string, projectRoot?: string, line?: number, query?: string) => void;
   projectPath?: string;
+  /** Paths currently included in the chat/LLM context (opened editor tabs with includeInContext). Shown as a subtle indicator, separate from the bulk-selection checkbox. */
+  includedPaths?: string[];
 }
 
 const langIcons: Record<string, string> = {
@@ -284,6 +279,7 @@ interface TreeNodeProps {
   projectRoot?: string;
   forceExpanded?: boolean;
   menu: FileMenuActions;
+  includedPaths?: Set<string>;
 }
 
 function TreeNode({
@@ -296,6 +292,7 @@ function TreeNode({
   projectRoot,
   forceExpanded,
   menu,
+  includedPaths,
 }: TreeNodeProps) {
   const [expanded, setExpanded] = useState(!!forceExpanded);
   const [children, setChildren] = useState<FileNode[] | null>(node.children ?? null);
@@ -400,7 +397,7 @@ function TreeNode({
     </button>
   );
 
-  const rowBase = `w-full justify-start h-7 px-2 text-xs gap-1.5 font-normal flex items-center transition-colors ${
+  const rowBase = `w-full justify-start h-7 px-2 text-xs gap-1.5 font-normal flex items-center text-left transition-colors ${
     forceExpanded ? "cursor-default" : ""
   }`;
   const rowState = selected
@@ -490,7 +487,7 @@ function TreeNode({
                   }`}
                 />
                 <FileIcon name={node.name} isDir expanded={expanded} />
-                <span className="truncate flex-1 min-w-0">{node.name}</span>
+                <span className="truncate flex-1 min-w-0 text-left">{node.name}</span>
                 {loadingChildren && (
                   <Loader2 className="w-3 h-3 shrink-0 text-muted-foreground animate-spin" />
                 )}
@@ -512,12 +509,14 @@ function TreeNode({
               projectRoot={projectRoot}
               forceExpanded={forceExpanded}
               menu={menu}
+              includedPaths={includedPaths}
             />
           ))}
       </div>
     );
   }
 
+  const isIncluded = !isDir && !!includedPaths?.has(node.path);
   return (
     <ContextMenu onOpenChange={(open) => open && openMenu()}>
       <ContextMenuTrigger asChild>
@@ -525,8 +524,15 @@ function TreeNode({
           {CheckBox}
           <button className={`${rowBase} ${rowState} flex-1 min-w-0`} onClick={handleRowClick}>
             <FileIcon name={node.name} isDir={false} expanded={false} />
-            <span className="truncate flex-1 min-w-0">{node.name}</span>
+            <span className="truncate flex-1 min-w-0 text-left">{node.name}</span>
             {node.git_status && <GitBadge status={node.git_status} />}
+            {isIncluded && (
+              <span
+                title="Included in chat context — uncheck in the file preview to remove"
+                className="ml-1 w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0"
+                aria-label="Included in chat context"
+              />
+            )}
           </button>
         </div>
       </ContextMenuTrigger>
@@ -639,7 +645,8 @@ function PromptDialog({ state, onCancel }: { state: PromptState | null; onCancel
   );
 }
 
-export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
+export default function FileTree({ onOpenFile, projectPath, includedPaths }: FileTreeProps) {
+  const includedSet = new Set(includedPaths ?? []);
   const [tree, setTree] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -655,12 +662,19 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
   const [contentQuery, setContentQuery] = useState("");
   const [contentResults, setContentResults] = useState<FileSearchResult[] | null>(null);
   const [contentLoading, setContentLoading] = useState(false);
-  const [contentLoadingMore, setContentLoadingMore] = useState(false);
-  const [contentHasMore, setContentHasMore] = useState(false);
-  const [contentTotal, setContentTotal] = useState<number | null>(null);
+  const [contentCapped, setContentCapped] = useState(false);
+  // Content-search filters — persisted per-project (wildcards, toggles)
+  const [contentExts, setContentExts] = useState(() => loadFileSearchFilters(projectPath).exts);
+  const [contentIgnore, setContentIgnore] = useState(() => loadFileSearchFilters(projectPath).ignore);
+  const [contentRegex, setContentRegex] = useState(() => loadFileSearchFilters(projectPath).regex);
+  const [contentCaseSensitive, setContentCaseSensitive] = useState(() => loadFileSearchFilters(projectPath).caseSensitive);
+  const [contentWholeWord, setContentWholeWord] = useState(() => loadFileSearchFilters(projectPath).wholeWord);
+  const [contentIncludeIgnored, setContentIncludeIgnored] = useState(() => loadFileSearchFilters(projectPath).includeIgnored);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  // While streaming, results are auto-followed (scroll pinned to the newest
+  // batch) until the user scrolls up to inspect earlier matches.
+  const followTailRef = useRef(true);
   const searchAbortRef = useRef<AbortController | null>(null);
   const searchGenRef = useRef(0);
   const fullTreeAbortRef = useRef<AbortController | null>(null);
@@ -692,6 +706,29 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
   useEffect(() => {
     saveFileTreeView(viewMode);
   }, [viewMode]);
+
+  // Persist per-project content-search filters (exts, ignore globs, toggles)
+  useEffect(() => {
+    saveFileSearchFilters(activeRoot ?? projectPath, {
+      exts: contentExts,
+      ignore: contentIgnore,
+      regex: contentRegex,
+      caseSensitive: contentCaseSensitive,
+      wholeWord: contentWholeWord,
+      includeIgnored: contentIncludeIgnored,
+    });
+  }, [activeRoot, projectPath, contentExts, contentIgnore, contentRegex, contentCaseSensitive, contentWholeWord, contentIncludeIgnored]);
+
+  // Reload filters when switching project/root
+  useEffect(() => {
+    const filters = loadFileSearchFilters(activeRoot ?? projectPath);
+    setContentExts(filters.exts);
+    setContentIgnore(filters.ignore);
+    setContentRegex(filters.regex);
+    setContentCaseSensitive(filters.caseSensitive);
+    setContentWholeWord(filters.wholeWord);
+    setContentIncludeIgnored(filters.includeIgnored);
+  }, [activeRoot, projectPath]);
 
   const keywords = useMemo(() => parseKeywords(keyword), [keyword]);
   const contentKeywords = useMemo(() => parseKeywords(contentQuery), [contentQuery]);
@@ -921,57 +958,94 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
     [activeRoot, contentQuery, fetchColumnChildren, onOpenFile, searchMode],
   );
 
-  const fetchContentPage = useCallback(
-    (offset: number, append: boolean) => {
-      const root = activeRoot ?? projectPath;
-      const q = contentQuery.trim();
-      if (!root || q.length < 2) return;
-      const gen = ++searchGenRef.current;
-      if (append) setContentLoadingMore(true);
-      else setContentLoading(true);
-      const controller = new AbortController();
-      searchAbortRef.current?.abort();
-      searchAbortRef.current = controller;
-      (async () => {
-        try {
-          const params = new URLSearchParams({
-            path: root,
-            query: q,
-            offset: String(offset),
-            limit: "50",
-          });
-          const res = await fetch(apiPath(`/api/files/search?${params.toString()}`), {
-            headers: authHeaders(),
-            signal: controller.signal,
-          });
-          if (!res.ok) throw new Error("Content search failed");
-          const data: FileSearchResponse = await res.json();
-          if (controller.signal.aborted || gen !== searchGenRef.current) return;
-          setContentResults((prev) =>
-            append ? [...(prev ?? []), ...data.results] : data.results,
-          );
-          setContentHasMore(!!data.has_more);
-          setContentTotal(data.total ?? null);
-        } catch (err) {
-          if ((err as Error).name !== "AbortError") console.error("Content search error:", err);
-        } finally {
-          if (!controller.signal.aborted) {
-            setContentLoading(false);
-            setContentLoadingMore(false);
-          }
+// Scroll helpers for the streamed results list: while following the tail,
+  // each incoming batch jumps the viewport to the newest results (after the
+  // DOM updates); scrolling up disengages the follow so earlier matches stay
+  // in view.
+  const onSearchScroll = useCallback(() => {
+    const vp = scrollViewportRef.current;
+    if (!vp) return;
+    followTailRef.current = vp.scrollHeight - vp.scrollTop - vp.clientHeight < 40;
+  }, []);
+
+  const scrollSearchToBottom = useCallback(() => {
+    const vp = scrollViewportRef.current;
+    if (vp) vp.scrollTop = vp.scrollHeight;
+  }, []);
+
+  // Starts a streamed content search. Matches arrive as SSE `result` batches
+  // the moment the backend finds them and are appended incrementally, so the
+  // first results render long before the full scan finishes — no more waiting
+  // for a whole page. The stream ends with a `done` frame carrying the total
+  // and cap status.
+  const startContentSearch = useCallback(() => {
+    const root = activeRoot ?? projectPath;
+    const q = contentQuery.trim();
+    if (!root || q.length < 2) return;
+    const gen = ++searchGenRef.current;
+    const controller = new AbortController();
+    searchAbortRef.current?.abort();
+    searchAbortRef.current = controller;
+    setContentLoading(true);
+    setContentCapped(false);
+    followTailRef.current = true;
+    const params = new URLSearchParams({ path: root, query: q });
+    if (contentExts.trim()) params.set("exts", contentExts.trim());
+    if (contentIgnore.trim()) params.set("ignore", contentIgnore.trim());
+    if (contentRegex) params.set("regex", "1");
+    if (contentCaseSensitive) params.set("caseSensitive", "1");
+    if (contentWholeWord) params.set("wholeWord", "1");
+    if (contentIncludeIgnored) params.set("includeIgnored", "1");
+    (async () => {
+      try {
+        const res = await fetch(apiPath(`/api/files/search/stream?${params.toString()}`), {
+          headers: authHeaders(),
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: res.statusText }));
+          throw new Error(err.error || res.statusText || "Content search failed");
         }
-      })();
-    },
-    [activeRoot, projectPath, contentQuery],
-  );
+        let gotDone = false;
+        await readSSEStream<{ results?: FileSearchResult[] } & { total?: number; capped?: boolean }>(
+          res,
+          {
+            result: (data) => {
+              if (gen !== searchGenRef.current || controller.signal.aborted) return;
+              const batch = data.results ?? [];
+              if (batch.length === 0) return;
+              setContentResults((prev) => [...(prev ?? []), ...batch]);
+              if (followTailRef.current) {
+                requestAnimationFrame(scrollSearchToBottom);
+              }
+            },
+            done: (data) => {
+              if (gen !== searchGenRef.current || controller.signal.aborted) return;
+              gotDone = true;
+              setContentCapped(!!data.capped);
+              setContentLoading(false);
+            },
+          },
+        );
+        // Stream ended without a done frame (server died mid-walk): make sure
+        // the loading indicator clears instead of spinning forever.
+        if (gen === searchGenRef.current && !gotDone && !controller.signal.aborted) {
+          setContentLoading(false);
+        }
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") console.error("Content search error:", err);
+        if (!controller.signal.aborted && gen === searchGenRef.current) {
+          setContentLoading(false);
+        }
+      }
+    })();
+  }, [activeRoot, projectPath, contentQuery, contentExts, contentIgnore, contentRegex, contentCaseSensitive, contentWholeWord, contentIncludeIgnored, scrollSearchToBottom]);
 
   useEffect(() => {
     if (searchMode !== "content") {
       setContentResults(null);
       setContentLoading(false);
-      setContentLoadingMore(false);
-      setContentHasMore(false);
-      setContentTotal(null);
+      setContentCapped(false);
       searchGenRef.current++;
       searchAbortRef.current?.abort();
       return;
@@ -980,41 +1054,25 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
     if (q.length < 2) {
       setContentResults(null);
       setContentLoading(false);
-      setContentLoadingMore(false);
-      setContentHasMore(false);
-      setContentTotal(null);
+      setContentCapped(false);
       searchGenRef.current++;
       searchAbortRef.current?.abort();
       return;
     }
-    setContentHasMore(false);
-    setContentTotal(null);
+    // Invalidate any in-flight stream immediately so late `result`/`done`
+    // frames from the previous query can't pollute the cleared results
+    // or clear the loading state for the new query during the debounce.
+    searchGenRef.current++;
+    searchAbortRef.current?.abort();
+    setContentResults(null);
+    setContentCapped(false);
     const timer = setTimeout(() => {
-      fetchContentPage(0, false);
+      startContentSearch();
     }, 300);
     return () => {
       clearTimeout(timer);
     };
-  }, [searchMode, contentQuery, activeRoot, projectPath, fetchContentPage]);
-
-  useEffect(() => {
-    if (searchMode !== "content" || !contentHasMore || contentLoading || contentLoadingMore) return;
-    const sentinel = sentinelRef.current;
-    const viewport =
-      scrollViewportRef.current ||
-      (document.querySelector("[data-radix-scroll-area-viewport]") as HTMLDivElement | null);
-    if (!sentinel) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting && contentHasMore && !contentLoading && !contentLoadingMore) {
-          fetchContentPage(contentResults?.length ?? 0, true);
-        }
-      },
-      { root: viewport, rootMargin: "200px", threshold: 0 },
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [searchMode, contentHasMore, contentLoading, contentLoadingMore, contentResults?.length, activeRoot, projectPath, contentQuery, fetchContentPage]);
+  }, [searchMode, contentQuery, activeRoot, projectPath, startContentSearch]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -1345,8 +1403,89 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
             )}
           </div>
         </div>
+        {searchMode === "content" && (
+          <div className="flex gap-1">
+            <Input
+              value={contentExts}
+              onChange={(e) => setContentExts(e.target.value)}
+              placeholder="*.go,*.ts include"
+              title="Filter by extensions (comma-separated). Example: *.go,*.ts"
+              className="h-7 text-xs flex-1"
+              aria-label="Include extensions"
+            />
+            <Input
+              value={contentIgnore}
+              onChange={(e) => setContentIgnore(e.target.value)}
+              placeholder="*.log,*.min.js ignore"
+              title="Ignore files by wildcard (comma-separated globs, * and **). Example: *.log,dist/**"
+              className="h-7 text-xs flex-1"
+              aria-label="Ignore patterns"
+            />
+          </div>
+        )}
+        {searchMode === "content" && (
+          <div className="flex gap-1 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setContentRegex((v) => !v)}
+              aria-pressed={contentRegex}
+              aria-label="Use regular expression"
+              title={contentRegex ? "Regex: on (query is a regular expression)" : "Regex: off (literal search)"}
+              className={`h-7 px-2 text-[11px] font-mono rounded border transition-colors ${contentRegex ? "bg-accent text-accent-foreground border-border" : "bg-transparent text-muted-foreground border-border hover:bg-accent hover:text-accent-foreground"}`}
+            >
+              .*
+            </button>
+            <button
+              type="button"
+              onClick={() => setContentCaseSensitive((v) => !v)}
+              aria-pressed={contentCaseSensitive}
+              aria-label="Match case"
+              title={contentCaseSensitive ? "Match case: on (case-sensitive)" : "Match case: off (case-insensitive)"}
+              className={`h-7 px-2 text-[11px] font-mono rounded border transition-colors ${contentCaseSensitive ? "bg-accent text-accent-foreground border-border" : "bg-transparent text-muted-foreground border-border hover:bg-accent hover:text-accent-foreground"}`}
+            >
+              Aa
+            </button>
+            <button
+              type="button"
+              onClick={() => setContentWholeWord((v) => !v)}
+              aria-pressed={contentWholeWord}
+              aria-label="Match whole word"
+              title={contentWholeWord ? "Whole word: on" : "Whole word: off"}
+              className={`h-7 px-2 text-[11px] font-mono rounded border transition-colors ${contentWholeWord ? "bg-accent text-accent-foreground border-border" : "bg-transparent text-muted-foreground border-border hover:bg-accent hover:text-accent-foreground"}`}
+            >
+              "ab"
+            </button>
+            <button
+              type="button"
+              onClick={() => setContentIncludeIgnored((v) => !v)}
+              aria-pressed={contentIncludeIgnored}
+              aria-label="Include ignored files"
+              title={contentIncludeIgnored ? "Ignored: included (searches hidden/.gitignore files)" : "Ignored: excluded (skips hidden files)"}
+              className={`h-7 px-2 text-[11px] font-medium rounded border transition-colors ${contentIncludeIgnored ? "bg-accent text-accent-foreground border-border" : "bg-transparent text-muted-foreground border-border hover:bg-accent hover:text-accent-foreground"}`}
+            >
+              {contentIncludeIgnored ? "⊕ ignored" : "⊘ ignored"}
+            </button>
+            {(contentExts || contentIgnore || contentRegex || contentCaseSensitive || contentWholeWord || contentIncludeIgnored) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setContentExts("");
+                  setContentIgnore("");
+                  setContentRegex(false);
+                  setContentCaseSensitive(false);
+                  setContentWholeWord(false);
+                  setContentIncludeIgnored(false);
+                }}
+                title="Clear filters"
+                className="h-7 px-2 text-[11px] rounded border bg-transparent text-muted-foreground border-border hover:bg-accent hover:text-accent-foreground"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        )}
         <div className="text-[11px] text-muted-foreground/70 hidden sm:block">
-          {searchMode === "content" ? "Tip: Ctrl+F toggles content search · keywords AND, case-insensitive" : "Tip: checkbox or ⌘/Ctrl-click to multi-select · right-click for actions"}
+          {searchMode === "content" ? "Tip: Ctrl+F toggles content search · wildcards * and ** in ignore · filters persist per project" : "Tip: checkbox or ⌘/Ctrl-click to multi-select · right-click for actions"}
         </div>
         {isFiltering && searchMode === "path" && (
           <div className="mt-1 text-[11px] text-muted-foreground truncate">
@@ -1360,19 +1499,24 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
             {contentLoading
               ? "Searching contents…"
               : contentResults
-                ? `${contentResults.length} match${contentResults.length === 1 ? "" : "es"}${contentTotal !== null ? ` of ${contentTotal}` : ""}${contentHasMore ? " — scroll for more" : ""}${contentLoadingMore ? " (loading…)" : ""}${(contentResults.length >= 5000 ? " (capped at 5000)" : "")}`
+                ? `${contentResults.length} match${contentResults.length === 1 ? "" : "es"}${contentCapped ? " (capped — more may exist)" : ""}`
                 : ""}
           </div>
         )}
       </div>
-      <ScrollArea className="flex-1" ref={(el) => {
+      <ScrollArea className="flex-1" ref={useCallback((el: HTMLDivElement | null) => {
+        const prev = scrollViewportRef.current;
+        if (prev) prev.removeEventListener("scroll", onSearchScroll);
         if (el) {
           const vp = el.querySelector("[data-radix-scroll-area-viewport]") as HTMLDivElement | null;
-          if (vp) scrollViewportRef.current = vp;
+          scrollViewportRef.current = vp;
+          vp?.addEventListener("scroll", onSearchScroll);
+        } else {
+          scrollViewportRef.current = null;
         }
-      }}>
+      }, [onSearchScroll])}>
         {searchMode === "content" && contentQuery.trim().length >= 2 ? (
-          contentLoading ? (
+          contentLoading && (!contentResults || contentResults.length === 0) ? (
             <div className="flex items-center justify-center py-12 text-xs text-muted-foreground gap-2">
               <Loader2 className="w-4 h-4 animate-spin" />
               Searching contents…
@@ -1399,13 +1543,12 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
                   </div>
                 </button>
               ))}
-              <div ref={sentinelRef} className="h-4" />
-              {contentLoadingMore && (
+              {contentLoading && (
                 <div className="flex items-center justify-center py-2 text-xs text-muted-foreground gap-2">
-                  <Loader2 className="w-3 h-3 animate-spin" /> Loading more…
+                  <Loader2 className="w-3 h-3 animate-spin" /> Streaming more results…
                 </div>
               )}
-              {!contentHasMore && contentResults.length > 0 && (
+              {!contentLoading && !contentCapped && contentResults.length > 0 && (
                 <div className="text-center py-2 text-[11px] text-muted-foreground/60">— end of results —</div>
               )}
             </div>
@@ -1440,6 +1583,7 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
                   projectRoot={activeRoot}
                   forceExpanded
                   menu={menu}
+                  includedPaths={includedSet}
                 />
               ))}
             </div>
@@ -1460,10 +1604,10 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
                       className="w-[200px] min-w-[180px] max-w-[260px] shrink-0 border-r border-border flex flex-col overflow-hidden bg-background"
                     >
                       <div
-                        className="px-2 py-1.5 text-[11px] font-medium text-muted-foreground border-b border-border bg-muted/30 truncate shrink-0 flex items-center gap-1"
+                        className="px-2 py-1.5 text-[11px] font-medium text-muted-foreground border-b border-border bg-muted/30 truncate shrink-0 flex items-center gap-1 text-left"
                         title={col.path || "/"}
                       >
-                        <span className="truncate flex-1">
+                        <span className="truncate flex-1 text-left">
                           {colIdx === 0 ? (activeRoot?.split("/").pop() || col.path?.split("/").pop() || "Root") : col.path.split("/").pop() || col.path}
                         </span>
                         {col.loading && <Loader2 className="w-3 h-3 shrink-0 animate-spin" />}
@@ -1505,11 +1649,20 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
                                       title={node.path}
                                     >
                                       <FileIcon name={node.name} isDir={isDir} expanded={isSelected && isDir} />
-                                      <span className="truncate flex-1 min-w-0">{node.name}</span>
+                                      <span className="truncate flex-1 min-w-0 text-left">{node.name}</span>
                                       {isDir ? (
                                         <ChevronRight className={`w-3 h-3 shrink-0 ${isSelected ? "text-accent-foreground" : "text-muted-foreground"}`} />
                                       ) : (
-                                        node.git_status && <GitBadge status={node.git_status} />
+                                        <>
+                                          {node.git_status && <GitBadge status={node.git_status} />}
+                                          {includedSet.has(node.path) && (
+                                            <span
+                                              title="Included in chat context — uncheck in the file preview to remove"
+                                              className="ml-1 w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0"
+                                              aria-label="Included in chat context"
+                                            />
+                                          )}
+                                        </>
                                       )}
                                     </button>
                                   </ContextMenuTrigger>
@@ -1609,6 +1762,7 @@ export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
                 onPlainClick={onPlainClick}
                 projectRoot={activeRoot}
                 menu={menu}
+                includedPaths={includedSet}
               />
             ))}
           </div>

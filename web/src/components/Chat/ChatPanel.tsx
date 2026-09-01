@@ -6,6 +6,7 @@ import { api } from "../../api/client";
 import MessageBubble, { AssistantText } from "./MessageBubble";
 import { StatusBlock, ThinkingBlock, ToolBlock } from "./TurnParts";
 import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
+import ModelPromptRow from "./ModelPromptRow";
 import { RESTORE_EVENT } from "../../lib/inputRestore";
 
 const PAGE_SIZE = 50;
@@ -743,6 +744,12 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
 
         <div ref={bottomRef} />
       </div>
+
+      {/* Mirror of the TUI's "◆ Model prompt" bottom chrome row: shows the
+          active model's custom prompt source + force-injected Kaizen
+          directives. Sits between the transcript and ChatInput like the TUI's
+          chrome; renders nothing for untuned models. */}
+      <ModelPromptRow prompt={slice.tuiStatus?.model_prompt} model={slice.tuiStatus?.main_model} />
 
       {showJumpToBottom && (
         <button

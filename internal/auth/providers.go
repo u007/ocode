@@ -147,6 +147,7 @@ var Providers = []Provider{
 	{ID: "novita-ai", Label: "Novita AI", EnvVar: "NOVITA_API_KEY"},
 	{ID: "requesty", Label: "Requesty", EnvVar: "REQUESTY_API_KEY"},
 	{ID: "deepinfra", Label: "DeepInfra", EnvVar: "DEEPINFRA_API_KEY"},
+	{ID: "runinfra", Label: "RunInfra", EnvVar: "RUNINFRA_GATEWAY_KEY"},
 	{ID: "nvidia", Label: "NVIDIA NIM", EnvVar: "NVIDIA_API_KEY"},
 	{ID: "lmstudio", Label: "LM Studio (local)"},
 	{ID: "cloudflare-workers", Label: "Cloudflare Workers AI", EnvVar: "CLOUDFLARE_API_KEY"},

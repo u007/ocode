@@ -16,8 +16,9 @@ okf_version: 0.1
 # architecture
 
 - [Shared LSP Broker Server-State and Routing Gotchas](architecture/lsp-broker-shared-server-gotchas.md) - Updated with confirmed spec violations from 2026-08-21 review: Manager sharing enabled by default, docs map unbounded/didClose absent, conflicting didOpen/didChange overwrites, daemon inherits terminal fds
+- [Shell Sandbox Backend Availability Status](architecture/shell-sandbox-backend-status.md) - Decision on handling sandbox backend availability (available, unsupported, unavailable) with fail-closed requirements and API status definitions.
+- [Shell Sandbox Is Write-Integrity Only, Not Confidentiality](architecture/shell-sandbox-integrity-only-mode.md) - Decision to document the sandbox as integrity-only/write-confined with explicit confidentiality limitations, since global reads and network egress remain open.
 - [Sidebar TUI/Web Parity Gaps](architecture/sidebar-tui-parity-gaps.md) - Gap analysis of web frontend sidebar features missing relative to the TUI sidebar, covering backend fields not consumed and missing TS types.
-- [Terminal Shells Survive Page Reload (Detach / Reattach)](architecture/terminal-detach-reattach.md) - Pty shells are keyed by terminal_id and outlive their websocket: reload detaches (30 min TTL, 256KB replay), same id reattaches, DELETE /api/terminal/{id} is the explicit kill.
 - [V1 Connection Cap Exclusion — Embedded Browser Panel](architecture/v1-connection-cap-exclusion.md) - Decision to exclude the per-stateKey concurrent upstream connection cap (32) from v1 embedded browser panel. The exclusion applied at v1 ship; the follow-up implementation has since landed.
 
 # gotchas
@@ -25,9 +26,12 @@ okf_version: 0.1
 - [Agent Replacement — Input Queuing & Stream Event Epochs](gotchas/agent-replacement-input-queuing.md) - Architectural decision and solution pattern for queuing user input during agent replacement and using stream event epochs to prevent stale events from mutating the new session.
 - [AIHubMix Test — Global Cache State Leakage](gotchas/aihubmix-test-cache-leak.md) - AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures
 - [Auto-Permission — Interpreter Scripts in Compound Commands](gotchas/auto-permission-interpreter-scripts-in-compound-commands.md) - Auto-permission custom-script detection must cover interpreter and runner forms (python x.py, node x.js, bun run x.ts, uv run x.py, npx tsx x.ts); the structured interpreter path only sees the FIRST command, so compound commands otherwise reach the generic LLM path with no script content and no truncation guard.
+- [Auto-Permission — Judge Must See the Session WorkDir, Not the Process CWD](gotchas/auto-permission-judge-process-cwd.md) - Desktop/web sessions call Agent.SetWorkDir without chdir-ing the process (the .app launches with cwd "/"). Every cwd-relative step in the auto-permission path must use the agent/permission-manager workDir, or the LLM judge denies in-project relative commands like `cd web && tsc` as escapes from the allowed roots.
+- [BashTool Dynamic Permission Manager Resolution](gotchas/shell-sandbox-dynamic-bash-permissions.md) - Gotcha: BashTool must resolve permission manager dynamically to ensure child agent enforcement follows updated policies, not stale parent pointers.
 - [Bubble Tea Cleanup Race — Orphaned Goroutines on Shutdown](gotchas/bubbletea-cleanup-race.md) - Bubble Tea runs tea.Cmd in untracked goroutines and does not wait for them during Program.Run shutdown, causing cleanup races with model-switch or /new commands that orphan agents or supervisors.
 - [Chat Input — Queued Messages Lost on Submission Failure](gotchas/chat-input-message-loss.md) - Queued messages are lost when submission fails — sendMessage returns false but the message is already shifted from the queue
 - [ChatPanel Autoscroll Bounce/Freeze](gotchas/autoscroll-bounce.md) - Root cause analysis of the autoscroll bounce/freeze bug: smooth-scrolling every live token without at-bottom state tracking causes competing animations that lock up the scroll position.
+- [Concurrent File Editing Risk — Multiple Writers in Same Checkout](gotchas/concurrent-file-editing-risk.md) - Gotcha: multiple writers (agents + manual edits) on the same files within a single checkout can corrupt both streams. Covers the concurrent modification problem, affected scenarios, mitigation strategies, and recovery.
 - [Debug Instrumentation Ships Unconditionally](gotchas/debug-instrumentation-ships-unconditionally.md) - Process gotcha: temporary Date.prototype instrumentation ships unconditionally in production builds, causing global prototype mutation, altered date behavior, and authenticated network requests.
 - [Embedded Browser — WebSocket Proxy 404](gotchas/embedded-browser-websocket-proxy-404.md) - Gotcha: WebSocket connections through the embedded browser proxy fail with 404 during handshake due to missing or unreachable upgrade path in the browse server.
 - [FilePicker.test.tsx Stale Build Status — Corrected](gotchas/filepicker-stale-todo.md) - Stale TODO item: FilePicker.test.tsx now has no user-event import and build passes
@@ -36,13 +40,16 @@ okf_version: 0.1
 - [Journal DB Connection Pool Leak](gotchas/journal-db-connection-pool-leak.md) - Architectural gotcha: journal.go caches *sql.DB connection pools in a module-global journalCache but never closes them, causing a slow connection-pool leak per distinct project dir in long-running processes.
 - [Local Model Auto-Start Hijacks the Controlling Terminal](gotchas/local-model-tty-hijack.md) - A locally-spawned model server (Setpgid only, same session as ocode) can grab the terminal foreground process group via TIOCSPGRP, crashing the TUI and corrupting the whole shell session
 - [Local Model Limiter — Stale-Slot Reclamation Race](gotchas/local-model-limiter-stale-slot-race.md) - TOCTOU race in local model slot-lock stale reclamation: reaper can delete a live lock between Stat and Remove, breaking MaxParallel limits
-- [Plugin Auto-Permission — Arbitrary Execution Risk](gotchas/plugin-auto-permission-security.md) - Security gotcha: auto-permission prompt tightened to read-only inspection only — no package install/run/exec/lifecycle/registry commands, no blanket OS temp access.
+- [PATH Shadowing Can Bypass Sandbox Discovery](gotchas/shell-sandbox-path-shadowing.md) - Gotcha: PATH-based sandbox-exec/bwrap discovery can be shadowed by user-writable executables, requiring hardening to prevent security bypasses.
+- [Plugin Auto-Permission — Arbitrary Execution Risk](gotchas/plugin-auto-permission-security.md) - Updated gotcha: blanket OS temp auto-permission is now a deliberate v1.8.0 policy, not an unresolved regression. Historical v1.5.0 tightening preserved.
 - [Plugin Install Rollback Bug](gotchas/plugin-install-rollback-bug.md) - Security gotcha: failed plugin installs leave stale directories and orphaned MCP registrations due to incorrect path handling in deferred cleanup.
 - [Plugin Removal — Root Directory Deletion Risk](gotchas/plugin-removal-root-deletion.md) - Security gotcha: removal validation must reject deletion of an entire approved plugin root directory, not just validate child paths.
 - [run_in_background Bash Commands Orphaned on Force-Killed ocode](gotchas/background-bash-orphan-on-force-kill.md) - Background bash commands started via the bash tool had no self-cleanup and would survive kill -9 on ocode; wrapped in the same parent-monitor mechanism local models already used
+- [Shell Execution Must Set cmd.Dir to Agent Workdir](gotchas/shell-sandbox-working-directory-not-set.md) - Gotcha: shell execution must set cmd.Dir to the agent/session workdir for both foreground and background commands, not relying on inherited process cwd.
 - [Skill Tool Test Fixture Gap — expectedBuiltinTools Missing load_skill](gotchas/skill-tool-test-fixture-gap.md) - expectedBuiltinTools in tool_test.go only lists "skill" but InitBuiltinTools also registers "load_skill" as a second alias, causing a stale test failure.
 - [Subagent Feedback-Loop Guard (task tool)](gotchas/subagent-feedback-loop-guard.md) - The task/subagent dispatch refuses consecutive same-type launches without new user input to break runaway feedback loops; vary the agent type or wait for user input.
 - [Symlink Escape in Plugin Removal Validation](gotchas/plugin-removal-symlink-escape.md) - Security gotcha: filepath.EvalSymlinks must resolve both the target dir and all approved roots to prevent symlink-based path traversal in plugin removal.
+- [Writable-Root Validation Prevents Confinement Defeat](gotchas/shell-sandbox-writable-root-validation.md) - Gotcha: writable-root validation must canonicalize paths and reject filesystem-volume roots (/) to prevent confinement defeat from env vars like TMPDIR.
 
 # guides
 
@@ -119,6 +126,8 @@ okf_version: 0.1
 
 # Unclassified
 
+- [desktop-single-instance.md](architecture/desktop-single-instance.md)
+- [terminal-detach-reattach.md](architecture/terminal-detach-reattach.md)
 - [HOW-TO-EVALUATE.md](okf/HOW-TO-EVALUATE.md)
 - [README.md](okf/README.md)
 - [conduct.md](okf/_prompts/conduct.md)
@@ -251,6 +260,19 @@ okf_version: 0.1
 - [09-browser-panel-component.md](superpowers/plans/2026-08-30-embedded-browser-panel/09-browser-panel-component.md)
 - [10-unified-tabbar-app-wiring.md](superpowers/plans/2026-08-30-embedded-browser-panel/10-unified-tabbar-app-wiring.md)
 - [INDEX.md](superpowers/plans/2026-08-30-embedded-browser-panel/INDEX.md)
+- [01-supervisor-and-config.md](superpowers/plans/2026-08-31-browser-chrome-cdp/01-supervisor-and-config.md)
+- [02-cdp-conn.md](superpowers/plans/2026-08-31-browser-chrome-cdp/02-cdp-conn.md)
+- [03-egress-proxy.md](superpowers/plans/2026-08-31-browser-chrome-cdp/03-egress-proxy.md)
+- [04-chrome-manager.md](superpowers/plans/2026-08-31-browser-chrome-cdp/04-chrome-manager.md)
+- [05-browse-ws-and-handoff.md](superpowers/plans/2026-08-31-browser-chrome-cdp/05-browse-ws-and-handoff.md)
+- [06-frontend.md](superpowers/plans/2026-08-31-browser-chrome-cdp/06-frontend.md)
+- [07-integration-and-docs.md](superpowers/plans/2026-08-31-browser-chrome-cdp/07-integration-and-docs.md)
+- [INDEX.md](superpowers/plans/2026-08-31-browser-chrome-cdp/INDEX.md)
+- [01-core-mode-and-roots.md](superpowers/plans/2026-08-31-shell-sandbox/01-core-mode-and-roots.md)
+- [02-sandbox-backends.md](superpowers/plans/2026-08-31-shell-sandbox/02-sandbox-backends.md)
+- [03-ui-toggles.md](superpowers/plans/2026-08-31-shell-sandbox/03-ui-toggles.md)
+- [04-docs-caveats.md](superpowers/plans/2026-08-31-shell-sandbox/04-docs-caveats.md)
+- [INDEX.md](superpowers/plans/2026-08-31-shell-sandbox/INDEX.md)
 - [2026-07-08-global-runtime-artifacts-design.md](superpowers/specs/2026-07-08-global-runtime-artifacts-design.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [2026-07-11-model-stack-benchmark-design.md](superpowers/specs/2026-07-11-model-stack-benchmark-design.md)
@@ -281,6 +303,7 @@ okf_version: 0.1
 - [INDEX.md](superpowers/specs/2026-08-29-remote-ssh/INDEX.md)
 - [2026-08-29-unified-session-terminal-tabs-design.md](superpowers/specs/2026-08-29-unified-session-terminal-tabs-design.md)
 - [2026-08-30-embedded-browser-panel-design.md](superpowers/specs/2026-08-30-embedded-browser-panel-design.md)
+- [2026-08-31-browser-chrome-cdp-design.md](superpowers/specs/2026-08-31-browser-chrome-cdp-design.md)
 - [telegram-bot.md](telegram-bot.md)
 - [web-desktop-parity-todo.md](web-desktop-parity-todo.md)
 

@@ -300,3 +300,28 @@ func TestBuildPermissionContextLineTruncation(t *testing.T) {
 		t.Fatal("expected line-truncated script to be denied by verifyAutoGrant")
 	}
 }
+
+// Desktop/web sessions set the agent workDir via SetWorkDir without chdir-ing
+// the process (the .app launches with cwd "/"). The permission judge must see
+// the session's project dir, not the process cwd — otherwise a relative
+// `cd web && ...` looks like an escape from the pre-authorized roots.
+func TestBuildPermissionContextUsesAgentWorkDirNotProcessCwd(t *testing.T) {
+	project := t.TempDir()
+	elsewhere := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(elsewhere)
+
+	a := NewAgent(nil, nil, nil, nil)
+	a.SetWorkDir(project)
+
+	args, _ := json.Marshal(map[string]string{"command": "cd web && ./node_modules/.bin/tsc --noEmit"})
+	ctx := a.buildPermissionContext("bash", args, 50000, 3, 40)
+	if !strings.Contains(ctx, "Working directory:\n"+project+"\n") {
+		t.Fatalf("expected working directory %q in context, got: %q", project, ctx)
+	}
+	resolvedElsewhere, _ := filepath.EvalSymlinks(elsewhere)
+	if strings.Contains(ctx, "Working directory:\n"+resolvedElsewhere+"\n") {
+		t.Fatalf("context reported process cwd %q instead of agent workDir", elsewhere)
+	}
+}

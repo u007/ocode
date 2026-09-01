@@ -130,10 +130,14 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// The agent's workdir comes from the registry entry's project root, not
 	// the process cwd — multi-project sessions run against their own repo
 	// (environment prompt, file-edit snapshots, permissions, discovery all
-	// follow SetWorkDir).
-	if projectRoot != "" {
-		ag.SetWorkDir(projectRoot)
+	// follow SetWorkDir). An empty projectRoot means "the server's project
+	// dir", never the process cwd: the desktop .app launches with cwd "/", so
+	// leaving workDir empty made confinedPath resolve relative tool paths
+	// ("TODO.md") against "/" and reject them as outside the working directory.
+	if projectRoot == "" {
+		projectRoot = h.workDir
 	}
+	ag.SetWorkDir(projectRoot)
 
 	// Wire secret redaction (tier-1 regex hook + tier-2 LLM scanner) from the
 	// effective config, mirroring the TUI. This makes the Security & Redaction
@@ -547,6 +551,10 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		h.wireHeadlessAgentCallbacks(sessionID, as.agent)
 	}
 
+	// Ensure a prior Cancel() doesn't permanently poison this session:
+	// ResetCancellation replaces a closed stop channel with a fresh one
+	// so the next Step isn't immediately cancelled.
+	as.agent.ResetCancellation()
 	resp, err := as.agent.Step(messages)
 	if err != nil {
 		log.Printf("serve error: agent step: %v", err)
@@ -564,6 +572,22 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 			})
 		}
 		return "", err
+	}
+	// Agent.Step can return (newMsgs, nil) when cancelled right after a
+	// successful LLM call (isCancelled check inside Step). Treat that as a
+	// cancellation so the caller stops draining queued messages.
+	if as.agent.Cancelled() {
+		h.commitPartialTranscript(sessionID, as, append(as.messages, resp...), headless)
+		cancelErr := fmt.Errorf("cancelled")
+		h.publishTurnError(sessionID, cancelErr, "")
+		if headless {
+			h.broadcastEvent(SSEEvent{
+				SessionID: sessionID,
+				Event:     "error",
+				Data:      map[string]string{"error": cancelErr.Error()},
+			})
+		}
+		return "", cancelErr
 	}
 
 	as.messages = append(as.messages, resp...)
@@ -678,13 +702,49 @@ func (h *Handler) sessionTurnLock(id string) *sync.Mutex {
 	return l
 }
 
+func (h *Handler) saveLockFor(path string) *sync.Mutex {
+	h.saveMu.Lock()
+	defer h.saveMu.Unlock()
+	if h.saveLocks == nil {
+		h.saveLocks = make(map[string]*sync.Mutex)
+	}
+	l, ok := h.saveLocks[path]
+	if !ok {
+		l = &sync.Mutex{}
+		h.saveLocks[path] = l
+	}
+	return l
+}
+
 // dispatchTurn starts a turn on its own goroutine, serialized per session
 // (single-flight bootstrap + ordered turns). model is used only when the
 // session has no resident agent yet. The caller waits on job.persistAck to
 // return 202 once the message is durable.
+//
+// The job is registered in turnInFlight BEFORE the goroutine starts, so a
+// HandleCancelSession racing this dispatch (cancel arrives between the
+// request and the job's first pendingCancel check) still sees an active
+// session and records the cancellation. The counter is released when the job
+// goroutine finishes — executing, erroring, or cancelled — so a queued
+// second job keeps the session visible as in-flight while the first drains.
 func (h *Handler) dispatchTurn(id, model, content string, opts turnOptions) (*turnJob, error) {
 	job := &turnJob{content: content, model: model, opts: opts, persistAck: make(chan struct{})}
-	go h.executeTurnJob(id, job)
+	h.cancelMu.Lock()
+	if h.turnInFlight == nil {
+		h.turnInFlight = make(map[string]int)
+	}
+	h.turnInFlight[id]++
+	h.cancelMu.Unlock()
+	go func() {
+		h.executeTurnJob(id, job)
+		h.cancelMu.Lock()
+		if n := h.turnInFlight[id] - 1; n <= 0 {
+			delete(h.turnInFlight, id)
+		} else {
+			h.turnInFlight[id] = n
+		}
+		h.cancelMu.Unlock()
+	}()
 	return job, nil
 }
 
@@ -706,6 +766,14 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 	lock.Lock()
 	defer lock.Unlock()
 
+	// If HandleCloseSession marked this session close-pending while the turn
+	// (or its bootstrap) was in flight, release the agent as soon as the job
+	// exits — the release couldn't run while the turn owned the agent, and a
+	// RACE at this point must not leave the teardown to the 5-min idle sweep.
+	// Runs on every exit path (success, error, cancellation, failed/aborted
+	// bootstrap) because the marker is drained and only acted on when set.
+	defer h.drainPendingClose(id)
+
 	entry := h.sessions.Lookup(id)
 	if entry == nil {
 		job.err = fmt.Errorf("session not found")
@@ -723,6 +791,14 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 	h.sessions.PushPending(id, job.content)
 	close(job.persistAck)
 
+	// Check for cancellation that arrived during persist or before bootstrap.
+	// If cancelled, keep the pending message for retry after Resume — don't
+	// shift it, just publish a cancelled turn_error so the UI clears.
+	if h.consumePendingCancel(id) {
+		h.publishTurnError(id, fmt.Errorf("cancelled"), "")
+		return
+	}
+
 	// 2. Bootstrap once if needed. Failure surfaces as turn_error carrying the
 	// failing stage; the message stays pending (durable) for the next job.
 	as := h.lookupAgentSession(id)
@@ -730,6 +806,17 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 		var err error
 		var stage string
 		as, stage, err = h.bootstrapEntryAgent(entry, job.model)
+		// Bootstrap cancellation check: if Stop was pressed while the agent
+		// was being built (agent not yet registered), abort without consuming
+		// the pending message so it can be retried after Resume.
+		if h.isPendingCancel(id) {
+			h.consumePendingCancel(id)
+			if as != nil && as.agent != nil {
+				as.agent.Cancel()
+			}
+			h.publishTurnError(id, fmt.Errorf("cancelled"), stage)
+			return
+		}
 		if err != nil {
 			h.sessions.SetBootstrapFailed(id, stage)
 			h.sessions.SetBootstrapError(id, err.Error())
@@ -753,13 +840,35 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 		as = reb
 	}
 
+	// Also check cancellation after reconcile before starting turns.
+	if h.consumePendingCancel(id) {
+		if as != nil && as.agent != nil {
+			as.agent.Cancel()
+		}
+		h.publishTurnError(id, fmt.Errorf("cancelled"), "")
+		return
+	}
+
 	// 3. Turn every pending message in order.
 	for {
 		content, ok := h.sessions.PendingFront(id)
 		if !ok {
 			break
 		}
+		// Cancellation between pending items — stop draining queued messages
+		// until the user resumes. Preserve remaining queue.
+		if h.isPendingCancel(id) {
+			h.consumePendingCancel(id)
+			h.publishTurnError(id, fmt.Errorf("cancelled"), "")
+			return
+		}
 		_, err := h.runTurn(id, as, content, job.opts)
+		// Treat a post-cancellation successful return as a cancellation so
+		// queued messages are not auto-drained. Agent.Step can return
+		// (newMsgs, nil) when cancelled after a successful LLM call.
+		if err == nil && as != nil && as.agent != nil && as.agent.Cancelled() {
+			err = fmt.Errorf("cancelled")
+		}
 		if errors.Is(err, ErrPermissionPending) {
 			// runTurn refused before appending — leave the message pending
 			// (it stays durable on disk) so it is retried once the session's
@@ -772,12 +881,23 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 		// (and remains durable on disk), so the next retry must not
 		// re-append it.
 		h.sessions.ShiftPending(id)
+		// If cancelled (or any error), stop draining — don't start the next
+		// queued turn until Resume. The remaining pending messages stay queued.
 		if err != nil {
+			// Ensure the cancel flag is cleared so the next turn isn't
+			// immediately poisoned.
+			h.consumePendingCancel(id)
 			return // runTurn published turn_error
 		}
 		// Only the first turn of the job carries the request's turn options
 		// (session_started correlation); catch-up turns are plain.
 		job.opts = turnOptions{}
+		// Check again after a successful turn in case Stop arrived during
+		// the turn's tail — don't auto-drain the next queued message.
+		if h.isPendingCancel(id) {
+			h.consumePendingCancel(id)
+			return
+		}
 	}
 }
 

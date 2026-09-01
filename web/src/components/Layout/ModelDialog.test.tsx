@@ -10,9 +10,9 @@ const hoisted = vi.hoisted(() => {
   const models: ModelInfo[] = [
     // Both recent and favorite — must appear only under Recently Used, but
     // keep its star lit (raw membership, mirroring TUI ctrl+f/IsFavorite).
-    { name: "anthropic/claude-a", model: "claude-a", provider: "anthropic", active: false, recent: true, favorite: true },
+    { name: "anthropic/claude-a", model: "claude-a", provider: "anthropic", active: false, recent: true, favorite: true, has_kaizen: true },
     { name: "openai/gpt-b", model: "gpt-b", provider: "openai", active: false, favorite: true },
-    { name: "openai/gpt-c", model: "gpt-c", provider: "openai", active: false },
+    { name: "openai/gpt-c", model: "gpt-c", provider: "openai", active: false, has_model_prompt: true },
     { name: "groq/compound", model: "compound", provider: "groq", active: false },
   ];
   const api = {
@@ -104,6 +104,21 @@ describe("ModelDialog favorites/recents sections", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("Favorite openai/gpt-c")).toBeInTheDocument(),
     );
+  });
+
+  it("badges tuned models (custom prompt / kaizen) with a 'tuned' marker", async () => {
+    render(<ModelDialog open onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("Recently Used")).toBeInTheDocument());
+
+    // claude-a (has_kaizen) and gpt-c (has_model_prompt) get the badge; the
+    // other rows must not (Radix portals rows to document.body).
+    expect(screen.getAllByText("tuned")).toHaveLength(2);
+    const tuned = screen.getAllByText("tuned");
+    for (const el of tuned) {
+      expect(el.closest("button")?.textContent).toMatch(/claude-a|gpt-c/);
+    }
+    expect(screen.getByText("gpt-b").closest("button")?.textContent).not.toContain("tuned");
+    expect(screen.getByText("compound").closest("button")?.textContent).not.toContain("tuned");
   });
 
   it("keeps the flat provider list for purposes the TUI does not offer favorites on", async () => {

@@ -73,10 +73,12 @@ func NewEgressProxy(dialer *net.Dialer) (*EgressProxy, error) {
 	return p, nil
 }
 
-// ProxyServerURL returns the per-launch credential-embedded proxy URL to hand
-// to Chrome (proxyServer), e.g. "http://<user>:<pass>@127.0.0.1:54321".
+// ProxyServerURL returns the proxy URL to hand to Chrome's
+// Target.createBrowserContext proxyServer. Chrome does not reliably honor
+// userinfo embedded in this URL, so credentials are supplied out-of-band via
+// CDP Fetch.authRequired (see target.go:handleAuthRequired).
 func (p *EgressProxy) ProxyServerURL() string {
-	return fmt.Sprintf("http://%s:%s@127.0.0.1:%d", p.username, p.password, p.AddrPort())
+	return fmt.Sprintf("http://127.0.0.1:%d", p.AddrPort())
 }
 
 // AddrPort returns the bound port (test/manager convenience).
@@ -89,6 +91,12 @@ func (p *EgressProxy) Addr() string { return p.ln.Addr().String() }
 
 // Credential returns "username:password" (test-only auth inspection).
 func (p *EgressProxy) Credential() string { return p.username + ":" + p.password }
+
+// UserPass returns the proxy credentials separately, for CDP
+// Fetch.authRequired handling: Chrome does not honor userinfo embedded in
+// createBrowserContext's proxyServer, so the manager answers 407 challenges
+// itself with these values.
+func (p *EgressProxy) UserPass() (string, string) { return p.username, p.password }
 
 // Close stops the listener and closes all active tunnels.
 func (p *EgressProxy) Close() error {

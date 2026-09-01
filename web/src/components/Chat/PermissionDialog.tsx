@@ -40,8 +40,13 @@ interface Props {
   /** Out-of-workspace target path for path-scope asks. */
   outOfScopePath?: string;
   requestId: string;
-  onDecide: (requestId: string, decision: PermissionDecision) => Promise<boolean>;
+  onDecide: (requestId: string, decision: PermissionDecision) => Promise<PermissionDecideResult>;
 }
+
+/** Outcome of a decision submit. `ok: false` carries the message the dialog
+ *  shows inline; whether the dialog stays mounted after a failure is the
+ *  parent's call (useChat dismisses asks the server no longer holds). */
+export type PermissionDecideResult = { ok: true } | { ok: false; error: string };
 
 /** Whether the "Always allow this rule" choice is offered, mirroring the
  *  TUI's permAlwaysRuleAvailable / agent.AlwaysRuleChoiceAvailable: git
@@ -86,6 +91,10 @@ export default function PermissionDialog({
   // Which always-allow choice is pending confirmation ("a"/"t" step in the
   // TUI); empty when the main button row is shown.
   const [confirming, setConfirming] = useState<"always_rule" | "always_tool" | null>(null);
+  // Why the last decision did not go through — shown inline so a failed
+  // submit is never silent (the store's per-session error is not rendered in
+  // the chat view). Cleared on the next attempt or a new request.
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const canAlwaysRule = useMemo(
     () => alwaysRuleAvailable(tool, scope, prefix),
@@ -100,17 +109,22 @@ export default function PermissionDialog({
   useEffect(() => {
     setLoading(false);
     setConfirming(null);
+    setSubmitError(null);
   }, [requestId, open]);
 
   const handleResponse = async (decision: PermissionDecision) => {
     setLoading(true);
+    setSubmitError(null);
     try {
-      const ok = await onDecide(requestId, decision);
-      if (!ok) {
+      const result = await onDecide(requestId, decision);
+      if (!result.ok) {
+        setSubmitError(result.error);
         setLoading(false);
         setConfirming(null);
       }
-    } catch {
+    } catch (err) {
+      console.error("PermissionDialog: decision submit threw:", err);
+      setSubmitError(err instanceof Error ? err.message : "permission decision failed");
       setLoading(false);
       setConfirming(null);
     }
@@ -252,6 +266,16 @@ export default function PermissionDialog({
           {confirming && (
             <div className="max-w-full rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-sm break-words text-foreground [overflow-wrap:anywhere]">
               {confirmExplanation}
+            </div>
+          )}
+
+          {submitError && (
+            <div
+              role="alert"
+              className="max-w-full rounded-lg border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-200"
+            >
+              <div className="font-medium">Could not submit decision:</div>
+              <div className="mt-1 break-words [overflow-wrap:anywhere]">{submitError}</div>
             </div>
           )}
 

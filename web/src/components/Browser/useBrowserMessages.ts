@@ -11,6 +11,7 @@ interface Handlers {
 // intentionally ignored: the address bar is driven by server nav events, so a
 // page-reported URL is never trusted for display.
 export function useBrowserMessages(stateKey: StateKey, browseBase: string | null, h: Handlers) {
+  const { pushConsole, pushNetwork } = h;
   useEffect(() => {
     if (!browseBase) return;
     let origin: string;
@@ -27,12 +28,16 @@ export function useBrowserMessages(stateKey: StateKey, browseBase: string | null
       if (d.stateKey !== stateKey) return;
       switch (d.type) {
         case "ocode:browse:console":
-          h.pushConsole(stateKey, { level: String(d.level ?? "log"), text: String((d.args ?? []).join(" ")), ts: Number(d.ts) || Date.now() });
+          pushConsole(stateKey, {
+            level: String(d.level ?? "log"),
+            text: String(Array.isArray(d.args) ? d.args.join(" ") : d.args ?? ""),
+            ts: Number(d.ts) || Date.now(),
+          });
           break;
         case "ocode:browse:network":
           // capture.js reports `duration`; the store's NetworkEvent is
           // `durationMs` — map at the boundary.
-          h.pushNetwork(stateKey, { method: String(d.method), url: String(d.url), status: Number(d.status) || 0, durationMs: Number(d.duration) || 0, ts: Number(d.ts) || Date.now() });
+          pushNetwork(stateKey, { method: String(d.method), url: String(d.url), status: Number(d.status) || 0, durationMs: Number(d.duration) || 0, ts: Number(d.ts) || Date.now() });
           break;
         // "ocode:browse:nav" intentionally not handled: display-untrusted.
         default:
@@ -41,5 +46,5 @@ export function useBrowserMessages(stateKey: StateKey, browseBase: string | null
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [stateKey, browseBase, h]);
+  }, [stateKey, browseBase, pushConsole, pushNetwork]);
 }

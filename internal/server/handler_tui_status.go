@@ -62,6 +62,11 @@ func (h *Handler) buildStatusSnapshot() TUIStatus {
 		}
 	}
 	snap.CWD = cwd
+	// Model-prompt indicator (custom .OCODE.md + force-injected Kaizen
+	// directives) for the model actually in force. Anchored at the server's
+	// workdir — NOT the process cwd, which can be "/" for a Finder-launched
+	// .app or drift from the configured workdir on a headless serve.
+	snap.ModelPrompt = buildModelPromptInfo(cwd, snap.MainModel)
 	snap.LSPServers = h.collectLSPStatuses()
 	return snap
 }

@@ -2,9 +2,11 @@ package browse
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,11 +66,11 @@ func (r *realManagerAdapter) Attach(ctx context.Context, stateKey string, sink c
 
 // wsOut is one outbound WS message queued to the single writer goroutine.
 type wsOut struct {
-	isBinary bool
-	data     []byte
+	isBinary  bool
+	data      []byte
 	closeCode int
 	closeText string
-	isClose  bool
+	isClose   bool
 }
 
 // cdpSocketEntry tracks one active __cdp WebSocket per stateKey.
@@ -77,7 +79,7 @@ type cdpSocketEntry struct {
 	// writer to exit.
 	send chan wsOut
 	// wsConn is the underlying gorilla connection (for pings and direct closes).
-	wsConn interface{ Close() error }
+	wsConn  interface{ Close() error }
 	closeFn func(code int, text string) error
 }
 
@@ -112,6 +114,15 @@ type Server struct {
 	// handleLocal (Part 06). Guarded by Once; never used for external mode.
 	localTransportOnce sync.Once
 	localTransportVal  *http.Transport
+	localInsecureTransportOnce sync.Once
+	localInsecureTransportVal  *http.Transport
+
+	// bypass tracks per-stateKey hosts the user has explicitly allowed
+	// after seeing a TLS “not trusted” interstitial (RFC1918 LAN hosts).
+	// Loopback hosts (localhost, 127.0.0.1, ::1) are auto-allowed without
+	// prompting, so they never need an entry here. Cleared on Revoke.
+	bypassMu sync.Mutex
+	bypass   map[string]map[string]bool // stateKey -> host -> true
 
 	// conns enforces the per-stateKey concurrent upstream connection cap
 	// (spec § External mode limits: 32). External and local traffic for one
@@ -119,8 +130,8 @@ type Server struct {
 	// resource, so the cap is per-stateKey, not per-mode.
 	conns *connLimiter
 
-	cdp     chromeManager
-	cdpMu   sync.Mutex
+	cdp      chromeManager
+	cdpMu    sync.Mutex
 	cdpSocks map[string]*cdpSocketEntry
 }
 
@@ -128,11 +139,12 @@ func New(apiToken string, logger *log.Logger, opts ...Options) *Server {
 	if logger == nil {
 		logger = log.Default()
 	}
-	s := &Server{apiToken: apiToken, auth: newAuthStore(), log: logger, mux: http.NewServeMux(), cdpSocks: make(map[string]*cdpSocketEntry)}
+	s := &Server{apiToken: apiToken, auth: newAuthStore(), log: logger, mux: http.NewServeMux(), cdpSocks: make(map[string]*cdpSocketEntry), bypass: make(map[string]map[string]bool)}
 	s.conns = newConnLimiter(maxUpstreamConnsPerKey)
 	s.mux.HandleFunc("/b/", s.handleBrowse)
 	s.mux.HandleFunc("GET /__ocode_capture.js", s.serveCapture)
 	s.mux.HandleFunc("GET /b/{stateKey}/__cdp", s.handleCDP)
+	s.mux.HandleFunc("POST /b/{stateKey}/__bypass", s.handleBypass)
 	if len(opts) > 0 {
 		s.initManager(opts[0])
 	}
@@ -202,6 +214,9 @@ func (s *Server) Revoke(stateKey string) {
 		delete(s.cdpSocks, stateKey)
 	}
 	s.cdpMu.Unlock()
+	s.bypassMu.Lock()
+	delete(s.bypass, stateKey)
+	s.bypassMu.Unlock()
 }
 
 func (s *Server) Close(ctx context.Context) error {
@@ -217,6 +232,67 @@ func (s *Server) emitNav(ev NavEvent) {
 	if s.publish != nil {
 		s.publish(ev.StateKey, ev)
 	}
+}
+
+// isBypassed reports whether stateKey has explicitly bypassed TLS verification for host.
+func (s *Server) isBypassed(stateKey, host string) bool {
+	s.bypassMu.Lock()
+	defer s.bypassMu.Unlock()
+	if m, ok := s.bypass[stateKey]; ok {
+		return m[host]
+	}
+	return false
+}
+
+// setBypassed records that stateKey has approved host's self-signed cert.
+func (s *Server) setBypassed(stateKey, host string) {
+	s.bypassMu.Lock()
+	defer s.bypassMu.Unlock()
+	if s.bypass == nil {
+		s.bypass = make(map[string]map[string]bool)
+	}
+	if s.bypass[stateKey] == nil {
+		s.bypass[stateKey] = make(map[string]bool)
+	}
+	s.bypass[stateKey][host] = true
+}
+
+// AllowBypass is the exported wrapper for setBypassed (used by the main
+// server's /api/browse/bypass endpoint).
+func (s *Server) AllowBypass(stateKey, host string) { s.setBypassed(stateKey, host) }
+
+// handleBypass records an explicit user “Continue anyway” for a TLS failure.
+// POST /b/{stateKey}/__bypass  { "host": "192.168.1.5:3000" }
+func (s *Server) handleBypass(w http.ResponseWriter, r *http.Request) {
+	stateKey := r.PathValue("stateKey")
+	cookieVal := ""
+	if c, err := r.Cookie(browseCookie); err == nil {
+		cookieVal = c.Value
+	}
+	if !s.auth.isValidSession(cookieVal, stateKey) {
+		http.Error(w, "browse: unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var body struct {
+		Host string `json:"host"`
+	}
+	if r.Header.Get("Content-Type") == "application/json" {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+	if body.Host == "" {
+		body.Host = r.URL.Query().Get("host")
+	}
+	if body.Host == "" {
+		http.Error(w, "browse: missing host", http.StatusBadRequest)
+		return
+	}
+	host := strings.TrimSpace(body.Host)
+	if !IsPrivateHost(host) {
+		http.Error(w, "bypass only allowed for private hosts", http.StatusBadRequest)
+		return
+	}
+	s.setBypassed(stateKey, host)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // Listen binds addr and returns the listener plus the base URL the SPA uses.

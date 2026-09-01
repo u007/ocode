@@ -295,6 +295,10 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// (see appendLiveFrame) instead of only covering the turn's first Step.
 	h.sessions.setTurnActive(sessID, true)
 	defer h.sessions.setTurnActive(sessID, false)
+	// A close that arrived while this continuation was running (turnActive
+	// true) could not release the agent mid-Step; drain the marker once the
+	// continuation unwinds, exactly like the async-job and sync-turn paths.
+	defer h.drainPendingClose(sessID)
 
 	resp, err := as.agent.Step(working)
 	if err != nil {

@@ -139,4 +139,30 @@ describe("App browser wiring", () => {
     fireEvent.click(screen.getByRole("button", { name: /new browser tab/i }));
     expect(toggle).toBeDisabled();
   });
+
+  it("collapses the side browser panel to a rail and expands it back", async () => {
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: /new chat session/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /toggle browser panel/i }));
+    expect(await screen.findByTestId("browser-panel")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /collapse browser panel/i }));
+    // Collapsed: panel body unmounted, only the expand rail remains.
+    expect(screen.queryByTestId("browser-panel")).toBeNull();
+    expect(screen.queryByRole("button", { name: /collapse browser panel/i })).toBeNull();
+
+    fireEvent.click(await screen.findByRole("button", { name: /show browser panel/i }));
+    expect(await screen.findByTestId("browser-panel")).toHaveAttribute("data-mode", "side");
+    expect(screen.queryByRole("button", { name: /show browser panel/i })).toBeNull();
+  });
+
+  it("closes the side browser panel via its close button", async () => {
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: /new chat session/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /toggle browser panel/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /close browser panel/i }));
+    expect(screen.queryByTestId("browser-panel")).toBeNull();
+    // The top-row globe toggle still opens it again.
+    expect(screen.queryByRole("button", { name: /toggle browser panel/i })).toBeEnabled();
+  });
 });

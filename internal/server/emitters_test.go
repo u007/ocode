@@ -159,6 +159,131 @@ func TestTerminalProcessesEmitterReportsRegisteredPID(t *testing.T) {
 	t.Fatal("no terminal_processes envelope within 5s")
 }
 
+// TestTerminalProcessesEmitterPublishesEmptyAfterLastTerminalCloses: when a
+// project's LAST registered terminal is unregistered (tab closed / shell
+// exited), the emitter still publishes a project-scoped terminal_processes
+// envelope with an empty stats slice, so the web Processes tab can drop the
+// stale row. Previously the empty snapshot was skipped (len(entries) == 0
+// early return), leaving the closed terminal's row visible forever.
+func TestTerminalProcessesEmitterPublishesEmptyAfterLastTerminalCloses(t *testing.T) {
+	h := NewHandler()
+	ch := h.bus.Subscribe([]string{"/proj/alpha"})
+	defer h.bus.Unsubscribe(ch)
+
+	h.terminalProcs.register("term-last", terminalProcEntry{Project: "/proj/alpha", PID: int32(os.Getpid())})
+	h.startTerminalProcessesEmitter()
+
+	// Wait for the initial snapshot carrying term-last before unregistering —
+	// otherwise lastProjects never sees the project and no empty envelope can
+	// be expected.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case env := <-ch:
+			if env.Event != "terminal_processes" || env.Project != "/proj/alpha" {
+				continue
+			}
+			stats, ok := env.Data.([]terminalProcessStat)
+			if !ok || len(stats) != 1 || stats[0].ID != "term-last" {
+				continue
+			}
+			goto registered
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatal("no terminal_processes envelope with term-last within 5s")
+
+registered:
+	h.terminalProcs.unregister("term-last")
+	// Mirror the real close path (terminalExited) waking the emitter.
+	h.notifyTerminalProcsChanged()
+
+	// Must now receive an EMPTY terminal_processes envelope for the project.
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case env := <-ch:
+			if env.Event != "terminal_processes" || env.Project != "/proj/alpha" {
+				continue
+			}
+			stats, ok := env.Data.([]terminalProcessStat)
+			if !ok {
+				continue
+			}
+			if len(stats) != 0 {
+				t.Fatalf("terminal_processes data after unregister = %#v, want empty slice", env.Data)
+			}
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatal("no empty terminal_processes envelope after unregister within 5s")
+}
+
+// TestTerminalProcessesEmitterNoEmptySpamForStillOpenProjects: after one of
+// two terminals in a project closes, the project keeps publishing non-empty
+// snapshots (no empty-envelope transition is emitted while terminals remain).
+func TestTerminalProcessesEmitterNoEmptySpamForStillOpenProjects(t *testing.T) {
+	h := NewHandler()
+	ch := h.bus.Subscribe([]string{"/proj/alpha"})
+	defer h.bus.Unsubscribe(ch)
+
+	h.terminalProcs.register("term-1", terminalProcEntry{Project: "/proj/alpha", PID: int32(os.Getpid())})
+	h.terminalProcs.register("term-2", terminalProcEntry{Project: "/proj/alpha", PID: int32(os.Getpid())})
+	h.startTerminalProcessesEmitter()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case env := <-ch:
+			if env.Event != "terminal_processes" || env.Project != "/proj/alpha" {
+				continue
+			}
+			stats, ok := env.Data.([]terminalProcessStat)
+			if !ok || len(stats) != 2 {
+				continue
+			}
+			goto bothRegistered
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatal("no terminal_processes envelope with both terminals within 5s")
+
+bothRegistered:
+	// Close one terminal — the project still has a live terminal, so incoming
+	// snapshots must be non-empty (contain term-2) and never an empty slice.
+	h.terminalProcs.unregister("term-1")
+	h.notifyTerminalProcsChanged()
+
+	sawNonEmpty := false
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case env := <-ch:
+			if env.Event != "terminal_processes" || env.Project != "/proj/alpha" {
+				continue
+			}
+			stats, ok := env.Data.([]terminalProcessStat)
+			if !ok {
+				continue
+			}
+			if len(stats) == 0 {
+				t.Fatalf("terminal_processes = empty slice while term-2 still open")
+			}
+			for _, s := range stats {
+				if s.ID == "term-2" {
+					sawNonEmpty = true
+				}
+			}
+			if sawNonEmpty {
+				return
+			}
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatal("no non-empty terminal_processes envelope with term-2 within 5s")
+}
+
 // TestTerminalRegistryUnregisterDropsEntry: register then unregister removes
 // the entry from the snapshot, matching HandleTerminalWS's shutdown path.
 func TestTerminalRegistryUnregisterDropsEntry(t *testing.T) {

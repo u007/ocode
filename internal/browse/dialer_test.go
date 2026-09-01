@@ -142,3 +142,48 @@ func TestSafeTransportUsesGuardedDialer(t *testing.T) {
 		t.Error("newSafeTransport: environment proxy must be disabled (Proxy != nil) — an env proxy would bypass the connect-time guard")
 	}
 }
+
+func TestSafeTransportTLSVerification(t *testing.T) {
+	// Strict transports (newSafeTransport) must keep verification on for
+	// both local and external — self-signed handling is via
+	// newSafeTransportInsecure, gated by isLoopbackHost / explicit bypass.
+	for _, allowPrivate := range []bool{false, true} {
+		tr := newSafeTransport(allowPrivate)
+		if tr.TLSClientConfig != nil && tr.TLSClientConfig.InsecureSkipVerify {
+			t.Errorf("newSafeTransport(%v): want TLS verification enabled (no InsecureSkipVerify)", allowPrivate)
+		}
+	}
+	// Insecure transport must skip verification (loopback auto-allow + explicit bypass).
+	for _, allowPrivate := range []bool{false, true} {
+		tr := newSafeTransportInsecure(allowPrivate)
+		if tr.TLSClientConfig == nil || !tr.TLSClientConfig.InsecureSkipVerify {
+			t.Errorf("newSafeTransportInsecure(%v): want InsecureSkipVerify=true", allowPrivate)
+		}
+	}
+	// isLoopbackHost must correctly identify loopback literals for auto-allow.
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"localhost", true},
+		{"localhost:3505", true},
+		{"app.localhost", true},
+		{"app.localhost:3000", true},
+		{"127.0.0.1", true},
+		{"127.0.0.1:5173", true},
+		{"[::1]", true},
+		{"[::1]:8080", true},
+		{"::1", true},
+		{"192.168.1.1", false},
+		{"192.168.1.1:3000", false},
+		{"10.0.0.1", false},
+		{"example.com", false},
+		{"localhost.", true}, // trailing dot
+		{"evil.localhost.com", false},
+	}
+	for _, c := range cases {
+		if got := isLoopbackHost(c.host); got != c.want {
+			t.Errorf("isLoopbackHost(%q) = %v, want %v", c.host, got, c.want)
+		}
+	}
+}

@@ -14,10 +14,17 @@ import MonacoSettingsPanel from "./MonacoSettingsPanel";
 import EditorHelpDialog from "./EditorHelpDialog";
 import { loadEditorScroll, saveEditorScroll } from "./editorTabsPersistence";
 import { parseDiffPatch, type DiffLine, type Hunk } from "../../lib/parseDiffPatch";
+import { resolveEditorDiffSource } from "../../lib/editorDiffSource";
+import type { ChangeDiff, GitDiffFile, GitStatus } from "../../api/types";
 
 // Ensure Monaco is configured before any editor mounts.
 import "../../lib/monaco-setup";
 import { consumePendingHighlight, setPendingHighlight } from "../../lib/fileSearchHighlight";
+import {
+  clearEditorModelInfo,
+  ensureEditorLinks,
+  setEditorModelInfo,
+} from "../../lib/editorLinks";
 
 interface FileEditorProps {
   path: string;
@@ -40,6 +47,7 @@ interface FileEditorProps {
   externalChange?: boolean;
   onReloadFromDisk?: () => void;
   onDismissExternalChange?: () => void;
+  onForceSave?: () => void;
   /** Initial highlight to apply (from content search). If provided, highlights all matches after mount. */
   initialHighlight?: { query: string; line?: number } | null;
 }
@@ -113,6 +121,7 @@ function FileEditorImpl({
   externalChange = false,
   onReloadFromDisk,
   onDismissExternalChange,
+  onForceSave,
   initialHighlight,
 }: FileEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
@@ -197,6 +206,7 @@ function FileEditorImpl({
       },
       multiCursorModifier: "alt",
       selectionClipboard: true,
+      links: true,
       // Persisted settings override defaults — intentionally spread last so a
       // user's saved fontSize/tabSize etc. win without recreating the object
       // when `persistedSettings` hasn't changed.
@@ -305,6 +315,14 @@ function FileEditorImpl({
   const handleEditorMount: OnMount = useCallback((ed, monaco) => {
     editorRef.current = ed;
     monacoRef.current = monaco;
+    // Register clickable import / file-path links inside the editor.
+    try {
+      ensureEditorLinks(monaco);
+    } catch {
+      // ignore provider registration failures (test env, older Monaco)
+    }
+    const initialModel = ed.getModel();
+    if (initialModel) setEditorModelInfo(initialModel.uri.toString(), { path, projectRoot });
 
     // Selection tracking (see wireSelectionTracking above).
     wireSelectionTracking(ed);
@@ -387,9 +405,11 @@ function FileEditorImpl({
     }
   }, [persistKey, wireSelectionTracking]);
 
-  // ── Inline diff decorations ──
-  // Fetch the change diff whenever path or session changes, parse it, and apply
-  // deltaDecorations (for added/modified lines) and view zones (for deleted lines).
+// ── Inline diff decorations ──
+  // Fetch the diffs whenever path/session/diffVersion changes, pick the source
+  // (git working-tree/unstaged diff in a repo via resolveEditorDiffSource,
+  // else the per-session change diff), parse it, and apply deltaDecorations
+  // (for added/modified lines) and view zones (for deleted lines).
   useEffect(() => {
     const ed = editorRef.current;
     const monaco = monacoRef.current;
@@ -397,7 +417,8 @@ function FileEditorImpl({
 
     let cancelled = false;
 
-    // Clear previous decorations/zones
+    // Clear previous decorations/zones before each fetch so switching files
+    // never leaves the previous path's highlights behind.
     if (decorationIdsRef.current.length > 0) {
       ed.deltaDecorations(decorationIdsRef.current, []);
       decorationIdsRef.current = [];
@@ -410,143 +431,168 @@ function FileEditorImpl({
     }
     viewZoneIdsRef.current = [];
 
-    api
-      .getChangeDiff(session, path)
-      .then((res) => {
-        if (cancelled) return;
-        const hunks = parseDiffPatch(res.patch);
-        if (hunks.length === 0) return;
+    const applyPatch = (patch: string) => {
+      if (cancelled) return;
+      const hunks = parseDiffPatch(patch);
+      if (hunks.length === 0) return;
 
-        const decorations: editor.IModelDeltaDecoration[] = [];
-        const zoneDefs: { afterLine: number; lines: { text: string }[] }[] = [];
+      const decorations: editor.IModelDeltaDecoration[] = [];
+      const zoneDefs: { afterLine: number; lines: { text: string }[] }[] = [];
 
-        for (const hunk of hunks) {
-          const modified = isModifiedHunk(hunk);
-          const delRunLines: string[] = [];
-          let currentNewLine = hunk.newStart;
+      for (const hunk of hunks) {
+        const modified = isModifiedHunk(hunk);
+        const delRunLines: string[] = [];
+        let currentNewLine = hunk.newStart;
 
-          const flushDeletionRun = () => {
-            if (delRunLines.length === 0) return;
-            zoneDefs.push({
-              afterLine: Math.max(currentNewLine - 1, 1),
-              lines: delRunLines.map((t: string) => ({ text: t })),
-            });
-            delRunLines.length = 0;
-          };
+        const flushDeletionRun = () => {
+          if (delRunLines.length === 0) return;
+          zoneDefs.push({
+            afterLine: Math.max(currentNewLine - 1, 1),
+            lines: delRunLines.map((t: string) => ({ text: t })),
+          });
+          delRunLines.length = 0;
+        };
 
-          for (const line of hunk.lines) {
-            if (line.type === "add") {
-              // If this add is replacing one or more deleted lines, emit the
-              // deleted block before the added text so the visual order matches
-              // the diff hunk.
-              flushDeletionRun();
+        for (const line of hunk.lines) {
+          if (line.type === "add") {
+            // If this add is replacing one or more deleted lines, emit the
+            // deleted block before the added text so the visual order matches
+            // the diff hunk.
+            flushDeletionRun();
 
-              // Added/modified line — highlight with decoration
-              const className = modified
-                ? "diff-line-modified"
-                : "diff-line-added";
-              const gutter = modified ? "diff-gutter-modified" : "diff-gutter-added";
-              decorations.push({
-                range: new monaco.Range(currentNewLine, 1, currentNewLine, 1),
-                options: {
-                  isWholeLine: true,
-                  className,
-                  linesDecorationsClassName: gutter,
-                  minimap: {
-                    color: modified ? "#eab308" : "#22c55e",
-                    position: monaco.editor.MinimapPosition.Gutter,
-                  },
+            // Added/modified line — highlight with decoration
+            const className = modified
+              ? "diff-line-modified"
+              : "diff-line-added";
+            const gutter = modified ? "diff-gutter-modified" : "diff-gutter-added";
+            decorations.push({
+              range: new monaco.Range(currentNewLine, 1, currentNewLine, 1),
+              options: {
+                isWholeLine: true,
+                className,
+                linesDecorationsClassName: gutter,
+                minimap: {
+                  color: modified ? "#eab308" : "#22c55e",
+                  position: monaco.editor.MinimapPosition.Gutter,
                 },
-              });
-              currentNewLine++;
-            } else if (line.type === "del") {
-              delRunLines.push(line.text);
-            } else {
-              // Context line — flush any pending deletion run as a view zone
-              // above THIS line (since it's the line after the deletion).
-              flushDeletionRun();
-              currentNewLine++;
-            }
+              },
+            });
+            currentNewLine++;
+          } else if (line.type === "del") {
+            delRunLines.push(line.text);
+          } else {
+            // Context line — flush any pending deletion run as a view zone
+            // above THIS line (since it's the line after the deletion).
+            flushDeletionRun();
+            currentNewLine++;
           }
-
-          // Flush trailing deletion run at end of hunk
-          flushDeletionRun();
         }
 
-        // Apply decorations
-        decorationIdsRef.current = ed.deltaDecorations([], decorations);
+        // Flush trailing deletion run at end of hunk
+        flushDeletionRun();
+      }
 
-        // Apply view zones
-        ed.changeViewZones((accessor) => {
-          for (const zd of zoneDefs) {
-            const domNode = document.createElement("div");
-            domNode.className = "monaco-deleted-block";
-            domNode.style.cssText = [
-              "background: rgba(127, 17, 17, 0.15);",
-              "border-left: 3px solid rgba(239, 68, 68, 0.6);",
-              "padding: 2px 8px;",
-              "font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', Menlo, monospace;",
-              "font-size: 12px;",
-              "color: rgba(239, 68, 68, 0.7);",
-              "display: flex;",
-              "align-items: flex-start;",
-              "gap: 6px;",
-              "user-select: text;",
-            ].join(" ");
+      // Apply decorations
+      decorationIdsRef.current = ed.deltaDecorations([], decorations);
 
-            // Copy button
-            const copyBtn = document.createElement("button");
-            copyBtn.innerHTML = [
-              '<svg width="12" height="12" viewBox="0 0 24 24" fill="none"',
-              '  stroke="currentColor" stroke-width="2"',
-              '  stroke-linecap="round" stroke-linejoin="round">',
-              '  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>',
-              '  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
-              "</svg>",
-            ].join("\n");
-            copyBtn.title = "Copy deleted text";
-            copyBtn.style.cssText = [
-              "background: none;",
-              "border: none;",
-              "cursor: pointer;",
-              "color: rgba(239, 68, 68, 0.5);",
-              "padding: 0;",
-              "flex-shrink: 0;",
-              "margin-top: 2px;",
-            ].join(" ");
-            copyBtn.onmouseover = () => { copyBtn.style.color = "rgba(239, 68, 68, 0.9)"; };
-            copyBtn.onmouseout = () => { copyBtn.style.color = "rgba(239, 68, 68, 0.5)"; };
-            copyBtn.onclick = (e: MouseEvent) => {
-              e.stopPropagation();
-              const text = zd.lines.map((l) => l.text).join("\n");
-              navigator.clipboard.writeText(text).catch(console.error);
-            };
+      // Apply view zones
+      ed.changeViewZones((accessor) => {
+        for (const zd of zoneDefs) {
+          const domNode = document.createElement("div");
+          domNode.className = "monaco-deleted-block";
+          domNode.style.cssText = [
+            "background: rgba(127, 17, 17, 0.15);",
+            "border-left: 3px solid rgba(239, 68, 68, 0.6);",
+            "padding: 2px 8px;",
+            "font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', Menlo, monospace;",
+            "font-size: 12px;",
+            "color: rgba(239, 68, 68, 0.7);",
+            "display: flex;",
+            "align-items: flex-start;",
+            "gap: 6px;",
+            "user-select: text;",
+          ].join(" ");
 
-            const textSpan = document.createElement("span");
-            textSpan.style.cssText = "white-space: pre-wrap;";
-            textSpan.textContent = zd.lines.map((l) => l.text).join("\n");
+          // Copy button
+          const copyBtn = document.createElement("button");
+          copyBtn.innerHTML = [
+            '<svg width="12" height="12" viewBox="0 0 24 24" fill="none"',
+            '  stroke="currentColor" stroke-width="2"',
+            '  stroke-linecap="round" stroke-linejoin="round">',
+            '  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>',
+            '  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+            "</svg>",
+          ].join("\n");
+          copyBtn.title = "Copy deleted text";
+          copyBtn.style.cssText = [
+            "background: none;",
+            "border: none;",
+            "cursor: pointer;",
+            "color: rgba(239, 68, 68, 0.5);",
+            "padding: 0;",
+            "flex-shrink: 0;",
+            "margin-top: 2px;",
+          ].join(" ");
+          copyBtn.onmouseover = () => { copyBtn.style.color = "rgba(239, 68, 68, 0.9)"; };
+          copyBtn.onmouseout = () => { copyBtn.style.color = "rgba(239, 68, 68, 0.5)"; };
+          copyBtn.onclick = (e: MouseEvent) => {
+            e.stopPropagation();
+            const text = zd.lines.map((l) => l.text).join("\n");
+            navigator.clipboard.writeText(text).catch(console.error);
+          };
 
-            domNode.appendChild(copyBtn);
-            domNode.appendChild(textSpan);
+          const textSpan = document.createElement("span");
+          textSpan.style.cssText = "white-space: pre-wrap;";
+          textSpan.textContent = zd.lines.map((l) => l.text).join("\n");
 
-            const id = accessor.addZone({
-              afterLineNumber: Math.max(zd.afterLine, 1),
-              heightInLines: zd.lines.length,
-              domNode,
-            });
-            viewZoneIdsRef.current.push(id);
-          }
-        });
-      })
-      .catch(() => {
-        // 404 or network error — no diff for this file, skip silently.
-        // This is the common case (most files have no uncommitted changes).
+          domNode.appendChild(copyBtn);
+          domNode.appendChild(textSpan);
+
+          const id = accessor.addZone({
+            afterLineNumber: Math.max(zd.afterLine, 1),
+            heightInLines: zd.lines.length,
+            domNode,
+          });
+          viewZoneIdsRef.current.push(id);
+        }
       });
+    };
+
+    // All sources are fetched in parallel: the agent-session change diff, the
+    // repo-ness status, and the git working-tree (unstaged) diff for this
+    // path. Errors degrade per-source (non-repo dirs fail the git calls,
+    // unchanged files 404 the session diff) without failing the others.
+    const sessionDiffP: Promise<ChangeDiff | null> =
+      api.getChangeDiff(session, path).catch(() => null);
+    const gitStatusP: Promise<GitStatus | undefined> = projectRoot
+      ? api.getGitStatus(projectRoot).catch(() => undefined)
+      : Promise.resolve(undefined);
+    const gitDiffP: Promise<GitDiffFile[]> = projectRoot
+      ? api.getGitDiff(path, projectRoot, false).catch(() => [])
+      : Promise.resolve([]);
+
+    Promise.all([sessionDiffP, gitStatusP, gitDiffP]).then(
+      ([sessionDiff, gitStatus, gitFiles]) => {
+        if (cancelled) return;
+        const { kind, patch } = resolveEditorDiffSource({
+          projectRoot,
+          gitStatus,
+          gitFiles,
+          path,
+          sessionPatch: sessionDiff?.patch ?? "",
+        });
+        // "git" with an empty patch is deliberate — a clean repo / a file
+        // with no unstaged changes shows no decorations and must NOT fall
+        // back to the session diff.
+        if (kind === "git" && patch === "") return;
+        if (kind !== "none") applyPatch(patch);
+      },
+    );
 
     return () => {
       cancelled = true;
     };
-  }, [path, session, diffVersion]);
+  }, [path, session, diffVersion, projectRoot]);
 
   // ── Search highlight decorations (content search) ──
   // Single mechanism: pending highlight store keyed by path+projectRoot.
@@ -669,13 +715,21 @@ function FileEditorImpl({
     return () => clearTimeout(timer);
   }, [content, path, activeHighlight]);
 
-  // Reset editor ref when path changes
+  // Keep modelInfo in sync when path/projectRoot changes and clear on unmount
+  useEffect(() => {
+    const model = editorRef.current?.getModel();
+    if (model) setEditorModelInfo(model.uri.toString(), { path, projectRoot });
+  }, [path, projectRoot]);
+
+  // Reset editor ref and modelInfo when path changes
   useEffect(() => {
     return () => {
+      const uri = editorRef.current?.getModel()?.uri.toString();
+      if (uri) clearEditorModelInfo(uri);
       editorRef.current = null;
       monacoRef.current = null;
     };
-  }, [path]);
+  }, [path, projectRoot]);
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -712,7 +766,7 @@ function FileEditorImpl({
       {/* External-change conflict banner */}
       {externalChange && (
         <div className="flex items-center justify-between gap-2 border-b border-amber-500/30 bg-amber-500/10 px-4 py-1.5 text-xs text-amber-500">
-          <span>This file was modified or deleted outside ocode. Your unsaved edits are kept; saving will overwrite the on-disk version.</span>
+          <span>This file was modified or deleted outside ocode. Your unsaved edits are kept; saving will overwrite the on-disk version (conflict-checked on save).</span>
           <div className="flex shrink-0 items-center gap-1">
             {onReloadFromDisk && (
               <Button
@@ -723,6 +777,17 @@ function FileEditorImpl({
                 title="Discard your edits and load the on-disk content"
               >
                 Reload from disk
+              </Button>
+            )}
+            {onForceSave && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs text-amber-500 hover:text-amber-400"
+                onClick={onForceSave}
+                title="Overwrite the on-disk file with your editor content, even though it changed"
+              >
+                Overwrite
               </Button>
             )}
             {onDismissExternalChange && (
@@ -758,8 +823,8 @@ function FileEditorImpl({
       {/* Monaco editor */}
       <div className="flex-1 overflow-hidden">
         <Editor
-          key={path}
-          path={path}
+          key={projectRoot ? `${projectRoot}::${path}` : path}
+          path={projectRoot ? `${projectRoot}::${path}` : path}
           language={lang}
           defaultValue={content}
           onChange={stableOnChange}
@@ -786,6 +851,7 @@ function FileEditorImpl({
 function arePropsEqual(prev: FileEditorProps, next: FileEditorProps): boolean {
   return (
     prev.path === next.path &&
+    prev.projectRoot === next.projectRoot &&
     prev.content === next.content &&
     prev.language === next.language &&
     prev.readOnly === next.readOnly &&

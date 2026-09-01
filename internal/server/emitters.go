@@ -390,25 +390,52 @@ func (h *Handler) terminalProcessesEmitterLoop() {
 	defer ticker.Stop()
 	cache := make(map[int32]*process.Process)
 	idleFor := time.Duration(0)
+	// lastProjects is the set of projects that had registered terminals on the
+	// previous publish. When a project's LAST terminal is removed (tab closed,
+	// shell exited), the registry snapshot no longer contains it, and if we
+	// only published for projects present in the current snapshot that project
+	// would silently disappear from the stream — the web Processes tab would
+	// keep showing the closed terminal's row forever. Publishing an empty
+	// snapshot for it lets clients drop the stale rows.
+	lastProjects := make(map[string]struct{})
 
 	publish := func() {
 		entries := h.terminalProcs.snapshot()
-		if len(entries) == 0 {
-			return
-		}
 		touched := make(map[int32]bool)
-		stats := gatherProcessStats(entries, cache, touched)
 		byProject := make(map[string][]terminalProcessStat, len(entries))
-		for _, s := range stats {
-			// entries[s.ID] is safe: gatherProcessStats preserves every id.
-			proj := entries[s.ID].Project
-			byProject[proj] = append(byProject[proj], s)
+		if len(entries) > 0 {
+			// The process-table walk is the expensive part of a tick; skip it
+			// entirely when no terminals are registered, but still publish the
+			// transition-to-empty snapshots below so closed terminals don't
+			// linger on clients.
+			stats := gatherProcessStats(entries, cache, touched)
+			for _, s := range stats {
+				// entries[s.ID] is safe: gatherProcessStats preserves every id.
+				proj := entries[s.ID].Project
+				byProject[proj] = append(byProject[proj], s)
+			}
 		}
+		// Prune cached process handles that are no longer part of any live
+		// tree, including the all-closed case (touched stays empty then, so
+		// this clears the whole cache instead of holding stale handles).
 		for pid := range cache {
 			if !touched[pid] {
 				delete(cache, pid)
 			}
 		}
+		// Publish a transition-to-empty envelope for every project that had
+		// terminals last publish but has none now, so subscribers can drop the
+		// stale rows of closed terminals.
+		current := make(map[string]struct{}, len(byProject))
+		for proj := range byProject {
+			current[proj] = struct{}{}
+		}
+		for proj := range lastProjects {
+			if _, ok := current[proj]; !ok {
+				h.bus.Publish("terminal_processes", proj, "", []terminalProcessStat{})
+			}
+		}
+		lastProjects = current
 		for proj, stats := range byProject {
 			h.bus.Publish("terminal_processes", proj, "", stats)
 		}

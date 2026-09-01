@@ -202,10 +202,28 @@ export function apiWsPath(path: string): string {
   return `${scheme}//${window.location.host}${httpUrl}`;
 }
 
+/** Shared browse-URL normalization (see lib/browseURL.ts). Re-exported here so
+ *  existing imports from "@/api/client" keep working; the store and the proxy
+ *  path share the same function via lib/browseURL to avoid drift. */
+import { normalizeBrowseURL } from "../lib/browseURL";
+export { normalizeBrowseURL };
+
 // projQuery appends ?project=<root> for endpoints that select a registered
 // project root via the query string (git + fs mutation endpoints).
 function projQuery(project?: string): string {
   return project ? `?project=${encodeURIComponent(project)}` : "";
+}
+
+/** Non-2xx response from fetchJSON. Carries the HTTP status so callers can
+ *  tell a terminal answer (404/409: the thing no longer exists / already
+ *  changed) from a retryable failure (network, 5xx). */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
 }
 
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
@@ -215,7 +233,7 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(apiPath(path), { ...init, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.message || err.error || res.statusText);
+    throw new ApiError(err.message || err.error || res.statusText, res.status);
   }
   return res.json();
 }
@@ -229,6 +247,73 @@ async function fetchEmpty(path: string, init?: RequestInit): Promise<void> {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || res.statusText);
   }
+}
+
+/**
+ * Reads an SSE stream from an already-open fetch Response and dispatches each
+ * frame's data to the handler registered for its event name (frames without an
+ * `event:` line dispatch to `message`). Handles LF and CRLF frame separators,
+ * multi-line `data:` fields, comment lines, and frames split across network
+ * chunks; JSON `data:` payloads are parsed, anything else passes through as a
+ * raw string. Resolves when the stream ends, rejects on network/parse errors
+ * or when the request's AbortSignal aborts (abort the *fetch* itself — the
+ * underlying body read rejects with AbortError and propagates here).
+ *
+ * This is the fetch-based counterpart to EventSource: it works for one-shot
+ * request-scoped streams (file search, exports) that must carry Authorization
+ * headers, must not auto-reconnect, and need abort-on-demand.
+ */
+export async function readSSEStream<T = unknown>(
+  res: Response,
+  handlers: Record<string, (data: T) => void>,
+): Promise<void> {
+  if (!res.body) throw new Error("response has no readable body");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventName = "";
+  let dataLines: string[] = [];
+
+  const dispatch = () => {
+    if (dataLines.length === 0 && !eventName) return; // comment-only frame
+    const name = eventName || "message";
+    const raw = dataLines.join("\n");
+    dataLines = [];
+    eventName = "";
+    const handler = handlers[name];
+    if (!handler) return;
+    let payload: T;
+    try {
+      payload = JSON.parse(raw) as T;
+    } catch {
+      payload = raw as unknown as T;
+    }
+    handler(payload);
+  };
+
+  const dispatchFrame = (frame: string) => {
+    for (const line of frame.split("\n")) {
+      if (line.startsWith(":")) continue; // comment / keepalive
+      if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+      else if (line.startsWith("event:")) eventName = line.slice(6).trim();
+    }
+    dispatch();
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    buffer = buffer.replace(/\r\n/g, "\n");
+    let sep: number;
+    while ((sep = buffer.indexOf("\n\n")) !== -1) {
+      const frame = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      dispatchFrame(frame);
+    }
+  }
+  // Trailing frame without a final blank-line separator.
+  if (buffer) dispatchFrame(buffer);
 }
 
 export const api = {
@@ -466,6 +551,10 @@ export const api = {
     const query = params.toString();
     return fetchJSON<GitDiffFile[]>(`/api/git/diff${query ? `?${query}` : ""}`);
   },
+
+  /** Working-tree status of the repo at `project` (or the server workdir). */
+  getGitStatus: (project?: string) =>
+    fetchJSON<GitStatus>(`/api/git/status${projQuery(project)}`),
 
   /** One-shot SourceTree-style snapshot: status + staged + unstaged diffs. */
   getGitWorkspace: (project?: string) =>
@@ -898,10 +987,10 @@ export const api = {
     ),
 
   // ── File content save (PUT) ──
-  saveFileContent: (path: string, content: string, projectRoot?: string) =>
+  saveFileContent: (path: string, content: string, projectRoot?: string, expectedHash?: string, force?: boolean) =>
     fetchJSON<{ path: string; saved: boolean }>("/api/files/content", {
       method: "PUT",
-      body: JSON.stringify({ path, content, project_root: projectRoot }),
+      body: JSON.stringify({ path, content, project_root: projectRoot, expected_hash: expectedHash, force }),
     }),
 
   // ── Session title / export ──
@@ -1164,6 +1253,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ job_id: jobId }),
     }),
+  cancelSession: (sessionId: string) =>
+    fetchJSON<{ cancelled: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+      method: "POST",
+    }),
+  /** Terminate the backend for a closed session (web/desktop tab close):
+   *  cancels in-flight work AND releases the resident agent. Fire-and-forget
+   *  safe on idle sessions (server no-ops). */
+  closeSession: (sessionId: string) =>
+    fetchJSON<{ cancelled: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
+      method: "POST",
+    }),
 };
 
 export interface SecretScanResponse {
@@ -1239,11 +1339,22 @@ export async function revokeBrowseSession(stateKey: string): Promise<void> {
   }
 }
 
+/** Explicit TLS bypass for a self-signed local host after the user clicks “Continue anyway”. */
+export async function bypassBrowseTLS(stateKey: string, host: string): Promise<void> {
+  const res = await authedFetch("/api/browse/bypass", {
+    method: "POST",
+    body: JSON.stringify({ state_key: stateKey, host }),
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`browse bypass: ${res.status}`);
+  }
+}
+
 /** Builds the iframe src pointing at the browse origin's stateless route:
- *  {base}/b/{stateKey}/{scheme}/{host}/{path}?{query}[&__grant=...].
- *  Only http/https targets are supported. */
+  *  {base}/b/{stateKey}/{scheme}/{host}/{path}?{query}[&__grant=...].
+  *  Only http/https targets are supported. */
 export function browseSrc(base: string, grant: string | null, stateKey: string, url: string): string {
-  const u = new URL(url);
+  const u = new URL(normalizeBrowseURL(url));
   const scheme = u.protocol.replace(":", "");
   const host = u.host; // host:port
   const path = u.pathname === "/" ? "/" : u.pathname;

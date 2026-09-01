@@ -68,6 +68,12 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 	if entry.ProjectRoot != "" {
 		snap.CWD = entry.ProjectRoot
 	}
+	// Populate persisted session title so the web tab bar shows the
+	// authoritative title (auto fallback or LLM-generated) immediately,
+	// not just after a generated-title status broadcast.
+	if s, err := session.LoadForDir(entry.ProjectRoot, id); err == nil {
+		snap.SessionTitle = s.Title
+	}
 	h.applySessionContext(&snap, id)
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 
@@ -162,10 +168,16 @@ func (h *Handler) effectiveSessionModel(id string) string {
 			}
 		}
 	}
+	// SetWorkDir replaces h.cfg under h.mu. Keep the lock limited to this
+	// in-memory read; session resolution and transcript loading above must stay
+	// outside the handler map lock.
+	h.mu.Lock()
+	model := ""
 	if h.cfg != nil {
-		return h.cfg.Model
+		model = h.cfg.Model
 	}
-	return ""
+	h.mu.Unlock()
+	return model
 }
 
 // setSessionModelOverride persists (or clears, when model == "") a per-session

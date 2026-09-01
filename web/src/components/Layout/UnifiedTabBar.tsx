@@ -26,7 +26,7 @@ import { browserActions } from "../../lib/browserStore";
 import type { FocusedKind } from "../../lib/viewPersistence";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
-import { cancelLiveDeltas } from "../../lib/sessionEvents";
+import { cancelLiveDeltas, closeSessionBackend } from "../../lib/sessionEvents";
 import { api } from "../../api/client";
 import { loadTabOrder, saveTabOrder, reconcileTabOrder, type UnifiedTabKey } from "./tabOrderPersistence";
 import { focusTerminalById } from "../Terminal/terminalFocus";
@@ -59,11 +59,34 @@ function shortCommandLabel(command: string | undefined, tool: string): string {
   return candidate.length > 40 ? `${candidate.slice(0, 40)}…` : candidate;
 }
 
+function truncateTitle(s: string, maxLen: number): string {
+  s = s.replace(/\n/g, " ").trim();
+  const runes = Array.from(s);
+  if (runes.length <= maxLen) return s;
+  return runes.slice(0, maxLen - 3).join("") + "...";
+}
+
+function deriveChatTabTitle(tab: { title: string; titleManual?: boolean }, slice: SessionSlice): string {
+  if (tab.titleManual) return tab.title;
+  if (tab.title && tab.title !== "New session") return tab.title;
+  const raw = slice.tuiStatus?.session_title?.trim() || "";
+  if (raw) return truncateTitle(raw, 80);
+  for (const m of slice.messages) {
+    const text = m.content?.trim() || "";
+    if (m.role === "user" && text && !text.startsWith("/")) {
+      return truncateTitle(text, 80);
+    }
+  }
+  if (slice.messages.length === 0) return "New session";
+  return tab.title || "New session";
+}
+
 interface ChatDerived {
   id: string;
   initialized: boolean;
   hasPending: boolean;
   processLabel: string | null;
+  displayTitle: string;
 }
 
 function chatDerivedEqual(a: ChatDerived[], b: ChatDerived[]): boolean {
@@ -71,7 +94,7 @@ function chatDerivedEqual(a: ChatDerived[], b: ChatDerived[]): boolean {
   for (let i = 0; i < a.length; i++) {
     const x = a[i];
     const y = b[i];
-    if (x.id !== y.id || x.initialized !== y.initialized || x.hasPending !== y.hasPending || x.processLabel !== y.processLabel) {
+    if (x.id !== y.id || x.initialized !== y.initialized || x.hasPending !== y.hasPending || x.processLabel !== y.processLabel || x.displayTitle !== y.displayTitle) {
       return false;
     }
   }
@@ -262,6 +285,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           initialized: slice.initialized,
           hasPending: activeChatId !== tab.id && (slice.pendingPermission !== null || slice.pendingQuestion !== null),
           processLabel: activeProcessLabel(slice),
+          displayTitle: deriveChatTabTitle(tab, slice),
         };
       }),
     chatDerivedEqual,
@@ -420,6 +444,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   const handleCloseChat = useCallback(
     (e: React.MouseEvent, id: string) => {
       e.stopPropagation();
+      closeSessionBackend(id);
       cancelLiveDeltas(id);
       chatDispatch({ type: "RESET", sessionId: id });
       closeSessionTab(id);
@@ -468,12 +493,13 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
               const tab = chatById.get(id);
               if (!tab) return null;
               const derived = chatDerived.find((d) => d.id === id);
+              const displayTitle = derived?.displayTitle ?? tab.title;
               return (
                 <TabPill
                   key={key}
                   sortId={key}
                   emoji="💬"
-                  title={tab.title}
+                  title={displayTitle}
                   isActive={focusedKind === "chat" && activeChatId === id}
                   isLoading={isLoadingChatTab(id, derived?.initialized ?? false)}
                   hasPending={derived?.hasPending ?? false}
@@ -481,8 +507,8 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
                   isEditing={editing?.kind === "chat" && editing.id === id}
                   editValue={editValue}
                   onEditValueChange={setEditValue}
-                  onClick={(e) => handleChatClick(e, id, tab.title)}
-                  onStartRename={() => startRename("chat", id, tab.title || "")}
+                  onClick={(e) => handleChatClick(e, id, displayTitle)}
+                  onStartRename={() => startRename("chat", id, displayTitle || "")}
                   onCommitRename={commitRename}
                   onCancelRename={() => setEditing(null)}
                   onClose={(e) => handleCloseChat(e, id)}

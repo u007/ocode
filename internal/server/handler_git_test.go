@@ -38,6 +38,46 @@ func TestGitDiffNoRepo(t *testing.T) {
 	}
 }
 
+// TestGitStatusIsRepoFlag asserts the is_repo field distinguishes a clean
+// repository (web editor: unstaged decorations must NOT fall back to session
+// diffs) from a non-repository directory (editor: session-diff fallback).
+func TestGitStatusIsRepoFlag(t *testing.T) {
+	call := func(dir string, body *strings.Builder) {
+		h := NewHandler()
+		h.SetWorkDir(dir)
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/api/git/status", nil)
+		h.HandleGitStatus(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		body.WriteString(w.Body.String())
+	}
+
+	var repoBody, plainBody strings.Builder
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	call(repo, &repoBody)
+	call(t.TempDir(), &plainBody)
+
+	var repoStatus, plainStatus GitStatus
+	if err := json.Unmarshal([]byte(repoBody.String()), &repoStatus); err != nil {
+		t.Fatalf("failed to decode repo status: %v", err)
+	}
+	if err := json.Unmarshal([]byte(plainBody.String()), &plainStatus); err != nil {
+		t.Fatalf("failed to decode plain status: %v", err)
+	}
+	if !repoStatus.IsRepo {
+		t.Error("clean repo must report is_repo=true (no unstaged changes ≠ not a repo)")
+	}
+	if plainStatus.IsRepo {
+		t.Error("non-repo dir must report is_repo=false")
+	}
+	if repoStatus.Branch == "" {
+		t.Error("clean repo should still report its branch")
+	}
+}
+
 func TestGitDiffCleanRepo(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)

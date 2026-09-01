@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 
 export const OPEN_FILE_EVENT = "ocode:open-file";
-export type OpenFileDetail = { path: string; line?: number };
+export type OpenFileDetail = { path: string; line?: number; col?: number; projectRoot?: string };
 
 // Known source-code / config extensions. A bare filename (no slash) is only
 // linkified when it ends in one of these — otherwise prose words like "e.g."

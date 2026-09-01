@@ -57,7 +57,7 @@ describe("useEditorTabs", () => {
     await act(async () => {
       await result.current.saveEditorTab(result.current.editorTabs[0].id);
     });
-    expect(api.saveFileContent).toHaveBeenCalledWith("src/a.ts", "hello", "/projects/active");
+    expect(api.saveFileContent).toHaveBeenCalledWith("src/a.ts", "hello", "/projects/active", expect.any(String), undefined);
   });
 
   it("closing the active tab falls back to null, not a string sentinel", async () => {
@@ -247,5 +247,129 @@ describe("useEditorTabs", () => {
     expect(tab.isDirty).toBe(false);
     expect(tab.externalChange).toBe(false);
     expect(window.localStorage.getItem("ocode.editor.draft.editor-/a/b.txt")).toBeNull();
+  });
+
+  it("external change on dirty tab then normal save 409s and preserves baseHash until reload or force", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("/a/b.txt");
+    });
+    // Make dirty
+    act(() => {
+      result.current.handleEditorChange("editor-/a/b.txt", "hello edited");
+    });
+    expect(result.current.editorTabs[0].isDirty).toBe(true);
+    const baseHashBefore = (result.current.editorTabs[0] as any).baseHash;
+    // Simulate external disk change to "external" by stubbing fetch.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: "external change" }) }),
+    );
+    // Trigger periodic check via focus
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(result.current.editorTabs[0].externalChange).toBe(true));
+    // baseHash should remain old, originalContent should not be rebased
+    expect((result.current.editorTabs[0] as any).baseHash).toBe(baseHashBefore);
+    // Normal save should 409 (mock api to reject with 409)
+    const conflictErr: any = new Error("file has changed");
+    conflictErr.status = 409;
+    (api.saveFileContent as any).mockRejectedValueOnce(conflictErr);
+    await act(async () => {
+      try {
+        await result.current.saveEditorTab("editor-/a/b.txt");
+      } catch {}
+    });
+    expect(result.current.editorTabs[0].externalChange).toBe(true);
+    // Force save should succeed and advance baseline
+    (api.saveFileContent as any).mockResolvedValueOnce({ path: "/a/b.txt", saved: true });
+    await act(async () => {
+      await result.current.forceSaveEditorTab("editor-/a/b.txt");
+    });
+    expect(result.current.editorTabs[0].externalChange).toBe(false);
+    expect(result.current.editorTabs[0].isDirty).toBe(false);
+  });
+
+  it("reload advances baseline after external change", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("/a/b.txt");
+    });
+    act(() => {
+      result.current.handleEditorChange("editor-/a/b.txt", "edited");
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: "external" }) }),
+    );
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(result.current.editorTabs[0].externalChange).toBe(true));
+    // Reload should clear externalChange and update baseHash
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: "external" }) }),
+    );
+    await act(async () => {
+      await result.current.reloadTabFromDisk("editor-/a/b.txt");
+    });
+    expect(result.current.editorTabs[0].externalChange).toBe(false);
+    expect(result.current.editorTabs[0].content).toBe("external");
+    expect(result.current.editorTabs[0].isDirty).toBe(false);
+  });
+
+  it("draft persistence preserves stale baseHash after external change + additional edit", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("/a/b.txt");
+    });
+    const originalBaseHash = (result.current.editorTabs[0] as any).baseHash;
+    act(() => {
+      result.current.handleEditorChange("editor-/a/b.txt", "first edit");
+    });
+    // External change to "external"
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: "external" }) }),
+    );
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(result.current.editorTabs[0].externalChange).toBe(true));
+    // Additional edit after external change
+    act(() => {
+      result.current.handleEditorChange("editor-/a/b.txt", "first edit + more");
+    });
+    // Flush draft via beforeunload (500ms debounce would otherwise be pending)
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload"));
+    });
+    const raw = window.localStorage.getItem("ocode.editor.draft.editor-/a/b.txt");
+    expect(raw).not.toBeNull();
+    const draft = JSON.parse(raw!);
+    // Must still be the original stale hash, not hash("external")
+    expect(draft.baseHash).toBe(originalBaseHash);
+    expect(draft.baseHash).not.toBe("45h"); // sanity
+    // Simulate reload: new hook should restore draft with externalChange still true
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: "external" }) }),
+    );
+    const second = renderHook(() => useEditorTabs());
+    // Wait for restore (async)
+    await waitFor(() => expect(second.result.current.editorTabs.length).toBe(1));
+    await waitFor(() => expect(second.result.current.editorTabs[0].externalChange).toBe(true));
+    // Normal save should still 409 (baseHash stale)
+    const conflictErr: any = new Error("file has changed");
+    conflictErr.status = 409;
+    (api.saveFileContent as any).mockRejectedValueOnce(conflictErr);
+    await act(async () => {
+      try {
+        await second.result.current.saveEditorTab("editor-/a/b.txt");
+      } catch {}
+    });
+    expect(second.result.current.editorTabs[0].externalChange).toBe(true);
   });
 });

@@ -134,7 +134,16 @@ A full-featured tree-based file explorer with:
 - **Tree navigation** with vertical scrollbar and scrollbar drag support
 - **Preview panel** with syntax-highlighted content (progressive, binary-detected — routes to system opener)
 - **Inline vim-style editor** (`i` insert, `:w`, `:q`, `:wq`) and external editor (tmux-split / tmux-window / plain exec via `/editor` + `/editor-mode`)
-- **Content search** across files with incremental streaming results and `Ctrl+F`
+- **Content search** across files with incremental streaming results (`Ctrl+F`):
+  Tab/Shift+Tab focuses the query, extension, match, case, whole-word, and
+  ignored-file controls; Space/Left/Right toggles options; matching defaults to
+  case-insensitive literal substrings and also supports regular expressions,
+  case-sensitive matching, and whole-word matching. `Enter` runs the search or
+  opens the selected result, `Esc` returns to the file browser, and
+  `Ctrl+N`/`Ctrl+P` move through results. By default, hidden files, common
+  ignored directories (`node_modules`, `vendor`, `target`, and `.history`),
+  and paths matched by the root `.gitignore` or `.ignore` are excluded;
+  `Ctrl+L` toggles searching those files back in
 - **Fuzzy file finder** overlay with `Ctrl+G`
 - **In-file search** with highlighted matches and `n`/`N` jumping
 - **Hidden files toggle** (`Ctrl+H`) — hidden entries visually dimmed

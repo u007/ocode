@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestOpenAIResponsesAutoFillsMissingOutput(t *testing.T) {
@@ -1114,5 +1115,205 @@ func TestProviderStatusErrorClassification(t *testing.T) {
 	}
 	if !strings.Contains(wrapped.Error(), "p error (503): ") {
 		t.Fatalf("empty body must render trailing colon-space exactly, got %q", wrapped.Error())
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want time.Duration
+	}{
+		{"empty", "", 0},
+		{"zero", "0", 0},
+		{"delta 5", "5", 5 * time.Second},
+		{"delta 10", "10", 10 * time.Second},
+		{"delta trimmed", "  5 ", 5 * time.Second},
+		{"leading zeros", "01", 1 * time.Second},
+		{"plus rejected", "+10", 0},
+		{"minus rejected", "-5", 0},
+		{"float rejected", "5.5", 0},
+		{"bad", "bad", 0},
+		{"empty with space", "   ", 0},
+		{"overflow big", "99999999999999999999", 60 * time.Second},
+		{"overflow just over maxSecs", "9223372037", 60 * time.Second},
+		{"maxSecs ok", "9223372036", 9223372036 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseRetryAfter(tc.in); got != tc.want {
+				t.Errorf("parseRetryAfter(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+	// HTTP-date future (~10s)
+	future := time.Now().Add(10 * time.Second).UTC().Format(http.TimeFormat)
+	got := parseRetryAfter(future)
+	if got < 9*time.Second || got > 11*time.Second {
+		t.Errorf("parseRetryAfter future date %q = %v, want ~10s", future, got)
+	}
+	// HTTP-date past -> 0
+	past := time.Now().Add(-10 * time.Second).UTC().Format(http.TimeFormat)
+	if got := parseRetryAfter(past); got != 0 {
+		t.Errorf("parseRetryAfter past date %q = %v, want 0", past, got)
+	}
+	// Malformed date -> 0
+	if got := parseRetryAfter("Fri, 99 Dec 9999 23:59:59 GMT"); got != 0 {
+		t.Errorf("parseRetryAfter malformed date = %v, want 0", got)
+	}
+}
+
+func TestRetryDelayFor429(t *testing.T) {
+	// Normal 429 linear
+	for i, want := range []time.Duration{3 * time.Second, 3400 * time.Millisecond, 3800 * time.Millisecond, 4200 * time.Millisecond, 4600 * time.Millisecond, 5 * time.Second} {
+		err := &providerStatusError{Provider: "openai", Code: http.StatusTooManyRequests, Body: "rate limit"}
+		if got := retryDelayFor429(err, i); got != want {
+			t.Errorf("normal attempt %d: got %v want %v", i, got, want)
+		}
+	}
+	// Hosted saturated exponential
+	for i, want := range []time.Duration{3 * time.Second, 6 * time.Second, 12 * time.Second, 24 * time.Second, 48 * time.Second, 60 * time.Second} {
+		err := &providerStatusError{Provider: "runinfra", Code: http.StatusTooManyRequests, Body: `{"error":{"code":"hosted_saturated_large_prompt","message":"deferred"}}`}
+		if got := retryDelayFor429(err, i); got != want {
+			t.Errorf("hosted attempt %d: got %v want %v", i, got, want)
+		}
+	}
+	// Retry-After header overrides hosted and normal
+	errRA := &providerStatusError{Provider: "runinfra", Code: http.StatusTooManyRequests, Body: `hosted_saturated_large_prompt`, RetryAfter: 10 * time.Second}
+	if got := retryDelayFor429(errRA, 0); got != 10*time.Second {
+		t.Errorf("RetryAfter override: got %v want 10s", got)
+	}
+	// Retry-After capped at 60s
+	errRABig := &providerStatusError{Provider: "openai", Code: http.StatusTooManyRequests, Body: "rate limit", RetryAfter: 120 * time.Second}
+	if got := retryDelayFor429(errRABig, 0); got != 60*time.Second {
+		t.Errorf("RetryAfter cap: got %v want 60s", got)
+	}
+	// Untyped hosted detection
+	untypedHosted := fmt.Errorf("runinfra error (429): %s", `{"error":{"code":"hosted_saturated_large_prompt"}}`)
+	if got := retryDelayFor429(untypedHosted, 2); got != 12*time.Second {
+		t.Errorf("untyped hosted: got %v want 12s", got)
+	}
+	if got := isHostedSaturatedError(untypedHosted); !got {
+		t.Errorf("isHostedSaturatedError untyped false")
+	}
+	// Normal untyped 429 stays linear
+	untypedNormal := fmt.Errorf("openai error (429): rate limit")
+	if got := retryDelayFor429(untypedNormal, 1); got != 3400*time.Millisecond {
+		t.Errorf("untyped normal: got %v want 3.4s", got)
+	}
+	if isHostedSaturatedError(untypedNormal) {
+		t.Errorf("isHostedSaturatedError false positive")
+	}
+}
+
+func TestChatWithContext_RetryAfterHeaderUsesHeaderDelay(t *testing.T) {
+	// Verify that an HTTP 429 with Retry-After header drives the RetryNotifier delay
+	// and that the request eventually succeeds. llmRetryWait is stubbed to avoid real sleep.
+	origWait := llmRetryWait
+	var capturedDelay time.Duration
+	llmRetryWait = func(_ context.Context, d time.Duration) bool { capturedDelay = d; return true }
+	t.Cleanup(func() { llmRetryWait = origWait })
+
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			resp := statusResponse(http.StatusTooManyRequests, `{"error":{"code":"rate_limit","message":"slow down"}}`)
+			resp.Header.Set("Retry-After", "2")
+			return resp, nil
+		}
+		return statusResponse(http.StatusOK, openAIChatOKStream), nil
+	}))
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	var notifierDelay time.Duration
+	client.RetryNotifier = func(_, _ int, delay time.Duration, _ error) { notifierDelay = delay }
+	msg, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("expected success after Retry-After retry, got %v", err)
+	}
+	if msg == nil || msg.Content != "ok" {
+		t.Fatalf("expected ok, got %+v", msg)
+	}
+	if notifierDelay != 2*time.Second {
+		t.Fatalf("RetryNotifier delay = %v, want 2s", notifierDelay)
+	}
+	if capturedDelay != 2*time.Second {
+		t.Fatalf("llmRetryWait delay = %v, want 2s", capturedDelay)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 calls, got %d", got)
+	}
+}
+
+func TestChatWithContext_HostedSaturatedExponentialDelay(t *testing.T) {
+	origWait := llmRetryWait
+	var delays []time.Duration
+	llmRetryWait = func(_ context.Context, d time.Duration) bool { delays = append(delays, d); return true }
+	t.Cleanup(func() { llmRetryWait = origWait })
+
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		n := atomic.AddInt32(&calls, 1)
+		if n <= 3 {
+			return statusResponse(http.StatusTooManyRequests, `{"error":{"code":"hosted_saturated_large_prompt","message":"The shared hosted model is momentarily near its concurrency limit of 64"}}`), nil
+		}
+		return statusResponse(http.StatusOK, openAIChatOKStream), nil
+	}))
+
+	client := &GenericClient{Provider: "runinfra", Model: "test", BaseURL: "https://example.test/v1"}
+	var notifierDelays []time.Duration
+	client.RetryNotifier = func(_, _ int, delay time.Duration, _ error) { notifierDelays = append(notifierDelays, delay) }
+	msg, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("expected success after hosted retries, got %v", err)
+	}
+	if msg.Content != "ok" {
+		t.Fatalf("want ok, got %+v", msg)
+	}
+	want := []time.Duration{3 * time.Second, 6 * time.Second, 12 * time.Second}
+	if len(notifierDelays) != len(want) {
+		t.Fatalf("notifier delays = %v, want %v", notifierDelays, want)
+	}
+	for i, w := range want {
+		if notifierDelays[i] != w {
+			t.Errorf("attempt %d: notifier delay %v want %v", i, notifierDelays[i], w)
+		}
+		if delays[i] != w {
+			t.Errorf("attempt %d: wait delay %v want %v", i, delays[i], w)
+		}
+	}
+}
+
+func TestChatWithContext_CancellationInterruptsRetry(t *testing.T) {
+	// Cancellation during the retry wait must abort without sleeping the full delay.
+	// We use a wait func that would block 10s, but context is cancelled after 50ms.
+	origWait := llmRetryWait
+	// Keep real wait for this test (we test the real implementation, not stub)
+	llmRetryWait = origWait
+	t.Cleanup(func() { llmRetryWait = origWait })
+
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return statusResponse(http.StatusTooManyRequests, `rate limit`), nil
+	}))
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel shortly after the retry wait begins
+	time.AfterFunc(50*time.Millisecond, cancel)
+	start := time.Now()
+	_, err := client.ChatWithContext(ctx, []Message{{Role: "user", Content: "hi"}}, nil)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected cancellation error")
+	}
+	// Should have returned quickly (~50ms), not waited the full 3s retry delay
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("cancellation did not interrupt retry wait: elapsed %v > 500ms (expected ~50ms)", elapsed)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected 1 call before cancel, got %d", got)
 	}
 }

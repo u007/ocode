@@ -328,6 +328,18 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
               ? `${m.display_name} (${m.model})`
               : m.model}
           </span>
+          {(m.has_model_prompt || m.has_kaizen) && (
+            <span
+              title={
+                (m.has_model_prompt ? "Custom model prompt (OCODE.md) active" : "") +
+                (m.has_model_prompt && m.has_kaizen ? " + " : "") +
+                (m.has_kaizen ? "Kaizen conduct directives active" : "")
+              }
+              className="mt-0.5 shrink-0 rounded border border-blue-400/40 bg-blue-500/10 px-1 py-0 text-[10px] leading-4 text-blue-400"
+            >
+              tuned
+            </span>
+          )}
           {selected && <Check className="mt-0.5 h-4 w-4 shrink-0 text-blue-400" />}
         </button>
         {canFavorite && (

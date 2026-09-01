@@ -2,16 +2,20 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type FileNode struct {
@@ -209,27 +213,173 @@ type FileSearchResponse struct {
 	Capped    bool               `json:"capped,omitempty"`
 }
 
-// HandleFileSearch searches file contents for keywords (whitespace-AND,
-// case-insensitive) within the anchored project root. Query param `q`
-// holds the keywords; `path` selects the project root (same anchoring as
-// HandleFileTree). It walks the tree similarly to buildFileTree but
-// inspects file contents line-by-line.
-func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
+const (
+	// maxSearchFileSize is the largest file whose contents are inspected.
+	maxSearchFileSize = 1 << 20 // 1 MiB
+	// maxSearchResults caps how many matches a single search returns. Beyond
+	// this the scan stops and the response/stream reports capped=true.
+	maxSearchResults = 5000
+	// maxSearchPageSize clamps the limit param of the paginated endpoint.
+	maxSearchPageSize = 100
+	// searchStreamBatchSize and searchStreamBatchInterval drive the stream
+	// endpoint's hybrid batching: a batch is flushed when it reaches this many
+	// results OR this much time has elapsed since the previous flush, so a
+	// slow walk still produces regular progress frames.
+	searchStreamBatchSize     = 25
+	searchStreamBatchInterval = 100 * time.Millisecond
+)
+
+// fileSearchParams are the validated inputs shared by HandleFileSearch and
+// HandleFileSearchStream.
+type fileSearchParams struct {
+	query          string
+	anchor         string // absolute root to walk
+	keywords       []string
+	exts           []string
+	ignorePatterns []string
+	regex          bool
+	caseSensitive  bool
+	wholeWord      bool
+	includeIgnored bool
+}
+
+func parseBoolParam(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// compileFileSearchPattern mirrors internal/tui/files_search.go:compileContentSearchPattern
+// but lives in the server so the API and TUI stay in sync.
+func compileFileSearchPattern(query string, caseSensitive, wholeWord, isRegex bool) (*regexp.Regexp, error) {
+	pattern := query
+	if !isRegex {
+		pattern = regexp.QuoteMeta(pattern)
+	}
+	if wholeWord {
+		pattern = `(?:^|[^\pL\pN_])(?:` + pattern + `)(?:$|[^\pL\pN_])`
+	}
+	if !caseSensitive {
+		pattern = `(?i:` + pattern + `)`
+	}
+	return regexp.Compile(pattern)
+}
+
+func parseIgnorePatterns(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		// Normalize to forward slashes for matching and keep the raw glob.
+		out = append(out, p)
+	}
+	return out
+}
+
+// matchesIgnore checks if rel path (forward-slash relative to anchor) matches any ignore glob.
+// Globs without "/" match the basename at any depth so "*.log" ignores any .log file.
+// Patterns with "/" or "**" are matched against the full relative path.
+func matchesIgnore(rel string, patterns []string) bool {
+	if len(patterns) == 0 || rel == "" {
+		return false
+	}
+	relSlash := filepath.ToSlash(rel)
+	lowerRel := strings.ToLower(relSlash)
+	base := filepath.Base(relSlash)
+	lowerBase := strings.ToLower(base)
+	for _, pat := range patterns {
+		pat = strings.TrimSpace(pat)
+		if pat == "" {
+			continue
+		}
+		patSlash := filepath.ToSlash(pat)
+		lowerPat := strings.ToLower(patSlash)
+		// Pattern without slash → match basename only (any depth)
+		if !strings.Contains(patSlash, "/") {
+			if ok, _ := filepath.Match(lowerPat, lowerBase); ok {
+				return true
+			}
+			// Also try direct case-sensitive match for exactness (already lower)
+			continue
+		}
+		// Patterns with slash: support ** handling via recursive match
+		if strings.Contains(lowerPat, "**") {
+			if doublestarMatch(lowerPat, lowerRel) {
+				return true
+			}
+			continue
+		}
+		if ok, _ := filepath.Match(lowerPat, lowerRel); ok {
+			return true
+		}
+		// Also match "**/pat" implicitly for basename globs that slipped through? Already handled.
+	}
+	return false
+}
+
+func doublestarMatch(pattern, path string) bool {
+	patParts := strings.Split(pattern, "/")
+	pathParts := strings.Split(path, "/")
+	return matchDoublestarParts(patParts, pathParts)
+}
+
+func matchDoublestarParts(patParts, pathParts []string) bool {
+	// Simple recursive doublestar: ** matches zero or more segments.
+	pi, pj := 0, 0
+	for pi < len(patParts) && pj < len(pathParts) {
+		if patParts[pi] == "**" {
+			// ** at end matches rest
+			if pi == len(patParts)-1 {
+				return true
+			}
+			// Try to match ** as 0..n segments
+			for k := pj; k <= len(pathParts); k++ {
+				if matchDoublestarParts(patParts[pi+1:], pathParts[k:]) {
+					return true
+				}
+			}
+			return false
+		}
+		matched, _ := filepath.Match(patParts[pi], pathParts[pj])
+		if !matched {
+			return false
+		}
+		pi++
+		pj++
+	}
+	// Consume trailing ** in pattern
+	for pi < len(patParts) && patParts[pi] == "**" {
+		pi++
+	}
+	return pi == len(patParts) && pj == len(pathParts)
+}
+
+// parseSearchParams validates the request and resolves the anchored walk root,
+// following the same anchoring rules as HandleFileTree (see fileTreeRootFor).
+// An empty query or keyword list is valid (yields no results); the returned
+// params have an empty anchor in that case.
+func (h *Handler) parseSearchParams(r *http.Request) (fileSearchParams, error) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if query == "" {
 		query = strings.TrimSpace(r.URL.Query().Get("query"))
 	}
 	if query == "" {
-		writeJSON(w, http.StatusOK, FileSearchResponse{Results: []FileSearchResult{}})
-		return
+		return fileSearchParams{}, nil
 	}
 	root := r.URL.Query().Get("path")
 	if root == "" {
 		root = h.workDir
 	}
 	if root == "" {
-		writeError(w, http.StatusBadRequest, "server has no working directory configured")
-		return
+		return fileSearchParams{}, errors.New("server has no working directory configured")
 	}
 	if !filepath.IsAbs(root) && h.workDir != "" {
 		root = filepath.Join(h.workDir, root)
@@ -237,20 +387,17 @@ func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
 	matchedRoot := h.workDir
 	if r.URL.Query().Get("path") != "" {
 		if h.workDir == "" {
-			writeError(w, http.StatusBadRequest, "server has no working directory configured; explicit path not allowed")
-			return
+			return fileSearchParams{}, errors.New("server has no working directory configured; explicit path not allowed")
 		}
 		dir, ok := h.fileTreeRootFor(root)
 		if !ok {
-			writeError(w, http.StatusBadRequest, "path outside working directory")
-			return
+			return fileSearchParams{}, errors.New("path outside working directory")
 		}
 		matchedRoot = dir
 	}
 	base, err := filepath.Abs(root)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid path")
-		return
+		return fileSearchParams{}, errors.New("invalid path")
 	}
 	anchor := base
 	if matchedRoot != "" {
@@ -258,10 +405,31 @@ func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
 			anchor = abs
 		}
 	}
-	keywords := strings.Fields(strings.ToLower(query))
-	if len(keywords) == 0 {
-		writeJSON(w, http.StatusOK, FileSearchResponse{Results: []FileSearchResult{}})
-		return
+	// New filter flags (all default false to preserve existing case-insensitive literal behavior)
+	isRegex := parseBoolParam(r.URL.Query().Get("regex"))
+	if raw := r.URL.Query().Get("match"); raw != "" && strings.EqualFold(strings.TrimSpace(raw), "regex") {
+		isRegex = true
+	}
+	caseSensitive := parseBoolParam(r.URL.Query().Get("caseSensitive"))
+	if !caseSensitive {
+		caseSensitive = parseBoolParam(r.URL.Query().Get("case"))
+	}
+	wholeWord := parseBoolParam(r.URL.Query().Get("wholeWord"))
+	includeIgnored := parseBoolParam(r.URL.Query().Get("includeIgnored"))
+
+	var keywords []string
+	if !isRegex {
+		// Keywords split preserves today's whitespace-AND semantics; case is deferred to matcher.
+		keywords = strings.Fields(query)
+		if len(keywords) == 0 {
+			return fileSearchParams{}, nil
+		}
+	} else {
+		// Regex mode validates the pattern eagerly so the client gets a 400 instead of empty results.
+		if _, err := compileFileSearchPattern(query, caseSensitive, wholeWord, true); err != nil {
+			return fileSearchParams{}, errors.New("invalid regex: " + err.Error())
+		}
+		keywords = []string{query}
 	}
 	var exts []string
 	if raw := r.URL.Query().Get("exts"); raw != "" {
@@ -275,39 +443,88 @@ func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// Pagination: infinite scroll support via offset/limit
-	offset := 0
-	limit := 50
-	if raw := r.URL.Query().Get("offset"); raw != "" {
-		if v, err := strconv.Atoi(raw); err == nil && v >= 0 {
-			offset = v
+	ignorePatterns := parseIgnorePatterns(r.URL.Query().Get("ignore"))
+	if len(ignorePatterns) == 0 {
+		ignorePatterns = parseIgnorePatterns(r.URL.Query().Get("exclude"))
+	}
+	return fileSearchParams{query: query, anchor: anchor, keywords: keywords, exts: exts, ignorePatterns: ignorePatterns, regex: isRegex, caseSensitive: caseSensitive, wholeWord: wholeWord, includeIgnored: includeIgnored}, nil
+}
+
+// searchFiles walks the tree rooted at anchor in filesystem order, invoking
+// emit for every matching line until maxTotal matches are emitted, the context
+// is cancelled, or emit returns an error (which aborts the walk and is
+// returned as-is). It returns the number of matches emitted, whether the scan
+// was stopped by the cap, and any aborting error (emit error or ctx.Err()).
+// emit is called synchronously inside the walk.
+func searchFiles(ctx context.Context, params fileSearchParams, maxTotal int, emit func(FileSearchResult) error) (int, bool, error) {
+	anchor := params.anchor
+	exts := params.exts
+	keywords := params.keywords
+	ignorePatterns := params.ignorePatterns
+	includeIgnored := params.includeIgnored
+	isRegex := params.regex
+	// Precompile matchers once so the per-line hot path is cheap.
+	var regexMatcher *regexp.Regexp
+	var keywordRegexes []*regexp.Regexp
+	if isRegex && params.query != "" {
+		re, err := compileFileSearchPattern(params.query, params.caseSensitive, params.wholeWord, true)
+		if err != nil {
+			return 0, false, err
+		}
+		regexMatcher = re
+	} else if (params.caseSensitive || params.wholeWord) && len(keywords) > 0 {
+		for _, kw := range keywords {
+			re, err := compileFileSearchPattern(kw, params.caseSensitive, params.wholeWord, false)
+			if err != nil {
+				return 0, false, err
+			}
+			keywordRegexes = append(keywordRegexes, re)
 		}
 	}
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 100 {
-			limit = v
-		}
-	}
-	const maxFileSize = 1 << 20
-	const maxTotal = 5000
-	allResults := make([]FileSearchResult, 0, 512)
-	hasMoreDueToCap := false
+	total := 0
+	capped := false
+	var abortErr error
 	_ = filepath.WalkDir(anchor, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
+		if err := ctx.Err(); err != nil {
+			abortErr = err
+			return err
+		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == ".git" || name == "node_modules" || name == "vendor" || name == "target" || name == ".history" {
-				return filepath.SkipDir
+			// When includeIgnored is false (default) we skip common ignored dirs and hidden dirs.
+			// When true we walk everything except we keep skipping .git to avoid huge noisy walks? Mirror TUI:
+			// TUI only skips when !includeIgnored, otherwise walks hidden. Keep behavior identical here.
+			if !includeIgnored {
+				if name == ".git" || name == "node_modules" || name == "vendor" || name == "target" || name == ".history" {
+					return filepath.SkipDir
+				}
+				if strings.HasPrefix(name, ".") {
+					return filepath.SkipDir
+				}
+			} else {
+				// Even when including ignored, still skip .git to avoid scanning massive .git objects?
+				// TUI walks .git when includeIgnored is true (only skips when !includeIgnored). Keep parity with TUI: don't skip.
 			}
-			if strings.HasPrefix(name, ".") {
-				return filepath.SkipDir
+			// Honor ignore globs on directories: if the directory itself matches ignore, skip descending.
+			if len(ignorePatterns) > 0 {
+				relDir, _ := filepath.Rel(anchor, path)
+				if relDir != "." && matchesIgnore(relDir, ignorePatterns) {
+					return filepath.SkipDir
+				}
+				// Also test directory name alone for convenience (e.g. ignore "dist")
+				if matchesIgnore(name, ignorePatterns) {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
-		if strings.HasPrefix(d.Name(), ".") {
-			return nil
+		if !includeIgnored {
+			if strings.HasPrefix(d.Name(), ".") {
+				return nil
+			}
 		}
 		if len(exts) > 0 {
 			ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(path), "."))
@@ -322,8 +539,15 @@ func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 		}
+		rel, _ := filepath.Rel(anchor, path)
+		if len(ignorePatterns) > 0 && matchesIgnore(rel, ignorePatterns) {
+			return nil
+		}
+		if len(ignorePatterns) > 0 && matchesIgnore(d.Name(), ignorePatterns) {
+			return nil
+		}
 		info, err := d.Info()
-		if err != nil || info.Size() > maxFileSize {
+		if err != nil || info.Size() > maxSearchFileSize {
 			return nil
 		}
 		f, err := os.Open(path)
@@ -338,7 +562,6 @@ func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 		}
-		rel, _ := filepath.Rel(anchor, path)
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			f.Close()
 			return nil
@@ -349,41 +572,102 @@ func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
 		lineNum := 0
 		for scanner.Scan() {
 			lineNum++
-			if len(allResults) >= maxTotal {
-				hasMoreDueToCap = true
-				break
-			}
 			line := scanner.Text()
-			lower := strings.ToLower(line)
-			ok := true
-			for _, kw := range keywords {
-				if !strings.Contains(lower, kw) {
-					ok = false
-					break
+			matchedLine := false
+			if regexMatcher != nil {
+				matchedLine = regexMatcher.MatchString(line)
+			} else if len(keywordRegexes) > 0 {
+				matchedLine = true
+				for _, re := range keywordRegexes {
+					if !re.MatchString(line) {
+						matchedLine = false
+						break
+					}
 				}
+			} else {
+				lower := strings.ToLower(line)
+				ok := true
+				for _, kw := range keywords {
+					// keywords preserved original case but default mode is case-insensitive, so lower both.
+					if !strings.Contains(lower, strings.ToLower(kw)) {
+						ok = false
+						break
+					}
+				}
+				matchedLine = ok
 			}
-			if ok {
-				// Preserve exact line; cap by runes to avoid splitting UTF-8 and bound payload
-				const maxRunes = 2000
-				if len([]rune(line)) > maxRunes {
-					runes := []rune(line)
-					line = string(runes[:maxRunes])
-				}
-				allResults = append(allResults, FileSearchResult{
-					Path: rel,
-					Line: lineNum,
-					Text: line,
-				})
-				if len(allResults) >= maxTotal {
-					hasMoreDueToCap = true
-					break
-				}
+			if !matchedLine {
+				continue
+			}
+			// Preserve exact line; cap by runes to avoid splitting UTF-8 and bound payload
+			const maxRunes = 2000
+			if len([]rune(line)) > maxRunes {
+				runes := []rune(line)
+				line = string(runes[:maxRunes])
+			}
+			if err := emit(FileSearchResult{
+				Path: rel,
+				Line: lineNum,
+				Text: line,
+			}); err != nil {
+				f.Close()
+				abortErr = err
+				return err
+			}
+			total++
+			if total >= maxTotal {
+				capped = true
+				f.Close()
+				return filepath.SkipAll
 			}
 		}
 		f.Close()
-		if hasMoreDueToCap {
-			return filepath.SkipAll
+		return nil
+	})
+	return total, capped, abortErr
+}
+
+// HandleFileSearch searches file contents within the anchored project root.
+// Query params:
+//   q / query : keywords (whitespace-AND when regex=0, single pattern when regex=1)
+//   path      : project root (same anchoring as HandleFileTree)
+//   exts      : comma-separated include extensions, e.g. "*.go,*.ts" (normalized)
+//   ignore / exclude : comma-separated ignore globs, e.g. "*.log,dist/**,*.min.js"
+//                      patterns without "/" match basename at any depth so "*.log" ignores all logs;
+//                      "dist/**" ignores subtree. Wildcards * ? and ** are supported.
+//   regex / match : when regex=1 or match=regex, query is a single RE2 regex instead of keywords-AND
+//   caseSensitive / case : when 1, matching is case-sensitive (default case-insensitive)
+//   wholeWord     : when 1, matches must be whole words (Unicode \pL\pN_ boundaries)
+//   includeIgnored: when 1, hidden files/dirs are walked; default walks only visible files (skips .git, node_modules, dotfiles)
+// Pagination: `limit` is page size (default 50, max 100, see maxSearchPageSize) with `offset`.
+// Stream variant `limit` is a total-result cap instead (see HandleFileSearchStream).
+// Invalid regex returns 400. The walk collects ALL matches then slices the page — see stream for incremental SSE.
+func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
+	p, err := h.parseSearchParams(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(p.keywords) == 0 {
+		writeJSON(w, http.StatusOK, FileSearchResponse{Results: []FileSearchResult{}})
+		return
+	}
+	// Pagination: infinite scroll support via offset/limit (page size, not total cap)
+	offset := 0
+	limit := 50
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v >= 0 {
+			offset = v
 		}
+	}
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= maxSearchPageSize {
+			limit = v
+		}
+	}
+	allResults := make([]FileSearchResult, 0, 512)
+	_, hasMoreDueToCap, _ := searchFiles(r.Context(), p, maxSearchResults, func(res FileSearchResult) error {
+		allResults = append(allResults, res)
 		return nil
 	})
 	totalCollected := len(allResults)
@@ -529,9 +813,44 @@ func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 }
 
 type saveFileContentRequest struct {
-	Path        string `json:"path"`
-	Content     string `json:"content"`
-	ProjectRoot string `json:"project_root,omitempty"`
+	Path         string `json:"path"`
+	Content      string `json:"content"`
+	ProjectRoot  string `json:"project_root,omitempty"`
+	ExpectedHash string `json:"expected_hash,omitempty"`
+	Force        bool   `json:"force,omitempty"`
+}
+
+// hashContent mirrors the frontend's hashContent() (djb2, base-36) so the
+// save guard can compare the client's base hash with the current disk
+// content without transferring the full original text. It iterates over
+// UTF-16 code units (surrogate pairs for non-BMP) to match JS's
+// String.charCodeAt semantics.
+func hashContent(s string) string {
+	h := int32(5381)
+	for _, r := range s {
+		if r <= 0xFFFF {
+			h = (h<<5 + h + int32(r))
+		} else {
+			r2 := r - 0x10000
+			high := int32(0xD800 + (r2 >> 10))
+			low := int32(0xDC00 + (r2 & 0x3FF))
+			h = (h<<5 + h + high)
+			h = (h<<5 + h + low)
+		}
+	}
+	u := uint32(h)
+	if u == 0 {
+		return "0"
+	}
+	const digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+	var buf [13]byte
+	i := len(buf)
+	for u > 0 {
+		i--
+		buf[i] = digits[u%36]
+		u /= 36
+	}
+	return string(buf[i:])
 }
 
 func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) {
@@ -588,6 +907,40 @@ func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) 
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		writeError(w, http.StatusBadRequest, "path is outside the workspace")
 		return
+	}
+
+	// Serialize concurrent ocode saves for the same path so the
+	// compare-and-write below is not TOCTOU-racy against other ocode
+	// requests. External editors remain uncooperative (no mandatory lock).
+	saveMu := h.saveLockFor(realTarget)
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
+	if req.ExpectedHash != "" && !req.Force {
+		// Distinguish "missing" from "present but empty" — both would hash
+		// to hashContent("") if we treated missing as "", allowing a normal
+		// save to silently recreate a deleted empty file. Use a sentinel that
+		// never collides with hashContent's base-36 output.
+		const missingSentinel = "__missing__"
+		diskHash := missingSentinel
+		if data, err := os.ReadFile(realTarget); err == nil {
+			diskHash = hashContent(string(data))
+		} else if errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrNotExist) {
+			diskHash = missingSentinel
+		} else {
+			// Unreadable (e.g. is a directory) — fall through to the normal
+			// write path which will surface the OS error; don't block with 409.
+			diskHash = req.ExpectedHash // force pass-through
+		}
+		// TOCTOU note: the hash is read, then the file is opened/truncated
+		// separately. With saveLockFor, concurrent ocode saves for the same
+		// path are serialized, closing the ocode-vs-ocode race. An external
+		// writer can still race without kernel-level mandatory locking; the
+		// 409 remains best-effort, not linearizable, for uncooperative editors.
+		if diskHash != req.ExpectedHash {
+			writeError(w, http.StatusConflict, "file has changed on disk since it was opened; reload or force-save to overwrite")
+			return
+		}
 	}
 
 	// O_NOFOLLOW rejects the write if the final path component is itself a

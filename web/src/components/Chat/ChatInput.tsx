@@ -45,6 +45,13 @@ export default function ChatInput({
   const [slashQuery, setSlashQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
+  // Paths the user has manually excluded from the CURRENT message via the X
+  // button on a context/editor pill. This is composer-local: it does NOT touch
+  // the persisted loop inclusion (includeInContext) — X only drops the file
+  // from this one send, and the set is cleared once the message goes out, so
+  // the file re-appears as a pill on the next message. ("whatever was included
+  // in past loop, let it be.")
+  const [excludedPaths, setExcludedPaths] = useState<Set<string>>(new Set());
   // shellInFlight is true while a `!cmd` shell command is being executed by
   // the server. We block new sends during this window so the user can't fire
   // a second message that interleaves with the in-flight shell result — the
@@ -317,7 +324,7 @@ export default function ChatInput({
     // into the LLM loop. Resolved now (not at drain time) so queueing a message
     // doesn't leave stale attachment chips hanging around in the composer.
       const refs = attachedFiles.map((n) => `@.ocode/uploads/${n}`).join(" ");
-      const contextRef = activeEditorContext
+      const contextRef = activeEditorContext && !excludedPaths.has(activeEditorContext.path)
         ? activeEditorContext.selection
           ? `@${activeEditorContext.path}#L${activeEditorContext.selection.startLine}-L${activeEditorContext.selection.endLine}`
           : `@${activeEditorContext.path}`
@@ -325,17 +332,20 @@ export default function ChatInput({
 
       // Opened editor tabs opted into the chat context: attach each as an
       // @path ref, skipping the active editor (already covered by contextRef)
-      // and de-duplicating against uploaded refs.
+      // and de-duplicating against uploaded refs. Also drop any path the user
+      // X'd out of THIS message (excludedPaths) — it stays opted into the loop
+      // for future messages.
       const seen = new Set<string>();
-      if (contextRef) seen.add(activeEditorContext!.path);
+      if (activeEditorContext) seen.add(activeEditorContext.path);
       const contextRefs = (contextFilePaths ?? [])
-        .filter((p) => !seen.has(p))
+        .filter((p) => !seen.has(p) && !excludedPaths.has(p))
         .map((p) => `@${p}`)
         .join(" ");
 
       const parts = [contextRef, contextRefs, refs, trimmed].filter(Boolean);
       const finalMessage = parts.join(" ");
       setAttachedFiles([]);
+      setExcludedPaths(new Set());
 
       if (wasInterrupted) {
         // Interrupted barrier: queue without dispatched flag so FIFO order is
@@ -468,10 +478,15 @@ export default function ChatInput({
           onHover={setSelectedIndex}
         />
       )}
+      {/* File pills above the input: manual uploads + active editor context +
+          opened editor tabs opted into the LLM loop. Each pill has an X that
+          removes it from the CURRENT message only (added to excludedPaths).
+          Removal is composer-local and cleared on send, so loop-included files
+          re-appear next message — past-loop context is never mutated. */}
       <div className="flex flex-wrap gap-1 mb-2">
         {attachedFiles.map((name) => (
           <span
-            key={name}
+            key={`upload:${name}`}
             className="inline-flex items-center gap-1 text-xs bg-accent text-accent-foreground rounded px-2 py-0.5"
           >
             {name}
@@ -479,17 +494,37 @@ export default function ChatInput({
               type="button"
               onClick={() => setAttachedFiles((prev) => prev.filter((n) => n !== name))}
               className="text-muted-foreground hover:text-foreground"
+              aria-label={`Remove ${name} from this message`}
             >
               <X className="w-3 h-3" />
             </button>
           </span>
         ))}
-        {activeEditorContext && (
+        {activeEditorContext && !excludedPaths.has(activeEditorContext.path) && (
           <EditorContextChip
             path={activeEditorContext.path}
             selection={activeEditorContext.selection ?? null}
+            onRemove={() => setExcludedPaths((prev) => new Set(prev).add(activeEditorContext.path))}
           />
         )}
+        {(contextFilePaths ?? [])
+          .filter((p) => p !== activeEditorContext?.path && !excludedPaths.has(p))
+          .map((p) => (
+            <span
+              key={`ctx:${p}`}
+              className="inline-flex items-center gap-1 text-xs bg-accent text-accent-foreground rounded px-2 py-0.5 font-mono"
+            >
+              <span className="truncate max-w-[160px]">{p}</span>
+              <button
+                type="button"
+                onClick={() => setExcludedPaths((prev) => new Set(prev).add(p))}
+                className="text-muted-foreground hover:text-foreground shrink-0"
+                aria-label={`Remove ${p} from this message`}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          ))}
       </div>
       {queueCount > 0 && (
         <div className="text-xs text-muted-foreground mb-1">
@@ -520,6 +555,10 @@ export default function ChatInput({
           value={input}
           onChange={(e) => updateDraft(e.target.value)}
           onKeyDown={handleKeyDown}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
         />
         {isStreaming ? (
           <Button

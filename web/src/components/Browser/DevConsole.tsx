@@ -22,6 +22,7 @@ const levelColor: Record<string, string> = {
 export function DevConsole(props: DevConsoleProps) {
   const [tab, setTab] = useState<"console" | "network">("console");
   const [filter, setFilter] = useState("");
+  const [open, setOpen] = useState(false); // drawer collapsed by default
 
   const consoleRows = useMemo(
     () => props.consoleEvents.filter((e) => e.text.toLowerCase().includes(filter.toLowerCase())),
@@ -33,8 +34,10 @@ export function DevConsole(props: DevConsoleProps) {
   );
 
   return (
-    <div className="flex flex-col h-full text-xs font-mono border-t border-neutral-200 dark:border-neutral-800">
+    <div className={`flex flex-col text-xs font-mono border-t border-neutral-200 dark:border-neutral-800 shrink-0 ${open ? "h-48" : ""}`}>
       <div className="flex items-center gap-2 px-2 py-1 shrink-0">
+        <button aria-label={open ? "Collapse console" : "Expand console"} aria-expanded={open}
+          onClick={() => setOpen((o) => !o)} className="w-4 opacity-60">{open ? "▾" : "▸"}</button>
         <button role="tab" aria-selected={tab === "console"} onClick={() => setTab("console")}
           className={tab === "console" ? "font-bold" : "opacity-60"}>Console</button>
         <button role="tab" aria-selected={tab === "network"} onClick={() => setTab("network")}
@@ -44,7 +47,7 @@ export function DevConsole(props: DevConsoleProps) {
         <button aria-label="Clear"
           onClick={tab === "console" ? props.onClearConsole : props.onClearNetwork}>Clear</button>
       </div>
-      <div className="flex-1 overflow-auto px-2 pb-2">
+      {open && <div className="flex-1 overflow-auto px-2 pb-2">
         {tab === "console"
           ? consoleRows.map((e, i) => (
               <div key={i} className={levelColor[e.level] ?? ""}>{e.text}</div>
@@ -63,7 +66,7 @@ export function DevConsole(props: DevConsoleProps) {
               </tbody>
             </table>
           )}
-      </div>
+      </div>}
     </div>
   );
 }

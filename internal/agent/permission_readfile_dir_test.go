@@ -19,7 +19,7 @@ func TestExecutePermissionReadFile_Directory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := executePermissionReadFile(dir, 0, 0)
+	out := executePermissionReadFile(dir, 0, 0, "")
 
 	if strings.Contains(strings.ToLower(out), "error") {
 		t.Fatalf("directory read returned an error-shaped result: %q", out)

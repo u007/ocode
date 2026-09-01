@@ -73,8 +73,36 @@ type TUIStatus struct {
 	// Extra paths pre-authorized by the user (so the model knows about them
 	// during permission checks; mirrored to the web for visibility).
 	ExtraAllowedPaths []string `json:"extra_allowed_paths,omitempty"`
+	// ModelPrompt mirrors the TUI's "◆ Model prompt" chrome row: which
+	// model-specific custom prompt (.OCODE.md or embedded fallback) and which
+	// force-injected Kaizen tuning directives are active for the current model.
+	// Nil when the model has neither — UIs render nothing then. The prompt
+	// CONTENT is intentionally not included (only its token estimate) so the
+	// status payload stays small on every push.
+	ModelPrompt *ModelPromptInfo `json:"model_prompt,omitempty"`
 	// Last update time (server clock, RFC3339Nano). Lets the web show staleness.
 	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
+// ModelPromptInfo is the payload for TUIStatus.ModelPrompt: the matched
+// model-specific prompt source plus the admitted Kaizen directives.
+type ModelPromptInfo struct {
+	// "file" (on-disk {model}.OCODE.md) | "embedded" (bundled fallback) | "".
+	Kind string `json:"kind,omitempty"`
+	// Absolute file path (kind "file") or embedded filename (kind "embedded").
+	Path string `json:"path,omitempty"`
+	// Estimated token count of the prompt content (len/4, same as the TUI).
+	Tokens int `json:"tokens,omitempty"`
+	// Admitted Kaizen tuning directives that carry a force-injected digest.
+	Kaizen []KaizenDirectiveInfo `json:"kaizen,omitempty"`
+}
+
+// KaizenDirectiveInfo names one force-injected Kaizen tuning directive for the
+// status row ("conduct-tuning-deepseek-v4-flash → deepseek-v4-flash (conduct)").
+type KaizenDirectiveInfo struct {
+	Name     string `json:"name"`
+	TunedFor string `json:"tuned_for"`
+	Stack    string `json:"stack,omitempty"`
 }
 
 // FileStatus is one entry in TUIStatus.ModifiedFiles.

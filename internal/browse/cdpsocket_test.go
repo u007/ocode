@@ -23,9 +23,12 @@ type fakeTarget struct {
 	backs     int
 	forwards  int
 	reloads   int
-	resizes   []struct{ w, h int; dpr float64 }
-	mouses    []cdp.MouseEvent
-	keys      []cdp.KeyEvent
+	resizes   []struct {
+		w, h int
+		dpr  float64
+	}
+	mouses       []cdp.MouseEvent
+	keys         []cdp.KeyEvent
 	detachCalled bool
 }
 
@@ -36,11 +39,24 @@ func (f *fakeTarget) Navigate(_ context.Context, url string) error {
 	return nil
 }
 func (f *fakeTarget) Back(_ context.Context) error { f.mu.Lock(); f.backs++; f.mu.Unlock(); return nil }
-func (f *fakeTarget) Forward(_ context.Context) error { f.mu.Lock(); f.forwards++; f.mu.Unlock(); return nil }
-func (f *fakeTarget) Reload(_ context.Context) error { f.mu.Lock(); f.reloads++; f.mu.Unlock(); return nil }
+func (f *fakeTarget) Forward(_ context.Context) error {
+	f.mu.Lock()
+	f.forwards++
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeTarget) Reload(_ context.Context) error {
+	f.mu.Lock()
+	f.reloads++
+	f.mu.Unlock()
+	return nil
+}
 func (f *fakeTarget) Resize(_ context.Context, w, h int, dpr float64) error {
 	f.mu.Lock()
-	f.resizes = append(f.resizes, struct{ w, h int; dpr float64 }{w, h, dpr})
+	f.resizes = append(f.resizes, struct {
+		w, h int
+		dpr  float64
+	}{w, h, dpr})
 	f.mu.Unlock()
 	return nil
 }
@@ -90,7 +106,12 @@ func (m *fakeManager) Revoke(stateKey string) {
 	m.revoked = append(m.revoked, stateKey)
 	m.mu.Unlock()
 }
-func (m *fakeManager) Close(_ context.Context) error { m.mu.Lock(); m.closeCalled = true; m.mu.Unlock(); return nil }
+func (m *fakeManager) Close(_ context.Context) error {
+	m.mu.Lock()
+	m.closeCalled = true
+	m.mu.Unlock()
+	return nil
+}
 
 func (m *fakeManager) sinkFor(key string) cdp.FrameSink {
 	m.mu.Lock()
