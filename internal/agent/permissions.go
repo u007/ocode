@@ -16,6 +16,7 @@ import (
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/pathscope"
+	"github.com/u007/ocode/internal/shell/sandbox"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -1559,6 +1560,67 @@ func (pm *PermissionManager) AllowedRoots() []string {
 	add(os.TempDir())
 	sort.Strings(roots)
 	return roots
+}
+
+// AllowedRootsClassified returns the same single authoritative root model as
+// AllowedRoots, but each root carries a capability flag: writable roots (the
+// session project, extra allowed paths, language dep caches, temp dirs) versus
+// read-only roots (managed caches, the global data + config dirs whose
+// integrity sandbox must preserve — auth.json, sessions). The sandbox backend
+// consumes this via NewRootSet; AllowedRoots() keeps returning the flat union
+// for its existing callers. The "/" writable boundary guard is applied here
+// too: no writable spec may resolve to the filesystem root.
+func (pm *PermissionManager) AllowedRootsClassified() []sandbox.RootSpec {
+	seen := make(map[string]struct{})
+	var specs []sandbox.RootSpec
+	add := func(p string, writable bool) {
+		if p == "" {
+			return
+		}
+		resolved, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			resolved = filepath.Clean(p)
+		}
+		if writable && resolved == "/" {
+			return
+		}
+		if _, ok := seen[resolved]; ok {
+			return
+		}
+		seen[resolved] = struct{}{}
+		specs = append(specs, sandbox.RootSpec{Path: resolved, Writable: writable})
+	}
+	if pm != nil {
+		add(pm.workDir, true)
+	}
+	for _, r := range tool.ExtraAllowedRoots() {
+		add(r, true)
+	}
+	// Managed cache dirs (truncated tool-results, cloned-repo cache): reads
+	// must keep working, but there is no reason to mutate them under sandbox.
+	for _, r := range tool.CacheRoots() {
+		add(r, false)
+	}
+	// Global data dir (~/.local/share/opencode: auth.json, sessions, memory)
+	// and config dir (~/.config/opencode): classified READ-ONLY so sandbox
+	// preserves their integrity (auth + session store must never be mutated
+	// by a sandboxed command).
+	if dataDir, err := paths.GlobalDataDir(); err == nil {
+		add(dataDir, false)
+	}
+	if configDir, err := paths.GlobalConfigDir(); err == nil {
+		add(configDir, false)
+	}
+	// Language dependency caches (npm/pip/cargo/go/maven/gradle) must stay
+	// writable so npm install / pip work under sandbox.
+	for _, r := range languageDepRoots() {
+		add(r, true)
+	}
+	add("/tmp", true)
+	add("/var/tmp", true)
+	add(os.TempDir(), true)
+	sort.Slice(specs, func(i, j int) bool { return specs[i].Path < specs[j].Path })
+	return specs
 }
 
 // IsPathWithinAllowedRoots reports whether rawPath resolves inside any root

@@ -31,12 +31,12 @@
 **Interfaces:**
 - Produces: `RootSpec{ Path string; Writable bool }`; `(*PermissionManager).AllowedRootsClassified() []RootSpec`. And in `internal/shell/sandbox`: `RootSet{ WritableRoots []string; ReadRoots []string; NetworkEgress bool }`, `NewRootSet(specs []RootSpec) RootSet` — `WritableRoots` = paths where `Writable && Path != "/"`; `ReadRoots` = empty (whole FS readable/executable); `NetworkEgress` = true.
 
-- [ ] **Step 1:** Write failing tests in `internal/agent`: `TestClassifiedRootsExtraPathsWritable` (a scratch dir added via `extra_allowed_paths` is present with `Writable==true`); `TestClassifiedRootsDataDirReadOnly` (the global data dir is present with `Writable==false` — proves auth/session integrity is preserved, resolving review point 5); `TestClassifiedRootsLanguageCachesWritable` (an npm/pip cache root is `Writable==true`); `TestClassifiedRootsDropsFilesystemRoot` (no writable spec has `Path=="/"`).
-- [ ] **Step 2:** Write failing tests in `internal/shell/sandbox`: `TestNewRootSetSplitsByCapability` (given mixed specs, `WritableRoots` contains only the writable, non-`/` paths; `ReadRoots` empty; `NetworkEgress` true).
-- [ ] **Step 3:** Run; expect FAIL.
-- [ ] **Step 4:** Implement `RootSpec`, `AllowedRootsClassified` (do not re-resolve symlinks beyond what the existing `add()` already does — the macOS `/var/folders` realpath must survive), `RootSet`, `NewRootSet`.
-- [ ] **Step 5:** Run tests; expect PASS.
-- [ ] **Step 6:** Commit: `feat(permissions,sandbox): capability-classified roots + RootSet`.
+- [x] **Step 1:** Write failing tests in `internal/agent`: `TestClassifiedRootsExtraPathsWritable` (a scratch dir added via `extra_allowed_paths` is present with `Writable==true`); `TestClassifiedRootsDataDirReadOnly` (the global data dir is present with `Writable==false` — proves auth/session integrity is preserved, resolving review point 5); `TestClassifiedRootsLanguageCachesWritable` (an npm/pip cache root is `Writable==true`); `TestClassifiedRootsDropsFilesystemRoot` (no writable spec has `Path=="/"`).
+- [x] **Step 2:** Write failing tests in `internal/shell/sandbox`: `TestNewRootSetSplitsByCapability` (given mixed specs, `WritableRoots` contains only the writable, non-`/` paths; `ReadRoots` empty; `NetworkEgress` true).
+- [x] **Step 3:** Run; expect FAIL.
+- [x] **Step 4:** Implement `RootSpec`, `AllowedRootsClassified` (do not re-resolve symlinks beyond what the existing `add()` already does — the macOS `/var/folders` realpath must survive), `RootSet`, `NewRootSet`.
+- [x] **Step 5:** Run tests; expect PASS.
+- [x] **Step 6:** Commit: `feat(permissions,sandbox): capability-classified roots + RootSet`.
 
 ---
 

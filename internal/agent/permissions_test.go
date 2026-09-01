@@ -228,6 +228,98 @@ func TestSetModeSandboxTransitions(t *testing.T) {
 	}
 }
 
+// TestClassifiedRootsExtraPathsWritable proves a root registered via
+// extra_allowed_paths is classified writable in the capability model.
+func TestClassifiedRootsExtraPathsWritable(t *testing.T) {
+	scratch := t.TempDir()
+	if !tool.AddExtraAllowedPath(scratch) {
+		t.Fatalf("AddExtraAllowedPath(%q) returned false", scratch)
+	}
+	t.Cleanup(func() { tool.RemoveExtraAllowedPath(scratch) })
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	found := false
+	for _, spec := range pm.AllowedRootsClassified() {
+		if spec.Path == resolvedForScopeCheckPath(scratch) {
+			found = true
+			if !spec.Writable {
+				t.Fatalf("extra allowed root %q classified read-only, want writable", spec.Path)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("extra allowed root %v missing from classified roots", resolvedForScopeCheckPath(scratch))
+	}
+}
+
+// TestClassifiedRootsDataDirReadOnly proves the global data dir (auth.json,
+// sessions, memory) is classified read-only — write-integrity of the auth and
+// session store is preserved under sandbox (review point 5).
+func TestClassifiedRootsDataDirReadOnly(t *testing.T) {
+	dataDir, err := paths.GlobalDataDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	found := false
+	for _, spec := range pm.AllowedRootsClassified() {
+		if spec.Path == resolvedForScopeCheckPath(dataDir) {
+			found = true
+			if spec.Writable {
+				t.Fatalf("data dir %q classified writable, want read-only", spec.Path)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("data dir %v missing from classified roots", resolvedForScopeCheckPath(dataDir))
+	}
+}
+
+// TestClassifiedRootsLanguageCachesWritable proves a language dep cache root
+// (npm_config_cache) is classified writable so npm install / pip keep working
+// under sandbox.
+func TestClassifiedRootsLanguageCachesWritable(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("npm_config_cache", cache)
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	found := false
+	for _, spec := range pm.AllowedRootsClassified() {
+		if spec.Path == resolvedForScopeCheckPath(cache) {
+			found = true
+			if !spec.Writable {
+				t.Fatalf("language cache root %q classified read-only, want writable", spec.Path)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("language cache root %v missing from classified roots", resolvedForScopeCheckPath(cache))
+	}
+}
+
+// TestClassifiedRootsDropsFilesystemRoot proves the boundary guard: no
+// classified spec may resolve to the filesystem root "/" as a writable root
+// (a writable "/" would void the whole sandbox boundary).
+func TestClassifiedRootsDropsFilesystemRoot(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	for _, spec := range pm.AllowedRootsClassified() {
+		if spec.Path == "/" && spec.Writable {
+			t.Fatalf("classified root %q is writable filesystem root", spec.Path)
+		}
+	}
+}
+
+// resolvedForScopeCheckPath mirrors the add() resolution in AllowedRoots:
+// EvalSymlinks with Clean fallback.
+func resolvedForScopeCheckPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
+}
+
 // TestPermissions_YOLO_RmInScope_StillAllowed confirms the new dangerous-rm
 // guard doesn't regress the common case: recursive/force rm targeting a path
 // inside the workdir stays a plain YOLO allow.
