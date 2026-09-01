@@ -278,6 +278,17 @@ func (h *Handler) registerAgentSession(id string, as *agentSession, projectRoot 
 		return existing
 	}
 	h.agents[id] = as
+	// A session-scoped permission-mode toggle (PUT /api/permissions/mode, yolo
+	// toggle) must carry into sessions registered afterwards — a brand-new tab
+	// or a resumed session should not silently revert to the config default
+	// while the runtime override is in force.
+	if as.agent != nil {
+		if p := h.livePermissionModeOverride.Load(); p != nil {
+			if pm := as.agent.Permissions(); pm != nil {
+				pm.SetMode(*p)
+			}
+		}
+	}
 	h.mu.Unlock()
 	h.sessions.setAgent(id, as)
 	entry.lastActivity = time.Now()

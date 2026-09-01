@@ -31,16 +31,16 @@
 
 **Files:**
 - Modify: `internal/server/server.go` (routes ~`:318-324`) — add `PUT /api/permissions/mode`. Leave `POST /api/permissions` as the tool-rule handler and `PUT /api/permissions/yolo` intact.
-- Modify: `internal/server/handler_permissions.go` — add `HandleSetPermissionMode`: parse `{mode}`, reject anything but `normal|yolo|locked|sandbox`, `SetMode` on **all live agents** (`h.allAgents()`, matching `HandleSetYolo`), do **not** persist (session-scoped, Decision 2). `GET /api/permissions` already reports `string(pm.Mode())` (`:62`) as the authoritative live status — no change.
-- Test: `internal/server/handler_permissions_test.go`
+- Modify: `internal/server/handler_permissions.go` — add `HandleSetPermissionMode`: parse `{mode}`, reject anything but `normal|yolo|locked|sandbox`, `SetMode` on **all live agents** (`h.allAgents()`, matching `HandleSetYolo`), do **not** persist (session-scoped, Decision 2). The live mode is recorded as a process-global `livePermissionModeOverride` (atomic, lock-free read) so `GET /api/permissions`, the status snapshot, and agents registered *after* the toggle (new tabs/resumed sessions) all resolve to the same live mode — "first live agent" would be nondeterministic (map order) and let a new session revert to the config default. `GET /api/permissions` reads the override (fall back to config) and adds `sandbox_supported` + `effective_behavior` so the web can surface the honest Windows degrade. `PUT` also calls `pushStatusSnapshot()` after unlocking (the snapshot live-mode read is atomic, safe under h.mu and unlocked alike).
+- Test: `internal/server/permissions_mode_test.go`
 
 **Interfaces:**
 - Produces: `PUT /api/permissions/mode {"mode":"sandbox"}` → 200; `GET /api/permissions` then reports `"mode":"sandbox"`; invalid mode → 400.
 
-- [ ] **Step 1:** Write failing tests: `TestSetPermissionModeAcceptsSandbox` (PUT sandbox ⇒ live mode sandbox, GET reflects it); `TestSetPermissionModeRejectsInvalid` (400, mode unchanged); `TestSetPermissionModePropagatesToAllAgents` (two live agents both flip); `TestSetPermissionModeDoesNotPersist` (config default unchanged).
-- [ ] **Step 2:** Run; expect FAIL (route/handler absent).
-- [ ] **Step 3:** Implement route + handler.
-- [ ] **Step 4:** Run tests + `internal/server` permission suite; expect PASS.
+- [x] **Step 1:** Write failing tests: `TestSetPermissionModeAcceptsSandbox` (PUT sandbox ⇒ live mode sandbox, GET reflects it); `TestSetPermissionModeRejectsInvalid` (400, mode unchanged); `TestSetPermissionModePropagatesToAllAgents` (two live agents both flip); `TestSetPermissionModeDoesNotPersist` (config default unchanged). Also `TestStatusSnapshotCarriesPermissionMode` + `TestSetPermissionModeCarriesToNewSessions` (live override survives agent registration).
+- [x] **Step 2:** Run; expect FAIL (route/handler absent).
+- [x] **Step 3:** Implement route + handler (override + live propagation + status push + registration inheritance).
+- [x] **Step 4:** Run tests + `internal/server` permission suite; expect PASS.
 - [ ] **Step 5:** Commit: `feat(server): PUT /api/permissions/mode with live propagation`.
 
 ---

@@ -19,8 +19,13 @@ type TUIStatus struct {
 	Mode string `json:"mode,omitempty"`
 	// Effective LLM temperature for the main model, mirroring the TUI sidebar.
 	Temperature float64 `json:"temperature,omitempty"`
-	// Permission mode (normal/yolo/locked) mirroring the TUI sidebar.
+	// Permission mode (normal/yolo/locked/sandbox) mirroring the TUI sidebar.
 	PermissionMode string `json:"permission_mode,omitempty"`
+	// Whether the current OS has a real sandbox backend (darwin/linux).
+	PermissionSandboxSupported bool `json:"permission_sandbox_supported"`
+	// Effective sandbox behavior: "confined", "degraded_normal" (unsupported
+	// OS), or the plain mode name — so the web can surface the Windows degrade.
+	PermissionEffectiveBehavior string `json:"permission_effective_behavior,omitempty"`
 	// Whether the LLM auto-permission judge is enabled.
 	PermissionAutoAllow bool `json:"permission_auto_allow"`
 	// Auto-permission model name (provider/model) for the LLM judge.

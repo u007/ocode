@@ -325,6 +325,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/permissions/resolve", s.authMiddleware(s.handleResolvePermission))
 	s.mux.HandleFunc("GET /api/permissions/yolo", s.authMiddleware(s.handleGetYolo))
 	s.mux.HandleFunc("PUT /api/permissions/yolo", s.authMiddleware(s.handleSetYolo))
+	s.mux.HandleFunc("PUT /api/permissions/mode", s.authMiddleware(s.handleSetPermissionMode))
 	// Remote-control (external client, e.g. Telegram) permission/question
 	// resolution. These target the live TUI agent via the RC bridge.
 	s.mux.HandleFunc("POST /api/rc/permission/resolve", s.authMiddleware(s.handler.handleRCPermissionResolve))
@@ -1482,6 +1483,9 @@ func (s *Server) handleSetPermission(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleGetYolo(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetYolo(w, r) }
 func (s *Server) handleSetYolo(w http.ResponseWriter, r *http.Request) { s.handler.HandleSetYolo(w, r) }
+func (s *Server) handleSetPermissionMode(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPermissionMode(w, r)
+}
 func (s *Server) handleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleAnswerQuestion(w, r)
 }

@@ -15108,6 +15108,11 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 		if m.agent != nil && m.agent.Permissions() != nil {
 			snap.PermissionMode = string(m.agent.Permissions().Mode())
 			snap.PermissionAutoAllow = m.agent.Permissions().AutoPermissionEnabled()
+			// Sandbox support/behavior mirror the web status shape so a bridged
+			// web client reading rc.TUIStatus() shows the same indicator (and the
+			// honest Windows degrade) the server would report headless.
+			snap.PermissionSandboxSupported = agent.SandboxSupported()
+			snap.PermissionEffectiveBehavior = agent.EffectivePermissionBehavior(m.agent.Permissions().Mode())
 		} else if m.config.Ocode.Permissions.Auto != nil {
 			snap.PermissionAutoAllow = m.config.Ocode.Permissions.Auto.Enabled
 		}
