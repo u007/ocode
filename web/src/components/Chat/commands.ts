@@ -74,6 +74,7 @@ export const COMMANDS: CommandDef[] = [
   { name: "/mask", description: "Show secret redaction status", icon: Shield },
   { name: "/permissions", description: "Show permission rules", icon: Shield },
   { name: "/yolo", description: "Toggle YOLO (auto-approve) mode", icon: Zap },
+  { name: "/sandbox", description: "Toggle sandbox (OS write-confined) mode", icon: Shield },
   { name: "/undo", description: "Undo the last file change", icon: Undo2 },
   { name: "/redo", description: "Redo the last undone file change", icon: Redo2 },
   { name: "/compact", description: "Compact conversation context", icon: Archive },
@@ -387,9 +388,11 @@ export async function dispatchCommand(
     // ── Permissions ──
     case "/permissions":
       return handlePermissions();
-
     case "/yolo":
       return handleYolo(args);
+
+    case "/sandbox":
+      return handleSandbox(args);
 
     // ── Agent selection ──
     case "/agent":
@@ -924,6 +927,46 @@ async function handleYolo(args: string): Promise<CommandResult> {
     };
   } catch (err) {
     return errorMessage("YOLO command failed", err);
+  }
+}
+
+async function handleSandbox(args: string): Promise<CommandResult> {
+  const sub = args.trim().toLowerCase();
+
+  try {
+    if (sub === "" || sub === "status") {
+      const perm = await api.getPermissions();
+      const behavior = perm.effective_behavior;
+      return {
+        handled: true,
+        messages: [{
+          role: "assistant",
+          content:
+            `**Sandbox mode:** ${perm.mode === "sandbox" ? "**on**" : "off"}` +
+            (behavior && perm.mode === "sandbox" ? ` (${behavior})` : ""),
+        }],
+      };
+    }
+    if (sub === "on" || sub === "enable" || sub === "true") {
+      await api.setPermissionMode("sandbox");
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: "Sandbox mode: **on** — filesystem writes are OS-confined to writable roots." }],
+      };
+    }
+    if (sub === "off" || sub === "disable" || sub === "false") {
+      await api.setPermissionMode("normal");
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: "Sandbox mode: **off** (back to normal)." }],
+      };
+    }
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: "Usage: `/sandbox [on\\|off\\|status]`" }],
+    };
+  } catch (err) {
+    return errorMessage("Sandbox command failed", err);
   }
 }
 

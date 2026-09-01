@@ -97,7 +97,6 @@ export default function CoworkSidebar({
   const projectState = useProjectState();
   const [gitBranch, setGitBranch] = useState<string>("");
   const [todoItems] = useState<string[]>([]);
-  const [yoloLoading, setYoloLoading] = useState(false);
   const [permLoading, setPermLoading] = useState(false);
   const [advisorLoading, setAdvisorLoading] = useState(false);
   const [smallLoading, setSmallLoading] = useState(false);
@@ -294,30 +293,37 @@ export default function CoworkSidebar({
   // column reclaims the space (push layout).
   if (!isOpen && !isMobile) return null;
 
+  // Current live permission mode, defaulting to the config-style yolo hint.
+  const currentMode = tuiStatus?.permission_mode || (config.yolo ? "yolo" : "normal");
+  const [modeLoading, setModeLoading] = useState(false);
 
-  const toggleYolo = async () => {
-    const currentMode = tuiStatus?.permission_mode || (config.yolo ? "yolo" : "");
-    const enabled = currentMode !== "yolo";
-    setYoloLoading(true);
+  // Cycle permission mode: normal → yolo → locked → sandbox → normal, via the
+  // dedicated mode endpoint (session-scoped, never persisted).
+  const cycleMode = async () => {
+    const order = ["normal", "yolo", "locked", "sandbox"];
+    const idx = order.indexOf(currentMode);
+    const next = order[(idx + 1) % order.length];
+    setModeLoading(true);
     try {
-      const res = await fetch(apiPath("/api/permissions/yolo"), {
+      const res = await fetch(apiPath("/api/permissions/mode"), {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ enabled }),
+        body: JSON.stringify({ mode: next }),
       });
       if (!res.ok) {
         const j = await res.json().catch(() => null);
-        console.error("toggle yolo failed", j);
+        console.error("set permission mode failed", j);
       } else if (sessionId) {
         const status = await api.getSessionStatus(sessionId);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
       }
     } catch (e) {
-      console.error("toggle yolo error", e);
+      console.error("set permission mode error", e);
     } finally {
-      setYoloLoading(false);
+      setModeLoading(false);
     }
   };
+
 
   const togglePermEnabled = async () => {
     const enabled = !(tuiStatus?.permission_auto_allow ?? config.permissionModelEnabled);
@@ -610,20 +616,24 @@ export default function CoworkSidebar({
               )}
               <div className="flex items-center justify-between">
                 <span className="text-xs text-muted-foreground">Permission</span>
-                <span className="text-xs font-mono text-foreground">
-                  {tuiStatus?.permission_mode || (config.yolo ? "yolo" : "normal")}
-                </span>
+                <button
+                  type="button"
+                  onClick={cycleMode}
+                  disabled={modeLoading}
+                  title="Cycle permission mode: normal → yolo → locked → sandbox → normal"
+                  className="text-xs font-mono text-foreground uppercase px-2 py-0.5 rounded border border-border hover:bg-muted disabled:opacity-50"
+                >
+                  {currentMode}
+                  {currentMode === "sandbox" &&
+                    tuiStatus?.permission_effective_behavior &&
+                    ` · ${tuiStatus.permission_effective_behavior}`}
+                </button>
               </div>
-              <label className="flex items-center justify-between cursor-pointer">
-                <span className="text-xs text-muted-foreground">YOLO (auto-allow all)</span>
-                <input
-                  type="checkbox"
-                  checked={(tuiStatus?.permission_mode ?? (config.yolo ? "yolo" : "normal")) === "yolo"}
-                  disabled={yoloLoading}
-                  onChange={toggleYolo}
-                  className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-purple-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
-                />
-              </label>
+              {tuiStatus?.permission_sandbox_supported === false && currentMode === "sandbox" && (
+                <p className="text-[11px] text-amber-600">
+                  Sandbox not supported on this OS — behaves like normal.
+                </p>
+              )}
               <label className="flex items-center justify-between cursor-pointer">
                 <span className="text-xs text-muted-foreground">Auto-permission</span>
                 <input

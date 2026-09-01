@@ -452,6 +452,10 @@ export interface TUIStatus {
   permission_mode?: string;
   permission_auto_allow?: boolean;
   permission_model?: string;
+  /** True when this OS has a real sandbox backend. Mirrors server/TUI. */
+  permission_sandbox_supported?: boolean;
+  /** Effective behavior: "confined" / "degraded_normal" / mode name. */
+  permission_effective_behavior?: string;
   small_model?: string;
   small_model_enabled?: boolean;
   advisor_model?: string;
@@ -564,6 +568,11 @@ export interface PermissionRule {
 export interface PermissionsResponse {
   mode: string;
   auto_allow: boolean;
+  /** Whether this OS has a real sandbox backend (darwin/linux). */
+  sandbox_supported?: boolean;
+  /** Effective sandbox behavior: "confined", "degraded_normal" (unsupported
+   * OS), or the plain mode name. Lets the web surface the Windows degrade. */
+  effective_behavior?: string;
   rules: PermissionRule[];
   bash_rules: PermissionRule[];
 }

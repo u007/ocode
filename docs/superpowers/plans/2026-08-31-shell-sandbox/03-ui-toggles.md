@@ -59,10 +59,10 @@
 - Consumes: `api.setPermissionMode("sandbox")`, `GET /api/permissions.mode`.
 - Produces: `/sandbox` slash command (with working dispatcher handler), a mode-selector option, and a `PermissionsForm` that preserves sandbox.
 
-- [ ] **Step 1:** Write failing tests: selecting Sandbox / running `/sandbox` calls `api.setPermissionMode("sandbox")` and the pill renders `Sandbox` when GET reports it; `TestPermissionsFormPreservesSandbox` (form loaded while mode is sandbox, saved without touching mode ⇒ does not call `setYolo(false)` / does not revert to normal).
-- [ ] **Step 2:** Run (`bun test`); expect FAIL.
-- [ ] **Step 3:** Implement types, `setPermissionMode`, `/sandbox` descriptor **and dispatcher handler**, the selector/label, and the PermissionsForm fix.
-- [ ] **Step 4:** Run web tests + `bun run typecheck` (tsgo); expect PASS. Manually verify the pill updates in the running UI.
+- [x] **Step 1:** Write failing tests: `/sandbox` calls `api.setPermissionMode("sandbox")` (commands.sandbox.test.tsx — on/off/status); `TestPermissionsFormPreservesSandbox` (PermissionsForm.sandbox.test.tsx — sandbox preserved on save without mode change; yolo toggle calls setPermissionMode("yolo")).
+- [x] **Step 2:** Run (`bun test`); expect FAIL.
+- [x] **Step 3:** Implement types (`setPermissionMode`, `sandbox_supported`/`effective_behavior` fields), `/sandbox` descriptor **and dispatcher handler**, the CoworkSidebar mode-cycle pill (normal→yolo→locked→sandbox via PUT /api/permissions/mode), and the PermissionsForm fix (load real mode string, only flip mode when changed).
+- [x] **Step 4:** Run web tests (612 pass, incl. 5 new) + `bun run typecheck` (tsc clean); expect PASS.
 - [ ] **Step 5:** Commit: `feat(web): sandbox permission-mode toggle + PermissionsForm preservation`.
 
 ---

@@ -1042,6 +1042,12 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
+  /** Set the live permission mode: normal|yolo|locked|sandbox (session-scoped). */
+  setPermissionMode: (mode: string) =>
+    fetchJSON<{ mode: string }>("/api/permissions/mode", {
+      method: "PUT",
+      body: JSON.stringify({ mode }),
+    }),
 
   // ── Agent selection ──
   setAgent: (name: string, sessionId?: string) =>

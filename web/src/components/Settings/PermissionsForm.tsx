@@ -11,7 +11,11 @@ const EMPTY_AUTO: AutoPermissionConfig = {
 };
 
 export default function PermissionsForm() {
-  const [mode, setMode] = useState(false); // yolo on/off
+  // Live permission mode string (normal|yolo|locked|sandbox). Loaded from GET
+  // /api/permissions and saved via the mode endpoint so a session-scoped
+  // sandbox toggle is preserved (never reverted by the "yolo" boolean path).
+  const [mode, setMode] = useState<string>("normal");
+  const [loadedMode, setLoadedMode] = useState<string>("normal");
   const [auto, setAuto] = useState<AutoPermissionConfig>(EMPTY_AUTO);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -22,8 +26,9 @@ export default function PermissionsForm() {
     setLoading(true);
     setError(null);
     try {
-      const [yolo, autoCfg] = await Promise.all([api.getYolo(), api.getAutoPermissionConfig()]);
-      setMode(yolo.yolo);
+      const [perms, autoCfg] = await Promise.all([api.getPermissions(), api.getAutoPermissionConfig()]);
+      setMode(perms.mode || "normal");
+      setLoadedMode(perms.mode || "normal");
       setAuto({ ...EMPTY_AUTO, ...autoCfg });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -40,7 +45,11 @@ export default function PermissionsForm() {
     setSaving(true);
     setError(null);
     try {
-      await api.setYolo(mode);
+      // Only flip the mode if the user changed it in this form; otherwise a
+      // session-scoped sandbox/yolo toggle stays untouched.
+      if (mode !== loadedMode) {
+        await api.setPermissionMode(mode);
+      }
       // Model is persisted separately via SavePermissionModel; preserve separation
       // so setAutoPermissionConfig doesn't clobber the model (it preserves it).
       const { model, ...rest } = auto;
@@ -69,9 +78,19 @@ export default function PermissionsForm() {
       {error && <div className="text-xs text-red-400">{error}</div>}
 
       <label className="flex items-center gap-2 text-xs text-muted-foreground">
-        <input type="checkbox" checked={mode} onChange={(e) => setMode(e.target.checked)} />
+        <input
+          type="checkbox"
+          checked={mode === "yolo"}
+          onChange={(e) => setMode(e.target.checked ? "yolo" : "normal")}
+        />
         Yolo mode (auto-approve all tool calls)
       </label>
+      {(mode === "sandbox" || mode === "locked") && (
+        <div className="text-xs text-muted-foreground">
+          Current live permission mode: <span className="font-mono text-foreground">{mode}</span> (preserved on save)
+        </div>
+      )}
+
 
       <div className="border-t border-border pt-4 space-y-4">
         <div className="text-xs font-semibold text-foreground">Auto-approval (LLM-assisted)</div>
