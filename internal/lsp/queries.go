@@ -3,7 +3,15 @@ package lsp
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 )
+
+// indexTimeout bounds queries that depend on the server's workspace index
+// being built. A cold gopls on a large repo can spend well over DefaultTimeout
+// (20s) on initial indexing — the first workspace/symbol or documentSymbol
+// after startup must wait for it rather than time out (see the DefaultTimeout
+// comment in client.go: indexing-heavy callers use CallTimeout).
+const indexTimeout = 60 * time.Second
 
 // Position is a 0-based line/character location.
 type Position struct {
@@ -89,7 +97,7 @@ func (c *Client) Implementation(path string, pos Position) ([]Location, error) {
 
 // WorkspaceSymbols resolves workspace/symbol for a name query.
 func (c *Client) WorkspaceSymbols(query string) ([]SymbolInformation, error) {
-	res, err := c.Call("workspace/symbol", map[string]interface{}{"query": query})
+	res, err := c.CallTimeout("workspace/symbol", map[string]interface{}{"query": query}, indexTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -156,9 +164,9 @@ func (c *Client) DocumentSymbols(path string) ([]SymbolInformation, error) {
 		return nil, err
 	}
 	abs, _ := absURI(path)
-	res, err := c.Call("textDocument/documentSymbol", map[string]interface{}{
+	res, err := c.CallTimeout("textDocument/documentSymbol", map[string]interface{}{
 		"textDocument": map[string]interface{}{"uri": abs},
-	})
+	}, indexTimeout)
 	if err != nil {
 		return nil, err
 	}

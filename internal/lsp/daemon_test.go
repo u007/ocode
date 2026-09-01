@@ -85,20 +85,32 @@ func TestDaemonUpstreamReconcilesDocVersionsAcrossClients(t *testing.T) {
 
 	// Notify is fire-and-forget over the wire, so the daemon may not have
 	// processed the frame yet when EnsureOpen returns.
+	// The doc pointer's fields are written by the daemon under upstream.mu
+	// (applyChange), so the test must snapshot them under the same lock —
+	// leaking the pointer and reading fields unlocked is a data race.
 	uri := fileURI(srcPath)
-	var doc *docState
+	snapshot := func() (found bool, refs, version int, text string) {
+		upstream.mu.Lock()
+		defer upstream.mu.Unlock()
+		doc, ok := upstream.docs[uri]
+		if !ok {
+			return false, 0, 0, ""
+		}
+		return true, doc.refs, doc.version, doc.text
+	}
+	var found bool
+	var refs, version int
+	var text string
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		upstream.mu.Lock()
-		doc = upstream.docs[uri]
-		upstream.mu.Unlock()
-		if doc != nil {
+		found, refs, version, text = snapshot()
+		if found {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if doc == nil || doc.refs != 1 || doc.version != 1 {
-		t.Fatalf("after first open: doc=%+v, want refs=1 version=1", doc)
+	if !found || refs != 1 || version != 1 {
+		t.Fatalf("after first open: found=%v refs=%d version=%d, want refs=1 version=1", found, refs, version)
 	}
 
 	// clientB has never opened this URI from its own perspective, so
@@ -111,16 +123,14 @@ func TestDaemonUpstreamReconcilesDocVersionsAcrossClients(t *testing.T) {
 
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		upstream.mu.Lock()
-		doc = upstream.docs[uri]
-		upstream.mu.Unlock()
-		if doc != nil && doc.version == 2 {
+		found, refs, version, text = snapshot()
+		if found && version == 2 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if doc == nil || doc.refs != 2 || doc.version != 2 || doc.text != edited {
-		t.Fatalf("after second client's open: doc=%+v, want refs=2 version=2 text=%q", doc, edited)
+	if !found || refs != 2 || version != 2 || text != edited {
+		t.Fatalf("after second client's open: found=%v refs=%d version=%d text=%q, want refs=2 version=2 text=%q", found, refs, version, text, edited)
 	}
 }
 

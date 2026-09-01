@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLSPTool_NameAndDefinition(t *testing.T) {
@@ -46,7 +47,21 @@ func TestLSPTool_Roundtrip(t *testing.T) {
 	}
 	tl := &LSPTool{}
 
-	out, err := tl.Execute(json.RawMessage(`{"operation":"workspaceSymbol","query":"LoadBuiltins"}`))
+	// The first query races gopls's cold full-repo indexing, which under
+	// -race and package-level CPU contention can exceed the client's
+	// per-request timeout. gopls keeps indexing after a client-side
+	// timeout, so retrying is the realistic client behaviour — only give
+	// up when repeated attempts stay unanswered.
+	var out string
+	var err error
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		out, err = tl.Execute(json.RawMessage(`{"operation":"workspaceSymbol","query":"LoadBuiltins"}`))
+		if err == nil || !strings.Contains(err.Error(), "timed out") || time.Now().After(deadline) {
+			break
+		}
+		t.Logf("workspaceSymbol timed out while gopls indexes; retrying: %v", err)
+	}
 	if err != nil {
 		t.Fatalf("workspaceSymbol: %v", err)
 	}
