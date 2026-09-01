@@ -22,10 +22,14 @@ const actions = {
   setCollapsed: vi.fn(), close: vi.fn(),
   setError: vi.fn(),
 };
-vi.mock("../../lib/browserStore", () => ({
-  useBrowserStore: (_key: string) => ({ ...state }),
-  useBrowserActions: () => actions,
-}));
+vi.mock("../../lib/browserStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/browserStore")>();
+  return {
+    ...actual,
+    useBrowserStore: (_key: string) => ({ ...state }),
+    useBrowserActions: () => actions,
+  };
+});
 vi.mock("../../api/client", () => ({
   getBrowseBase: vi.fn(async () => "http://127.0.0.1:54321"),
   mintBrowseGrant: vi.fn(async () => "GRANT123"),
@@ -38,6 +42,14 @@ vi.mock("../../api/client", () => ({
 
 import { BrowserPanel } from "./BrowserPanel";
 
+// Mock ChromeViewport to a stub so surface-selection is testable without the
+// socket stack.
+vi.mock("./ChromeViewport", () => ({
+  ChromeViewport: (props: Record<string, unknown>) => (
+    <div data-testid="chrome-viewport" data-url={String(props.url)} />
+  ),
+}));
+
 describe("BrowserPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -48,7 +60,41 @@ describe("BrowserPanel", () => {
     (state as unknown as Record<string, unknown>).collapsed = false;
   });
 
+  it("chrome mode mounts ChromeViewport and no iframe", async () => {
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    await waitFor(() => expect(container.querySelector("[data-testid='chrome-viewport']")).toBeTruthy());
+    expect(container.querySelector("iframe")).toBeNull();
+  });
+
+  it("local mode mounts the iframe and no chrome viewport", async () => {
+    (state as unknown as Record<string, unknown>).mode = "local";
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
+    expect(container.querySelector("[data-testid='chrome-viewport']")).toBeNull();
+  });
+
+  it("mode null falls back on the url host: public → chrome, private → local", async () => {
+    (state as unknown as Record<string, unknown>).mode = null;
+    const pub = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    await waitFor(() => expect(pub.container.querySelector("[data-testid='chrome-viewport']")).toBeTruthy());
+    pub.unmount();
+    (state as unknown as Record<string, unknown>).url = "http://localhost:3000/";
+    const priv = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    await waitFor(() => expect(priv.container.querySelector("iframe")).toBeTruthy());
+    expect(priv.container.querySelector("[data-testid='chrome-viewport']")).toBeNull();
+  });
+
+  it("collapsed mounts neither surface", () => {
+    (state as unknown as Record<string, unknown>).collapsed = true;
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(container.querySelector("[data-testid='chrome-viewport']")).toBeNull();
+  });
+
   it("mounts the iframe with the grant only on first load", async () => {
+    // Local mode: the iframe path (chrome mode mounts the viewport instead).
+    (state as unknown as Record<string, unknown>).mode = "local";
+    (state as unknown as Record<string, unknown>).url = "http://localhost:3000/";
     const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
     const iframe = await waitFor(() => container.querySelector("iframe")!);
     expect(iframe).toBeTruthy();
@@ -111,6 +157,9 @@ describe("BrowserPanel", () => {
   });
 
   it("routes console messages only from the browse origin", async () => {
+    // Local mode registers the capture-script postMessage listener.
+    (state as unknown as Record<string, unknown>).mode = "local";
+    (state as unknown as Record<string, unknown>).url = "http://localhost:3000/";
     const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
     // The listener registers once browseBase resolves; the iframe src being
     // set is the same-effect-batch signal that the message listener is live.
