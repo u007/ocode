@@ -1,12 +1,16 @@
 package cdp
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/tool"
 )
@@ -193,5 +197,90 @@ func TestLaunchChrome_Gated(t *testing.T) {
 	case <-exited:
 	case <-ctx.Done():
 		t.Fatal("timeout waiting for exit")
+	}
+}
+
+// TestMain doubles as a fake Chrome when re-exec'd with OCODE_FAKE_CHROME=1:
+// it answers the Browser.getVersion handshake over the debugging pipe
+// (fd 3 in, fd 4 out) and then sleeps, like a healthy idle Chrome.
+func TestMain(m *testing.M) {
+	if os.Getenv("OCODE_FAKE_CHROME") == "1" {
+		runFakeChrome()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+func runFakeChrome() {
+	in := os.NewFile(3, "cdp-in")
+	out := os.NewFile(4, "cdp-out")
+	buf := make([]byte, 0, 4096)
+	one := make([]byte, 1)
+	for {
+		if _, err := in.Read(one); err != nil {
+			os.Exit(0) // pipe closed: parent went away
+		}
+		if one[0] != 0 {
+			buf = append(buf, one[0])
+			continue
+		}
+		var msg struct {
+			ID     int    `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(buf, &msg); err != nil {
+			os.Exit(2)
+		}
+		buf = buf[:0]
+		resp := fmt.Sprintf(`{"id":%d,"result":{"product":"FakeChrome/1.0"}}`, msg.ID)
+		if _, err := out.Write(append([]byte(resp), 0)); err != nil {
+			os.Exit(0)
+		}
+	}
+}
+
+// Chrome's lifetime is owned by the manager/supervisor, NOT the first
+// caller's request context: cancelling the Attach ctx after a successful
+// launch must not kill the process. Regression test for the live bug where
+// closing the first CDP websocket (React StrictMode double-mount) killed
+// Chrome via exec.CommandContext → "chrome exited" on every navigation.
+func TestLaunchChromeSurvivesCallerCtxCancel(t *testing.T) {
+	t.Setenv("OCODE_FAKE_CHROME", "1")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: time.Second})
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = sup.Shutdown(ctx)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	conn, exited, cleanup, err := launchChrome(ctx, exe, sup, nil)
+	if err != nil {
+		t.Fatalf("launchChrome: %v", err)
+	}
+	defer cleanup()
+
+	cancel() // caller's request context goes away (websocket closed)
+
+	// The process must still be alive and answering CDP calls.
+	select {
+	case code := <-exited:
+		t.Fatalf("chrome exited (code %d) after caller ctx cancel", code)
+	case <-time.After(300 * time.Millisecond):
+	}
+	hctx, hcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer hcancel()
+	var ver struct {
+		Product string `json:"product"`
+	}
+	if err := conn.Call(hctx, "", "Browser.getVersion", nil, &ver); err != nil {
+		t.Fatalf("CDP call after ctx cancel: %v", err)
+	}
+	if ver.Product == "" {
+		t.Fatal("empty product from fake chrome")
 	}
 }
