@@ -67,9 +67,9 @@
 **Interfaces:**
 - Produces (this task, plain form — sandbox params added in Part 02): `buildBashCmd(ctx context.Context, command string, dir string) *exec.Cmd` encapsulating the GOOS branch (`cmd /C` Windows; `bash -c` + `setProcGroup` Unix), used by both fg and bg sites. `WrapWithParentMonitor` continues to be applied by callers exactly as today; Start-before-Register ordering preserved.
 
-- [ ] **Step 1:** Write failing test `TestBuildBashCmd` (Unix: `Args==["bash","-c",command]`, non-nil `SysProcAttr`; Windows: `Args==["cmd","/C",command]`; `Dir` set when a non-empty dir is passed).
-- [ ] **Step 2:** Write failing test `TestBashUsesSessionWorkdirNotProcessCwd`: with the session project root differing from `os.Getwd()`, a foreground command (e.g. `pwd`) runs in the session root, and the background hook environment reflects the session root — not the process cwd.
-- [ ] **Step 3:** Run; expect FAIL.
-- [ ] **Step 4:** Implement `buildBashCmd` by lifting the inline construction; switch both call sites; thread the session workdir into `cmd.Dir` (fg + bg) and into the background hook env. Do not change pipe/cancellation/registration behavior.
-- [ ] **Step 5:** Run new tests + full `internal/tool` suite; expect PASS, no behavior regressions.
-- [ ] **Step 6:** Commit: `refactor(tool): unified bash builder + session workdir wiring`.
+- [x] **Step 1:** Write failing test `TestBuildBashCmd` (Unix: `Args==["bash","-c",command]`, non-nil `SysProcAttr`; Windows: `Args==["cmd","/C",command]`; `Dir` set when a non-empty dir is passed).
+- [x] **Step 2:** Write failing test `TestBashUsesSessionWorkdirNotProcessCwd`: with the session project root differing from `os.Getwd()`, a foreground command (e.g. `pwd`) runs in the session root, and the background hook environment reflects the session root — not the process cwd.
+- [x] **Step 3:** Run; expect FAIL.
+- [x] **Step 4:** Implement `buildBashCmd` by lifting the inline construction; switch both call sites; thread the session workdir into `cmd.Dir` (fg + bg) and into the background hook env. Do not change pipe/cancellation/registration behavior.
+- [x] **Step 5:** Run new tests + full `internal/tool` suite; expect PASS, no behavior regressions.
+- [x] **Step 6:** Commit: `refactor(tool): unified bash builder + session workdir wiring`.

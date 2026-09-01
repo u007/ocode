@@ -242,7 +242,7 @@ func (r *ProcessRegistry) onDoneCallback() func(*Process) {
 
 // StartBackground launches command detached and returns its Process record.
 func (r *ProcessRegistry) StartBackground(command string) *Process {
-	return r.StartBackgroundDisplay(command, command)
+	return r.StartBackgroundDisplayDir(command, command, "")
 }
 
 // StartBackgroundDisplay is StartBackground with the shown Command text
@@ -253,8 +253,19 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 // construction, before p is published to r.procs or the supervisor, so the
 // "write-once, safe to read without holding mu" invariant Command shares
 // with ID and PID (see the Process struct's PID doc comment) still holds —
-// nothing may mutate Command after this point.
+// nothing may mutate Command after this point. The background cmd inherits
+// the process cwd.
 func (r *ProcessRegistry) StartBackgroundDisplay(command, displayCommand string) *Process {
+	return r.StartBackgroundDisplayDir(command, displayCommand, "")
+}
+
+// StartBackgroundDisplayDir is StartBackgroundDisplay with an explicit
+// session workdir: cmd.Dir and the process-hook cwd resolve against dir when
+// non-empty (the session project root), falling back to the process cwd for
+// non-agent callers. The bash tool passes the session workdir through so
+// background commands run in the project even when the process cwd differs
+// (desktop/.app launches with cwd "/").
+func (r *ProcessRegistry) StartBackgroundDisplayDir(command, displayCommand, dir string) *Process {
 	r.mu.Lock()
 	id := r.nextIDLocked()
 	supKey := r.supIDLocked(id)
@@ -265,18 +276,19 @@ func (r *ProcessRegistry) StartBackgroundDisplay(command, displayCommand string)
 	sup := r.sup
 	r.mu.Unlock()
 
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/C", command)
-	} else {
-		cmd = exec.Command("bash", "-c", command)
-		setProcGroup(cmd)
+	cwd := dir
+	if cwd == "" {
+		cwd, _ = os.Getwd()
 	}
+	// Unified construction: GOOS branch + cmd.Dir. The wrap happens here in
+	// Part 02 (fail-closed, before any registry record exists — the record is
+	// created above, so the Part 02 call site must validate availability
+	// before invoking this method or roll back the record).
+	cmd := buildBashCmd(nil, command, cwd)
 	processHooksMu.RLock()
 	ph := processHooks
 	processHooksMu.RUnlock()
 	if ph != nil {
-		cwd, _ := os.Getwd()
 		extra := ph.RunShellEnv(cwd)
 		if len(extra) > 0 {
 			base := os.Environ()

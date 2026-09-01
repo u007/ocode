@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -146,8 +145,10 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 		// graceful-shutdown cleanup — see ParentMonitorWrap's doc comment.
 		// StartBackgroundDisplay keeps bash_output/kill_shell listings
 		// showing the command the caller actually asked for, not the
-		// monitor-wrapper shell around it.
-		p := t.Procs.StartBackgroundDisplay(WrapWithParentMonitor(params.Command), params.Command)
+		// monitor-wrapper shell around it. The session workdir rides along so
+		// the background cmd.Dir and its process-hole cwd are the session
+		// root, not the process cwd.
+		p := t.Procs.StartBackgroundDisplayDir(WrapWithParentMonitor(params.Command), params.Command, workDirFromContext(ctx))
 		return fmt.Sprintf("Started background process %s. Poll with bash_output(id=%q), stop with kill_shell(id=%q).", p.ID, p.ID, p.ID), nil
 	}
 
@@ -172,21 +173,18 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 	}()
 
 	command := params.Command
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd", "/C", params.Command)
-	} else {
-		// Wrap before Start, rather than when the command is promoted. A
-		// foreground command may become a background command after it has
-		// already started; starting the monitor here means both paths retain
-		// the same parent-death protection without interrupting streaming or
-		// replacing the process that the registry and supervisor track.
-		if t.Procs != nil {
-			command = WrapWithParentMonitor(params.Command)
-		}
-		cmd = exec.CommandContext(ctx, "bash", "-c", command)
-		setProcGroup(cmd)
+	// Wrap before Start, rather than when the command is promoted. A
+	// foreground command may become a background command after it has
+	// already started; starting the monitor here means both paths retain
+	// the same parent-death protection without interrupting streaming or
+	// replacing the process that the registry and supervisor track.
+	if t.Procs != nil {
+		command = WrapWithParentMonitor(params.Command)
 	}
+	// Unified construction: GOOS branch + session-workdir cmd.Dir. The
+	// timeout ctx keeps CommandContext kill behavior (whole process group via
+	// setProcGroup); sandbox wrap lands here in Part 02.
+	cmd := buildBashCmd(ctx, command, workDirFromContext(ctx))
 
 	// streaming gates live emission. Once the command is moved to the
 	// background we stop emitting so the transcript keeps the output produced
