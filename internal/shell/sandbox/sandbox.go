@@ -41,3 +41,9 @@ func Supported() bool {
 // real backend (windows, others) it returns the no-op, which the permission
 // layer treats as "degrade to normal".
 func New() Wrapper { return newWrapper() }
+
+// ConfineEntrypoint handles the hidden `sandbox-confine` re-exec used by the
+// Linux Landlock backend: it applies the ruleset to this process and execs the
+// confined command. main() dispatches the subcommand argv[1] here. Returns the
+// process exit code (never returns on success). No-op on non-Linux.
+func ConfineEntrypoint(args []string) int { return confineEntrypoint(args) }

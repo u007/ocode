@@ -28,6 +28,7 @@ import (
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/secretcli"
 	"github.com/u007/ocode/internal/server"
+	"github.com/u007/ocode/internal/shell/sandbox"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tui"
 	"github.com/u007/ocode/internal/version"
@@ -133,6 +134,11 @@ func main() {
 
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "sandbox-confine":
+			// Hidden re-exec entry for the Linux Landlock backend (see
+			// internal/shell/sandbox). The confiner applies the ruleset to
+			// itself and execs bash; on success this process is replaced.
+			os.Exit(sandbox.ConfineEntrypoint(os.Args))
 		case "version", "--version", "-version":
 			fmt.Println(version.Version)
 			return

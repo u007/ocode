@@ -45,8 +45,3 @@ func (seatbeltWrapper) Wrap(cmd *exec.Cmd, roots RootSet) (*exec.Cmd, error) {
 		SysProcAttr: cmd.SysProcAttr,
 	}, nil
 }
-
-// bashCmd builds a plain *exec.Cmd for tests.
-func bashCmd(path string, args ...string) *exec.Cmd {
-	return &exec.Cmd{Path: path, Args: append([]string{path}, args...)}
-}
