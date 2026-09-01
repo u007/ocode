@@ -1548,6 +1548,12 @@ func (pm *PermissionManager) AllowedRoots() []string {
 	if configDir, err := paths.GlobalConfigDir(); err == nil {
 		add(configDir)
 	}
+	// Cross-tool agent state (~/.claude): the user granted Claude Code read/write
+	// access to this dir; keep it in the same shared scope. Note this widens the
+	// write surface to that agent's state.
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".claude"))
+	}
 	// Language dependency cache/registry directories (Go module cache, npm
 	// cache, cargo registry, pip cache, Maven/Gradle caches, etc.). These are
 	// content-addressed or append-only stores; read-only access is always safe,
@@ -1610,6 +1616,11 @@ func (pm *PermissionManager) AllowedRootsClassified() []sandbox.RootSpec {
 	}
 	if configDir, err := paths.GlobalConfigDir(); err == nil {
 		add(configDir, false)
+	}
+	// Cross-tool agent state (~/.claude): writable — the user explicitly
+	// granted read/write access to this dir (same rationale as the flat union).
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".claude"), true)
 	}
 	// Language dependency caches (npm/pip/cargo/go/maven/gradle) must stay
 	// writable so npm install / pip work under sandbox.

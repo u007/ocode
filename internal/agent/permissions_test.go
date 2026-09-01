@@ -311,6 +311,47 @@ func TestClassifiedRootsDropsFilesystemRoot(t *testing.T) {
 	}
 }
 
+// TestAllowedRootsIncludesClaudeDir proves the expanded ~/.claude directory is
+// present in the flat AllowedRoots() union (cross-tool agent state stays in
+// scope for auto-permission decisions).
+func TestAllowedRootsIncludesClaudeDir(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude := resolvedForScopeCheckPath(filepath.Join(home, ".claude"))
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	for _, root := range pm.AllowedRoots() {
+		if root == claude {
+			return
+		}
+	}
+	t.Fatalf("~/.claude (%s) missing from AllowedRoots()", claude)
+}
+
+// TestClaudeDirIsWritable proves ~/.claude is classified writable in the
+// capability model (the user explicitly granted read/write access to that
+// cross-tool agent state).
+func TestClaudeDirIsWritable(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude := resolvedForScopeCheckPath(filepath.Join(home, ".claude"))
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	for _, spec := range pm.AllowedRootsClassified() {
+		if spec.Path == claude {
+			if !spec.Writable {
+				t.Fatalf("~/.claude (%s) classified read-only, want writable", claude)
+			}
+			return
+		}
+	}
+	t.Fatalf("~/.claude (%s) missing from classified roots", claude)
+}
+
 // resolvedForScopeCheckPath mirrors the add() resolution in AllowedRoots:
 // EvalSymlinks with Clean fallback.
 func resolvedForScopeCheckPath(p string) string {

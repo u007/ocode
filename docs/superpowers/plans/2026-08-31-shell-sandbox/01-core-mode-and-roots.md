@@ -49,11 +49,11 @@
 **Interfaces:**
 - Produces: expanded `~/.claude` as a writable classified root and a flat `AllowedRoots()` entry.
 
-- [ ] **Step 1:** Write failing tests `TestAllowedRootsIncludesClaudeDir` (present in flat `AllowedRoots()`) and `TestClaudeDirIsWritable` (present with `Writable==true` in classified).
-- [ ] **Step 2:** Run; expect FAIL.
-- [ ] **Step 3:** Add the `add()` call in both the flat and classified builders, using the same home-dir expansion the config-dir branch uses.
-- [ ] **Step 4:** Run tests + full allowed-roots suite; expect PASS.
-- [ ] **Step 5:** Commit: `feat(permissions): allow ~/.claude as a writable root`.
+- [x] **Step 1:** Write failing tests `TestAllowedRootsIncludesClaudeDir` (present in flat `AllowedRoots()`) and `TestClaudeDirIsWritable` (present with `Writable==true` in classified).
+- [x] **Step 2:** Run; expect FAIL.
+- [x] **Step 3:** Add the `add()` call in both the flat and classified builders, using the same home-dir expansion the config-dir branch uses.
+- [x] **Step 4:** Run tests + full allowed-roots suite; expect PASS.
+- [x] **Step 5:** Commit: `feat(permissions): allow ~/.claude as a writable root`.
 
 ---
 
