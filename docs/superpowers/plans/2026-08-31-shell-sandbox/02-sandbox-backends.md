@@ -68,12 +68,12 @@ Rationale: sandbox = YOLO's prompt-bypass **plus** OS write-confinement. Hard bl
 - Allow network egress (documented open).
 - **Escaping:** any path interpolated into SBPL must be rejected/escaped if it contains quotes, newlines, or null bytes; reject a writable root that resolves to `/` or to a non-existent path that would broaden scope.
 
-- [ ] **Step 1:** Write failing profile-generation tests (any OS): `TestSeatbeltProfileGrantsWritableRoots` (a `file-write*` rule per writable root + global `file-read*`); `TestSeatbeltProfileRejectsMaliciousPath` (a root containing a quote/newline is rejected, not emitted raw).
-- [ ] **Step 2:** Write failing darwin-only integration tests (guarded to darwin + binary present): `TestSeatbeltConfinesWrites` (write inside a writable root succeeds; write to a sibling outside all roots fails); `TestSeatbeltConfinesMutations` (unlink/rename/symlink targeting a read-only root fails; the same inside a writable root succeeds); `TestSeatbeltAllowsExec` (`npm --version`, `python --version` succeed wrapped).
-- [ ] **Step 3:** Run; expect FAIL.
-- [ ] **Step 4:** Implement profile generator (with escaping/rejection) + darwin `Wrap` (absolute `sandbox-exec`); register in `New()`.
-- [ ] **Step 5:** Run on macOS; expect PASS.
-- [ ] **Step 6:** Commit: `feat(shell/sandbox): macOS Seatbelt backend`.
+- [x] **Step 1:** Write failing profile-generation tests (any OS): `TestSeatbeltProfileGrantsWritableRoots` (a `file-write*` rule per writable root + global `file-read*`); `TestSeatbeltProfileRejectsMaliciousPath` (a root containing a quote/newline is rejected, not emitted raw).
+- [x] **Step 2:** Write failing darwin-only integration tests (guarded to darwin + binary present): `TestSeatbeltConfinesWrites` (write inside a writable root succeeds; write to a sibling outside all roots fails); `TestSeatbeltConfinesMutations` (unlink/rename/symlink targeting a read-only root fails; the same inside a writable root succeeds); `TestSeatbeltAllowsExec` (`npm --version`, `python --version` succeed wrapped).
+- [x] **Step 3:** Run; expect FAIL.
+- [x] **Step 4:** Implement profile generator (with escaping/rejection) + darwin `Wrap` (absolute `sandbox-exec`); register in `New()`.
+- [x] **Step 5:** Run on macOS; expect PASS.
+- [x] **Step 6:** Commit: `feat(shell/sandbox): macOS Seatbelt backend`.
 
 ---
 
