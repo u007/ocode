@@ -15,11 +15,11 @@
 **Interfaces:**
 - Produces: `Wrapper{ Wrap(cmd *exec.Cmd, roots RootSet) (*exec.Cmd, error); Available() bool }`. `New() Wrapper` selects by GOOS. `Supported() bool` = current GOOS has a real backend (compile-time: darwin/linux true, windows false). Distinction: **`Supported()`** = a backend exists for this OS; **`Available()`** = that backend can actually run now (binary present / kernel ABI ok). No-op: `Wrap` returns cmd unchanged, `Available()` false.
 
-- [ ] **Step 1:** Write failing tests `TestNoopWrapPassthrough` (cmd returned unchanged, nil error) and `TestSupportedMatchesGOOS` (true on darwin/linux, false on windows — table by build tag or a runtime check).
-- [ ] **Step 2:** Run; expect FAIL.
-- [ ] **Step 3:** Define interface, no-op, `New()`, `Supported()`. `New()` returns no-op where no real backend exists so all targets compile before Tasks 3–4.
-- [ ] **Step 4:** Run tests; `GOOS=windows go build ./...` and `GOOS=linux go build ./...`.
-- [ ] **Step 5:** Commit: `feat(shell/sandbox): Wrapper interface + no-op backend`.
+- [x] **Step 1:** Write failing tests `TestNoopWrapPassthrough` (cmd returned unchanged, nil error) and `TestSupportedMatchesGOOS` (true on darwin/linux, false on windows — table by build tag or a runtime check).
+- [x] **Step 2:** Run; expect FAIL.
+- [x] **Step 3:** Define interface, no-op, `New()`, `Supported()`. `New()` returns no-op where no real backend exists so all targets compile before Tasks 3–4.
+- [x] **Step 4:** Run tests; `GOOS=windows go build ./...` and `GOOS=linux go build ./...`.
+- [x] **Step 5:** Commit: `feat(shell/sandbox): Wrapper interface + no-op backend`.
 
 ---
 
