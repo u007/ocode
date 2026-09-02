@@ -32,10 +32,27 @@ see the progress contract below):
    `<remote-ocode> remote-receive-config` on stdin; remote validates
    checksum and writes files `0600` via temp+rename. Skipped when the
    payload hash matches the per-host cache in
-   `~/.config/ocode/remote-sync.json`.
-5. **Launch** — replace the local process with
-   `ssh -t <host> <remote-ocode> <path>`. From here the remote TUI owns
-   the terminal; local ocode is out of the loop entirely.
+   `<OcodeGlobalDataDir>/remote-sync.json` (see `01-architecture.md`).
+5. **Multiplex detect** — `ssh <host> 'command -v tmux || command -v
+   screen'`. Determines how stage 6 wraps the launch command; see
+   "Session resume on disconnect" in `01-architecture.md`.
+6. **Launch** — run (not exec-replace, so the local process stays alive
+   to supervise/relaunch on a dropped session — see below):
+   - tmux found: `ssh -t <host> tmux new-session -A -s
+     ocode-<sha256(remote-path)[:12]> <remote-ocode> <path>`
+   - else screen found: `ssh -t <host> screen -xRR
+     ocode-<sha256(remote-path)[:12]> <remote-ocode> <path>`
+   - else: `ssh -t <host> <remote-ocode> <path>`, with a one-line warning
+     already printed at stage 5 that this connection will not survive a
+     disconnect.
+   From here the remote TUI owns the terminal. If neither multiplexer was
+   found, the local `ssh -t` exiting ends the session for good (today's
+   behavior). If one was found, the local `ssh -t` exiting (network drop,
+   `ssh` killed) only detaches the multiplexer client — the remote
+   session and the ocode process inside it keep running. Rerunning
+   `ocode remote <host> [path]` re-executes stages 1-6; stage 6 reattaches
+   to the same session instead of starting a new one, because the session
+   name is deterministic from the resolved remote path.
 
 ## Path resolution
 
@@ -50,7 +67,7 @@ see the progress contract below):
 
 | Area | Change |
 |---|---|
-| `internal/remote` (new) | `target.go`, `transport.go`, `ssh.go`, `provision.go`, `sync.go`, `progress.go` |
+| `internal/remote` (new) | `target.go`, `transport.go`, `ssh.go`, `provision.go`, `sync.go`, `multiplex.go`, `progress.go` |
 | CLI (`main.go` / `internal/runcli` pattern) | `remote` subcommand; hidden `remote-receive-config` subcommand |
 | `internal/auth` | export a payload builder for sync (profiles + core model config), reusing profile-store read/write with `0600` |
 | `internal/projects` | optional `host` field on `Project`; picker rows show `host:path`; selecting a remote entry re-runs the connect flow |
@@ -63,7 +80,8 @@ contents.
 
 ## Progress contract (user requirement)
 
-Stages: `reachable → platform → build → upload → verify → sync → launch`.
+Stages: `reachable → platform → build → upload → verify → sync → multiplex
+→ launch`.
 TTY: spinner + checkmarks, updated in place. Non-TTY: one plain line per
 stage. Failure output = failing stage name + verbatim underlying stderr +
 one actionable hint when the cause is recognized. No stage output is ever
@@ -82,6 +100,10 @@ swallowed; exit code is non-zero on any failure.
   line; the payload-hash cache is not updated.
 - Remote `ocode --version` mismatch after install → treated as install
   failure (named error), never silently launched.
+- Multiplex detect failure (e.g. the detect command itself errors rather
+  than simply finding nothing) → treated the same as "neither found":
+  degrade to plain passthrough with the warning, never fail the connect
+  over it.
 
 ## Testing
 
@@ -89,7 +111,9 @@ swallowed; exit code is non-zero on any failure.
   Phase 3 lands), `uname -sm` → GOOS/GOARCH mapping, install command
   construction, GC selection (keep-two-newest), sync payload
   framing/checksum/partial-write rejection, per-host hash cache,
-  progress renderer TTY + non-TTY.
+  progress renderer TTY + non-TTY, multiplex command construction (tmux
+  found / screen found / neither), session-name determinism (same remote
+  path → same name across two separate connect invocations).
 - Security (mandatory, one each): framing rejection, checksum rejection,
   `0600` bits, partial-write rejection, secrets absent from argv/logs.
 - Integration (flag-gated): full connect → provision → sync → launch

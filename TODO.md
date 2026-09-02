@@ -1,5 +1,36 @@
 # TODO
 
+## ocode Remote (SSH) Phase 1 — picker UI not wired (2026-09-02)
+
+`ocode remote <[user@]host> [path]` (`internal/remote`, `internal/remotecli`)
+implements the Phase 1 connect flow from
+`docs/superpowers/specs/2026-08-29-remote-ssh/`: reachability, platform
+detect, cross-compile/upload/verify, credential sync (framed stdin,
+checksummed, 0600 temp+rename), and — the resume story — wraps the remote
+TUI launch in `tmux`/`screen` (`new-session -A` / `-xRR`, keyed by a
+sha256 of the resolved remote path) so a dropped SSH connection only
+detaches the local client; rerunning the same command reattaches to the
+still-running remote session instead of starting a fresh one. Falls back to
+a plain passthrough with a printed warning when neither multiplexer is on
+the remote.
+
+`internal/projects.Project` gained an optional `Host` field plus
+`AddRemote`/`TouchRemote`/`FindLastRemote` (identity scoped to
+`(host, path)`, never colliding with a same-path local project), and
+`ocode remote` records/reads through it for the "omitted path → last
+remote project for that host" default. **Not done**: no TUI/web picker UI
+change to actually *display* `host:path` rows or let a user reconnect by
+selecting one — the store-layer support is there, the picker components
+themselves are untouched. Follow-up: wire `internal/tui`'s project picker
+(and the web equivalent) to render `Project.Host` and re-run the connect
+flow (`internal/remotecli.Run`) when a remote entry is selected.
+
+Also out of scope here (later phases per the spec, not regressions):
+Phase 2 (`--web` tunnel mode) and Phase 3 (WSL transport) are unimplemented;
+the multiplexer-detect step re-probes every connect rather than caching
+per-host (cheap, so not a correctness issue, just a possible future
+optimization).
+
 ## Pending permission asks do not survive a server restart (2026-08-31)
 
 `session.LoadForDir` runs `removeIncompleteToolRequests`, which strips

@@ -23,6 +23,13 @@ type Project struct {
 	LastUsedAt time.Time `json:"last_used_at"`
 	Order      int       `json:"order"` // manual sort position (lower = higher)
 	Group      string    `json:"group"` // group name, "" = ungrouped
+	// Host identifies the ocode Remote target this project lives on
+	// (Target.String() — "[user@]host" or "wsl:<distro>"). Empty means a
+	// local project. Local (Add/Remove/Touch/Rename/Reorder/SetGroup) and
+	// remote (AddRemote/TouchRemote/FindRemote) operations key on Path
+	// scoped to Host so a remote project never collides with a local one,
+	// or with a same-path project on a different host.
+	Host string `json:"host,omitempty"`
 }
 
 // ProjectGroup represents a named group of projects.
@@ -141,7 +148,7 @@ func (s *Store) Add(path string) error {
 
 	// Update existing entry.
 	for i := range s.cache {
-		if s.cache[i].Path == cleaned {
+		if s.cache[i].Path == cleaned && s.cache[i].Host == "" {
 			s.cache[i].LastUsedAt = now
 			return s.save()
 		}
@@ -167,7 +174,7 @@ func (s *Store) Remove(path string) error {
 	cleaned := filepath.Clean(path)
 	idx := -1
 	for i, p := range s.cache {
-		if p.Path == cleaned {
+		if p.Path == cleaned && p.Host == "" {
 			idx = i
 			break
 		}
@@ -186,7 +193,7 @@ func (s *Store) Touch(path string) error {
 
 	cleaned := filepath.Clean(path)
 	for i := range s.cache {
-		if s.cache[i].Path == cleaned {
+		if s.cache[i].Path == cleaned && s.cache[i].Host == "" {
 			s.cache[i].LastUsedAt = time.Now()
 			return s.save()
 		}
@@ -201,12 +208,80 @@ func (s *Store) Rename(path, name string) error {
 
 	cleaned := filepath.Clean(path)
 	for i := range s.cache {
-		if s.cache[i].Path == cleaned {
+		if s.cache[i].Path == cleaned && s.cache[i].Host == "" {
 			s.cache[i].Name = name
 			return s.save()
 		}
 	}
 	return fmt.Errorf("project %q not found", path)
+}
+
+// AddRemote upserts a remote project entry, identified by (host, path)
+// rather than path alone — host is a Target.String() value
+// ("[user@]host" or "wsl:<distro>"), so the same remote path on two
+// different hosts stays two distinct entries. path is used verbatim (no
+// filepath.Clean — a remote path's separator conventions are the remote's,
+// not this machine's, and "~" is meaningful only to the remote shell).
+func (s *Store) AddRemote(host, path string) error {
+	if host == "" {
+		return fmt.Errorf("projects: AddRemote requires a non-empty host")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	for i := range s.cache {
+		if s.cache[i].Host == host && s.cache[i].Path == path {
+			s.cache[i].LastUsedAt = now
+			return s.save()
+		}
+	}
+
+	s.cache = append(s.cache, Project{
+		Path:       path,
+		Name:       host + ":" + path,
+		Host:       host,
+		AddedAt:    now,
+		LastUsedAt: now,
+	})
+	return s.save()
+}
+
+// TouchRemote updates LastUsedAt for a remote (host, path) entry. Unlike
+// Touch, a missing entry is not silently ignored — callers use this only
+// after a successful AddRemote/connect, so a miss indicates a caller bug.
+func (s *Store) TouchRemote(host, path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.cache {
+		if s.cache[i].Host == host && s.cache[i].Path == path {
+			s.cache[i].LastUsedAt = time.Now()
+			return s.save()
+		}
+	}
+	return fmt.Errorf("remote project %s:%s not found", host, path)
+}
+
+// FindLastRemote returns the most-recently-used project entry for host, if
+// any — the "omitted path → last remote project for that host" default
+// from the connect flow.
+func (s *Store) FindLastRemote(host string) (Project, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var best Project
+	found := false
+	for _, p := range s.cache {
+		if p.Host != host {
+			continue
+		}
+		if !found || p.LastUsedAt.After(best.LastUsedAt) {
+			best = p
+			found = true
+		}
+	}
+	return best, found
 }
 
 // Reorder sets the manual sort order for all projects. The paths slice
@@ -238,7 +313,7 @@ func (s *Store) SetGroup(path, group string) error {
 
 	cleaned := filepath.Clean(path)
 	for i := range s.cache {
-		if s.cache[i].Path == cleaned {
+		if s.cache[i].Path == cleaned && s.cache[i].Host == "" {
 			s.cache[i].Group = group
 			return s.save()
 		}

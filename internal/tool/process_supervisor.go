@@ -19,6 +19,10 @@ const (
 	ProcessKindInteractiveShell ProcessKind = "interactive_shell"
 	ProcessKindEditor           ProcessKind = "editor"
 	ProcessKindBrowser          ProcessKind = "browser"
+	// ProcessKindRemote covers ssh/scp/go-build/wsl.exe child processes
+	// spawned by internal/remote while connecting to or provisioning a
+	// remote ocode host.
+	ProcessKindRemote ProcessKind = "remote"
 )
 
 var ErrProcessSupervisorClosed = errors.New("process supervisor is shutting down")

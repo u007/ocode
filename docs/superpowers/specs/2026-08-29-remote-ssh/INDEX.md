@@ -36,6 +36,7 @@ web UI already speaks.
 | Web token | URL fragment → sessionStorage → Authorization header (fragment never reaches server logs) |
 | Default remote path | Last remote project for that host, else remote `$HOME` |
 | Server reuse | Remote serve writes a state file; `--web` reconnect discovers and reuses a live server so sessions resume |
+| TUI resume on disconnect | Remote TUI launches inside `tmux`/`screen` on the remote (`new-session -A` / `-xRR`), keyed by remote path — a dropped SSH connection leaves the remote process running; rerunning `ocode remote` reattaches instead of starting fresh. Neither present → plain passthrough with a printed warning, no resume |
 | Progress/errors | Provisioning and connect render staged progress in the invoking terminal; failures show the failing stage + ssh/scp stderr verbatim |
 | Sessions | Never synced; live on the remote under remote `$HOME` (per-host storage automatic) |
 

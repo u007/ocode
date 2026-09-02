@@ -26,6 +26,7 @@ internal/remote/
   provision.go   // detect platform, cross-compile, install, verify
   sync.go        // credential/config sync framing + push
   serve.go       // remote serve launch, state file, tunnel (Phase 2)
+  multiplex.go   // tmux/screen detection + launch-command wrapping (resume)
   progress.go    // staged progress reporting (see below)
 ```
 
@@ -68,6 +69,49 @@ exist. The module is cgo-free (modernc.org/sqlite), so plain
 Installed binaries never appear on `$PATH`; the client always invokes the
 full versioned path, so client and remote can never drift.
 
+## Session resume on disconnect (TUI)
+
+A raw `ssh -t <host> <remote-ocode> <path>` passthrough has no survival story:
+a dropped connection (network blip, laptop sleep, `ssh` client killed) sends
+SIGHUP to the remote process group and the in-progress TUI session — and
+whatever the agent was mid-turn on — dies with it. Reconnecting starts a
+brand new process with no memory of the old one.
+
+Decision: wrap the launch stage in a terminal multiplexer already on the
+remote host, keyed by the resolved remote project path so the same project
+always reattaches to the same session:
+
+- `tmux` present → `tmux new-session -A -s ocode-<sha256(remote-path)[:12]>
+  <remote-ocode> <path>`. `-A` attaches if the session exists, else creates
+  it — one code path for both first-connect and reattach.
+- else `screen` present → `screen -xRR ocode-<sha256(remote-path)[:12]>
+  <remote-ocode> <path>`. `-xRR` reattaches (multi-display if already
+  attached elsewhere) or creates.
+- else → fall back to the plain passthrough, and the progress output prints
+  a one-line non-fatal warning: no resume on disconnect, with a hint to
+  install tmux on the remote.
+
+Why shell out to an existing multiplexer rather than build one: the
+codebase already leans on system tools for exactly this reason (`ssh`/`scp`
+instead of `x/crypto/ssh`) — tmux/screen already solve PTY ownership,
+resize propagation (`SIGWINCH`), scrollback, and multi-client attach
+correctly, and doing so needs zero changes to `internal/tui` or the
+provisioning story (no new binary to ship, no custom attach protocol over a
+socket). The cost is that a remote with neither tool installed gets no
+resume — accepted, since it degrades to today's behavior with a visible
+warning rather than a silent gap.
+
+Detection runs once per connect (`ssh <host> 'command -v tmux ||
+command -v screen'`), cheap enough not to warrant caching. Multiple local
+clients reattaching to the same session concurrently is allowed (tmux
+mirrors, `screen -x` mirrors) — not treated as an error.
+
+This only applies to the TUI passthrough. Phase 2 (web) already has an
+independent, stronger resume story: the remote server is a detached
+long-lived process (state file + reuse, see Part 03) that outlives any one
+SSH tunnel by design — the multiplexer wrapping here is additive for TUI
+mode only and never applies to `--web`.
+
 ## Credential & config sync channel
 
 At connect time: push auth profiles + core model config to the remote —
@@ -78,7 +122,9 @@ protections as `internal/auth/profile_store.go`). Secrets never appear in
 argv, environment listings, logs, or LLM traffic.
 
 Skip-if-unchanged: the local client caches the last-pushed payload hash
-per host in `~/.config/ocode/remote-sync.json`; identical hash → skip the
+per host in `<OcodeGlobalDataDir>/remote-sync.json` (`internal/paths.OcodeGlobalDataDir`,
+i.e. `~/.local/share/ocode/remote-sync.json` — the existing ocode-only
+sidecar dir, not a new config-dir helper); identical hash → skip the
 push entirely. `--no-sync` disables sync for a connect.
 
 Security tests are mandatory, one each: framing rejection, checksum
@@ -119,7 +165,11 @@ output. Every stage failure exits non-zero.
 4. Host authenticity: system ssh known_hosts, unmodified.
 5. All remote-launched processes are children of the tracked ssh/wsl
    process — killing the local supervisor entry tears down the chain
-   (serve is the exception; it outlives the connect, see Part 03).
+   (serve is the exception; it outlives the connect, see Part 03. The TUI
+   under tmux/screen is a second, narrower exception: killing the local
+   `ssh -t` only detaches the multiplexer client, the remote session and
+   the ocode process inside it keep running by design — that is the
+   resume mechanism, not a leak).
 
 ## Sessions & projects
 
