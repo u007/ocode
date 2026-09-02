@@ -143,7 +143,7 @@ func init() {
 		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|auto|model|<tool>]", help: "View or set tool, bash auto-allow, and LLM auto-permissions (model test runs tests)", handler: runPermissionsCmd},
 		{name: "/ban", usage: "/ban [list|add <command...>|remove <command...>|clear]", help: "List or manage banned bash command prefixes, including multi-word prefixes; no prefixes are banned by default; /ban clear confirms before wiping them", handler: runBanCmd},
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
-		{name: "/sandbox", usage: "/sandbox [on|off|status]", help: "Toggle sandbox permissions mode: shell commands run without prompts but cannot write outside the workspace/allowed dirs. Does NOT hide files or block network", handler: runSandboxCmd},
+{name: "/sandbox", usage: "/sandbox [on|off|status]", help: "Sandbox: runs shell commands without prompts, but the OS blocks writes outside the workspace/allowed dirs, and touching secrets (auth.json, ~/.ssh, .env) or config still asks. Network stays open — write protection, not full containment", handler: runSandboxCmd},
 		{name: "/small-model", usage: "/small-model [model]", help: "Show or switch the small model (used for lightweight tasks)", handler: runSmallModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},

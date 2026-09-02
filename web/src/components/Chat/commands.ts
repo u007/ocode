@@ -74,7 +74,7 @@ export const COMMANDS: CommandDef[] = [
   { name: "/mask", description: "Show secret redaction status", icon: Shield },
   { name: "/permissions", description: "Show permission rules", icon: Shield },
   { name: "/yolo", description: "Toggle YOLO (auto-approve) mode", icon: Zap },
-  { name: "/sandbox", description: "Toggle sandbox (OS write-confined) mode", icon: Shield },
+{ name: "/sandbox", description: "Sandbox: shell commands run without prompts, OS blocks writes outside allowed dirs; secrets (auth.json, ~/.ssh, .env) or config still ask; network stays open", icon: Shield },
   { name: "/undo", description: "Undo the last file change", icon: Undo2 },
   { name: "/redo", description: "Redo the last undone file change", icon: Redo2 },
   { name: "/compact", description: "Compact conversation context", icon: Archive },

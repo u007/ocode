@@ -620,7 +620,7 @@ export default function CoworkSidebar({
                   type="button"
                   onClick={cycleMode}
                   disabled={modeLoading}
-                  title="Cycle permission mode: normal → yolo → locked → sandbox → normal"
+title="Sandbox: shell commands run without prompts, but the OS blocks writes outside the workspace/allowed dirs; secrets (auth.json, ~/.ssh, .env) or config still ask; network stays open — write protection, not full containment. Cycle: normal → yolo → locked → sandbox"
                   className="text-xs font-mono text-foreground uppercase px-2 py-0.5 rounded border border-border hover:bg-muted disabled:opacity-50"
                 >
                   {currentMode}

@@ -1,5 +1,25 @@
 # TODO
 
+## Sandbox permission mode — known deferrals (2026-09-02)
+
+Deliberate follow-ups from the shell-sandbox implementation, none blocking the
+write-integrity confinement itself:
+
+- **nvm**: `nvm` is a shell *function*, not a binary — under `bash -c` it is
+  unavailable unless `$NVM_DIR/nvm.sh` is sourced. Orthogonal to sandboxing
+  and NOT solved there. TODO: source `$NVM_DIR/nvm.sh` in the agent shell
+  command context so `nvm` works (independent of sandbox).
+- **Windows**: confinement intentionally degraded — sandbox mode behaves like
+  `normal` (prompts), no OS confinement. Rationale: AppContainer needs per-dir
+  capability-SID ACLs and breaks Node/Python toolchains. Revisit if a viable
+  Windows FS-confinement path appears. The web UI surfaces this honestly via
+  `sandbox_supported`/`effective_behavior` ("degraded_normal").
+- **cron sandbox**: scheduled jobs cannot select sandbox from the web UI
+  (`CronPermissionMode` is normal/yolo/locked); blank jobs are pinned to
+  `normal` (authoritative `resolveCronPermissionMode` in
+  `internal/server/scheduler_runner.go`). Decide later whether to expose
+  explicit cron sandbox.
+
 ## Pending permission asks do not survive a server restart (2026-08-31)
 
 `session.LoadForDir` runs `removeIncompleteToolRequests`, which strips
