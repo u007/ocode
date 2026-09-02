@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { Button } from "@/components/ui/button";
@@ -30,14 +31,41 @@ function formatUSD(n: number): string {
 // resolution and is too expensive to redo on every render — this component
 // re-renders once per streamed token while a tool is active.
 const activityTimeFormatter = new Intl.DateTimeFormat([], { hour12: false, timeStyle: "medium" });
+const doneTimeFormatter = new Intl.DateTimeFormat([], { hour12: true, timeStyle: "medium" });
+
+function formatDuration(ms: number): string {
+  if (!isFinite(ms) || ms < 0) return "0s";
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m < 60) return s === 0 ? `${m}m` : `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  if (rm === 0 && s === 0) return `${h}h`;
+  if (s === 0) return `${h}h ${rm}m`;
+  return `${h}h ${rm}m ${s}s`;
+}
+
+function elapsedMsSince(iso: string | undefined, nowMs: number): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (!isFinite(t)) return null;
+  return Math.max(0, nowMs - t);
+}
 
 // Render one in-flight tool the way the TUI activity row does: `name [HH:MM:SS]`.
 // Long tool names are truncated so the status bar stays readable on one row.
-function toolActivityLabel(t: ToolActivityStatus): string {
+// When elapsed is known it mirrors the TUI's `name [HH:MM:SS · 12s]` form.
+function toolActivityLabel(t: ToolActivityStatus, nowMs: number): string {
   const name = t.name.length > 24 ? t.name.slice(0, 21) + "…" : t.name;
   if (!t.started_at) return `⚙ ${name}`;
   const started = new Date(t.started_at);
   if (isNaN(started.getTime())) return `⚙ ${name}`;
+  const elapsed = elapsedMsSince(t.started_at, nowMs);
+  if (elapsed != null && elapsed >= 1000) {
+    return `⚙ ${name} [${activityTimeFormatter.format(started)} · ${formatDuration(elapsed)}]`;
+  }
   return `⚙ ${name} [${activityTimeFormatter.format(started)}]`;
 }
 
@@ -53,15 +81,25 @@ function runningStatusParts(
   isRunning: boolean,
   snap: import("../../api/types").TUIStatus | null,
   liveToolName: string | undefined,
+  nowMs: number,
 ): string[] {
   // Stale or late "status" snapshots must not resurrect the indicator after
   // turn_done/turn_error, so everything below is gated on the authoritative
   // per-session liveness flag.
   if (!isRunning) return [];
   const parts: string[] = [];
-  if (snap?.llm_running) parts.push("⟳ llm");
+  let llmLabel = "⟳ llm";
+  if (snap?.llm_running) {
+    const elapsed = elapsedMsSince(snap.turn_started_at, nowMs);
+    if (elapsed != null && elapsed >= 1000) {
+      llmLabel += ` · ${formatDuration(elapsed)}`;
+    } else if (snap.turn_elapsed_ms && snap.turn_elapsed_ms >= 1000) {
+      llmLabel += ` · ${formatDuration(snap.turn_elapsed_ms)}`;
+    }
+    parts.push(llmLabel);
+  }
   for (const agent of snap?.active_agents ?? []) parts.push(`@ ${agent}`);
-  for (const t of snap?.active_tools ?? []) parts.push(toolActivityLabel(t));
+  for (const t of snap?.active_tools ?? []) parts.push(toolActivityLabel(t, nowMs));
   if (parts.length === 0 && liveToolName) {
     parts.push(`⚙ ${liveToolName.length > 24 ? liveToolName.slice(0, 21) + "…" : liveToolName}`);
   }
@@ -69,12 +107,22 @@ function runningStatusParts(
   // While a turn is active, always surface at least a base "working" indicator
   // so the row never looks idle during the silent gaps of a turn when no
   // deltas flow and the TUI snapshot reports nothing.
+  // Include live elapsed even on the fallback label.
+  const fallbackElapsed = elapsedMsSince(snap?.turn_started_at, nowMs);
+  if (fallbackElapsed != null && fallbackElapsed >= 1000) {
+    return [`working… · ${formatDuration(fallbackElapsed)}`];
+  }
+  if (snap?.turn_elapsed_ms && snap.turn_elapsed_ms >= 1000) {
+    return [`working… · ${formatDuration(snap.turn_elapsed_ms)}`];
+  }
   return ["working…"];
 }
 
 // Exported for unit tests (StatusBar.test.ts) — the component keeps using the
 // local function directly.
 export const runningStatusPartsForTests = runningStatusParts;
+export const formatDurationForTests = formatDuration;
+export const elapsedMsSinceForTests = elapsedMsSince;
 
 export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const { activeTabId } = useProjectState();
@@ -83,6 +131,16 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   // re-render this always-mounted status bar.
   const { isStreaming, error, live, tuiStatus, turnActive } = useChatSelector((s) => getSessionSlice(s, activeTabId));
   const isRunning = isStreaming || turnActive;
+
+  // Live tick for elapsed counters — updates once per second while a turn is
+  // active or a session timer is displayed, otherwise idle.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const needsTick = isRunning || !!tuiStatus?.session_created_at || !!tuiStatus?.turn_started_at || !!tuiStatus?.turn_ended_at;
+    if (!needsTick) return;
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [isRunning, tuiStatus?.session_created_at, tuiStatus?.turn_started_at, tuiStatus?.turn_ended_at]);
 
   // Pull every field from the consolidated snapshot when present; fall back to
   // the per-field store state for older TUI builds that don't push "status".
@@ -95,7 +153,7 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
       (p): p is Extract<import("../../api/types").LivePart, { kind: "tool" }> =>
         p.kind === "tool" && p.output === undefined,
     )?.tool;
-  const runningParts = runningStatusParts(isRunning, snap, liveToolName);
+  const runningParts = runningStatusParts(isRunning, snap, liveToolName, nowMs);
   const ideStatus = snap?.ide_status || "";
   const sessionTitle = snap?.session_title || "";
   const sessionId = snap?.session_id || "";
@@ -107,6 +165,22 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const lspCount = snap?.lsp_servers?.length ?? 0;
   const extraPathsCount = snap?.extra_allowed_paths?.length ?? 0;
   const subagent = snap?.subagent_model || "";
+
+  // Elapsed timers — mirror the TUI's stream timing.
+  const sessionElapsedMs = elapsedMsSince(snap?.session_created_at, nowMs);
+  const sessionElapsedLabel = sessionElapsedMs != null ? formatDuration(sessionElapsedMs) : null;
+  const lastTookMs = snap?.turn_took_ms ?? null;
+  const lastTookLabel = lastTookMs != null && lastTookMs >= 1000 ? formatDuration(lastTookMs) : null;
+  const lastEndedAt = snap?.turn_ended_at ? new Date(snap.turn_ended_at) : null;
+  const lastEndedLabel =
+    lastEndedAt && !isNaN(lastEndedAt.getTime()) ? doneTimeFormatter.format(lastEndedAt) : null;
+  const currentInputElapsedMs = isRunning
+    ? elapsedMsSince(snap?.turn_started_at, nowMs) ?? snap?.turn_elapsed_ms ?? null
+    : null;
+  const currentInputElapsedLabel =
+    currentInputElapsedMs != null && currentInputElapsedMs >= 1000
+      ? formatDuration(currentInputElapsedMs)
+      : null;
 
   // Compact display of the cwd — strip the user's HOME prefix if present so
   // long paths don't dominate the row. The full path is in the title attribute.
@@ -145,6 +219,24 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
             >
               <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-blue-500" />
               <span className="truncate max-w-[28rem]">{runningParts.join("  ·  ")}</span>
+            </span>
+          )}
+          {/* Current-input elapsed when running but no detailed activity yet */}
+          {isRunning && runningParts.length === 0 && currentInputElapsedLabel && (
+            <span className="text-blue-400" title="Elapsed since current input">
+              · {currentInputElapsedLabel}
+            </span>
+          )}
+          {/* Last turn took — mirrors TUI's "✓ done at … · took …" */}
+          {!isRunning && lastTookLabel && (
+            <span className="text-muted-foreground" title={lastEndedLabel ? `Done at ${lastEndedLabel}` : "Last turn duration"}>
+              {lastEndedLabel ? `✓ done at ${lastEndedLabel} · took ${lastTookLabel}` : `took ${lastTookLabel}`}
+            </span>
+          )}
+          {/* Entire-session elapsed — always visible when session_created_at is known */}
+          {sessionElapsedLabel && (
+            <span className="text-muted-foreground" title={`Session created at ${snap?.session_created_at}`}>
+              session {sessionElapsedLabel}
             </span>
           )}
         </div>

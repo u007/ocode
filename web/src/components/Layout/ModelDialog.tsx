@@ -308,13 +308,25 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   // (main/permission — the TUI kinds whose ctrl+f handler acts), the favorite
   // star. The star is a sibling of the select button — clicking it toggles
   // the favorite without selecting the model, mirroring ctrl+f in the TUI.
-  const renderRow = (m: ModelInfo) => {
+  // `withProvider` mirrors the TUI's modelPickerLabel(id) which shows the full
+  // "provider/model" id in the Recently Used / Favorites sections where there
+  // is no per-provider header to disambiguate.
+  const renderRow = (m: ModelInfo, opts?: { withProvider?: boolean }) => {
     const selected =
       getCurrentModel() === (purpose === "advisor" ? m.model : m.name) || m.active;
     // Only canonical "provider/model" ids can enter the shared favorites
     // state (the server validates the same way); pseudo-rows like the
     // locally-added LM Studio entries never show a star.
     const canFavorite = supportsFavoriteToggle && m.name.includes("/");
+    const withProvider = opts?.withProvider ?? false;
+    const baseLabel = withProvider ? m.name : m.model;
+    // Match TUI display-name decoration but keep the provider prefix when
+    // withProvider is true. Guard against display_name that is just the bare
+    // model or the full id restated.
+    const label =
+      m.display_name && m.display_name !== m.model && m.display_name !== m.name
+        ? `${m.display_name} (${baseLabel})`
+        : baseLabel;
     return (
       <div key={m.name} className="flex items-start gap-1">
         <button
@@ -324,9 +336,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           }`}
         >
           <span className="min-w-0 flex-1 whitespace-normal break-words [overflow-wrap:anywhere]">
-            {m.display_name && m.display_name !== m.model
-              ? `${m.display_name} (${m.model})`
-              : m.model}
+            {label}
           </span>
           {(m.has_model_prompt || m.has_kaizen) && (
             <span
@@ -399,7 +409,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
               <div className="px-2 py-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                 Recently Used
               </div>
-              {sections.recents.map(renderRow)}
+              {sections.recents.map((m) => renderRow(m, { withProvider: true }))}
             </div>
           )}
           {sections && sections.favorites.length > 0 && (
@@ -407,7 +417,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
               <div className="px-2 py-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                 ★ Favorites
               </div>
-              {sections.favorites.map(renderRow)}
+              {sections.favorites.map((m) => renderRow(m, { withProvider: true }))}
             </div>
           )}
           {Object.entries(providerGroups).map(([provider, providerModels]) => (
@@ -415,7 +425,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
               <div className="px-2 py-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                 {provider}
               </div>
-              {providerModels.map(renderRow)}
+              {providerModels.map((m) => renderRow(m))}
             </div>
           ))}
           {filteredModels.length === 0 && (

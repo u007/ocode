@@ -97,13 +97,13 @@ export default function SessionSubTabs() {
           <button
             key={tab.id}
             onClick={() => dispatch({ type: "SET_TAB_SUB_TAB", id: activeSessionTab.id, subTab: tab.id })}
-            className={`flex items-center gap-2 px-[13px] py-[7px] rounded-md text-[15px] leading-5 font-medium transition-colors whitespace-nowrap shrink-0 border ${
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-xs leading-4 transition-colors whitespace-nowrap shrink-0 ${
               isActive
-                ? "bg-accent text-accent-foreground border-border"
-                : "border-border text-muted-foreground hover:text-foreground hover:bg-muted"
+                ? "text-foreground font-medium border-b-2 border-accent bg-accent/10"
+                : "text-muted-foreground/80 hover:text-foreground hover:bg-muted/60"
             }`}
           >
-            <Icon className="w-4 h-4" />
+            <Icon className="w-3.5 h-3.5" />
             {tab.label}
             {badgeLabel !== undefined && badgeLabel !== null && (
               <span

@@ -85,6 +85,18 @@ type TUIStatus struct {
 	// CONTENT is intentionally not included (only its token estimate) so the
 	// status payload stays small on every push.
 	ModelPrompt *ModelPromptInfo `json:"model_prompt,omitempty"`
+	// Turn timing — lets the web show elapsed for the current input.
+	// TurnStartedAt is RFC3339Nano when a turn is active, empty otherwise.
+	// TurnElapsedMs is the live elapsed for a running turn in milliseconds
+	// (server-computed so wall-clock skew doesn't matter). TurnEndedAt /
+	// TurnTookMs mirror the TUI's "done at · took" banner for the last turn.
+	TurnStartedAt string `json:"turn_started_at,omitempty"`
+	TurnElapsedMs int64  `json:"turn_elapsed_ms,omitempty"`
+	TurnEndedAt   string `json:"turn_ended_at,omitempty"`
+	TurnTookMs    int64  `json:"turn_took_ms,omitempty"`
+	// SessionCreatedAt is RFC3339Nano for the session's creation time, so the
+	// web can show entire-session elapsed without an extra fetch.
+	SessionCreatedAt string `json:"session_created_at,omitempty"`
 	// Last update time (server clock, RFC3339Nano). Lets the web show staleness.
 	UpdatedAt string `json:"updated_at,omitempty"`
 }

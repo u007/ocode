@@ -7,15 +7,18 @@ const consoleEvents = [
   { level: "error", text: "boom failure", ts: 2 },
 ];
 const networkEvents = [
-  { method: "GET", url: "https://a.dev/x", status: 200, durationMs: 12, ts: 1 },
+  { requestId: "req-1", method: "GET", url: "https://a.dev/x", status: 200, durationMs: 12, ts: 1 },
 ];
 
 describe("DevConsole", () => {
   const base = {
     consoleEvents,
     networkEvents,
+    responseBodies: {},
+    perfMetrics: {},
     onClearConsole: vi.fn(),
     onClearNetwork: vi.fn(),
+    onRequestBody: vi.fn(),
   };
 
   it("starts collapsed and expands on toggle", () => {

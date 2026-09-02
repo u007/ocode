@@ -194,9 +194,11 @@ When the auto-permission model approves a request, Go derives a typed `AutoGrant
 A versioned, installable system-prompt addendum is prepended to the LLM gatekeeper prompt before the user's `permissions.auto.prompt` override. The installed file lives at `~/.config/opencode/auto-permission-prompt.md` (with a `.bundled-hash` sidecar recording the installed version), and ships a default body of known-safe git commands that should always be allowed without further reasoning (`git status`/`diff`/`log`/`show`/`blame`/`ls-files`/`branch` (listing only, `-a`/`-v`/`-r`)/`remote -v`/`stash list`/`rev-parse`/`describe`/`fetch`/`add`).
 
 Manage it with `/permissions auto prompt <status|install|upgrade> [force]`:
-- `status` → `missing` / `up-to-date` / `outdated` / `custom-modified`
+- `status` → `missing` / `up-to-date` / `outdated` / `custom-modified` / `newer`
 - `install` → writes the bundled body; upgrades an untouched `outdated` copy automatically
-- `upgrade` → same as `install`; `force` overwrites a `custom-modified` file (backup `.bak.<ts>` first, atomic temp+rename write)
+- `upgrade` → same as `install`; `force` overwrites a `custom-modified` or `newer` file (backup `.bak.<ts>` copied first — the live file is never renamed away — then atomic temp+rename write)
+
+Self-healing: `LoadAutoPermissionPromptBody()` installs a `missing` file and upgrades an `outdated` one on every load, so the bundled rules (e.g. the temp-dir ALLOW) can never silently drop out of the gatekeeper prompt. The `.bundled-hash` sidecar holds `<hash>\n<version>`; a sidecar version above the running build's `BundledAutoPermissionPromptVersion` reports `newer` and is never downgraded, so two ocode builds sharing `~/.config/opencode` stop reinstalling over each other. The bash prompt also lists temp-dir aliases (`/tmp -> /private/tmp`, `$TMPDIR`) next to the resolved roots, and states that executing binaries outside the roots (`/bin`, `sandbox-exec`, …) is not a path violation.
 
 Implementation: `internal/config/auto_permission_prompt.go` (versioned body, status detection, install), `internal/agent/agent.go` (`buildAutoPermissionPrompt` prepends `LoadAutoPermissionPromptBody()`), `internal/tui/commands.go` (`runAutoPermissionPromptCmd`). The addendum is **separate** from `permissions.auto.prompt` in `ocodeconfig.json` — that field is the user's own free-form override and is never silently clobbered by a bundled update. When editing the prompt body, bump `BundledAutoPermissionPromptVersion` so installed copies are detected as stale.
 

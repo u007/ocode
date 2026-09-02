@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, act } from "@testing-library/react";
+import { fireEvent, render, screen, act, within } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
@@ -6,7 +6,7 @@ import { api } from "../../api/client";
 import { ChatProvider } from "../../stores/chatStore";
 import { TerminalProvider, useTerminalState } from "../../stores/terminalStore";
 import { BrowserTabsProvider } from "../../stores/browserTabsStore";
-import { browserStore } from "../../lib/browserStore";
+import { browserStore, browserActions } from "../../lib/browserStore";
 import type { FocusedKind } from "../../lib/viewPersistence";
 import UnifiedTabBar from "./UnifiedTabBar";
 
@@ -66,6 +66,8 @@ beforeEach(() => {
   openNewSessionTab.mockClear();
   toggleSessionPicker.mockClear();
   projectDispatch.mockClear();
+  (api.closeSession as unknown as ReturnType<typeof vi.fn>).mockClear?.();
+  (api.setSessionTitle as unknown as ReturnType<typeof vi.fn>).mockClear?.();
   projectFake = {
     state: { activeProject: { path: "/proj", name: "proj" } },
     tabs: [{ id: "s1", projectPath: "/proj", title: "Chat One", activeSubTab: "chat" }],
@@ -93,6 +95,30 @@ describe("UnifiedTabBar", () => {
     expect(browserStore.state.byKey[keys[0]].panelOpen).toBe(true);
   });
 
+  it("swaps the browser tab globe for a spinner while that tab is loading", () => {
+    renderBar();
+    fireEvent.click(screen.getByRole("button", { name: /new browser tab/i }));
+    const key = Object.keys(browserStore.state.byKey).find((k) => k.startsWith("tab:"))!;
+    const pill = screen.getByRole("tab", { name: /new tab/i });
+    // Idle → identity globe visible (the add-button's own 🌐 is outside the pill).
+    expect(within(pill).getByText("🌐")).toBeInTheDocument();
+    // navigate() marks the slice loading → the globe yields to a spinner.
+    act(() => browserActions.navigate(key as never, "https://example.com/"));
+    expect(within(pill).queryByText("🌐")).not.toBeInTheDocument();
+    // Title stays put (the swap is the leading icon slot only).
+    expect(screen.getByText("New tab")).toBeInTheDocument();
+    // Server nav event resolves the load → globe returns.
+    act(() =>
+      browserActions.applyNavEvent(key as never, {
+        state_key: key,
+        url: "https://example.com/",
+        status: 200,
+        mode: "local",
+      }),
+    );
+    expect(within(pill).getByText("🌐")).toBeInTheDocument();
+  });
+
   it("lists a persisted-but-never-activated terminal as a pill (peek, no pty)", () => {
     window.localStorage.setItem(
       "ocode.ui.terminals.project.v1",
@@ -109,14 +135,75 @@ describe("UnifiedTabBar", () => {
     expect(onFocusKindChange).toHaveBeenCalledWith("chat");
   });
 
-  it("X on a chat tab closes it AND terminates the backend session", () => {
+  it("X on a chat tab shows confirmation before closing (confirm -> closes backend)", async () => {
     renderBar();
     fireEvent.click(screen.getByLabelText("Close Chat One"));
+    // X should not close immediately — it shows a confirmation dialog
+    expect(closeSessionTab).not.toHaveBeenCalled();
+    expect(screen.getByText(/Close chat tab\?/)).toBeInTheDocument();
+    // Confirming closes it AND terminates the backend session
+    fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
     expect(closeSessionTab).toHaveBeenCalledWith("s1");
     // The closed session's backend must be released (cancel + agent teardown),
     // not just hidden — otherwise the server keeps running the turn nobody is
     // viewing. Mock api.closeSession asserts the fire-and-forget call.
     expect(api.closeSession).toHaveBeenCalledWith("s1");
+  });
+
+  it("X on a chat tab confirmation Cancel preserves the tab", async () => {
+    renderBar();
+    fireEvent.click(screen.getByLabelText("Close Chat One"));
+    expect(screen.getByText(/Close chat tab\?/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(closeSessionTab).not.toHaveBeenCalled();
+    expect(api.closeSession).not.toHaveBeenCalled();
+    // Tab still visible
+    expect(screen.getByText("Chat One")).toBeInTheDocument();
+  });
+
+  it("middle-click on a chat tab closes immediately without confirmation", async () => {
+    renderBar();
+    const pill = screen.getByRole("tab", { name: "Chat One" });
+    fireEvent(pill, new MouseEvent("auxclick", { button: 1, bubbles: true }));
+    expect(closeSessionTab).toHaveBeenCalledWith("s1");
+    expect(api.closeSession).toHaveBeenCalledWith("s1");
+    // No dialog should appear
+    expect(screen.queryByText(/Close chat tab\?/)).not.toBeInTheDocument();
+  });
+
+  it("middle-click on a browser tab closes immediately without confirmation", async () => {
+    renderBar();
+    // Browser tab exists from beforeEach (id: b1, title: New tab)
+    // The default projectFake has no browser tab; browser tabs come from provider's persisted state.
+    // To have a browser tab, create one via the store before render.
+    // However renderBar already sets up browser tabs via beforeEach? Let's open one explicitly.
+    const addBtn = screen.getByRole("button", { name: /new browser tab/i });
+    fireEvent.click(addBtn);
+    expect(screen.getByRole("tab", { name: /New tab/ })).toBeInTheDocument();
+    const pill = screen.getByRole("tab", { name: /New tab/ });
+    fireEvent(pill, new MouseEvent("auxclick", { button: 1, bubbles: true }));
+    // Browser close should not trigger chat close
+    expect(closeSessionTab).not.toHaveBeenCalled();
+    // The specific browser pill should be removed, but chat pill remains.
+    // After closing, no browser pill should remain (we opened one and closed it).
+    expect(screen.queryByRole("tab", { name: /New tab/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Close browser tab\?/)).not.toBeInTheDocument();
+  });
+
+  it("X on a browser tab shows confirmation before closing", async () => {
+    renderBar();
+    const addBtn = screen.getByRole("button", { name: /new browser tab/i });
+    fireEvent.click(addBtn);
+    expect(screen.getByRole("tab", { name: /New tab/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Close New tab"));
+    expect(screen.getByText(/Close browser tab\?/)).toBeInTheDocument();
+    // Dialog is open, tab is hidden from accessibility tree while modal is open,
+    // so check via hidden-aware query or just ensure close not yet happened.
+    expect(screen.queryByText(/Close browser tab\?/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+    // After confirm, dialog closes and browser pill should be gone
+    expect(screen.queryByText(/Close browser tab\?/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /New tab/, hidden: false } as any)).not.toBeInTheDocument();
   });
 
   it("⌨️+ creates a new terminal (visible as a pill) and switches focus to terminal", () => {

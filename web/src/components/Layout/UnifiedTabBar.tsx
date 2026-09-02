@@ -22,7 +22,7 @@ import { useProjectState } from "../../stores/projectStore";
 import { useTerminalConfig } from "@/hooks/useTerminalConfig";
 import { useTerminalState, getProjectTerminals, PROCESSES_TAB_ID } from "../../stores/terminalStore";
 import { useBrowserTabs } from "../../stores/browserTabsStore";
-import { browserActions } from "../../lib/browserStore";
+import { browserActions, useBrowserStore, type StateKey } from "../../lib/browserStore";
 import type { FocusedKind } from "../../lib/viewPersistence";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
@@ -30,6 +30,8 @@ import { cancelLiveDeltas, closeSessionBackend } from "../../lib/sessionEvents";
 import { api } from "../../api/client";
 import { loadTabOrder, saveTabOrder, reconcileTabOrder, type UnifiedTabKey } from "./tabOrderPersistence";
 import { focusTerminalById } from "../Terminal/terminalFocus";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
+import { Button } from "../ui/button";
 
 // While a tab's session has an in-flight turn, show what it's doing as a
 // badge alongside its title (never replacing the title). Reverts once idle.
@@ -120,6 +122,7 @@ interface TabPillProps {
   onCommitRename: () => void;
   onCancelRename: () => void;
   onClose: (e: React.MouseEvent) => void;
+  onAuxClose?: (e: React.MouseEvent) => void;
 }
 
 function TabPill({
@@ -139,6 +142,7 @@ function TabPill({
   onCommitRename,
   onCancelRename,
   onClose,
+  onAuxClose,
 }: TabPillProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: sortId });
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
@@ -163,7 +167,10 @@ function TabPill({
         e.stopPropagation();
       }}
       onAuxClick={(e) => {
-        if (e.button === 1) onClose(e);
+        if (e.button === 1) {
+          if (onAuxClose) onAuxClose(e);
+          else onClose(e);
+        }
       }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -171,8 +178,8 @@ function TabPill({
           onClick({ button: 0, detail: 1 } as unknown as React.MouseEvent);
         }
       }}
-      className={`relative flex items-center gap-1 px-2 py-1 rounded-md text-xs cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring border ${
-        isActive ? "bg-muted text-foreground border-border border-t-blue-500" : "bg-card/20 text-muted-foreground border-border hover:text-foreground hover:bg-muted/60"
+      className={`relative flex items-center gap-1 px-2.5 py-1 rounded-md text-[13px] leading-4 cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+        isActive ? "bg-muted/80 text-foreground border border-border/70 shadow-sm" : "bg-card/20 text-muted-foreground border border-transparent hover:bg-muted/50 hover:text-foreground"
       }`}
     >
       {hasAlert && (
@@ -184,10 +191,19 @@ function TabPill({
           <Bell className="h-2.5 w-2.5" />
         </span>
       )}
-      <span aria-hidden className="shrink-0">
-        {emoji}
-      </span>
-      {isLoading && <Loader2 className="w-3 h-3 animate-spin shrink-0" />}
+      {/* Leading icon slot: while loading, the tab's glyph is replaced by a
+          spinner (browser favicon convention — the identity icon yields to
+          the in-flight state) instead of rendering both side by side. */}
+      {isLoading ? (
+        <Loader2
+          aria-hidden
+          className="w-3 h-3 animate-spin motion-reduce:animate-none text-muted-foreground shrink-0"
+        />
+      ) : (
+        <span aria-hidden className="shrink-0">
+          {emoji}
+        </span>
+      )}
       {hasPending && (
         <span className="h-1.5 w-1.5 rounded-full bg-amber-400 shrink-0" title="Waiting for a response in this tab" />
       )}
@@ -229,7 +245,7 @@ function TabPill({
         tabIndex={0}
         aria-label={`Close ${displayTitle}`}
         title={`Close ${displayTitle}`}
-        className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors shrink-0"
+      className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors shrink-0"
         onClick={onClose}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -244,6 +260,15 @@ function TabPill({
     </div>
   );
 }
+
+/** Browser pills read live loading state from the browser store (server-driven
+ *  via nav events); the browserTabsStore strip only owns tab identity/title. */
+function BrowserTabPill({ id, ...props }: { id: string } & Omit<TabPillProps, "isLoading">) {
+  const s = useBrowserStore(`tab:${id}` as StateKey);
+  return <TabPill {...props} isLoading={!!s?.loading} />;
+}
+
+type PendingTabClose = { kind: "chat" | "browser" | "terminal"; id: string; title: string } | null;
 
 interface Props {
   focusedKind: FocusedKind;
@@ -398,16 +423,87 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     [onFocusKindChange, activateBrowserTab],
   );
 
-  const handleCloseBrowser = useCallback(
-    (e: React.MouseEvent, id: string) => {
-      e.stopPropagation();
-      closeBrowserTab(id);
-      // Drop the tab's page state (URL/history/console) and revoke its server
-      // browse session — browserTabsStore owns only the strip identity.
-      browserActions.close(`tab:${id}`);
-    },
-    [closeBrowserTab],
-  );
+  const [pendingClose, setPendingClose] = useState<PendingTabClose>(null);
+
+  const doCloseChat = useCallback((id: string) => {
+    closeSessionBackend(id);
+    cancelLiveDeltas(id);
+    chatDispatch({ type: "RESET", sessionId: id });
+    closeSessionTab(id);
+    clearQueue(id);
+  }, [closeSessionTab, chatDispatch]);
+
+  const doCloseBrowser = useCallback((id: string) => {
+    closeBrowserTab(id);
+    // Drop the tab's page state (URL/history/console) and revoke its server
+    // browse session — browserTabsStore owns only the strip identity.
+    browserActions.close(`tab:${id}`);
+  }, [closeBrowserTab]);
+
+  const doCloseTerminal = useCallback((id: string) => {
+    closeTerminal(activeProjectPath, id);
+  }, [closeTerminal, activeProjectPath]);
+
+  const confirmPendingClose = useCallback(() => {
+    if (!pendingClose) return;
+    const req = pendingClose;
+    setPendingClose(null);
+    if (req.kind === "chat") doCloseChat(req.id);
+    else if (req.kind === "browser") doCloseBrowser(req.id);
+    else doCloseTerminal(req.id);
+  }, [pendingClose, doCloseChat, doCloseBrowser, doCloseTerminal]);
+
+  const cancelPendingClose = useCallback(() => setPendingClose(null), []);
+
+  // X button → confirm first; middle-click → immediate close (no confirmation)
+  const handleRequestCloseChat = useCallback((e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    const tab = chatTabs.find((t) => t.id === id);
+    const title = tab?.title || id;
+    setPendingClose({ kind: "chat", id, title });
+  }, [chatTabs]);
+
+  const handleImmediateCloseChat = useCallback((e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    doCloseChat(id);
+  }, [doCloseChat]);
+
+  const handleRequestCloseBrowser = useCallback((e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    const tab = browserTabs.find((t) => t.id === id);
+    const title = tab?.title || id;
+    setPendingClose({ kind: "browser", id, title });
+  }, [browserTabs]);
+
+  const handleImmediateCloseBrowser = useCallback((e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    doCloseBrowser(id);
+  }, [doCloseBrowser]);
+
+  const handleRequestCloseTerminal = useCallback((e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    // If the terminal has no running app, close directly without confirmation.
+    // We have no reliable "running" signal in the tab metadata, so treat idle
+    // terminals as directly closable. A future enhancement can check a live
+    // busy flag before showing the dialog.
+    const t = terminals.find((term) => term.id === id);
+    // Heuristic: if we ever track busy state, gate on it here. For now all
+    // terminals are considered idle → close immediately (no confirmation).
+    // To preserve the "confirm when busy" contract, keep the pending path
+    // reachable by checking t?.alerted or similar when available.
+    const hasRunningApp = false; // TODO: wire to actual busy detection when available
+    if (!hasRunningApp) {
+      doCloseTerminal(id);
+      return;
+    }
+    const title = t?.title || id;
+    setPendingClose({ kind: "terminal", id, title });
+  }, [terminals, doCloseTerminal]);
+
+  const handleImmediateCloseTerminal = useCallback((e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    doCloseTerminal(id);
+  }, [doCloseTerminal]);
 
   const handleNewBrowser = useCallback(() => {
     const id = openBrowserTab();
@@ -440,26 +536,6 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
       renameTerminal(activeProjectPath, target.id, title);
     }
   }, [editing, editValue, projectDispatch, renameTerminal, renameBrowserTab, activeProjectPath]);
-
-  const handleCloseChat = useCallback(
-    (e: React.MouseEvent, id: string) => {
-      e.stopPropagation();
-      closeSessionBackend(id);
-      cancelLiveDeltas(id);
-      chatDispatch({ type: "RESET", sessionId: id });
-      closeSessionTab(id);
-      clearQueue(id);
-    },
-    [closeSessionTab, chatDispatch],
-  );
-
-  const handleCloseTerminal = useCallback(
-    (e: React.MouseEvent, id: string) => {
-      e.stopPropagation();
-      closeTerminal(activeProjectPath, id);
-    },
-    [closeTerminal, activeProjectPath],
-  );
 
   const handleNewChat = useCallback(() => {
     onFocusKindChange("chat");
@@ -494,7 +570,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
               if (!tab) return null;
               const derived = chatDerived.find((d) => d.id === id);
               const displayTitle = derived?.displayTitle ?? tab.title;
-              return (
+          return (
                 <TabPill
                   key={key}
                   sortId={key}
@@ -511,7 +587,8 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
                   onStartRename={() => startRename("chat", id, displayTitle || "")}
                   onCommitRename={commitRename}
                   onCancelRename={() => setEditing(null)}
-                  onClose={(e) => handleCloseChat(e, id)}
+                  onClose={(e) => handleRequestCloseChat(e, id)}
+                  onAuxClose={(e) => handleImmediateCloseChat(e, id)}
                 />
               );
             }
@@ -520,8 +597,9 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
               const tab = browserTabs.find((t) => t.id === id);
               if (!tab) return null;
               return (
-                <TabPill
+                <BrowserTabPill
                   key={key}
+                  id={id}
                   sortId={key}
                   emoji="🌐"
                   title={tab.title}
@@ -533,7 +611,8 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
                   onStartRename={() => startRename("browser", id, tab.title)}
                   onCommitRename={commitRename}
                   onCancelRename={() => setEditing(null)}
-                  onClose={(e) => handleCloseBrowser(e, id)}
+                  onClose={(e) => handleRequestCloseBrowser(e, id)}
+                  onAuxClose={(e) => handleImmediateCloseBrowser(e, id)}
                 />
               );
             }
@@ -555,20 +634,23 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
                 onStartRename={() => startRename("terminal", id, term.title)}
                 onCommitRename={commitRename}
                 onCancelRename={() => setEditing(null)}
-                onClose={(e) => handleCloseTerminal(e, id)}
+                onClose={(e) => handleRequestCloseTerminal(e, id)}
+                onAuxClose={(e) => handleImmediateCloseTerminal(e, id)}
               />
             );
           })}
         </SortableContext>
       </DndContext>
 
+      <div className="w-px h-4 bg-border mx-1 shrink-0" aria-hidden="true" />
+
       <button
         onClick={handleNewChat}
         aria-label="New chat session"
         title="New chat session"
-        className="flex shrink-0 items-center gap-0.5 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors border border-border"
+        className="flex shrink-0 items-center gap-0.5 h-6 px-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
       >
-        <span aria-hidden>💬</span>
+        <span aria-hidden className="text-[13px]">💬</span>
         <Plus className="w-3 h-3" />
       </button>
 
@@ -576,9 +658,9 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         onClick={handleNewBrowser}
         aria-label="New browser tab"
         title="New browser tab"
-        className="flex shrink-0 items-center gap-0.5 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors border border-border"
+        className="flex shrink-0 items-center gap-0.5 h-6 px-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
       >
-        <span aria-hidden>🌐</span>
+        <span aria-hidden className="text-[13px]">🌐</span>
         <Plus className="w-3 h-3" />
       </button>
 
@@ -602,8 +684,8 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           }}
           className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors border ${
             focusedKind === "terminal" && activeTerminalId === PROCESSES_TAB_ID
-              ? "bg-accent text-accent-foreground border-border"
-              : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+              ? "bg-accent text-accent-foreground "
+              : " text-muted-foreground hover:bg-muted hover:text-foreground"
           }`}
         >
           Processes
@@ -618,6 +700,22 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         <List className="w-3.5 h-3.5" />
         <span className="hidden sm:inline">All sessions</span>
       </button>
+      {pendingClose && (
+        <Dialog open onOpenChange={(o) => !o && cancelPendingClose()}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="text-sm">Close {pendingClose.kind} tab?</DialogTitle>
+            </DialogHeader>
+            <p className="text-sm text-muted-foreground">
+              Close <span className="font-medium text-foreground">{pendingClose.title || pendingClose.id}</span>? This cannot be undone.
+            </p>
+            <DialogFooter className="gap-2">
+              <Button variant="ghost" onClick={cancelPendingClose}>Cancel</Button>
+              <Button variant="destructive" onClick={confirmPendingClose}>Close tab</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }

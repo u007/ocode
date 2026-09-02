@@ -13,6 +13,13 @@
 
 
 
+
+## 2026-09-02
+
+* **Creation**: Radix Select Empty String Sentinel ([gotchas/radix-select-empty-string-sentinel.md](/gotchas/radix-select-empty-string-sentinel.md))
+* **Creation**: Browser Panel — Documentation vs. Landed Behavior Mismatch ([gotchas/browser-panel-transition-inconsistency.md](/gotchas/browser-panel-transition-inconsistency.md))
+* **Creation**: OKF Naming Convention Enforcement ([okf/_schema/naming-convention-enforcement.md](/okf/_schema/naming-convention-enforcement.md))
+* **Creation**: Auto-Permission Prompt — TOCTOU Install Race ([gotchas/auto-permission-prompt-atomic-race.md](/gotchas/auto-permission-prompt-atomic-race.md))
 ## 2026-09-01
 
 * **Creation**: Shell Sandbox Is Write-Integrity Only, Not Confidentiality ([architecture/shell-sandbox-integrity-only-mode.md](/architecture/shell-sandbox-integrity-only-mode.md))

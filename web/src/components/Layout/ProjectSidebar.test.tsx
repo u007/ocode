@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import type { SessionSlice } from "../../stores/chatStore";
 import type { Project, ProjectGroup } from "../../api/types";
 import ProjectSidebar, { buildProjectSidebarOrder } from "./ProjectSidebar";
 
@@ -97,12 +98,19 @@ describe("buildProjectSidebarOrder", () => {
 // Fixtures simulate the backend's global-order array (interleaved across
 // groups) so the regression is observable end-to-end in the DOM.
 
+// ── Mutable mock state (hoisted, per-test configurable) ──────────────────────
 const stateFake = vi.hoisted(() => ({
   projects: [] as Project[],
   groups: [] as ProjectGroup[],
   activeProject: null as Project | null,
   loading: false,
-  tabsByProject: {} as Record<string, unknown[]>,
+  tabsByProject: {} as Record<string, { id: string }[]>,
+}));
+
+const chatSessionsFake = vi.hoisted(() => ({} as Record<string, Partial<SessionSlice>>));
+
+const terminalStateFake = vi.hoisted(() => ({
+  byProject: {} as Record<string, { alerts?: Record<string, boolean> }>,
 }));
 
 vi.mock("../../stores/projectStore", () => ({
@@ -124,7 +132,13 @@ vi.mock("../../stores/projectStore", () => ({
 
 vi.mock("../../stores/chatStore", () => ({
   useChatSelector: (sel: (s: { sessions: Record<string, unknown> }) => unknown) =>
-    sel({ sessions: {} }),
+    sel({ sessions: chatSessionsFake }),
+}));
+
+vi.mock("../../stores/terminalStore", () => ({
+  useTerminalState: () => ({
+    state: terminalStateFake,
+  }),
 }));
 
 function railLabels(): (string | null)[] {
@@ -169,5 +183,111 @@ describe("ProjectSidebar collapsed rail", () => {
     render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} />);
 
     expect(railLabels()).toEqual(["B1", "B2", "A1", "A2", "U1"]);
+  });
+});
+
+// ── Project indicator tests ──────────────────────────────────────────────────
+
+function makeSessionSlice(overrides: Partial<SessionSlice> = {}): Partial<SessionSlice> {
+  return {
+    messages: [],
+    live: [],
+    isStreaming: false,
+    error: null,
+    pendingPermission: null,
+    permissionQueue: [],
+    pendingQuestion: null,
+    totalMessages: 0,
+    hasMore: false,
+    loadingMore: false,
+    initialized: true,
+    collapsedRunIds: [],
+    tuiStatus: null,
+    turnActive: false,
+    lastHeartbeatAt: null,
+    bootstrapStage: null,
+    turnStalled: false,
+    statusLoading: false,
+    wasInterrupted: false,
+    ...overrides,
+  };
+}
+
+describe("ProjectSidebar project indicators", () => {
+  beforeEach(() => {
+    stateFake.projects = [project("/proj", "")];
+    stateFake.groups = [];
+    stateFake.activeProject = null;
+    stateFake.tabsByProject = {};
+    // Reset mock state
+    Object.keys(chatSessionsFake).forEach((k) => delete chatSessionsFake[k]);
+    terminalStateFake.byProject = {};
+  });
+
+  it("renders session count badge in expanded row", () => {
+    stateFake.tabsByProject = { "/proj": [{ id: "s1" }, { id: "s2" }] };
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    // Should show session count badge with "2"
+    expect(screen.getByText("2")).toBeDefined();
+  });
+
+  it("renders streaming badge when a session is streaming", () => {
+    stateFake.tabsByProject = { "/proj": [{ id: "s1" }] };
+    chatSessionsFake["s1"] = makeSessionSlice({ isStreaming: true });
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    // The streaming badge title should be present
+    expect(screen.getByTitle("1 streaming")).toBeDefined();
+  });
+
+  it("renders stalled badge when a session is stalled, not streaming", () => {
+    stateFake.tabsByProject = { "/proj": [{ id: "s1" }] };
+    chatSessionsFake["s1"] = makeSessionSlice({ turnActive: true, turnStalled: true });
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    expect(screen.getByTitle("1 stalled (streaming stopped)")).toBeDefined();
+    // Should NOT also show streaming badge
+    expect(screen.queryByTitle("1 streaming")).toBeNull();
+  });
+
+  it("renders pending permission badge", () => {
+    stateFake.tabsByProject = { "/proj": [{ id: "s1" }] };
+    chatSessionsFake["s1"] = makeSessionSlice({
+      pendingPermission: { tool: "bash", request_id: "r1" },
+    });
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    expect(screen.getByTitle("1 pending permission")).toBeDefined();
+  });
+
+  it("renders pending question badge", () => {
+    stateFake.tabsByProject = { "/proj": [{ id: "s1" }] };
+    chatSessionsFake["s1"] = makeSessionSlice({
+      pendingQuestion: { request_id: "q1", questions: [] },
+    });
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    expect(screen.getByTitle("1 pending permission")).toBeDefined();
+  });
+
+  it("renders terminal beep badge", () => {
+    stateFake.tabsByProject = { "/proj": [{ id: "s1" }] };
+    terminalStateFake.byProject["/proj"] = { alerts: { t1: true } };
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    expect(screen.getByTitle("1 terminal beep")).toBeDefined();
+  });
+
+  it("renders terminal beep even with no open chat sessions", () => {
+    // Terminal-only project: no tabs, but has an alerted terminal
+    terminalStateFake.byProject["/proj"] = { alerts: { t1: true } };
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    expect(screen.getByTitle("1 terminal beep")).toBeDefined();
+    // Should NOT show session count (no sessions)
+    expect(screen.queryByText("0")).toBeNull();
+  });
+
+  it("does not render badges when project has no activity", () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    // No badges rendered for an empty project
+    expect(screen.queryByTitle(/session/)).toBeNull();
+    expect(screen.queryByTitle(/streaming/)).toBeNull();
+    expect(screen.queryByTitle(/pending/)).toBeNull();
+    expect(screen.queryByTitle(/beep/)).toBeNull();
   });
 });

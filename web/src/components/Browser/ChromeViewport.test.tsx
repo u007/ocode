@@ -27,7 +27,17 @@ const mockApi = {
     mockApi.frameCbs.add(cb);
     return () => mockApi.frameCbs.delete(cb);
   },
+  fileChooserCbs: new Set<(multiple: boolean) => void>(),
+  onFileChooser: (cb: (multiple: boolean) => void) => {
+    mockApi.fileChooserCbs.add(cb);
+    return () => mockApi.fileChooserCbs.delete(cb);
+  },
 };
+
+const mockUpload = vi.hoisted(() => vi.fn(async (_key: string, _files: File[]) => {}));
+vi.mock("../../api/client", () => ({
+  uploadBrowseFiles: (key: string, files: File[]) => mockUpload(key, files),
+}));
 
 vi.mock("./useCdpSocket", () => ({
   useCdpSocket: () => mockApi,
@@ -50,6 +60,8 @@ beforeEach(() => {
   mockApi.status = "open";
   mockApi.error = null;
   mockApi.frameCbs.clear();
+  mockApi.fileChooserCbs.clear();
+  mockUpload.mockClear();
   vi.useFakeTimers();
   // Stub ResizeObserver: capture the callback for manual triggering.
   vi.stubGlobal(
@@ -230,5 +242,49 @@ describe("ChromeViewport", () => {
     // page and renders blank.
     render(<ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://dev.local/admin" />);
     expect(mockApi.send).toHaveBeenCalledWith({ t: "nav", url: "https://dev.local/admin" });
+  });
+});
+
+describe("ChromeViewport file chooser", () => {
+  it("opens the hidden picker on fileChooser and uploads the picked files", async () => {
+    const clickSpy = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+    );
+    const input = container.querySelector("[data-testid='cdp-file-input']") as HTMLInputElement;
+    expect(input).toBeTruthy();
+    act(() => {
+      for (const cb of mockApi.fileChooserCbs) cb(true);
+    });
+    expect(input.multiple).toBe(true);
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+
+    const file = new File(["hi"], "a.txt", { type: "text/plain" });
+    Object.defineProperty(input, "files", { value: [file], configurable: true });
+    await act(async () => {
+      fireEvent.change(input);
+    });
+    expect(mockUpload).toHaveBeenCalledTimes(1);
+    expect(mockUpload.mock.calls[0][0]).toBe("tab:abc");
+    expect(mockUpload.mock.calls[0][1].map((f) => f.name)).toEqual(["a.txt"]);
+    expect(mockApi.send).not.toHaveBeenCalledWith({ t: "fileChooserCancel" });
+    clickSpy.mockRestore();
+  });
+
+  it("reports a dismissed picker as fileChooserCancel", () => {
+    vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+    );
+    const input = container.querySelector("[data-testid='cdp-file-input']") as HTMLInputElement;
+    act(() => {
+      for (const cb of mockApi.fileChooserCbs) cb(false);
+    });
+    expect(input.multiple).toBe(false);
+    act(() => {
+      fireEvent(input, new Event("cancel", { bubbles: true }));
+    });
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "fileChooserCancel" });
+    expect(mockUpload).not.toHaveBeenCalled();
   });
 });

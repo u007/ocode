@@ -8,7 +8,7 @@ import { TerminalProvider } from "./stores/terminalStore";
 import { BrowserTabsProvider, useBrowserTabs } from "./stores/browserTabsStore";
 import { BrowserPanel } from "./components/Browser/BrowserPanel";
 import { useBrowserStore, browserActions, type StateKey } from "./lib/browserStore";
-import type { FocusedKind } from "./lib/viewPersistence";
+import { loadViewStateForProject, saveViewStateForProject, type FocusedKind } from "./lib/viewPersistence";
 import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ChatPanel from "./components/Chat/ChatPanel";
@@ -40,6 +40,7 @@ import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import { shouldRenderCoworkSidebar } from "./components/Layout/coworkSidebarVisibility";
 import ModelDialog from "./components/Layout/ModelDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
+import QuestionDialog from "./components/Chat/QuestionDialog";
 import { useKeyboard } from "./hooks/useKeyboard";
 import { useTheme } from "./hooks/useTheme";
 import { useResizableSidebar } from "./hooks/useResizableSidebar";
@@ -118,7 +119,7 @@ function HomeApp() {
   // token) just to keep this reference "fresh" — see useChatStateRef's docs.
   const chatStateRef = useChatStateRef();
   const { state: projectState, tabs, activeTabId, dispatch: projectDispatch, openSessionTab, openNewSessionTab, closeSessionTab } = useProjectState();
-  const { resolvePermission, pendingPermission } = useChat(activeTabId);
+  const { resolvePermission, pendingPermission, pendingQuestion, submitQuestionAnswers } = useChat(activeTabId);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [coworkOpen, setCoworkOpen] = useState(true);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -155,7 +156,7 @@ function HomeApp() {
     "files" | "git" | "cron" | "assets" | "sessions" | "settings"
   >("sessions");
   // Which half of the merged Sessions tab (chat vs terminal) is currently
-  // shown. Resets to chat on project switch — no per-project memory (v1).
+  // shown. Restored from per-project persistence on project switch.
   const [focusedKind, setFocusedKind] = useState<FocusedKind>("chat");
   const activeProjectPath = projectState.activeProject?.path ?? "";
   const { activeId: activeBrowserId, closeBrowserTab } = useBrowserTabs(activeProjectPath);
@@ -178,9 +179,29 @@ function HomeApp() {
     maxWidth: 1400,
     collapsible: true,
   });
+  // Restore per-project view state on project switch. Falls back to defaults
+  // for new/unknown projects.
   useEffect(() => {
-    setFocusedKind("chat");
+    const path = projectState.activeProject?.path;
+    if (!path) return;
+    const saved = loadViewStateForProject(path);
+    if (saved) {
+      setActiveView(saved.view);
+      setFocusedKind(saved.focusedKind);
+    } else {
+      setActiveView("sessions");
+      setFocusedKind("chat");
+    }
   }, [projectState.activeProject?.path]);
+  // Persist view state whenever it changes (debounced).
+  useEffect(() => {
+    const path = projectState.activeProject?.path;
+    if (!path) return;
+    const t = setTimeout(() => {
+      saveViewStateForProject(path, { view: activeView, focusedKind });
+    }, 300);
+    return () => clearTimeout(t);
+  }, [projectState.activeProject?.path, activeView, focusedKind]);
   useEffect(() => {
     const h = () => setActiveView("settings")
     window.addEventListener("ocode:open-settings-profiles", h)
@@ -1118,6 +1139,17 @@ function HomeApp() {
           outOfScopePath={pendingPermission.out_of_scope_path}
           requestId={pendingPermission.request_id}
           onDecide={resolvePermission}
+        />
+      )}
+
+      {/* Question Dialog (agent `question` tool prompt) */}
+      {pendingQuestion && (
+        <QuestionDialog
+          key={pendingQuestion.request_id}
+          open={true}
+          requestId={pendingQuestion.request_id}
+          questions={pendingQuestion.questions}
+          onSubmit={submitQuestionAnswers}
         />
       )}
 

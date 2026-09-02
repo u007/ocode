@@ -490,6 +490,13 @@ export interface TUIStatus {
   // model-specific custom prompt is active plus the force-injected Kaizen
   // directives. Absent when the active model has neither.
   model_prompt?: ModelPromptInfo;
+  // Turn timing — lets the web show elapsed for the current input and took for
+  // the last turn.
+  turn_started_at?: string;
+  turn_elapsed_ms?: number;
+  turn_ended_at?: string;
+  turn_took_ms?: number;
+  session_created_at?: string;
   updated_at?: string;
 }
 

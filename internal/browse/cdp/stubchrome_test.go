@@ -23,6 +23,9 @@ type stubChrome struct {
 	callsMu sync.Mutex
 	calls   []stubCall
 	seq     int
+	// beforeReply, when set, runs after a command is recorded and before its
+	// reply is written — lets a test inject events that race the reply.
+	beforeReply func(method, sessionID string)
 }
 
 // newStubChrome creates a pipe pair and a Conn. The returned conn is what
@@ -116,6 +119,9 @@ func (s *stubChrome) handleFrame(frame []byte) {
 			result = map[string]any{"browserContextIds": []string{}}
 		default:
 			result = map[string]any{}
+		}
+		if s.beforeReply != nil {
+			s.beforeReply(msg.Method, msg.SessionID)
 		}
 		raw, _ := json.Marshal(result)
 		reply := map[string]any{"id": *msg.ID, "result": json.RawMessage(raw)}

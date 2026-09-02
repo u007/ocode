@@ -543,7 +543,7 @@ describe("browse_nav routing (Part 07/08 contract)", () => {
         "tab:x": {
           url: "", status: 0, loading: true, mode: null, userMode: null, error: null,
           history: [], historyIndex: -1, panelOpen: true, collapsed: false,
-          consoleEvents: [], networkEvents: [],
+          consoleEvents: [], networkEvents: [], responseBodies: {}, perfMetrics: {},
         },
       },
     }));

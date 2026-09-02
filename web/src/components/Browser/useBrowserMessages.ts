@@ -37,7 +37,14 @@ export function useBrowserMessages(stateKey: StateKey, browseBase: string | null
         case "ocode:browse:network":
           // capture.js reports `duration`; the store's NetworkEvent is
           // `durationMs` — map at the boundary.
-          pushNetwork(stateKey, { method: String(d.method), url: String(d.url), status: Number(d.status) || 0, durationMs: Number(d.duration) || 0, ts: Number(d.ts) || Date.now() });
+          pushNetwork(stateKey, {
+            requestId: "",
+            method: String(d.method),
+            url: String(d.url),
+            status: Number(d.status) || 0,
+            durationMs: Number(d.duration) || 0,
+            ts: Number(d.ts) || Date.now(),
+          });
           break;
         // "ocode:browse:nav" intentionally not handled: display-untrusted.
         default:

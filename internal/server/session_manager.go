@@ -64,6 +64,11 @@ type sessionEntry struct {
 	bootstrapErr string
 	// turnActive is true while a turn is running on this session's agent.
 	turnActive bool
+	// turnStartedAt is set when the current turn becomes active; cleared when
+	// it completes (turnEndedAt captures the end time and TurnTookMs is derived
+	// from the pair). These drive the web's current-input and last-took timers.
+	turnStartedAt time.Time
+	turnEndedAt   time.Time
 	// lastSeq is the last event-bus sequence observed for this session, the
 	// reconcile watermark returned by GET /api/sessions/:id/state.
 	lastSeq uint64
@@ -265,12 +270,21 @@ func (m *SessionManager) touch(sessionID string) {
 // means the turn (or continuation) just finished and the authoritative
 // `messages` broadcast/persisted transcript supersedes whatever was buffered.
 func (m *SessionManager) setTurnActive(sessionID string, active bool) {
+	now := time.Now()
 	m.mu.Lock()
 	if e := m.entries[sessionID]; e != nil {
 		e.turnActive = active
-		e.lastActivity = time.Now()
+		e.lastActivity = now
 		e.liveFrames = nil
 		e.liveFramesSize = 0
+		if active {
+			e.turnStartedAt = now
+			e.turnEndedAt = time.Time{}
+		} else {
+			if !e.turnStartedAt.IsZero() {
+				e.turnEndedAt = now
+			}
+		}
 	}
 	m.mu.Unlock()
 }
@@ -312,6 +326,17 @@ func (m *SessionManager) IsTurnActive(sessionID string) bool {
 		return e.turnActive
 	}
 	return false
+}
+
+// TurnTiming returns the stored turn start/end for a session. Zero times mean
+// no turn has run yet (or the entry does not exist).
+func (m *SessionManager) TurnTiming(sessionID string) (startedAt, endedAt time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[sessionID]; e != nil {
+		return e.turnStartedAt, e.turnEndedAt
+	}
+	return time.Time{}, time.Time{}
 }
 
 // EvictIdle releases the built agent of every entry that has sat idle longer

@@ -30,7 +30,6 @@ import (
 	"github.com/u007/ocode/internal/desktop"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/skill"
-	"github.com/u007/ocode/internal/version"
 	"github.com/u007/ocode/web"
 	// Register provider plugins in the desktop binary as well as the CLI. Without
 	// these side-effect imports, OAuth-backed OpenAI requests fall through to the
@@ -222,9 +221,12 @@ func main() {
 	}
 
 	// Create the main webview window.
+	// Derive the window title from the resolved workDir: prefer the saved
+	// project name, fall back to directory basename, last resort "ocode".
+	windowTitle := desktop.ResolveWindowTitle(workDir)
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:      desktopWindowName,
-		Title:     "ocode " + version.Version,
+		Title:     windowTitle,
 		Width:     1280,
 		Height:    800,
 		MinWidth:  800,

@@ -1335,6 +1335,24 @@ export async function mintBrowseGrant(stateKey: string): Promise<string> {
 }
 
 /** Best-effort revoke of a browse session (called on panel close). */
+/** Answers a Chrome-mode file chooser: uploads the picked files so headless
+ *  Chrome can attach them to the page's <input type=file>. 409 means the
+ *  page no longer has a chooser waiting. */
+export async function uploadBrowseFiles(stateKey: string, files: File[]): Promise<void> {
+  const form = new FormData();
+  form.append("state_key", stateKey);
+  for (const f of files) form.append("files", f, f.name);
+  // No Content-Type: the browser sets the multipart boundary itself.
+  const res = await fetch(apiPath("/api/browse/upload"), {
+    method: "POST",
+    headers: authHeaders(),
+    body: form,
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`browse upload: ${res.status}`);
+  }
+}
+
 export async function revokeBrowseSession(stateKey: string): Promise<void> {
   const res = await authedFetch("/api/browse/revoke", {
     method: "POST",

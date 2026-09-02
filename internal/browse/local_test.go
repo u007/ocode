@@ -675,3 +675,78 @@ func TestHandleLocalTerminalNavPreservesQuery(t *testing.T) {
 		t.Fatalf("terminal nav event lost the query string, got %+v", navs)
 	}
 }
+
+// Site cookies round-trip through the per-stateKey server-side jar: the
+// upstream's Set-Cookie is captured (and hidden from the browser), then sent
+// back on the next request for the same stateKey — never for another one.
+func TestHandleLocalCookiesRoundTripViaJar(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("Cookie"))
+		mu.Unlock()
+		if r.URL.Path == "/login" {
+			http.SetCookie(w, &http.Cookie{Name: "sid", Value: "s3cr3t", Path: "/", HttpOnly: true})
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	s, cookie := newLocalTestServer(t, "tab:ck1")
+
+	do := func(path string, ck *http.Cookie) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/b/tab:ck1/http/"+host+path, nil)
+		r.AddCookie(ck)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		return w
+	}
+	w := do("/login", cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login status = %d", w.Code)
+	}
+	if got := w.Header().Get("Set-Cookie"); got != "" {
+		t.Fatalf("site cookie leaked to the browser: %q", got)
+	}
+	do("/app", cookie)
+
+	mu.Lock()
+	got := append([]string(nil), seen...)
+	mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("upstream requests = %d, want 2", len(got))
+	}
+	if got[0] != "" {
+		t.Errorf("first request carried a cookie upstream: %q (browse session cookie must be stripped)", got[0])
+	}
+	if got[1] != "sid=s3cr3t" {
+		t.Errorf("second request Cookie = %q, want sid=s3cr3t", got[1])
+	}
+
+	// Another stateKey on the same upstream never sees tab:ck1's session.
+	s2 := s
+	_, cookie2 := newLocalTestServerOn(t, s2, "tab:ck2")
+	r := httptest.NewRequest("GET", "/b/tab:ck2/http/"+host+"/app", nil)
+	r.AddCookie(cookie2)
+	s2.Handler().ServeHTTP(httptest.NewRecorder(), r)
+	mu.Lock()
+	last := seen[len(seen)-1]
+	mu.Unlock()
+	if last != "" {
+		t.Errorf("stateKey tab:ck2 received tab:ck1's cookie: %q", last)
+	}
+}
+
+// newLocalTestServerOn adds a live local session for stateKey to an existing
+// server (multi-tab tests).
+func newLocalTestServerOn(t *testing.T, s *Server, stateKey string) (*Server, *http.Cookie) {
+	t.Helper()
+	grant := s.MintGrant(stateKey, "")
+	cookieVal, _, ok := s.auth.redeem(grant, true)
+	if !ok {
+		t.Fatal("could not redeem grant in test setup")
+	}
+	return s, &http.Cookie{Name: browseCookie, Value: cookieVal, Path: "/b/"}
+}

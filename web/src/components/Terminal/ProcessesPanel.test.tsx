@@ -251,7 +251,7 @@ describe("ProcessesPanel", () => {
       browserActions.pushConsole("tab:b1", { level: "log", text: "hello ".repeat(100), ts: i });
     }
     for (let i = 0; i < 2; i++) {
-      browserActions.pushNetwork("tab:b1", { method: "GET", url: "https://example.com/api", status: 200, durationMs: 12, ts: i });
+      browserActions.pushNetwork("tab:b1", { requestId: `r${i}`, method: "GET", url: "https://example.com/api", status: 200, durationMs: 12, ts: i });
     }
 
     render(<ProcessesPanel projectPath={projectPath} />);

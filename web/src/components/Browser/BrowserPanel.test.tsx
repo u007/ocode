@@ -1,4 +1,4 @@
-import { render, waitFor, act, fireEvent } from "@testing-library/react";
+import { render, waitFor, act, fireEvent, screen } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockBypass = vi.hoisted(() => vi.fn(async () => {}));
@@ -10,6 +10,7 @@ const state = {
   panelOpen: true,
   collapsed: false,
   status: 200,
+  loading: false,
   mode: "chrome" as const,
   userMode: null as "local" | "chrome" | null,
   error: "",
@@ -57,6 +58,7 @@ describe("BrowserPanel", () => {
     state.error = "";
     state.url = "https://example.com/";
     state.status = 200;
+    state.loading = false;
     (state as unknown as Record<string, unknown>).mode = "chrome";
     (state as unknown as Record<string, unknown>).userMode = null;
     (state as unknown as Record<string, unknown>).collapsed = false;
@@ -247,5 +249,45 @@ describe("BrowserPanel", () => {
     expect(container.querySelector("[data-testid='chrome-viewport']")).toBeNull();
     // The remounted iframe got its src re-issued (not blank).
     expect((container.querySelector("iframe") as HTMLIFrameElement).src).toContain("/b/tab:abc/");
+  });
+
+  it("shows the indeterminate loading bar + connecting overlay on first load", () => {
+    state.loading = true;
+    state.status = 0;
+    (state as unknown as Record<string, unknown>).mode = "local";
+    render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    expect(screen.getByTestId("browser-loading-bar")).toBeInTheDocument();
+    expect(screen.getByTestId("browser-loading-overlay")).toBeInTheDocument();
+    expect(screen.getByText(/Connecting to example\.com/i)).toBeInTheDocument();
+  });
+
+  it("chrome mode shows only the top bar on first load — ChromeViewport owns the centered spinner", () => {
+    // Default mock mode is chrome; the panel must NOT stack its connecting
+    // overlay on top of ChromeViewport's own first-frame spinner.
+    state.loading = true;
+    state.status = 0;
+    render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    expect(screen.getByTestId("browser-loading-bar")).toBeInTheDocument();
+    expect(screen.queryByTestId("browser-loading-overlay")).not.toBeInTheDocument();
+  });
+
+  it("keeps only the top bar after the first successful load", async () => {
+    state.loading = false;
+    state.status = 200;
+    const { rerender } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    // First load completes → everLoaded flips; then a later navigation shows
+    // the progress bar again but never the full-page overlay.
+    await waitFor(() => expect(screen.queryByTestId("browser-loading-overlay")).not.toBeInTheDocument());
+    (state as unknown as Record<string, unknown>).loading = true;
+    (state as unknown as Record<string, unknown>).status = 0;
+    rerender(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    expect(screen.getByTestId("browser-loading-bar")).toBeInTheDocument();
+    expect(screen.queryByTestId("browser-loading-overlay")).not.toBeInTheDocument();
+  });
+
+  it("shows no loading indicators while idle", () => {
+    render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    expect(screen.queryByTestId("browser-loading-bar")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("browser-loading-overlay")).not.toBeInTheDocument();
   });
 });

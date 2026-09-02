@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -351,6 +353,336 @@ func waitForEvent(t *testing.T, sub chan Envelope, id, event string) bool {
 		}
 	}
 }
+
+// waitForEnvelopeData waits for an event on sub for id and decodes its payload.
+func waitForEnvelopeData(t *testing.T, sub chan Envelope, id, event string) (map[string]any, bool) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case env := <-sub:
+			if env.SessionID != id || env.Event != event {
+				continue
+			}
+			var data map[string]any
+			if err := json.Unmarshal(mustMarshal(t, env.Data), &data); err != nil {
+				t.Fatalf("decode %s data: %v", event, err)
+			}
+			return data, true
+		case <-deadline:
+			return nil, false
+		}
+	}
+}
+
+// TestTurnStartedIncludesStartedAtAndSessionCreatedAt verifies the bus payload
+// for turn_started carries the authoritative started-at timestamp (RFC3339Nano)
+// plus the session's persisted CreatedAt when available — so the web's
+// current-input and entire-session timers can be driven from a single event.
+func TestTurnStartedIncludesStartedAtAndSessionCreatedAt(t *testing.T) {
+	h := NewHandler()
+	h.turnHeartbeatInterval = time.Hour // no heartbeats in this test
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	// Persist the session first so CreatedAt is populated, then register.
+	saveSessionToDir(t, proj, id)
+	h.sessions.Register(id, proj)
+	newTestSession(h, id, instantClient{})
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	if _, err := h.runTurn(id, h.lookupAgentSession(id), "hi", turnOptions{}); err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+
+	data, ok := waitForEnvelopeData(t, sub, id, "turn_started")
+	if !ok {
+		t.Fatal("turn_started not observed")
+	}
+	started, ok := data["started_at"].(string)
+	if !ok || started == "" {
+		t.Fatalf("turn_started missing started_at: %+v", data)
+	}
+	if t1, err := time.Parse(time.RFC3339Nano, started); err != nil {
+		t.Fatalf("started_at not RFC3339Nano: %v", err)
+	} else if delta := time.Since(t1); delta < 0 || delta > 30*time.Second {
+		t.Fatalf("started_at %s is not recent (delta %s)", started, delta)
+	}
+	if created, ok := data["session_created_at"].(string); !ok || created == "" {
+		t.Fatalf("turn_started missing session_created_at: %+v", data)
+	} else {
+		eventCreated, err := time.Parse(time.RFC3339Nano, created)
+		if err != nil {
+			t.Fatalf("session_created_at not RFC3339Nano: %v", err)
+		}
+		// The persisted session was written just above — the event must carry
+		// that same creation time (disk round-trip may shift sub-second
+		// precision, so tolerance is a few seconds, not exact equality).
+		s, err := session.LoadForDir(proj, id)
+		if err != nil {
+			t.Fatalf("reload persisted session: %v", err)
+		}
+		persistedCreated := s.CreatedAt.UTC()
+		if eventCreated.Sub(persistedCreated) > 5*time.Second ||
+			persistedCreated.Sub(eventCreated) > 5*time.Second {
+			t.Fatalf("session_created_at %v != persisted CreatedAt %v", eventCreated, persistedCreated)
+		}
+	}
+}
+
+// TestTurnDoneIncludesTookMs verifies turn_done carries started_at, ended_at,
+// and took_ms for a successful turn, so the web can show "✓ done at … · took …".
+// The started_at must equal the one published on turn_started, ended_at must
+// not be earlier, and took_ms must match the timestamp difference.
+func TestTurnDoneIncludesTookMs(t *testing.T) {
+	h := NewHandler()
+	h.turnHeartbeatInterval = time.Hour
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	h.sessions.Register(id, proj)
+	// Slow client so the took duration is measurable.
+	slow := &slowClient{delay: 50 * time.Millisecond}
+	newTestSession(h, id, slow)
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	if _, err := h.runTurn(id, h.lookupAgentSession(id), "hi", turnOptions{}); err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+
+	startedData, ok := waitForEnvelopeData(t, sub, id, "turn_started")
+	if !ok {
+		t.Fatal("turn_started not observed")
+	}
+	startedStr, ok := startedData["started_at"].(string)
+	if !ok || startedStr == "" {
+		t.Fatalf("turn_started missing started_at: %+v", startedData)
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, startedStr)
+	if err != nil {
+		t.Fatalf("turn_started started_at not RFC3339Nano: %v", err)
+	}
+
+	data, ok := waitForEnvelopeData(t, sub, id, "turn_done")
+	if !ok {
+		t.Fatal("turn_done not observed")
+	}
+	doneStarted, _ := data["started_at"].(string)
+	endedStr, _ := data["ended_at"].(string)
+	if doneStarted != startedStr {
+		t.Fatalf("turn_done started_at = %q, want %q (must match turn_started)", doneStarted, startedStr)
+	}
+	if doneStarted == "" || endedStr == "" {
+		t.Fatalf("turn_done missing started_at/ended_at: %+v", data)
+	}
+	endedAt, err := time.Parse(time.RFC3339Nano, endedStr)
+	if err != nil {
+		t.Fatalf("turn_done ended_at not RFC3339Nano: %v", err)
+	}
+	if endedAt.Before(startedAt) {
+		t.Fatalf("ended_at %s before started_at %s", endedAt, startedAt)
+	}
+	tookMs, ok := data["took_ms"].(float64)
+	if !ok {
+		t.Fatalf("turn_done missing took_ms: %+v", data)
+	}
+	// took_ms is the millisecond-truncated timestamp span. RFC3339Nano
+	// round-tripping may lose <1ms of precision, so allow a 1ms delta.
+	spanMs := endedAt.Sub(startedAt).Milliseconds()
+	if diff := int64(tookMs) - spanMs; diff < -1 || diff > 1 {
+		t.Fatalf("took_ms=%v does not match timestamp span %dms", tookMs, spanMs)
+	}
+}
+
+// TestTurnErrorIncludesTookMs verifies turn_error carries started_at/ended_at/
+// took_ms too, so the web shows took for failed turns as well.
+func TestTurnErrorIncludesTookMs(t *testing.T) {
+	h := NewHandler()
+	h.turnHeartbeatInterval = time.Hour
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	h.sessions.Register(id, proj)
+	newTestSession(h, id, errorClient{})
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	if _, err := h.runTurn(id, h.lookupAgentSession(id), "boom", turnOptions{}); err == nil {
+		t.Fatal("expected runTurn error")
+	}
+
+	data, ok := waitForEnvelopeData(t, sub, id, "turn_error")
+	if !ok {
+		t.Fatal("turn_error not observed")
+	}
+	startedStr, _ := data["started_at"].(string)
+	endedStr, _ := data["ended_at"].(string)
+	if startedStr == "" || endedStr == "" {
+		t.Fatalf("turn_error missing started_at/ended_at: %+v", data)
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, startedStr)
+	if err != nil {
+		t.Fatalf("turn_error started_at not RFC3339Nano: %v", err)
+	}
+	endedAt, err := time.Parse(time.RFC3339Nano, endedStr)
+	if err != nil {
+		t.Fatalf("turn_error ended_at not RFC3339Nano: %v", err)
+	}
+	if endedAt.Before(startedAt) {
+		t.Fatalf("ended_at %s before started_at %s", endedAt, startedAt)
+	}
+	if tookMs, ok := data["took_ms"].(float64); !ok {
+		t.Fatalf("turn_error missing took_ms: %+v", data)
+	} else {
+		spanMs := endedAt.Sub(startedAt).Milliseconds()
+		if diff := int64(tookMs) - spanMs; diff < -1 || diff > 1 {
+			t.Fatalf("turn_error took_ms=%v does not match timestamp span %dms", tookMs, spanMs)
+		}
+	}
+}
+
+// TestSessionStatusIncludesTurnTiming verifies GET /api/sessions/:id/status
+// returns TurnStartedAt/TurnElapsedMs/TurnEndedAt/TurnTookMs and
+// SessionCreatedAt from authoritative state.
+func TestSessionStatusIncludesTurnTiming(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	h.sessions.Register(id, proj)
+
+	// Pre-set a turn that has finished so the snapshot carries ended/took.
+	// No duration lower bound is asserted: an immediate on→off can
+	// legitimately measure 0ms. Only internal consistency is checked.
+	h.sessions.setTurnActive(id, true)
+	h.sessions.setTurnActive(id, false)
+
+	rec := httptest.NewRecorder()
+	h.HandleSessionStatus(rec, httptest.NewRequest("GET", "/api/sessions/"+id+"/status", nil), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var snap TUIStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if snap.TurnStartedAt == "" || snap.TurnEndedAt == "" {
+		t.Fatalf("status missing turn timing: %+v", snap)
+	}
+	if snap.SessionCreatedAt == "" {
+		t.Fatalf("status missing session_created_at: %+v", snap)
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, snap.TurnStartedAt)
+	if err != nil {
+		t.Fatalf("turn_started_at not RFC3339Nano: %v", err)
+	}
+	endedAt, err := time.Parse(time.RFC3339Nano, snap.TurnEndedAt)
+	if err != nil {
+		t.Fatalf("turn_ended_at not RFC3339Nano: %v", err)
+	}
+	if endedAt.Before(startedAt) {
+		t.Fatalf("turn_ended_at %s before turn_started_at %s", endedAt, startedAt)
+	}
+	// TurnTookMs must match the timestamp span (1ms tolerance for the
+	// RFC3339Nano round-trip). The turn finished, so TurnElapsedMs stays 0
+	// (omitempty) — only the terminal fields are asserted.
+	spanMs := endedAt.Sub(startedAt).Milliseconds()
+	if diff := snap.TurnTookMs - spanMs; diff < -1 || diff > 1 {
+		t.Fatalf("status turn_took_ms=%d does not match span %dms", snap.TurnTookMs, spanMs)
+	}
+}
+
+// TestTurnTimingForBridgedSessionDoesNotAutoStart ensures no turn timing is
+// published for an idle bridged session — the bridged TUI owns the snapshot.
+func TestTurnTimingForBridgedSessionDoesNotAutoStart(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	h.sessions.Register(id, proj)
+	// Attach a bridge for THIS session — headless turn events are routed
+	// through publishBusEvent (no auto status push); see publishTurnStarted.
+	h.rc = &RCBridge{SessionID: id, RcCh: make(chan RCRequest, 1)}
+	newTestSession(h, id, instantClient{})
+
+	rec := httptest.NewRecorder()
+	h.HandleSessionStatus(rec, httptest.NewRequest("GET", "/api/sessions/"+id+"/status", nil), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", rec.Code)
+	}
+	var snap TUIStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// SessionCreatedAt is loaded from disk regardless of bridged state.
+	if snap.SessionCreatedAt == "" {
+		t.Fatalf("bridged status missing session_created_at: %+v", snap)
+	}
+	// No turn has run yet, so turn timing stays empty.
+	if snap.TurnStartedAt != "" || snap.TurnEndedAt != "" {
+		t.Fatalf("bridged status leaked turn timing before any turn: %+v", snap)
+	}
+}
+
+// TestBridgedTurnTimingStillFlowsOnBus verifies that in bridged mode (TUI
+// attached, /rc active) the turn lifecycle events still carry started_at /
+// ended_at / took_ms on the unified bus, even though no headless status push
+// fires (the TUI owns the status feed).
+func TestBridgedTurnTimingStillFlowsOnBus(t *testing.T) {
+	h := NewHandler()
+	h.turnHeartbeatInterval = time.Hour
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	h.sessions.Register(id, proj)
+	h.rc = &RCBridge{SessionID: id, RcCh: make(chan RCRequest, 1)}
+	newTestSession(h, id, instantClient{})
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	if _, err := h.runTurn(id, h.lookupAgentSession(id), "hi", turnOptions{}); err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+
+	startedData, ok := waitForEnvelopeData(t, sub, id, "turn_started")
+	if !ok {
+		t.Fatal("turn_started not observed with bridge attached")
+	}
+	if startedAt, _ := startedData["started_at"].(string); startedAt == "" {
+		t.Fatalf("bridged turn_started missing started_at: %+v", startedData)
+	}
+
+	doneData, ok := waitForEnvelopeData(t, sub, id, "turn_done")
+	if !ok {
+		t.Fatal("turn_done not observed with bridge attached")
+	}
+	if doneStarted, _ := doneData["started_at"].(string); doneStarted == "" {
+		t.Fatalf("bridged turn_done missing started_at: %+v", doneData)
+	}
+	if ended, _ := doneData["ended_at"].(string); ended == "" {
+		t.Fatalf("bridged turn_done missing ended_at: %+v", doneData)
+	}
+	if tookMs, ok := doneData["took_ms"].(float64); !ok {
+		t.Fatalf("bridged turn_done missing took_ms: %+v", doneData)
+	} else if int(tookMs) < 0 {
+		t.Fatalf("bridged turn_done took_ms=%v, want >= 0", tookMs)
+	}
+}
+
+// slowClient delays Chat by `delay` to give a measurable took_ms.
+type slowClient struct{ delay time.Duration }
+
+func (c *slowClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
+	time.Sleep(c.delay)
+	return &agent.Message{Role: "assistant", Content: "ok"}, nil
+}
+func (c *slowClient) GetProvider() string { return "fake" }
+func (c *slowClient) GetModel() string    { return "fake-model" }
 
 // mustMarshal round-trips any data through JSON so envelope payloads can be
 // inspected in a type-safe way.

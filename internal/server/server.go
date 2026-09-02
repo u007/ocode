@@ -2,18 +2,25 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/u007/ocode/internal/browse/cdp"
+	"io"
 	"io/fs"
 	"log"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -498,6 +505,7 @@ func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 	s.mux.HandleFunc("GET /api/browse/config", s.authMiddleware(s.handleBrowseConfig))
 	s.mux.HandleFunc("POST /api/browse/grant", s.authMiddleware(s.handleBrowseGrant))
 	s.mux.HandleFunc("POST /api/browse/revoke", s.authMiddleware(s.handleBrowseRevoke))
+	s.mux.HandleFunc("POST /api/browse/upload", s.authMiddleware(s.handleBrowseUpload))
 	s.mux.HandleFunc("POST /api/browse/bypass", s.authMiddleware(s.handleBrowseBypass))
 	// Bridge server-authoritative nav events onto the SSE bus. The first
 	// publisher arg (stateKey) is redundant with ev.StateKey — ignore it and
@@ -575,7 +583,40 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 }
 
 func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"base_url": s.browseBase})
+	writeJSON(w, http.StatusOK, map[string]string{"base_url": sameSiteBrowseBase(s.browseBase, r.Host)})
+}
+
+// sameSiteBrowseBase rewrites base's hostname to the loopback hostname the
+// SPA was loaded from (reqHost). The browse session cookie is SameSite=Lax,
+// and browsers treat localhost, 127.0.0.1 and ::1 as distinct sites, so an
+// iframe on 127.0.0.1 under a SPA on localhost never receives the cookie and
+// every local-mode navigation fails with 401. Non-loopback SPA hosts cannot
+// reach the loopback listener at all, so base is returned unchanged.
+func sameSiteBrowseBase(base, reqHost string) string {
+	reqName := reqHost
+	if h, _, err := net.SplitHostPort(reqHost); err == nil {
+		reqName = h
+	}
+	if !isLoopbackName(reqName) {
+		return base
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return base
+	}
+	u.Host = net.JoinHostPort(reqName, u.Port())
+	return u.String()
+}
+
+// isLoopbackName: "localhost", "*.localhost", or a loopback IP literal
+// (with or without IPv6 brackets).
+func isLoopbackName(h string) bool {
+	h = strings.ToLower(strings.TrimSuffix(strings.Trim(h, "[]"), "."))
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(h)
+	return err == nil && ip.IsLoopback()
 }
 
 func (s *Server) handleBrowseGrant(w http.ResponseWriter, r *http.Request) {
@@ -629,7 +670,100 @@ func (s *Server) handleBrowseRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.browse.Revoke(req.StateKey)
+	if err := os.RemoveAll(browseUploadDir(req.StateKey)); err != nil {
+		log.Printf("browse revoke: remove upload dir for %s: %v", req.StateKey, err)
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// maxBrowseUploadFiles bounds one Chrome-mode file-chooser answer.
+const maxBrowseUploadFiles = 20
+
+// browseUploadDir is where one stateKey's chooser files land so headless
+// Chrome (same machine) can read them via DOM.setFileInputFiles. Replaced
+// on every upload, removed on revoke.
+func browseUploadDir(stateKey string) string {
+	sum := sha256.Sum256([]byte(stateKey))
+	return filepath.Join(os.TempDir(), "ocode-browse-uploads", hex.EncodeToString(sum[:8]))
+}
+
+// handleBrowseUpload answers a Chrome-mode file chooser: multipart form with
+// state_key + one or more "files" parts. Files are written to a per-stateKey
+// temp dir and handed to the pending chooser. 409 when no chooser is
+// waiting (page moved on / picker answered twice).
+func (s *Server) handleBrowseUpload(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+		log.Printf("browse upload: parse multipart: %v", err)
+		writeError(w, http.StatusBadRequest, "invalid multipart form")
+		return
+	}
+	stateKey := r.FormValue("state_key")
+	if stateKey == "" {
+		log.Printf("browse upload: missing state_key")
+		writeError(w, http.StatusBadRequest, "missing state_key")
+		return
+	}
+	parts := r.MultipartForm.File["files"]
+	if len(parts) == 0 {
+		writeError(w, http.StatusBadRequest, "no files provided in 'files' field")
+		return
+	}
+	if len(parts) > maxBrowseUploadFiles {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("too many files (max %d)", maxBrowseUploadFiles))
+		return
+	}
+	dir := browseUploadDir(stateKey)
+	if err := os.RemoveAll(dir); err != nil {
+		log.Printf("browse upload: clear %s: %v", dir, err)
+		writeError(w, http.StatusInternalServerError, "failed to prepare upload dir")
+		return
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("browse upload: mkdir %s: %v", dir, err)
+		writeError(w, http.StatusInternalServerError, "failed to prepare upload dir")
+		return
+	}
+	paths := make([]string, 0, len(parts))
+	for i, fh := range parts {
+		name := filepath.Base(fh.Filename)
+		if name == "" || name == "." || name == ".." || name == string(filepath.Separator) {
+			name = fmt.Sprintf("upload-%d", i)
+		}
+		dst := filepath.Join(dir, name)
+		if err := copyMultipartFile(fh, dst); err != nil {
+			log.Printf("browse upload: save %s: %v", fh.Filename, err)
+			writeError(w, http.StatusInternalServerError, "failed to save upload")
+			return
+		}
+		paths = append(paths, dst)
+	}
+	if err := s.browse.SetFiles(r.Context(), stateKey, paths); err != nil {
+		log.Printf("browse upload: set files for %s: %v", stateKey, err)
+		if errors.Is(err, cdp.ErrNoFileChooser) || errors.Is(err, cdp.ErrNoTarget) {
+			writeError(w, http.StatusConflict, "no file chooser is waiting for files")
+			return
+		}
+		writeError(w, http.StatusBadGateway, "chrome mode unavailable: "+err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func copyMultipartFile(fh *multipart.FileHeader, dst string) error {
+	src, err := fh.Open()
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, src); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func (s *Server) handleBrowseBypass(w http.ResponseWriter, r *http.Request) {

@@ -11,6 +11,9 @@ export type CdpClientMessage =
   | { t: "forward" }
   | { t: "reload" }
   | { t: "resize"; w: number; h: number; dpr: number }
+  /** User dismissed the file picker opened for a {t:"fileChooser"}. */
+  | { t: "fileChooserCancel" }
+  | { t: "getResponseBody"; requestId: string }
   | {
       t: "mouse";
       kind: "move" | "down" | "up" | "wheel";
@@ -36,13 +39,32 @@ export type CdpServerMessage =
   | { t: "console"; level: string; args: string[]; ts: number }
   | {
       t: "network";
+      requestId: string;
       method: string;
       url: string;
       status: number;
       durationMs: number;
       ts: number;
+      size: number;
       blocked?: string;
+      contentType?: string;
+      requestHeaders?: Record<string, string>;
+      responseHeaders?: Record<string, string>;
+      postData?: string;
     }
+  /** The page opened an <input type=file>; the SPA must show a native picker
+   *  and POST the chosen files to /api/browse/upload. */
+  | { t: "fileChooser"; multiple: boolean }
+  /** Reply to a client "getResponseBody" command. */
+  | {
+      t: "responseBody";
+      requestId: string;
+      body?: string;
+      base64Encoded?: boolean;
+      truncated?: boolean;
+      error?: string;
+    }
+  | { t: "performance"; metrics: Record<string, number> }
   | { t: "error"; message: string };
 
 /** Decoded screencast frame header: CSS-pixel dimensions of the JPEG body. */
@@ -53,7 +75,7 @@ export interface CdpFrameHeader {
 
 /** Splits a binary WS payload into its 8-byte big-endian header + JPEG body.
  *  Returns null for frames shorter than the header (protocol violation). */
-export function decodeFrame(data: ArrayBuffer): { header: CdpFrameHeader; jpeg: Uint8Array } | null {
+export function decodeFrame(data: ArrayBuffer): { header: CdpFrameHeader; jpeg: Uint8Array<ArrayBuffer> } | null {
   if (data.byteLength < 8) return null;
   const view = new DataView(data);
   return {

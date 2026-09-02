@@ -558,28 +558,54 @@ export default function CoworkSidebar({
           />
         </div>
 
-        {/* Git Section */}
+        {/* Context Section — real token usage from the TUI status snapshot. */}
         <div className="border-b border-border">
           <button
-            onClick={() => toggleSection("git")}
+            onClick={() => toggleSection("context")}
             className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
-            {expandedSections.git ? (
+            {expandedSections.context ? (
               <ChevronDown className="w-4 h-4" />
             ) : (
               <ChevronRight className="w-4 h-4" />
             )}
-            <GitBranch className="w-4 h-4 text-cyan-400" />
-            Git
+            <Hash className="w-4 h-4 text-cyan-400" />
+            Context
           </button>
-          {expandedSections.git && (
+          {expandedSections.context && (
             <div className="px-4 pb-3">
-              <div className="text-sm font-mono text-foreground">
-                {gitBranch || "Loading..."}
-              </div>
-              {tuiStatus?.cwd && (
-                <div className="text-xs text-muted-foreground mt-1 truncate" title={tuiStatus.cwd}>
-                  {tuiStatus.cwd}
+              {contextMax > 0 ? (
+                <>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+                    <span>Used</span>
+                    <span className="font-mono text-muted-foreground">
+                      {formatTokenCount(contextCurrent)} / {formatTokenCount(contextMax)}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full rounded bg-muted overflow-hidden">
+                    <div
+                      className={`h-full transition-all ${
+                        contextPct > 85
+                          ? "bg-red-500"
+                          : contextPct > 65
+                            ? "bg-yellow-500"
+                            : "bg-emerald-500"
+                      }`}
+                      style={{ width: `${contextPct}%` }}
+                    />
+                  </div>
+                  <div className="text-right text-[11px] text-muted-foreground mt-1">
+                    {contextPct}%
+                    {contextModel && (
+                      <span className="ml-2 text-foreground font-mono">
+                        {contextModel}
+                      </span>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="text-xs text-muted-foreground">
+                  No context data yet
                 </div>
               )}
             </div>
@@ -689,54 +715,28 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
           )}
         </div>
 
-        {/* Context Section — real token usage from the TUI status snapshot. */}
+        {/* Git Section */}
         <div className="border-b border-border">
           <button
-            onClick={() => toggleSection("context")}
+            onClick={() => toggleSection("git")}
             className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
-            {expandedSections.context ? (
+            {expandedSections.git ? (
               <ChevronDown className="w-4 h-4" />
             ) : (
               <ChevronRight className="w-4 h-4" />
             )}
-            <Hash className="w-4 h-4 text-cyan-400" />
-            Context
+            <GitBranch className="w-4 h-4 text-cyan-400" />
+            Git
           </button>
-          {expandedSections.context && (
+          {expandedSections.git && (
             <div className="px-4 pb-3">
-              {contextMax > 0 ? (
-                <>
-                  <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
-                    <span>Used</span>
-                    <span className="font-mono text-muted-foreground">
-                      {formatTokenCount(contextCurrent)} / {formatTokenCount(contextMax)}
-                    </span>
-                  </div>
-                  <div className="h-2 w-full rounded bg-muted overflow-hidden">
-                    <div
-                      className={`h-full transition-all ${
-                        contextPct > 85
-                          ? "bg-red-500"
-                          : contextPct > 65
-                            ? "bg-yellow-500"
-                            : "bg-emerald-500"
-                      }`}
-                      style={{ width: `${contextPct}%` }}
-                    />
-                  </div>
-                  <div className="text-right text-[11px] text-muted-foreground mt-1">
-                    {contextPct}%
-                    {contextModel && (
-                      <span className="ml-2 text-foreground font-mono">
-                        {contextModel}
-                      </span>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <div className="text-xs text-muted-foreground">
-                  No context data yet
+              <div className="text-sm font-mono text-foreground">
+                {gitBranch || "Loading..."}
+              </div>
+              {tuiStatus?.cwd && (
+                <div className="text-xs text-muted-foreground mt-1 truncate" title={tuiStatus.cwd}>
+                  {tuiStatus.cwd}
                 </div>
               )}
             </div>

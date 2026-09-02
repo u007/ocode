@@ -36,12 +36,26 @@ export interface ConsoleEvent {
   ts: number;
 }
 
+export interface ResponseBody {
+  body: string;
+  base64Encoded: boolean;
+  truncated: boolean;
+  error?: string;
+}
+
 export interface NetworkEvent {
+  requestId: string;
   method: string;
   url: string;
   status: number;
   durationMs: number;
   ts: number;
+  blocked?: string;
+  contentType?: string;
+  size?: number;
+  requestHeaders?: Record<string, string>;
+  responseHeaders?: Record<string, string>;
+  postData?: string;
 }
 
 /** Server-authoritative navigation update (from the `browse_nav` bus event).
@@ -75,6 +89,8 @@ export interface BrowserTabState {
   collapsed: boolean;
   consoleEvents: ConsoleEvent[];
   networkEvents: NetworkEvent[];
+  responseBodies: Record<string, ResponseBody>;
+  perfMetrics: Record<string, number>;
 }
 
 interface BrowserState {
@@ -104,6 +120,8 @@ function defaultTab(persistedUrl = ""): BrowserTabState {
     collapsed: false,
     consoleEvents: [],
     networkEvents: [],
+    responseBodies: {},
+    perfMetrics: {},
   };
 }
 
@@ -180,6 +198,17 @@ export const browserActions = {
 
   clearNetwork(key: StateKey) {
     mutate(key, (t) => ({ ...t, networkEvents: [] }));
+  },
+
+  setResponseBody(key: StateKey, requestId: string, body: ResponseBody) {
+    mutate(key, (t) => ({
+      ...t,
+      responseBodies: { ...t.responseBodies, [requestId]: body },
+    }));
+  },
+
+  setPerformanceMetrics(key: StateKey, metrics: Record<string, number>) {
+    mutate(key, (t) => ({ ...t, perfMetrics: metrics }));
   },
 
   setError(key: StateKey, error: string) {

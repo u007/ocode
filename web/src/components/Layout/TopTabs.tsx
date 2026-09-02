@@ -127,7 +127,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
               key={tab.id}
               value={tab.id}
               ref={isActive ? activeRef : undefined}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors whitespace-nowrap data-[state=active]:bg-accent data-[state=active]:text-accent-foreground data-[state=active]:shadow-none text-muted-foreground hover:text-foreground hover:bg-muted shrink-0"
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-semibold transition-colors whitespace-nowrap data-[state=active]:bg-accent data-[state=active]:text-accent-foreground data-[state=active]:shadow-none text-muted-foreground hover:text-foreground hover:bg-muted shrink-0"
             >
               <Icon className="w-4 h-4" />
               <span className="hidden sm:inline">{tab.label}</span>

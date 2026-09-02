@@ -25,9 +25,11 @@ okf_version: 0.1
 
 - [Agent Replacement — Input Queuing & Stream Event Epochs](gotchas/agent-replacement-input-queuing.md) - Architectural decision and solution pattern for queuing user input during agent replacement and using stream event epochs to prevent stale events from mutating the new session.
 - [AIHubMix Test — Global Cache State Leakage](gotchas/aihubmix-test-cache-leak.md) - AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures
+- [Auto-Permission Prompt — TOCTOU Install Race](gotchas/auto-permission-prompt-atomic-race.md) - TOCTOU race in auto-permission prompt install: concurrent older build can downgrade the bundled gatekeeper prompt.
 - [Auto-Permission — Interpreter Scripts in Compound Commands](gotchas/auto-permission-interpreter-scripts-in-compound-commands.md) - Auto-permission custom-script detection must cover interpreter and runner forms (python x.py, node x.js, bun run x.ts, uv run x.py, npx tsx x.ts); the structured interpreter path only sees the FIRST command, so compound commands otherwise reach the generic LLM path with no script content and no truncation guard.
 - [Auto-Permission — Judge Must See the Session WorkDir, Not the Process CWD](gotchas/auto-permission-judge-process-cwd.md) - Desktop/web sessions call Agent.SetWorkDir without chdir-ing the process (the .app launches with cwd "/"). Every cwd-relative step in the auto-permission path must use the agent/permission-manager workDir, or the LLM judge denies in-project relative commands like `cd web && tsc` as escapes from the allowed roots.
 - [BashTool Dynamic Permission Manager Resolution](gotchas/shell-sandbox-dynamic-bash-permissions.md) - Gotcha: BashTool must resolve permission manager dynamically to ensure child agent enforcement follows updated policies, not stale parent pointers.
+- [Browser Panel — Documentation vs. Landed Behavior Mismatch](gotchas/browser-panel-transition-inconsistency.md) - Inconsistency between browser panel docs (showConnecting overlay) and actual implementation (indeterminate progress bar + everLoaded flag).
 - [Bubble Tea Cleanup Race — Orphaned Goroutines on Shutdown](gotchas/bubbletea-cleanup-race.md) - Bubble Tea runs tea.Cmd in untracked goroutines and does not wait for them during Program.Run shutdown, causing cleanup races with model-switch or /new commands that orphan agents or supervisors.
 - [Chat Input — Queued Messages Lost on Submission Failure](gotchas/chat-input-message-loss.md) - Queued messages are lost when submission fails — sendMessage returns false but the message is already shifted from the queue
 - [ChatPanel Autoscroll Bounce/Freeze](gotchas/autoscroll-bounce.md) - Root cause analysis of the autoscroll bounce/freeze bug: smooth-scrolling every live token without at-bottom state tracking causes competing animations that lock up the scroll position.
@@ -44,6 +46,7 @@ okf_version: 0.1
 - [Plugin Auto-Permission — Arbitrary Execution Risk](gotchas/plugin-auto-permission-security.md) - Updated gotcha: blanket OS temp auto-permission is now a deliberate v1.8.0 policy, not an unresolved regression. Historical v1.5.0 tightening preserved.
 - [Plugin Install Rollback Bug](gotchas/plugin-install-rollback-bug.md) - Security gotcha: failed plugin installs leave stale directories and orphaned MCP registrations due to incorrect path handling in deferred cleanup.
 - [Plugin Removal — Root Directory Deletion Risk](gotchas/plugin-removal-root-deletion.md) - Security gotcha: removal validation must reject deletion of an entire approved plugin root directory, not just validate child paths.
+- [Radix Select Empty String Sentinel](gotchas/radix-select-empty-string-sentinel.md) - Radix Select rejects empty strings as item values; use a sentinel value instead
 - [run_in_background Bash Commands Orphaned on Force-Killed ocode](gotchas/background-bash-orphan-on-force-kill.md) - Background bash commands started via the bash tool had no self-cleanup and would survive kill -9 on ocode; wrapped in the same parent-monitor mechanism local models already used
 - [Shell Execution Must Set cmd.Dir to Agent Workdir](gotchas/shell-sandbox-working-directory-not-set.md) - Gotcha: shell execution must set cmd.Dir to the agent/session workdir for both foreground and background commands, not relying on inherited process cwd.
 - [Skill Tool Test Fixture Gap — expectedBuiltinTools Missing load_skill](gotchas/skill-tool-test-fixture-gap.md) - expectedBuiltinTools in tool_test.go only lists "skill" but InitBuiltinTools also registers "load_skill" as a second alias, causing a stale test failure.
@@ -59,66 +62,84 @@ okf_version: 0.1
 
 - [okf/_schema/scorecard.template.md](okf/_schema/scorecard.template.md)
 - [okf/conduct/scores/deepseek-v4-flash.md](okf/conduct/scores/deepseek-v4-flash.md)
+- [okf/conduct/scores/glm-5.3-flash.md](okf/conduct/scores/glm-5.3-flash.md)
 - [okf/conduct/scores/mimo-v2.5.md](okf/conduct/scores/mimo-v2.5.md)
 - [okf/conduct/scores/muse-spark-1.2.md](okf/conduct/scores/muse-spark-1.2.md)
 - [okf/conduct/scores/tencent__hy3.md](okf/conduct/scores/tencent__hy3.md)
 - [okf/conduct/scores/tencent__hy3.with-skill.md](okf/conduct/scores/tencent__hy3.with-skill.md)
 - [okf/csharp/derived/csharp.mimo-v2.5.SKILL.md](okf/csharp/derived/csharp.mimo-v2.5.SKILL.md) - Corrective C# knowledge for mimo-v2.5, targeting the nullable-reference/ record-equality and pattern-matching gaps this model showed on the closed-book csharp benchmark (record class mutability, switch expression exhaustiveness, property-pattern syntax, `is` binding scope).
 
+- [okf/csharp/scores/glm-5.3-flash.md](okf/csharp/scores/glm-5.3-flash.md)
 - [okf/csharp/scores/mimo-v2.5.md](okf/csharp/scores/mimo-v2.5.md)
 - [okf/csharp/scores/muse-spark-1.2.md](okf/csharp/scores/muse-spark-1.2.md)
 - [okf/csharp/scores/tencent__hy3.md](okf/csharp/scores/tencent__hy3.md)
+- [okf/dotnet/scores/glm-5.3-flash.md](okf/dotnet/scores/glm-5.3-flash.md)
 - [okf/dotnet/scores/mimo-v2.5.md](okf/dotnet/scores/mimo-v2.5.md)
 - [okf/dotnet/scores/muse-spark-1.2.md](okf/dotnet/scores/muse-spark-1.2.md)
 - [okf/dotnet/scores/tencent__hy3.md](okf/dotnet/scores/tencent__hy3.md)
 - [okf/elixir/derived/elixir.tencent__hy3.SKILL.md](okf/elixir/derived/elixir.tencent__hy3.SKILL.md) - Corrective Elixir knowledge for tencent/hy3, targeting the pattern-matching gaps this model showed on the closed-book elixir benchmark (guard restrictions, the FunctionClauseError / MatchError failure modes, and the "match is not assignment" framing).
 
+- [okf/elixir/scores/glm-5.3-flash.md](okf/elixir/scores/glm-5.3-flash.md)
 - [okf/elixir/scores/mimo-v2.5.md](okf/elixir/scores/mimo-v2.5.md)
 - [okf/elixir/scores/muse-spark-1.2.md](okf/elixir/scores/muse-spark-1.2.md)
 - [okf/elixir/scores/tencent__hy3.md](okf/elixir/scores/tencent__hy3.md)
 - [okf/elixir/scores/tencent__hy3.with-skill.md](okf/elixir/scores/tencent__hy3.with-skill.md)
+- [okf/golang/scores/glm-5.3-flash.md](okf/golang/scores/glm-5.3-flash.md)
 - [okf/golang/scores/mimo-v2.5.md](okf/golang/scores/mimo-v2.5.md)
 - [okf/golang/scores/muse-spark-1.2.md](okf/golang/scores/muse-spark-1.2.md)
 - [okf/golang/scores/tencent__hy3.md](okf/golang/scores/tencent__hy3.md)
 - [okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md](okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md) - Corrective NestJS guidance for the exact area mimo-v2.5 tests weak on (shutdown/lifecycle hook order and triggers). Loaded only in NestJS repos when this exact model is active.
+- [okf/nestjs/scores/glm-5.3-flash.md](okf/nestjs/scores/glm-5.3-flash.md)
 - [okf/nestjs/scores/mimo-v2.5.md](okf/nestjs/scores/mimo-v2.5.md)
 - [okf/nestjs/scores/muse-spark-1.2.md](okf/nestjs/scores/muse-spark-1.2.md)
 - [okf/nestjs/scores/tencent__hy3.md](okf/nestjs/scores/tencent__hy3.md)
 - [okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md](okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md) - Corrective Next.js App Router guidance for the exact area mimo-v2.5 tests weak on (metadata). Loaded only in Next.js repos when this exact model is active.
+- [okf/nextjs/scores/glm-5.3-flash.md](okf/nextjs/scores/glm-5.3-flash.md)
 - [okf/nextjs/scores/mimo-v2.5.md](okf/nextjs/scores/mimo-v2.5.md)
 - [okf/nextjs/scores/muse-spark-1.2.md](okf/nextjs/scores/muse-spark-1.2.md)
 - [okf/nextjs/scores/tencent__hy3.md](okf/nextjs/scores/tencent__hy3.md)
+- [okf/php/scores/glm-5.3-flash.md](okf/php/scores/glm-5.3-flash.md)
 - [okf/php/scores/mimo-v2.5.md](okf/php/scores/mimo-v2.5.md)
 - [okf/php/scores/muse-spark-1.2.md](okf/php/scores/muse-spark-1.2.md)
 - [okf/php/scores/tencent__hy3.md](okf/php/scores/tencent__hy3.md)
+- [okf/python/scores/glm-5.3-flash.md](okf/python/scores/glm-5.3-flash.md)
 - [okf/python/scores/mimo-v2.5.md](okf/python/scores/mimo-v2.5.md)
 - [okf/python/scores/muse-spark-1.2.md](okf/python/scores/muse-spark-1.2.md)
 - [okf/python/scores/tencent__hy3.md](okf/python/scores/tencent__hy3.md)
 - [okf/react/derived/react.claude-opus-4-8.SKILL.md](okf/react/derived/react.claude-opus-4-8.SKILL.md) - Corrective React guidance for the exact areas claude-opus-4-8 tests weak on (RSC boundaries, Suspense, refs). Loaded only in React repos when this exact model is active.
 - [okf/react/scores/claude-opus-4-8.md](okf/react/scores/claude-opus-4-8.md)
+- [okf/react/scores/glm-5.3-flash.md](okf/react/scores/glm-5.3-flash.md)
 - [okf/react/scores/mimo-v2.5.md](okf/react/scores/mimo-v2.5.md)
 - [okf/react/scores/muse-spark-1.2.md](okf/react/scores/muse-spark-1.2.md)
 - [okf/react/scores/tencent__hy3.md](okf/react/scores/tencent__hy3.md)
 - [okf/ror/derived/ror.mimo-v2.5.SKILL.md](okf/ror/derived/ror.mimo-v2.5.SKILL.md) - Corrective Rails migrations/schema guidance for the exact gaps mimo-v2.5 tests weak on — the purpose of the schema.rb/structure.sql dump, and the two classic dangerous-migration patterns on large production tables (locking column defaults/NOT NULL, and index builds). Loaded only in Rails repos when this exact model is active.
+- [okf/ror/scores/glm-5.3-flash.md](okf/ror/scores/glm-5.3-flash.md)
 - [okf/ror/scores/mimo-v2.5.md](okf/ror/scores/mimo-v2.5.md)
 - [okf/ror/scores/muse-spark-1.2.md](okf/ror/scores/muse-spark-1.2.md)
 - [okf/ror/scores/tencent__hy3.md](okf/ror/scores/tencent__hy3.md)
+- [okf/ruby/scores/glm-5.3-flash.md](okf/ruby/scores/glm-5.3-flash.md)
 - [okf/ruby/scores/mimo-v2.5.md](okf/ruby/scores/mimo-v2.5.md)
 - [okf/ruby/scores/muse-spark-1.2.md](okf/ruby/scores/muse-spark-1.2.md)
 - [okf/ruby/scores/tencent__hy3.md](okf/ruby/scores/tencent__hy3.md)
+- [okf/rust/derived/rust.glm-5.3-flash.SKILL.md](okf/rust/derived/rust.glm-5.3-flash.SKILL.md) - Corrective Rust async knowledge for glm-5.3-flash, targeting the one gap this model showed on the closed-book rust benchmark: it describes the effects of async (futures need a runtime; blocking starves tasks) without stating the underlying mechanism (std ships no executor; scheduling is cooperative and yields only at `.await`).
+
+- [okf/rust/scores/glm-5.3-flash.md](okf/rust/scores/glm-5.3-flash.md)
 - [okf/rust/scores/mimo-v2.5.md](okf/rust/scores/mimo-v2.5.md)
 - [okf/rust/scores/muse-spark-1.2.md](okf/rust/scores/muse-spark-1.2.md)
 - [okf/rust/scores/tencent__hy3.md](okf/rust/scores/tencent__hy3.md)
 - [okf/tanstack/derived/tanstack.mimo-v2.5.SKILL.md](okf/tanstack/derived/tanstack.mimo-v2.5.SKILL.md) - Corrective TanStack Router knowledge for mimo-v2.5, targeting the router-search gaps this model showed on the closed-book tanstack benchmark (reading search params via useSearch(), loaderDeps for search-driven loaders, and the type-safety surface useSearch() gets from validateSearch).
 
+- [okf/tanstack/scores/glm-5.3-flash.md](okf/tanstack/scores/glm-5.3-flash.md)
 - [okf/tanstack/scores/mimo-v2.5.md](okf/tanstack/scores/mimo-v2.5.md)
 - [okf/tanstack/scores/muse-spark-1.2.md](okf/tanstack/scores/muse-spark-1.2.md)
 - [okf/tanstack/scores/tencent__hy3.md](okf/tanstack/scores/tencent__hy3.md)
 - [okf/vbnet/derived/vbnet.mimo-v2.5.SKILL.md](okf/vbnet/derived/vbnet.mimo-v2.5.SKILL.md) - Corrective VB.NET guidance for the exact area mimo-v2.5 tests weak on (WithEvents/Handles vs AddHandler/RemoveHandler event wiring). Loaded only in VB.NET repos when this exact model is active.
 - [okf/vbnet/derived/vbnet.muse-spark-1.2.SKILL.md](okf/vbnet/derived/vbnet.muse-spark-1.2.SKILL.md) - Corrective VB.NET guidance for the exact area muse-spark-1.2 tests weak on (WithEvents/Handles and AddHandler/RemoveHandler event-wiring edge cases). Loaded only in VB.NET repos when this exact model is active.
+- [okf/vbnet/scores/glm-5.3-flash.md](okf/vbnet/scores/glm-5.3-flash.md)
 - [okf/vbnet/scores/mimo-v2.5.md](okf/vbnet/scores/mimo-v2.5.md)
 - [okf/vbnet/scores/muse-spark-1.2.md](okf/vbnet/scores/muse-spark-1.2.md)
 - [okf/vbnet/scores/tencent__hy3.md](okf/vbnet/scores/tencent__hy3.md)
+- [OKF Naming Convention Enforcement](okf/_schema/naming-convention-enforcement.md) - OKF naming conventions for question IDs, bundle entries, and index format to maintain bundle integrity.
 
 # superpowers
 
@@ -150,70 +171,86 @@ okf_version: 0.1
 - [stack-detection.md](okf/_schema/stack-detection.md)
 - [deepseek-v4-flash.md](okf/conduct/answers/deepseek-v4-flash.md)
 - [deepseek-v4-flash.spotcheck.md](okf/conduct/answers/deepseek-v4-flash.spotcheck.md)
+- [glm-5.3-flash.md](okf/conduct/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/conduct/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/conduct/answers/muse-spark-1.2.md)
 - [tencent__hy3.digest-spotcheck.md](okf/conduct/answers/tencent__hy3.digest-spotcheck.md)
 - [tencent__hy3.md](okf/conduct/answers/tencent__hy3.md)
 - [tencent__hy3.with-skill.md](okf/conduct/answers/tencent__hy3.with-skill.md)
 - [conduct.deepseek-v4-flash.SKILL.md](okf/conduct/derived/conduct.deepseek-v4-flash.SKILL.md)
+- [conduct.glm-5.3-flash.SKILL.md](okf/conduct/derived/conduct.glm-5.3-flash.SKILL.md)
 - [conduct.mimo-v2.5.SKILL.md](okf/conduct/derived/conduct.mimo-v2.5.SKILL.md)
 - [conduct.muse-spark-1.2.SKILL.md](okf/conduct/derived/conduct.muse-spark-1.2.SKILL.md)
 - [conduct.tencent__hy3.SKILL.md](okf/conduct/derived/conduct.tencent__hy3.SKILL.md)
 - [questions.md](okf/conduct/questions.md)
+- [glm-5.3-flash.md](okf/csharp/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/csharp/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/csharp/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/csharp/answers/tencent__hy3.md)
 - [questions.md](okf/csharp/questions.md)
+- [glm-5.3-flash.md](okf/dotnet/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/dotnet/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/dotnet/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/dotnet/answers/tencent__hy3.md)
 - [questions.md](okf/dotnet/questions.md)
+- [glm-5.3-flash.md](okf/elixir/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/elixir/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/elixir/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/elixir/answers/tencent__hy3.md)
 - [tencent__hy3.with-skill.md](okf/elixir/answers/tencent__hy3.with-skill.md)
 - [questions.md](okf/elixir/questions.md)
+- [glm-5.3-flash.md](okf/golang/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/golang/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/golang/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/golang/answers/tencent__hy3.md)
 - [questions.md](okf/golang/questions.md)
+- [glm-5.3-flash.md](okf/nestjs/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/nestjs/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/nestjs/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/nestjs/answers/tencent__hy3.md)
 - [questions.md](okf/nestjs/questions.md)
+- [glm-5.3-flash.md](okf/nextjs/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/nextjs/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/nextjs/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/nextjs/answers/tencent__hy3.md)
 - [questions.md](okf/nextjs/questions.md)
+- [glm-5.3-flash.md](okf/php/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/php/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/php/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/php/answers/tencent__hy3.md)
 - [questions.md](okf/php/questions.md)
+- [glm-5.3-flash.md](okf/python/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/python/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/python/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/python/answers/tencent__hy3.md)
 - [questions.md](okf/python/questions.md)
+- [glm-5.3-flash.md](okf/react/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/react/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/react/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/react/answers/tencent__hy3.md)
 - [questions.md](okf/react/questions.md)
 - [README.md](okf/react/scores/README.md)
+- [glm-5.3-flash.md](okf/ror/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/ror/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/ror/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/ror/answers/tencent__hy3.md)
 - [questions.md](okf/ror/questions.md)
+- [glm-5.3-flash.md](okf/ruby/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/ruby/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/ruby/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/ruby/answers/tencent__hy3.md)
 - [questions.md](okf/ruby/questions.md)
+- [glm-5.3-flash.md](okf/rust/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/rust/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/rust/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/rust/answers/tencent__hy3.md)
 - [questions.md](okf/rust/questions.md)
+- [glm-5.3-flash.md](okf/tanstack/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/tanstack/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/tanstack/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/tanstack/answers/tencent__hy3.md)
 - [questions.md](okf/tanstack/questions.md)
+- [glm-5.3-flash.md](okf/vbnet/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/vbnet/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/vbnet/answers/muse-spark-1.2.md)
 - [tencent__hy3.md](okf/vbnet/answers/tencent__hy3.md)

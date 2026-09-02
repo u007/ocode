@@ -5,6 +5,7 @@ import { AddressBar } from "./AddressBar";
 import { DevConsole } from "./DevConsole";
 import { useBrowserMessages } from "./useBrowserMessages";
 import { ChromeViewport } from "./ChromeViewport";
+import { LoadingSpinner } from "./LoadingSpinner";
 
 // Frontend parity of Go's isLoopbackHost — handles [::1]:port via URL.hostname
 function isLoopbackHost(hostname: string): boolean {
@@ -22,6 +23,10 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
   const [base, setBase] = useState<string | null>(null);
   const [bypassing, setBypassing] = useState(false);
   const [dismissedLoopbackWarning, setDismissedLoopbackWarning] = useState(false);
+  // True once any navigation has completed without error. The full-page
+  // "Connecting to <host>" overlay only shows before that point — later
+  // navigations keep the page visible and use just the top progress bar.
+  const [everLoaded, setEverLoaded] = useState(false);
   const loadGeneration = useRef(0);
 
   useEffect(() => {
@@ -87,6 +92,17 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
     setDismissedLoopbackWarning(false);
   }, [s?.url]);
 
+  // A different surface (stateKey) starts its own first-load lifecycle.
+  useEffect(() => {
+    setEverLoaded(false);
+  }, [stateKey]);
+
+  // First successful nav flips the "connecting" overlay off for good; the
+  // indeterminate top bar alone keeps signaling later navigations.
+  useEffect(() => {
+    if (s && s.status > 0 && !s.loading && !s.error) setEverLoaded(true);
+  }, [s?.status, s?.loading, s?.error, s]);
+
   // Only local/private navigations can show the bypass interstitial — a
   // Chrome-mode error must never offer to bypass a public host.
   const isTLSBypassable = !!s?.error && s.error.includes("TLS certificate") && s.mode === "local";
@@ -133,7 +149,7 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
   if (!s) return null;
 
   return (
-    <div className="flex flex-col h-full min-w-0" data-testid={`browser-${mode}`}>
+    <div className="flex flex-col h-full min-h-0 min-w-0" data-testid={`browser-${mode}`}>
       <AddressBar
         url={s.url}
         status={s.status}
@@ -208,7 +224,7 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
           </button>
         </div>
       )}
-      <div className="flex-1 min-h-0">
+      <div className="relative flex-1 min-h-0">
         {showIframe && effectiveMode === "local" && (
           <iframe
             ref={iframeRef}
@@ -221,12 +237,51 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
         {showIframe && effectiveMode === "chrome" && (
           <ChromeViewport stateKey={stateKey} browseBase={base} url={s.url} />
         )}
+        {showIframe && s.loading && (
+          <div
+            role="progressbar"
+            aria-label="Loading page"
+            data-testid="browser-loading-bar"
+            className="pointer-events-none absolute inset-x-0 top-0 h-0.5 overflow-hidden"
+          >
+            {/* Safari-style indeterminate sweep; freezes under reduced motion. */}
+            <div className="h-full w-1/3 bg-blue-500 animate-browser-load motion-reduce:animate-none" />
+          </div>
+        )}
+        {/* Local mode: the blank iframe gets the full connecting treatment.
+            Chrome mode instead relies on ChromeViewport's own first-frame
+            spinner — rendering both would stack two centered indicators. */}
+        {showIframe && s.loading && !everLoaded && effectiveMode === "local" && (
+          <div
+            data-testid="browser-loading-overlay"
+            className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-3"
+          >
+            <LoadingSpinner className="w-6 h-6" />
+            <span className="text-xs text-muted-foreground">
+              Connecting to {(() => {
+                if (!s.url) return "";
+                try {
+                  return new URL(normalizeBrowseURL(s.url)).host;
+                } catch {
+                  return s.url;
+                }
+              })()}…
+            </span>
+          </div>
+        )}
       </div>
       <DevConsole
         consoleEvents={s.consoleEvents}
         networkEvents={s.networkEvents}
+        responseBodies={s.responseBodies}
+        perfMetrics={s.perfMetrics}
         onClearConsole={() => actions.clearConsole(stateKey)}
         onClearNetwork={() => actions.clearNetwork(stateKey)}
+        onRequestBody={(requestId) => {
+          // Send getResponseBody request via CDP socket.
+          // The socket is accessed through the ChromeViewport's parent context.
+          window.dispatchEvent(new CustomEvent("cdp:send", { detail: { t: "getResponseBody", requestId } }));
+        }}
       />
     </div>
   );

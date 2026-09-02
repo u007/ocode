@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useProjectState } from "../../stores/projectStore";
-import { useChatSelector } from "../../stores/chatStore";
+import { useChatSelector, type ChatState } from "../../stores/chatStore";
+import { useTerminalState } from "../../stores/terminalStore";
 import type { Project, ProjectGroup } from "../../api/types";
 import {
   DndContext,
@@ -33,6 +34,11 @@ import {
   Pencil,
   FolderTree,
   X,
+  Bell,
+  AlertTriangle,
+  Pause,
+  ShieldAlert,
+  MessageSquare,
 } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -44,6 +50,18 @@ import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { computeProjectDrag } from "../../lib/projectDrag";
 
 type SessionStatus = "none" | "idle" | "running";
+
+type ProjectIndicators = {
+  sessionCount: number;
+  streamingCount: number;
+  stalledCount: number;
+  pendingCount: number;
+  terminalAlertCount: number;
+  hasRealSession: boolean;
+  anyStreaming: boolean;
+  anyStalled: boolean;
+  status: SessionStatus;
+};
 
 type ProjectSidebarItem = {
   type: "group" | "project";
@@ -99,28 +117,74 @@ export function buildProjectSidebarOrder(
   return { orderedProjects, visibleItems };
 }
 
-/** Derive per-project session status from open tabs + chat slices. */
-function useProjectSessionStatus(projectPath: string): SessionStatus {
+/** Derive per-project indicators from open tabs, chat slices, and terminal alerts.
+ *  Covers: # sessions open, streaming count / stalled (chat streaming stopped),
+ *  pending permission, and terminal beep (alerted). Optimized to only re-render
+ *  when the aggregate counts actually change, not on every streamed token. */
+function useProjectIndicators(projectPath: string): ProjectIndicators {
   const { state: projectState } = useProjectState();
-  const tabs = projectState.tabsByProject[projectPath];
-  // A boolean selector: only re-renders when this project's aggregate
-  // streaming state actually flips, not on every streamed token (isStreaming
-  // only changes at turn start/end, unlike `live`/`messages`).
-  const anyStreaming = useChatSelector((s) => {
-    if (!tabs) return false;
-    for (const tab of tabs) {
-      if (tab.id.startsWith("new-")) continue;
-      if (s.sessions[tab.id]?.isStreaming) return true;
-    }
-    return false;
-  });
+  const tabs = projectState.tabsByProject[projectPath] ?? [];
+  const sessionCount = tabs.length;
+  const hasRealSession = useMemo(
+    () => tabs.some((t) => !t.id.startsWith("new-")),
+    [tabs],
+  );
 
-  return useMemo(() => {
-    if (!tabs || tabs.length === 0) return "none";
+  // Chat-derived aggregates: streamingCount, stalledCount, pendingCount.
+  // The selector closes over `tabs` so the derived counts update even without
+  // a chat dispatch when tabs are added/removed.
+  const chatAgg = useChatSelector(
+    (s: ChatState) => {
+      let streamingCount = 0;
+      let stalledCount = 0;
+      let pendingCount = 0;
+      for (const tab of tabs) {
+        if (tab.id.startsWith("new-")) continue;
+        const slice = s.sessions[tab.id];
+        if (!slice) continue;
+        const active = slice.isStreaming || slice.turnActive;
+        if (slice.turnStalled) stalledCount++;
+        else if (active) streamingCount++;
+        if (slice.pendingPermission || slice.pendingQuestion) pendingCount++;
+      }
+      return { streamingCount, stalledCount, pendingCount };
+    },
+    (a, b) =>
+      a.streamingCount === b.streamingCount &&
+      a.stalledCount === b.stalledCount &&
+      a.pendingCount === b.pendingCount,
+  );
+
+  // Terminal-derived aggregate: how many backgrounded terminals emitted a bell.
+  const { state: terminalState } = useTerminalState();
+  const terminalAlertCount = useMemo(() => {
+    const entry = terminalState.byProject[projectPath];
+    if (!entry?.alerts) return 0;
+    let c = 0;
+    for (const v of Object.values(entry.alerts)) if (v) c++;
+    return c;
+  }, [terminalState, projectPath]);
+
+  const anyStreaming = chatAgg.streamingCount > 0;
+  const anyStalled = chatAgg.stalledCount > 0;
+
+  const status: SessionStatus = useMemo(() => {
+    if (sessionCount === 0) return "none";
     if (anyStreaming) return "running";
-    const hasRealSession = tabs.some((t) => !t.id.startsWith("new-"));
     return hasRealSession ? "idle" : "none";
-  }, [tabs, anyStreaming]);
+  }, [sessionCount, anyStreaming, hasRealSession]);
+
+  return {
+    sessionCount,
+    streamingCount: chatAgg.streamingCount,
+    stalledCount: chatAgg.stalledCount,
+    pendingCount: chatAgg.pendingCount,
+    terminalAlertCount,
+    hasRealSession,
+    anyStreaming,
+    anyStalled,
+    status,
+  };
 }
 
 function SessionDot({ status }: { status: SessionStatus }) {
@@ -130,9 +194,70 @@ function SessionDot({ status }: { status: SessionStatus }) {
       className={`shrink-0 h-2 w-2 rounded-full ${
         status === "running"
           ? "bg-blue-500 animate-pulse"
-          : "bg-muted"
+          : "bg-muted-foreground/30"
       }`}
     />
+  );
+}
+
+function ProjectBadges({ indicators }: { indicators: ProjectIndicators }) {
+  const { sessionCount, streamingCount, stalledCount, pendingCount, terminalAlertCount } = indicators;
+  const hasAny = sessionCount > 0 || streamingCount > 0 || stalledCount > 0 || pendingCount > 0 || terminalAlertCount > 0;
+  if (!hasAny) return null;
+  return (
+    <span className="flex items-center gap-1 shrink-0">
+      {/* # sessions open */}
+      {sessionCount > 0 && (
+        <span
+          className="inline-flex items-center gap-0.5 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground"
+          title={`${sessionCount} session${sessionCount === 1 ? "" : "s"} open`}
+        >
+          <MessageSquare className="w-2.5 h-2.5" />
+          {sessionCount}
+        </span>
+      )}
+      {/* streaming count */}
+      {streamingCount > 0 && (
+        <span
+          className="inline-flex items-center gap-0.5 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-blue-600 dark:text-blue-400 border border-blue-500/20"
+          title={`${streamingCount} streaming`}
+        >
+          <Loader2 className="w-2.5 h-2.5 animate-spin" />
+          {streamingCount}
+        </span>
+      )}
+      {/* chat streaming stopped / stalled */}
+      {stalledCount > 0 && (
+        <span
+          className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-600 dark:text-amber-400 border border-amber-500/30"
+          title={`${stalledCount} stalled (streaming stopped)`}
+        >
+          <Pause className="w-2.5 h-2.5" />
+          {stalledCount}
+          <AlertTriangle className="w-2.5 h-2.5" />
+        </span>
+      )}
+      {/* pending permission / question */}
+      {pendingCount > 0 && (
+        <span
+          className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:text-amber-300 border border-amber-500/40"
+          title={`${pendingCount} pending permission`}
+        >
+          <ShieldAlert className="w-2.5 h-2.5" />
+          {pendingCount}
+        </span>
+      )}
+      {/* terminal beep / bell */}
+      {terminalAlertCount > 0 && (
+        <span
+          className="inline-flex items-center gap-0.5 rounded-full bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-red-600 dark:text-red-400 border border-red-500/30"
+          title={`${terminalAlertCount} terminal beep`}
+        >
+          <Bell className="w-2.5 h-2.5" />
+          {terminalAlertCount}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -199,7 +324,8 @@ function SortableProjectRow({
   onRemoveFromGroup,
   groups,
 }: SortableProjectRowProps) {
-  const status = useProjectSessionStatus(project.path);
+  const indicators = useProjectIndicators(project.path);
+  const status = indicators.status;
   const rename = useInlineRename(project.name, onRename);
 
   const contextItems: ContextMenuItem[] = useMemo(() => {
@@ -306,7 +432,10 @@ function SortableProjectRow({
               </>
             )}
           </div>
-          <SessionDot status={status} />
+          <span className="flex items-center gap-1 shrink-0">
+            <ProjectBadges indicators={indicators} />
+            <SessionDot status={status} />
+          </span>
           <Button
             variant="ghost"
             size="sm"
@@ -474,6 +603,85 @@ function CreateGroupDialog({
 
 // ── Main Sidebar ────────────────────────────────────────────────────────────
 
+function CollapsedProjectButton({
+  project,
+  isActive,
+  onSelect,
+}: {
+  project: Project;
+  isActive: boolean;
+  onSelect: () => void;
+}) {
+  const indicators = useProjectIndicators(project.path);
+  const showCount = indicators.sessionCount > 0;
+  // Prioritize overlays: pending > terminal alert > streaming > stalled
+  const hasPending = indicators.pendingCount > 0;
+  const hasAlert = indicators.terminalAlertCount > 0;
+  const hasStreaming = indicators.streamingCount > 0;
+  const hasStalled = indicators.stalledCount > 0;
+  const overlayColor = hasPending
+    ? "bg-amber-500"
+    : hasAlert
+      ? "bg-red-500"
+      : hasStreaming
+        ? "bg-blue-500"
+        : hasStalled
+          ? "bg-amber-400"
+          : null;
+  const overlayTitle = hasPending
+    ? `${indicators.pendingCount} pending permission`
+    : hasAlert
+      ? `${indicators.terminalAlertCount} terminal beep`
+      : hasStreaming
+        ? `${indicators.streamingCount} streaming`
+        : hasStalled
+          ? `${indicators.stalledCount} stalled`
+          : "";
+  const tooltipDetails = [
+    `${indicators.sessionCount} session${indicators.sessionCount === 1 ? "" : "s"}`,
+    hasStreaming ? `${indicators.streamingCount} streaming` : null,
+    hasStalled ? `${indicators.stalledCount} stalled` : null,
+    hasPending ? `${indicators.pendingCount} pending` : null,
+    hasAlert ? `${indicators.terminalAlertCount} beep` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label={project.name}
+          className={`relative p-2 h-9 w-9 ${
+            isActive ? "bg-primary/15 text-primary" : "text-muted-foreground"
+          }`}
+          onClick={onSelect}
+        >
+          <FolderGit2 className="w-4 h-4" />
+          {showCount && (
+            <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full bg-muted-foreground text-white text-[8px] leading-[14px] font-bold text-center border border-background">
+              {indicators.sessionCount}
+            </span>
+          )}
+          {overlayColor && (
+            <span
+              title={overlayTitle}
+              className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-background ${overlayColor} ${hasStreaming ? "animate-pulse" : ""}`}
+            />
+          )}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="right">
+        <div className="text-xs">
+          <div className="font-medium">{project.name}</div>
+          {showCount && <div className="text-muted-foreground">{tooltipDetails}</div>}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 interface Props {
   isOpen: boolean;
   onToggle: () => void;
@@ -598,24 +806,12 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
           {state.projects.length > 0 && (
             <div className="flex flex-col gap-1">
               {orderedProjects.slice(0, 5).map((p) => (
-                <Tooltip key={p.path}>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      aria-label={p.name}
-                      className={`p-2 h-9 w-9 ${
-                        state.activeProject?.path === p.path
-                          ? "bg-primary/15 text-primary"
-                          : "text-muted-foreground"
-                      }`}
-                      onClick={() => selectProject(p)}
-                    >
-                      <FolderGit2 className="w-4 h-4" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="right">{p.name}</TooltipContent>
-                </Tooltip>
+                <CollapsedProjectButton
+                  key={p.path}
+                  project={p}
+                  isActive={state.activeProject?.path === p.path}
+                  onSelect={() => selectProject(p)}
+                />
               ))}
             </div>
           )}
