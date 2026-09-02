@@ -23,7 +23,7 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   activeAgent: string;
-  onModelClick?: (tab: "main" | "small" | "advisor" | "permission") => void;
+  onModelClick?: (tab: "main" | "small" | "advisor" | "permission" | "explorer" | "context") => void;
   // When true the sidebar becomes a fixed overlay (right side) with a backdrop
   // instead of pushing the chat column. Used for the mobile layout (≤767px).
   isMobile?: boolean;
@@ -47,6 +47,10 @@ interface ConfigState {
   advisorEnabled?: boolean;
   smallModel?: string;
   smallModelEnabled?: boolean;
+  explorerModel?: string;
+  explorerModelEnabled?: boolean;
+  contextModel?: string;
+  contextModelEnabled?: boolean;
 }
 
 // Expanded/collapsed state of the sidebar sections. Persisted to localStorage
@@ -100,6 +104,8 @@ export default function CoworkSidebar({
   const [permLoading, setPermLoading] = useState(false);
   const [advisorLoading, setAdvisorLoading] = useState(false);
   const [smallLoading, setSmallLoading] = useState(false);
+  const [explorerLoading, setExplorerLoading] = useState(false);
+  const [contextLoading, setContextLoading] = useState(false);
   // Locally-tracked active agent. The `activeAgent` prop is fixed by the
   // parent, so switching agents is reflected via this optimistic state.
   const [selectedAgent, setSelectedAgent] = useState<string>(activeAgent);
@@ -225,8 +231,10 @@ export default function CoworkSidebar({
       api.getAdvisor().catch(() => null),
       api.getAdvisorEnabled().catch(() => null),
       api.getSmallModelWithEnabled().catch(() => null),
+      api.getExplorerModel().catch(() => null),
+      api.getContextModel().catch(() => null),
     ])
-      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, advisorRes, advisorEnabledRes, smallRes]) => {
+      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, advisorRes, advisorEnabledRes, smallRes, explorerRes, contextRes]) => {
         setConfig({
           model: modelRes?.model || "",
           thinkingBudget: thinkingRes?.budget,
@@ -240,6 +248,10 @@ export default function CoworkSidebar({
           advisorEnabled: advisorEnabledRes?.enabled,
           smallModel: smallRes?.model || "",
           smallModelEnabled: smallRes?.enabled,
+          explorerModel: explorerRes?.model || "",
+          explorerModelEnabled: explorerRes?.enabled,
+          contextModel: contextRes?.model || "",
+          contextModelEnabled: contextRes?.enabled,
         });
       })
       .catch(console.error);
@@ -380,6 +392,44 @@ export default function CoworkSidebar({
       dispatch({ type: "SET_SMALL_MODEL_ENABLED", enabled: current ?? false });
     } finally {
       setSmallLoading(false);
+    }
+  };
+
+  const toggleExplorer = async () => {
+    const current = tuiStatus?.explorer_model_enabled ?? config.explorerModelEnabled ?? false;
+    const next = !current;
+    setExplorerLoading(true);
+    try {
+      await api.setExplorerModelEnabled(next);
+      if (sessionId) {
+        const status = await api.getSessionStatus(sessionId);
+        dispatch({ type: "SET_TUI_STATUS", sessionId, status });
+      } else {
+        setConfig((prev) => ({ ...prev, explorerModelEnabled: next }));
+      }
+    } catch (e) {
+      console.error("toggle explorer model error", e);
+    } finally {
+      setExplorerLoading(false);
+    }
+  };
+
+  const toggleContext = async () => {
+    const current = tuiStatus?.context_agent_model_enabled ?? config.contextModelEnabled ?? false;
+    const next = !current;
+    setContextLoading(true);
+    try {
+      await api.setContextModelEnabled(next);
+      if (sessionId) {
+        const status = await api.getSessionStatus(sessionId);
+        dispatch({ type: "SET_TUI_STATUS", sessionId, status });
+      } else {
+        setConfig((prev) => ({ ...prev, contextModelEnabled: next }));
+      }
+    } catch (e) {
+      console.error("toggle context model error", e);
+    } finally {
+      setContextLoading(false);
     }
   };
 
@@ -547,6 +597,66 @@ export default function CoworkSidebar({
               checked={Boolean(tuiStatus?.small_model_enabled ?? config.smallModelEnabled ?? globalSmallModelEnabled)}
               disabled={smallLoading}
               onChange={toggleSmall}
+              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+            />
+          </label>
+          {/* Explorer model — model picker + on/off toggle for the explore/scout
+              agents; off or unset falls back to the small model, then the main
+              model (mirrors TUI's explorer: ●on/○off <model> row). */}
+          <button
+            type="button"
+            onClick={() => onModelClick?.("explorer")}
+            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-muted disabled:cursor-default disabled:hover:bg-transparent"
+            disabled={!onModelClick}
+            title="Pick the explorer agent (explore/scout) model"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">Explorer</span>
+              <span className={`font-mono text-[11px] ${(tuiStatus?.explorer_model_enabled ?? config.explorerModelEnabled) ? "text-emerald-400" : "text-muted-foreground"}`}>
+                {(tuiStatus?.explorer_model_enabled ?? config.explorerModelEnabled) ? "●on" : "○off"}
+              </span>
+            </div>
+            <div className="text-foreground font-mono truncate">
+              {tuiStatus?.explorer_model || config.explorerModel || "(auto)"}
+            </div>
+          </button>
+          <label className="flex items-center justify-between cursor-pointer rounded px-1 py-1 hover:bg-muted">
+            <span className="text-xs text-muted-foreground">Explorer model enabled</span>
+            <input
+              type="checkbox"
+              checked={Boolean(tuiStatus?.explorer_model_enabled ?? config.explorerModelEnabled)}
+              disabled={explorerLoading}
+              onChange={toggleExplorer}
+              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+            />
+          </label>
+          {/* Context model — model picker + on/off toggle for the context/doc-sync
+              agents; off or unset falls back to the small model, then the main
+              model (mirrors TUI's context: ●on/○off <model> row). */}
+          <button
+            type="button"
+            onClick={() => onModelClick?.("context")}
+            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-muted disabled:cursor-default disabled:hover:bg-transparent"
+            disabled={!onModelClick}
+            title="Pick the context agent (context/doc-sync) model"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">Context</span>
+              <span className={`font-mono text-[11px] ${(tuiStatus?.context_agent_model_enabled ?? config.contextModelEnabled) ? "text-emerald-400" : "text-muted-foreground"}`}>
+                {(tuiStatus?.context_agent_model_enabled ?? config.contextModelEnabled) ? "●on" : "○off"}
+              </span>
+            </div>
+            <div className="text-foreground font-mono truncate">
+              {tuiStatus?.context_agent_model || config.contextModel || "(auto)"}
+            </div>
+          </button>
+          <label className="flex items-center justify-between cursor-pointer rounded px-1 py-1 hover:bg-muted">
+            <span className="text-xs text-muted-foreground">Context model enabled</span>
+            <input
+              type="checkbox"
+              checked={Boolean(tuiStatus?.context_agent_model_enabled ?? config.contextModelEnabled)}
+              disabled={contextLoading}
+              onChange={toggleContext}
               className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
             />
           </label>

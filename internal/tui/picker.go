@@ -169,6 +169,12 @@ func (m *model) refreshModelPickerItems() {
 	if kind == "recap-model" {
 		m.prependRecapModelClearOption()
 	}
+	if kind == "explorer-model" {
+		m.prependExplorerModelClearOption()
+	}
+	if kind == "context-model" {
+		m.prependContextModelClearOption()
+	}
 	if kind == "autocontinue-model" {
 		m.appendAutoContinueModelLocalModels()
 		m.prependAutoContinueModelClearOption()
@@ -877,7 +883,7 @@ func (m model) pickerRowForY(y int) (int, bool) {
 		return 0, false
 	}
 	row := start + idx
-	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "explorer-model" || m.pickerKind == "context-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 	if !isFiltered && row < len(m.pickerIsHeader) && m.pickerIsHeader[row] {
 		return 0, false
 	}
@@ -893,7 +899,7 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 		m.closePicker()
 		return m, nil
 	}
-	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "explorer-model" || m.pickerKind == "context-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 	if !isFiltered && index < len(m.pickerIsHeader) && m.pickerIsHeader[index] {
 		m.closePicker()
 		return m, nil
@@ -946,6 +952,12 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 	if kind == "recap-model" {
 		return m.handleCommand("/recap model " + selected)
 	}
+	if kind == "explorer-model" {
+		return m.handleCommand("/explorer-model " + selected)
+	}
+	if kind == "context-model" {
+		return m.handleCommand("/context-model " + selected)
+	}
 	if kind == "autocontinue-model" {
 		return m.handleCommand("/autocontinue model " + selected)
 	}
@@ -965,7 +977,7 @@ func (m model) renderPicker() string {
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
 	if isMultiSelectPickerKind(m.pickerKind) {
 		hintLine = hintStyle.Render("↑/↓ move · Space toggle · Enter confirm · Esc cancel · type to filter")
-	} else if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "image-model" {
+	} else if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "explorer-model" || m.pickerKind == "context-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "image-model" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+f favorite · ctrl+r refresh · Esc cancel · type to filter")
 	} else if m.pickerKind == "advisor" || m.pickerKind == "ocr-model" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+r refresh · Esc cancel · type to filter")
@@ -1048,7 +1060,7 @@ func (m model) renderPicker() string {
 		}
 		body.WriteString(hintStyle.Render(empty))
 	} else {
-		isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
+		isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "explorer-model" || m.pickerKind == "context-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 		start, end := m.pickerVisibleRange()
 		for i := start; i < end; i++ {
 			line := items[i]
@@ -1294,6 +1306,44 @@ func (m *model) prependRecapModelClearOption() {
 		return
 	}
 	m.pickerItems = append([]string{"  auto (resolve from priority list)"}, m.pickerItems...)
+	m.pickerValues = append([]string{"auto"}, m.pickerValues...)
+	m.pickerIsHeader = append([]bool{false}, m.pickerIsHeader...)
+}
+
+func (m *model) openExplorerModelPicker() tea.Cmd {
+	// Reuse the model picker listing with kind="explorer-model" so picker
+	// selection saves the explorer agent (explore/scout) model instead of
+	// switching the active model.
+	cmd := m.openModelPicker()
+	m.pickerKind = "explorer-model"
+	m.prependExplorerModelClearOption()
+	return cmd
+}
+
+func (m *model) prependExplorerModelClearOption() {
+	if m.pickerKind != "explorer-model" {
+		return
+	}
+	m.pickerItems = append([]string{"  auto (fall back to small/main model)"}, m.pickerItems...)
+	m.pickerValues = append([]string{"auto"}, m.pickerValues...)
+	m.pickerIsHeader = append([]bool{false}, m.pickerIsHeader...)
+}
+
+func (m *model) openContextModelPicker() tea.Cmd {
+	// Reuse the model picker listing with kind="context-model" so picker
+	// selection saves the context agent (context/doc-sync) model instead of
+	// switching the active model.
+	cmd := m.openModelPicker()
+	m.pickerKind = "context-model"
+	m.prependContextModelClearOption()
+	return cmd
+}
+
+func (m *model) prependContextModelClearOption() {
+	if m.pickerKind != "context-model" {
+		return
+	}
+	m.pickerItems = append([]string{"  auto (fall back to small/main model)"}, m.pickerItems...)
 	m.pickerValues = append([]string{"auto"}, m.pickerValues...)
 	m.pickerIsHeader = append([]bool{false}, m.pickerIsHeader...)
 }

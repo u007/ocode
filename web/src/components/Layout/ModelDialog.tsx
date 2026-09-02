@@ -13,7 +13,7 @@ import {
 
 /** The single model-selection purpose this dialog is opened for. Each settings
  *  field opens the dialog for exactly one purpose — there are no tabs. */
-export type ModelDialogTab = "main" | "small" | "advisor" | "recap" | "ocr" | "mask" | "commit" | "summary" | "permission";
+export type ModelDialogTab = "main" | "small" | "advisor" | "recap" | "ocr" | "mask" | "commit" | "summary" | "permission" | "explorer" | "context";
 
 const PURPOSE_TITLES: Record<ModelDialogTab, string> = {
   main: "Select Model",
@@ -25,6 +25,8 @@ const PURPOSE_TITLES: Record<ModelDialogTab, string> = {
   commit: "Select Commit Message Model",
   summary: "Select Summary Model",
   permission: "Select Permission Model",
+  explorer: "Select Explorer Model",
+  context: "Select Context Model",
 };
 
 interface Props {
@@ -56,6 +58,8 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   // until the response resyncs, so double-clicks can't race the shared file.
   const [pendingFavorite, setPendingFavorite] = useState<string | null>(null);
   const [permissionModelState, setPermissionModelState] = useState("");
+  const [explorerModelState, setExplorerModelState] = useState("");
+  const [contextModelState, setContextModelState] = useState("");
   const activeModel = useChatSelector((s) => s.model);
   const smallModel = useChatSelector((s) => s.smallModel);
   const advisorModel = useChatSelector((s) => s.advisorModel);
@@ -113,8 +117,18 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           setPermissionModelState(res.model ?? "");
         }).catch(console.error);
       }
+      if (purpose === "explorer" && !currentValues?.explorer) {
+        api.getExplorerModel().then((res) => {
+          setExplorerModelState(res.model ?? "");
+        }).catch(console.error);
+      }
+      if (purpose === "context" && !currentValues?.context) {
+        api.getContextModel().then((res) => {
+          setContextModelState(res.model ?? "");
+        }).catch(console.error);
+      }
     }
-  }, [open, dispatch, purpose]);
+  }, [open, dispatch, purpose, currentValues?.explorer, currentValues?.context]);
 
   const filteredModels = models.filter(
     (m) =>
@@ -144,7 +158,9 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     purpose === "small" ||
     purpose === "recap" ||
     purpose === "permission" ||
-    purpose === "mask";
+    purpose === "mask" ||
+    purpose === "explorer" ||
+    purpose === "context";
   const supportsFavoriteToggle = purpose === "main" || purpose === "permission";
   const sections = supportsSections ? partitionModelSections(filteredModels) : null;
   // Flat provider grouping for purposes without favorites sections. Must NOT
@@ -166,6 +182,10 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         return advisorModel;
       case "permission":
         return currentValues?.permission ?? permissionModelState;
+      case "explorer":
+        return currentValues?.explorer ?? explorerModelState;
+      case "context":
+        return currentValues?.context ?? contextModelState;
       default:
         // "main": when a session is scoped, highlight that session's own
         // effective model (from its per-session status snapshot) rather than
@@ -224,6 +244,20 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         // If no form owns this pick (sidebar direct trigger), persist directly.
         if (!onPick) {
           api.setPermissionModel(modelId).catch(console.error);
+        }
+        break;
+      case "explorer":
+        onPick?.(purpose, modelId, selectedModel);
+        if (!onPick) {
+          setExplorerModelState(modelId);
+          api.setExplorerModel(modelId).catch(console.error);
+        }
+        break;
+      case "context":
+        onPick?.(purpose, modelId, selectedModel);
+        if (!onPick) {
+          setContextModelState(modelId);
+          api.setContextModel(modelId).catch(console.error);
         }
         break;
       default:
@@ -294,6 +328,20 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         onPick?.(purpose, "");
         if (!onPick) {
           api.setPermissionModel("").catch(console.error);
+        }
+        break;
+      case "explorer":
+        onPick?.(purpose, "");
+        if (!onPick) {
+          setExplorerModelState("");
+          api.setExplorerModel("auto").catch(console.error);
+        }
+        break;
+      case "context":
+        onPick?.(purpose, "");
+        if (!onPick) {
+          setContextModelState("");
+          api.setContextModel("auto").catch(console.error);
         }
         break;
       default:

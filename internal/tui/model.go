@@ -3715,7 +3715,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pickerIndex = 0
 	case modelPickerFullModelsLoadedMsg:
 		m.pickerLoadingAll = false
-		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "autocontinue-model" && m.pickerKind != "ocr-model" && m.pickerKind != "image-model") {
+		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "autocontinue-model" && m.pickerKind != "explorer-model" && m.pickerKind != "context-model" && m.pickerKind != "ocr-model" && m.pickerKind != "image-model") {
 			return m, nil
 		}
 		// Append provider sections below the existing recents+favorites items.
@@ -3728,7 +3728,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pickerRefreshing = false
 		// If the picker was closed while the refresh was in flight, just
 		// surface the result as a transcript message and skip repopulation.
-		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "autocontinue-model" && m.pickerKind != "image-model") {
+		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "autocontinue-model" && m.pickerKind != "explorer-model" && m.pickerKind != "context-model" && m.pickerKind != "image-model") {
 			if msg.err != nil {
 				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Model cache refresh failed: %v", msg.err)})
 				m.rerenderTranscriptAndMaybeScroll()
@@ -5448,7 +5448,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			newM, cmd := m.selectPickerIndex(m.pickerIndex)
 			return true, newM, cmd
 		case "ctrl+r":
-			if m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "image-model" {
+			if m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "recap-model" || m.pickerKind == "autocontinue-model" || m.pickerKind == "explorer-model" || m.pickerKind == "context-model" || m.pickerKind == "image-model" {
 				if m.pickerRefreshing {
 					return true, m, nil
 				}
@@ -7173,6 +7173,28 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.sidebarSel = selectionState{}
 				return m, nil, true
 			}
+			if m.sidebarExplorerModelToggleForClick(mouse) {
+				if m.config != nil {
+					m.config.Ocode.ExplorerModelEnabled = !m.config.Ocode.ExplorerModelEnabled
+					if err := config.SaveExplorerModelEnabled(m.config.Ocode.ExplorerModelEnabled); err != nil {
+						log.Printf("save explorer model enabled: %v", err)
+					}
+				}
+				m.broadcastTUIStatus()
+				m.sidebarSel = selectionState{}
+				return m, nil, true
+			}
+			if m.sidebarContextModelToggleForClick(mouse) {
+				if m.config != nil {
+					m.config.Ocode.ContextModelEnabled = !m.config.Ocode.ContextModelEnabled
+					if err := config.SaveContextModelEnabled(m.config.Ocode.ContextModelEnabled); err != nil {
+						log.Printf("save context model enabled: %v", err)
+					}
+				}
+				m.broadcastTUIStatus()
+				m.sidebarSel = selectionState{}
+				return m, nil, true
+			}
 			m.sidebarSel = selectionState{}
 		}
 		if !m.detail.empty() {
@@ -8171,6 +8193,11 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		// effect on the very turn at risk of being cut off.
 		cmd == "/localmodel" ||
 		cmd == "/autocontinue" ||
+		// /explorer-model and /context-model are synchronous local config
+		// commands like /small-model and /recap: they never start an agent
+		// request, so they must remain usable mid-stream.
+		cmd == "/explorer-model" ||
+		cmd == "/context-model" ||
 		cmd == "/goal"
 	// Agent status is a local inspection command and must remain usable while
 	// the stream is busy. Changing the persistent limit is deliberately queued,
@@ -11951,6 +11978,214 @@ func (m *model) handleSmallModelCmd(args []string) tea.Cmd {
 	return nil
 }
 
+// handleExplorerModelCmd implements `/explorer-model [status|enable|disable|model [name]]`.
+// Sets the model used by the explore/scout agents; when disabled or unset,
+// those agents fall back to the small model, then the main model — see
+// agent.injectPurposeModelIfEligible.
+func (m *model) handleExplorerModelCmd(args []string) tea.Cmd {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No config loaded."})
+		return nil
+	}
+	if len(args) == 0 {
+		m.handleExplorerModelStatus()
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "status":
+		m.handleExplorerModelStatus()
+		return nil
+	case "enable", "on":
+		return m.handleExplorerModelEnable(true)
+	case "disable", "off":
+		return m.handleExplorerModelEnable(false)
+	case "model":
+		return m.handleExplorerModelSub(args[1:])
+	}
+	return m.handleExplorerModelSub(args)
+}
+
+func (m *model) handleExplorerModelSub(args []string) tea.Cmd {
+	if len(args) == 0 {
+		return m.openExplorerModelPicker()
+	}
+
+	target := strings.ToLower(args[0])
+	if target == "auto" {
+		m.config.Ocode.ExplorerModel = ""
+		if err := config.SaveExplorerModel(""); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to clear explorer model: %v", err)})
+			return nil
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Explorer model cleared — falling back to the small model, then the main model."})
+		return nil
+	}
+
+	client := agent.NewClient(m.config, args[0])
+	if client == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create client for %s — unknown provider or missing configuration.", args[0])})
+		return nil
+	}
+
+	m.config.Ocode.ExplorerModel = args[0]
+	if err := config.SaveExplorerModel(args[0]); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save explorer model: %v", err)})
+		return nil
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Explorer model updated to %s\nPersisted to config for next session.", args[0])})
+	return nil
+}
+
+func (m *model) handleExplorerModelEnable(enable bool) tea.Cmd {
+	if m.config != nil {
+		m.config.Ocode.ExplorerModelEnabled = enable
+	}
+	if err := config.SaveExplorerModelEnabled(enable); err != nil {
+		log.Printf("save explorer model enabled: %v", err)
+	}
+	m.broadcastTUIStatus()
+	state := "disabled"
+	if enable {
+		state = "enabled"
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Explorer model: " + state})
+	return nil
+}
+
+func (m *model) handleExplorerModelStatus() {
+	var b strings.Builder
+	b.WriteString("≡ Explorer Model Status\n")
+	b.WriteString(strings.Repeat("─", 30) + "\n\n")
+	model := ""
+	enabled := false
+	if m.config != nil {
+		model = m.config.Ocode.ExplorerModel
+		enabled = m.config.Ocode.ExplorerModelEnabled
+	}
+	if model == "" {
+		model = "(not set — will use small model, then main model)"
+	}
+	b.WriteString(fmt.Sprintf("Model:   %s\n", model))
+	if enabled {
+		b.WriteString("Enabled: ● enabled\n")
+	} else {
+		b.WriteString("Enabled: ○ disabled\n")
+	}
+	b.WriteString("\nApplies to: explore, scout\n")
+	b.WriteString("\nUsage:\n")
+	b.WriteString("  /explorer-model model      — pick explorer model\n")
+	b.WriteString("  /explorer-model model <id> — set explorer model directly\n")
+	b.WriteString("  /explorer-model model auto — clear override\n")
+	b.WriteString("  /explorer-model enable     — enable explorer model\n")
+	b.WriteString("  /explorer-model disable    — disable explorer model\n")
+	b.WriteString("  /explorer-model status     — show this status\n")
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
+// handleContextModelCmd implements `/context-model [status|enable|disable|model [name]]`.
+// Sets the model used by the context/doc-sync agents; when disabled or unset,
+// those agents fall back to the small model, then the main model — see
+// agent.injectPurposeModelIfEligible.
+func (m *model) handleContextModelCmd(args []string) tea.Cmd {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No config loaded."})
+		return nil
+	}
+	if len(args) == 0 {
+		m.handleContextModelStatus()
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "status":
+		m.handleContextModelStatus()
+		return nil
+	case "enable", "on":
+		return m.handleContextModelEnable(true)
+	case "disable", "off":
+		return m.handleContextModelEnable(false)
+	case "model":
+		return m.handleContextModelSub(args[1:])
+	}
+	return m.handleContextModelSub(args)
+}
+
+func (m *model) handleContextModelSub(args []string) tea.Cmd {
+	if len(args) == 0 {
+		return m.openContextModelPicker()
+	}
+
+	target := strings.ToLower(args[0])
+	if target == "auto" {
+		m.config.Ocode.ContextModel = ""
+		if err := config.SaveContextModel(""); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to clear context model: %v", err)})
+			return nil
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Context model cleared — falling back to the small model, then the main model."})
+		return nil
+	}
+
+	client := agent.NewClient(m.config, args[0])
+	if client == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create client for %s — unknown provider or missing configuration.", args[0])})
+		return nil
+	}
+
+	m.config.Ocode.ContextModel = args[0]
+	if err := config.SaveContextModel(args[0]); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save context model: %v", err)})
+		return nil
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Context model updated to %s\nPersisted to config for next session.", args[0])})
+	return nil
+}
+
+func (m *model) handleContextModelEnable(enable bool) tea.Cmd {
+	if m.config != nil {
+		m.config.Ocode.ContextModelEnabled = enable
+	}
+	if err := config.SaveContextModelEnabled(enable); err != nil {
+		log.Printf("save context model enabled: %v", err)
+	}
+	m.broadcastTUIStatus()
+	state := "disabled"
+	if enable {
+		state = "enabled"
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Context model: " + state})
+	return nil
+}
+
+func (m *model) handleContextModelStatus() {
+	var b strings.Builder
+	b.WriteString("≡ Context Model Status\n")
+	b.WriteString(strings.Repeat("─", 30) + "\n\n")
+	model := ""
+	enabled := false
+	if m.config != nil {
+		model = m.config.Ocode.ContextModel
+		enabled = m.config.Ocode.ContextModelEnabled
+	}
+	if model == "" {
+		model = "(not set — will use small model, then main model)"
+	}
+	b.WriteString(fmt.Sprintf("Model:   %s\n", model))
+	if enabled {
+		b.WriteString("Enabled: ● enabled\n")
+	} else {
+		b.WriteString("Enabled: ○ disabled\n")
+	}
+	b.WriteString("\nApplies to: context, doc-sync\n")
+	b.WriteString("\nUsage:\n")
+	b.WriteString("  /context-model model      — pick context model\n")
+	b.WriteString("  /context-model model <id> — set context model directly\n")
+	b.WriteString("  /context-model model auto — clear override\n")
+	b.WriteString("  /context-model enable     — enable context model\n")
+	b.WriteString("  /context-model disable    — disable context model\n")
+	b.WriteString("  /context-model status     — show this status\n")
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
 func (m *model) handleMaxStepCmd(args []string) {
 	if len(args) == 0 {
 		// Show current value
@@ -15135,6 +15370,10 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 		snap.AdvisorModel = m.config.Ocode.Advisor.Model
 		snap.ExtraAllowedPaths = m.config.Ocode.ExtraAllowedPaths
 		snap.RecapModel = m.config.Ocode.RecapModel
+		snap.ExplorerModel = m.config.Ocode.ExplorerModel
+		snap.ExplorerModelOn = m.config.Ocode.ExplorerModelEnabled
+		snap.ContextAgentModel = m.config.Ocode.ContextModel
+		snap.ContextAgentModelOn = m.config.Ocode.ContextModelEnabled
 		snap.OcrBackend = m.config.Ocode.Ocr.Backend
 		if snap.OcrBackend == "" {
 			snap.OcrBackend = "openai-compat"
@@ -19267,31 +19506,35 @@ type sidebarTelemetry struct {
 }
 
 type sidebarRenderData struct {
-	topLines                 []string
-	scrollLines              []string
-	bottomLines              []string
-	fileScrollLinePaths      map[int]string
-	allowedHeaderBottomIdx   int    // index in bottomLines of the Allowed header, -1 if absent
-	advisorToggleTopIdx      int    // index in topLines of the advisor on/off row, -1 if absent
-	advisorToggleRows        int    // number of (possibly wrapped) rows the advisor row occupies
-	smallModelToggleTopIdx   int    // index in topLines of the small model on/off row, -1 if absent
-	smallModelToggleRows     int    // number of (possibly wrapped) rows the small model row occupies
-	permModelToggleTopIdx    int    // index in topLines of the perm model on/off row, -1 if absent
-	permModelToggleRows      int    // number of (possibly wrapped) rows the perm model row occupies
-	ideToggleTopIdx          int    // index in topLines of the IDE on/off row, -1 if absent
-	ideToggleRows            int    // number of (possibly wrapped) rows the IDE row occupies
-	recapModelToggleTopIdx   int    // index in topLines of the recap model on/off row, -1 if absent
-	recapModelToggleRows     int    // number of (possibly wrapped) rows the recap model row occupies
-	autoContinueToggleTopIdx int    // index in topLines of the auto-continue on/off row, -1 if absent
-	autoContinueToggleRows   int    // number of (possibly wrapped) rows the auto-continue row occupies
-	ocrToggleTopIdx          int    // index in topLines of the OCR on/off row, -1 if absent
-	ocrToggleRows            int    // number of (possibly wrapped) rows the OCR row occupies
-	discoverToggleTopIdx     int    // index in topLines of the discovery on/off row, -1 if absent
-	discoverToggleRows       int    // number of (possibly wrapped) rows the discovery row occupies
-	cwdTopIdx                int    // index in topLines of the "cwd:" row, -1 if absent
-	cwdRows                  int    // number of (possibly wrapped) rows the cwd row occupies
-	cwdLabel                 string // dim "cwd: " label (ANSI styled), kept for hover underline
-	cwdPath                  string // raw working-dir path text (unstyled), for hover underline
+	topLines                  []string
+	scrollLines               []string
+	bottomLines               []string
+	fileScrollLinePaths       map[int]string
+	allowedHeaderBottomIdx    int    // index in bottomLines of the Allowed header, -1 if absent
+	advisorToggleTopIdx       int    // index in topLines of the advisor on/off row, -1 if absent
+	advisorToggleRows         int    // number of (possibly wrapped) rows the advisor row occupies
+	smallModelToggleTopIdx    int    // index in topLines of the small model on/off row, -1 if absent
+	smallModelToggleRows      int    // number of (possibly wrapped) rows the small model row occupies
+	permModelToggleTopIdx     int    // index in topLines of the perm model on/off row, -1 if absent
+	permModelToggleRows       int    // number of (possibly wrapped) rows the perm model row occupies
+	ideToggleTopIdx           int    // index in topLines of the IDE on/off row, -1 if absent
+	ideToggleRows             int    // number of (possibly wrapped) rows the IDE row occupies
+	recapModelToggleTopIdx    int    // index in topLines of the recap model on/off row, -1 if absent
+	recapModelToggleRows      int    // number of (possibly wrapped) rows the recap model row occupies
+	explorerModelToggleTopIdx int    // index in topLines of the explorer model on/off row, -1 if absent
+	explorerModelToggleRows   int    // number of (possibly wrapped) rows the explorer model row occupies
+	contextModelToggleTopIdx  int    // index in topLines of the context model on/off row, -1 if absent
+	contextModelToggleRows    int    // number of (possibly wrapped) rows the context model row occupies
+	autoContinueToggleTopIdx  int    // index in topLines of the auto-continue on/off row, -1 if absent
+	autoContinueToggleRows    int    // number of (possibly wrapped) rows the auto-continue row occupies
+	ocrToggleTopIdx           int    // index in topLines of the OCR on/off row, -1 if absent
+	ocrToggleRows             int    // number of (possibly wrapped) rows the OCR row occupies
+	discoverToggleTopIdx      int    // index in topLines of the discovery on/off row, -1 if absent
+	discoverToggleRows        int    // number of (possibly wrapped) rows the discovery row occupies
+	cwdTopIdx                 int    // index in topLines of the "cwd:" row, -1 if absent
+	cwdRows                   int    // number of (possibly wrapped) rows the cwd row occupies
+	cwdLabel                  string // dim "cwd: " label (ANSI styled), kept for hover underline
+	cwdPath                   string // raw working-dir path text (unstyled), for hover underline
 }
 
 func (t sidebarTelemetry) usedTokens() int64 {
@@ -19602,7 +19845,7 @@ func renderSidebarModelToggle(label, model string, on bool, width int) string {
 }
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
-	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1, recapModelToggleTopIdx: -1, autoContinueToggleTopIdx: -1, ocrToggleTopIdx: -1, discoverToggleTopIdx: -1, cwdTopIdx: -1}
+	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1, recapModelToggleTopIdx: -1, explorerModelToggleTopIdx: -1, contextModelToggleTopIdx: -1, autoContinueToggleTopIdx: -1, ocrToggleTopIdx: -1, discoverToggleTopIdx: -1, cwdTopIdx: -1}
 	// User requested no border/padding on scroll sections (2026-05-25)
 	outerBodyWidth := sidebarColumnWidth - 4
 	boxBodyWidth := sidebarColumnWidth - 4
@@ -19796,6 +20039,28 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	data.recapModelToggleTopIdx = len(data.topLines)
 	appendWrapped(&data.topLines, renderSidebarModelToggle("recap", recapModel, recapModelOn, outerBodyWidth), outerBodyWidth)
 	data.recapModelToggleRows = len(data.topLines) - data.recapModelToggleTopIdx
+	// Explorer model row doubles as an on/off toggle (click to flip the gate).
+	// Applies to the explore/scout agents; off or unset falls back to the small
+	// model, then the main model.
+	explorerModelOn := m.config != nil && m.config.Ocode.ExplorerModelEnabled
+	explorerModel := "(auto)"
+	if m.config != nil && m.config.Ocode.ExplorerModel != "" {
+		explorerModel = m.config.Ocode.ExplorerModel
+	}
+	data.explorerModelToggleTopIdx = len(data.topLines)
+	appendWrapped(&data.topLines, renderSidebarModelToggle("explorer", explorerModel, explorerModelOn, outerBodyWidth), outerBodyWidth)
+	data.explorerModelToggleRows = len(data.topLines) - data.explorerModelToggleTopIdx
+	// Context model row doubles as an on/off toggle (click to flip the gate).
+	// Applies to the context/doc-sync agents; off or unset falls back to the
+	// small model, then the main model.
+	contextModelOn := m.config != nil && m.config.Ocode.ContextModelEnabled
+	contextModel := "(auto)"
+	if m.config != nil && m.config.Ocode.ContextModel != "" {
+		contextModel = m.config.Ocode.ContextModel
+	}
+	data.contextModelToggleTopIdx = len(data.topLines)
+	appendWrapped(&data.topLines, renderSidebarModelToggle("context", contextModel, contextModelOn, outerBodyWidth), outerBodyWidth)
+	data.contextModelToggleRows = len(data.topLines) - data.contextModelToggleTopIdx
 	// Auto-continue row doubles as an on/off toggle (click to flip the runtime gate).
 	autoContinueOn := m.autoContinueEnabled
 	autoContinueModel := "(step-limit only)"
@@ -20648,6 +20913,44 @@ func (m model) sidebarRecapModelToggleForClick(mouse tea.Mouse) bool {
 	}
 	startY := layout.contentTopY + data.recapModelToggleTopIdx
 	endY := minInt(startY+data.recapModelToggleRows, layout.scrollScreenY)
+	return mouse.Y >= startY && mouse.Y < endY
+}
+
+// sidebarExplorerModelToggleForClick returns true when the click lands on the
+// explorer model on/off row in the pinned top area of the sidebar.
+func (m model) sidebarExplorerModelToggleForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) {
+		return false
+	}
+	data := m.buildSidebarRenderData()
+	if data.explorerModelToggleTopIdx < 0 {
+		return false
+	}
+	layout := m.sidebarScreenLayout(data)
+	if data.explorerModelToggleTopIdx >= layout.topCount {
+		return false
+	}
+	startY := layout.contentTopY + data.explorerModelToggleTopIdx
+	endY := minInt(startY+data.explorerModelToggleRows, layout.scrollScreenY)
+	return mouse.Y >= startY && mouse.Y < endY
+}
+
+// sidebarContextModelToggleForClick returns true when the click lands on the
+// context model on/off row in the pinned top area of the sidebar.
+func (m model) sidebarContextModelToggleForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) {
+		return false
+	}
+	data := m.buildSidebarRenderData()
+	if data.contextModelToggleTopIdx < 0 {
+		return false
+	}
+	layout := m.sidebarScreenLayout(data)
+	if data.contextModelToggleTopIdx >= layout.topCount {
+		return false
+	}
+	startY := layout.contentTopY + data.contextModelToggleTopIdx
+	endY := minInt(startY+data.contextModelToggleRows, layout.scrollScreenY)
 	return mouse.Y >= startY && mouse.Y < endY
 }
 

@@ -37,6 +37,10 @@ type ProfileDelta struct {
 	SmallModelEnabled       *bool                      `json:"small_model_enabled,omitempty"`
 	RecapModel              *string                    `json:"recap_model,omitempty"`
 	RecapModelEnabled       *bool                      `json:"recap_model_enabled,omitempty"`
+	ExplorerModel           *string                    `json:"explorer_model,omitempty"`
+	ExplorerModelEnabled    *bool                      `json:"explorer_model_enabled,omitempty"`
+	ContextModel            *string                    `json:"context_model,omitempty"`
+	ContextModelEnabled     *bool                      `json:"context_model_enabled,omitempty"`
 	Editor                  *string                    `json:"editor,omitempty"`
 	EditorMode              *string                    `json:"editor_mode,omitempty"`
 	IDEMode                 *string                    `json:"ide_mode,omitempty"`
@@ -86,6 +90,18 @@ func ProfileOverrideCount(delta ProfileDelta) int {
 		n++
 	}
 	if delta.RecapModelEnabled != nil {
+		n++
+	}
+	if delta.ExplorerModel != nil {
+		n++
+	}
+	if delta.ExplorerModelEnabled != nil {
+		n++
+	}
+	if delta.ContextModel != nil {
+		n++
+	}
+	if delta.ContextModelEnabled != nil {
 		n++
 	}
 	if delta.Editor != nil {
@@ -155,6 +171,18 @@ func EffectiveOcodeConfig(base *OcodeConfig, profile string) *OcodeConfig {
 	}
 	if delta.RecapModelEnabled != nil {
 		clone.RecapModelEnabled = *delta.RecapModelEnabled
+	}
+	if delta.ExplorerModel != nil {
+		clone.ExplorerModel = *delta.ExplorerModel
+	}
+	if delta.ExplorerModelEnabled != nil {
+		clone.ExplorerModelEnabled = *delta.ExplorerModelEnabled
+	}
+	if delta.ContextModel != nil {
+		clone.ContextModel = *delta.ContextModel
+	}
+	if delta.ContextModelEnabled != nil {
+		clone.ContextModelEnabled = *delta.ContextModelEnabled
 	}
 	if delta.Editor != nil {
 		clone.Editor = *delta.Editor
@@ -425,21 +453,25 @@ type OcodeConfig struct {
 	TerminalFontSize int
 	// TerminalShell overrides which shell binary the interactive terminal
 	// starts. Empty means use $SHELL, falling back to /bin/sh.
-	TerminalShell       string
-	ExtraAllowedPaths   []string
-	Editor              string
-	EditorMode          string
-	IDEMode             string
-	SmallModel          string
-	SmallModelEnabled   bool
-	RecapModel          string
-	RecapModelEnabled   bool
-	AutoContinueEnabled bool
-	AutoContinueModel   string
-	CommitMsgModel      string
-	CommitMsgPrompt     string
-	TUI                 TUIConfig
-	MaxSteps            int `json:"max_steps,omitempty"`
+	TerminalShell        string
+	ExtraAllowedPaths    []string
+	Editor               string
+	EditorMode           string
+	IDEMode              string
+	SmallModel           string
+	SmallModelEnabled    bool
+	RecapModel           string
+	RecapModelEnabled    bool
+	ExplorerModel        string
+	ExplorerModelEnabled bool
+	ContextModel         string
+	ContextModelEnabled  bool
+	AutoContinueEnabled  bool
+	AutoContinueModel    string
+	CommitMsgModel       string
+	CommitMsgPrompt      string
+	TUI                  TUIConfig
+	MaxSteps             int `json:"max_steps,omitempty"`
 	// MaxImageDim caps the longest edge (px) of an embedded image; larger
 	// images are downscaled to fit, preserving aspect ratio. 0 means use the
 	// agent package default (2000).
@@ -690,6 +722,10 @@ type ocodeConfigFile struct {
 	SmallModelEnabled       *bool                       `json:"small_model_enabled,omitempty"`
 	RecapModel              string                      `json:"recap_model,omitempty"`
 	RecapModelEnabled       *bool                       `json:"recap_model_enabled,omitempty"`
+	ExplorerModel           string                      `json:"explorer_model,omitempty"`
+	ExplorerModelEnabled    *bool                       `json:"explorer_model_enabled,omitempty"`
+	ContextModel            string                      `json:"context_model,omitempty"`
+	ContextModelEnabled     *bool                       `json:"context_model_enabled,omitempty"`
 	AutoContinueEnabled     *bool                       `json:"auto_continue_enabled,omitempty"`
 	AutoContinueModel       string                      `json:"auto_continue_model,omitempty"`
 	RecapTimeoutSeconds     *int                        `json:"recap_timeout_seconds,omitempty"`
@@ -753,6 +789,8 @@ func defaultOcodeConfig() OcodeConfig {
 		MemoryEnabled:           true,
 		SmallModelEnabled:       true,
 		RecapModelEnabled:       false,
+		ExplorerModelEnabled:    false,
+		ContextModelEnabled:     false,
 		Security:                defaultSecurityConfig(),
 		Discovery:               defaultDiscoveryConfig(),
 		RecapTimeoutSeconds:     120,
@@ -1102,6 +1140,33 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		}
 		delete(raw, "recap_model_enabled")
 	}
+
+	if _, ok := raw["explorer_model"]; ok {
+		if file.ExplorerModel != "" {
+			cfg.ExplorerModel = file.ExplorerModel
+		}
+		delete(raw, "explorer_model")
+	}
+	if _, ok := raw["explorer_model_enabled"]; ok {
+		if file.ExplorerModelEnabled != nil {
+			cfg.ExplorerModelEnabled = *file.ExplorerModelEnabled
+		}
+		delete(raw, "explorer_model_enabled")
+	}
+
+	if _, ok := raw["context_model"]; ok {
+		if file.ContextModel != "" {
+			cfg.ContextModel = file.ContextModel
+		}
+		delete(raw, "context_model")
+	}
+	if _, ok := raw["context_model_enabled"]; ok {
+		if file.ContextModelEnabled != nil {
+			cfg.ContextModelEnabled = *file.ContextModelEnabled
+		}
+		delete(raw, "context_model_enabled")
+	}
+
 	if _, ok := raw["auto_continue_enabled"]; ok {
 		if file.AutoContinueEnabled != nil {
 			cfg.AutoContinueEnabled = *file.AutoContinueEnabled
@@ -1681,6 +1746,14 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["recap_model"] = cfg.RecapModel
 	}
 	payload["recap_model_enabled"] = cfg.RecapModelEnabled
+	if cfg.ExplorerModel != "" {
+		payload["explorer_model"] = cfg.ExplorerModel
+	}
+	payload["explorer_model_enabled"] = cfg.ExplorerModelEnabled
+	if cfg.ContextModel != "" {
+		payload["context_model"] = cfg.ContextModel
+	}
+	payload["context_model_enabled"] = cfg.ContextModelEnabled
 	payload["auto_continue_enabled"] = cfg.AutoContinueEnabled
 	if cfg.AutoContinueModel != "" {
 		payload["auto_continue_model"] = cfg.AutoContinueModel
@@ -2602,6 +2675,40 @@ func SaveRecapModel(model string) error {
 func SaveRecapModelEnabled(enabled bool) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.RecapModelEnabled = enabled
+		return nil
+	})
+}
+
+// SaveExplorerModel persists the explorer agent model override to config.
+// Set to empty string to clear the override and fall back to the small model.
+func SaveExplorerModel(model string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.ExplorerModel = model
+		return nil
+	})
+}
+
+// SaveExplorerModelEnabled persists the explorer model enabled/disabled state to config.
+func SaveExplorerModelEnabled(enabled bool) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.ExplorerModelEnabled = enabled
+		return nil
+	})
+}
+
+// SaveContextModel persists the context agent model override to config.
+// Set to empty string to clear the override and fall back to the small model.
+func SaveContextModel(model string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.ContextModel = model
+		return nil
+	})
+}
+
+// SaveContextModelEnabled persists the context model enabled/disabled state to config.
+func SaveContextModelEnabled(enabled bool) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.ContextModelEnabled = enabled
 		return nil
 	})
 }

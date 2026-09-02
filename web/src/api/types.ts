@@ -462,6 +462,14 @@ export interface TUIStatus {
   advisor_enabled?: boolean;
   recap_model?: string;
   recap_model_enabled?: boolean;
+  /** Explorer agent (explore/scout) model. Off or unset falls back to the
+   *  small model, then the main model. */
+  explorer_model?: string;
+  explorer_model_enabled?: boolean;
+  /** Context agent (context/doc-sync) model. Off or unset falls back to the
+   *  small model, then the main model. */
+  context_agent_model?: string;
+  context_agent_model_enabled?: boolean;
   ide_mode?: string;
   ide_status?: string;
   ocr_backend?: string;

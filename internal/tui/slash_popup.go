@@ -449,6 +449,10 @@ func (m *model) acceptPopupSuggestion(selected slashSuggestion) tea.Cmd {
 		m.openThemePicker()
 	} else if selected.name == "/small-model" {
 		return m.openSmallModelPicker()
+	} else if selected.name == "/explorer-model" {
+		return m.openExplorerModelPicker()
+	} else if selected.name == "/context-model" {
+		return m.openContextModelPicker()
 	} else if selected.name == "/advisor" {
 		return m.openAdvisorPicker()
 	}

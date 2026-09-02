@@ -49,6 +49,7 @@ var smallModelEligibleNames = map[string]bool{
 	// orchestrator-planner intentionally excluded: requires reliable JSON output
 	"orchestrator-explorer": true,
 	"doc-sync":              true,
+	"scout":                 true,
 }
 
 // smallModelEligible reports whether the named agent is a candidate for the
@@ -73,4 +74,43 @@ func injectSmallModelIfEligible(a *Agent, spec *AgentSpec, cfg *config.Config) {
 	}
 	spec.Model = cfg.Ocode.SmallModel
 	a.emitDebug("AGENT", fmt.Sprintf("spec %q: injecting small model %s", spec.Name, spec.Model))
+}
+
+// agentPurpose maps an agent name to the purpose-specific model slot it draws
+// from before falling back to the small model: an explorer-family agent
+// (explore, scout) may use the configured explorer model, and a
+// context-family agent (context, doc-sync) may use the configured context
+// model.
+var agentPurpose = map[string]string{
+	"explore":  "explorer",
+	"scout":    "explorer",
+	"context":  "context",
+	"doc-sync": "context",
+}
+
+// injectPurposeModelIfEligible sets spec.Model following the fallback chain:
+// explicit model (unchanged) > purpose-specific model (explorer/context, if
+// enabled and configured) > small model (via injectSmallModelIfEligible) >
+// main model (left unset). No-op if spec already has an explicit model —
+// an explicit registry/markdown override always wins.
+func injectPurposeModelIfEligible(a *Agent, spec *AgentSpec, cfg *config.Config) {
+	if cfg == nil || spec == nil || strings.TrimSpace(spec.Model) != "" {
+		injectSmallModelIfEligible(a, spec, cfg)
+		return
+	}
+	switch agentPurpose[spec.Name] {
+	case "explorer":
+		if cfg.Ocode.ExplorerModelEnabled && cfg.Ocode.ExplorerModel != "" {
+			spec.Model = cfg.Ocode.ExplorerModel
+			a.emitDebug("AGENT", fmt.Sprintf("spec %q: injecting explorer model %s", spec.Name, spec.Model))
+			return
+		}
+	case "context":
+		if cfg.Ocode.ContextModelEnabled && cfg.Ocode.ContextModel != "" {
+			spec.Model = cfg.Ocode.ContextModel
+			a.emitDebug("AGENT", fmt.Sprintf("spec %q: injecting context model %s", spec.Name, spec.Model))
+			return
+		}
+	}
+	injectSmallModelIfEligible(a, spec, cfg)
 }

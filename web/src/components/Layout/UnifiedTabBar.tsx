@@ -218,12 +218,12 @@ function TabPill({
             if (e.key === "Enter") onCommitRename();
             else if (e.key === "Escape") onCancelRename();
           }}
-          className="max-w-28 w-24 bg-background text-foreground rounded px-1 outline-none border border-blue-500"
+          className="max-w-48 w-44 bg-background text-foreground rounded px-1 outline-none border border-blue-500"
         />
       ) : (
         <span
-          className="max-w-28 truncate shrink-0"
-          title="Double-click to rename, drag to reorder"
+          className="max-w-48 truncate shrink-0"
+          title={displayTitle}
           onDoubleClick={(e) => {
             e.stopPropagation();
             onStartRename();

@@ -39,6 +39,14 @@ type TUIStatus struct {
 	// Recap model name + runtime on/off.
 	RecapModel   string `json:"recap_model,omitempty"`
 	RecapModelOn bool   `json:"recap_model_enabled"`
+	// Explorer agent model (explore/scout) + on/off. Falls back to the small
+	// model, then the main model, when off or unset.
+	ExplorerModel   string `json:"explorer_model,omitempty"`
+	ExplorerModelOn bool   `json:"explorer_model_enabled"`
+	// Context agent model (context/doc-sync) + on/off. Falls back to the small
+	// model, then the main model, when off or unset.
+	ContextAgentModel   string `json:"context_agent_model,omitempty"`
+	ContextAgentModelOn bool   `json:"context_agent_model_enabled"`
 	// OCR tool model + runtime on/off.
 	OcrBackend string `json:"ocr_backend,omitempty"`
 	OcrModel   string `json:"ocr_model,omitempty"`

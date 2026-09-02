@@ -1072,6 +1072,138 @@ func (h *Handler) HandleSetRecapConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleGetExplorerModel reports the explorer agent (explore/scout) model
+// override and whether it is enabled. When disabled or unset, those agents
+// fall back to the small model, then the main model — see
+// agent.injectPurposeModelIfEligible.
+func (h *Handler) HandleGetExplorerModel(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	model, enabled := "", false
+	if h.cfg != nil {
+		model = h.cfg.Ocode.ExplorerModel
+		enabled = h.cfg.Ocode.ExplorerModelEnabled
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model":   model,
+		"enabled": enabled,
+	})
+}
+
+// HandleSetExplorerModel persists the explorer agent model override and/or
+// enabled gate.
+func (h *Handler) HandleSetExplorerModel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model   string `json:"model"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	h.mu.Lock()
+	if h.cfg == nil {
+		h.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, "config not loaded")
+		return
+	}
+	if req.Enabled != nil {
+		if err := config.SaveExplorerModelEnabled(*req.Enabled); err != nil {
+			h.mu.Unlock()
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
+		h.cfg.Ocode.ExplorerModelEnabled = *req.Enabled
+	}
+	if req.Model != "" {
+		model := req.Model
+		if model == "auto" {
+			model = ""
+		}
+		if err := config.SaveExplorerModel(model); err != nil {
+			h.mu.Unlock()
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
+		h.cfg.Ocode.ExplorerModel = model
+	}
+	model, enabled := h.cfg.Ocode.ExplorerModel, h.cfg.Ocode.ExplorerModelEnabled
+	h.mu.Unlock()
+
+	h.pushStatusSnapshot()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model":   model,
+		"enabled": enabled,
+	})
+}
+
+// HandleGetContextModel reports the context agent (context/doc-sync) model
+// override and whether it is enabled. When disabled or unset, those agents
+// fall back to the small model, then the main model — see
+// agent.injectPurposeModelIfEligible.
+func (h *Handler) HandleGetContextModel(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	model, enabled := "", false
+	if h.cfg != nil {
+		model = h.cfg.Ocode.ContextModel
+		enabled = h.cfg.Ocode.ContextModelEnabled
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model":   model,
+		"enabled": enabled,
+	})
+}
+
+// HandleSetContextModel persists the context agent model override and/or
+// enabled gate.
+func (h *Handler) HandleSetContextModel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model   string `json:"model"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	h.mu.Lock()
+	if h.cfg == nil {
+		h.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, "config not loaded")
+		return
+	}
+	if req.Enabled != nil {
+		if err := config.SaveContextModelEnabled(*req.Enabled); err != nil {
+			h.mu.Unlock()
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
+		h.cfg.Ocode.ContextModelEnabled = *req.Enabled
+	}
+	if req.Model != "" {
+		model := req.Model
+		if model == "auto" {
+			model = ""
+		}
+		if err := config.SaveContextModel(model); err != nil {
+			h.mu.Unlock()
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
+		h.cfg.Ocode.ContextModel = model
+	}
+	model, enabled := h.cfg.Ocode.ContextModel, h.cfg.Ocode.ContextModelEnabled
+	h.mu.Unlock()
+
+	h.pushStatusSnapshot()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model":   model,
+		"enabled": enabled,
+	})
+}
+
 // HandleGetCommitMsgConfig reports the commit-message generation model and prompt.
 func (h *Handler) HandleGetCommitMsgConfig(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()

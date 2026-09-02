@@ -2727,14 +2727,15 @@ func TestSidebarHoverAtBottomVisibleScrollRow(t *testing.T) {
 		}
 	}
 
-	// Height 24 (was 23): the sidebar budget subtracts appHeaderHeight plus all
+	// Height 26 (was 24): the sidebar budget subtracts appHeaderHeight plus all
 	// pinned top lines (mode/model, details, context, cwd, and the advisor/small/
-	// perm/recap/autocontinue/ide/ocr/discover toggles). A 20-row terminal leaves
-	// no visible scroll window with this much pinned content, and each added
-	// toggle row removes one scroll row — 23 now drops below one visible row
-	// (the auto-continue toggle added one more pinned row), so bump to 24 to
-	// keep the minimal "one visible scroll row" scenario this test guards.
-	m := model{ready: true, width: 140, height: 24, showSidebar: true, input: textarea.New(), viewport: fastviewport.New(100, 24)}
+	// perm/recap/explorer/context/autocontinue/ide/ocr/discover toggles). A
+	// 20-row terminal leaves no visible scroll window with this much pinned
+	// content, and each added toggle row removes one scroll row — 24 now drops
+	// below one visible row (the explorer/context model toggles added two more
+	// pinned rows), so bump to 26 to keep the minimal "one visible scroll row"
+	// scenario this test guards.
+	m := model{ready: true, width: 140, height: 26, showSidebar: true, input: textarea.New(), viewport: fastviewport.New(100, 26)}
 	data := m.buildSidebarRenderData()
 	layout := m.sidebarScreenLayout(data)
 	targetPath := "file-11.go"

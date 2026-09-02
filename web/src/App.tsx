@@ -68,7 +68,7 @@ import { revokeBrowseSession } from "./api/client";
 // client→store→client import cycle.
 __setRevoker(revokeBrowseSession);
 
-type ModelDialogTab = "main" | "small" | "advisor" | "permission" | "recap" | "ocr" | "mask" | "commit" | "summary";
+type ModelDialogTab = "main" | "small" | "advisor" | "permission" | "recap" | "ocr" | "mask" | "commit" | "summary" | "explorer" | "context";
 
 function StatusMetricsHydrator() {
   const dispatch = useChatDispatch();

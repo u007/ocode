@@ -1617,6 +1617,13 @@ func (pm *PermissionManager) AllowedRoots() []string {
 	for _, r := range languageDepRoots() {
 		add(r)
 	}
+	// User-owned writable caches and binary destinations — sandboxed commands
+	// must be able to write here (go build cache, uv/bun caches, cargo/go bins).
+	// Kept separate from languageDepRoots so isImmutableReadRoot does not
+	// auto-allow reads of the entire ~/.cache tree.
+	for _, r := range userWritableRoots() {
+		add(r)
+	}
 	add("/tmp")
 	add("/var/tmp")
 	add(os.TempDir())
@@ -1704,6 +1711,11 @@ func (pm *PermissionManager) AllowedRootsClassified() []sandbox.RootSpec {
 	// Language dependency caches (npm/pip/cargo/go/maven/gradle) must stay
 	// writable so npm install / pip work under sandbox.
 	for _, r := range languageDepRoots() {
+		add(r, true)
+	}
+	// User-owned writable caches and binary destinations — distinct from
+	// language dep caches so they do not leak into isImmutableReadRoot.
+	for _, r := range userWritableRoots() {
 		add(r, true)
 	}
 	add("/tmp", true)
@@ -1915,6 +1927,122 @@ func languageDepRoots() []string {
 
 	sort.Strings(roots)
 	return roots
+}
+
+// userWritableRoots returns user-owned writable roots for sandbox confinement:
+// generic caches (whole ~/.cache per explicit user request + UserCacheDir +
+// targeted subdirs) and binary install destinations (~/.local/bin, ~/bin,
+// ~/.cargo/bin, ~/go/bin + validated GOBIN/GOPATH bins). Separated from
+// languageDepRoots so isImmutableReadRoot does not broaden to whole ~/.cache.
+func userWritableRoots() []string {
+	seen := make(map[string]struct{})
+	var roots []string
+	add := func(p string) {
+		if p == "" || p == "/" {
+			return
+		}
+		clean := filepath.Clean(p)
+		if clean == "/" || clean == "." {
+			return
+		}
+		if _, ok := seen[clean]; ok {
+			return
+		}
+		seen[clean] = struct{}{}
+		roots = append(roots, clean)
+	}
+	home, homeErr := os.UserHomeDir()
+
+	// Generic cache roots — cross-platform.
+	// os.UserCacheDir is canonical: darwin ~/Library/Caches, linux ~/.cache, windows %LOCALAPPDATA%.
+	if cacheDir, err := os.UserCacheDir(); err == nil && cacheDir != "" && cacheDir != "/" {
+		if !isSystemRoot(cacheDir) {
+			add(cacheDir)
+		}
+	}
+	if xdgCache := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); xdgCache != "" {
+		clean := filepath.Clean(xdgCache)
+		if clean != "/" && !isSystemRoot(clean) {
+			add(clean)
+		}
+	} else if homeErr == nil {
+		// Explicit /Users/james/.cache coverage when XDG_CACHE_HOME is unset —
+		// on macOS UserCacheDir is ~/Library/Caches, so ~/.cache would otherwise be missing.
+		// Whole ~/.cache is broader than targeted subdirs (browser/app caches) — intentional
+		// tradeoff per user requirement.
+		add(filepath.Join(home, ".cache"))
+	}
+	if homeErr == nil && runtime.GOOS == "darwin" {
+		add(filepath.Join(home, "Library", "Caches"))
+	}
+	if homeErr == nil {
+		// Targeted subdirs for tool caches that may live outside UserCacheDir.
+		add(filepath.Join(home, ".cache", "go-build"))
+		add(filepath.Join(home, ".cache", "uv"))
+		add(filepath.Join(home, ".cache", "bun"))
+		add(filepath.Join(home, ".cache", "yarn"))
+	}
+
+	// User-owned binary install destinations — writable for `go install` / `cargo install`.
+	if homeErr == nil {
+		add(filepath.Join(home, ".local", "bin"))
+		add(filepath.Join(home, "bin"))
+		// Cargo bin — respect CARGO_HOME, but require home containment or non-system path.
+		if ch := strings.TrimSpace(os.Getenv("CARGO_HOME")); ch != "" {
+			clean := filepath.Clean(ch)
+			if clean != "/" && !isSystemRoot(clean) && isUnderHomeStrict(clean, home) {
+				add(filepath.Join(clean, "bin"))
+			}
+		} else {
+			add(filepath.Join(home, ".cargo", "bin"))
+		}
+		// Go bin — GOBIN takes precedence; otherwise GOPATH/bin + ~/go/bin.
+		if gobin := strings.TrimSpace(os.Getenv("GOBIN")); gobin != "" {
+			clean := filepath.Clean(gobin)
+			if clean != "/" && !isSystemRoot(clean) && isUnderHomeStrict(clean, home) {
+				add(clean)
+			}
+		} else if gp := strings.TrimSpace(os.Getenv("GOPATH")); gp != "" {
+			for _, p := range filepath.SplitList(gp) {
+				if p == "" {
+					continue
+				}
+				clean := filepath.Clean(p)
+				if clean == "/" || isSystemRoot(clean) || !isUnderHomeStrict(clean, home) {
+					continue
+				}
+				add(filepath.Join(clean, "bin"))
+			}
+			add(filepath.Join(home, "go", "bin"))
+		} else {
+			add(filepath.Join(home, "go", "bin"))
+		}
+	}
+
+	sort.Strings(roots)
+	return roots
+}
+
+func isSystemRoot(p string) bool {
+	clean := filepath.Clean(p)
+	if clean == "/usr" || clean == "/opt" || clean == "/System" || clean == "/Library" {
+		return true
+	}
+	if strings.HasPrefix(clean, "/usr/") || strings.HasPrefix(clean, "/opt/") {
+		return true
+	}
+	if strings.HasPrefix(clean, "/System/") || strings.HasPrefix(clean, "/Library/") {
+		return true
+	}
+	// Windows system roots are not relevant here; isSystemRoot is Unix-focused.
+	return false
+}
+
+func isUnderHomeStrict(p, home string) bool {
+	if p == home {
+		return true
+	}
+	return pathUnderRoot(p, home)
 }
 
 // isImmutableReadRoot reports whether rawPath lies within a known read-only,

@@ -426,6 +426,36 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
 
+  // Explorer agent (explore/scout) model. Off or unset falls back to the
+  // small model, then the main model — see agent.injectPurposeModelIfEligible.
+  getExplorerModel: () =>
+    fetchJSON<{ model: string; enabled: boolean }>("/api/config/explorer-model"),
+  setExplorerModel: (model: string) =>
+    fetchJSON<{ model: string; enabled: boolean }>("/api/config/explorer-model", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
+  setExplorerModelEnabled: (enabled: boolean) =>
+    fetchJSON<{ model: string; enabled: boolean }>("/api/config/explorer-model", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+
+  // Context agent (context/doc-sync) model. Off or unset falls back to the
+  // small model, then the main model — see agent.injectPurposeModelIfEligible.
+  getContextModel: () =>
+    fetchJSON<{ model: string; enabled: boolean }>("/api/config/context-model"),
+  setContextModel: (model: string) =>
+    fetchJSON<{ model: string; enabled: boolean }>("/api/config/context-model", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
+  setContextModelEnabled: (enabled: boolean) =>
+    fetchJSON<{ model: string; enabled: boolean }>("/api/config/context-model", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+
   // --- New/extended OcodeConfig endpoints (Plan 1: configuration-api-backend) ---
 
   getRecapConfig: () =>

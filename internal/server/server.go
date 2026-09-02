@@ -259,6 +259,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/thinking-budget", s.authMiddleware(s.handleSetThinkingBudget))
 	s.mux.HandleFunc("GET /api/config/small-model", s.authMiddleware(s.handleGetSmallModel))
 	s.mux.HandleFunc("PUT /api/config/small-model", s.authMiddleware(s.handleSetSmallModel))
+	s.mux.HandleFunc("GET /api/config/explorer-model", s.authMiddleware(s.handleGetExplorerModel))
+	s.mux.HandleFunc("PUT /api/config/explorer-model", s.authMiddleware(s.handleSetExplorerModel))
+	s.mux.HandleFunc("GET /api/config/context-model", s.authMiddleware(s.handleGetContextModel))
+	s.mux.HandleFunc("PUT /api/config/context-model", s.authMiddleware(s.handleSetContextModel))
 	s.mux.HandleFunc("GET /api/config/permission-model", s.authMiddleware(s.handleGetPermissionModel))
 	s.mux.HandleFunc("PUT /api/config/permission-model", s.authMiddleware(s.handleSetPermissionModel))
 	s.mux.HandleFunc("GET /api/config/terminal", s.authMiddleware(s.handleGetTerminalConfig))
@@ -1419,6 +1423,18 @@ func (s *Server) handleGetSmallModel(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleSetSmallModel(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetSmallModel(w, r)
+}
+func (s *Server) handleGetExplorerModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetExplorerModel(w, r)
+}
+func (s *Server) handleSetExplorerModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetExplorerModel(w, r)
+}
+func (s *Server) handleGetContextModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetContextModel(w, r)
+}
+func (s *Server) handleSetContextModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetContextModel(w, r)
 }
 func (s *Server) handleGetPermissionModel(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetPermissionModel(w, r)

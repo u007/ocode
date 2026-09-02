@@ -435,9 +435,11 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	if len(injectedDocToolNames) > 0 {
 		subSpec.Tools = append(spec.Tools, injectedDocToolNames...)
 	}
-	// Inject the small model for lightweight agents (explore, general, compaction)
-	// when no explicit model override is present on the spec.
-	injectSmallModelIfEligible(subAgent, &subSpec, t.mainAgent.config)
+	// Inject a model for lightweight/purpose-specific agents when no explicit
+	// model override is present on the spec: explorer/context model first
+	// (explore/scout/context/doc-sync), falling back to the small model
+	// (explore, general, compaction, ...) and finally the main model.
+	injectPurposeModelIfEligible(subAgent, &subSpec, t.mainAgent.config)
 	subAgent.SetSpec(&subSpec)
 
 	// Discovery: the sub-agent gets its OWN fresh sticky set (it does not inherit

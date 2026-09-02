@@ -141,7 +141,8 @@ func TestBuildPermissionContextIncludesCustomScriptEvenWhenBudgetExhausted(t *te
 	args, _ := json.Marshal(map[string]string{"command": "./my.sh --flag"})
 	// Use maxSources=3, same as default. With old logic, metadata would consume budget and script would be excluded.
 	// New logic reserves metadata not counting, so script should still appear.
-	ctx := a.buildPermissionContext("bash", args, 2048, 3, 40)
+	// Budget increased to 4096 to accommodate expanded allowed-roots (userWritableRoots: ~/.cache, bins, etc.).
+	ctx := a.buildPermissionContext("bash", args, 4096, 3, 40)
 	if !strings.Contains(ctx, "Executed custom script") {
 		t.Fatalf("expected Executed custom script in context, got: %q", ctx)
 	}
