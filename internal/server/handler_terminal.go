@@ -143,24 +143,48 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		shell = config.DefaultTerminalShell()
 	}
 
-	cmd := terminalShellCommand(shell)
-	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
-
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		log.Printf("terminal: failed to start pty shell %q in %q: %v", shell, workDir, err)
-		writeError(w, http.StatusInternalServerError, "failed to start terminal")
-		return
-	}
-
 	// terminal_id (the frontend's TerminalPanel `id`) is the reattach key: a
 	// reload or socket drop detaches the shell, and the next socket carrying
 	// the same id resumes it. It also lets the terminal-processes emitter
 	// correlate a pid with the tab the browser shows it under. An empty id
 	// (old/other clients) gets a shell that dies with its socket, as before.
 	terminalID := r.URL.Query().Get("terminal_id")
-	if existing := h.terminalSessions.lookup(terminalID); existing != nil {
+
+	// Anonymous sockets (no id) have nothing to reattach to: each spawns its
+	// own shell that dies with its socket. They skip the reservation — the
+	// shared empty key would serialize unrelated connections onto one fake
+	// "create" — but still publish their session under the generated anon-N
+	// key so the kill/shutdown paths can reach them.
+	if terminalID == "" {
+		anonSess, anonErr := h.startTerminalShell("", workDir, shell)
+		if anonErr != nil {
+			log.Printf("terminal: failed to start pty shell %q in %q: %v", shell, workDir, anonErr)
+			writeError(w, http.StatusInternalServerError, "failed to start terminal")
+			return
+		}
+		h.terminalSessions.put(anonSess.id, anonSess)
+		h.serveFreshTerminal(w, r, anonSess)
+		return
+	}
+
+	// reserve() decides, under the table lock, whether to reattach to a live
+	// shell (it returns it) or hand this caller the exclusive right to spawn.
+	// No pty is started before this decision, so reattach and project-mismatch
+	// paths can never orphan a shell they didn't spawn, and N concurrent
+	// sockets for the same brand-new id spawn exactly one shell: losers get
+	// created=false and a done channel, then reattach to the winner.
+	existing, created, done := h.terminalSessions.reserve(terminalID)
+	if !created {
+		if existing == nil {
+			// Another socket is spawning right now; wait for it to publish.
+			<-done
+			existing = h.terminalSessions.lookup(terminalID)
+			if existing == nil {
+				// The winner's pty.Start failed; the client will retry.
+				writeError(w, http.StatusInternalServerError, "failed to start terminal")
+				return
+			}
+		}
 		if existing.project != workDir {
 			log.Printf("terminal %s: rejected reattach from project %q (owned by %q)", terminalID, workDir, existing.project)
 			writeError(w, http.StatusConflict, "terminal_id belongs to a different project")
@@ -186,18 +210,61 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// This caller won the reservation: spawn exactly one shell for the id.
+	sess, err := h.startTerminalShell(terminalID, workDir, shell)
+	// Publish the session (or the failure) before doing anything else so
+	// waiters unblock promptly; on failure they re-lookup, find nothing, and
+	// return an error the client will retry.
+	h.terminalSessions.completeCreate(terminalID, sess)
+	if err != nil {
+		log.Printf("terminal: failed to start pty shell %q in %q: %v", shell, workDir, err)
+		writeError(w, http.StatusInternalServerError, "failed to start terminal")
+		return
+	}
+	h.serveFreshTerminal(w, r, sess)
+}
+
+// startTerminalShell spawns a pty-backed shell in workDir and returns it
+// fully wired: process registered and readLoop running. It does NOT publish
+// the session to the reattach table — callers do that (completeCreate for
+// named ids, or the anonymous path) so concurrent waiters only ever see a
+// fully started shell. On failure the shell is torn down so no process,
+// pty fd, or goroutine survives.
+func (h *Handler) startTerminalShell(terminalID, workDir, shell string) (*terminalSession, error) {
+	cmd := terminalShellCommand(shell)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		return nil, err
+	}
 	sess := newTerminalSession(terminalID, workDir, cmd, ptmx, h.terminalSessions.detachTTL, h.terminalExited)
-	h.terminalSessions.put(sess.id, sess)
 	h.terminalProcs.register(terminalID, terminalProcEntry{Project: workDir, PID: int32(cmd.Process.Pid)})
 	h.notifyTerminalProcsChanged()
 	go sess.readLoop()
+	return sess, nil
+}
 
+// serveFreshTerminal upgrades the websocket for a just-spawned shell, attaches
+// it as a fresh (non-resumed) session, and serves it. It is the shared tail of
+// both the anonymous path and the named-id reservation winner. On upgrade
+// failure the shell is torn back down so a failed handshake doesn't leak a
+// process until the detach TTL — unless a waiting socket already reattached
+// and is actively using it, in which case that session must be left alone.
+func (h *Handler) serveFreshTerminal(w http.ResponseWriter, r *http.Request, sess *terminalSession) {
+	if sess == nil {
+		writeError(w, http.StatusInternalServerError, "failed to start terminal")
+		return
+	}
 	ws, err := terminalUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		// Upgrade already wrote an error response; tear the shell back down so
 		// a failed handshake doesn't leak a process until the detach TTL.
 		log.Printf("terminal: websocket upgrade failed: %v", err)
-		sess.kill()
+		if !sess.attached() {
+			sess.kill()
+		}
 		return
 	}
 	ws.SetReadLimit(terminalMaxMessageSize)

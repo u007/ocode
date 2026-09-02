@@ -158,13 +158,17 @@ func TestAutoPermissionPromptOutdatedUpgrade(t *testing.T) {
 func TestLoadAutoPermissionPromptBody(t *testing.T) {
 	setupAutoPermPromptHome(t)
 
-	// Missing → "" with nil error.
+	// Missing → self-installs and returns the bundled body; a missing file
+	// must never silently drop the bundled rules from the gatekeeper prompt.
 	body, err := LoadAutoPermissionPromptBody()
 	if err != nil {
 		t.Fatalf("load missing: %v", err)
 	}
-	if body != "" {
-		t.Fatalf("expected empty body, got %q", body)
+	if body != BundledAutoPermissionPromptBody {
+		t.Fatalf("expected bundled body after self-install, got %q", body)
+	}
+	if status, _ := GetAutoPermissionPromptStatus(); status != AutoPermissionPromptUpToDate {
+		t.Fatalf("expected up-to-date after self-install, got %s", status)
 	}
 
 	// Installed → bundled body.
@@ -266,6 +270,104 @@ func TestBackupAutoPermissionPromptFilePrunes(t *testing.T) {
 	for _, p := range left {
 		if strings.HasSuffix(p, "20260101T000000Z") {
 			t.Fatalf("oldest backup should have been pruned: %v", left)
+		}
+	}
+}
+
+func TestAutoPermissionPromptNewerNeverDowngraded(t *testing.T) {
+	setupAutoPermPromptHome(t)
+	path, err := AutoPermissionPromptFilePath()
+	if err != nil {
+		t.Fatalf("AutoPermissionPromptFilePath: %v", err)
+	}
+	// Simulate a newer build having installed a different body: sidecar hash
+	// matches the file, sidecar version is above ours.
+	newerBody := BundledAutoPermissionPromptBody + "\nAlways ALLOW \"future-cmd\".\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(newerBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(autoPermissionPromptSidecarPath(path), sidecarBody(sha256Hex([]byte(newerBody)), "999.0.0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	status, err := GetAutoPermissionPromptStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != AutoPermissionPromptNewer {
+		t.Fatalf("expected newer, got %s", status)
+	}
+	if action, err := InstallAutoPermissionPrompt(false); err != nil || action != "newer" {
+		t.Fatalf("install without force: action=%q err=%v", action, err)
+	}
+	body, err := LoadAutoPermissionPromptBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != newerBody {
+		t.Fatalf("load downgraded a newer install")
+	}
+	if action, err := InstallAutoPermissionPrompt(true); err != nil || action != "updated" {
+		t.Fatalf("forced install: action=%q err=%v", action, err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != BundledAutoPermissionPromptBody {
+		t.Fatalf("forced install did not write bundled body")
+	}
+	if _, version, ok := readSidecar(autoPermissionPromptSidecarPath(path)); !ok || version != BundledAutoPermissionPromptVersion {
+		t.Fatalf("sidecar version = %q ok=%v, want %q", version, ok, BundledAutoPermissionPromptVersion)
+	}
+}
+
+func TestAutoPermissionPromptLegacySidecarIsOutdated(t *testing.T) {
+	setupAutoPermPromptHome(t)
+	path, err := AutoPermissionPromptFilePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleBody := strings.Replace(BundledAutoPermissionPromptBody, "git status", "git st", 1)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(staleBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-version sidecar: hash only, no trailing version line.
+	if err := os.WriteFile(autoPermissionPromptSidecarPath(path), []byte(sha256Hex([]byte(staleBody))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ := GetAutoPermissionPromptStatus(); status != AutoPermissionPromptOutdated {
+		t.Fatalf("expected outdated for legacy sidecar, got %s", status)
+	}
+}
+
+func TestBackupAutoPermissionPromptFileKeepsSource(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "auto-permission-prompt.md")
+	if err := os.WriteFile(src, []byte("body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := backupAutoPermissionPromptFile(src); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("backup removed the live file: %v", err)
+	}
+	baks, _ := filepath.Glob(filepath.Join(dir, "auto-permission-prompt.md.bak.*"))
+	if len(baks) != 1 {
+		t.Fatalf("expected 1 backup, got %d", len(baks))
+	}
+}
+
+func TestCompareVersion(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{{"1.8.0", "1.8.0", 0}, {"1.9.0", "1.8.0", 1}, {"1.8", "1.8.1", -1}, {"0.0.0", "1.0.0", -1}, {"2.0.0", "1.99.99", 1}}
+	for _, c := range cases {
+		if got := compareVersion(c.a, c.b); got != c.want {
+			t.Errorf("compareVersion(%q,%q)=%d want %d", c.a, c.b, got, c.want)
 		}
 	}
 }

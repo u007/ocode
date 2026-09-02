@@ -12,7 +12,7 @@ the `skills/ocode-*` catalog, not here.
 name). Do not duplicate content between the two — update here only.
 
 ## Tech Stack
-- Go 1.23
+- Go 1.26.1 (per `go.mod`)
 - Charm TUI (Bubble Tea, Lipgloss v2 — note v2 wraps each rune in its own
   SGR sequence; substring assertions on rendered output need `stripANSI` from
   `internal/tui/selection.go`)
@@ -56,6 +56,50 @@ git worktree add .worktrees/feature-branch feature-branch
   These files often contain secrets, API keys, or configuration that is
   different from local dev — blindly replacing them can break deployments
   or leak credentials. When in doubt, ask.
+
+## Sandbox permission mode
+
+`sandbox` is the fourth permission mode (besides `normal`/`yolo`/`locked`),
+toggled from the TUI permission-mode click cycle, `/sandbox`, or the web mode
+selector. It is **write-integrity confinement only** — it does NOT protect
+secrets or prevent exfiltration.
+
+What it confines:
+- Only the agent **shell tool** (`bash`) is wrapped. The interactive PTY
+  terminal (`handler_terminal.go`) and the web `!shell` path run unsandboxed.
+- Filesystem **writes** fail at the OS level unless the target is under a
+  writable root: workspace/`extra_allowed_paths`, language dependency caches
+  (npm/pip/cargo/go/maven/gradle), `~/.claude`, and temp dirs
+  (`/tmp`, `/var/tmp`, `os.TempDir()`).
+- **Reads and exec stay global, network egress is open** — toolchains need
+  them. A sandboxed `python`/`node` can still read `.env`/`~/.ssh`/`auth.json`
+  and POST them anywhere.
+
+What still asks (permission layer, not the OS):
+- `auth.json` (read or write) → Ask
+- ocode config/data dir (writes only) → Ask
+- `~/.ssh`, `.env` (read or write) → Ask
+- danger-`rm` heuristics → Ask
+- writes to permission-defining files (`.ocode/settings.json`,
+  `.claude/settings.json`, ocode config gating files) and loopback requests to
+  `/api/permissions*` → Ask (self-escalation guard, all modes)
+
+Ask routes to the auto-permission LLM judge when `auto` is on, else a human
+prompt. These static checks catch direct commands (`cat auth.json`), but NOT a
+read/write hidden inside an interpreter (`python -c ...`) — the backends are
+write-walls only and never OS-block secret reads (that would make approval
+impossible). Real config/secret changes should be made outside sandbox.
+
+Platform matrix:
+- macOS: real — Seatbelt via `/usr/bin/sandbox-exec` (trusted absolute path)
+- Linux: real — Landlock (kernel ≥5.13, ABI-probed, `PR_SET_NO_NEW_PRIVS`)
+  with `bubblewrap` (`/usr/bin/bwrap`) fallback
+- Windows: no backend — selecting sandbox behaves like `normal` (prompts),
+  no confinement
+
+Toggling is per-session and never persisted: restarts return to `normal`.
+Fail-closed on macOS/Linux: if the mode is sandbox but no backend is available,
+the command errors before starting (no silent unsandboxed execution).
 
 ## Context Loading
 

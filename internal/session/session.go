@@ -902,6 +902,32 @@ type ocodeMeta struct {
 // file. It stays correct regardless of on-disk key order (older files store
 // messages mid-object, newer ones may not), so dedup of cloned Claude sessions
 // remains exact. modTime is the fallback for updated_at when the field is absent.
+// skipJSONValue consumes exactly one JSON value from dec (whatever the
+// decoder is positioned at next) without retaining its bytes, unlike decoding
+// into json.RawMessage which copies the entire value into one allocation.
+// For a large array/object this walks its tokens one at a time so no
+// single allocation grows past a few bytes.
+func skipJSONValue(dec *json.Decoder) error {
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+		}
+		if depth == 0 {
+			return nil
+		}
+	}
+}
+
 func readOcodeMeta(path string, modTime time.Time) (ocodeMeta, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -948,11 +974,14 @@ func readOcodeMeta(path string, modTime time.Time) (ocodeMeta, error) {
 				meta.CloneOf = v
 			}
 		default:
-			// Skip any other value (notably the heavy "messages" array) as raw
-			// bytes — no struct allocation. Must consume exactly one value here
-			// or the decoder desyncs for every subsequent key.
-			var raw json.RawMessage
-			if err := dec.Decode(&raw); err != nil {
+			// Skip any other value (notably the heavy "messages" array) by
+			// walking its tokens without retaining them — decoding into
+			// json.RawMessage still materializes the entire skipped value as
+			// one contiguous byte slice (confirmed via heap profile: it was
+			// the dominant allocation source when listing sessions with large
+			// legacy .json files). Must consume exactly one value here or the
+			// decoder desyncs for every subsequent key.
+			if err := skipJSONValue(dec); err != nil {
 				return ocodeMeta{}, err
 			}
 		}

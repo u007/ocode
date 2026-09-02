@@ -15,11 +15,11 @@
 **Interfaces:**
 - Produces: `Wrapper{ Wrap(cmd *exec.Cmd, roots RootSet) (*exec.Cmd, error); Available() bool }`. `New() Wrapper` selects by GOOS. `Supported() bool` = current GOOS has a real backend (compile-time: darwin/linux true, windows false). Distinction: **`Supported()`** = a backend exists for this OS; **`Available()`** = that backend can actually run now (binary present / kernel ABI ok). No-op: `Wrap` returns cmd unchanged, `Available()` false.
 
-- [ ] **Step 1:** Write failing tests `TestNoopWrapPassthrough` (cmd returned unchanged, nil error) and `TestSupportedMatchesGOOS` (true on darwin/linux, false on windows — table by build tag or a runtime check).
-- [ ] **Step 2:** Run; expect FAIL.
-- [ ] **Step 3:** Define interface, no-op, `New()`, `Supported()`. `New()` returns no-op where no real backend exists so all targets compile before Tasks 3–4.
-- [ ] **Step 4:** Run tests; `GOOS=windows go build ./...` and `GOOS=linux go build ./...`.
-- [ ] **Step 5:** Commit: `feat(shell/sandbox): Wrapper interface + no-op backend`.
+- [x] **Step 1:** Write failing tests `TestNoopWrapPassthrough` (cmd returned unchanged, nil error) and `TestSupportedMatchesGOOS` (true on darwin/linux, false on windows — table by build tag or a runtime check).
+- [x] **Step 2:** Run; expect FAIL.
+- [x] **Step 3:** Define interface, no-op, `New()`, `Supported()`. `New()` returns no-op where no real backend exists so all targets compile before Tasks 3–4.
+- [x] **Step 4:** Run tests; `GOOS=windows go build ./...` and `GOOS=linux go build ./...`.
+- [x] **Step 5:** Commit: `feat(shell/sandbox): Wrapper interface + no-op backend`.
 
 ---
 
@@ -32,24 +32,31 @@
 - Modify: `internal/agent/permissions.go` `Decide()` bash branch (`:1179-1260`) — insert the sandbox auto-allow at the **same position as the YOLO shortcut (`:1204`)**: after `isHardBlockedCommand`/Claude-deny/dangerous-`rm`, before interpreter/heredoc/compound/prefix/sensitive-path checks. Decision matrix below.
 - Test: `internal/tool/bash_build_test.go`, `internal/agent/permissions_test.go`
 
+> **⚠️ REVISION — this task's matrix was executed with the old "bypass sensitive-path" behavior and must be reworked.** Sandbox mode must **keep the sensitive-path + ocode-self-config checks authoritative** (they were previously bypassed). Re-open the `Decide` change and the tests below.
+
 **Decision matrix (sandbox mode, supported OS):**
 
 | Check (in `Decide` order) | Normal | YOLO | **Sandbox** |
 |---|---|---|---|
 | `isHardBlockedCommand` (`rm -rf /`, forkbomb, `| sh`, `; sudo`, `dd if=`, `mkfs`) | HardDeny | HardDeny | **HardDeny** |
 | Claude-settings deny | HardDeny | HardDeny | **HardDeny** |
+| `auth.json` read or write | Ask/redact | Ask | **Ask** (→ judge when auto on; agent has no legit need, so refuse) |
+| ocode config-dir / data-dir **write** | (auto today) | bypass | **Ask** (→ judge; guards self-granting a bypass) |
+| `~/.ssh`, `.env` read or write | Ask | bypass | **Ask** |
 | dangerous-`rm` heuristic | Ask | Ask | **Ask** |
-| interpreter/heredoc, sensitive-path READ, redirection, prefix scope | Ask/prompt | bypass | **bypass** (OS confines writes; reads are intentionally open) |
+| interpreter/heredoc, redirection, prefix scope | Ask/prompt | bypass | **bypass** |
 | everything else | scope-checked | Allow | **Allow, OS-wrapped** |
 
-Rationale: sandbox = YOLO's prompt-bypass **plus** OS write-confinement. Hard blocks and dangerous-`rm` remain authoritative as belt-and-suspenders. Sensitive-path *read* prompts are intentionally bypassed (write-integrity only).
+Rationale: sandbox = YOLO's ordinary-prompt-bypass **plus** OS write-confinement **minus** the sensitive set, which stays authoritative. Hard blocks and dangerous-`rm` remain.
 
-- [ ] **Step 1:** Write failing builder tests: `TestBuildBashCmdFailsClosedForeground` (active + stub `Available()==false` ⇒ error, no cmd); `TestBuildBashCmdFailsClosedBackgroundNoRecord` (bg path: wrap failure ⇒ error **and** `ProcessRegistry` has no record for it); `TestBuildBashCmdWrapsWhenActive` / `TestBuildBashCmdSkipsWhenInactive`.
-- [ ] **Step 2:** Write failing `Decide` tests: `TestDecideSandboxAutoAllowsPlainCommand`; `TestDecideSandboxHardDenyStillWins` (`rm -rf /`); `TestDecideSandboxDangerousRmStillAsks`; `TestDecideSandboxBypassesInterpreterPrompt` (a `python -c` heredoc auto-allows in sandbox but the same in normal asks); `TestDecideSandboxDegradesOnUnsupportedOS` (mode sandbox, `Supported()==false` ⇒ behaves like normal).
-- [ ] **Step 3:** Run; expect FAIL.
-- [ ] **Step 4:** Implement the fail-closed builder (fg+bg, pre-Start/pre-register), the `BashTool` provider wiring, and the `Decide` matrix branch.
-- [ ] **Step 5:** Run all + full `internal/tool` + `internal/agent`; expect PASS.
-- [ ] **Step 6:** Commit: `feat(shell/sandbox): fail-closed wrap (fg+bg) + Decide sandbox matrix`.
+**"Ask" in sandbox ≠ human prompt (INDEX Decision 9).** Because sandbox keeps `auto` enabled, every **Ask** cell above routes through the auto-permission LLM judge when enabled (judge decides allow/deny), and only reaches a human prompt when `auto` is disabled. The sensitive set — `auth.json`, config/data-dir writes, `~/.ssh`, `.env` — is all **Ask** (owner's settled choice: same treatment for auth.json and config writes; the judge/human is the gate, not an absolute block). The **only** absolute cells (never reach the judge) are the hard-block set (`rm -rf /`, forkbomb, `| sh`, `; sudo`, `dd if=`, `mkfs`). The sensitive rows are enforced at the **permission layer only** — the backends do write-walls, not read-deny (an OS read-block would prevent the judge/human from approving these Ask decisions). Residual: an interpreter-hidden read of a sensitive file isn't statically caught (INDEX Decision 3).
+
+- [x] **Step 1:** Write failing builder tests: `TestBuildBashCmdFailsClosedForeground` (active + stub `Available()==false` ⇒ error, no cmd); `TestBuildBashCmdFailsClosedBackgroundNoRecord` (bg path: wrap failure ⇒ error **and** `ProcessRegistry` has no record for it); `TestBuildBashCmdWrapsWhenActive` / `TestBuildBashCmdSkipsWhenInactive`.
+- [x] **Step 2:** Write failing `Decide` tests: `TestDecideSandboxAutoAllowsPlainCommand`; `TestDecideSandboxHardDenyStillWins` (`rm -rf /`); `TestDecideSandboxDangerousRmStillAsks`; `TestDecideSandboxBypassesInterpreterPrompt` (a `python -c` heredoc auto-allows in sandbox but the same in normal asks); `TestDecideSandboxDegradesOnUnsupportedOS` (mode sandbox, `Supported()==false` ⇒ behaves like normal).
+- [x] **Step 3:** Run; expect FAIL.
+- [x] **Step 4:** Implement the fail-closed builder (fg+bg, pre-Start/pre-register), the `BashTool` provider wiring, and the `Decide` matrix branch.
+- [x] **Step 5:** Run all + full `internal/tool` + `internal/agent`; expect PASS.
+- [x] **Step 6:** Commit: `feat(shell/sandbox): fail-closed wrap (fg+bg) + Decide sandbox matrix`.
 
 ---
 
@@ -68,12 +75,12 @@ Rationale: sandbox = YOLO's prompt-bypass **plus** OS write-confinement. Hard bl
 - Allow network egress (documented open).
 - **Escaping:** any path interpolated into SBPL must be rejected/escaped if it contains quotes, newlines, or null bytes; reject a writable root that resolves to `/` or to a non-existent path that would broaden scope.
 
-- [ ] **Step 1:** Write failing profile-generation tests (any OS): `TestSeatbeltProfileGrantsWritableRoots` (a `file-write*` rule per writable root + global `file-read*`); `TestSeatbeltProfileRejectsMaliciousPath` (a root containing a quote/newline is rejected, not emitted raw).
-- [ ] **Step 2:** Write failing darwin-only integration tests (guarded to darwin + binary present): `TestSeatbeltConfinesWrites` (write inside a writable root succeeds; write to a sibling outside all roots fails); `TestSeatbeltConfinesMutations` (unlink/rename/symlink targeting a read-only root fails; the same inside a writable root succeeds); `TestSeatbeltAllowsExec` (`npm --version`, `python --version` succeed wrapped).
-- [ ] **Step 3:** Run; expect FAIL.
-- [ ] **Step 4:** Implement profile generator (with escaping/rejection) + darwin `Wrap` (absolute `sandbox-exec`); register in `New()`.
-- [ ] **Step 5:** Run on macOS; expect PASS.
-- [ ] **Step 6:** Commit: `feat(shell/sandbox): macOS Seatbelt backend`.
+- [x] **Step 1:** Write failing profile-generation tests (any OS): `TestSeatbeltProfileGrantsWritableRoots` (a `file-write*` rule per writable root + global `file-read*`); `TestSeatbeltProfileRejectsMaliciousPath` (a root containing a quote/newline is rejected, not emitted raw).
+- [x] **Step 2:** Write failing darwin-only integration tests (guarded to darwin + binary present): `TestSeatbeltConfinesWrites` (write inside a writable root succeeds; write to a sibling outside all roots fails); `TestSeatbeltConfinesMutations` (unlink/rename/symlink targeting a read-only root fails; the same inside a writable root succeeds); `TestSeatbeltAllowsExec` (`npm --version`, `python --version` succeed wrapped).
+- [x] **Step 3:** Run; expect FAIL.
+- [x] **Step 4:** Implement profile generator (with escaping/rejection) + darwin `Wrap` (absolute `sandbox-exec`); register in `New()`.
+- [x] **Step 5:** Run on macOS; expect PASS.
+- [x] **Step 6:** Commit: `feat(shell/sandbox): macOS Seatbelt backend`.
 
 ---
 
@@ -88,11 +95,54 @@ Rationale: sandbox = YOLO's prompt-bypass **plus** OS write-confinement. Hard bl
 
 **Landlock path:** re-exec ocode as a tiny confiner subcommand that sets `PR_SET_NO_NEW_PRIVS`, applies a Landlock ruleset (read+exec broad; write/mutation restricted to `WritableRoots`, covering all `LANDLOCK_ACCESS_FS_*` mutation rights — write, create, remove-file, remove-dir, make-reg, make-sym, make-dir, rename/`refer` where the ABI supports cross-root reference control), then `execve`s `bash -c …`. Probe the Landlock ABI level; if too low, degrade to `bwrap`.
 
-**bwrap path:** build a `bwrap` argv (absolute trusted `/usr/bin/bwrap`): bind `WritableRoots` read-write, bind the rest of `/` read-only (`--ro-bind / /` then rw binds), share the network namespace (egress open), and run `bash -c …`. Handle non-existent roots (skip or create-as-needed, never widen). If neither Landlock nor `bwrap` is usable while active, `Wrap` errors (fail-closed).
+**bwrap path:** build a `bwrap` argv (absolute trusted `/usr/bin/bwrap`): bind `WritableRoots` read-write, bind the rest of `/` read-only (`--ro-bind / /` then rw binds), share the network namespace (egress open), and run `bash -c …`. Handle non-existent roots (skip or create-as-needed, never widen). If neither Landlock nor `bwrap` is usable while active, `Wrap` errors (fail-closed). **No sensitive-read hiding here** — sensitive reads are Ask→judge (INDEX Decision 3), so OS-hiding them would block a legitimately approved read; the permission layer handles that set. This keeps Landlock and bwrap at parity (both: write-walls only).
 
-- [ ] **Step 1:** Write failing test `TestLinuxBackendSelectsLandlockOrBwrap` (selection reflects ABI probe / `bwrap` lookup; neither available ⇒ `Wrap` errors and `Available()==false`).
-- [ ] **Step 2:** Write failing linux-only integration tests (guarded to where a backend is available): `TestLinuxConfinesWrites` (inside writable ok, outside fails); `TestLinuxConfinesMutations` (unlink/rename/symlink across into a read-only root fails); `TestLinuxAllowsExec` (`npm`/`python` run wrapped).
-- [ ] **Step 3:** Run; expect FAIL.
-- [ ] **Step 4:** Implement the confiner re-exec subcommand (`PR_SET_NO_NEW_PRIVS` + Landlock ruleset), the `bwrap` fallback argv, ABI/binary detection; register in `New()`. Route the re-exec through existing spawn conventions where applicable.
-- [ ] **Step 5:** Run on Linux (Landlock kernel, and a `bwrap`-only env if available); expect PASS.
-- [ ] **Step 6:** Commit: `feat(shell/sandbox): Linux Landlock backend + bwrap fallback`.
+- [x] **Step 1:** Write failing test `TestLinuxBackendSelectsLandlockOrBwrap` (selection reflects ABI probe / `bwrap` lookup; neither available ⇒ `Wrap` errors and `Available()==false`).
+- [x] **Step 2:** Write failing linux-only integration tests (guarded to where a backend is available): `TestLinuxConfinesWrites` (inside writable ok, outside fails); `TestLinuxConfinesMutations` (unlink/rename/symlink across into a read-only root fails); `TestLinuxAllowsExec` (`npm`/`python` run wrapped).
+- [x] **Step 3:** Run; expect FAIL.
+- [x] **Step 4:** Implement the confiner re-exec subcommand (`PR_SET_NO_NEW_PRIVS` + Landlock ruleset), the `bwrap` fallback argv, ABI/binary detection; register in `New()`. Route the re-exec through existing spawn conventions where applicable.
+- [x] **Step 5:** Run on Linux (Landlock kernel, and a `bwrap`-only env if available); expect PASS.
+- [x] **Step 6:** Commit: `feat(shell/sandbox): Linux Landlock backend + bwrap fallback`.
+
+---
+
+### Task 5: Sensitive-path protection (revision to Tasks 2–4)
+
+> Task 2 was executed with the earlier "bypass sensitive-path" behavior. This task reworks it to the INDEX Decision 3/9 model. It is the security core — do not skip. **Permission-layer only — no OS read-deny** (the sensitive set is Ask→judge, so it must stay approvable; OS-blocking it would break approval).
+
+**Files:**
+- Modify: `internal/agent/permissions.go` — a `sensitiveSandboxDecision(command)` helper reusing the existing `isSensitivePath`/`redact.IsSensitiveFile` machinery, called **inside** the sandbox branch of `Decide` (added in Task 2) so the sandbox auto-allow is skipped for the sensitive set, which then flows through the normal Ask path (→ auto-permission judge when `auto` on, else human). Dispositions — **all Ask** (owner's settled choice): `auth.json` read/write → Ask; ocode config-dir/data-dir **write** → Ask; `~/.ssh`/`.env` read/write → Ask. Applies to the statically-extractable paths of the command (residual: interpreter-hidden reads aren't caught).
+- Test: `internal/agent/permissions_test.go`
+
+**Interfaces:**
+- Produces: `sensitiveSandboxDecision`. (No `RootSet` deny fields, no backend read-deny — the backends stay write-walls only.)
+
+- [x] **Step 1:** Write failing `Decide` tests: `TestDecideSandboxAuthJsonAsks` (cat <authpath> and a redirect-write to it → Ask in sandbox); `TestDecideSandboxConfigWriteAsks` (config-dir write → Ask); `TestDecideSandboxSshReadAsks` (`cat ~/.ssh/id_rsa` → Ask); `TestDecideSandboxEnvWriteAsks` (`.env` write → Ask); `TestDecideSandboxNonSensitiveStillAutoAllows` (plain workspace command still auto-allows).
+- [x] **Step 2:** Write a failing test `TestSandboxAskRoutesThroughAutoPermission` asserting that a sandbox Ask outcome is handed to the auto-permission judge when `auto` is enabled, and to the human when disabled.
+- [x] **Step 3:** Run; expect FAIL.
+- [x] **Step 4:** Implement the `sensitiveSandboxDecision` carve-out in the sandbox branch of `Decide`; confirm sandbox does not disable `auto` (Part 01 Task 1) so Ask routes correctly. Document the interpreter-hidden-read residual in code + docs (Part 04).
+- [x] **Step 5:** Run all + full `internal/agent`; expect PASS.
+- [x] **Step 6:** Commit: `feat(permissions): sandbox sensitive-path → Ask (auth.json/ssh/env/config)`.
+
+---
+
+### Task 6: Self-escalation guard (agent can't shortcut its own permissions)
+
+> Path-based confinement misses this: the files that *define* the boundary (`.ocode/settings.json`, `.claude/settings.json`) live **inside** the writable workspace, so a bare OS sandbox would auto-allow the agent rewriting them to widen its own access. This guard closes that. It is **mode-independent** — it applies in normal-auto, YOLO, and sandbox, and sits **above** every auto-allow shortcut (like the hard-block layer).
+
+**Files:**
+- Modify: `internal/agent/permissions.go` — a `isPermissionEscalation(command)` check placed near the top of the bash branch of `Decide` (alongside `isHardBlockedCommand`, **before** the YOLO/sandbox auto-allow). Returns Ask (never auto-allowable) when a command **writes** to a permission-defining target, resolved against the command's extracted write paths + redirections:
+  - project `.ocode/settings.json`, `.claude/settings.json` (anywhere in the tree, not just workspace root)
+  - ocode global config permissions (config dir — already write-Ask from Task 5; keep consistent)
+  - any file matching the permission/allowlist config set (tool allow/deny, bash-prefix rules, `extra_allowed_paths`)
+- Modify: the loopback-API exfil/escalation detectors (the existing `isExfiltrationRiskCurl/Wget/HTTPie/Netcat` family, `permissions.go:617-795`) — a loopback request whose path targets `/api/permissions*` (mode/yolo/rule endpoints) → Ask, so a shell command can't flip its own mode via the local server.
+- Test: `internal/agent/permissions_test.go`
+
+**Interfaces:**
+- Produces: `isPermissionEscalation`, wired into `Decide` above the shortcuts.
+
+- [x] **Step 1:** Write failing tests: `TestWriteToProjectSettingsAsks` (a redirect/`tee`/`cp`/editor write to `.ocode/settings.json` inside the workspace → Ask in **sandbox and YOLO and normal-auto**, never auto-allow); `TestWriteToClaudeSettingsAsks`; `TestLoopbackPermissionApiAsks` (`curl` to `127.0.0.1:<port>/api/permissions/mode` → Ask); `TestOrdinaryWorkspaceWriteStillAutoAllows` (a normal file write in the workspace is unaffected).
+- [x] **Step 2:** Run; expect FAIL.
+- [x] **Step 3:** Implement `isPermissionEscalation` + the loopback-permission-endpoint check; wire both above the auto-allow shortcuts. Reuse `extractBashCommandPaths`/redirection extraction so it catches the common write forms.
+- [x] **Step 4:** Run tests + full `internal/agent`; expect PASS. Note the known limitation in code: static extraction can't catch a write hidden inside an interpreter (`python -c`) — the OS layer doesn't help here either since the file is in a writable root; document this residual (Part 04) as the reason config edits should ultimately be made outside sandbox.
+- [x] **Step 5:** Commit: `feat(permissions): self-escalation guard on permission-config writes`.

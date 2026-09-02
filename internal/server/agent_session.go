@@ -278,6 +278,17 @@ func (h *Handler) registerAgentSession(id string, as *agentSession, projectRoot 
 		return existing
 	}
 	h.agents[id] = as
+	// A session-scoped permission-mode toggle (PUT /api/permissions/mode, yolo
+	// toggle) must carry into sessions registered afterwards — a brand-new tab
+	// or a resumed session should not silently revert to the config default
+	// while the runtime override is in force.
+	if as.agent != nil {
+		if p := h.livePermissionModeOverride.Load(); p != nil {
+			if pm := as.agent.Permissions(); pm != nil {
+				pm.SetMode(*p)
+			}
+		}
+	}
 	h.mu.Unlock()
 	h.sessions.setAgent(id, as)
 	entry.lastActivity = time.Now()
@@ -339,7 +350,43 @@ func (h *Handler) publishBootstrapWarning(sessionID, stage, warning string) {
 
 // publishTurnStarted emits turn_started for a session entering a turn.
 func (h *Handler) publishTurnStarted(sessionID string) {
-	h.publishBusEvent("turn_started", sessionID, map[string]string{"session_id": sessionID})
+	startedAt, _ := h.sessions.TurnTiming(sessionID)
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
+	sessionCreatedAt := h.sessionCreatedAt(sessionID)
+	data := map[string]string{
+		"session_id":     sessionID,
+		"started_at":     startedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if !sessionCreatedAt.IsZero() {
+		data["session_created_at"] = sessionCreatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	h.publishBusEvent("turn_started", sessionID, data)
+	// Push a session-tagged status snapshot so the web shows current-input
+	// elapsed immediately (headless mode only; bridged TUI pushes its own
+	// snapshot via broadcastTUIStatus with TurnStartedAt).
+	if h.RCBridge() == nil {
+		h.publishTurnStatusSnapshot(sessionID)
+	}
+}
+
+// sessionCreatedAt returns the creation time of sessionID, or zero if unknown.
+// It reads through the SessionManager's resolver (disk scan per project root)
+// so it works for sessions that have not yet had an agent built.
+func (h *Handler) sessionCreatedAt(sessionID string) time.Time {
+	if sessionID == "" {
+		return time.Time{}
+	}
+	entry, err := h.sessions.Resolve(sessionID)
+	if err != nil || entry == nil {
+		return time.Time{}
+	}
+	s, err := session.LoadForDir(entry.ProjectRoot, sessionID)
+	if err != nil || s == nil {
+		return time.Time{}
+	}
+	return s.CreatedAt
 }
 
 // publishTurnDone emits the terminal turn_done for a successful turn. In
@@ -351,7 +398,23 @@ func (h *Handler) publishTurnDone(sessionID, model string) {
 	// agent's tool loop returns early on mid-batch cancellation), so nothing is
 	// retained past the turn that created it.
 	h.toolOutput.dropSession(sessionID)
-	ev := DoneEvent{SessionID: sessionID, Model: model}
+	startedAt, endedAt := h.sessions.TurnTiming(sessionID)
+	if endedAt.IsZero() {
+		endedAt = time.Now()
+	}
+	var tookMs int64
+	if !startedAt.IsZero() {
+		tookMs = endedAt.Sub(startedAt).Milliseconds()
+	}
+	ev := map[string]any{
+		"session_id": sessionID,
+		"model":      model,
+	}
+	if !startedAt.IsZero() {
+		ev["started_at"] = startedAt.UTC().Format(time.RFC3339Nano)
+		ev["ended_at"] = endedAt.UTC().Format(time.RFC3339Nano)
+		ev["took_ms"] = tookMs
+	}
 	if h.RCBridge() == nil {
 		h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "turn_done", Data: ev})
 		// Push a fresh session-tagged status snapshot so the web sidebar's
@@ -372,9 +435,22 @@ func (h *Handler) publishTurnDone(sessionID, model string) {
 func (h *Handler) publishTurnError(sessionID string, err error, stage string) {
 	// See publishTurnDone: a failed turn must release its buffers too.
 	h.toolOutput.dropSession(sessionID)
+	startedAt, endedAt := h.sessions.TurnTiming(sessionID)
+	if endedAt.IsZero() {
+		endedAt = time.Now()
+	}
+	var tookMs int64
+	if !startedAt.IsZero() {
+		tookMs = endedAt.Sub(startedAt).Milliseconds()
+	}
 	data := map[string]any{"session_id": sessionID, "error": err.Error()}
 	if stage != "" {
 		data["stage"] = stage
+	}
+	if !startedAt.IsZero() {
+		data["started_at"] = startedAt.UTC().Format(time.RFC3339Nano)
+		data["ended_at"] = endedAt.UTC().Format(time.RFC3339Nano)
+		data["took_ms"] = tookMs
 	}
 	h.publishBusEvent("turn_error", sessionID, data)
 	if h.RCBridge() == nil {

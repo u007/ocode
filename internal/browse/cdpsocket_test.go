@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,6 +31,14 @@ type fakeTarget struct {
 	mouses       []cdp.MouseEvent
 	keys         []cdp.KeyEvent
 	detachCalled bool
+	setFiles     [][]string
+	bodies       map[string]fakeResponseBody
+}
+
+type fakeResponseBody struct {
+	body      string
+	isBase64  bool
+	truncated bool
 }
 
 func (f *fakeTarget) Navigate(_ context.Context, url string) error {
@@ -72,7 +81,23 @@ func (f *fakeTarget) Key(_ context.Context, ev cdp.KeyEvent) error {
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeTarget) Detach() { f.mu.Lock(); f.detachCalled = true; f.mu.Unlock() }
+func (f *fakeTarget) SetFiles(_ context.Context, paths []string) error {
+	f.mu.Lock()
+	f.setFiles = append(f.setFiles, paths)
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeTarget) DetachSink(_ cdp.FrameSink) { f.mu.Lock(); f.detachCalled = true; f.mu.Unlock() }
+
+func (f *fakeTarget) GetResponseBody(_ context.Context, requestID string) (body string, isBase64 bool, truncated bool, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.bodies[requestID]
+	if !ok {
+		return "", false, false, errors.New("no response body for request")
+	}
+	return b.body, b.isBase64, b.truncated, nil
+}
 
 // fakeManager implements chromeManager without Chrome.
 type fakeManager struct {
@@ -105,6 +130,15 @@ func (m *fakeManager) Revoke(stateKey string) {
 	m.mu.Lock()
 	m.revoked = append(m.revoked, stateKey)
 	m.mu.Unlock()
+}
+func (m *fakeManager) SetFiles(ctx context.Context, stateKey string, paths []string) error {
+	m.mu.Lock()
+	t := m.targets[stateKey]
+	m.mu.Unlock()
+	if t == nil {
+		return cdp.ErrNoTarget
+	}
+	return t.SetFiles(ctx, paths)
 }
 func (m *fakeManager) Close(_ context.Context) error {
 	m.mu.Lock()
@@ -269,7 +303,16 @@ func TestCDP_SinkConsoleNetwork(t *testing.T) {
 	if got["t"] != "console" || got["level"] != "log" {
 		t.Fatalf("console frame = %s", string(data))
 	}
-	sink.Network(cdp.NetworkEvent{Method: "GET", URL: "https://example.com/", Status: 200, DurationMs: 10, TS: 456})
+	sink.Network(cdp.NetworkEvent{
+		RequestID:       "req-1",
+		Method:          "GET",
+		URL:             "https://example.com/",
+		Status:          200,
+		DurationMs:      10,
+		TS:              456,
+		RequestHeaders:  map[string]string{"Host": "example.com"},
+		ResponseHeaders: map[string]string{"Content-Type": "text/html"},
+	})
 	_, data, _ = conn.ReadMessage()
 	_ = json.Unmarshal(data, &got)
 	if got["t"] != "network" || got["method"] != "GET" {
@@ -498,5 +541,68 @@ func TestCDP_AttachUnsupportedPlatform(t *testing.T) {
 	msg, _ := got["message"].(string)
 	if msg != "Chrome mode is not supported on Windows yet" {
 		t.Fatalf("message = %q want Chrome mode not supported", msg)
+	}
+}
+
+// A Chrome file-chooser open is forwarded to the SPA as {"t":"fileChooser"};
+// the SPA's cancel comes back as {"t":"fileChooserCancel"} and drops the
+// pending chooser (SetFiles(nil)).
+func TestCDP_FileChooserForwardAndCancel(t *testing.T) {
+	s, fake, ts := newBrowseWithFake(t, "http://example.com")
+	grant := s.MintGrant("tab:x", "http://example.com")
+	u := wsURL(ts, "tab:x", grant)
+	conn, _, err := (&websocket.Dialer{}).Dial(u, http.Header{"Origin": []string{"http://example.com"}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond)
+	sink, ok := fake.sinkFor("tab:x").(cdp.FileChooserSink)
+	if !ok {
+		t.Fatal("cdpSink must implement cdp.FileChooserSink")
+	}
+	sink.FileChooser(true)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var msg struct {
+		T        string `json:"t"`
+		Multiple bool   `json:"multiple"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil || msg.T != "fileChooser" || !msg.Multiple {
+		t.Fatalf("got %s (err=%v), want fileChooser multiple=true", data, err)
+	}
+
+	if err := conn.WriteJSON(map[string]any{"t": "fileChooserCancel"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	ft := fake.targetFor("tab:x")
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	if len(ft.setFiles) != 1 || len(ft.setFiles[0]) != 0 {
+		t.Fatalf("SetFiles calls = %v, want one empty (cancel)", ft.setFiles)
+	}
+}
+
+func TestServerSetFilesRoutesToManager(t *testing.T) {
+	s, fake, ts := newBrowseWithFake(t, "http://example.com")
+	defer ts.Close()
+	if err := s.SetFiles(context.Background(), "tab:none", []string{"/tmp/x"}); !errors.Is(err, cdp.ErrNoTarget) {
+		t.Fatalf("no target: err = %v", err)
+	}
+	if _, err := fake.Attach(context.Background(), "tab:y", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFiles(context.Background(), "tab:y", []string{"/tmp/x"}); err != nil {
+		t.Fatal(err)
+	}
+	ft := fake.targetFor("tab:y")
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	if len(ft.setFiles) != 1 || ft.setFiles[0][0] != "/tmp/x" {
+		t.Fatalf("SetFiles calls = %v", ft.setFiles)
 	}
 }

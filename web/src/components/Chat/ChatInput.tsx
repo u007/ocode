@@ -45,13 +45,17 @@ export default function ChatInput({
   const [slashQuery, setSlashQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
-  // Paths the user has manually excluded from the CURRENT message via the X
-  // button on a context/editor pill. This is composer-local: it does NOT touch
-  // the persisted loop inclusion (includeInContext) — X only drops the file
-  // from this one send, and the set is cleared once the message goes out, so
-  // the file re-appears as a pill on the next message. ("whatever was included
-  // in past loop, let it be.")
+  // Paths the user has manually excluded via the X button on a context/editor
+  // pill. This is STICKY for the session: X'ing a file off does NOT touch the
+  // persisted loop inclusion (includeInContext) and the file stays excluded
+  // across sends. It is only auto-reinjected when a genuinely NEW file tab opens
+  // (or a closed file is reopened) — re-selecting an existing tab never
+  // reinjects. ("whatever was included in past loop, let it be.")
   const [excludedPaths, setExcludedPaths] = useState<Set<string>>(new Set());
+  // Tracks which context-file paths have ever been seen so we can distinguish a
+  // genuinely new tab opening (→ reinject) from a re-select / rerender (→ don't).
+  // Paths leave this set when their tab closes, so a later reopen counts as new.
+  const seenContextPathsRef = useRef<Set<string>>(new Set(contextFilePaths ?? []));
   // shellInFlight is true while a `!cmd` shell command is being executed by
   // the server. We block new sends during this window so the user can't fire
   // a second message that interleaves with the in-flight shell result — the
@@ -85,6 +89,38 @@ export default function ChatInput({
   useEffect(() => {
     setInput(getDraft(sessionTabId));
     setQueueCount(getQueue(sessionTabId).length);
+  }, [sessionTabId]);
+
+  // Reinjection: a file the user X'd off stays excluded UNTIL a genuinely new
+  // file tab opens. We detect "new" by diffing contextFilePaths against the set
+  // of paths we've already seen this session. A path that appears for the first
+  // time is a freshly-opened tab → drop it from excludedPaths so it re-injects.
+  // When a path disappears (tab closed) we forget it, so a later reopen counts
+  // as new too. Re-selecting an existing tab does NOT change contextFilePaths,
+  // so it never reinjects. On session change the seen set resets (fresh slate).
+  useEffect(() => {
+    const current = new Set(contextFilePaths ?? []);
+    const seen = seenContextPathsRef.current;
+    const newlyOpened = [...current].filter((p) => !seen.has(p));
+    if (newlyOpened.length > 0) {
+      setExcludedPaths((prev) => {
+        const next = new Set(prev);
+        for (const p of newlyOpened) next.delete(p);
+        return next;
+      });
+      for (const p of newlyOpened) seen.add(p);
+    }
+    // Forget paths whose tabs have closed so a reopen counts as new.
+    for (const p of [...seen]) {
+      if (!current.has(p)) seen.delete(p);
+    }
+  }, [contextFilePaths]);
+
+  // Reset exclusions when the session changes — exclusions must not leak across
+  // sessions. The seen set is reseeded from the new session's context files.
+  useEffect(() => {
+    setExcludedPaths(new Set());
+    seenContextPathsRef.current = new Set(contextFilePaths ?? []);
   }, [sessionTabId]);
 
   // "Restore older input" — ChatPanel's user bubble dispatches a typed window
@@ -345,7 +381,6 @@ export default function ChatInput({
       const parts = [contextRef, contextRefs, refs, trimmed].filter(Boolean);
       const finalMessage = parts.join(" ");
       setAttachedFiles([]);
-      setExcludedPaths(new Set());
 
       if (wasInterrupted) {
         // Interrupted barrier: queue without dispatched flag so FIFO order is

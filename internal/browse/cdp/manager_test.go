@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -40,6 +41,9 @@ func (s *testSink) Network(e NetworkEvent) {
 	s.mu.Lock()
 	s.networks = append(s.networks, e)
 	s.mu.Unlock()
+}
+func (s *testSink) Performance(metrics map[string]float64) {
+	// Record for test assertions if needed.
 }
 func (s *testSink) Error(msg string) {
 	s.mu.Lock()
@@ -348,6 +352,52 @@ func TestManager_Navigate(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected nav 200 after responseReceived, got %v", nc.get())
+	}
+}
+
+// Chrome replies to Page.navigate only once the navigation commits, which
+// can be AFTER Network.responseReceived for the document. The "loading"
+// nav (Status 0) must still precede the 200 — otherwise the SPA applies
+// them in arrival order and ends on loading=true forever.
+func TestManager_NavigateEmitsLoadingBeforeResponse(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	var nc navCollector
+	m := newTestManager(t, stub, nc.emit, nil)
+	defer m.Close(context.Background())
+	ctx := context.Background()
+	tgt, err := m.Attach(ctx, "k1", &testSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	tgt.mu.Lock()
+	tgt.mainFrameID = "frame-main"
+	tgt.mu.Unlock()
+	nc.reset()
+	stub.beforeReply = func(method, sessionID string) {
+		if method != "Page.navigate" {
+			return
+		}
+		stub.InjectEvent(sessionID, "Network.responseReceived", map[string]any{
+			"requestId": "r1", "type": "Document", "frameId": "frame-main",
+			"response": map[string]any{"url": "https://example.com/", "status": 200},
+		})
+		time.Sleep(30 * time.Millisecond) // let the event be dispatched before the reply
+	}
+	if err := tgt.Navigate(ctx, "https://example.com/"); err != nil {
+		t.Fatalf("Navigate: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	evs := nc.get()
+	var statuses []int
+	for _, e := range evs {
+		if e.URL == "https://example.com/" {
+			statuses = append(statuses, e.Status)
+		}
+	}
+	if len(statuses) != 2 || statuses[0] != 0 || statuses[1] != 200 {
+		t.Fatalf("expected nav statuses [0 200] in order, got %v (events %+v)", statuses, evs)
 	}
 }
 
@@ -804,13 +854,18 @@ func TestManager_NetworkTelemetry(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	stub.InjectEvent(tgt.sessionID, "Network.responseReceived", map[string]any{
 		"requestId": "r1", "type": "Other", "frameId": "f1",
-		"response": map[string]any{"url": "https://example.com/a", "status": 200},
+		"response": map[string]any{"url": "https://example.com/a", "status": 200, "headers": map[string]any{"content-type": "text/html"}},
+	})
+	time.Sleep(20 * time.Millisecond)
+	// loadingFinished triggers the correlated emission.
+	stub.InjectEvent(tgt.sessionID, "Network.loadingFinished", map[string]any{
+		"requestId": "r1", "encodedDataLength": 1234,
 	})
 	time.Sleep(30 * time.Millisecond)
 	sink.mu.Lock()
 	nn := append([]NetworkEvent(nil), sink.networks...)
 	sink.mu.Unlock()
-	if len(nn) < 2 {
+	if len(nn) < 1 {
 		t.Fatalf("networks %d", len(nn))
 	}
 	found := false
@@ -819,6 +874,18 @@ func TestManager_NetworkTelemetry(t *testing.T) {
 			if n.DurationMs < 0 {
 				t.Error("duration negative")
 			}
+			if n.Size != 1234 {
+				t.Errorf("size = %d, want 1234", n.Size)
+			}
+			if n.ContentType != "text/html" {
+				t.Errorf("contentType = %q, want text/html", n.ContentType)
+			}
+			if n.RequestID != "r1" {
+				t.Errorf("requestId = %q, want r1", n.RequestID)
+			}
+			if n.Method != "GET" {
+				t.Errorf("method = %q, want GET", n.Method)
+			}
 			found = true
 		}
 	}
@@ -826,6 +893,10 @@ func TestManager_NetworkTelemetry(t *testing.T) {
 		t.Error("missing network 200")
 	}
 	// loadingFailed tunnel → blocked
+	stub.InjectEvent(tgt.sessionID, "Network.requestWillBeSent", map[string]any{
+		"requestId": "r2", "request": map[string]any{"url": "http://10.0.0.1/", "method": "GET"},
+	})
+	time.Sleep(10 * time.Millisecond)
 	stub.InjectEvent(tgt.sessionID, "Network.loadingFailed", map[string]any{
 		"requestId": "r2", "type": "Other", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED",
 	})
@@ -972,4 +1043,231 @@ func TestManager_IdleReaper(t *testing.T) {
 		t.Fatalf("relaunch after idle: %v", err)
 	}
 	_ = m.Close(context.Background())
+}
+
+// A policy 403 from the egress proxy carries X-Ocode-Blocked (readable by
+// CDP even though CORS hides it from page JS for cross-origin fetches with
+// ACAO:*): the network drawer row must surface it as Blocked.
+func TestNetworkRowMarksProxyBlockedResponses(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+
+	sink := &testSink{}
+	tgt, err := m.Attach(context.Background(), "tab:blk", sink)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	stub.InjectEvent(tgt.sessionID, "Network.requestWillBeSent", map[string]any{
+		"requestId": "R1", "request": map[string]any{"url": "http://10.0.0.1/", "method": "GET"},
+	})
+	stub.InjectEvent(tgt.sessionID, "Network.responseReceived", map[string]any{
+		"requestId": "R1", "type": "Fetch",
+		"response": map[string]any{
+			"url": "http://10.0.0.1/", "status": 403,
+			"headers": map[string]any{"X-Ocode-Blocked": "private address"},
+		},
+	})
+	// loadingFinished triggers the correlated emission.
+	stub.InjectEvent(tgt.sessionID, "Network.loadingFinished", map[string]any{
+		"requestId": "R1", "encodedDataLength": 0,
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var got *NetworkEvent
+		for _, n := range sink.getNetworks() {
+			if n.URL == "http://10.0.0.1/" && n.Status == 403 {
+				nn := n
+				got = &nn
+				break
+			}
+		}
+		if got != nil {
+			if got.Blocked != "private address" {
+				t.Fatalf("Blocked = %q, want %q; ev=%+v", got.Blocked, "private address", *got)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no 403 network row for http://10.0.0.1/; rows=%+v", sink.getNetworks())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Navigating a target registers its top-level host with the egress proxy and
+// toggles Security.setIgnoreCertificateErrors: on for loopback (self-signed
+// dev servers, parity with local mode), off for everything else. Moving to a
+// new host releases the previous one; Revoke releases the last.
+func TestManager_NavigateLoopbackAllowsHostAndIgnoresCertErrors(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	var nc navCollector
+	m := newTestManager(t, stub, nc.emit, nil)
+	defer m.Close(context.Background())
+	ctx := context.Background()
+	tgt, err := m.Attach(ctx, "k1", &testSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(40 * time.Millisecond)
+
+	ignoreCalls := func() []bool {
+		var out []bool
+		for _, c := range stub.CallsFor("Security.setIgnoreCertificateErrors") {
+			var p struct {
+				Ignore bool `json:"ignore"`
+			}
+			_ = json.Unmarshal(c.Params, &p)
+			out = append(out, p.Ignore)
+		}
+		return out
+	}
+
+	if err := tgt.Navigate(ctx, "https://localhost:3510/"); err != nil {
+		t.Fatalf("Navigate: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := ignoreCalls(); len(got) != 1 || !got[0] {
+		t.Fatalf("loopback nav: want [true], got %v", got)
+	}
+	if !m.proxy.hostAllowed("localhost", 3510) {
+		t.Fatal("localhost:3510 should be allowed after nav")
+	}
+
+	if err := tgt.Navigate(ctx, "https://example.com/"); err != nil {
+		t.Fatalf("Navigate: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := ignoreCalls(); len(got) != 2 || got[1] {
+		t.Fatalf("public nav: want [true false], got %v", got)
+	}
+	if m.proxy.hostAllowed("localhost", 3510) {
+		t.Fatal("localhost:3510 must be released after leaving it")
+	}
+	if !m.proxy.hostAllowed("example.com", 443) {
+		t.Fatal("example.com:443 should be allowed while it is the top-level page")
+	}
+
+	// A main-frame navigation Chrome performs itself (redirect / link click)
+	// updates the registration too.
+	tgt.mu.Lock()
+	mf := tgt.mainFrameID
+	if mf == "" {
+		mf = "frame-main"
+		tgt.mainFrameID = mf
+	}
+	tgt.mu.Unlock()
+	stub.InjectEvent(tgt.sessionID, "Page.frameNavigated", map[string]any{
+		"frame": map[string]any{"id": mf, "url": "https://127.0.0.1:8443/app"},
+	})
+	time.Sleep(30 * time.Millisecond)
+	if !m.proxy.hostAllowed("127.0.0.1", 8443) || m.proxy.hostAllowed("example.com", 443) {
+		t.Fatal("frameNavigated must move the allowed host to 127.0.0.1:8443")
+	}
+	if got := ignoreCalls(); len(got) != 3 || !got[2] {
+		t.Fatalf("loopback redirect: want trailing true, got %v", got)
+	}
+
+	m.Revoke("k1")
+	if m.proxy.hostAllowed("127.0.0.1", 8443) {
+		t.Fatal("Revoke must release the target's host")
+	}
+}
+
+// chooserSink records file-chooser requests (FileChooserSink).
+type chooserSink struct {
+	testSink
+	mu2      sync.Mutex
+	choosers []bool
+}
+
+func (c *chooserSink) FileChooser(multiple bool) {
+	c.mu2.Lock()
+	c.choosers = append(c.choosers, multiple)
+	c.mu2.Unlock()
+}
+
+func TestManager_FileChooserRoundTrip(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	var nc navCollector
+	m := newTestManager(t, stub, nc.emit, nil)
+	defer m.Close(context.Background())
+	ctx := context.Background()
+	sink := &chooserSink{}
+	tgt, err := m.Attach(ctx, "k1", sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	if !containsCall(stub.Calls(), "Page.setInterceptFileChooserDialog") {
+		t.Fatal("expected Page.setInterceptFileChooserDialog on attach")
+	}
+	// Nothing pending yet.
+	if err := m.SetFiles(ctx, "k1", []string{"/tmp/a"}); !errors.Is(err, ErrNoFileChooser) {
+		t.Fatalf("SetFiles without chooser: err = %v, want ErrNoFileChooser", err)
+	}
+	if err := m.SetFiles(ctx, "nope", nil); !errors.Is(err, ErrNoTarget) {
+		t.Fatalf("SetFiles unknown key: err = %v, want ErrNoTarget", err)
+	}
+
+	stub.InjectEvent(tgt.sessionID, "Page.fileChooserOpened", map[string]any{
+		"frameId": "f1", "mode": "selectMultiple", "backendNodeId": 42,
+	})
+	time.Sleep(30 * time.Millisecond)
+	sink.mu2.Lock()
+	got := append([]bool(nil), sink.choosers...)
+	sink.mu2.Unlock()
+	if len(got) != 1 || !got[0] {
+		t.Fatalf("sink.FileChooser calls = %v, want [true]", got)
+	}
+
+	if err := m.SetFiles(ctx, "k1", []string{"/tmp/a.png", "/tmp/b.png"}); err != nil {
+		t.Fatalf("SetFiles: %v", err)
+	}
+	calls := stub.CallsFor("DOM.setFileInputFiles")
+	if len(calls) != 1 {
+		t.Fatalf("DOM.setFileInputFiles calls = %d, want 1", len(calls))
+	}
+	var params struct {
+		Files         []string `json:"files"`
+		BackendNodeID int      `json:"backendNodeId"`
+	}
+	if err := json.Unmarshal(calls[0].Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params.BackendNodeID != 42 || len(params.Files) != 2 {
+		t.Fatalf("params = %+v", params)
+	}
+	// Answered: a second answer has nothing to attach to.
+	if err := m.SetFiles(ctx, "k1", []string{"/tmp/c"}); !errors.Is(err, ErrNoFileChooser) {
+		t.Fatalf("second SetFiles: err = %v, want ErrNoFileChooser", err)
+	}
+
+	// selectSingle truncates to one file; cancel (nil) drops the chooser.
+	stub.InjectEvent(tgt.sessionID, "Page.fileChooserOpened", map[string]any{
+		"frameId": "f1", "mode": "selectSingle", "backendNodeId": 43,
+	})
+	time.Sleep(30 * time.Millisecond)
+	if err := m.SetFiles(ctx, "k1", []string{"/tmp/a", "/tmp/b"}); err != nil {
+		t.Fatal(err)
+	}
+	calls = stub.CallsFor("DOM.setFileInputFiles")
+	_ = json.Unmarshal(calls[len(calls)-1].Params, &params)
+	if len(params.Files) != 1 || params.BackendNodeID != 43 {
+		t.Fatalf("selectSingle params = %+v", params)
+	}
+	stub.InjectEvent(tgt.sessionID, "Page.fileChooserOpened", map[string]any{
+		"frameId": "f1", "mode": "selectSingle", "backendNodeId": 44,
+	})
+	time.Sleep(30 * time.Millisecond)
+	if err := m.SetFiles(ctx, "k1", nil); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if n := len(stub.CallsFor("DOM.setFileInputFiles")); n != 2 {
+		t.Fatalf("cancel must not call DOM.setFileInputFiles (calls=%d)", n)
+	}
 }

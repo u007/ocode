@@ -119,7 +119,14 @@ func launchChrome(ctx context.Context, chromePath string, sup *tool.ProcessSuper
 	}
 	// Child reads from r3Read (fd 3), writes to r4Write (fd 4).
 	// Parent keeps r3Write (write end) and r4Read (read end).
-	cmd := exec.CommandContext(ctx, chromePath, chromeArgs(tmpDir)...)
+	//
+	// exec.Command, NOT exec.CommandContext: ctx here is the first caller's
+	// request context (the CDP websocket handler's Attach). Chrome's lifetime
+	// is owned by the manager + supervisor — tying it to the launching
+	// request meant the first socket close (React StrictMode double-mount,
+	// tab switch) killed Chrome and every panel saw "chrome exited". ctx
+	// still bounds the handshake below.
+	cmd := exec.Command(chromePath, chromeArgs(tmpDir)...)
 	cmd.ExtraFiles = []*os.File{r3Read, r4Write}
 	if lg != nil {
 		cmd.Stderr = &logWriter{lg: lg}

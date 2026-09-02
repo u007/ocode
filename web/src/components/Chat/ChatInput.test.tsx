@@ -110,7 +110,7 @@ describe("ChatInput submission", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  // --- Context file pill removal (per-message exclusion, loop-preserving) ---
+  // --- Context file pill removal (sticky exclusion, event-based reinjection) ---
 
   it("attaches context file paths and active editor as @path refs by default", async () => {
     render(
@@ -186,22 +186,22 @@ describe("ChatInput submission", () => {
     expect(payload).not.toContain("@src/b.ts");
   });
 
-  it("excluded file re-attaches on the next message (loop inclusion untouched)", async () => {
+  it("keeps a X'd file excluded across sends (sticky, does not re-attach)", async () => {
     render(
       <ChatInput
         sessionTabId="new-1"
         contextFilePaths={["src/a.ts", "src/b.ts"]}
       />,
     );
+    const ta = getTextarea();
 
-    // First message: X out src/b.ts, then send.
+    // X out src/b.ts, then send.
     const removeB = screen.getByRole("button", {
       name: /remove src\/b\.ts from this message/i,
     });
     await act(async () => {
       fireEvent.click(removeB);
     });
-    const ta = getTextarea();
     fireEvent.change(ta, { target: { value: "first" } });
     await act(async () => {
       fireEvent.keyDown(ta, { key: "Enter" });
@@ -209,12 +209,162 @@ describe("ChatInput submission", () => {
     await tick();
     expect(sendMessage).toHaveBeenNthCalledWith(1, "@src/a.ts first");
 
-    // Second message: no X — src/b.ts is back (excludedPaths cleared on send).
+    // Second message WITHOUT re-opening anything — src/b.ts stays excluded.
     fireEvent.change(ta, { target: { value: "second" } });
     await act(async () => {
       fireEvent.keyDown(ta, { key: "Enter" });
     });
     await tick();
-    expect(sendMessage).toHaveBeenNthCalledWith(2, "@src/a.ts @src/b.ts second");
+    expect(sendMessage).toHaveBeenNthCalledWith(2, "@src/a.ts second");
+    expect(sendMessage.mock.calls[1][0]).not.toContain("@src/b.ts");
+  });
+
+  it("reinjects a X'd file only when a genuinely new tab opens", async () => {
+    const { rerender } = render(
+      <ChatInput
+        sessionTabId="new-1"
+        contextFilePaths={["src/a.ts", "src/b.ts"]}
+      />,
+    );
+    const ta = getTextarea();
+
+    // X out src/b.ts, send.
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /remove src\/b\.ts from this message/i }),
+      );
+    });
+    fireEvent.change(ta, { target: { value: "first" } });
+    await act(async () => {
+      fireEvent.keyDown(ta, { key: "Enter" });
+    });
+    await tick();
+    expect(sendMessage).toHaveBeenNthCalledWith(1, "@src/a.ts first");
+
+    // Open a genuinely NEW file (src/c.ts) — only it reinjects, src/b.ts stays excluded.
+    rerender(
+      <ChatInput
+        sessionTabId="new-1"
+        contextFilePaths={["src/a.ts", "src/b.ts", "src/c.ts"]}
+      />,
+    );
+    fireEvent.change(ta, { target: { value: "second" } });
+    await act(async () => {
+      fireEvent.keyDown(ta, { key: "Enter" });
+    });
+    await tick();
+    expect(sendMessage).toHaveBeenNthCalledWith(2, "@src/a.ts @src/c.ts second");
+    expect(sendMessage.mock.calls[1][0]).not.toContain("@src/b.ts");
+  });
+
+  it("reinjects a X'd file after its tab is closed and reopened", async () => {
+    const { rerender } = render(
+      <ChatInput
+        sessionTabId="new-1"
+        contextFilePaths={["src/a.ts", "src/b.ts"]}
+      />,
+    );
+    const ta = getTextarea();
+
+    // X out src/b.ts.
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /remove src\/b\.ts from this message/i }),
+      );
+    });
+
+    // Close src/b.ts (drop from contextFilePaths).
+    rerender(
+      <ChatInput
+        sessionTabId="new-1"
+        contextFilePaths={["src/a.ts"]}
+      />,
+    );
+    // Reopen src/b.ts (re-added) — counts as genuinely new → reinjects.
+    rerender(
+      <ChatInput
+        sessionTabId="new-1"
+        contextFilePaths={["src/a.ts", "src/b.ts"]}
+      />,
+    );
+
+    fireEvent.change(ta, { target: { value: "after-reopen" } });
+    await act(async () => {
+      fireEvent.keyDown(ta, { key: "Enter" });
+    });
+    await tick();
+    expect(sendMessage).toHaveBeenCalledWith("@src/a.ts @src/b.ts after-reopen");
+  });
+
+  it("re-selecting the active editor does NOT reinject a X'd file", async () => {
+    const { rerender } = render(
+      <ChatInput
+        sessionTabId="new-1"
+        activeEditorContext={{ path: "src/a.ts" }}
+        contextFilePaths={["src/a.ts", "src/b.ts"]}
+      />,
+    );
+
+    // X out src/b.ts.
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /remove src\/b\.ts from this message/i }),
+      );
+    });
+
+    // Switch active editor to src/a.ts and back — contextFilePaths unchanged.
+    rerender(
+      <ChatInput
+        sessionTabId="new-1"
+        activeEditorContext={{ path: "src/a.ts" }}
+        contextFilePaths={["src/a.ts", "src/b.ts"]}
+      />,
+    );
+
+    const ta = getTextarea();
+    fireEvent.change(ta, { target: { value: "still-excluded" } });
+    await act(async () => {
+      fireEvent.keyDown(ta, { key: "Enter" });
+    });
+    await tick();
+    expect(sendMessage).toHaveBeenCalledWith("@src/a.ts still-excluded");
+    expect(sendMessage.mock.calls[0][0]).not.toContain("@src/b.ts");
+  });
+
+  it("clears exclusions when the session changes", async () => {
+    const { rerender } = render(
+      <ChatInput
+        sessionTabId="new-1"
+        contextFilePaths={["src/a.ts", "src/b.ts"]}
+      />,
+    );
+    const ta = getTextarea();
+
+    // X out src/b.ts in session 1.
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /remove src\/b\.ts from this message/i }),
+      );
+    });
+    fireEvent.change(ta, { target: { value: "s1" } });
+    await act(async () => {
+      fireEvent.keyDown(ta, { key: "Enter" });
+    });
+    await tick();
+    expect(sendMessage).toHaveBeenNthCalledWith(1, "@src/a.ts s1");
+
+    // Switch to a new session — exclusions reset, src/b.ts reinjects.
+    rerender(
+      <ChatInput
+        sessionTabId="new-2"
+        contextFilePaths={["src/a.ts", "src/b.ts"]}
+      />,
+    );
+    fireEvent.change(ta, { target: { value: "s2" } });
+    await act(async () => {
+      fireEvent.keyDown(ta, { key: "Enter" });
+    });
+    await tick();
+    expect(sendMessage).toHaveBeenNthCalledWith(2, "@src/a.ts @src/b.ts s2");
   });
 });

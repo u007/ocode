@@ -197,6 +197,36 @@ func saveDebugHandle(url, token string) {
 	}
 }
 
+// ResolveWindowTitle returns a user-friendly window title for the desktop app.
+// It prefers the saved project name (if the workDir matches a known project),
+// otherwise falls back to the directory basename. Returns "ocode" as the last
+// resort for empty, root, home, or temp paths.
+func ResolveWindowTitle(workDir string) string {
+	// Reject broad/sensitive roots first — even if they appear in the project
+	// store, they make poor window titles.
+	clean := filepath.Clean(workDir)
+	if clean == "" || clean == "." || clean == string(filepath.Separator) {
+		return "ocode"
+	}
+	if home, err := os.UserHomeDir(); err == nil && clean == filepath.Clean(home) {
+		return "ocode"
+	}
+	if clean == os.TempDir() {
+		return "ocode"
+	}
+	// Try to find the project by path in the saved projects store.
+	// Compare normalized paths so trailing separators or equivalent forms match.
+	if store, _, err := projects.NewStore(); err == nil && store != nil {
+		for _, p := range store.List() {
+			if filepath.Clean(p.Path) == clean && p.Name != "" {
+				return p.Name
+			}
+		}
+	}
+	// Fall back to directory basename.
+	return filepath.Base(clean)
+}
+
 // IsUnsafeDesktopRoot reports whether dir is too broad/sensitive to use as the
 // desktop server's default workDir. The Finder/Dock-launched .app starts with
 // cwd "/" and the old fallback used the home directory — both are huge trees

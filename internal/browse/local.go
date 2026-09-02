@@ -87,12 +87,21 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
 			req.URL.Path = t.Path
 			req.URL.RawQuery = t.RawQuery
 			req.Host = upstream.Host
-			// Never forward the browse session cookie upstream.
-			req.Header.Del("Cookie")
+			// Site cookies come from the per-stateKey server-side jar; this
+			// also drops the browser's Cookie header (the browse session
+			// cookie must never go upstream). See cookiejar.go.
+			s.cookies.Apply(t.StateKey, req)
 			// Strip the grant marker if it somehow survived.
 			req.Header.Del("X-Ocode-Grant")
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			// Capture upstream cookies into the stateKey's jar and keep them
+			// out of the browser: the browse origin is shared by every
+			// proxied host, so a browser-stored cookie would leak across
+			// hosts and tabs. Runs first so redirects (login flows) keep
+			// their session cookie too.
+			s.cookies.Store(t.StateKey, resp.Request.URL, resp)
+			resp.Header.Del("Set-Cookie")
 			// Local → Chrome hand-off: if a document request received a 3xx
 			// whose Location resolves to a non-private host, do not follow it
 			// inside the iframe (it would die on X-Frame-Options). Instead

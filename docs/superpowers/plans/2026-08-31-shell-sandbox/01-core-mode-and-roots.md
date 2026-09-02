@@ -13,11 +13,11 @@
 **Interfaces:**
 - Produces: `PermissionModeSandbox PermissionMode = "sandbox"`, accepted by `SetMode`.
 
-- [ ] **Step 1:** Write failing tests: `TestSetModeSandboxAccepted` (`SetMode(PermissionModeSandbox)` ⇒ `Mode()=="sandbox"`); `TestSetModeInvalidLeavesModeUnchanged` (set to `sandbox`, then `SetMode("bogus")` ⇒ mode still `sandbox` — documents the silent-no-op contract); `TestSetModeSandboxKeepsAutoPermission` (auto-permission enabled before ⇒ still enabled after entering sandbox).
-- [ ] **Step 2:** Run; expect FAIL (constant undefined).
-- [ ] **Step 3:** Add the constant + `SetMode` case (no auto-permission mutation). No `Decide` behavior change yet (Part 02 Task 2).
-- [ ] **Step 4:** Run tests + full `internal/agent` permissions suite; expect PASS.
-- [ ] **Step 5:** Commit: `feat(permissions): add sandbox permission mode`.
+- [x] **Step 1:** Write failing tests: `TestSetModeSandboxAccepted` (`SetMode(PermissionModeSandbox)` ⇒ `Mode()=="sandbox"`); `TestSetModeInvalidLeavesModeUnchanged` (set to `sandbox`, then `SetMode("bogus")` ⇒ mode still `sandbox` — documents the silent-no-op contract); `TestSetModeSandboxKeepsAutoPermission` (auto-permission enabled before ⇒ still enabled after entering sandbox).
+- [x] **Step 2:** Run; expect FAIL (constant undefined).
+- [x] **Step 3:** Add the constant + `SetMode` case (no auto-permission mutation). No `Decide` behavior change yet (Part 02 Task 2).
+- [x] **Step 4:** Run tests + full `internal/agent` permissions suite; expect PASS.
+- [x] **Step 5:** Commit: `feat(permissions): add sandbox permission mode`.
 
 ---
 
@@ -31,12 +31,12 @@
 **Interfaces:**
 - Produces: `RootSpec{ Path string; Writable bool }`; `(*PermissionManager).AllowedRootsClassified() []RootSpec`. And in `internal/shell/sandbox`: `RootSet{ WritableRoots []string; ReadRoots []string; NetworkEgress bool }`, `NewRootSet(specs []RootSpec) RootSet` — `WritableRoots` = paths where `Writable && Path != "/"`; `ReadRoots` = empty (whole FS readable/executable); `NetworkEgress` = true.
 
-- [ ] **Step 1:** Write failing tests in `internal/agent`: `TestClassifiedRootsExtraPathsWritable` (a scratch dir added via `extra_allowed_paths` is present with `Writable==true`); `TestClassifiedRootsDataDirReadOnly` (the global data dir is present with `Writable==false` — proves auth/session integrity is preserved, resolving review point 5); `TestClassifiedRootsLanguageCachesWritable` (an npm/pip cache root is `Writable==true`); `TestClassifiedRootsDropsFilesystemRoot` (no writable spec has `Path=="/"`).
-- [ ] **Step 2:** Write failing tests in `internal/shell/sandbox`: `TestNewRootSetSplitsByCapability` (given mixed specs, `WritableRoots` contains only the writable, non-`/` paths; `ReadRoots` empty; `NetworkEgress` true).
-- [ ] **Step 3:** Run; expect FAIL.
-- [ ] **Step 4:** Implement `RootSpec`, `AllowedRootsClassified` (do not re-resolve symlinks beyond what the existing `add()` already does — the macOS `/var/folders` realpath must survive), `RootSet`, `NewRootSet`.
-- [ ] **Step 5:** Run tests; expect PASS.
-- [ ] **Step 6:** Commit: `feat(permissions,sandbox): capability-classified roots + RootSet`.
+- [x] **Step 1:** Write failing tests in `internal/agent`: `TestClassifiedRootsExtraPathsWritable` (a scratch dir added via `extra_allowed_paths` is present with `Writable==true`); `TestClassifiedRootsDataDirReadOnly` (the global data dir is present with `Writable==false` — proves auth/session integrity is preserved, resolving review point 5); `TestClassifiedRootsLanguageCachesWritable` (an npm/pip cache root is `Writable==true`); `TestClassifiedRootsDropsFilesystemRoot` (no writable spec has `Path=="/"`).
+- [x] **Step 2:** Write failing tests in `internal/shell/sandbox`: `TestNewRootSetSplitsByCapability` (given mixed specs, `WritableRoots` contains only the writable, non-`/` paths; `ReadRoots` empty; `NetworkEgress` true).
+- [x] **Step 3:** Run; expect FAIL.
+- [x] **Step 4:** Implement `RootSpec`, `AllowedRootsClassified` (do not re-resolve symlinks beyond what the existing `add()` already does — the macOS `/var/folders` realpath must survive), `RootSet`, `NewRootSet`.
+- [x] **Step 5:** Run tests; expect PASS.
+- [x] **Step 6:** Commit: `feat(permissions,sandbox): capability-classified roots + RootSet`.
 
 ---
 
@@ -49,11 +49,11 @@
 **Interfaces:**
 - Produces: expanded `~/.claude` as a writable classified root and a flat `AllowedRoots()` entry.
 
-- [ ] **Step 1:** Write failing tests `TestAllowedRootsIncludesClaudeDir` (present in flat `AllowedRoots()`) and `TestClaudeDirIsWritable` (present with `Writable==true` in classified).
-- [ ] **Step 2:** Run; expect FAIL.
-- [ ] **Step 3:** Add the `add()` call in both the flat and classified builders, using the same home-dir expansion the config-dir branch uses.
-- [ ] **Step 4:** Run tests + full allowed-roots suite; expect PASS.
-- [ ] **Step 5:** Commit: `feat(permissions): allow ~/.claude as a writable root`.
+- [x] **Step 1:** Write failing tests `TestAllowedRootsIncludesClaudeDir` (present in flat `AllowedRoots()`) and `TestClaudeDirIsWritable` (present with `Writable==true` in classified).
+- [x] **Step 2:** Run; expect FAIL.
+- [x] **Step 3:** Add the `add()` call in both the flat and classified builders, using the same home-dir expansion the config-dir branch uses.
+- [x] **Step 4:** Run tests + full allowed-roots suite; expect PASS.
+- [x] **Step 5:** Commit: `feat(permissions): allow ~/.claude as a writable root`.
 
 ---
 
@@ -67,9 +67,9 @@
 **Interfaces:**
 - Produces (this task, plain form — sandbox params added in Part 02): `buildBashCmd(ctx context.Context, command string, dir string) *exec.Cmd` encapsulating the GOOS branch (`cmd /C` Windows; `bash -c` + `setProcGroup` Unix), used by both fg and bg sites. `WrapWithParentMonitor` continues to be applied by callers exactly as today; Start-before-Register ordering preserved.
 
-- [ ] **Step 1:** Write failing test `TestBuildBashCmd` (Unix: `Args==["bash","-c",command]`, non-nil `SysProcAttr`; Windows: `Args==["cmd","/C",command]`; `Dir` set when a non-empty dir is passed).
-- [ ] **Step 2:** Write failing test `TestBashUsesSessionWorkdirNotProcessCwd`: with the session project root differing from `os.Getwd()`, a foreground command (e.g. `pwd`) runs in the session root, and the background hook environment reflects the session root — not the process cwd.
-- [ ] **Step 3:** Run; expect FAIL.
-- [ ] **Step 4:** Implement `buildBashCmd` by lifting the inline construction; switch both call sites; thread the session workdir into `cmd.Dir` (fg + bg) and into the background hook env. Do not change pipe/cancellation/registration behavior.
-- [ ] **Step 5:** Run new tests + full `internal/tool` suite; expect PASS, no behavior regressions.
-- [ ] **Step 6:** Commit: `refactor(tool): unified bash builder + session workdir wiring`.
+- [x] **Step 1:** Write failing test `TestBuildBashCmd` (Unix: `Args==["bash","-c",command]`, non-nil `SysProcAttr`; Windows: `Args==["cmd","/C",command]`; `Dir` set when a non-empty dir is passed).
+- [x] **Step 2:** Write failing test `TestBashUsesSessionWorkdirNotProcessCwd`: with the session project root differing from `os.Getwd()`, a foreground command (e.g. `pwd`) runs in the session root, and the background hook environment reflects the session root — not the process cwd.
+- [x] **Step 3:** Run; expect FAIL.
+- [x] **Step 4:** Implement `buildBashCmd` by lifting the inline construction; switch both call sites; thread the session workdir into `cmd.Dir` (fg + bg) and into the background hook env. Do not change pipe/cancellation/registration behavior.
+- [x] **Step 5:** Run new tests + full `internal/tool` suite; expect PASS, no behavior regressions.
+- [x] **Step 6:** Commit: `refactor(tool): unified bash builder + session workdir wiring`.

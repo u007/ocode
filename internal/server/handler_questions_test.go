@@ -9,8 +9,28 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
+
+// questionFakeClientAsk: first call returns a `question` tool call, second
+// returns a plain assistant message ending the loop. Drives a real agent Step
+// so the question-tool sentinel, OnMessage emission and turn pause all run
+// for real (unlike the static-transcript tests).
+type questionFakeClientAsk struct{ calls int }
+
+func (f *questionFakeClientAsk) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
+	f.calls++
+	if f.calls == 1 {
+		return &agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "q-call-1", Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: "question", Arguments: `{"questions":[{"header":"Deploy target","question":"Where should I deploy?","options":[{"label":"Staging","description":"Push to staging"},{"label":"Production","description":"Push to production"}]}]}`}}}}, nil
+	}
+	return &agent.Message{Role: "assistant", Content: "thanks, deploying to staging"}, nil
+}
+func (f *questionFakeClientAsk) GetProvider() string { return "fake" }
+func (f *questionFakeClientAsk) GetModel() string    { return "fake-model" }
 
 // questionAskContent builds the tool-result content the `question` tool emits
 // for one prompt, matching tool.QuestionTool.Execute.
@@ -253,5 +273,105 @@ func TestHandleAnswerQuestionForwardsMultipleSelection(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("no resolution forwarded to the bridge")
+	}
+}
+
+// TestQuestionEventEmittedOnRealTurn reproduces the live web question flow end to
+// end: a real async agent turn (the path web/desktop uses) whose model returns a
+// `question` tool call. The agent must execute the real QuestionTool, emit a
+// `question` SSE frame on the unified bus carrying the tool-call id and the
+// decoded prompts, and pause (the model's second call must NOT happen until an
+// answer is submitted). This is the contract a connected browser relies on to
+// render the question dialog.
+func TestQuestionEventEmittedOnRealTurn(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	// Completed MCP cache so bootstrap does not stall.
+	ready := make(chan struct{})
+	close(ready)
+	h.mcpCache = &mcpCache{ready: ready, tools: []tool.Tool{}, errs: nil}
+	if h.cfg != nil {
+		h.cfg.Model = "fake-model"
+	}
+
+	// Register the real question tool so the fake tool call actually executes.
+	ag := agent.NewAgent(&questionFakeClientAsk{}, []tool.Tool{&tool.QuestionTool{}}, nil, nil)
+	defer ag.Shutdown()
+	as := &agentSession{agent: ag, model: "fake-model"}
+	h.mu.Lock()
+	h.agents[id] = as
+	h.mu.Unlock()
+
+	// Subscribe to the unified bus BEFORE dispatching the turn so we are
+	// guaranteed to see the question frame (a late subscriber can miss it).
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	turnDone := make(chan error, 1)
+	go func() {
+		_, err := h.runTurn(id, as, "where should I deploy?", turnOptions{})
+		turnDone <- err
+	}()
+
+	// Wait for the question frame on the bus. The turn must pause on it, so the
+	// second model call must not occur beforehand.
+	deadline := time.After(10 * time.Second)
+	var gotQuestion *Envelope
+	secondCallSeen := false
+	for gotQuestion == nil {
+		select {
+		case env := <-sub:
+			if env.SessionID != id {
+				continue
+			}
+			if env.Event == "question" {
+				ev := env
+				gotQuestion = &ev
+			}
+			if env.Event == "text" || env.Event == "turn_done" {
+				secondCallSeen = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for question event on the bus")
+		}
+	}
+
+	if secondCallSeen {
+		t.Fatalf("turn continued past the question ask (model second call ran); the agent must pause")
+	}
+
+	data, ok := gotQuestion.Data.(QuestionEvent)
+	if !ok {
+		t.Fatalf("question frame payload was %T, want QuestionEvent", gotQuestion.Data)
+	}
+	if data.RequestID != "q-call-1" {
+		t.Fatalf("question request_id = %q, want q-call-1 (the tool-call id)", data.RequestID)
+	}
+	if len(data.Questions) != 1 {
+		t.Fatalf("question has %d prompts, want 1", len(data.Questions))
+	}
+	if data.Questions[0].Header != "Deploy target" || data.Questions[0].Question != "Where should I deploy?" {
+		t.Fatalf("unexpected question prompt: %+v", data.Questions[0])
+	}
+	if len(data.Questions[0].Options) != 2 {
+		t.Fatalf("question has %d options, want 2", len(data.Questions[0].Options))
+	}
+
+	as.mu.Lock()
+	tail := as.messages[len(as.messages)-1]
+	as.mu.Unlock()
+	if !strings.HasPrefix(tail.Content, tool.SentinelQuestionPrompt) {
+		t.Fatalf("transcript tail = %q, want question sentinel", tail.Content)
+	}
+	if tail.ToolID != "q-call-1" {
+		t.Fatalf("question tool-call id = %q, want q-call-1", tail.ToolID)
+	}
+
+	select {
+	case <-turnDone:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("runTurn did not return after the question pause")
 	}
 }

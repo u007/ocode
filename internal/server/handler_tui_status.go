@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/u007/ocode/internal/agent"
 )
 
 // HandleGetTUIStatus returns the latest TUI status snapshot pushed by the TUI
@@ -39,6 +41,16 @@ func (h *Handler) buildStatusSnapshot() TUIStatus {
 			snap.PermissionModel = h.cfg.Ocode.Permissions.Auto.Model
 			snap.PermissionAutoAllow = h.cfg.Ocode.Permissions.Auto.Enabled
 		}
+		// The LIVE permission mode is authoritative for the status SSE (a
+		// session-scoped yolo/sandbox toggle moves agents without touching the
+		// config). Fall back to the config default when no live agent exists.
+		live := h.livePermissionModeSnapshot()
+		if live == "" && h.cfg != nil {
+			live = agent.PermissionMode(h.cfg.Ocode.Permissions.Mode)
+		}
+		snap.PermissionMode = string(live)
+		snap.PermissionSandboxSupported = agent.SandboxSupported()
+		snap.PermissionEffectiveBehavior = effectivePermissionBehavior(live)
 		snap.ExtraAllowedPaths = h.cfg.Ocode.ExtraAllowedPaths
 		snap.OcrBackend = h.cfg.Ocode.Ocr.Backend
 		if snap.OcrBackend == "" {
@@ -90,6 +102,9 @@ func (h *Handler) pushStatusSnapshot() {
 		cur.AdvisorModel = snap.AdvisorModel
 		cur.PermissionModel = snap.PermissionModel
 		cur.PermissionAutoAllow = snap.PermissionAutoAllow
+		cur.PermissionMode = snap.PermissionMode
+		cur.PermissionSandboxSupported = snap.PermissionSandboxSupported
+		cur.PermissionEffectiveBehavior = snap.PermissionEffectiveBehavior
 		cur.UpdatedAt = snap.UpdatedAt
 		h.rc.StatusStore().Set(cur, h.rc)
 		return

@@ -80,6 +80,7 @@ vi.mock("./components/Cron/CronPanel", () => ({ default: () => null }));
 vi.mock("./components/Layout/SessionDialog", () => ({ default: () => null }));
 vi.mock("./components/Layout/ModelDialog", () => ({ default: () => null }));
 vi.mock("./components/Chat/PermissionDialog", () => ({ default: () => null }));
+vi.mock("./components/Chat/QuestionDialog", () => ({ default: () => null }));
 vi.mock("./components/Settings/SettingsPanel", () => ({ default: () => null }));
 vi.mock("./components/Layout/EditorTabBar", () => ({ default: () => null }));
 vi.mock("./components/Layout/ProjectSidebar", () => ({ default: () => null }));

@@ -6,15 +6,20 @@ import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 
+// Radix Select rejects an empty-string item value, so "same origin" (empty
+// backend_url) is represented by this sentinel and mapped back to "" when
+// saving.
+const SAME_ORIGIN = "__same_origin__";
+
 const OPTIONS = [
-  { value: "", label: "Same origin (default)" },
+  { value: SAME_ORIGIN, label: "Same origin (default)" },
   { value: "http://localhost:4096", label: "http://localhost:4096" },
   { value: "https://hub.mercstudio.com", label: "https://hub.mercstudio.com" },
   { value: "__custom__", label: "Custom…" },
 ];
 
 function normalizeOption(value: string): string {
-  if (!value) return "";
+  if (!value) return SAME_ORIGIN;
   if (value === "https://hub.mercstudio.com") return value;
   if (OPTIONS.some((o) => o.value === value)) return value;
   return "__custom__";
@@ -23,7 +28,7 @@ function normalizeOption(value: string): string {
 export default function BackendForm() {
   const [backendUrl, setBackendUrl] = useState("");
   const [customUrl, setCustomUrl] = useState("");
-  const [selectValue, setSelectValue] = useState("");
+  const [selectValue, setSelectValue] = useState(SAME_ORIGIN);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +66,7 @@ export default function BackendForm() {
       // keep customUrl as is
       return;
     }
-    setBackendUrl(v);
+    setBackendUrl(v === SAME_ORIGIN ? "" : v);
     setError(null);
   };
 
@@ -69,7 +74,12 @@ export default function BackendForm() {
     setSaving(true);
     setError(null);
     try {
-      const toSave = selectValue === "__custom__" ? customUrl.trim() : backendUrl.trim();
+      const toSave =
+        selectValue === "__custom__"
+          ? customUrl.trim()
+          : selectValue === SAME_ORIGIN
+            ? ""
+            : backendUrl.trim();
       const res = await api.setBackendConfig(toSave);
       const normalized = res.backend_url || "";
       setBackendUrl(normalized);

@@ -60,11 +60,15 @@ describe("ModelDialog favorites/recents sections", () => {
     expect(screen.getByText("★ Favorites")).toBeInTheDocument();
 
     // A model that is both recent and favorite appears exactly once, under
-    // Recently Used (getAllByText would also match nothing else).
-    expect(screen.getAllByText("claude-a")).toHaveLength(1);
-    // Favorites/regular models are not duplicated across sections: gpt-b is
-    // only in ★ Favorites, gpt-c only in the openai provider group.
-    expect(screen.getAllByText("gpt-b")).toHaveLength(1);
+    // Recently Used with its full provider/model id (matching TUI's
+    // modelPickerLabel), while provider groups show the bare model.
+    expect(screen.getByText("anthropic/claude-a")).toBeInTheDocument();
+    expect(screen.getAllByText("anthropic/claude-a")).toHaveLength(1);
+    // gpt-b is favorite-only so it renders in ★ Favorites with provider prefix.
+    expect(screen.getByText("openai/gpt-b")).toBeInTheDocument();
+    expect(screen.getAllByText("openai/gpt-b")).toHaveLength(1);
+    // gpt-c is provider-grouped, so it shows the bare model under the openai header.
+    expect(screen.getByText("gpt-c")).toBeInTheDocument();
     expect(screen.getAllByText("gpt-c")).toHaveLength(1);
 
     // Radix dialogs portal to document.body, so section order must be read
@@ -117,8 +121,38 @@ describe("ModelDialog favorites/recents sections", () => {
     for (const el of tuned) {
       expect(el.closest("button")?.textContent).toMatch(/claude-a|gpt-c/);
     }
-    expect(screen.getByText("gpt-b").closest("button")?.textContent).not.toContain("tuned");
+    // gpt-b lives in ★ Favorites with provider prefix, compound in provider group bare.
+    expect(screen.getByText("openai/gpt-b").closest("button")?.textContent).not.toContain("tuned");
     expect(screen.getByText("compound").closest("button")?.textContent).not.toContain("tuned");
+  });
+
+  it("shows provider-qualified names in Recently Used / Favorites and keeps display_name provider-prefixed", async () => {
+    const displayModels: ModelInfo[] = [
+      { name: "anthropic/claude-a", model: "claude-a", provider: "anthropic", active: false, recent: true, display_name: "Claude A" },
+      { name: "openai/gpt-b", model: "gpt-b", provider: "openai", active: false, favorite: true, display_name: "GPT B" },
+      // Guard: display_name === model should not duplicate parenthesis — falls back to base label.
+      { name: "groq/compound", model: "compound", provider: "groq", active: false, display_name: "compound" },
+      // Guard: display_name === name should not duplicate — falls back to base label.
+      { name: "openai/gpt-c", model: "gpt-c", provider: "openai", active: false, display_name: "openai/gpt-c" },
+      // Pseudo local model without provider prefix — should render bare without crashing.
+      { name: "my-local", model: "my-local", provider: "", active: false, recent: true },
+    ];
+    hoisted.api.listModels.mockResolvedValueOnce(displayModels.map((m) => ({ ...m })));
+    render(<ModelDialog open onClose={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText("Recently Used")).toBeInTheDocument());
+    // Recently Used: provider-qualified even with display_name
+    expect(screen.getByText("Claude A (anthropic/claude-a)")).toBeInTheDocument();
+    expect(screen.getByText("my-local")).toBeInTheDocument();
+    // Favorites: provider-qualified with display_name
+    expect(screen.getByText("GPT B (openai/gpt-b)")).toBeInTheDocument();
+    // Guard cases: provider groups show bare model, no parenthetical duplication
+    expect(screen.getByText("compound")).toBeInTheDocument();
+    expect(screen.queryByText("compound (compound)")).toBeNull();
+    // gpt-c is provider-grouped with display_name === name, guard keeps bare label
+    const gptCBtn = screen.getByText("gpt-c").closest("button")?.textContent ?? "";
+    expect(gptCBtn).not.toContain("(openai/gpt-c)");
+    expect(gptCBtn).not.toContain("(gpt-c)");
   });
 
   it("keeps the flat provider list for purposes the TUI does not offer favorites on", async () => {
@@ -173,9 +207,9 @@ describe("ModelDialog favorites/recents sections", () => {
 
     it("keeps a draft tab's pick local to the tab (SET_SESSION_MODEL) — no API calls", async () => {
       render(<ModelDialog open onClose={vi.fn()} purpose="main" sessionId="new-1700000000" />);
-      await waitFor(() => expect(screen.getByText("gpt-b")).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText("openai/gpt-b")).toBeInTheDocument());
 
-      fireEvent.click(screen.getByText("gpt-b"));
+      fireEvent.click(screen.getByText("openai/gpt-b"));
 
       expect(hoisted.dispatchSpy).toHaveBeenCalledWith({
         type: "SET_SESSION_MODEL",

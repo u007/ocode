@@ -14,9 +14,11 @@ import {
 } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+import TerminalFindBar from "./TerminalFindBar";
 import { apiPath, apiWsPath, authHeaders, authToken } from "@/api/client";
 import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
 import { registerTerminal, unregisterTerminal } from "@/lib/debug/terminalRegistry";
@@ -60,17 +62,26 @@ export default function TerminalPanel({
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const serializeRef = useRef<SerializeAddon | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const dragCounterRef = useRef(0);
   const [isDragging, setIsDragging] = useState(false);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; hasSelection: boolean } | null>(null);
   const ctxMenuRef = useRef<HTMLDivElement>(null);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findResult, setFindResult] = useState<{ count: number; index: number }>({ count: 0, index: -1 });
   // Mirrors `active` so the xterm event handlers (registered once at mount) can
   // read the live focused state without re-subscribing.
   const activeRef = useRef(active);
   // False during the initial scrollback replay; flipped true once the live pty
   // socket opens so a BEL baked into restored history can't false-alert.
   const readyRef = useRef(false);
+
+  const findOpenRef = useRef(findOpen);
+  const findQueryRef = useRef(findQuery);
+  useEffect(() => { findOpenRef.current = findOpen; }, [findOpen]);
+  useEffect(() => { findQueryRef.current = findQuery; }, [findQuery]);
 
   const { markAlerted, openTerminal, closeTerminal } = useTerminalState();
 
@@ -214,14 +225,63 @@ export default function TerminalPanel({
   }, []);
 
   const handleFind = useCallback(() => {
-    // xterm.js has no built-in find UI; trigger the browser find as a best-effort.
-    // Consumers that load the search addon can intercept this via a custom event.
+    const sel = termRef.current?.getSelection() ?? "";
+    if (sel && !findOpen) setFindQuery(sel);
+    setFindOpen(true);
+    // Keep dispatch for backwards compat with any external listener, but the
+    // primary find UI is now handled locally via SearchAddon.
     window.dispatchEvent(new CustomEvent("ocode:terminal-find", { detail: { id } }));
-    // Fallback: open browser find (works in most browsers when the terminal is focused)
-    // by dispatching the keyboard shortcut is unreliable, so just focus and hint.
-    termRef.current?.focus();
     setCtxMenu(null);
-  }, [id]);
+  }, [id, findOpen]);
+
+  const handleCloseFind = useCallback(() => {
+    setFindOpen(false);
+    searchRef.current?.clearDecorations();
+    setFindResult({ count: 0, index: -1 });
+    termRef.current?.focus();
+  }, []);
+
+  const searchOptions = useCallback(() => {
+    // Enable decorations so matches are highlighted in the buffer and overview
+    // ruler. Colors match the dark terminal theme; they are intentionally muted
+    // to not clash with selection.
+    return {
+      decorations: {
+        matchBackground: "#facc15",
+        matchBorder: "#facc15",
+        matchOverviewRuler: "#facc15",
+        activeMatchBackground: "#f97316",
+        activeMatchBorder: "#f97316",
+        activeMatchColorOverviewRuler: "#f97316",
+      },
+    } as const;
+  }, []);
+
+  const handleFindNext = useCallback(() => {
+    const q = findQuery;
+    if (!q.trim()) return;
+    searchRef.current?.findNext(q, searchOptions());
+  }, [findQuery, searchOptions]);
+
+  const handleFindPrev = useCallback(() => {
+    const q = findQuery;
+    if (!q.trim()) return;
+    searchRef.current?.findPrevious(q, searchOptions());
+  }, [findQuery, searchOptions]);
+
+  const handleFindQueryChange = useCallback(
+    (q: string) => {
+      setFindQuery(q);
+      if (!q.trim()) {
+        searchRef.current?.clearDecorations();
+        setFindResult({ count: 0, index: -1 });
+        return;
+      }
+      // Incremental search: highlight and jump to first match as you type.
+      searchRef.current?.findNext(q, searchOptions());
+    },
+    [searchOptions],
+  );
 
   const handleNewTerminal = useCallback(() => {
     openTerminal(projectPath);
@@ -232,6 +292,21 @@ export default function TerminalPanel({
     closeTerminal(projectPath, id);
     setCtxMenu(null);
   }, [closeTerminal, projectPath, id]);
+
+  // External find trigger (e.g. from future callers dispatching
+  // ocode:terminal-find). HandleFind already opens locally, but this keeps
+  // the event useful if dispatched from outside this component.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { id?: string } | undefined;
+      if (detail?.id !== id) return;
+      const sel = termRef.current?.getSelection() ?? "";
+      if (sel && !findOpenRef.current) setFindQuery(sel);
+      setFindOpen(true);
+    };
+    window.addEventListener("ocode:terminal-find", handler as EventListener);
+    return () => window.removeEventListener("ocode:terminal-find", handler as EventListener);
+  }, [id]);
 
   // Drag-and-drop handlers — follow the same counter-based pattern used by
   // ChatInput to correctly handle nested dragenter/dragleave from child
@@ -337,6 +412,11 @@ export default function TerminalPanel({
     term.loadAddon(fit);
     const serialize = new SerializeAddon();
     term.loadAddon(serialize);
+    const search = new SearchAddon();
+    term.loadAddon(search);
+    const searchDisp = search.onDidChangeResults((e) => {
+      setFindResult({ count: e.resultCount, index: e.resultIndex });
+    });
     term.open(el);
     // Try WebGL renderer — GPU-accelerated, much lower memory than the DOM
     // renderer for large scrollback buffers. Falls back to DOM if WebGL is
@@ -350,17 +430,47 @@ export default function TerminalPanel({
     registerTerminal(id, term);
     fitRef.current = fit;
     serializeRef.current = serialize;
+    searchRef.current = search;
 
-    // xterm.js sends plain "\r" for Enter regardless of Shift, so a nested
-    // TUI (e.g. ocode itself) can never tell them apart. Emit the CSI-u
-    // disambiguated sequence bubbletea already knows how to decode
-    // (charm.land/bubbletea/v2's key disambiguation is on by default) so
-    // Shift+Enter reaches it as a distinct key instead of a second Enter.
+    const searchOpts = {
+      decorations: {
+        matchBackground: "#facc15",
+        matchBorder: "#facc15",
+        matchOverviewRuler: "#facc15",
+        activeMatchBackground: "#f97316",
+        activeMatchBorder: "#f97316",
+        activeMatchColorOverviewRuler: "#f97316",
+      },
+    } as const;
+
+    // Custom key handler: Shift+Enter disambiguation, Ctrl/Cmd+F for find,
+    // Esc to close find, F3/Ctrl+G to navigate matches.
     term.attachCustomKeyEventHandler((ev) => {
-      if (ev.type === "keydown" && ev.key === "Enter" && ev.shiftKey) {
+      if (ev.type !== "keydown") return true;
+      if (ev.key === "Enter" && ev.shiftKey) {
         const sock = socketRef.current;
         if (sock && sock.readyState === WebSocket.OPEN) sock.send("\x1b[13;2u");
         return false;
+      }
+      if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === "f") {
+        const sel = term.getSelection();
+        if (sel && !findOpenRef.current) setFindQuery(sel);
+        setFindOpen(true);
+        return false;
+      }
+      if (ev.key === "Escape" && findOpenRef.current) {
+        setFindOpen(false);
+        search.clearDecorations();
+        setFindResult({ count: 0, index: -1 });
+        return false;
+      }
+      const q = findQueryRef.current;
+      if (q && q.trim()) {
+        if (ev.key === "F3" || ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "g")) {
+          if (ev.shiftKey) search.findPrevious(q, searchOpts);
+          else search.findNext(q, searchOpts);
+          return false;
+        }
       }
       return true;
     });
@@ -554,6 +664,8 @@ export default function TerminalPanel({
       osc9Disp.dispose();
       osc777Disp.dispose();
       osc99Disp.dispose();
+      searchDisp.dispose();
+      search.dispose();
       // Cancel any pending chunk writes.
       if (chunkRafId) cancelAnimationFrame(chunkRafId);
       pendingChunks.length = 0;
@@ -567,6 +679,7 @@ export default function TerminalPanel({
       termRef.current = null;
       fitRef.current = null;
       serializeRef.current = null;
+      searchRef.current = null;
     };
     // Backend switches intentionally do NOT restart existing terminals:
     // the PTY is host-local and would be lost. New terminals after a switch
@@ -652,6 +765,17 @@ export default function TerminalPanel({
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
+      {findOpen && (
+        <TerminalFindBar
+          query={findQuery}
+          onQueryChange={handleFindQueryChange}
+          resultCount={findResult.count}
+          resultIndex={findResult.index}
+          onNext={handleFindNext}
+          onPrev={handleFindPrev}
+          onClose={handleCloseFind}
+        />
+      )}
       {isDragging && (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-md border-2 border-dashed border-blue-500 bg-blue-500/10">
           <span className="text-sm font-medium text-blue-300">Drop files here</span>

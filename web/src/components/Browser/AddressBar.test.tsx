@@ -49,4 +49,14 @@ describe("AddressBar", () => {
     render(<AddressBar {...base} status={0} error="connection refused" />);
     expect(screen.getByText(/connection refused/i)).toBeInTheDocument();
   });
+
+  it("shows a loading spinner while a page is in flight", () => {
+    render(<AddressBar {...base} status={0} error="" />);
+    expect(screen.getByLabelText("Loading")).toBeInTheDocument();
+  });
+
+  it("hides the loading spinner once a status arrives and does not mask errors", () => {
+    render(<AddressBar {...base} status={200} error="" />);
+    expect(screen.queryByLabelText("Loading")).not.toBeInTheDocument();
+  });
 });

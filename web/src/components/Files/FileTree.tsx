@@ -48,7 +48,7 @@ import {
   X,
 } from "lucide-react";
 import { api, apiPath, authHeaders, readSSEStream } from "@/api/client";
-import { parseKeywords, matchesKeywords } from "@/lib/keywordFilter";
+import { parseKeywords, matchesKeywords, scoreMatch } from "@/lib/keywordFilter";
 import SecretActionDialog from "./SecretActionDialog";
 import { loadFileTreeView, saveFileTreeView, type FileTreeViewMode } from "./fileTreeViewPersistence";
 import { loadFileSearchFilters, saveFileSearchFilters } from "./fileSearchFiltersPersistence";
@@ -171,6 +171,14 @@ function filterTreeNodes(nodes: FileNode[], keywords: string[]): FileNode[] {
         children: childFiltered.length > 0 ? childFiltered : undefined,
       });
     }
+  }
+  // Sort by relevance score descending (stable sort preserves original order for ties)
+  if (keywords.length > 0) {
+    out.sort((a, b) => {
+      const scoreA = scoreMatch(`${a.name} ${a.path}`, keywords);
+      const scoreB = scoreMatch(`${b.name} ${b.path}`, keywords);
+      return scoreB - scoreA;
+    });
   }
   return out;
 }

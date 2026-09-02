@@ -1,7 +1,7 @@
 interface EditorContextChipProps {
   path: string;
   selection?: { startLine: number; endLine: number } | null;
-  /** When provided, an X button is shown that removes the chip (per-message). */
+  /** When provided, an X button is shown that removes the chip (sticky for the session). */
   onRemove?: () => void;
 }
 
@@ -9,7 +9,8 @@ interface EditorContextChipProps {
  * A small chip shown above ChatInput when an editor tab is active.
  * Displays the active file path and selected line range (if any).
  * Read-only indicator of the live editor context. When `onRemove` is provided,
- * an X button lets the user drop it from the current message only.
+ * an X button lets the user drop it from the chat for the rest of the session
+ * (it re-injects only if a genuinely new file tab is opened).
  */
 export default function EditorContextChip({ path, selection, onRemove }: EditorContextChipProps) {
   const label = selection

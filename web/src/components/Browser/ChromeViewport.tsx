@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useCdpSocket } from "./useCdpSocket";
 import type { StateKey } from "../../lib/browserStore";
+import { LoadingSpinner } from "./LoadingSpinner";
+import { uploadBrowseFiles } from "../../api/client";
 
 /** CDP modifier bitmask (Input.dispatchMouseEvent/KeyEvent convention). */
 const MOD_ALT = 1;
@@ -40,8 +42,10 @@ export interface ChromeViewportProps {
  *  are CSS pixels relative to the canvas rect (Chrome expects CSS px; the
  *  screencast frames are device px and are only used for the backing store). */
 export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProps) {
-  const { send, status, error, onFrame } = useCdpSocket(stateKey, browseBase, true);
+  const { send, status, error, onFrame, onFileChooser } = useCdpSocket(stateKey, browseBase, true);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Hidden native picker answering the page's intercepted <input type=file>.
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [hasFrame, setHasFrame] = useState(false);
   // Start empty so the FIRST mount always navigates (iframe → chrome switches,
   // e.g. the dev-server escape hatch, would otherwise mount a target sitting
@@ -62,6 +66,16 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
     }
   }, [url, send]);
 
+  // Listen for cdp:send events from DevConsole (e.g., getResponseBody).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail) send(detail);
+    };
+    window.addEventListener("cdp:send", handler);
+    return () => window.removeEventListener("cdp:send", handler);
+  }, [send]);
+
   // Frames → backing store + paint.
   useEffect(() => {
     return onFrame((bitmap, w, h) => {
@@ -77,6 +91,40 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
       setHasFrame(true);
     });
   }, [onFrame]);
+
+  // Page opened a file chooser → open our own picker. The click that opened
+  // it is still a transient user activation (Chrome allows ~5s), which
+  // input.click() needs.
+  useEffect(() => {
+    return onFileChooser((multiple) => {
+      const input = fileInputRef.current;
+      if (!input) return;
+      input.multiple = multiple;
+      input.value = "";
+      input.click();
+    });
+  }, [onFileChooser]);
+
+  // The input's "cancel" event (picker dismissed) has no React prop in this
+  // React version; listen natively.
+  useEffect(() => {
+    const input = fileInputRef.current;
+    if (!input) return;
+    const onCancel = () => send({ t: "fileChooserCancel" });
+    input.addEventListener("cancel", onCancel);
+    return () => input.removeEventListener("cancel", onCancel);
+  }, [send]);
+
+  const onFilesPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) {
+      send({ t: "fileChooserCancel" });
+      return;
+    }
+    uploadBrowseFiles(stateKey, files).catch((err: unknown) => {
+      console.error("cdp: file upload for chooser failed", { stateKey, files: files.map((f) => f.name) }, err);
+    });
+  };
 
   // Container resize → Emulation.setDeviceMetricsOverride via the socket.
   useEffect(() => {
@@ -168,7 +216,7 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
   };
 
   return (
-    <div className="relative flex-1 min-h-0 w-full">
+    <div className="absolute inset-0">
       <canvas
         ref={canvasRef}
         tabIndex={0}
@@ -181,9 +229,16 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
         onKeyUp={onKeyUp}
         onContextMenu={(e) => e.preventDefault()}
       />
+      <input
+        ref={fileInputRef}
+        type="file"
+        data-testid="cdp-file-input"
+        className="hidden"
+        onChange={onFilesPicked}
+      />
       {!hasFrame && status !== "closed" && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <span data-testid="cdp-spinner" className="animate-spin text-neutral-400">◌</span>
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none" data-testid="cdp-spinner">
+          <LoadingSpinner className="w-6 h-6" />
         </div>
       )}
       {status === "reconnecting" && (

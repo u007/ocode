@@ -102,3 +102,39 @@ func TestStartServerRejectsUnauthed(t *testing.T) {
 		t.Fatalf("expected 401 for wrong token, got %d", res.StatusCode)
 	}
 }
+
+func TestResolveWindowTitle(t *testing.T) {
+	// Use a temp config dir so the test doesn't depend on the real project store.
+	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
+
+	// Normal project directory → basename.
+	if got := ResolveWindowTitle("/Users/dev/my-project"); got != "my-project" {
+		t.Errorf("normal path: got %q, want %q", got, "my-project")
+	}
+	// Trailing separator stripped.
+	if got := ResolveWindowTitle("/Users/dev/my-project/"); got != "my-project" {
+		t.Errorf("trailing slash: got %q, want %q", got, "my-project")
+	}
+	// Root → "ocode" fallback.
+	if got := ResolveWindowTitle("/"); got != "ocode" {
+		t.Errorf("root: got %q, want %q", got, "ocode")
+	}
+	// Home dir → "ocode" fallback (too broad for a window title).
+	if home, err := os.UserHomeDir(); err == nil {
+		if got := ResolveWindowTitle(home); got != "ocode" {
+			t.Errorf("home dir: got %q, want %q", got, "ocode")
+		}
+	}
+	// Empty string → "ocode" fallback.
+	if got := ResolveWindowTitle(""); got != "ocode" {
+		t.Errorf("empty: got %q, want %q", got, "ocode")
+	}
+	// Dot → "ocode" fallback.
+	if got := ResolveWindowTitle("."); got != "ocode" {
+		t.Errorf("dot: got %q, want %q", got, "ocode")
+	}
+	// Tilde not expanded -> basename (filepath.Clean doesn't expand ~).
+	if got := ResolveWindowTitle("~/projects"); got != "projects" {
+		t.Errorf("tilde: got %q, want %q", got, "projects")
+	}
+}

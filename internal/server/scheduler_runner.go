@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
@@ -52,10 +53,14 @@ func (r *schedulerRunner) RunScheduledJob(ctx context.Context, job *scheduler.Jo
 	defer ag.Shutdown()
 	ag.LoadExternalToolsWithMCP(cfg)
 	ag.SetAdvisorEnabled(false)
-	if job.Payload.PermMode != "" {
-		ag.Permissions().SetMode(agent.PermissionMode(job.Payload.PermMode))
-	}
-
+	// Bind the job's permission mode. Blank/whitespace perm_mode resolves to
+	// normal — a cron agent must NEVER inherit a session-scoped sandbox/yolo
+	// toggle (Decision 2/6). The bind is authoritative: even though today's
+	// runner builds a fresh agent per firing (default normal), an explicit
+	// "blank => normal" resolves the mode so the invariant is immune to any
+	// future agent reuse or lifecycle change. Invalid values are silently
+	// ignored by SetMode (preserved global constraint).
+	ag.Permissions().SetMode(resolveCronPermissionMode(job.Payload.PermMode))
 	sessionID := "cron:" + job.ID
 	ag.SetSessionID(sessionID)
 	prefix := scheduler.ContextPrefix(job)
@@ -149,4 +154,25 @@ func lastCronAssistantContent(msgs []agent.Message) string {
 // need to know about the unexported schedulerRunner struct.
 func RunScheduledJob(ctx context.Context, cfg *config.Config, job *scheduler.Job) (string, error) {
 	return (&schedulerRunner{cfg: cfg}).RunScheduledJob(ctx, job)
+}
+
+// resolveCronPermissionMode maps a job's perm_mode to the agent permission mode
+// for the fired run. The contract (Decision 2/6):
+//
+//   - blank or whitespace -> normal (never sandbox; a cron job must not inherit
+//     a session-scoped toggle)
+//   - explicit normal/yolo/locked/sandbox -> the same value (SetMode accepts
+//     sandbox post Part 01; the web cron UI does not offer it, but an
+//     explicitly-authorized job payload is honored)
+//   - any other value -> passed through to SetMode, which silently ignores
+//     invalid modes (preserved global constraint)
+//
+// Resolving here (rather than "skip SetMode when blank") makes the invariant
+// explicit and immune to future agent reuse: even if the runner ever reuses an
+// agent whose mode was changed by a session, blank always re-binds normal.
+func resolveCronPermissionMode(m scheduler.PermissionMode) agent.PermissionMode {
+	if strings.TrimSpace(string(m)) == "" {
+		return agent.PermissionModeNormal
+	}
+	return agent.PermissionMode(m)
 }

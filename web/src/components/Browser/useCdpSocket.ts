@@ -15,6 +15,8 @@ export interface CdpSocketApi {
   error: string | null;
   /** Subscribe to decoded screencast frames. Returns an unsubscribe fn. */
   onFrame(cb: (bitmap: ImageBitmap, w: number, h: number) => void): () => void;
+  /** Subscribe to file-chooser requests from the page. Returns an unsubscribe fn. */
+  onFileChooser(cb: (multiple: boolean) => void): () => void;
 }
 
 // Reconnect backoff sequence; caps at the last value.
@@ -32,6 +34,9 @@ export function useCdpSocket(stateKey: StateKey, browseBase: string | null, enab
   const wsRef = useRef<WebSocket | null>(null);
   const queueRef = useRef<CdpClientMessage[]>([]);
   const frameCbsRef = useRef(new Set<(bitmap: ImageBitmap, w: number, h: number) => void>());
+  const fileChooserCbsRef = useRef(new Set<(multiple: boolean) => void>());
+  // Serializes async JPEG decodes so onFrame fires in wire order.
+  const decodeChainRef = useRef<Promise<void>>(Promise.resolve());
   const attemptRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disposedRef = useRef(false);
@@ -72,7 +77,23 @@ export function useCdpSocket(stateKey: StateKey, browseBase: string | null, enab
           if (ev.data instanceof ArrayBuffer) {
             const decoded = decodeFrame(ev.data);
             if (!decoded) return; // malformed: smaller than the 8-byte header
-            for (const cb of frameCbsRef.current) cb(decoded.jpeg as unknown as ImageBitmap, decoded.header.width, decoded.header.height);
+            const { width, height } = decoded.header;
+            // JPEG bytes → ImageBitmap (drawImage rejects raw bytes). Chain
+            // decodes so frames reach callbacks in wire order.
+            decodeChainRef.current = decodeChainRef.current
+              .then(() => createImageBitmap(new Blob([decoded.jpeg], { type: "image/jpeg" })))
+              .then(
+                (bitmap) => {
+                  if (wsRef.current !== ws) {
+                    bitmap.close();
+                    return; // socket superseded while decoding
+                  }
+                  for (const cb of frameCbsRef.current) cb(bitmap, width, height);
+                },
+                (err: unknown) => {
+                  console.error("cdp: failed to decode screencast frame", { width, height, bytes: decoded.jpeg.byteLength }, err);
+                },
+              );
             return;
           }
           if (typeof ev.data !== "string") return;
@@ -88,20 +109,42 @@ export function useCdpSocket(stateKey: StateKey, browseBase: string | null, enab
               break;
             case "network":
               browserActions.pushNetwork(key, {
+                requestId: msg.requestId ?? "",
                 method: msg.method,
                 url: msg.url,
                 status: msg.status,
                 durationMs: msg.durationMs,
                 ts: msg.ts,
+                blocked: msg.blocked,
+                contentType: msg.contentType,
+                size: msg.size,
+                requestHeaders: msg.requestHeaders,
+                responseHeaders: msg.responseHeaders,
+                postData: msg.postData,
               });
               break;
-            case "error":
-              // Fatal: chrome missing/unsupported/replaced. No reconnect.
-              setError(msg.message);
-              setStatus("closed");
-              wsRef.current = null;
-              ws.close();
-              break;
+			case "fileChooser":
+				for (const cb of fileChooserCbsRef.current) cb(msg.multiple);
+				break;
+			case "responseBody":
+				// Store response body for the requesting row.
+				browserActions.setResponseBody(key, msg.requestId, {
+					body: msg.body ?? "",
+					base64Encoded: msg.base64Encoded ?? false,
+					truncated: msg.truncated ?? false,
+					error: msg.error,
+				});
+				break;
+			case "performance":
+				browserActions.setPerformanceMetrics(key, msg.metrics ?? {});
+				break;
+			case "error":
+				// Fatal: chrome missing/unsupported/replaced. No reconnect.
+				setError(msg.message);
+				setStatus("closed");
+				wsRef.current = null;
+				ws.close();
+				break;
           }
         };
 
@@ -177,5 +220,12 @@ export function useCdpSocket(stateKey: StateKey, browseBase: string | null, enab
     };
   }, []);
 
-  return { send, status, error, onFrame };
+  const onFileChooser = useCallback((cb: (multiple: boolean) => void) => {
+    fileChooserCbsRef.current.add(cb);
+    return () => {
+      fileChooserCbsRef.current.delete(cb);
+    };
+  }, []);
+
+  return { send, status, error, onFrame, onFileChooser };
 }

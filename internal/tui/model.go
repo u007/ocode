@@ -1291,6 +1291,7 @@ type model struct {
 	config             *config.Config
 	sessionID          string
 	sessionTitle       string
+	sessionCreatedAt   time.Time
 	titleRegenerating  bool // true while a manual title regeneration (gen button) is in flight
 	// sessionLoadErr records a failure to load an explicitly requested
 	// session (via -session or -continue). When set, Run aborts before the
@@ -2605,6 +2606,7 @@ func newModel(opts ...RunOptions) model {
 				m.titleRequested = true
 			}
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
+			m.sessionCreatedAt = sess.CreatedAt
 			restoreTodoState(sess.Metadata)
 			for _, am := range sess.Messages {
 				role := tuiRoleForAgentMessage(am)
@@ -2621,6 +2623,10 @@ func newModel(opts ...RunOptions) model {
 			// writing a placeholder file under the (missing) session ID.
 			m.sessionLoadErr = err
 		}
+	} else if m.sessionID == "" {
+		// New unsaved session — seed creation time so the bridged web status
+		// can show session elapsed immediately without waiting for first save.
+		m.sessionCreatedAt = time.Now()
 	}
 
 	// cfg.Model was set but agent.NewClient still failed to build a client
@@ -4250,12 +4256,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = true
 		m.cancelStream = msg.cancel
 		m.lastActivity = agent.ActivitySnapshot{LLMRunning: true}
+		m.streamStartedAt = time.Now()
+		m.streamEndedAt = time.Time{}
 		// Push the activity state to the web status bar (mirrors the TUI's
 		// "⟳ LLM" indicator) — the activity tracker's own snapshot arrives a
 		// beat later, so reflect the transition promptly.
 		m.broadcastTUIStatus()
-		m.streamStartedAt = time.Now()
-		m.streamEndedAt = time.Time{}
 		m.streamTokenEstimate = 0
 		m.streamThinkingChars = 0
 		m.streamOutputChars = 0
@@ -4744,12 +4750,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = false
 		m.cancelStream = nil
 		m.lastActivity = agent.ActivitySnapshot{}
+		m.streamEndedAt = time.Now()
+		m.streamWasInterrupted = msg.err != nil
 		// The agent's own LLMRunning=false snapshot may not have landed yet —
 		// push the idle activity state so the web status bar clears its running
 		// indicator promptly at turn end.
 		m.broadcastTUIStatus()
-		m.streamEndedAt = time.Now()
-		m.streamWasInterrupted = msg.err != nil
 		// Ring the terminal bell on task completion (if enabled).
 		if m.soundEnabled {
 			m.ringBell()
@@ -7036,7 +7042,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 			if m.sidebarAllowedHeaderForClick(mouse) && m.agent != nil {
 				perm := m.agent.Permissions()
-				// Cycle: normal → normal·auto → yolo → locked → normal
+				// Cycle: normal → normal·auto → yolo → locked → sandbox → normal
 				switch {
 				case perm.Mode() == agent.PermissionModeNormal && !perm.AutoPermissionEnabled():
 					perm.SetAutoPermissionEnabled(true)
@@ -7048,6 +7054,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 					m.permDirty.mode = true
 				case perm.Mode() == agent.PermissionModeYOLO:
 					perm.SetMode(agent.PermissionModeLocked)
+					m.permDirty.mode = true
+				case perm.Mode() == agent.PermissionModeLocked:
+					perm.SetMode(agent.PermissionModeSandbox)
 					m.permDirty.mode = true
 				default:
 					perm.SetMode(agent.PermissionModeNormal)
@@ -7203,7 +7212,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		statusTop := m.statusBarTopY()
 		if mouse.Y >= statusTop && mouse.Y < statusTop+2 && mouse.X >= m.statusPermColStart && mouse.X < m.statusPermColEnd && mouse.Y == statusTop && m.agent != nil {
 			perm := m.agent.Permissions()
-			// Cycle: normal → normal·auto → yolo → locked → normal
+			// Cycle: normal → normal·auto → yolo → locked → sandbox → normal
 			switch {
 			case perm.Mode() == agent.PermissionModeNormal && !perm.AutoPermissionEnabled():
 				perm.SetAutoPermissionEnabled(true)
@@ -7215,6 +7224,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.permDirty.mode = true
 			case perm.Mode() == agent.PermissionModeYOLO:
 				perm.SetMode(agent.PermissionModeLocked)
+				m.permDirty.mode = true
+			case perm.Mode() == agent.PermissionModeLocked:
+				perm.SetMode(agent.PermissionModeSandbox)
 				m.permDirty.mode = true
 			default:
 				perm.SetMode(agent.PermissionModeNormal)
@@ -8136,6 +8148,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/sidebar" || cmd == "/commands" || cmd == "/permissions" ||
 		cmd == "/ban" ||
 		cmd == "/yolo" || cmd == "/small-model" || cmd == "/editor" ||
+		cmd == "/sandbox" ||
 		cmd == "/editor-mode" || cmd == "/themes" || cmd == "/theme" ||
 		cmd == "/lsp" || cmd == "/usage" || cmd == "/share" ||
 		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp" ||
@@ -10312,6 +10325,7 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 		} else {
 			m.saveSession()
 			m.sessionID = sess.ID
+			m.sessionCreatedAt = sess.CreatedAt
 			if m.agent != nil {
 				m.agent.SetChangesSession(sess.ID)
 			}
@@ -10721,6 +10735,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	}
 	newSessionID := time.Now().Format("2006-01-02-150405")
 	m.sessionID = newSessionID
+	m.sessionCreatedAt = time.Now()
 	if m.agent != nil {
 		m.agent.SetChangesSession(newSessionID)
 	}
@@ -13500,6 +13515,7 @@ func (m *model) saveSession() {
 	// session file — the root cause of hundreds of phantom sessions.
 	if m.sessionID == "" {
 		m.sessionID = session.NewSessionID()
+		m.sessionCreatedAt = time.Now()
 	}
 	agentMsgs := m.persistedAgentMessages()
 	if len(agentMsgs) == 0 {
@@ -14268,7 +14284,15 @@ func (m *model) persistPermissions() {
 		}
 	}
 	if m.permDirty.mode {
-		if err := config.SavePermissionModeSwitch(string(pm.Mode())); err != nil {
+		persistMode := string(pm.Mode())
+		if pm.Mode() == agent.PermissionModeSandbox {
+			// Sandbox is a deliberate per-session opt-in (Decision 2): it must
+			// never be written as the durable default. The live agent stays
+			// sandboxed; only the on-disk mode field is clamped to normal so a
+			// restart / fresh agent / cron job starts unconfined.
+			persistMode = string(agent.PermissionModeNormal)
+		}
+		if err := config.SavePermissionModeSwitch(persistMode); err != nil {
 			errs = append(errs, "mode: "+err.Error())
 		} else {
 			m.permDirty.mode = false
@@ -15093,6 +15117,11 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 		if m.agent != nil && m.agent.Permissions() != nil {
 			snap.PermissionMode = string(m.agent.Permissions().Mode())
 			snap.PermissionAutoAllow = m.agent.Permissions().AutoPermissionEnabled()
+			// Sandbox support/behavior mirror the web status shape so a bridged
+			// web client reading rc.TUIStatus() shows the same indicator (and the
+			// honest Windows degrade) the server would report headless.
+			snap.PermissionSandboxSupported = agent.SandboxSupported()
+			snap.PermissionEffectiveBehavior = agent.EffectivePermissionBehavior(m.agent.Permissions().Mode())
 		} else if m.config.Ocode.Permissions.Auto != nil {
 			snap.PermissionAutoAllow = m.config.Ocode.Permissions.Auto.Enabled
 		}
@@ -15192,6 +15221,27 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 			m.modelPromptInfoVal = m.computeModelPromptInfo()
 		}
 		snap.ModelPrompt = m.modelPromptInfoVal
+	}
+	// Turn timing — authoritative for the bridged web status bar. The web uses
+	// TurnStartedAt to drive its live elapsed counter via Date.now().
+	if !m.streamStartedAt.IsZero() {
+		snap.TurnStartedAt = m.streamStartedAt.UTC().Format(time.RFC3339Nano)
+		if m.streaming {
+			snap.TurnElapsedMs = time.Since(m.streamStartedAt).Milliseconds()
+		}
+	}
+	if !m.streamEndedAt.IsZero() && !m.streamStartedAt.IsZero() {
+		snap.TurnEndedAt = m.streamEndedAt.UTC().Format(time.RFC3339Nano)
+		snap.TurnTookMs = m.streamEndedAt.Sub(m.streamStartedAt).Milliseconds()
+	}
+	// Session elapsed — prefer cached CreatedAt, fall back to disk once.
+	if m.sessionCreatedAt.IsZero() && m.sessionID != "" && m.workDir != "" {
+		if s, err := session.LoadForDir(m.workDir, m.sessionID); err == nil && s != nil && !s.CreatedAt.IsZero() {
+			m.sessionCreatedAt = s.CreatedAt
+		}
+	}
+	if !m.sessionCreatedAt.IsZero() {
+		snap.SessionCreatedAt = m.sessionCreatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return snap
 }
@@ -19048,6 +19098,8 @@ func (m *model) renderStatus() string {
 			permissionMode = " | YOLO permissions"
 		case agent.PermissionModeLocked:
 			permissionMode = " | locked permissions"
+		case agent.PermissionModeSandbox:
+			permissionMode = " | sandbox permissions"
 		}
 		if m.agent.Permissions().AutoPermissionEnabled() {
 			if permissionMode == "" {

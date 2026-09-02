@@ -85,6 +85,15 @@ func (s *terminalSession) attached() bool {
 	return s.ws != nil
 }
 
+// hasExited reports whether the shell has terminated (set by exit() before
+// the table entry is removed). Callers use it to avoid reattaching to — or
+// handing out — a session that is only awaiting teardown.
+func (s *terminalSession) hasExited() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exited
+}
+
 // readLoop pumps pty output into the replay buffer and to the attached
 // socket until the shell exits, then runs the exit teardown. It is the only
 // goroutine that reads ptmx, so it is also the one that reaps the process.

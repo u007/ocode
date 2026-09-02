@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { BrowseMode } from "../../lib/browserStore";
+import { LoadingSpinner } from "./LoadingSpinner";
 
 export interface AddressBarProps {
   url: string;
@@ -40,7 +41,11 @@ export function AddressBar(props: AddressBarProps) {
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter") props.onNavigate(draft.trim()); }}
       />
-      {loading && <span aria-label="Loading" className="animate-spin px-1">◌</span>}
+      {loading && (
+        <span aria-label="Loading" className="px-1 flex items-center">
+          <LoadingSpinner className="w-3.5 h-3.5" />
+        </span>
+      )}
       {status > 0 && (
         <span className={"px-1 tabular-nums " + (status >= 400 ? "text-red-500" : "text-neutral-500")}>
           {status}

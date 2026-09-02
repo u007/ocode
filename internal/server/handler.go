@@ -63,6 +63,16 @@ type Handler struct {
 	// agents this handler creates. Seeded from config, flipped from the web
 	// sidebar, never persisted back to config.
 	advisorEnabled bool
+	// livePermissionModeOverride is the process-global runtime permission mode
+	// set via PUT /api/permissions/mode (and, for parity, PUT
+	// /api/permissions/yolo). It is session-scoped and never persisted: new
+	// agent sessions inherit it at registration (applyLivePermissionOverride)
+	// so a freshly created tab does not silently revert to the config default.
+	// Atomic on purpose: status snapshots are built from call sites that may or
+	// may not hold h.mu (pushStatusSnapshot is invoked under h.mu by
+	// HandleSetAdvisor and unlocked by the permission handlers), so reads must
+	// not re-enter the lock. Nil means "no override — use config default".
+	livePermissionModeOverride atomic.Pointer[agent.PermissionMode]
 	// windowProfiles caches windowId -> activeProfile (empty = Default).
 	// Hydrated from window-state.json once at startup; mutated only via
 	// handleSetWindowActiveProfile which also persists to disk. Avoids file I/O

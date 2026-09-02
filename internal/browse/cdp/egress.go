@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,15 @@ type EgressProxy struct {
 	mu      sync.Mutex
 	tunnels map[net.Conn]struct{}
 	closed  bool
+
+	// allowed holds canonical "host:port" keys (lowercase, explicit port) of
+	// hosts a target is currently showing as its TOP-LEVEL page, refcounted
+	// across targets. Dials to these bypass the policy dialer's private-IP
+	// guard: the user navigated there on purpose (loopback/LAN dev server in
+	// Chrome mode). Everything else — including a public page's subrequests
+	// to private ranges — stays policed.
+	allowMu sync.Mutex
+	allowed map[string]int
 }
 
 // NewEgressProxy binds 127.0.0.1:0, generates a random 24-byte proxy
@@ -64,6 +74,7 @@ func NewEgressProxy(dialer *net.Dialer) (*EgressProxy, error) {
 		username: base64.RawURLEncoding.EncodeToString(cred[:9]),
 		password: base64.RawURLEncoding.EncodeToString(cred[9:]),
 		tunnels:  make(map[net.Conn]struct{}),
+		allowed:  make(map[string]int),
 	}
 	p.server = &http.Server{
 		Handler:           http.HandlerFunc(p.handle),
@@ -71,6 +82,60 @@ func NewEgressProxy(dialer *net.Dialer) (*EgressProxy, error) {
 	}
 	go func() { _ = p.server.Serve(ln) }()
 	return p, nil
+}
+
+// canonHostPort lowercases host and fills in defaultPort when hostport has
+// none, so "LocalHost" (plain http) and "localhost:80" key identically.
+func canonHostPort(hostport string, defaultPort int) string {
+	h, prt, err := net.SplitHostPort(hostport)
+	if err != nil {
+		h, prt = hostport, strconv.Itoa(defaultPort)
+	}
+	return net.JoinHostPort(strings.ToLower(strings.Trim(h, "[]")), prt)
+}
+
+// AllowHost registers hostport (default port 80 when absent) as a top-level
+// navigation host whose dials bypass the private-IP policy. Refcounted; pair
+// every call with ReleaseHost.
+func (p *EgressProxy) AllowHost(hostport string) {
+	key := canonHostPort(hostport, 80)
+	p.allowMu.Lock()
+	p.allowed[key]++
+	p.allowMu.Unlock()
+}
+
+// ReleaseHost drops one AllowHost reference; the host is policed again once
+// no target holds it.
+func (p *EgressProxy) ReleaseHost(hostport string) {
+	key := canonHostPort(hostport, 80)
+	p.allowMu.Lock()
+	if n := p.allowed[key]; n <= 1 {
+		delete(p.allowed, key)
+	} else {
+		p.allowed[key] = n - 1
+	}
+	p.allowMu.Unlock()
+}
+
+func (p *EgressProxy) hostAllowed(host string, port int) bool {
+	key := canonHostPort(net.JoinHostPort(host, strconv.Itoa(port)), port)
+	p.allowMu.Lock()
+	defer p.allowMu.Unlock()
+	return p.allowed[key] > 0
+}
+
+// dialerFor picks the dialer for one upstream: the policy dialer normally, or
+// an unguarded copy (same timeouts, no Control hook) when hostport is a
+// registered top-level navigation host.
+func (p *EgressProxy) dialerFor(hostport string, defaultPort int) *net.Dialer {
+	key := canonHostPort(hostport, defaultPort)
+	p.allowMu.Lock()
+	ok := p.allowed[key] > 0
+	p.allowMu.Unlock()
+	if !ok {
+		return p.dialer
+	}
+	return &net.Dialer{Timeout: p.dialer.Timeout, KeepAlive: p.dialer.KeepAlive}
 }
 
 // ProxyServerURL returns the proxy URL to hand to Chrome's
@@ -192,7 +257,7 @@ func (p *EgressProxy) handlePlain(w http.ResponseWriter, r *http.Request) {
 	// Ensure the Host header matches the upstream, not the proxy.
 	req.Host = r.URL.Host
 
-	tr := &http.Transport{DialContext: p.dialer.DialContext, Proxy: nil, DisableCompression: true}
+	tr := &http.Transport{DialContext: p.dialerFor(req.URL.Host, 80).DialContext, Proxy: nil, DisableCompression: true}
 	resp, err := tr.RoundTrip(req)
 	if err != nil {
 		p.classifyDialErr(w, err)
@@ -208,6 +273,12 @@ func (p *EgressProxy) handlePlain(w http.ResponseWriter, r *http.Request) {
 // block (ErrBlocked), 502 otherwise.
 func (p *EgressProxy) classifyDialErr(w http.ResponseWriter, err error) {
 	if errors.Is(err, ErrBlocked) {
+		// Readable by the page (ACAO:*) and by CDP Network.responseReceived:
+		// the static body/headers carry only the block verdict, nothing from
+		// the refused upstream. Without ACAO the page sees an opaque CORS
+		// failure (net::ERR_FAILED) and the drawer cannot attribute the block.
+		w.Header().Set("X-Ocode-Blocked", "private address")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		http.Error(w, "blocked: private address", http.StatusForbidden)
 		return
 	}
@@ -228,16 +299,23 @@ func (p *EgressProxy) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	if target == "" {
 		target = r.Host
 	}
-	up, err := p.dialer.DialContext(r.Context(), "tcp", target)
+	up, err := p.dialerFor(target, 80).DialContext(r.Context(), "tcp", target)
 	if err != nil {
 		p.classifyDialErr(w, err)
 		return
 	}
 	p.trackTunnel(up)
 	defer p.untrackTunnel(up)
+	closeUp := true
+	defer func() {
+		if closeUp {
+			_ = up.Close()
+		}
+	}()
 
 	req := r.Clone(r.Context())
 	req.RequestURI = r.URL.RequestURI()
+	stripHopByHop(req.Header)
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "websocket")
 	if err := req.Write(up); err != nil {
@@ -286,6 +364,7 @@ func (p *EgressProxy) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// Bidirectional pipe. Use br (buffered reader wrapping up) for the
 	// upstream→client direction so any bytes already buffered beyond the
 	// 101 headers (early WebSocket frames) are not lost.
+	closeUp = false
 	go func() { _, _ = io.Copy(up, clientRW); up.Close(); _ = clientRW.Close() }()
 	go func() { _, _ = io.Copy(clientRW, br); up.Close(); _ = clientRW.Close() }()
 }
@@ -293,7 +372,7 @@ func (p *EgressProxy) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 // handleConnect establishes a CONNECT tunnel to the requested host.
 func (p *EgressProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	host := r.Host
-	up, err := p.dialer.DialContext(r.Context(), "tcp", host)
+	up, err := p.dialerFor(host, 443).DialContext(r.Context(), "tcp", host)
 	if err != nil {
 		p.classifyDialErr(w, err)
 		return

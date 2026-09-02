@@ -73,8 +73,12 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 	// not just after a generated-title status broadcast.
 	if s, err := session.LoadForDir(entry.ProjectRoot, id); err == nil {
 		snap.SessionTitle = s.Title
+		if !s.CreatedAt.IsZero() {
+			snap.SessionCreatedAt = s.CreatedAt.UTC().Format(time.RFC3339Nano)
+		}
 	}
 	h.applySessionContext(&snap, id)
+	h.applyTurnTiming(&snap, id)
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 
 	writeJSON(w, http.StatusOK, snap)
@@ -129,6 +133,32 @@ func (h *Handler) applySessionContext(snap *TUIStatus, id string) {
 	snap.ContextModel = model
 }
 
+// applyTurnTiming fills snap's turn timing fields from the SessionManager's
+// authoritative turn lifecycle (setTurnActive). Used for every per-session
+// status snapshot so the web can show current-input elapsed and last-took
+// without an extra round-trip.
+func (h *Handler) applyTurnTiming(snap *TUIStatus, id string) {
+	if startedAt, endedAt := h.sessions.TurnTiming(id); !startedAt.IsZero() {
+		snap.TurnStartedAt = startedAt.UTC().Format(time.RFC3339Nano)
+		if h.sessions.IsTurnActive(id) {
+			snap.TurnElapsedMs = time.Since(startedAt).Milliseconds()
+		}
+		if !endedAt.IsZero() {
+			snap.TurnEndedAt = endedAt.UTC().Format(time.RFC3339Nano)
+			snap.TurnTookMs = endedAt.Sub(startedAt).Milliseconds()
+		}
+	}
+	// SessionCreatedAt is populated by the caller when it has the session
+	// metadata; if not yet set, try to load it here as fallback.
+	if snap.SessionCreatedAt == "" {
+		if entry, err := h.sessions.Resolve(id); err == nil {
+			if s, err := session.LoadForDir(entry.ProjectRoot, id); err == nil && !s.CreatedAt.IsZero() {
+				snap.SessionCreatedAt = s.CreatedAt.UTC().Format(time.RFC3339Nano)
+			}
+		}
+	}
+}
+
 // publishTurnStatusSnapshot broadcasts a fresh session-tagged "status" event
 // whose context fields were computed from the just-persisted transcript.
 // Called right after a headless turn completes so the web/desktop sidebar's
@@ -141,10 +171,20 @@ func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 	}
 	snap := h.buildStatusSnapshot()
 	snap.SessionID = sessionID
-	if entry, err := h.sessions.Resolve(sessionID); err == nil && entry.ProjectRoot != "" {
-		snap.CWD = entry.ProjectRoot
+	var projectRoot string
+	if entry, err := h.sessions.Resolve(sessionID); err == nil {
+		projectRoot = entry.ProjectRoot
+		if projectRoot != "" {
+			snap.CWD = projectRoot
+		}
 	}
 	h.applySessionContext(&snap, sessionID)
+	if projectRoot != "" {
+		if s, err := session.LoadForDir(projectRoot, sessionID); err == nil && !s.CreatedAt.IsZero() {
+			snap.SessionCreatedAt = s.CreatedAt.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	h.applyTurnTiming(&snap, sessionID)
 	// Reflect the session's effective (override-or-default) model so the
 	// sidebar's Context gauge and Model row stay in sync per session.
 	snap.MainModel = h.effectiveSessionModel(sessionID)
@@ -225,6 +265,14 @@ func (h *Handler) pushSessionStatusSnapshot(id string) {
 		snap.CWD = entry.ProjectRoot
 	}
 	h.applySessionContext(&snap, id)
+	h.applyTurnTiming(&snap, id)
+	if snap.SessionCreatedAt == "" {
+		if entry, err := h.sessions.Resolve(id); err == nil {
+			if s, err := session.LoadForDir(entry.ProjectRoot, id); err == nil && !s.CreatedAt.IsZero() {
+				snap.SessionCreatedAt = s.CreatedAt.UTC().Format(time.RFC3339Nano)
+			}
+		}
+	}
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	h.broadcastEvent(SSEEvent{SessionID: id, Event: "status", Data: snap})
 }

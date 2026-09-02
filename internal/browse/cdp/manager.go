@@ -30,12 +30,18 @@ type ConsoleEvent struct {
 
 // NetworkEvent is delivered to FrameSink.Network.
 type NetworkEvent struct {
-	Method     string
-	URL        string
-	Status     int
-	DurationMs int64
-	TS         int64
-	Blocked    string
+	RequestID       string // CDP request ID for correlation
+	Method          string
+	URL             string
+	Status          int
+	DurationMs      int64
+	TS              int64
+	Blocked         string
+	RequestHeaders  map[string]string // bounded: top headers from request
+	ResponseHeaders map[string]string // bounded: top headers from response
+	ContentType     string            // shortcut from response headers
+	Size            int64             // encoded body length if available
+	PostData        string            // bounded request body (capped at maxPostDataLen)
 }
 
 // FrameSink receives frames and telemetry for one stateKey.
@@ -43,6 +49,7 @@ type FrameSink interface {
 	Frame(width, height uint32, jpeg []byte)
 	Console(ConsoleEvent)
 	Network(NetworkEvent)
+	Performance(metrics map[string]float64)
 	Error(msg string)
 }
 
@@ -405,6 +412,7 @@ func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (
 	_ = conn.Call(ctx, sessionID, "Page.enable", nil, nil)
 	_ = conn.Call(ctx, sessionID, "Runtime.enable", nil, nil)
 	_ = conn.Call(ctx, sessionID, "Network.enable", nil, nil)
+	_ = conn.Call(ctx, sessionID, "Performance.enable", nil, nil)
 
 	t := &Target{
 		manager:          m,
@@ -419,6 +427,7 @@ func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (
 	}
 	// Setup per-target event handlers + screencast
 	t.startHandlers()
+	t.startFileChooser()
 	_ = t.restartScreencast(ctx)
 
 	m.mu.Lock()
@@ -431,6 +440,20 @@ func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (
 	m.mu.Unlock()
 
 	return t, nil
+}
+
+// ErrNoTarget is returned by SetFiles when stateKey has no attached target.
+var ErrNoTarget = errors.New("no chrome target for state key")
+
+// SetFiles forwards uploaded file paths to stateKey's pending file chooser.
+func (m *Manager) SetFiles(ctx context.Context, stateKey string, paths []string) error {
+	m.mu.Lock()
+	t, ok := m.targets[stateKey]
+	m.mu.Unlock()
+	if !ok {
+		return ErrNoTarget
+	}
+	return t.SetFiles(ctx, paths)
 }
 
 // Revoke closes target + disposes context; no-op if absent.
@@ -448,6 +471,7 @@ func (m *Manager) Revoke(stateKey string) {
 
 	// Stop screencast and close target
 	t.Detach()
+	t.releaseTopLevelHost()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if conn != nil {

@@ -17,6 +17,7 @@ import (
 // clientMsg is the inbound JSON from the browser panel.
 type clientMsg struct {
 	T          string  `json:"t"`
+	RequestID  string  `json:"requestId,omitempty"`
 	URL        string  `json:"url,omitempty"`
 	W          int     `json:"w,omitempty"`
 	H          int     `json:"h,omitempty"`
@@ -34,9 +35,10 @@ type clientMsg struct {
 	Text       string  `json:"text,omitempty"`
 }
 
-// cdpSink implements cdp.FrameSink by forwarding to the single writer channel.
+// cdpSink implements cdp.FrameSink by forwarding to the single writer channel,
+// via entry's closed-guard so a send never races entry.closeSend().
 type cdpSink struct {
-	send chan wsOut
+	entry *cdpSocketEntry
 }
 
 func (s *cdpSink) Frame(width, height uint32, jpeg []byte) {
@@ -44,45 +46,64 @@ func (s *cdpSink) Frame(width, height uint32, jpeg []byte) {
 	binary.BigEndian.PutUint32(buf[0:4], width)
 	binary.BigEndian.PutUint32(buf[4:8], height)
 	copy(buf[8:], jpeg)
-	select {
-	case s.send <- wsOut{isBinary: true, data: buf}:
-	default:
-		// drop if full (should not happen with buffered channel)
-	}
+	s.entry.trySend(wsOut{isBinary: true, data: buf})
 }
 
 func (s *cdpSink) Console(ev cdp.ConsoleEvent) {
 	m := map[string]any{"t": "console", "level": ev.Level, "args": ev.Args, "ts": ev.TS}
 	b, _ := json.Marshal(m)
-	select {
-	case s.send <- wsOut{data: b}:
-	default:
-	}
+	s.entry.trySend(wsOut{data: b})
 }
 
 func (s *cdpSink) Network(ev cdp.NetworkEvent) {
-	m := map[string]any{"t": "network", "method": ev.Method, "url": ev.URL, "status": ev.Status, "durationMs": ev.DurationMs, "ts": ev.TS}
+	m := map[string]any{
+		"t":          "network",
+		"requestId":  ev.RequestID,
+		"method":     ev.Method,
+		"url":        ev.URL,
+		"status":     ev.Status,
+		"durationMs": ev.DurationMs,
+		"ts":         ev.TS,
+		"size":       ev.Size,
+	}
 	if ev.Blocked != "" {
 		m["blocked"] = ev.Blocked
 	}
-	b, _ := json.Marshal(m)
-	select {
-	case s.send <- wsOut{data: b}:
-	default:
+	if ev.ContentType != "" {
+		m["contentType"] = ev.ContentType
 	}
+	if len(ev.RequestHeaders) > 0 {
+		m["requestHeaders"] = ev.RequestHeaders
+	}
+	if len(ev.ResponseHeaders) > 0 {
+		m["responseHeaders"] = ev.ResponseHeaders
+	}
+	if ev.PostData != "" {
+		m["postData"] = ev.PostData
+	}
+	b, _ := json.Marshal(m)
+	s.entry.trySend(wsOut{data: b})
+}
+
+// FileChooser asks the SPA to open a native file picker for the page's
+// intercepted <input type=file>; the picked files come back through
+// POST /api/browse/upload → Server.SetFiles.
+func (s *cdpSink) FileChooser(multiple bool) {
+	b, _ := json.Marshal(map[string]any{"t": "fileChooser", "multiple": multiple})
+	s.entry.trySend(wsOut{data: b})
+}
+
+func (s *cdpSink) Performance(metrics map[string]float64) {
+	m := map[string]any{"t": "performance", "metrics": metrics}
+	b, _ := json.Marshal(m)
+	s.entry.trySend(wsOut{data: b})
 }
 
 func (s *cdpSink) Error(msg string) {
 	m := map[string]any{"t": "error", "message": msg}
 	b, _ := json.Marshal(m)
-	select {
-	case s.send <- wsOut{data: b}:
-	default:
-	}
-	select {
-	case s.send <- wsOut{isClose: true, closeCode: 1011, closeText: msg}:
-	default:
-	}
+	s.entry.trySend(wsOut{data: b})
+	s.entry.trySend(wsOut{isClose: true, closeCode: 1011, closeText: msg})
 }
 
 func marshalError(msg string) []byte {
@@ -153,30 +174,27 @@ func (s *Server) handleCDP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	send := make(chan wsOut, 32)
-	sink := &cdpSink{send: send}
+	entry := &cdpSocketEntry{
+		send:   send,
+		wsConn: conn,
+		closeFn: func(code int, text string) error {
+			// Used by Revoke to close this connection. WriteControl (unlike
+			// WriteMessage) is safe to call concurrently with the writer
+			// goroutine's WriteMessage calls per gorilla/websocket's
+			// concurrency contract, so this doesn't race the single writer.
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, text), time.Now().Add(time.Second))
+			return conn.Close()
+		},
+	}
+	sink := &cdpSink{entry: entry}
 
 	// Handle replacement: second socket for same key closes first with "replaced".
 	s.cdpMu.Lock()
 	if old, ok := s.cdpSocks[stateKey]; ok {
 		// Queue replaced error to old writer; it will close after.
-		select {
-		case old.send <- wsOut{data: marshalError("replaced")}:
-		default:
-		}
-		select {
-		case old.send <- wsOut{isClose: true, closeCode: 1011, closeText: "replaced"}:
-		default:
-		}
+		old.trySend(wsOut{data: marshalError("replaced")})
+		old.trySend(wsOut{isClose: true, closeCode: 1011, closeText: "replaced"})
 		// Do not delete old yet; its writer will clean up, but we replace map entry now.
-	}
-	entry := &cdpSocketEntry{
-		send:   send,
-		wsConn: conn,
-		closeFn: func(code int, text string) error {
-			// Used by Revoke to close this connection.
-			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, text))
-			return conn.Close()
-		},
 	}
 	s.cdpSocks[stateKey] = entry
 	s.cdpMu.Unlock()
@@ -232,20 +250,16 @@ func (s *Server) handleCDP(w http.ResponseWriter, r *http.Request) {
 	// Ensure Detach on exit, not Revoke.
 	defer func() {
 		// Signal writer to exit if still running.
-		// Close send if not already closed; writer will exit on channel close or isClose.
-		// We avoid double-close by checking map entry.
-		target.Detach()
+		target.DetachSink(sink)
 		s.cdpMu.Lock()
 		if cur, ok := s.cdpSocks[stateKey]; ok && cur == entry {
 			delete(s.cdpSocks, stateKey)
 		}
 		s.cdpMu.Unlock()
-		// Close send to wake writer if it's still waiting.
-		// Use non-blocking close via recover.
-		func() {
-			defer func() { _ = recover() }()
-			close(send)
-		}()
+		// Close send to wake writer if it's still waiting. Guarded against a
+		// racing trySend (e.g. from Revoke or a replacement socket) by
+		// entry.mu, so this never closes a channel a sender is mid-send on.
+		entry.closeSend()
 		// Wait for writer to flush (with timeout).
 		select {
 		case <-doneWriter:
@@ -285,6 +299,12 @@ func (s *Server) handleCDP(w http.ResponseWriter, r *http.Request) {
 			_ = target.Forward(context.Background())
 		case "reload":
 			_ = target.Reload(context.Background())
+		case "fileChooserCancel":
+			// User dismissed the picker: drop the pending chooser so a stale
+			// upload cannot land in a later input.
+			if err := target.SetFiles(context.Background(), nil); err != nil && !errors.Is(err, cdp.ErrNoFileChooser) {
+				s.log.Printf("browse cdp: cancel file chooser for %s: %v", stateKey, err)
+			}
 		case "resize":
 			dpr := cm.DPR
 			if dpr == 0 {
@@ -310,6 +330,21 @@ func (s *Server) handleCDP(w http.ResponseWriter, r *http.Request) {
 				Text:      cm.Text,
 				Modifiers: cm.Modifiers,
 			})
+		case "getResponseBody":
+			body, isBase64, truncated, err := target.GetResponseBody(context.Background(), cm.RequestID)
+			resp := map[string]any{"t": "responseBody", "requestId": cm.RequestID}
+			if err != nil {
+				resp["error"] = err.Error()
+			} else {
+				resp["body"] = body
+				resp["base64Encoded"] = isBase64
+				resp["truncated"] = truncated
+			}
+			b, _ := json.Marshal(resp)
+			select {
+			case send <- wsOut{data: b}:
+			default:
+			}
 		default:
 			s.log.Printf("browse cdp: unknown client t=%q", cm.T)
 		}

@@ -53,6 +53,10 @@ func (r *recordingSink) Network(ev NetworkEvent) {
 	r.networks = append(r.networks, ev)
 }
 
+func (r *recordingSink) Performance(metrics map[string]float64) {
+	// Record for test assertions if needed.
+}
+
 func (r *recordingSink) Error(msg string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

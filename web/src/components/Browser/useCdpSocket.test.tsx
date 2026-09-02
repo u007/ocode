@@ -135,6 +135,24 @@ describe("useCdpSocket", () => {
     expect(ws.sent).toEqual([JSON.stringify({ t: "back" }), JSON.stringify({ t: "nav", url: "https://a.com/" })]);
   });
 
+  it("routes fileChooser messages to onFileChooser subscribers", async () => {
+    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    const ws = lastSocket();
+    act(() => ws.serverOpen());
+    const seen: boolean[] = [];
+    const off = lastApi!.onFileChooser((multiple) => seen.push(multiple));
+    act(() => {
+      ws.serverMessage(JSON.stringify({ t: "fileChooser", multiple: true }));
+    });
+    expect(seen).toEqual([true]);
+    off();
+    act(() => {
+      ws.serverMessage(JSON.stringify({ t: "fileChooser", multiple: false }));
+    });
+    expect(seen).toEqual([true]);
+  });
+
   it("routes console telemetry into browserActions.pushConsole", async () => {
     render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
@@ -161,20 +179,31 @@ describe("useCdpSocket", () => {
     expect(evs[0].durationMs).toBe(7);
   });
 
-  it("decodes binary frames big-endian and fires onFrame callbacks", async () => {
+  it("decodes binary frames big-endian into an ImageBitmap and fires onFrame callbacks", async () => {
+    // jsdom has no createImageBitmap; stub it and assert the hook decodes
+    // the JPEG payload through it instead of forwarding raw bytes (which
+    // drawImage rejects, leaving ChromeViewport's spinner up forever).
+    const bitmap = { width: 640, height: 480, close: vi.fn() } as unknown as ImageBitmap;
+    const create = vi.fn(async (_blob: Blob) => bitmap);
+    (globalThis as unknown as { createImageBitmap: typeof create }).createImageBitmap = create;
     render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
-    const seen: { w: number; h: number }[] = [];
-    act(() => lastApi!.onFrame((_, w, h) => seen.push({ w, h })));
+    const seen: { bitmap: ImageBitmap; w: number; h: number }[] = [];
+    act(() => lastApi!.onFrame((b, w, h) => seen.push({ bitmap: b, w, h })));
     act(() => ws.serverOpen());
     const buf = new ArrayBuffer(12);
     const dv = new DataView(buf);
     dv.setUint32(0, 640);
     dv.setUint32(4, 480);
-    new Uint8Array(buf, 8).set([1, 2, 3, 4]); // fake jpeg tail
+    new Uint8Array(buf, 8).set([0xff, 0xd8, 0xff, 0xd9]); // minimal jpeg markers
     act(() => ws.serverMessage(buf));
-    expect(seen).toEqual([{ w: 640, h: 480 }]);
+    await waitFor(() => expect(seen).toEqual([{ bitmap, w: 640, h: 480 }]));
+    expect(create).toHaveBeenCalledTimes(1);
+    const blob = create.mock.calls[0][0];
+    expect(blob).toBeInstanceOf(Blob);
+    expect(blob.type).toBe("image/jpeg");
+    expect(blob.size).toBe(4);
   });
 
   it("reconnects with new grant + backoff on close without error", async () => {

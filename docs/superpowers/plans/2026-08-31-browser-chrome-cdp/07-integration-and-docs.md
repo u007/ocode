@@ -64,7 +64,7 @@ Add, next to the existing embedded-browser entries, one bullet each:
 - Extensions: config schema `browser.extensions: [{path, enabled}]` → `--load-extension`; note branded Google Chrome dropped `--load-extension` in 2025 (Chromium/Canary/Edge still honour it); no popup/toolbar UI in headless.
 - Loopback opt-in from Chrome contexts (OAuth callbacks to `localhost:PORT`): per-stateKey "allow once" prompt or `browser.allow_loopback_ports`; must never be automatic (SSRF, see spec rev 2 review decisions).
 - Windows Chrome mode: `--remote-debugging-port=0` + `DevToolsActivePort` file, Origin/Host-gated.
-- Canvas text selection / clipboard, file-upload dialogs, downloads, IME composition.
+- Canvas text selection / clipboard, downloads, IME composition. (File-upload dialogs landed: `Page.setInterceptFileChooserDialog` → SPA picker → `POST /api/browse/upload` → `DOM.setFileInputFiles`.)
 - Headed "attach to my Chrome" mode.
 
 - [ ] Step 1: Add the entries.

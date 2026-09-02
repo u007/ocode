@@ -163,6 +163,277 @@ func TestPermissions_YOLO_DangerousRmOutOfScope_StillAsks(t *testing.T) {
 	}
 }
 
+// TestSetModeSandboxAccepted confirms the fourth permission mode is accepted
+// by SetMode exactly like normal/yolo/locked.
+func TestSetModeSandboxAccepted(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetMode(PermissionModeSandbox)
+	if pm.Mode() != PermissionModeSandbox {
+		t.Fatalf("SetMode(sandbox) => Mode()=%q, want %q", pm.Mode(), PermissionModeSandbox)
+	}
+}
+
+// TestSetModeInvalidLeavesModeUnchanged documents the silent no-op contract:
+// an invalid mode string must leave the current mode untouched (here, sandbox).
+func TestSetModeInvalidLeavesModeUnchanged(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetMode(PermissionModeSandbox)
+	pm.SetMode(PermissionMode("bogus"))
+	if pm.Mode() != PermissionModeSandbox {
+		t.Fatalf("SetMode(bogus) after sandbox => Mode()=%q, want sandbox unchanged", pm.Mode())
+	}
+}
+
+// TestSetModeSandboxKeepsAutoPermission confirms sandbox does NOT force-disable
+// the LLM auto-permission layer (unlike YOLO): its prompt-bypass lives in
+// Decide, not by killing the LLM layer.
+func TestSetModeSandboxKeepsAutoPermission(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetAutoPermissionEnabled(true)
+	pm.SetMode(PermissionModeSandbox)
+	if !pm.AutoPermissionEnabled() {
+		t.Fatal("entering sandbox must not disable auto-permission")
+	}
+}
+
+// TestSetModeSandboxTransitions covers every existing mode -> sandbox and
+// sandbox -> every mode, plus the idempotent sandbox -> sandbox case, so the
+// TUI click-cycle never depends on accidental state behavior.
+func TestSetModeSandboxTransitions(t *testing.T) {
+	fromModes := []PermissionMode{
+		PermissionModeNormal, PermissionModeYOLO, PermissionModeLocked, PermissionModeSandbox,
+	}
+	for _, from := range fromModes {
+		t.Run("to-sandbox-from-"+string(from), func(t *testing.T) {
+			pm := NewPermissionManager()
+			pm.SetMode(from)
+			pm.SetMode(PermissionModeSandbox)
+			if pm.Mode() != PermissionModeSandbox {
+				t.Fatalf("SetMode(sandbox) from %q => Mode()=%q", from, pm.Mode())
+			}
+		})
+	}
+	toModes := []PermissionMode{
+		PermissionModeNormal, PermissionModeYOLO, PermissionModeLocked,
+	}
+	for _, to := range toModes {
+		t.Run("from-sandbox-to-"+string(to), func(t *testing.T) {
+			pm := NewPermissionManager()
+			pm.SetMode(PermissionModeSandbox)
+			pm.SetMode(to)
+			if pm.Mode() != to {
+				t.Fatalf("SetMode(%q) from sandbox => Mode()=%q", to, pm.Mode())
+			}
+		})
+	}
+}
+
+// TestClassifiedRootsExtraPathsWritable proves a root registered via
+// extra_allowed_paths is classified writable in the capability model.
+func TestClassifiedRootsExtraPathsWritable(t *testing.T) {
+	scratch := t.TempDir()
+	if !tool.AddExtraAllowedPath(scratch) {
+		t.Fatalf("AddExtraAllowedPath(%q) returned false", scratch)
+	}
+	t.Cleanup(func() { tool.RemoveExtraAllowedPath(scratch) })
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	found := false
+	for _, spec := range pm.AllowedRootsClassified() {
+		if spec.Path == resolvedForScopeCheckPath(scratch) {
+			found = true
+			if !spec.Writable {
+				t.Fatalf("extra allowed root %q classified read-only, want writable", spec.Path)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("extra allowed root %v missing from classified roots", resolvedForScopeCheckPath(scratch))
+	}
+}
+
+// TestClassifiedRootsDataDirReadOnly proves the global data dir (auth.json,
+// sessions, memory) is classified read-only — write-integrity of the auth and
+// session store is preserved under sandbox (review point 5).
+func TestClassifiedRootsDataDirReadOnly(t *testing.T) {
+	dataDir, err := paths.GlobalDataDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	found := false
+	for _, spec := range pm.AllowedRootsClassified() {
+		if spec.Path == resolvedForScopeCheckPath(dataDir) {
+			found = true
+			if spec.Writable {
+				t.Fatalf("data dir %q classified writable, want read-only", spec.Path)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("data dir %v missing from classified roots", resolvedForScopeCheckPath(dataDir))
+	}
+}
+
+// TestClassifiedRootsLanguageCachesWritable proves a language dep cache root
+// (npm_config_cache) is classified writable so npm install / pip keep working
+// under sandbox.
+func TestClassifiedRootsLanguageCachesWritable(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("npm_config_cache", cache)
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	found := false
+	for _, spec := range pm.AllowedRootsClassified() {
+		if spec.Path == resolvedForScopeCheckPath(cache) {
+			found = true
+			if !spec.Writable {
+				t.Fatalf("language cache root %q classified read-only, want writable", spec.Path)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("language cache root %v missing from classified roots", resolvedForScopeCheckPath(cache))
+	}
+}
+
+// TestClassifiedRootsDropsFilesystemRoot proves the boundary guard: no
+// classified spec may resolve to the filesystem root "/" as a writable root
+// (a writable "/" would void the whole sandbox boundary).
+func TestClassifiedRootsDropsFilesystemRoot(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	for _, spec := range pm.AllowedRootsClassified() {
+		if spec.Path == "/" && spec.Writable {
+			t.Fatalf("classified root %q is writable filesystem root", spec.Path)
+		}
+	}
+}
+
+// TestAllowedRootsIncludesClaudeDir proves the expanded ~/.claude directory is
+// present in the flat AllowedRoots() union (cross-tool agent state stays in
+// scope for auto-permission decisions).
+func TestAllowedRootsIncludesClaudeDir(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude := resolvedForScopeCheckPath(filepath.Join(home, ".claude"))
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	for _, root := range pm.AllowedRoots() {
+		if root == claude {
+			return
+		}
+	}
+	t.Fatalf("~/.claude (%s) missing from AllowedRoots()", claude)
+}
+
+// TestClaudeDirIsWritable proves ~/.claude is classified writable in the
+// capability model (the user explicitly granted read/write access to that
+// cross-tool agent state).
+func TestClaudeDirIsWritable(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude := resolvedForScopeCheckPath(filepath.Join(home, ".claude"))
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	for _, spec := range pm.AllowedRootsClassified() {
+		if spec.Path == claude {
+			if !spec.Writable {
+				t.Fatalf("~/.claude (%s) classified read-only, want writable", claude)
+			}
+			return
+		}
+	}
+	t.Fatalf("~/.claude (%s) missing from classified roots", claude)
+}
+
+// resolvedForScopeCheckPath mirrors the add() resolution in AllowedRoots:
+// EvalSymlinks with Clean fallback.
+func resolvedForScopeCheckPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
+}
+
+// TestDecideSandboxAutoAllowsPlainCommand locks the core sandbox behavior:
+// a plain command auto-allows (promptless) when the backend is supported.
+func TestDecideSandboxAutoAllowsPlainCommand(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetMode(PermissionModeSandbox)
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"echo hi"}`))
+	if dec.Level != PermissionAllow {
+		t.Fatalf("sandbox plain command = %s, want Allow", dec.Level)
+	}
+}
+
+// TestDecideSandboxHardDenyStillWins confirms the runaway guard stays
+// authoritative: sandbox never auto-allows a hard-blocked command.
+func TestDecideSandboxHardDenyStillWins(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetMode(PermissionModeSandbox)
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"rm -rf /"}`))
+	if dec.Level != PermissionDeny || !dec.HardDeny {
+		t.Fatalf("sandbox hard-blocked = %+v, want HardDeny", dec)
+	}
+}
+
+// TestDecideSandboxDangerousRmStillAsks confirms the dangerous-rm heuristic
+// stays belt-and-suspenders: an out-of-scope rm -rf asks even under sandbox.
+func TestDecideSandboxDangerousRmStillAsks(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetMode(PermissionModeSandbox)
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"rm -rf /Users/test/other-project"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("sandbox dangerous-rm = %s, want Ask", dec.Level)
+	}
+}
+
+// TestDecideSandboxBypassesInterpreterPrompt confirms the OS write-confinement
+// replaces the LLM interpreter ask: a python -c inline eval auto-allows in
+// sandbox (supported OS) but asks in normal mode.
+func TestDecideSandboxBypassesInterpreterPrompt(t *testing.T) {
+	args := json.RawMessage(`{"command":"python3 -c 'print(1)'"}`)
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	dec := pm.Decide("bash", args)
+	if dec.Level != PermissionAsk {
+		t.Fatalf("normal interpreter = %s, want Ask", dec.Level)
+	}
+
+	pm.SetMode(PermissionModeSandbox)
+	dec = pm.Decide("bash", args)
+	if dec.Level != PermissionAllow {
+		t.Fatalf("sandbox interpreter = %s, want Allow (OS confines writes)", dec.Level)
+	}
+}
+
+// TestDecideSandboxDegradesOnUnsupportedOS confirms the Windows/unsupported
+// contract: with no backend, sandbox mode behaves exactly like normal (asks —
+// no silent promptless execution).
+func TestDecideSandboxDegradesOnUnsupportedOS(t *testing.T) {
+	orig := sandboxSupported
+	sandboxSupported = func() bool { return false }
+	t.Cleanup(func() { sandboxSupported = orig })
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetMode(PermissionModeSandbox)
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"python3 -c 'print(1)'"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("unsupported-OS sandbox interpreter = %s, want Ask (behaves like normal)", dec.Level)
+	}
+}
+
 // TestPermissions_YOLO_RmInScope_StillAllowed confirms the new dangerous-rm
 // guard doesn't regress the common case: recursive/force rm targeting a path
 // inside the workdir stays a plain YOLO allow.
@@ -1853,5 +2124,325 @@ func TestGitCDangerousConfigHandling(t *testing.T) {
 		if got := matchSubcommandAllow(tc.cmd); got != tc.wantAllow {
 			t.Errorf("matchSubcommandAllow(%q)=%v want %v", tc.cmd, got, tc.wantAllow)
 		}
+	}
+}
+
+func TestTempRootAliasesResolveToRoots(t *testing.T) {
+	pm := NewPermissionManager()
+	roots := map[string]struct{}{}
+	for _, r := range pm.AllowedRoots() {
+		roots[r] = struct{}{}
+	}
+	for _, a := range TempRootAliases() {
+		if a[0] == a[1] {
+			t.Errorf("alias %q equals its resolved form; should be omitted", a[0])
+		}
+		if _, ok := roots[a[1]]; !ok {
+			t.Errorf("alias %q resolves to %q which is not an allowed root", a[0], a[1])
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Part 02 Task 5 — sandbox sensitive-set stays authoritative (Ask, not auto-allow)
+//
+// Decision 3/9: in sandbox mode the YOLO-style prompt-bypass does NOT extend to
+// the sensitive set. auth.json (read+write), ocode config-dir/data-dir writes,
+// and ~/.ssh/.env (read+write) all resolve to Ask and route through the
+// auto-permission judge when auto is enabled (else a human prompt). Only the
+// OS write-confinement (approved Ask -> run wrapped) and the permit of ordinary
+// workspace commands change.
+// ---------------------------------------------------------------------------
+
+// TestDecideSandboxAuthJsonAsks: reading or writing auth.json (ocode's token)
+// is Ask in sandbox — never the silent auto-allow a bare writable root would give.
+func TestDecideSandboxAuthJsonAsks(t *testing.T) {
+	isolateConfigHome(t)
+	dataDir, err := paths.GlobalDataDir()
+	if err != nil {
+		t.Fatalf("GlobalDataDir: %v", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(dataDir, "auth.json")
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	pm.SetMode(PermissionModeSandbox)
+
+	cases := []string{
+		"cat " + authPath,
+		"cat > " + authPath,
+		"tee " + authPath + " </dev/null",
+	}
+	for _, cmd := range cases {
+		dec := pm.Decide("bash", json.RawMessage(`{"command":"`+cmd+`"}`))
+		if dec.Level != PermissionAsk {
+			t.Errorf("sandbox command %q = %s, want Ask (auth.json sensitive)", cmd, dec.Level)
+		}
+	}
+}
+
+// TestDecideSandboxConfigWriteAsks: a write into ocode's global config dir is
+// Ask in sandbox (guards self-granting a permission rule), while a plain
+// sibling write stays auto-allowed.
+func TestDecideSandboxConfigWriteAsks(t *testing.T) {
+	isolateConfigHome(t)
+	cfgDir, err := paths.GlobalConfigDir()
+	if err != nil {
+		t.Fatalf("GlobalConfigDir: %v", err)
+	}
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(cfgDir, "ocodeconfig.json")
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	pm.SetMode(PermissionModeSandbox)
+
+	// A redirect write into the config dir must ask.
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"echo x > `+target+`"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("config-dir write = %s, want Ask (self-escalation guard)", dec.Level)
+	}
+	// A plain workspace command still auto-allows.
+	dec = pm.Decide("bash", json.RawMessage(`{"command":"echo hi > workspace-file.txt"}`))
+	if dec.Level != PermissionAllow {
+		t.Fatalf("ordinary workspace write = %s, want Allow", dec.Level)
+	}
+}
+
+// TestDecideSandboxSshReadAsks: reading a private key is Ask in sandbox.
+func TestDecideSandboxSshReadAsks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	ssh := filepath.Join(home, ".ssh")
+	key := filepath.Join(ssh, "id_ed25519")
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	pm.SetMode(PermissionModeSandbox)
+
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"cat `+key+`"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("sandbox ~/.ssh read = %s, want Ask", dec.Level)
+	}
+}
+
+// TestDecideSandboxEnvWriteAsks: writing a .env file is Ask in sandbox.
+func TestDecideSandboxEnvWriteAsks(t *testing.T) {
+	pm := NewPermissionManager()
+	work := t.TempDir()
+	pm.SetWorkDir(work)
+	pm.SetMode(PermissionModeSandbox)
+
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"echo SECRET=x > `+filepath.Join(work, ".env")+`"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("sandbox .env write = %s, want Ask", dec.Level)
+	}
+}
+
+// TestDecideSandboxNonSensitiveStillAutoAllows: an ordinary workspace command is
+// auto-allowed even when it touches a file whose *name* is not sensitive.
+func TestDecideSandboxNonSensitiveStillAutoAllows(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	pm.SetMode(PermissionModeSandbox)
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"echo hi > notes.txt && cat notes.txt"}`))
+	if dec.Level != PermissionAllow {
+		t.Fatalf("sandbox ordinary command = %s, want Allow", dec.Level)
+	}
+}
+
+// TestSandboxAskRoutesThroughAutoPermission: a sandbox sensitive Ask flows
+// through the auto-permission LLM judge when auto is enabled (the judge can
+// approve), and reaches the human callback when auto is disabled. This is the
+// Decision 9 contract — the sensitive set is Ask, not an absolute deny, so the
+// judge/human is the gate.
+func TestSandboxAskRoutesThroughAutoPermission(t *testing.T) {
+	isolateConfigHome(t)
+	dataDir, err := paths.GlobalDataDir()
+	if err != nil {
+		t.Fatalf("GlobalDataDir: %v", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(dataDir, "auth.json")
+	// Core contract (Decision 9): the sensitive set produces an Ask decision in
+	// sandbox mode, never the silent auto-allow a bare writable root would
+	// grant. Auto-enabled shorthand: Ask routes to the (configured) LLM judge.
+	dec := func(t *testing.T, pm *PermissionManager) PermissionDecision {
+		t.Helper()
+		return pm.Decide("bash", json.RawMessage(`{"command":"cat `+authPath+`"}`))
+	}
+
+	t.Run("sensitive set is Ask in sandbox regardless of auto", func(t *testing.T) {
+		for _, auto := range []bool{true, false} {
+			pm := NewPermissionManager()
+			pm.SetWorkDir(t.TempDir())
+			pm.SetMode(PermissionModeSandbox)
+			pm.SetAutoPermissionEnabled(auto)
+			d := dec(t, pm)
+			if d.Level != PermissionAsk {
+				t.Fatalf("auto=%v: sandbox sensitive command = %s, want Ask (routed to judge/human)", auto, d.Level)
+			}
+		}
+	})
+
+	t.Run("with auto enabled, ask reaches the judge (human callback not called)", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
+		a := NewAgent(nil, nil, cfg, nil)
+		a.Permissions().SetWorkDir(t.TempDir())
+		a.Permissions().SetMode(PermissionModeSandbox)
+		a.Permissions().SetAutoPermissionEnabled(true)
+
+		prevClientFn := newClientFn
+		t.Cleanup(func() { newClientFn = prevClientFn })
+		newClientFn = func(_ *config.Config, _ string) LLMClient {
+			return &MockClient{Response: &Message{Role: "assistant", Content: "ALLOW: safe"}}
+		}
+		humanCalled := false
+		a.OnPermissionAsk = func(req PermissionRequest) PermissionResponse {
+			humanCalled = true
+			return PermissionResponse{Level: PermissionDeny}
+		}
+
+		res, err := a.HandleToolCall("bash", json.RawMessage(`{"command":"cat `+authPath+`"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if humanCalled {
+			t.Fatal("auto-enabled: the LLM judge must be consulted first, not the human callback")
+		}
+		if strings.HasPrefix(res, "denied:") {
+			t.Fatalf("auto-enabled: judge approval must not result in a policy denial, got %q", res)
+		}
+	})
+
+	t.Run("with auto disabled, ask reaches the human callback", func(t *testing.T) {
+		cfg := &config.Config{}
+		a := NewAgent(nil, nil, cfg, nil)
+		a.Permissions().SetWorkDir(t.TempDir())
+		a.Permissions().SetMode(PermissionModeSandbox)
+		a.Permissions().SetAutoPermissionEnabled(false)
+
+		humanCalled := false
+		a.OnPermissionAsk = func(req PermissionRequest) PermissionResponse {
+			humanCalled = true
+			return PermissionResponse{Level: PermissionDeny}
+		}
+
+		_, _ = a.HandleToolCall("bash", json.RawMessage(`{"command":"cat `+authPath+`"}`))
+		if !humanCalled {
+			t.Fatal("auto-disabled: a sandbox sensitive Ask must reach the human callback")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Part 02 Task 6 — self-escalation guard
+//
+// The files that define the permission boundary (.ocode/settings.json,
+// .claude/settings.json, ocode global config permissions, extra_allowed_paths)
+// live INSIDE writable roots, so a bare sandbox (and even normal/yolo
+// auto-allow) would let the agent rewrite them to widen its own access. This
+// guard sits ABOVE every auto-allow shortcut (next to the hard-block layer)
+// and is mode-independent: normal-auto, YOLO, and sandbox all Ask on writes to
+// permission-defining targets, and on loopback requests to /api/permissions*.
+// ---------------------------------------------------------------------------
+
+// writeTargetsInCommand returns the resolved write-oriented targets of a
+// command (redirection targets + a coarse write-tool pair), for assertion.
+func writeTargetsInCommand(t *testing.T, pm *PermissionManager, cmd string) []string {
+	t.Helper()
+	tn, _ := sandboxSensitiveTargets(cmd, pm.workDir)
+	return tn
+}
+
+// TestWriteToProjectSettingsAsks: a redirect/tee/cp/editor write to
+// .ocode/settings.json inside the workspace is Ask in sandbox, YOLO, and
+// normal-auto — never auto-allowed.
+func TestWriteToProjectSettingsAsks(t *testing.T) {
+	work := t.TempDir()
+	settings := filepath.Join(work, ".ocode", "settings.json")
+	_ = os.MkdirAll(filepath.Join(work, ".ocode"), 0o755)
+
+	for _, mode := range []PermissionMode{PermissionModeSandbox, PermissionModeYOLO, PermissionModeNormal} {
+		for _, cmd := range []string{
+			"echo x > " + settings,
+			"echo x >> " + settings,
+			"tee " + settings + " </dev/null",
+			"cp /tmp/a " + settings,
+		} {
+			pm := NewPermissionManager()
+			pm.SetWorkDir(work)
+			pm.SetMode(mode)
+			dec := pm.Decide("bash", json.RawMessage(`{"command":"`+cmd+`"}`))
+			if dec.Level != PermissionAsk {
+				t.Errorf("mode=%s cmd=%q = %s, want Ask (self-escalation)", mode, cmd, dec.Level)
+			}
+		}
+	}
+}
+
+// TestWriteToClaudeSettingsAsks: .claude/settings.json anywhere in the tree is
+// Ask (a matching deny there would otherwise be editable away).
+func TestWriteToClaudeSettingsAsks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	work := t.TempDir()
+	claude := filepath.Join(home, ".claude", "settings.json")
+	_ = os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
+
+	for _, mode := range []PermissionMode{PermissionModeSandbox, PermissionModeYOLO} {
+		pm := NewPermissionManager()
+		pm.SetWorkDir(work)
+		pm.SetMode(mode)
+		dec := pm.Decide("bash", json.RawMessage(`{"command":"echo x > `+claude+`"}`))
+		if dec.Level != PermissionAsk {
+			t.Errorf("mode=%s .claude/settings write = %s, want Ask", mode, dec.Level)
+		}
+	}
+}
+
+// TestLoopbackPermissionApiAsks: a loopback request to /api/permissions (mode,
+// yolo, or rule endpoints) is Ask — the agent can't flip its own mode or rules
+// via the local server.
+func TestLoopbackPermissionApiAsks(t *testing.T) {
+	for _, mode := range []PermissionMode{PermissionModeSandbox, PermissionModeYOLO, PermissionModeNormal} {
+		for _, cmd := range []string{
+			`curl -X PUT -d '{"mode":"yolo"}' http://127.0.0.1:3999/api/permissions/mode`,
+			`curl http://localhost:4000/api/permissions`,
+			`wget -qO- http://127.0.0.1:1/api/permissions/yolo`,
+		} {
+			args, err := json.Marshal(map[string]string{"command": cmd})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pm := NewPermissionManager()
+			pm.SetWorkDir(t.TempDir())
+			pm.SetMode(mode)
+			dec := pm.Decide("bash", args)
+			if dec.Level != PermissionAsk {
+				t.Errorf("mode=%s cmd=%q = %s, want Ask (loopback permission API)", mode, cmd, dec.Level)
+			}
+		}
+	}
+}
+
+// TestOrdinaryWorkspaceWriteStillAutoAllows: a normal file write in the
+// workspace is unaffected by the escalation guard.
+func TestOrdinaryWorkspaceWriteStillAutoAllows(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	pm.SetMode(PermissionModeSandbox)
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"echo hi > task-notes.md"}`))
+	if dec.Level != PermissionAllow {
+		t.Fatalf("ordinary workspace write = %s, want Allow", dec.Level)
 	}
 }

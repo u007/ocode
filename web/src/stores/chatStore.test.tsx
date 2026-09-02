@@ -730,4 +730,33 @@ describe("chatStore reload rehydration from transcript snapshot", () => {
     });
     expect(getSessionSlice(state, "a").pendingPermission?.request_id).toBe(before);
   });
+
+  // Regression: an already-initialized slice (messages present, turn armed by
+  // applyReconcileState) whose live question event was missed during a
+  // disconnect must still surface the question dialog from a later transcript
+  // snapshot. The reconcile path dispatches SET_TURN_STATE(true) BEFORE
+  // MERGE_SNAPSHOT, so the mid-turn guard tripped and never re-derived
+  // pendingQuestion — the sentinel was the only recovery source.
+  it("MERGE_SNAPSHOT surfaces a pending question for an already-initialized slice that missed the live event", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_TURN_STATE", sessionId: "a", turnActive: true });
+    state = chatReducer(state, {
+      type: "ADD_MESSAGE",
+      sessionId: "a",
+      message: { role: "user", content: "hi" },
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion).toBeNull();
+    state = chatReducer(state, {
+      type: "MERGE_SNAPSHOT",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "", tool_calls: [{ id: "q1", type: "function", function: { name: "question", arguments: "{}" } }] },
+        makeQuestionMsg("q1"),
+      ],
+      total: 3,
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q1");
+    expect(getSessionSlice(state, "a").pendingQuestion?.questions[0].question).toBe("q?");
+  });
 });

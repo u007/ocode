@@ -16,6 +16,7 @@ import (
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/pathscope"
+	"github.com/u007/ocode/internal/shell/sandbox"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -33,7 +34,39 @@ const (
 	PermissionModeNormal PermissionMode = "normal"
 	PermissionModeYOLO   PermissionMode = "yolo"
 	PermissionModeLocked PermissionMode = "locked"
+	// PermissionModeSandbox runs bash without prompts but confines OS-level
+	// writes to the classified allowed roots (write-integrity only: reads,
+	// exec, and network egress stay open). It never outlives the session —
+	// the persist path clamps it back to normal.
+	PermissionModeSandbox PermissionMode = "sandbox"
 )
+
+// sandboxSupported reports whether this OS has a real confinement backend.
+// Production value is sandbox.Supported(); it is a package var (not called
+// inline) so cross-platform tests can simulate an unsupported OS and then
+// restore the original.
+var sandboxSupported = sandbox.Supported
+
+// SandboxSupported exposes the platform capability to status producers (TUI,
+// web server) through the same seam Decide uses, so tests can flip it
+// globally and every consumer reflects the simulation.
+func SandboxSupported() bool { return sandboxSupported() }
+
+// EffectivePermissionBehavior describes what a permission mode actually does
+// on this OS. For sandbox: "confined" (real backend), "degraded_normal"
+// (Windows: prompts like normal), plain mode name otherwise. Exposed in the
+// permission status shape so the UI can surface the Windows degrade honestly.
+func EffectivePermissionBehavior(mode PermissionMode) string {
+	switch mode {
+	case PermissionModeSandbox:
+		if sandboxSupported() {
+			return "confined"
+		}
+		return "degraded_normal"
+	default:
+		return string(mode)
+	}
+}
 
 type PermissionScope string
 
@@ -1201,8 +1234,37 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 				}
 			}
 		}
+		// Self-escalation guard (mode-independent, INDEX Decision 8): the agent
+		// must not silently shortcut its own permissions by editing the files
+		// that define them, or by flipping its mode/rules via the local server.
+		// This sits ABOVE the YOLO/sandbox auto-allow shortcuts (like the
+		// hard-block layer) so it applies in every mode. Writes to
+		// permission-defining targets resolve to Ask → routed through the
+		// auto-permission judge when auto is on, else a human prompt.
+		if pm.isPermissionEscalation(command) {
+			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "permission.escalation")}
+		}
 		if pm.mode == PermissionModeYOLO {
 			pm.emitDebug("perm", "Decide ALLOW (yolo): tool=bash")
+			return PermissionDecision{Level: PermissionAllow}
+		}
+		// Sandbox = YOLO's prompt-bypass plus OS write-confinement: allow
+		// (the bash builder wraps the command so writes outside the writable
+		// roots fail at the OS level). Hard blocks and dangerous-rm still win,
+		// having returned above. Only when the OS has a backend — on Windows
+		// sandbox degrades to normal (asks).
+		//
+		// The sensitive set (auth.json, ocode config/data-dir writes, ~/.ssh,
+		// .env) stays authoritative in sandbox (Decision 3/9): it is ASK, NOT
+		// auto-allowed. The OS write-wall does not protect it — auth.json/ssh
+		// are readable globally and config/.env live in writable roots — so the
+		// permission layer must. Reroutes to the auto-permission judge when auto
+		// is on, else a human prompt (sandbox never disables auto).
+		if sd := pm.sensitiveSandboxDecision(command); sd != nil {
+			return *sd
+		}
+		if pm.mode == PermissionModeSandbox && sandboxSupported() {
+			pm.emitDebug("perm", "Decide ALLOW (sandbox, OS-wrapped): tool=bash")
 			return PermissionDecision{Level: PermissionAllow}
 		}
 
@@ -1542,6 +1604,12 @@ func (pm *PermissionManager) AllowedRoots() []string {
 	if configDir, err := paths.GlobalConfigDir(); err == nil {
 		add(configDir)
 	}
+	// Cross-tool agent state (~/.claude): the user granted Claude Code read/write
+	// access to this dir; keep it in the same shared scope. Note this widens the
+	// write surface to that agent's state.
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".claude"))
+	}
 	// Language dependency cache/registry directories (Go module cache, npm
 	// cache, cargo registry, pip cache, Maven/Gradle caches, etc.). These are
 	// content-addressed or append-only stores; read-only access is always safe,
@@ -1554,6 +1622,95 @@ func (pm *PermissionManager) AllowedRoots() []string {
 	add(os.TempDir())
 	sort.Strings(roots)
 	return roots
+}
+
+// TempRootAliases returns the well-known temp directories whose symlink-resolved
+// form differs from the spelling commands actually use (macOS: /tmp ->
+// /private/tmp, $TMPDIR -> /private/var/folders/...). AllowedRoots lists only
+// the resolved form, which a permission judge cannot map back to the literal
+// "/tmp/..." in a command; the prompt prints these pairs so the judge sees both.
+func TempRootAliases() [][2]string {
+	var out [][2]string
+	seen := map[string]struct{}{}
+	for _, p := range []string{"/tmp", "/var/tmp", os.TempDir()} {
+		clean := filepath.Clean(p)
+		if _, ok := seen[clean]; ok || clean == "" {
+			continue
+		}
+		seen[clean] = struct{}{}
+		resolved, err := filepath.EvalSymlinks(clean)
+		if err != nil || resolved == clean {
+			continue
+		}
+		out = append(out, [2]string{clean, resolved})
+	}
+	return out
+}
+
+// AllowedRootsClassified returns the same single authoritative root model as
+// AllowedRoots, but each root carries a capability flag: writable roots (the
+// session project, extra allowed paths, language dep caches, temp dirs) versus
+// read-only roots (managed caches, the global data + config dirs whose
+// integrity sandbox must preserve — auth.json, sessions). The sandbox backend
+// consumes this via NewRootSet; AllowedRoots() keeps returning the flat union
+// for its existing callers. The "/" writable boundary guard is applied here
+// too: no writable spec may resolve to the filesystem root.
+func (pm *PermissionManager) AllowedRootsClassified() []sandbox.RootSpec {
+	seen := make(map[string]struct{})
+	var specs []sandbox.RootSpec
+	add := func(p string, writable bool) {
+		if p == "" {
+			return
+		}
+		resolved, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			resolved = filepath.Clean(p)
+		}
+		if writable && resolved == "/" {
+			return
+		}
+		if _, ok := seen[resolved]; ok {
+			return
+		}
+		seen[resolved] = struct{}{}
+		specs = append(specs, sandbox.RootSpec{Path: resolved, Writable: writable})
+	}
+	if pm != nil {
+		add(pm.workDir, true)
+	}
+	for _, r := range tool.ExtraAllowedRoots() {
+		add(r, true)
+	}
+	// Managed cache dirs (truncated tool-results, cloned-repo cache): reads
+	// must keep working, but there is no reason to mutate them under sandbox.
+	for _, r := range tool.CacheRoots() {
+		add(r, false)
+	}
+	// Global data dir (~/.local/share/opencode: auth.json, sessions, memory)
+	// and config dir (~/.config/opencode): classified READ-ONLY so sandbox
+	// preserves their integrity (auth + session store must never be mutated
+	// by a sandboxed command).
+	if dataDir, err := paths.GlobalDataDir(); err == nil {
+		add(dataDir, false)
+	}
+	if configDir, err := paths.GlobalConfigDir(); err == nil {
+		add(configDir, false)
+	}
+	// Cross-tool agent state (~/.claude): writable — the user explicitly
+	// granted read/write access to this dir (same rationale as the flat union).
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".claude"), true)
+	}
+	// Language dependency caches (npm/pip/cargo/go/maven/gradle) must stay
+	// writable so npm install / pip work under sandbox.
+	for _, r := range languageDepRoots() {
+		add(r, true)
+	}
+	add("/tmp", true)
+	add("/var/tmp", true)
+	add(os.TempDir(), true)
+	sort.Slice(specs, func(i, j int) bool { return specs[i].Path < specs[j].Path })
+	return specs
 }
 
 // IsPathWithinAllowedRoots reports whether rawPath resolves inside any root
@@ -1859,6 +2016,251 @@ func isSensitivePath(path string) bool {
 	}
 
 	return false
+}
+
+// sensitiveSandboxDecision implements the sandbox-mode sensitive-set carve-out
+// (INDEX Decision 3): in sandbox mode the YOLO-style auto-allow does NOT extend
+// to the sensitive set. It returns an ASK decision (routed to the auto-
+// permission judge when auto is on, else a human prompt — sandbox never
+// disables auto, Decision 9) when the command statically touches:
+//
+//   - ocode's auth.json (read or write) — the agent never legitimately needs it
+//   - ocode's global config dir or data dir (WRITE only) — guards the agent
+//     silently self-granting a permission rule by rewriting its own config
+//   - ~/.ssh and .env files (read or write)
+//
+// It returns nil when no sensitive target is statically found, letting the
+// caller auto-allow. Static extraction can't see a read hidden inside an
+// interpreter (`python -c`); that residual is documented (Part 04). The OS
+// write-wall does not protect this set (auth.json/ssh are globally readable,
+// config/.env sit in writable roots), so the permission layer is the gate.
+func (pm *PermissionManager) sensitiveSandboxDecision(command string) *PermissionDecision {
+	// Only meaningful in sandbox mode; never applies in normal/yolo/locked.
+	if pm.mode != PermissionModeSandbox {
+		return nil
+	}
+
+	targets, isWrite := sandboxSensitiveTargets(command, pm.workDir)
+	if len(targets) == 0 {
+		return nil
+	}
+	for _, tgt := range targets {
+		if sandboxSensitivePath(tgt, isWrite) {
+			pm.emitDebug("perm", fmt.Sprintf("sandbox sensitive ASK: command=%q", command))
+			return &PermissionDecision{
+				Level:   PermissionAsk,
+				Request: bashPermissionRequest(nil, command, "sandbox.sensitive"),
+			}
+		}
+	}
+	return nil
+}
+
+// sandboxSensitiveTargets returns the absolute, resolved target paths a command
+// statically touches (path args + redirect targets) and whether the command is
+// a write-oriented operation. It mirrors the extractBashCommandPaths /
+// parseShellCommandLine redirection logic so the carve-out catches the common
+// read/write forms the matrix calls out (cat, redirect, tee, cp, editor).
+func sandboxSensitiveTargets(command, workDir string) (paths []string, write bool) {
+	set := map[string]struct{}{}
+	add := func(p string) {
+		if p == "" || isAllowedDevicePath(p) {
+			return
+		}
+		r := resolvePath(p, workDir)
+		if _, ok := set[r]; !ok {
+			set[r] = struct{}{}
+			paths = append(paths, r)
+		}
+	}
+
+	parsed, err := parseShellCommandLine(command)
+	if err == nil {
+		for _, cmd := range parsed {
+			if len(cmd.redirections) > 0 {
+				write = true // a redirection target is a write (or read) target
+			}
+			for _, r := range cmd.redirections {
+				add(r)
+			}
+		}
+	}
+	fields := splitShellFields(command)
+	if len(fields) > 0 {
+		for _, p := range extractBashCommandPaths(fields[0], fields) {
+			add(p)
+		}
+	}
+	return paths, write
+}
+
+// sandboxSensitivePath classifies a resolved path against the sandbox sensitive
+// set. isWrite distinguishes write-only entries (config/data dirs) from
+// read-or-write entries (auth.json, ~/.ssh, .env).
+func sandboxSensitivePath(resolved string, write bool) bool {
+	if resolved == "" {
+		return false
+	}
+	clean := filepath.Clean(resolved)
+
+	// ocode's global config/data dirs: write-only for the self-escalation guard.
+	// (data dir holds auth.json, which is additionally covered by the auth.json
+	// rule below; config dir writes guard self-granting a permission rule.)
+	if write {
+		if cfgDir, err := paths.GlobalConfigDir(); err == nil && pathUnderRoot(clean, cfgDir) {
+			return true
+		}
+		if dataDir, err := paths.GlobalDataDir(); err == nil && pathUnderRoot(clean, dataDir) {
+			return true
+		}
+	}
+
+	// auth.json, wherever it lives (always read-or-write).
+	if base := filepath.Base(clean); base == "auth.json" {
+		return true
+	}
+
+	// ~/.ssh reads or writes.
+	if home, err := os.UserHomeDir(); err == nil {
+		if sshRoot := filepath.Join(home, ".ssh"); pathUnderRoot(clean, sshRoot) {
+			return true
+		}
+	}
+
+	// .env files (isSensitivePath already flags them; reuse for parity).
+	if isSensitivePath(clean) {
+		return true
+	}
+	return false
+}
+
+// isPermissionEscalation reports whether a bash command could silently widen
+// the agent's own permissions and must therefore never auto-allow in ANY mode
+// (INDEX Decision 8; wired above the YOLO/sandbox shortcuts in Decide). It
+// returns true when the command WRITES to a permission-defining target
+// (project/.ocode/settings.json, .claude/settings.json, ocode global config
+// permissions, allowlist/config files feeding extra_allowed_paths / allow-
+// deny rules) or makes a loopback request to the local /api/permissions* API
+// (which would flip the mode/rules directly).
+//
+// Static only: a write hidden inside an interpreter (`python -c`) is a
+// documented residual (Part 04) — the OS write-wall can't stop it either since
+// the file lives in a writable root, so config edits belong outside sandbox.
+func (pm *PermissionManager) isPermissionEscalation(command string) bool {
+	return pm.escalationWriteTarget(command, pm.workDir) || permissionApiLoopback(command)
+}
+
+// escalationWriteTarget reports whether the command writes to any
+// permission-defining target. It reuses the redirection + path-arg extraction
+// so the common write forms (redirect, tee, cp, editor) are caught.
+func (pm *PermissionManager) escalationWriteTarget(command, workDir string) bool {
+	parseTarget := command
+	if header, _ := extractHeredocs(command); len(header) > 0 {
+		parseTarget = header
+	}
+	parsed, err := parseShellCommandLine(parseTarget)
+	if err != nil {
+		return false
+	}
+	for _, cmd := range parsed {
+		// A write must be present: redirection target(s) mean a write.
+		if len(cmd.redirections) == 0 {
+			continue
+		}
+		for _, r := range cmd.redirections {
+			if isAllowedDevicePath(r) {
+				continue
+			}
+			resolved := resolvePath(r, workDir)
+			if isPermissionConfigTarget(resolved) {
+				return true
+			}
+		}
+	}
+	// Additionally check path-arg tools that write: cp/touch/mv/install,
+	// tee, and source editors target a file as a positional argument.
+	fields := splitShellFields(parseTarget)
+	if len(fields) > 0 {
+		switch fields[0] {
+		case "cp", "mv", "touch", "install", "vim", "vi", "nano", "sed", "ed", "tee":
+			for _, p := range extractBashCommandPaths(fields[0], fields) {
+				if isPermissionConfigTarget(resolvePath(p, workDir)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isPermissionConfigTarget reports whether a resolved path is a permission-
+// defining target the agent must not silently rewrite.
+func isPermissionConfigTarget(resolved string) bool {
+	if resolved == "" {
+		return false
+	}
+	base := filepath.Base(resolved)
+	dirBase := filepath.Base(filepath.Dir(resolved))
+
+	// Project .ocode/settings.json and .claude/settings.json (anywhere in tree).
+	if base == "settings.json" && (dirBase == ".ocode" || dirBase == ".claude") {
+		return true
+	}
+	// ocode global config files (config dir) that gate permissions/allowlist.
+	if cfgDir, err := paths.GlobalConfigDir(); err == nil && pathUnderRoot(resolved, cfgDir) {
+		switch base {
+		case "ocodeconfig.json", "opencode.json", "autopermission-prompt.md", "smartpermission-prompt.md":
+			return true
+		}
+	}
+	// .claude/settings.json anywhere is a deny-rule source.
+	if filepath.Clean(resolved) != "" && base == "settings.json" && dirBase == ".claude" {
+		return true
+	}
+	return false
+}
+
+// permissionApiLoopback reports whether a network command targets the local
+// /api/permissions* API — the agent could flip its own mode or rules here.
+func permissionApiLoopback(command string) bool {
+	fields := splitShellFields(command)
+	if len(fields) < 2 {
+		return false
+	}
+	switch fields[0] {
+	case "curl", "wget", "http", "https":
+	default:
+		return false
+	}
+	for _, tok := range fields[1:] {
+		t := strings.Trim(tok, `'"`)
+		if !strings.Contains(t, "/api/permissions") {
+			continue
+		}
+		// Loopback host requirement: the URL's host must be localhost/127.x.
+		if isLocalhostURL(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLocalhostURL reports whether an http(s) URL host is loopback (localhost,
+// 127.0.0.0/8, ::1). Used for the permission-API self-escalation check: a
+// request to a *remote* /api/permissions is not our server and is harmless.
+func isLocalhostURL(raw string) bool {
+	host := raw
+	if at := strings.Index(host, "://"); at >= 0 {
+		host = host[at+3:]
+	}
+	if slash := strings.IndexByte(host, '/'); slash >= 0 {
+		host = host[:slash]
+	}
+	// Strip port.
+	if colon := strings.LastIndexByte(host, ':'); colon >= 0 && !strings.Contains(host[:colon], "]") {
+		host = host[:colon]
+	}
+	return isLocalhostDomain(host)
 }
 
 func extractPathFromArgs(toolName string, args json.RawMessage) string {
@@ -2611,7 +3013,7 @@ func (pm *PermissionManager) SetBashPrefixMode(prefix, mode string) bool {
 
 func (pm *PermissionManager) SetMode(mode PermissionMode) {
 	switch mode {
-	case PermissionModeNormal, PermissionModeYOLO, PermissionModeLocked:
+	case PermissionModeNormal, PermissionModeYOLO, PermissionModeLocked, PermissionModeSandbox:
 		pm.mode = mode
 		if mode == PermissionModeYOLO {
 			// YOLO is a hard bypass: it must not retain or re-enable the

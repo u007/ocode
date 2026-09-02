@@ -666,15 +666,31 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // finished turn whose turn_done was missed flips turnActive first
       // and still gets the recovery merge below.
       return updateSession(state, action.sessionId, (s) => {
+        const pending = extractPendingFromMessages(action.messages);
         if (s.turnActive && s.messages.length > 0) {
+          // Mid-turn guard: the live buffer/committed messages are newer than
+          // this disk snapshot, so they are preserved. Pending asks however
+          // must still be hydrated from the snapshot when the live slice has
+          // none — reconcileOpenSessions arms turnActive BEFORE dispatching
+          // this merge (applyReconcileState), so a reload/reconnect that
+          // missed the live `question`/`permission` event would otherwise
+          // never surface the dialog (the mid-turn guard skipped the
+          // re-derivation entirely and the sentinel was the only recovery
+          // source). An already-live pending ask always wins over the
+          // snapshot — the live event is newer.
           return {
             ...s,
             totalMessages: action.total,
             hasMore: s.messages.length < action.total,
             initialized: true,
+            pendingPermission: s.pendingPermission ?? pending.pendingPermission,
+            permissionQueue:
+              s.pendingPermission != null
+                ? s.permissionQueue
+                : pending.permissionQueue,
+            pendingQuestion: s.pendingQuestion ?? pending.pendingQuestion,
           };
         }
-        const pending = extractPendingFromMessages(action.messages);
         return {
           ...s,
           messages: action.messages,

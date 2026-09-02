@@ -75,6 +75,20 @@ func proxyAuthHeader(cred string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(cred))
 }
 
+// authedProxyURL rebuilds the proxy URL with userinfo for Go test clients
+// (http.Transport only sends Proxy-Authorization when the proxy URL carries
+// credentials; Chrome gets them via Fetch.authRequired instead).
+func authedProxyURL(t *testing.T, p *EgressProxy) *url.URL {
+	t.Helper()
+	u, err := url.Parse(p.ProxyServerURL())
+	if err != nil {
+		t.Fatalf("ProxyServerURL parse: %v", err)
+	}
+	user, pass := p.UserPass()
+	u.User = url.UserPassword(user, pass)
+	return u
+}
+
 func mustProxyURL(t *testing.T, s string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(s)
@@ -158,7 +172,7 @@ func TestEgress_ProxyAuthOKForwards(t *testing.T) {
 	}
 	defer proxy.Close()
 
-	proxyURL := mustProxyURL(t, proxy.ProxyServerURL())
+	proxyURL := authedProxyURL(t, proxy)
 	client := &http.Client{
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 		Timeout:   5 * time.Second,
@@ -184,6 +198,9 @@ func TestEgress_ProxyServerURLCredential(t *testing.T) {
 	}
 	defer proxy.Close()
 
+	// Chrome does not honor userinfo embedded in proxyServer URLs; credentials
+	// are supplied out-of-band via Fetch.authRequired (UserPass). The URL must
+	// therefore carry NO userinfo.
 	u, err := url.Parse(proxy.ProxyServerURL())
 	if err != nil {
 		t.Fatalf("ProxyServerURL parse: %v", err)
@@ -191,24 +208,17 @@ func TestEgress_ProxyServerURLCredential(t *testing.T) {
 	if u.Scheme != "http" {
 		t.Fatalf("scheme = %q, want http", u.Scheme)
 	}
-	user := u.User.Username()
-	pass, hasPass := u.User.Password()
-	if !hasPass {
-		t.Fatalf("ProxyServerURL missing password userinfo")
+	if u.User != nil {
+		t.Fatalf("ProxyServerURL must not embed userinfo, got %q", u.User)
 	}
-	cred := user + ":" + pass
-	if cred != proxy.Credential() {
-		t.Fatalf("user-info %q != Credential() %q", cred, proxy.Credential())
+	user, pass := proxy.UserPass()
+	if user == "" || pass == "" {
+		t.Fatal("UserPass returned empty credentials")
 	}
-	// Host should match Addr()
-	if u.Host != proxy.Addr() {
-		t.Fatalf("host %q != Addr() %q", u.Host, proxy.Addr())
+	if got := user + ":" + pass; got != proxy.Credential() {
+		t.Fatalf("UserPass %q != Credential %q", got, proxy.Credential())
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Task 2 — Plain forward requests
-// ---------------------------------------------------------------------------
 
 func TestEgress_PlainForwardStripsHopByHop(t *testing.T) {
 	var captured struct {
@@ -331,7 +341,7 @@ func TestEgress_UpgradeWebSocket(t *testing.T) {
 	}
 	defer proxy.Close()
 
-	proxyURL := mustProxyURL(t, proxy.ProxyServerURL())
+	proxyURL := authedProxyURL(t, proxy)
 	dialer := websocket.Dialer{
 		Proxy:            http.ProxyURL(proxyURL),
 		HandshakeTimeout: 5 * time.Second,
@@ -373,6 +383,12 @@ func TestEgress_PlainBlockedReturns403(t *testing.T) {
 	raw := fmt.Sprintf("GET http://%s/ HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\nConnection: close\r\n\r\n",
 		upURL.Host, upURL.Host, proxyAuthHeader(proxy.Credential()))
 	resp, body := dialProxyRaw(t, proxy.Addr(), raw)
+	if got := resp.Header.Get("X-Ocode-Blocked"); got != "private address" {
+		t.Fatalf("X-Ocode-Blocked = %q, want %q", got, "private address")
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want * (page must be able to read the block)", got)
+	}
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d body %q", resp.StatusCode, body)
 	}
@@ -647,5 +663,72 @@ func TestEgress_ConnectCloseClosesTunnel(t *testing.T) {
 	case c := <-hold:
 		_ = c.Close()
 	default:
+	}
+}
+
+// AllowHost lets a target's top-level navigation host bypass the private-IP
+// policy (user-initiated loopback/LAN dev servers in Chrome mode); Release
+// restores the block. Other hosts stay blocked throughout.
+func TestEgress_AllowHostBypassesPolicyThenRelease(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+	upURL, _ := url.Parse(upstream.URL)
+
+	proxy, err := NewEgressProxy(newRefuseAllDialer())
+	if err != nil {
+		t.Fatalf("NewEgressProxy: %v", err)
+	}
+	defer proxy.Close()
+
+	get := func() (*http.Response, string) {
+		raw := fmt.Sprintf("GET http://%s/ HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\nConnection: close\r\n\r\n",
+			upURL.Host, upURL.Host, proxyAuthHeader(proxy.Credential()))
+		return dialProxyRaw(t, proxy.Addr(), raw)
+	}
+	if resp, _ := get(); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("before allow: want 403, got %d", resp.StatusCode)
+	}
+	proxy.AllowHost(upURL.Host)
+	if resp, body := get(); resp.StatusCode != http.StatusOK || body != "ok" {
+		t.Fatalf("after allow: want 200 ok, got %d %q", resp.StatusCode, body)
+	}
+	// A different host is still policed.
+	raw := fmt.Sprintf("CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\nProxy-Authorization: %s\r\n\r\n",
+		proxyAuthHeader(proxy.Credential()))
+	if resp, _ := dialProxyRaw(t, proxy.Addr(), raw); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("other host: want 403, got %d", resp.StatusCode)
+	}
+	proxy.ReleaseHost(upURL.Host)
+	if resp, _ := get(); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("after release: want 403, got %d", resp.StatusCode)
+	}
+}
+
+// Host matching is canonical: default ports are filled in and case ignored,
+// since Chrome sends "host" for plain http and "host:443" for CONNECT.
+func TestEgress_AllowHostCanonicalizesPort(t *testing.T) {
+	proxy, err := NewEgressProxy(newRefuseAllDialer())
+	if err != nil {
+		t.Fatalf("NewEgressProxy: %v", err)
+	}
+	defer proxy.Close()
+	proxy.AllowHost("LocalHost:80")
+	if !proxy.hostAllowed("localhost", 80) {
+		t.Fatal("localhost (default 80) should be allowed")
+	}
+	if proxy.hostAllowed("localhost", 443) {
+		t.Fatal("localhost:443 must not be allowed")
+	}
+	proxy.AllowHost("example.com:443")
+	proxy.AllowHost("example.com:443") // refcount 2
+	proxy.ReleaseHost("example.com:443")
+	if !proxy.hostAllowed("example.com", 443) {
+		t.Fatal("still one holder; must stay allowed")
+	}
+	proxy.ReleaseHost("example.com:443")
+	if proxy.hostAllowed("example.com", 443) {
+		t.Fatal("released: must be blocked")
 	}
 }

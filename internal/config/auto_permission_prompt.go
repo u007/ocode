@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -78,6 +79,12 @@ const (
 	// matches neither the current bundled body nor the sidecar — the user
 	// (or an external tool) edited it. Never auto-overwritten.
 	AutoPermissionPromptCustomModified
+	// AutoPermissionPromptNewer means the installed file was written by a
+	// build whose bundled version is newer than this one (sidecar version >
+	// BundledAutoPermissionPromptVersion). Never auto-downgraded: two ocode
+	// builds sharing one config dir would otherwise reinstall over each
+	// other on every permission prompt.
+	AutoPermissionPromptNewer
 )
 
 func (s AutoPermissionPromptStatus) String() string {
@@ -90,6 +97,8 @@ func (s AutoPermissionPromptStatus) String() string {
 		return "outdated"
 	case AutoPermissionPromptCustomModified:
 		return "custom-modified"
+	case AutoPermissionPromptNewer:
+		return "newer"
 	default:
 		return "unknown"
 	}
@@ -170,6 +179,48 @@ func autoPermissionPromptSidecarPath(installedPath string) string {
 	return installedPath + ".bundled-hash"
 }
 
+// sidecarBody encodes the sidecar as "<hash>\n<version>\n". Older sidecars
+// hold only the hash; readSidecar treats a missing version as "0.0.0".
+func sidecarBody(hash, version string) []byte {
+	return []byte(hash + "\n" + version + "\n")
+}
+
+func readSidecar(path string) (hash, version string, ok bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", false
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	hash = strings.TrimSpace(lines[0])
+	version = "0.0.0"
+	if len(lines) > 1 && strings.TrimSpace(lines[1]) != "" {
+		version = strings.TrimSpace(lines[1])
+	}
+	return hash, version, hash != ""
+}
+
+// compareVersion compares dotted numeric versions ("1.8.0"); non-numeric
+// segments compare as 0.
+func compareVersion(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		var x, y int
+		if i < len(as) {
+			x, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			y, _ = strconv.Atoi(bs[i])
+		}
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
@@ -195,10 +246,11 @@ func GetAutoPermissionPromptStatus() (AutoPermissionPromptStatus, error) {
 	if installedHash == bundledHash {
 		return AutoPermissionPromptUpToDate, nil
 	}
-	if sidecar, serr := os.ReadFile(autoPermissionPromptSidecarPath(path)); serr == nil {
-		if strings.TrimSpace(string(sidecar)) == installedHash {
-			return AutoPermissionPromptOutdated, nil
+	if hash, version, ok := readSidecar(autoPermissionPromptSidecarPath(path)); ok && hash == installedHash {
+		if compareVersion(version, BundledAutoPermissionPromptVersion) > 0 {
+			return AutoPermissionPromptNewer, nil
 		}
+		return AutoPermissionPromptOutdated, nil
 	}
 	return AutoPermissionPromptCustomModified, nil
 }
@@ -209,8 +261,10 @@ func GetAutoPermissionPromptStatus() (AutoPermissionPromptStatus, error) {
 //   - AutoPermissionPromptOutdated: upgrades (this is the safe, unattended case).
 //   - AutoPermissionPromptCustomModified: refuses unless force (the user
 //     edited the file; overwriting would silently discard that).
+//   - AutoPermissionPromptNewer: no-op unless force (never downgrade a file
+//     written by a newer build sharing the same config dir).
 //
-// Returns "installed", "updated", or "up-to-date".
+// Returns "installed", "updated", "up-to-date", or "newer".
 func InstallAutoPermissionPrompt(force bool) (string, error) {
 	path, err := AutoPermissionPromptFilePath()
 	if err != nil {
@@ -229,6 +283,10 @@ func InstallAutoPermissionPrompt(force bool) (string, error) {
 		if !force {
 			return "", fmt.Errorf("installed auto-permission prompt at %s has been customized; re-run with force to overwrite", path)
 		}
+	case AutoPermissionPromptNewer:
+		if !force {
+			return "newer", nil
+		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -242,7 +300,7 @@ func InstallAutoPermissionPrompt(force bool) (string, error) {
 	if err := writeAutoPermissionPromptFileAtomic(path, []byte(BundledAutoPermissionPromptBody)); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
-	if err := os.WriteFile(autoPermissionPromptSidecarPath(path), []byte(sha256Hex([]byte(BundledAutoPermissionPromptBody))), 0o644); err != nil {
+	if err := os.WriteFile(autoPermissionPromptSidecarPath(path), sidecarBody(sha256Hex([]byte(BundledAutoPermissionPromptBody)), BundledAutoPermissionPromptVersion), 0o644); err != nil {
 		return "", fmt.Errorf("write bundled-hash sidecar: %w", err)
 	}
 
@@ -252,19 +310,19 @@ func InstallAutoPermissionPrompt(force bool) (string, error) {
 	return "updated", nil
 }
 
-// LoadAutoPermissionPromptBody returns the installed prompt body, or ""
-// (with a nil error) if nothing is installed yet. An installed file that is
-// Outdated (unmodified since install, but the bundled body has since
-// changed) is silently auto-upgraded first — this is the same "safe,
-// unattended" case InstallAutoPermissionPrompt documents, so a stale
-// addendum self-heals the next time it's loaded instead of requiring the
-// user to run `/permissions auto prompt upgrade` by hand. A
-// CustomModified file is left untouched, exactly as a manual upgrade
-// without force would leave it.
+// LoadAutoPermissionPromptBody returns the installed prompt body. A Missing
+// file is installed and an Outdated one (unmodified since install, but the
+// bundled body has since changed) is upgraded first — both are the "safe,
+// unattended" cases InstallAutoPermissionPrompt documents, so the addendum
+// self-heals the next time it's loaded instead of requiring the user to run
+// `/permissions auto prompt install|upgrade` by hand. Without this, a
+// missing file silently drops every bundled rule (e.g. the temp-dir ALLOW)
+// from the gatekeeper prompt. CustomModified and Newer files are left
+// untouched, exactly as a manual install without force would leave them.
 func LoadAutoPermissionPromptBody() (string, error) {
-	if status, err := GetAutoPermissionPromptStatus(); err == nil && status == AutoPermissionPromptOutdated {
+	if status, err := GetAutoPermissionPromptStatus(); err == nil && (status == AutoPermissionPromptMissing || status == AutoPermissionPromptOutdated) {
 		if _, ierr := InstallAutoPermissionPrompt(false); ierr != nil {
-			return "", fmt.Errorf("auto-upgrade outdated auto-permission prompt: %w", ierr)
+			return "", fmt.Errorf("auto-install auto-permission prompt (status %s): %w", status, ierr)
 		}
 	}
 
@@ -293,17 +351,14 @@ func backupAutoPermissionPromptFile(src string) error {
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	dst := filepath.Join(dir, base+".bak."+ts)
 	defer pruneAutoPermissionPromptBackups(dir, base)
-	if err := os.Rename(src, dst); err == nil {
-		return nil
-	}
+	// Copy rather than rename: the live file must never be absent between
+	// backup and the atomic rewrite that follows, or a concurrent loader in
+	// another ocode process sees Missing and the two race on the same path.
 	body, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(dst, body, 0o644); err != nil {
-		return err
-	}
-	return os.Remove(src)
+	return os.WriteFile(dst, body, 0o644)
 }
 
 // pruneAutoPermissionPromptBackups deletes all but the newest

@@ -143,6 +143,7 @@ func init() {
 		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|auto|model|<tool>]", help: "View or set tool, bash auto-allow, and LLM auto-permissions (model test runs tests)", handler: runPermissionsCmd},
 		{name: "/ban", usage: "/ban [list|add <command...>|remove <command...>|clear]", help: "List or manage banned bash command prefixes, including multi-word prefixes; no prefixes are banned by default; /ban clear confirms before wiping them", handler: runBanCmd},
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
+{name: "/sandbox", usage: "/sandbox [on|off|status]", help: "Sandbox: runs shell commands without prompts, but the OS blocks writes outside the workspace/allowed dirs, and touching secrets (auth.json, ~/.ssh, .env) or config still asks. Network stays open — write protection, not full containment", handler: runSandboxCmd},
 		{name: "/small-model", usage: "/small-model [model]", help: "Show or switch the small model (used for lightweight tasks)", handler: runSmallModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
@@ -983,6 +984,47 @@ func runYoloCmd(m *model, args []string) tea.Cmd {
 		return nil
 	default:
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /yolo [on|off|status]"})
+		return nil
+	}
+	m.permDirty.mode = true
+	m.persistPermissions()
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission mode: %s", m.agent.Permissions().Mode())})
+	return nil
+}
+
+// runSandboxCmd toggles sandbox permission mode. Sandbox is session-scoped
+// (Decision 2): persistPermissions clamps the on-disk default back to normal,
+// so a restart never resumes sandbox. Entering/leaving sandbox does not touch
+// auto-permission (unlike YOLO).
+func runSandboxCmd(m *model, args []string) tea.Cmd {
+	if m.agent == nil || m.agent.Permissions() == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured."})
+		return nil
+	}
+	mode := m.agent.Permissions().Mode()
+	if len(args) == 0 {
+		if mode == agent.PermissionModeSandbox {
+			m.agent.Permissions().SetMode(agent.PermissionModeNormal)
+			mode = agent.PermissionModeNormal
+		} else {
+			m.agent.Permissions().SetMode(agent.PermissionModeSandbox)
+			mode = agent.PermissionModeSandbox
+		}
+		m.permDirty.mode = true
+		m.persistPermissions()
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission mode: %s", mode)})
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "on", "true", "yes", "sandbox":
+		m.agent.Permissions().SetMode(agent.PermissionModeSandbox)
+	case "off", "false", "no", "normal":
+		m.agent.Permissions().SetMode(agent.PermissionModeNormal)
+	case "status":
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission mode: %s", mode)})
+		return nil
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /sandbox [on|off|status]"})
 		return nil
 	}
 	m.permDirty.mode = true

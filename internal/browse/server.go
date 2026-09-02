@@ -3,6 +3,7 @@ package browse
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -43,13 +44,16 @@ type chromeTarget interface {
 	Resize(ctx context.Context, w, h int, dpr float64) error
 	Mouse(ctx context.Context, ev cdp.MouseEvent) error
 	Key(ctx context.Context, ev cdp.KeyEvent) error
-	Detach()
+	SetFiles(ctx context.Context, paths []string) error
+	GetResponseBody(ctx context.Context, requestID string) (body string, isBase64 bool, truncated bool, err error)
+	DetachSink(sink cdp.FrameSink)
 }
 
 // chromeManager is the subset of cdp.Manager used by the browse server.
 type chromeManager interface {
 	Attach(ctx context.Context, stateKey string, sink cdp.FrameSink) (chromeTarget, error)
 	Revoke(stateKey string)
+	SetFiles(ctx context.Context, stateKey string, paths []string) error
 	Close(ctx context.Context) error
 }
 
@@ -75,9 +79,13 @@ type wsOut struct {
 
 // cdpSocketEntry tracks one active __cdp WebSocket per stateKey.
 type cdpSocketEntry struct {
-	// send is the writer channel (frames + JSON). Closing it signals the
-	// writer to exit.
+	// send is the writer channel (frames + JSON). Guarded by mu/closed below
+	// so no sender ever writes to it once it's closed.
 	send chan wsOut
+
+	mu     sync.Mutex
+	closed bool
+
 	// wsConn is the underlying gorilla connection (for pings and direct closes).
 	wsConn  interface{ Close() error }
 	closeFn func(code int, text string) error
@@ -91,6 +99,32 @@ func (e *cdpSocketEntry) connClose(code int, text string) error {
 		return e.wsConn.Close()
 	}
 	return nil
+}
+
+// trySend enqueues v if the entry hasn't been closed yet, dropping it
+// (rather than blocking or panicking) if the channel is full or closed.
+func (e *cdpSocketEntry) trySend(v wsOut) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return
+	}
+	select {
+	case e.send <- v:
+	default:
+	}
+}
+
+// closeSend closes the writer channel exactly once, synchronized with
+// trySend so a racing sender never sends on a closed channel.
+func (e *cdpSocketEntry) closeSend() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return
+	}
+	e.closed = true
+	close(e.send)
 }
 
 // Server is the isolated browse origin. Proxied content is served only here,
@@ -112,8 +146,8 @@ type Server struct {
 
 	// localTransport caches the allowPrivate transport used ONLY by
 	// handleLocal (Part 06). Guarded by Once; never used for external mode.
-	localTransportOnce sync.Once
-	localTransportVal  *http.Transport
+	localTransportOnce         sync.Once
+	localTransportVal          *http.Transport
 	localInsecureTransportOnce sync.Once
 	localInsecureTransportVal  *http.Transport
 
@@ -123,6 +157,10 @@ type Server struct {
 	// prompting, so they never need an entry here. Cleared on Revoke.
 	bypassMu sync.Mutex
 	bypass   map[string]map[string]bool // stateKey -> host -> true
+
+	// cookies holds upstream site cookies per stateKey (local mode); see
+	// cookiejar.go. Cleared on Revoke.
+	cookies *cookieJar
 
 	// conns enforces the per-stateKey concurrent upstream connection cap
 	// (spec § External mode limits: 32). External and local traffic for one
@@ -139,7 +177,7 @@ func New(apiToken string, logger *log.Logger, opts ...Options) *Server {
 	if logger == nil {
 		logger = log.Default()
 	}
-	s := &Server{apiToken: apiToken, auth: newAuthStore(), log: logger, mux: http.NewServeMux(), cdpSocks: make(map[string]*cdpSocketEntry), bypass: make(map[string]map[string]bool)}
+	s := &Server{apiToken: apiToken, auth: newAuthStore(), log: logger, mux: http.NewServeMux(), cdpSocks: make(map[string]*cdpSocketEntry), bypass: make(map[string]map[string]bool), cookies: newCookieJar()}
 	s.conns = newConnLimiter(maxUpstreamConnsPerKey)
 	s.mux.HandleFunc("/b/", s.handleBrowse)
 	s.mux.HandleFunc("GET /__ocode_capture.js", s.serveCapture)
@@ -202,8 +240,18 @@ func (s *Server) MintGrant(stateKey, spaOrigin string) string {
 	return s.auth.mint(stateKey, spaOrigin)
 }
 
+// SetFiles answers stateKey's pending Chrome-mode file chooser with local
+// file paths (already saved by the main server's upload endpoint).
+func (s *Server) SetFiles(ctx context.Context, stateKey string, paths []string) error {
+	if s.cdp == nil {
+		return errors.New("chrome mode not configured")
+	}
+	return s.cdp.SetFiles(ctx, stateKey, paths)
+}
+
 func (s *Server) Revoke(stateKey string) {
 	s.auth.revoke(stateKey)
+	s.cookies.Clear(stateKey)
 	if s.cdp != nil {
 		s.cdp.Revoke(stateKey)
 	}

@@ -97,7 +97,6 @@ export default function CoworkSidebar({
   const projectState = useProjectState();
   const [gitBranch, setGitBranch] = useState<string>("");
   const [todoItems] = useState<string[]>([]);
-  const [yoloLoading, setYoloLoading] = useState(false);
   const [permLoading, setPermLoading] = useState(false);
   const [advisorLoading, setAdvisorLoading] = useState(false);
   const [smallLoading, setSmallLoading] = useState(false);
@@ -294,30 +293,37 @@ export default function CoworkSidebar({
   // column reclaims the space (push layout).
   if (!isOpen && !isMobile) return null;
 
+  // Current live permission mode, defaulting to the config-style yolo hint.
+  const currentMode = tuiStatus?.permission_mode || (config.yolo ? "yolo" : "normal");
+  const [modeLoading, setModeLoading] = useState(false);
 
-  const toggleYolo = async () => {
-    const currentMode = tuiStatus?.permission_mode || (config.yolo ? "yolo" : "");
-    const enabled = currentMode !== "yolo";
-    setYoloLoading(true);
+  // Cycle permission mode: normal → yolo → locked → sandbox → normal, via the
+  // dedicated mode endpoint (session-scoped, never persisted).
+  const cycleMode = async () => {
+    const order = ["normal", "yolo", "locked", "sandbox"];
+    const idx = order.indexOf(currentMode);
+    const next = order[(idx + 1) % order.length];
+    setModeLoading(true);
     try {
-      const res = await fetch(apiPath("/api/permissions/yolo"), {
+      const res = await fetch(apiPath("/api/permissions/mode"), {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ enabled }),
+        body: JSON.stringify({ mode: next }),
       });
       if (!res.ok) {
         const j = await res.json().catch(() => null);
-        console.error("toggle yolo failed", j);
+        console.error("set permission mode failed", j);
       } else if (sessionId) {
         const status = await api.getSessionStatus(sessionId);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
       }
     } catch (e) {
-      console.error("toggle yolo error", e);
+      console.error("set permission mode error", e);
     } finally {
-      setYoloLoading(false);
+      setModeLoading(false);
     }
   };
+
 
   const togglePermEnabled = async () => {
     const enabled = !(tuiStatus?.permission_auto_allow ?? config.permissionModelEnabled);
@@ -552,28 +558,54 @@ export default function CoworkSidebar({
           />
         </div>
 
-        {/* Git Section */}
+        {/* Context Section — real token usage from the TUI status snapshot. */}
         <div className="border-b border-border">
           <button
-            onClick={() => toggleSection("git")}
+            onClick={() => toggleSection("context")}
             className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
-            {expandedSections.git ? (
+            {expandedSections.context ? (
               <ChevronDown className="w-4 h-4" />
             ) : (
               <ChevronRight className="w-4 h-4" />
             )}
-            <GitBranch className="w-4 h-4 text-cyan-400" />
-            Git
+            <Hash className="w-4 h-4 text-cyan-400" />
+            Context
           </button>
-          {expandedSections.git && (
+          {expandedSections.context && (
             <div className="px-4 pb-3">
-              <div className="text-sm font-mono text-foreground">
-                {gitBranch || "Loading..."}
-              </div>
-              {tuiStatus?.cwd && (
-                <div className="text-xs text-muted-foreground mt-1 truncate" title={tuiStatus.cwd}>
-                  {tuiStatus.cwd}
+              {contextMax > 0 ? (
+                <>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+                    <span>Used</span>
+                    <span className="font-mono text-muted-foreground">
+                      {formatTokenCount(contextCurrent)} / {formatTokenCount(contextMax)}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full rounded bg-muted overflow-hidden">
+                    <div
+                      className={`h-full transition-all ${
+                        contextPct > 85
+                          ? "bg-red-500"
+                          : contextPct > 65
+                            ? "bg-yellow-500"
+                            : "bg-emerald-500"
+                      }`}
+                      style={{ width: `${contextPct}%` }}
+                    />
+                  </div>
+                  <div className="text-right text-[11px] text-muted-foreground mt-1">
+                    {contextPct}%
+                    {contextModel && (
+                      <span className="ml-2 text-foreground font-mono">
+                        {contextModel}
+                      </span>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="text-xs text-muted-foreground">
+                  No context data yet
                 </div>
               )}
             </div>
@@ -610,20 +642,24 @@ export default function CoworkSidebar({
               )}
               <div className="flex items-center justify-between">
                 <span className="text-xs text-muted-foreground">Permission</span>
-                <span className="text-xs font-mono text-foreground">
-                  {tuiStatus?.permission_mode || (config.yolo ? "yolo" : "normal")}
-                </span>
+                <button
+                  type="button"
+                  onClick={cycleMode}
+                  disabled={modeLoading}
+title="Sandbox: shell commands run without prompts, but the OS blocks writes outside the workspace/allowed dirs; secrets (auth.json, ~/.ssh, .env) or config still ask; network stays open — write protection, not full containment. Cycle: normal → yolo → locked → sandbox"
+                  className="text-xs font-mono text-foreground uppercase px-2 py-0.5 rounded border border-border hover:bg-muted disabled:opacity-50"
+                >
+                  {currentMode}
+                  {currentMode === "sandbox" &&
+                    tuiStatus?.permission_effective_behavior &&
+                    ` · ${tuiStatus.permission_effective_behavior}`}
+                </button>
               </div>
-              <label className="flex items-center justify-between cursor-pointer">
-                <span className="text-xs text-muted-foreground">YOLO (auto-allow all)</span>
-                <input
-                  type="checkbox"
-                  checked={(tuiStatus?.permission_mode ?? (config.yolo ? "yolo" : "normal")) === "yolo"}
-                  disabled={yoloLoading}
-                  onChange={toggleYolo}
-                  className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-purple-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
-                />
-              </label>
+              {tuiStatus?.permission_sandbox_supported === false && currentMode === "sandbox" && (
+                <p className="text-[11px] text-amber-600">
+                  Sandbox not supported on this OS — behaves like normal.
+                </p>
+              )}
               <label className="flex items-center justify-between cursor-pointer">
                 <span className="text-xs text-muted-foreground">Auto-permission</span>
                 <input
@@ -679,54 +715,28 @@ export default function CoworkSidebar({
           )}
         </div>
 
-        {/* Context Section — real token usage from the TUI status snapshot. */}
+        {/* Git Section */}
         <div className="border-b border-border">
           <button
-            onClick={() => toggleSection("context")}
+            onClick={() => toggleSection("git")}
             className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
-            {expandedSections.context ? (
+            {expandedSections.git ? (
               <ChevronDown className="w-4 h-4" />
             ) : (
               <ChevronRight className="w-4 h-4" />
             )}
-            <Hash className="w-4 h-4 text-cyan-400" />
-            Context
+            <GitBranch className="w-4 h-4 text-cyan-400" />
+            Git
           </button>
-          {expandedSections.context && (
+          {expandedSections.git && (
             <div className="px-4 pb-3">
-              {contextMax > 0 ? (
-                <>
-                  <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
-                    <span>Used</span>
-                    <span className="font-mono text-muted-foreground">
-                      {formatTokenCount(contextCurrent)} / {formatTokenCount(contextMax)}
-                    </span>
-                  </div>
-                  <div className="h-2 w-full rounded bg-muted overflow-hidden">
-                    <div
-                      className={`h-full transition-all ${
-                        contextPct > 85
-                          ? "bg-red-500"
-                          : contextPct > 65
-                            ? "bg-yellow-500"
-                            : "bg-emerald-500"
-                      }`}
-                      style={{ width: `${contextPct}%` }}
-                    />
-                  </div>
-                  <div className="text-right text-[11px] text-muted-foreground mt-1">
-                    {contextPct}%
-                    {contextModel && (
-                      <span className="ml-2 text-foreground font-mono">
-                        {contextModel}
-                      </span>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <div className="text-xs text-muted-foreground">
-                  No context data yet
+              <div className="text-sm font-mono text-foreground">
+                {gitBranch || "Loading..."}
+              </div>
+              {tuiStatus?.cwd && (
+                <div className="text-xs text-muted-foreground mt-1 truncate" title={tuiStatus.cwd}>
+                  {tuiStatus.cwd}
                 </div>
               )}
             </div>

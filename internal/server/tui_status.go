@@ -19,8 +19,13 @@ type TUIStatus struct {
 	Mode string `json:"mode,omitempty"`
 	// Effective LLM temperature for the main model, mirroring the TUI sidebar.
 	Temperature float64 `json:"temperature,omitempty"`
-	// Permission mode (normal/yolo/locked) mirroring the TUI sidebar.
+	// Permission mode (normal/yolo/locked/sandbox) mirroring the TUI sidebar.
 	PermissionMode string `json:"permission_mode,omitempty"`
+	// Whether the current OS has a real sandbox backend (darwin/linux).
+	PermissionSandboxSupported bool `json:"permission_sandbox_supported"`
+	// Effective sandbox behavior: "confined", "degraded_normal" (unsupported
+	// OS), or the plain mode name — so the web can surface the Windows degrade.
+	PermissionEffectiveBehavior string `json:"permission_effective_behavior,omitempty"`
 	// Whether the LLM auto-permission judge is enabled.
 	PermissionAutoAllow bool `json:"permission_auto_allow"`
 	// Auto-permission model name (provider/model) for the LLM judge.
@@ -80,6 +85,18 @@ type TUIStatus struct {
 	// CONTENT is intentionally not included (only its token estimate) so the
 	// status payload stays small on every push.
 	ModelPrompt *ModelPromptInfo `json:"model_prompt,omitempty"`
+	// Turn timing — lets the web show elapsed for the current input.
+	// TurnStartedAt is RFC3339Nano when a turn is active, empty otherwise.
+	// TurnElapsedMs is the live elapsed for a running turn in milliseconds
+	// (server-computed so wall-clock skew doesn't matter). TurnEndedAt /
+	// TurnTookMs mirror the TUI's "done at · took" banner for the last turn.
+	TurnStartedAt string `json:"turn_started_at,omitempty"`
+	TurnElapsedMs int64  `json:"turn_elapsed_ms,omitempty"`
+	TurnEndedAt   string `json:"turn_ended_at,omitempty"`
+	TurnTookMs    int64  `json:"turn_took_ms,omitempty"`
+	// SessionCreatedAt is RFC3339Nano for the session's creation time, so the
+	// web can show entire-session elapsed without an extra fetch.
+	SessionCreatedAt string `json:"session_created_at,omitempty"`
 	// Last update time (server clock, RFC3339Nano). Lets the web show staleness.
 	UpdatedAt string `json:"updated_at,omitempty"`
 }
