@@ -3019,6 +3019,13 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 			for _, r := range roots {
 				allowedRoots += "  - " + r + "\n"
 			}
+			if aliases := TempRootAliases(); len(aliases) > 0 {
+				allowedRoots += "Temporary directories are always pre-authorized; these spellings are the SAME roots as their resolved form above:\n"
+				for _, a := range aliases {
+					allowedRoots += "  - " + a[0] + " -> " + a[1] + "\n"
+				}
+			}
+			allowedRoots += "Running a program that lives outside these roots (/bin, /usr/bin, /opt/homebrew/bin, sandbox-exec, etc.) is NOT a path violation: the roots govern which files a command reads, writes, or deletes, not where its executables live.\n"
 		}
 	}
 
