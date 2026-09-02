@@ -76,8 +76,8 @@
 **Interfaces:**
 - Produces: invariant — blank `perm_mode` cron job runs in `normal`.
 
-- [ ] **Step 1:** Write failing/regression test `TestCronBlankPermModeResolvesNormal` (a job with empty `PermMode` yields an agent in `normal`, never `sandbox`, even if a prior TUI session set sandbox live). Add `TestCronExplicitSandboxHonored` only if explicit cron sandbox is desired — otherwise assert an explicit `sandbox` PermMode is accepted by `SetMode` (it is, post Part 01) but note the web cron UI does not offer it (out of scope).
-- [ ] **Step 2:** Run; expect PASS if the invariant already holds, FAIL if not.
-- [ ] **Step 3:** Add the explicit guard if the test surfaced a gap; otherwise keep the test as a pinned invariant.
-- [ ] **Step 4:** Run the scheduler suite; expect PASS.
+- [x] **Step 1:** Write failing/regression test `TestCronBlankPermModeResolvesNormal` (a job with empty `PermMode` yields an agent in `normal`, never `sandbox`, even if a prior TUI session set sandbox live). `TestCronExplicitPermModePassesThrough` asserts explicit `sandbox` is accepted by `SetMode` (post Part 01) and invalid values are silent-ignored; the web cron UI does not offer sandbox (out of scope).
+- [x] **Step 2:** Run; expect PASS if the invariant already holds, FAIL if not.
+- [x] **Step 3:** Add the explicit guard — extracted `resolveCronPermissionMode` (blank/whitespace → normal, authoritative bind at `scheduler_runner.go:62`) so the invariant is immune to future agent reuse; `TestCronFreshAgentStartsNormalIsolation` proves the runner-level wiring on a fresh agent.
+- [x] **Step 4:** Run the scheduler suite; expect PASS.
 - [ ] **Step 5:** Commit: `test(cron): pin blank perm_mode resolves to normal`.
