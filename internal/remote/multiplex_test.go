@@ -2,6 +2,9 @@ package remote
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -98,5 +101,51 @@ func TestShellQuoteEscapesSingleQuotes(t *testing.T) {
 	want := `'o'\''brien'`
 	if got != want {
 		t.Errorf("shellQuote = %q, want %q", got, want)
+	}
+}
+
+func TestShellQuotePathPreservesTildeExpansion(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"~", `"$HOME"`},
+		{"~/.ocode/bin", `"$HOME/.ocode/bin"`},
+		{"~/.ocode/bin/0.9.3/ocode", `"$HOME/.ocode/bin/0.9.3/ocode"`},
+		{"/home/user/proj", `'/home/user/proj'`}, // absolute: no tilde, quote whole thing
+		{"~/o'brien", `"$HOME/o'brien"`},         // single quote is not special inside double quotes
+		{`~/$(evil)`, `"$HOME/\$(evil)"`},        // $ must be escaped: no command substitution
+		{"~/back`tick", "\"$HOME/back\\`tick\""},
+	}
+	for _, c := range cases {
+		if got := shellQuotePath(c.in); got != c.want {
+			t.Errorf("shellQuotePath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestShellQuotePathActuallyExpandsUnderSh(t *testing.T) {
+	// Regression guard for the bug this quoting exists to fix: naively
+	// single-quoting a "~..." path (shellQuote's behavior) makes POSIX
+	// shells treat "~" as a literal character instead of $HOME, so
+	// `test -x` (and every other remote command built from RemoteBinDir/
+	// RemoteBinaryPath/opts.Path) silently operates on a directory named
+	// "~" that never exists. shellQuotePath must not have that problem —
+	// verified against a real shell, not just string-compared, since the
+	// first fix attempt (bare "~" + single-quoted rest) looked plausible
+	// but does not actually expand under either dash or bash.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh on PATH")
+	}
+	home := t.TempDir()
+	sub := filepath.Join(home, "marker dir with spaces")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	quoted := shellQuotePath("~/marker dir with spaces")
+	cmd := exec.Command("sh", "-c", "test -d "+quoted)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sh -c 'test -d %s' (HOME=%s) failed: %v: %s — tilde expansion broken", quoted, home, err, out)
 	}
 }

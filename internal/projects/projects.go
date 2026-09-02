@@ -297,8 +297,14 @@ func (s *Store) Reorder(paths []string) error {
 	}
 
 	// Apply order to cache. Projects not in the reorder list keep their
-	// existing order (but this shouldn't happen in normal usage).
+	// existing order (but this shouldn't happen in normal usage). Scoped to
+	// Host=="" like every other local mutator — a remote entry that happens
+	// to share a Path string with a local project must never have its
+	// Order silently overwritten by a local reorder call.
 	for i := range s.cache {
+		if s.cache[i].Host != "" {
+			continue
+		}
 		if order, ok := orderMap[s.cache[i].Path]; ok {
 			s.cache[i].Order = order
 		}

@@ -103,3 +103,39 @@ func ResumeWarning(m Multiplexer) string {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// shellQuotePath quotes a remote path for use in a shell command, the same
+// way shellQuote does, except a leading "~" or "~/" is translated to the
+// double-quoted "$HOME" parameter expansion rather than single-quoted.
+//
+// A naive shellQuote("~/foo") produces '~/foo', and POSIX shells never
+// expand "~" inside single quotes, so that would target a literal
+// directory named "~" instead of $HOME/foo. The seemingly obvious fix —
+// leave the tilde bare and quote only the rest, e.g. ~'/foo' — is also
+// wrong: POSIX tilde-prefix recognition requires every character up to
+// the first unquoted "/" to be unquoted too, so a quote immediately after
+// "~" disqualifies the whole prefix from expansion (verified against both
+// dash and bash). "$HOME" is expanded inside double quotes (only word
+// splitting/globbing is suppressed there, not parameter expansion), so
+// double-quoting "$HOME/<rest>" gets both correctness and safety — the
+// rest just needs backslash/dollar/backtick/double-quote escaped, the only
+// characters double quotes don't already neutralize.
+//
+// "~otheruser/..." forms are not handled (out of scope: every path built
+// by this package is either the invoking user's own "~" or an absolute
+// path).
+func shellQuotePath(p string) string {
+	if p == "~" {
+		return `"$HOME"`
+	}
+	if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		return `"$HOME/` + escapeDoubleQuoted(rest) + `"`
+	}
+	return shellQuote(p)
+}
+
+var doubleQuoteEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`")
+
+func escapeDoubleQuoted(s string) string {
+	return doubleQuoteEscaper.Replace(s)
+}

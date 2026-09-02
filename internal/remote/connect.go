@@ -128,7 +128,7 @@ func Connect(opts ConnectOptions) error {
 
 	// 8. Launch.
 	progress.Start("launch", "launching remote TUI")
-	remoteCmd := shellQuote(RemoteBinaryPath(ver)) + " " + shellQuote(opts.Path)
+	remoteCmd := shellQuotePath(RemoteBinaryPath(ver)) + " " + shellQuotePath(opts.Path)
 	launchCmd := WrapLaunch(mux, opts.Path, remoteCmd)
 	progress.Done("")
 
@@ -164,7 +164,7 @@ func runSyncStage(progress *Progress, transport Transport, hostKey, ver string) 
 	}
 
 	res, err := transport.ExecStdin(
-		shellQuote(RemoteBinaryPath(ver))+" remote-receive-config",
+		shellQuotePath(RemoteBinaryPath(ver))+" remote-receive-config",
 		bytes.NewReader(frame),
 	)
 	if err != nil || res.ExitCode != 0 {

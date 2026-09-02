@@ -57,7 +57,7 @@ func TestDetectPlatformMalformedOutput(t *testing.T) {
 
 func TestBinaryExists(t *testing.T) {
 	ft := newFakeTransport()
-	cmd := "test -x " + shellQuote(RemoteBinaryPath("1.2.3"))
+	cmd := "test -x " + shellQuotePath(RemoteBinaryPath("1.2.3"))
 	ft.execResults[cmd] = ExecResult{ExitCode: 0}
 	if !BinaryExists(ft, "1.2.3") {
 		t.Error("expected BinaryExists true")
@@ -72,7 +72,7 @@ func TestBinaryExists(t *testing.T) {
 
 func TestGCVersionsKeepsTwoNewest(t *testing.T) {
 	ft := newFakeTransport()
-	ft.execResults["ls -1 "+shellQuote(RemoteBinDir)+" 2>/dev/null || true"] = ExecResult{
+	ft.execResults["ls -1 "+shellQuotePath(RemoteBinDir)+" 2>/dev/null || true"] = ExecResult{
 		Stdout: "0.1.0\n0.2.0\n0.3.0\n0.9.9\n",
 	}
 	if err := GCVersions(ft); err != nil {
@@ -81,15 +81,15 @@ func TestGCVersionsKeepsTwoNewest(t *testing.T) {
 	// keep-two-newest lexicographically: 0.3.0 and 0.9.9 survive; 0.1.0 and
 	// 0.2.0 are rm -rf'd.
 	wantRemoved := map[string]bool{
-		"rm -rf " + shellQuote(RemoteBinDir+"/0.1.0"): true,
-		"rm -rf " + shellQuote(RemoteBinDir+"/0.2.0"): true,
+		"rm -rf " + shellQuotePath(RemoteBinDir+"/0.1.0"): true,
+		"rm -rf " + shellQuotePath(RemoteBinDir+"/0.2.0"): true,
 	}
 	seen := map[string]bool{}
 	for _, c := range ft.execCalls {
 		if wantRemoved[c] {
 			seen[c] = true
 		}
-		if c == "rm -rf "+shellQuote(RemoteBinDir+"/0.3.0") || c == "rm -rf "+shellQuote(RemoteBinDir+"/0.9.9") {
+		if c == "rm -rf "+shellQuotePath(RemoteBinDir+"/0.3.0") || c == "rm -rf "+shellQuotePath(RemoteBinDir+"/0.9.9") {
 			t.Errorf("GCVersions removed a newest-two dir: %s", c)
 		}
 	}
@@ -100,7 +100,7 @@ func TestGCVersionsKeepsTwoNewest(t *testing.T) {
 
 func TestGCVersionsNoopUnderTwo(t *testing.T) {
 	ft := newFakeTransport()
-	ft.execResults["ls -1 "+shellQuote(RemoteBinDir)+" 2>/dev/null || true"] = ExecResult{Stdout: "0.1.0\n"}
+	ft.execResults["ls -1 "+shellQuotePath(RemoteBinDir)+" 2>/dev/null || true"] = ExecResult{Stdout: "0.1.0\n"}
 	if err := GCVersions(ft); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

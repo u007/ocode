@@ -61,7 +61,7 @@ func DetectPlatform(t Transport) (goos, goarch string, err error) {
 // BinaryExists checks whether the versioned binary is already installed and
 // executable on the remote.
 func BinaryExists(t Transport, ver string) bool {
-	res, err := t.Exec("test -x " + shellQuote(RemoteBinaryPath(ver)))
+	res, err := t.Exec("test -x " + shellQuotePath(RemoteBinaryPath(ver)))
 	return err == nil && res.ExitCode == 0
 }
 
@@ -140,7 +140,7 @@ func remotePartialPath(ver string) string {
 // the binary — see ActivateAndVerify.
 func UploadBinary(t Transport, ver, localPath string) error {
 	remoteDir := RemoteBinDir + "/" + ver
-	if _, err := t.Exec("mkdir -p " + shellQuote(remoteDir)); err != nil {
+	if _, err := t.Exec("mkdir -p " + shellQuotePath(remoteDir)); err != nil {
 		return fmt.Errorf("prepare remote dir %s: %w", remoteDir, err)
 	}
 
@@ -168,7 +168,7 @@ func ActivateAndVerify(t Transport, ver string) error {
 	partial := remotePartialPath(ver)
 	final := RemoteBinaryPath(ver)
 
-	installCmd := fmt.Sprintf("chmod +x %s && mv %s %s", shellQuote(partial), shellQuote(partial), shellQuote(final))
+	installCmd := fmt.Sprintf("chmod +x %s && mv %s %s", shellQuotePath(partial), shellQuotePath(partial), shellQuotePath(final))
 	if res, err := t.Exec(installCmd); err != nil || res.ExitCode != 0 {
 		if err == nil {
 			err = fmt.Errorf("exit %d", res.ExitCode)
@@ -176,7 +176,7 @@ func ActivateAndVerify(t Transport, ver string) error {
 		return fmt.Errorf("install %s: %w: %s", final, err, res.Stderr)
 	}
 
-	verify, err := t.Exec(shellQuote(final) + " --version")
+	verify, err := t.Exec(shellQuotePath(final) + " --version")
 	if err != nil {
 		return fmt.Errorf("verify %s --version: %w", final, err)
 	}
@@ -229,7 +229,7 @@ func EnsureBinary(t Transport, moduleDir string) (installed bool, err error) {
 // whichever `ls` returns last, which is acceptable since GC is best-effort
 // cleanup, never correctness-critical).
 func GCVersions(t Transport) error {
-	res, err := t.Exec("ls -1 " + shellQuote(RemoteBinDir) + " 2>/dev/null || true")
+	res, err := t.Exec("ls -1 " + shellQuotePath(RemoteBinDir) + " 2>/dev/null || true")
 	if err != nil {
 		return nil // best-effort; a listing failure is not a connect failure
 	}
@@ -253,7 +253,7 @@ func GCVersions(t Transport) error {
 		if d == "" || d == "." || d == ".." || strings.Contains(d, "/") {
 			continue
 		}
-		_, _ = t.Exec("rm -rf " + shellQuote(RemoteBinDir+"/"+d))
+		_, _ = t.Exec("rm -rf " + shellQuotePath(RemoteBinDir+"/"+d))
 	}
 	return nil
 }

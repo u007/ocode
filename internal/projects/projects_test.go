@@ -101,6 +101,35 @@ func TestLocalOpsNeverMatchRemoteEntry(t *testing.T) {
 	}
 }
 
+// Reorder (like Touch/Rename/SetGroup) must never touch a remote entry
+// that happens to share a Path string with a local project.
+func TestReorderNeverMatchesRemoteEntry(t *testing.T) {
+	store, err := NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatalf("NewStoreAt: %v", err)
+	}
+	if err := store.AddRemote("devbox", "/home/user/app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add("/home/user/other"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reorder local paths only — but include the shared-path string as if
+	// it were meant for the local project. The remote entry's Order must
+	// stay untouched (its zero value), never silently reassigned.
+	if err := store.Reorder([]string{"/home/user/app", "/home/user/other"}); err != nil {
+		t.Fatal(err)
+	}
+
+	list := store.List()
+	for _, p := range list {
+		if p.Host == "devbox" && p.Order != 0 {
+			t.Errorf("Reorder mutated remote entry %+v (Order should stay 0)", p)
+		}
+	}
+}
+
 func TestFindLastRemotePicksMostRecent(t *testing.T) {
 	store, err := NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
 	if err != nil {
