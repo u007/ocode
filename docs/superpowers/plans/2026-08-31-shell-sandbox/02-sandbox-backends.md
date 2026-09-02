@@ -122,7 +122,7 @@ Rationale: sandbox = YOLO's ordinary-prompt-bypass **plus** OS write-confinement
 - [x] **Step 3:** Run; expect FAIL.
 - [x] **Step 4:** Implement the `sensitiveSandboxDecision` carve-out in the sandbox branch of `Decide`; confirm sandbox does not disable `auto` (Part 01 Task 1) so Ask routes correctly. Document the interpreter-hidden-read residual in code + docs (Part 04).
 - [x] **Step 5:** Run all + full `internal/agent`; expect PASS.
-- [ ] **Step 6:** Commit: `feat(permissions): sandbox sensitive-path → Ask (auth.json/ssh/env/config)`.
+- [x] **Step 6:** Commit: `feat(permissions): sandbox sensitive-path → Ask (auth.json/ssh/env/config)`.
 
 ---
 
@@ -145,4 +145,4 @@ Rationale: sandbox = YOLO's ordinary-prompt-bypass **plus** OS write-confinement
 - [x] **Step 2:** Run; expect FAIL.
 - [x] **Step 3:** Implement `isPermissionEscalation` + the loopback-permission-endpoint check; wire both above the auto-allow shortcuts. Reuse `extractBashCommandPaths`/redirection extraction so it catches the common write forms.
 - [x] **Step 4:** Run tests + full `internal/agent`; expect PASS. Note the known limitation in code: static extraction can't catch a write hidden inside an interpreter (`python -c`) — the OS layer doesn't help here either since the file is in a writable root; document this residual (Part 04) as the reason config edits should ultimately be made outside sandbox.
-- [ ] **Step 5:** Commit: `feat(permissions): self-escalation guard on permission-config writes`.
+- [x] **Step 5:** Commit: `feat(permissions): self-escalation guard on permission-config writes`.

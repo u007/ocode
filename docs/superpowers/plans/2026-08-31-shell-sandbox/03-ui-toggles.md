@@ -41,7 +41,7 @@
 - [x] **Step 2:** Run; expect FAIL (route/handler absent).
 - [x] **Step 3:** Implement route + handler (override + live propagation + status push + registration inheritance).
 - [x] **Step 4:** Run tests + `internal/server` permission suite; expect PASS.
-- [ ] **Step 5:** Commit: `feat(server): PUT /api/permissions/mode with live propagation`.
+- [x] **Step 5:** Commit: `feat(server): PUT /api/permissions/mode with live propagation`.
 
 ---
 
@@ -63,7 +63,7 @@
 - [x] **Step 2:** Run (`bun test`); expect FAIL.
 - [x] **Step 3:** Implement types (`setPermissionMode`, `sandbox_supported`/`effective_behavior` fields), `/sandbox` descriptor **and dispatcher handler**, the CoworkSidebar mode-cycle pill (normal→yolo→locked→sandbox via PUT /api/permissions/mode), and the PermissionsForm fix (load real mode string, only flip mode when changed).
 - [x] **Step 4:** Run web tests (612 pass, incl. 5 new) + `bun run typecheck` (tsc clean); expect PASS.
-- [ ] **Step 5:** Commit: `feat(web): sandbox permission-mode toggle + PermissionsForm preservation`.
+- [x] **Step 5:** Commit: `feat(web): sandbox permission-mode toggle + PermissionsForm preservation`.
 
 ---
 
@@ -80,4 +80,4 @@
 - [x] **Step 2:** Run; expect PASS if the invariant already holds, FAIL if not.
 - [x] **Step 3:** Add the explicit guard — extracted `resolveCronPermissionMode` (blank/whitespace → normal, authoritative bind at `scheduler_runner.go:62`) so the invariant is immune to future agent reuse; `TestCronFreshAgentStartsNormalIsolation` proves the runner-level wiring on a fresh agent.
 - [x] **Step 4:** Run the scheduler suite; expect PASS.
-- [ ] **Step 5:** Commit: `test(cron): pin blank perm_mode resolves to normal`.
+- [x] **Step 5:** Commit: `test(cron): pin blank perm_mode resolves to normal`.

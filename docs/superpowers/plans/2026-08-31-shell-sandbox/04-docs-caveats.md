@@ -14,7 +14,7 @@
 - [x] **Step 3:** Platform matrix documented in AGENTS.md (macOS Seatbelt, Linux Landlock+bwrap, Windows normal-prompts degrade).
 - [x] **Step 4:** Toggling documented (TUI cycle / `/sandbox`, web selector / `/sandbox`; per-session, never persisted).
 - [x] **Step 5:** Out-of-scope surfaces labeled (PTY terminal + web `!shell` unsandboxed) in AGENTS.md.
-- [ ] **Step 6:** Commit: `docs: sandbox mode model, platform matrix, honest framing`.
+- [x] **Step 6:** Commit: `docs: sandbox mode model, platform matrix, honest framing`.
 
 ---
 
@@ -29,4 +29,4 @@
 - [x] **Step 4:** `TODO.md` entry — **cron sandbox**: `CronPermissionMode` left normal/yolo/locked; blank jobs pinned to normal (`resolveCronPermissionMode`); decide later on explicit cron sandbox.
 - [x] **Step 5:** **Go version alignment**: `AGENTS.md` Tech Stack updated to Go 1.26.1 (matches `go.mod`). Embedded model-briefing assets left untouched (model prompts, out of scope per plan).
 - [x] **Step 6:** On completion, explicitly tell the user which items are left as TODO: nvm sourcing, Windows confinement, cron sandbox exposure.
-- [ ] **Step 7:** Commit: `docs: sandbox caveats, TODO (nvm/windows/cron), Go version alignment`.
+- [x] **Step 7:** Commit: `docs: sandbox caveats, TODO (nvm/windows/cron), Go version alignment`.
