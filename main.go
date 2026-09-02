@@ -13,6 +13,7 @@ import (
 	"github.com/u007/ocode/internal/bundled"
 	"github.com/u007/ocode/internal/mcpcli"
 	"github.com/u007/ocode/internal/models"
+	"github.com/u007/ocode/internal/remotecli"
 	// Registers the OpenAI/Codex provider plugin via its init(). Without this
 	// blank import the plugin is never registered, so providerplugin.Get("openai")
 	// returns ok=false and ChatGPT OAuth tokens are misrouted to
@@ -197,6 +198,22 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "remote":
+			if err := remotecli.Run(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "remote-receive-config":
+			// Hidden subcommand: piped a framed credential/config payload on
+			// stdin by the connecting client's sync stage (internal/remote),
+			// never invoked directly by a user. Deliberately absent from
+			// printUsage, same as lsp-daemon above.
+			if err := remotecli.RunReceiveConfig(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
 		case "models":
 			if err := models.Run(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
@@ -310,6 +327,7 @@ func printUsage() {
 	fmt.Println("  skills           Manage skills")
 	fmt.Println("  secret           Encrypt/decrypt project files or dirs (init, encrypt, decrypt, rekey)")
 	fmt.Println("  debug            Print project-scoping info (slug, data/sessions dirs)")
+	fmt.Println("  remote           Connect to (and provision) ocode on a remote SSH host")
 	fmt.Println("  version          Show version information")
 	fmt.Println()
 	fmt.Println("TUI Mode (no command):")
