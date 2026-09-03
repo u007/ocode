@@ -186,6 +186,29 @@ func (s *Store) Remove(path string) error {
 	return s.save()
 }
 
+// RemoveRemote deletes a remote (host, path) entry. Path is matched verbatim
+// (not Cleaned) for the same reason as AddRemote.
+func (s *Store) RemoveRemote(host, path string) error {
+	if host == "" {
+		return fmt.Errorf("projects: RemoveRemote requires a non-empty host")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := -1
+	for i, p := range s.cache {
+		if p.Host == host && p.Path == path {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("remote project %s:%s not found", host, path)
+	}
+	s.cache = append(s.cache[:idx], s.cache[idx+1:]...)
+	return s.save()
+}
+
 // Touch updates the LastUsedAt for a project, so it rises to the top of the list.
 func (s *Store) Touch(path string) error {
 	s.mu.Lock()

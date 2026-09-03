@@ -132,6 +132,14 @@ type Handler struct {
 	// concurrently, and one job clearing a bool would hide a still-queued job
 	// from cancellation.
 	turnInFlight map[string]int
+	// shutdownMu guards shutdownStarted. Once Shutdown begins, dispatchTurn
+	// refuses new turn jobs so shutdown can join a bounded set; turnJobsWG
+	// tracks every dispatched job (including jobs still bootstrapping an
+	// agent, which own no resident agent yet) so shutdown waits for them
+	// instead of missing them.
+	shutdownMu      sync.Mutex
+	shutdownStarted bool
+	turnJobsWG      sync.WaitGroup
 
 	// closePending marks sessions whose HandleCloseSession release could not
 	// run immediately (an active turn held the agent). executeTurnJob drains
@@ -160,11 +168,19 @@ type Handler struct {
 	// (web/desktop, no TUI). See title_gen.go.
 	titleGen *titleGenState
 
-	// syncMu guards syncClient/syncStop, which back the /api/sync/* routes
-	// (web/desktop equivalent of the TUI's /login, /logout).
-	syncMu     sync.Mutex
-	syncClient *ocodesync.Client
-	syncStop   func()
+	// syncMu guards syncClientInst/syncStop, which back the /api/sync/* routes
+	// (web/desktop equivalent of the TUI's /login, /logout). The lock is
+	// owned internally by syncClient() and detachSyncClientForLogout() —
+	// callers must NOT hold syncMu. This centralizes the lock contract so
+	// a future caller cannot race on the shared *sync.Client.
+	syncMu         sync.Mutex
+	syncClientInst *ocodesync.Client
+	syncStop       func()
+	// syncConfiguredURL is the cfg.Ocode.SyncURL value last used to build
+	// syncClientInst, so syncClient() only rebuilds it when that setting
+	// actually changes at runtime — never on every call, which would clobber
+	// a client pointed at a test server or otherwise built out-of-band.
+	syncConfiguredURL string
 
 	// lspMgrs holds one LSP manager per project root. Sessions bound to the
 	// same project share a manager (multiple tabs on one repo don't spawn
@@ -677,23 +693,42 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	createdSession := false
 	var entry *sessionEntry
 	if sid != "" {
-		// Bind the session to its project root in the registry (explicit
-		// project_path wins; a resolved existing session keeps its root) so
-		// the agent is built against the right workdir and cross-project 404s
-		// become impossible for sessions that exist.
+		// Bind the session to its project root. An explicit project_path that
+		// disagrees with the session's bound project is rejected (409): a
+		// resident agent stays built for the old project while persistence
+		// would move to the new one, so the next turn could execute in
+		// project A but save into project B. An empty project_path keeps
+		// the bound root (or the default root for unknown sessions).
 		if req.ProjectPath != "" {
-			h.sessions.RegisterWithWindow(sid, req.ProjectPath, windowID)
-		}
-		var err error
-		entry, err = h.sessions.Resolve(sid)
-		if err != nil {
-			// Session exists in no registered project. Today this call site is
-			// lenient (a missing session silently starts with empty history);
-			// preserve that by binding to the default root and continuing.
-			entry = h.sessions.RegisterWithWindow(sid, projectRoot, windowID)
-		} else if windowID != "" {
-			h.sessions.SetWindowID(sid, windowID)
+			snap, verr := h.sessions.BindNewOrVerify(sid, req.ProjectPath, windowID)
+			if verr != nil {
+				writeError(w, http.StatusConflict, verr.Error())
+				return
+			}
 			entry = h.sessions.Lookup(sid)
+			if entry == nil {
+				// Evicted between verify and lookup; re-register to the
+				// verified snapshot root and continue.
+				entry = h.sessions.RegisterWithWindow(sid, snap.ProjectRoot, windowID)
+			}
+		} else if entry = h.sessions.Lookup(sid); entry != nil {
+			if windowID != "" {
+				h.sessions.SetWindowID(sid, windowID)
+				entry = h.sessions.Lookup(sid)
+			}
+		} else {
+			var rerr error
+			entry, rerr = h.sessions.Resolve(sid)
+			if rerr != nil {
+				// Session exists in no registered project. Today this
+				// call site is lenient (a missing session silently starts
+				// with empty history); preserve that by binding to the
+				// default root and continuing.
+				entry = h.sessions.RegisterWithWindow(sid, projectRoot, windowID)
+			} else if windowID != "" {
+				h.sessions.SetWindowID(sid, windowID)
+				entry = h.sessions.Lookup(sid)
+			}
 		}
 	} else {
 		// A model is only required to create a new session.

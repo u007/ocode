@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -504,9 +505,16 @@ type OcodeConfig struct {
 	UploadDir string `json:"upload_dir,omitempty"`
 	// BackendURL overrides the API backend the web frontend connects to.
 	// Empty means same-origin (existing behavior). Allowed values are
-	// empty, http://localhost[:port], http://127.0.0.1[:port], or
-	// https://hub.mercstudio.com (optional trailing slash normalized away).
+	// empty, http://localhost[:port], or http://127.0.0.1[:port]
+	// (optional trailing slash normalized away). Local dev origins only —
+	// config/auth sync goes through the separate /api/sync/* flow instead.
 	BackendURL string `json:"backend_url,omitempty"`
+	// SyncURL overrides the config/auth sync server (kakiit) this machine
+	// talks to for the /api/sync/* device-login + push/pull flow. Empty
+	// falls back to OCODE_SYNC_URL, then the production default
+	// (https://hub.mercstudio.com). Unlike BackendURL, this never affects
+	// general API routing — only internal/sync's client.
+	SyncURL string `json:"sync_url,omitempty"`
 	// Ocr holds the OCR tool configuration (backend, model, endpoint).
 	// Backend accepts openai-compat, paddle, and the lmstudio alias.
 	Ocr      ocr.OcrConfig           `json:"ocr"`
@@ -738,6 +746,7 @@ type ocodeConfigFile struct {
 	MaxImageDim             int                         `json:"image_max_dim,omitempty"`
 	UploadDir               string                      `json:"upload_dir,omitempty"`
 	BackendURL              string                      `json:"backend_url,omitempty"`
+	SyncURL                 string                      `json:"sync_url,omitempty"`
 	Ocr                     *ocr.OcrConfig              `json:"ocr,omitempty"`
 	ImageGen                *ImageGenConfig             `json:"imagegen,omitempty"`
 	Profiles                map[string]ProfileDelta     `json:"profiles,omitempty"`
@@ -1290,8 +1299,24 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["backend_url"]; ok {
 		if normalized, err := NormalizeBackendURL(file.BackendURL); err == nil {
 			cfg.BackendURL = normalized
+			delete(raw, "backend_url")
+		} else {
+			// Normalization failed: leave the raw json.RawMessage in `raw`
+			// so it flows through to cfg.Extra and a later save round-trips
+			// it intact instead of silently dropping the user's value.
+			// Surface the failure via log for field diagnosis.
+			log.Printf("config: invalid backend_url %q on disk, preserving raw value: %v", file.BackendURL, err)
 		}
-		delete(raw, "backend_url")
+	}
+
+	if _, ok := raw["sync_url"]; ok {
+		if normalized, err := NormalizeSyncURL(file.SyncURL); err == nil {
+			cfg.SyncURL = normalized
+			delete(raw, "sync_url")
+		} else {
+			// Leave raw in place so the next save round-trips it.
+			log.Printf("config: invalid sync_url %q on disk, preserving raw value: %v", file.SyncURL, err)
+		}
 	}
 
 	if rawOcr, ok := raw["ocr"]; ok && rawOcr != nil {
@@ -1795,9 +1820,6 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.UploadDir != "" {
 		payload["upload_dir"] = cfg.UploadDir
 	}
-	if cfg.BackendURL != "" {
-		payload["backend_url"] = cfg.BackendURL
-	}
 	if len(cfg.Profiles) > 0 {
 		payload["profiles"] = cfg.Profiles
 	}
@@ -1807,10 +1829,23 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
+		// Canonical keys are set either by the Extra loop (preserving raw
+		// on-disk values that failed normalization) or overridden afterward
+		// by the canonical setters below when a valid normalized value exists.
 		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" {
 			continue
 		}
 		payload[k] = v
+	}
+	// Canonical backend_url/sync_url setters run AFTER the Extra loop so a
+	// valid normalized value always wins over a preserved raw value from
+	// Extra; when empty (normalization failed), the Extra value passes
+	// through and round-trips intact.
+	if cfg.BackendURL != "" {
+		payload["backend_url"] = cfg.BackendURL
+	}
+	if cfg.SyncURL != "" {
+		payload["sync_url"] = cfg.SyncURL
 	}
 
 	data, err := json.MarshalIndent(payload, "", "  ")
@@ -2120,9 +2155,27 @@ func SaveUploadDir(dir string) error {
 	})
 }
 
+// hubBackendURL is the legacy production backend host that used to be an
+// accepted value for backend_url. It is now scoped to the dedicated sync
+// channel (sync_url / internal/sync) instead. NormalizeBackendURL returns
+// ErrBackendURLIsHub when it sees this value so callers (API handlers, tests)
+// can detect the migration case and emit a useful "use sync_url instead"
+// message rather than a generic "invalid URL" error.
+const hubBackendURL = "https://hub.mercstudio.com"
+
+// ErrBackendURLIsHub is returned by NormalizeBackendURL when the caller
+// supplies the legacy production hub URL (https://hub.mercstudio.com). That
+// host is no longer valid for backend_url — it belongs in sync_url. Callers
+// can errors.Is this to surface a migration hint.
+var ErrBackendURLIsHub = errors.New("backend_url no longer accepts " + hubBackendURL + "; use sync_url instead")
+
 // NormalizeBackendURL validates and normalizes a backend URL. Allowed values
-// are empty (same-origin), http://localhost[:port], http://127.0.0.1[:port],
-// or https://hub.mercstudio.com (optional trailing slash normalized away).
+// are empty (same-origin), http://localhost[:port], or http://127.0.0.1[:port]
+// (optional trailing slash normalized away). backend_url redirects every
+// /api/* call the frontend makes, so it must stay scoped to local dev
+// origins — it is not the config/auth sync channel (that's the dedicated
+// /api/sync/* flow in internal/sync, which talks to kakiit directly and
+// never touches this setting).
 // It rejects credentials, paths, query strings, fragments, wrong schemes,
 // host-subdomain tricks, and malformed ports.
 func NormalizeBackendURL(raw string) (string, error) {
@@ -2134,10 +2187,6 @@ func NormalizeBackendURL(raw string) (string, error) {
 	if strings.HasSuffix(trimmed, "/") && trimmed != "/" {
 		trimmed = strings.TrimSuffix(trimmed, "/")
 	}
-	// For hub URL, string comparison is easiest and safest.
-	if trimmed == "https://hub.mercstudio.com" {
-		return trimmed, nil
-	}
 	// Use net/url parsing for localhost variants.
 	u, err := parseBackendURL(trimmed)
 	if err != nil {
@@ -2145,6 +2194,12 @@ func NormalizeBackendURL(raw string) (string, error) {
 	}
 	// Only http scheme for localhost.
 	if u.Scheme != "http" {
+		// Legacy migration: the production hub host used to be a valid
+		// backend_url. It now belongs in sync_url. Return a typed sentinel
+		// so callers can emit a migration hint instead of a generic error.
+		if u.Scheme == "https" && u.Hostname() == "hub.mercstudio.com" && (u.Path == "" || u.Path == "/") {
+			return "", ErrBackendURLIsHub
+		}
 		return "", fmt.Errorf("backend_url must be http for localhost, got %q", u.Scheme)
 	}
 	// Reject userinfo.
@@ -2165,7 +2220,7 @@ func NormalizeBackendURL(raw string) (string, error) {
 	hostname := u.Hostname()
 	port := u.Port()
 	if hostname != "localhost" && hostname != "127.0.0.1" {
-		return "", fmt.Errorf("backend_url host must be localhost, 127.0.0.1, or https://hub.mercstudio.com")
+		return "", fmt.Errorf("backend_url host must be localhost or 127.0.0.1")
 	}
 	// Validate port if present.
 	if port != "" {
@@ -2209,6 +2264,83 @@ func SaveBackendURL(raw string) error {
 	}
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.BackendURL = normalized
+		return nil
+	})
+}
+
+// NormalizeSyncURL validates and normalizes the config/auth sync server URL
+// (internal/sync's kakiit client). Unlike backend_url, this is meant to
+// reach a real external host, so any https:// origin is allowed, plus
+// http://localhost[:port] and http://127.0.0.1[:port] for local kakiit dev.
+// Empty means "use the default" (OCODE_SYNC_URL env, then the production
+// hub — see internal/sync.DefaultBaseURL). Rejects credentials, paths,
+// query strings, and fragments — the sync client appends its own
+// /api/ocode/... paths onto whatever origin this resolves to.
+func NormalizeSyncURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	if strings.HasSuffix(trimmed, "/") && trimmed != "/" {
+		trimmed = strings.TrimSuffix(trimmed, "/")
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid sync_url %q: %w", trimmed, err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("sync_url must be an absolute URL, got %q", trimmed)
+	}
+	if u.User != nil || strings.Contains(trimmed, "@") {
+		return "", fmt.Errorf("sync_url must not contain credentials")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("sync_url must not contain a path")
+	}
+	if u.RawQuery != "" {
+		return "", fmt.Errorf("sync_url must not contain a query string")
+	}
+	if u.Fragment != "" {
+		return "", fmt.Errorf("sync_url must not contain a fragment")
+	}
+	hostname := strings.ToLower(u.Hostname())
+	switch u.Scheme {
+	case "https":
+		// Any host is allowed over https — this is expected to reach a real
+		// external kakiit deployment, not just localhost.
+	case "http":
+		if hostname != "localhost" && hostname != "127.0.0.1" {
+			return "", fmt.Errorf("sync_url must be https, except http://localhost or http://127.0.0.1 for local dev")
+		}
+	default:
+		return "", fmt.Errorf("sync_url scheme must be http or https, got %q", u.Scheme)
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return "", fmt.Errorf("sync_url has invalid port %q", port)
+		}
+		return fmt.Sprintf("%s://%s:%s", u.Scheme, hostname, port), nil
+	}
+	return fmt.Sprintf("%s://%s", u.Scheme, hostname), nil
+}
+
+// ValidateSyncURL is a convenience wrapper that only checks validity.
+func ValidateSyncURL(raw string) error {
+	_, err := NormalizeSyncURL(raw)
+	return err
+}
+
+// SaveSyncURL persists the sync_url field after validation/normalization,
+// using load-modify-write so it cannot clobber a concurrent session's other
+// config (see withOcodeConfigLock).
+func SaveSyncURL(raw string) error {
+	normalized, err := NormalizeSyncURL(raw)
+	if err != nil {
+		return err
+	}
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.SyncURL = normalized
 		return nil
 	})
 }

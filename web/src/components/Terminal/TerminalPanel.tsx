@@ -17,7 +17,9 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
+import { registerFileLinkProvider } from "./terminalLinkProvider";
 import TerminalFindBar from "./TerminalFindBar";
 import { apiPath, apiWsPath, authHeaders, authToken } from "@/api/client";
 import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
@@ -399,6 +401,13 @@ export default function TerminalPanel({
       scrollback: scrollbackLines,
       fontFamily,
       fontSize,
+      // Wheel/trackpad scrolled ~1 row per notch at the default
+      // scrollSensitivity (1), which feels very slow on large scrollback.
+      // 3x normal + 5x Alt-held fast scroll, instant (no smooth animation
+      // lag) keeps long-history navigation responsive.
+      scrollSensitivity: 3,
+      fastScrollSensitivity: 5,
+      smoothScrollDuration: 0,
       theme: { background: "#18181b", foreground: "#e4e4e7" },
       // Construct at the size the buffer was serialized at, so restoring it
       // doesn't reflow/garble the text before the ResizeObserver-driven fit()
@@ -418,14 +427,30 @@ export default function TerminalPanel({
       setFindResult({ count: e.resultCount, index: e.resultIndex });
     });
     term.open(el);
-    // Try WebGL renderer — GPU-accelerated, much lower memory than the DOM
-    // renderer for large scrollback buffers. Falls back to DOM if WebGL is
+    // Links: WebLinksAddon handles http(s) URLs (e.g. Vite's localhost link),
+    // registerFileLinkProvider handles file paths (src/foo.ts:12, .ocode/uploads)
+    // and dispatches ocode:open-file to open the editor.
+    let webLinks: InstanceType<typeof WebLinksAddon> | null = null;
+    let fileLinkProvider: { dispose(): void } | null = null;
+    try {
+      webLinks = new WebLinksAddon();
+      term.loadAddon(webLinks);
+    } catch {
+      webLinks = null;
+    }
+    try {
+      fileLinkProvider = registerFileLinkProvider(term, projectPath);
+    } catch {
+      fileLinkProvider = { dispose() {} };
+    }
+    // Try WebGL renderer — GPU-accelerated, much lower memory than the canvas
+    // renderer for large scrollback buffers. Falls back to canvas if WebGL is
     // unavailable (e.g. headless, offscreen, or unsupported browser).
     try {
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => { webgl.dispose(); });
       term.loadAddon(webgl);
-    } catch { /* fall back to DOM renderer */ }
+    } catch { /* fall back to canvas renderer */ }
     termRef.current = term;
     registerTerminal(id, term);
     fitRef.current = fit;
@@ -666,6 +691,12 @@ export default function TerminalPanel({
       osc99Disp.dispose();
       searchDisp.dispose();
       search.dispose();
+      try {
+        fileLinkProvider?.dispose();
+      } catch {}
+      try {
+        webLinks?.dispose();
+      } catch {}
       // Cancel any pending chunk writes.
       if (chunkRafId) cancelAnimationFrame(chunkRafId);
       pendingChunks.length = 0;

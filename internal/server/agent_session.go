@@ -625,6 +625,10 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 			Data:      map[string]string{"content": content},
 		})
 		h.wireHeadlessAgentCallbacks(sessionID, as.agent)
+		// Live-persist each completed step message as the turn streams, so a
+		// crash mid-turn loses at most the in-flight LLM round. Headless
+		// only: a bridged TUI persists its own transcript live.
+		h.wireLivePersist(sessionID, as, messages)
 	}
 
 	// Ensure a prior Cancel() doesn't permanently poison this session:
@@ -805,6 +809,16 @@ func (h *Handler) saveLockFor(path string) *sync.Mutex {
 // second job keeps the session visible as in-flight while the first drains.
 func (h *Handler) dispatchTurn(id, model, content string, opts turnOptions) (*turnJob, error) {
 	job := &turnJob{content: content, model: model, opts: opts, persistAck: make(chan struct{})}
+	// Refuse new turns once shutdown has begun: shutdown joins a bounded job
+	// set, so a turn dispatched after the join starts could create plugin/model
+	// processes, register an agent, and write after shutdown began.
+	h.shutdownMu.Lock()
+	if h.shutdownStarted {
+		h.shutdownMu.Unlock()
+		return nil, fmt.Errorf("server is shutting down")
+	}
+	h.turnJobsWG.Add(1)
+	h.shutdownMu.Unlock()
 	h.cancelMu.Lock()
 	if h.turnInFlight == nil {
 		h.turnInFlight = make(map[string]int)
@@ -812,6 +826,7 @@ func (h *Handler) dispatchTurn(id, model, content string, opts turnOptions) (*tu
 	h.turnInFlight[id]++
 	h.cancelMu.Unlock()
 	go func() {
+		defer h.turnJobsWG.Done()
 		h.executeTurnJob(id, job)
 		h.cancelMu.Lock()
 		if n := h.turnInFlight[id] - 1; n <= 0 {
@@ -1104,12 +1119,57 @@ func (h *Handler) applyCompactResult(sessionID string, r agent.CompactResult) {
 // saveSession persists a transcript to the session's owning project's storage
 // dir — multi-project sessions must not land in the server's own project (the
 // process workdir). Falls back to the process default only when the registry
-// entry is unknown.
+// entry is unknown. The root is read from an immutable snapshot so a
+// concurrent rebinding cannot move persistence mid-call.
 func (h *Handler) saveSession(sessionID, title string, msgs []agent.Message, metadata map[string]any) error {
-	if e := h.sessions.Lookup(sessionID); e != nil && e.ProjectRoot != "" {
+	if e, ok := h.sessions.SnapshotEntry(sessionID); ok && e.ProjectRoot != "" {
 		return session.SaveForDir(e.ProjectRoot, sessionID, title, msgs, metadata)
 	}
 	return session.Save(sessionID, title, msgs, metadata)
+}
+
+// saveSessionAsync enqueues a live transcript snapshot for background
+// persistence and returns immediately. It resolves the session's owning
+// project exactly like saveSession. Snapshots use live (never-regress)
+// semantics, so a queued snapshot that a newer sync save already superseded
+// is a harmless no-op; the turn-end saveSession stays authoritative.
+func (h *Handler) saveSessionAsync(sessionID, title string, msgs []agent.Message, metadata map[string]any) error {
+	if e, ok := h.sessions.SnapshotEntry(sessionID); ok && e.ProjectRoot != "" {
+		return session.SaveAsyncForDir(e.ProjectRoot, sessionID, title, msgs, metadata)
+	}
+	return session.SaveAsync(sessionID, title, msgs, metadata)
+}
+
+// wireLivePersist wraps the agent's OnMessage — installed by the caller
+// (wireHeadlessAgentCallbacks, or the inline callbacks in handler_sse.go),
+// which must run immediately before — so each message completed during
+// the upcoming Step is appended to the session's on-disk transcript in the
+// background instead of waiting for turn end. base is the about-to-Step
+// from; it is persisted immediately too, so the turn's opening user message
+// is durable even if the LLM call never returns.
+//
+// The closure holds its own mutex because OnMessage can fire from parallel
+// tool-dispatch goroutines inside Step, not just the calling goroutine. Only
+// the snapshot copy is taken under it; the enqueue itself runs outside.
+func (h *Handler) wireLivePersist(sessionID string, as *agentSession, base []agent.Message) {
+	prev := as.agent.OnMessage
+	var mu sync.Mutex
+	live := append([]agent.Message(nil), base...)
+	if err := h.saveSessionAsync(sessionID, "", live, nil); err != nil {
+		log.Printf("serve: live persist for %s: %v", sessionID, err)
+	}
+	as.agent.OnMessage = func(m agent.Message) {
+		if prev != nil {
+			prev(m)
+		}
+		mu.Lock()
+		live = append(live, m)
+		cp := append([]agent.Message(nil), live...)
+		mu.Unlock()
+		if err := h.saveSessionAsync(sessionID, "", cp, nil); err != nil {
+			log.Printf("serve: live persist for %s: %v", sessionID, err)
+		}
+	}
 }
 
 // loadSession is the read-side counterpart to saveSession: it resolves the

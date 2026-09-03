@@ -199,7 +199,7 @@ func TestBunRunFileGuard(t *testing.T) {
 		{"npm run build", true},         // npm run unaffected
 	}
 	for _, tc := range cases {
-		if got := matchSubcommandAllow(tc.command); got != tc.allow {
+		if got := matchSubcommandAllow(tc.command, ""); got != tc.allow {
 			t.Errorf("matchSubcommandAllow(%q)=%v want %v", tc.command, got, tc.allow)
 		}
 	}
@@ -225,11 +225,137 @@ func TestRunnerInvokedSafeTool(t *testing.T) {
 		{"npx vite", false},                 // executes a dev server, not inert
 		{"npx", false},                      // runner with no tool
 		{"npx some-random-cli", false},      // unknown tool
+		{"vpx tsc --noEmit", true},          // vp runner ~ npx
+		{"vp exec eslint .", true},          // vp exec ~ pnpm exec
+		{"vp dlx prettier --write .", true},
+		{"vpx -p evil tsc", false},     // value flag → fail closed
+		{"vpx create-vite foo", false}, // not a safe tool
+		{"vpx", false},                 // runner with no tool
 	}
 	for _, tc := range cases {
-		if got := matchSubcommandAllow(tc.command); got != tc.allow {
+		if got := matchSubcommandAllow(tc.command, ""); got != tc.allow {
 			t.Errorf("matchSubcommandAllow(%q)=%v want %v", tc.command, got, tc.allow)
 		}
+	}
+}
+
+// --- Vite+ commands and node_modules/.bin shims ------------------------------
+
+func TestMatchSubcommandAllow_VP(t *testing.T) {
+	cases := []struct {
+		command string
+		allow   bool
+	}{
+		// Read-only queries.
+		{"vp outdated", true},
+		{"vp list", true},
+		{"vp ls", true},
+		{"vp why foo", true},
+		{"vp explain foo", true},
+		{"vp info foo", true},
+		{"vp view foo", true},
+		{"vp show foo", true},
+		{"vp help", true},
+		{"vp --version", true},
+		{"vp -V", true},
+		// Project tasks (npm-run/make trust model).
+		{"vp run build", true},
+		{"vpr build", true},
+		{"vp test", true},
+		{"vp check", true},
+		{"vp lint", true},
+		{"vp fmt", true},
+		{"vp build", true},
+		{"vp dev", true},
+		{"vp preview", true},
+		// Path-like run targets must drop to Ask (bun-run parity).
+		{"vp run ./evil.ts", false},
+		{"vp run scripts/x.js", false},
+		{"vpr ./evil.ts", false},
+		// Bare vp and mutating/self-modify commands never auto-allow.
+		{"vp", false},
+		{"vp install", false},
+		{"vp add foo", false},
+		{"vp remove foo", false},
+		{"vp update", false},
+		{"vp env", false},
+		{"vp node script.js", false},
+		{"vp upgrade", false},
+		{"vp implode", false},
+		{"vp create foo", false},
+		{"vp migrate", false},
+		{"vp config", false},
+		{"vp hooks enable", false},
+		{"vp pack", false},
+	}
+	for _, tc := range cases {
+		if got := matchSubcommandAllow(tc.command, ""); got != tc.allow {
+			t.Errorf("matchSubcommandAllow(%q)=%v want %v", tc.command, got, tc.allow)
+		}
+	}
+}
+
+func TestMatchSubcommandAllow_NodeModulesBin(t *testing.T) {
+	workDir := t.TempDir()
+	cases := []struct {
+		command string
+		workDir string
+		allow   bool
+	}{
+		{"./node_modules/.bin/tsc --noEmit", workDir, true},
+		{"node_modules/.bin/tsc --noEmit", workDir, true},
+		{"web/node_modules/.bin/eslint .", workDir, true},
+		{workDir + "/node_modules/.bin/vitest run", workDir, true},
+		{"./node_modules/.bin/evil-tool", workDir, false},   // unknown tool
+		{"./node_modules/.bin/tsc --noEmit", "", false},     // no workDir → fail closed
+		{"/tmp/evil/node_modules/.bin/tsc", workDir, false}, // outside project
+		{"../other/node_modules/.bin/tsc", workDir, false},  // escapes project
+	}
+	for _, tc := range cases {
+		if got := matchSubcommandAllow(tc.command, tc.workDir); got != tc.allow {
+			t.Errorf("matchSubcommandAllow(%q, workDir=%q)=%v want %v", tc.command, tc.workDir, got, tc.allow)
+		}
+	}
+}
+
+func TestMatchSubcommandAllow_NodeModulesBinSymlinkEscape(t *testing.T) {
+	evilDir := t.TempDir() // outside every workDir below
+
+	// Project node_modules symlinked outside the worktree: the shim must not
+	// auto-allow even though it is lexically under workDir.
+	workA := t.TempDir()
+	linkA := filepath.Join(workA, "node_modules")
+	if err := os.Symlink(evilDir, linkA); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if got := matchSubcommandAllow(linkA+"/.bin/tsc --noEmit", workA); got {
+		t.Errorf("symlinked-outside node_modules must not auto-allow")
+	}
+
+	// Nested escape through a symlinked subdir.
+	workB := t.TempDir()
+	sub := filepath.Join(workB, "sub")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(evilDir, filepath.Join(sub, "nm")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if got := matchSubcommandAllow("sub/nm/.bin/tsc --noEmit", workB); got {
+		t.Errorf("nested symlinked-outside node_modules must not auto-allow")
+	}
+
+	// Symlink staying inside the worktree: allowed (canonical target in scope).
+	workC := t.TempDir()
+	realBin := filepath.Join(workC, "realnm", ".bin")
+	if err := os.MkdirAll(realBin, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(workC, "realnm"), filepath.Join(workC, "node_modules")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if got := matchSubcommandAllow("./node_modules/.bin/tsc --noEmit", workC); !got {
+		t.Errorf("in-worktree symlinked node_modules should auto-allow the safe tool")
 	}
 }
 

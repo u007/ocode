@@ -42,7 +42,9 @@ vi.mock("./api/client", () => {
   return {
     api,
     authHeaders: () => ({}),
+    authToken: () => null,
     apiPath: (p: string) => p,
+    apiWsPath: (p: string) => `ws://localhost${p}`,
     authedFetch: vi.fn(async () => new Response("{}")),
     getBrowseBase: vi.fn(async () => "http://browse.test"),
     mintBrowseGrant: vi.fn(async () => "G1"),

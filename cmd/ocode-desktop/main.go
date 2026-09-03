@@ -281,6 +281,13 @@ func main() {
 			app.Clipboard.SetText(desktopURL)
 		}),
 		application.NewMenuItemSeparator(),
+		application.NewMenuItem("Share Session…").OnClick(func(ctx *application.Context) {
+			window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:share-session"))`)
+		}),
+		application.NewMenuItem("Share Entire Desktop…").OnClick(func(ctx *application.Context) {
+			window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:share-desktop"))`)
+		}),
+		application.NewMenuItemSeparator(),
 		application.NewMenuItem("Quit").OnClick(func(ctx *application.Context) {
 			app.Quit()
 		}),
@@ -431,6 +438,28 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow) *appl
 
 	// View menu (reload, devtools, zoom, fullscreen).
 	menu.AddRole(application.ViewMenu)
+
+	// Share menu — native entry points for remote-control / desktop sharing.
+	// Mirrors TUI's /rc (share session) and surfaces the already-running
+	// desktop server URL (share entire desktop). The handlers dispatch DOM
+	// CustomEvents to the React frontend (same mechanism as Settings…) so the
+	// SPA can show the share dialog / copy the token URL without duplicating
+	// dialog logic in Go.
+	shareMenu := menu.AddSubmenu("Share")
+	shareMenu.Add("Share Session…").
+		SetAccelerator("CmdOrCtrl+Shift+S").
+		OnClick(func(*application.Context) {
+			window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:share-session"))`)
+		})
+	shareMenu.Add("Share Entire Desktop…").
+		OnClick(func(*application.Context) {
+			window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:share-desktop"))`)
+		})
+	shareMenu.AddSeparator()
+	shareMenu.Add("Copy Desktop URL").
+		OnClick(func(*application.Context) {
+			window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:copy-desktop-url"))`)
+		})
 
 	// Window menu. The macOS role is fine (Minimise/Zoom/Front, no Cmd+W).
 	// On Windows/Linux the default role adds "Close Window" bound to Cmd+W,

@@ -327,6 +327,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/sync/login/poll", s.authMiddleware(s.handleSyncLoginPoll))
 	s.mux.HandleFunc("GET /api/sync/status", s.authMiddleware(s.handleSyncStatus))
 	s.mux.HandleFunc("POST /api/sync/logout", s.authMiddleware(s.handleSyncLogout))
+	s.mux.HandleFunc("GET /api/config/ocode/sync-url", s.authMiddleware(s.handler.HandleGetSyncURLConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/sync-url", s.authMiddleware(s.handler.HandleSetSyncURLConfig))
 
 	// Permissions
 	s.mux.HandleFunc("GET /api/permissions", s.authMiddleware(s.handleGetPermissions))
@@ -1170,7 +1172,12 @@ func (s *Server) RegisterExternalSession(sessionID, model, projectRoot string, r
 	if projectRoot == "" {
 		projectRoot = s.handler.workDir
 	}
-	s.handler.sessions.Register(sessionID, projectRoot)
+	// Never silently rebind an existing session to a different project: the
+	// resident agent (if any) was built for the bound root. On mismatch keep
+	// the existing binding so execution and persistence cannot diverge.
+	if _, err := s.handler.sessions.BindNewOrVerify(sessionID, projectRoot, ""); err != nil {
+		log.Printf("server: external session %s project mismatch kept at bound root: %v", sessionID, err)
+	}
 	s.handler.rc = bridge
 	return bridge
 }

@@ -15,7 +15,13 @@ import (
 // background via tea.Tick messages driven by the model's Update loop.
 func runSyncLoginCmd(m *model, args []string) tea.Cmd {
 	return func() tea.Msg {
-		client := sync.NewClient(sync.DefaultBaseURL())
+		var syncURL string
+		if m.config != nil {
+			syncURL = m.config.Ocode.SyncURL
+		}
+		resolved, src := sync.ResolveBaseURLWithSource(syncURL)
+		sync.LogBaseURLNotice(resolved, src)
+		client := sync.NewClient(resolved)
 		ctx := context.Background()
 
 		// Start device flow (fast HTTP call — no blocking).
@@ -64,7 +70,13 @@ func runSyncLogoutCmd(m *model, args []string) tea.Cmd {
 			}
 			return statusMsg{text: "Not logged in to sync."}
 		}
-		client := sync.NewClient(sync.DefaultBaseURL())
+		var logoutURL string
+		if m.config != nil {
+			logoutURL = m.config.Ocode.SyncURL
+		}
+		logoutResolved, logoutSrc := sync.ResolveBaseURLWithSource(logoutURL)
+		sync.LogBaseURLNotice(logoutResolved, logoutSrc)
+		client := sync.NewClient(logoutResolved)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := client.Revoke(ctx, token); err != nil {

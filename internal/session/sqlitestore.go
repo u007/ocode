@@ -62,11 +62,19 @@ func openSessionDB(path string) (*sql.DB, error) {
 			title_generated INTEGER NOT NULL DEFAULT 0,
 			created_at      DATETIME NOT NULL,
 			updated_at      DATETIME NOT NULL,
-			metadata_json   TEXT NOT NULL DEFAULT '{}'
+			metadata_json   TEXT NOT NULL DEFAULT '{}',
+			history_gen     INTEGER NOT NULL DEFAULT 0
 		)
 	`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("session: create meta table: %w", err)
+	}
+	// history_gen guards live writes against post-compaction resurrection
+	// (see appendSqliteSession). Files created before the column existed
+	// gain it here; fresh files already have it via the CREATE above.
+	if err := ensureHistoryGenColumn(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS messages (
@@ -78,6 +86,63 @@ func openSessionDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("session: create messages table: %w", err)
 	}
 	return db, nil
+}
+
+// ensureHistoryGenColumn adds meta.history_gen to session files created
+// before the column existed. It inspects PRAGMA table_info rather than
+// matching error strings, so only a genuinely missing column triggers the
+// ALTER — any other failure propagates.
+func ensureHistoryGenColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(meta)`)
+	if err != nil {
+		return fmt.Errorf("session: inspect meta schema: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return fmt.Errorf("session: scan meta schema: %w", err)
+		}
+		if name == "history_gen" {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("session: iterate meta schema: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE meta ADD COLUMN history_gen INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("session: add history_gen column: %w", err)
+	}
+	return nil
+}
+
+// readHistoryGen returns the session file's current history generation: 0
+// for a missing file (a new session starts at generation 0, matching the
+// column default) or an error when the file cannot be read. It opens via
+// openSessionDB so pre-column files gain history_gen (defaulting 0, the
+// correct value for a file with no recorded shrinks) before reading.
+func readHistoryGen(dir, id string) (int64, error) {
+	path := sqliteSessionPath(dir, id)
+	if !fileExists(path) {
+		return 0, nil
+	}
+	db, err := openSessionDB(path)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	var gen int64
+	if err := db.QueryRow(`SELECT history_gen FROM meta WHERE id = ?`, id).Scan(&gen); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("session: read history_gen %s: %w", id, err)
+	}
+	return gen, nil
 }
 
 // openIndexDB opens (creating if needed) the shared per-project
@@ -165,30 +230,93 @@ func writeSqliteSessionFull(dir string, s Session) error {
 // history on every turn. title is the caller's explicit-title-this-save
 // signal exactly as in saveOjsonl/saveJSON: "" means keep the existing
 // title, non-empty always wins and marks the title as explicitly set.
-func appendSqliteSession(dir, id, title string, messages []agent.Message, metadata map[string]any) error {
+//
+// live selects the async live-write mode used by the per-session worker in
+// live.go: the message count is read inside the write transaction, and a
+// snapshot that adds no new messages is a complete no-op (messages, title,
+// metadata, and updated_at are all left untouched) — a live write must never
+// shrink the transcript (compaction goes through the synchronous path with
+// live=false), replace same-length content, or regress a newer title/metadata
+// with an older queued snapshot. Title/metadata ride along only with
+// genuinely new messages; the turn-end synchronous save stays authoritative
+// for them. The function reports whether anything changed so callers can skip
+// the index refresh when the write was a stale no-op.
+//
+// liveGen is the history generation the live snapshot was taken against (see
+// readHistoryGen): a live write whose generation no longer matches the stored
+// one is a superseded pre-compaction snapshot and is dropped, so a queued
+// write can never resurrect history a synchronous shrink already replaced.
+// Synchronous shrinks bump history_gen in the same transaction as the
+// replacement, so the check inside this transaction closes the race in both
+// orders. liveGen is ignored when live is false.
+// appendSqliteSession is the retrying entry point: concurrent writers on one
+// session file can hit SQLITE_BUSY when both hold SHARED locks and one tries
+// to upgrade (busy_timeout does not cover that upgrade deadlock — SQLite
+// fails it immediately), so a busy failure retries the whole transaction with
+// backoff instead of surfacing a transient lock as a write error. Conflict
+// errors (diverged overlap) are NOT retried — retrying those would spin.
+func appendSqliteSession(dir, id, title string, messages []agent.Message, metadata map[string]any, live bool, liveGen int64) (bool, error) {
+	var changed bool
+	var err error
+	for attempt := 0; attempt < 8; attempt++ {
+		changed, err = appendSqliteSessionOnce(dir, id, title, messages, metadata, live, liveGen)
+		if err == nil || !isBusyErr(err) {
+			return changed, err
+		}
+		time.Sleep(time.Duration(5*(attempt+1)) * time.Millisecond)
+	}
+	return false, err
+}
+
+// isBusyErr reports a transient SQLite lock contention.
+func isBusyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "database is locked") || strings.Contains(s, "database table is locked")
+}
+
+func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, metadata map[string]any, live bool, liveGen int64) (bool, error) {
 	path := sqliteSessionPath(dir, id)
 	db, err := openSessionDB(path)
 	if err != nil {
-		return fmt.Errorf("session: open sqlite %s: %w", id, err)
+		return false, fmt.Errorf("session: open sqlite %s: %w", id, err)
 	}
 	defer db.Close()
 
 	tx, err := db.Begin()
 	if err != nil {
-		return fmt.Errorf("session: begin tx %s: %w", id, err)
+		return false, fmt.Errorf("session: begin tx %s: %w", id, err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	var existingTitle string
 	var existingTitleGenerated bool
 	var existingMetaJSON string
-	if err := tx.QueryRow(`SELECT title, title_generated, metadata_json FROM meta WHERE id = ?`, id).
-		Scan(&existingTitle, &existingTitleGenerated, &existingMetaJSON); err != nil {
-		return fmt.Errorf("session: read meta %s: %w", id, err)
+	var existingGen int64
+	if err := tx.QueryRow(`SELECT title, title_generated, metadata_json, history_gen FROM meta WHERE id = ?`, id).
+		Scan(&existingTitle, &existingTitleGenerated, &existingMetaJSON, &existingGen); err != nil {
+		return false, fmt.Errorf("session: read meta %s: %w", id, err)
 	}
 	var existingCount int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&existingCount); err != nil {
-		return fmt.Errorf("session: count messages %s: %w", id, err)
+		return false, fmt.Errorf("session: count messages %s: %w", id, err)
+	}
+
+	if live && existingGen != liveGen {
+		// Superseded pre-compaction snapshot: a synchronous shrink replaced
+		// the history after this snapshot was queued. Appending its suffix
+		// would resurrect compacted messages, so drop it entirely.
+		return false, nil
+	}
+
+	if live && existingCount >= len(messages) {
+		// No new messages (stale or identical queued snapshot) — leave
+		// everything untouched, including title, metadata, updated_at, and
+		// the index row. Title/metadata ride along only with genuinely new
+		// messages so an older snapshot can never regress them.
+		return false, nil
 	}
 
 	resolvedTitle := existingTitle
@@ -207,44 +335,106 @@ func appendSqliteSession(dir, id, title string, messages []agent.Message, metada
 	} else {
 		b, err := json.Marshal(metadata)
 		if err != nil {
-			return fmt.Errorf("session: marshal metadata %s: %w", id, err)
+			return false, fmt.Errorf("session: marshal metadata %s: %w", id, err)
 		}
 		metaJSON = string(b)
 	}
 
-	if _, err := tx.Exec(
-		`UPDATE meta SET title = ?, title_generated = ?, updated_at = ?, metadata_json = ? WHERE id = ?`,
-		resolvedTitle, titleGenerated, time.Now(), metaJSON, id,
-	); err != nil {
-		return fmt.Errorf("session: update meta %s: %w", id, err)
+	newGen := existingGen
+	shrinking := existingCount > len(messages)
+	if shrinking {
+		// Synchronous shrink only: live writes with fewer messages than
+		// stored returned early above, so reaching here with a shorter
+		// snapshot means an authoritative compaction. Bump the generation
+		// in this same transaction so any queued pre-compaction live
+		// snapshot mismatches and drops instead of resurrecting history.
+		newGen++
 	}
 
-	if existingCount > len(messages) {
+	if _, err := tx.Exec(
+		`UPDATE meta SET title = ?, title_generated = ?, updated_at = ?, metadata_json = ?, history_gen = ? WHERE id = ?`,
+		resolvedTitle, titleGenerated, time.Now(), metaJSON, newGen, id,
+	); err != nil {
+		return false, fmt.Errorf("session: update meta %s: %w", id, err)
+	}
+
+	if shrinking {
 		// Message count shrank (e.g. /compact) — the append-only path
 		// can't represent that, so replace the message set wholesale.
-		// Mirrors saveOjsonl's identical handling in ojsonl.go.
+		// Mirrors saveOjsonl's identical handling in ojsonl.go. Only the
+		// synchronous path reaches here; live writes return early above.
 		if _, err := tx.Exec(`DELETE FROM messages`); err != nil {
-			return fmt.Errorf("session: clear messages %s: %w", id, err)
+			return false, fmt.Errorf("session: clear messages %s: %w", id, err)
 		}
 		existingCount = 0
 	}
 
+	// Overlap check: the stored prefix and the incoming snapshot must agree
+	// wherever they overlap. Two processes appending different messages at
+	// the same seq (independent concurrent turns from the same base) must
+	// never silently drop one of them — the old INSERT OR IGNORE did exactly
+	// that. Identical overlap converges (idempotent retry); differing overlap
+	// is a conflict: the synchronous path reports an error so the caller can
+	// retry/reconcile, while the live path drops the stale snapshot (the
+	// turn-end sync save stays authoritative).
+	if overlap := min(existingCount, len(messages)); overlap > 0 {
+		stored := make([]string, 0, overlap)
+		rows, err := tx.Query(`SELECT data FROM messages ORDER BY seq ASC LIMIT ?`, overlap)
+		if err != nil {
+			return false, fmt.Errorf("session: read overlap %s: %w", id, err)
+		}
+		for rows.Next() {
+			var data string
+			if err := rows.Scan(&data); err != nil {
+				rows.Close()
+				return false, fmt.Errorf("session: scan overlap %s: %w", id, err)
+			}
+			stored = append(stored, data)
+		}
+		rowsCloseErr := rows.Err()
+		if err := rows.Close(); err != nil {
+			return false, fmt.Errorf("session: close overlap %s: %w", id, err)
+		}
+		if rowsCloseErr != nil {
+			return false, fmt.Errorf("session: iterate overlap %s: %w", id, rowsCloseErr)
+		}
+		for i, want := range stored {
+			got, err := json.Marshal(messages[i])
+			if err != nil {
+				return false, fmt.Errorf("session: marshal message %d of %s: %w", i, id, err)
+			}
+			if string(got) != want {
+				if live {
+					return false, nil
+				}
+				return false, fmt.Errorf("session: conflicting message at seq %d of %s (concurrent writers diverged)", i, id)
+			}
+		}
+	}
+
+	// A plain INSERT surfaces any residual primary-key race as an error
+	// instead of silently discarding a message. In-process writers are
+	// serialized by lockFor; a cross-process loser re-reads and retries via
+	// the overlap check above on its next save rather than losing data.
 	stmt, err := tx.Prepare(`INSERT INTO messages (seq, data) VALUES (?, ?)`)
 	if err != nil {
-		return fmt.Errorf("session: prepare insert %s: %w", id, err)
+		return false, fmt.Errorf("session: prepare insert %s: %w", id, err)
 	}
 	defer stmt.Close()
 	for i := existingCount; i < len(messages); i++ {
 		data, err := json.Marshal(messages[i])
 		if err != nil {
-			return fmt.Errorf("session: marshal message %d of %s: %w", i, id, err)
+			return false, fmt.Errorf("session: marshal message %d of %s: %w", i, id, err)
 		}
 		if _, err := stmt.Exec(i, string(data)); err != nil {
-			return fmt.Errorf("session: insert message %d of %s: %w", i, id, err)
+			return false, fmt.Errorf("session: insert message %d of %s: %w", i, id, err)
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // readSqliteSession loads the full session (meta + all messages) from a

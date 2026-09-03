@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/u007/ocode/internal/knowledge"
 	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -51,20 +52,28 @@ Output:
 - End with a "remaining unknowns" section listing anything you could not verify within scope.
 - Do not propose fixes or write design discussion; you are a research agent.`
 
-const contextSubAgentPrompt = `You are context, the knowledge curator for this project's OKF (Open Knowledge Format) bundle under docs/. Your job is to answer "why/what did we decide/do we have a playbook for X" questions from curated docs, and to be the sole automated writer of the bundle.
+const contextSubAgentPrompt = `You are context, the knowledge curator for this project's OKF (Open Knowledge Format) bundle under docs/ AND the codebase navigator when the bundle is active. Your job is to answer "why/what did we decide/do we have a playbook for X" questions from curated docs, be the sole automated writer of the bundle, and answer "where/how/what" questions about code when docs are insufficient — you subsume the explore agent when active.
 
-Approach:
-- Start by issuing a single 'doc_search' with a broad query and 'get_top: 3' so the top matches return their full bodies inline — this avoids a separate 'doc_get' round-trip. Answer and cite document paths directly from the returned content.
-- Only call 'doc_get' when you need a document beyond the top-N (use 'page'/'get_top' to retrieve more), must verify an exact claim against the verbatim text, or are about to write/update the bundle.
-- Verify doc claims against code before answering or writing — use grep/glob/read to cross-reference.
+Priority (knowledge-first, explore as fallback/verification):
+- ALWAYS start with a single 'doc_search' (broad query, get_top: 3) so the top matches return their full bodies inline. This is cheap and answers most why/decision/playbook questions.
+- Only call 'doc_get' when you need a document beyond the top-N (use page/get_top), must verify an exact claim against verbatim text, or are about to write/update the bundle.
+
+Code exploration (inherited from explore):
+- When doc_search is insufficient, the question is where/how/what, or you must verify a doc claim against code, use the explore toolkit: start broad with glob to map the area, then narrow with grep for symbols/callsites, use list for directory structure, read for smallest relevant excerpts, lsp for definitions/references when grep is ambiguous, and read-only bash sparingly (git log/blame, jq on manifests). Never run network/install/write commands.
+- You MAY issue doc_search and code tools (grep/glob/read/lsp/bash/webfetch) in parallel in the SAME tool-call batch when the question is mixed (why + where) or you suspect docs won't cover it — this saves a round-trip. If doc_search returns a sufficient answer, ignore the parallel code results and cite docs/*.md directly. Do NOT waste parallel exploration for pure why/decision questions where docs alone suffice.
+- Thoroughness levels the caller may specify: quick (one targeted lookup), medium (handful of queries), very thorough (multiple naming conventions, synonyms, adjacent layers).
+
+Writes:
+- Verify doc claims against code before answering or writing — use grep/glob/read/lsp to cross-reference.
 - Write only through the doc tools (doc_write, doc_deprecate). Never edit docs/ files directly.
 - Prefer updating an existing document over creating a near-duplicate.
 - Deprecate rather than delete — set status=deprecated with a reason.
 - When the knowledge system is not initialized, say so and suggest /docs init.
 
 Output:
-- Lead with the answer, citing document paths.
-- When writing, summarise what changed and why in one paragraph.`
+- Lead with the answer, citing document paths for knowledge and file:line for code claims.
+- When writing, summarise what changed and why in one paragraph.
+- Address each caller expectation explicitly; end with remaining unknowns if any.`
 
 const scoutSubAgentPrompt = `You are scout, a read-only research agent for code OUTSIDE this workspace — external libraries, dependency source, vendor docs, and reference repositories.
 
@@ -106,9 +115,9 @@ var DefaultSubAgents = []SubAgentSpec{
 	},
 	{
 		Name:         "context",
-		Description:  "knowledge curator and retriever for the project's OKF docs/ bundle — answers why/decision/playbook questions from curated docs, cites doc paths, sole automated writer of the bundle",
+		Description:  "knowledge curator and retriever for the project's OKF docs/ bundle — answers why/decision/playbook questions from curated docs, cites doc paths, sole automated writer of the bundle; also handles codebase exploration (where/how/what) when the bundle is active — subsumes explore",
 		SystemPrompt: contextSubAgentPrompt,
-		Tools:        []string{"grep", "glob", "read", "list", "skill", "load_skill"},
+		Tools:        []string{"grep", "glob", "read", "list", "lsp", "bash", "webfetch", "websearch", "skill", "load_skill"},
 	},
 }
 
@@ -121,6 +130,23 @@ func enumNames(visible, all []string) []string {
 		return visible
 	}
 	return all
+}
+
+// isContextActive reports whether the knowledge bundle is active for the main
+// agent: DocPromptEnabled is on AND an OKF bundle (docs/index.md with
+// okf_version) is present at the agent's workDir. This is the user-visible
+// "context agent is available" gate (two gates, both required). When active,
+// context subsumes explore and explore is hidden from the task schema.
+func (t TaskTool) isContextActive() bool {
+	if t.mainAgent == nil || !t.mainAgent.DocPromptEnabled() {
+		return false
+	}
+	wd := t.mainAgent.WorkDir()
+	if wd == "" {
+		wd, _ = os.Getwd()
+	}
+	_, ok := knowledge.DetectBundle(wd)
+	return ok
 }
 
 func FindSubAgentSpec(name string) *SubAgentSpec {
@@ -167,6 +193,19 @@ func (t TaskTool) Description() string { return "Delegate a task to a specialize
 func (t TaskTool) Parallel() bool      { return true }
 func (t TaskTool) Definition() map[string]interface{} {
 	subAgents := t.registrySubAgents()
+	// When the knowledge bundle is active, context subsumes explore: hide
+	// explore from the schema so the model cannot choose the wrong agent.
+	// Keep the implementation and lookup intact for fallback/compat.
+	if t.isContextActive() {
+		var filtered []AgentDefinition
+		for _, sa := range subAgents {
+			if sa.Name == "explore" {
+				continue
+			}
+			filtered = append(filtered, sa)
+		}
+		subAgents = filtered
+	}
 	subAgentNames := make([]string, 0)
 	subAgentDescs := make([]string, 0)
 	visibleAgentNames := make([]string, 0)

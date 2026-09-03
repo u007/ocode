@@ -178,6 +178,83 @@ func (m *SessionManager) RegisterWithWindow(sessionID, projectRoot, windowID str
 	return entry
 }
 
+// projectMismatchError reports a rejected attempt to rebind an existing
+// session to a different project root.
+type projectMismatchError struct {
+	sessionID string
+	have      string
+	want      string
+}
+
+func (e *projectMismatchError) Error() string {
+	return "session " + e.sessionID + " belongs to project " + e.have + ", not " + e.want
+}
+
+// Snapshot returns an immutable copy of the registry entry for sessionID.
+// Unlike Lookup (which hands out the live pointer), the copy cannot observe
+// — or be observed racing with — a later rebinding, so persistence paths
+// that act on ProjectRoot after the manager lock is released must use this.
+func (m *SessionManager) SnapshotEntry(sessionID string) (sessionEntry, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e, ok := m.entries[sessionID]; ok {
+		return *e, true
+	}
+	return sessionEntry{}, false
+}
+
+// BindNewOrVerify binds sessionID to projectRoot when the session is not yet
+// known (resolving via disk first, registering to projectRoot when it exists
+// nowhere), or verifies a known session already belongs to projectRoot.
+// A non-empty projectRoot that disagrees with the bound root is rejected:
+// silently rebinding would leave a resident agent built for the old project
+// running while persistence moves to the new one, so the next turn could
+// execute in project A but save into project B. Window binding updates on
+// success. Returns an immutable snapshot of the entry.
+//
+// Today this call site is lenient about sessions that exist in no registered
+// project (a missing session silently starts with empty history); that is
+// preserved by binding to the default root and continuing.
+func (m *SessionManager) BindNewOrVerify(sessionID, projectRoot, windowID string) (sessionEntry, error) {
+	m.mu.Lock()
+	if e, ok := m.entries[sessionID]; ok {
+		if projectRoot != "" && e.ProjectRoot != "" && projectRoot != e.ProjectRoot {
+			snap := *e
+			m.mu.Unlock()
+			return snap, &projectMismatchError{sessionID: sessionID, have: e.ProjectRoot, want: projectRoot}
+		}
+		if windowID != "" {
+			e.WindowID = windowID
+		}
+		e.lastActivity = time.Now()
+		snap := *e
+		m.mu.Unlock()
+		return snap, nil
+	}
+	m.mu.Unlock()
+
+	// Unknown id: resolve via disk without holding the manager lock.
+	if _, err := m.Resolve(sessionID); err == nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		cur := m.entries[sessionID]
+		if cur == nil {
+			// Evicted between Resolve and here; bind fresh below.
+		} else {
+			if projectRoot != "" && cur.ProjectRoot != "" && projectRoot != cur.ProjectRoot {
+				snap := *cur
+				return snap, &projectMismatchError{sessionID: sessionID, have: cur.ProjectRoot, want: projectRoot}
+			}
+			if windowID != "" {
+				cur.WindowID = windowID
+			}
+			cur.lastActivity = time.Now()
+			return *cur, nil
+		}
+	}
+	return *m.RegisterWithWindow(sessionID, projectRoot, windowID), nil
+}
+
 // SetWindowID updates the window binding for an existing session. No-op if
 // session unknown or windowID empty.
 func (m *SessionManager) SetWindowID(sessionID, windowID string) {

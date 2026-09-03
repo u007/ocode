@@ -1,7 +1,9 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -11,6 +13,11 @@ import (
 // void the write boundary (quotes, newlines, null bytes, or a writable
 // filesystem root). The generated profile is a security boundary, so a path we
 // cannot emit faithfully must fail the whole command.
+// Missing (not-yet-created) roots are SKIPPED, matching the Linux backends
+// (canonicalExistingWritables / buildBwrapArgv): binding a missing source
+// would fail startup, and skipping never widens the boundary — nothing exists
+// there to write to. A missing cache subdir (e.g. ~/.cache/bun) is already
+// covered when its existing parent (e.g. ~/.cache) is writable via subpath.
 func seatbeltProfileSafe(roots RootSet) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(`(version 1)
@@ -27,6 +34,9 @@ func seatbeltProfileSafe(roots RootSet) (string, error) {
 		var canonical string
 		canonical, err := canonicalRoot(root)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return "", err
 		}
 		if canonical == "/" {

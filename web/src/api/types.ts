@@ -566,6 +566,8 @@ export interface Project {
   last_used_at: string;
   order: number;
   group: string;
+  /** Optional remote host for ocode Remote SSH/WSL projects. Empty for local projects. */
+  host?: string;
 }
 
 export interface ProjectGroup {

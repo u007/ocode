@@ -1017,6 +1017,12 @@ func (m *model) cleanupCurrentSession() {
 	// Wait for any background session saves (enqueued by async model
 	// switch or /new) so the process does not exit before they hit disk.
 	m.waitForPendingSaves(5 * time.Second)
+	// Drain per-message live snapshots too: they are not WG-tracked (one
+	// barrier goroutine per streamed message would be pure churn), so a quit
+	// mid-turn would otherwise drop the turn's streamed transcript.
+	if err := session.FlushAll(5 * time.Second); err != nil {
+		log.Printf("shutdown: flush live session writes: %v", err)
+	}
 	// Evict stale tool-result cache files (older than 2 days).
 	_ = agent.CleanupToolResults(48 * time.Hour)
 }
@@ -1460,7 +1466,10 @@ type model struct {
 	transcriptLines          []string
 	rawTranscriptLines       []string
 	urlLinkRegions           []urlLinkRegion             // clickable [text](url) markdown-link targets, indexed by absolute transcript line. Markdown links drop the URL during rendering (so rawTranscriptLines can't detect them); these regions restore clickability.
-	transcriptMsgStartLine   []int                       // for each message index, the first wrapped line of its block in transcriptLines (parallel to m.messages; -1 for indices past the end). Used to scroll to a chat-search match.
+	transcriptMsgStartLine   []int                       // for each message index, the first wrapped line of its block in transcriptLines (parallel to m.messages; -1 for hidden messages outside the window). Used to scroll to a chat-search match.
+	transcriptWindowStart    int                         // first message index rendered in the transcript window; always >= 0 once initialized (0 = show all). Never -1: -1 is reserved for transcriptMsgStartLine entries meaning "hidden".
+	transcriptWindowInit     bool                        // true once the window has been computed; false until the first render. New models and zero-value test models start uninitialized and compute the window on first render.
+	transcriptRenderedLen    int                         // len(m.messages) at the last render; eviction only trims when the tail grew since then, so explicitly expanded history is never discarded by a mere re-render.
 	msgRenderCache           map[int]msgRenderCacheEntry // per-message rendered-block cache keyed by message index; avoids re-running lipgloss/markdown render for unchanged messages on every streamed delta
 	themeGen                 int                         // bumped on every applyTheme so the render cache invalidates when colors change
 	pipboyArtLines           []string                    // current pipboy art lines, randomized per session when pipboy theme is active
@@ -2986,22 +2995,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.activeTab == tabGit {
-			panelW := m.panelWidth()
-			sectW := panelW * 20 / 100
-			filesW := panelW * 30 / 100
+			// Column geometry must match gitModel.View, which lays out
+			// from the full width (no sidebar on the git tab).
+			sectW := m.width * 20 / 100
+			filesW := m.width * 30 / 100
 			sectRight := sectW
 			filesRight := sectRight + filesW
 			mouseX := msg.Mouse().X
 
-			// Mouse wheel over the files column scrolls the file list.
+			// Mouse wheel over the files column scrolls the visible
+			// section's list (files, commits, stashes, or branches).
 			if mouseX >= sectRight && mouseX < filesRight {
-				if msg.Button == tea.MouseWheelUp {
-					m.git.changesList.ScrollUp(scrollSpeed)
-					return m, nil
-				}
-				if msg.Button == tea.MouseWheelDown {
-					m.git.changesList.ScrollDown(scrollSpeed)
-					return m, nil
+				if lb := m.git.listBoxForSection(); lb != nil {
+					if msg.Button == tea.MouseWheelUp {
+						lb.ScrollUp(scrollSpeed)
+						return m, nil
+					}
+					if msg.Button == tea.MouseWheelDown {
+						lb.ScrollDown(scrollSpeed)
+						return m, nil
+					}
 				}
 			}
 			// All other areas scroll the diff panel.
@@ -3063,7 +3076,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.Button == tea.MouseWheelUp {
-			m.viewport.ScrollUp(scrollSpeed)
+			m.scrollTranscriptUp(scrollSpeed)
 			return m, nil
 		}
 		if msg.Button == tea.MouseWheelDown {
@@ -4639,6 +4652,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.rerenderTranscriptAndMaybeScroll()
 		}
+		// Live-persist each completed message as it lands in the transcript
+		// (covers assistant/tool/injected-user branches above) — the turn-end
+		// saveSession stays authoritative.
+		m.persistLiveSnapshot()
 		return m, m.continueStreamEvent(msg.epoch, msg.ch, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
 	case streamDoneMsg:
 		if !m.currentStreamEpoch(msg.epoch) {
@@ -5992,6 +6009,34 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	case "ctrl+t":
 		m.cycleTheme()
 		return m, nil
+	case "pgup":
+		m.scrollTranscriptUp(m.viewport.Height())
+		return m, nil
+	case "pgdown":
+		m.viewport.ScrollDown(m.viewport.Height())
+		return m, nil
+	case "home":
+		if strings.TrimSpace(m.input.Value()) == "" {
+			if m.transcriptHiddenCount() > 0 {
+				// Load everything in one render so Home truly reaches the
+				// oldest message. Pre-mark the tail as rendered so the
+				// tail-growth eviction doesn't trim the just-loaded history
+				// back down (no new messages arrived).
+				m.transcriptWindowStart = 0
+				m.transcriptWindowInit = true
+				m.transcriptRenderedLen = len(m.messages)
+				m.renderTranscript()
+			}
+			m.viewport.GotoTop()
+			return m, nil
+		}
+		break
+	case "end":
+		if strings.TrimSpace(m.input.Value()) == "" {
+			m.viewport.GotoBottom()
+			return m, nil
+		}
+		break
 	case "ctrl+d":
 		m.cycleThinkingLevel()
 		return m, nil
@@ -6515,6 +6560,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 		if m.transcriptScrollbarHit(mouse) {
 			scrollbarSetOffset(&m.viewport, mouse.Y, m.viewportContentTopY(), m.viewport.Height())
+			m.maybeLoadMoreTranscriptToTop()
 			return m, nil, true
 		}
 	}
@@ -6555,15 +6601,16 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 	}
 	if pressed && m.activeTab == tabGit {
-		panelW := m.panelWidth()
+		// Column geometry must match gitModel.View, which lays out from
+		// the full width (no sidebar on the git tab).
 		// +1 for the pane's top border, which sits one row below the (now
 		// 2-row) header.
 		gitBodyTop := appHeaderHeight + 1
-		sectW := panelW * 20 / 100
-		filesW := panelW * 30 / 100
+		sectW := m.width * 20 / 100
+		filesW := m.width * 30 / 100
 		sectRight := sectW
 		filesRight := sectRight + filesW
-		diffRight := panelW - 1
+		diffRight := m.width - 1
 		scrollX := diffRight - 1
 
 		// scrollbar for diff panel
@@ -6602,22 +6649,16 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.lastClickY = mouse.Y
 				m.git.panel = gitPanelFiles
 
-				// Use ListBox HitTest to map click to item index
-				// The ListBox accounts for headers, filter bar, and scroll offset
-				filesW := panelW * 30 / 100
-				filesListW := filesW - 4
-				// Match Resize()'s height calculation: h - 4 - commitInputRows
+				// Use ListBox HitTest to map click to item index.
+				// The ListBox accounts for headers, filter bar, and scroll
+				// offset. Geometry comes from the shared helper (in parent
+				// coordinates, matching the rendered panes) so hit testing
+				// matches the rendered rows exactly.
 				commitInputRows := 0
 				if m.git.committing {
 					commitInputRows = m.git.commitInput.Height() + 2
 				}
-				filesListH := m.height - 4 - commitInputRows
-				if m.git.section == gitSectionLog {
-					filesListH = m.git.commitViewport.Height()
-				}
-				if filesListH < 1 {
-					filesListH = 1
-				}
+				filesListW, filesListH := gitFilesListInnerDims(m.width, m.height, commitInputRows)
 				lb := m.git.getOrCreateListBox(m.git.section, filesListW, filesListH)
 
 				if lb != nil {
@@ -6941,9 +6982,17 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	}
 	if !pressed {
 		wasScrollbarDrag := m.scrollbarDrag != scrollbarDragNone
+		prevDrag := m.scrollbarDrag
 		m.scrollbarDrag = scrollbarDragNone
 		m.scrollbarDragOffset = 0
 		if wasScrollbarDrag {
+			// A transcript drag released while pinned to the top loads one
+			// older chunk pinned to the new top (thumb stays under the
+			// cursor). Further chunks load via wheel/pgup — never
+			// mid-drag, where expansion would yank the thumb away.
+			if prevDrag == scrollbarDragTranscript {
+				m.maybeLoadMoreTranscriptToTop()
+			}
 			return m, nil, true
 		}
 		if m.sel.dragging {
@@ -7232,6 +7281,17 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		// Plain click (no drag): check if click is on the permission text
 		// and cycle the permission mode.
 		statusTop := m.statusBarTopY()
+		// Pending permission/question on a non-Chat tab: the dialog only
+		// renders on Chat, so a click on the status-bar pending hint jumps
+		// back to Chat instead of stranding the user with no popup.
+		if (m.showPermDialog || m.showQuestionDialog) && m.activeTab != tabChat &&
+			mouse.Y == statusTop+1 {
+			m.activeTab = tabChat
+			m.chatUnread = false
+			m.layout()
+			m.statusSel = selectionState{}
+			return m, nil, true
+		}
 		if mouse.Y >= statusTop && mouse.Y < statusTop+2 && mouse.X >= m.statusPermColStart && mouse.X < m.statusPermColEnd && mouse.Y == statusTop && m.agent != nil {
 			perm := m.agent.Permissions()
 			// Cycle: normal → normal·auto → yolo → locked → sandbox → normal
@@ -7758,6 +7818,10 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	switch m.scrollbarDrag {
 	case scrollbarDragTranscript:
 		scrollbarSetOffset(&m.viewport, mouse.Y-m.scrollbarDragOffset, trackTop, m.viewport.Height())
+		// Deliberately no load-more here: expanding mid-drag would shift
+		// the content under the thumb away from the cursor and fire once
+		// per motion event (many chunks per drag). A drag that ends at the
+		// top loads exactly one chunk on release (see handleMouseAction).
 		return m, nil, true
 	case scrollbarDragDetail:
 		detailTrackTop, detailTrackHeight := m.detailScrollbarMetrics()
@@ -10370,6 +10434,7 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			restoreTodoState(sess.Metadata)
 			m.messages = []message{}
+			m.resetTranscriptWindow()
 			m.streamingThinkingIdx = -1
 			roleCounts := map[string]int{}
 			for _, am := range sess.Messages {
@@ -10749,6 +10814,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.rawTranscriptLines = nil
 	m.urlLinkRegions = nil
 	m.sel = selectionState{}
+	m.resetTranscriptWindow()
 	m.streamingThinkingIdx = -1
 	m.pendingCompactManual = false
 	m.pendingCompactUIIdx = nil
@@ -13714,14 +13780,21 @@ func (m *model) enqueueAsyncSessionSave(id, title string, msgs []agent.Message, 
 	if id == "" || len(msgs) == 0 {
 		return
 	}
-	cp := make([]agent.Message, len(msgs))
-	copy(cp, msgs)
+	// Live (never-regress) semantics: a queued snapshot that a newer sync
+	// save already superseded is a harmless no-op, so this is safe to fire
+	// before mutating the session — unlike the old direct-save goroutine,
+	// a stale snapshot can no longer rewrite the transcript, title, or
+	// metadata. The turn-end saveSession stays authoritative.
+	if err := session.SaveAsync(id, title, msgs, meta); err != nil {
+		log.Printf("async save session %s: %v", id, err)
+		return
+	}
 	wg := m.ensurePendingSavesWG()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := session.Save(id, title, cp, meta); err != nil {
-			log.Printf("async save session %s: %v", id, err)
+		if err := session.Flush(id, 30*time.Second); err != nil {
+			log.Printf("async save session %s: flush: %v", id, err)
 		}
 	}()
 }
@@ -13765,6 +13838,28 @@ func (m *model) saveSession() {
 		return
 	}
 	agent.DebugAppendf("SESSION", "saved session %s (%d msgs: user=%d asst=%d tool=%d system=%d)", m.sessionID, len(agentMsgs), roleCounts["user"], roleCounts["assistant"], roleCounts["tool"], roleCounts["system"])
+}
+
+// persistLiveSnapshot enqueues the current transcript for background
+// persistence and returns immediately. It fires per streamed message (and at
+// turn start, covering the user message during LLM TTFT) so a crash mid-turn
+// loses at most the in-flight round instead of the whole turn — affordable
+// now that sqlite appends only the new messages instead of rewriting the
+// file. Snapshots use live (never-regress) semantics with keep-title /
+// keep-metadata, so they can never clobber the turn-end saveSession, which
+// stays authoritative for titles and sidebar metadata.
+func (m *model) persistLiveSnapshot() {
+	if m.sessionID == "" {
+		m.sessionID = session.NewSessionID()
+		m.sessionCreatedAt = time.Now()
+	}
+	agentMsgs := m.persistedAgentMessages()
+	if len(agentMsgs) == 0 {
+		return
+	}
+	if err := session.SaveAsync(m.sessionID, "", agentMsgs, nil); err != nil {
+		agent.DebugAppendf("SESSION", "live persist FAILED for session %s: %v", m.sessionID, err)
+	}
 }
 
 func (m *model) persistedAgentMessages() []agent.Message {
@@ -14772,6 +14867,10 @@ func (m *model) askAgent() tea.Cmd {
 // through here so they share identical streaming, activity-row, and
 // error-surfacing behaviour.
 func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
+	// Live-persist the turn's opening state (history + new user message)
+	// before the LLM call starts, so it is durable during TTFT — the first
+	// streamed completion triggers the next snapshot in streamMsgEvent.
+	m.persistLiveSnapshot()
 	cancel := make(chan struct{})
 	msgCh := make(chan agent.Message, 16)
 	deltaCh := make(chan deltaEvent, 256)
@@ -16568,6 +16667,161 @@ func (m *model) maybeScrollTranscriptToBottom() {
 	}
 }
 
+// ensureTranscriptWindow computes the transcript window on first render:
+// len(messages)-transcriptInitialWindowMsgs when the session is long, else 0
+// (show all). Afterwards it only clamps a stale start (e.g. after /new or a
+// compaction shrank m.messages). Initialization is tracked by
+// transcriptWindowInit, so transcriptWindowStart itself never carries a
+// sentinel: 0 unambiguously means show-all. m.messages is never trimmed —
+// the window affects only what renderTranscript paints.
+func (m *model) ensureTranscriptWindow() {
+	n := len(m.messages)
+	if !m.transcriptWindowInit {
+		m.transcriptWindowInit = true
+		if n > transcriptInitialWindowMsgs {
+			m.transcriptWindowStart = n - transcriptInitialWindowMsgs
+		} else {
+			m.transcriptWindowStart = 0
+		}
+		return
+	}
+	if m.transcriptWindowStart > n || m.transcriptWindowStart < 0 {
+		m.transcriptWindowStart = 0
+	}
+}
+
+// transcriptHiddenCount reports how many oldest messages are outside the
+// rendered window (0 = full transcript visible).
+func (m *model) transcriptHiddenCount() int {
+	if !m.transcriptWindowInit {
+		return 0
+	}
+	if m.transcriptWindowStart > len(m.messages) || m.transcriptWindowStart < 0 {
+		return 0
+	}
+	return m.transcriptWindowStart
+}
+
+// resetTranscriptWindow clears windowing so the next render recomputes it
+// from scratch. Called on /new, /clear, and session-load paths where the
+// message list is rebuilt rather than appended to.
+func (m *model) resetTranscriptWindow() {
+	m.transcriptWindowStart = 0
+	m.transcriptWindowInit = false
+	m.transcriptRenderedLen = 0
+}
+
+// expandTranscriptWindow grows the rendered window backward by one chunk,
+// preserving the user's scroll anchor so the previously-visible top line stays
+// put: newTotal-oldTotal lines are prepended above, so YOffset shifts down by
+// exactly that delta. Returns true when the window actually grew.
+func (m *model) expandTranscriptWindow() bool {
+	return m.expandTranscriptWindowAnchored(true)
+}
+
+// expandTranscriptWindowAnchored grows the rendered window backward by one
+// chunk. With anchor=true (wheel/page-up/search paths) the user's scroll
+// anchor is preserved: the content at oldOffset is pushed down by the
+// prepended delta, so YOffset shifts down by exactly that delta and the
+// previously-visible top line stays put. With anchor=false (scrollbar
+// track-click/drag-release at the very top) the viewport pins to the newly
+// loaded top instead — shifting the offset there would yank the thumb away
+// from the cursor and fire repeated loads mid-gesture. SetYOffset clamps
+// internally, so both modes are safe even on short terminals.
+// Returns true when the window actually grew.
+func (m *model) expandTranscriptWindowAnchored(anchor bool) bool {
+	m.ensureTranscriptWindow()
+	if m.transcriptWindowStart <= 0 {
+		return false
+	}
+	oldTotal := m.viewport.TotalLineCount()
+	oldOffset := m.viewport.YOffset()
+	newStart := m.transcriptWindowStart - transcriptLoadMoreChunkMsgs
+	if newStart < 0 {
+		newStart = 0
+	}
+	if newStart == m.transcriptWindowStart {
+		return false
+	}
+	m.transcriptWindowStart = newStart
+	m.renderTranscript()
+	if anchor {
+		// Anchor: the content that was at oldOffset is now pushed down by the
+		// prepended delta.
+		m.viewport.SetYOffset(m.viewport.TotalLineCount() - oldTotal + oldOffset)
+	} else {
+		m.viewport.SetYOffset(0)
+	}
+	return true
+}
+
+// ensureTranscriptMessageVisible expands the window until message msgIdx is
+// rendered, then renders. Used by chat-search jumps whose target may sit in
+// the hidden prefix. Returns true when the target is renderable afterwards.
+func (m *model) ensureTranscriptMessageVisible(msgIdx int) bool {
+	if msgIdx < 0 || msgIdx >= len(m.messages) {
+		return false
+	}
+	m.ensureTranscriptWindow()
+	if m.transcriptWindowStart <= msgIdx {
+		// Already rendered: return without re-rendering so caller-built
+		// line maps (e.g. a chat-search jump on a not-yet-rendered
+		// transcript) stay valid. Only hidden targets pay for a render.
+		return true
+	}
+	for m.transcriptWindowStart > msgIdx {
+		newStart := m.transcriptWindowStart - transcriptLoadMoreChunkMsgs
+		if newStart < 0 {
+			newStart = 0
+		}
+		if newStart == m.transcriptWindowStart {
+			break
+		}
+		m.transcriptWindowStart = newStart
+		if m.transcriptWindowStart <= msgIdx {
+			break
+		}
+	}
+	m.renderTranscript()
+	return msgIdx >= m.transcriptWindowStart
+}
+
+// maybeLoadMoreTranscript expands the window when the viewport is pinned to
+// the top and older messages remain. Call after every upward-scroll path
+// (wheel-up, scrollbar drag, pgup). Returns true when more content was loaded.
+func (m *model) maybeLoadMoreTranscript() bool {
+	if !m.viewport.AtTop() {
+		return false
+	}
+	return m.expandTranscriptWindow()
+}
+
+// maybeLoadMoreTranscriptToTop is the scrollbar variant: when a scrollbar
+// track-click or drag-release lands pinned to the top, it loads one older
+// chunk and pins the viewport to the newly loaded top (thumb stays under the
+// cursor) instead of preserving the old anchor.
+func (m *model) maybeLoadMoreTranscriptToTop() bool {
+	if !m.viewport.AtTop() {
+		return false
+	}
+	return m.expandTranscriptWindowAnchored(false)
+}
+
+// scrollTranscriptUp moves the transcript up by n lines, loading an older
+// chunk first when already pinned to the top so a single scroll gesture at
+// the edge keeps moving into history instead of stalling.
+func (m *model) scrollTranscriptUp(n int) {
+	if m.viewport.AtTop() && m.transcriptHiddenCount() > 0 {
+		m.expandTranscriptWindow()
+		// Fall through to ScrollUp so the same gesture also moves visibly
+		// into the newly loaded content.
+	}
+	m.viewport.ScrollUp(n)
+	// A wheel tick that lands exactly on the top edge after moving should
+	// eagerly load the next chunk, matching infinite-scroll expectations.
+	m.maybeLoadMoreTranscript()
+}
+
 // formatNoteBusEntry renders a notebus.Entry as a one-line display string
 // for the chat transcript. Returns "" for entries that should not be shown.
 func formatNoteBusEntry(e notebus.Entry) string {
@@ -16678,6 +16932,20 @@ const (
 	blockKindTool
 	blockKindThinking
 	blockKindCompaction
+)
+
+// Transcript windowing: long sessions render every message on each streamed
+// delta, which grows past the ~8ms perf budget. The window covers only the
+// most recent messages; scrolling to the top loads an older chunk.
+const (
+	transcriptInitialWindowMsgs = 50
+	transcriptLoadMoreChunkMsgs = 50
+	// transcriptMaxWindowMsgs bounds the rendered window while pinned to the
+	// bottom. Initial render shows the last transcriptInitialWindowMsgs;
+	// scroll-up loading can grow the window up to this cap before
+	// tail-following trims the oldest rows again. Scrolled-up views never
+	// trim, so content under the cursor stays put.
+	transcriptMaxWindowMsgs = 150
 )
 
 // msgRenderKey captures every input that affects a single message's rendered
@@ -16938,6 +17206,7 @@ func (m *model) renderTranscript() {
 		m.rawTranscriptLines = nil
 		m.urlLinkRegions = nil
 		m.sel = selectionState{}
+		m.transcriptRenderedLen = len(m.messages)
 		if art := m.renderEmptyStateBackground(); art != "" {
 			m.viewport.SetContent(art)
 		} else {
@@ -17001,12 +17270,41 @@ func (m *model) renderTranscript() {
 	// testers (toolOutputForClick etc.).
 	// Fresh slices: SetContentLines retains the slice we hand it, so the backing
 	// array must not be reused/truncated on the next render.
-	m.transcriptLines = make([]string, 0, len(m.messages)*2+10)
-	m.rawTranscriptLines = make([]string, 0, len(m.messages)*2+10)
+	// Windowing: only messages[transcriptWindowStart:] are rendered. Hidden
+	// prefix indices get -1 in transcriptMsgStartLine so chat-search and click
+	// paths can detect "not rendered" instead of scrolling to a stale offset.
+	m.ensureTranscriptWindow()
+	windowStart := m.transcriptWindowStart
+	if windowStart > len(m.messages) || windowStart < 0 {
+		windowStart = 0
+		m.transcriptWindowStart = 0
+	}
+	// Tail-follow eviction: while pinned to the bottom (or on first render,
+	// when the viewport is still empty), keep the rendered window bounded so
+	// a live session can't grow it without limit. A scrolled-up view freezes
+	// the window instead — trimming there would shift content under the
+	// cursor. The trim applies once the user scrolls back to the bottom.
+	// The tail-growth guard (len > renderedLen) is load-bearing: without it,
+	// the render inside expandTranscriptWindow / ensureTranscriptMessageVisible
+	// / Home would immediately trim the just-expanded history back down while
+	// the viewport sits at the bottom. Explicitly loaded history is only
+	// trimmed when new tail messages arrive.
+	if (m.viewport.TotalLineCount() == 0 || m.viewport.AtBottom()) &&
+		len(m.messages) > m.transcriptRenderedLen &&
+		len(m.messages)-windowStart > transcriptMaxWindowMsgs {
+		windowStart = len(m.messages) - transcriptMaxWindowMsgs
+		m.transcriptWindowStart = windowStart
+	}
+	m.transcriptLines = make([]string, 0, (len(m.messages)-windowStart)*2+10)
+	m.rawTranscriptLines = make([]string, 0, (len(m.messages)-windowStart)*2+10)
 	// Parallel to m.messages: for each message index, the first wrapped line of
-	// its block in transcriptLines. -1 for indices past the end. The chat-search
-	// jump-to-match uses this to scroll the viewport to the match's first line.
+	// its block in transcriptLines. -1 for hidden messages outside the window.
+	// The chat-search jump-to-match uses this to scroll the viewport to the
+	// match's first line.
 	m.transcriptMsgStartLine = make([]int, len(m.messages))
+	for i := 0; i < windowStart; i++ {
+		m.transcriptMsgStartLine[i] = -1
+	}
 	// Build a fast membership set for chat-search matches so the inner loop
 	// can decide in O(1) whether to apply term highlighting.
 	var searchMatchSet map[int]struct{}
@@ -17017,12 +17315,24 @@ func (m *model) renderTranscript() {
 		}
 	}
 	nlAcc := 0 // wrapped lines written so far (= next index into transcriptLines)
-	for i, msg := range m.messages {
-		if i > 0 {
+	if windowStart > 0 {
+		// Header notice occupies line 0 so message start lines shift by one.
+		// Single-row, clamped to width so it never wraps and breaks hit-test math.
+		notice := hintStyle.Render(fmt.Sprintf("↑ %d earlier messages — scroll up to load more", windowStart))
+		notice = truncateToWidth(notice, max(1, m.viewport.Width()))
+		m.transcriptLines = append(m.transcriptLines, notice)
+		m.rawTranscriptLines = append(m.rawTranscriptLines, stripANSI(notice))
+		nlAcc = 1
+	}
+	firstRendered := true
+	for i := windowStart; i < len(m.messages); i++ {
+		msg := m.messages[i]
+		if !firstRendered {
 			nlAcc += 1 // one separator empty line
 			m.transcriptLines = append(m.transcriptLines, "")
 			m.rawTranscriptLines = append(m.rawTranscriptLines, "")
 		}
+		firstRendered = false
 		entry := m.renderMessageBlock(i, msg, toolNames)
 		startLine := nlAcc
 		m.transcriptMsgStartLine[i] = startLine
@@ -17058,6 +17368,7 @@ func (m *model) renderTranscript() {
 	// maps the label's column span to the URL.
 	m.buildURLLinkRegions()
 	m.viewport.SetContentLines(m.transcriptLines)
+	m.transcriptRenderedLen = len(m.messages)
 	m.sel = selectionState{}
 	// If a chat-search jump is active, the in-app selection machinery was
 	// just cleared by the line above — re-paint the single-line flash on
@@ -17093,6 +17404,10 @@ func (m *model) buildURLLinkRegions() {
 	for i, msg := range m.messages {
 		src := messageSourceText(msg)
 		if !strings.Contains(src, "](") {
+			continue
+		}
+		// Hidden window-prefix messages have no rendered lines; skip them.
+		if i >= len(m.transcriptMsgStartLine) || m.transcriptMsgStartLine[i] < 0 {
 			continue
 		}
 		// Bounds of this message's rendered line range.
@@ -18052,6 +18367,10 @@ func (m *model) applyCompactionResult(r agent.CompactResult, uiIdx []int) (bool,
 		newMsgs = append(newMsgs, tailMsg)
 	}
 	m.messages = newMsgs
+	// Show the full post-compaction transcript so the compaction banner stays
+	// visible; the list just shrank, so rendering it all is cheap.
+	m.transcriptWindowStart = 0
+	m.transcriptWindowInit = true
 	bannerIdx := uiFrom + 1 // divider at uiFrom, banner at uiFrom+1
 	return true, bannerIdx
 }
@@ -19427,6 +19746,15 @@ func (m *model) renderStatus() string {
 			pending = fmt.Sprintf("permission pending: %s", pending)
 		} else {
 			pending = fmt.Sprintf("permission pending: %s", pending)
+		}
+		rightContent += " · " + pending + " · click Chat to answer"
+	} else if m.showQuestionDialog {
+		n := len(m.questionPrompts)
+		pending := "question pending"
+		if n == 1 {
+			pending = "question pending: 1 question"
+		} else if n > 1 {
+			pending = fmt.Sprintf("question pending: %d questions", n)
 		}
 		rightContent += " · " + pending + " · click Chat to answer"
 	}

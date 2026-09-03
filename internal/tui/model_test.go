@@ -4213,6 +4213,8 @@ func TestLLMStreamErrorIsRenderedButNotSentToLLM(t *testing.T) {
 // prompt. The streamMsgEvent handler marks the message streamFinalized; the
 // guard in appendShellOutput then drops any subsequent chunk.
 func TestStreamedToolOutputLateDeltaNotAppendedAfterFinal(t *testing.T) {
+	// streamMsgEvent now live-persists the transcript — isolate session files.
+	t.Setenv("HOME", t.TempDir())
 	toolCallID := "call-stream-1"
 	m := model{
 		viewport:  fastviewport.New(80, 24),
@@ -7491,6 +7493,8 @@ func TestGetInitialToolsMatchesCanonicalList(t *testing.T) {
 // chunks are not clobbered on completion) while keeping raw.Content truncated
 // so the LLM prompt still receives the bounded head + truncation notice.
 func TestStreamedToolOutputDisplayContentPreferred(t *testing.T) {
+	// streamMsgEvent now live-persists the transcript — isolate session files.
+	t.Setenv("HOME", t.TempDir())
 	toolCallID := "call-display-1"
 	// Truncated Content (what the LLM sees, with the notice) + full
 	// DisplayContent (what the UI must show).

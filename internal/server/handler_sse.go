@@ -256,10 +256,20 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+	// Live-persist each completed message as the turn streams (mirrors
+	// runTurn); the sync save below stays authoritative.
+	h.wireLivePersist(sessionID, as, messages)
 
 	resp, err := ag.Step(messages)
 	if err != nil {
 		log.Printf("serve error: agent step: %v", err)
+		// Keep whatever the turn produced before it failed (mirrors
+		// runTurn): Step returns completed rounds alongside the error, and
+		// those were already streamed above — without this a reload loses
+		// them and even the opening user message stays dependent on the
+		// asynchronous live write. commitPartialTranscript persists
+		// synchronously before the error frame goes out.
+		h.commitPartialTranscript(sessionID, as, append(as.messages, resp...), h.RCBridge() == nil)
 		sendSSE(w, flusher, "error", map[string]string{"error": err.Error()})
 		return
 	}

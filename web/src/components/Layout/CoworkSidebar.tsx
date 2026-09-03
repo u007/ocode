@@ -106,6 +106,11 @@ export default function CoworkSidebar({
   const [smallLoading, setSmallLoading] = useState(false);
   const [explorerLoading, setExplorerLoading] = useState(false);
   const [contextLoading, setContextLoading] = useState(false);
+  // Permission-mode cycling (normal → yolo → locked → sandbox). Hoisted with
+  // the other hooks: hooks must run unconditionally before any early return
+  // (collapsing the sidebar returns null on desktop) or React throws
+  // "Rendered fewer hooks than expected" (minified error #300).
+  const [modeLoading, setModeLoading] = useState(false);
   // Locally-tracked active agent. The `activeAgent` prop is fixed by the
   // parent, so switching agents is reflected via this optimistic state.
   const [selectedAgent, setSelectedAgent] = useState<string>(activeAgent);
@@ -307,7 +312,6 @@ export default function CoworkSidebar({
 
   // Current live permission mode, defaulting to the config-style yolo hint.
   const currentMode = tuiStatus?.permission_mode || (config.yolo ? "yolo" : "normal");
-  const [modeLoading, setModeLoading] = useState(false);
 
   // Cycle permission mode: normal → yolo → locked → sandbox → normal, via the
   // dedicated mode endpoint (session-scoped, never persisted).

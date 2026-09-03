@@ -238,6 +238,10 @@ func (m *model) jumpToChatMatch(msgIdx int) {
 	if msgIdx < 0 || msgIdx >= len(m.messages) {
 		return
 	}
+	// The target may sit in the hidden window prefix. Expand first so the
+	// message is rendered; otherwise transcriptMsgStartLine[msgIdx] is -1 and
+	// the jump would land at the top notice instead of the match.
+	m.ensureTranscriptMessageVisible(msgIdx)
 	// Clamp in case the cache hasn't been built yet (e.g. /search during a
 	// fresh session where the transcript was never re-rendered). Falling back
 	// to 0 keeps the viewport in a sane place rather than panicking.

@@ -27,6 +27,8 @@ func (h *Handler) HandleListProjects(w http.ResponseWriter, _ *http.Request) {
 }
 
 // HandleAddProject adds a new project root to the saved list.
+// Accepts either a local project (`{path}`) or a remote project
+// (`{host, path}` where host is `[user@]host` or `wsl:<distro>`).
 func (h *Handler) HandleAddProject(w http.ResponseWriter, r *http.Request) {
 	if h.projects == nil {
 		writeError(w, http.StatusInternalServerError, "project store not available")
@@ -35,6 +37,7 @@ func (h *Handler) HandleAddProject(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		Path string `json:"path"`
+		Host string `json:"host"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
@@ -45,7 +48,13 @@ func (h *Handler) HandleAddProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.projects.Add(body.Path); err != nil {
+	var err error
+	if body.Host != "" {
+		err = h.projects.AddRemote(body.Host, body.Path)
+	} else {
+		err = h.projects.Add(body.Path)
+	}
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("add project: %v", err))
 		return
 	}
@@ -54,6 +63,8 @@ func (h *Handler) HandleAddProject(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleRemoveProject removes a project root from the saved list.
+// For remote projects pass `?host=<host>` to scope the deletion to that
+// (host, path) entry. Without `?host` the legacy local-only path is used.
 func (h *Handler) HandleRemoveProject(w http.ResponseWriter, r *http.Request) {
 	if h.projects == nil {
 		writeError(w, http.StatusInternalServerError, "project store not available")
@@ -67,7 +78,14 @@ func (h *Handler) HandleRemoveProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.projects.Remove(path); err != nil {
+	host := r.URL.Query().Get("host")
+	var err error
+	if host != "" {
+		err = h.projects.RemoveRemote(host, path)
+	} else {
+		err = h.projects.Remove(path)
+	}
+	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("remove project: %v", err))
 		return
 	}

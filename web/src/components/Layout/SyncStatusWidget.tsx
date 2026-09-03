@@ -57,6 +57,12 @@ export default function SyncStatusWidget() {
 
   const startLogin = async () => {
     setLoginState({ phase: "starting" });
+    // Open the tab synchronously, inside the click handler, so browsers treat
+    // it as a user-gesture navigation instead of a popup. Opening it after
+    // the `await` below breaks that chain and Chrome/Safari silently block
+    // it — the dialog said "a browser tab opened" but nothing did.
+    const popup = window.open("", "_blank");
+    if (popup) popup.opener = null;
     try {
       const result = await api.syncLoginStart();
       setLoginState({
@@ -65,7 +71,11 @@ export default function SyncStatusWidget() {
         verifyUrl: result.verifyUrl,
         deviceCode: result.deviceCode,
       });
-      window.open(result.verifyUrl, "_blank", "noopener,noreferrer");
+      if (popup) {
+        popup.location.href = result.verifyUrl;
+      } else {
+        window.open(result.verifyUrl, "_blank", "noopener,noreferrer");
+      }
 
       pollTimer.current = setInterval(async () => {
         try {
@@ -83,6 +93,7 @@ export default function SyncStatusWidget() {
         }
       }, POLL_INTERVAL_MS);
     } catch (err) {
+      popup?.close();
       setLoginState({
         phase: "error",
         message: err instanceof Error ? err.message : "Failed to start login",

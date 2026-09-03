@@ -54,7 +54,7 @@ func TestHandlerChatBindsSessionToRequestProjectPath(t *testing.T) {
 	h.workDir = ""
 	projectRoot := t.TempDir()
 	const sessionID = "sess-request-project"
-	h.sessions.Register(sessionID, t.TempDir())
+	h.sessions.Register(sessionID, projectRoot)
 	newTestSession(h, sessionID, instantClient{})
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/api/chat", bytes.NewReader([]byte(fmt.Sprintf(
@@ -73,6 +73,38 @@ func TestHandlerChatBindsSessionToRequestProjectPath(t *testing.T) {
 	}
 	if got := entry.ProjectRoot; got != projectRoot {
 		t.Fatalf("session project root = %q, want %q", got, projectRoot)
+	}
+}
+
+// TestHandlerChatRejectsSessionProjectRebind verifies a client-supplied
+// project_path that disagrees with the session's bound project is rejected:
+// silently rebinding would leave the resident agent built for the old project
+// running while persistence moves to the new one.
+func TestHandlerChatRejectsSessionProjectRebind(t *testing.T) {
+	h := NewHandler()
+	h.workDir = ""
+	boundRoot := t.TempDir()
+	otherRoot := t.TempDir()
+	const sessionID = "sess-rebind-reject"
+	h.sessions.Register(sessionID, boundRoot)
+	newTestSession(h, sessionID, instantClient{})
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/chat", bytes.NewReader([]byte(fmt.Sprintf(
+		`{"content":"hello","sessionId":%q,"project_path":%q}`,
+		sessionID,
+		otherRoot,
+	))))
+	h.HandleChat(w, r)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	entry := h.sessions.Lookup(sessionID)
+	if entry == nil {
+		t.Fatalf("session %q was dropped", sessionID)
+	}
+	if got := entry.ProjectRoot; got != boundRoot {
+		t.Fatalf("session project root = %q, want bound root %q", got, boundRoot)
 	}
 }
 

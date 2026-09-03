@@ -460,3 +460,61 @@ func TestHandleSetModelRejectsProviderlessModel(t *testing.T) {
 		t.Fatalf("prefixed id: status = %d, want 200", w2.Code)
 	}
 }
+
+// TestHandleSetBackendConfigRejectsWithMigrationHint verifies that posting the
+// legacy production hub URL returns 400 with a migration-specific message
+// pointing at the new sync_url setting, rather than a generic "invalid URL"
+// error. backend_url is local-dev-only as of the backend/sync split.
+func TestHandleSetBackendConfigRejectsWithMigrationHint(t *testing.T) {
+	h := testConfigHandler(t)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/backend",
+		strings.NewReader(`{"backend_url":"https://hub.mercstudio.com"}`))
+	h.HandleSetBackendConfig(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(resp.Error, "sync_url") {
+		t.Fatalf("error should mention the sync_url migration, got %q", resp.Error)
+	}
+	if strings.Contains(resp.Error, "must be http for localhost") {
+		t.Fatalf("error should be the migration hint, not a generic validation error: %q", resp.Error)
+	}
+
+	// In-memory cfg must not be mutated by the rejected request.
+	h.mu.Lock()
+	got := h.cfg.Ocode.BackendURL
+	h.mu.Unlock()
+	if got != "" {
+		t.Fatalf("BackendURL should remain empty on rejected hub value, got %q", got)
+	}
+}
+
+// TestHandleSetBackendConfigAcceptsLocalhost verifies the migration is scoped:
+// a valid localhost backend_url still normalizes and persists normally.
+func TestHandleSetBackendConfigAcceptsLocalhost(t *testing.T) {
+	h := testConfigHandler(t)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/backend",
+		strings.NewReader(`{"backend_url":"http://localhost:4096/"}`))
+	h.HandleSetBackendConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.BackendURL
+	h.mu.Unlock()
+	if got != "http://localhost:4096" {
+		t.Fatalf("BackendURL = %q, want http://localhost:4096", got)
+	}
+}

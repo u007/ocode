@@ -319,6 +319,34 @@ var bashSubcommandAllow = map[string]bool{
 	"yarn why":      true,
 	"bun run":       true,
 	"bun test":      true,
+	// Vite+ — project-trusted commands, same trust model as `npm run`/`make`:
+	// tasks live in the project manifest. Read-only queries plus the Develop
+	// task group (dev/check/lint/fmt/test/build/preview) and `run`.
+	// Bare `vp`, dependency mutations (install/add/remove/update/...),
+	// toolchain/env management, scaffolding, and self-modify
+	// (upgrade/implode) are NOT allowed. `vp node` runs arbitrary scripts
+	// (Ask). `vp exec`/`vp dlx` resolve through runnerInvokedSafeTool like
+	// `pnpm exec`/`npx`, and standalone `vpr` is `vp run` (path-guarded below).
+	"vp outdated":  true,
+	"vp list":      true,
+	"vp ls":        true,
+	"vp why":       true,
+	"vp explain":   true,
+	"vp info":      true,
+	"vp view":      true,
+	"vp show":      true,
+	"vp help":      true,
+	"vp --version": true,
+	"vp -V":        true,
+	"vp run":       true,
+	"vp test":      true,
+	"vp check":     true,
+	"vp lint":      true,
+	"vp fmt":       true,
+	"vp build":     true,
+	"vp dev":       true,
+	"vp preview":   true,
+	"vpr":          true,
 	// make: project-trusted, all targets (same risk model as before).
 	"make": true,
 }
@@ -1388,6 +1416,14 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 					pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (delete, user-confirmed tool): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
+				// Sandbox mode: the path has already cleared the workdir/allowed-scope
+				// and sensitive-path gates above, so it is treated the same as write/edit
+				// (which fall through to Allow at the bottom of this branch) instead of
+				// singling delete out for an extra prompt.
+				if pm.mode == PermissionModeSandbox {
+					pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (delete, sandbox): tool=%s path=%s", toolName, path))
+					return PermissionDecision{Level: PermissionAllow}
+				}
 				pm.emitDebug("perm", fmt.Sprintf("Decide ASK (delete): tool=%s path=%s", toolName, path))
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".delete",
@@ -1764,13 +1800,18 @@ func isTempDir(rawPath string) bool {
 // go tool: $GOMODCACHE, else $GOPATH/pkg/mod (GOPATH may be a list), else the
 // default $HOME/go/pkg/mod.
 func goModCacheRoots() []string {
+	home, _ := os.UserHomeDir()
 	if mc := strings.TrimSpace(os.Getenv("GOMODCACHE")); mc != "" {
-		return []string{mc}
+		// Validate the override: a stray GOMODCACHE=/ or =$HOME must not
+		// widen the boundary (falls back to GOPATH/default below instead).
+		if isEnvCacheBaseValid(mc, home) {
+			return []string{filepath.Clean(mc)}
+		}
 	}
 	var roots []string
 	if gp := strings.TrimSpace(os.Getenv("GOPATH")); gp != "" {
 		for _, p := range filepath.SplitList(gp) {
-			if p != "" {
+			if p != "" && isEnvCacheBaseValid(p, home) {
 				roots = append(roots, filepath.Join(p, "pkg", "mod"))
 			}
 		}
@@ -1809,38 +1850,38 @@ func languageDepRoots() []string {
 	home, homeErr := os.UserHomeDir()
 	if homeErr == nil {
 		// npm content-addressable cache (respect npm_config_cache env var).
-		if nc := strings.TrimSpace(os.Getenv("npm_config_cache")); nc != "" {
-			add(nc)
-		} else {
+		if nc := strings.TrimSpace(os.Getenv("npm_config_cache")); nc != "" && isEnvCacheBaseValid(nc, home) {
+			add(filepath.Clean(nc))
+		} else if nc == "" {
 			add(filepath.Join(home, ".npm", "_cacache"))
 		}
 		// pnpm store (immutable, content-addressed).
 		add(filepath.Join(home, ".local", "share", "pnpm", "store"))
 		add(filepath.Join(home, ".pnpm-store"))
 		// yarn berry cache (immutable zip archives).
-		if yc := strings.TrimSpace(os.Getenv("YARN_CACHE_FOLDER")); yc != "" {
-			add(yc)
-		} else {
+		if yc := strings.TrimSpace(os.Getenv("YARN_CACHE_FOLDER")); yc != "" && isEnvCacheBaseValid(yc, home) {
+			add(filepath.Clean(yc))
+		} else if yc == "" {
 			add(filepath.Join(home, ".yarn", "berry", "cache"))
 		}
 		// Rust cargo registry (append-only, immutable packages).
-		if ch := strings.TrimSpace(os.Getenv("CARGO_HOME")); ch != "" {
+		if ch := strings.TrimSpace(os.Getenv("CARGO_HOME")); ch != "" && isEnvCacheBaseValid(ch, home) {
 			add(filepath.Join(ch, "registry"))
-		} else {
+		} else if ch == "" {
 			add(filepath.Join(home, ".cargo", "registry"))
 		}
 		// Python pip cache (content-addressed http cache).
-		if pc := strings.TrimSpace(os.Getenv("PIP_CACHE_DIR")); pc != "" {
-			add(pc)
-		} else {
+		if pc := strings.TrimSpace(os.Getenv("PIP_CACHE_DIR")); pc != "" && isEnvCacheBaseValid(pc, home) {
+			add(filepath.Clean(pc))
+		} else if pc == "" {
 			add(filepath.Join(home, ".cache", "pip"))
 		}
 		// Maven local repository.
 		add(filepath.Join(home, ".m2", "repository"))
 		// Gradle cache.
-		if gh := strings.TrimSpace(os.Getenv("GRADLE_USER_HOME")); gh != "" {
+		if gh := strings.TrimSpace(os.Getenv("GRADLE_USER_HOME")); gh != "" && isEnvCacheBaseValid(gh, home) {
 			add(filepath.Join(gh, "caches"))
-		} else {
+		} else if gh == "" {
 			add(filepath.Join(home, ".gradle", "caches"))
 		}
 	}
@@ -1858,21 +1899,23 @@ func languageDepRoots() []string {
 	if homeErr == nil {
 		// Ruby gem installation directories.
 		if gemHome := strings.TrimSpace(os.Getenv("GEM_HOME")); gemHome != "" {
-			add(gemHome)
+			if isEnvCacheBaseValid(gemHome, home) {
+				add(filepath.Clean(gemHome))
+			}
 		}
 		if gemPath := strings.TrimSpace(os.Getenv("GEM_PATH")); gemPath != "" {
 			for _, p := range filepath.SplitList(gemPath) {
-				if p != "" {
-					add(p)
+				if p != "" && isEnvCacheBaseValid(p, home) {
+					add(filepath.Clean(p))
 				}
 			}
 		}
 		add(filepath.Join(home, ".gem"))
 
 		// PHP Composer cache (respect COMPOSER_HOME, fall back to defaults).
-		if ch := strings.TrimSpace(os.Getenv("COMPOSER_HOME")); ch != "" {
+		if ch := strings.TrimSpace(os.Getenv("COMPOSER_HOME")); ch != "" && isEnvCacheBaseValid(ch, home) {
 			add(filepath.Join(ch, "cache"))
-		} else {
+		} else if ch == "" {
 			add(filepath.Join(home, ".cache", "composer"))
 			add(filepath.Join(home, ".composer")) // Older default location
 		}
@@ -1920,9 +1963,13 @@ func languageDepRoots() []string {
 	}
 
 	// XDG_CACHE_HOME-based paths for tools that respect the XDG spec.
+	// The base is validated (a stray XDG=/ or =$HOME must not widen the
+	// boundary); home is best-effort here since UserHomeDir may fail.
 	if xdgCache := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); xdgCache != "" {
-		add(filepath.Join(xdgCache, "pip"))
-		add(filepath.Join(xdgCache, "npm", "_cacache"))
+		if home, herr := os.UserHomeDir(); herr == nil && isEnvCacheBaseValid(xdgCache, home) {
+			add(filepath.Join(xdgCache, "pip"))
+			add(filepath.Join(xdgCache, "npm", "_cacache"))
+		}
 	}
 
 	sort.Strings(roots)
@@ -1930,10 +1977,13 @@ func languageDepRoots() []string {
 }
 
 // userWritableRoots returns user-owned writable roots for sandbox confinement:
-// generic caches (whole ~/.cache per explicit user request + UserCacheDir +
-// targeted subdirs) and binary install destinations (~/.local/bin, ~/bin,
-// ~/.cargo/bin, ~/go/bin + validated GOBIN/GOPATH bins). Separated from
-// languageDepRoots so isImmutableReadRoot does not broaden to whole ~/.cache.
+// generic caches (whole ~/.cache per explicit user request + UserCacheDir),
+// toolchain version managers (nvm/vite-plus/volta/fnm/rvm/rbenv/rustup/
+// sdkman/jenv, conda env+pkg dirs, dotnet/mono, haskell, julia), their env
+// overrides (validated: non-system + strictly under home), and binary install
+// destinations (~/.local/bin, ~/bin, ~/.cargo/bin, ~/go/bin + validated
+// GOBIN/GOPATH bins). Separated from languageDepRoots so isImmutableReadRoot
+// does not broaden to whole ~/.cache.
 func userWritableRoots() []string {
 	seen := make(map[string]struct{})
 	var roots []string
@@ -1953,17 +2003,70 @@ func userWritableRoots() []string {
 	}
 	home, homeErr := os.UserHomeDir()
 
-	// Generic cache roots — cross-platform.
-	// os.UserCacheDir is canonical: darwin ~/Library/Caches, linux ~/.cache, windows %LOCALAPPDATA%.
-	if cacheDir, err := os.UserCacheDir(); err == nil && cacheDir != "" && cacheDir != "/" {
-		if !isSystemRoot(cacheDir) {
-			add(cacheDir)
+	// addHomeEnv grants an env-provided dir only when it is a valid direct
+	// root (absolute, non-system, strictly below home — never $HOME itself —
+	// and canonical-path clean: a symlink escaping home is rejected).
+	// Invalid values are ignored, never granted.
+	addHomeEnv := func(key string) {
+		v := strings.TrimSpace(os.Getenv(key))
+		if v == "" {
+			return
+		}
+		if clean, ok := validatedHomeRoot(v, home); ok {
+			add(clean)
 		}
 	}
-	if xdgCache := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); xdgCache != "" {
-		clean := filepath.Clean(xdgCache)
-		if clean != "/" && !isSystemRoot(clean) {
+	// addHomeEnvOrDefault grants the validated env dir, or the home-joined
+	// default when the env var is unset (mirrors the CARGO_HOME pattern: a
+	// set-but-invalid value grants nothing, not even the default).
+	addHomeEnvOrDefault := func(key, def string) {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			addHomeEnv(key)
+			return
+		}
+		add(def)
+	}
+	// addHomeList grants each entry of a list env var (filepath.SplitList)
+	// under the same direct-root + canonical-path validation.
+	addHomeList := func(key string) {
+		for _, p := range filepath.SplitList(strings.TrimSpace(os.Getenv(key))) {
+			if p == "" {
+				continue
+			}
+			if clean, ok := validatedHomeRoot(p, home); ok {
+				add(clean)
+			}
+		}
+	}
+
+	// Generic cache roots — cross-platform.
+	// os.UserCacheDir is canonical: darwin ~/Library/Caches, linux ~/.cache, windows %LOCALAPPDATA%.
+	// On Linux it echoes XDG_CACHE_HOME verbatim, so an unvalidated add here
+	// would let XDG_CACHE_HOME=$HOME (or /tmp/evil) bypass the boundary check
+	// below. When the returned dir is the env value, validate it as a direct
+	// root instead of trusting it.
+	xdgCache := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME"))
+	if cacheDir, err := os.UserCacheDir(); err == nil && cacheDir != "" && cacheDir != "/" {
+		clean := filepath.Clean(cacheDir)
+		if xdgCache != "" && clean == filepath.Clean(xdgCache) {
+			if homeErr == nil {
+				if canonical, ok := validatedHomeRoot(clean, home); ok {
+					add(canonical)
+				}
+			}
+		} else if !isSystemRoot(clean) {
 			add(clean)
+		}
+	}
+	if xdgCache != "" {
+		// XDG dir not echoed by UserCacheDir (darwin): grant when valid.
+		// Strict direct-root validation: XDG_CACHE_HOME=$HOME must not grant
+		// the entire home directory (needs home, so skipped when homeless).
+		// Re-adding an already-covered dir is a harmless dedup no-op.
+		if homeErr == nil {
+			if clean, ok := validatedHomeRoot(xdgCache, home); ok {
+				add(clean)
+			}
 		}
 	} else if homeErr == nil {
 		// Explicit /Users/james/.cache coverage when XDG_CACHE_HOME is unset —
@@ -1977,10 +2080,16 @@ func userWritableRoots() []string {
 	}
 	if homeErr == nil {
 		// Targeted subdirs for tool caches that may live outside UserCacheDir.
-		add(filepath.Join(home, ".cache", "go-build"))
-		add(filepath.Join(home, ".cache", "uv"))
-		add(filepath.Join(home, ".cache", "bun"))
-		add(filepath.Join(home, ".cache", "yarn"))
+		// Skipped when whole ~/.cache is already writable: the parent subpath
+		// rule covers them, so emitting child rules only bloats the profile
+		// and risks a missing-dir failure (e.g. ~/.cache/bun not yet created).
+		dotCache := filepath.Clean(filepath.Join(home, ".cache"))
+		if _, covered := seen[dotCache]; !covered {
+			add(filepath.Join(home, ".cache", "go-build"))
+			add(filepath.Join(home, ".cache", "uv"))
+			add(filepath.Join(home, ".cache", "bun"))
+			add(filepath.Join(home, ".cache", "yarn"))
+		}
 	}
 
 	// User-owned binary install destinations — writable for `go install` / `cargo install`.
@@ -1997,9 +2106,11 @@ func userWritableRoots() []string {
 			add(filepath.Join(home, ".cargo", "bin"))
 		}
 		// Go bin — GOBIN takes precedence; otherwise GOPATH/bin + ~/go/bin.
+		// GOBIN is granted as-is, so it uses strict direct-root validation:
+		// GOBIN=$HOME must not make the entire home directory writable
+		// (GOPATH entries below only ever grant their bin/ child).
 		if gobin := strings.TrimSpace(os.Getenv("GOBIN")); gobin != "" {
-			clean := filepath.Clean(gobin)
-			if clean != "/" && !isSystemRoot(clean) && isUnderHomeStrict(clean, home) {
+			if clean, ok := validatedHomeRoot(gobin, home); ok {
 				add(clean)
 			}
 		} else if gp := strings.TrimSpace(os.Getenv("GOPATH")); gp != "" {
@@ -2017,6 +2128,143 @@ func userWritableRoots() []string {
 		} else {
 			add(filepath.Join(home, "go", "bin"))
 		}
+		// Go build cache override — the default (~/.cache/go-build) is already
+		// covered by the whole-~/.cache rule above.
+		addHomeEnv("GOCACHE")
+
+		// Node.js version managers and runtimes — toolchains install outside
+		// the cache dirs, so `nvm install` / `volta install` / `fnm install`
+		// and bun/deno/pnpm setup fail under sandbox without explicit roots.
+		addHomeEnvOrDefault("NVM_DIR", filepath.Join(home, ".nvm"))
+		// Vite+ toolchain manager — owns node versions, shims, and caches
+		// (bins/, current, cache/) outside the cache dirs. Newer layouts use
+		// the XDG data dir; VP_HOME relocates the whole manager and the
+		// VP_*_DIR vars relocate individual dirs (all validated home-contained).
+		if strings.TrimSpace(os.Getenv("VP_HOME")) != "" {
+			addHomeEnv("VP_HOME")
+		} else {
+			add(filepath.Join(home, ".vite-plus"))
+			add(filepath.Join(home, ".local", "share", "vite-plus"))
+		}
+		addHomeEnv("VP_BIN_DIR")
+		addHomeEnv("VP_DATA_DIR")
+		addHomeEnv("VP_CACHE_DIR")
+		addHomeEnvOrDefault("BUN_INSTALL", filepath.Join(home, ".bun"))
+		addHomeEnvOrDefault("DENO_INSTALL", filepath.Join(home, ".deno"))
+		addHomeEnv("DENO_DIR")
+		addHomeEnvOrDefault("VOLTA_HOME", filepath.Join(home, ".volta"))
+		addHomeEnvOrDefault("FNM_DIR", filepath.Join(home, ".fnm"))
+		if strings.TrimSpace(os.Getenv("PNPM_HOME")) != "" {
+			addHomeEnv("PNPM_HOME")
+		} else if runtime.GOOS == "darwin" {
+			add(filepath.Join(home, "Library", "pnpm"))
+		} else {
+			add(filepath.Join(home, ".local", "share", "pnpm"))
+		}
+		// uv cache default lives under ~/.cache (covered above); managed
+		// Pythons default outside it — honor overrides or platform defaults.
+		addHomeEnv("UV_CACHE_DIR")
+		if strings.TrimSpace(os.Getenv("UV_PYTHON_INSTALL_DIR")) != "" {
+			addHomeEnv("UV_PYTHON_INSTALL_DIR")
+		} else if runtime.GOOS == "darwin" {
+			add(filepath.Join(home, "Library", "Application Support", "uv", "python"))
+		} else {
+			add(filepath.Join(home, ".local", "share", "uv", "python"))
+		}
+
+		// Ruby version managers — rubies, gemsets, and shims live under home.
+		addHomeEnvOrDefault("rvm_path", filepath.Join(home, ".rvm"))
+		addHomeEnvOrDefault("RBENV_ROOT", filepath.Join(home, ".rbenv"))
+		addHomeEnvOrDefault("JENV_ROOT", filepath.Join(home, ".jenv"))
+
+		// Rust toolchain manager — `rustup update` writes toolchains outside
+		// the cargo registry/bin roots covered above.
+		addHomeEnvOrDefault("RUSTUP_HOME", filepath.Join(home, ".rustup"))
+
+		// Conda — environment + package caches plus the active prefix.
+		// Install roots (~/miniconda3 etc.) are deliberately NOT added: they
+		// bundle interpreters and packages, and envs belong in CONDA_ENVS_PATH.
+		add(filepath.Join(home, ".conda"))
+		addHomeList("CONDA_ENVS_PATH")
+		addHomeList("CONDA_PKGS_DIRS")
+		addHomeEnv("CONDA_PREFIX")
+
+		// npm — whole ~/.npm (languageDepRoots covers only _cacache; npx's
+		// _npx and _logs live alongside it and stay denied without the parent).
+		add(filepath.Join(home, ".npm"))
+
+		// .NET / Mono — NuGet global packages, dotnet CLI home, mono registry.
+		// The system Mono framework stays read-only (sdk installs need
+		// elevation and are out of sandbox scope).
+		addHomeEnvOrDefault("NUGET_PACKAGES", filepath.Join(home, ".nuget", "packages"))
+		addHomeEnvOrDefault("DOTNET_CLI_HOME", filepath.Join(home, ".dotnet"))
+		addHomeEnv("DOTNET_ROOT")
+		add(filepath.Join(home, ".mono"))
+
+		// JVM — sdkman (JDK/Gradle/Maven versions), sbt/ivy/coursier state,
+		// whole ~/.m2 (settings.xml + wrapper dists alongside the repository
+		// covered in languageDepRoots) and whole gradle home (daemons/logs
+		// alongside caches).
+		addHomeEnvOrDefault("SDKMAN_DIR", filepath.Join(home, ".sdkman"))
+		add(filepath.Join(home, ".sbt"))
+		add(filepath.Join(home, ".ivy2"))
+		add(filepath.Join(home, ".coursier"))
+		add(filepath.Join(home, ".m2"))
+		if strings.TrimSpace(os.Getenv("GRADLE_USER_HOME")) != "" {
+			addHomeEnv("GRADLE_USER_HOME")
+		} else {
+			add(filepath.Join(home, ".gradle"))
+		}
+		addHomeEnv("COURSIER_CACHE")
+
+		// Python — broaden pyenv to the whole root (shims/ rehash + download
+		// cache, not just versions/), pipenv/virtualenvwrapper homes, poetry.
+		add(filepath.Join(home, ".pyenv"))
+		if strings.TrimSpace(os.Getenv("WORKON_HOME")) != "" {
+			addHomeEnv("WORKON_HOME")
+		} else {
+			add(filepath.Join(home, ".local", "share", "virtualenvs"))
+			add(filepath.Join(home, ".virtualenvs"))
+		}
+		if strings.TrimSpace(os.Getenv("POETRY_HOME")) != "" {
+			addHomeEnv("POETRY_HOME")
+		} else if runtime.GOOS == "darwin" {
+			add(filepath.Join(home, "Library", "Application Support", "pypoetry"))
+		} else {
+			add(filepath.Join(home, ".local", "share", "pypoetry"))
+		}
+
+		// Julia depot (packages + environments), Terraform plugin cache,
+		// Haskell toolchains.
+		if strings.TrimSpace(os.Getenv("JULIA_DEPOT_PATH")) != "" {
+			addHomeList("JULIA_DEPOT_PATH")
+		} else {
+			add(filepath.Join(home, ".julia"))
+		}
+		addHomeEnv("TF_PLUGIN_CACHE_DIR")
+		add(filepath.Join(home, ".terraform.d"))
+		add(filepath.Join(home, ".ghcup"))
+		add(filepath.Join(home, ".cabal"))
+		add(filepath.Join(home, ".stack"))
+
+		// Mobile / misc ecosystems — Android SDK, Dart pub cache, pipx venvs,
+		// npm global prefix, R libs, Elixir hex/mix, asdf/mise shims.
+		if strings.TrimSpace(os.Getenv("ANDROID_HOME")) != "" {
+			addHomeEnv("ANDROID_HOME")
+		} else if runtime.GOOS == "darwin" {
+			add(filepath.Join(home, "Library", "Android", "sdk"))
+		} else {
+			add(filepath.Join(home, "Android", "Sdk"))
+		}
+		addHomeEnvOrDefault("PUB_CACHE", filepath.Join(home, ".pub-cache"))
+		addHomeEnvOrDefault("PIPX_HOME", filepath.Join(home, ".local", "share", "pipx"))
+		addHomeEnvOrDefault("NPM_CONFIG_PREFIX", filepath.Join(home, ".npm-global"))
+		addHomeList("R_LIBS")
+		addHomeList("R_LIBS_USER")
+		addHomeEnvOrDefault("MIX_HOME", filepath.Join(home, ".mix"))
+		addHomeEnvOrDefault("HEX_HOME", filepath.Join(home, ".hex"))
+		addHomeEnvOrDefault("ASDF_DIR", filepath.Join(home, ".asdf"))
+		addHomeEnvOrDefault("MISE_DATA_DIR", filepath.Join(home, ".local", "share", "mise"))
 	}
 
 	sort.Strings(roots)
@@ -2043,6 +2291,67 @@ func isUnderHomeStrict(p, home string) bool {
 		return true
 	}
 	return pathUnderRoot(p, home)
+}
+
+// isDirectEnvRootValid reports whether an env-provided dir may be granted as a
+// writable root as-is: absolute, non-system, neither / nor $HOME itself, and
+// strictly below $HOME. Equal-to-home (or parent/relative) values are rejected
+// so a stray GOBIN=$HOME or XDG_CACHE_HOME=$HOME cannot make the entire home
+// directory writable. Callers that append a safe child (e.g. $CARGO_HOME/bin,
+// $GOPATH/bin) keep using isUnderHomeStrict, where equal-home only grants the
+// child.
+func isDirectEnvRootValid(p, home string) bool {
+	if p == "" || !filepath.IsAbs(p) {
+		return false
+	}
+	clean := filepath.Clean(p)
+	if clean == "/" || clean == filepath.Clean(home) || isSystemRoot(clean) {
+		return false
+	}
+	return pathUnderRoot(clean, home)
+}
+
+// validatedHomeRoot enforces the canonical-path policy for env-provided
+// roots: a path lexically under $HOME that is a symlink to /tmp (or anywhere
+// outside home) must not be granted. When the path exists, the symlink-resolved
+// canonical path must itself pass direct-root validation, and the canonical
+// path is what gets granted; when it does not exist yet there is nothing to
+// escape through, so the lexical path is granted (a missing dir is skipped by
+// the sandbox backends until created).
+func validatedHomeRoot(p, home string) (string, bool) {
+	clean := filepath.Clean(p)
+	if !isDirectEnvRootValid(clean, home) {
+		return "", false
+	}
+	canonical, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return clean, true
+	}
+	homeCanonical, herr := filepath.EvalSymlinks(home)
+	if herr != nil {
+		homeCanonical = home
+	}
+	if !isDirectEnvRootValid(canonical, homeCanonical) {
+		return "", false
+	}
+	return canonical, true
+}
+
+// isEnvCacheBaseValid validates env-provided language-cache bases
+// (npm/pip/yarn/cargo/gradle/composer/gem overrides): absolute, not the
+// filesystem root, not $HOME itself, and outside system dirs. Unlike direct
+// tool roots it may live outside $HOME (CI caches on scratch volumes such as
+// PIP_CACHE_DIR=/tmp/pip stay usable), yet a stray =/ or =$HOME value must
+// never widen the boundary to the whole disk or home.
+func isEnvCacheBaseValid(p, home string) bool {
+	if p == "" || !filepath.IsAbs(p) {
+		return false
+	}
+	clean := filepath.Clean(p)
+	if clean == "/" || clean == filepath.Clean(home) || isSystemRoot(clean) {
+		return false
+	}
+	return true
 }
 
 // isImmutableReadRoot reports whether rawPath lies within a known read-only,
@@ -2419,6 +2728,70 @@ func extractPathFromArgs(toolName string, args json.RawMessage) string {
 	}
 }
 
+// shimUnderWorkDir reports whether shim resolves inside workDir after
+// following symlinks. An existing shim (file or symlink) is resolved fully;
+// a missing shim resolves its nearest existing ancestor and then verifies
+// that no intermediate component is a symlink escaping workDir. This closes
+// the hole where project `node_modules` is itself a symlink pointing outside
+// the worktree — lexical containment (resolvePath + pathUnderRoot) would
+// wrongly pass that.
+func shimUnderWorkDir(shim, workDir string) bool {
+	workCanon, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		workCanon = filepath.Clean(workDir)
+	}
+	if canon, err := filepath.EvalSymlinks(shim); err == nil {
+		return pathUnderRoot(canon, workCanon)
+	}
+	cur := shim
+	var comps []string
+	for {
+		if _, err := os.Lstat(cur); err == nil {
+			break
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		comps = append([]string{filepath.Base(cur)}, comps...)
+		cur = parent
+	}
+	baseCanon, err := filepath.EvalSymlinks(cur)
+	if err != nil || !pathUnderRoot(baseCanon, workCanon) {
+		return false
+	}
+	for _, c := range comps {
+		cur = filepath.Join(cur, c)
+		if st, err := os.Lstat(cur); err == nil && st.Mode()&os.ModeSymlink != 0 {
+			t, err := filepath.EvalSymlinks(cur)
+			if err != nil || !pathUnderRoot(t, workCanon) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// nodeModulesBinTool normalizes a project-local package-bin invocation to its
+// tool basename (e.g. `./node_modules/.bin/tsc` → `tsc`), or "" when the
+// first word is not an in-project node_modules/.bin shim. Containment is
+// canonical (see shimUnderWorkDir) and empty workDir fails closed, so a
+// similarly-named shim outside the project (or with no project to check
+// against) never auto-allows.
+func nodeModulesBinTool(fields []string, workDir string) string {
+	if len(fields) == 0 || workDir == "" {
+		return ""
+	}
+	slash := strings.ReplaceAll(fields[0], "\\", "/")
+	if !strings.Contains(slash, "node_modules/.bin/") {
+		return ""
+	}
+	if !shimUnderWorkDir(resolvePath(fields[0], workDir), filepath.Clean(workDir)) {
+		return ""
+	}
+	return filepath.Base(slash)
+}
+
 // matchSubcommandAllow returns true when the command matches an entry in
 // bashSubcommandAllow at the longest possible token length (3 → 2 → 1).
 // For `git`, leading global wrappers like `-C`, `--no-pager`, etc. are
@@ -2426,10 +2799,16 @@ func extractPathFromArgs(toolName string, args json.RawMessage) string {
 // `git log`. "-c" wrappers are NOT stripped — they are evaluated by the LLM
 // (read-only underlying subcommand → ALLOW, dangerous keys → DENY) and must
 // not be auto-allowed via the code allowlist.
-func matchSubcommandAllow(command string) bool {
+func matchSubcommandAllow(command, workDir string) bool {
 	fields := splitShellFields(command)
 	if len(fields) == 0 {
 		return false
+	}
+	// Project-local package bins (`./node_modules/.bin/tsc`,
+	// `web/node_modules/.bin/eslint`): reuse runnerSafeTools on the basename,
+	// gated on workDir containment (see nodeModulesBinTool).
+	if bin := nodeModulesBinTool(fields, workDir); bin != "" {
+		return runnerSafeTools[bin]
 	}
 	// Package runner invoking an inert tool (e.g. `npx tsc`, `pnpm dlx prettier`).
 	if runnerInvokedSafeTool(fields) {
@@ -2469,15 +2848,21 @@ func matchSubcommandAllow(command string) bool {
 	if len(normalized) >= 2 {
 		key := normalized[0] + " " + normalized[1]
 		if bashSubcommandAllow[key] {
-			// `bun run` guard: unlike `npm/pnpm/yarn run` (which only execute a
-			// named package.json script), `bun run <path>` executes an arbitrary
-			// file. A path-like run target must not auto-allow — drop to Ask so the
-			// interpreter verifier (or a human) sees it.
-			if key == "bun run" && len(normalized) >= 3 && isPathLikeScript(normalized[2]) {
+			// `bun run` / `vp run` guard: unlike `npm/pnpm/yarn run` (which
+			// only execute a named package.json script), these also execute
+			// an arbitrary file when given one. A path-like run target must
+			// not auto-allow — drop to Ask so the interpreter verifier (or a
+			// human) sees it.
+			if (key == "bun run" || key == "vp run") && len(normalized) >= 3 && isPathLikeScript(normalized[2]) {
 				return false
 			}
 			return true
 		}
+	}
+	// `vpr` is standalone `vp run`: project tasks, same trust as `npm run` —
+	// but a path-like target must not auto-allow (parity with the guard above).
+	if normalized[0] == "vpr" && len(normalized) >= 2 && isPathLikeScript(normalized[1]) {
+		return false
 	}
 	// Single-word match (e.g. "make", "tsc"). These accept any args.
 	return bashSubcommandAllow[normalized[0]]
@@ -2522,12 +2907,12 @@ func runnerInvokedSafeTool(fields []string) bool {
 	}
 	idx := 0
 	switch {
-	case remoteRunners[fields[0]]: // npx, bunx
+	case remoteRunners[fields[0]]: // npx, bunx, vpx
 		idx = 1
 	case len(fields) >= 2:
 		two := fields[0] + " " + fields[1]
 		switch two {
-		case "pnpm dlx", "pnpm exec", "yarn dlx", "yarn exec", "bun x":
+		case "pnpm dlx", "pnpm exec", "yarn dlx", "yarn exec", "bun x", "vp exec", "vp dlx":
 			idx = 2
 		}
 	}
@@ -2594,6 +2979,7 @@ var interpreterLanguages = map[string]string{
 var remoteRunners = map[string]bool{
 	"npx":  true,
 	"bunx": true,
+	"vpx":  true, // Vite+ package runner (`vpx tsc` ~ `npx tsc`)
 }
 
 // bunBuiltinSubcommands are `bun` subcommands that are NOT script-file
@@ -4566,7 +4952,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	}
 
 	// 5. Subcommand-pinned allowlist
-	if matchSubcommandAllow(command) {
+	if matchSubcommandAllow(command, pm.workDir) {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (subcommand allowlist): command=%q", command))
 		return PermissionDecision{Level: PermissionAllow}
 	}

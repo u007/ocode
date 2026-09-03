@@ -140,7 +140,16 @@ func Save(id string, title string, messages []agent.Message, metadata map[string
 	if err != nil {
 		return err
 	}
-	return saveToDir(dir, id, title, messages, metadata)
+	// saveToDir serializes in-process writers itself; the authoritative
+	// transcript is durable on return.
+	if err := saveToDir(dir, id, title, messages, metadata, false, 0); err != nil {
+		return err
+	}
+	// The authoritative transcript is durable: queued live snapshots are
+	// superseded, so satisfy their barriers instead of leaving a shutdown
+	// FlushAll waiting on writes that no longer need to happen.
+	markLiveCovered(dir, id)
+	return nil
 }
 
 // SaveForDir persists a session into the storage dir associated with wd, so
@@ -154,7 +163,13 @@ func SaveForDir(wd, id string, title string, messages []agent.Message, metadata 
 	if err != nil {
 		return err
 	}
-	return saveToDir(dir, id, title, messages, metadata)
+	// saveToDir serializes in-process writers itself (see Save).
+	if err := saveToDir(dir, id, title, messages, metadata, false, 0); err != nil {
+		return err
+	}
+	// See Save: an authoritative sync save satisfies queued live barriers.
+	markLiveCovered(dir, id)
+	return nil
 }
 
 // PaginatedLoad returns a window of messages for id, most-recent-first paging
@@ -194,14 +209,31 @@ func PaginatedLoad(wd, id string, limit, offset int) (msgs []agent.Message, tota
 // time it is written to again after being loaded; sessions that are only
 // ever read are left in their original format. See
 // docs/superpowers/plans/2026-08-28-sqlite-session-storage/INDEX.md.
-func saveToDir(dir, id string, title string, messages []agent.Message, metadata map[string]any) error {
+//
+// Callers hold no lock: saveToDir serializes in-process writers on the
+// session's stripe mutex (lockFor), so the sync Save/SaveForDir path, the
+// async live worker, and direct callers all funnel through one lock.
+// live selects the async live-write mode:
+// appends never regress (see appendSqliteSession) and the index refresh is
+// meta-only, avoiding a full transcript re-read per streamed message.
+func saveToDir(dir, id string, title string, messages []agent.Message, metadata map[string]any, live bool, liveGen int64) error {
+	mu := lockFor(dir, id)
+	mu.Lock()
+	defer mu.Unlock()
 	if id == "" {
 		id = NewSessionID()
 	}
 
 	if fileExists(sqliteSessionPath(dir, id)) {
-		if err := appendSqliteSession(dir, id, title, messages, metadata); err != nil {
+		changed, err := appendSqliteSession(dir, id, title, messages, metadata, live, liveGen)
+		if err != nil {
 			return err
+		}
+		if !changed {
+			return nil
+		}
+		if live {
+			return refreshIndexMeta(dir, id)
 		}
 		return refreshIndexRow(dir, id)
 	}
@@ -264,38 +296,45 @@ func migrateToSqlite(dir, id, title string, messages []agent.Message, metadata m
 
 	if wasJSON {
 		jsonPath := filepath.Join(dir, id+".json")
-		if data, err := os.ReadFile(jsonPath); err == nil {
-			var old Session
-			if err := json.Unmarshal(data, &old); err == nil {
-				if !old.CreatedAt.IsZero() {
-					s.CreatedAt = old.CreatedAt
-				}
-				if s.Title == "" {
-					s.Title = old.Title
-					s.TitleGenerated = old.TitleGenerated
-				}
-				if s.Metadata == nil && old.Metadata != nil {
-					s.Metadata = old.Metadata
-				}
-			}
+		data, err := os.ReadFile(jsonPath)
+		if err != nil {
+			return fmt.Errorf("session: migrate %s: cannot read legacy %s, original left in place: %w", id, jsonPath, err)
+		}
+		var old Session
+		if err := json.Unmarshal(data, &old); err != nil {
+			return fmt.Errorf("session: migrate %s: legacy %s is corrupt, original left in place: %w", id, jsonPath, err)
+		}
+		if !old.CreatedAt.IsZero() {
+			s.CreatedAt = old.CreatedAt
+		}
+		if s.Title == "" {
+			s.Title = old.Title
+			s.TitleGenerated = old.TitleGenerated
+		}
+		if s.Metadata == nil && old.Metadata != nil {
+			s.Metadata = old.Metadata
 		}
 	} else {
 		ojsonlPath := ojsonlSessionPath(dir, id)
-		if state, existed, err := getOjsonlWriteState(ojsonlPath); err == nil && existed {
-			if !state.createdAt.IsZero() {
-				s.CreatedAt = state.createdAt
-			}
-			if s.Title == "" {
-				s.Title = state.title
-				s.TitleGenerated = state.titleGenerated
-			}
+		// The legacy file is the only source of created_at/title/metadata
+		// here, so a file that cannot be parsed must fail the migration —
+		// writing only the caller's snapshot and deleting the original
+		// would destroy the transcript it still holds.
+		legacy, err := loadOjsonlSession(ojsonlPath)
+		if err != nil {
+			return fmt.Errorf("session: migrate %s: legacy %s is unreadable, original left in place: %w", id, ojsonlPath, err)
+		}
+		if !legacy.CreatedAt.IsZero() {
+			s.CreatedAt = legacy.CreatedAt
+		}
+		if s.Title == "" {
+			s.Title = legacy.Title
+			s.TitleGenerated = legacy.TitleGenerated
 		}
 		// Preserve legacy metadata when caller supplies nil (e.g. server
-		// compaction path). State does not hold metadata, so load the file.
+		// compaction path).
 		if s.Metadata == nil {
-			if s2, err := loadOjsonlSession(ojsonlPath); err == nil && s2.Metadata != nil {
-				s.Metadata = s2.Metadata
-			}
+			s.Metadata = legacy.Metadata
 		}
 	}
 
@@ -322,9 +361,41 @@ func migrateToSqlite(dir, id, title string, messages []agent.Message, metadata m
 	return nil
 }
 
-// refreshIndexRow reads a just-written .sqlite session's meta straight
-// back out and upserts it into the project's shared index — used after
-// every sqlite write so the index never drifts from the file it mirrors.
+// refreshIndexMeta is the lightweight index refresh used by live writes: it
+// reads only the meta row (no transcript scan) and upserts it into the
+// project's shared index. Live writes fire per streamed message, so the full
+// readSqliteSession round-trip in refreshIndexRow would re-read a growing
+// transcript on every message.
+func refreshIndexMeta(dir, id string) error {
+	db, err := openDB(sqliteSessionPath(dir, id))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var title string
+	var createdAt, updatedAt time.Time
+	var metaJSON string
+	if err := db.QueryRow(`SELECT title, created_at, updated_at, metadata_json FROM meta WHERE id = ?`, id).
+		Scan(&title, &createdAt, &updatedAt, &metaJSON); err != nil {
+		return fmt.Errorf("session: read meta %s for index refresh: %w", id, err)
+	}
+	cloneOf := ""
+	if metaJSON != "" && metaJSON != "{}" && metaJSON != "null" {
+		var meta map[string]any
+		if err := json.Unmarshal([]byte(metaJSON), &meta); err == nil {
+			if v, ok := meta["claude_original_session_id"].(string); ok {
+				cloneOf = v
+			}
+		}
+	}
+	return upsertIndexRow(dir, ocodeMeta{
+		ID:        id,
+		Title:     title,
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+		CloneOf:   cloneOf,
+	})
+}
 func refreshIndexRow(dir, id string) error {
 	s, err := readSqliteSession(sqliteSessionPath(dir, id))
 	if err != nil {

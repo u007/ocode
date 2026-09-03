@@ -139,10 +139,42 @@ func (c *Client) Push(ctx context.Context, blob BlobType, local json.RawMessage)
 			return nil
 		}
 		os.MkdirAll(filepath.Dir(localPath), 0700)
-		if err := writeLocalConfigFileAtomic(localPath, merged); err != nil {
-			log.Printf("sync: writing merged %s to disk failed, will retry next cycle: %v", blob, err)
+		// Compare-before-write under the per-blob lock: a local edit that
+		// landed after this push read its source must not be overwritten by
+		// a merge computed from that stale snapshot. On a move, re-merge
+		// against the fresh file so the local edit survives; if the fresh
+		// merge also races, defer to the next cycle rather than losing it.
+		mu := blobLock(blob)
+		mu.Lock()
+		wrote, werr := writeMergedLocalLocked(localPath, payload, merged)
+		if werr != nil {
+			mu.Unlock()
+			log.Printf("sync: writing merged %s to disk failed, will retry next cycle: %v", blob, werr)
 			return nil
 		}
+		if !wrote {
+			fresh, rerr := readLocalConfigFile(localPath)
+			if rerr != nil {
+				mu.Unlock()
+				log.Printf("sync: re-reading %s after raced edit failed, will retry next cycle: %v", blob, rerr)
+				return nil
+			}
+			remerged, merr := Merge(blob, base, fresh, json.RawMessage(resp.CurrentBlob))
+			if merr != nil {
+				mu.Unlock()
+				log.Printf("sync: re-merge failed for %s, will retry next cycle: %v", blob, merr)
+				return nil
+			}
+			wrote, werr = writeMergedLocalLocked(localPath, fresh, remerged)
+			if werr != nil || !wrote {
+				mu.Unlock()
+				log.Printf("sync: writing re-merged %s to disk raced again, will retry next cycle", blob)
+				return nil
+			}
+			merged = remerged
+			payload = fresh
+		}
+		mu.Unlock()
 		// Refresh auth in-memory cache after direct disk write.
 		if blob == BlobTypeAuth {
 			if err := auth.LoadStore(); err != nil {

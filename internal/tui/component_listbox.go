@@ -39,6 +39,14 @@ type ListBox struct {
 	contentTopY   int // screen row where first item starts (relative to listbox origin)
 	contentHeight int // number of rows available for items
 
+	// itemWidth is the max visible width for item rows: the full width,
+	// minus one cell when a scrollbar is shown alongside the items.
+	// Render appends the scrollbar to each item row, so without this
+	// reservation the rows would exceed the pane's text area, lipgloss
+	// would wrap them onto extra physical lines, and the 1:1 row/scroll
+	// mapping (offsets, EnsureVisible, HitTest) would silently break.
+	itemWidth int
+
 	// Wrap mode: when true, each item's rendered row may word-wrap across
 	// multiple physical lines instead of being truncated to one line. Off
 	// by default so other ListBox callers keep the strict single-line
@@ -178,6 +186,16 @@ func (lb *ListBox) Layout() {
 	// Content starts after chrome
 	lb.contentTopY = chromeHeight
 
+	// Item rows share their lines with the scrollbar when one is shown;
+	// reserve its cell so rows never overflow the pane's text area.
+	lb.itemWidth = lb.width
+	if lb.count > lb.contentHeight {
+		lb.itemWidth = lb.width - 1
+		if lb.itemWidth < 1 {
+			lb.itemWidth = 1
+		}
+	}
+
 	// Clamp scroll
 	lb.clampScroll()
 
@@ -197,8 +215,8 @@ func (lb *ListBox) buildLineMap() {
 	}
 	for i := lb.scrollOffset; i < lb.count && len(lb.lineMap) < lb.contentHeight; i++ {
 		selected := i == lb.selected
-		raw := lb.renderRow(i, lb.width, selected)
-		for _, w := range strings.Split(wordWrap(raw, lb.width), "\n") {
+		raw := lb.renderRow(i, lb.itemWidth, selected)
+		for _, w := range strings.Split(wordWrap(raw, lb.itemWidth), "\n") {
 			if len(lb.lineMap) >= lb.contentHeight {
 				break
 			}
@@ -235,7 +253,7 @@ func (lb *ListBox) Render() string {
 		// lineMap was built in Layout() — Render and HitTest share it so
 		// click offsets can never drift from what's on screen.
 		for _, ln := range lb.lineMap {
-			lines = append(lines, lipgloss.NewStyle().Width(lb.width).Render(ln.text))
+			lines = append(lines, lipgloss.NewStyle().Width(lb.itemWidth).Render(ln.text))
 		}
 	} else {
 		// Render visible items
@@ -246,9 +264,11 @@ func (lb *ListBox) Render() string {
 
 		for i := lb.scrollOffset; i < end; i++ {
 			selected := i == lb.selected
-			line := lb.renderRow(i, lb.width, selected)
-			// Enforce single-line invariant: truncate to width
-			line = truncateToWidth(line, lb.width)
+			line := lb.renderRow(i, lb.itemWidth, selected)
+			// Enforce single-line invariant: truncate to the item width
+			// (scrollbar cell already reserved) so the appended scrollbar
+			// can never push the row past the pane and force a wrap.
+			line = truncateToWidth(line, lb.itemWidth)
 			lines = append(lines, line)
 		}
 	}

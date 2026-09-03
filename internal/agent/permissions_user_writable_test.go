@@ -23,8 +23,6 @@ func TestUserWritableRoots_ContainsCacheAndBins(t *testing.T) {
 		filepath.Join(home, "bin"),
 		filepath.Join(home, ".cargo", "bin"),
 		filepath.Join(home, "go", "bin"),
-		filepath.Join(home, ".cache", "go-build"),
-		filepath.Join(home, ".cache", "uv"),
 	}
 	for _, exp := range mustContain {
 		found := false
@@ -36,6 +34,21 @@ func TestUserWritableRoots_ContainsCacheAndBins(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("userWritableRoots missing %q; got %v", exp, roots)
+		}
+	}
+	// When whole ~/.cache is writable, targeted subdirs must be pruned: the
+	// parent subpath rule already covers them, and emitting child rules only
+	// risks a missing-dir sandbox failure (e.g. ~/.cache/bun not yet created).
+	for _, child := range []string{
+		filepath.Join(home, ".cache", "go-build"),
+		filepath.Join(home, ".cache", "uv"),
+		filepath.Join(home, ".cache", "bun"),
+		filepath.Join(home, ".cache", "yarn"),
+	} {
+		for _, r := range roots {
+			if r == child {
+				t.Errorf("userWritableRoots should prune %q when %q is writable; got %v", child, filepath.Join(home, ".cache"), roots)
+			}
 		}
 	}
 	// Language dep roots must NOT have been broadened to whole ~/.cache.
@@ -78,20 +91,29 @@ func TestUserWritableRoots_ContainsCacheAndBins(t *testing.T) {
 
 func TestUserWritableRoots_XDGCacheHome(t *testing.T) {
 	setHomeForTest(t, "/home/testuser")
-	t.Setenv("XDG_CACHE_HOME", "/xdg/cache")
+	// Home-contained XDG cache is granted as a direct root.
+	t.Setenv("XDG_CACHE_HOME", "/home/testuser/xdg-cache")
 	roots := userWritableRoots()
 	found := false
 	for _, r := range roots {
-		if r == "/xdg/cache" {
+		if r == "/home/testuser/xdg-cache" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("userWritableRoots should include XDG_CACHE_HOME /xdg/cache; got %v", roots)
+		t.Errorf("userWritableRoots should include XDG_CACHE_HOME /home/testuser/xdg-cache; got %v", roots)
 	}
 	// When XDG set, the fallback ~/.cache should not be added as separate root (dedup covers it if UserCacheDir already)
 	// but we at least ensure XDG is present.
+	// Outside-home XDG values stay rejected: an env var must not grant
+	// writes to arbitrary external volumes.
+	t.Setenv("XDG_CACHE_HOME", "/xdg/cache")
+	for _, r := range userWritableRoots() {
+		if r == "/xdg/cache" {
+			t.Errorf("userWritableRoots must reject outside-home XDG_CACHE_HOME /xdg/cache")
+		}
+	}
 }
 
 func TestUserWritableRoots_ValidatesEnvPaths(t *testing.T) {

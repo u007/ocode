@@ -110,7 +110,9 @@ const BASE = _basePath;
 // Configurable backend origin (same-origin by default). When set via
 // /api/config/ocode/backend, all API/SSE calls are routed to that origin.
 // Empty means same-origin (existing behavior). Allowed values are
-// http://localhost[:port], http://127.0.0.1[:port], or https://hub.mercstudio.com.
+// http://localhost[:port] or http://127.0.0.1[:port] — local dev origins
+// only. Config/auth sync is a separate flow (/api/sync/*) and never uses
+// this override.
 let backendBase: string | null = null;
 
 export function getApiBackendBase(): string | null {
@@ -178,7 +180,7 @@ export async function authedFetch(path: string, init: RequestInit = {}): Promise
 
 /** Prepends the current SPA base path to an API or SSE path.
  *  When a backend origin is configured, the absolute origin is prepended
- *  (e.g. https://hub.mercstudio.com/api/...), otherwise same-origin relative.
+ *  (e.g. http://localhost:4096/api/...), otherwise same-origin relative.
  *  SSE/EventSource URLs and upload URLs all flow through here. */
 export function apiPath(path: string): string {
   const withBase = `${BASE}${path}`;
@@ -573,6 +575,16 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ backend_url }),
     }),
+
+  // Config/auth sync server (kakiit) override — separate from backend_url
+  // above. Empty sync_url means "use the default" (resolved_url reports
+  // what that resolves to: OCODE_SYNC_URL, then the production hub).
+  getSyncURLConfig: () => fetchJSON<{ sync_url: string; resolved_url: string }>("/api/config/ocode/sync-url"),
+  setSyncURLConfig: (sync_url: string) =>
+    fetchJSON<{ sync_url: string; resolved_url: string }>("/api/config/ocode/sync-url", {
+      method: "PUT",
+      body: JSON.stringify({ sync_url }),
+    }),
   getGitDiff: (path?: string, project?: string, staged?: boolean) => {
     const params = new URLSearchParams();
     if (path) params.set("path", path);
@@ -900,10 +912,22 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
+  /** Add a remote (SSH/WSL) project. Host is `[user@]host` or `wsl:<distro>`. */
+  addRemoteProject: (host: string, path: string) =>
+    fetchJSON<{ status: string }>("/api/projects", {
+      method: "POST",
+      body: JSON.stringify({ host, path }),
+    }),
   removeProject: (path: string) =>
     fetchJSON<{ status: string }>("/api/projects/" + encodeURIComponent(path), {
       method: "DELETE",
     }),
+  /** Remove with explicit host scope (for remote projects). */
+  removeRemoteProject: (path: string, host: string) =>
+    fetchJSON<{ status: string }>(
+      `/api/projects/${encodeURIComponent(path)}?host=${encodeURIComponent(host)}`,
+      { method: "DELETE" },
+    ),
   listProjectSessions: (path: string) =>
     fetchJSON<SessionInfo[]>("/api/projects/sessions?path=" + encodeURIComponent(path)),
   renameProject: (path: string, name: string) =>

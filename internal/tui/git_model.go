@@ -275,14 +275,64 @@ func (m *gitModel) ensureBranchesListCursorVisible() {
 	}
 }
 
+// filesListInnerDims returns the inner content dimensions of the files pane
+// from the model's own geometry. Every path that sizes, renders, or
+// hit-tests the section ListBoxes must agree on these dimensions so the
+// scroll math always matches what's on screen. ListBox renders exactly
+// lb.height lines, so handing it the outer pane height would grow the pane
+// past the terminal budget and hide the last rows where no scroll offset
+// can reach them.
+func (m gitModel) filesListInnerDims() (width, height int) {
+	commitInputRows := 0
+	if m.committing {
+		commitInputRows = m.commitInput.Height() + 2
+	}
+	return gitFilesListInnerDims(m.width, m.height, commitInputRows)
+}
+
+// gitFilesListInnerDims is the pure geometry behind filesListInnerDims:
+// width minus borders+padding, height minus the header/status chrome rows,
+// the commit-input rows, and the pane's top+bottom borders.
+func gitFilesListInnerDims(width, height, commitInputRows int) (innerW, innerH int) {
+	filesW := width * 30 / 100
+	innerW = filesW - 4
+	innerH = height - 4 - commitInputRows - 2
+	if innerW < 1 {
+		innerW = 1
+	}
+	if innerH < 1 {
+		innerH = 1
+	}
+	return innerW, innerH
+}
+
+// listBoxForSection returns the ListBox backing the currently visible
+// section (nil when the model was built without one, e.g. in tests).
+func (m *gitModel) listBoxForSection() *ListBox {
+	switch m.section {
+	case gitSectionLog:
+		return m.logList
+	case gitSectionStash:
+		return m.stashList
+	case gitSectionBranches:
+		return m.branchesList
+	default:
+		return m.changesList
+	}
+}
+
 // getOrCreateListBox returns the ListBox for the given section, creating it if necessary.
 func (m *gitModel) getOrCreateListBox(section gitSection, width, height int) *ListBox {
+	// NOTE: all section lists keep the ListBox single-line invariant (no
+	// wrap) so one item is always exactly one physical line. Scroll offsets,
+	// EnsureVisible, and HitTest all assume that 1:1 mapping — enabling wrap
+	// would let the cursor run off the visible window with no offset able
+	// to bring it back.
 	var lb *ListBox
 	switch section {
 	case gitSectionChanges:
 		if m.changesList == nil {
 			m.changesList = NewListBox(width, height)
-			m.changesList.SetWrapEnabled(true)
 		}
 		lb = m.changesList
 	case gitSectionLog:
@@ -329,15 +379,10 @@ func (m *gitModel) Resize(w, h int) {
 	m.commitViewport.SetHeight(h - 5 - commitInputRows)
 	// full width minus border
 	m.commitInput.SetWidth(w - 4)
-	
-	// Set ListBox sizes for all sections
-	// Files pane content width: filesW - 4 (border 2 + padding 2)
-	// Height: h - 4 (header) - commitInputRows
-	filesListW := filesW - 4
-	filesListH := h - 4 - commitInputRows
-	if filesListH < 1 {
-		filesListH = 1
-	}
+
+	// Size every section ListBox to the files pane's inner content area so
+	// the scroll math matches the rendered rows (see filesListInnerDims).
+	filesListW, filesListH := m.filesListInnerDims()
 	if m.changesList != nil {
 		m.changesList.SetSize(filesListW, filesListH)
 	}
@@ -649,6 +694,8 @@ func (m *gitModel) loadBranches() {
 }
 
 func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
+	m.width = w
+	m.height = h
 	switch msg := msg.(type) {
 	case diffReadyMsg:
 		if msg.seq != m.diffLoadSeq || msg.workDir != m.workDir {
@@ -2151,24 +2198,16 @@ func (m *gitModel) clampFileListScroll() {
 
 func (m *gitModel) renderFileList(width int) []string {
 	// Configure and render the appropriate ListBox for the current section
-	var lb *ListBox
-	switch m.section {
-	case gitSectionChanges:
-		lb = m.changesList
-	case gitSectionLog:
-		lb = m.logList
-	case gitSectionStash:
-		lb = m.stashList
-	case gitSectionBranches:
-		lb = m.branchesList
-	}
-	
-	// Initialize ListBox if nil (for tests or uninitialized models)
+	lb := m.listBoxForSection()
+
+	// Initialize ListBox if nil (for tests or uninitialized models).
+	// Single-line rows only (see getOrCreateListBox): one item is always
+	// exactly one physical line, which is what the scroll math assumes.
 	if lb == nil {
-		lb = NewListBox(width, m.height-4)
+		_, innerH := m.filesListInnerDims()
+		lb = NewListBox(width, innerH)
 		switch m.section {
 		case gitSectionChanges:
-			lb.SetWrapEnabled(true)
 			m.changesList = lb
 		case gitSectionLog:
 			m.logList = lb
@@ -2176,6 +2215,13 @@ func (m *gitModel) renderFileList(width int) []string {
 			m.stashList = lb
 		case gitSectionBranches:
 			m.branchesList = lb
+		}
+	} else {
+		// Re-sync the size every frame so the scroll window always matches
+		// the pane even if Resize lagged behind (or was never called).
+		_, innerH := m.filesListInnerDims()
+		if m.height != 0 {
+			lb.SetSize(width, innerH)
 		}
 	}
 	

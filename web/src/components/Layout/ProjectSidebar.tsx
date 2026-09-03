@@ -39,6 +39,8 @@ import {
   Pause,
   ShieldAlert,
   MessageSquare,
+  Server,
+  Globe,
 } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -397,7 +399,7 @@ function SortableProjectRow({
               ? "bg-primary/15 text-foreground border-l-2 border-primary"
               : "text-muted-foreground border-l-2 border-transparent"
           }`}
-          onClick={onSelect}
+      onClick={onSelect}
         >
           <span
             className="shrink-0 cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-60 hover:!opacity-100 touch-none"
@@ -406,7 +408,11 @@ function SortableProjectRow({
           >
             <GripVertical className="w-3.5 h-3.5" />
           </span>
-          <FolderGit2 className="w-4 h-4 shrink-0 text-muted-foreground" />
+          {project.host ? (
+            <Server className="w-4 h-4 shrink-0 text-sky-600 dark:text-sky-400" />
+          ) : (
+            <FolderGit2 className="w-4 h-4 shrink-0 text-muted-foreground" />
+          )}
           <div className="min-w-0 flex-1 text-left">
             {rename.editing ? (
               <Input
@@ -426,9 +432,16 @@ function SortableProjectRow({
                 <div className="truncate font-medium text-foreground">
                   {project.name}
                 </div>
-                <div className="truncate text-xs text-muted-foreground">
-                  {project.path}
-                </div>
+                {project.host ? (
+                  <div className="flex items-center gap-1 truncate text-xs text-sky-600 dark:text-sky-400">
+                    <Globe className="w-3 h-3 shrink-0" />
+                    <span className="truncate">{project.host}:{project.path}</span>
+                  </div>
+                ) : (
+                  <div className="truncate text-xs text-muted-foreground">
+                    {project.path}
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -601,6 +614,92 @@ function CreateGroupDialog({
   );
 }
 
+// ── Add Remote Project Dialog ───────────────────────────────────────────────
+
+function AddRemoteDialog({
+  open,
+  onClose,
+  onAdd,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onAdd: (host: string, path: string) => Promise<void>;
+}) {
+  const [host, setHost] = useState("");
+  const [path, setPath] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const hostRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (open) {
+      setHost("");
+      setPath("");
+      setError(null);
+      setLoading(false);
+      setTimeout(() => hostRef.current?.focus(), 50);
+    }
+  }, [open]);
+
+  if (!open) return null;
+
+  const handleAdd = async () => {
+    const h = host.trim();
+    const p = path.trim();
+    if (!h) { setError("Host is required (e.g. user@host or wsl:Ubuntu)"); return; }
+    if (!p) { setError("Remote path is required"); return; }
+    setLoading(true);
+    setError(null);
+    try {
+      await onAdd(h, p);
+      onClose();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="px-3 py-2 border-t border-border bg-muted/30">
+      <div className="text-xs font-semibold text-foreground mb-2 flex items-center gap-1.5">
+        <Server className="w-3.5 h-3.5 text-sky-600" />
+        Add Remote Project
+      </div>
+      <div className="flex flex-col gap-2">
+        <Input
+          ref={hostRef}
+          value={host}
+          onChange={(e) => setHost(e.target.value)}
+          placeholder="user@host or wsl:Ubuntu"
+          className="h-7 text-xs"
+          onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); if (e.key === "Escape") onClose(); }}
+        />
+        <Input
+          value={path}
+          onChange={(e) => setPath(e.target.value)}
+          placeholder="/home/user/project or ~/project"
+          className="h-7 text-xs"
+          onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); if (e.key === "Escape") onClose(); }}
+        />
+        {error && <div className="text-[11px] text-destructive">{error}</div>}
+        <div className="text-[11px] text-muted-foreground">
+          SSH: uses system <code className="bg-muted px-1 rounded">ssh</code> config. WSL: <code className="bg-muted px-1 rounded">wsl:</code>distro on Windows.
+        </div>
+        <div className="flex gap-2">
+          <Button size="sm" className="flex-1 h-7 text-xs" onClick={handleAdd} disabled={loading}>
+            {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+            Add Remote
+          </Button>
+          <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onClose} disabled={loading}>
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Sidebar ────────────────────────────────────────────────────────────
 
 function CollapsedProjectButton({
@@ -652,13 +751,13 @@ function CollapsedProjectButton({
         <Button
           variant="ghost"
           size="sm"
-          aria-label={project.name}
+          aria-label={project.host ? `${project.host}:${project.path}` : project.name}
           className={`relative p-2 h-9 w-9 ${
             isActive ? "bg-primary/15 text-primary" : "text-muted-foreground"
           }`}
           onClick={onSelect}
         >
-          <FolderGit2 className="w-4 h-4" />
+          {project.host ? <Server className="w-4 h-4 text-sky-600" /> : <FolderGit2 className="w-4 h-4" />}
           {showCount && (
             <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full bg-muted-foreground text-white text-[8px] leading-[14px] font-bold text-center border border-background">
               {indicators.sessionCount}
@@ -675,6 +774,7 @@ function CollapsedProjectButton({
       <TooltipContent side="right">
         <div className="text-xs">
           <div className="font-medium">{project.name}</div>
+          {project.host && <div className="text-sky-600 dark:text-sky-400 flex items-center gap-1"><Globe className="w-3 h-3" />{project.host}:{project.path}</div>}
           {showCount && <div className="text-muted-foreground">{tooltipDetails}</div>}
         </div>
       </TooltipContent>
@@ -694,6 +794,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
     state,
     selectProject,
     addProject,
+    addRemoteProject,
     removeProject,
     renameProject,
     reorderProjects,
@@ -708,6 +809,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
   const [newPath, setNewPath] = useState("");
   const [browserOpen, setBrowserOpen] = useState(false);
   const [creatingGroup, setCreatingGroup] = useState(false);
+  const [addingRemote, setAddingRemote] = useState(false);
 
   const toggleGroupCollapse = useCallback((name: string, currentlyCollapsed: boolean) => {
     setGroupCollapsed(name, !currentlyCollapsed);
@@ -720,6 +822,10 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
     setNewPath("");
     setAdding(false);
   };
+
+  const handleAddRemote = useCallback(async (host: string, path: string) => {
+    await addRemoteProject(host, path);
+  }, [addRemoteProject]);
 
   // Build the sorted list: groups first (in group order), then ungrouped projects
   const { orderedProjects, visibleItems: sortedItems } = useMemo(() => {
@@ -772,9 +878,14 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
     [state.groups, state.projects, reorderGroups, reorderProjects, setProjectGroup],
   );
 
-  // Unique sortable IDs
+  // Unique sortable IDs — remote projects use host:path composite to avoid
+  // collisions when the same path exists on two hosts.
   const sortableIds = useMemo(
-    () => sortedItems.map((item) => (item.type === "group" ? `group:${(item.data as ProjectGroup).name}` : (item.data as Project).path)),
+    () => sortedItems.map((item) => {
+      if (item.type === "group") return `group:${(item.data as ProjectGroup).name}`;
+      const p = item.data as Project;
+      return p.host ? `${p.host}:${p.path}` : p.path;
+    }),
     [sortedItems],
   );
 
@@ -869,11 +980,11 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
                   const project = item.data as Project;
                   return (
                     <SortableProjectRow
-                      key={project.path}
+                      key={project.host ? `${project.host}:${project.path}` : project.path}
                       project={project}
-                      isActive={state.activeProject?.path === project.path}
+                      isActive={state.activeProject?.path === project.path && (state.activeProject?.host ?? "") === (project.host ?? "")}
                       onSelect={() => selectProject(project)}
-                      onRemove={() => removeProject(project.path)}
+                      onRemove={() => removeProject(project.path, project.host)}
                       onRename={(name) => renameProject(project.path, name)}
                       onCreateGroup={async (name) => {
                         await createGroup(name);
@@ -938,6 +1049,15 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
               <Plus className="w-3.5 h-3.5" />
               Add project
             </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start gap-2 h-8 text-xs text-sky-600 dark:text-sky-400"
+              onClick={() => setAddingRemote(true)}
+            >
+              <Server className="w-3.5 h-3.5" />
+              Add remote (SSH / WSL)
+            </Button>
             {state.projects.length > 0 && (
               <Button
                 variant="ghost"
@@ -953,6 +1073,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
         )}
       </div>
 
+      <AddRemoteDialog open={addingRemote} onClose={() => setAddingRemote(false)} onAdd={handleAddRemote} />
       <CreateGroupDialog open={creatingGroup} onClose={() => setCreatingGroup(false)} onCreate={handleCreateGroup} />
       <DirectoryBrowser open={browserOpen} onOpenChange={setBrowserOpen} onSelect={(path) => { setNewPath(path); setBrowserOpen(false); }} />
     </div>

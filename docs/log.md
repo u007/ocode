@@ -14,6 +14,11 @@
 
 
 
+
+## 2026-09-03
+
+* **Creation**: Session Storage Critical Issues ([gotchas/session-storage-critical-issues.md](/gotchas/session-storage-critical-issues.md))
+* **Creation**: Sandbox Writable-Root Must Exist on Disk ([gotchas/sandbox-writable-root-must-exist.md](/gotchas/sandbox-writable-root-must-exist.md))
 ## 2026-09-02
 
 * **Creation**: Radix Select Empty String Sentinel ([gotchas/radix-select-empty-string-sentinel.md](/gotchas/radix-select-empty-string-sentinel.md))

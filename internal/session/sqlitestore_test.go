@@ -116,7 +116,7 @@ func TestAppendSqliteSessionOnlyInsertsNewMessages(t *testing.T) {
 		{Role: "assistant", Content: "two"},
 		{Role: "user", Content: "three"},
 	}
-	if err := appendSqliteSession(dir, id, "", full, nil); err != nil {
+	if _, err := appendSqliteSession(dir, id, "", full, nil, false, 0); err != nil {
 		t.Fatalf("appendSqliteSession: %v", err)
 	}
 
@@ -146,7 +146,7 @@ func TestAppendSqliteSessionExplicitTitleOverrides(t *testing.T) {
 		t.Fatalf("writeSqliteSessionFull: %v", err)
 	}
 
-	if err := appendSqliteSession(dir, id, "Explicit Title", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+	if _, err := appendSqliteSession(dir, id, "Explicit Title", []agent.Message{{Role: "user", Content: "hi"}}, nil, false, 0); err != nil {
 		t.Fatalf("appendSqliteSession: %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestAppendSqliteSessionShrinkingMessagesReplacesAll(t *testing.T) {
 
 	// Simulates /compact splicing out earlier messages.
 	shrunk := []agent.Message{{Role: "user", Content: "compacted summary"}}
-	if err := appendSqliteSession(dir, id, "", shrunk, nil); err != nil {
+	if _, err := appendSqliteSession(dir, id, "", shrunk, nil, false, 0); err != nil {
 		t.Fatalf("appendSqliteSession: %v", err)
 	}
 
@@ -346,7 +346,7 @@ func TestAppendPreservesMetadataWhenNil(t *testing.T) {
 		t.Fatalf("writeSqliteSessionFull: %v", err)
 	}
 	// Append with nil metadata — should preserve existing
-	if err := appendSqliteSession(dir, id, "", []agent.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "there"}}, nil); err != nil {
+	if _, err := appendSqliteSession(dir, id, "", []agent.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "there"}}, nil, false, 0); err != nil {
 		t.Fatalf("appendSqliteSession nil meta: %v", err)
 	}
 	got, err := readSqliteSession(sqliteSessionPath(dir, id))
@@ -358,7 +358,7 @@ func TestAppendPreservesMetadataWhenNil(t *testing.T) {
 	}
 	// Append with new metadata — should replace
 	newMeta := map[string]any{"new": float64(2)}
-	if err := appendSqliteSession(dir, id, "", []agent.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "there"}, {Role: "user", Content: "again"}}, newMeta); err != nil {
+	if _, err := appendSqliteSession(dir, id, "", []agent.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "there"}, {Role: "user", Content: "again"}}, newMeta, false, 0); err != nil {
 		t.Fatalf("appendSqliteSession new meta: %v", err)
 	}
 	got, err = readSqliteSession(sqliteSessionPath(dir, id))

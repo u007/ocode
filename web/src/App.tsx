@@ -39,6 +39,7 @@ import SessionTabSync from "./components/Layout/SessionTabSync";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import { shouldRenderCoworkSidebar } from "./components/Layout/coworkSidebarVisibility";
 import ModelDialog from "./components/Layout/ModelDialog";
+import ShareDialog from "./components/Layout/ShareDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
 import QuestionDialog from "./components/Chat/QuestionDialog";
 import { useKeyboard } from "./hooks/useKeyboard";
@@ -1112,6 +1113,7 @@ function HomeApp() {
 
       {/* Dialogs */}
       <SessionDialog />
+      <ShareDialog />
       <CommandPalette
         open={cmdOpen}
         onClose={() => setCmdOpen(false)}

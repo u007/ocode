@@ -880,7 +880,7 @@ func TestLoadDoesNotFallBackToOtherProjects(t *testing.T) {
 func TestSaveToDirNewSessionCreatesSqlite(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := saveToDir(dir, "ses_new1", "", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+	if err := saveToDir(dir, "ses_new1", "", []agent.Message{{Role: "user", Content: "hi"}}, nil, false, 0); err != nil {
 		t.Fatalf("saveToDir: %v", err)
 	}
 
@@ -896,13 +896,13 @@ func TestSaveToDirExistingSqliteSessionAppends(t *testing.T) {
 	dir := t.TempDir()
 	id := "ses_appendflow1"
 
-	if err := saveToDir(dir, id, "", []agent.Message{{Role: "user", Content: "one"}}, nil); err != nil {
+	if err := saveToDir(dir, id, "", []agent.Message{{Role: "user", Content: "one"}}, nil, false, 0); err != nil {
 		t.Fatalf("saveToDir (create): %v", err)
 	}
 	if err := saveToDir(dir, id, "", []agent.Message{
 		{Role: "user", Content: "one"},
 		{Role: "assistant", Content: "two"},
-	}, nil); err != nil {
+	}, nil, false, 0); err != nil {
 		t.Fatalf("saveToDir (append): %v", err)
 	}
 
@@ -931,7 +931,7 @@ func TestSaveToDirMigratesExistingOjsonlSessionOnWrite(t *testing.T) {
 	if err := saveToDir(dir, id, "", []agent.Message{
 		{Role: "user", Content: "first"},
 		{Role: "assistant", Content: "second"},
-	}, nil); err != nil {
+	}, nil, false, 0); err != nil {
 		t.Fatalf("saveToDir (migrate): %v", err)
 	}
 
@@ -986,7 +986,7 @@ func TestSaveToDirMigratesExistingJSONSessionOnWrite(t *testing.T) {
 	if err := saveToDir(dir, id, "", []agent.Message{
 		{Role: "user", Content: "hi"},
 		{Role: "assistant", Content: "reply"},
-	}, nil); err != nil {
+	}, nil, false, 0); err != nil {
 		t.Fatalf("saveToDir (migrate): %v", err)
 	}
 
@@ -1027,7 +1027,7 @@ func TestSaveToDirMigrationLeavesOriginalOnWriteFailure(t *testing.T) {
 	err := saveToDir(dir, id, "", []agent.Message{
 		{Role: "user", Content: "hi"},
 		{Role: "assistant", Content: "reply"},
-	}, nil)
+	}, nil, false, 0)
 	if err == nil {
 		t.Fatalf("expected saveToDir to fail when the .sqlite write fails")
 	}

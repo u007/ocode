@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1798,5 +1799,219 @@ func TestBrowserConfigExplicitZeroKeepsDefault(t *testing.T) {
 	}
 	if cfg.Ocode.Browser.IdleTimeoutMinutes != 10 {
 		t.Fatalf("explicit-0 IdleTimeoutMinutes = %d, want default 10", cfg.Ocode.Browser.IdleTimeoutMinutes)
+	}
+}
+
+// TestInvalidBackendURLPreservesRawOnLoadThenSave verifies that a backend_url
+// that fails normalization (e.g. the pre-narrowing hub value, or a typo) is
+// NOT silently dropped on load: the raw value survives in cfg.Extra and
+// round-trips through a subsequent save intact, so the user's on-disk value is
+// preserved for diagnosis rather than clobbered to empty.
+func TestInvalidBackendURLPreservesRawOnLoadThenSave(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "ocodeconfig.json")
+
+	// Pre-narrowing hub value is now invalid for backend_url (local-only).
+	initial := `{"backend_url":"https://hub.mercstudio.com"}`
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	if cfg.Ocode.BackendURL != "" {
+		t.Fatalf("invalid backend_url should not normalize, got %q", cfg.Ocode.BackendURL)
+	}
+	// Raw value must survive into Extra for round-trip preservation.
+	if _, ok := cfg.Ocode.Extra["backend_url"]; !ok {
+		t.Fatalf("expected invalid backend_url to be preserved in Extra, Extra=%v", cfg.Ocode.Extra)
+	}
+
+	// Save and re-read the file: the raw value must still be on disk.
+	if err := SaveOcodeConfig(&cfg.Ocode); err != nil {
+		t.Fatalf("SaveOcodeConfig: %v", err)
+	}
+	reloaded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(reloaded, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := raw["backend_url"]; !ok {
+		t.Fatalf("invalid backend_url was dropped on save; file=%s", reloaded)
+	}
+}
+
+// TestInvalidSyncURLPreservesRawOnLoadThenSave covers the same preservation
+// contract for the new sync_url field (e.g. a typo'd value with a path).
+func TestInvalidSyncURLPreservesRawOnLoadThenSave(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "ocodeconfig.json")
+
+	// A sync_url with a path is rejected (NormalizeSyncURL forbids paths).
+	initial := `{"sync_url":"https://hub.example.com/some/path"}`
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	if cfg.Ocode.SyncURL != "" {
+		t.Fatalf("invalid sync_url should not normalize, got %q", cfg.Ocode.SyncURL)
+	}
+	if _, ok := cfg.Ocode.Extra["sync_url"]; !ok {
+		t.Fatalf("expected invalid sync_url to be preserved in Extra, Extra=%v", cfg.Ocode.Extra)
+	}
+
+	if err := SaveOcodeConfig(&cfg.Ocode); err != nil {
+		t.Fatalf("SaveOcodeConfig: %v", err)
+	}
+	reloaded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(reloaded, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := raw["sync_url"]; !ok {
+		t.Fatalf("invalid sync_url was dropped on save; file=%s", reloaded)
+	}
+}
+
+// TestValidURLWinsOverPreservedRaw verifies that once a valid value is set and
+// saved, it takes precedence over any previously-preserved invalid raw value in
+// Extra (the write-path skip list must exclude backend_url/sync_url keys).
+func TestValidURLWinsOverPreservedRaw(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "ocodeconfig.json")
+
+	// Start with an invalid sync_url that gets preserved in Extra.
+	initial := `{"sync_url":"https://bad.example.com/path"}`
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+
+	// Now set a valid value and save.
+	if err := SaveSyncURL("https://good.example.com"); err != nil {
+		t.Fatalf("SaveSyncURL: %v", err)
+	}
+	var cfg2 Config
+	if err := LoadOcodeConfig(&cfg2); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	if cfg2.Ocode.SyncURL != "https://good.example.com" {
+		t.Fatalf("SyncURL = %q, want https://good.example.com", cfg2.Ocode.SyncURL)
+	}
+	// The previously-preserved invalid raw must not survive now that a valid
+	// canonical value is present.
+	reloaded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(reloaded, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var syncVal string
+	if rawMsg, ok := raw["sync_url"]; ok {
+		if err := json.Unmarshal(rawMsg, &syncVal); err != nil {
+			t.Fatalf("unmarshal sync_url: %v", err)
+		}
+	}
+	if syncVal != "https://good.example.com" {
+		t.Fatalf("on-disk sync_url = %q, want the valid value to win over preserved raw", syncVal)
+	}
+}
+
+// TestNormalizeBackendURLHubReturnsSentinel verifies the legacy production
+// hub URL is rejected with the typed ErrBackendURLIsHub sentinel (not a
+// generic validation error) so callers can emit a migration hint. Both the
+// bare host and a trailing-slash variant must match.
+func TestNormalizeBackendURLHubReturnsSentinel(t *testing.T) {
+	cases := []string{
+		"https://hub.mercstudio.com",
+		"https://hub.mercstudio.com/",
+		"  https://hub.mercstudio.com  ",
+	}
+	for _, raw := range cases {
+		_, err := NormalizeBackendURL(raw)
+		if !errors.Is(err, ErrBackendURLIsHub) {
+			t.Fatalf("NormalizeBackendURL(%q) err = %v, want ErrBackendURLIsHub", raw, err)
+		}
+	}
+
+	// A different https host must NOT match the hub sentinel — it should be a
+	// generic scheme error.
+	_, err := NormalizeBackendURL("https://example.com")
+	if errors.Is(err, ErrBackendURLIsHub) {
+		t.Fatalf("non-hub https URL must not match ErrBackendURLIsHub, got %v", err)
+	}
+
+	// Valid localhost still normalizes without error.
+	got, err := NormalizeBackendURL("http://localhost:4096/")
+	if err != nil {
+		t.Fatalf("valid localhost: %v", err)
+	}
+	if got != "http://localhost:4096" {
+		t.Fatalf("got %q, want http://localhost:4096", got)
+	}
+}
+
+// TestValidBackendURLNormalizesAndPersists verifies the success path still
+// works: a valid localhost backend_url normalizes (trailing slash stripped) and
+// persists, and does NOT leak into Extra.
+func TestValidBackendURLNormalizesAndPersists(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "ocodeconfig.json")
+
+	initial := `{"backend_url":"http://localhost:4096/"}`
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	// Trailing slash should be stripped by normalization.
+	if cfg.Ocode.BackendURL != "http://localhost:4096" {
+		t.Fatalf("BackendURL = %q, want http://localhost:4096", cfg.Ocode.BackendURL)
+	}
+	if _, ok := cfg.Ocode.Extra["backend_url"]; ok {
+		t.Fatalf("valid backend_url should not leak into Extra, Extra=%v", cfg.Ocode.Extra)
 	}
 }

@@ -72,9 +72,40 @@ func (c *Client) Pull(ctx context.Context, blob BlobType) error {
 		return fmt.Errorf("merge on pull: %w", err)
 	}
 	os.MkdirAll(filepath.Dir(localPath), 0700)
-	if err := writeLocalConfigFileAtomic(localPath, merged); err != nil {
-		return err
+	// Compare-before-write under the per-blob lock (see Push): a local edit
+	// that landed between the read above and the write below must not be
+	// overwritten. On a move, re-merge against the fresh file so the edit
+	// survives instead of being lost.
+	mu := blobLock(blob)
+	mu.Lock()
+	wrote, werr := writeMergedLocalLocked(localPath, jsonOrEmptyObject(local), merged)
+	if werr != nil {
+		mu.Unlock()
+		return werr
 	}
+	if !wrote {
+		fresh, rerr := readLocalConfigFile(localPath)
+		if rerr != nil {
+			mu.Unlock()
+			return rerr
+		}
+		remerged, merr := Merge(blob, base, fresh, json.RawMessage(out.Blob))
+		if merr != nil {
+			mu.Unlock()
+			return fmt.Errorf("merge on pull after raced edit: %w", merr)
+		}
+		wrote, werr = writeMergedLocalLocked(localPath, fresh, remerged)
+		if werr != nil {
+			mu.Unlock()
+			return werr
+		}
+		if !wrote {
+			mu.Unlock()
+			return fmt.Errorf("pull %s raced a concurrent local edit, will retry next cycle", blob)
+		}
+		merged = remerged
+	}
+	mu.Unlock()
 	// Refresh auth in-memory cache after direct disk write.
 	if blob == BlobTypeAuth {
 		if err := auth.LoadStore(); err != nil {

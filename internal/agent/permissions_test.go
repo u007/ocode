@@ -97,6 +97,25 @@ func TestPermissions_NoToolAllow_StillAsksForSensitive(t *testing.T) {
 	}
 }
 
+// TestPermissions_Sandbox_DeleteAutoAllowed verifies sandbox mode auto-allows
+// delete for in-workdir, non-sensitive paths — mirroring the bash auto-allow
+// — instead of falling through to Ask like normal mode does.
+func TestPermissions_Sandbox_DeleteAutoAllowed(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetMode(PermissionModeSandbox)
+	dec := pm.Decide("delete", json.RawMessage(`{"file_path":"sub/file.txt"}`))
+	if dec.Level != PermissionAllow {
+		t.Fatalf("expected Allow under sandbox mode, got %s", dec.Level)
+	}
+
+	// Sensitive paths still Ask even under sandbox mode.
+	dec = pm.Decide("delete", json.RawMessage(`{"file_path":".env"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("expected Ask for sensitive path under sandbox mode, got %s", dec.Level)
+	}
+}
+
 func TestIsSensitivePath_AllowsEnvTemplates(t *testing.T) {
 	allowed := []string{
 		".env.example",
@@ -2121,7 +2140,7 @@ func TestGitCDangerousConfigHandling(t *testing.T) {
 		if got := IsHarmfulBashCommand(tc.cmd); got != tc.wantHarmful {
 			t.Errorf("IsHarmfulBashCommand(%q)=%v want %v", tc.cmd, got, tc.wantHarmful)
 		}
-		if got := matchSubcommandAllow(tc.cmd); got != tc.wantAllow {
+		if got := matchSubcommandAllow(tc.cmd, ""); got != tc.wantAllow {
 			t.Errorf("matchSubcommandAllow(%q)=%v want %v", tc.cmd, got, tc.wantAllow)
 		}
 	}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -1907,8 +1908,8 @@ func (h *Handler) HandleGetBackendConfig(w http.ResponseWriter, r *http.Request)
 }
 
 // HandleSetBackendConfig persists the backend URL configuration.
-// Allowed values are empty (same-origin), http://localhost[:port],
-// http://127.0.0.1[:port], or https://hub.mercstudio.com.
+// Allowed values are empty (same-origin), http://localhost[:port], or
+// http://127.0.0.1[:port] — local dev origins only.
 func (h *Handler) HandleSetBackendConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BackendURL string `json:"backend_url"`
@@ -1919,6 +1920,16 @@ func (h *Handler) HandleSetBackendConfig(w http.ResponseWriter, r *http.Request)
 	}
 	normalized, err := config.NormalizeBackendURL(req.BackendURL)
 	if err != nil {
+		// Migration hint: the legacy production hub URL is no longer valid for
+		// backend_url — point the user at the dedicated sync_url setting.
+		if errors.Is(err, config.ErrBackendURLIsHub) {
+			writeError(w, http.StatusBadRequest,
+				"backend_url no longer accepts the legacy hub URL; "+
+					"the config/auth sync channel now uses the separate sync_url setting "+
+					"(set via the Sync server field in Settings > Backend, or PUT /api/config/ocode/sync-url). "+
+					"See release notes: backend_url is local-dev-only as of this version.")
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

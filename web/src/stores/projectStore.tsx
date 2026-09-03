@@ -258,7 +258,8 @@ interface ProjectContextType {
   openSessionTab: (sessionId: string, sessionTitle: string) => void;
   closeSessionTab: (sessionId: string) => void;
   addProject: (path: string) => Promise<void>;
-  removeProject: (path: string) => Promise<void>;
+  addRemoteProject: (host: string, path: string) => Promise<void>;
+  removeProject: (path: string, host?: string) => Promise<void>;
   renameProject: (path: string, name: string) => Promise<void>;
   reorderProjects: (paths: string[]) => Promise<void>;
   setProjectGroup: (path: string, group: string) => Promise<void>;
@@ -469,9 +470,23 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshProjects]);
 
-  const removeProject = useCallback(async (path: string) => {
+  const addRemoteProject = useCallback(async (host: string, path: string) => {
     try {
-      await api.removeProject(path);
+      await api.addRemoteProject(host, path);
+      await refreshProjects();
+    } catch (err) {
+      console.error("Failed to add remote project:", err);
+      throw err;
+    }
+  }, [refreshProjects]);
+
+  const removeProject = useCallback(async (path: string, host?: string) => {
+    try {
+      if (host) {
+        await api.removeRemoteProject(path, host);
+      } else {
+        await api.removeProject(path);
+      }
       await refreshProjects();
     } catch (err) {
       console.error("Failed to remove project:", err);
@@ -668,6 +683,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         openSessionTab,
         closeSessionTab,
         addProject,
+        addRemoteProject,
         removeProject,
         renameProject,
         reorderProjects,

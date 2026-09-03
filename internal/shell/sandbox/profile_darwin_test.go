@@ -68,12 +68,40 @@ func TestSeatbeltProfileRejectsMaliciousPath(t *testing.T) {
 	}
 }
 
-// TestSeatbeltProfileRejectsUnresolvableRoot locks fail-closed: a nonexistent
-// writable root is an error, not silently dropped or broadened.
-func TestSeatbeltProfileRejectsUnresolvableRoot(t *testing.T) {
-	roots := RootSet{WritableRoots: []string{filepath.Join(t.TempDir(), "does-not-exist")}, NetworkEgress: true}
-	if _, err := seatbeltProfileSafe(roots); err == nil {
-		t.Fatal("unresolvable writable root must be rejected")
+// TestSeatbeltProfileSkipsMissingRoot locks Linux parity: a nonexistent
+// writable root is skipped, not a hard error — binding a missing source would
+// fail startup, and skipping never widens the boundary. A missing cache
+// subdir (e.g. ~/.cache/bun) is already covered when its existing parent
+// (e.g. ~/.cache) is writable via subpath.
+func TestSeatbeltProfileSkipsMissingRoot(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	roots := RootSet{WritableRoots: []string{missing}, NetworkEgress: true}
+	profile, err := seatbeltProfileSafe(roots)
+	if err != nil {
+		t.Fatalf("missing writable root must be skipped, got error: %v", err)
+	}
+	if strings.Contains(profile, missing) {
+		t.Fatalf("profile must not contain missing root %s:\n%s", missing, profile)
+	}
+}
+
+// TestSeatbeltProfileSkipsMissingKeepsExisting locks the mixed-root
+// regression: an existing root still gets a write rule while a missing
+// sibling does not fail the profile.
+func TestSeatbeltProfileSkipsMissingKeepsExisting(t *testing.T) {
+	existing := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	roots := RootSet{WritableRoots: []string{existing, missing}, NetworkEgress: true}
+	profile, err := seatbeltProfileSafe(roots)
+	if err != nil {
+		t.Fatalf("mixed roots must not error, got: %v", err)
+	}
+	want := `(allow file-write* (subpath "` + canonicalForTest(t, existing) + `"))`
+	if !strings.Contains(profile, want) {
+		t.Fatalf("profile missing existing-root rule %s:\n%s", want, profile)
+	}
+	if strings.Contains(profile, missing) {
+		t.Fatalf("profile must not contain missing root %s:\n%s", missing, profile)
 	}
 }
 

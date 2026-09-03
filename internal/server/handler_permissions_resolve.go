@@ -289,7 +289,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	}
 
 	h.wireHeadlessAgentCallbacks(sessID, as.agent)
-
+	h.wireLivePersist(sessID, as, working)
 	// Mirrors runTurn: turnActive true only while Step actually runs, so a
 	// reload during this continuation's streaming can buffer/replay it too
 	// (see appendLiveFrame) instead of only covering the turn's first Step.

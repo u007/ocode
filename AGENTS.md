@@ -128,13 +128,11 @@ tags, timestamp, status). When active, the agent receives a
 
 | Agent | Role | Tools |
 |-------|------|-------|
-| `context` | Knowledge curator/retriever and **sole automated writer** to the bundle. Answers why/decision/playbook questions; verifies doc claims against code before writing; prefers updating existing docs over near-duplicates; deprecates rather than deletes. Uses the configured context model if set and enabled, else the small model, else the main model (see `/context-model`). | `grep`, `glob`, `read`, `list`, `doc_search`, `doc_get`, `doc_write`, `doc_deprecate` |
-| `explore` | Code-level exploration — where/how/what in source; general codebase research, not pinned to the knowledge bundle | `read`, `glob`, `grep`, `list`, `lsp`, `bash`, `webfetch`, `websearch` |
+| `context` | Knowledge curator/retriever and **sole automated writer** to the bundle. Answers why/decision/playbook questions; verifies doc claims against code before writing; prefers updating existing docs over near-duplicates; deprecates rather than deletes. Uses the configured context model if set and enabled, else the small model, else the main model (see `/context-model`). When the bundle is active, also handles codebase exploration (where/how/what) — subsumes `explore` — with full explore toolkit plus doc tools; `explore` is hidden from the schema. Priority: `doc_search` first, then `doc_get`, then code tools; parallel `doc_search` + code search in the same batch is allowed for mixed questions. | `grep`, `glob`, `read`, `list`, `lsp`, `bash`, `webfetch`, `websearch`, `doc_search`, `doc_get`, `doc_write`, `doc_deprecate` |
+| `explore` | Code-level exploration — where/how/what in source; general codebase research, not pinned to the knowledge bundle (hidden when `context` is active) | `read`, `glob`, `grep`, `list`, `lsp`, `bash`, `webfetch`, `websearch` |
 
 Guidance in the `DocPromptEnabled` prompt fragment: try `knowledge_lookup` first
-for why/decision/playbook questions; use `explore` for code-level questions; for
-mixed questions dispatch both in background concurrently, take the first
-sufficient answer, `task_cancel` the other.
+for why/decision/playbook questions; when the bundle is active use `context` (which subsumes `explore`) for code-level or mixed (why+where) questions — `explore` is hidden — with knowledge-first priority: `doc_search` first, `doc_get` as needed, then code tools, parallel batch allowed; when the bundle is inactive, use `explore` for code-level questions as before.
 
 **Sole-automated-writer invariant:** no agent path outside the `context`
 subagent may write to the bundle — the main agent's tool set never includes
@@ -684,6 +682,33 @@ project-scoped even when working from different checkouts. The TUI's
 `/cd`, `--dir`, or `session.SetWorkDir`); `os.Getwd()` is not — `/cd`
 can change the project root without changing the process CWD on every
 caller.
+
+## Backend / Sync URL Split (2026-09-03) — user-facing migration
+`backend_url` (`config.NormalizeBackendURL`) is now **local-dev-only**: empty
+(same-origin) or `http://localhost[:port]` / `http://127.0.0.1[:port]`. The
+production hub (`https://hub.mercstudio.com`) is no longer accepted there.
+
+The dedicated config/auth sync channel is the new `sync_url` field
+(`config.NormalizeSyncURL`): any `https://` origin plus `http://localhost` /
+`http://127.0.0.1`; empty falls back to `OCODE_SYNC_URL`, then the production hub
+(`sync.DefaultBaseURL` is now `https://hub.mercstudio.com`, up from
+`http://localhost:3201`). `internal/sync` resolves via `sync.ResolveBaseURL`;
+a one-time diagnostic (`sync.logBaseURLNotice`) is emitted at client
+construction so an unconfigured local kakiit dev machine that silently
+reaches production after the flip is visibly flagged.
+
+**Migration for existing hub users:** an on-disk `backend_url:
+"https://hub.mercstudio.com"` is preserved verbatim in `ocodeconfig.json`
+(not silently dropped) and logged as a warning on load, but resolves to
+same-origin at runtime. To restore hub connectivity, move the value to
+`sync_url` (Settings > Backend > Sync server, or
+`PUT /api/config/ocode/sync-url`). Posting the legacy hub to
+`PUT /api/config/ocode/backend` returns **400** with a `use sync_url instead`
+hint. See `CHANGES.md` `[Unreleased]` for the full list of affected symbols.
+
+When diagnosing a user whose hub routing silently broke after an upgrade, check
+`ocodeconfig.json` for a `backend_url: "https://hub.mercstudio.com"` entry and
+migrate it to `sync_url`.
 
 ## Prompt Cache Stability
 Anthropic prompt caching reads one linear prefix in a **fixed order: `tools` →

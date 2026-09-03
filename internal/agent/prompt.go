@@ -43,7 +43,9 @@ After implementing, update documentation to reflect your changes:
 
 When the knowledge bundle is active, the [ocode:knowledge] index above lists curated project docs (docs/). For any **why / what-did-we-decide / playbook / gotcha** question about THIS project, call the **knowledge_lookup** tool FIRST — it dispatches the context sub-agent, which semantically searches the bundle, verifies claims against the codebase, and cites doc paths.
 
-**Do NOT read docs/ files directly with the read tool** to answer knowledge questions. The docs/ directory is owned by the knowledge system: retrieval is intentionally routed through knowledge_lookup so answers stay curated, verified, and citation-tracked. Only fall back to read on docs/ if knowledge_lookup explicitly reports the bundle has no relevant information.`
+**Do NOT read docs/ files directly with the read tool** to answer knowledge questions. The docs/ directory is owned by the knowledge system: retrieval is intentionally routed through knowledge_lookup so answers stay curated, verified, and citation-tracked. Only fall back to read on docs/ if knowledge_lookup explicitly reports the bundle has no relevant information.
+
+**Context subsumes explore when the bundle is active:** the context sub-agent also handles codebase exploration (where/how/what) and has the full explore toolkit (grep/glob/read/list/lsp/bash/webfetch/websearch) plus doc tools. When the bundle is active, dispatch task with agent=context for code-level or mixed (why+where) questions — explore is hidden from the schema. Priority: doc_search first (get_top: 3), then doc_get as needed, then code tools; for mixed questions you MAY call doc_search and code tools (grep/glob/lsp/read) in parallel in the same batch — if docs answer, ignore the parallel code results.`
 
 // PrepareMessages prepends the stable base prompt fragments for this agent.
 // It is safe to call more than once; marked fragments are not duplicated.
