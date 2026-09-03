@@ -155,6 +155,10 @@ func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any) []Tool {
 	// images via Gemini (default), OpenAI, Novita, DeepInfra, or any
 	// OpenAI-compatible endpoint.
 	builtins = append(builtins, &ImageGenTool{Config: cfg})
+	// Sidebar preview activation — lets the model open a file in the web
+	// PreviewHost (pdf/docx/pptx/mermaid/image/text). The result carries a
+	// PREVIEW_OPEN sentinel the SPA auto-opens; no server push needed.
+	builtins = append(builtins, &PreviewOpenTool{})
 	// Scheduled-job management — only included when a scheduler service is
 	// attached. The indirection through any (resolved in cron.go) avoids a
 	// tool ↔ scheduler import cycle, since internal/scheduler/dispatch.go

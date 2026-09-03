@@ -25,6 +25,11 @@ interface ChatInputProps {
   sessionTabId?: string | null;
   /** Called when a temporary tab has been replaced by the real session ID. */
   onSessionCreated?: (tempTabId: string, sessionId: string) => void;
+  /** Sidebar preview highlight (file + page/slide/node label + excerpt) to
+   *  display as a chip and attach to the outgoing message. */
+  previewContext?: { path: string; label: string; excerpt: string } | null;
+  /** Called when the user X's the preview chip off this message. */
+  onClearPreviewContext?: () => void;
 }
 
 export interface SlashCommandResult {
@@ -39,6 +44,8 @@ export default function ChatInput({
   contextFilePaths,
   sessionTabId,
   onSessionCreated,
+  previewContext,
+  onClearPreviewContext,
 }: ChatInputProps) {
   const [input, setInput] = useState("");
   const [showSlashMenu, setShowSlashMenu] = useState(false);
@@ -378,7 +385,13 @@ export default function ChatInput({
         .map((p) => `@${p}`)
         .join(" ");
 
-      const parts = [contextRef, contextRefs, refs, trimmed].filter(Boolean);
+      // Sidebar preview highlight: file + page/slide/node label + excerpt so
+      // the LLM knows exactly what was highlighted and where.
+      const previewRef = previewContext
+        ? `@${previewContext.path} (${previewContext.label}): "${previewContext.excerpt.slice(0, 500)}"`
+        : "";
+
+      const parts = [contextRef, contextRefs, previewRef, refs, trimmed].filter(Boolean);
       const finalMessage = parts.join(" ");
       setAttachedFiles([]);
 
@@ -541,6 +554,22 @@ export default function ChatInput({
             selection={activeEditorContext.selection ?? null}
             onRemove={() => setExcludedPaths((prev) => new Set(prev).add(activeEditorContext.path))}
           />
+        )}
+        {previewContext && (
+          <span className="inline-flex items-center gap-1 text-xs bg-purple-900/50 text-purple-300 rounded px-2 py-0.5 font-mono max-w-[220px]">
+            <span className="w-1.5 h-1.5 rounded-full bg-purple-400 shrink-0" />
+            <span className="truncate" title={`@${previewContext.path} (${previewContext.label})`}>
+              {previewContext.path} · {previewContext.label}
+            </span>
+            <button
+              type="button"
+              onClick={() => onClearPreviewContext?.()}
+              className="text-purple-300/70 hover:text-purple-100 shrink-0"
+              aria-label={`Remove preview highlight from this message`}
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </span>
         )}
         {(contextFilePaths ?? [])
           .filter((p) => p !== activeEditorContext?.path && !excludedPaths.has(p))

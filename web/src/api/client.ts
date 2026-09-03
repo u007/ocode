@@ -1047,6 +1047,41 @@ export const api = {
       body: JSON.stringify({ path, content, project_root: projectRoot, expected_hash: expectedHash, force }),
     }),
 
+  // ── File content load (GET) for the sidebar PreviewHost text/markdown
+  // viewer (same endpoint the editor tabs use).
+  getFileContent: async (path: string, projectRoot?: string): Promise<string> => {
+    const query = new URLSearchParams({ path });
+    if (projectRoot) query.set("project_root", projectRoot);
+    const res = await fetch(apiPath(`/api/files/content?${query.toString()}`), { headers: authHeaders() });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || res.statusText);
+    }
+    const data = await res.json();
+    return data.content as string;
+  },
+
+  // ── Sidebar preview: open with the OS default app (native-fidelity
+  // playback for pptx/docx) — forces the system opener, never the editor.
+  openFileWithOS: (path: string, projectRoot?: string) =>
+    fetchJSON<{ path: string; status: string }>("/api/files/open", {
+      method: "POST",
+      body: JSON.stringify({ path, mode: "os", project_root: projectRoot }),
+    }),
+
+  // ── Sidebar preview: fetch raw bytes for pdf/docx/pptx/image/mmd via
+  // GET /api/files/raw (auth headers required — plain <img>/<iframe> tags
+  // can't attach them, so callers use fetch + blob URLs).
+  fetchFileRaw: async (path: string, projectRoot?: string): Promise<ArrayBuffer> => {
+    const q = `path=${encodeURIComponent(path)}${projectRoot ? `&project_root=${encodeURIComponent(projectRoot)}` : ""}`;
+    const res = await fetch(apiPath(`/api/files/raw?${q}`), { headers: authHeaders() });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || res.statusText);
+    }
+    return res.arrayBuffer();
+  },
+
   // ── Session title / export ──
   setSessionTitle: (id: string, title: string) =>
     fetchJSON<{ title: string }>(

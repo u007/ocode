@@ -17,6 +17,14 @@ import (
 type openFileRequest struct {
 	Path string `json:"path"`
 	Line int    `json:"line,omitempty"`
+	// Mode selects the opener: ""/"editor" uses the configured GUI editor
+	// with system-opener fallback (previous behavior); "os" forces the OS
+	// default application (used by PreviewHost "Open with OS app" for
+	// native-fidelity pptx/docx playback). Any other value is rejected.
+	Mode string `json:"mode,omitempty"`
+	// ProjectRoot optionally anchors relative paths (same allowlist as
+	// HandleFileContent's project_root). Empty falls back to workDir.
+	ProjectRoot string `json:"project_root,omitempty"`
 }
 
 // HandleOpenFile opens a file referenced from a rendered chat message in the
@@ -33,8 +41,14 @@ func (h *Handler) HandleOpenFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
+	switch req.Mode {
+	case "", "editor", "os":
+	default:
+		writeError(w, http.StatusBadRequest, "mode must be \"editor\" or \"os\"")
+		return
+	}
 
-	abs, err := h.resolveWithinWorkdir(req.Path)
+	abs, err := h.resolveOpenPath(req.Path, req.ProjectRoot)
 	if err != nil {
 		log.Printf("[open] rejected path %q: %v", req.Path, err)
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -46,12 +60,45 @@ func (h *Handler) HandleOpenFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := openPathInEditor(abs, req.Line); err != nil {
+	if err := openResolvedPath(abs, req.Line, req.Mode); err != nil {
 		log.Printf("[open] failed to open %q: %v", abs, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"path": abs, "status": "opened"})
+}
+
+// resolveOpenPath anchors reqPath under projectRoot when provided (same
+// allowlist as HandleFileContent's fileContentRootFor), else workDir.
+func (h *Handler) resolveOpenPath(reqPath, projectRoot string) (string, error) {
+	if projectRoot != "" {
+		root, ok := h.fileContentRootFor(projectRoot)
+		if !ok {
+			return "", fmt.Errorf("project_root is not an allowed project root")
+		}
+		p := reqPath
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(root, p)
+		}
+		p = filepath.Clean(p)
+		rel, err := filepath.Rel(root, p)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("path is outside the project root")
+		}
+		return p, nil
+	}
+	return h.resolveWithinWorkdir(reqPath)
+}
+
+// openResolvedPath honors mode: "os" forces the OS default application
+// (native-fidelity playback for pptx/docx); anything else uses the
+// configured editor with system-opener fallback.
+func openResolvedPath(absPath string, line int, mode string) error {
+	if mode == "os" {
+		name, args := systemOpener(absPath)
+		return startDetached(name, args)
+	}
+	return openPathInEditor(absPath, line)
 }
 
 // resolveWithinWorkdir cleans path (relative to the server working dir) and

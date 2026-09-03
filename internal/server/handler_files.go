@@ -639,6 +639,7 @@ func searchFiles(ctx context.Context, params fileSearchParams, maxTotal int, emi
 //   caseSensitive / case : when 1, matching is case-sensitive (default case-insensitive)
 //   wholeWord     : when 1, matches must be whole words (Unicode \pL\pN_ boundaries)
 //   includeIgnored: when 1, hidden files/dirs are walked; default walks only visible files (skips .git, node_modules, dotfiles)
+//
 // Pagination: `limit` is page size (default 50, max 100, see maxSearchPageSize) with `offset`.
 // Stream variant `limit` is a total-result cap instead (see HandleFileSearchStream).
 // Invalid regex returns 400. The walk collects ALL matches then slices the page — see stream for incremental SSE.
@@ -810,6 +811,85 @@ func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 		"path":    path,
 		"content": string(data),
 	})
+}
+
+// previewRawMaxBytes caps GET /api/files/raw responses so a malicious or
+// accidental request for a huge binary (video, disk image) can't OOM the
+// server or the preview tab. 32 MiB covers real docx/pptx/pdf decks.
+const previewRawMaxBytes = 32 << 20
+
+// previewRawTypes allowlists previewable binary extensions. The browser
+// renderers (pdf.js, docx-preview, jszip slide parser) only need these;
+// anything else falls back to the text content endpoint or OS-open.
+var previewRawTypes = map[string]string{
+	".pdf":  "application/pdf",
+	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+	".webp": "image/webp",
+	".svg":  "image/svg+xml",
+	".mmd":  "text/plain; charset=utf-8",
+	".md":   "text/markdown; charset=utf-8",
+}
+
+// HandleFileRaw serves previewable file bytes for PreviewHost (pdf.js,
+// docx-preview, pptx slide parser, mermaid). Same anchoring and containment
+// rules as HandleFileContent; directories, unknown extensions, and files
+// over the size cap are rejected so the endpoint can't be used as an
+// arbitrary file exfiltration channel.
+func (h *Handler) HandleFileRaw(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	if projectRoot := r.URL.Query().Get("project_root"); projectRoot != "" {
+		root, ok := h.fileContentRootFor(projectRoot)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "project_root is not an allowed project root")
+			return
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(root, path)
+		}
+		if !containedIn(path, root) {
+			writeError(w, http.StatusBadRequest, "path is outside the project root")
+			return
+		}
+	} else if !filepath.IsAbs(path) && h.workDir != "" {
+		path = filepath.Join(h.workDir, path)
+	}
+
+	ct, ok := previewRawTypes[strings.ToLower(filepath.Ext(path))]
+	if !ok {
+		writeError(w, http.StatusBadRequest, "file type is not previewable as raw bytes")
+		return
+	}
+
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	if info.Size() > previewRawMaxBytes {
+		writeError(w, http.StatusBadRequest, "file exceeds the 32 MiB preview limit")
+		return
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 type saveFileContentRequest struct {

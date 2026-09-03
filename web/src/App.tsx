@@ -7,6 +7,9 @@ import { ProjectProvider, findProjectPathForTab, useProjectState } from "./store
 import { TerminalProvider } from "./stores/terminalStore";
 import { BrowserTabsProvider, useBrowserTabs } from "./stores/browserTabsStore";
 import { BrowserPanel } from "./components/Browser/BrowserPanel";
+import PreviewHost from "./components/Preview/PreviewHost";
+import { usePreviewActivation } from "./components/Preview/usePreviewActivation";
+import { PREVIEW_CONTEXT_EVENT, type PreviewSelection } from "./lib/previewKind";
 import { useBrowserStore, browserActions, type StateKey } from "./lib/browserStore";
 import { loadViewStateForProject, saveViewStateForProject, type FocusedKind } from "./lib/viewPersistence";
 import { api } from "./api/client";
@@ -251,6 +254,31 @@ function HomeApp() {
     if (tab && tab.includeInContext === false) return null;
     return activeEditorContext;
   }, [activeEditorContext, editorTabs]);
+
+  // ── Sidebar PreviewHost: AI/file-tree activation + highlight context ──
+  // The `preview_open` agent tool and `ocode:open-preview` events (file tree
+  // "Preview in sidebar", diagram node links) arrive as request + nonce; a
+  // fresh nonce opens the side panel so the file is actually visible.
+  const { request: previewRequest, nonce: previewNonce } = usePreviewActivation(activeTabId);
+  const [previewContext, setPreviewContext] = useState<PreviewSelection | null>(null);
+
+  useEffect(() => {
+    if (previewNonce === 0 || !sideStateKey) return;
+    browserActions.open(sideStateKey);
+  }, [previewNonce, sideStateKey]);
+
+  // Preview highlight (Ask LLM) → chat composer chip; cleared on tab switch.
+  useEffect(() => {
+    const onCtx = (e: Event) => {
+      const detail = (e as CustomEvent<PreviewSelection>).detail;
+      if (detail?.path) setPreviewContext(detail);
+    };
+    window.addEventListener(PREVIEW_CONTEXT_EVENT, onCtx as EventListener);
+    return () => window.removeEventListener(PREVIEW_CONTEXT_EVENT, onCtx as EventListener);
+  }, []);
+  useEffect(() => {
+    setPreviewContext(null);
+  }, [activeTabId]);
 
   useEffect(() => {
     const onDelete = (e: Event) => {
@@ -928,6 +956,10 @@ function HomeApp() {
                               effectiveActiveEditorContext && (effectiveActiveEditorContext.projectRoot ?? "") === (tab.projectPath ?? "") ? effectiveActiveEditorContext : null
                             }
                             contextFilePaths={contextFileEntries.filter((e) => (e.projectRoot ?? "") === (tab.projectPath ?? "")).map((e) => e.path)}
+                            previewContext={
+                              previewContext && (previewContext.projectRoot ?? "") === (tab.projectPath ?? "") ? previewContext : null
+                            }
+                            onClearPreviewContext={() => setPreviewContext(null)}
                             sessionTabId={tab.id}
                             onSessionCreated={handleSessionCreated}
                           />
@@ -1043,7 +1075,7 @@ function HomeApp() {
                     className="flex-shrink-0 h-full min-h-0 flex flex-col border-l border-border"
                   >
                     <div className="flex shrink-0 items-center justify-between h-8 pl-3 pr-1.5 border-b border-border">
-                      <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">Browser</span>
+                      <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">Browser / Preview</span>
                       <div className="flex shrink-0 items-center gap-0.5">
                         <button
                           type="button"
@@ -1066,7 +1098,13 @@ function HomeApp() {
                       </div>
                     </div>
                     <div className="flex-1 min-h-0">
-                      <BrowserPanel key={sideStateKey} stateKey={sideStateKey} mode="side" />
+                      <PreviewHost
+                        key={sideStateKey}
+                        stateKey={sideStateKey}
+                        projectRoot={projectState.activeProject?.path}
+                        request={previewRequest}
+                        nonce={previewNonce}
+                      />
                     </div>
                   </div>
                 </>

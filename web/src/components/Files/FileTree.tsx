@@ -29,6 +29,7 @@ import {
   Clipboard,
   Columns2,
   Copy,
+  Eye,
   File,
   FilePlus2,
   Files,
@@ -49,6 +50,7 @@ import {
 } from "lucide-react";
 import { api, apiPath, authHeaders, readSSEStream } from "@/api/client";
 import { parseKeywords, matchesKeywords, scoreMatch } from "@/lib/keywordFilter";
+import { dispatchOpenPreview, previewKindForPath } from "../../lib/previewKind";
 import SecretActionDialog from "./SecretActionDialog";
 import { loadFileTreeView, saveFileTreeView, type FileTreeViewMode } from "./fileTreeViewPersistence";
 import { loadFileSearchFilters, saveFileSearchFilters } from "./fileSearchFiltersPersistence";
@@ -1689,6 +1691,11 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
                                           <ContextMenuItem onSelect={() => menu.open(node.path)}>
                                             <File className="w-3.5 h-3.5 mr-2" /> Open
                                           </ContextMenuItem>
+                                          {!isDir && previewKindForPath(node.path) && (
+                                            <ContextMenuItem onSelect={() => dispatchOpenPreview(node.path, 1, activeRoot)}>
+                                              <Eye className="w-3.5 h-3.5 mr-2" /> Preview in sidebar
+                                            </ContextMenuItem>
+                                          )}
                                           <ContextMenuItem onSelect={() => menu.copyPath(requestPath)}>
                                             <Link2 className="w-3.5 h-3.5 mr-2" /> Copy path
                                           </ContextMenuItem>

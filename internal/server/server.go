@@ -200,6 +200,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/files/search", s.authMiddleware(s.handleFileSearch))
 	s.mux.HandleFunc("GET /api/files/search/stream", s.authMiddleware(s.handleFileSearchStream))
 	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
+	s.mux.HandleFunc("GET /api/files/raw", s.authMiddleware(s.handleFileRaw))
 	s.mux.HandleFunc("PUT /api/files/content", s.authMiddleware(s.handleSaveFileContent))
 	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
 	s.mux.HandleFunc("POST /api/fs/copy", s.authMiddleware(s.handler.HandleFSCopy))
@@ -924,6 +925,10 @@ func (s *Server) handleFileSearchStream(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleFileContent(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleFileContent(w, r)
+}
+
+func (s *Server) handleFileRaw(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleFileRaw(w, r)
 }
 
 func (s *Server) handleSaveFileContent(w http.ResponseWriter, r *http.Request) {
