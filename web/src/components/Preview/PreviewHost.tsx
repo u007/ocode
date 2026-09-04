@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { BrowserPanel } from "../Browser/BrowserPanel";
 import type { StateKey } from "../../lib/browserStore";
-import { previewKindForPath, type PreviewOpenRequest } from "../../lib/previewKind";
+import { previewKindForPath, resolvePreviewDoc, type PreviewOpenRequest } from "../../lib/previewKind";
 import { api } from "../../api/client";
 import PdfViewer from "./PdfViewer";
 import DocxViewer from "./DocxViewer";
 import PptxViewer from "./PptxViewer";
+import ExcelViewer from "./ExcelViewer";
 import MmdViewer from "./MmdViewer";
 import MarkdownViewer from "./MarkdownViewer";
 import TextViewer from "./TextViewer";
@@ -53,13 +54,24 @@ export default function PreviewHost({
   const lastNonceRef = useRef(0);
 
   // New activation → show the file in the Preview tab, starting at the
-  // requested page/slide.
+  // requested page/slide. Legacy .doc/.ppt (see resolvePreviewDoc) land on
+  // an explicit OS-open fallback instead of a broken preview. The fallback
+  // keeps the request's own project root so OS-open resolves (and is
+  // containment-checked) against the right project in multi-project windows.
+  const [unsupported, setUnsupported] = useState<{ path: string; projectRoot?: string } | null>(null);
   useEffect(() => {
     if (!request || nonce === lastNonceRef.current) return;
     lastNonceRef.current = nonce;
-    const kind = previewKindForPath(request.path) ?? request.kind;
+    const resolved = resolvePreviewDoc(request.path, request.kind);
+    if (!resolved.kind) {
+      setDoc(null);
+      setUnsupported({ path: resolved.unsupported, projectRoot: request.projectRoot ?? projectRoot });
+      setSurface("preview");
+      return;
+    }
+    setUnsupported(null);
     const anchor = request.projectRoot ?? projectRoot;
-    setDoc({ path: request.path, kind, projectRoot: anchor });
+    setDoc({ path: request.path, kind: resolved.kind, projectRoot: anchor });
     setPage(Math.max(1, request.page));
     setSurface("preview");
   }, [request, nonce, projectRoot]);
@@ -69,11 +81,16 @@ export default function PreviewHost({
     setDoc((d) => (d && !d.projectRoot && projectRoot ? { ...d, projectRoot } : d));
   }, [projectRoot]);
 
-  const openWithOS = async () => {
-    if (!doc) return;
+  const openWithOS = async (target?: string) => {
+    const targetPath = target ?? doc?.path;
+    // Legacy fallback keeps its own project root (multi-project windows);
+    // docs use their anchor, else the pane default.
+    const fallbackRoot = unsupported && targetPath && unsupported.path === targetPath ? unsupported.projectRoot : undefined;
+    const targetRoot = fallbackRoot ?? doc?.projectRoot ?? projectRoot;
+    if (!targetPath) return;
     setOsOpenState("Opening…");
     try {
-      await api.openFileWithOS(doc.path, doc.projectRoot ?? projectRoot);
+      await api.openFileWithOS(targetPath, targetRoot);
       setOsOpenState("Opened in OS app");
     } catch (e) {
       setOsOpenState(e instanceof Error ? e.message : String(e));
@@ -111,6 +128,21 @@ export default function PreviewHost({
         <div className="min-h-0 flex-1">
           <BrowserPanel key={stateKey} stateKey={stateKey} mode="side" />
         </div>
+      ) : unsupported ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
+          <div className="max-w-[240px] truncate font-mono text-xs text-foreground" title={unsupported.path}>{unsupported.path}</div>
+          <div className="max-w-[240px] text-[11px] leading-relaxed text-muted-foreground">
+            Legacy Office formats (.doc/.ppt) can't preview in the browser — open with the OS app instead.
+          </div>
+          {osOpenState && <div className="text-[11px] text-muted-foreground">{osOpenState}</div>}
+          <button
+            type="button"
+            onClick={() => openWithOS(unsupported.path)}
+            className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground hover:opacity-90"
+          >
+            Open in app
+          </button>
+        </div>
       ) : doc ? (
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex shrink-0 items-center gap-1 border-b border-border px-2 py-1 text-xs">
@@ -118,7 +150,7 @@ export default function PreviewHost({
               {doc.path}
             </span>
             {osOpenState && <span className="shrink-0 text-muted-foreground">{osOpenState}</span>}
-            <button type="button" onClick={openWithOS} className="shrink-0 rounded px-1.5 py-0.5 hover:bg-muted" title="Open with the OS default app (native PowerPoint/Keynote/Word playback)">
+            <button type="button" onClick={() => openWithOS()} className="shrink-0 rounded px-1.5 py-0.5 hover:bg-muted" title="Open with the OS default app (native PowerPoint/Keynote/Word playback)">
               Open in app
             </button>
             <button
@@ -134,6 +166,7 @@ export default function PreviewHost({
             {doc.kind === "pdf" && <PdfViewer path={doc.path} projectRoot={doc.projectRoot} page={page} onPageChange={setPage} />}
             {doc.kind === "docx" && <DocxViewer path={doc.path} projectRoot={doc.projectRoot} />}
             {doc.kind === "pptx" && <PptxViewer path={doc.path} projectRoot={doc.projectRoot} slide={page} onSlideChange={setPage} />}
+            {doc.kind === "excel" && <ExcelViewer path={doc.path} projectRoot={doc.projectRoot} />}
             {doc.kind === "mermaid" && <MmdViewer path={doc.path} projectRoot={doc.projectRoot} onOpenFile={openLinked} />}
             {doc.kind === "markdown" && <MarkdownViewer path={doc.path} projectRoot={doc.projectRoot} onOpenFile={openLinked} />}
             {doc.kind === "text" && <TextViewer path={doc.path} projectRoot={doc.projectRoot} />}

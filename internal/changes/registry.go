@@ -67,23 +67,21 @@ func (r *Registry) listInternal() []FileChange {
 }
 
 // signatureLocked returns a cheap, order-independent summary of everything
-// listInternal's rebuild depends on: the number of attached stores, the
-// number of bash-only entries, and the snapshot count of every attached
-// store. It is a sum rather than e.g. a hash chain specifically so that
-// map iteration order (which Go randomizes) can't change the result for
-// unchanged state.
+// listInternal's rebuild depends on: the attached stores' monotonic versions
+// (see snapshot.Store.Version), the number of attached stores, the number of
+// bash entries, and the bash bump counter.
 //
-// This is a heuristic, not a cryptographic digest: two different states
-// could in principle sum to the same signature (e.g. one store gaining a
-// snapshot while another loses one in the same tick). That would only
-// cause the changes tab to show a stale render for one extra frame, which
-// is already the tolerance the TUI accepts elsewhere (View() only
-// refreshes once per render). Caller must hold r.mu.
+// Versions (not snapshot counts) are summed deliberately: every store
+// mutation strictly increases its version, so the sum is monotonic
+// non-decreasing and can never collide the way a Len-based sum could (one
+// store gaining a snapshot while another loses one between two List() calls
+// summed to the same total and permanently hid the new file). Caller must
+// hold r.mu.
 func (r *Registry) signatureLocked() int64 {
-	sig := int64(len(r.byAgent))*1_000_000_007 + int64(len(r.files))
+	var sig int64 = int64(len(r.byAgent))*1_000_000_007 + int64(len(r.files))*1_000_003 + int64(r.bashVersion)
 	for _, store := range r.byAgent {
 		if store != nil {
-			sig += int64(store.Len())
+			sig += int64(store.Version())
 		}
 	}
 	return sig
@@ -134,20 +132,49 @@ func (r *Registry) finalizeLocked(aggs []*fileAggregate) []FileChange {
 	for _, agg := range aggs {
 		out = append(out, agg.toFileChange())
 	}
-	// Phase 5: bash-only entries (recorded via NotifyBashWrite
-	// into r.files but never appearing in any snapshot store) are
-	// appended here. The per-snapshot walk above already covers
-	// files with snapshot backups; we only emit r.files entries
-	// that did not surface in aggs.
-	bashSeen := make(map[string]struct{}, len(aggs))
-	for _, fc := range out {
-		bashSeen[fc.OriginalPath] = struct{}{}
+	// Phase 5: bash entries (recorded via NotifyBashWrite into r.files).
+	// Entries for paths with no snapshot backup are appended as new rows.
+	// Entries for snapshot-covered paths are MERGED into the row above:
+	// without this, the per-row bash details (LastBashCommand, the
+	// FileDeleted promotion when bash removed a restorable file) would be
+	// silently dropped for any file the agent also edited directly.
+	byPath := make(map[string]int, len(out))
+	for i := range out {
+		byPath[out[i].OriginalPath] = i
 	}
 	for path, bash := range r.files {
-		if _, covered := bashSeen[path]; covered {
+		if idx, covered := byPath[path]; covered {
+			merged := &out[idx]
+			// Fold bash metadata into the snapshot row only when the bash
+			// event is at least as recent as the newest snapshot for this
+			// path. An older bash touch must not claim the row: the field
+			// doc (changes.go) defines LastBashCommand as the write that
+			// came most recently from bash, and resurrecting its FileDeleted
+			// status would contradict the live filesystem after a newer
+			// snapshot write or an undo recreated the file (toFileChange
+			// already derives FileDeleted from os.Stat).
+			if !bash.UpdatedAt.Before(merged.UpdatedAt) {
+				merged.LastBashCommand = bash.LastBashCommand
+				merged.LastBashExitCode = bash.LastBashExitCode
+				if bash.UpdatedAt.After(merged.UpdatedAt) {
+					merged.UpdatedAt = bash.UpdatedAt
+				}
+			}
 			continue
 		}
-		out = append(out, *bash)
+		// Bash-only rows: the stored status reflects the bash op at event
+		// time, and that op-derived status stays authoritative EXCEPT for
+		// the one contradiction the op cannot express — a bash-deleted file
+		// that is back on disk (a snapshot undo restored it, or something
+		// recreated it). Without this the row would keep showing a stale
+		// FileDeleted for an existing file forever.
+		row := *bash
+		if row.Status == FileDeleted && pathExists(row.OriginalPath) {
+			// We can no longer tell Added from Modified, so Modified is
+			// the honest mid-state.
+			row.Status = FileModified
+		}
+		out = append(out, row)
 	}
 	// Sort by UpdatedAt desc, then by OriginalPath asc for stability
 	// when two files have identical UpdatedAt (rare but possible when

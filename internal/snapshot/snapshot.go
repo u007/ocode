@@ -50,6 +50,13 @@ type Store struct {
 	agentID   string
 	baseDir   string // where backup files are written; empty => legacy ".opencode/snapshots"
 	sessionID string // "" => backups are not journaled (e.g. global store)
+	// version is a monotonic mutation counter bumped on every change that
+	// affects the snapshot membership (Backup append, Undo/UndoByToolCallID
+	// removal, DiscardRecent, Reset, Rehydrate load). The changes registry
+	// uses it (instead of Len) to detect staleness: a Len-based sum can
+	// collide when one store gains a snapshot while another loses one
+	// between two List() calls, permanently hiding the new file.
+	version uint64
 }
 
 // NewStore creates a Store for one agent. agentID must be unique across all
@@ -112,6 +119,7 @@ func (s *Store) Rehydrate() {
 	s.mu.Lock()
 	if len(s.snapshots) == 0 { // re-check under lock
 		s.snapshots = append(s.snapshots, kept...)
+		s.version++
 	}
 	s.mu.Unlock()
 }
@@ -305,6 +313,7 @@ func (s *Store) backupAtDir(path, toolCallID, baseDir string) error {
 	s.mu.Lock()
 	snap.AgentStep = s.step
 	s.snapshots = append(s.snapshots, snap)
+	s.version++
 	sessionID := s.sessionID
 	s.mu.Unlock()
 
@@ -419,6 +428,7 @@ func (s *Store) UndoByToolCallID(toolCallID string, maxAgeDelta int) ([]string, 
 		idx := indices[i]
 		snap := s.snapshots[idx]
 		if err := restoreSnapshot(snap); err != nil {
+			s.version++
 			return restored, fmt.Errorf("restore %s: %w", snap.OriginalPath, err)
 		}
 		if snap.ToolCallID != "" {
@@ -426,6 +436,7 @@ func (s *Store) UndoByToolCallID(toolCallID string, maxAgeDelta int) ([]string, 
 		}
 		restored = append([]string{snap.OriginalPath}, restored...) // prepend to keep natural order
 		s.snapshots = append(s.snapshots[:idx], s.snapshots[idx+1:]...)
+		s.version++
 	}
 	return restored, nil
 }
@@ -468,6 +479,17 @@ func (s *Store) Len() int {
 	return len(s.snapshots)
 }
 
+// Version returns the store's monotonic mutation counter, bumped on every
+// change to the snapshot membership (Backup, Undo, UndoByToolCallID,
+// DiscardRecent, Reset, Rehydrate). Unlike Len, the sum of versions across
+// stores can never collide when one store gains a snapshot while another
+// loses one, so it is safe to use as a cache-invalidation signal.
+func (s *Store) Version() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.version
+}
+
 // Snapshots returns a copy of this store's snapshot slice in chronological
 // order. Used by the changes package (and any other read-only consumer that
 // needs the full per-write metadata: timestamp, tool call id, backup path).
@@ -508,6 +530,7 @@ func (s *Store) Reset() {
 	s.snapshots = nil
 	s.clearRedoLocked()
 	s.step = 0
+	s.version++
 	s.mu.Unlock()
 	if s.agentID != "global" {
 		UnregisterAgent(s.agentID)
@@ -524,6 +547,7 @@ func (s *Store) Undo() (string, error) {
 	}
 	last := s.snapshots[len(s.snapshots)-1]
 	s.snapshots = s.snapshots[:len(s.snapshots)-1]
+	s.version++
 	s.mu.Unlock()
 
 	// Save current state for redo before restoring.
@@ -612,6 +636,7 @@ func (s *Store) DiscardRecent(count int) error {
 	}
 	removed := append([]Snapshot(nil), s.snapshots[len(s.snapshots)-count:]...)
 	s.snapshots = s.snapshots[:len(s.snapshots)-count]
+	s.version++
 	s.mu.Unlock()
 
 	var firstErr error

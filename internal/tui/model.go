@@ -4966,26 +4966,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Drain background-job completions deferred during compaction (see the
 		// jobCompletedMsg handler). Resume the agent turn so it reacts to them,
 		// mirroring the streamDone drain path.
-		if len(m.pendingJobMsgs) > 0 && m.agent != nil {
-			m.messages = append(m.messages, message{
-				role:      roleAssistant,
-				text:      hintStyle.Render("↩ background job(s) completed — resuming"),
-				transient: true,
-			})
-			m.messages = append(m.messages, m.pendingJobMsgs...)
-			m.pendingJobMsgs = nil
-			m.rerenderTranscriptAndMaybeScroll()
-			return m, tea.Batch(m.askAgent(), waitCompactEvent(m.compactStartCh, m.compactCh))
-		}
-		// Drain messages queued during compaction (unified queue in insertion order).
-		if cmd, drained := m.drainQueuedItems(); drained {
-			if cmd != nil {
-				return m, tea.Batch(cmd, waitCompactEvent(m.compactStartCh, m.compactCh))
-			}
-			if resume && m.agent != nil {
+		//
+		// Both drains are gated on !queueDrainBlocked: if a permission or
+		// question dialog is still open when compaction finishes, the queued
+		// items must NOT be dispatched — they would be consumed by
+		// processFileReferences/askAgent while the dialog blocks input,
+		// causing the messages to vanish from the user's queue without
+		// reaching the LLM. The drain is deferred to the streamDoneMsg that
+		// fires after the dialog is answered (same pattern as the primary
+		// streamDone path at model.go:4843).
+		if !m.queueDrainBlocked() {
+			if len(m.pendingJobMsgs) > 0 && m.agent != nil {
+				m.messages = append(m.messages, message{
+					role:      roleAssistant,
+					text:      hintStyle.Render("↩ background job(s) completed — resuming"),
+					transient: true,
+				})
+				m.messages = append(m.messages, m.pendingJobMsgs...)
+				m.pendingJobMsgs = nil
+				m.rerenderTranscriptAndMaybeScroll()
 				return m, tea.Batch(m.askAgent(), waitCompactEvent(m.compactStartCh, m.compactCh))
 			}
-			return m, waitCompactEvent(m.compactStartCh, m.compactCh)
+			// Drain messages queued during compaction (unified queue in insertion order).
+			if cmd, drained := m.drainQueuedItems(); drained {
+				if cmd != nil {
+					return m, tea.Batch(cmd, waitCompactEvent(m.compactStartCh, m.compactCh))
+				}
+				if resume && m.agent != nil {
+					return m, tea.Batch(m.askAgent(), waitCompactEvent(m.compactStartCh, m.compactCh))
+				}
+				return m, waitCompactEvent(m.compactStartCh, m.compactCh)
+			}
 		}
 		if resume && m.agent != nil {
 			return m, tea.Batch(m.askAgent(), waitCompactEvent(m.compactStartCh, m.compactCh))
@@ -5270,6 +5281,12 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 			m.refreshLogViewport()
 		}
 		if m.activeTab == tabChanges {
+			// Pull the latest registry state into the persistent model on
+			// tab entry. View() refreshes a throwaway copy for display,
+			// so without this the selection/diff cache would lag one
+			// keypress behind after edits landed while another tab was
+			// visible.
+			m.changes = m.changes.refreshFiles()
 			return true, m, nil
 		}
 		if m.activeTab == tabGit {
@@ -5290,6 +5307,12 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 			m.refreshLogViewport()
 		}
 		if m.activeTab == tabChanges {
+			// Pull the latest registry state into the persistent model on
+			// tab entry. View() refreshes a throwaway copy for display,
+			// so without this the selection/diff cache would lag one
+			// keypress behind after edits landed while another tab was
+			// visible.
+			m.changes = m.changes.refreshFiles()
 			return true, m, nil
 		}
 		if m.activeTab == tabGit {
@@ -6537,7 +6560,11 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 		// Click on agent strip: open the clicked run's detail view.
 		// Only on the chat tab — the agents tab has its own click handler.
-		if m.activeTab != tabAgents {
+		// The strip renders inside the left panel above the input area, so
+		// ignore clicks in the sidebar (X >= panelWidth) or at/below the
+		// input area (stale agentStripTopY after safety-net shrink would
+		// otherwise swallow status-bar permission clicks).
+		if m.activeTab == tabChat && mouse.X < m.panelWidth() && mouse.Y < m.inputAreaTopY() {
 			if strip, blocks := m.renderAgentStrip(); strip != "" {
 				stripTop := m.agentStripTopY()
 				stripH := lipgloss.Height(strip)
@@ -6575,6 +6602,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		return m, nil, true
 	}
 	if pressed && m.activeTab == tabChanges {
+		// Refresh the persistent model before hit-testing: edits may have
+		// landed while this tab was already visible (View refreshes only a
+		// throwaway copy), otherwise clicks use stale rows and indices.
+		// refreshFiles also clamps the selection and evicts diffs for
+		// removed/updated paths.
+		m.changes = m.changes.refreshFiles()
 		contentTop := appHeaderHeight + 1
 		leftW := m.width * 35 / 100
 		if leftW < 10 {
@@ -7391,6 +7424,8 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.logViewport.GotoBottom()
 			}
 			if tab == tabChanges {
+				// Same tab-entry refresh as handleGlobalTabKeys above.
+				m.changes = m.changes.refreshFiles()
 				return m, nil, true
 			}
 			if tab == tabGit {
@@ -7438,7 +7473,10 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		// the value-receiver copy ensures the returned model has the cache.
 		m.renderStatus()
 		statusTop := m.statusBarTopY()
-		if mouse.Y >= statusTop && mouse.Y < statusTop+2 && mouse.X >= statusContentLeftX {
+		// Status bar lives in the left panel only — clicks at sidebar X
+		// (X >= panelWidth) belong to the sidebar, not the status bar.
+		// Upper bound is the exact rendered status width (panelWidth-2).
+		if mouse.Y >= statusTop && mouse.Y < statusTop+2 && mouse.X >= statusContentLeftX && mouse.X < statusContentLeftX+m.statusContentWidth() {
 			relRow := mouse.Y - statusTop
 			col := mouse.X - statusContentLeftX
 			if relRow >= 0 && relRow < len(m.statusRawLines) {
@@ -8071,6 +8109,11 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 				m.logViewport.GotoBottom()
 			}
 			if tab == tabChanges {
+				// Hover only switches tabs — no registry refresh here.
+				// The display copy refreshes every View frame, and the
+				// persistent model syncs on click-entry and before
+				// Changes-tab key/mouse interactions, so a scan on every
+				// mouse-motion event would be pure overhead.
 				return m, nil, true
 			}
 			if tab == tabGit {

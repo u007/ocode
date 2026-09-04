@@ -21,6 +21,9 @@ var previewOpenKinds = map[string]string{
 	".pdf":  "pdf",
 	".docx": "docx",
 	".pptx": "pptx",
+	".xlsx": "excel",
+	".xls":  "excel",
+	".csv":  "excel",
 	".png":  "image",
 	".jpg":  "image",
 	".jpeg": "image",
@@ -43,17 +46,19 @@ var previewOpenKinds = map[string]string{
 	".css":  "text",
 }
 
-// PreviewOpenTool lets the LLM activate the sidebar preview/editor on a
-// file: "show this deck in the sidebar", "open the spec for editing".
-// It validates the path only (existence + allowlist); the actual bytes
-// flow through GET /api/files/raw or /api/files/content so confinement
-// stays in the server handlers, not the tool.
+// PreviewOpenTool lets the LLM activate the sidebar preview on a file:
+// "show this deck in the sidebar", "open the report for a look".
+// Office documents (Word, Excel, PowerPoint) and PDFs are preview-only
+// with selectable text; only text/code opens editable. It validates the
+// path only (workspace-relative + allowlist); the actual bytes flow
+// through GET /api/files/raw or /api/files/content so confinement stays
+// in the server handlers, not the tool.
 type PreviewOpenTool struct{}
 
 func (t *PreviewOpenTool) Name() string { return "preview_open" }
 
 func (t *PreviewOpenTool) Description() string {
-	return "Open a file in the sidebar preview (browser tab stays available). Use when the user asks to preview, present, or edit a file: PDFs (multi-page), Word docs, PowerPoint decks (slides + present mode), mermaid diagrams (clickable nodes), images, or text/code (editable). Returns a PREVIEW_OPEN directive the web UI auto-opens."
+	return "Open a file in the sidebar preview (browser tab stays available). Use when the user asks to preview or present a file: PDFs (multi-page), Word docs (preview + select), Excel sheets (preview + select), PowerPoint decks (slides + present mode), mermaid diagrams (clickable nodes), images, or text/code (editable). Returns a PREVIEW_OPEN directive the web UI auto-opens."
 }
 
 func (t *PreviewOpenTool) Definition() map[string]interface{} {

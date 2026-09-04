@@ -517,6 +517,54 @@ func TestRegistryMultiAgent(t *testing.T) {
 	}
 }
 
+// TestRegistryStoreReplacementInvalidatesCache locks down the pre-existing
+// cache-collision class that signatureLocked cannot catch by itself: when an
+// attached store is REPLACED under the same agent id (agent rebuild), the
+// replacement may have the same Version() as its predecessor, so the summed
+// signature is unchanged and the old store's cached rows would survive
+// without an explicit cache invalidation on attach.
+func TestRegistryStoreReplacementInvalidatesCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	a := filepath.Join(tmpDir, "a.txt")
+	b := filepath.Join(tmpDir, "b.txt")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, []byte("v1\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	storeA := snapshot.NewStore("main", filepath.Join(tmpDir, "snaps-a"))
+	if err := storeA.Backup(a, "tc-a"); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry()
+	if err := r.AttachSnapshotStore("main", storeA); err != nil {
+		t.Fatal(err)
+	}
+	// Prime the aggregate cache against store A.
+	if got := r.List(); len(got) != 1 || got[0].OriginalPath != a {
+		t.Fatalf("expected cached row for %q, got %v", a, got)
+	}
+
+	// Replace the binding with store B, which happens to sit at the same
+	// Version() (one backup each) under the same agent id and map length.
+	storeB := snapshot.NewStore("main", filepath.Join(tmpDir, "snaps-b"))
+	if err := storeB.Backup(b, "tc-b"); err != nil {
+		t.Fatal(err)
+	}
+	if storeA.Version() != storeB.Version() {
+		t.Fatalf("test setup: expected equal versions, got %d vs %d", storeA.Version(), storeB.Version())
+	}
+	if err := r.AttachSnapshotStore("main", storeB); err != nil {
+		t.Fatal(err)
+	}
+
+	got := r.List()
+	if len(got) != 1 || got[0].OriginalPath != b {
+		t.Fatalf("after store replacement, expected row for %q, got %v", b, got)
+	}
+}
+
 // TestRegistryAttachErrors covers the AttachSnapshotStore validation paths.
 func TestRegistryAttachErrors(t *testing.T) {
 	r := NewRegistry()

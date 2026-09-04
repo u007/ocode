@@ -65,10 +65,28 @@ type FileChange struct {
     Authors         []ChangeAuthor // ordered: main first, then sub-agents
     CreatedAt       time.Time
     UpdatedAt       time.Time
-    LastBashCommand string         // the command that last touched this file via bash
+    LastBashCommand string         // the most recent write from bash, when it is the row's newest event
     LastBashExitCode int
 }
 ```
+
+## Status semantics
+
+`FileStatus` (Added / Modified / Deleted) is derived from the **live
+filesystem** at render time, not from a stored op flag: the registry runs an
+`os.Stat` per row on every `List()` and re-derives the status each time.
+This is load-bearing for interleaved snapshot/bash sequences — a file that a
+bash `rm` deleted is re-derived as Modified as soon as a newer snapshot
+write or an undo puts it back on disk, instead of lingering as `-` forever.
+
+Bash metadata (`LastBashCommand`, `LastBashExitCode`, `UpdatedAt`) is merged
+into a snapshot-backed row **only when the bash event is at least as recent
+as the newest snapshot for that path** — `LastBashCommand` documents the
+write that came most recently from bash, so an older bash touch must not
+claim a row a newer snapshot write owns. Deleting a file via bash does not
+remove its snapshot backups, so such rows stay `Undoable`; if an undo then
+consumes every snapshot, the row falls back to bash-only (non-undoable) and
+`Status` reflects whatever the filesystem currently says.
 
 ## Undo semantics
 

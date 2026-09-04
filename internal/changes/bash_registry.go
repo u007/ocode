@@ -34,6 +34,11 @@ func (r *Registry) NotifyBashWrite(event BashWriteEvent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Bump even for in-place updates below so signatureLocked observes
+	// every bash event (len(r.files) alone would miss a re-touch of an
+	// already-known path).
+	r.bashVersion++
+
 	now := time.Now()
 	// Deterministic order so two concurrent bash events on the
 	// same file produce the same in-place update. The file
@@ -48,9 +53,9 @@ func (r *Registry) NotifyBashWrite(event BashWriteEvent) {
 		// Build a partial FileChange. We need a value (not a
 		// pointer) so the map can be populated atomically.
 		fc := FileChange{
-			OriginalPath:    t.Path,
-			Undoable:        false,
-			LastBashCommand: event.Command,
+			OriginalPath:     t.Path,
+			Undoable:         false,
+			LastBashCommand:  event.Command,
 			LastBashExitCode: event.ExitCode,
 		}
 		// FileStatus is derived from the live filesystem and
@@ -81,12 +86,15 @@ func (r *Registry) NotifyBashWrite(event BashWriteEvent) {
 			existing.LastBashCommand = event.Command
 			existing.LastBashExitCode = event.ExitCode
 			existing.UpdatedAt = now
-			// If the bash op indicates the file is gone
-			// but the snapshot store still has a backup,
-			// promote the row to FileDeleted (the user
-			// can still undo via the restore path,
-			// because the backup file is on disk).
-			if t.Op == BashDeleted {
+			// Track the op on every in-place update, not just BashDeleted:
+			// a delete followed by a re-add must read as FileAdded again,
+			// not linger as FileDeleted from the earlier event.
+			switch t.Op {
+			case BashAdded:
+				existing.Status = FileAdded
+			case BashModified:
+				existing.Status = FileModified
+			case BashDeleted:
 				existing.Status = FileDeleted
 			}
 			r.files[t.Path] = existing

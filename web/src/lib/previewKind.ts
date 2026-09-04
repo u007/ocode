@@ -13,6 +13,7 @@ export type PreviewKind =
   | "pdf"
   | "docx"
   | "pptx"
+  | "excel"
   | "image"
   | "mermaid"
   | "markdown"
@@ -22,6 +23,9 @@ const kindByExt: Record<string, PreviewKind> = {
   ".pdf": "pdf",
   ".docx": "docx",
   ".pptx": "pptx",
+  ".xlsx": "excel",
+  ".xls": "excel",
+  ".csv": "excel",
   ".png": "image",
   ".jpg": "image",
   ".jpeg": "image",
@@ -50,6 +54,27 @@ export function previewKindForPath(path: string): PreviewKind | null {
   const dot = path.lastIndexOf(".");
   if (dot === -1) return null;
   return kindByExt[path.slice(dot).toLowerCase()] ?? null;
+}
+
+// Legacy Office formats with no reliable browser renderer (no server-side
+// conversion in v1): .docx/.pptx preview; these do not.
+const LEGACY_OFFICE_RE = /\.(doc|ppt)$/i;
+
+/**
+ * Resolves an open request to a renderable kind or an explicit unsupported
+ * path. Unknown-but-textual extensions (e.g. `.java`, extensionless
+ * `Makefile`) fall through to the text editor when the request asked for
+ * text; only explicitly legacy formats (plus non-text unknowns) land on
+ * the OS-open fallback — never a broken preview.
+ */
+export function resolvePreviewDoc(
+  path: string,
+  requestedKind: PreviewKind,
+): { kind: PreviewKind; unsupported: null } | { kind: null; unsupported: string } {
+  const known = previewKindForPath(path);
+  if (known) return { kind: known, unsupported: null };
+  if (requestedKind === "text" && !LEGACY_OFFICE_RE.test(path)) return { kind: "text", unsupported: null };
+  return { kind: null, unsupported: path };
 }
 
 export interface PreviewOpenRequest {

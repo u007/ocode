@@ -6,6 +6,7 @@ import {
   dispatchPreviewContext,
   parsePreviewOpen,
   previewKindForPath,
+  resolvePreviewDoc,
 } from "./previewKind";
 
 describe("previewKindForPath", () => {
@@ -17,6 +18,9 @@ describe("previewKindForPath", () => {
     expect(previewKindForPath("notes.md")).toBe("markdown");
     expect(previewKindForPath("main.go")).toBe("text");
     expect(previewKindForPath("photo.PNG")).toBe("image");
+    expect(previewKindForPath("budget.xlsx")).toBe("excel");
+    expect(previewKindForPath("legacy.xls")).toBe("excel");
+    expect(previewKindForPath("data.csv")).toBe("excel");
   });
 
   it("returns null for unknown or missing extensions", () => {
@@ -72,5 +76,29 @@ describe("preview events", () => {
     } finally {
       window.removeEventListener(PREVIEW_CONTEXT_EVENT, h as EventListener);
     }
+  });
+});
+
+describe("resolvePreviewDoc", () => {
+  it("resolves known kinds directly", () => {
+    expect(resolvePreviewDoc("report.pdf", "pdf")).toEqual({ kind: "pdf", unsupported: null });
+    expect(resolvePreviewDoc("budget.xlsx", "excel")).toEqual({ kind: "excel", unsupported: null });
+  });
+
+  it("falls unknown-but-textual requests through to the text editor", () => {
+    expect(resolvePreviewDoc("Main.java", "text")).toEqual({ kind: "text", unsupported: null });
+    expect(resolvePreviewDoc("Makefile", "text")).toEqual({ kind: "text", unsupported: null });
+  });
+
+  it("sends legacy .doc/.ppt to the OS fallback, never a fake preview", () => {
+    expect(resolvePreviewDoc("old.doc", "text")).toEqual({ kind: null, unsupported: "old.doc" });
+    expect(resolvePreviewDoc("old.ppt", "text")).toEqual({ kind: null, unsupported: "old.ppt" });
+    // …but the modern formats still preview.
+    expect(resolvePreviewDoc("new.docx", "text").kind).toBe("docx");
+    expect(resolvePreviewDoc("new.pptx", "text").kind).toBe("pptx");
+  });
+
+  it("sends non-text unknowns to the fallback", () => {
+    expect(resolvePreviewDoc("movie.mkv", "pdf")).toEqual({ kind: null, unsupported: "movie.mkv" });
   });
 });

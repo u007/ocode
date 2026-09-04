@@ -17,7 +17,7 @@ func previewArgs(t *testing.T, path string, page int) json.RawMessage {
 
 func TestPreviewOpenToolAcceptsPreviewable(t *testing.T) {
 	tool := &PreviewOpenTool{}
-	for _, p := range []string{"docs/deck.pptx", "spec.docx", "report.pdf", "flow.mmd", "notes.md", "main.go"} {
+	for _, p := range []string{"docs/deck.pptx", "spec.docx", "report.pdf", "flow.mmd", "notes.md", "main.go", "budget.xlsx", "legacy.xls", "data.csv"} {
 		got, err := tool.Execute(previewArgs(t, p, 0))
 		if err != nil {
 			t.Errorf("path %q: unexpected error %v", p, err)
@@ -56,6 +56,8 @@ func TestPreviewOpenToolRejects(t *testing.T) {
 		{"dotdot", "a/../../etc/passwd", 0},
 		{"unknown ext", "movie.mkv", 0},
 		{"binary", "app.exe", 0},
+		{"legacy doc (OS-open fallback, never previewed)", "old.doc", 0},
+		{"legacy ppt (OS-open fallback, never previewed)", "old.ppt", 0},
 		{"negative page", "report.pdf", -1},
 	}
 	for _, tc := range cases {
@@ -70,5 +72,27 @@ func TestPreviewOpenToolRejects(t *testing.T) {
 func TestPreviewOpenToolName(t *testing.T) {
 	if (&PreviewOpenTool{}).Name() != "preview_open" {
 		t.Error("tool name must be preview_open")
+	}
+}
+
+// TestPreviewOpenCoversOfficeSet pins the office formats the sidebar can
+// preview. It must stay synchronized with HandleFileRaw.previewRawTypes in
+// internal/server (raw bytes) and kindByExt in web/src/lib/previewKind.ts
+// (renderer routing): a format accepted here but missing there would be an
+// AI-promised preview that can never render.
+func TestPreviewOpenCoversOfficeSet(t *testing.T) {
+	office := map[string]string{
+		".pdf": "pdf", ".docx": "docx", ".pptx": "pptx",
+		".xlsx": "excel", ".xls": "excel", ".csv": "excel",
+	}
+	for ext, want := range office {
+		got, ok := previewOpenKinds[ext]
+		if !ok {
+			t.Errorf("previewOpenKinds missing %q", ext)
+			continue
+		}
+		if got != want {
+			t.Errorf("previewOpenKinds[%q] = %q, want %q", ext, got, want)
+		}
 	}
 }

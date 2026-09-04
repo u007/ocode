@@ -17,6 +17,7 @@ import (
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -1187,6 +1188,242 @@ func TestCompactSummaryClientExplicitOverrideBeatsSmallModel(t *testing.T) {
 	}
 }
 
+// TestCompactSummaryClientThinkingBudgetOff verifies that every client
+// created by compactSummaryClient has ThinkingBudget == 0, regardless of the
+// user's configured reasoning level. This covers three paths:
+//   - explicit compact.summary_model override
+//   - small-model path
+//   - fallback to noThinkingClient when main client is a *GenericClient
+
+func TestCompactSummaryClientExplicitModelThinkingBudgetOff(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+
+	a := &Agent{
+		client: &MockClient{},
+		config: &config.Config{
+			ThinkingBudget: 16000, // user has "high" reasoning enabled
+			Ocode: config.OcodeConfig{
+				Compact: config.CompactConfig{
+					SummaryProvider: "openai",
+					SummaryModel:    "gpt-4o-mini",
+				},
+			},
+		},
+	}
+
+	client := a.compactSummaryClient()
+	gc, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected *GenericClient, got %T", client)
+	}
+	if gc.ThinkingBudget != 0 {
+		t.Errorf("explicit compact client ThinkingBudget = %d, want 0", gc.ThinkingBudget)
+	}
+}
+
+func TestCompactSummaryClientSmallModelThinkingBudgetOff(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+
+	a := &Agent{
+		client: &MockClient{},
+		config: &config.Config{
+			ThinkingBudget: 8000, // user has "med" reasoning enabled
+			Ocode: config.OcodeConfig{
+				SmallModel:        "openai/gpt-4o-mini",
+				SmallModelEnabled: true,
+			},
+		},
+	}
+
+	client := a.compactSummaryClient()
+	gc, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected *GenericClient (small model), got %T", client)
+	}
+	if gc.ThinkingBudget != 0 {
+		t.Errorf("small-model compact client ThinkingBudget = %d, want 0", gc.ThinkingBudget)
+	}
+}
+
+func TestCompactSummaryClientDoesNotMutateAgentConfig(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+
+	origBudget := 32000
+	a := &Agent{
+		client: &MockClient{},
+		config: &config.Config{
+			ThinkingBudget: origBudget,
+			Ocode: config.OcodeConfig{
+				Compact: config.CompactConfig{
+					SummaryProvider: "openai",
+					SummaryModel:    "gpt-4o-mini",
+				},
+			},
+		},
+	}
+
+	_ = a.compactSummaryClient()
+
+	if a.config.ThinkingBudget != origBudget {
+		t.Errorf("compactSummaryClient mutated agent config ThinkingBudget: got %d, want %d",
+			a.config.ThinkingBudget, origBudget)
+	}
+}
+
+func TestCompactSummaryClientFallbackUsesNoThinkingGenericClient(t *testing.T) {
+	// When small model is disabled and no explicit compact model is set,
+	// compactSummaryClient falls back. With a *GenericClient as main client,
+	// it should return a copy with ThinkingBudget == 0 rather than the main
+	// client which may have ThinkingBudget > 0.
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	mainClient := &GenericClient{
+		Provider:       "anthropic",
+		Model:          "claude-sonnet-4-6",
+		APIKey:         "test-key",
+		ThinkingBudget: 8000,
+	}
+
+	a := &Agent{
+		client: mainClient,
+		config: &config.Config{
+			ThinkingBudget: 8000,
+			// No SmallModel, no Compact override → fallback path.
+		},
+	}
+
+	client := a.compactSummaryClient()
+	gc, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected *GenericClient, got %T", client)
+	}
+	if gc.ThinkingBudget != 0 {
+		t.Errorf("fallback compact client ThinkingBudget = %d, want 0", gc.ThinkingBudget)
+	}
+	if gc == mainClient {
+		t.Error("fallback must return a distinct client, not the original main client")
+	}
+	// Verify the main client was not mutated.
+	if mainClient.ThinkingBudget != 8000 {
+		t.Errorf("main client ThinkingBudget mutated to %d, want 8000", mainClient.ThinkingBudget)
+	}
+}
+
+func TestCompactSummaryClientNilConfigFallback(t *testing.T) {
+
+	// When a.config is nil, compactSummaryClient cannot create a synthetic
+	// client via NewClient. If a.client is a *GenericClient, a no-thinking
+	// copy should be returned.
+	mainClient := &GenericClient{
+		Provider:       "anthropic",
+		Model:          "claude-sonnet-4-6",
+		APIKey:         "test-key",
+		ThinkingBudget: 8000,
+	}
+
+	a := &Agent{
+		client: mainClient,
+		config: nil, // no config
+	}
+
+	client := a.compactSummaryClient()
+	gc, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected *GenericClient, got %T", client)
+	}
+	if gc.ThinkingBudget != 0 {
+		t.Errorf("nil-config fallback ThinkingBudget = %d, want 0", gc.ThinkingBudget)
+	}
+	if gc == mainClient {
+		t.Error("fallback must return a distinct client, not the original main client")
+	}
+	if mainClient.ThinkingBudget != 8000 {
+		t.Errorf("main client ThinkingBudget mutated to %d, want 8000", mainClient.ThinkingBudget)
+	}
+}
+
+func TestNoThinkingClientPreservesFields(t *testing.T) {
+	// Verify that noThinkingClient copies all safe fields (credentials,
+	// transport, redaction hook, session tag, sampling params) and only
+	// overrides ThinkingBudget to 0.
+	temp := 0.7
+	topP := 0.9
+	topK := 40.0
+	hook := &redact.NetHook{Enabled: true}
+
+	mainClient := &GenericClient{
+		APIKey:          "sk-test",
+		Model:           "claude-sonnet-4-6",
+		BaseURL:         "https://api.anthropic.com",
+		Provider:        "anthropic",
+		MaxImageDim:     2048,
+		UseOAuth:        true,
+		AccountID:       "acct-123",
+		CookieAuthToken: "tok",
+		CookieCt0:       "ct0",
+		ThinkingBudget:  16000,
+		Temperature:     &temp,
+		TopP:            &topP,
+		TopK:            &topK,
+		UseWebSocket:    true,
+		Redaction:       hook,
+		sessionID:       "sess-42",
+	}
+
+	a := &Agent{client: mainClient}
+	got := a.noThinkingClient()
+	if got == nil {
+		t.Fatal("noThinkingClient returned nil for *GenericClient")
+	}
+	gc, ok := got.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected *GenericClient, got %T", got)
+	}
+
+	// ThinkingBudget must be 0.
+	if gc.ThinkingBudget != 0 {
+		t.Errorf("ThinkingBudget = %d, want 0", gc.ThinkingBudget)
+	}
+	// Safe fields must be preserved.
+	checks := []struct {
+		name string
+		got  interface{}
+		want interface{}
+	}{
+		{"APIKey", gc.APIKey, "sk-test"},
+		{"Model", gc.Model, "claude-sonnet-4-6"},
+		{"BaseURL", gc.BaseURL, "https://api.anthropic.com"},
+		{"Provider", gc.Provider, "anthropic"},
+		{"MaxImageDim", gc.MaxImageDim, 2048},
+		{"UseOAuth", gc.UseOAuth, true},
+		{"AccountID", gc.AccountID, "acct-123"},
+		{"CookieAuthToken", gc.CookieAuthToken, "tok"},
+		{"CookieCt0", gc.CookieCt0, "ct0"},
+		{"Temperature", gc.Temperature, &temp},
+		{"TopP", gc.TopP, &topP},
+		{"TopK", gc.TopK, &topK},
+		{"UseWebSocket", gc.UseWebSocket, true},
+		{"Redaction", gc.Redaction, hook},
+		{"sessionID", gc.sessionID, "sess-42"},
+	}
+	for _, c := range checks {
+		if !reflect.DeepEqual(c.got, c.want) {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+
+	// Per-call fields must be nil (not copied from original).
+	if gc.OnDelta != nil {
+		t.Error("OnDelta should be nil on new client")
+	}
+	if gc.OnUsage != nil {
+		t.Error("OnUsage should be nil on new client")
+	}
+	if gc.RetryNotifier != nil {
+		t.Error("RetryNotifier should be nil on new client")
+	}
+}
+
 func TestRunCompactPrunesLargeToolResultsInSummaryPrompt(t *testing.T) {
 	client := &scriptedCaptureClient{Responses: []string{validSummaryText("summary")}}
 	a := &Agent{client: client}
@@ -1198,6 +1435,7 @@ func TestRunCompactPrunesLargeToolResultsInSummaryPrompt(t *testing.T) {
 		MaxSummaryInputTokens: 50000,
 	}
 	big := strings.Repeat("y", 5000)
+
 	msgs := []Message{
 		{Role: "system", Content: "sys"},
 		{Role: "user", Content: "original ask"},

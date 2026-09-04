@@ -67,3 +67,12 @@ Browser tab; oversized/unpreviewable files are rejected server-side with
 OnlyOffice/Collabora native embed, docx tracked-change editing,
 pptx text editing, slide thumbnail rastering, per-branch diagram
 deep-links (`file.mmd#node-id`).
+
+## Update 2026-09-04 — Excel viewer, read-only office docs
+
+- `ExcelViewer` (SheetJS `xlsx`): sheet tabs + read-only HTML tables,
+  selectable for Copy / Ask-LLM, 1000×100 cap with truncation notice.
+- Policy locked: Word/Excel/PowerPoint/PDF are preview-only; Monaco is
+  text/code-only. Tool description updated to match.
+- `.xlsx`/`.xls`/`.csv` added to raw + tool allowlists; legacy
+  `.doc`/`.ppt` show an explicit OS-open fallback (no fake preview).

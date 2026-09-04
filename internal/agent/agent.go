@@ -2281,12 +2281,65 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 	return res
 }
 
+// noThinkingClient creates a fresh *GenericClient with ThinkingBudget=0
+// (extended thinking disabled) using the main client's credentials. Returns
+// nil if a.client is not a *GenericClient (custom/mock) — callers must
+// handle this by documenting the fallback limitation.
+func (a *Agent) noThinkingClient() LLMClient {
+	gc, ok := a.client.(*GenericClient)
+	if !ok {
+		return nil
+	}
+	// Build a new GenericClient explicitly rather than struct-copying, because
+	// GenericClient contains sync.Mutex (deltaMu) which must not be copied.
+	// All safe fields (credentials, transport, redaction hook, session tag)
+	// are copied; per-call fields (OnDelta, OnUsage, RetryNotifier, deltaMu,
+	// deltaWrapToken) are left at zero values — ChatWithContext initialises
+	// them per-call.
+	return &GenericClient{
+		APIKey:          gc.APIKey,
+		Model:           gc.Model,
+		BaseURL:         gc.BaseURL,
+		Provider:        gc.Provider,
+		MaxImageDim:     gc.MaxImageDim,
+		UseOAuth:        gc.UseOAuth,
+		AccountID:       gc.AccountID,
+		CookieAuthToken: gc.CookieAuthToken,
+		CookieCt0:       gc.CookieCt0,
+		ThinkingBudget:  0, // compaction must never use extended thinking
+		Temperature:     gc.Temperature,
+		TopP:            gc.TopP,
+		TopK:            gc.TopK,
+		UseWebSocket:    gc.UseWebSocket,
+		Redaction:       gc.Redaction,
+		sessionID:       gc.sessionID,
+	}
+}
+
 func (a *Agent) compactSummaryClient() LLMClient {
 	if a.config == nil {
+
+		// If the main client is a *GenericClient, return a zero-budget copy;
+		// otherwise fall back to the original (may use thinking — documented
+		// limitation for non-standard client implementations).
+		if noThink := a.noThinkingClient(); noThink != nil {
+			return noThink
+		}
 		return a.client
 	}
 
-	compact := a.config.Ocode.Compact
+	// Compaction should never use extended thinking — it summarises conversation
+	// history, not reasoning traces, so the budget is pure overhead. Force "off"
+	// (ThinkingBudget=0) for every client we create here, regardless of what the
+	// user has configured for the main agent.
+	//
+	// We create a shallow config copy rather than mutating a.config directly,
+	// because a.config is shared state that may be read concurrently by the
+	// main agent, config/UI paths, or other client construction.
+	compactCfg := *a.config
+	compactCfg.ThinkingBudget = 0
+
+	compact := compactCfg.Ocode.Compact
 	if compact.SummaryProvider == "" && compact.SummaryModel == "" {
 		// No explicit summary-model override: prefer the small model when
 		// enabled (compaction is a good fit for it — cheap/fast, no tool
@@ -2294,10 +2347,18 @@ func (a *Agent) compactSummaryClient() LLMClient {
 		// disabled or unresolvable.
 		if a.SmallModelRuntimeEnabled() {
 			if small := a.resolveSmallModel(); small != "" {
-				if client := NewClient(a.config, small); client != nil {
+				if client := NewClient(&compactCfg, small); client != nil {
 					return client
 				}
 			}
+		}
+		// Fallback: try to create a fresh no-thinking client for the main
+		// provider/model. If a.client is a custom/mock implementation that
+		// cannot be reconstructed, return it as-is — compaction may then
+		// use extended thinking; this is a documented limitation for
+		// non-standard client implementations.
+		if noThink := a.noThinkingClient(); noThink != nil {
+			return noThink
 		}
 		return a.client
 	}
@@ -2312,6 +2373,9 @@ func (a *Agent) compactSummaryClient() LLMClient {
 		model = a.client.GetModel()
 	}
 	if model == "" {
+		if noThink := a.noThinkingClient(); noThink != nil {
+			return noThink
+		}
 		return a.client
 	}
 
@@ -2320,8 +2384,11 @@ func (a *Agent) compactSummaryClient() LLMClient {
 		targetModel = provider + ":" + model
 	}
 
-	if client := NewClient(a.config, targetModel); client != nil {
+	if client := NewClient(&compactCfg, targetModel); client != nil {
 		return client
+	}
+	if noThink := a.noThinkingClient(); noThink != nil {
+		return noThink
 	}
 	return a.client
 }

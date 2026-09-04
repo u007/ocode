@@ -138,6 +138,10 @@ type Registry struct {
 	cacheValid bool
 	cacheSig   int64
 	cache      []*fileAggregate
+	// bashVersion is bumped on every NotifyBashWrite (even in-place updates
+	// that don't change len(files)) so the signature below always observes
+	// bash activity.
+	bashVersion uint64
 }
 
 // NewRegistry returns an empty Registry. Attach at least one
@@ -150,8 +154,12 @@ func NewRegistry() *Registry {
 }
 
 // AttachSnapshotStore wires store into the registry as the snapshot
-// source for agentID. After Phase 1 this triggers an eager rebuild of
-// the file map; in Phase 0 it just records the binding.
+// source for agentID. Re-attaching under an existing agentID replaces the
+// binding (e.g. an agent rebuild hands the registry a fresh store). The
+// aggregate cache is invalidated unconditionally: a replacement store may
+// have the same Version() as its predecessor, so the signature alone
+// cannot distinguish the swap — without this, rows from the old store
+// would survive in the cached aggregate.
 func (r *Registry) AttachSnapshotStore(agentID string, store *snapshot.Store) error {
 	if agentID == "" {
 		return errors.New("changes: agentID is required")
@@ -162,16 +170,21 @@ func (r *Registry) AttachSnapshotStore(agentID string, store *snapshot.Store) er
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.byAgent[agentID] = store
+	r.cacheValid = false
 	return nil
 }
 
-// DetachSnapshotStore removes the binding for agentID. The file map is
-// not invalidated; existing rows remain visible until a future
-// Attach/Detach or NotifyBashWrite triggers a rebuild. Phase 0 stub.
+// DetachSnapshotStore removes the binding for agentID and invalidates the
+// aggregate cache. Existing rows remain visible until the next List()
+// rebuilds against the remaining stores.
 func (r *Registry) DetachSnapshotStore(agentID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, ok := r.byAgent[agentID]; !ok {
+		return
+	}
 	delete(r.byAgent, agentID)
+	r.cacheValid = false
 }
 
 // List returns the current snapshot of FileChange, sorted by OriginalPath
