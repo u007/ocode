@@ -299,6 +299,13 @@ func Run(args []string) error {
 		}
 	}
 
+	// Resolve the session before the first request so a new run and later
+	// `-session <id>` runs use the same x-opencode-session value.
+	if opts.sessionID == "" {
+		opts.sessionID = session.NewSessionID()
+	}
+	ag.SetSessionID(opts.sessionID)
+
 	startTime := time.Now()
 
 	// Headless runs have no interactive UI, so instruct the model up front to

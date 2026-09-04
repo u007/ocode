@@ -1317,3 +1317,121 @@ func TestChatWithContext_CancellationInterruptsRetry(t *testing.T) {
 		t.Fatalf("expected 1 call before cancel, got %d", got)
 	}
 }
+
+func TestOpencodeSessionHeaderStablePerClient(t *testing.T) {
+	newReq := func() *http.Request {
+		r, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/chat/completions", nil)
+		return r
+	}
+
+	for _, provider := range []string{"opencode", "opencode-go"} {
+		c := &GenericClient{Provider: provider}
+		r1, r2 := newReq(), newReq()
+		c.setOpencodeSessionHeader(r1)
+		c.setOpencodeSessionHeader(r2)
+		got := r1.Header.Get("x-opencode-session")
+		if got == "" || got != r2.Header.Get("x-opencode-session") {
+			t.Fatalf("%s: fallback session id must be non-empty and stable: %q vs %q", provider, got, r2.Header.Get("x-opencode-session"))
+		}
+		other := &GenericClient{Provider: provider}
+		r3 := newReq()
+		other.setOpencodeSessionHeader(r3)
+		if r3.Header.Get("x-opencode-session") == got {
+			t.Fatalf("%s: distinct clients must not share a fallback session id", provider)
+		}
+	}
+
+	// Wired agent session id wins over the fallback.
+	c := &GenericClient{Provider: "opencode-go", sessionID: "sess-123"}
+	r := newReq()
+	c.setOpencodeSessionHeader(r)
+	if r.Header.Get("x-opencode-session") != "sess-123" {
+		t.Fatalf("expected wired session id, got %q", r.Header.Get("x-opencode-session"))
+	}
+
+	// Non-opencode providers never send it.
+	o := &GenericClient{Provider: "openai"}
+	r = newReq()
+	o.setOpencodeSessionHeader(r)
+	if r.Header.Get("x-opencode-session") != "" {
+		t.Fatalf("non-opencode provider must not send x-opencode-session")
+	}
+}
+
+func TestChatOpenAIHTTPSendsOpencodeSessionHeader(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("x-opencode-session"))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	c := &GenericClient{Provider: "opencode-go", Model: "mimo-v2.5", BaseURL: srv.URL, APIKey: "k"}
+	for i := 0; i < 2; i++ {
+		if _, err := c.chatOpenAIHTTP(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+			t.Fatalf("chatOpenAIHTTP: %v", err)
+		}
+	}
+	if len(got) != 2 || got[0] == "" || got[0] != got[1] {
+		t.Fatalf("x-opencode-session not sent/stable across requests: %v", got)
+	}
+}
+
+func TestChatOpenAISendsOpencodeSessionHeader(t *testing.T) {
+	var got string
+	stubLLMHTTP(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		got = req.Header.Get("x-opencode-session")
+		return statusResponse(http.StatusOK, openAIChatOKStream), nil
+	}))
+
+	c := &GenericClient{Provider: "opencode-go", Model: "mimo-v2.5", BaseURL: "https://example.test/v1"}
+	if _, err := c.chatOpenAI(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("chatOpenAI: %v", err)
+	}
+	if got == "" {
+		t.Fatal("chatOpenAI did not send x-opencode-session")
+	}
+}
+
+func TestChatOpenAIResponsesSendsOpencodeSessionHeader(t *testing.T) {
+	var got string
+	stubLLMHTTP(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		got = req.Header.Get("x-opencode-session")
+		body := "event: response.created\ndata: {\"type\":\"response.created\",\"model\":\"gpt-5.6-test\"}\n\n" +
+			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+			"event: response.completed\ndata: {\"type\":\"response.completed\",\"model\":\"gpt-5.6-test\"}\n\n" +
+			"data: [DONE]\n"
+		return statusResponse(http.StatusOK, body), nil
+	}))
+
+	c := &GenericClient{Provider: "opencode-go", Model: "gpt-5.6-test", BaseURL: "https://example.test/v1"}
+	if _, err := c.chatOpenAIResponses(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("chatOpenAIResponses: %v", err)
+	}
+	if got == "" {
+		t.Fatal("chatOpenAIResponses did not send x-opencode-session")
+	}
+}
+
+func TestChatAnthropicSendsOpencodeSessionHeader(t *testing.T) {
+	var got string
+	stubLLMHTTP(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		got = req.Header.Get("x-opencode-session")
+		body := "data: {\"type\":\"message_start\",\"message\":{\"model\":\"minimax-m2\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+			"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\n" +
+			"data: {\"type\":\"message_stop\"}\n\n"
+		return statusResponse(http.StatusOK, body), nil
+	}))
+
+	c := &GenericClient{Provider: "opencode-go", Model: "minimax-m2", BaseURL: "https://example.test/v1"}
+	if _, err := c.chatAnthropic(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("chatAnthropic: %v", err)
+	}
+	if got == "" {
+		t.Fatal("chatAnthropic did not send x-opencode-session")
+	}
+}

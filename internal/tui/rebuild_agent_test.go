@@ -76,3 +76,27 @@ func TestRebuildAgentClientClearsStalePendingSubmit(t *testing.T) {
 		t.Fatalf("pendingSubmitAgent not cleared: %#v", m.pendingSubmitAgent)
 	}
 }
+
+func TestRebuildAgentClientPreservesOpenCodeSessionID(t *testing.T) {
+	cfg := &config.Config{Model: "opencode-go/mimo-v2.5"}
+	prev := agent.NewAgent(&agent.GenericClient{Provider: "opencode-go"}, nil, cfg, nil)
+	prev.SetOpenCodeSessionID("tui-session")
+
+	m := model{
+		config:         cfg,
+		sessionID:      "tui-session",
+		agent:          prev,
+		compactCh:      make(chan agent.CompactResult, 4),
+		compactStartCh: make(chan struct{}, 4),
+		recapCh:        make(chan recapFinishedMsg, 1),
+		usageCh:        make(chan usageEvent, 16),
+	}
+	m.rebuildAgentClient()
+
+	if m.agent == nil {
+		t.Fatal("rebuildAgentClient left m.agent nil")
+	}
+	if got := m.agent.OpenCodeSessionID(); got != "tui-session" {
+		t.Fatalf("rebuilt agent OpenCode session ID = %q, want %q", got, "tui-session")
+	}
+}

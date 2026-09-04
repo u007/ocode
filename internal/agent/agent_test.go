@@ -2984,3 +2984,79 @@ func TestEffectiveTemperature(t *testing.T) {
 		}
 	})
 }
+
+func opencodeHeaderForTest(t *testing.T, client LLMClient) string {
+	t.Helper()
+	c, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected *GenericClient, got %T", client)
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://example.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.setOpencodeSessionHeader(req)
+	return req.Header.Get("x-opencode-session")
+}
+
+func TestCompactClientsPreserveExplicitOpenCodeSessionID(t *testing.T) {
+	a := &Agent{
+		client: &GenericClient{Provider: "opencode-go", Model: "mimo-v2.5"},
+		config: &config.Config{},
+	}
+	a.SetSessionID("sess-explicit")
+
+	for range 3 {
+		if got := opencodeHeaderForTest(t, a.compactSummaryClient()); got != "sess-explicit" {
+			t.Fatalf("compaction client header = %q, want %q", got, "sess-explicit")
+		}
+	}
+}
+
+func TestCompactClientsPreserveFallbackOpenCodeSessionID(t *testing.T) {
+	a := &Agent{
+		client: &GenericClient{Provider: "opencode-go", Model: "mimo-v2.5"},
+		config: &config.Config{},
+	}
+	want := a.OpenCodeSessionID()
+	if want == "" {
+		t.Fatal("expected a fallback OpenCode session ID")
+	}
+
+	for range 3 {
+		if got := opencodeHeaderForTest(t, a.compactSummaryClient()); got != want {
+			t.Fatalf("compaction client header = %q, want stable ID %q", got, want)
+		}
+	}
+}
+
+func TestConfiguredCompactClientsPreserveOpenCodeSessionID(t *testing.T) {
+	a := &Agent{
+		client: &GenericClient{Provider: "openai", Model: "gpt-4o"},
+		config: &config.Config{
+			Ocode: config.OcodeConfig{Compact: config.CompactConfig{
+				SummaryProvider: "opencode-go",
+				SummaryModel:    "mimo-v2.5",
+			}},
+		},
+	}
+	a.SetOpenCodeSessionID("sess-compact")
+
+	for range 3 {
+		if got := opencodeHeaderForTest(t, a.compactSummaryClient()); got != "sess-compact" {
+			t.Fatalf("configured compaction client header = %q, want %q", got, "sess-compact")
+		}
+	}
+}
+
+func TestOpenCodeSessionIDCanBePropagatedToReplacementAgent(t *testing.T) {
+	const sessionID = "tui-session"
+	old := NewAgent(&GenericClient{Provider: "opencode-go"}, nil, nil, nil)
+	old.SetOpenCodeSessionID(sessionID)
+	next := NewAgent(&GenericClient{Provider: "opencode-go"}, nil, nil, nil)
+	next.SetOpenCodeSessionID(old.OpenCodeSessionID())
+
+	if got := opencodeHeaderForTest(t, next.client); got != sessionID {
+		t.Fatalf("replacement client header = %q, want %q", got, sessionID)
+	}
+}

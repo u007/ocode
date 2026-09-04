@@ -112,12 +112,15 @@ func (a *Agent) DrainPendingInjections() []Message {
 // (buildAgentSession); the TUI never calls this, so its entries stay
 // untagged (process-global), matching its single-session-per-process model.
 func (a *Agent) SetSessionID(sessionID string) {
+	a.opencodeSessionMu.Lock()
 	a.sessionID = sessionID
+	a.opencodeSessionID = sessionID
+	a.opencodeSessionMu.Unlock()
 	if a.permissions != nil {
 		a.permissions.sessionID = sessionID
 	}
 	if gc, ok := a.client.(*GenericClient); ok {
-		gc.sessionID = sessionID
+		gc.setSessionID(sessionID)
 	}
 	// Tag the snapshot store so backups are journaled under this session,
 	// then replay any journaled snapshots from a previous process into the
@@ -128,6 +131,53 @@ func (a *Agent) SetSessionID(sessionID string) {
 		a.snapshotStore.SetSessionID(sessionID)
 		a.snapshotStore.Rehydrate()
 	}
+}
+
+// SetOpenCodeSessionID sets the logical conversation identity used by
+// OpenCode requests without changing the session id used to scope debug logs.
+// The TUI uses this because it deliberately keeps debug entries process-global.
+func (a *Agent) SetOpenCodeSessionID(sessionID string) {
+	if a == nil || sessionID == "" {
+		return
+	}
+	a.opencodeSessionMu.Lock()
+	a.opencodeSessionID = sessionID
+	a.opencodeSessionMu.Unlock()
+	if gc, ok := a.client.(*GenericClient); ok {
+		gc.setOpencodeSessionID(sessionID)
+	}
+}
+
+// OpenCodeSessionID returns the stable logical conversation identity. Explicit
+// Agent.SetSessionID/SetOpenCodeSessionID values win; otherwise the main
+// GenericClient's fallback is resolved once and reused by derived clients.
+func (a *Agent) OpenCodeSessionID() string {
+	if a == nil {
+		return ""
+	}
+	a.opencodeSessionMu.Lock()
+	defer a.opencodeSessionMu.Unlock()
+	if a.sessionID != "" {
+		return a.sessionID
+	}
+	if a.opencodeSessionID != "" {
+		return a.opencodeSessionID
+	}
+	if gc, ok := a.client.(*GenericClient); ok {
+		a.opencodeSessionID = gc.opencodeSessionID()
+	} else {
+		a.opencodeSessionID = newOpencodeFallbackID()
+	}
+	return a.opencodeSessionID
+}
+
+func (a *Agent) bindOpenCodeSessionID(client LLMClient) LLMClient {
+	if gc, ok := client.(*GenericClient); ok {
+		if sessionID := a.OpenCodeSessionID(); sessionID != "" {
+			gc.setOpencodeSessionID(sessionID)
+		}
+	}
+	return client
 }
 
 // SetChangesSession tags only the snapshot store with a session id (so
@@ -233,6 +283,11 @@ type Agent struct {
 	// emitDebug). Empty in the TUI, where DebugAppend is process-global by
 	// design (single session per process).
 	sessionID string
+	// opencodeSessionID is the logical conversation identity used for OpenCode
+	// request affinity. It is separate from sessionID so the TUI can keep its
+	// process-global debug log while still sending a stable request identity.
+	opencodeSessionID string
+	opencodeSessionMu sync.Mutex
 	// lspMgr, when non-nil, is the project-wide LSP manager. The agent
 	// loop reads its diagnostic store on every Step to build a
 	// transient system-message fragment (see injectLSPDiagnostics) — it
@@ -2296,7 +2351,7 @@ func (a *Agent) noThinkingClient() LLMClient {
 	// are copied; per-call fields (OnDelta, OnUsage, RetryNotifier, deltaMu,
 	// deltaWrapToken) are left at zero values — ChatWithContext initialises
 	// them per-call.
-	return &GenericClient{
+	return a.bindOpenCodeSessionID(&GenericClient{
 		APIKey:          gc.APIKey,
 		Model:           gc.Model,
 		BaseURL:         gc.BaseURL,
@@ -2312,8 +2367,8 @@ func (a *Agent) noThinkingClient() LLMClient {
 		TopK:            gc.TopK,
 		UseWebSocket:    gc.UseWebSocket,
 		Redaction:       gc.Redaction,
-		sessionID:       gc.sessionID,
-	}
+		sessionID:       gc.sessionIDValue(),
+	})
 }
 
 func (a *Agent) compactSummaryClient() LLMClient {
@@ -2348,7 +2403,7 @@ func (a *Agent) compactSummaryClient() LLMClient {
 		if a.SmallModelRuntimeEnabled() {
 			if small := a.resolveSmallModel(); small != "" {
 				if client := NewClient(&compactCfg, small); client != nil {
-					return client
+					return a.bindOpenCodeSessionID(client)
 				}
 			}
 		}
@@ -2385,7 +2440,7 @@ func (a *Agent) compactSummaryClient() LLMClient {
 	}
 
 	if client := NewClient(&compactCfg, targetModel); client != nil {
-		return client
+		return a.bindOpenCodeSessionID(client)
 	}
 	if noThink := a.noThinkingClient(); noThink != nil {
 		return noThink
@@ -4563,6 +4618,7 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 			a.emitDebug("AGENT", fmt.Sprintf("spec %q requested model %q but agent has no config; keeping current client", spec.Name, spec.Model))
 		} else if client := NewClient(a.config, spec.Model); client != nil {
 			a.emitDebug("AGENT", fmt.Sprintf("spec %q: switching client to %s", spec.Name, spec.Model))
+			client = a.bindOpenCodeSessionID(client)
 			a.client = client
 			a.clearEnvironmentPromptCache()
 			a.preloadedModelContext = "" // model may have changed; reload model-specific context lazily

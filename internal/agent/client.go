@@ -212,17 +212,35 @@ type GenericClient struct {
 	// session (set via Agent.SetSessionID). Empty means untagged
 	// (process-global) — see emitDebug.
 	sessionID string
+	// opencodeSessionIDOverride is the logical conversation id used by the
+	// OpenCode transport when the debug-log sessionID is intentionally empty
+	// (for example, in the TUI).
+	opencodeSessionIDOverride string
+	sessionMu                 sync.RWMutex
+	opencodeFallbackMu        sync.Mutex
+	opencodeFallback          func() string
 }
 
 // emitDebug appends a debug-log entry tagged with the owning agent's
 // session id, or falls back to the process-global sink when untagged (TUI,
 // or a client built outside a session-scoped Agent, e.g. NewClient itself).
 func (c *GenericClient) emitDebug(kind, msg string) {
-	if c == nil || c.sessionID == "" {
+	if c == nil {
 		emitDebug(kind, msg)
 		return
 	}
-	debuglog.Log.Append(debuglog.Entry{Kind: debuglog.EntryKind(kind), Message: msg, SessionID: c.sessionID})
+	sessionID := c.sessionIDValue()
+	if sessionID == "" {
+		emitDebug(kind, msg)
+		return
+	}
+	debuglog.Log.Append(debuglog.Entry{Kind: debuglog.EntryKind(kind), Message: msg, SessionID: sessionID})
+}
+
+func (c *GenericClient) sessionIDValue() string {
+	c.sessionMu.RLock()
+	defer c.sessionMu.RUnlock()
+	return c.sessionID
 }
 
 // SetOnDelta installs (or clears, with nil) the streaming-token callback on
@@ -259,6 +277,88 @@ func (c *GenericClient) onUsage() func(inputTokens, outputTokens int64) {
 	c.deltaMu.Lock()
 	defer c.deltaMu.Unlock()
 	return c.OnUsage
+}
+
+// opencodeSessionHeader is the per-conversation session header the opencode
+// zen backend uses for metrics/rate-limit grouping. It mirrors upstream
+// opencode's LLMRequestPrep.prepare, which sends "x-opencode-session":
+// sessionID on every LLM request whose provider id starts with "opencode"
+// (packages/opencode/src/session/llm/request.ts), consumed by the zen
+// handler (packages/console/app/src/routes/zen/util/handler.ts).
+// Go canonicalizes the spelling to X-Opencode-Session on the wire —
+// header names are case-insensitive, so this is identical to upstream's
+// lowercase form.
+const opencodeSessionHeader = "X-Opencode-Session"
+
+// isOpencodeProvider reports whether this client talks to an opencode zen
+// backend (opencode, opencode-go, and any future opencode-* variant),
+// matching upstream's providerID.startsWith("opencode") predicate.
+func (c *GenericClient) isOpencodeProvider() bool {
+	return strings.HasPrefix(c.Provider, "opencode")
+}
+
+// setOpencodeSessionHeader stamps the stable per-conversation session id onto
+// an outbound LLM request. It is a no-op for non-opencode providers, so every
+// chat transport can call it unconditionally. The value is the agent's
+// session id (wired via Agent.SetSessionID) or, when none is wired, a
+// per-client id generated once — either way stable for the whole
+// conversation, never a per-request UUID, so the backend groups all of one
+// conversation's requests together.
+func (c *GenericClient) setOpencodeSessionHeader(req *http.Request) {
+	if req == nil || c == nil || !c.isOpencodeProvider() {
+		return
+	}
+	req.Header.Set(opencodeSessionHeader, c.opencodeSessionID())
+}
+
+func newOpencodeFallbackID() string {
+	b := make([]byte, 16)
+	if _, err := cryptorand.Read(b); err != nil {
+		// crypto/rand failing is a broken runtime; surface loudly rather than
+		// silently weakening the conversation identity.
+		panic(fmt.Sprintf("opencode session id: crypto/rand failed: %v", err))
+	}
+	return hex.EncodeToString(b)
+}
+
+// opencodeSessionID returns the agent session id when wired, else a
+// per-client random id generated once — the header must always be present
+// and stable for the conversation, never a per-request value.
+func (c *GenericClient) opencodeSessionID() string {
+	c.sessionMu.RLock()
+	sessionID := c.sessionID
+	override := c.opencodeSessionIDOverride
+	c.sessionMu.RUnlock()
+	if sessionID != "" {
+		return sessionID
+	}
+	if override != "" {
+		return override
+	}
+	c.opencodeFallbackMu.Lock()
+	if c.opencodeFallback == nil {
+		c.opencodeFallback = sync.OnceValue(newOpencodeFallbackID)
+	}
+	fallback := c.opencodeFallback
+	c.opencodeFallbackMu.Unlock()
+	return fallback()
+}
+
+func (c *GenericClient) setOpencodeSessionID(sessionID string) {
+	if c != nil {
+		c.sessionMu.Lock()
+		c.opencodeSessionIDOverride = sessionID
+		c.sessionMu.Unlock()
+	}
+}
+
+func (c *GenericClient) setSessionID(sessionID string) {
+	if c != nil {
+		c.sessionMu.Lock()
+		c.sessionID = sessionID
+		c.opencodeSessionIDOverride = sessionID
+		c.sessionMu.Unlock()
+	}
 }
 
 // applyGenerationParams adds temperature / top_p / top_k to a request payload
@@ -1095,6 +1195,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	if c.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
+	c.setOpencodeSessionHeader(req)
 	c.emitDebug("LLM", fmt.Sprintf("chatOpenAI: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
 
 	resp, err := llmHTTPClient.Do(req)
@@ -1198,6 +1299,7 @@ func (c *GenericClient) chatGoogle(ctx context.Context, messages []Message, tool
 	if c.APIKey != "" {
 		req.Header.Set("x-goog-api-key", c.APIKey)
 	}
+	c.setOpencodeSessionHeader(req)
 	c.emitDebug("LLM", fmt.Sprintf("chatGoogle: url=%s model=%q", url, c.Model))
 
 	resp, err := llmHTTPClient.Do(req)
@@ -2807,6 +2909,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	c.setOpencodeSessionHeader(req)
 	if accountID != "" {
 		req.Header.Set("ChatGPT-Account-ID", accountID)
 	}
@@ -3377,6 +3480,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
+	c.setOpencodeSessionHeader(req)
 	if c.UseOAuth {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 		if c.ThinkingBudget > 0 {
@@ -4465,6 +4569,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	if c.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
+	c.setOpencodeSessionHeader(req)
 	c.emitDebug("LLM", fmt.Sprintf("chatOpenAIHTTP: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
 
 	resp, err := llmHTTPClient.Do(req)

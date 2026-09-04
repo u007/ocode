@@ -1136,6 +1136,9 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	}
 	m.agent = next
 	if m.agent != nil {
+		if m.sessionID != "" {
+			m.agent.SetOpenCodeSessionID(m.sessionID)
+		}
 		m.agent.SetSupervisor(m.supervisor)
 		m.syncRedactionRuntime()
 		// Wire the changes tab's registry accessor to the live agent.
@@ -2352,12 +2355,14 @@ func newModel(opts ...RunOptions) model {
 	vp.SetContent(hintStyle.Render("  ocode v" + version.Version + " — opencode clone · type a message to begin\n"))
 
 	if o.SessionID == "" {
-		o.SessionID = time.Now().Format("2006-01-02-150405")
+		o.SessionID = session.NewSessionID()
 	}
 	tool.SetTodoSession(o.SessionID)
 	snapshot.Reset()
 	tool.ResetTodoState()
 	if a != nil {
+		// Keep OpenCode request affinity stable without tagging TUI debug logs.
+		a.SetOpenCodeSessionID(o.SessionID)
 		// Journal file-edit backups under this session and replay any
 		// journaled snapshots from a previous process so the changes tab
 		// survives a TUI restart/resume.
@@ -10461,6 +10466,7 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			m.sessionID = sess.ID
 			m.sessionCreatedAt = sess.CreatedAt
 			if m.agent != nil {
+				m.agent.SetOpenCodeSessionID(sess.ID)
 				m.agent.SetChangesSession(sess.ID)
 			}
 			m.sessionTitle = ""
@@ -10869,10 +10875,11 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	if !m.replacementQueuePending {
 		m.queuedItems = nil
 	}
-	newSessionID := time.Now().Format("2006-01-02-150405")
+	newSessionID := session.NewSessionID()
 	m.sessionID = newSessionID
 	m.sessionCreatedAt = time.Now()
 	if m.agent != nil {
+		m.agent.SetOpenCodeSessionID(newSessionID)
 		m.agent.SetChangesSession(newSessionID)
 	}
 	m.sessionTitle = ""

@@ -18,6 +18,14 @@ name). Do not duplicate content between the two — update here only.
   `internal/tui/selection.go`)
 - LLM providers: OpenAI, Anthropic, Google, Z.AI, Alibaba, plus the
   `opencode-go` (DeepSeek) and Minimax routes
+- Every request to an `opencode*` provider must carry `X-Opencode-Session`, an
+  opaque ID stable for one conversation (Zen/Go pin the conversation to one
+  upstream for prompt caching; some Go models 400 without it). All transports
+  capable of serving `opencode*` providers call `setOpencodeSessionHeader`.
+  The identity source is `Agent.SetSessionID` for CLI/server sessions,
+  `Agent.SetOpenCodeSessionID` for TUI sessions, or one lazily resolved
+  fallback on the owning agent. Compaction, replacement, and side-query
+  clients inherit the same identity. New transports must call the helper too.
 
 ## Git Worktrees
 The default location for `git worktree` checkouts is `.worktrees/` in the

@@ -195,6 +195,8 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 	}
 	if a.sessionID != "" {
 		child.SetSessionID(a.sessionID)
+	} else if sessionID := a.OpenCodeSessionID(); sessionID != "" {
+		child.SetOpenCodeSessionID(sessionID)
 	}
 	// Share session-scoped state so side-query mutations are tracked and
 	// undoable in the Changes tab (same contract as subagents).
