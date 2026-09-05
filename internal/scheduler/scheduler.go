@@ -131,20 +131,25 @@ func (s *Service) run() {
 		delay := s.nextFireDelayLocked()
 		s.mu.Unlock()
 
-		var timer *time.Timer
-		if delay > 0 {
-			timer = time.NewTimer(delay)
+		if delay <= 0 {
+			// Already due (e.g. a persisted one-shot whose time passed while
+			// the app was closed): fire now. tick removes or reschedules every
+			// due job, so this cannot spin. Still honour stop first.
+			select {
+			case <-s.stopCh:
+				return
+			default:
+			}
+			s.tick()
+			continue
 		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-s.stopCh:
-			if timer != nil {
-				timer.Stop()
-			}
+			timer.Stop()
 			return
 		case <-s.wakeCh:
-			if timer != nil {
-				timer.Stop()
-			}
+			timer.Stop()
 			// Recompute soonest due job.
 		case <-timer.C:
 			s.tick()

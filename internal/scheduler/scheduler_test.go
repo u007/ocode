@@ -371,3 +371,30 @@ func TestUpdateJob(t *testing.T) {
 		t.Fatal("expected error for unknown id")
 	}
 }
+
+// A job that is already due when the loop starts (e.g. a persisted one-shot
+// whose time passed while the app was closed) must fire immediately instead
+// of blocking on a nil timer.
+func TestRunFiresOverdueJobOnStart(t *testing.T) {
+	s := newTestService(t)
+	fired := make(chan string, 1)
+	s.SetOnJob(func(_ context.Context, j *Job) error { fired <- j.ID; return nil })
+
+	id, err := s.AddJob(Job{Schedule: Schedule{Kind: KindAt, AtMs: fixedNow.Add(-time.Hour).UnixMilli()}, Payload: Payload{Message: "late"}})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := s.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	select {
+	case got := <-fired:
+		if got != id {
+			t.Fatalf("fired %s, want %s", got, id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("overdue job never fired")
+	}
+}
