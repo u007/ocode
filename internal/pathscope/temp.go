@@ -15,6 +15,12 @@ func TempRootsForGOOS(goos string) []string {
 	if goos != "windows" {
 		roots = append(roots, normalizeRoot("/tmp"), normalizeRoot("/var/tmp"))
 	}
+	if goos == "darwin" {
+		// confstr-derived per-user temp dir; independent of $TMPDIR.
+		for _, p := range DarwinUserTempDir() {
+			roots = append(roots, normalizeRoot(p))
+		}
+	}
 	seen := make(map[string]struct{}, len(roots))
 	out := make([]string, 0, len(roots))
 	for _, root := range roots {

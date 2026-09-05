@@ -1803,6 +1803,12 @@ func (pm *PermissionManager) AllowedRoots() []string {
 	add("/tmp")
 	add("/var/tmp")
 	add(os.TempDir())
+	// macOS per-user /var/folders/.../{T,C}: what confstr hands child tools
+	// regardless of $TMPDIR (unset under launchd/env -i), plus the cache dir
+	// clang/swift/xcodebuild write to.
+	for _, r := range pathscope.DarwinUserDirs() {
+		add(r)
+	}
 	sort.Strings(roots)
 	return roots
 }
@@ -1815,7 +1821,7 @@ func (pm *PermissionManager) AllowedRoots() []string {
 func TempRootAliases() [][2]string {
 	var out [][2]string
 	seen := map[string]struct{}{}
-	for _, p := range []string{"/tmp", "/var/tmp", os.TempDir()} {
+	for _, p := range append([]string{"/tmp", "/var/tmp", os.TempDir()}, pathscope.DarwinUserDirs()...) {
 		clean := filepath.Clean(p)
 		if _, ok := seen[clean]; ok || clean == "" {
 			continue
@@ -1897,6 +1903,9 @@ func (pm *PermissionManager) AllowedRootsClassified() []sandbox.RootSpec {
 	add("/tmp", true)
 	add("/var/tmp", true)
 	add(os.TempDir(), true)
+	for _, r := range pathscope.DarwinUserDirs() {
+		add(r, true)
+	}
 	sort.Slice(specs, func(i, j int) bool { return specs[i].Path < specs[j].Path })
 	return specs
 }

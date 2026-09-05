@@ -78,7 +78,10 @@ What it confines:
 - Filesystem **writes** fail at the OS level unless the target is under a
   writable root: workspace/`extra_allowed_paths`, language dependency caches
   (npm/pip/cargo/go/maven/gradle), `~/.claude`, and temp dirs
-  (`/tmp`, `/var/tmp`, `os.TempDir()`).
+  (`/tmp`, `/var/tmp`, `os.TempDir()`, plus on macOS the uid-owned
+  `/var/folders/*/*/{T,C}` confstr dirs — found by ownership, not `$TMPDIR`,
+  so `mktemp`/Python/Node/clang caches work even when ocode runs without
+  `TMPDIR`, e.g. under launchd; see `pathscope.DarwinUserDirs`).
 - **Reads and exec stay global, network egress is open** — toolchains need
   them. A sandboxed `python`/`node` can still read `.env`/`~/.ssh`/`auth.json`
   and POST them anywhere.

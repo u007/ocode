@@ -1968,16 +1968,24 @@ func TestAskPermissionModelIncludesAllowedRootsInPrompt(t *testing.T) {
 // paths.GlobalConfigDir() resolves to <home>/.config/opencode without ever
 // touching the developer's live config. t.Setenv restores the environment.
 //
-// TMPDIR is then re-pointed at a sibling dir: temp dirs are themselves
-// pre-authorized roots, so a test home under the default $TMPDIR would make
-// every path under it (including the boundary cases) vacuously in-scope.
+// The home lives under the package source dir, NOT t.TempDir(): temp dirs
+// (and on macOS the per-user /var/folders T dir regardless of $TMPDIR) are
+// pre-authorized roots, so a test home there would make every path under it
+// (including the boundary cases) vacuously in-scope.
 func isolateConfigHome(t *testing.T) {
 	t.Helper()
-	home := t.TempDir()
+	home, err := os.MkdirTemp(".", ".isolated-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err = filepath.Abs(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(home) })
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("TMPDIR", t.TempDir())
 }
 
 func TestAllowedRootsIncludesGlobalConfigDir(t *testing.T) {
