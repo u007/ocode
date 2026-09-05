@@ -15,6 +15,27 @@
 
 
 
+
+## 2026-09-05
+
+* **Update**: Auto-Permission Prompt Prose Code Audit Gap ([gotchas/auto-permission-prompt-prose-code-audit-gap.md](/gotchas/auto-permission-prompt-prose-code-audit-gap.md))
+* **Update**: Seatbelt Profile Test Coverage Gap ([gotchas/seatbelt-profile-test-coverage-gap.md](/gotchas/seatbelt-profile-test-coverage-gap.md))
+* **Update**: Version-Changelog Mismatch ([gotchas/version-changelog-mismatch.md](/gotchas/version-changelog-mismatch.md))
+* **Update**: Auto-Permission Prompt Prose Code Audit Gap ([gotchas/auto-permission-prompt-prose-code-audit-gap.md](/gotchas/auto-permission-prompt-prose-code-audit-gap.md))
+* **Update**: Seatbelt Profile Test Coverage Gap ([gotchas/seatbelt-profile-test-coverage-gap.md](/gotchas/seatbelt-profile-test-coverage-gap.md))
+* **Update**: Version-Changelog Mismatch ([gotchas/version-changelog-mismatch.md](/gotchas/version-changelog-mismatch.md))
+* **Update**: Auto-Permission Prompt Prose Code Audit Gap ([docs/gotchas/auto-permission-prompt-prose-code-audit-gap.md](/docs/gotchas/auto-permission-prompt-prose-code-audit-gap.md))
+* **Update**: Seatbelt Profile Test Coverage Gap ([docs/gotchas/seatbelt-profile-test-coverage-gap.md](/docs/gotchas/seatbelt-profile-test-coverage-gap.md))
+* **Update**: Version-Changelog Mismatch ([docs/gotchas/version-changelog-mismatch.md](/docs/gotchas/version-changelog-mismatch.md))
+* **Update**: Version-Changelog Mismatch ([docs/gotchas/version-changelog-mismatch.md](/docs/gotchas/version-changelog-mismatch.md))
+* **Creation**: Auto-Permission Prompt Prose Code Audit Gap ([docs/gotchas/auto-permission-prompt-prose-code-audit-gap.md](/docs/gotchas/auto-permission-prompt-prose-code-audit-gap.md))
+* **Creation**: Seatbelt Profile Test Coverage Gap ([docs/gotchas/seatbelt-profile-test-coverage-gap.md](/docs/gotchas/seatbelt-profile-test-coverage-gap.md))
+* **Creation**: Version-Changelog Mismatch ([docs/gotchas/version-changelog-mismatch.md](/docs/gotchas/version-changelog-mismatch.md))
+* **Creation**: Auto-Permission Dependency Binaries — Policy Decision ([docs/gotchas/auto-permission-dependency-bin-policy.md](/docs/gotchas/auto-permission-dependency-bin-policy.md))
+* **Creation**: Version-Changelog Mismatch ([gotchas/version-changelog-mismatch.md](/gotchas/version-changelog-mismatch.md))
+* **Creation**: Auto-Permission Prompt Prose Code Audit Gap ([gotchas/auto-permission-prompt-prose-code-audit-gap.md](/gotchas/auto-permission-prompt-prose-code-audit-gap.md))
+* **Creation**: Seatbelt Profile Test Coverage Gap ([gotchas/seatbelt-profile-test-coverage-gap.md](/gotchas/seatbelt-profile-test-coverage-gap.md))
+* **Creation**: Auto-Permission Prompt — Load-Semantics Flip ([gotchas/auto-permission-prompt-load-semantics-flip.md](/gotchas/auto-permission-prompt-load-semantics-flip.md))
 ## 2026-09-03
 
 * **Creation**: Session Storage Critical Issues ([gotchas/session-storage-critical-issues.md](/gotchas/session-storage-critical-issues.md))

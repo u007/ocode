@@ -25,16 +25,20 @@ const (
 )
 
 // docPromptContent is the documentation-first development prompt injected
-// when DocPromptEnabled is true. It instructs the agent to consult existing
-// docs before implementing and to update them afterward.
+// when DocPromptEnabled is true. It requires inspection and alignment checks
+// for nontrivial changes, allows a quick look only for narrowly scoped
+// single-file edits, and requires doc updates when the change affects
+// documented behavior.
 const docPromptContent = `## Documentation-First Development
 
-Before writing any code:
+Before acting, assess scope. For nontrivial, cross-file, behavioral, or unfamiliar changes, you must read relevant docs, check documentation alignment, and build a mental model before acting:
 1. **Read existing documentation** — look for README, CLAUDE.md, ARCHITECTURE.md, API docs, style guides, and schema definitions related to your changes.
 2. **Check documentation alignment** — if existing docs describe behavior your changes will affect, verify there is no conflict. If there is a conflict, ask the user before proceeding.
 3. **Build a mental model** of affected code paths and dependencies.
 
-After implementing, update documentation to reflect your changes:
+Only small, self-contained tasks (one file, explicitly scoped by the user, localized, with no public-interface, documented-behavior, schema, dependency, or cross-file implication) may proceed after a quick look at the named area — and even then, if the change affects documented behavior or public interfaces, the documentation obligations below still apply.
+
+If the change affects documented behavior or public interfaces, you must update documentation to reflect your changes:
 1. **Update inline documentation** — function/type comments, docstrings.
 2. **Update project documentation** — README, API docs, architecture docs, migration notes if your changes affect public APIs, config, setup steps, or data flow.
 3. **State explicitly if no doc updates are needed** and explain why.

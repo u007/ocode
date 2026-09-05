@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,6 +33,77 @@ func TestSeatbeltProfileGrantsWritableRoots(t *testing.T) {
 	if !strings.Contains(profile, "(allow file-read*") {
 		t.Fatalf("profile missing global file-read*:\n%s", profile)
 	}
+}
+
+// TestSeatbeltProfileGrantsDevNullOnly locks the /dev grant surface at the
+// profile-emission level: /dev/null (pure discard target — a write there is a
+// no-op) is granted; /dev/tty is DELIBERATELY not (a fresh open would let a
+// confined subprocess paint over the running TUI, bypassing captured output).
+// See seatbeltProfileSafe for the rationale and the empirical probe list.
+func TestSeatbeltProfileGrantsDevNullOnly(t *testing.T) {
+	roots := RootSet{WritableRoots: []string{t.TempDir()}, NetworkEgress: true}
+	profile := seatbeltProfile(roots)
+	if profile == "" {
+		t.Fatal("seatbeltProfile returned empty (canonicalization failed)")
+	}
+	if !strings.Contains(profile, `(allow file-write* (path "/dev/null"))`) {
+		t.Fatalf("profile missing the /dev/null discard grant:\n%s", profile)
+	}
+	if strings.Contains(profile, `"/dev/tty"`) {
+		t.Fatalf("profile grants /dev/tty — a confined process could paint over the live TUI:\n%s", profile)
+	}
+}
+
+// TestSeatbeltAllowsDevNullDiscard exec-tests the /dev/null grant under real
+// sandbox-exec: an O_RDWR open (the "exec 3<>" redirection form) must succeed.
+func TestSeatbeltAllowsDevNullDiscard(t *testing.T) {
+	if !seatbeltAvailable() {
+		t.Skip("/usr/bin/sandbox-exec not present")
+	}
+	work := t.TempDir()
+	if _, err := runWrapped([]string{work}, "sh", "-c", "exec 3<>/dev/null"); err != nil {
+		t.Fatalf("O_RDWR open of /dev/null failed under sandbox: %v", err)
+	}
+}
+
+// TestSeatbeltDeniesDevTTYFreshOpen exec-tests the /dev/tty denial under a
+// REAL controlling pseudo-terminal: script(1) forks the probe inside a fresh
+// pty session, so the child has /dev/tty even in headless test runs — this
+// removes the vacuous-pass case where a tty-less CI would fail the open for
+// the wrong reason. Control first: unsandboxed under the pty, the fresh open
+// succeeds. Then confined (same pty harness, sandbox-exec outside the pty
+// fork): the fresh open of the tty device must be denied by the default
+// write rule (only /dev/null is granted — see TestSeatbeltProfileGrantsDevNullOnly).
+func TestSeatbeltDeniesDevTTYFreshOpen(t *testing.T) {
+	if !seatbeltAvailable() {
+		t.Skip("/usr/bin/sandbox-exec not present")
+	}
+	if !fileExists("/usr/bin/script") {
+		t.Skip("/usr/bin/script not present")
+	}
+	work := t.TempDir()
+	probe := "exec 3<>/dev/tty"
+
+	// Control: a fresh /dev/tty open works under a real pty unsandboxed.
+	if err := exec.Command("/usr/bin/script", "-q", "/dev/null", "/bin/sh", "-c", probe).Run(); err != nil {
+		t.Skipf("pty control probe did not reproduce an openable /dev/tty: %v", err)
+	}
+
+	// Confined: same pty harness with sandbox-exec OUTSIDE the pty fork, so
+	// script's pty is the confined sh's controlling terminal and the fresh
+	// open resolves to a real tty device.
+	roots := RootSet{WritableRoots: []string{work}, NetworkEgress: true}
+	profile := seatbeltProfile(roots)
+	if profile == "" {
+		t.Fatal("seatbeltProfile returned empty (canonicalization failed)")
+	}
+	sandboxed := exec.Command("/usr/bin/script", "-q", "/dev/null",
+		sandboxExecPath, "-p", profile, "/bin/sh", "-c", probe)
+	out, err := sandboxed.CombinedOutput()
+	if err == nil {
+		t.Fatalf("fresh open of /dev/tty succeeded under sandbox with a real controlling pty — the TUI-corruption surface is open:\n%s", out)
+	}
+	t.Logf("confined /dev/tty open denied as expected: %v (%s)", err, strings.TrimSpace(string(out)))
 }
 
 // TestSeatbeltProfileCanonicalizesSymlinkRoot locks the realpath boundary: a

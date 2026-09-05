@@ -44,6 +44,22 @@ func seatbeltProfileSafe(roots RootSet) (string, error) {
 		}
 		fmt.Fprintf(&sb, "(allow file-write* (subpath %q))\n", canonical)
 	}
+	// /dev/null sits outside every writable root but is opened O_WRONLY/O_RDWR
+	// as a pure discard target by many tools (git, ssh, pagers); a write there
+	// is a no-op, so it is granted explicitly. /dev/tty is DELIBERATELY NOT
+	// granted: a fresh open of it would let a confined subprocess paint
+	// terminal-control sequences over the running TUI, bypassing the captured
+	// output path (alt-screen corruption class). Interactive tty users (sudo/gpg
+	// passphrase prompts, ssh password prompts, pager keyboards, isatty probes)
+	// belong to the unsandboxed PTY terminal, not the agent's shell tool — and
+	// those flows should fail closed here rather than silently find the
+	// controlling terminal. Writes to already-inherited descriptors (stdout/
+	// stderr pipes, the PTY) are not path-resolved operations and are
+	// unaffected; /dev/stdout, /dev/stderr, and /dev/fd/* therefore need no
+	// path grants either. Empirically probed: git status/log/stash/diff/
+	// rev-parse, less --version, ssh -V, gpg --version, npm --version all work
+	// without a /dev/tty grant.
+	sb.WriteString("(allow file-write* (path \"/dev/null\"))\n")
 	// Reads/exec open, so toolchains and interpreters keep working.
 	sb.WriteString("(allow file-read*)\n")
 	sb.WriteString("(allow process-exec*)\n")

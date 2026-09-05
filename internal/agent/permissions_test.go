@@ -1545,6 +1545,65 @@ func TestPermissions_IsHarmfulBashCommand_ExtendsToExfiltration(t *testing.T) {
 	}
 }
 
+// TestIsHarmfulBashCommand_GitConfigWrites pins the code-side backstop for
+// the gatekeeper prose: `git config` writes — legacy two-positional form,
+// mutating flags, and the modern (git >= 2.46) subcommand forms — are hard
+// harmful, so a judge can never auto-allow planting core.sshCommand,
+// core.hooksPath, url.*.insteadOf, credential.*, or friends, which
+// code-auto-allowed read-only commands like `git ls-remote` later execute.
+// Config reads stay judge-mediated (not harmful): the bundled prompt
+// allowlists them.
+func TestIsHarmfulBashCommand_GitConfigWrites(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		// Exploit-chain writes: a persistent dangerous key, later executed
+		// by an auto-allowed read-only command.
+		{"config_write_sshcommand", `git config core.sshCommand "sh -c payload"`, true},
+		{"config_write_hookspath", "git config core.hooksPath /tmp/evil", true},
+		{"config_write_global", "git config --global user.name attacker", true},
+		{"config_write_local", "git config --local core.sshCommand payload", true},
+		{"config_write_file_flag", "git config -f other.file user.name attacker", true},
+		{"config_write_add", "git config --add url.evil.insteadOf https://evil", true},
+		{"config_write_unset", "git config --unset user.name", true},
+		{"config_write_unset_all", "git config --unset-all user.name", true},
+		{"config_write_remove_section", "git config --remove-section core", true},
+		{"config_modern_set", "git config set core.hooksPath /tmp/evil", true},
+		{"config_modern_unset", "git config unset user.name", true},
+		{"config_modern_replace_all", "git config replace-all user.name attacker", true},
+		{"config_wrapper_c_safe_key", "git -c core.quotepath=on config user.name attacker", true},
+		{"config_wrapper_nopager", "git --no-pager config set user.name attacker", true},
+
+		// Reads must stay judge-mediated, not hard-blocked.
+		{"config_read_get", "git config --get user.name", false},
+		{"config_read_list", "git config --list", false},
+		{"config_read_short_list", "git config -l", false},
+		{"config_read_regexp", "git config --get-regexp 'remote.*'", false},
+		{"config_read_implicit_one_positional", "git config user.name", false},
+		{"config_read_modern_get", "git config get user.name", false},
+		{"config_read_modern_list", "git config list", false},
+		{"config_read_urlmatch", "git config --get-urlmatch http https://example.com", false},
+		{"config_wrapper_c_read", "git -c core.quotepath=on config --get user.name", false},
+
+		// Dangerous -c keys stay harmful independent of the config detector
+		// (extended list: pager.* and gpg.program now included).
+		{"c_dangerous_sshcommand", "git -c core.sshCommand=payload ls-remote origin", true},
+		{"c_dangerous_pager", "git -c pager.log=evil log", true},
+		{"c_dangerous_gpg", "git -c gpg.program=/tmp/evil verify-tag HEAD", true},
+		{"c_dangerous_credential_scoped", "git -c credential.https://github.com.helper=evil fetch origin", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsHarmfulBashCommand(tc.command); got != tc.want {
+				t.Errorf("IsHarmfulBashCommand(%q) = %v, want %v", tc.command, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPermissions_ExfiltrationRiskRequiresHumanApproval(t *testing.T) {
 	pm := NewPermissionManager()
 	pm.SetWorkDir("/Users/test/project")
@@ -2463,5 +2522,62 @@ func TestOrdinaryWorkspaceWriteStillAutoAllows(t *testing.T) {
 	dec := pm.Decide("bash", json.RawMessage(`{"command":"echo hi > task-notes.md"}`))
 	if dec.Level != PermissionAllow {
 		t.Fatalf("ordinary workspace write = %s, want Allow", dec.Level)
+	}
+}
+
+// TestGitStashReadOnlyFormsReachAutoAllow is the end-to-end decision test for
+// the read-only stash inspection forms: without the isReadOnlyGitStashForm
+// exclusion in IsHarmfulBashCommand, the whole "git stash" family was routed
+// to a human ASK before the subcommand allowlist or the LLM judge ever ran,
+// making the matching always-ALLOW lines in
+// config.BundledAutoPermissionPromptBody dead text. These cases lock the
+// full Decide() path: list/show auto-allow; every mutating stash form still
+// asks.
+func TestGitStashReadOnlyFormsReachAutoAllow(t *testing.T) {
+	// Isolate from real Claude settings: ~/.claude/settings.json may carry a
+	// user deny like "Bash(git stash *)" (a deliberate user choice that wins
+	// over everything), which would leak into the test via claudeSettingsPaths
+	// and mask the code-level behavior under test.
+	t.Setenv("HOME", t.TempDir())
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+
+	for _, cmd := range []string{
+		"git stash list",
+		"git stash list --format=%gd",
+		"git stash show",
+		"git stash show -p",
+		"git stash show stash@{1}",
+		"git -C . stash list",
+		"git --no-pager stash show",
+	} {
+		dec := pm.Decide("bash", json.RawMessage(fmt.Sprintf(`{"command":%q}`, cmd)))
+		if dec.Level != PermissionAllow {
+			t.Errorf("Decide(bash %q) = %s (hard=%v), want Allow — read-only stash form must reach the auto-allow path", cmd, dec.Level, dec.HardDeny)
+		}
+	}
+
+	// Every mutating stash form stays on the harmful ASK path.
+	for _, cmd := range []string{
+		"git stash",             // bare == push — mutating
+		"git stash pop",         // restores + drops
+		"git stash apply",       // restores
+		"git stash drop",        // discards an entry
+		"git stash clear",       // discards all entries
+		"git stash branch feat", // moves entries to a branch
+		"git stash store -m x",  // creates a stash entry
+		"git stash save wip",    // legacy create
+	} {
+		dec := pm.Decide("bash", json.RawMessage(fmt.Sprintf(`{"command":%q}`, cmd)))
+		if dec.Level != PermissionAsk {
+			t.Errorf("Decide(bash %q) = %s, want Ask — mutating stash form must stay on the harmful path", cmd, dec.Level)
+		}
+	}
+
+	// A dangerous -c override keeps the whole pipeline harmful regardless of
+	// the inspection form.
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"git -c protocol.allow=always stash list"}`))
+	if dec.Level != PermissionAsk {
+		t.Errorf("Decide(bash git -c protocol.allow=always stash list) = %s, want Ask — dangerous -c key stays harmful", dec.Level)
 	}
 }

@@ -1059,14 +1059,14 @@ func runSkillsCmd(m *model, args []string) tea.Cmd {
 }
 
 // runAutoPermissionPromptCmd handles `/permissions auto prompt [status|install|upgrade]`,
-// which manages the bundled auto-LLM gatekeeper prompt addendum
-// (~/.config/opencode/auto-permission-prompt.md) the same way `/skills
-// install|upgrade` manages bundled skills: detect missing/outdated/
+// which manages the user-installed copy of the auto-LLM gatekeeper prompt
+// addendum (~/.config/opencode/auto-permission-prompt.md) the same way
+// `/skills install|upgrade` manages bundled skills: detect missing/outdated/
 // custom-modified, and only overwrite a customized file when the user
-// explicitly upgrades. An outdated-but-unmodified file also self-heals the
-// next time it's loaded (config.LoadAutoPermissionPromptBody), so this
-// command is mostly for checking status or forcing an upgrade over local
-// edits.
+// explicitly upgrades. Loading never writes to disk — a missing file falls
+// back to the embedded bundled body (config.LoadAutoPermissionPromptBody) —
+// so this command exists to materialize a disk copy or force an upgrade
+// over local edits.
 //
 // The `edit` subcommand is handled by the caller (runPermissionsCmd) rather
 // than here, since opening $EDITOR needs the tea.Cmd / *model plumbing this
@@ -1085,7 +1085,14 @@ func runAutoPermissionPromptCmd(args []string) string {
 			return fmt.Sprintf("Failed to check auto-permission prompt status: %v", err)
 		}
 		path, _ := config.AutoPermissionPromptFilePath()
-		return fmt.Sprintf("Auto-permission prompt addendum: %s\n  path: %s\n  bundled version: %s", status, path, config.BundledAutoPermissionPromptVersion)
+		msg := fmt.Sprintf("Auto-permission prompt addendum: %s\n  path: %s\n  bundled version: %s", status, path, config.BundledAutoPermissionPromptVersion)
+		switch status {
+		case config.AutoPermissionPromptOutdated:
+			msg += "\n  the current bundled rules are served (the stale copy is superseded); run \"/permissions auto prompt upgrade\" to update the installed copy"
+		case config.AutoPermissionPromptCustomModified:
+			msg += "\n  the custom copy is served verbatim; \"/permissions auto prompt install force\" restores the bundled body"
+		}
+		return msg
 	case "install", "upgrade", "update":
 		force := false
 		for _, a := range args[1:] {

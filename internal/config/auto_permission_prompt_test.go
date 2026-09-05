@@ -1,9 +1,12 @@
 package config
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -157,30 +160,306 @@ func TestAutoPermissionPromptOutdatedUpgrade(t *testing.T) {
 
 func TestLoadAutoPermissionPromptBody(t *testing.T) {
 	setupAutoPermPromptHome(t)
+	path, err := AutoPermissionPromptFilePath()
+	if err != nil {
+		t.Fatalf("AutoPermissionPromptFilePath: %v", err)
+	}
 
-	// Missing → self-installs and returns the bundled body; a missing file
-	// must never silently drop the bundled rules from the gatekeeper prompt.
+	// Missing → returns the embedded bundled body without creating or
+	// writing anything to disk: no self-heal/auto-install on load.
 	body, err := LoadAutoPermissionPromptBody()
 	if err != nil {
 		t.Fatalf("load missing: %v", err)
 	}
 	if body != BundledAutoPermissionPromptBody {
-		t.Fatalf("expected bundled body after self-install, got %q", body)
+		t.Fatalf("expected embedded bundled fallback, got %q", body)
 	}
-	if status, _ := GetAutoPermissionPromptStatus(); status != AutoPermissionPromptUpToDate {
-		t.Fatalf("expected up-to-date after self-install, got %s", status)
+	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("expected no file on disk after fallback load, stat err = %v", statErr)
+	}
+	if _, statErr := os.Stat(path + ".bundled-hash"); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("expected no sidecar on disk after fallback load, stat err = %v", statErr)
+	}
+	if status, _ := GetAutoPermissionPromptStatus(); status != AutoPermissionPromptMissing {
+		t.Fatalf("expected missing status after fallback load, got %s", status)
 	}
 
-	// Installed → bundled body.
+	// Installed file → returned verbatim, even when it differs from the
+	// bundled body (upgrade stays manual; loading never rewrites).
 	if _, err := InstallAutoPermissionPrompt(false); err != nil {
 		t.Fatalf("install: %v", err)
 	}
+	custom := "user-managed body — do not silently replace"
+	if err := os.WriteFile(path, []byte(custom), 0o644); err != nil {
+		t.Fatalf("write custom body: %v", err)
+	}
 	body, err = LoadAutoPermissionPromptBody()
 	if err != nil {
-		t.Fatalf("load installed: %v", err)
+		t.Fatalf("load custom: %v", err)
+	}
+	if body != custom {
+		t.Fatalf("expected installed file verbatim, got %q", body)
+	}
+	if got, _ := os.ReadFile(path); string(got) != custom {
+		t.Fatalf("load rewrote the installed file: %q", got)
+	}
+}
+
+func TestBundledAutoPermissionPrompt_CoversLanguageToolBins(t *testing.T) {
+	for _, want := range []string{
+		"node_modules/.bin",
+		".venv/bin",
+		"venv/bin",
+		"env/bin",
+		"pyenv",
+		"go run",
+		"GOPATH/bin",
+		"vendor/bin",
+		"bundle exec",
+		"gradlew",
+		"mvnw",
+		"~/.cargo/bin",
+		"Judge the ACTION",
+	} {
+		if !strings.Contains(BundledAutoPermissionPromptBody, want) {
+			t.Fatalf("bundled auto-permission prompt missing %q", want)
+		}
+	}
+}
+
+// TestBundledAutoPermissionPrompt_GitConfigBoundary pins the judge-facing
+// wording for the two decision surfaces the code allowlist deliberately
+// defers to it ("git config" is absent from bashSubcommandAllow, so every
+// git config form reaches the judge): the bare two-argument write form
+// ("git config <key> <value>") must be named as mutating even without a
+// write flag, and the allowlist must be stated as conservative for unlisted
+// forms. The code-level counterpart lives in
+// internal/agent/permission_interpreter_test.go
+// (TestMatchSubcommandAllow_GitConfigBoundary).
+func TestBundledAutoPermissionPrompt_GitConfigBoundary(t *testing.T) {
+	for _, want := range []string{
+		// Positional two-argument write form — the hidden writer.
+		"two-argument form \"git config <key> <value>\"",
+		"git config user.name attacker",
+		"git config --global core.hooksPath /tmp/x",
+		"the absence of a write flag does not make it a read",
+		// Explicit read forms enumerated (not just --get/--list).
+		"git config --get-all",
+		"git config --get-regexp",
+		"--get-urlmatch",
+		"--get-color",
+		"--get-colorbool",
+		// Single positional argument is the implicit read.
+		"git config <key>\" (exactly one positional argument",
+		// Fail-closed conservatism for unlisted forms.
+		"Unlisted subcommand forms are intentionally NOT auto-allowed",
+		// Mutating flags incl. the ones the old text missed.
+		"--replace-all",
+		"--remove-section",
+		"--rename-section",
+	} {
+		if !strings.Contains(BundledAutoPermissionPromptBody, want) {
+			t.Fatalf("bundled auto-permission prompt missing %q", want)
+		}
+	}
+	// The old unsafe phrasing must be gone: it covered flag/"key=value" forms
+	// but not the positional write.
+	if strings.Contains(BundledAutoPermissionPromptBody, "or key=value form is mutating") {
+		t.Fatalf("bundled auto-permission prompt still carries the pre-1.9.1 git config wording")
+	}
+	// Judge-the-action ambiguity pins: opaque commands require approval;
+	// familiar names prove nothing.
+	for _, want := range []string{
+		"do not guess safety from the binary's path or basename",
+		"require human approval",
+		"proves nothing about what the script actually executes",
+	} {
+		if !strings.Contains(BundledAutoPermissionPromptBody, want) {
+			t.Fatalf("bundled auto-permission prompt missing %q", want)
+		}
+	}
+}
+
+func TestAutoPermissionPromptAdvisory(t *testing.T) {
+	// Missing/UpToDate: no note — the first serves the always-current embedded
+	// body, the second the identical installed body.
+	if got := AutoPermissionPromptAdvisory(AutoPermissionPromptMissing); got != "" {
+		t.Errorf("missing status advisory = %q, want empty", got)
+	}
+	if got := AutoPermissionPromptAdvisory(AutoPermissionPromptUpToDate); got != "" {
+		t.Errorf("up-to-date status advisory = %q, want empty", got)
+	}
+
+	outdated := AutoPermissionPromptAdvisory(AutoPermissionPromptOutdated)
+	for _, want := range []string{"predates bundled v" + BundledAutoPermissionPromptVersion, "/permissions auto prompt upgrade"} {
+		if !strings.Contains(outdated, want) {
+			t.Errorf("outdated advisory missing %q: %q", want, outdated)
+		}
+	}
+
+	custom := AutoPermissionPromptAdvisory(AutoPermissionPromptCustomModified)
+	for _, want := range []string{"customized", "/permissions auto prompt install force"} {
+		if !strings.Contains(custom, want) {
+			t.Errorf("custom-modified advisory missing %q: %q", want, custom)
+		}
+	}
+
+	newer := AutoPermissionPromptAdvisory(AutoPermissionPromptNewer)
+	for _, want := range []string{"newer ocode build", "not as permission to widen allows"} {
+		if !strings.Contains(newer, want) {
+			t.Errorf("newer advisory missing %q: %q", want, newer)
+		}
+	}
+}
+
+// TestLoadAutoPermissionPromptBodyWithStatus covers the four statuses through
+// the combined read the gatekeeper prepend uses: missing → embedded body,
+// outdated → current embedded body (the stale copy is superseded without a
+// disk write), customized / newer sidecar → installed body verbatim, each
+// with the corresponding status.
+func TestLoadAutoPermissionPromptBodyWithStatus(t *testing.T) {
+	setupAutoPermPromptHome(t)
+	path, err := AutoPermissionPromptFilePath()
+	if err != nil {
+		t.Fatalf("AutoPermissionPromptFilePath: %v", err)
+	}
+
+	// Missing → embedded body + Missing.
+	body, status, err := LoadAutoPermissionPromptBodyWithStatus()
+	if err != nil {
+		t.Fatalf("load missing: %v", err)
+	}
+	if body != BundledAutoPermissionPromptBody || status != AutoPermissionPromptMissing {
+		t.Fatalf("missing: body-is-bundled=%v status=%s", body == BundledAutoPermissionPromptBody, status)
+	}
+
+	// Install v-current, then simulate a stale install: body + sidecar both
+	// from an older bundled version.
+	if _, err := InstallAutoPermissionPrompt(false); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	staleBody := strings.Replace(BundledAutoPermissionPromptBody, "git status", "git st", 1)
+	if err := os.WriteFile(path, []byte(staleBody), 0o644); err != nil {
+		t.Fatalf("write stale body: %v", err)
+	}
+	if err := os.WriteFile(autoPermissionPromptSidecarPath(path), sidecarBody(sha256Hex([]byte(staleBody)), "1.8.0"), 0o644); err != nil {
+		t.Fatalf("write stale sidecar: %v", err)
+	}
+	body, status, err = LoadAutoPermissionPromptBodyWithStatus()
+	if err != nil {
+		t.Fatalf("load stale: %v", err)
 	}
 	if body != BundledAutoPermissionPromptBody {
-		t.Fatalf("expected bundled body")
+		t.Fatalf("stale: expected current bundled body (outdated copies are superseded so the gatekeeper never runs a stale rulebook)")
+	}
+	if status != AutoPermissionPromptOutdated {
+		t.Fatalf("stale: expected outdated, got %s", status)
+	}
+	// Superseding is a pure read: the stale copy and its sidecar stay on
+	// disk untouched until an explicit upgrade.
+	if got, rerr := os.ReadFile(path); rerr != nil || string(got) != staleBody {
+		t.Fatalf("stale: load rewrote the installed file (err=%v)", rerr)
+	}
+	if hash, version, ok := readSidecar(autoPermissionPromptSidecarPath(path)); !ok || hash != sha256Hex([]byte(staleBody)) || version != "1.8.0" {
+		t.Fatalf("stale: load mutated the sidecar (hash=%q version=%q ok=%v)", hash, version, ok)
+	}
+
+	// Customized (sidecar matches nothing) → verbatim + CustomModified.
+	customBody := "user rules, version unknown"
+	if err := os.WriteFile(path, []byte(customBody), 0o644); err != nil {
+		t.Fatalf("write custom body: %v", err)
+	}
+	body, status, err = LoadAutoPermissionPromptBodyWithStatus()
+	if err != nil {
+		t.Fatalf("load custom: %v", err)
+	}
+	if body != customBody || status != AutoPermissionPromptCustomModified {
+		t.Fatalf("custom: body-verbatim=%v status=%s", body == customBody, status)
+	}
+
+	// Newer sidecar → verbatim + Newer.
+	if err := os.WriteFile(autoPermissionPromptSidecarPath(path), sidecarBody(sha256Hex([]byte(customBody)), "999.0.0"), 0o644); err != nil {
+		t.Fatalf("write newer sidecar: %v", err)
+	}
+	body, status, err = LoadAutoPermissionPromptBodyWithStatus()
+	if err != nil {
+		t.Fatalf("load newer: %v", err)
+	}
+	if body != customBody || status != AutoPermissionPromptNewer {
+		t.Fatalf("newer: body-verbatim=%v status=%s", body == customBody, status)
+	}
+}
+
+// TestInstallAutoPermissionPromptConcurrent exercises the serialized install
+// path under -race: concurrent installs over a stale (outdated) copy must all
+// resolve through the lock and leave body and sidecar mutually consistent —
+// without the lock, two installs can both act on the same pre-write status
+// and interleave their body/sidecar writes so the last sidecar describes a
+// body the file no longer holds.
+func TestInstallAutoPermissionPromptConcurrent(t *testing.T) {
+	setupAutoPermPromptHome(t)
+	path, err := AutoPermissionPromptFilePath()
+	if err != nil {
+		t.Fatalf("AutoPermissionPromptFilePath: %v", err)
+	}
+
+	// Seed the outdated state the race occurs on.
+	if _, err := InstallAutoPermissionPrompt(false); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	staleBody := strings.Replace(BundledAutoPermissionPromptBody, "git status", "git st", 1)
+	if err := os.WriteFile(path, []byte(staleBody), 0o644); err != nil {
+		t.Fatalf("write stale body: %v", err)
+	}
+	if err := os.WriteFile(autoPermissionPromptSidecarPath(path), sidecarBody(sha256Hex([]byte(staleBody)), "1.8.0"), 0o644); err != nil {
+		t.Fatalf("write stale sidecar: %v", err)
+	}
+
+	const n = 8
+	actions := make([]string, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			actions[i], errs[i] = InstallAutoPermissionPrompt(false)
+		}(i)
+	}
+	wg.Wait()
+
+	upgraded := 0
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent install %d: %v", i, err)
+		}
+		if actions[i] == "updated" {
+			upgraded++
+		}
+	}
+	if upgraded == 0 {
+		t.Fatalf("no install upgraded the stale copy: %v", actions)
+	}
+
+	// Final state: body is the bundled text and the sidecar describes exactly
+	// that body (hash + version). A mismatched sidecar here is the interleaved
+	// write the lock exists to prevent.
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != BundledAutoPermissionPromptBody {
+		t.Fatalf("body is not the bundled text after concurrent install")
+	}
+	side, err := os.ReadFile(autoPermissionPromptSidecarPath(path))
+	if err != nil {
+		t.Fatalf("read sidecar: %v", err)
+	}
+	if want := string(sidecarBody(sha256Hex([]byte(BundledAutoPermissionPromptBody)), BundledAutoPermissionPromptVersion)); string(side) != want {
+		t.Fatalf("sidecar does not describe the installed body:\n got %q\nwant %q", side, want)
+	}
+	if status, _ := GetAutoPermissionPromptStatus(); status != AutoPermissionPromptUpToDate {
+		t.Fatalf("expected up-to-date after concurrent installs, got %s", status)
 	}
 }
 

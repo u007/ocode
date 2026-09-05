@@ -201,6 +201,73 @@ func TestBuildReferenceCatalog_IncludesLoadingGuidance(t *testing.T) {
 	}
 }
 
+func TestBuildModePrompt_IsDiscretionaryNotMandatoryExplore(t *testing.T) {
+	build := ModeBuild.SystemPrompt()
+	for _, unwanted := range []string{
+		"Before doing substantial work, explore",
+		"Before writing any code",
+	} {
+		if strings.Contains(build, unwanted) {
+			t.Fatalf("BUILD mode prompt still mandates exploration %q: %s", unwanted, build)
+		}
+	}
+	for _, want := range []string{
+		"Choose an appropriate workflow",
+		"checklist and per-item validation always apply",
+		"For nontrivial",
+		"must inspect relevant code and docs",
+		"check documentation alignment",
+		"build a mental model",
+		"Only small, self-contained edits",
+		"quick look at the named area",
+		"Derive an explicit User Expectation Checklist",
+		"validate every checklist item",
+		"strongest practical checks",
+		"compact context packet",
+		"report checklist status",
+	} {
+		if !strings.Contains(build, want) {
+			t.Fatalf("BUILD mode prompt missing %q: %s", want, build)
+		}
+	}
+}
+
+func TestDocPrompt_IsConditionalGuidance(t *testing.T) {
+	a := &Agent{client: providerStubClient{provider: "anthropic", model: "claude-opus-4-7"}, mode: ModeBuild}
+	a.SetDocPromptEnabled(true)
+
+	base := a.BasePromptMessages("")
+	doc := findMarker(base, promptDocPromptMarker)
+	if doc == "" {
+		t.Fatal("expected base prompt to include the doc prompt fragment when DocPromptEnabled is true")
+	}
+	if strings.Contains(doc, "Before writing any code:") {
+		t.Fatalf("doc prompt still mandates pre-code inspection: %s", doc)
+	}
+	for _, want := range []string{
+		"Before acting, assess scope",
+		"For nontrivial",
+		"must read relevant docs",
+		"check documentation alignment",
+		"build a mental model",
+		"Only small, self-contained tasks",
+		"quick look at the named area",
+		"documentation obligations below still apply",
+		"If the change affects documented behavior or public interfaces",
+		"you must update documentation",
+		"Read existing documentation",
+		"Check documentation alignment",
+		"ask the user before proceeding",
+		"Update inline documentation",
+		"Update project documentation",
+		"State explicitly if no doc updates are needed",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("doc prompt missing %q: %s", want, doc)
+		}
+	}
+}
+
 func collectMarkers(msgs []Message) []string {
 	var out []string
 	for _, m := range msgs {

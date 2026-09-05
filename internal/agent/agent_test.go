@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -3058,5 +3060,96 @@ func TestOpenCodeSessionIDCanBePropagatedToReplacementAgent(t *testing.T) {
 
 	if got := opencodeHeaderForTest(t, next.client); got != sessionID {
 		t.Fatalf("replacement client header = %q, want %q", got, sessionID)
+	}
+}
+
+// TestAutoPermissionAddendumAdvisory covers the gatekeeper addendum
+// composition across all four installed-file statuses: missing → embedded
+// bundled body with no advisory; stale (outdated sidecar) → current bundled
+// body (the stale copy is superseded, disk untouched) + the upgrade
+// remediation; customized → verbatim + the restore remediation; newer
+// sidecar → verbatim + the no-widening note. This is the migration surface
+// that replaced load-time self-heal, so all four paths must stay pinned at
+// the composition level.
+func TestAutoPermissionAddendumAdvisory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path, err := config.AutoPermissionPromptFilePath()
+	if err != nil {
+		t.Fatalf("AutoPermissionPromptFilePath: %v", err)
+	}
+
+	// Missing → embedded body, no advisory.
+	addendum, err := autoPermissionAddendum()
+	if err != nil {
+		t.Fatalf("missing: %v", err)
+	}
+	if !strings.Contains(addendum, config.BundledAutoPermissionPromptBody) || strings.Contains(addendum, "[Note:") {
+		t.Fatalf("missing: expected embedded body without advisory (hasNote=%v)", strings.Contains(addendum, "[Note:"))
+	}
+
+	// Install, then simulate a stale copy: body + sidecar from an older
+	// bundled version.
+	if _, err := config.InstallAutoPermissionPrompt(false); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	staleBody := strings.Replace(config.BundledAutoPermissionPromptBody, "git status", "git st", 1)
+	if err := os.WriteFile(path, []byte(staleBody), 0o644); err != nil {
+		t.Fatalf("write stale body: %v", err)
+	}
+	// Sidecar must record the stale body's real hash (matching hash + older
+	// version = Outdated; a mismatching hash would classify CustomModified).
+	sum := sha256.Sum256([]byte(staleBody))
+	sidecar := path + ".bundled-hash"
+	if err := os.WriteFile(sidecar, []byte(hex.EncodeToString(sum[:])+"\n1.8.0\n"), 0o644); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+
+	addendum, err = autoPermissionAddendum()
+	if err != nil {
+		t.Fatalf("stale: %v", err)
+	}
+	if !strings.HasPrefix(addendum, config.BundledAutoPermissionPromptBody) {
+		t.Fatalf("stale: addendum must start with the CURRENT bundled body (outdated copies are superseded so the gatekeeper never runs a stale rulebook)")
+	}
+	if !strings.Contains(addendum, "predates bundled v"+config.BundledAutoPermissionPromptVersion) ||
+		!strings.Contains(addendum, "/permissions auto prompt upgrade") {
+		t.Fatalf("stale: advisory missing stale wording: %q", addendum[len(addendum)-300:])
+	}
+	// Superseding is a pure read: the stale file stays on disk untouched.
+	if got, rerr := os.ReadFile(path); rerr != nil || string(got) != staleBody {
+		t.Fatalf("stale: load rewrote the installed file (err=%v)", rerr)
+	}
+
+	// Customized: sidecar matches nothing.
+	customBody := "user rules, version unknown"
+	if err := os.WriteFile(path, []byte(customBody), 0o644); err != nil {
+		t.Fatalf("write custom body: %v", err)
+	}
+	addendum, err = autoPermissionAddendum()
+	if err != nil {
+		t.Fatalf("custom: %v", err)
+	}
+	if !strings.HasPrefix(addendum, customBody) {
+		t.Fatalf("custom: addendum must start with the installed body verbatim")
+	}
+	if !strings.Contains(addendum, "customized") || !strings.Contains(addendum, "install force") {
+		t.Fatalf("custom: advisory missing custom wording")
+	}
+
+	// Newer: sidecar records a version above the running build's (hash still
+	// matches the installed body).
+	sum2 := sha256.Sum256([]byte(customBody))
+	if err := os.WriteFile(sidecar, []byte(hex.EncodeToString(sum2[:])+"\n999.0.0\n"), 0o644); err != nil {
+		t.Fatalf("write newer sidecar: %v", err)
+	}
+	addendum, err = autoPermissionAddendum()
+	if err != nil {
+		t.Fatalf("newer: %v", err)
+	}
+	if !strings.HasPrefix(addendum, customBody) {
+		t.Fatalf("newer: addendum must start with the installed body verbatim")
+	}
+	if !strings.Contains(addendum, "newer ocode build") || !strings.Contains(addendum, "not as permission to widen allows") {
+		t.Fatalf("newer: advisory missing newer wording")
 	}
 }

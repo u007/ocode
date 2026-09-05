@@ -213,7 +213,15 @@ var bashSubcommandAllow = map[string]bool{
 	"git grep":         true,
 	"git name-rev":     true,
 	"git for-each-ref": true,
-	// Intentionally NOT in the list: branch, tag, remote, stash, worktree,
+	// Three-word stash inspection forms — read-only, and paired with the
+	// isReadOnlyGitStashForm exclusion in IsHarmfulBashCommand (which would
+	// otherwise ASK the whole "git stash" family before this allowlist is
+	// reached). The matching always-ALLOW lines live in
+	// config.BundledAutoPermissionPromptBody; keep the three in sync.
+	"git stash list": true,
+	"git stash show": true,
+	// Intentionally NOT in the list: branch, tag, remote, stash (except the
+	// two read-only forms above), worktree,
 	// submodule, notes, config, fetch, pull, push,
 	// reset, checkout, clean, apply, am, cherry-pick, rebase, revert, restore,
 	// switch, merge, init, add, commit. Some of these are read-only without
@@ -468,6 +476,14 @@ func isDangerousGitConfigKey(key string) bool {
 	if k == "credential.helper" || strings.HasPrefix(k, "credential.") {
 		return true
 	}
+	if strings.HasPrefix(k, "pager.") {
+		// A pager is an executed command (when git's stdout is a terminal).
+		return true
+	}
+	if k == "gpg.program" {
+		// Executed by git verify-commit/verify-tag.
+		return true
+	}
 	return false
 }
 
@@ -554,6 +570,108 @@ func gitSubcommandIndexSkippingC(fields []string) int {
 		return i
 	}
 	return -1
+}
+
+// isReadOnlyGitStashForm reports whether the words after "git stash" are one
+// of the read-only inspection forms: "list" (optionally with log-formatting
+// options) or "show" (optionally -u/--include-untracked/--only/-p and a stash
+// ref). Every other form — pop, apply, drop, clear, branch, save, store,
+// create, or no subcommand at all (bare "git stash" defaults to push) —
+// mutates or discards stash state and stays harmful. The companion
+// "git stash list"/"git stash show" entries in bashSubcommandAllow provide
+// the code-level auto-allow that this exclusion in IsHarmfulBashCommand
+// unlocks.
+func isReadOnlyGitStashForm(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "list", "show":
+		return true
+	default:
+		return false
+	}
+}
+
+// gitConfigWriteFlagForms are legacy `git config` flags that write config.
+var gitConfigWriteFlagForms = map[string]bool{
+	"--add": true, "--unset": true, "--unset-all": true, "--replace-all": true,
+	"--remove-section": true, "--rename-section": true, "-e": true, "--edit": true,
+}
+
+// gitConfigReadFlagForms are legacy `git config` flags whose following
+// arguments belong to a read action (so they must not be counted as the
+// two-positional "<name> <value>" write form).
+var gitConfigReadFlagForms = map[string]bool{
+	"--get": true, "--get-all": true, "--get-regexp": true, "--list": true, "-l": true,
+	"--get-urlmatch": true, "--get-color": true, "--get-colorbool": true,
+}
+
+// gitConfigValueFlags are `git config` options that take a separate value
+// argument; the flag and its value are skipped when counting positionals.
+// Unknown dashed flags are NOT skipped — an unknown flag's value would then
+// be miscounted as a positional, which fails CLOSED (a read misclassified as
+// a write costs a human approval; a write misclassified as a read would not).
+var gitConfigValueFlags = map[string]bool{
+	"--file": true, "-f": true, "--blob": true, "--type": true,
+	"--fixed-value": true, "--comment": true,
+}
+
+// gitConfigWriteSubcommands are the modern (git >= 2.46) `git config`
+// subcommand forms that write config. "get"/"list" are the read forms.
+var gitConfigWriteSubcommands = map[string]bool{
+	"set": true, "unset": true, "unset-all": true, "replace-all": true,
+	"remove-section": true, "rename-section": true, "edit": true,
+}
+
+// gitConfigWriteArgs reports whether the arguments after `git config` invoke
+// a config-writing form. This is the code-side backstop for the gatekeeper
+// prose: config reads stay judge-mediated (the prose allowlists them), but a
+// config WRITE must reach the human, because the same security-sensitive
+// keys the -c scanner treats as dangerous can be planted persistently via
+// `git config <key> <value>` or the modern `git config set` form (e.g.
+// "git config core.sshCommand <payload>"), after which code-auto-allowed
+// read-only commands like "git ls-remote" execute them. Classification is
+// conservative: anything that is not clearly a read form is treated as a
+// write.
+func gitConfigWriteArgs(args []string) bool {
+	// Modern subcommand forms: "git config set <name> <value>", etc.
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		if gitConfigWriteSubcommands[args[0]] {
+			return true
+		}
+		if args[0] == "get" || args[0] == "list" {
+			return false
+		}
+	}
+	writeFlag, readFlag := false, false
+	positionals := 0
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case gitConfigWriteFlagForms[a]:
+			writeFlag = true
+		case gitConfigReadFlagForms[a]:
+			readFlag = true
+		case gitConfigValueFlags[a]:
+			if i+1 < len(args) {
+				i++ // consume the flag's value
+			}
+		case strings.HasPrefix(a, "-"):
+			// Boolean or unknown flag: never a positional.
+		default:
+			positionals++
+		}
+	}
+	if writeFlag {
+		return true
+	}
+	if readFlag {
+		return false
+	}
+	// Legacy positional grammar: "git config <name> <value>" writes; a
+	// single positional is the implicit read "git config <name>".
+	return positionals >= 2
 }
 
 // pathScopedTools are file tools whose decision depends on the target path
@@ -1009,7 +1127,8 @@ func isExfiltrationRiskCommand(command string) bool {
 // IsHarmfulBashCommand returns true when the given bash command is
 // inherently destructive or risky and should never be auto-allowed.
 // This covers:
-//   - git revert, stash, reset, clean, checkout, restore, switch (any args)
+//   - git revert, reset, clean, checkout, restore, switch (any args)
+//   - git stash — except the read-only inspection forms "list" and "show"
 //   - git push / pull with --force or -f
 //   - curl/wget/httpie with data exfiltration risk (file upload, env var
 //     injection, subshell expansion)
@@ -1017,7 +1136,12 @@ func isExfiltrationRiskCommand(command string) bool {
 //
 // Harmful operations always require human approval — they cannot be
 // auto-allowed by the LLM auto-permission layer and cannot be
-// persisted as "always allow" rules.
+// persisted as "always allow" rules. The single exception is the
+// read-only stash inspection forms ("git stash list"/"git stash show",
+// isReadOnlyGitStashForm) — without it the whole stash family would be
+// routed to a human ask before the auto-allow lists or the judge ever see
+// it, making the matching always-ALLOW lines in the bundled gatekeeper
+// prompt dead text.
 func IsHarmfulBashCommand(command string) bool {
 	cmd := strings.TrimSpace(command)
 	fields := splitShellFields(cmd)
@@ -1041,7 +1165,23 @@ func IsHarmfulBashCommand(command string) bool {
 		if idx != -1 && idx+1 <= len(fields) {
 			sub := fields[idx]
 			prefix := "git " + sub
-			if harmfulBashPrefixes[prefix] {
+			// "git stash" is harmful as a family (pop/apply/drop/clear/branch
+			// can lose or move stashes; a bare "git stash" defaults to push),
+			// but two inspection forms are read-only — "git stash list" and
+			// "git stash show" — and are mirrored as always-ALLOW in the
+			// bundled gatekeeper prompt (config.BundledAutoPermissionPromptBody).
+			// Excluding them here is what makes those prompt rules reachable:
+			// this check runs before every auto-allow and the LLM judge, so
+			// without the exclusion "git stash list" would always be routed
+			// to a human ask and the prompt line would be dead text.
+			if sub == "config" && gitConfigWriteArgs(fields[idx+1:]) {
+				// Code-side backstop for the gatekeeper prose: a config write
+				// plants a persistent key (core.sshCommand, core.hooksPath,
+				// url.*.insteadOf, …) that code-auto-allowed read-only commands
+				// like "git ls-remote" later execute. Reads stay judge-mediated.
+				return true
+			}
+			if harmfulBashPrefixes[prefix] && !(prefix == "git stash" && isReadOnlyGitStashForm(fields[idx+1:])) {
 				return true
 			}
 			if flags, ok := harmfulBashForceFlags[prefix]; ok {

@@ -25,6 +25,9 @@ okf_version: 0.1
 
 - [Agent Replacement — Input Queuing & Stream Event Epochs](gotchas/agent-replacement-input-queuing.md) - Architectural decision and solution pattern for queuing user input during agent replacement and using stream event epochs to prevent stale events from mutating the new session.
 - [AIHubMix Test — Global Cache State Leakage](gotchas/aihubmix-test-cache-leak.md) - AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures
+- [Auto-Permission Dependency Binaries — Policy Decision](gotchas/auto-permission-dependency-bin-policy.md) - Deliberate security-policy expansion in bundled auto-permission gatekeeper prompt v1.9.x that auto-allows direct invocation of project/toolchain dependency binaries, with accepted residual risk and maintainer rules.
+- [Auto-Permission Prompt Prose Code Audit Gap](gotchas/auto-permission-prompt-prose-code-audit-gap.md) - The bundled gatekeeper prompt v1.9.0 enumerated non-existent git config forms (e.g., --set) and omitted real ones. Resolved in v1.9.2: prose synced with the -c dangerous-key list and a code backstop (`gitConfigWriteArgs` in IsHarmfulBashCommand, internal/agent/permissions.go) hard-blocks git config writes; ~25 regression cases in TestIsHarmfulBashCommand_GitConfigWrites (internal/agent/permissions_test.go). Prose and code must be audited together.
+- [Auto-Permission Prompt — Load-Semantics Flip](gotchas/auto-permission-prompt-load-semantics-flip.md) - The load-semantics flip from self-healing to pure-read introduces a silent stale-gatekeeper trap with no proactive surfacing, distinct from the existing TOCTOU race gotcha.
 - [Auto-Permission Prompt — TOCTOU Install Race](gotchas/auto-permission-prompt-atomic-race.md) - TOCTOU race in auto-permission prompt install: concurrent older build can downgrade the bundled gatekeeper prompt.
 - [Auto-Permission — Interpreter Scripts in Compound Commands](gotchas/auto-permission-interpreter-scripts-in-compound-commands.md) - Auto-permission custom-script detection must cover interpreter and runner forms (python x.py, node x.js, bun run x.ts, uv run x.py, npx tsx x.ts); the structured interpreter path only sees the FIRST command, so compound commands otherwise reach the generic LLM path with no script content and no truncation guard.
 - [Auto-Permission — Judge Must See the Session WorkDir, Not the Process CWD](gotchas/auto-permission-judge-process-cwd.md) - Desktop/web sessions call Agent.SetWorkDir without chdir-ing the process (the .app launches with cwd "/"). Every cwd-relative step in the auto-permission path must use the agent/permission-manager workDir, or the LLM judge denies in-project relative commands like `cd web && tsc` as escapes from the allowed roots.
@@ -49,11 +52,13 @@ okf_version: 0.1
 - [Radix Select Empty String Sentinel](gotchas/radix-select-empty-string-sentinel.md) - Radix Select rejects empty strings as item values; use a sentinel value instead
 - [run_in_background Bash Commands Orphaned on Force-Killed ocode](gotchas/background-bash-orphan-on-force-kill.md) - Background bash commands started via the bash tool had no self-cleanup and would survive kill -9 on ocode; wrapped in the same parent-monitor mechanism local models already used
 - [Sandbox Writable-Root Must Exist on Disk](gotchas/sandbox-writable-root-must-exist.md) - Gotcha: sandbox backend validates writable-root directories before command execution and fails if they don't exist on disk, preventing mkdir -p inside sandbox
+- [Seatbelt Profile Test Coverage Gap](gotchas/seatbelt-profile-test-coverage-gap.md) - Seatbelt profile addition for /dev/null and /dev/tty now has test coverage: TestSeatbeltProfileGrantsDevNullOnly, TestSeatbeltAllowsDevNullDiscard, TestSeatbeltDeniesDevTTYFreshOpen added plus pre-existing profile tests in profile_darwin_test.go. Coverage gap closed.
 - [Session Storage Critical Issues](gotchas/session-storage-critical-issues.md) - Critical issues discovered in session storage code review
 - [Shell Execution Must Set cmd.Dir to Agent Workdir](gotchas/shell-sandbox-working-directory-not-set.md) - Gotcha: shell execution must set cmd.Dir to the agent/session workdir for both foreground and background commands, not relying on inherited process cwd.
 - [Skill Tool Test Fixture Gap — expectedBuiltinTools Missing load_skill](gotchas/skill-tool-test-fixture-gap.md) - expectedBuiltinTools in tool_test.go only lists "skill" but InitBuiltinTools also registers "load_skill" as a second alias, causing a stale test failure.
 - [Subagent Feedback-Loop Guard (task tool)](gotchas/subagent-feedback-loop-guard.md) - The task/subagent dispatch refuses consecutive same-type launches without new user input to break runaway feedback loops; vary the agent type or wait for user input.
 - [Symlink Escape in Plugin Removal Validation](gotchas/plugin-removal-symlink-escape.md) - Security gotcha: filepath.EvalSymlinks must resolve both the target dir and all approved roots to prevent symlink-based path traversal in plugin removal.
+- [Version-Changelog Mismatch](gotchas/version-changelog-mismatch.md) - Version mismatch between version.go (0.8.83) and CHANGES.md resolved — CHANGES.md [Unreleased] now includes "- **Version Bump** — 0.8.82 → 0.8.83" entry; `go test ./internal/version/` passes as of this commit. Status updated to resolved-as-of-this-commit.
 - [Writable-Root Validation Prevents Confinement Defeat](gotchas/shell-sandbox-writable-root-validation.md) - Gotcha: writable-root validation must canonicalize paths and reject filesystem-volume roots (/) to prevent confinement defeat from env vars like TMPDIR.
 
 # guides
@@ -343,6 +348,7 @@ okf_version: 0.1
 - [2026-08-29-unified-session-terminal-tabs-design.md](superpowers/specs/2026-08-29-unified-session-terminal-tabs-design.md)
 - [2026-08-30-embedded-browser-panel-design.md](superpowers/specs/2026-08-30-embedded-browser-panel-design.md)
 - [2026-08-31-browser-chrome-cdp-design.md](superpowers/specs/2026-08-31-browser-chrome-cdp-design.md)
+- [2026-09-03-sidebar-preview-design.md](superpowers/specs/2026-09-03-sidebar-preview-design.md)
 - [telegram-bot.md](telegram-bot.md)
 - [web-desktop-parity-todo.md](web-desktop-parity-todo.md)
 

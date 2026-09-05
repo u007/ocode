@@ -3069,6 +3069,30 @@ func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *P
 // came up, or the request never completed. Callers must keep those apart:
 // only consulted==true reflects an actual judgment about the command.
 //
+// autoPermissionAddendum composes the gatekeeper's addendum: the installed
+// auto-permission-prompt.md when present and current (or customized/from a
+// newer build — served verbatim), the current embedded bundled body when no
+// file is installed or the installed copy provably predates the bundled body
+// (superseded without a disk write), plus a status advisory. Loading never
+// writes to disk (no self-heal), so the advisory is the migration surface:
+// the judge always sees which rulebook is in effect, and the user learns
+// the remediation.
+// A package-level func so the composition is unit-testable without an Agent
+// or an LLM round-trip; the status is stable per process lifetime, so the
+// per-ask rebuild cannot flicker mid-session.
+func autoPermissionAddendum() (string, error) {
+	bundled, status, err := config.LoadAutoPermissionPromptBodyWithStatus()
+	if err != nil {
+		return "", err
+	}
+	addendum := bundled
+	if advisory := config.AutoPermissionPromptAdvisory(status); advisory != "" {
+		addendum += advisory
+	}
+	return addendum, nil
+}
+
+// askPermissionModel consults the LLM permission judge for a single request.
 // The LLM is given a read_file tool so it can explore the codebase before
 // deciding. The tool call loop is capped at maxToolCalls to prevent abuse.
 func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *PermissionRequest) (allowed bool, reason string, consulted bool) {
@@ -3207,14 +3231,17 @@ These are format examples only — decide from THIS request's tool and arguments
 		prompt = custom + "\n\n" + prompt
 	}
 
-	// Prepend the bundled auto-permission addendum, if installed (see
-	// config.InstallAutoPermissionPrompt). This is kept separate from
-	// permissions.auto.prompt below, which is the user's own free-form
-	// override and must never be silently overwritten by a bundled update.
-	if bundled, err := config.LoadAutoPermissionPromptBody(); err != nil {
+	// Prepend the auto-permission addendum: the installed
+	// auto-permission-prompt.md when present, otherwise the embedded bundled
+	// body, plus a status advisory when the installed copy is stale,
+	// customized, or from a newer build (see autoPermissionAddendum). This is
+	// kept separate from permissions.auto.prompt below, which is the user's
+	// own free-form override and must never be silently overwritten by a
+	// bundled update.
+	if addendum, err := autoPermissionAddendum(); err != nil {
 		a.emitDebug("ERROR", fmt.Sprintf("failed to load bundled auto-permission prompt: %v", err))
-	} else if bundled != "" {
-		prompt = bundled + "\n\n" + prompt
+	} else if addendum != "" {
+		prompt = addendum + "\n\n" + prompt
 	}
 
 	// Apply custom prompt from config if set.

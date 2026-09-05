@@ -1022,3 +1022,76 @@ func TestBuildPermissionInterpreterRetryPromptIncludesPriorOutput(t *testing.T) 
 		}
 	}
 }
+
+// TestMatchSubcommandAllow_GitConfigBoundary pins the code-level decision
+// boundary for every git config form: bashSubcommandAllow deliberately has
+// NO "git config" entry, so no git config invocation — read or write — is
+// ever auto-allowed at the code level; all of them fall to the LLM judge,
+// whose rulebook (config.BundledAutoPermissionPromptBody) classifies the
+// positional two-argument write form ("git config user.name attacker",
+// "git config --global core.hooksPath /tmp/x") as mutating. These cases lock
+// the fail-closed half of that contract: the code layer must never widen to
+// allowlist "git config" by prefix.
+func TestMatchSubcommandAllow_GitConfigBoundary(t *testing.T) {
+	cases := []struct {
+		command string
+		why     string
+	}{
+		{"git config user.name attacker", "positional two-arg write — the hidden mutating form"},
+		{"git config --global user.name attacker", "positional write with scope flag"},
+		{"git config --global core.hooksPath /tmp/x", "positional write to a security-sensitive key"},
+		{"git config core.hooksPath /tmp/x", "positional write, no scope flag"},
+		{"git config --add user.name attacker", "explicit mutating flag"},
+		{"git config --unset user.name", "explicit mutating flag"},
+		{"git config user.email", "single-arg read — also not code-allowed; the judge decides"},
+		{"git config --list", "read form — also not code-allowed; the judge decides"},
+		{"git config --get user.email", "read form — also not code-allowed; the judge decides"},
+	}
+	for _, tc := range cases {
+		if got := matchSubcommandAllow(tc.command, ""); got {
+			t.Errorf("matchSubcommandAllow(%q) auto-allowed (%s) — must fall to the judge", tc.command, tc.why)
+		}
+	}
+	// Sanity: the read-only git forms around it still auto-allow, so the
+	// boundary above is specific to git config, not a blanket git regression.
+	for _, cmd := range []string{"git status", "git log -1", "git diff --staged"} {
+		if !matchSubcommandAllow(cmd, "") {
+			t.Errorf("matchSubcommandAllow(%q) unexpectedly denied", cmd)
+		}
+	}
+}
+
+// TestMatchSubcommandAllow_DependencyBinAction pins the fail-closed half of
+// the dependency-bin rule at the code level: project-local bins auto-allow
+// ONLY for the inert runnerSafeTools (tsc, eslint, vitest, …); an unknown
+// bin under the same directory — or a familiar-looking name that is not in
+// the safe set — must fall to the judge (whose bundled prompt now says the
+// binary's path proves nothing: judge the ACTION, require approval when
+// effects cannot be established from argv).
+func TestMatchSubcommandAllow_DependencyBinAction(t *testing.T) {
+	work := t.TempDir()
+	// Inert safe tools auto-allow (existing behavior, kept).
+	for _, cmd := range []string{
+		"node_modules/.bin/tsc --noEmit",
+		"node_modules/.bin/eslint .",
+		"node_modules/.bin/vitest run",
+	} {
+		if !matchSubcommandAllow(cmd, work) {
+			t.Errorf("matchSubcommandAllow(%q) denied — inert tool must auto-allow", cmd)
+		}
+	}
+	// Unknown/opaque bins must NOT code-allow, regardless of how trusted the
+	// name looks: the path proves nothing; the judge (or a human) decides.
+	for _, cmd := range []string{
+		"node_modules/.bin/build",        // familiar-looking name, not inert by contract
+		"node_modules/.bin/test",         // same
+		"node_modules/.bin/deploy",       // obviously not inert
+		"node_modules/.bin/postinstall",  // lifecycle-style script
+		".venv/bin/pytest",               // non-runnerSafeTools interpreter path
+		".venv/bin/pip install requests", // installs into the environment
+	} {
+		if got := matchSubcommandAllow(cmd, work); got {
+			t.Errorf("matchSubcommandAllow(%q) auto-allowed — unknown dependency bin must fall to the judge", cmd)
+		}
+	}
+}
