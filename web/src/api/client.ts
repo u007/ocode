@@ -148,9 +148,58 @@ export async function initBackendBase(): Promise<string | null> {
   }
 }
 
-// Auth token embedded in URL by /rc command (?token=...). Stored at load time
-// so navigation or hash changes don't lose it.
-const _token = new URLSearchParams(window.location.search).get("token") ?? "";
+// Auth token resolution, in priority order:
+//   1. URL fragment (#token=...) — set by `ocode remote --web`'s one-time
+//      browser-open URL. Read once, cached to sessionStorage, then the
+//      fragment is stripped via history.replaceState so it never survives
+//      a copy-paste of the URL or shows up in browser history.
+//   2. sessionStorage (ocode.remoteToken) — the fragment token, cached
+//      across reloads within the same tab session.
+//   3. ?token=... query string — the existing /rc (remote control) path.
+// Fragments are never sent in HTTP requests, so (1)/(2) never reach server
+// or proxy logs; (3) is a weaker, pre-existing mechanism kept for /rc.
+const REMOTE_TOKEN_STORAGE_KEY = "ocode.remoteToken";
+
+function resolveInitialToken(): { token: string; isRemote: boolean } {
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const fragmentToken = hashParams.get("token");
+  if (fragmentToken) {
+    try {
+      sessionStorage.setItem(REMOTE_TOKEN_STORAGE_KEY, fragmentToken);
+    } catch {
+      // sessionStorage unavailable (privacy mode, etc.) — the token still
+      // works for this page load via the returned value; it just won't
+      // survive a reload. Not fatal.
+    }
+    const url = new URL(window.location.href);
+    url.hash = "";
+    window.history.replaceState(null, "", url.toString());
+    return { token: fragmentToken, isRemote: true };
+  }
+
+  let cached: string | null = null;
+  try {
+    cached = sessionStorage.getItem(REMOTE_TOKEN_STORAGE_KEY);
+  } catch {
+    cached = null;
+  }
+  if (cached) {
+    return { token: cached, isRemote: true };
+  }
+
+  const queryToken = new URLSearchParams(window.location.search).get("token") ?? "";
+  return { token: queryToken, isRemote: false };
+}
+
+const { token: _token, isRemote: _isRemoteSession } = resolveInitialToken();
+
+/** True when this tab's token came from a `--remote` server's URL fragment
+ *  (or its sessionStorage cache) rather than the legacy /rc ?token= path.
+ *  Used to pick stricter, header-only auth for endpoints that also accept
+ *  query-string tokens today (see TerminalPanel's WS connection). */
+export function isRemoteSession(): boolean {
+  return _isRemoteSession;
+}
 
 /** Returns auth headers for fetch() calls. Exported for components that use raw
  *  fetch or EventSource (which cannot set headers). */
