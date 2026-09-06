@@ -232,12 +232,27 @@ func ConnectWeb(opts ConnectOptions) error {
 	url := fmt.Sprintf("http://localhost:%d/#token=%s", localPort, state.Token)
 	if err := openBrowserURL(url); err != nil {
 		progress.Fail(err, "")
+		// The tunnel is already running and registered on sup at this
+		// point — without an explicit shutdown here, superviseTunnel (the
+		// only other place that tears the tunnel down) is never reached on
+		// this path, orphaning the ssh -N -L subprocess indefinitely.
+		shutdownSupervisor(sup)
 		return err
 	}
 	progress.Done("")
 
 	fmt.Fprintln(out, "Tunnel active. Press Ctrl-C to close it (the remote server keeps running).")
 	return superviseTunnel(sup, tunnelCmd)
+}
+
+// shutdownSupervisor shuts sup down with the standard 5s grace timeout used
+// everywhere a connect flow tears down its supervisor. Errors are
+// intentionally swallowed — the caller is already on an error/exit path and
+// a shutdown failure has nothing further for it to do.
+func shutdownSupervisor(sup *tool.ProcessSupervisor) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = sup.Shutdown(ctx)
 }
 
 // openBrowserURL opens url in the platform default browser. Duplicated
@@ -299,9 +314,7 @@ func superviseTunnel(sup *tool.ProcessSupervisor, tunnelCmd *exec.Cmd) error {
 		}
 		return fmt.Errorf("tunnel closed unexpectedly")
 	case <-sigCh:
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = sup.Shutdown(ctx)
+		shutdownSupervisor(sup)
 		<-waitCh
 		return nil
 	}
