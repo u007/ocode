@@ -33,8 +33,10 @@ import (
 	"github.com/u007/ocode/internal/browse"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/scheduler"
+	"github.com/u007/ocode/internal/secretfile"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/version"
 )
 
 type rlEntry struct {
@@ -1085,6 +1087,55 @@ func (s *Server) SetRemoteMode(v bool) {
 	s.remoteMode = v
 }
 
+// remoteServeState is the JSON shape written to ~/.ocode/remote/serve.json
+// by a --remote launch, and read back by internal/remote's reconnect
+// discovery (DiscoverServer). Field names are the wire contract with that
+// package — do not rename without updating both sides.
+type remoteServeState struct {
+	PID       int       `json:"pid"`
+	Port      int       `json:"port"`
+	Token     string    `json:"token"`
+	Version   string    `json:"version"`
+	StartedAt time.Time `json:"startedAt"`
+}
+
+// writeRemoteStateFile persists this server's identity so a later
+// `ocode remote --web` reconnect can discover and reuse it instead of
+// launching a duplicate. Called once, right after Listen succeeds, only
+// when remoteMode is set. 0600 + temp-file-then-rename (secretfile's atomic
+// writer) — never partially visible, never world-readable (it carries the
+// bearer token).
+func (s *Server) writeRemoteStateFile(ln net.Listener) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home dir for remote state file: %w", err)
+	}
+	dir := filepath.Join(home, ".ocode", "remote")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	_, portStr, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		return fmt.Errorf("parse bound address %s: %w", ln.Addr().String(), err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return fmt.Errorf("parse bound port %q: %w", portStr, err)
+	}
+	state := remoteServeState{
+		PID:       os.Getpid(),
+		Port:      port,
+		Token:     s.password,
+		Version:   version.Version,
+		StartedAt: time.Now(),
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal remote state: %w", err)
+	}
+	return secretfile.WriteFileAtomic(filepath.Join(dir, "serve.json"), data, 0600)
+}
+
 // Serve serves requests on an already-bound listener.
 func (s *Server) Serve(ln net.Listener) error {
 	// Populate the live model caches (OpenRouter, Novita, Groq) in the background so
@@ -1292,6 +1343,11 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	ln, err := srv.Listen()
 	if err != nil {
 		return err
+	}
+	if *remoteFlag {
+		if err := srv.writeRemoteStateFile(ln); err != nil {
+			return fmt.Errorf("write remote state file: %w", err)
+		}
 	}
 
 	// Browse origin for the embedded browser panel. The panel is additive:

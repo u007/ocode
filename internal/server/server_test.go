@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -364,5 +366,51 @@ func TestResolveRemoteLaunchParamsPassesThroughWhenNotRemote(t *testing.T) {
 	}
 	if password != "somepass" {
 		t.Fatalf("remote=false must pass through password unchanged, got %q", password)
+	}
+}
+
+func TestRunRemoteModeWritesStateFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	s := New("127.0.0.1:0", "", "sometoken", nil)
+	s.SetRemoteMode(true)
+	ln, err := s.Listen()
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	if err := s.writeRemoteStateFile(ln); err != nil {
+		t.Fatalf("writeRemoteStateFile: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, ".ocode", "remote", "serve.json"))
+	if err != nil {
+		t.Fatalf("read state file: %v", err)
+	}
+	info, _ := os.Stat(filepath.Join(home, ".ocode", "remote", "serve.json"))
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("state file mode = %o, want 0600", info.Mode().Perm())
+	}
+	var state struct {
+		PID     int    `json:"pid"`
+		Port    int    `json:"port"`
+		Token   string `json:"token"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if state.Token != "sometoken" {
+		t.Errorf("token = %q, want %q", state.Token, "sometoken")
+	}
+	if state.PID != os.Getpid() {
+		t.Errorf("pid = %d, want %d", state.PID, os.Getpid())
+	}
+	_, boundPortStr, _ := net.SplitHostPort(ln.Addr().String())
+	boundPort, _ := strconv.Atoi(boundPortStr)
+	if state.Port != boundPort {
+		t.Errorf("port = %d, want %d", state.Port, boundPort)
 	}
 }
