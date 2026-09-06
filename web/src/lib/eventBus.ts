@@ -1,12 +1,17 @@
-import { apiPath, authToken } from "../api/client";
+import { apiPath, authHeaders, readSSEStream } from "../api/client";
 
 /**
  * eventBus — the single frontend transport for the unified server event bus.
  *
- * One `EventSource` on `GET /api/events` carries every event type the server
- * publishes (chat mirror frames, turn lifecycle, status, logs, agent runs,
- * git status, spending). Consumers register per-event-type handlers; handlers
- * receive the full envelope so they can route by `session_id` / `project`.
+ * A single long-lived `fetch()`-based SSE stream on `GET /api/events` carries
+ * every event type the server publishes (chat mirror frames, turn lifecycle,
+ * status, logs, agent runs, git status, spending). Consumers register
+ * per-event-type handlers; handlers receive the full envelope so they can
+ * route by `session_id` / `project`.
+ *
+ * `fetch` + `readSSEStream` (not `EventSource`) is used deliberately: the
+ * stream must carry an `Authorization: Bearer` header for remote-mode auth,
+ * and the browser's native `EventSource` cannot set custom headers.
  *
  * Reliability contract (design spec, Part 02/04):
  * - Reconnect with exponential backoff; on re-establishment every
@@ -40,7 +45,12 @@ export const RECONNECT_BASE_MS = 1_000;
 export const RECONNECT_MAX_MS = 30_000;
 
 class EventBus {
-  private es: EventSource | null = null;
+  /** Identifies the in-flight stream attempt. Aborting it (via closeStream)
+   *  and nulling this field is how a stale attempt's continuation (the
+   *  fetch's `.then`/`.catch`, or a readSSEStream handler callback) knows to
+   *  no-op instead of acting on/reconnecting a connection we deliberately
+   *  tore down. */
+  private abortController: AbortController | null = null;
   private readonly handlers = new Map<string, Set<EnvelopeHandler>>();
   private readonly reconnectHandlers = new Set<ReconnectHandler>();
   private projects: string[] = [];
@@ -85,7 +95,8 @@ class EventBus {
 
   /** Declare the project roots this client is viewing. Drives the server's
    *  subscriber-aware git/spending emitters. Restarts the stream when the set
-   *  changes (the EventSource URL is fixed at construction). */
+   *  changes (the stream's query params are fixed for the life of the
+   *  request). */
   setProjects(projects: string[]): void {
     const next = [...new Set(projects.filter(Boolean))].sort();
     if (
@@ -95,7 +106,7 @@ class EventBus {
       return;
     }
     this.projects = next;
-    if (this.es) {
+    if (this.abortController) {
       // Controlled restart: the reconnect handlers reconcile, and the seq
       // watermark resets (no gap warning for the new stream).
       this.closeStream();
@@ -105,7 +116,7 @@ class EventBus {
 
   /** Start the connection. No-op when already connected/connecting. */
   start(): void {
-    if (this.started || typeof EventSource === "undefined") return;
+    if (this.started || typeof fetch === "undefined") return;
     this.started = true;
     this.openStream();
   }
@@ -143,70 +154,82 @@ class EventBus {
   }
 
   private openStream(): void {
-    if (this.es || !this.started) return;
+    if (this.abortController || !this.started) return;
+    const controller = new AbortController();
+    this.abortController = controller;
+    void this.runStream(controller);
+  }
+
+  /** Runs one stream attempt end-to-end: fetch, dispatch the "open" reconcile
+   *  logic on a good response, then read frames until the stream ends or
+   *  fails. Whether it ends cleanly (server closed it) or fails (network
+   *  error, non-2xx status), that's a lost connection and schedules a
+   *  backoff reconnect — unless a deliberate closeStream()/restart() already
+   *  moved `abortController` on, in which case this attempt is stale and
+   *  no-ops. */
+  private async runStream(controller: AbortController): Promise<void> {
     const params = new URLSearchParams();
     if (this.projects.length > 0) params.set("projects", this.projects.join(","));
-    const token = authToken();
-    if (token) params.set("token", token);
-    const es = new EventSource(apiPath(`/api/events?${params.toString()}`));
-    this.es = es;
+    const url = apiPath(`/api/events?${params.toString()}`);
 
-    es.addEventListener("open", () => {
-      if (this.es !== es) return;
-      this.reconnectDelay = RECONNECT_BASE_MS;
-      this.lastSeq = 0; // fresh stream — no gap warnings for the first frames
-      if (this.hasOpenedOnce) {
-        this.fireReconnect("reconnect");
-      }
-      this.hasOpenedOnce = true;
-    });
+    let lostConnection = false;
+    try {
+      const res = await fetch(url, { headers: authHeaders(), signal: controller.signal });
+      if (this.abortController !== controller) return; // superseded while awaiting fetch
 
-    // The server sends every envelope as `event: envelope\ndata: <json>`.
-    es.addEventListener("envelope", (e) => {
-      if (this.es !== es) return;
-      const raw = (e as MessageEvent).data;
-      let env: BusEnvelope;
-      try {
-        env = JSON.parse(raw) as BusEnvelope;
-      } catch {
-        console.error("eventBus: failed to parse envelope frame", raw);
-        return;
-      }
-      if (typeof env.seq !== "number" || typeof env.event !== "string") {
-        console.error("eventBus: malformed envelope", env);
-        return;
-      }
-      this.trackSeq(env.seq);
-      this.handlers.get(env.event)?.forEach((h) => {
-        try {
-          h(env);
-        } catch (err) {
-          console.error(`eventBus: handler for '${env.event}' threw`, err);
+      if (!res.ok) {
+        console.error(`eventBus: stream request failed with status ${res.status}`);
+        lostConnection = true;
+      } else {
+        // The server sends every envelope as `event: envelope\ndata: <json>`.
+        this.reconnectDelay = RECONNECT_BASE_MS;
+        this.lastSeq = 0; // fresh stream — no gap warnings for the first frames
+        if (this.hasOpenedOnce) {
+          this.fireReconnect("reconnect");
         }
-      });
-    });
+        this.hasOpenedOnce = true;
 
-    es.addEventListener("error", () => {
-      // Transport error: close and retry with backoff. EventSource would
-      // auto-reconnect, but we manage the retry ourselves so the URL carries
-      // the current project list and so reconnect handlers fire on success.
-      if (this.es !== es) return;
-      this.es.close();
-      this.es = null;
-      if (!this.started) return;
-      const delay = this.reconnectDelay;
-      this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);
-      this.reconnectTimer = window.setTimeout(() => {
-        this.reconnectTimer = undefined;
-        this.openStream();
-      }, delay);
-    });
+        await readSSEStream<BusEnvelope>(res, {
+          envelope: (env) => {
+            if (this.abortController !== controller) return;
+            if (typeof env.seq !== "number" || typeof env.event !== "string") {
+              console.error("eventBus: malformed envelope", env);
+              return;
+            }
+            this.trackSeq(env.seq);
+            this.handlers.get(env.event)?.forEach((h) => {
+              try {
+                h(env);
+              } catch (err) {
+                console.error(`eventBus: handler for '${env.event}' threw`, err);
+              }
+            });
+          },
+        });
+        if (this.abortController !== controller) return; // superseded while reading
+        lostConnection = true; // stream ended cleanly — still a lost connection
+      }
+    } catch (err) {
+      if (this.abortController !== controller) return; // deliberate abort
+      console.error("eventBus: stream error", err);
+      lostConnection = true;
+    }
+
+    if (!lostConnection) return;
+    this.abortController = null;
+    if (!this.started) return;
+    const delay = this.reconnectDelay;
+    this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = undefined;
+      this.openStream();
+    }, delay);
   }
 
   private closeStream(): void {
-    if (this.es) {
-      this.es.close();
-      this.es = null;
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
     }
   }
 
