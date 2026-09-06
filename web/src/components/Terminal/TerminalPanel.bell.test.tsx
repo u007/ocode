@@ -62,6 +62,7 @@ vi.mock("@/api/client", () => ({
   apiWsPath: (p: string) => `ws://localhost${p}`,
   authToken: () => "tok",
   authHeaders: () => ({}),
+  isRemoteSession: () => false,
 }));
 vi.mock("./terminalAlertSound", () => ({
   playAlertSound: vi.fn(),

@@ -54,6 +54,7 @@ vi.mock("@/api/client", () => ({
   apiWsPath: (p: string) => `ws://localhost${p}`,
   authToken: () => "tok",
   authedFetch: (...args: unknown[]) => authedFetchMock(...args),
+  isRemoteSession: () => false,
 }));
 
 // ProcessesPanel (rendered inside TerminalTabs) reads the session/browser

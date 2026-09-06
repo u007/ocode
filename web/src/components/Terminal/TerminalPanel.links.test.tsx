@@ -59,6 +59,7 @@ vi.mock("../../api/client", () => ({
   apiWsPath: (p: string) => `ws://localhost${p}`,
   authToken: () => null,
   authHeaders: () => ({}),
+  isRemoteSession: () => false,
 }));
 vi.mock("./terminalPersistence", () => ({
   loadTerminalBuffer: () => null,

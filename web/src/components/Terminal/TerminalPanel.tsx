@@ -21,12 +21,54 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { registerFileLinkProvider } from "./terminalLinkProvider";
 import TerminalFindBar from "./TerminalFindBar";
-import { apiPath, apiWsPath, authHeaders, authToken } from "@/api/client";
+import { apiPath, apiWsPath, authHeaders, authToken, isRemoteSession } from "@/api/client";
 import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
 import { registerTerminal, unregisterTerminal } from "@/lib/debug/terminalRegistry";
 import { playAlertSound } from "./terminalAlertSound";
 import { useTerminalState } from "../../stores/terminalStore";
 import { registerTerminalFocus, unregisterTerminalFocus } from "./terminalFocus";
+
+/**
+ * Builds the URL and WebSocket subprotocols for /api/terminal/ws. In remote
+ * mode the browser can't set an Authorization header and query-string tokens
+ * are forbidden (leak vector), so the bearer token travels as a
+ * Sec-WebSocket-Protocol entry (`ocode.bearer.<token>`) instead — matching
+ * the server-side checkAuth handling added for HandleTerminalWS. In
+ * non-remote mode the token stays in the `?token=` query string, unchanged.
+ * `project_path` and `terminal_id` are never secrets, so they always go in
+ * the query string regardless of mode.
+ *
+ * Pure function of its inputs (no calls to authToken()/isRemoteSession()
+ * internally) so it's trivially unit-testable.
+ */
+export function buildTerminalWsConnection(opts: {
+  token: string;
+  projectPath: string | undefined;
+  terminalId: string;
+  isRemote: boolean;
+}): { url: string; protocols: string[] | undefined } {
+  const { token, projectPath, terminalId, isRemote } = opts;
+  const params = new URLSearchParams();
+  let protocols: string[] | undefined;
+  if (token) {
+    if (isRemote) {
+      protocols = [`ocode.bearer.${token}`];
+    } else {
+      params.set("token", token);
+    }
+  }
+  // project_path pins the shell's cwd to this tab's project; the server
+  // validates it against its registered project roots. terminal_id lets the
+  // terminal-processes emitter (Processes tab) correlate a pid with this tab.
+  if (projectPath) params.set("project_path", projectPath);
+  params.set("terminal_id", terminalId);
+  const query = params.toString();
+  // apiWsPath keeps the tailscale --set-path prefix and respects the
+  // configured backend origin (same-origin vs hub). Handles ws/wss
+  // conversion for absolute backend URLs.
+  const url = apiWsPath(`/api/terminal/ws${query ? `?${query}` : ""}`);
+  return { url, protocols };
+}
 
 /**
  * A single interactive terminal: one xterm.js instance bridged to one
@@ -569,20 +611,13 @@ export default function TerminalPanel({
     document.addEventListener("visibilitychange", onPageHide);
     window.addEventListener("pagehide", onPageHide);
 
-    const token = authToken();
-    const params = new URLSearchParams();
-    if (token) params.set("token", token);
-    // project_path pins the shell's cwd to this tab's project; the server
-    // validates it against its registered project roots. terminal_id lets the
-    // terminal-processes emitter (Processes tab) correlate a pid with this tab.
-    if (projectPath) params.set("project_path", projectPath);
-    params.set("terminal_id", id);
-    const query = params.toString();
-    // apiWsPath keeps the tailscale --set-path prefix and respects the
-    // configured backend origin (same-origin vs hub). Handles ws/wss
-    // conversion for absolute backend URLs.
-    const url = apiWsPath(`/api/terminal/ws${query ? `?${query}` : ""}`);
-    const sock = new WebSocket(url);
+    const { url, protocols } = buildTerminalWsConnection({
+      token: authToken(),
+      projectPath,
+      terminalId: id,
+      isRemote: isRemoteSession(),
+    });
+    const sock = new WebSocket(url, protocols);
     sock.binaryType = "arraybuffer";
     socketRef.current = sock;
 
