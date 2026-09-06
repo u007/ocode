@@ -43,6 +43,7 @@ vi.mock("./api/client", () => {
     api,
     authHeaders: () => ({}),
     authToken: () => null,
+    isRemoteSession: () => false,
     apiPath: (p: string) => p,
     apiWsPath: (p: string) => `ws://localhost${p}`,
     authedFetch: vi.fn(async () => new Response("{}")),

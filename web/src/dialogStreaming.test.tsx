@@ -79,6 +79,7 @@ vi.mock("./api/client", () => {
     api,
     authHeaders: () => ({}),
     authToken: () => "",
+    isRemoteSession: () => false,
     apiPath: (p: string) => p,
     authedFetch: vi.fn(async () => new Response("{}")),
     getBrowseBase: vi.fn(async () => "http://browse.test"),

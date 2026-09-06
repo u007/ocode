@@ -12,8 +12,9 @@ import { usePreviewActivation } from "./components/Preview/usePreviewActivation"
 import { PREVIEW_CONTEXT_EVENT, type PreviewSelection } from "./lib/previewKind";
 import { useBrowserStore, browserActions, type StateKey } from "./lib/browserStore";
 import { loadViewStateForProject, saveViewStateForProject, type FocusedKind } from "./lib/viewPersistence";
-import { api } from "./api/client";
+import { api, isRemoteSession, authToken } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
+import RemoteReconnect from "./components/RemoteReconnect";
 import ChatPanel from "./components/Chat/ChatPanel";
 import AgentPreview from "./components/Chat/AgentPreview";
 import AgentsPanel from "./components/Agents/AgentsPanel";
@@ -1214,6 +1215,9 @@ function HomeApp() {
 export default function App() {
   // Applies the server (terminal) theme to the CSS variables once on load.
   useTheme();
+  if (isRemoteSession() && !authToken()) {
+    return <RemoteReconnect />;
+  }
   return (
     <ErrorBoundary>
       <ChatProvider>
