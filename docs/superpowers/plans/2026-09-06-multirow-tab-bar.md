@@ -31,7 +31,10 @@ app boots.
 
 ## Phase 2 — Pure algorithm + unit tests (no DOM)
 
-New `web/src/components/Layout/useWrappedOverflow.ts` (pure exports only) + test file.
+New `web/src/components/Layout/multirowLayout.ts` (pure exports only) + `multirowLayout.test.ts`.
+Landed as `multirowLayout.ts` (the pure arithmetic) — the React measurement
+hook lives separately in `useWrappedOverflow.ts` (Phase 3), which imports
+`computeRowBuckets` / `partitionVisible` from `multirowLayout.ts`.
 
 ```ts
 export function computeRowBuckets(tops: number[], tolerancePx?: number): number[]; // top → row
@@ -140,6 +143,17 @@ auto-close on empty.
   horizontally; nearest X in the row above/below). Read current rects (not stale drag-time
   snapshots).
 - Wire drag freeze (start/end) per Phase 3; persistence handler untouched.
+
+> **Landed deviation:** `gridKeyboardCoordinates.ts` is deferred — the shipped code keeps
+> `sortableKeyboardCoordinates` (handles the common case); adding it is a documented follow-up.
+> `rectSortingStrategy` + the drag freeze are landed. `handleDragEnd` still reorders the
+> complete `order` (incl. hidden keys), so `saveTabOrder` always persists the full sequence.
+
+**Note (landed design):** the bar uses **one** `DndContext` for both the probe and final frames
+(sensors stay `dndSensors`; in probe mode the pills themselves pass `disabled` to
+`useSortable` + `pointer-events-none`, so no drag can start during measurement). Swapping
+`sensors={[]}` → `sensors={dndSensors}` on the same `DndContext` broke dnd-kit's drag
+registration, so the probe frame is not sensors-disabled at the DndContext level.
 
 **Tests:** getter unit tests (ragged rows, boundaries, single row); component assertion that
 `saveTabOrder` always receives the complete order incl. hidden keys during visible-only
