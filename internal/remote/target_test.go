@@ -36,10 +36,38 @@ func TestParseTarget(t *testing.T) {
 	}
 }
 
-func TestParseTargetWSLRejectedInPhase1(t *testing.T) {
-	for _, in := range []string{"wsl:Ubuntu", "wsl:"} {
-		if _, err := ParseTarget(in); err == nil {
-			t.Errorf("ParseTarget(%q): expected phase-1 rejection error, got nil", in)
+func TestParseTargetWSL(t *testing.T) {
+	cases := []struct {
+		in         string
+		wantDistro string
+	}{
+		{"wsl:Ubuntu", "Ubuntu"},
+		{"wsl:", ""},
+	}
+	for _, c := range cases {
+		got, err := ParseTarget(c.in)
+		if err != nil {
+			t.Fatalf("ParseTarget(%q): unexpected error: %v", c.in, err)
+		}
+		if got.Kind != KindWSL || got.Distro != c.wantDistro {
+			t.Errorf("ParseTarget(%q) = %+v, want Kind=KindWSL Distro=%q", c.in, got, c.wantDistro)
+		}
+	}
+}
+
+func TestValidateTargetOS(t *testing.T) {
+	if err := validateTargetOS(KindSSH, "linux"); err != nil {
+		t.Errorf("ssh target should be valid on any OS, got %v", err)
+	}
+	if err := validateTargetOS(KindSSH, "windows"); err != nil {
+		t.Errorf("ssh target should be valid on any OS, got %v", err)
+	}
+	if err := validateTargetOS(KindWSL, "windows"); err != nil {
+		t.Errorf("wsl target should be valid on windows, got %v", err)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if err := validateTargetOS(KindWSL, goos); err == nil {
+			t.Errorf("wsl target should be rejected on %s", goos)
 		}
 	}
 }

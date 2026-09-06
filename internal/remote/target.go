@@ -1,5 +1,5 @@
 // Package remote implements ocode Remote: connecting to and provisioning
-// ocode on a remote host over SSH (and, in a later phase, WSL). See
+// ocode on a remote host over SSH or a local WSL distro. See
 // docs/superpowers/specs/2026-08-29-remote-ssh/ for the design.
 package remote
 
@@ -14,8 +14,9 @@ type Kind int
 const (
 	// KindSSH targets any host the system ssh binary can reach.
 	KindSSH Kind = iota
-	// KindWSL targets a local Windows Subsystem for Linux distro. Phase 1
-	// rejects wsl: targets; Phase 3 implements the transport.
+	// KindWSL targets a local Windows Subsystem for Linux distro, launched
+	// via wsl.exe. Only valid when ocode itself is running on Windows —
+	// see validateTargetOS.
 	KindWSL
 )
 
@@ -45,8 +46,9 @@ func (t Target) String() string {
 }
 
 // ParseTarget parses a connect destination: "[user@]host" for SSH, or
-// "wsl:<distro>" / "wsl:" for WSL (Phase 3 only — returned here as a
-// recognized-but-unsupported error so callers can give a precise message).
+// "wsl:<distro>" / "wsl:" for WSL. This is pure syntax parsing — it does not
+// check whether WSL targets are usable on the current OS; see
+// validateTargetOS for that.
 func ParseTarget(s string) (Target, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -54,7 +56,7 @@ func ParseTarget(s string) (Target, error) {
 	}
 
 	if rest, ok := strings.CutPrefix(s, "wsl:"); ok {
-		return Target{}, fmt.Errorf("wsl target %q is not supported yet (WSL support ships in a later phase); distro=%q", s, rest)
+		return Target{Kind: KindWSL, Distro: rest, Raw: s}, nil
 	}
 
 	if strings.Contains(s, "/") || strings.ContainsAny(s, " \t\n") {
@@ -74,4 +76,15 @@ func ParseTarget(s string) (Target, error) {
 	}
 
 	return Target{Kind: KindSSH, User: user, Host: host, Raw: s}, nil
+}
+
+// validateTargetOS enforces "wsl: targets are only valid when the local OS
+// is Windows" without hard-coding runtime.GOOS, so it's unit-testable on
+// any platform (there is no Windows CI — see 04-phase3-wsl.md's Testing
+// section). Callers pass runtime.GOOS; only tests pass a literal.
+func validateTargetOS(kind Kind, goos string) error {
+	if kind == KindWSL && goos != "windows" {
+		return fmt.Errorf("wsl targets are only supported when ocode is running on Windows (this machine is %s)", goos)
+	}
+	return nil
 }
