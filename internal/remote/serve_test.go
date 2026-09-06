@@ -241,14 +241,14 @@ func TestLaunchServerCmdDeletesStaleStateFileSynchronously(t *testing.T) {
 	if !strings.Contains(cmd, "rm -f "+statePath) {
 		t.Errorf("launch command must delete the old state file before starting: %q", cmd)
 	}
-	// The delete must run synchronously (before the backgrounded `&&` chain,
-	// separated by `;` not swept into it) so it is guaranteed complete by the
-	// time Exec returns — otherwise a stale file could still be read on the
-	// very next poll iteration.
-	rmIdx := strings.Index(cmd, "rm -f")
-	ampIdx := strings.Index(cmd, "&")
-	if rmIdx == -1 || ampIdx == -1 || rmIdx >= ampIdx {
-		t.Errorf("rm -f must appear before the backgrounding '&' in the launch command: %q", cmd)
+	// The delete must run synchronously — terminated by `;`, not swept into
+	// the backgrounded `&&` chain — so it is guaranteed complete by the time
+	// Exec returns. `rm -f X && mkdir ...` would NOT guarantee that (the
+	// whole chain including the rm would run in the background), so this
+	// must specifically assert the `;` separator, not just "rm appears
+	// somewhere before a '&'".
+	if !strings.Contains(cmd, "rm -f "+statePath+"; ") {
+		t.Errorf("rm -f must be `;`-terminated (run synchronously, not part of the backgrounded && chain): %q", cmd)
 	}
 }
 

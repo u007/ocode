@@ -193,17 +193,18 @@ func ConnectWeb(opts ConnectOptions) error {
 
 	progress := NewProgress(out, fmt.Sprintf("Connecting to %s (web)…", opts.Target.String()))
 	transport, sup, err := runPrepareStages(opts, progress)
+	// Mirror Connect's pattern exactly: the defer is registered before the
+	// err check, right after sup exists, so every return path below —
+	// prepare-stage failure included — shuts it down, not just the one
+	// failure path that used to have its own explicit shutdownSupervisor
+	// call. ProcessSupervisor.Shutdown is idempotent (a second call just
+	// waits on the same in-flight/finished shutdown) and a no-op with no
+	// registered children, so this is safe alongside superviseTunnel's own
+	// shutdownSupervisor call on Ctrl-C.
+	defer shutdownSupervisor(sup)
 	if err != nil {
 		return err
 	}
-	// Mirror Connect's pattern: every return path below (prepare-stage
-	// failure is handled above and never registered anything on sup, so it's
-	// excluded) must shut the supervisor down, not just the one failure path
-	// that used to have its own explicit shutdownSupervisor call.
-	// ProcessSupervisor.Shutdown is idempotent (a second call just waits on
-	// the same in-flight/finished shutdown), so this is safe alongside
-	// superviseTunnel's own shutdownSupervisor call on Ctrl-C.
-	defer shutdownSupervisor(sup)
 
 	progress.Start("server", "discovering or starting remote server")
 	state, reused, err := EnsureRemoteServer(transport, version.Version)
