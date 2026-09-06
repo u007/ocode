@@ -61,6 +61,34 @@ func TestParseArgsWebFlagAnyPosition(t *testing.T) {
 	}
 }
 
+func TestRunRejectsExplicitPathWithWebFlag(t *testing.T) {
+	// The check fires before any network/SSH activity (right after
+	// parseArgs, before path defaulting or remote.ConnectWeb), so this never
+	// touches the network.
+	err := Run([]string{"--web", "host", "/proj"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "does not yet support selecting a specific project path") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestRunAllowsWebFlagWithoutExplicitPath(t *testing.T) {
+	// nosuchhost.invalid (RFC 2606 reserved TLD, guaranteed never to
+	// resolve) makes Run fail fast on the "reachable" prepare stage instead
+	// of reaching a real host — this test only needs to confirm the new
+	// path guard does not fire when no path was given; a real connection
+	// failure past that point is expected and fine.
+	err := Run([]string{"--web", "nosuchhost.invalid"})
+	if err == nil {
+		t.Fatal("expected an error (no such remote host), just not the path-rejection one")
+	}
+	if strings.Contains(err.Error(), "does not yet support selecting a specific project path") {
+		t.Errorf("--web without an explicit path must not be rejected by the path guard: %v", err)
+	}
+}
+
 func TestRunReceiveConfigRejectsMalformedFrame(t *testing.T) {
 	var out bytes.Buffer
 	err := runReceiveConfig(strings.NewReader("not json"), &out)

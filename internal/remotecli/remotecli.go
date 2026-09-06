@@ -20,6 +20,16 @@ func Run(args []string) error {
 	if err != nil {
 		return err
 	}
+	// path here is only ever non-empty when the user explicitly typed one —
+	// the FindLastRemote/"~" defaulting below hasn't run yet. --web launches
+	// `ocode serve --remote` on the remote with no workdir argument (it ends
+	// up rooted at the ssh session's default directory, typically $HOME),
+	// and a second --web invocation with a different path would silently
+	// reuse the first invocation's already-running server anyway — so
+	// reject an explicit path outright rather than silently ignoring it.
+	if web && path != "" {
+		return fmt.Errorf("ocode remote --web does not yet support selecting a specific project path; omit the path argument, or connect without --web for TUI mode")
+	}
 
 	store, _, err := projects.NewStore()
 	if err != nil {
