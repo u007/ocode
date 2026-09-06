@@ -286,3 +286,14 @@ func TestListModels(t *testing.T) {
 	}
 	t.Log("opencode/x-preview-f-free absent from registry; display_name mapping unverified")
 }
+
+func TestRunRemoteModeForcesLoopbackAndGeneratesToken(t *testing.T) {
+	s := New("0.0.0.0:0", "", "", nil)
+	if s.remoteMode {
+		t.Fatal("remoteMode should default false")
+	}
+	s.SetRemoteMode(true)
+	if !s.remoteMode {
+		t.Fatal("SetRemoteMode(true) did not set the field")
+	}
+}

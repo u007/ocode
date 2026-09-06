@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -93,6 +94,13 @@ type Server struct {
 	schedulerTargets *scheduler.Targets // optional; set via SetScheduler
 	frontendStats    *frontendStatsRing
 	startedAt        time.Time
+
+	// remoteMode is true when the process was launched as `ocode serve
+	// --remote` (see Run). It forces loopback-only binding, requires a
+	// generated API token (never the OPENCODE_SERVER_* env vars), and
+	// switches checkAuth into a stricter mode that rejects the ?token=
+	// query-string path (see Task 2).
+	remoteMode bool
 
 	// browse is the isolated browse-origin server backing the embedded
 	// browser panel; browseBase is its loopback base URL as advertised to
@@ -1056,6 +1064,14 @@ func (s *Server) SetWorkDir(dir string) {
 	}
 }
 
+// SetRemoteMode marks the server as launched in `--remote` mode. Must be
+// called before Serve; it only affects checkAuth behavior (Task 2), not
+// binding — the caller (Run) is responsible for forcing the loopback
+// address and generating the token before constructing the listener.
+func (s *Server) SetRemoteMode(v bool) {
+	s.remoteMode = v
+}
+
 // Serve serves requests on an already-bound listener.
 func (s *Server) Serve(ln net.Listener) error {
 	// Populate the live model caches (OpenRouter, Novita, Groq) in the background so
@@ -1237,13 +1253,26 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	port := fs.Int("port", 4096, "Port to listen on")
 	host := fs.String("host", "0.0.0.0", "Host to bind to")
 	openBrowser := fs.Bool("open", false, "Open browser after starting")
+	remoteFlag := fs.Bool("remote", false, "Remote mode: bind 127.0.0.1 only, require a generated API token, and write ~/.ocode/remote/serve.json for reconnect discovery")
 	fs.Parse(args)
 
+	if *remoteFlag {
+		*host = "127.0.0.1"
+	}
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 	username := os.Getenv("OPENCODE_SERVER_USERNAME")
 	password := os.Getenv("OPENCODE_SERVER_PASSWORD")
+	if *remoteFlag {
+		token, err := generateRemoteToken()
+		if err != nil {
+			return fmt.Errorf("generate remote API token: %w", err)
+		}
+		username = ""
+		password = token
+	}
 
 	srv := New(addr, username, password, webFS)
+	srv.SetRemoteMode(*remoteFlag)
 	// Anchor the server to the process working directory so relative-path
 	// endpoints (file tree, file content, git, uploads) resolve against the
 	// project root regardless of where the process was launched from. The
@@ -1309,6 +1338,17 @@ func openURL(url string) {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	_ = cmd.Start()
+}
+
+// generateRemoteToken returns a 256-bit random token, hex-encoded, for
+// --remote mode. Generated fresh on every launch — never derived from or
+// stored alongside a user-chosen password.
+func generateRemoteToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
