@@ -197,6 +197,38 @@ func TestCheckAuthRemoteModeRejectsQueryStringToken(t *testing.T) {
 	}
 }
 
+func TestCheckAuthRemoteModeAcceptsWebSocketSubprotocolToken(t *testing.T) {
+	s := New("127.0.0.1:0", "", "tok123", nil)
+	s.SetRemoteMode(true)
+
+	r := httptest.NewRequest("GET", "/api/terminal/ws", nil)
+	r.Header.Set("Sec-WebSocket-Protocol", "ocode.bearer.tok123")
+	if !s.checkAuth(r) {
+		t.Fatal("remote mode must accept a matching Sec-WebSocket-Protocol bearer token")
+	}
+
+	r2 := httptest.NewRequest("GET", "/api/terminal/ws", nil)
+	r2.Header.Set("Sec-WebSocket-Protocol", "ocode.bearer.wrong")
+	if s.checkAuth(r2) {
+		t.Fatal("remote mode must reject a mismatched subprotocol token")
+	}
+}
+
+func TestRemoteWebSocketSubprotocolNotAcceptedOutsideRemoteMode(t *testing.T) {
+	s := New("127.0.0.1:0", "", "tok123", nil)
+	// remoteMode left false: the ?token= path (Task 2) is how non-remote WS
+	// auth works today. The subprotocol path should still parse harmlessly
+	// but must not be treated as authoritative outside remote mode, since
+	// non-remote checkAuth never reaches this branch — assert via the
+	// negative: no Authorization header, no ?token, only the subprotocol,
+	// non-remote mode.
+	r := httptest.NewRequest("GET", "/api/terminal/ws", nil)
+	r.Header.Set("Sec-WebSocket-Protocol", "ocode.bearer.tok123")
+	if s.checkAuth(r) {
+		t.Fatal("non-remote mode must not authenticate via the WS subprotocol token")
+	}
+}
+
 func TestRunRemoteModeRefusesEmptyToken(t *testing.T) {
 	s := New("127.0.0.1:0", "", "", nil)
 	s.SetRemoteMode(true)

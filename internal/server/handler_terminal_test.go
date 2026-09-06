@@ -29,6 +29,39 @@ func terminalTestServer(t *testing.T) (*httptest.Server, string) {
 	return srv, "ws" + strings.TrimPrefix(srv.URL, "http")
 }
 
+// terminalUpgradeRespHeader must echo back the ocode.bearer. subprotocol the
+// client offered so the browser's WebSocket handshake completes (per spec,
+// the client fails the connection if the server doesn't select one of the
+// offered subprotocols).
+func TestTerminalUpgradeRespHeaderEchoesMatchingSubprotocol(t *testing.T) {
+	r := httptest.NewRequest("GET", "/api/terminal/ws", nil)
+	r.Header.Set("Sec-WebSocket-Protocol", "ocode.bearer.tok123")
+	got := terminalUpgradeRespHeader(r)
+	if got == nil {
+		t.Fatal("expected a response header echoing the subprotocol")
+	}
+	if want := "ocode.bearer.tok123"; got.Get("Sec-WebSocket-Protocol") != want {
+		t.Errorf("Sec-WebSocket-Protocol = %q, want %q", got.Get("Sec-WebSocket-Protocol"), want)
+	}
+}
+
+func TestTerminalUpgradeRespHeaderNilWhenNoSubprotocolOffered(t *testing.T) {
+	r := httptest.NewRequest("GET", "/api/terminal/ws", nil)
+	got := terminalUpgradeRespHeader(r)
+	if got != nil {
+		t.Errorf("expected nil response header when no Sec-WebSocket-Protocol was offered, got %v", got)
+	}
+}
+
+func TestTerminalUpgradeRespHeaderNilWhenSubprotocolDoesNotMatchPrefix(t *testing.T) {
+	r := httptest.NewRequest("GET", "/api/terminal/ws", nil)
+	r.Header.Set("Sec-WebSocket-Protocol", "some-other-protocol")
+	got := terminalUpgradeRespHeader(r)
+	if got != nil {
+		t.Errorf("expected nil response header for a non-ocode.bearer. subprotocol, got %v", got)
+	}
+}
+
 func TestTerminalShellCommandUsesLoginMode(t *testing.T) {
 	cmd := terminalShellCommand("/bin/zsh")
 	want := []string{"/bin/zsh", "-l"}

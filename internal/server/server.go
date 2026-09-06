@@ -463,6 +463,25 @@ func realIP(r *http.Request) string {
 	return "unknown"
 }
 
+// remoteWSProtocolPrefix namespaces the token carried in Sec-WebSocket-
+// Protocol so it can't collide with a real subprotocol a future WS endpoint
+// might negotiate.
+const remoteWSProtocolPrefix = "ocode.bearer."
+
+// remoteWSToken extracts the bearer token from a Sec-WebSocket-Protocol
+// header value (which may list multiple comma-separated protocols, per
+// RFC 6455 — the browser API takes an array), or "" if none match the
+// ocode.bearer. prefix.
+func remoteWSToken(header string) string {
+	for _, p := range strings.Split(header, ",") {
+		p = strings.TrimSpace(p)
+		if tok, ok := strings.CutPrefix(p, remoteWSProtocolPrefix); ok {
+			return tok
+		}
+	}
+	return ""
+}
+
 func (s *Server) checkAuth(r *http.Request) bool {
 	// Bearer token header (used by frontend fetch calls)
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
@@ -473,6 +492,14 @@ func (s *Server) checkAuth(r *http.Request) bool {
 	// intermediary proxies, which the remote token model treats as a leak.
 	if !s.remoteMode {
 		if tok := r.URL.Query().Get("token"); tok != "" {
+			return tok == s.password
+		}
+	}
+	// WebSocket subprotocol token (remote mode only — the browser WebSocket
+	// API can't set Authorization or use ?token= safely under the remote
+	// token model, but it can offer a Sec-WebSocket-Protocol list).
+	if s.remoteMode {
+		if tok := remoteWSToken(r.Header.Get("Sec-WebSocket-Protocol")); tok != "" {
 			return tok == s.password
 		}
 	}

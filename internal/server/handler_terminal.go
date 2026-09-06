@@ -63,6 +63,27 @@ var resizePrefix = []byte(`{"type":"resize"`)
 
 const terminalMaxMessageSize = 32 * 1024
 
+// terminalUpgradeRespHeader echoes back the ocode.bearer. subprotocol the
+// client offered, if any, so the browser's `new WebSocket(url, [protocol])`
+// call completes — per the WebSocket spec, the client fails the connection
+// if the server doesn't select one of the offered subprotocols. The token
+// itself was already validated (or ignored outside remote mode) by
+// checkAuth in authMiddleware before this handler ever runs; this just
+// completes the handshake for the case that requires it.
+func terminalUpgradeRespHeader(r *http.Request) http.Header {
+	proto := r.Header.Get("Sec-WebSocket-Protocol")
+	if proto == "" {
+		return nil
+	}
+	tok := remoteWSToken(proto)
+	if tok == "" {
+		return nil
+	}
+	respHeader := http.Header{}
+	respHeader.Set("Sec-WebSocket-Protocol", remoteWSProtocolPrefix+tok)
+	return respHeader
+}
+
 type terminalResizeMsg struct {
 	Type string `json:"type"`
 	Cols uint16 `json:"cols"`
@@ -190,7 +211,7 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "terminal_id belongs to a different project")
 			return
 		}
-		ws, err := terminalUpgrader.Upgrade(w, r, nil)
+		ws, err := terminalUpgrader.Upgrade(w, r, terminalUpgradeRespHeader(r))
 		if err != nil {
 			log.Printf("terminal %s: websocket upgrade for reattach failed: %v", terminalID, err)
 			return
@@ -257,7 +278,7 @@ func (h *Handler) serveFreshTerminal(w http.ResponseWriter, r *http.Request, ses
 		writeError(w, http.StatusInternalServerError, "failed to start terminal")
 		return
 	}
-	ws, err := terminalUpgrader.Upgrade(w, r, nil)
+	ws, err := terminalUpgrader.Upgrade(w, r, terminalUpgradeRespHeader(r))
 	if err != nil {
 		// Upgrade already wrote an error response; tear the shell back down so
 		// a failed handshake doesn't leak a process until the detach TTL.
