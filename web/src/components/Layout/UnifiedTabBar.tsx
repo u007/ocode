@@ -710,7 +710,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           onClick={handleNewTerminal}
           aria-label="New terminal"
           title="New terminal"
-          className="flex shrink-0 items-center gap-0.5 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors border border-border"
+          className="flex shrink-0 items-center gap-0.5 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
         >
           <span aria-hidden>⌨️</span>
           <Plus className="w-3 h-3" />
