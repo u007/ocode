@@ -178,9 +178,11 @@ func TestEnsureRemoteServerStartsFreshWhenStale(t *testing.T) {
 }
 
 // pollAfterLaunchFake wraps fakeTransport so that DiscoverServer's polling
-// loop (in StartFreshServer) sees the "missing/dead" state until the launch
-// command has been issued at least once, then sees the fresh state — without
-// needing StartFreshServer to expose its retry internals to the test.
+// loop (in StartFreshServer) sees the fresh state as soon as the launch
+// command has been issued — a stand-in for "the new server has already
+// written its state file" that doesn't model the realistic intermediate
+// window (rm'd, not yet rewritten). See raceProneFake below for a fake that
+// exercises that window and proves the stale file is never returned.
 type pollAfterLaunchFake struct {
 	*fakeTransport
 	freshStateJSON string
@@ -195,6 +197,86 @@ func (p *pollAfterLaunchFake) Exec(command string) (ExecResult, error) {
 		return ExecResult{Stdout: p.freshStateJSON}, nil
 	}
 	return p.fakeTransport.Exec(command)
+}
+
+// raceProneFake models the realistic timing StartFreshServer must be safe
+// against: before launch, `cat` returns a stale (already on disk) state file
+// — exactly what EnsureRemoteServer sees when ServerAlive rejects a
+// discovered server as dead/mismatched/unhealthy but the old process never
+// got around to deleting its own file. Once the launch command runs, `cat`
+// must never again see that stale content — the launch command's `rm -f`
+// now runs synchronously, so by the time Exec("launch...") returns, the file
+// is gone. This fake enforces exactly that: `appearAfterPolls` poll
+// iterations see "missing" (the deleted-but-not-yet-rewritten window) before
+// the fresh state appears.
+type raceProneFake struct {
+	*fakeTransport
+	freshStateJSON   string
+	appearAfterPolls int
+	launched         bool
+	pollsSinceLaunch int
+}
+
+func (p *raceProneFake) Exec(command string) (ExecResult, error) {
+	if command == launchServerCmd("0.8.85") {
+		p.launched = true
+		return p.fakeTransport.Exec(command)
+	}
+	if command == remoteStateCatCmd {
+		if !p.launched {
+			return p.fakeTransport.Exec(command) // pre-launch: stale file still there
+		}
+		p.pollsSinceLaunch++
+		if p.pollsSinceLaunch <= p.appearAfterPolls {
+			return ExecResult{Stdout: ""}, nil // rm'd, not yet rewritten by the new server
+		}
+		return ExecResult{Stdout: p.freshStateJSON}, nil
+	}
+	return p.fakeTransport.Exec(command)
+}
+
+func TestLaunchServerCmdDeletesStaleStateFileSynchronously(t *testing.T) {
+	cmd := launchServerCmd("0.8.85")
+	statePath := shellQuotePath(remoteStateFilePath)
+	if !strings.Contains(cmd, "rm -f "+statePath) {
+		t.Errorf("launch command must delete the old state file before starting: %q", cmd)
+	}
+	// The delete must run synchronously (before the backgrounded `&&` chain,
+	// separated by `;` not swept into it) so it is guaranteed complete by the
+	// time Exec returns — otherwise a stale file could still be read on the
+	// very next poll iteration.
+	rmIdx := strings.Index(cmd, "rm -f")
+	ampIdx := strings.Index(cmd, "&")
+	if rmIdx == -1 || ampIdx == -1 || rmIdx >= ampIdx {
+		t.Errorf("rm -f must appear before the backgrounding '&' in the launch command: %q", cmd)
+	}
+}
+
+func TestStartFreshServerNeverReturnsStaleStateEvenIfObservableAfterLaunch(t *testing.T) {
+	stale := ServeState{PID: 42, Port: 4096, Token: "oldtok", Version: "0.8.85"}
+	staleData, _ := json.Marshal(stale)
+	fresh := ServeState{PID: 999, Port: 4097, Token: "newtok", Version: "0.8.85", StartedAt: time.Now().Round(0)}
+	freshData, _ := json.Marshal(fresh)
+
+	ft := newFakeTransport()
+	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(staleData)}
+	ft.execResults[launchServerCmd("0.8.85")] = ExecResult{ExitCode: 0}
+	raceFake := &raceProneFake{fakeTransport: ft, freshStateJSON: string(freshData), appearAfterPolls: 2}
+
+	origInterval := serveStatePollInterval
+	serveStatePollInterval = time.Millisecond
+	defer func() { serveStatePollInterval = origInterval }()
+
+	state, err := StartFreshServer(raceFake, "0.8.85")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state == stale {
+		t.Fatal("StartFreshServer returned the stale state — the old file must never be reused after a fresh launch")
+	}
+	if state != fresh {
+		t.Errorf("got %+v, want %+v", state, fresh)
+	}
 }
 
 func TestFreeLocalPort(t *testing.T) {

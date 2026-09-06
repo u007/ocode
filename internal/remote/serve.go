@@ -94,6 +94,19 @@ func ServerAlive(t Transport, state ServeState, localVersion string) bool {
 func launchServerCmd(ver string) string {
 	remoteOcode := shellQuotePath(RemoteBinaryPath(ver))
 	logPath := shellQuotePath("~/.ocode/remote/serve.log")
+	statePath := shellQuotePath(remoteStateFilePath)
+	// Delete any existing state file before launching: StartFreshServer only
+	// gets here because the previously discovered state was unusable (dead
+	// pid, version mismatch, unhealthy) — not because the file was missing —
+	// so it's often still present and still parses. Without this delete, the
+	// poll loop below could re-read that stale file on its very first
+	// iteration and return it as if it were the new server's, silently
+	// reconnecting to the wrong (old/mismatched-version) server. `rm -f` runs
+	// synchronously (`;`, not part of the backgrounded `&&` chain) so it has
+	// completed by the time this Exec call returns, making that stale read
+	// structurally impossible: the poll can only ever see nothing (keep
+	// polling) or the genuinely new server's fresh state.
+	//
 	// Redirect all three standard fds explicitly and disown the child: a
 	// backgrounded process that still holds the ssh session's stdout/stderr
 	// pipe open makes the outer non-interactive `ssh host cmd` hang waiting
@@ -101,8 +114,8 @@ func launchServerCmd(ver string) string {
 	// plus explicit redirects plus `disown` fully detaches it so `ssh`
 	// returns as soon as this command's own shell exits.
 	return fmt.Sprintf(
-		"mkdir -p %s && nohup %s serve --remote --host 127.0.0.1 --port 0 </dev/null >%s 2>&1 & disown; echo launched",
-		shellQuotePath("~/.ocode/remote"), remoteOcode, logPath,
+		"rm -f %s; mkdir -p %s && nohup %s serve --remote --host 127.0.0.1 --port 0 </dev/null >%s 2>&1 & disown; echo launched",
+		statePath, shellQuotePath("~/.ocode/remote"), remoteOcode, logPath,
 	)
 }
 
