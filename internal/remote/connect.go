@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
+	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/u007/ocode/internal/tool"
@@ -43,34 +47,64 @@ func Connect(opts ConnectOptions) error {
 		return fmt.Errorf("internal error: Connect requires a resolved Path")
 	}
 
-	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{})
+	progress := NewProgress(out, fmt.Sprintf("Connecting to %s…", opts.Target.String()))
+	transport, sup, err := runPrepareStages(opts, progress)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = sup.Shutdown(ctx)
 	}()
-
-	transport := NewSSHTransport(opts.Target, sup)
-	progress := NewProgress(out, fmt.Sprintf("Connecting to %s…", opts.Target.String()))
-
-	// 1. Reachability.
-	progress.Start("reachable", "ssh reachable")
-	if res, err := transport.Exec("true"); err != nil {
-		progress.Fail(namedError("reachable", "ssh", res.Stderr, err), "check the host, your ssh_config, and known_hosts")
+	if err != nil {
 		return err
+	}
+
+	progress.Start("multiplex", "checking for tmux/screen")
+	mux := DetectMultiplexer(transport)
+	if warn := ResumeWarning(mux); warn != "" {
+		progress.Warn(warn)
+	} else {
+		progress.Done(mux.String())
+	}
+
+	progress.Start("launch", "launching remote TUI")
+	remoteCmd := shellQuotePath(RemoteBinaryPath(version.Version)) + " " + shellQuotePath(opts.Path)
+	launchCmd := WrapLaunch(mux, opts.Path, remoteCmd)
+	progress.Done("")
+
+	return transport.ExecInteractive(launchCmd)
+}
+
+// runPrepareStages executes the shared reachability → platform-detect →
+// ensure-binary → credential-sync stages (1-4 of the spec's numbering; TUI
+// mode additionally runs multiplex-detect as its own stage 5, web mode
+// never does — see 01-architecture.md "Session resume on disconnect").
+// Returns the constructed Transport plus the supervisor it was built with,
+// so ConnectWeb can register the tunnel process on the same supervisor
+// (and Connect can pass it through to ExecInteractive unchanged, exactly
+// as before this refactor). The caller owns shutting the supervisor down.
+func runPrepareStages(opts ConnectOptions, progress *Progress) (Transport, *tool.ProcessSupervisor, error) {
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{})
+	transport, err := newTransportForTarget(opts.Target, sup)
+	if err != nil {
+		progress.Fail(err, "")
+		return nil, sup, err
+	}
+
+	progress.Start("reachable", transport.Describe()+" reachable")
+	if res, err := transport.Exec("true"); err != nil {
+		progress.Fail(namedError("reachable", transport.Describe(), res.Stderr, err), "check the host, your ssh_config, and known_hosts")
+		return nil, sup, err
 	}
 	progress.Done("")
 
-	// 2. Platform detect.
 	progress.Start("platform", "platform detect")
 	goos, goarch, err := DetectPlatform(transport)
 	if err != nil {
 		progress.Fail(err, "")
-		return err
+		return nil, sup, err
 	}
 	progress.Done(goos + "/" + goarch)
 
-	// 3-5. Ensure binary (build/upload/verify), broken into progress rows.
 	ver := version.Version
 	if BinaryExists(transport, ver) {
 		progress.Start("build", fmt.Sprintf("ocode v%s", ver))
@@ -80,7 +114,7 @@ func Connect(opts ConnectOptions) error {
 		build, err := PrepareLocalBuild(goos, goarch, opts.ModuleDir)
 		if err != nil {
 			progress.Fail(err, "install Go, or run from an ocode source checkout")
-			return err
+			return nil, sup, err
 		}
 		if !build.Reused {
 			defer os.Remove(build.Path)
@@ -92,47 +126,185 @@ func Connect(opts ConnectOptions) error {
 		progress.Start("upload", "uploading")
 		if err := UploadBinary(transport, ver, build.Path); err != nil {
 			progress.Fail(err, "")
-			return err
+			return nil, sup, err
 		}
 		progress.Done("")
 
 		progress.Start("verify", "installing + verifying")
 		if err := ActivateAndVerify(transport, ver); err != nil {
 			progress.Fail(err, "")
-			return err
+			return nil, sup, err
 		}
 		progress.Done("")
 
 		_ = GCVersions(transport)
 	}
 
-	// 6. Credential sync (unless --no-sync).
 	if opts.NoSync {
 		progress.Start("sync", "credentials synced")
 		progress.Warn("skipped (--no-sync)")
 	} else if err := runSyncStage(progress, transport, opts.Target.String(), ver); err != nil {
-		// Per spec: a sync failure does not abort the connect — it's
-		// marked failed in the progress output and the flow continues to
-		// launch, since the remote may already have working keys.
 		_ = err
 	}
 
-	// 7. Multiplex detect.
-	progress.Start("multiplex", "checking for tmux/screen")
-	mux := DetectMultiplexer(transport)
-	if warn := ResumeWarning(mux); warn != "" {
-		progress.Warn(warn)
-	} else {
-		progress.Done(mux.String())
+	return transport, sup, nil
+}
+
+// newTransportForTarget builds the Transport implementation for t.Kind,
+// after validating the target is usable on this OS (KindWSL requires
+// Windows — see target.go's validateTargetOS, added in Task 12).
+func newTransportForTarget(t Target, sup *tool.ProcessSupervisor) (Transport, error) {
+	if err := validateTargetOS(t.Kind, runtime.GOOS); err != nil {
+		return nil, err
+	}
+	switch t.Kind {
+	case KindWSL:
+		return NewWSLTransport(t.Distro, sup), nil
+	default:
+		return NewSSHTransport(t, sup), nil
+	}
+}
+
+// ConnectWebOptions extends ConnectOptions with web-mode-only knobs.
+type ConnectWebOptions struct {
+	ConnectOptions
+	// OpenBrowser is called with the local URL to open once the tunnel (or,
+	// for WSL, the direct localhost port) is ready. Defaults to the
+	// platform opener; overridable in tests.
+	OpenBrowser func(url string) error
+}
+
+// ConnectWeb runs the shared prepare stages, then discovers-or-launches a
+// detached remote server, tunnels it to a local port (skipped for WSL —
+// Windows forwards WSL2 localhost natively), and opens the browser with a
+// one-time token in the URL fragment. Unlike Connect, it does not block on
+// the remote process: it blocks supervising the local tunnel (SSH targets)
+// until the user disconnects (Ctrl-C) or the tunnel dies. The remote server
+// itself is a detached long-lived process and outlives this call by design.
+func ConnectWeb(opts ConnectOptions) error {
+	out := opts.Out
+	if out == nil {
+		out = os.Stdout
+	}
+	if opts.Path == "" {
+		return fmt.Errorf("internal error: ConnectWeb requires a resolved Path")
 	}
 
-	// 8. Launch.
-	progress.Start("launch", "launching remote TUI")
-	remoteCmd := shellQuotePath(RemoteBinaryPath(ver)) + " " + shellQuotePath(opts.Path)
-	launchCmd := WrapLaunch(mux, opts.Path, remoteCmd)
+	progress := NewProgress(out, fmt.Sprintf("Connecting to %s (web)…", opts.Target.String()))
+	transport, sup, err := runPrepareStages(opts, progress)
+	if err != nil {
+		return err
+	}
+
+	progress.Start("server", "discovering or starting remote server")
+	state, reused, err := EnsureRemoteServer(transport, version.Version)
+	if err != nil {
+		progress.Fail(err, "check ~/.ocode/remote/serve.log on the remote")
+		return err
+	}
+	if reused {
+		progress.Done("reusing existing server")
+	} else {
+		progress.Done("started fresh")
+	}
+
+	if opts.Target.Kind == KindWSL {
+		progress.Start("open", "opening browser")
+		url := fmt.Sprintf("http://localhost:%d/#token=%s", state.Port, state.Token)
+		if err := openBrowserURL(url); err != nil {
+			progress.Fail(err, "")
+			return err
+		}
+		progress.Done("")
+		fmt.Fprintln(out, "Remote server running inside WSL; this command can now exit — the server keeps running.")
+		return nil
+	}
+
+	progress.Start("tunnel", "opening SSH tunnel")
+	localPort, tunnelCmd, err := startTunnelWithRetry(sup, opts.Target, state.Port)
+	if err != nil {
+		progress.Fail(err, "")
+		return err
+	}
+	progress.Done(fmt.Sprintf("localhost:%d → remote:%d", localPort, state.Port))
+
+	progress.Start("open", "opening browser")
+	url := fmt.Sprintf("http://localhost:%d/#token=%s", localPort, state.Token)
+	if err := openBrowserURL(url); err != nil {
+		progress.Fail(err, "")
+		return err
+	}
 	progress.Done("")
 
-	return transport.ExecInteractive(launchCmd)
+	fmt.Fprintln(out, "Tunnel active. Press Ctrl-C to close it (the remote server keeps running).")
+	return superviseTunnel(sup, tunnelCmd)
+}
+
+// openBrowserURL opens url in the platform default browser. Duplicated
+// (deliberately, it's five lines) rather than exported from
+// internal/server, to avoid remotecli/remote depending on the server
+// package for one helper.
+func openBrowserURL(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		return fmt.Errorf("unsupported platform %q for opening a browser", runtime.GOOS)
+	}
+	return cmd.Start()
+}
+
+// startTunnelWithRetry picks a free local port and starts the tunnel; per
+// the spec's error-handling table, a bind failure (port grabbed by another
+// process between FreeLocalPort's probe and ssh's actual bind — an
+// accepted, narrow TOCTOU race) gets exactly one retry with a fresh port
+// before the failure is surfaced with ssh's own stderr.
+func startTunnelWithRetry(sup *tool.ProcessSupervisor, target Target, remotePort int) (localPort int, tunnelCmd *exec.Cmd, err error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		localPort, err = FreeLocalPort()
+		if err != nil {
+			return 0, nil, err
+		}
+		tunnelCmd, err = StartTunnel(sup, target, localPort, remotePort)
+		if err == nil {
+			return localPort, tunnelCmd, nil
+		}
+	}
+	return 0, nil, fmt.Errorf("open ssh tunnel after retry: %w", err)
+}
+
+// superviseTunnel blocks until either the tunnel process exits on its own
+// (reported as an error — the connection is gone) or the user sends
+// SIGINT/SIGTERM (reported as nil — a clean, requested disconnect). The
+// tunnel's own process group (StartSupervised via setProcGroup) is separate
+// from this process's, so a terminal Ctrl-C does not reach it automatically
+// — this signal handler explicitly kills it on the way out.
+func superviseTunnel(sup *tool.ProcessSupervisor, tunnelCmd *exec.Cmd) error {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- tunnelCmd.Wait() }()
+
+	select {
+	case err := <-waitCh:
+		if err != nil {
+			return fmt.Errorf("tunnel closed unexpectedly: %w", err)
+		}
+		return fmt.Errorf("tunnel closed unexpectedly")
+	case <-sigCh:
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = sup.Shutdown(ctx)
+		<-waitCh
+		return nil
+	}
 }
 
 // runSyncStage builds and pushes the credential/config payload, honoring
