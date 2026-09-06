@@ -20,6 +20,7 @@ vi.mock("@xterm/xterm", () => ({
     focus = vi.fn();
     onData = vi.fn(() => ({ dispose: vi.fn() }));
     onBell = vi.fn(() => ({ dispose: vi.fn() }));
+    onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
     parser = {
       registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })),
     };
@@ -47,6 +48,7 @@ vi.mock("@/api/client", () => ({
   api: {
     getTerminalConfig: () => Promise.resolve({ available: true, scrollback_lines: 9999, work_dir: "/project" }),
     getTerminalProcesses: () => Promise.resolve([]),
+    getBrowseProcesses: () => Promise.resolve([]),
   },
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,

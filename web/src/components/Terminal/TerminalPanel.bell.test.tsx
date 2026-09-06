@@ -1,7 +1,7 @@
 import { render, screen, act, fireEvent } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { TerminalProvider, useTerminalState, getProjectTerminals } from "../../stores/terminalStore";
+import { TerminalProvider, useTerminalState, getProjectTerminals, terminalDisplayTitle } from "../../stores/terminalStore";
 import { playAlertSound } from "./terminalAlertSound";
 import TerminalPanel from "./TerminalPanel";
 
@@ -10,7 +10,11 @@ import TerminalPanel from "./TerminalPanel";
 // test can fire a BEL / OSC 9 / 777 / 99 the way a real pty would and assert the
 // panel raises a background-activity alert + plays the alert sound.
 const h = vi.hoisted(() => ({
-  terminals: [] as Array<{ _bell: (() => void) | null; _osc: Record<number, () => boolean> }>,
+  terminals: [] as Array<{
+    _bell: (() => void) | null;
+    _title: ((title: string) => void) | null;
+    _osc: Record<number, () => boolean>;
+  }>,
   sockets: [] as Array<{ onopen: (() => void) | null; url: string }>,
 }));
 
@@ -20,6 +24,7 @@ vi.mock("@xterm/xterm", () => {
     rows = 24;
     options: Record<string, unknown> = {};
     _bell: (() => void) | null = null;
+    _title: ((title: string) => void) | null = null;
     _osc: Record<number, () => boolean> = {};
     constructor() {
       h.terminals.push(this);
@@ -31,6 +36,10 @@ vi.mock("@xterm/xterm", () => {
     onData = vi.fn(() => ({ dispose: vi.fn() }));
     onBell = vi.fn((cb: () => void) => {
       this._bell = cb;
+      return { dispose: vi.fn() };
+    });
+    onTitleChange = vi.fn((cb: (title: string) => void) => {
+      this._title = cb;
       return { dispose: vi.fn() };
     });
     parser = {
@@ -93,7 +102,12 @@ function AlertReader({ projectPath }: { projectPath: string }) {
   const { state } = useTerminalState();
   const { terminals } = getProjectTerminals(state, projectPath);
   const alerted = terminals.filter((t) => (t as { alerted?: boolean }).alerted).map((t) => t.id).join(",");
-  return <div data-testid="alerted">{alerted}</div>;
+  return (
+    <>
+      <div data-testid="alerted">{alerted}</div>
+      <div data-testid="titles">{terminals.map(terminalDisplayTitle).join(",")}</div>
+    </>
+  );
 }
 
 // Makes the project's terminal region live (seeded from the mocked
@@ -226,5 +240,20 @@ describe("TerminalPanel bell/OSC detection", () => {
     });
     expect(screen.getByTestId("alerted").textContent).toBe("t1");
     expect(playAlertSound).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards the program's OSC window title to the tab name", () => {
+    render(
+      <TerminalProvider>
+        <SeedHarness projectPath="/proj" />
+        <PanelHost initialActive={true} />
+        <AlertReader projectPath="/proj" />
+      </TerminalProvider>,
+    );
+    const term = h.terminals[0];
+    act(() => {
+      term._title?.("⦿ ocode — fix bug");
+    });
+    expect(screen.getByTestId("titles").textContent).toBe("⦿ ocode — fix bug");
   });
 });

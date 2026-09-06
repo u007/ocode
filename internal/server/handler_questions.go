@@ -190,7 +190,7 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 		log.Printf("serve error: question answer step: %v", err)
 		// The answer is already in `working`; keep it (plus any rounds Step
 		// completed) so a failed continuation does not discard the exchange.
-		h.commitPartialTranscript(sessID, as, append(working, resp...), true)
+		h.commitPartialTranscript(sessID, as, working, resp, true)
 		h.broadcastEvent(SSEEvent{
 			SessionID: sessID,
 			Event:     "error",

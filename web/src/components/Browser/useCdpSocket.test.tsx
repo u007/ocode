@@ -179,6 +179,21 @@ describe("useCdpSocket", () => {
     expect(evs[0].durationMs).toBe(7);
   });
 
+  it("routes perfState into perfRecording (attach sync + toggle ack)", async () => {
+    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    const ws = lastSocket();
+    act(() => {
+      ws.serverOpen();
+      ws.serverMessage(JSON.stringify({ t: "perfState", recording: false }));
+    });
+    expect(browserStore.state.byKey["tab:abc"].perfRecording).toBe(false);
+    act(() => {
+      ws.serverMessage(JSON.stringify({ t: "perfState", recording: true }));
+    });
+    expect(browserStore.state.byKey["tab:abc"].perfRecording).toBe(true);
+  });
+
   it("decodes binary frames big-endian into an ImageBitmap and fires onFrame callbacks", async () => {
     // jsdom has no createImageBitmap; stub it and assert the hook decodes
     // the JPEG payload through it instead of forwarding raw bytes (which

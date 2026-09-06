@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
-	"github.com/mattn/go-runewidth"
 )
 
 // compositeOverlay splices box over backdrop at visual position (x, y).
@@ -174,25 +173,25 @@ func splitBackdropAtVisual(line string, visualCol int) (left, right, currentSGR 
 		}
 
 		// Regular character — advance visual position.
-		r, size := utf8Decode(line, i)
-		w := runewidth.RuneWidth(r)
+		cluster, w := nextVisualCluster(line[i:])
+		clLen := len(cluster)
 		if visualPos+w > visualCol {
 			// Split falls within a double-width character.
 			// Replace the character with a space to avoid half-character artifacts.
 			currentSGR = reconstructSGR(sgrCodes)
 			left = line[:i] + " "
-			right = " " + line[i+size:]
+			right = " " + line[i+clLen:]
 			return
 		}
 		visualPos += w
 		if visualPos == visualCol {
 			// Found the split point after this character.
 			currentSGR = reconstructSGR(sgrCodes)
-			left = line[:i+size]
-			right = line[i+size:]
+			left = line[:i+clLen]
+			right = line[i+clLen:]
 			return
 		}
-		i += size
+		i += clLen
 	}
 
 	// visualCol is at or past the end of the line.
@@ -217,13 +216,12 @@ func takeAfterVisual(line string, visualCol int) string {
 				continue
 			}
 		}
-		r, size := utf8Decode(line, i)
-		w := runewidth.RuneWidth(r)
+		cluster, w := nextVisualCluster(line[i:])
 		visualPos += w
 		if visualPos > visualCol {
 			return line[i:]
 		}
-		i += size
+		i += len(cluster)
 	}
 	return ""
 }

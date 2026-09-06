@@ -28,11 +28,17 @@ type fakeTarget struct {
 		w, h int
 		dpr  float64
 	}
-	mouses       []cdp.MouseEvent
-	keys         []cdp.KeyEvent
-	detachCalled bool
-	setFiles     [][]string
-	bodies       map[string]fakeResponseBody
+	mouses        []cdp.MouseEvent
+	keys          []cdp.KeyEvent
+	detachCalled  bool
+	setFiles      [][]string
+	bodies        map[string]fakeResponseBody
+	perfStarts    int
+	perfStops     int
+	perfRecording bool
+	perfErr       error
+	scrollToys    []float64
+	scrollY       float64
 }
 
 type fakeResponseBody struct {
@@ -89,6 +95,40 @@ func (f *fakeTarget) SetFiles(_ context.Context, paths []string) error {
 }
 func (f *fakeTarget) DetachSink(_ cdp.FrameSink) { f.mu.Lock(); f.detachCalled = true; f.mu.Unlock() }
 
+func (f *fakeTarget) PerfStart(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.perfStarts++
+	if f.perfErr != nil {
+		return f.perfErr
+	}
+	f.perfRecording = true
+	return nil
+}
+func (f *fakeTarget) PerfStop(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.perfStops++
+	if f.perfErr != nil {
+		return f.perfErr
+	}
+	f.perfRecording = false
+	return nil
+}
+func (f *fakeTarget) PerfRecording() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.perfRecording }
+
+func (f *fakeTarget) ScrollTo(_ context.Context, _, y float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.scrollToys = append(f.scrollToys, y)
+	return nil
+}
+func (f *fakeTarget) ScrollY(_ context.Context) (float64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.scrollY, nil
+}
+
 func (f *fakeTarget) GetResponseBody(_ context.Context, requestID string) (body string, isBase64 bool, truncated bool, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -121,7 +161,7 @@ func (m *fakeManager) Attach(_ context.Context, stateKey string, sink cdp.FrameS
 	m.mu.Lock()
 	m.attachCalls = append(m.attachCalls, stateKey)
 	m.sinks[stateKey] = sink
-	t := &fakeTarget{}
+	t := &fakeTarget{perfRecording: true}
 	m.targets[stateKey] = t
 	m.mu.Unlock()
 	return t, nil
@@ -245,6 +285,23 @@ func TestCDP_ValidUpgrade101AndAttach(t *testing.T) {
 	fake.mu.Unlock()
 }
 
+// drainAttachPerfState reads and verifies the authoritative perfState pushed
+// on every socket attach. Tests asserting on later messages must drain it
+// first — it is always the first frame after upgrade.
+func drainAttachPerfState(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read attach perfState: %v", err)
+	}
+	var got map[string]any
+	_ = json.Unmarshal(data, &got)
+	if got["t"] != "perfState" || got["recording"] != true {
+		t.Fatalf("attach frame = %s, want perfState recording=true", string(data))
+	}
+}
+
 func TestCDP_SinkFrameBinary(t *testing.T) {
 	s, fake, ts := newBrowseWithFake(t, "http://example.com")
 	grant := s.MintGrant("tab:x", "http://example.com")
@@ -260,6 +317,7 @@ func TestCDP_SinkFrameBinary(t *testing.T) {
 		t.Fatal("no sink after attach")
 	}
 	jpeg := []byte{0xFF, 0xD8, 0xFF}
+	drainAttachPerfState(t, conn)
 	sink.Frame(2, 3, jpeg)
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	mt, data, err := conn.ReadMessage()
@@ -292,6 +350,7 @@ func TestCDP_SinkConsoleNetwork(t *testing.T) {
 	defer conn.Close()
 	time.Sleep(50 * time.Millisecond)
 	sink := fake.sinkFor("tab:x")
+	drainAttachPerfState(t, conn)
 	sink.Console(cdp.ConsoleEvent{Level: "log", Args: []string{"hi"}, TS: 123})
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, data, err := conn.ReadMessage()
@@ -330,6 +389,7 @@ func TestCDP_SinkErrorCloses1011(t *testing.T) {
 	defer conn.Close()
 	time.Sleep(50 * time.Millisecond)
 	sink := fake.sinkFor("tab:x")
+	drainAttachPerfState(t, conn)
 	sink.Error("boom")
 	// First message is error JSON
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -411,6 +471,96 @@ func TestCDP_ClientNavResizeMouseKey(t *testing.T) {
 	target.mu.Unlock()
 }
 
+func TestCDP_PerfStartStopAck(t *testing.T) {
+	s, fake, ts := newBrowseWithFake(t, "http://example.com")
+	grant := s.MintGrant("tab:x", "http://example.com")
+	conn, _, err := (&websocket.Dialer{}).Dial(wsURL(ts, "tab:x", grant), http.Header{"Origin": []string{"http://example.com"}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	readJSON := func() map[string]any {
+		t.Helper()
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, rerr := conn.ReadMessage()
+		if rerr != nil {
+			t.Fatalf("read: %v", rerr)
+		}
+		var m map[string]any
+		if uerr := json.Unmarshal(data, &m); uerr != nil {
+			t.Fatalf("unmarshal %q: %v", data, uerr)
+		}
+		return m
+	}
+	// Authoritative state is pushed on every attach.
+	if m := readJSON(); m["t"] != "perfState" || m["recording"] != true {
+		t.Fatalf("initial perfState = %v, want recording=true", m)
+	}
+	target := fake.targetFor("tab:x")
+	if target == nil {
+		t.Fatal("no target")
+	}
+	// Stop: backend disables, ack carries the authoritative state.
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"perfStop"}`))
+	if m := readJSON(); m["t"] != "perfState" || m["recording"] != false || m["error"] != nil {
+		t.Fatalf("perfStop ack = %v, want recording=false no error", m)
+	}
+	target.mu.Lock()
+	if target.perfStops != 1 {
+		t.Fatalf("perfStops = %d, want 1", target.perfStops)
+	}
+	target.mu.Unlock()
+	// Start: backend re-enables.
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"perfStart"}`))
+	if m := readJSON(); m["t"] != "perfState" || m["recording"] != true || m["error"] != nil {
+		t.Fatalf("perfStart ack = %v, want recording=true no error", m)
+	}
+	target.mu.Lock()
+	if target.perfStarts != 1 {
+		t.Fatalf("perfStarts = %d, want 1", target.perfStarts)
+	}
+	target.mu.Unlock()
+}
+
+func TestCDP_PerfToggleErrorReported(t *testing.T) {
+	s, fake, ts := newBrowseWithFake(t, "http://example.com")
+	grant := s.MintGrant("tab:x", "http://example.com")
+	conn, _, err := (&websocket.Dialer{}).Dial(wsURL(ts, "tab:x", grant), http.Header{"Origin": []string{"http://example.com"}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	// Drain the initial perfState.
+	if _, _, rerr := conn.ReadMessage(); rerr != nil {
+		t.Fatalf("read initial: %v", rerr)
+	}
+	target := fake.targetFor("tab:x")
+	if target == nil {
+		t.Fatal("no target")
+	}
+	target.mu.Lock()
+	target.perfErr = errors.New("cdp boom")
+	target.mu.Unlock()
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"perfStop"}`))
+	_, data, rerr := conn.ReadMessage()
+	if rerr != nil {
+		t.Fatalf("read ack: %v", rerr)
+	}
+	var m map[string]any
+	if uerr := json.Unmarshal(data, &m); uerr != nil {
+		t.Fatalf("unmarshal %q: %v", data, uerr)
+	}
+	// The failure is reported, and `recording` stays the authoritative
+	// backend value (true) instead of the requested one.
+	if m["t"] != "perfState" || m["recording"] != true {
+		t.Fatalf("error ack = %v, want recording=true", m)
+	}
+	if _, ok := m["error"]; !ok {
+		t.Fatalf("error ack = %v, want error field", m)
+	}
+}
+
 func TestCDP_MalformedJSONIgnored(t *testing.T) {
 	s, fake, ts := newBrowseWithFake(t, "http://example.com")
 	grant := s.MintGrant("tab:x", "http://example.com")
@@ -468,6 +618,8 @@ func TestCDP_SecondSocketReplacesFirst(t *testing.T) {
 	}
 	defer c1.Close()
 	time.Sleep(50 * time.Millisecond)
+	// Drain c1's attach state so the next read sees the replacement error.
+	drainAttachPerfState(t, c1)
 	c2, _, err := dialer.Dial(wsURL(ts, "tab:x", grant2), http.Header{"Origin": []string{"http://example.com"}})
 	if err != nil {
 		t.Fatalf("dial2: %v", err)
@@ -561,6 +713,7 @@ func TestCDP_FileChooserForwardAndCancel(t *testing.T) {
 	if !ok {
 		t.Fatal("cdpSink must implement cdp.FileChooserSink")
 	}
+	drainAttachPerfState(t, conn)
 	sink.FileChooser(true)
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, data, err := conn.ReadMessage()
@@ -604,5 +757,52 @@ func TestServerSetFilesRoutesToManager(t *testing.T) {
 	defer ft.mu.Unlock()
 	if len(ft.setFiles) != 1 || ft.setFiles[0][0] != "/tmp/x" {
 		t.Fatalf("SetFiles calls = %v", ft.setFiles)
+	}
+}
+
+// TestCDP_ScrollToGetScroll pins the scroll save/restore wire commands:
+// scrollTo forwards the persisted offset to the target (best-effort, no
+// ack), getScroll replies with the live offset for SPA persistence.
+func TestCDP_ScrollToGetScroll(t *testing.T) {
+	s, fake, ts := newBrowseWithFake(t, "http://example.com")
+	grant := s.MintGrant("tab:x", "http://example.com")
+	conn, _, err := (&websocket.Dialer{}).Dial(wsURL(ts, "tab:x", grant), http.Header{"Origin": []string{"http://example.com"}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	// Drain the attach perfState message so the next read is ours.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("drain perfState: %v", err)
+	}
+	target := fake.targetFor("tab:x")
+	if target == nil {
+		t.Fatal("no target")
+	}
+	target.mu.Lock()
+	target.scrollY = 321
+	target.mu.Unlock()
+	// scrollTo: forwarded, no reply.
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"scrollTo","y":321}`))
+	time.Sleep(50 * time.Millisecond)
+	target.mu.Lock()
+	if len(target.scrollToys) != 1 || target.scrollToys[0] != 321 {
+		t.Fatalf("scrollToys = %v, want [321]", target.scrollToys)
+	}
+	target.mu.Unlock()
+	// getScroll: replies {t:scroll, y}.
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"getScroll"}`))
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read scroll reply: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal %q: %v", data, err)
+	}
+	if m["t"] != "scroll" || m["y"] != 321.0 {
+		t.Fatalf("scroll reply = %v, want {scroll 321}", m)
 	}
 }

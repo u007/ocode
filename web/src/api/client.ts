@@ -778,6 +778,20 @@ export const api = {
     fetchJSON<
       { id: string; pid: number; cpu_percent: number; mem_bytes: number }[]
     >("/api/terminal/processes"),
+  getBrowseProcesses: () =>
+    fetchJSON<
+      {
+        state_key: string;
+        tab_id: string;
+        title: string;
+        url: string;
+        pid: number;
+        cpu_percent: number;
+        mem_bytes: number;
+        js_heap_bytes: number;
+        shared: boolean;
+      }[]
+    >("/api/browse/processes"),
   // TUI status (consolidated snapshot pushed by the TUI on every state
   // change). The web also subscribes to the "status" SSE event so the bar
   // updates live without polling.

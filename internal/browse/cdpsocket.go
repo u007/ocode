@@ -246,6 +246,13 @@ func (s *Server) handleCDP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Sync the authoritative recording state so the performance tab never
+	// claims "recording" while the CDP domain is disabled (or vice versa).
+	// Re-sent on every attach, including reconnects.
+	if b, merr := json.Marshal(map[string]any{"t": "perfState", "recording": target.PerfRecording()}); merr == nil {
+		entry.trySend(wsOut{data: b})
+	}
+
 	// Reader loop (this goroutine).
 	// Ensure Detach on exit, not Revoke.
 	defer func() {
@@ -344,6 +351,52 @@ func (s *Server) handleCDP(w http.ResponseWriter, r *http.Request) {
 			select {
 			case send <- wsOut{data: b}:
 			default:
+			}
+		case "scrollTo":
+			// Restore a persisted scroll offset (CSS px in cm.Y). Best-effort:
+			// the page may still be rendering; the SPA retries a few times.
+			// The concrete *cdp.Target offers ScrollTo/ScrollY but the
+			// chromeTarget interface is intentionally NOT extended (test
+			// fakes must not grow new required methods) - assert optionally.
+			if st, ok := target.(interface {
+				ScrollTo(context.Context, float64, float64) error
+			}); ok {
+				_ = st.ScrollTo(context.Background(), 0, cm.Y)
+			}
+		case "getScroll":
+			// Report the live scroll offset so the SPA can persist it.
+			if st, ok := target.(interface {
+				ScrollY(context.Context) (float64, error)
+			}); ok {
+				if y, err := st.ScrollY(context.Background()); err == nil {
+					if b, merr := json.Marshal(map[string]any{"t": "scroll", "y": y}); merr == nil {
+						select {
+						case send <- wsOut{data: b}:
+						default:
+						}
+					}
+				}
+			}
+		case "perfStart", "perfStop":
+			// Toggle metrics collection. Errors are reported back in the
+			// perfState ack (not discarded) so the tab stays in sync with
+			// the authoritative backend state.
+			var perr error
+			if cm.T == "perfStart" {
+				perr = target.PerfStart(context.Background())
+			} else {
+				perr = target.PerfStop(context.Background())
+			}
+			presp := map[string]any{"t": "perfState", "recording": target.PerfRecording()}
+			if perr != nil {
+				presp["error"] = perr.Error()
+				s.log.Printf("browse cdp: %s for %s: %v", cm.T, stateKey, perr)
+			}
+			if pb, merr := json.Marshal(presp); merr == nil {
+				select {
+				case send <- wsOut{data: pb}:
+				default:
+				}
 			}
 		default:
 			s.log.Printf("browse cdp: unknown client t=%q", cm.T)

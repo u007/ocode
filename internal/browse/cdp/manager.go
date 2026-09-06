@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,17 @@ type NavEvent struct {
 	URL      string
 	Status   int
 	Error    string
+}
+
+// TitleEvent is a cdp-local page-title update (maps to browse.TitleEvent).
+// Titles change without navigation (JS document.title), so they travel on a
+// dedicated channel, never inside NavEvent. URL is the page URL from the same
+// targetInfo payload — the SPA applies the title only when it matches the
+// surface's current URL (stale-event guard).
+type TitleEvent struct {
+	StateKey string
+	Title    string
+	URL      string
 }
 
 // ConsoleEvent is delivered to FrameSink.Console.
@@ -83,6 +95,7 @@ type ManagerOptions struct {
 	Supervisor  *tool.ProcessSupervisor
 	Dialer      *net.Dialer
 	EmitNav     func(NavEvent)
+	EmitTitle   func(TitleEvent)
 	Log         *log.Logger
 }
 
@@ -108,6 +121,13 @@ type Manager struct {
 
 	targets map[string]*Target
 
+	// pending maps a freshly created Chrome targetID to its stateKey between
+	// Target.attachToTarget and the m.targets[stateKey] insert at the end of
+	// Attach. Browser-level events (attachedToTarget, targetInfoChanged) can
+	// arrive in that window; without this map their titles would be dropped.
+	// Guarded by mu. Entries are removed on insert, Revoke, and target crash.
+	pending map[string]string
+
 	// for "log once" on chrome not found
 	chromeNotFoundLogged bool
 
@@ -124,6 +144,7 @@ func NewManager(opts ManagerOptions) *Manager {
 	m := &Manager{
 		opts:    opts,
 		targets: make(map[string]*Target),
+		pending: make(map[string]string),
 	}
 	m.launchFn = m.defaultLaunch
 	return m
@@ -250,6 +271,7 @@ func (m *Manager) handleChromeExit() {
 	// We keep map entries but mark them as crashed so next Attach replaces?
 	// Simpler: clear map so next Attach creates new.
 	m.targets = make(map[string]*Target)
+	m.pending = make(map[string]string)
 	// Cancel browser subs
 	for _, fn := range m.browserCancel {
 		fn()
@@ -265,9 +287,11 @@ func (m *Manager) startBrowserHandlersLocked() {
 	conn := m.conn
 	ch1, cancel1 := conn.Subscribe("", "Target.targetCrashed")
 	ch2, cancel2 := conn.Subscribe("", "Target.attachedToTarget")
-	m.browserCancel = append(m.browserCancel, cancel1, cancel2)
+	ch3, cancel3 := conn.Subscribe("", "Target.targetInfoChanged")
+	m.browserCancel = append(m.browserCancel, cancel1, cancel2, cancel3)
 	go m.handleTargetCrashed(ch1, conn)
 	go m.handleAttachedToTarget(ch2, conn)
+	go m.handleTargetInfoChanged(ch3)
 	go func(c *Conn) {
 		<-c.Done()
 		m.handleChromeExit()
@@ -302,6 +326,7 @@ func (m *Manager) handleTargetCrashed(ch <-chan json.RawMessage, conn *Conn) {
 			}
 			m.mu.Lock()
 			delete(m.targets, key)
+			delete(m.pending, ev.TargetID)
 			m.mu.Unlock()
 			_ = conn.Call(context.Background(), "", "Target.closeTarget", map[string]string{"targetId": ev.TargetID}, nil)
 			_ = conn.Call(context.Background(), "", "Target.disposeBrowserContext", map[string]string{"browserContextId": matched.browserContextID}, nil)
@@ -314,12 +339,64 @@ func (m *Manager) handleAttachedToTarget(ch <-chan json.RawMessage, conn *Conn) 
 		var ev struct {
 			SessionID          string `json:"sessionId"`
 			WaitingForDebugger bool   `json:"waitingForDebugger"`
+			TargetInfo         struct {
+				TargetID string `json:"targetId"`
+				Type     string `json:"type"`
+				Title    string `json:"title"`
+				URL      string `json:"url"`
+			} `json:"targetInfo"`
 		}
 		_ = json.Unmarshal(raw, &ev)
 		if ev.WaitingForDebugger {
 			_ = conn.Call(context.Background(), ev.SessionID, "Runtime.runIfWaitingForDebugger", nil, nil)
 		}
+		m.emitTargetTitle(ev.TargetInfo.TargetID, ev.TargetInfo.Type, ev.TargetInfo.Title, ev.TargetInfo.URL)
 	}
+}
+
+// handleTargetInfoChanged forwards page-title updates (including JS
+// document.title changes, which fire no navigation event) to the owning
+// stateKey. Child targets (iframes — type "iframe") are ignored so embedded
+// frames can never overwrite the tab title.
+func (m *Manager) handleTargetInfoChanged(ch <-chan json.RawMessage) {
+	for raw := range ch {
+		var ev struct {
+			TargetInfo struct {
+				TargetID string `json:"targetId"`
+				Type     string `json:"type"`
+				Title    string `json:"title"`
+				URL      string `json:"url"`
+			} `json:"targetInfo"`
+		}
+		_ = json.Unmarshal(raw, &ev)
+		m.emitTargetTitle(ev.TargetInfo.TargetID, ev.TargetInfo.Type, ev.TargetInfo.Title, ev.TargetInfo.URL)
+	}
+}
+
+// emitTargetTitle resolves a Chrome targetID to its stateKey (registered
+// targets first, then the Attach pending window) and invokes EmitTitle
+// outside the manager lock. Unknown targetIDs (stale events after Revoke)
+// and non-page types are dropped silently.
+func (m *Manager) emitTargetTitle(targetID, targetType, title, url string) {
+	if targetID == "" || targetType != "page" {
+		return
+	}
+	m.mu.Lock()
+	var key string
+	for k, t := range m.targets {
+		if t.targetID == targetID {
+			key = k
+			break
+		}
+	}
+	if key == "" {
+		key = m.pending[targetID]
+	}
+	m.mu.Unlock()
+	if key == "" {
+		return
+	}
+	m.emitTitle(TitleEvent{StateKey: key, Title: title, URL: url})
 }
 
 // Attach lazily launches Chrome, creates context+target for the key if absent,
@@ -407,6 +484,12 @@ func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (
 	}
 	sessionID := attRes.SessionID
 
+	// Register the targetID early: attachedToTarget/targetInfoChanged can
+	// arrive before the m.targets insert below. Removed on insert/Revoke.
+	m.mu.Lock()
+	m.pending[targetID] = stateKey
+	m.mu.Unlock()
+
 	// 4. Enable domains and auto-attach
 	_ = conn.Call(ctx, sessionID, "Target.setAutoAttach", map[string]any{"autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true}, nil)
 	_ = conn.Call(ctx, sessionID, "Page.enable", nil, nil)
@@ -425,6 +508,10 @@ func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (
 		sink:             sink,
 		conn:             conn,
 	}
+	// The Performance domain was enabled above, so recording starts on.
+	// PerfStop/PerfStart toggle it per socket command; the flag is the
+	// authoritative state re-sent to each newly attached socket.
+	t.perfRecording = true
 	// Setup per-target event handlers + screencast
 	t.startHandlers()
 	t.startFileChooser()
@@ -432,6 +519,7 @@ func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (
 
 	m.mu.Lock()
 	m.targets[stateKey] = t
+	delete(m.pending, targetID)
 	// Cancel idle timer if any
 	if m.idleTimer != nil {
 		m.idleTimer.Stop()
@@ -439,7 +527,37 @@ func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (
 	}
 	m.mu.Unlock()
 
+	// Best-effort initial title: about:blank has none, but a restored tab may
+	// navigate immediately after Attach; the query covers titles set before
+	// the first targetInfoChanged arrives.
+	m.emitInitialTitle(conn, targetID, stateKey)
+
 	return t, nil
+}
+
+// emitInitialTitle queries Target.getTargetInfo once and forwards a page
+// title when present. Failures are silent — the event stream is the live
+// source of truth.
+func (m *Manager) emitInitialTitle(conn *Conn, targetID, stateKey string) {
+	if conn == nil || targetID == "" {
+		return
+	}
+	var res struct {
+		TargetInfo struct {
+			Type  string `json:"type"`
+			Title string `json:"title"`
+			URL   string `json:"url"`
+		} `json:"targetInfo"`
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := conn.Call(ctx, "", "Target.getTargetInfo", map[string]string{"targetId": targetID}, &res); err != nil {
+		return
+	}
+	if res.TargetInfo.Type != "page" || res.TargetInfo.Title == "" {
+		return
+	}
+	m.emitTitle(TitleEvent{StateKey: stateKey, Title: res.TargetInfo.Title, URL: res.TargetInfo.URL})
 }
 
 // ErrNoTarget is returned by SetFiles when stateKey has no attached target.
@@ -465,6 +583,7 @@ func (m *Manager) Revoke(stateKey string) {
 		return
 	}
 	delete(m.targets, stateKey)
+	delete(m.pending, t.targetID)
 	needIdle := len(m.targets) == 0 && m.opts.IdleTimeout > 0
 	conn := m.conn
 	m.mu.Unlock()
@@ -559,6 +678,86 @@ func (m *Manager) emitNav(ev NavEvent) {
 	if m.opts.EmitNav != nil {
 		m.opts.EmitNav(ev)
 	}
+}
+
+func (m *Manager) emitTitle(ev TitleEvent) {
+	if m.opts.EmitTitle != nil {
+		m.opts.EmitTitle(ev)
+	}
+}
+
+// EmitTitleForTest fires the configured EmitTitle closure exactly as
+// emitTargetTitle would (payload passthrough, no lock held by the caller).
+func (m *Manager) EmitTitleForTest(ev TitleEvent) { m.emitTitle(ev) }
+
+// TargetKeys lists the stateKeys with a live Chrome target.
+func (m *Manager) TargetKeys() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keys := make([]string, 0, len(m.targets))
+	for k := range m.targets {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// TargetPerf snapshots every target's Performance metrics, keyed by stateKey.
+// JSHeapUsedSize backs the Processes tab memory column; TaskDuration is
+// available for CPU attribution. Targets without samples yet are absent.
+func (m *Manager) TargetPerf() map[string]map[string]float64 {
+	m.mu.Lock()
+	targets := make(map[string]*Target, len(m.targets))
+	for k, t := range m.targets {
+		targets[k] = t
+	}
+	m.mu.Unlock()
+	out := make(map[string]map[string]float64, len(targets))
+	for k, t := range targets {
+		out[k] = t.PerfSnapshot()
+	}
+	return out
+}
+
+// RendererProcess is one Chrome renderer from SystemInfo.getProcessInfo.
+type RendererProcess struct {
+	PID     int32
+	CPUTime float64 // cumulative seconds of CPU time
+	Title   string  // page title/URL as reported by Chrome
+}
+
+// RendererProcesses queries the browser-level SystemInfo.getProcessInfo and
+// returns the renderer-type processes. Best-effort: older Chrome builds may
+// lack the method (nil error, empty result — callers fall back to JS heap).
+func (m *Manager) RendererProcesses(ctx context.Context) ([]RendererProcess, error) {
+	m.mu.Lock()
+	conn := m.conn
+	m.mu.Unlock()
+	if conn == nil {
+		return nil, nil
+	}
+	var res struct {
+		ProcessInfo []struct {
+			ID      string  `json:"id"`
+			Type    string  `json:"type"`
+			Title   string  `json:"title"`
+			CPUTime float64 `json:"cpuTime"`
+		} `json:"processInfo"`
+	}
+	if err := conn.Call(ctx, "", "SystemInfo.getProcessInfo", nil, &res); err != nil {
+		return nil, nil
+	}
+	var out []RendererProcess
+	for _, pi := range res.ProcessInfo {
+		if pi.Type != "renderer" {
+			continue
+		}
+		var pid int32
+		if n, err := strconv.Atoi(pi.ID); err == nil {
+			pid = int32(n)
+		}
+		out = append(out, RendererProcess{PID: pid, CPUTime: pi.CPUTime, Title: pi.Title})
+	}
+	return out, nil
 }
 
 // EmitNavForTest fires the configured EmitNav closure exactly as emitNav

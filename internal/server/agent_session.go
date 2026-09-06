@@ -642,7 +642,7 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		// completed rounds alongside the error, and those were already streamed
 		// to the browser — discarding them here is what made a failed turn
 		// reopen as nothing but the user's own message.
-		h.commitPartialTranscript(sessionID, as, append(as.messages, resp...), headless)
+		h.commitPartialTranscript(sessionID, as, as.messages, resp, headless)
 		h.publishTurnError(sessionID, err, "")
 		if headless {
 			h.broadcastEvent(SSEEvent{
@@ -657,7 +657,7 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 	// successful LLM call (isCancelled check inside Step). Treat that as a
 	// cancellation so the caller stops draining queued messages.
 	if as.agent.Cancelled() {
-		h.commitPartialTranscript(sessionID, as, append(as.messages, resp...), headless)
+		h.commitPartialTranscript(sessionID, as, as.messages, resp, headless)
 		cancelErr := fmt.Errorf("cancelled")
 		h.publishTurnError(sessionID, cancelErr, "")
 		if headless {
@@ -679,7 +679,13 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		}
 	}
 
-	_ = h.saveSession(sessionID, "", as.messages, nil)
+	// Persist the turn durably before the UI broadcast. baseLen is the
+	// turn's base transcript (everything through the user message); the
+	// reconcile inside persistTurnTranscript rebases this turn's response
+	// on top of rows another writer appended concurrently, and on true
+	// base divergence re-syncs memory to disk (logged) so the session
+	// stays writable instead of every later save conflicting forever.
+	h.persistTurnTranscript(sessionID, as, len(messages), "turn-end")
 
 	// Headless-only: generate a title for an untitled session after its first
 	// turn (mirrors the TUI; no-op when an RC bridge is attached).
@@ -704,24 +710,69 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 	return reply.String(), nil
 }
 
-// commitPartialTranscript stores, persists and mirrors the transcript of a turn
-// that failed part-way through. Every message in msgs was already streamed to
-// the browser (and every tool result in it already ran), so a failed final LLM
-// round must not erase it: without this, reopening the session shows nothing
-// but the user's own message. mirror is false for bridged sessions, which
-// broadcast their own frames.
-func (h *Handler) commitPartialTranscript(sessionID string, as *agentSession, msgs []agent.Message, mirror bool) {
-	if len(msgs) == 0 {
+// commitPartialTranscript stores, persists and mirrors the transcript of a
+// turn that failed part-way through. Every message in base+resp was already
+// streamed to the browser (and every tool result in it already ran), so a
+// failed final LLM round must not erase it: without this, reopening the
+// session shows nothing but the user's own message. mirror is false for
+// bridged sessions, which broadcast their own frames.
+// persistTurnTranscript durably persists the session transcript after a
+// turn (or partial turn), with one bounded concurrent-writer reconcile: on
+// a save conflict, the raw disk transcript is reloaded and merged (stored
+// rows kept, the caller's not-yet-stored suffix appended after them — see
+// session.ReconcileAppendForDir), so a racing writer's rows and this
+// session's response both survive instead of the response staying
+// memory-only with every later save conflicting. If the base itself
+// diverged (two writers produced different content for the same position),
+// no safe merge exists: memory is re-synced to the stored transcript and
+// the dropped in-memory suffix is logged explicitly, so the session stays
+// writable and the loss is visible rather than silently permanent.
+func (h *Handler) persistTurnTranscript(sessionID string, as *agentSession, baseLen int, label string) {
+	err := h.reconcileTurnSave(sessionID, as, baseLen)
+	if err == nil {
 		return
 	}
-	// Copy: callers build msgs with append() over the session's own slice, so
-	// storing it directly would leave two slice headers sharing one backing
-	// array — a later append through either one (an injection flush, a compact
-	// result) would write into the other's elements.
-	as.messages = append([]agent.Message(nil), msgs...)
-	if err := h.saveSession(sessionID, "", as.messages, nil); err != nil {
-		log.Printf("serve error: persisting partial transcript for session %s: %v", sessionID, err)
+	if session.IsConflictErr(err) {
+		// Hard divergence: converge memory to the stored transcript so the
+		// NEXT save is guaranteed consistent instead of conflicting
+		// forever. Broadcast ordering (below) uses the converged view, so
+		// the UI mirrors what is actually durable.
+		s, loadErr := h.loadSession(sessionID)
+		if loadErr != nil {
+			log.Printf("serve: %s save for %s diverged and disk reload failed: %v (save err: %v)", label, sessionID, loadErr, err)
+			return
+		}
+		log.Printf("serve: %s save for %s diverged from a concurrent writer; re-synced to disk (stored %d msgs, in-memory %d msgs, dropped suffix %d msgs)", label, sessionID, len(s.Messages), len(as.messages), max(0, len(as.messages)-len(s.Messages)))
+		as.messages = s.Messages
+		return
 	}
+	log.Printf("serve: %s save for %s: %v", label, sessionID, err)
+}
+
+// reconcileTurnSave resolves the session's owning project exactly like
+// saveSession, then persists with the bounded concurrent-writer rebase.
+func (h *Handler) reconcileTurnSave(sessionID string, as *agentSession, baseLen int) error {
+	if e, ok := h.sessions.SnapshotEntry(sessionID); ok && e.ProjectRoot != "" {
+		return session.ReconcileAppendForDir(e.ProjectRoot, sessionID, "", as.messages, baseLen, nil)
+	}
+	return session.ReconcileAppend(sessionID, "", as.messages, baseLen, nil)
+}
+
+// commitPartialTranscript keeps whatever the turn produced before it
+// failed/was cancelled: it persists base+resp synchronously (with the
+// concurrent-writer reconcile of persistTurnTranscript) before the error
+// frame goes out, then mirrors the transcript.
+func (h *Handler) commitPartialTranscript(sessionID string, as *agentSession, base []agent.Message, resp []agent.Message, mirror bool) {
+	if len(base) == 0 && len(resp) == 0 {
+		return
+	}
+	// Copy: callers build base/resp over the session's own slice, so
+	// storing the append result directly would leave two slice headers
+	// sharing one backing array — a later append through either one (an
+	// injection flush, a compact result) would write into the other's
+	// elements.
+	as.messages = append(append([]agent.Message(nil), base...), resp...)
+	h.persistTurnTranscript(sessionID, as, len(base), "partial-transcript")
 	if mirror {
 		h.broadcastEvent(SSEEvent{
 			SessionID: sessionID,
@@ -1020,12 +1071,12 @@ func (h *Handler) bootstrapEntryAgent(entry *sessionEntry, model string) (*agent
 // the message up at turn time (runTurn's append); the registry's pending
 // count keeps the two in sync.
 func (h *Handler) persistUserMessage(entry *sessionEntry, content string) error {
-	var msgs []agent.Message
-	if s, err := session.LoadForDir(entry.ProjectRoot, entry.SessionID); err == nil {
-		msgs = s.Messages
-	}
-	msgs = append(msgs, agent.Message{Role: "user", Content: content})
-	return session.SaveForDir(entry.ProjectRoot, entry.SessionID, "", msgs, nil)
+	// AppendUserMessageForDir loads the current disk transcript, appends the
+	// user message, and retries (bounded) when another writer appended
+	// concurrently — the exact race that used to surface as "conflicting
+	// message at seq N (concurrent writers diverged)" and drop the user's
+	// message. See session.AppendUserMessageForDir.
+	return session.AppendUserMessageForDir(entry.ProjectRoot, entry.SessionID, content)
 }
 
 // tryEnqueueInjection hands content to sessionID's agent for mid-turn
@@ -1104,7 +1155,7 @@ func (h *Handler) applyCompactResult(sessionID string, r agent.CompactResult) {
 	compacted = append(compacted, as.messages[r.ReplaceTo:]...)
 	as.messages = compacted
 
-	if err := h.saveSession(sessionID, "", as.messages, nil); err != nil {
+	if err := h.replaceSession(sessionID, "", as.messages, nil); err != nil {
 		log.Printf("serve: persisting compacted transcript for session %s: %v", sessionID, err)
 	}
 	if h.RCBridge() == nil {
@@ -1126,6 +1177,22 @@ func (h *Handler) saveSession(sessionID, title string, msgs []agent.Message, met
 		return session.SaveForDir(e.ProjectRoot, sessionID, title, msgs, metadata)
 	}
 	return session.Save(sessionID, title, msgs, metadata)
+}
+
+// replaceSession persists an authoritative transcript replacement into the
+// session's owning project's storage dir. Compaction must go through this
+// path: ordinary saves can no longer shrink the transcript — a shorter
+// snapshot conflicts (session.ErrTranscriptConflict) instead of silently
+// deleting rows another writer appended — while ReplaceForDir rewrites the
+// stored history to exactly msgs and bumps history_gen so queued
+// pre-compaction live snapshots drop instead of resurrecting replaced
+// history. Falls back to the process default only when the registry entry
+// is unknown.
+func (h *Handler) replaceSession(sessionID, title string, msgs []agent.Message, metadata map[string]any) error {
+	if e, ok := h.sessions.SnapshotEntry(sessionID); ok && e.ProjectRoot != "" {
+		return session.ReplaceForDir(e.ProjectRoot, sessionID, title, msgs, metadata)
+	}
+	return session.Replace(sessionID, title, msgs, metadata)
 }
 
 // saveSessionAsync enqueues a live transcript snapshot for background

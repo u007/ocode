@@ -85,7 +85,7 @@ export default function TerminalPanel({
   useEffect(() => { findOpenRef.current = findOpen; }, [findOpen]);
   useEffect(() => { findQueryRef.current = findQuery; }, [findQuery]);
 
-  const { markAlerted, openTerminal, closeTerminal } = useTerminalState();
+  const { markAlerted, setOscTitle, openTerminal, closeTerminal } = useTerminalState();
 
   useEffect(() => {
     activeRef.current = active;
@@ -513,6 +513,11 @@ export default function TerminalPanel({
       playAlertSound();
     };
     const bellDisp = term.onBell(onAttention);
+    // OSC 0/2 window title from the running program (claude code, the ocode
+    // TUI, shells with a title-setting prompt) becomes the tab name unless
+    // the user renamed the tab. Titles replayed from restored scrollback are
+    // fine to apply: they are the program's last known title.
+    const titleDisp = term.onTitleChange((title) => setOscTitle(projectPath, id, title));
     const osc9Disp = term.parser.registerOscHandler(9, () => {
       onAttention();
       return true;
@@ -686,6 +691,7 @@ export default function TerminalPanel({
       observer.disconnect();
       dataSub.dispose();
       bellDisp.dispose();
+      titleDisp.dispose();
       osc9Disp.dispose();
       osc777Disp.dispose();
       osc99Disp.dispose();
@@ -789,7 +795,18 @@ export default function TerminalPanel({
   return (
     <div
       ref={containerRef}
-      className="relative h-full w-full bg-card p-2"
+      // This div is xterm's fit parent, so it must stay padding-free:
+      // FitAddon subtracts only the .xterm element's own padding from the
+      // parent's computed (border-box) height, so a `p-2` here made the fitted
+      // grid up to a row taller than the visible content box — clipped by the
+      // app-level overflow-hidden with no way to reach it. The 8px padding
+      // therefore lives on .xterm itself ([&_.xterm]:p-2, same visual ring,
+      // same color: --card equals the xterm background #18181b), which makes
+      // the fit exact. overflow-y-auto is the requested "vertical scroll:
+      // auto": a scrollbar appears only when content genuinely overflows
+      // (font resize before refit, tiny windows where even one row doesn't
+      // fit). Horizontal overflow belongs to xterm, hence overflow-x-hidden.
+      className="relative h-full w-full bg-card overflow-y-auto overflow-x-hidden [&_.xterm]:p-2"
       onContextMenu={handleContextMenu}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}

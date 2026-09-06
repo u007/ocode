@@ -269,7 +269,7 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		// them and even the opening user message stays dependent on the
 		// asynchronous live write. commitPartialTranscript persists
 		// synchronously before the error frame goes out.
-		h.commitPartialTranscript(sessionID, as, append(as.messages, resp...), h.RCBridge() == nil)
+		h.commitPartialTranscript(sessionID, as, as.messages, resp, h.RCBridge() == nil)
 		sendSSE(w, flusher, "error", map[string]string{"error": err.Error()})
 		return
 	}

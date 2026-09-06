@@ -129,3 +129,86 @@ describe("normalizeBrowseURL", () => {
     expect(browserStore.state.byKey[KEY].history).toEqual(["http://localhost:3000", "https://example.com"]);
   });
 });
+
+describe("page titles (tab strip)", () => {
+  it("setPageTitle applies matching titles and drops stale ones", () => {
+    browserActions.open(KEY);
+    browserActions.navigate(KEY, "https://a.com/");
+    browserActions.setPageTitle(KEY, "A Site", "https://a.com/");
+    expect(browserStore.state.byKey[KEY].pageTitle).toBe("A Site");
+    // Stale: URL from before a navigation.
+    browserActions.setPageTitle(KEY, "Stale", "https://old.com/");
+    expect(browserStore.state.byKey[KEY].pageTitle).toBe("A Site");
+  });
+
+  it("an empty title clears back to fallback instead of sticking", () => {
+    browserActions.open(KEY);
+    browserActions.navigate(KEY, "https://a.com/");
+    browserActions.setPageTitle(KEY, "A Site", "https://a.com/");
+    expect(browserStore.state.byKey[KEY].pageTitle).toBe("A Site");
+    // Page removed its <title>: clear (strip falls back to "New tab").
+    browserActions.setPageTitle(KEY, "   ", "https://a.com/");
+    expect(browserStore.state.byKey[KEY].pageTitle).toBeNull();
+    // A stale clear for another URL must not wipe the live title.
+    browserActions.setPageTitle(KEY, "A Site", "https://a.com/");
+    browserActions.setPageTitle(KEY, "", "https://old.com/");
+    expect(browserStore.state.byKey[KEY].pageTitle).toBe("A Site");
+  });
+
+  it("navigate clears a stale page title for the new document", () => {
+    browserActions.open(KEY);
+    browserActions.navigate(KEY, "https://a.com/");
+    browserActions.setPageTitle(KEY, "A Site", "https://a.com/");
+    browserActions.navigate(KEY, "https://b.com/");
+    expect(browserStore.state.byKey[KEY].pageTitle).toBeNull();
+  });
+
+  it("applyNavEvent keeps the title on same-URL updates, drops it on new URLs", () => {
+    browserActions.open(KEY, "https://a.com/");
+    browserActions.setPageTitle(KEY, "A Site", "https://a.com/");
+    browserActions.applyNavEvent(KEY, { state_key: KEY, url: "https://a.com/", status: 200, mode: "chrome" });
+    expect(browserStore.state.byKey[KEY].pageTitle).toBe("A Site");
+    browserActions.applyNavEvent(KEY, { state_key: KEY, url: "https://b.com/", status: 200, mode: "chrome" });
+    expect(browserStore.state.byKey[KEY].pageTitle).toBeNull();
+  });
+});
+
+describe("scroll offsets", () => {
+  it("setScrollY records per-URL offsets and rejects garbage", () => {
+    browserActions.open(KEY);
+    browserActions.navigate(KEY, "https://a.com/");
+    browserActions.setScrollY(KEY, -5);
+    browserActions.setScrollY(KEY, NaN);
+    expect(browserStore.state.byKey[KEY].scrollByUrl).toEqual({});
+    browserActions.setScrollY(KEY, 321);
+    expect(browserStore.state.byKey[KEY].scrollY).toBe(321);
+    expect(browserStore.state.byKey[KEY].scrollByUrl["https://a.com/"]).toBe(321);
+  });
+
+  it("back/forward preload the stored offset for the target URL", () => {
+    browserActions.open(KEY);
+    browserActions.navigate(KEY, "https://a.com/");
+    browserActions.setScrollY(KEY, 100);
+    browserActions.navigate(KEY, "https://b.com/");
+    expect(browserStore.state.byKey[KEY].scrollY).toBe(0);
+    browserActions.back(KEY);
+    expect(browserStore.state.byKey[KEY].scrollY).toBe(100);
+  });
+
+  it("restoreSurface rehydrates a persisted snapshot", () => {
+    browserActions.restoreSurface(KEY, {
+      url: "https://b.com/",
+      history: ["https://a.com/", "https://b.com/"],
+      historyIndex: 1,
+      userMode: null,
+      pageTitle: "B Site",
+      scrollByUrl: { "https://b.com/": 55 },
+    });
+    const s = browserStore.state.byKey[KEY];
+    expect(s.url).toBe("https://b.com/");
+    expect(s.historyIndex).toBe(1);
+    expect(s.pageTitle).toBe("B Site");
+    expect(s.scrollY).toBe(55);
+    expect(s.loading).toBe(false);
+  });
+});

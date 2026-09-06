@@ -918,11 +918,10 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 		m.input.SetValue(input)
 		m.renderTranscript()
 		m.viewport.GotoBottom()
-		if len(m.messages) == 0 {
-			session.Save(m.sessionID, "", nil, m.sessionSidebarMetadata()) //nolint:errcheck
-		} else {
-			m.saveSession()
-		}
+		// Rewind (partial or to-empty) is an explicit transcript truncation:
+		// it must go through the replace path — an ordinary save would now
+		// conflict against the longer stored history instead of truncating.
+		m.replaceSession()
 		return m, nil
 	}
 	if kind == "theme" {

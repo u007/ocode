@@ -10,6 +10,12 @@ export type CdpClientMessage =
   | { t: "back" }
   | { t: "forward" }
   | { t: "reload" }
+  | { t: "perfStart" }
+  | { t: "perfStop" }
+  /** Restore a persisted vertical scroll offset (CSS px). Best-effort. */
+  | { t: "scrollTo"; y: number }
+  /** Ask the server for the page's live scroll offset (replies {t:"scroll"}). */
+  | { t: "getScroll" }
   | { t: "resize"; w: number; h: number; dpr: number }
   /** User dismissed the file picker opened for a {t:"fileChooser"}. */
   | { t: "fileChooserCancel" }
@@ -65,6 +71,12 @@ export type CdpServerMessage =
       error?: string;
     }
   | { t: "performance"; metrics: Record<string, number> }
+  /** Reply to a client "getScroll" command. */
+  | { t: "scroll"; y: number }
+  /** Authoritative perf-recording state: sent on every socket attach and as
+   *  the ack to perfStart/perfStop. `error` carries a failed toggle's reason
+   *  while `recording` stays the authoritative backend value. */
+  | { t: "perfState"; recording: boolean; error?: string }
   | { t: "error"; message: string };
 
 /** Decoded screencast frame header: CSS-pixel dimensions of the JPEG body. */

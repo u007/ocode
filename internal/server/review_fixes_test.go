@@ -64,7 +64,7 @@ func TestCommitPartialTranscriptPersistsSynchronously(t *testing.T) {
 	as := &agentSession{messages: []agent.Message{{Role: "user", Content: "hi"}}}
 	partial := append(append([]agent.Message(nil), as.messages...),
 		agent.Message{Role: "assistant", Content: "partial reply"})
-	h.commitPartialTranscript(id, as, partial, false)
+	h.commitPartialTranscript(id, as, partial, nil, false)
 
 	if len(as.messages) != 2 || as.messages[1].Content != "partial reply" {
 		t.Fatalf("in-memory transcript not updated: %+v", as.messages)

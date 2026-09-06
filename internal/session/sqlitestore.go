@@ -7,6 +7,7 @@ package session
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,8 +15,45 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
-	_ "modernc.org/sqlite"
+	sqlite "modernc.org/sqlite"
 )
+
+// ErrTranscriptConflict reports that a synchronous save's in-memory
+// transcript disagrees with the stored one: either the overlap check found
+// differing content at a shared sequence number, or the snapshot is shorter
+// than the stored transcript (another writer appended messages this
+// process has not seen). Callers should reload the session from disk and
+// rebuild their snapshot — retrying the same snapshot verbatim keeps
+// failing. Only the explicit replace path (Replace/ReplaceForDir:
+// compaction, truncation, transcript rewind) is allowed to shrink or
+// rewrite overlapping history, by design.
+var ErrTranscriptConflict = errors.New("session: transcript conflict (concurrent writers diverged)")
+
+// isConflictErr reports whether err is (or wraps) ErrTranscriptConflict.
+func isConflictErr(err error) bool {
+	return errors.Is(err, ErrTranscriptConflict)
+}
+
+// IsConflictErr reports whether err is (or wraps) ErrTranscriptConflict —
+// the typed signal that a synchronous save raced a concurrent writer and
+// the caller must reload from disk (see ReconcileAppendForDir for the
+// bounded rebase helper).
+func IsConflictErr(err error) bool {
+	return isConflictErr(err)
+}
+
+// isConstraintErr reports a SQLite constraint violation (primary key /
+// unique), the backstop that surfaces a lost append race as an error
+// instead of silently discarding a message. Extended result codes keep the
+// primary class in the low byte: SQLITE_CONSTRAINT = 19, and the
+// primary-key/unique violations here arrive as 1555/2067.
+func isConstraintErr(err error) bool {
+	var e *sqlite.Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	return e.Code()&0xff == 19
+}
 
 // sqliteSessionPath returns the .sqlite file path for a session id.
 func sqliteSessionPath(dir, id string) string {
@@ -29,13 +67,20 @@ func indexDBPath(dir string) string {
 	return filepath.Join(dir, "index.sqlite")
 }
 
-// openDB opens a sqlite file with WAL journaling and a busy timeout, so
-// concurrent access from multiple ocode processes (TUI, desktop, web
-// server) against the same session or index file waits briefly instead of
-// failing with "database is locked". It does not create any schema —
-// callers reading an existing file that don't want to implicitly create
-// empty tables for a missing/corrupt file should use this directly;
-// openSessionDB/openIndexDB below wrap it with CREATE TABLE IF NOT EXISTS.
+// openDB opens a sqlite file with WAL journaling, immediate write
+// transactions, and a busy timeout, so concurrent access from multiple
+// ocode processes (TUI, desktop, web server) against the same session or
+// index file serializes cleanly: _txlock=immediate makes every BeginTx
+// take its write lock at BEGIN (see the driver's tx.go), so the classic
+// deferred-upgrade deadlock — two writers holding SHARED locks and both
+// trying to upgrade, which busy_timeout does not cover — cannot arise. A
+// second writer's BEGIN IMMEDIATE then blocks up to busy_timeout instead
+// of failing fast, and the overlap check in appendSqliteSessionOnce
+// catches genuine divergence after the wait. It does not create any
+// schema — callers reading an existing file that don't want to implicitly
+// create empty tables for a missing/corrupt file should use this
+// directly; openSessionDB/openIndexDB below wrap it with CREATE TABLE IF
+// NOT EXISTS.
 func openDB(path string) (*sql.DB, error) {
 	// Escape URI-significant characters in the filesystem path so a dir
 	// containing "?" or "#" does not break the query string. Session ids
@@ -44,7 +89,7 @@ func openDB(path string) (*sql.DB, error) {
 	escaped := strings.ReplaceAll(path, "%", "%25")
 	escaped = strings.ReplaceAll(escaped, "?", "%3F")
 	escaped = strings.ReplaceAll(escaped, "#", "%23")
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", escaped)
+	dsn := fmt.Sprintf("file:%s?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", escaped)
 	return sql.Open("sqlite", dsn)
 }
 
@@ -235,8 +280,9 @@ func writeSqliteSessionFull(dir string, s Session) error {
 // live.go: the message count is read inside the write transaction, and a
 // snapshot that adds no new messages is a complete no-op (messages, title,
 // metadata, and updated_at are all left untouched) — a live write must never
-// shrink the transcript (compaction goes through the synchronous path with
-// live=false), replace same-length content, or regress a newer title/metadata
+// shrink the transcript (compaction goes through the synchronous replace
+// path — Replace/ReplaceForDir), replace same-length content, or regress a
+// newer title/metadata
 // with an older queued snapshot. Title/metadata ride along only with
 // genuinely new messages; the turn-end synchronous save stays authoritative
 // for them. The function reports whether anything changed so callers can skip
@@ -249,17 +295,19 @@ func writeSqliteSessionFull(dir string, s Session) error {
 // Synchronous shrinks bump history_gen in the same transaction as the
 // replacement, so the check inside this transaction closes the race in both
 // orders. liveGen is ignored when live is false.
-// appendSqliteSession is the retrying entry point: concurrent writers on one
-// session file can hit SQLITE_BUSY when both hold SHARED locks and one tries
-// to upgrade (busy_timeout does not cover that upgrade deadlock — SQLite
-// fails it immediately), so a busy failure retries the whole transaction with
-// backoff instead of surfacing a transient lock as a write error. Conflict
-// errors (diverged overlap) are NOT retried — retrying those would spin.
-func appendSqliteSession(dir, id, title string, messages []agent.Message, metadata map[string]any, live bool, liveGen int64) (bool, error) {
+// appendSqliteSession is the retrying entry point: transient SQLite lock
+// contention (SQLITE_BUSY) retries the whole transaction with backoff.
+// With the _txlock=immediate DSN in openDB, a transaction takes its write
+// lock at BEGIN, so the deferred-upgrade deadlock two writers used to hit
+// (both holding SHARED and upgrading — SQLite fails that immediately, and
+// busy_timeout does not cover it) can no longer arise; BUSY now only means
+// genuine contention. Conflict errors (diverged overlap, stale shorter
+// snapshot) are NOT retried — retrying those would spin.
+func appendSqliteSession(dir, id, title string, messages []agent.Message, metadata map[string]any, live bool, liveGen int64, replace bool) (bool, error) {
 	var changed bool
 	var err error
 	for attempt := 0; attempt < 8; attempt++ {
-		changed, err = appendSqliteSessionOnce(dir, id, title, messages, metadata, live, liveGen)
+		changed, err = appendSqliteSessionOnce(dir, id, title, messages, metadata, live, liveGen, replace)
 		if err == nil || !isBusyErr(err) {
 			return changed, err
 		}
@@ -277,7 +325,7 @@ func isBusyErr(err error) bool {
 	return strings.Contains(s, "database is locked") || strings.Contains(s, "database table is locked")
 }
 
-func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, metadata map[string]any, live bool, liveGen int64) (bool, error) {
+func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, metadata map[string]any, live bool, liveGen int64, replace bool) (bool, error) {
 	path := sqliteSessionPath(dir, id)
 	db, err := openSessionDB(path)
 	if err != nil {
@@ -342,41 +390,32 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 
 	newGen := existingGen
 	shrinking := existingCount > len(messages)
-	if shrinking {
-		// Synchronous shrink only: live writes with fewer messages than
-		// stored returned early above, so reaching here with a shorter
-		// snapshot means an authoritative compaction. Bump the generation
-		// in this same transaction so any queued pre-compaction live
-		// snapshot mismatches and drops instead of resurrecting history.
-		newGen++
-	}
-
-	if _, err := tx.Exec(
-		`UPDATE meta SET title = ?, title_generated = ?, updated_at = ?, metadata_json = ?, history_gen = ? WHERE id = ?`,
-		resolvedTitle, titleGenerated, time.Now(), metaJSON, newGen, id,
-	); err != nil {
-		return false, fmt.Errorf("session: update meta %s: %w", id, err)
-	}
-
-	if shrinking {
-		// Message count shrank (e.g. /compact) — the append-only path
-		// can't represent that, so replace the message set wholesale.
-		// Mirrors saveOjsonl's identical handling in ojsonl.go. Only the
-		// synchronous path reaches here; live writes return early above.
-		if _, err := tx.Exec(`DELETE FROM messages`); err != nil {
-			return false, fmt.Errorf("session: clear messages %s: %w", id, err)
-		}
-		existingCount = 0
+	if shrinking && !replace {
+		// An ordinary save must never delete stored history. A shorter
+		// snapshot here means the caller's in-memory copy is stale relative
+		// to disk: another writer appended messages it has not seen, or its
+		// load failed. The old delete-all-and-rewrite silently destroyed the
+		// other writer's rows in exactly that case, so report a conflict and
+		// let the caller reload; only the explicit replace path
+		// (Replace/ReplaceForDir: compaction, truncation, transcript rewind)
+		// may shrink history. Live writes never reach this: they returned
+		// early above.
+		return false, fmt.Errorf("session: stale snapshot for %s: %d message(s) but %d stored (another writer appended; reload and retry): %w", id, len(messages), existingCount, ErrTranscriptConflict)
 	}
 
 	// Overlap check: the stored prefix and the incoming snapshot must agree
 	// wherever they overlap. Two processes appending different messages at
 	// the same seq (independent concurrent turns from the same base) must
 	// never silently drop one of them — the old INSERT OR IGNORE did exactly
-	// that. Identical overlap converges (idempotent retry); differing overlap
-	// is a conflict: the synchronous path reports an error so the caller can
-	// retry/reconcile, while the live path drops the stale snapshot (the
-	// turn-end sync save stays authoritative).
+	// that. Identical overlap converges (idempotent retry). For the
+	// synchronous path a differing overlap is a conflict error; for the
+	// live path it drops the stale snapshot (the turn-end sync save stays
+	// authoritative). The explicit replace path treats a differing overlap
+	// as an authoritative content rewrite instead: the caller owns the
+	// transcript, so it is applied wholesale below (history_gen bumps so
+	// queued pre-replacement live snapshots drop instead of resurrecting
+	// replaced rows).
+	rewrite := shrinking
 	if overlap := min(existingCount, len(messages)); overlap > 0 {
 		stored := make([]string, 0, overlap)
 		rows, err := tx.Query(`SELECT data FROM messages ORDER BY seq ASC LIMIT ?`, overlap)
@@ -404,12 +443,43 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 				return false, fmt.Errorf("session: marshal message %d of %s: %w", i, id, err)
 			}
 			if string(got) != want {
+				if replace {
+					rewrite = true
+					break
+				}
 				if live {
 					return false, nil
 				}
-				return false, fmt.Errorf("session: conflicting message at seq %d of %s (concurrent writers diverged)", i, id)
+				return false, fmt.Errorf("session: conflicting message at seq %d of %s (concurrent writers diverged): %w", i, id, ErrTranscriptConflict)
 			}
 		}
+	}
+
+	if rewrite {
+		// Authoritative replacement (shrunk, or overlapping content
+		// rewritten): bump the generation in this same transaction so any
+		// queued pre-replacement live snapshot mismatches and drops
+		// instead of resurrecting history.
+		newGen = existingGen + 1
+	}
+
+	if _, err := tx.Exec(
+		`UPDATE meta SET title = ?, title_generated = ?, updated_at = ?, metadata_json = ?, history_gen = ? WHERE id = ?`,
+		resolvedTitle, titleGenerated, time.Now(), metaJSON, newGen, id,
+	); err != nil {
+		return false, fmt.Errorf("session: update meta %s: %w", id, err)
+	}
+
+	if rewrite {
+		// The replace path rewrites the message set wholesale (count shrank
+		// and/or overlapping content changed) — the append-only path can't
+		// represent that. Mirrors saveOjsonl's identical handling in
+		// ojsonl.go. Only the synchronous replace path reaches here; live
+		// writes return early above or drop silently in the overlap check.
+		if _, err := tx.Exec(`DELETE FROM messages`); err != nil {
+			return false, fmt.Errorf("session: clear messages %s: %w", id, err)
+		}
+		existingCount = 0
 	}
 
 	// A plain INSERT surfaces any residual primary-key race as an error
@@ -435,6 +505,60 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 		return false, err
 	}
 	return true, nil
+}
+
+// appendUserMessageTail durably appends one user message at the transcript
+// tail (seq = stored count) in a single immediate transaction. It never
+// reads or rewrites existing rows, so — unlike a full-snapshot save — it
+// cannot trip the overlap conflict even when the stored transcript holds
+// rows the load path filters out (incomplete tool results, the
+// PERMISSION_ASK sentinel): loading such a file yields a SHORTER, shifted
+// sequence, and a "disk+1" snapshot save would compare the shifted
+// sequence against the stored rows and conflict forever. A primary-key
+// violation means another writer appended to the same seq first; the
+// caller retries and the count is re-read inside the next transaction.
+// Title, metadata, and history_gen are intentionally untouched (keep
+// semantics — the turn-end sync save stays authoritative for them);
+// updated_at is bumped. Commit ambiguity needs no deduplication: a commit
+// error on a local SQLite file rolls the tx back deterministically, so a
+// retry cannot double-insert.
+//
+// The caller must have verified the .sqlite file exists (a missing session
+// goes through the create/migrate path in AppendUserMessageForDir, which
+// also writes the meta row and index entry that a bare insert here would
+// not).
+func appendUserMessageTail(dir, id, content string) error {
+	mu := lockFor(dir, id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	db, err := openSessionDB(sqliteSessionPath(dir, id))
+	if err != nil {
+		return fmt.Errorf("session: open sqlite %s: %w", id, err)
+	}
+	defer db.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("session: begin tx %s: %w", id, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var existingCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&existingCount); err != nil {
+		return fmt.Errorf("session: count messages %s: %w", id, err)
+	}
+	data, err := json.Marshal(agent.Message{Role: "user", Content: content})
+	if err != nil {
+		return fmt.Errorf("session: marshal user message %s: %w", id, err)
+	}
+	if _, err := tx.Exec(`INSERT INTO messages (seq, data) VALUES (?, ?)`, existingCount, string(data)); err != nil {
+		return fmt.Errorf("session: insert user message %s: %w", id, err)
+	}
+	if _, err := tx.Exec(`UPDATE meta SET updated_at = ? WHERE id = ?`, time.Now(), id); err != nil {
+		return fmt.Errorf("session: update meta %s: %w", id, err)
+	}
+	return tx.Commit()
 }
 
 // readSqliteSession loads the full session (meta + all messages) from a

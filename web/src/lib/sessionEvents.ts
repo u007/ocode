@@ -5,7 +5,7 @@ import type { Message, SSEPermissionEvent, TUIStatus } from "../api/types";
 import type { BusEnvelope } from "./eventBus";
 import { rekeyDraft } from "./tabDrafts";
 import { rekeyQueue } from "./tabQueue";
-import { browserActions, type NavEvent } from "./browserStore";
+import { browserActions, type NavEvent, type TitleEvent } from "./browserStore";
 
 /**
  * sessionEvents — pure routing of bus envelopes into chatStore/projectStore.
@@ -154,7 +154,7 @@ const SESSION_SCOPED_EVENTS = new Set([
  *  (`session_started`, `status`) plus every session-scoped event above. The
  *  bus dispatches per-event-type (see eventBus.ts), so a consumer must
  *  subscribe to each of these individually; there's no wildcard. */
-export const ROUTABLE_EVENTS = ["session_started", "status", "browse_nav", ...SESSION_SCOPED_EVENTS];
+export const ROUTABLE_EVENTS = ["session_started", "status", "browse_nav", "browse_title", ...SESSION_SCOPED_EVENTS];
 
 /** Highest bus seq already applied per session, via a live envelope or a
  *  reconcile replay (see reconcileOpenSessions). Lets a mid-turn reload's
@@ -278,6 +278,20 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       browserActions.applyNavEvent(nav.state_key, nav);
     } else {
       console.error("browse_nav event missing state_key:", data);
+    }
+    return;
+  }
+
+  // Server-authoritative page title (Chrome targetInfo, backend title probe).
+  // Global like browse_nav: keyed by payload state_key, applied only when
+  // the URL matches the surface (stale-event guard lives in setPageTitle).
+  // The tab strip renders this; the address bar never does.
+  if (event === "browse_title") {
+    const t = data as TitleEvent;
+    if (t && t.state_key && typeof t.title === "string") {
+      browserActions.setPageTitle(t.state_key, t.title, t.url);
+    } else if (t && !t.state_key) {
+      console.error("browse_title event missing state_key:", data);
     }
     return;
   }

@@ -51,8 +51,11 @@ func (h *Handler) HandleTruncateSession(w http.ResponseWriter, r *http.Request) 
 
 	s.Messages = s.Messages[:req.KeepUntil]
 	s.UpdatedAt = time.Now()
-	// Persist via session.SaveForDir which handles sqlite/json/ojsonl dispatch and metadata.
-	if err := session.SaveForDir(entry.ProjectRoot, s.ID, s.Title, s.Messages, s.Metadata); err != nil {
+	// Truncation is an explicit transcript replacement: it must go through
+	// ReplaceForDir (ordinary SaveForDir now conflicts on a shorter
+	// snapshot instead of deleting stored rows — see the
+	// concurrent-writer hardening in the session package).
+	if err := session.ReplaceForDir(entry.ProjectRoot, s.ID, s.Title, s.Messages, s.Metadata); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save session")
 		return
 	}

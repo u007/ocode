@@ -7,7 +7,24 @@ export const PROCESSES_TAB_ID = "processes";
 
 export interface TerminalInstance {
   id: string;
+  /** Default "Terminal N" name, or the user's explicit rename. */
   title: string;
+  /** True once the user renamed the tab; a manual name always beats oscTitle. */
+  renamed?: boolean;
+  /** Last title the running program set via OSC 0/2 (e.g. claude code or the
+   *  ocode TUI). Shown instead of `title` unless the tab was renamed. */
+  oscTitle?: string;
+}
+
+/** Max length kept for an OSC-set title so a runaway program can't bloat the
+ *  persisted tab metadata. */
+const MAX_OSC_TITLE_LEN = 80;
+
+/** The name a terminal tab should show: manual rename wins, then the
+ *  program-set OSC title, then the default "Terminal N". */
+export function terminalDisplayTitle(t: TerminalInstance): string {
+  if (t.renamed) return t.title;
+  return t.oscTitle || t.title;
 }
 
 /** A TerminalInstance plus the ephemeral, non-persisted alert flag surfaced by
@@ -34,6 +51,7 @@ type TerminalAction =
   | { type: "CLOSE_TERMINAL"; projectPath: string; id: string }
   | { type: "SET_ACTIVE_ID"; projectPath: string; id: string }
   | { type: "RENAME_TERMINAL"; projectPath: string; id: string; title: string }
+  | { type: "SET_OSC_TITLE"; projectPath: string; id: string; title: string }
   | { type: "MARK_ALERTED"; projectPath: string; id: string }
   | { type: "CLEAR_ALERT"; projectPath: string; id: string };
 
@@ -125,7 +143,23 @@ function terminalReducer(state: TerminalStoreState, action: TerminalAction): Ter
     case "RENAME_TERMINAL": {
       const cur = state.byProject[action.projectPath];
       if (!cur) return state;
-      const terminals = cur.terminals.map((t) => (t.id === action.id ? { ...t, title: action.title } : t));
+      const terminals = cur.terminals.map((t) => (t.id === action.id ? { ...t, title: action.title, renamed: true } : t));
+      return { byProject: { ...state.byProject, [action.projectPath]: { ...cur, terminals } } };
+    }
+    case "SET_OSC_TITLE": {
+      const cur = state.byProject[action.projectPath];
+      if (!cur) return state;
+      const oscTitle = action.title.replace(/\s+/g, " ").trim().slice(0, MAX_OSC_TITLE_LEN);
+      const target = cur.terminals.find((t) => t.id === action.id);
+      if (!target || (target.oscTitle ?? "") === oscTitle) return state;
+      const terminals = cur.terminals.map((t) => {
+        if (t.id !== action.id) return t;
+        if (!oscTitle) {
+          const { oscTitle: _drop, ...rest } = t;
+          return rest;
+        }
+        return { ...t, oscTitle };
+      });
       return { byProject: { ...state.byProject, [action.projectPath]: { ...cur, terminals } } };
     }
     default:
@@ -174,6 +208,8 @@ interface TerminalContextType {
    *  PROCESSES_TAB_ID). */
   setActiveId: (projectPath: string, id: string) => void;
   renameTerminal: (projectPath: string, id: string, title: string) => void;
+  /** Records the title the running program set via OSC 0/2. Empty clears it. */
+  setOscTitle: (projectPath: string, id: string, title: string) => void;
   /** Marks a terminal as having emitted a bell/notification while backgrounded. */
   markAlerted: (projectPath: string, id: string) => void;
   /** Clears a terminal's background-activity badge. */
@@ -260,6 +296,12 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     [dispatch],
   );
 
+  const setOscTitle = useCallback(
+    (projectPath: string, id: string, title: string) =>
+      dispatch({ type: "SET_OSC_TITLE", projectPath, id, title }),
+    [dispatch],
+  );
+
   const markAlerted = useCallback(
     (projectPath: string, id: string) => dispatch({ type: "MARK_ALERTED", projectPath, id }),
     [dispatch],
@@ -317,7 +359,13 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
         }
         const same =
           saved.terminals.length === cur.terminals.length &&
-          saved.terminals.every((t, i) => t.id === cur.terminals[i]?.id && t.title === cur.terminals[i]?.title) &&
+          saved.terminals.every(
+            (t, i) =>
+              t.id === cur.terminals[i]?.id &&
+              t.title === cur.terminals[i]?.title &&
+              !!t.renamed === !!cur.terminals[i]?.renamed &&
+              (t.oscTitle ?? "") === (cur.terminals[i]?.oscTitle ?? ""),
+          ) &&
           saved.activeId === cur.activeId;
         if (same) continue;
         bumpSeqPast(saved.terminals.map((t) => t.title));
@@ -335,7 +383,7 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
   }, [store, dispatch]);
 
   return (
-    <TerminalContext.Provider value={{ state, activate, openTerminal, closeTerminal, setActiveId, renameTerminal, markAlerted, clearAlert }}>
+    <TerminalContext.Provider value={{ state, activate, openTerminal, closeTerminal, setActiveId, renameTerminal, setOscTitle, markAlerted, clearAlert }}>
       {children}
     </TerminalContext.Provider>
   );

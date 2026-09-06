@@ -2318,6 +2318,50 @@ func TestDecideSandboxSshReadAsks(t *testing.T) {
 	}
 }
 
+// TestDecideSandboxGitPush documents the sandbox push boundary: ordinary
+// git push rides the sandbox auto-allow (network egress is open, and the OS
+// write-wall cannot constrain remote mutations), but force-flagged push/pull
+// keep the harmful set's "never auto-allow" contract (harmfulBashForceFlags)
+// and ASK — isHarmfulForceCommand is evaluated before the sandbox shortcut.
+func TestDecideSandboxGitPush(t *testing.T) {
+	orig := sandboxSupported
+	sandboxSupported = func() bool { return true }
+	t.Cleanup(func() { sandboxSupported = orig })
+
+	// Stub HOME so no user/global .claude/settings.json deny rules (e.g. a
+	// real "Bash(git push --force*)" deny) leak in — the force assertions
+	// below must exercise the isHarmfulForceCommand gate, not local env.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	pm.SetMode(PermissionModeSandbox)
+
+	for _, cmd := range []string{"git push", "git push origin main"} {
+		dec := pm.Decide("bash", json.RawMessage(`{"command":"`+cmd+`"}`))
+		if dec.Level != PermissionAllow {
+			t.Fatalf("sandbox %q = %s, want Allow (sandbox auto-allow)", cmd, dec.Level)
+		}
+	}
+	for _, cmd := range []string{"git push --force", "git push -f origin main", "git pull --force", "git pull -f"} {
+		dec := pm.Decide("bash", json.RawMessage(`{"command":"`+cmd+`"}`))
+		if dec.Level != PermissionAsk {
+			t.Fatalf("sandbox %q = %s, want Ask (harmful force must not auto-allow)", cmd, dec.Level)
+		}
+	}
+
+	// Contrast: normal mode asks for force-push via decideSingleCommand.
+	pmNormal := NewPermissionManager()
+	pmNormal.SetWorkDir(t.TempDir())
+	pmNormal.SetMode(PermissionModeNormal)
+	dec := pmNormal.Decide("bash", json.RawMessage(`{"command":"git push --force"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("normal git push --force = %s, want Ask (harmful)", dec.Level)
+	}
+}
+
 // TestDecideSandboxEnvWriteAsks: writing a .env file is Ask in sandbox.
 func TestDecideSandboxEnvWriteAsks(t *testing.T) {
 	pm := NewPermissionManager()

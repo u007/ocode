@@ -69,6 +69,16 @@ export interface NavEvent {
   error?: string;
 }
 
+/** Server-authoritative page-title update (from the `browse_title` bus
+ *  event, fed by Chrome targetInfo titles). The tab strip renders this —
+ *  never the address bar. `url` is the page URL from the same payload; the
+ *  title applies only when it matches the surface's current URL. */
+export interface TitleEvent {
+  state_key: string;
+  title: string;
+  url?: string;
+}
+
 /** Rendering mode for one browser surface: local = reverse-proxy iframe
  *  (private hosts), chrome = headless-Chrome screencast (public hosts). */
 export type BrowseMode = "local" | "chrome";
@@ -90,7 +100,18 @@ export interface BrowserTabState {
   consoleEvents: ConsoleEvent[];
   networkEvents: NetworkEvent[];
   responseBodies: Record<string, ResponseBody>;
+  pageTitle: string | null;
+  /** Last reported vertical scroll offset (CSS px) for the current URL. */
+  scrollY: number;
+  /** Persisted scroll offsets keyed by normalized page URL (restore on
+   *  reload, back/forward, and app restart). */
+  scrollByUrl: Record<string, number>;
   perfMetrics: Record<string, number>;
+  /** Live-metrics collection state (CDP Performance domain). Authoritative
+   *  value arrives from the server (`perfState` on attach + toggle acks);
+   *  defaults true to match the backend's enable-on-attach. Stop only pauses
+   *  collection — the last snapshot is kept, never erased. */
+  perfRecording: boolean;
 }
 
 interface BrowserState {
@@ -121,7 +142,11 @@ function defaultTab(persistedUrl = ""): BrowserTabState {
     consoleEvents: [],
     networkEvents: [],
     responseBodies: {},
+    pageTitle: null,
+    scrollY: 0,
+    scrollByUrl: {},
     perfMetrics: {},
+    perfRecording: true,
   };
 }
 
@@ -172,16 +197,82 @@ export const browserActions = {
     mutate(key, (t) => {
       const trimmed = t.history.slice(0, t.historyIndex + 1);
       trimmed.push(url);
-      return { ...t, url, history: trimmed, historyIndex: trimmed.length - 1, loading: true, error: null };
+      return { ...t, url, history: trimmed, historyIndex: trimmed.length - 1, loading: true, error: null, pageTitle: null, scrollY: t.scrollByUrl[url] ?? 0 };
     });
   },
 
   back(key: StateKey) {
-    mutate(key, (t) => (t.historyIndex > 0 ? { ...t, historyIndex: t.historyIndex - 1, url: t.history[t.historyIndex - 1], loading: true } : t));
+    mutate(key, (t) => {
+      if (t.historyIndex <= 0) return t;
+      const url = t.history[t.historyIndex - 1];
+      return { ...t, historyIndex: t.historyIndex - 1, url, loading: true, pageTitle: null, scrollY: t.scrollByUrl[url] ?? 0 };
+    });
   },
 
   forward(key: StateKey) {
-    mutate(key, (t) => (t.historyIndex < t.history.length - 1 ? { ...t, historyIndex: t.historyIndex + 1, url: t.history[t.historyIndex + 1], loading: true } : t));
+    mutate(key, (t) => {
+      if (t.historyIndex >= t.history.length - 1) return t;
+      const url = t.history[t.historyIndex + 1];
+      return { ...t, historyIndex: t.historyIndex + 1, url, loading: true, pageTitle: null, scrollY: t.scrollByUrl[url] ?? 0 };
+    });
+  },
+
+  /** Apply a page title (tab strip only). An empty title is an explicit
+   *  clear (page removed its `<title>`): the strip falls back to the manual
+   *  rename or "New tab" instead of sticking on a stale title. When the
+   *  event carries a URL it must match the surface's current URL or the
+   *  update is stale (closed-tab echo, pre-navigation title) and dropped —
+   *  clears included. */
+  setPageTitle(key: string, title: string, url?: string) {
+    const clean = (title ?? "").trim() || null;
+    mutate(key, (t) => {
+      if (url) {
+        try {
+          if (normalizeBrowseURL(url) !== t.url) return t;
+        } catch {
+          return t;
+        }
+      }
+      if (t.pageTitle === clean) return t;
+      return { ...t, pageTitle: clean };
+    });
+  },
+
+  /** Record a scroll offset for the surface's current URL (or an explicit
+   *  one). The per-URL map is what survives reloads and restarts. */
+  setScrollY(key: string, y: number, url?: string) {
+    if (!Number.isFinite(y) || y < 0) return;
+    mutate(key, (t) => {
+      const at = url ?? t.url;
+      if (!at) return t;
+      if (t.scrollByUrl[at] === y && t.scrollY === y) return t;
+      return { ...t, scrollY: y, scrollByUrl: { ...t.scrollByUrl, [at]: y } };
+    });
+  },
+
+  /** Restore a persisted surface wholesale (app-restart path). */
+  restoreSurface(key: string, snap: {
+    url: string;
+    history: string[];
+    historyIndex: number;
+    userMode: BrowseMode | null;
+    pageTitle: string | null;
+    scrollByUrl: Record<string, number>;
+  }) {
+    browserStore.setState((s) => ({
+      byKey: {
+        ...s.byKey,
+        [key]: {
+          ...defaultTab(snap.url),
+          history: snap.history,
+          historyIndex: snap.historyIndex,
+          userMode: snap.userMode,
+          pageTitle: snap.pageTitle,
+          scrollY: snap.scrollByUrl[snap.url] ?? 0,
+          scrollByUrl: snap.scrollByUrl,
+        },
+      },
+    }));
   },
 
   pushConsole(key: StateKey, ev: ConsoleEvent) {
@@ -211,19 +302,34 @@ export const browserActions = {
     mutate(key, (t) => ({ ...t, perfMetrics: metrics }));
   },
 
+  setPerfRecording(key: StateKey, recording: boolean) {
+    mutate(key, (t) => ({ ...t, perfRecording: recording }));
+  },
+
+  clearPerformance(key: StateKey) {
+    mutate(key, (t) => ({ ...t, perfMetrics: {} }));
+  },
+
   setError(key: StateKey, error: string) {
     mutate(key, (t) => ({ ...t, loading: false, error }));
   },
 
   applyNavEvent(key: string, ev: NavEvent) {
-    mutate(key, (t) => ({
-      ...t,
-      url: ev.url || t.url,
-      status: ev.status,
-      loading: ev.status === 0,
-      mode: ev.mode,
-      error: ev.error ?? null,
-    }));
+    mutate(key, (t) => {
+      const url = ev.url || t.url;
+      return {
+        ...t,
+        url,
+        status: ev.status,
+        loading: ev.status === 0,
+        mode: ev.mode,
+        error: ev.error ?? null,
+        // A new document drops the previous page title; same-URL status
+        // updates (loading → loaded) keep it.
+        pageTitle: url !== t.url ? null : t.pageTitle,
+        scrollY: url !== t.url ? (t.scrollByUrl[url] ?? 0) : t.scrollY,
+      };
+    });
   },
 };
 

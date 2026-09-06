@@ -710,6 +710,34 @@ var harmfulBashForceFlags = map[string]map[string]bool{
 	"git pull": {"--force": true, "-f": true},
 }
 
+// isHarmfulForceCommand reports whether the command is a force-flagged
+// git push/pull (harmfulBashForceFlags). Extracted from IsHarmfulBashCommand
+// so the sandbox auto-allow shortcut can enforce the same contract as the
+// normal pipeline: the harmful set "always requires explicit human approval
+// and must never auto-allow" (see decideSingleCommand). A remote mutation is
+// exactly the class the sandbox OS write-wall cannot constrain.
+func isHarmfulForceCommand(command string) bool {
+	cmd := strings.TrimSpace(command)
+	fields := splitShellFields(cmd)
+	if len(fields) < 2 || fields[0] != "git" {
+		return false
+	}
+	idx := gitSubcommandIndexSkippingC(fields)
+	if idx == -1 || idx+1 > len(fields) {
+		return false
+	}
+	flags, ok := harmfulBashForceFlags["git "+fields[idx]]
+	if !ok {
+		return false
+	}
+	for _, part := range fields[idx+1:] {
+		if flags[part] {
+			return true
+		}
+	}
+	return false
+}
+
 // exfiltrationDataFlags are curl flags that upload local data to a remote server.
 // Each flag takes a value argument that may be a file reference (@path) or inline data.
 var exfiltrationDataFlags = map[string]bool{
@@ -1184,12 +1212,8 @@ func IsHarmfulBashCommand(command string) bool {
 			if harmfulBashPrefixes[prefix] && !(prefix == "git stash" && isReadOnlyGitStashForm(fields[idx+1:])) {
 				return true
 			}
-			if flags, ok := harmfulBashForceFlags[prefix]; ok {
-				for _, part := range fields[idx+1:] {
-					if flags[part] {
-						return true
-					}
-				}
+			if isHarmfulForceCommand(cmd) {
+				return true
 			}
 		}
 	}
@@ -1428,6 +1452,16 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		// are readable globally and config/.env live in writable roots — so the
 		// permission layer must. Reroutes to the auto-permission judge when auto
 		// is on, else a human prompt (sandbox never disables auto).
+		// Force-flagged git push/pull must not ride the sandbox auto-allow:
+		// the harmful set's contract is "always require explicit human
+		// approval and must never auto-allow" (see decideSingleCommand), and
+		// a remote mutation is exactly the class the OS write-wall cannot
+		// constrain. Normal mode is unchanged (decideSingleCommand still
+		// asks); YOLO above remains the explicit promptless escape hatch.
+		if pm.mode == PermissionModeSandbox && isHarmfulForceCommand(command) {
+			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful force): tool=bash command=%q", command))
+			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_force")}
+		}
 		if sd := pm.sensitiveSandboxDecision(command); sd != nil {
 			return *sd
 		}

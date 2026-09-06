@@ -3,6 +3,9 @@ import { createContext, useContext, useReducer, useCallback, useMemo, type React
 export interface BrowserTab {
   id: string;
   title: string;
+  /** User-typed rename (double-click). Wins over page titles until the next
+   *  top-level navigation clears it. Null when the strip follows the page. */
+  manualTitle: string | null;
 }
 
 interface State {
@@ -12,17 +15,37 @@ interface State {
 
 type Action =
   | { type: "OPEN"; project: string; id: string }
+  | { type: "OPEN_RESTORED"; project: string; id: string; title: string; manualTitle: string | null }
   | { type: "CLOSE"; project: string; id: string }
   | { type: "RENAME"; project: string; id: string; title: string }
-  | { type: "ACTIVATE"; project: string; id: string };
+  | { type: "CLEAR_MANUAL"; project: string; id: string }
+  | { type: "ACTIVATE"; project: string; id: string }
+  | { type: "RESTORE"; project: string; tabs: BrowserTab[]; activeId: string | null };
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "OPEN": {
       const tabs = state.tabsByProject[action.project] ?? [];
       return {
-        tabsByProject: { ...state.tabsByProject, [action.project]: [...tabs, { id: action.id, title: "New tab" }] },
+        tabsByProject: { ...state.tabsByProject, [action.project]: [...tabs, { id: action.id, title: "New tab", manualTitle: null }] },
         activeByProject: { ...state.activeByProject, [action.project]: action.id },
+      };
+    }
+    case "OPEN_RESTORED": {
+      const tabs = state.tabsByProject[action.project] ?? [];
+      if (tabs.some((t) => t.id === action.id)) return state;
+      return {
+        tabsByProject: {
+          ...state.tabsByProject,
+          [action.project]: [...tabs, { id: action.id, title: action.title, manualTitle: action.manualTitle }],
+        },
+        activeByProject: { ...state.activeByProject, [action.project]: action.id },
+      };
+    }
+    case "RESTORE": {
+      return {
+        tabsByProject: { ...state.tabsByProject, [action.project]: action.tabs },
+        activeByProject: { ...state.activeByProject, [action.project]: action.activeId },
       };
     }
     case "CLOSE": {
@@ -36,7 +59,13 @@ function reducer(state: State, action: Action): State {
     }
     case "RENAME": {
       const tabs = (state.tabsByProject[action.project] ?? []).map((t) =>
-        t.id === action.id ? { ...t, title: action.title } : t,
+        t.id === action.id ? { ...t, title: action.title, manualTitle: action.title } : t,
+      );
+      return { ...state, tabsByProject: { ...state.tabsByProject, [action.project]: tabs } };
+    }
+    case "CLEAR_MANUAL": {
+      const tabs = (state.tabsByProject[action.project] ?? []).map((t) =>
+        t.id === action.id ? { ...t, manualTitle: null } : t,
       );
       return { ...state, tabsByProject: { ...state.tabsByProject, [action.project]: tabs } };
     }
@@ -84,7 +113,17 @@ export function useBrowserTabs(projectPath: string) {
 
   const closeBrowserTab = useCallback((id: string) => dispatch({ type: "CLOSE", project: projectPath, id }), [dispatch, projectPath]);
   const renameBrowserTab = useCallback((id: string, title: string) => dispatch({ type: "RENAME", project: projectPath, id, title }), [dispatch, projectPath]);
+  const clearManualTitle = useCallback((id: string) => dispatch({ type: "CLEAR_MANUAL", project: projectPath, id }), [dispatch, projectPath]);
+  const restoreBrowserTabs = useCallback(
+    (tabs: BrowserTab[], activeId: string | null) => dispatch({ type: "RESTORE", project: projectPath, tabs, activeId }),
+    [dispatch, projectPath],
+  );
+  const openRestoredBrowserTab = useCallback(
+    (id: string, title: string, manualTitle: string | null) =>
+      dispatch({ type: "OPEN_RESTORED", project: projectPath, id, title, manualTitle }),
+    [dispatch, projectPath],
+  );
   const activateBrowserTab = useCallback((id: string) => dispatch({ type: "ACTIVATE", project: projectPath, id }), [dispatch, projectPath]);
 
-  return { tabs, activeId, openBrowserTab, closeBrowserTab, renameBrowserTab, activateBrowserTab };
+  return { tabs, activeId, openBrowserTab, closeBrowserTab, renameBrowserTab, activateBrowserTab, clearManualTitle, restoreBrowserTabs, openRestoredBrowserTab };
 }

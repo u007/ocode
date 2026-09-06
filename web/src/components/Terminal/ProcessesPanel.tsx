@@ -19,6 +19,23 @@ interface TerminalProcessStat {
   command?: string;
 }
 
+/** One row from GET /api/browse/processes: real CPU/memory for a Chrome-mode
+ *  browser tab. mem_bytes is the renderer RSS when the tab maps to a pid,
+ *  else the page's JS heap. shared marks rows whose renderer hosts multiple
+ *  tabs (or could not be uniquely mapped) — CPU/RSS then cover the shared
+ *  renderer, not the tab alone. */
+interface BrowseProcessStat {
+  state_key: string;
+  tab_id: string;
+  title: string;
+  url: string;
+  pid: number;
+  cpu_percent: number;
+  mem_bytes: number;
+  js_heap_bytes: number;
+  shared: boolean;
+}
+
 /**
  * A frontend-attributed row for a surface that has no OS process of its own
  * (the chat session and each browser tab live in the same renderer as the
@@ -114,6 +131,11 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
 
   const [localRows, setLocalRows] = useState<LocalFootprintRow[]>([]);
   const lastRowsJson = useRef("");
+  // Real per-tab Chrome stats (global list from the server, filtered to this
+  // project's tab ids at render). Tabs without a stat keep estimate rows.
+  const [browseStats, setBrowseStats] = useState<Record<string, BrowseProcessStat>>({});
+  const browseStatsRef = useRef(browseStats);
+  browseStatsRef.current = browseStats;
 
   // Reset estimated rows when switching projects so stale rows from the
   // previous project don't flash before the next tick, and identical
@@ -121,7 +143,37 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
   useEffect(() => {
     lastRowsJson.current = "";
     setLocalRows([]);
+    setBrowseStats({});
   }, [projectPath]);
+
+  // Poll real Chrome per-tab stats alongside the local estimate ticker.
+  // Global list (all projects); render filters to this project's tab ids.
+  useEffect(() => {
+    // Method-missing guard: unit-test api mocks predate this endpoint.
+    if (typeof api.getBrowseProcesses !== "function") return;
+    let cancelled = false;
+    const poll = () => {
+      api
+        .getBrowseProcesses()
+        .then((list) => {
+          if (cancelled || !Array.isArray(list)) return;
+          const next: Record<string, BrowseProcessStat> = {};
+          for (const b of list as BrowseProcessStat[]) {
+            if (b && typeof b.tab_id === "string" && b.tab_id) next[b.tab_id] = b;
+          }
+          setBrowseStats(next);
+        })
+        .catch(() => {
+          // Non-fatal — estimate rows still render.
+        });
+    };
+    poll();
+    const interval = setInterval(poll, localFootprintInterval);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   useEffect(() => {
     const tick = () => {
@@ -150,6 +202,7 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
         }
       }
       for (const tab of browserTabsRef.current) {
+        if (browseStatsRef.current[tab.id]) continue;
         const surface = browserStore.state.byKey[`tab:${tab.id}`];
         if (!surface) {
           rows.push({
@@ -256,6 +309,28 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
       .sort((a, b) => b.cpu_percent - a.cpu_percent);
   }, [stats, titles]);
 
+  // Real Chrome per-tab rows for this project's browser tabs, CPU-sorted.
+  // Display name follows the tab strip (manual rename > page title).
+  const browserRealRows = useMemo(() => {
+    const out: { id: string; name: string; sub: string; command: string; pid: string; cpu: number; mem: number }[] = [];
+    for (const tab of rawBrowserTabs) {
+      const st = browseStats[tab.id];
+      if (!st) continue;
+      const surface = browserStore.state.byKey[`tab:${tab.id}`];
+      const name = tab.manualTitle ?? surface?.pageTitle ?? tab.title;
+      out.push({
+        id: `browser:${tab.id}`,
+        name,
+        sub: st.shared ? "shared renderer" : st.title || st.url,
+        command: st.url || surface?.url || "",
+        pid: st.pid > 0 ? String(st.pid) : "—",
+        cpu: st.cpu_percent || 0,
+        mem: st.mem_bytes || 0,
+      });
+    }
+    return out.sort((a, b) => b.cpu - a.cpu);
+  }, [rawBrowserTabs, browseStats]);
+
   const total = widths.name + widths.command + widths.pid + widths.cpu + widths.mem;
 
   return (
@@ -265,7 +340,7 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
         Processes
       </div>
       <div className="flex-1 overflow-auto">
-        {rows.length === 0 && localRows.length === 0 ? (
+        {rows.length === 0 && localRows.length === 0 && browserRealRows.length === 0 ? (
           <div className="p-4 text-sm text-muted-foreground">
             No terminal process data yet. Open a terminal to see it here.
           </div>
@@ -313,6 +388,32 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
                     {row.cpu_percent.toFixed(1)}%
                   </td>
                   <td className="px-3 py-2 tabular-nums">{formatBytes(row.mem_bytes)}</td>
+                </tr>
+              ))}
+              {browserRealRows.map((row) => (
+                <tr key={row.id} className="border-b border-border/50 text-foreground">
+                  <td className="px-3 py-2">
+                    <div className="truncate" title={row.name}>
+                      🌐 {row.name}
+                    </div>
+                    <div className="truncate text-xs text-muted-foreground" title={row.sub}>
+                      {row.sub}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs">
+                    <div className="truncate" title={row.command}>
+                      {row.command || "—"}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-muted-foreground">{row.pid}</td>
+                  <td
+                    className={`px-3 py-2 tabular-nums ${
+                      row.cpu > 50 ? "text-red-400" : row.cpu > 15 ? "text-yellow-400" : ""
+                    }`}
+                  >
+                    {row.cpu.toFixed(1)}%
+                  </td>
+                  <td className="px-3 py-2 tabular-nums">{formatBytes(row.mem)}</td>
                 </tr>
               ))}
               {localRows.length > 0 && (

@@ -54,6 +54,11 @@ type Target struct {
 	perfMetrics map[string]float64
 	perfMu      sync.Mutex
 
+	// perfRecording is the authoritative collection state. The Performance
+	// domain is session-scoped: attach enables it (recording starts on),
+	// PerfStop disables it. Guarded by mu alongside sink.
+	perfRecording bool
+
 	// handler cancels
 	cancels []func()
 
@@ -232,8 +237,8 @@ func (t *Target) startHandlers() {
 	chReq, c6 := t.conn.Subscribe(t.sessionID, "Network.requestWillBeSent")
 	chConsole, c7 := t.conn.Subscribe(t.sessionID, "Runtime.consoleAPICalled")
 	chExc, c8 := t.conn.Subscribe(t.sessionID, "Runtime.exceptionThrown")
-	chAuth, c9 := t.conn.Subscribe(t.sessionID, "Fetch.authRequired")
-	chPaused, c10 := t.conn.Subscribe(t.sessionID, "Fetch.requestPaused")
+	chAuth, c9 := t.conn.SubscribeLossless(t.sessionID, "Fetch.authRequired")
+	chPaused, c10 := t.conn.SubscribeLossless(t.sessionID, "Fetch.requestPaused")
 	chFinished, c11 := t.conn.Subscribe(t.sessionID, "Network.loadingFinished")
 	chPerf, c12 := t.conn.Subscribe(t.sessionID, "Performance.metrics")
 	t.cancels = append(t.cancels, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12)
@@ -670,6 +675,10 @@ func (t *Target) handlePerformanceMetrics(ch <-chan json.RawMessage) {
 	}
 }
 
+// PerfSnapshot returns a copy of the current performance metrics
+// (JSHeapUsedSize, TaskDuration, ...). Safe for concurrent use.
+func (t *Target) PerfSnapshot() map[string]float64 { return t.getPerformanceSnapshot() }
+
 // getPerformanceSnapshot returns a copy of the current performance metrics.
 func (t *Target) getPerformanceSnapshot() map[string]float64 {
 	t.perfMu.Lock()
@@ -829,6 +838,60 @@ func (t *Target) navHistory(ctx context.Context, delta int) error {
 
 func (t *Target) Reload(ctx context.Context) error {
 	return t.conn.Call(ctx, t.sessionID, "Page.reload", nil, nil)
+}
+
+// ScrollY reports the page's current vertical scroll offset in CSS pixels.
+func (t *Target) ScrollY(ctx context.Context) (float64, error) {
+	var res struct {
+		Result struct {
+			Value float64 `json:"value"`
+		} `json:"result"`
+	}
+	if err := t.conn.Call(ctx, t.sessionID, "Runtime.evaluate",
+		map[string]any{"expression": "window.scrollY", "returnByValue": true}, &res); err != nil {
+		return 0, err
+	}
+	return res.Result.Value, nil
+}
+
+// ScrollTo sets the page's scroll offset in CSS pixels.
+func (t *Target) ScrollTo(ctx context.Context, x, y float64) error {
+	expr := fmt.Sprintf("window.scrollTo(%f, %f)", x, y)
+	return t.conn.Call(ctx, t.sessionID, "Runtime.evaluate",
+		map[string]any{"expression": expr, "returnByValue": true}, nil)
+}
+
+// PerfStart resumes performance-metrics collection (Performance.enable).
+// Attach enables the domain by default; this re-enables after a PerfStop.
+// Stop means "stop collecting events" — the last snapshot is kept, nothing
+// is erased or finalized (these are live counters, not a trace recording).
+func (t *Target) PerfStart(ctx context.Context) error {
+	if err := t.conn.Call(ctx, t.sessionID, "Performance.enable", nil, nil); err != nil {
+		return err
+	}
+	t.mu.Lock()
+	t.perfRecording = true
+	t.mu.Unlock()
+	return nil
+}
+
+// PerfStop pauses performance-metrics collection (Performance.disable).
+// The last snapshot is kept so the panel still shows data while paused.
+func (t *Target) PerfStop(ctx context.Context) error {
+	if err := t.conn.Call(ctx, t.sessionID, "Performance.disable", nil, nil); err != nil {
+		return err
+	}
+	t.mu.Lock()
+	t.perfRecording = false
+	t.mu.Unlock()
+	return nil
+}
+
+// PerfRecording reports the authoritative collection state.
+func (t *Target) PerfRecording() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.perfRecording
 }
 
 func (t *Target) Resize(ctx context.Context, w, h int, dpr float64) error {

@@ -514,12 +514,16 @@ func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 	s.mux.HandleFunc("POST /api/browse/revoke", s.authMiddleware(s.handleBrowseRevoke))
 	s.mux.HandleFunc("POST /api/browse/upload", s.authMiddleware(s.handleBrowseUpload))
 	s.mux.HandleFunc("POST /api/browse/bypass", s.authMiddleware(s.handleBrowseBypass))
+	s.mux.HandleFunc("GET /api/browse/processes", s.authMiddleware(s.handleBrowseProcesses))
 	// Bridge server-authoritative nav events onto the SSE bus. The first
 	// publisher arg (stateKey) is redundant with ev.StateKey — ignore it and
 	// treat ev.StateKey as the single source of truth so the SPA and the bus
 	// never disagree.
 	bs.SetNavPublisher(func(_ string, ev browse.NavEvent) {
 		s.publishBrowseNav(ev)
+	})
+	bs.SetTitlePublisher(func(_ string, ev browse.TitleEvent) {
+		s.publishBrowseTitle(ev)
 	})
 }
 
@@ -531,6 +535,14 @@ func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 // SSE payload shape: event "browse_nav", data {state_key, url, status, mode, error?}.
 func (s *Server) publishBrowseNav(ev browse.NavEvent) {
 	s.handler.bus.Publish("browse_nav", "", "", ev)
+}
+
+// publishBrowseTitle fans a browse TitleEvent onto the unified bus as a
+// project/global-scoped event. Like browse_nav, the stateKey rides inside
+// ev.Data - "browse_title" must never be added to sessionScopedEvents.
+// SSE payload shape: event "browse_title", data {state_key, title, url?}.
+func (s *Server) publishBrowseTitle(ev browse.TitleEvent) {
+	s.handler.bus.Publish("browse_title", "", "", ev)
 }
 
 // BrowseOptions carries the headless-Chrome configuration for the browse
@@ -681,6 +693,24 @@ func (s *Server) handleBrowseRevoke(w http.ResponseWriter, r *http.Request) {
 		log.Printf("browse revoke: remove upload dir for %s: %v", req.StateKey, err)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleBrowseProcesses returns per-tab CPU/memory for live Chrome targets.
+// Local-mode surfaces have no OS process and are never included. When Chrome
+// is not running (or the manager is a test fake) the result is an empty
+// list - never an error - so the Processes panel simply keeps estimate rows.
+func (s *Server) handleBrowseProcesses(w http.ResponseWriter, r *http.Request) {
+	var stats []browse.BrowserProcessStat
+	if s.browse != nil {
+		stats = s.browse.BrowserProcesses(r.Context())
+	}
+	if stats == nil {
+		stats = []browse.BrowserProcessStat{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(stats); err != nil {
+		log.Printf("browse processes: failed to encode response: %v", err)
+	}
 }
 
 // maxBrowseUploadFiles bounds one Chrome-mode file-chooser answer.

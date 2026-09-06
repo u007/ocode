@@ -306,7 +306,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		// The approved tool already ran and its result is in `working`; keep it
 		// (plus any rounds Step completed) instead of leaving the session on the
 		// unresolved sentinel.
-		h.commitPartialTranscript(sessID, as, append(working, resp...), true)
+		h.commitPartialTranscript(sessID, as, working, resp, true)
 		h.broadcastEvent(SSEEvent{
 			SessionID: sessID,
 			Event:     "error",

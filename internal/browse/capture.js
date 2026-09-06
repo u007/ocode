@@ -230,4 +230,78 @@
   history.pushState = function () { var r = ps.apply(this, arguments); navHint(); return r; };
   history.replaceState = function () { var r = rs.apply(this, arguments); navHint(); return r; };
   window.addEventListener("popstate", navHint);
+
+  // --- page title (DISPLAY ONLY) ---
+  // The tab strip shows the site's own <title>, including JS-driven changes.
+  // Titles are display data only: the SPA never uses them for navigation or
+  // the address bar. originalURL() reconstructs the site URL from the /b/
+  // route so the SPA can drop titles that don't match the current surface.
+  function originalURL() {
+    // location.pathname === /b/{stateKey}/{scheme}/{host}/{path...}
+    var m = location.pathname.match(/^\/b\/[^/]+\/([^/]+)\/([^/]+)(\/.*)?$/);
+    if (!m) return "";
+    var scheme = m[1], host = m[2], path = m[3] || "/";
+    if (scheme !== "http" && scheme !== "https") return "";
+    return scheme + "://" + host + path + location.search + location.hash;
+  }
+  var lastTitle = null;
+  function reportTitle() {
+    var t = "";
+    try { t = document.title || ""; } catch (e) { t = ""; }
+    if (t === lastTitle) return;
+    lastTitle = t;
+    post({ type: "ocode:browse:title", title: t, url: originalURL(), ts: Date.now() });
+  }
+  function watchTitle() {
+    reportTitle();
+    try {
+      // characterData on the <title> node covers text edits; childList +
+      // subtree on <head> covers title-node replacement (SPA re-renders).
+      // Setting document.title mutates the <title> node's text, so no
+      // setter wrapping is needed.
+      var root = document.head || document.documentElement;
+      if (root && window.MutationObserver) {
+        var obs = new MutationObserver(function () { reportTitle(); });
+        obs.observe(root, { childList: true, characterData: true, subtree: true });
+      }
+    } catch (e) { /* old engine: the initial report stands */ }
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", watchTitle);
+  } else {
+    watchTitle();
+  }
+
+  // --- scroll position (reported only; the SPA owns persistence) ---
+  // The page REPORTS scrollY; the SPA persists it. A proxied page must never
+  // write application storage directly, so restore arrives via window message
+  // from the SPA origin and is applied here.
+  var lastScrollY = -1;
+  var scrollTimer = null;
+  function reportScroll() {
+    var y = 0;
+    try { y = window.scrollY || 0; } catch (e) { y = 0; }
+    if (y === lastScrollY) return;
+    lastScrollY = y;
+    post({ type: "ocode:browse:scroll", y: y, url: originalURL(), ts: Date.now() });
+  }
+  window.addEventListener("scroll", function () {
+    if (scrollTimer) return;
+    scrollTimer = setTimeout(function () { scrollTimer = null; reportScroll(); }, 300);
+  }, { passive: true });
+  window.addEventListener("message", function (e) {
+    if (e.origin !== spaOrigin) return;
+    var d = e.data;
+    if (!d || typeof d !== "object") return;
+    if (d.stateKey !== stateKey || d.type !== "ocode:browse:restore-scroll") return;
+    var y = Number(d.y);
+    if (!(y > 0)) return;
+    try {
+      if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+      window.scrollTo(0, y);
+      lastScrollY = y;
+    } catch (err) { /* benign teardown/restriction noise */ }
+  });
+  // First report after load settles (images/fonts shift layout).
+  window.addEventListener("load", function () { setTimeout(reportScroll, 500); });
 })();

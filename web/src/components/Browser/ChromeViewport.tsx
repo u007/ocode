@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useCdpSocket } from "./useCdpSocket";
-import type { StateKey } from "../../lib/browserStore";
+import { useBrowserStore, type StateKey } from "../../lib/browserStore";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { uploadBrowseFiles } from "../../api/client";
 
@@ -67,14 +67,23 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
   }, [url, send]);
 
   // Listen for cdp:send events from DevConsole (e.g., getResponseBody).
+  // Events are stateKey-scoped: each mounted viewport only forwards commands
+  // addressed to its own surface, so one tab's toggle never leaks into
+  // another tab's socket.
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail) send(detail);
+      if (!detail) return;
+      if (detail.stateKey && detail.stateKey !== stateKey) return;
+      // The socket is already per-stateKey; don't leak the routing key onto
+      // the wire (clientMsg has no such field).
+      const msg = { ...detail };
+      delete msg.stateKey;
+      send(msg);
     };
     window.addEventListener("cdp:send", handler);
     return () => window.removeEventListener("cdp:send", handler);
-  }, [send]);
+  }, [send, stateKey]);
 
   // Frames → backing store + paint.
   useEffect(() => {
@@ -114,6 +123,44 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
     input.addEventListener("cancel", onCancel);
     return () => input.removeEventListener("cancel", onCancel);
   }, [send]);
+
+  // Chrome-mode scroll save: wheel/pointer input goes straight to the page,
+  // so poll the live offset; replies land in the store via useCdpSocket and
+  // from there into per-URL persistence. Chrome-mode scroll restore: re-send
+  // the persisted offset with bounded retries after (re)mount/navigation —
+  // SPA content renders late and early scrollTo calls land short.
+  const surface = useBrowserStore(stateKey);
+  useEffect(() => {
+    if (status !== "open") return;
+    const timer = setInterval(() => send({ t: "getScroll" }), 2000);
+    return () => clearInterval(timer);
+  }, [status, send]);
+
+  const restoredChromeScroll = useRef("");
+  useEffect(() => {
+    const y = surface?.scrollByUrl?.[url] ?? 0;
+    if (status !== "open" || !(y > 0)) {
+      if (!(y > 0)) restoredChromeScroll.current = "";
+      return;
+    }
+    const stamp = `${url}@${y}`;
+    restoredChromeScroll.current = stamp;
+    let attempts = 0;
+    const timer = setInterval(() => {
+      if (restoredChromeScroll.current !== stamp) {
+        clearInterval(timer);
+        return;
+      }
+      attempts += 1;
+      if (attempts > 4) {
+        clearInterval(timer);
+        return;
+      }
+      send({ t: "scrollTo", y });
+    }, 750);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, url, stateKey, send]);
 
   const onFilesPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);

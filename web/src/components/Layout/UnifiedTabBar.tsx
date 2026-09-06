@@ -20,8 +20,9 @@ import { CSS } from "@dnd-kit/utilities";
 import { useChatDispatch, useChatSelector, getSessionSlice, type ChatState, type SessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { useTerminalConfig } from "@/hooks/useTerminalConfig";
-import { useTerminalState, getProjectTerminals, PROCESSES_TAB_ID } from "../../stores/terminalStore";
+import { useTerminalState, getProjectTerminals, terminalDisplayTitle, PROCESSES_TAB_ID } from "../../stores/terminalStore";
 import { useBrowserTabs } from "../../stores/browserTabsStore";
+import { useBrowserPersistence } from "../Browser/browserPersistence";
 import { browserActions, useBrowserStore, type StateKey } from "../../lib/browserStore";
 import type { FocusedKind } from "../../lib/viewPersistence";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
@@ -261,11 +262,38 @@ function TabPill({
   );
 }
 
-/** Browser pills read live loading state from the browser store (server-driven
- *  via nav events); the browserTabsStore strip only owns tab identity/title. */
-function BrowserTabPill({ id, ...props }: { id: string } & Omit<TabPillProps, "isLoading">) {
+/** Browser pills read live page state from the browser store (server-driven
+ *  via nav events); the browserTabsStore strip owns tab identity, the manual
+ *  rename, and the fallback title. Display precedence: manual rename >
+ *  page title > strip fallback. A top-level navigation clears the manual
+ *  override so the next page title takes effect. */
+function BrowserTabPill({
+  id,
+  manualTitle,
+  fallbackTitle,
+  onNavigated,
+  ...props
+}: {
+  id: string;
+  manualTitle: string | null;
+  fallbackTitle: string;
+  onNavigated: (id: string) => void;
+} & Omit<TabPillProps, "isLoading" | "title">) {
   const s = useBrowserStore(`tab:${id}` as StateKey);
-  return <TabPill {...props} isLoading={!!s?.loading} />;
+  const seenUrl = useRef<string | null>(null);
+  useEffect(() => {
+    const url = s?.url ?? null;
+    if (seenUrl.current === null) {
+      seenUrl.current = url;
+      return;
+    }
+    if (url !== seenUrl.current) {
+      seenUrl.current = url;
+      onNavigated(id);
+    }
+  }, [s?.url, id, onNavigated]);
+  const displayTitle = manualTitle ?? s?.pageTitle ?? fallbackTitle ?? "New tab";
+  return <TabPill {...props} title={displayTitle} isLoading={!!s?.loading} />;
 }
 
 type PendingTabClose = { kind: "chat" | "browser" | "terminal"; id: string; title: string } | null;
@@ -287,6 +315,8 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     dispatch: projectDispatch,
   } = useProjectState();
   const activeProjectPath = projectState.activeProject?.path ?? "";
+  useBrowserPersistence(activeProjectPath);
+
   const chatDispatch = useChatDispatch();
   const { available: terminalAvailable } = useTerminalConfig();
   const { state: terminalState, openTerminal, closeTerminal, setActiveId: setActiveTerminalId, renameTerminal, clearAlert } =
@@ -299,6 +329,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     closeBrowserTab,
     renameBrowserTab,
     activateBrowserTab,
+    clearManualTitle,
   } = useBrowserTabs(activeProjectPath);
 
   const chatDerived = useChatSelector(
@@ -423,6 +454,14 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     [onFocusKindChange, activateBrowserTab],
   );
 
+  // A top-level navigation (new document) clears the manual rename so the
+  // next page title takes effect. Same-URL status updates don't reach here
+  // (the pill only fires when the surface URL actually changes).
+  const handleBrowserNavigated = useCallback(
+    (id: string) => clearManualTitle(id),
+    [clearManualTitle],
+  );
+
   const [pendingClose, setPendingClose] = useState<PendingTabClose>(null);
 
   const doCloseChat = useCallback((id: string) => {
@@ -496,7 +535,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
       doCloseTerminal(id);
       return;
     }
-    const title = t?.title || id;
+    const title = t ? terminalDisplayTitle(t) : id;
     setPendingClose({ kind: "terminal", id, title });
   }, [terminals, doCloseTerminal]);
 
@@ -602,13 +641,15 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
                   id={id}
                   sortId={key}
                   emoji="🌐"
-                  title={tab.title}
+                  fallbackTitle={tab.title}
+                  manualTitle={tab.manualTitle ?? null}
+                  onNavigated={handleBrowserNavigated}
                   isActive={focusedKind === "browser" && activeBrowserId === id}
                   isEditing={editing?.kind === "browser" && editing.id === id}
                   editValue={editValue}
                   onEditValueChange={setEditValue}
                   onClick={(e) => handleBrowserClick(e, id)}
-                  onStartRename={() => startRename("browser", id, tab.title)}
+                  onStartRename={() => startRename("browser", id, tab.manualTitle ?? tab.title)}
                   onCommitRename={commitRename}
                   onCancelRename={() => setEditing(null)}
                   onClose={(e) => handleRequestCloseBrowser(e, id)}
@@ -624,14 +665,14 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
                 key={key}
                 sortId={key}
                 emoji="⌨️"
-                title={term.title}
+                title={terminalDisplayTitle(term)}
                 isActive={focusedKind === "terminal" && activeTerminalId === id}
                 hasAlert={!!term.alerted}
                 isEditing={editing?.kind === "terminal" && editing.id === id}
                 editValue={editValue}
                 onEditValueChange={setEditValue}
                 onClick={(e) => handleTerminalClick(e, id)}
-                onStartRename={() => startRename("terminal", id, term.title)}
+                onStartRename={() => startRename("terminal", id, terminalDisplayTitle(term))}
                 onCommitRename={commitRename}
                 onCancelRename={() => setEditing(null)}
                 onClose={(e) => handleRequestCloseTerminal(e, id)}

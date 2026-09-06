@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/process"
 	"github.com/u007/ocode/internal/browse/cdp"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -23,6 +24,17 @@ type NavEvent struct {
 	Status   int    `json:"status"`
 	Mode     string `json:"mode"` // "local" | "chrome"
 	Error    string `json:"error,omitempty"`
+}
+
+// TitleEvent is a page-title update for one browser surface. Titles change
+// without navigation (JS document.title), so they travel on a dedicated
+// channel, never inside NavEvent. The SPA renders the title in the tab strip
+// only — never in the address bar (spoofing defense) — and applies it only
+// when URL matches the surface's current URL (stale-event guard).
+type TitleEvent struct {
+	StateKey string `json:"state_key"`
+	Title    string `json:"title"`
+	URL      string `json:"url,omitempty"`
 }
 
 // Options configures the headless Chrome subsystem. ChromePath overrides
@@ -46,6 +58,9 @@ type chromeTarget interface {
 	Key(ctx context.Context, ev cdp.KeyEvent) error
 	SetFiles(ctx context.Context, paths []string) error
 	GetResponseBody(ctx context.Context, requestID string) (body string, isBase64 bool, truncated bool, err error)
+	PerfStart(ctx context.Context) error
+	PerfStop(ctx context.Context) error
+	PerfRecording() bool
 	DetachSink(sink cdp.FrameSink)
 }
 
@@ -137,6 +152,10 @@ type Server struct {
 	mux      *http.ServeMux
 	publish  func(stateKey string, ev NavEvent)
 
+	// titlePublish fans TitleEvents to the main server's SSE bus.
+	// Installed via SetTitlePublisher; nil in tests that don't need it.
+	titlePublish func(stateKey string, ev TitleEvent)
+
 	// spaOrigin is the main (SPA) origin, set via EnableBrowse wiring; the
 	// server-wide default postMessage targetOrigin for the capture script.
 	// Real traffic uses the per-stateKey origin recorded at grant mint
@@ -171,6 +190,20 @@ type Server struct {
 	cdp      chromeManager
 	cdpMu    sync.Mutex
 	cdpSocks map[string]*cdpSocketEntry
+
+	// procMeta tracks the last known page title/URL per stateKey (from
+	// chrome targetInfo events and local navigations) so BrowserProcesses
+	// can label rows and match Chrome renderers to tabs. Guarded by
+	// procMu, as is the renderer cpuTime cache below.
+	procMu    sync.Mutex
+	procTitle map[string]string
+	procURL   map[string]string
+	// cpuLast/cpuAt attribute renderer cpuTime deltas as CPU% across
+	// BrowserProcesses polls (same pattern as the terminal emitter's
+	// Percent cache). procCache holds gopsutil handles for RSS reads.
+	cpuLast   map[int32]float64
+	cpuAt     time.Time
+	procCache map[int32]*process.Process
 }
 
 func New(apiToken string, logger *log.Logger, opts ...Options) *Server {
@@ -203,6 +236,9 @@ func (s *Server) initManager(opts Options) {
 		Log:         s.log,
 		EmitNav: func(ev cdp.NavEvent) {
 			s.emitNav(NavEvent{StateKey: ev.StateKey, URL: ev.URL, Status: ev.Status, Mode: "chrome", Error: ev.Error})
+		},
+		EmitTitle: func(ev cdp.TitleEvent) {
+			s.emitTitle(TitleEvent{StateKey: ev.StateKey, Title: ev.Title, URL: ev.URL})
 		},
 	}
 	m := cdp.NewManager(mgrOpts)
@@ -265,6 +301,10 @@ func (s *Server) Revoke(stateKey string) {
 	s.bypassMu.Lock()
 	delete(s.bypass, stateKey)
 	s.bypassMu.Unlock()
+	s.procMu.Lock()
+	delete(s.procTitle, stateKey)
+	delete(s.procURL, stateKey)
+	s.procMu.Unlock()
 }
 
 func (s *Server) Close(ctx context.Context) error {
@@ -276,7 +316,37 @@ func (s *Server) Close(ctx context.Context) error {
 
 func (s *Server) SetNavPublisher(fn func(stateKey string, ev NavEvent)) { s.publish = fn }
 
+func (s *Server) SetTitlePublisher(fn func(stateKey string, ev TitleEvent)) { s.titlePublish = fn }
+
+func (s *Server) emitTitle(ev TitleEvent) {
+	s.procMu.Lock()
+	if s.procTitle == nil {
+		s.procTitle = make(map[string]string)
+	}
+	if s.procURL == nil {
+		s.procURL = make(map[string]string)
+	}
+	if ev.Title != "" {
+		s.procTitle[ev.StateKey] = ev.Title
+	}
+	if ev.URL != "" {
+		s.procURL[ev.StateKey] = ev.URL
+	}
+	s.procMu.Unlock()
+	if s.titlePublish != nil {
+		s.titlePublish(ev.StateKey, ev)
+	}
+}
+
 func (s *Server) emitNav(ev NavEvent) {
+	if ev.URL != "" {
+		s.procMu.Lock()
+		if s.procURL == nil {
+			s.procURL = make(map[string]string)
+		}
+		s.procURL[ev.StateKey] = ev.URL
+		s.procMu.Unlock()
+	}
 	if s.publish != nil {
 		s.publish(ev.StateKey, ev)
 	}
@@ -430,4 +500,159 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		s.emitNav(NavEvent{StateKey: t.StateKey, URL: urlStr, Status: 0, Mode: "chrome"})
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// BrowserProcessStat is one Processes-tab row for a Chrome-mode browser tab.
+// MemBytes is the renderer's OS RSS when the tab maps to a renderer pid,
+// else the page's JS heap (always real, never estimated). CPUPercent derives
+// from renderer cpuTime deltas across polls (0 on the first sample).
+// Shared marks rows whose renderer hosts multiple tabs (same-site pages
+// coalesce into one renderer) or could not be uniquely mapped — CPU/RSS on
+// such rows covers the shared renderer, not the tab alone.
+type BrowserProcessStat struct {
+	StateKey    string  `json:"state_key"`
+	TabID       string  `json:"tab_id"`
+	Title       string  `json:"title"`
+	URL         string  `json:"url"`
+	PID         int32   `json:"pid"`
+	CPUPercent  float64 `json:"cpu_percent"`
+	MemBytes    uint64  `json:"mem_bytes"`
+	JSHeapBytes uint64  `json:"js_heap_bytes"`
+	Shared      bool    `json:"shared"`
+}
+
+// cdpProcessProvider is the optional capability the real CDP manager offers
+// for per-tab process stats. Fake managers in tests don't implement it —
+// BrowserProcesses then returns nil and the panel keeps its estimate rows.
+type cdpProcessProvider interface {
+	TargetKeys() []string
+	TargetPerf() map[string]map[string]float64
+	RendererProcesses(ctx context.Context) ([]cdp.RendererProcess, error)
+}
+
+// BrowserProcesses snapshots per-tab CPU/memory for live Chrome targets.
+// Local-mode surfaces have no OS process and are never included — the panel
+// keeps showing their JS-state estimates.
+func (s *Server) BrowserProcesses(ctx context.Context) []BrowserProcessStat {
+	prov, ok := s.cdp.(cdpProcessProvider)
+	if !ok || prov == nil {
+		return nil
+	}
+	keys := prov.TargetKeys()
+	if len(keys) == 0 {
+		return nil
+	}
+	perf := prov.TargetPerf()
+	renderers, _ := prov.RendererProcesses(ctx)
+
+	s.procMu.Lock()
+	titles := make(map[string]string, len(keys))
+	urls := make(map[string]string, len(keys))
+	for _, k := range keys {
+		titles[k] = s.procTitle[k]
+		urls[k] = s.procURL[k]
+	}
+	now := time.Now()
+	dt := now.Sub(s.cpuAt).Seconds()
+	first := s.cpuAt.IsZero()
+	if s.cpuLast == nil {
+		s.cpuLast = make(map[int32]float64)
+	}
+	if s.procCache == nil {
+		s.procCache = make(map[int32]*process.Process)
+	}
+	// Match each tab to at most one renderer: exact page-title match wins;
+	// a single renderer with a single target maps directly. Anything else
+	// stays pid 0 (JS heap only) and is flagged shared when ambiguous.
+	pidByKey := make(map[string]int32, len(keys))
+	claims := make(map[int32]int)
+	for _, k := range keys {
+		var pid int32
+		if t := titles[k]; t != "" {
+			for _, r := range renderers {
+				if r.Title == t {
+					pid = r.PID
+					break
+				}
+			}
+		}
+		if pid == 0 && len(renderers) == 1 && len(keys) == 1 {
+			pid = renderers[0].PID
+		}
+		if pid != 0 {
+			pidByKey[k] = pid
+			claims[pid]++
+		}
+	}
+	cpuByPID := make(map[int32]float64, len(renderers))
+	for _, r := range renderers {
+		if !first && dt > 0 {
+			if last, seen := s.cpuLast[r.PID]; seen {
+				if d := (r.CPUTime - last) / dt * 100; d > 0 {
+					cpuByPID[r.PID] = d
+				}
+			}
+		}
+		s.cpuLast[r.PID] = r.CPUTime
+	}
+	seen := make(map[int32]bool, len(renderers))
+	for _, r := range renderers {
+		seen[r.PID] = true
+	}
+	for pid := range s.cpuLast {
+		if !seen[pid] {
+			delete(s.cpuLast, pid)
+			delete(s.procCache, pid)
+		}
+	}
+	s.cpuAt = now
+	rssByPID := make(map[int32]uint64, len(pidByKey))
+	for _, pid := range pidByKey {
+		if _, done := rssByPID[pid]; done {
+			continue
+		}
+		h, ok := s.procCache[pid]
+		if !ok {
+			var err error
+			h, err = process.NewProcess(pid)
+			if err != nil {
+				continue
+			}
+			s.procCache[pid] = h
+		}
+		if mi, err := h.MemoryInfo(); err == nil && mi != nil {
+			rssByPID[pid] = mi.RSS
+		}
+	}
+	s.procMu.Unlock()
+
+	out := make([]BrowserProcessStat, 0, len(keys))
+	for _, k := range keys {
+		var jsHeap uint64
+		if m := perf[k]; m != nil {
+			jsHeap = uint64(m["JSHeapUsedSize"])
+		}
+		row := BrowserProcessStat{
+			StateKey:    k,
+			TabID:       strings.TrimPrefix(k, "tab:"),
+			Title:       titles[k],
+			URL:         urls[k],
+			JSHeapBytes: jsHeap,
+			MemBytes:    jsHeap,
+		}
+		if pid, mapped := pidByKey[k]; mapped {
+			row.PID = pid
+			row.CPUPercent = cpuByPID[pid]
+			if rss, ok := rssByPID[pid]; ok && rss > 0 {
+				row.MemBytes = rss
+			}
+			row.Shared = claims[pid] > 1
+		} else if len(renderers) > 0 {
+			// Chrome renderers exist but this tab couldn't be uniquely
+			// mapped — say so rather than attributing a stranger's RSS.
+			row.Shared = true
+		}
+		out = append(out, row)
+	}
+	return out
 }

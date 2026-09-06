@@ -3,11 +3,10 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
-
-	"regexp"
 
 	"github.com/mattn/go-runewidth"
 )

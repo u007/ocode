@@ -32,3 +32,34 @@ describe("browserTabsStore", () => {
     expect(b.result.current.tabs).toHaveLength(0);
   });
 });
+
+describe("manual renames vs page titles", () => {
+  it("rename marks the title manual; clearManualTitle releases it", () => {
+    const { result } = renderHook(() => useBrowserTabs("/proj/manual"), { wrapper: wrap });
+    let id = "";
+    act(() => { id = result.current.openBrowserTab(); });
+    expect(result.current.tabs[0].manualTitle).toBeNull();
+    act(() => { result.current.renameBrowserTab(id, "My Label"); });
+    expect(result.current.tabs[0].title).toBe("My Label");
+    expect(result.current.tabs[0].manualTitle).toBe("My Label");
+    act(() => { result.current.clearManualTitle(id); });
+    expect(result.current.tabs[0].manualTitle).toBeNull();
+    expect(result.current.tabs[0].title).toBe("My Label");
+  });
+
+  it("restore rehydrates tabs with manual flags and active pointer", () => {
+    const { result } = renderHook(() => useBrowserTabs("/proj/restore"), { wrapper: wrap });
+    act(() => {
+      result.current.restoreBrowserTabs(
+        [
+          { id: "b1", title: "One", manualTitle: null },
+          { id: "b2", title: "Mine", manualTitle: "Mine" },
+        ],
+        "b2",
+      );
+    });
+    expect(result.current.tabs).toHaveLength(2);
+    expect(result.current.activeId).toBe("b2");
+    expect(result.current.tabs[1].manualTitle).toBe("Mine");
+  });
+});

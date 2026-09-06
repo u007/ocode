@@ -277,6 +277,10 @@ Server → client:
 | `frame` | binary | 8-byte **big-endian** header `[u32 width][u32 height]` (`DataView.getUint32(0)`, `getUint32(4)`) + JPEG bytes |
 | `console` | JSON text | `level, args: string[], ts` |
 | `network` | JSON text | `method, url, status, durationMs, ts, blocked?: string` |
+| `fileChooser` | JSON text | `multiple: boolean` (page opened `<input type=file>`; SPA POSTs files to `/api/browse/upload`, or sends `fileChooserCancel`) |
+| `responseBody` | JSON text | `requestId, body?, base64Encoded?, truncated?, error?` (reply to `getResponseBody`) |
+| `performance` | JSON text | `metrics: Record<string, number>` (live `Performance.metrics` snapshot) |
+| `perfState` | JSON text | `recording: boolean, error?: string` — authoritative collection state; pushed on every socket attach and as the ack to `perfStart`/`perfStop` |
 | `error` | JSON text | `message` (fatal for this target; WS closes after) |
 
 Navigation state is **not** sent on the WS: the existing
@@ -290,6 +294,9 @@ Client → server (JSON text):
 |---|---|
 | `nav` | `url` |
 | `back` / `forward` / `reload` | — |
+| `perfStart` / `perfStop` | — (resume/pause `Performance` collection; acked with `perfState`. Stop only pauses collection — the last snapshot is kept) |
+| `getResponseBody` | `requestId` (reply arrives as `responseBody`) |
+| `fileChooserCancel` | — (drop the pending file chooser) |
 | `resize` | `w, h, dpr` → `Emulation.setDeviceMetricsOverride` + `stopScreencast`/`startScreencast` with new `maxWidth/maxHeight` |
 | `mouse` | `kind: move\|down\|up\|wheel, x, y, button, clickCount, deltaX, deltaY, modifiers` |
 | `key` | `kind: down\|up\|char, key, code, text, modifiers` |
@@ -438,6 +445,14 @@ and the branded-Chrome caveat), loopback opt-in, and Windows support.
   the resolve-then-connect TOCTOU.
 - Removal list corrected: `rewrite.go` and `capture.js` reroutes are
   local-mode dependencies and stay.
+- `Fetch` stays enabled only for proxy auth (`handleAuthRequests`), so
+  Chrome still pauses every request until `Fetch.continueRequest`. The
+  two Fetch control events use a **lossless** subscription
+  (`Conn.SubscribeLossless`: queue in memory when the buffer fills);
+  telemetry subs (frames, network, console) keep drop-oldest. Found
+  2026-09-06: a Vite module graph (~300 requests in one burst) overran
+  the 64-slot buffer, dropped `requestPaused` events were never
+  continued, and the page hung "loading" forever.
 - Grant redeemed directly on the WS URL; no `__grant` endpoint, no
   cross-site cookie/CORS dependency.
 - Nav on SSE only (no duplicate WS `nav`).

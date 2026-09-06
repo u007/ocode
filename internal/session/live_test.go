@@ -78,7 +78,7 @@ func TestLiveStaleSnapshotIsNoOp(t *testing.T) {
 	// A stale queued snapshot (fewer messages, older title/metadata) landing
 	// after the sync save must change nothing.
 	changed, err := appendSqliteSession(dir, id, "Stale Title",
-		liveMsgs("one"), map[string]any{"v": float64(1)}, true, gen)
+		liveMsgs("one"), map[string]any{"v": float64(1)}, true, gen, false)
 	if err != nil {
 		t.Fatalf("appendSqliteSession (live stale): %v", err)
 	}
@@ -114,7 +114,7 @@ func TestLiveDoesNotShrink(t *testing.T) {
 	}
 	// Compaction-style shrink via the live path must be refused; only the
 	// synchronous path may replace the message set wholesale.
-	changed, err := appendSqliteSession(dir, id, "", liveMsgs("compacted"), nil, true, 0)
+	changed, err := appendSqliteSession(dir, id, "", liveMsgs("compacted"), nil, true, 0, false)
 	if err != nil {
 		t.Fatalf("appendSqliteSession (live shrink): %v", err)
 	}
@@ -267,8 +267,8 @@ func TestLiveGenDropsPreCompactionSnapshot(t *testing.T) {
 		t.Fatalf("saveAsyncToDir: %v", err)
 	}
 	compacted := liveMsgs("summary")
-	if err := saveToDir(dir, id, "", compacted, nil, false, 0); err != nil {
-		t.Fatalf("saveToDir (compact): %v", err)
+	if err := persistToDir(dir, id, "", compacted, nil, false, 0, true); err != nil {
+		t.Fatalf("persistToDir (replace/compact): %v", err)
 	}
 	if err := flushDir(dir, id, 10*time.Second); err != nil {
 		t.Fatalf("flushDir: %v", err)
@@ -287,10 +287,10 @@ func TestLiveGenDropsPreCompactionSnapshot(t *testing.T) {
 	if err := saveToDir(dir, id2, "", liveMsgs("a", "b", "c"), nil, false, 0); err != nil {
 		t.Fatalf("saveToDir (seed2): %v", err)
 	}
-	if err := saveToDir(dir, id2, "", liveMsgs("compacted"), nil, false, 0); err != nil {
-		t.Fatalf("saveToDir (compact2): %v", err)
+	if err := persistToDir(dir, id2, "", liveMsgs("compacted"), nil, false, 0, true); err != nil {
+		t.Fatalf("persistToDir (replace/compact2): %v", err)
 	}
-	changed, err := appendSqliteSession(dir, id2, "", liveMsgs("a", "b", "c", "d"), nil, true, 0)
+	changed, err := appendSqliteSession(dir, id2, "", liveMsgs("a", "b", "c", "d"), nil, true, 0, false)
 	if err != nil {
 		t.Fatalf("appendSqliteSession (superseded gen): %v", err)
 	}

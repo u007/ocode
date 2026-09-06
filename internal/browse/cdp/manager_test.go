@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -1269,5 +1270,105 @@ func TestManager_FileChooserRoundTrip(t *testing.T) {
 	}
 	if n := len(stub.CallsFor("DOM.setFileInputFiles")); n != 2 {
 		t.Fatalf("cancel must not call DOM.setFileInputFiles (calls=%d)", n)
+	}
+}
+
+// A dev-server page (Vite module graph) fires hundreds of requests in one
+// burst. Every Fetch.requestPaused MUST be answered with Fetch.continueRequest,
+// or Chrome holds that request forever and the page never finishes loading.
+// Regression: the paused-event subscription used to drop oldest-on-full while
+// the handler did one blocking round trip per event, so a burst lost requests.
+func TestManager_RequestPausedBurstContinuesEveryRequest(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	var nc navCollector
+	m := newTestManager(t, stub, nc.emit, nil)
+	defer m.Close(context.Background())
+	ctx := context.Background()
+	tgt, err := m.Attach(ctx, "k1", &testSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(40 * time.Millisecond)
+
+	const n = 300
+	for i := 0; i < n; i++ {
+		stub.InjectEvent(tgt.sessionID, "Fetch.requestPaused", map[string]any{
+			"requestId": fmt.Sprintf("req-%d", i),
+			"request":   map[string]any{"url": fmt.Sprintf("https://localhost:3510/src/mod%d.ts", i)},
+		})
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(stub.CallsFor("Fetch.continueRequest")) >= n {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	got := map[string]bool{}
+	for _, c := range stub.CallsFor("Fetch.continueRequest") {
+		var p struct {
+			RequestID string `json:"requestId"`
+		}
+		_ = json.Unmarshal(c.Params, &p)
+		got[p.RequestID] = true
+	}
+	var missing []string
+	for i := 0; i < n; i++ {
+		if id := fmt.Sprintf("req-%d", i); !got[id] {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("%d/%d paused requests never continued (first: %v); dropped=%d",
+			len(missing), n, missing[:min(5, len(missing))], tgt.conn.Dropped(tgt.sessionID, "Fetch.requestPaused"))
+	}
+}
+
+// TestManager_EmitTargetTitle_ResolvesRegisteredTarget pins the page-target
+// lookup: a targetInfoChanged title for a known targetID reaches EmitTitle
+// with the owning stateKey, and the EmitTitle call happens without holding
+// the manager lock (verified implicitly — the callback re-enters TargetKeys,
+// which would deadlock on a held mu).
+func TestManager_EmitTargetTitle_ResolvesRegisteredTarget(t *testing.T) {
+	var got []TitleEvent
+	m := NewManager(ManagerOptions{EmitTitle: func(ev TitleEvent) { got = append(got, ev) }})
+	m.targets["tab:abc"] = &Target{stateKey: "tab:abc", targetID: "T1"}
+	m.emitTargetTitle("T1", "page", "Example Domain", "https://example.com/")
+	if len(got) != 1 {
+		t.Fatalf("emitted %d events, want 1", len(got))
+	}
+	if got[0] != (TitleEvent{StateKey: "tab:abc", Title: "Example Domain", URL: "https://example.com/"}) {
+		t.Fatalf("event = %+v", got[0])
+	}
+}
+
+// TestManager_EmitTargetTitle_PendingWindow covers the Attach race:
+// attachedToTarget/targetInfoChanged can arrive after attachToTarget but
+// before the m.targets insert. The pending map carries those titles.
+func TestManager_EmitTargetTitle_PendingWindow(t *testing.T) {
+	var got []TitleEvent
+	m := NewManager(ManagerOptions{EmitTitle: func(ev TitleEvent) { got = append(got, ev) }})
+	m.pending["T9"] = "tab:pending"
+	m.emitTargetTitle("T9", "page", "Late Title", "https://late.example/")
+	if len(got) != 1 || got[0].StateKey != "tab:pending" || got[0].Title != "Late Title" {
+		t.Fatalf("pending-window events = %+v", got)
+	}
+}
+
+// TestManager_EmitTargetTitle_DropsNoise pins the filters: iframe/child
+// targets must never overwrite the tab title, and stale events for unknown
+// targetIDs (post-Revoke echoes) are dropped silently.
+func TestManager_EmitTargetTitle_DropsNoise(t *testing.T) {
+	var got []TitleEvent
+	m := NewManager(ManagerOptions{EmitTitle: func(ev TitleEvent) { got = append(got, ev) }})
+	m.targets["tab:abc"] = &Target{stateKey: "tab:abc", targetID: "T1"}
+	m.emitTargetTitle("T1", "iframe", "Ad Frame", "https://ads.example/")
+	m.emitTargetTitle("T1", "worker", "Worker", "https://example.com/")
+	m.emitTargetTitle("T-gone", "page", "Stale", "https://stale.example/")
+	m.emitTargetTitle("", "page", "Empty", "https://example.com/")
+	if len(got) != 0 {
+		t.Fatalf("noise events = %+v, want none", got)
 	}
 }

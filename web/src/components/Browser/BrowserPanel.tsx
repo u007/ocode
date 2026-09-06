@@ -36,6 +36,10 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
   useBrowserMessages(stateKey, base, {
     pushConsole: actions.pushConsole,
     pushNetwork: actions.pushNetwork,
+    // Local-mode page title (capture.js observer): tab strip only, applied
+    // with the stale-URL guard in setPageTitle.
+    onTitle: (key, title, url) => actions.setPageTitle(key, title, url || undefined),
+    onScroll: (key, y, url) => actions.setScrollY(key, y, url || undefined),
   });
 
   const showIframe = !!s && s.panelOpen && !s.collapsed;
@@ -77,6 +81,45 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
       actions.setError(stateKey, e instanceof Error ? e.message : String(e));
     }
   }, [actions, base, stateKey]);
+
+  // Local-mode scroll restore: after each (re)load, send the persisted
+  // offset for this URL into the page (capture.js applies it). Retried a few
+  // times — SPA content renders late and early scrollTo calls land on a
+  // short document. Only fires when there is actually an offset to restore.
+  const restoredScrollFor = useRef("");
+  useEffect(() => {
+    if (!s || effectiveMode !== "local" || !base) return;
+    const y = s.scrollByUrl?.[s.url] ?? 0;
+    if (!(y > 0)) {
+      restoredScrollFor.current = "";
+      return;
+    }
+    const stamp = `${s.url}@${y}`;
+    restoredScrollFor.current = stamp;
+    let attempts = 0;
+    const timer = setInterval(() => {
+      if (restoredScrollFor.current !== stamp) {
+        clearInterval(timer);
+        return;
+      }
+      attempts += 1;
+      if (attempts > 6) {
+        clearInterval(timer);
+        return;
+      }
+      try {
+        const origin = new URL(base).origin;
+        iframeRef.current?.contentWindow?.postMessage(
+          { type: "ocode:browse:restore-scroll", stateKey, y },
+          origin,
+        );
+      } catch {
+        clearInterval(timer);
+      }
+    }, 500);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [base, effectiveMode, s?.url, s?.historyIndex, stateKey]);
 
   useEffect(() => {
     if (!s) return;
@@ -275,12 +318,24 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
         networkEvents={s.networkEvents}
         responseBodies={s.responseBodies}
         perfMetrics={s.perfMetrics}
+        perfRecording={s.perfRecording}
+        perfAvailable={effectiveMode === "chrome"}
         onClearConsole={() => actions.clearConsole(stateKey)}
         onClearNetwork={() => actions.clearNetwork(stateKey)}
+        onClearPerformance={() => actions.clearPerformance(stateKey)}
+        onTogglePerfRecording={() => {
+          // State-key scoped: ChromeViewport only forwards events addressed
+          // to its own surface, so one tab's toggle never leaks into another.
+          // No optimistic update — the server's `perfState` ack is the
+          // authoritative state (also re-sent on every socket attach).
+          window.dispatchEvent(new CustomEvent("cdp:send", {
+            detail: { t: s.perfRecording ? "perfStop" : "perfStart", stateKey },
+          }));
+        }}
         onRequestBody={(requestId) => {
           // Send getResponseBody request via CDP socket.
           // The socket is accessed through the ChromeViewport's parent context.
-          window.dispatchEvent(new CustomEvent("cdp:send", { detail: { t: "getResponseBody", requestId } }));
+          window.dispatchEvent(new CustomEvent("cdp:send", { detail: { t: "getResponseBody", requestId, stateKey } }));
         }}
       />
     </div>

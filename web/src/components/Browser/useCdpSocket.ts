@@ -138,6 +138,15 @@ export function useCdpSocket(stateKey: StateKey, browseBase: string | null, enab
 			case "performance":
 				browserActions.setPerformanceMetrics(key, msg.metrics ?? {});
 				break;
+			case "scroll":
+				if (typeof (msg as { y?: unknown }).y === "number") {
+					browserActions.setScrollY(key, (msg as { y: number }).y);
+				}
+				break;
+			case "perfState":
+				browserActions.setPerfRecording(key, msg.recording);
+				if (msg.error) console.error("browse: perf toggle failed:", msg.error);
+				break;
 			case "error":
 				// Fatal: chrome missing/unsupported/replaced. No reconnect.
 				setError(msg.message);

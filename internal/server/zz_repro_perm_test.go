@@ -29,6 +29,7 @@ func (f *fakeClientAskBash) GetProvider() string { return "fake" }
 func (f *fakeClientAskBash) GetModel() string    { return "fake-model" }
 
 func TestReproPermissionResolveHeadless(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate session storage from other tests/runs sharing "sess-1"
 	h := NewHandler()
 	if h.cfg != nil {
 		h.cfg.Model = "fake-model"
@@ -67,6 +68,7 @@ func TestReproPermissionResolveHeadless(t *testing.T) {
 // be refused instead of stepping the agent again on top of the unresolved
 // ask.
 func TestSecondSyncChatRefusedWhilePermissionPending(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate session storage from other tests/runs sharing "sess-1"
 	h := NewHandler()
 	if h.cfg != nil {
 		h.cfg.Model = "fake-model"
@@ -109,6 +111,7 @@ func TestSecondSyncChatRefusedWhilePermissionPending(t *testing.T) {
 // surface as an error event and stay in the pending queue for retry, rather
 // than being shifted away and silently dropped.
 func TestAsyncTurnRefusedWhilePermissionPending(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate session storage from other tests/runs sharing "sess-1"
 	h := NewHandler()
 	as := newTestSession(h, "sess-async-pending", &fakeClientAskBash{})
 

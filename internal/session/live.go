@@ -90,6 +90,12 @@ type liveWriter struct {
 	dir string
 	id  string
 
+	// idleTimeout is captured at worker creation. Workers are long-lived
+	// goroutines; reading the package global liveIdleTimeout in run() raced
+	// with tests (and any future runtime tuning) that mutate it while a
+	// worker from an earlier test is still looping.
+	idleTimeout time.Duration
+
 	mu           sync.Mutex
 	pending      *liveReq
 	notify       chan struct{}
@@ -146,7 +152,7 @@ func liveWriterForLocked(dir, id string) *liveWriter {
 	if w, ok := liveRegistry[k]; ok {
 		return w
 	}
-	w := &liveWriter{dir: dir, id: id, notify: make(chan struct{}, 1)}
+	w := &liveWriter{dir: dir, id: id, idleTimeout: liveIdleTimeout, notify: make(chan struct{}, 1)}
 	liveRegistry[k] = w
 	go w.run()
 	return w
@@ -453,7 +459,7 @@ func FlushAll(timeout time.Duration) error {
 // themselves (see tryRetire) so a long-lived process does not accumulate one
 // goroutine per session ever touched.
 func (w *liveWriter) run() {
-	idle := time.NewTimer(liveIdleTimeout)
+	idle := time.NewTimer(w.idleTimeout)
 	defer idle.Stop()
 	for {
 		select {
@@ -464,13 +470,13 @@ func (w *liveWriter) run() {
 				default:
 				}
 			}
-			idle.Reset(liveIdleTimeout)
+			idle.Reset(w.idleTimeout)
 			w.drain()
 		case <-idle.C:
 			if w.tryRetire() {
 				return
 			}
-			idle.Reset(liveIdleTimeout)
+			idle.Reset(w.idleTimeout)
 		}
 	}
 }

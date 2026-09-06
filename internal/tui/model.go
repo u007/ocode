@@ -4950,7 +4950,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.maybeScrollTranscriptToBottom()
 				}
-				m.saveSession()
+				// Compaction rewrites (and shrinks) the transcript — it must
+				// persist via the explicit replace path; an ordinary save
+				// would now conflict against the longer stored history.
+				m.replaceSession()
 			} else {
 				agent.DebugAppendf("COMPACT", "applyCompactionResult returned false (ui index mismatch); transcript unchanged — from=%d to=%d len(uiIdx)=%d len(messages)=%d manual=%v",
 					msg.result.ReplaceFrom, msg.result.ReplaceTo, len(m.pendingCompactUIIdx), len(m.messages), manual)
@@ -13888,6 +13891,30 @@ func (m *model) saveSession() {
 		return
 	}
 	agent.DebugAppendf("SESSION", "saved session %s (%d msgs: user=%d asst=%d tool=%d system=%d)", m.sessionID, len(agentMsgs), roleCounts["user"], roleCounts["assistant"], roleCounts["tool"], roleCounts["system"])
+}
+
+// replaceSession persists an explicit transcript replacement (compaction,
+// or a message-picker rewind that truncated the visible transcript).
+// Ordinary saves can no longer shrink the stored transcript — a shorter
+// snapshot conflicts (session.ErrTranscriptConflict) instead of silently
+// deleting rows another writer appended — so user-driven truncation and
+// compaction must go through session.Replace, which rewrites the stored
+// history to exactly the current persisted view and bumps history_gen so
+// queued pre-replacement live snapshots drop instead of resurrecting it.
+func (m *model) replaceSession() {
+	agentMsgs := m.persistedAgentMessages()
+	if m.sessionID == "" {
+		if len(agentMsgs) == 0 {
+			return
+		}
+		m.sessionID = session.NewSessionID()
+		m.sessionCreatedAt = time.Now()
+	}
+	if err := session.Replace(m.sessionID, m.sessionTitle, agentMsgs, m.sessionSidebarMetadata()); err != nil {
+		agent.DebugAppendf("SESSION", "replace FAILED for session %s: %v", m.sessionID, err)
+		return
+	}
+	agent.DebugAppendf("SESSION", "replaced session %s (%d msgs)", m.sessionID, len(agentMsgs))
 }
 
 // persistLiveSnapshot enqueues the current transcript for background

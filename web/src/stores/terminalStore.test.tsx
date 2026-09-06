@@ -1,9 +1,9 @@
 import { render, screen, act } from "@testing-library/react";
 import { describe, it, expect, beforeEach } from "vitest";
-import { TerminalProvider, useTerminalState, getProjectTerminals, PROCESSES_TAB_ID } from "./terminalStore";
+import { TerminalProvider, useTerminalState, getProjectTerminals, terminalDisplayTitle, PROCESSES_TAB_ID } from "./terminalStore";
 
 function Harness({ projectPath }: { projectPath: string }) {
-  const { state, activate, openTerminal, closeTerminal, setActiveId, markAlerted, clearAlert } =
+  const { state, activate, openTerminal, closeTerminal, setActiveId, renameTerminal, setOscTitle, markAlerted, clearAlert } =
     useTerminalState();
   const { terminals, activeId, live } = getProjectTerminals(state, projectPath);
   return (
@@ -12,6 +12,7 @@ function Harness({ projectPath }: { projectPath: string }) {
       <div data-testid="active-id">{activeId}</div>
       <div data-testid="count">{terminals.length}</div>
       <div data-testid="titles">{terminals.map((t) => t.title).join(",")}</div>
+      <div data-testid="display-titles">{terminals.map(terminalDisplayTitle).join(",")}</div>
       <div data-testid="alerted">
         {terminals.map((t) => (t.alerted ? t.id : "")).filter(Boolean).join(",")}
       </div>
@@ -23,6 +24,9 @@ function Harness({ projectPath }: { projectPath: string }) {
         <span key={t.id}>
           <button onClick={() => markAlerted(projectPath, t.id)}>{`mark-${t.id}`}</button>
           <button onClick={() => clearAlert(projectPath, t.id)}>{`clear-${t.id}`}</button>
+          <button onClick={() => renameTerminal(projectPath, t.id, "Mine")}>{`rename-${t.id}`}</button>
+          <button onClick={() => setOscTitle(projectPath, t.id, "  ⦿ ocode —  fix\nbug  ")}>{`osc-${t.id}`}</button>
+          <button onClick={() => setOscTitle(projectPath, t.id, "")}>{`osc-clear-${t.id}`}</button>
         </span>
       ))}
     </div>
@@ -156,5 +160,43 @@ describe("terminalStore", () => {
     const raw = window.localStorage.getItem("ocode.ui.terminals.project.v1");
     expect(raw).not.toBeNull();
     expect(raw).not.toContain("alerted");
+  });
+
+  describe("OSC titles", () => {
+    function mountLive(id = "term-1-1") {
+      seedPersisted("/proj", [{ id, title: "Terminal 1" }], id);
+      const { unmount } = render(
+        <TerminalProvider>
+          <Harness projectPath="/proj" />
+        </TerminalProvider>,
+      );
+      act(() => screen.getByText("activate").click());
+      return { id, unmount };
+    }
+
+    it("shows the program-set title, normalised, until cleared", () => {
+      const { id } = mountLive();
+      expect(screen.getByTestId("display-titles").textContent).toBe("Terminal 1");
+      act(() => screen.getByText(`osc-${id}`).click());
+      expect(screen.getByTestId("display-titles").textContent).toBe("⦿ ocode — fix bug");
+      expect(screen.getByTestId("titles").textContent).toBe("Terminal 1");
+      act(() => screen.getByText(`osc-clear-${id}`).click());
+      expect(screen.getByTestId("display-titles").textContent).toBe("Terminal 1");
+    });
+
+    it("a manual rename beats the OSC title", () => {
+      const { id } = mountLive();
+      act(() => screen.getByText(`rename-${id}`).click());
+      act(() => screen.getByText(`osc-${id}`).click());
+      expect(screen.getByTestId("display-titles").textContent).toBe("Mine");
+    });
+
+    it("persists the OSC title so a reload keeps it", () => {
+      const { id, unmount } = mountLive();
+      act(() => screen.getByText(`osc-${id}`).click());
+      unmount(); // flushes the debounced save synchronously
+      const saved = JSON.parse(window.localStorage.getItem("ocode.ui.terminals.project.v1")!);
+      expect(saved.projects["/proj"].terminals[0].oscTitle).toBe("⦿ ocode — fix bug");
+    });
   });
 });

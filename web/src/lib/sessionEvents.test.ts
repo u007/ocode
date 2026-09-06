@@ -543,7 +543,8 @@ describe("browse_nav routing (Part 07/08 contract)", () => {
         "tab:x": {
           url: "", status: 0, loading: true, mode: null, userMode: null, error: null,
           history: [], historyIndex: -1, panelOpen: true, collapsed: false,
-          consoleEvents: [], networkEvents: [], responseBodies: {}, perfMetrics: {},
+          consoleEvents: [], networkEvents: [], responseBodies: {}, pageTitle: null, scrollY: 0, scrollByUrl: {},
+          perfMetrics: {}, perfRecording: true,
         },
       },
     }));
@@ -560,6 +561,52 @@ describe("browse_nav routing (Part 07/08 contract)", () => {
     expect(browserStore.state.byKey["tab:x"].url).toBe("https://done.com/");
     expect(browserStore.state.byKey["tab:x"].status).toBe(200);
     expect(browserStore.state.byKey["tab:x"].loading).toBe(false);
+    browserStore.setState(() => ({ byKey: {} }));
+  });
+});
+
+describe("browse_title routing", () => {
+  it("routes browse_title into the browser store with URL guard", () => {
+    browserStore.setState(() => ({
+      byKey: {
+        "tab:x": {
+          url: "https://done.com/", status: 200, loading: false, mode: "chrome", userMode: null, error: null,
+          history: ["https://done.com/"], historyIndex: 0, panelOpen: true, collapsed: false,
+          consoleEvents: [], networkEvents: [], responseBodies: {}, pageTitle: null, scrollY: 0, scrollByUrl: {},
+          perfMetrics: {}, perfRecording: true,
+        },
+      },
+    }));
+    const { router } = makeRouter(["s1"]);
+    routeBusEnvelope(
+      env("browse_title", {
+        project: "",
+        session_id: "",
+        data: { state_key: "tab:x", title: "Done Site", url: "https://done.com/" },
+      }),
+      router,
+    );
+    expect(browserStore.state.byKey["tab:x"].pageTitle).toBe("Done Site");
+    // Stale URL must not overwrite.
+    routeBusEnvelope(
+      env("browse_title", {
+        project: "",
+        session_id: "",
+        data: { state_key: "tab:x", title: "Stale", url: "https://old.com/" },
+      }),
+      router,
+    );
+    expect(browserStore.state.byKey["tab:x"].pageTitle).toBe("Done Site");
+    // Empty title is an explicit clear, not a no-op.
+    routeBusEnvelope(
+      env("browse_title", {
+        project: "",
+        session_id: "",
+        data: { state_key: "tab:x", title: "", url: "https://done.com/" },
+      }),
+      router,
+    );
+    expect(browserStore.state.byKey["tab:x"].pageTitle).toBeNull();
     browserStore.setState(() => ({ byKey: {} }));
   });
 });

@@ -733,12 +733,14 @@ func TestSaveHandlesShrinkingMessageCount(t *testing.T) {
 
 	// Simulate /compact: the middle is replaced by a single summary
 	// message, so the persisted count (4) now exceeds len(messages) (2).
+	// Compaction must go through the explicit Replace path: ordinary saves
+	// conflict on a shorter snapshot since the concurrent-writer hardening.
 	compacted := []agent.Message{
 		{Role: "system", Content: "summary of one..four"},
 		{Role: "user", Content: "five"},
 	}
-	if err := Save(id, "", compacted, map[string]any{"total_tokens": 20.0}); err != nil {
-		t.Fatalf("Save after compaction: %v", err)
+	if err := Replace(id, "", compacted, map[string]any{"total_tokens": 20.0}); err != nil {
+		t.Fatalf("Replace after compaction: %v", err)
 	}
 
 	sess, err := Load(id)

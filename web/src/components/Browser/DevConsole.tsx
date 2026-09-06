@@ -6,8 +6,14 @@ export interface DevConsoleProps {
   networkEvents: NetworkEvent[];
   responseBodies: Record<string, ResponseBody>;
   perfMetrics: Record<string, number>;
+  /** Live-collection state (server-authoritative via `perfState`). */
+  perfRecording: boolean;
+  /** False on non-CDP surfaces (local proxy): the toggle is disabled. */
+  perfAvailable: boolean;
   onClearConsole: () => void;
   onClearNetwork: () => void;
+  onClearPerformance: () => void;
+  onTogglePerfRecording: () => void;
   onRequestBody: (requestId: string) => void;
 }
 
@@ -177,7 +183,38 @@ export function DevConsole(props: DevConsoleProps) {
           </button>
         ))}
         <div className="flex-1" />
-        {tab !== "performance" && (
+        {tab === "performance" ? (
+          <>
+            <span
+              role="status"
+              aria-label={props.perfRecording ? "Recording performance metrics" : "Performance recording paused"}
+              title={props.perfRecording ? "Collecting live metrics" : "Collection paused — showing last snapshot"}
+              className={`flex items-center gap-1 px-1.5 text-[11px] ${props.perfRecording ? "text-red-400" : "text-neutral-500"}`}
+            >
+              <span
+                aria-hidden
+                className={`inline-block w-1.5 h-1.5 rounded-full ${props.perfRecording ? "bg-red-500 animate-pulse" : "bg-neutral-600"}`}
+              />
+              {props.perfRecording ? "Recording" : "Paused"}
+            </span>
+            <button
+              aria-label={props.perfRecording ? "Stop performance recording" : "Start performance recording"}
+              title={props.perfAvailable ? undefined : "Performance recording needs Chrome mode"}
+              disabled={!props.perfAvailable}
+              onClick={props.onTogglePerfRecording}
+              className="px-2 py-0.5 ml-1 text-[11px] text-neutral-300 hover:text-neutral-100 hover:bg-neutral-800 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors"
+            >
+              {props.perfRecording ? "⏹ Stop" : "⏺ Record"}
+            </button>
+            <button
+              aria-label="Clear performance metrics"
+              onClick={props.onClearPerformance}
+              className="px-2 py-0.5 ml-1 text-[11px] text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded transition-colors"
+            >
+              Clear
+            </button>
+          </>
+        ) : (
           <>
             <input
               aria-label="Filter"
@@ -359,7 +396,9 @@ export function DevConsole(props: DevConsoleProps) {
           {tab === "performance" && (
             <div className="px-2 py-1">
               {Object.keys(props.perfMetrics).length === 0 ? (
-                <div className="text-neutral-500 italic">No performance data yet</div>
+                <div className="text-neutral-500 italic">
+                  {props.perfRecording ? "No performance data yet" : "No performance data — press Record to collect"}
+                </div>
               ) : (
                 <table className="w-full text-left">
                   <thead>

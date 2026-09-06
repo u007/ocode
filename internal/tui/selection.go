@@ -217,8 +217,7 @@ func visualColToRuneIdx(line string, visualCol int) int {
 		if col >= visualCol {
 			break
 		}
-		r, size := utf8.DecodeRuneInString(line[i:])
-		w := runewidth.RuneWidth(r)
+		cluster, w := nextVisualCluster(line[i:])
 		if r == '\t' {
 			w = tabWidth - (col % tabWidth)
 		}
@@ -226,7 +225,7 @@ func visualColToRuneIdx(line string, visualCol int) int {
 			break
 		}
 		col += w
-		i += size
+		i += len(cluster)
 	}
 	return i
 }

@@ -35,6 +35,7 @@ vi.mock("@xterm/xterm", () => ({
     focus = vi.fn();
     onData = vi.fn(() => ({ dispose: vi.fn() }));
     onBell = vi.fn(() => ({ dispose: vi.fn() }));
+    onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
     parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) };
     dispose = vi.fn();
     attachCustomKeyEventHandler = vi.fn(() => true);

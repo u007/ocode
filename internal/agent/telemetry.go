@@ -34,6 +34,14 @@ func parseOpenAIUsage(raw json.RawMessage) (*TokenUsage, error) {
 		PromptCacheHitTokens *int64 `json:"prompt_cache_hit_tokens"`
 		PromptTokensDetails  *struct {
 			CachedTokens *int64 `json:"cached_tokens"`
+			// CreatedCacheTokens counts input tokens that CREATED (warmed) a
+			// prefix-cache entry on this request — runinfra reports it beside
+			// cached_tokens. Like cached_tokens it is a subset of
+			// prompt_tokens (already billed at the plain input rate), so it is
+			// surfaced as CacheWriteTokens for visibility only;
+			// SpendWithPricing never adds a cache-write charge for
+			// OpenAI-style payloads.
+			CreatedCacheTokens *int64 `json:"created_cache_tokens"`
 		} `json:"prompt_tokens_details"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
@@ -47,11 +55,17 @@ func parseOpenAIUsage(raw json.RawMessage) (*TokenUsage, error) {
 		cacheRead = payload.PromptCacheHitTokens
 	}
 
+	var cacheWrite *int64
+	if payload.PromptTokensDetails != nil {
+		cacheWrite = payload.PromptTokensDetails.CreatedCacheTokens
+	}
+
 	return &TokenUsage{
 		PromptTokens:            payload.PromptTokens,
 		CompletionTokens:        payload.CompletionTokens,
 		TotalTokens:             payload.TotalTokens,
 		CacheReadTokens:         cacheRead,
+		CacheWriteTokens:        cacheWrite,
 		PromptIncludesCacheRead: true,
 	}, nil
 }
@@ -223,7 +237,12 @@ func (u *TokenUsage) SpendWithPricing(modelPricing pricing.ModelPricing) *float6
 	if cacheReadTokens > 0 && modelPricing.CacheReadPerMillion > 0 {
 		spend += cacheReadTokens * modelPricing.CacheReadPerMillion / 1_000_000
 	}
-	if u.CacheWriteTokens != nil && modelPricing.CacheWritePerMillion > 0 {
+	// Cache-write tokens from OpenAI-style payloads (e.g. runinfra's
+	// created_cache_tokens) are a subset of prompt_tokens and were already
+	// billed at the plain input rate above — adding a cache-write charge here
+	// would double-count them. Only Anthropic-style payloads, whose cache
+	// creation tokens sit outside input_tokens, get a cache-write charge.
+	if u.CacheWriteTokens != nil && modelPricing.CacheWritePerMillion > 0 && !u.PromptIncludesCacheRead {
 		spend += float64(*u.CacheWriteTokens) * modelPricing.CacheWritePerMillion / 1_000_000
 	}
 	return &spend

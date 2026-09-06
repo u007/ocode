@@ -20,6 +20,7 @@
     "/Users/james/go/bin",
     "/Users/james/.opencode",
     "/Users/james/Library/Application Support/opencode",
-    "/Applications/Google Chrome.app/Contents/MacOS"
+    "/Applications/Google Chrome.app/Contents/MacOS",
+    "/home"
   ]
 }

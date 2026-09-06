@@ -16,6 +16,14 @@ type EventSub struct {
 	ch      chan json.RawMessage
 	dropped int64
 	closed  bool
+
+	// lossless subs (SubscribeLossless) never drop: when ch is full the event
+	// is queued here and a drainer goroutine forwards it once the consumer
+	// catches up. Used for CDP control events (Fetch.requestPaused,
+	// Fetch.authRequired) where a lost event leaves a request stuck forever.
+	lossless bool
+	queue    []json.RawMessage
+	draining bool
 }
 
 // C exposes the event channel.
@@ -44,6 +52,16 @@ func (s *EventSub) push(ev json.RawMessage) {
 		return
 	default:
 	}
+	if s.lossless {
+		// Buffer full: queue in memory and let the drainer forward in order.
+		s.queue = append(s.queue, ev)
+		if !s.draining {
+			s.draining = true
+			go s.drain()
+		}
+		s.mu.Unlock()
+		return
+	}
 	// Buffer full: drop the oldest, then enqueue (flush with capacity restored).
 	select {
 	case <-s.ch:
@@ -54,13 +72,42 @@ func (s *EventSub) push(ev json.RawMessage) {
 	s.mu.Unlock()
 }
 
+// drain forwards queued lossless events to ch in order. It blocks on the
+// consumer (never the reader goroutine) and owns closing ch while active so a
+// concurrent close() cannot race the blocked send.
+func (s *EventSub) drain() {
+	for {
+		s.mu.Lock()
+		if s.closed {
+			s.draining = false
+			close(s.ch)
+			s.mu.Unlock()
+			return
+		}
+		if len(s.queue) == 0 {
+			s.draining = false
+			s.mu.Unlock()
+			return
+		}
+		ev := s.queue[0]
+		s.queue[0] = nil
+		s.queue = s.queue[1:]
+		s.mu.Unlock()
+		s.ch <- ev
+	}
+}
+
 // close is idempotent: closing an already-closed (or an EventSub never added)
 // channel is a no-op.
 func (s *EventSub) close() {
 	s.mu.Lock()
 	if !s.closed {
 		s.closed = true
-		close(s.ch)
+		// An active drainer may be blocked sending on ch; it observes closed
+		// and closes ch itself (see drain).
+		if !s.draining {
+			close(s.ch)
+		}
 	}
 	s.mu.Unlock()
 }
@@ -87,7 +134,19 @@ func (c *Conn) finished() bool {
 // the subscription and closes its channel; Conn.Close does the same for all
 // remaining subscriptions. Callers must always propagate cancel.
 func (c *Conn) Subscribe(sessionID, method string) (<-chan json.RawMessage, func()) {
-	s := &EventSub{ch: make(chan json.RawMessage, subBufSize)}
+	return c.subscribe(sessionID, method, false)
+}
+
+// SubscribeLossless is Subscribe for control events that must never be
+// dropped (Fetch.requestPaused, Fetch.authRequired): a burst beyond the
+// channel buffer is queued in memory instead of evicting the oldest event.
+// Telemetry events (frames, network, console) stay on the lossy Subscribe.
+func (c *Conn) SubscribeLossless(sessionID, method string) (<-chan json.RawMessage, func()) {
+	return c.subscribe(sessionID, method, true)
+}
+
+func (c *Conn) subscribe(sessionID, method string, lossless bool) (<-chan json.RawMessage, func()) {
+	s := &EventSub{ch: make(chan json.RawMessage, subBufSize), lossless: lossless}
 	k := subKey{sessionID, method}
 	c.subsMu.Lock()
 	// A subscription fabricated after Close/EOF would never be closed (the

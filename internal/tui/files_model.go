@@ -2070,7 +2070,7 @@ func (m filesModel) helpView(w, h int, styles Styles) string {
 	bodyLines := strings.Split(bodyText, "\n")
 	bodyW := 0
 	for _, line := range bodyLines {
-		if l := runewidth.StringWidth(line); l > bodyW {
+		if l := visualWidth(line); l > bodyW {
 			bodyW = l
 		}
 	}

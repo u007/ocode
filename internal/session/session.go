@@ -140,9 +140,9 @@ func Save(id string, title string, messages []agent.Message, metadata map[string
 	if err != nil {
 		return err
 	}
-	// saveToDir serializes in-process writers itself; the authoritative
+	// persistToDir serializes in-process writers itself; the authoritative
 	// transcript is durable on return.
-	if err := saveToDir(dir, id, title, messages, metadata, false, 0); err != nil {
+	if err := persistToDir(dir, id, title, messages, metadata, false, 0, false); err != nil {
 		return err
 	}
 	// The authoritative transcript is durable: queued live snapshots are
@@ -163,8 +163,8 @@ func SaveForDir(wd, id string, title string, messages []agent.Message, metadata 
 	if err != nil {
 		return err
 	}
-	// saveToDir serializes in-process writers itself (see Save).
-	if err := saveToDir(dir, id, title, messages, metadata, false, 0); err != nil {
+	// persistToDir serializes in-process writers itself (see Save).
+	if err := persistToDir(dir, id, title, messages, metadata, false, 0, false); err != nil {
 		return err
 	}
 	// See Save: an authoritative sync save satisfies queued live barriers.
@@ -202,7 +202,256 @@ func PaginatedLoad(wd, id string, limit, offset int) (msgs []agent.Message, tota
 	return sess.Messages[start:end], total, nil
 }
 
-// saveToDir is the shared save core: it resolves the session's storage
+// saveToDir is the append-mode core used by the live worker and tests: it
+// delegates to persistToDir with live/append semantics (never shrinks or
+// replaces stored history).
+func saveToDir(dir, id string, title string, messages []agent.Message, metadata map[string]any, live bool, liveGen int64) error {
+	return persistToDir(dir, id, title, messages, metadata, live, liveGen, false)
+}
+
+// Replace persists an authoritative transcript replacement into the
+// process-default storage dir; ReplaceForDir targets the storage dir of
+// wd (session-owning project). Use these for compaction, truncation, and
+// transcript rewind: the stored history is rewritten to exactly messages
+// (which may be shorter or differ in content) and history_gen is bumped so
+// queued pre-replacement live snapshots drop instead of resurrecting
+// replaced history. Ordinary Save/SaveForDir must NOT be used for that:
+// since the concurrent-writer hardening, a shorter snapshot conflicts
+// (ErrTranscriptConflict) instead of silently deleting the other writer's
+// rows.
+func Replace(id string, title string, messages []agent.Message, metadata map[string]any) error {
+	dir, err := GetStorageDir()
+	if err != nil {
+		return err
+	}
+	return persistToDir(dir, id, title, messages, metadata, false, 0, true)
+}
+
+// ReplaceForDir persists an authoritative transcript replacement under the
+// storage dir associated with wd. See Replace.
+func ReplaceForDir(wd, id string, title string, messages []agent.Message, metadata map[string]any) error {
+	dir, err := GetStorageDirForPath(wd)
+	if err != nil {
+		return err
+	}
+	return persistToDir(dir, id, title, messages, metadata, false, 0, true)
+}
+
+// AppendUserMessageForDir durably appends a single user message to session
+// id before its turn is dispatched (the server path's persist-before-202
+// rule). The .sqlite fast path is an append-only tail insert
+// (appendUserMessageTail): it never rewrites stored rows, so it cannot
+// conflict with the overlap check even when the stored transcript contains
+// rows the load path filters out (incomplete tool results, the
+// PERMISSION_ASK sentinel) — the exact shape that made the previous
+// load-append-save implementation conflict forever ("conflicting message
+// at seq N (concurrent writers diverged)") and drop the user's message.
+// A primary-key violation (another writer took the same tail seq first)
+// retries with a re-read count; the legacy/missing-session path goes
+// through the normal create/migrate save with the RAW stored transcript.
+//
+// Retry is bounded (8 attempts, matching the store's BUSY retry) and only
+// for classified conflict/constraint errors; transient lock contention is
+// already retried inside the store, and any other error is returned
+// immediately.
+func AppendUserMessageForDir(projectRoot, id, content string) error {
+	dir, err := GetStorageDirForPath(projectRoot)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		id = NewSessionID()
+	}
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		if attempt > 0 {
+			// The retry itself is the convergence step (tail count re-read
+			// inside the next transaction, or a raw reload for the legacy
+			// path); the small backoff keeps a hot multi-writer loop from
+			// spinning. Bounded, never indefinite.
+			time.Sleep(time.Duration(attempt) * 5 * time.Millisecond)
+		}
+		if fileExists(sqliteSessionPath(dir, id)) {
+			err := appendUserMessageTail(dir, id, content)
+			if err == nil {
+				return refreshIndexMeta(dir, id)
+			}
+			lastErr = err
+			if !isConstraintErr(err) {
+				return err
+			}
+			continue
+		}
+		// Legacy .json/.ojsonl or missing session: migrate/create through
+		// the normal save path with the RAW stored transcript (no
+		// incomplete-tool-request filtering) plus the user message, so the
+		// migrated file matches the legacy file row-for-row and the
+		// message lands at the true tail.
+		msgs, err := loadRawMessages(dir, id)
+		if err != nil {
+			return err
+		}
+		msgs = append(msgs, agent.Message{Role: "user", Content: content})
+		err = persistToDir(dir, id, "", msgs, nil, false, 0, false)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isConflictErr(err) && !isConstraintErr(err) {
+			return err
+		}
+	}
+	return fmt.Errorf("session: append user message to %s: %w", id, lastErr)
+}
+
+// loadRawMessages reads the stored transcript WITHOUT the LLM-oriented
+// incomplete-tool-request filtering loadFromDir applies. Persist paths use
+// it so a saved snapshot matches the stored rows row-for-row; feeding the
+// filtered view back would drop stored rows (sentinels, orphaned tool
+// results) or shift positions and trip the overlap conflict check. A
+// missing session yields an empty transcript (the save creates the file).
+func loadRawMessages(dir, id string) ([]agent.Message, error) {
+	for _, candidate := range sessionCandidateIDs(id) {
+		sqlitePath := sqliteSessionPath(dir, candidate)
+		if !fileExists(sqlitePath) {
+			continue
+		}
+		s, err := readSqliteSession(sqlitePath)
+		if err != nil {
+			return nil, err
+		}
+		return s.Messages, nil
+	}
+	for _, candidate := range sessionCandidateIDs(id) {
+		ojsonlPath := ojsonlSessionPath(dir, candidate)
+		if !fileExists(ojsonlPath) {
+			continue
+		}
+		s, err := loadOjsonlSession(ojsonlPath)
+		if err != nil {
+			return nil, err
+		}
+		return s.Messages, nil
+	}
+	path, data, err := readSessionFile(dir, id)
+	if err != nil {
+		return nil, nil
+	}
+	var s Session
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, fmt.Errorf("session file %s is corrupt: %w", path, err)
+	}
+	return s.Messages, nil
+}
+
+// ReconcileAppend persists msgs (a full transcript whose first baseLen
+// messages are the caller's trusted base) into the process-default storage
+// dir with one bounded rebase: on a concurrent-writer conflict, the raw
+// disk transcript is reloaded and merged — stored rows kept in place, the
+// caller's not-yet-stored suffix appended after them — so BOTH writers'
+// messages survive instead of the turn's response being left memory-only.
+// Divergence inside the base (two writers produced different content for
+// the same position) has no safe merge and returns the conflict. See
+// rebaseAppend for the merge rule.
+func ReconcileAppend(id, title string, messages []agent.Message, baseLen int, metadata map[string]any) error {
+	dir, err := GetStorageDir()
+	if err != nil {
+		return err
+	}
+	return reconcileAppendToDir(dir, id, title, messages, baseLen, metadata)
+}
+
+// ReconcileAppendForDir is ReconcileAppend targeting the storage dir of wd
+// (the session-owning project).
+func ReconcileAppendForDir(projectRoot, id, title string, messages []agent.Message, baseLen int, metadata map[string]any) error {
+	dir, err := GetStorageDirForPath(projectRoot)
+	if err != nil {
+		return err
+	}
+	return reconcileAppendToDir(dir, id, title, messages, baseLen, metadata)
+}
+
+func reconcileAppendToDir(dir, id, title string, messages []agent.Message, baseLen int, metadata map[string]any) error {
+	err := persistToDir(dir, id, title, messages, metadata, false, 0, false)
+	if err == nil {
+		return nil
+	}
+	if !isConflictErr(err) {
+		return err
+	}
+	var lastErr = err
+	for attempt := 0; attempt < 8; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 5 * time.Millisecond)
+		}
+		stored, err := loadRawMessages(dir, id)
+		if err != nil {
+			return err
+		}
+		merged, ok := rebaseAppend(stored, messages, baseLen)
+		if !ok {
+			// The base itself diverged: two writers produced different
+			// content for the same position. No safe merge exists; the
+			// caller (server) converges to disk and logs the dropped
+			// suffix instead of silently staying diverged forever.
+			return fmt.Errorf("session: reconcile append to %s: base diverged from stored transcript: %w", id, lastErr)
+		}
+		err = persistToDir(dir, id, title, merged, metadata, false, 0, false)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isConflictErr(err) && !isConstraintErr(err) {
+			return err
+		}
+	}
+	return fmt.Errorf("session: reconcile append to %s: %w", id, lastErr)
+}
+
+// rebaseAppend merges ours (a transcript whose first baseLen messages are
+// the caller's trusted base) onto stored (the current disk transcript) for
+// the concurrent-append case. Rows beyond baseLen in stored may be a mix of
+// the caller's own earlier live writes and another writer's appends, so the
+// merge walks stored in order and consumes the next unsaved message of ours
+// whenever a stored row matches it byte-for-byte (our live writes land in
+// order, so a matching row is ours; a non-matching row is foreign and is
+// kept). Rows of ours never matched stay in order at the tail. Returns
+// ok=false when the base itself diverged — same-position content written by
+// two writers cannot be merged without dropping one side.
+func rebaseAppend(stored, ours []agent.Message, baseLen int) ([]agent.Message, bool) {
+	if baseLen < 0 || baseLen > len(ours) || len(stored) < baseLen {
+		return nil, false
+	}
+	for i := 0; i < baseLen; i++ {
+		if !sameMessage(stored[i], ours[i]) {
+			return nil, false
+		}
+	}
+	merged := append([]agent.Message(nil), stored...)
+	next := baseLen
+	for i := baseLen; i < len(stored); i++ {
+		if next < len(ours) && sameMessage(stored[i], ours[next]) {
+			next++
+		}
+	}
+	return append(merged, ours[next:]...), true
+}
+
+// sameMessage reports byte-equal persistence form (the overlap check's
+// notion of identity).
+func sameMessage(a, b agent.Message) bool {
+	ab, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	bb, err := json.Marshal(b)
+	if err != nil {
+		return false
+	}
+	return string(ab) == string(bb)
+}
+
+// persistToDir is the shared save core: it resolves the session's storage
 // dir and dispatches on which format already exists for id. New sessions
 // are always created directly as .sqlite. An existing .json or .ojsonl
 // session is migrated to .sqlite — and its old file deleted — the first
@@ -210,13 +459,13 @@ func PaginatedLoad(wd, id string, limit, offset int) (msgs []agent.Message, tota
 // ever read are left in their original format. See
 // docs/superpowers/plans/2026-08-28-sqlite-session-storage/INDEX.md.
 //
-// Callers hold no lock: saveToDir serializes in-process writers on the
+// Callers hold no lock: persistToDir serializes in-process writers on the
 // session's stripe mutex (lockFor), so the sync Save/SaveForDir path, the
 // async live worker, and direct callers all funnel through one lock.
 // live selects the async live-write mode:
 // appends never regress (see appendSqliteSession) and the index refresh is
 // meta-only, avoiding a full transcript re-read per streamed message.
-func saveToDir(dir, id string, title string, messages []agent.Message, metadata map[string]any, live bool, liveGen int64) error {
+func persistToDir(dir, id string, title string, messages []agent.Message, metadata map[string]any, live bool, liveGen int64, replace bool) error {
 	mu := lockFor(dir, id)
 	mu.Lock()
 	defer mu.Unlock()
@@ -225,7 +474,7 @@ func saveToDir(dir, id string, title string, messages []agent.Message, metadata 
 	}
 
 	if fileExists(sqliteSessionPath(dir, id)) {
-		changed, err := appendSqliteSession(dir, id, title, messages, metadata, live, liveGen)
+		changed, err := appendSqliteSession(dir, id, title, messages, metadata, live, liveGen, replace)
 		if err != nil {
 			return err
 		}

@@ -1169,6 +1169,12 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	}
 	c.applyGenerationParams(ctx, payload)
 	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
+	// Providers that hide the usage frame without an explicit opt-in: ask for
+	// it so streamed calls still report tokens, prompt-cache hits
+	// (usage.prompt_tokens_details.cached_tokens) and provider-reported cost.
+	if providerNeedsStreamUsageOptIn(c.Provider) {
+		payload["stream_options"] = map[string]interface{}{"include_usage": true}
+	}
 	if providerSupportsReasoningEffort(c.Provider) && c.ThinkingBudget > 0 {
 		// Novita only accepts reasoning_effort on its reasoning-capable models
 		// (e.g. tencent/hy3); gate on model detection so non-reasoning Novita
@@ -2241,6 +2247,34 @@ func providerSupportsReasoningEffort(provider string) bool {
 		provider == "novita-ai" ||
 		provider == "grok" ||
 		strings.HasPrefix(provider, "xiaomi")
+}
+
+// streamUsageOptInProviders lists OpenAI-compatible providers whose streamed
+// /chat/completions endpoint forwards the usage frame only when the request
+// opts in with stream_options.include_usage (standard OpenAI semantics).
+// Without the opt-in these providers stream content fine but report no usage
+// at all — no prompt/completion tokens, no
+// usage.prompt_tokens_details.cached_tokens, no provider-reported cost — so
+// prompt-cache hit visibility and spend tracking silently vanish for every
+// streamed call, even though the provider's server-side prefix caching keeps
+// working. runinfra is the verified member: its streaming docs state the
+// usage frame "is forwarded to you only when your request carried
+// stream_options.include_usage: true", and its cache cookbook relies on
+// usage.prompt_tokens_details.cached_tokens to read hit rates. The list is an
+// explicit allowlist on purpose: runinfra-style gateways reject unknown
+// request parameters with 400 hosted_parameter_not_supported (they reject
+// prompt_cache_key / prompt_cache_options / prompt_cache_retention this way),
+// so stream_options must only be sent to providers verified to accept it.
+// Extend only after verifying a provider accepts the field.
+var streamUsageOptInProviders = map[string]bool{
+	"runinfra": true,
+}
+
+// providerNeedsStreamUsageOptIn reports whether the provider's streamed
+// chat/completions response hides the usage frame unless the request carries
+// stream_options.include_usage.
+func providerNeedsStreamUsageOptIn(provider string) bool {
+	return streamUsageOptInProviders[provider]
 }
 
 // googleThinkingLevel maps ThinkingBudget to Gemini's thinking_level values.
@@ -3954,6 +3988,16 @@ var keyOptionalProviders = map[string]bool{
 	"local":       true, // /localmodel-managed local server, no key
 }
 
+// providerAliases normalizes domain-spelled provider ids to the canonical
+// registry id, so a model string like "runinfra.ai/nvidia/..." parses as
+// provider "runinfra" and every provider-keyed behavior downstream — stored
+// credentials, base URL, stream usage opt-in — keys on the one canonical id
+// instead of a second, unrecognized identity. Extend only with spellings that
+// would otherwise fall through to an unknown-provider nil client.
+var providerAliases = map[string]string{
+	"runinfra.ai": "runinfra",
+}
+
 var providers = map[string]providerInfo{
 	"openai":         {"OPENAI_API_KEY", "https://api.openai.com/v1"},
 	"anthropic":      {"ANTHROPIC_API_KEY", "https://api.anthropic.com/v1"},
@@ -4033,6 +4077,13 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 	if parts := strings.SplitN(model, "/", 2); len(parts) == 2 {
 		if _, ok := providers[parts[0]]; ok {
 			provider = parts[0]
+			model = parts[1]
+		} else if canon, ok := providerAliases[parts[0]]; ok {
+			// Domain-spelled alias for a registered provider (e.g.
+			// "runinfra.ai/nvidia/..."): parse as the canonical id so
+			// credentials, base URL, and provider-keyed behaviors (stream
+			// usage opt-in, retry classification) all apply.
+			provider = canon
 			model = parts[1]
 		} else if cfg != nil {
 			if _, ok := cfg.Provider[parts[0]]; ok {
@@ -4543,6 +4594,11 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	}
 	c.applyGenerationParams(ctx, payload)
 	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
+	// Same usage opt-in as chatOpenAI — keep the two payload builders aligned
+	// (see streamUsageOptInProviders above).
+	if providerNeedsStreamUsageOptIn(c.Provider) {
+		payload["stream_options"] = map[string]interface{}{"include_usage": true}
+	}
 	if providerSupportsReasoningEffort(c.Provider) && c.ThinkingBudget > 0 {
 		// Novita only accepts reasoning_effort on its reasoning-capable models
 		// (e.g. tencent/hy3); gate on model detection so non-reasoning Novita
