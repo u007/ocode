@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getBrowseBase, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS } from "../../api/client";
+import { getBrowseBase, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS, isRemoteSession } from "../../api/client";
 import { useBrowserStore, useBrowserActions, isPrivateHost, type StateKey } from "../../lib/browserStore";
 import { AddressBar } from "./AddressBar";
 import { DevConsole } from "./DevConsole";
@@ -190,6 +190,23 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
   }, [bypassHost, stateKey, s?.url, base, loadInto, actions, s]);
 
   if (!s) return null;
+
+  // The browse origin runs on a second local port that isn't tunneled in
+  // `--web` remote mode (only the main server port is), so the SPA's
+  // /api/browse/config-provided base URL points at a port on the *local*
+  // machine — unrelated to (or potentially conflicting with) the remote
+  // host. Rather than embed a broken or misleading iframe, disable the
+  // panel entirely for a remote session until a second tunnel exists.
+  if (isRemoteSession()) {
+    return (
+      <div
+        className="flex flex-col items-center justify-center h-full min-h-0 min-w-0 p-4 text-center text-sm text-neutral-500 dark:text-neutral-400"
+        data-testid={`browser-${mode}-remote-unavailable`}
+      >
+        Browser panel isn't available in a remote session yet.
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full min-h-0 min-w-0" data-testid={`browser-${mode}`}>

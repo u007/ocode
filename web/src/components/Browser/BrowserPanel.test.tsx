@@ -32,11 +32,13 @@ vi.mock("../../lib/browserStore", async (importOriginal) => {
     useBrowserActions: () => actions,
   };
 });
+const mockIsRemoteSession = vi.hoisted(() => vi.fn(() => false));
 vi.mock("../../api/client", () => ({
   getBrowseBase: vi.fn(async () => "http://127.0.0.1:54321"),
   mintBrowseGrant: vi.fn(async () => "GRANT123"),
   bypassBrowseTLS: (...args: unknown[]) => (mockBypass as unknown as (...a: unknown[]) => unknown)(...args),
   normalizeBrowseURL: (u: string) => u,
+  isRemoteSession: mockIsRemoteSession,
   // Reconciled to Part 08's real signature: (base, grant, stateKey, url).
   browseSrc: (base: string, grant: string | null, key: string, _url: string) =>
     `${base}/b/${key}/https/example.com/${grant ? "?__grant=" + grant : ""}`,
@@ -55,6 +57,7 @@ vi.mock("./ChromeViewport", () => ({
 describe("BrowserPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIsRemoteSession.mockReturnValue(false);
     state.error = "";
     state.url = "https://example.com/";
     state.status = 200;
@@ -289,5 +292,14 @@ describe("BrowserPanel", () => {
     render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
     expect(screen.queryByTestId("browser-loading-bar")).not.toBeInTheDocument();
     expect(screen.queryByTestId("browser-loading-overlay")).not.toBeInTheDocument();
+  });
+
+  it("shows an explanatory message instead of an iframe/viewport in a remote session", () => {
+    mockIsRemoteSession.mockReturnValue(true);
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    expect(screen.getByTestId("browser-full-remote-unavailable")).toBeInTheDocument();
+    expect(container.textContent).toContain("isn't available in a remote session");
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(container.querySelector("[data-testid='chrome-viewport']")).toBeNull();
   });
 });
