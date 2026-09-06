@@ -61,17 +61,24 @@ and 2 (multi-row wrap) were presented; the user chose **Option 2**.
     Popover rows are focusable and clickable to activate the tab; **no drag handles** in the
     popover.
   - Is **outside `SortableContext`** and never participates in persistence.
-- **Overflow control semantics (one pattern, no mixed ARIA roles):** non-modal Radix Popover
-  (content carries dialog semantics) containing a plain list of **button rows** — each row
-  activates its tab and carries an inner ✕ button that closes it. No `listbox`/`menu` roles
-  (they forbid the nested interactive elements the rows need). Keyboard: roving-tabindex
-  arrow navigation across rows, Enter/Space activates, ✕ is its own tab stop; Escape and
-  outside-click close (Radix built-in); focus returns to the chip on close.
-- **Active-tab promotion rule:** the active tab is **always visible in the bar**. After each
-  measurement, if the active tab lands in a hidden row it is promoted to the last slot of the
-  final visible row, demoting the last previously-visible pill into the hidden set. The
-  chip's active-highlight style remains only as a same-frame fallback (the instant before
-  promotion lands).
+- **Overflow control semantics (one pattern, no mixed ARIA roles, no nested buttons):**
+  non-modal Radix Popover (content carries dialog semantics) containing a plain list of rows;
+  each row holds **sibling** buttons — a row-activate button (title + badges) and a separate
+  ✕ close button — never a button inside a button (invalid HTML, broken keyboard/a11y). No
+  `listbox`/`menu` roles. Keyboard: roving-tabindex arrow navigation across the activate
+  buttons, Enter/Space activates, each ✕ is its own tab stop; Escape and outside-click close
+  (Radix built-in); focus returns to the chip on close.
+- **Active-tab promotion rule (width-checked):** the active tab is **always visible in the
+  bar**. After measurement, if the active tab lands in a hidden row it is promoted to the last
+  slot of the final visible row, demoting the last previously-visible pill into the hidden
+  set. Because a promoted pill can be wider than the one it displaces, every swap is
+  **width-checked against probe-measured `offsetWidth`s**: the swap is applied only while the
+  active pill fits in the last visible row's remaining space (reserved chip width included);
+  otherwise the next-to-last visible pill is demoted instead, and so on — bounded by the
+  visible-pill count, always terminating. All arithmetic uses the same measured widths flex
+  used, so the final render is guaranteed to stay within `MAX_ROWS`. (This supersedes the
+  earlier, false "rows can only shrink" assumption.) The chip's active-highlight style
+  remains only as a same-frame fallback.
 - **Popover live updates:** rows list hidden tabs in canonical persisted `order` (deterministic
   ordering); closing a hidden tab removes its row; a hidden tab that becomes visible for any
   reason (resize, promotion, reorder, a visible tab closing) leaves the list; if the hidden
@@ -122,13 +129,16 @@ output: { visibleKeys: string[], hiddenKeys: string[] }
 - Mechanism: **single-probe measurement** (advisor-confirmed measurement is required; CSS
   clamping cannot produce the hidden-set, and a fixed-point loop without a chip-width contract
   cannot settle). The probe frame renders ALL pills plus a chip probe of **reserved fixed
-  width** `chipReservedPx` (40px — ≥ the widest possible "+99+" label incl. padding) in the real
+  width** `chipReservedPx` (40px — fits the widest label "99+" incl. padding; the label is
+  explicitly capped at `min(count, 99)` + "+", so no tab count can exceed the reserved width)
+  in the real
   flex geometry. A `useLayoutEffect` groups pill elements by `offsetTop` into row buckets;
   pills in rows ≥ `MAX_ROWS` are hidden. The result is stored in state and the **final frame
   renders only `visibleKeys` + the real chip**, flushed before paint. Because the final render
-  drops exactly the hidden pills (rows can only shrink, never grow past the cap, and the real
-  chip width ≤ reserved width), the final wrap matches the probe wrap — one measurement,
-  deterministic, no oscillation.
+  drops exactly the hidden pills. The final render's visible set is **width-verified**
+  (promotion swaps check measured `offsetWidth`s against row capacity incl. the reserved chip
+  width — see the promotion rule), so the final wrap matches the probe geometry and stays
+  within `MAX_ROWS` — one measurement pass, deterministic, no oscillation.
 - Re-measure on: `orderedKeys` identity/length change, container width change
   (`ResizeObserver` on the wrap area; `window.resize` fallback where unsupported), and pill
   content changes (titles, process badges — geometry inputs).
@@ -176,8 +186,8 @@ output: { visibleKeys: string[], hiddenKeys: string[] }
   exact/multi-row overflow), chip reservation math, re-measure triggers, drag freeze (no
   re-measure while `activeDragId` set), empty/single-tab cases.
 - **Pure algorithm (vitest, no DOM):** `computeRowBuckets` + `partitionVisible` — row-cap
-  filter, active-tab promotion (active never hidden), greedy allocation, empty/single-tab
-  cases.
+  filter, width-checked active-tab promotion (active never hidden; a wider promoted pill
+  demotes further pills; termination bound), greedy allocation, empty/single-tab cases.
 - **Component (vitest + @testing-library/react, following the existing `GitPanel.test.tsx`
   conventions — viability evidenced by that file, not inferred from package.json):**
   geometry mocked at the hook boundary — chip renders correct N, popover lists hidden tabs with
@@ -202,6 +212,9 @@ co-dependent). No feature flag; behavior change is contained to the tab bar chro
 **Dependency cost:** the sole new dependency is `@radix-ui/react-popover` (small runtime, no
 CSS import; 10 Radix packages already in use). Everything else is existing code or new local
 files.
+**Validation status of this spec commit:** documentation-only — no tests, typecheck, or build
+were run (nothing executable changed). The Testing section above defines the gates that bind
+the implementation phase (`tsc && vite build`, `vitest run`, browser harness).
 
 ## Open Questions
 
