@@ -229,6 +229,18 @@ func TestRemoteWebSocketSubprotocolNotAcceptedOutsideRemoteMode(t *testing.T) {
 	}
 }
 
+// The browser WebSocket API offers Sec-WebSocket-Protocol as a comma-
+// separated list, and the ocode.bearer. token may sit anywhere in it
+// alongside other protocol names.
+func TestRemoteWSTokenMultipleSubprotocols(t *testing.T) {
+	if got := remoteWSToken("chat, ocode.bearer.tok123"); got != "tok123" {
+		t.Errorf("got %q, want %q", got, "tok123")
+	}
+	if got := remoteWSToken("ocode.bearer.tok123, chat"); got != "tok123" {
+		t.Errorf("got %q, want %q", got, "tok123")
+	}
+}
+
 func TestRunRemoteModeRefusesEmptyToken(t *testing.T) {
 	s := New("127.0.0.1:0", "", "", nil)
 	s.SetRemoteMode(true)
