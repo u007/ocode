@@ -53,15 +53,21 @@ func pidAliveCmd(pid int) string {
 	return fmt.Sprintf("kill -0 %d 2>/dev/null", pid)
 }
 
-func healthProbeCmd(port int, token string) string {
+func healthProbeCmd(port int) string {
 	// Best-effort: curl ships on the overwhelming majority of target
 	// systems ocode already requires (git, go toolchain era Linux/macOS).
 	// A missing curl makes this probe report "000" (curl's own placeholder
 	// for "no response"), which ServerAlive correctly treats as not-alive —
 	// degrading to a fresh server start rather than failing the connect.
+	//
+	// No Authorization header: /api/health is deliberately unauthenticated
+	// (see internal/server/handler_health.go), and putting the token into
+	// this command string would land it in the remote host's process
+	// listing (ps) for the probe's duration — the same class of leak
+	// Transport.ExecStdin's doc warns against.
 	return fmt.Sprintf(
-		"curl -s -o /dev/null -w '%%{http_code}' -H %s http://127.0.0.1:%d/api/health",
-		shellQuote("Authorization: Bearer "+token), port,
+		"curl -s -o /dev/null -w '%%{http_code}' http://127.0.0.1:%d/api/health",
+		port,
 	)
 }
 
@@ -78,7 +84,7 @@ func ServerAlive(t Transport, state ServeState, localVersion string) bool {
 	if res, err := t.Exec(pidAliveCmd(state.PID)); err != nil || res.ExitCode != 0 {
 		return false
 	}
-	res, err := t.Exec(healthProbeCmd(state.Port, state.Token))
+	res, err := t.Exec(healthProbeCmd(state.Port))
 	if err != nil {
 		return false
 	}
@@ -113,8 +119,8 @@ var (
 // serveStatePollAttempts × serveStatePollInterval), returning the parsed
 // state. Used when DiscoverServer finds nothing reusable.
 func StartFreshServer(t Transport, ver string) (ServeState, error) {
-	if _, err := t.Exec(launchServerCmd(ver)); err != nil {
-		return ServeState{}, fmt.Errorf("launch remote server: %w", err)
+	if res, err := t.Exec(launchServerCmd(ver)); err != nil {
+		return ServeState{}, fmt.Errorf("launch remote server: %w: %s", err, res.Stderr)
 	}
 	for i := 0; i < serveStatePollAttempts; i++ {
 		if state, ok := DiscoverServer(t); ok {
@@ -162,10 +168,18 @@ func FreeLocalPort() (int, error) {
 // under sup's supervision. It does not wait for the tunnel to establish or
 // for it to exit — see ConnectWeb for the foreground supervise loop. Only
 // meaningful for KindSSH targets; WSL never tunnels (Task 13).
+//
+// The registration ID is keyed on localPort rather than a fixed string:
+// ProcessSupervisor.Register rejects a duplicate ID outright, and
+// StartSupervised's canReplace only allows replacing a terminal
+// ProcessKindBrowser record — never ProcessKindRemote — so a retry (a new
+// FreeLocalPort + a second StartTunnel call on the same supervisor, after a
+// first bind failure) would otherwise always fail with "already
+// registered." A fresh port on each retry makes the ID naturally unique.
 func StartTunnel(sup *tool.ProcessSupervisor, target Target, localPort, remotePort int) (*exec.Cmd, error) {
 	cmd := exec.Command("ssh", "-N", "-L", fmt.Sprintf("%d:127.0.0.1:%d", localPort, remotePort), target.String())
 	if _, err := tool.StartSupervised(sup, cmd, tool.ProcessRegistration{
-		ID:      "remote-tunnel",
+		ID:      fmt.Sprintf("remote-tunnel-%d", localPort),
 		Name:    "ssh-tunnel",
 		Command: cmd.String(),
 		Kind:    tool.ProcessKindRemote,

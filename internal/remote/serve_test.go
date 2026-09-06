@@ -2,8 +2,10 @@ package remote
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -45,7 +47,7 @@ func TestServerAliveRequiresPidAndVersionAndHealth(t *testing.T) {
 
 	ft := newFakeTransport()
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
-	ft.execResults[healthProbeCmd(4096, "tok")] = ExecResult{Stdout: "200"}
+	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
 	if !ServerAlive(ft, state, "0.8.85") {
 		t.Fatal("expected alive: pid alive, version matches, health 200")
 	}
@@ -64,9 +66,56 @@ func TestServerAliveRequiresPidAndVersionAndHealth(t *testing.T) {
 
 	ftBadHealth := newFakeTransport()
 	ftBadHealth.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
-	ftBadHealth.execResults[healthProbeCmd(4096, "tok")] = ExecResult{Stdout: "000"}
+	ftBadHealth.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "000"}
 	if ServerAlive(ftBadHealth, state, "0.8.85") {
 		t.Fatal("expected not alive: health probe did not return 200 (curl missing or server wedged)")
+	}
+}
+
+func TestHealthProbeCmdDoesNotLeakToken(t *testing.T) {
+	// /api/health is deliberately unauthenticated (handler_health.go); the
+	// probe must never put a token into the executed command string, since
+	// that would be visible in the remote host's process listing (ps) for
+	// the probe's duration.
+	cmd := healthProbeCmd(4096)
+	if strings.Contains(cmd, "Authorization") || strings.Contains(cmd, "-H ") {
+		t.Errorf("health probe command must not carry an Authorization header: %q", cmd)
+	}
+	if !strings.Contains(cmd, "/api/health") {
+		t.Errorf("health probe command must hit /api/health: %q", cmd)
+	}
+}
+
+// launchFailsWithStderrFake wraps fakeTransport so a single named command
+// returns both a non-nil error and populated Stderr — mirroring what a real
+// Transport does on a failed remote command (see SSHTransport.Exec).
+// fakeTransport's own execErrs path can't express this: it discards the
+// ExecResult whenever an error is configured.
+type launchFailsWithStderrFake struct {
+	*fakeTransport
+	failCmd string
+	stderr  string
+}
+
+func (l *launchFailsWithStderrFake) Exec(command string) (ExecResult, error) {
+	if command == l.failCmd {
+		return ExecResult{Stderr: l.stderr}, errors.New("exit status 127")
+	}
+	return l.fakeTransport.Exec(command)
+}
+
+func TestStartFreshServerLaunchFailureIncludesStderr(t *testing.T) {
+	ft := &launchFailsWithStderrFake{
+		fakeTransport: newFakeTransport(),
+		failCmd:       launchServerCmd("0.8.85"),
+		stderr:        "nohup: command not found",
+	}
+	_, err := StartFreshServer(ft, "0.8.85")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "nohup: command not found") {
+		t.Errorf("expected launch error to include remote stderr, got: %v", err)
 	}
 }
 
@@ -77,7 +126,7 @@ func TestEnsureRemoteServerReusesLiveMatchingServer(t *testing.T) {
 	ft := newFakeTransport()
 	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(data)}
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
-	ft.execResults[healthProbeCmd(4096, "tok")] = ExecResult{Stdout: "200"}
+	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
 
 	state, reused, err := EnsureRemoteServer(ft, "0.8.85")
 	if err != nil {
