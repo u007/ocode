@@ -20,6 +20,7 @@ okf_version: 0.1
 - [Shell Sandbox Is Write-Integrity Only, Not Confidentiality](architecture/shell-sandbox-integrity-only-mode.md) - Decision to document the sandbox as integrity-only/write-confined with explicit confidentiality limitations, since global reads and network egress remain open.
 - [Sidebar TUI/Web Parity Gaps](architecture/sidebar-tui-parity-gaps.md) - Gap analysis of web frontend sidebar features missing relative to the TUI sidebar, covering backend fields not consumed and missing TS types.
 - [V1 Connection Cap Exclusion — Embedded Browser Panel](architecture/v1-connection-cap-exclusion.md) - Decision to exclude the per-stateKey concurrent upstream connection cap (32) from v1 embedded browser panel. The exclusion applied at v1 ship; the follow-up implementation has since landed.
+- [Worktree-Based Parallel Feature Development](architecture/worktree-based-parallel-feature-development.md) - Integration pattern for parallel feature development using git worktrees to avoid collisions when multiple features touch shared files
 
 # gotchas
 
@@ -37,6 +38,7 @@ okf_version: 0.1
 - [Chat Input — Queued Messages Lost on Submission Failure](gotchas/chat-input-message-loss.md) - Queued messages are lost when submission fails — sendMessage returns false but the message is already shifted from the queue
 - [ChatPanel Autoscroll Bounce/Freeze](gotchas/autoscroll-bounce.md) - Root cause analysis of the autoscroll bounce/freeze bug: smooth-scrolling every live token without at-bottom state tracking causes competing animations that lock up the scroll position.
 - [Concurrent File Editing Risk — Multiple Writers in Same Checkout](gotchas/concurrent-file-editing-risk.md) - Gotcha: multiple writers (agents + manual edits) on the same files within a single checkout can corrupt both streams. Covers the concurrent modification problem, affected scenarios, mitigation strategies, and recovery.
+- [Concurrent session writers — conflict semantics and recovery](gotchas/session-writers-conflict-recovery.md)
 - [Debug Instrumentation Ships Unconditionally](gotchas/debug-instrumentation-ships-unconditionally.md) - Process gotcha: temporary Date.prototype instrumentation ships unconditionally in production builds, causing global prototype mutation, altered date behavior, and authenticated network requests.
 - [Embedded Browser — WebSocket Proxy 404](gotchas/embedded-browser-websocket-proxy-404.md) - Gotcha: WebSocket connections through the embedded browser proxy fail with 404 during handshake due to missing or unreachable upgrade path in the browse server.
 - [FilePicker.test.tsx Stale Build Status — Corrected](gotchas/filepicker-stale-todo.md) - Stale TODO item: FilePicker.test.tsx now has no user-event import and build passes
@@ -51,6 +53,7 @@ okf_version: 0.1
 - [Plugin Removal — Root Directory Deletion Risk](gotchas/plugin-removal-root-deletion.md) - Security gotcha: removal validation must reject deletion of an entire approved plugin root directory, not just validate child paths.
 - [Radix Select Empty String Sentinel](gotchas/radix-select-empty-string-sentinel.md) - Radix Select rejects empty strings as item values; use a sentinel value instead
 - [run_in_background Bash Commands Orphaned on Force-Killed ocode](gotchas/background-bash-orphan-on-force-kill.md) - Background bash commands started via the bash tool had no self-cleanup and would survive kill -9 on ocode; wrapped in the same parent-monitor mechanism local models already used
+- [Sandbox git push — SSH agent inheritance and fail-closed TTY prompts](gotchas/sandbox-git-push-ssh-agent-tty.md) - Sandbox mode git push behavior: why plain push auto-allows, why force flags ASK, root causes of "ssh key not available" failures, and user-facing fixes
 - [Sandbox Writable-Root Must Exist on Disk](gotchas/sandbox-writable-root-must-exist.md) - Gotcha: sandbox backend validates writable-root directories before command execution and fails if they don't exist on disk, preventing mkdir -p inside sandbox
 - [Seatbelt Profile Test Coverage Gap](gotchas/seatbelt-profile-test-coverage-gap.md) - Seatbelt profile addition for /dev/null and /dev/tty now has test coverage: TestSeatbeltProfileGrantsDevNullOnly, TestSeatbeltAllowsDevNullDiscard, TestSeatbeltDeniesDevTTYFreshOpen added plus pre-existing profile tests in profile_darwin_test.go. Coverage gap closed.
 - [Session Storage Critical Issues](gotchas/session-storage-critical-issues.md) - Critical issues discovered in session storage code review
@@ -317,6 +320,7 @@ okf_version: 0.1
 - [03-ui-toggles.md](superpowers/plans/2026-08-31-shell-sandbox/03-ui-toggles.md)
 - [04-docs-caveats.md](superpowers/plans/2026-08-31-shell-sandbox/04-docs-caveats.md)
 - [INDEX.md](superpowers/plans/2026-08-31-shell-sandbox/INDEX.md)
+- [2026-09-06-multirow-tab-bar.md](superpowers/plans/2026-09-06-multirow-tab-bar.md)
 - [2026-07-08-global-runtime-artifacts-design.md](superpowers/specs/2026-07-08-global-runtime-artifacts-design.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [2026-07-11-model-stack-benchmark-design.md](superpowers/specs/2026-07-11-model-stack-benchmark-design.md)
@@ -349,6 +353,7 @@ okf_version: 0.1
 - [2026-08-30-embedded-browser-panel-design.md](superpowers/specs/2026-08-30-embedded-browser-panel-design.md)
 - [2026-08-31-browser-chrome-cdp-design.md](superpowers/specs/2026-08-31-browser-chrome-cdp-design.md)
 - [2026-09-03-sidebar-preview-design.md](superpowers/specs/2026-09-03-sidebar-preview-design.md)
+- [2026-09-06-multirow-tab-bar-design.md](superpowers/specs/2026-09-06-multirow-tab-bar-design.md)
 - [telegram-bot.md](telegram-bot.md)
 - [web-desktop-parity-todo.md](web-desktop-parity-todo.md)
 

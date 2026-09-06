@@ -16,6 +16,11 @@
 
 
 
+
+## 2026-09-06
+
+* **Creation**: Worktree-Based Parallel Feature Development ([architecture/worktree-based-parallel-feature-development.md](/architecture/worktree-based-parallel-feature-development.md))
+* **Creation**: Sandbox git push — SSH agent inheritance and fail-closed TTY prompts ([gotchas/sandbox-git-push-ssh-agent-tty.md](/gotchas/sandbox-git-push-ssh-agent-tty.md))
 ## 2026-09-05
 
 * **Update**: Auto-Permission Prompt Prose Code Audit Gap ([gotchas/auto-permission-prompt-prose-code-audit-gap.md](/gotchas/auto-permission-prompt-prose-code-audit-gap.md))
