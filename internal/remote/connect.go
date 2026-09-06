@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -195,6 +196,14 @@ func ConnectWeb(opts ConnectOptions) error {
 	if err != nil {
 		return err
 	}
+	// Mirror Connect's pattern: every return path below (prepare-stage
+	// failure is handled above and never registered anything on sup, so it's
+	// excluded) must shut the supervisor down, not just the one failure path
+	// that used to have its own explicit shutdownSupervisor call.
+	// ProcessSupervisor.Shutdown is idempotent (a second call just waits on
+	// the same in-flight/finished shutdown), so this is safe alongside
+	// superviseTunnel's own shutdownSupervisor call on Ctrl-C.
+	defer shutdownSupervisor(sup)
 
 	progress.Start("server", "discovering or starting remote server")
 	state, reused, err := EnsureRemoteServer(transport, version.Version)
@@ -228,15 +237,25 @@ func ConnectWeb(opts ConnectOptions) error {
 	}
 	progress.Done(fmt.Sprintf("localhost:%d → remote:%d", localPort, state.Port))
 
+	// startTunnelWithRetry only starts the `ssh -N -L` process; it never
+	// waits for the forwarding to actually establish. Without this check, a
+	// remote sshd that refuses forwarding, or a network drop mid-handshake,
+	// would leave a live ssh process but a dead local port — and the
+	// browser would open against it with no error surfaced anywhere until
+	// superviseTunnel eventually notices the process died.
+	progress.Start("ready", "waiting for tunnel to accept connections")
+	if err := waitForTunnelReady(localPort); err != nil {
+		progress.Fail(err, "check remote sshd's AllowTcpForwarding setting and your network")
+		return err
+	}
+	progress.Done("")
+
 	progress.Start("open", "opening browser")
 	url := fmt.Sprintf("http://localhost:%d/#token=%s", localPort, state.Token)
 	if err := openBrowserURL(url); err != nil {
 		progress.Fail(err, "")
-		// The tunnel is already running and registered on sup at this
-		// point — without an explicit shutdown here, superviseTunnel (the
-		// only other place that tears the tunnel down) is never reached on
-		// this path, orphaning the ssh -N -L subprocess indefinitely.
-		shutdownSupervisor(sup)
+		// The deferred shutdownSupervisor above tears the tunnel down on
+		// this return, same as every other failure path here.
 		return err
 	}
 	progress.Done("")
@@ -291,6 +310,33 @@ func startTunnelWithRetry(sup *tool.ProcessSupervisor, target Target, remotePort
 		}
 	}
 	return 0, nil, fmt.Errorf("open ssh tunnel after retry: %w", err)
+}
+
+// tunnelReadyAttempts/Interval bound how long waitForTunnelReady polls a
+// freshly started tunnel before giving up. Package-level vars (not consts)
+// so tests can shrink them instead of taking seconds per run.
+var (
+	tunnelReadyAttempts = 25
+	tunnelReadyInterval = 200 * time.Millisecond
+)
+
+// waitForTunnelReady dials 127.0.0.1:localPort in a bounded retry loop
+// (tunnelReadyAttempts × tunnelReadyInterval, 5s total at the defaults),
+// closing the connection immediately on success. Returns the last dial
+// error if no attempt succeeds in time.
+func waitForTunnelReady(localPort int) error {
+	addr := fmt.Sprintf("127.0.0.1:%d", localPort)
+	var lastErr error
+	for i := 0; i < tunnelReadyAttempts; i++ {
+		conn, err := net.DialTimeout("tcp", addr, tunnelReadyInterval)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		lastErr = err
+		time.Sleep(tunnelReadyInterval)
+	}
+	return fmt.Errorf("tunnel at %s never accepted a connection: %w", addr, lastErr)
 }
 
 // superviseTunnel blocks until either the tunnel process exits on its own
