@@ -1256,19 +1256,12 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	remoteFlag := fs.Bool("remote", false, "Remote mode: bind 127.0.0.1 only, require a generated API token, and write ~/.ocode/remote/serve.json for reconnect discovery")
 	fs.Parse(args)
 
-	if *remoteFlag {
-		*host = "127.0.0.1"
-	}
-	addr := fmt.Sprintf("%s:%d", *host, *port)
-	username := os.Getenv("OPENCODE_SERVER_USERNAME")
-	password := os.Getenv("OPENCODE_SERVER_PASSWORD")
-	if *remoteFlag {
-		token, err := generateRemoteToken()
-		if err != nil {
-			return fmt.Errorf("generate remote API token: %w", err)
-		}
-		username = ""
-		password = token
+	addr, username, password, err := resolveRemoteLaunchParams(
+		*remoteFlag, *host, *port,
+		os.Getenv("OPENCODE_SERVER_USERNAME"), os.Getenv("OPENCODE_SERVER_PASSWORD"),
+	)
+	if err != nil {
+		return fmt.Errorf("generate remote API token: %w", err)
 	}
 
 	srv := New(addr, username, password, webFS)
@@ -1338,6 +1331,23 @@ func openURL(url string) {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	_ = cmd.Start()
+}
+
+// resolveRemoteLaunchParams computes the effective bind address and
+// username/password for `ocode serve`, forcing loopback binding and a
+// freshly generated token when remote is true — the two properties
+// --remote mode must always guarantee regardless of -host/env vars.
+func resolveRemoteLaunchParams(remote bool, host string, port int, username, password string) (addr, effUsername, effPassword string, err error) {
+	if remote {
+		host = "127.0.0.1"
+		token, terr := generateRemoteToken()
+		if terr != nil {
+			return "", "", "", terr
+		}
+		username = ""
+		password = token
+	}
+	return fmt.Sprintf("%s:%d", host, port), username, password, nil
 }
 
 // generateRemoteToken returns a 256-bit random token, hex-encoded, for

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -295,5 +296,43 @@ func TestRunRemoteModeForcesLoopbackAndGeneratesToken(t *testing.T) {
 	s.SetRemoteMode(true)
 	if !s.remoteMode {
 		t.Fatal("SetRemoteMode(true) did not set the field")
+	}
+}
+
+func TestResolveRemoteLaunchParamsForcesLoopbackAndToken(t *testing.T) {
+	addr, username, password, err := resolveRemoteLaunchParams(true, "0.0.0.0", 4096, "someuser", "somepass")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if addr != "127.0.0.1:4096" {
+		t.Fatalf("remote=true must force loopback regardless of -host, got addr=%q", addr)
+	}
+	if username != "" {
+		t.Fatalf("remote=true must clear username, got %q", username)
+	}
+	if password == "" {
+		t.Fatal("remote=true must generate a non-empty token")
+	}
+	if password == "somepass" {
+		t.Fatal("remote=true must generate a fresh token, not pass through the given password")
+	}
+	if _, hexErr := hex.DecodeString(password); hexErr != nil {
+		t.Fatalf("remote=true password should be a hex token, got %q: %v", password, hexErr)
+	}
+}
+
+func TestResolveRemoteLaunchParamsPassesThroughWhenNotRemote(t *testing.T) {
+	addr, username, password, err := resolveRemoteLaunchParams(false, "0.0.0.0", 4096, "someuser", "somepass")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if addr != "0.0.0.0:4096" {
+		t.Fatalf("remote=false must pass through host/port unchanged, got addr=%q", addr)
+	}
+	if username != "someuser" {
+		t.Fatalf("remote=false must pass through username unchanged, got %q", username)
+	}
+	if password != "somepass" {
+		t.Fatalf("remote=false must pass through password unchanged, got %q", password)
 	}
 }
