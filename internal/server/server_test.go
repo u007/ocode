@@ -179,6 +179,36 @@ func TestNoAuthWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestCheckAuthRemoteModeRejectsQueryStringToken(t *testing.T) {
+	s := New("127.0.0.1:0", "", "tok123", nil)
+	s.SetRemoteMode(true)
+
+	r := httptest.NewRequest("GET", "/api/sessions?token=tok123", nil)
+	if s.checkAuth(r) {
+		t.Fatal("remote mode must reject a query-string token even when it matches")
+	}
+
+	r2 := httptest.NewRequest("GET", "/api/sessions", nil)
+	r2.Header.Set("Authorization", "Bearer tok123")
+	if !s.checkAuth(r2) {
+		t.Fatal("remote mode must still accept a matching Bearer header")
+	}
+}
+
+func TestRunRemoteModeRefusesEmptyToken(t *testing.T) {
+	s := New("127.0.0.1:0", "", "", nil)
+	s.SetRemoteMode(true)
+	// authMiddleware must never become a no-op (username=="" && password=="")
+	// short-circuit in remote mode — an empty password would otherwise
+	// disable auth entirely, which contradicts "always requires a token."
+	r := httptest.NewRequest("GET", "/api/sessions", nil)
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("remote mode with no password configured must still deny access, got %d", w.Code)
+	}
+}
+
 func TestTerminalRejectedOnUnauthenticatedNonLoopbackServer(t *testing.T) {
 	s := New("0.0.0.0:0", "", "", nil)
 

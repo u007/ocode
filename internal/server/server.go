@@ -463,9 +463,13 @@ func (s *Server) checkAuth(r *http.Request) bool {
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		return auth[7:] == s.password
 	}
-	// ?token= query param (used by EventSource which can't set headers)
-	if tok := r.URL.Query().Get("token"); tok != "" {
-		return tok == s.password
+	// ?token= query param (used by EventSource, which can't set headers).
+	// Forbidden in --remote mode: query strings reach access logs and
+	// intermediary proxies, which the remote token model treats as a leak.
+	if !s.remoteMode {
+		if tok := r.URL.Query().Get("token"); tok != "" {
+			return tok == s.password
+		}
 	}
 	// HTTP Basic Auth
 	user, pass, ok := r.BasicAuth()
@@ -476,10 +480,15 @@ func (s *Server) checkAuth(r *http.Request) bool {
 }
 
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	if s.username == "" && s.password == "" {
-		return next
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Checked per-request (not at wrap time): registerRoutes runs inside
+		// New(), before Run's caller has a chance to call SetRemoteMode, so a
+		// wrap-time check would permanently bake in remoteMode==false for
+		// every route.
+		if !s.remoteMode && s.username == "" && s.password == "" {
+			next(w, r)
+			return
+		}
 		ip := realIP(r)
 		if s.rl.isBlocked(ip) {
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
@@ -1065,9 +1074,10 @@ func (s *Server) SetWorkDir(dir string) {
 }
 
 // SetRemoteMode marks the server as launched in `--remote` mode. Must be
-// called before Serve; it only affects checkAuth behavior (Task 2), not
-// binding — the caller (Run) is responsible for forcing the loopback
-// address and generating the token before constructing the listener.
+// called before Serve; it only affects checkAuth and authMiddleware
+// behavior (Task 2), not binding — the caller (Run) is responsible for
+// forcing the loopback address and generating the token before
+// constructing the listener.
 func (s *Server) SetRemoteMode(v bool) {
 	s.remoteMode = v
 }
