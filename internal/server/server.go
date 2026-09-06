@@ -166,6 +166,9 @@ func isLoopbackBind(addr string) bool {
 }
 
 func (s *Server) registerRoutes() {
+	// Deliberately unauthenticated: lets a --remote server's reuse check
+	// probe liveness before any tunnel or token has been established.
+	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/chat", s.authMiddleware(s.handleChat))
 	s.mux.HandleFunc("GET /api/chat/stream", s.authMiddleware(s.handleChatStream))
 	s.mux.HandleFunc("GET /api/chat/messages", s.authMiddleware(s.handleSessionMessages))
