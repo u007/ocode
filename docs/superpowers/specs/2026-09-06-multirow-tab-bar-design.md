@@ -1,7 +1,8 @@
 # Multi-Row Wrapping Tab Bar — Design
 
 - **Date:** 2026-09-06
-- **Status:** Draft — design approved in conversation (multi-row cap + "+N" fallback); spec review pending (todo t6)
+- **Status:** Approved — user-reviewed 2026-09-06. Implementation plan:
+  `docs/superpowers/plans/2026-09-06-multirow-tab-bar.md` (commit `9428df6`).
 - **Scope:** `web/src/components/Layout/UnifiedTabBar.tsx` + new helper files; web frontend only. No backend changes.
 - **Related:** `docs/superpowers/specs/2026-08-29-unified-session-terminal-tabs-design.md` (predecessor single-row unified bar)
 
