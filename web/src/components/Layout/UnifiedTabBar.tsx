@@ -13,7 +13,7 @@ import {
   arrayMove,
   SortableContext,
   sortableKeyboardCoordinates,
-  horizontalListSortingStrategy,
+  rectSortingStrategy,
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -708,7 +708,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         >
           <SortableContext
             items={probe ? order : visibleKeys}
-            strategy={horizontalListSortingStrategy}
+            strategy={rectSortingStrategy}
           >
             {(probe ? order : visibleKeys).map((key) =>
               renderPill(key, probe ? { registerRef: registerPillRef(key), disabled: true } : {}),
