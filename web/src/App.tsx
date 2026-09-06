@@ -12,7 +12,7 @@ import { usePreviewActivation } from "./components/Preview/usePreviewActivation"
 import { PREVIEW_CONTEXT_EVENT, type PreviewSelection } from "./lib/previewKind";
 import { useBrowserStore, browserActions, type StateKey } from "./lib/browserStore";
 import { loadViewStateForProject, saveViewStateForProject, type FocusedKind } from "./lib/viewPersistence";
-import { api, isRemoteSession, authToken } from "./api/client";
+import { api, isRemoteSession, authToken, setAuthFailureHandler } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import RemoteReconnect from "./components/RemoteReconnect";
 import ChatPanel from "./components/Chat/ChatPanel";
@@ -1215,7 +1215,25 @@ function HomeApp() {
 export default function App() {
   // Applies the server (terminal) theme to the CSS variables once on load.
   useTheme();
-  if (isRemoteSession() && !authToken()) {
+
+  // `!authToken()` alone only catches "no token at all" (a tab that never
+  // had one). The realistic failure is the remote server restarting: the
+  // cached token goes stale, every API call starts 401ing, but authToken()
+  // still returns that (now-invalid) cached value. reportAuthFailure (in
+  // client.ts) detects that 401 and calls this handler so the app can
+  // switch to RemoteReconnect immediately instead of the user staring at a
+  // silently broken app.
+  const [remoteAuthFailed, setRemoteAuthFailed] = useState(false);
+  useEffect(() => {
+    if (!isRemoteSession()) return;
+    setAuthFailureHandler(() => {
+      eventBus.stop(); // stop retrying the stream with the now-dead token
+      setRemoteAuthFailed(true);
+    });
+    return () => setAuthFailureHandler(null);
+  }, []);
+
+  if (isRemoteSession() && (!authToken() || remoteAuthFailed)) {
     return <RemoteReconnect />;
   }
   return (

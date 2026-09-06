@@ -1,4 +1,4 @@
-import { apiPath, authHeaders, readSSEStream } from "../api/client";
+import { apiPath, authHeaders, readSSEStream, reportAuthFailure } from "../api/client";
 
 /**
  * eventBus — the single frontend transport for the unified server event bus.
@@ -179,6 +179,10 @@ class EventBus {
 
       if (!res.ok) {
         console.error(`eventBus: stream request failed with status ${res.status}`);
+        // The long-lived event stream is often the first thing to 401 after
+        // a remote server restart (new random token) — report it so the app
+        // can offer RemoteReconnect immediately instead of retrying forever.
+        reportAuthFailure(res.status);
         lostConnection = true;
       } else {
         // The server sends every envelope as `event: envelope\ndata: <json>`.

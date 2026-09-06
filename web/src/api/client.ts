@@ -155,10 +155,26 @@ export async function initBackendBase(): Promise<string | null> {
 //      a copy-paste of the URL or shows up in browser history.
 //   2. sessionStorage (ocode.remoteToken) — the fragment token, cached
 //      across reloads within the same tab session.
-//   3. ?token=... query string — the existing /rc (remote control) path.
-// Fragments are never sent in HTTP requests, so (1)/(2) never reach server
-// or proxy logs; (3) is a weaker, pre-existing mechanism kept for /rc.
+//   3. A persistent "this tab is a remote session" marker with no token —
+//      set alongside (1)/(2) and never cleared by reportAuthFailure's token
+//      wipe, so a reload after the server invalidates the cached token still
+//      resolves isRemoteSession()=true (and authToken()="", which the App
+//      guard below already treats as "show RemoteReconnect") instead of
+//      silently falling through to the legacy /rc path.
+//   4. ?token=... query string — the existing /rc (remote control) path.
+// Fragments are never sent in HTTP requests, so (1)/(2)/(3) never reach
+// server or proxy logs; (4) is a weaker, pre-existing mechanism kept for /rc.
 const REMOTE_TOKEN_STORAGE_KEY = "ocode.remoteToken";
+const REMOTE_SESSION_MARKER_KEY = "ocode.remoteSessionMarker";
+
+function markRemoteSession(): void {
+  try {
+    sessionStorage.setItem(REMOTE_SESSION_MARKER_KEY, "1");
+  } catch {
+    // sessionStorage unavailable — the marker only helps a reload survive a
+    // cleared token, which needs sessionStorage anyway. Not fatal.
+  }
+}
 
 function resolveInitialToken(): { token: string; isRemote: boolean } {
   const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
@@ -171,6 +187,7 @@ function resolveInitialToken(): { token: string; isRemote: boolean } {
       // works for this page load via the returned value; it just won't
       // survive a reload. Not fatal.
     }
+    markRemoteSession();
     const url = new URL(window.location.href);
     url.hash = "";
     window.history.replaceState(null, "", url.toString());
@@ -184,7 +201,18 @@ function resolveInitialToken(): { token: string; isRemote: boolean } {
     cached = null;
   }
   if (cached) {
+    markRemoteSession();
     return { token: cached, isRemote: true };
+  }
+
+  let hasMarker = false;
+  try {
+    hasMarker = sessionStorage.getItem(REMOTE_SESSION_MARKER_KEY) === "1";
+  } catch {
+    hasMarker = false;
+  }
+  if (hasMarker) {
+    return { token: "", isRemote: true };
   }
 
   const queryToken = new URLSearchParams(window.location.search).get("token") ?? "";
@@ -192,6 +220,45 @@ function resolveInitialToken(): { token: string; isRemote: boolean } {
 }
 
 const { token: _token, isRemote: _isRemoteSession } = resolveInitialToken();
+
+// Registered by App.tsx for a remote session only. Fired by reportAuthFailure
+// so the app can render RemoteReconnect immediately on a 401, without
+// waiting for the user to reload the tab.
+let onAuthFailure: (() => void) | null = null;
+
+/** Registers (or clears, with null) the handler reportAuthFailure calls. */
+export function setAuthFailureHandler(fn: (() => void) | null): void {
+  onAuthFailure = fn;
+}
+
+/**
+ * Called with a response's HTTP status after any remote-mode API call. A 401
+ * means the server likely restarted (a fresh random token) and this tab's
+ * cached token is now stale/invalid — every further call would 401 forever
+ * with no explanation. Clears the cached token (the persistent marker above
+ * keeps isRemoteSession() true regardless) and notifies the registered
+ * handler so the app can switch to RemoteReconnect right away.
+ *
+ * `_isRemoteSession` never changes after module load — a genuinely fresh
+ * non-remote server also returning 401 (wrong password) must not trip this;
+ * gating on it (not just the status code) keeps that case a plain
+ * unauthorized error instead of a false "reconnect" prompt.
+ *
+ * Exported so eventBus's long-lived SSE stream (which doesn't go through
+ * fetchJSON/fetchEmpty/authedFetch below) can report its own non-2xx
+ * responses too — after a server restart, the SSE stream is often the
+ * *first* thing to 401, since it's the one connection every page keeps
+ * open continuously.
+ */
+export function reportAuthFailure(status: number): void {
+  if (status !== 401 || !_isRemoteSession) return;
+  try {
+    sessionStorage.removeItem(REMOTE_TOKEN_STORAGE_KEY);
+  } catch (err) {
+    console.error("client: failed to clear stale remote token from sessionStorage", err);
+  }
+  onAuthFailure?.();
+}
 
 /** True when this tab's token came from a `--remote` server's URL fragment
  *  (or its sessionStorage cache) rather than the legacy /rc ?token= path.
@@ -224,7 +291,9 @@ export async function authedFetch(path: string, init: RequestInit = {}): Promise
   const headers = new Headers(init.headers);
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
-  return fetch(apiPath(path), { ...init, headers });
+  const res = await fetch(apiPath(path), { ...init, headers });
+  if (!res.ok) reportAuthFailure(res.status);
+  return res;
 }
 
 /** Prepends the current SPA base path to an API or SSE path.
@@ -283,6 +352,7 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
   const res = await fetch(apiPath(path), { ...init, headers });
   if (!res.ok) {
+    reportAuthFailure(res.status);
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new ApiError(err.message || err.error || res.statusText, res.status);
   }
@@ -295,6 +365,7 @@ async function fetchEmpty(path: string, init?: RequestInit): Promise<void> {
   for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
   const res = await fetch(apiPath(path), { ...init, headers });
   if (!res.ok) {
+    reportAuthFailure(res.status);
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || res.statusText);
   }
