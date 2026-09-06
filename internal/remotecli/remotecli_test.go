@@ -7,20 +7,20 @@ import (
 )
 
 func TestParseArgs(t *testing.T) {
-	target, path, noSync, err := parseArgs([]string{"user@host", "/proj", "--no-sync"})
+	target, path, noSync, web, err := parseArgs([]string{"user@host", "/proj", "--no-sync"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if target.String() != "user@host" || path != "/proj" || !noSync {
-		t.Errorf("got target=%q path=%q noSync=%v", target.String(), path, noSync)
+	if target.String() != "user@host" || path != "/proj" || !noSync || web {
+		t.Errorf("got target=%q path=%q noSync=%v web=%v", target.String(), path, noSync, web)
 	}
 
-	target, path, noSync, err = parseArgs([]string{"host"})
+	target, path, noSync, web, err = parseArgs([]string{"host"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if target.String() != "host" || path != "" || noSync {
-		t.Errorf("got target=%q path=%q noSync=%v", target.String(), path, noSync)
+	if target.String() != "host" || path != "" || noSync || web {
+		t.Errorf("got target=%q path=%q noSync=%v web=%v", target.String(), path, noSync, web)
 	}
 }
 
@@ -32,9 +32,32 @@ func TestParseArgsErrors(t *testing.T) {
 		{"--unknown-flag", "host"},
 	}
 	for _, args := range cases {
-		if _, _, _, err := parseArgs(args); err == nil {
+		if _, _, _, _, err := parseArgs(args); err == nil {
 			t.Errorf("parseArgs(%v): expected error", args)
 		}
+	}
+}
+
+func TestParseArgsWebFlag(t *testing.T) {
+	target, path, noSync, web, err := parseArgs([]string{"--web", "host", "/proj"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !web {
+		t.Error("expected web=true")
+	}
+	if target.Host != "host" || path != "/proj" || noSync {
+		t.Errorf("got target=%+v path=%q noSync=%v", target, path, noSync)
+	}
+}
+
+func TestParseArgsWebFlagAnyPosition(t *testing.T) {
+	_, _, _, web, err := parseArgs([]string{"host", "--web"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !web {
+		t.Error("expected web=true regardless of flag position")
 	}
 }
 

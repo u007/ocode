@@ -14,9 +14,9 @@ import (
 	"github.com/u007/ocode/internal/remote"
 )
 
-// Run dispatches `ocode remote <[user@]host> [path] [--no-sync]`.
+// Run dispatches `ocode remote <[user@]host> [path] [--web] [--no-sync]`.
 func Run(args []string) error {
-	target, path, noSync, err := parseArgs(args)
+	target, path, noSync, web, err := parseArgs(args)
 	if err != nil {
 		return err
 	}
@@ -40,12 +40,17 @@ func Run(args []string) error {
 		}
 	}
 
-	err = remote.Connect(remote.ConnectOptions{
+	connectOpts := remote.ConnectOptions{
 		Target: target,
 		Path:   path,
 		NoSync: noSync,
 		Out:    os.Stdout,
-	})
+	}
+	if web {
+		err = remote.ConnectWeb(connectOpts)
+	} else {
+		err = remote.Connect(connectOpts)
+	}
 
 	if store != nil {
 		// Record the attempt regardless of how the session ended (a
@@ -58,32 +63,36 @@ func Run(args []string) error {
 	return err
 }
 
-func parseArgs(args []string) (target remote.Target, path string, noSync bool, err error) {
+func parseArgs(args []string) (target remote.Target, path string, noSync bool, web bool, err error) {
 	var positional []string
 	for _, a := range args {
 		if a == "--no-sync" {
 			noSync = true
 			continue
 		}
+		if a == "--web" {
+			web = true
+			continue
+		}
 		if len(a) > 0 && a[0] == '-' {
-			return remote.Target{}, "", false, fmt.Errorf("unknown flag %q (usage: ocode remote <[user@]host> [path] [--no-sync])", a)
+			return remote.Target{}, "", false, false, fmt.Errorf("unknown flag %q (usage: ocode remote <[user@]host> [path] [--web] [--no-sync])", a)
 		}
 		positional = append(positional, a)
 	}
 	if len(positional) == 0 {
-		return remote.Target{}, "", false, fmt.Errorf("usage: ocode remote <[user@]host> [path] [--no-sync]")
+		return remote.Target{}, "", false, false, fmt.Errorf("usage: ocode remote <[user@]host> [path] [--web] [--no-sync]")
 	}
 	target, err = remote.ParseTarget(positional[0])
 	if err != nil {
-		return remote.Target{}, "", false, err
+		return remote.Target{}, "", false, false, err
 	}
 	if len(positional) > 1 {
 		path = positional[1]
 	}
 	if len(positional) > 2 {
-		return remote.Target{}, "", false, fmt.Errorf("too many arguments (usage: ocode remote <[user@]host> [path] [--no-sync])")
+		return remote.Target{}, "", false, false, fmt.Errorf("too many arguments (usage: ocode remote <[user@]host> [path] [--web] [--no-sync])")
 	}
-	return target, path, noSync, nil
+	return target, path, noSync, web, nil
 }
 
 // RunReceiveConfig implements the hidden `ocode remote-receive-config`
