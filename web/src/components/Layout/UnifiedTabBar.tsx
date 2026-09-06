@@ -32,6 +32,7 @@ import { loadTabOrder, saveTabOrder, reconcileTabOrder, type UnifiedTabKey } fro
 import { useWrappedOverflow } from "./useWrappedOverflow";
 import { focusTerminalById } from "../Terminal/terminalFocus";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Button } from "../ui/button";
 
 // While a tab's session has an in-flight turn, show what it's doing as a
@@ -278,6 +279,102 @@ function TabPill({
 function BrowserTabPill({ id, ...props }: { id: string } & Omit<TabPillProps, "isLoading">) {
   const s = useBrowserStore(`tab:${id}` as StateKey);
   return <TabPill {...props} isLoading={!!s?.loading} />;
+}
+
+export interface HiddenPill {
+  key: string;
+  emoji: string;
+  title: string;
+  hasPending?: boolean;
+  hasAlert?: boolean;
+  onActivate: (e: React.MouseEvent) => void;
+  onClose: (e: React.MouseEvent) => void;
+}
+
+/** The "+N" overflow chip + popover listing tabs that did not fit the capped rows. */
+export function OverflowChip({ label, pills, hasActive }: { label: string; pills: HiddenPill[]; hasActive: boolean }) {
+  const [open, setOpen] = useState(false);
+  const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  // Auto-close when the hidden set empties (a hidden tab became visible or closed).
+  useEffect(() => {
+    if (pills.length === 0 && open) setOpen(false);
+  }, [pills.length, open]);
+
+  const focusRow = (idx: number) => rowRefs.current[idx]?.focus();
+  const onRowKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>, idx: number) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      focusRow(idx + 1 < pills.length ? idx + 1 : 0);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      focusRow(idx > 0 ? idx - 1 : pills.length - 1);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      focusRow(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      focusRow(pills.length - 1);
+    }
+  };
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={`${label} more tabs`}
+          title={`Show ${label} hidden tabs`}
+          className={`flex w-10 h-6 shrink-0 items-center justify-center rounded-md border px-1.5 text-xs transition-colors ${
+            hasActive
+              ? "border-ring bg-accent/40 text-foreground"
+              : "border-border bg-card/20 text-muted-foreground hover:bg-muted hover:text-foreground"
+          }`}
+        >
+          {label}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" sideOffset={6} className="w-64 max-h-72 overflow-y-auto p-1">
+        <div role="list" aria-label="Hidden tabs">
+          {pills.map((p, i) => (
+            <div key={p.key} role="listitem" className="flex items-center gap-0.5 rounded-md px-1 py-0.5 hover:bg-muted">
+              <button
+                ref={(el) => {
+                  rowRefs.current[i] = el;
+                }}
+                type="button"
+                tabIndex={0}
+                onClick={(e) => {
+                  p.onActivate(e);
+                  setOpen(false);
+                }}
+                onKeyDown={(e) => onRowKeyDown(e, i)}
+                className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-sm"
+                title={p.title}
+              >
+                <span aria-hidden className="shrink-0">{p.emoji}</span>
+                <span className="truncate">{p.title}</span>
+                {p.hasPending && <span aria-label="pending" className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />}
+                {p.hasAlert && <Bell aria-hidden className="h-3 w-3 shrink-0 text-red-500" />}
+              </button>
+              <button
+                type="button"
+                aria-label={`Close ${p.title}`}
+                title={`Close ${p.title}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  p.onClose(e);
+                }}
+                className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 type PendingTabClose = { kind: "chat" | "browser" | "terminal"; id: string; title: string } | null;
@@ -689,6 +786,47 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   };
 
   const chipLabel = `${Math.min(hiddenKeys.length, 99)}+`;
+  const activeHidden = activeTabKey != null && hiddenKeys.includes(activeTabKey);
+
+  const hiddenPills: HiddenPill[] = hiddenKeys.map((key) => {
+    if (key.startsWith("chat:")) {
+      const id = key.slice("chat:".length);
+      const tab = chatById.get(id);
+      const d = chatDerived.find((x) => x.id === id);
+      const title = d?.displayTitle ?? tab?.title ?? id;
+      return {
+        key,
+        emoji: "💬",
+        title,
+        hasPending: d?.hasPending ?? false,
+        onActivate: (e) => handleChatClick(e, id, title),
+        onClose: () => doCloseChat(id),
+      };
+    }
+    if (key.startsWith("browser:")) {
+      const id = key.slice("browser:".length);
+      const tab = browserTabs.find((t) => t.id === id);
+      const title = tab?.title ?? id;
+      return {
+        key,
+        emoji: "🌐",
+        title,
+        onActivate: (e) => handleBrowserClick(e, id),
+        onClose: () => doCloseBrowser(id),
+      };
+    }
+    const id = key.slice("term:".length);
+    const term = terminalById.get(id);
+    const title = term?.title ?? id;
+    return {
+      key,
+      emoji: "⌨️",
+      title,
+      hasAlert: !!term?.alerted,
+      onActivate: (e) => handleTerminalClick(e, id),
+      onClose: () => doCloseTerminal(id),
+    };
+  });
 
   return (
     <div className="flex items-start px-2 pt-2 gap-0.5 bg-card border-b border-border min-w-0 w-full">
@@ -718,9 +856,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
             /* Chip probe: reserves the overflow chip's width so wrapping is measured correctly. */
             <span aria-hidden className="w-10 h-6 shrink-0 pointer-events-none" />
           ) : hiddenKeys.length > 0 ? (
-            <span className="flex w-10 h-6 shrink-0 items-center justify-center rounded-md border border-border bg-card/20 px-1.5 text-xs text-muted-foreground">
-              {chipLabel}
-            </span>
+            <OverflowChip label={chipLabel} pills={hiddenPills} hasActive={activeHidden} />
           ) : null}
         </DndContext>
       </div>
