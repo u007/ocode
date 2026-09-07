@@ -114,7 +114,7 @@ func applyGitHunk(dir, spec string, req gitHunkRequest) error {
 		diffArgs = append(diffArgs, "--cached")
 	}
 	diffArgs = append(diffArgs, "--", spec)
-	out, err := gitRunInDir(dir, diffArgs...)
+	out, err := gitDiffRawInDir(dir, diffArgs...)
 	if err != nil || out == "" {
 		return fmt.Errorf("no diff found for %s", spec)
 	}
@@ -150,6 +150,22 @@ func applyGitHunk(dir, spec string, req gitHunkRequest) error {
 		return fmt.Errorf("git apply failed (the file may have changed): %w", err)
 	}
 	return nil
+}
+
+// gitDiffRawInDir runs a `git diff` and returns its stdout with only the
+// trailing newline(s) git appends removed. Unlike gitRunInDir's
+// strings.TrimSpace, this preserves a trailing blank context line (a lone
+// " " marker for an unchanged empty line in the file) — TrimSpace would eat
+// that leading space along with the newline, turning it into a bare empty
+// line with no diff marker and making the reconstructed hunk patch invalid
+// (git apply then fails with "corrupt patch").
+func gitDiffRawInDir(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	return strings.TrimRight(string(out), "\n"), err
 }
 
 // splitDiffHunks splits a unified diff into its preamble (the diff --git /

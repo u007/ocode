@@ -729,3 +729,45 @@ func TestGitHunkDeleteRestore(t *testing.T) {
 		t.Fatalf("expected staged deleted f.txt, got %+v", ws.Staged)
 	}
 }
+
+// TestGitHunkStageWithTrailingBlankContextLine guards against a regression
+// where gitRunInDir's strings.TrimSpace stripped the leading space off a
+// trailing blank *context* line (an unchanged empty line at/near EOF),
+// turning it into a bare empty line with no diff marker. git apply then
+// rejected the reconstructed hunk patch with "corrupt patch at line N".
+func TestGitHunkStageWithTrailingBlankContextLine(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+
+	var b strings.Builder
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(&b, "line%d\n", i)
+	}
+	b.WriteString("\n") // trailing blank line, close enough to be included as context
+	writeFile(t, filepath.Join(dir, "b.txt"), b.String())
+	run(t, dir, "git", "add", "b.txt")
+	run(t, dir, "git", "commit", "-m", "baseline")
+
+	lines := strings.Split(b.String(), "\n")
+	lines[10] = "line11 EDITED"
+	writeFile(t, filepath.Join(dir, "b.txt"), strings.Join(lines, "\n"))
+
+	h := NewHandler()
+	h.SetWorkDir(dir)
+	body, _ := json.Marshal(gitHunkRequest{Path: "b.txt", Hunk: 0, Action: "stage", Staged: false})
+	w := httptest.NewRecorder()
+	h.HandleGitHunk(w, httptest.NewRequest("POST", "/api/git/hunk", strings.NewReader(string(body))))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var ws GitWorkspace
+	if err := json.NewDecoder(w.Body).Decode(&ws); err != nil {
+		t.Fatal(err)
+	}
+	if len(ws.Staged) != 1 || ws.Staged[0].Path != "b.txt" {
+		t.Fatalf("expected b.txt staged, got %+v", ws.Staged)
+	}
+	if !strings.Contains(ws.Staged[0].Patch, "+line11 EDITED") {
+		t.Errorf("staged patch should contain the edit, got: %s", ws.Staged[0].Patch)
+	}
+}

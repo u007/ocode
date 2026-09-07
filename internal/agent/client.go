@@ -110,6 +110,14 @@ type Message struct {
 	// transcript but NOT sent to the LLM. Used by tools that encounter
 	// recoverable problems worth surfacing (e.g. LSP server not installed).
 	Notice string `json:"notice,omitempty"`
+	// UserSeq is a durable, per-session, monotonic sequence assigned to each
+	// user-role message at the moment it is appended to the transcript. It is
+	// carried identically on the persisted message and the `user_message` SSE
+	// frame, so the web frontend can dedupe a snapshot-before-SSE race by
+	// (sessionId, UserSeq) without conflating two legitimate identical
+	// consecutive user messages. 0 = legacy/no sequence; such messages are
+	// never deduplicated.
+	UserSeq int `json:"user_seq,omitempty"`
 	// DisplayContent, when set, carries the FULL (untruncated) tool result for
 	// transcript/UI display. The LLM prompt always uses Content (which may be
 	// truncated by TruncateToolResult to protect the context window). This lets

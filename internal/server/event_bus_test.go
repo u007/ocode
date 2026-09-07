@@ -70,6 +70,52 @@ func TestEventBusSlowSubscriberDoesNotBlock(t *testing.T) {
 drained:
 }
 
+// TestEventBusCriticalEventWaitsForRoom: a critical event (turn_done) must
+// not be dropped just because a subscriber's buffer is full of queued
+// deltas — it should wait for room instead, so the client's transcript never
+// ends up permanently truncated by a burst of text events crowding out the
+// turn's terminal signal.
+func TestEventBusCriticalEventWaitsForRoom(t *testing.T) {
+	bus := NewEventBus()
+	sub := bus.Subscribe(nil)
+	defer bus.Unsubscribe(sub)
+
+	for i := 0; i < busBufferSize; i++ {
+		bus.Publish("text", "/proj", "ses_1", map[string]string{"delta": "x"})
+	}
+
+	done := make(chan struct{})
+	go func() {
+		bus.Publish("turn_done", "/proj", "ses_1", map[string]string{"status": "done"})
+		close(done)
+	}()
+
+	// Give the publish goroutine time to block on the full channel, then
+	// drain one slot to make room for it.
+	time.Sleep(50 * time.Millisecond)
+	<-sub
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("critical publish did not unblock after room was made")
+	}
+
+	var last Envelope
+	for {
+		select {
+		case env := <-sub:
+			last = env
+		default:
+			goto drained
+		}
+	}
+drained:
+	if last.Event != "turn_done" {
+		t.Fatalf("expected last drained event to be turn_done, got %q", last.Event)
+	}
+}
+
 // TestEventBusViewedProjects: the subscriber-aware scope tracks which
 // projects at least one subscriber declares, and shrinks when the last
 // subscriber for a project leaves.

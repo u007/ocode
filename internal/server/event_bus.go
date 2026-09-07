@@ -3,6 +3,7 @@ package server
 import (
 	"log"
 	"sync"
+	"time"
 )
 
 // Envelope is the wire format for every event on the unified bus. All
@@ -24,6 +25,24 @@ type Envelope struct {
 // drop events (with a log) rather than stalling the publisher — the same
 // non-blocking discipline as broadcastEvent in handler.go.
 const busBufferSize = 256
+
+// criticalEvents are the terminal per-turn events a subscriber must not miss:
+// losing one leaves the client's transcript permanently truncated, since
+// neither the mid-turn replay buffer (session_manager.go liveFrameEvents) nor
+// the client's seq-gap reconcile (which only fires on a later envelope) can
+// recover them if nothing else publishes afterward. Publish waits up to
+// criticalPublishTimeout for room instead of dropping these immediately.
+var criticalEvents = map[string]bool{
+	"messages":   true,
+	"turn_done":  true,
+	"turn_error": true,
+}
+
+// criticalPublishTimeout bounds how long Publish waits for a stalled
+// subscriber to drain before giving up on a critical event. Long enough for
+// a subscriber to catch up on a burst of queued deltas, short enough not to
+// hang the publisher indefinitely on a dead subscriber.
+const criticalPublishTimeout = 3 * time.Second
 
 // sessionScopedEvents are the event types that must carry a session id.
 // Publishing one without a session id is a loud error (never a silent
@@ -123,9 +142,11 @@ func (b *EventBus) ViewedProjects() []string {
 
 // Publish stamps the next monotonic seq onto an envelope and fans it out to
 // every subscriber. Sends are non-blocking: a slow subscriber drops the event
-// (with a log line) rather than stalling the publisher. A session-scoped
-// event published without a session id is logged as an error — the event is
-// still delivered, but the publisher is told loudly.
+// (with a log line) rather than stalling the publisher — except for
+// criticalEvents, which wait up to criticalPublishTimeout for room so a
+// backlog of dropped deltas can't also take the turn's terminal event with
+// it. A session-scoped event published without a session id is logged as an
+// error — the event is still delivered, but the publisher is told loudly.
 func (b *EventBus) Publish(event, project, sessionID string, data any) {
 	if sessionScopedEvents[event] && sessionID == "" {
 		log.Printf("event bus: ERROR publishing %q without a session id (project %q)", event, project)
@@ -133,14 +154,28 @@ func (b *EventBus) Publish(event, project, sessionID string, data any) {
 	b.mu.Lock()
 	b.seq++
 	env := Envelope{Event: event, Project: project, SessionID: sessionID, Seq: b.seq, Data: data}
+	chans := make([]chan Envelope, 0, len(b.subs))
 	for ch := range b.subs {
+		chans = append(chans, ch)
+	}
+	b.mu.Unlock()
+
+	critical := criticalEvents[event]
+	for _, ch := range chans {
+		if critical {
+			select {
+			case ch <- env:
+			case <-time.After(criticalPublishTimeout):
+				log.Printf("event bus: dropping critical %q event for stalled subscriber after %s (seq %d)", event, criticalPublishTimeout, env.Seq)
+			}
+			continue
+		}
 		select {
 		case ch <- env:
 		default:
-			log.Printf("event bus: dropping %q event for slow subscriber (seq %d)", event, b.seq)
+			log.Printf("event bus: dropping %q event for slow subscriber (seq %d)", event, env.Seq)
 		}
 	}
-	b.mu.Unlock()
 }
 
 // LastSeq returns the most recently stamped global sequence. It is used to

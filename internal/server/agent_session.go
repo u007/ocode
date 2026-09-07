@@ -567,7 +567,8 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		return "", ErrPermissionPending
 	}
 
-	as.messages = append(as.messages, agent.Message{Role: "user", Content: content})
+	userSeq := nextUserSeq(as.messages)
+	as.messages = append(as.messages, agent.Message{Role: "user", Content: content, UserSeq: userSeq})
 	messages := append([]agent.Message(nil), as.messages...)
 
 	// Turn lifecycle: mark active, start the heartbeat, emit turn_started.
@@ -618,11 +619,14 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 				},
 			})
 		}
-		// Broadcast the user message so the SSE mirror can echo it.
+		// Broadcast the user message so the SSE mirror can echo it. The frame
+		// carries the same user_seq stamped on the persisted/transcript copy, so
+		// the web frontend can dedupe the snapshot-before-SSE race by
+		// (sessionId, user_seq) identity.
 		h.broadcastEvent(SSEEvent{
 			SessionID: sessionID,
 			Event:     "user_message",
-			Data:      map[string]string{"content": content},
+			Data:      map[string]any{"content": content, "user_seq": userSeq},
 		})
 		h.wireHeadlessAgentCallbacks(sessionID, as.agent)
 		// Live-persist each completed step message as the turn streams, so a
@@ -1095,6 +1099,24 @@ func (h *Handler) tryEnqueueInjection(sessionID, content string) bool {
 	}
 	as.agent.EnqueueInjection(agent.Message{Role: "user", Content: content})
 	return true
+}
+
+// nextUserSeq returns the durable per-session sequence for the NEXT user
+// message: one more than the highest UserSeq already present in the
+// transcript. Because every user message is persisted with its stamped
+// UserSeq, a reload/reconnect that rebuilds as.messages from disk preserves
+// monotonicity — the highest persisted seq is intact, so the next turn keeps
+// counting up. Zero for an empty/legacy transcript (a fresh session's first
+// user message starts at 1). Never derived from global SSE seq, timestamps,
+// or array position (compaction may rebase the slice).
+func nextUserSeq(messages []agent.Message) int {
+	max := 0
+	for _, m := range messages {
+		if m.Role == "user" && m.UserSeq > max {
+			max = m.UserSeq
+		}
+	}
+	return max + 1
 }
 
 // flushStrandedInjections drains any message left in as.agent's injection
