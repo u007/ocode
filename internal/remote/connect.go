@@ -198,10 +198,13 @@ func ConnectWeb(opts ConnectOptions) error {
 	}
 
 	progress.Start("server", "discovering or starting remote server")
-	state, reused, err := EnsureRemoteServer(transport, version.Version)
+	state, reused, staleVersionPID, err := EnsureRemoteServer(transport, version.Version)
 	if err != nil {
 		progress.Fail(err, "check ~/.ocode/remote/serve.log on the remote")
 		return err
+	}
+	if staleVersionPID != 0 {
+		progress.Warn(fmt.Sprintf("a different-version server (pid %d) is still running on the remote and was left in place — kill it manually if it's no longer needed", staleVersionPID))
 	}
 	if reused {
 		progress.Done("reusing existing server")

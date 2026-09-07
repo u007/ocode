@@ -197,6 +197,17 @@ func TestCheckAuthRemoteModeRejectsQueryStringToken(t *testing.T) {
 	}
 }
 
+func TestCheckAuthRemoteModeRejectsBasicAuth(t *testing.T) {
+	s := New("127.0.0.1:0", "", "tok123", nil)
+	s.SetRemoteMode(true)
+
+	r := httptest.NewRequest("GET", "/api/sessions", nil)
+	r.SetBasicAuth("anything", "tok123")
+	if s.checkAuth(r) {
+		t.Fatal("remote mode must reject Basic Auth even when the password matches the token — the spec requires the token be accepted only via the Authorization: Bearer header (or the WS subprotocol)")
+	}
+}
+
 func TestCheckAuthRemoteModeAcceptsWebSocketSubprotocolToken(t *testing.T) {
 	s := New("127.0.0.1:0", "", "tok123", nil)
 	s.SetRemoteMode(true)

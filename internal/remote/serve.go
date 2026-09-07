@@ -147,16 +147,27 @@ func StartFreshServer(t Transport, ver string) (ServeState, error) {
 // EnsureRemoteServer implements the reuse-vs-fresh decision table: discover
 // → alive+matching-version → reuse; anything else (missing, dead,
 // version-mismatched, unhealthy) → start fresh. reused reports which path
-// was taken, for progress reporting.
-func EnsureRemoteServer(t Transport, ver string) (state ServeState, reused bool, err error) {
-	if existing, ok := DiscoverServer(t); ok && ServerAlive(t, existing, ver) {
-		return existing, true, nil
+// was taken, for progress reporting. staleVersionPID is nonzero only when a
+// discovered server is still running but was skipped for a version
+// mismatch: the old server is left running but ignored, and the caller
+// prints a notice with its pid so the operator can decide whether to kill
+// it manually.
+func EnsureRemoteServer(t Transport, ver string) (state ServeState, reused bool, staleVersionPID int, err error) {
+	if existing, ok := DiscoverServer(t); ok {
+		if ServerAlive(t, existing, ver) {
+			return existing, true, 0, nil
+		}
+		if existing.Version != ver {
+			if res, execErr := t.Exec(pidAliveCmd(existing.PID)); execErr == nil && res.ExitCode == 0 {
+				staleVersionPID = existing.PID
+			}
+		}
 	}
 	fresh, err := StartFreshServer(t, ver)
 	if err != nil {
-		return ServeState{}, false, err
+		return ServeState{}, false, staleVersionPID, err
 	}
-	return fresh, false, nil
+	return fresh, false, staleVersionPID, nil
 }
 
 // FreeLocalPort asks the OS for an ephemeral free TCP port on 127.0.0.1 by

@@ -508,10 +508,15 @@ func (s *Server) checkAuth(r *http.Request) bool {
 			return tok == s.password
 		}
 	}
-	// HTTP Basic Auth
-	user, pass, ok := r.BasicAuth()
-	if ok {
-		return (s.username == "" || user == s.username) && pass == s.password
+	// HTTP Basic Auth. Forbidden in --remote mode: the remote token model
+	// accepts the token only via the Authorization: Bearer header (or the
+	// WS subprotocol above), and Basic Auth would let any username paired
+	// with the token as password authenticate through a second path.
+	if !s.remoteMode {
+		user, pass, ok := r.BasicAuth()
+		if ok {
+			return (s.username == "" || user == s.username) && pass == s.password
+		}
 	}
 	return false
 }

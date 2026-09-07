@@ -128,7 +128,7 @@ func TestEnsureRemoteServerReusesLiveMatchingServer(t *testing.T) {
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
 
-	state, reused, err := EnsureRemoteServer(ft, "0.8.85")
+	state, reused, staleVersionPID, err := EnsureRemoteServer(ft, "0.8.85")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -137,6 +137,9 @@ func TestEnsureRemoteServerReusesLiveMatchingServer(t *testing.T) {
 	}
 	if state != existing {
 		t.Errorf("got %+v, want %+v", state, existing)
+	}
+	if staleVersionPID != 0 {
+		t.Errorf("expected staleVersionPID=0 on reuse, got %d", staleVersionPID)
 	}
 	for _, c := range ft.execCalls {
 		if c == launchServerCmd("0.8.85") {
@@ -165,7 +168,7 @@ func TestEnsureRemoteServerStartsFreshWhenStale(t *testing.T) {
 	_ = origExec
 	// Simulate "file now exists" by having a second fakeTransport wrapper
 	// switch its answer after the launch call is observed.
-	state, reused, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85")
+	state, reused, staleVersionPID, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -174,6 +177,40 @@ func TestEnsureRemoteServerStartsFreshWhenStale(t *testing.T) {
 	}
 	if state != fresh {
 		t.Errorf("got %+v, want %+v", state, fresh)
+	}
+	if staleVersionPID != 0 {
+		t.Errorf("expected staleVersionPID=0 for a dead-pid stale server, got %d", staleVersionPID)
+	}
+}
+
+// TestEnsureRemoteServerReportsStaleVersionPID covers the spec's "version
+// mismatch on reuse" case: the discovered server is alive but running a
+// different version, so it must be left running (never killed
+// automatically) while EnsureRemoteServer reports its pid for the caller to
+// print as an operator notice.
+func TestEnsureRemoteServerReportsStaleVersionPID(t *testing.T) {
+	stale := ServeState{PID: 42, Port: 4096, Token: "oldtok", Version: "0.8.84"}
+	data, _ := json.Marshal(stale)
+	fresh := ServeState{PID: 999, Port: 4097, Token: "newtok", Version: "0.8.85", StartedAt: time.Now().Round(0)}
+	freshData, _ := json.Marshal(fresh)
+
+	ft := newFakeTransport()
+	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(data)}
+	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0} // still running, just wrong version
+	ft.execResults[launchServerCmd("0.8.85")] = ExecResult{ExitCode: 0}
+
+	state, reused, staleVersionPID, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reused {
+		t.Error("expected reused=false")
+	}
+	if state != fresh {
+		t.Errorf("got %+v, want %+v", state, fresh)
+	}
+	if staleVersionPID != 42 {
+		t.Errorf("expected staleVersionPID=42, got %d", staleVersionPID)
 	}
 }
 
