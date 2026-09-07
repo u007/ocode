@@ -163,7 +163,7 @@ func EnsureRemoteServer(t Transport, ver string) (state ServeState, reused bool,
 // binding to :0 and immediately releasing it — standard technique, with the
 // usual (accepted) TOCTOU caveat that something else could grab it before
 // the tunnel binds; ssh reports that failure directly and the caller
-// retries once with a new port (see ConnectWeb, Task 7).
+// retries once with a new port (see ConnectWeb's startTunnelWithRetry).
 func FreeLocalPort() (int, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -180,7 +180,9 @@ func FreeLocalPort() (int, error) {
 // StartTunnel starts `ssh -N -L localPort:127.0.0.1:remotePort <target>`
 // under sup's supervision. It does not wait for the tunnel to establish or
 // for it to exit — see ConnectWeb for the foreground supervise loop. Only
-// meaningful for KindSSH targets; WSL never tunnels (Task 13).
+// meaningful for KindSSH targets; WSL never tunnels — Windows forwards
+// WSL2 localhost natively, so the browser can reach the WSL server's port
+// directly with no tunnel process needed.
 //
 // The registration ID is keyed on localPort rather than a fixed string:
 // ProcessSupervisor.Register rejects a duplicate ID outright, and

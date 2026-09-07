@@ -101,7 +101,8 @@ type Server struct {
 	// --remote` (see Run). It forces loopback-only binding, requires a
 	// generated API token (never the OPENCODE_SERVER_* env vars), and
 	// switches checkAuth into a stricter mode that rejects the ?token=
-	// query-string path (see Task 2).
+	// query-string path: query strings reach access logs and intermediary
+	// proxies, which the remote token model treats as a leak.
 	remoteMode bool
 
 	// browse is the isolated browse-origin server backing the embedded
@@ -168,9 +169,13 @@ func isLoopbackBind(addr string) bool {
 }
 
 func (s *Server) registerRoutes() {
-	// Deliberately unauthenticated: lets a --remote server's reuse check
-	// probe liveness before any tunnel or token has been established.
-	s.mux.HandleFunc("GET /api/health", s.handleHealth)
+	// Unauthenticated only in --remote mode: lets a --remote server's reuse
+	// check (internal/remote's ServerAlive) probe liveness, via a curl
+	// command executed directly on the remote host, before any tunnel or
+	// token has been established — that probe can't send an Authorization
+	// header (see healthProbeCmd's doc). Every other server requires the
+	// same auth as any other route.
+	s.mux.HandleFunc("GET /api/health", s.healthMiddleware(s.handleHealth))
 	s.mux.HandleFunc("POST /api/chat", s.authMiddleware(s.handleChat))
 	s.mux.HandleFunc("GET /api/chat/stream", s.authMiddleware(s.handleChatStream))
 	s.mux.HandleFunc("GET /api/chat/messages", s.authMiddleware(s.handleSessionMessages))
@@ -534,6 +539,24 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		s.rl.reset(ip)
 		next(w, r)
+	}
+}
+
+// healthMiddleware gates /api/health: unauthenticated only when the server
+// is running in --remote mode, since ServerAlive's exec-based probe
+// (internal/remote/serve.go's healthProbeCmd) runs as a plain curl command
+// on the remote host itself and deliberately never carries a token. Every
+// other server (including one with no username/password configured, same
+// as authMiddleware's own bypass) goes through the normal auth check —
+// checked per-request for the same reason authMiddleware is: registerRoutes
+// runs before Run's caller has a chance to call SetRemoteMode.
+func (s *Server) healthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.remoteMode {
+			next(w, r)
+			return
+		}
+		s.authMiddleware(next)(w, r)
 	}
 }
 
@@ -1107,9 +1130,9 @@ func (s *Server) SetWorkDir(dir string) {
 
 // SetRemoteMode marks the server as launched in `--remote` mode. Must be
 // called before Serve; it only affects checkAuth and authMiddleware
-// behavior (Task 2), not binding — the caller (Run) is responsible for
-// forcing the loopback address and generating the token before
-// constructing the listener.
+// behavior (see the remoteMode field doc), not binding — the caller (Run)
+// is responsible for forcing the loopback address and generating the token
+// before constructing the listener.
 func (s *Server) SetRemoteMode(v bool) {
 	s.remoteMode = v
 }
@@ -2069,6 +2092,9 @@ func printServeUsage() {
 	fmt.Println("  -port <port>    Port to listen on (default: 4096)")
 	fmt.Println("  -host <host>    Host to bind to (default: 0.0.0.0)")
 	fmt.Println("  -open           Open browser after starting")
+	fmt.Println("  -remote         Remote mode: bind 127.0.0.1 only, require a generated API")
+	fmt.Println("                  token, and write ~/.ocode/remote/serve.json for reconnect")
+	fmt.Println("                  discovery (used by `ocode remote --web`, not run directly)")
 	fmt.Println("  -h, --help      Show this help message")
 	fmt.Println()
 	fmt.Println("Environment Variables:")

@@ -153,7 +153,7 @@ func runPrepareStages(opts ConnectOptions, progress *Progress) (Transport, *tool
 
 // newTransportForTarget builds the Transport implementation for t.Kind,
 // after validating the target is usable on this OS (KindWSL requires
-// Windows — see target.go's validateTargetOS, added in Task 12).
+// Windows — see target.go's validateTargetOS).
 func newTransportForTarget(t Target, sup *tool.ProcessSupervisor) (Transport, error) {
 	if err := validateTargetOS(t.Kind, runtime.GOOS); err != nil {
 		return nil, err
@@ -164,15 +164,6 @@ func newTransportForTarget(t Target, sup *tool.ProcessSupervisor) (Transport, er
 	default:
 		return NewSSHTransport(t, sup), nil
 	}
-}
-
-// ConnectWebOptions extends ConnectOptions with web-mode-only knobs.
-type ConnectWebOptions struct {
-	ConnectOptions
-	// OpenBrowser is called with the local URL to open once the tunnel (or,
-	// for WSL, the direct localhost port) is ready. Defaults to the
-	// platform opener; overridable in tests.
-	OpenBrowser func(url string) error
 }
 
 // ConnectWeb runs the shared prepare stages, then discovers-or-launches a
