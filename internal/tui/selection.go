@@ -7,7 +7,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
-	"github.com/mattn/go-runewidth"
 )
 
 // selectionHighlightOpen and selectionHighlightClose are the ANSI SGR
@@ -218,7 +217,7 @@ func visualColToRuneIdx(line string, visualCol int) int {
 			break
 		}
 		cluster, w := nextVisualCluster(line[i:])
-		if r == '\t' {
+		if cluster == "\t" {
 			w = tabWidth - (col % tabWidth)
 		}
 		if col+w > visualCol {
