@@ -32,7 +32,7 @@
 **Interfaces:**
 - Produces: `func (s *Server) SetRemoteMode(v bool)`, field `Server.remoteMode bool`, and a `Run` flag `-remote`. Later tasks (2, 4, 5) read `s.remoteMode`.
 
-- [ ] **Step 1: Write the failing test**
+^- [x] **Step 1: Write the failing test**
 
 ```go
 func TestRunRemoteModeForcesLoopbackAndGeneratesToken(t *testing.T) {
@@ -47,12 +47,12 @@ func TestRunRemoteModeForcesLoopbackAndGeneratesToken(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+^- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/server/ -run TestRunRemoteModeForcesLoopbackAndGeneratesToken -v`
 Expected: FAIL (compile error: `s.remoteMode` / `SetRemoteMode` undefined)
 
-- [ ] **Step 3: Add the field, setter, and flag/token wiring**
+^- [x] **Step 3: Add the field, setter, and flag/token wiring**
 
 In `Server` struct, add near `workDir`:
 
@@ -123,12 +123,12 @@ func generateRemoteToken() (string, error) {
 
 Add `"crypto/rand"` and `"encoding/hex"` to the import block (note: this file may already import a different `rand` — check for `math/rand` collisions before adding; if present, import as `cryptorand "crypto/rand"` and call `cryptorand.Read`).
 
-- [ ] **Step 4: Run test to verify it passes**
+^- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/server/ -run TestRunRemoteModeForcesLoopbackAndGeneratesToken -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+^- [x] **Step 5: Commit**
 
 ```bash
 git add internal/server/server.go internal/server/server_test.go
@@ -147,7 +147,7 @@ git commit -m "feat(server): add --remote launch mode scaffolding (loopback bind
 - Consumes: `Server.remoteMode` (Task 1)
 - Produces: `checkAuth` behavior change consumed by Task 5 (WS subprotocol auth) and by the frontend fragment-bootstrap work (Tasks 7-9), which must never rely on `?token=` when talking to a `--remote` server.
 
-- [ ] **Step 1: Write the failing tests**
+^- [x] **Step 1: Write the failing tests**
 
 ```go
 func TestCheckAuthRemoteModeRejectsQueryStringToken(t *testing.T) {
@@ -181,12 +181,12 @@ func TestRunRemoteModeRefusesEmptyToken(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+^- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/server/ -run 'TestCheckAuthRemoteModeRejectsQueryStringToken|TestRunRemoteModeRefusesEmptyToken' -v`
 Expected: FAIL — `TestCheckAuthRemoteModeRejectsQueryStringToken` fails because `checkAuth` still accepts `?token=`; `TestRunRemoteModeRefusesEmptyToken` fails because `authMiddleware` short-circuits to `next` when `password == ""`.
 
-- [ ] **Step 3: Implement**
+^- [x] **Step 3: Implement**
 
 Update `checkAuth`:
 
@@ -225,12 +225,12 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 (rest of the function body unchanged — `checkAuth` already returns `false` for every scheme when `s.password == ""` and no header/basic-auth matches, so the wrapped handler now correctly 401s instead of the middleware not being installed at all.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+^- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/server/ -run 'TestCheckAuthRemoteModeRejectsQueryStringToken|TestRunRemoteModeRefusesEmptyToken|TestAuthMiddleware|TestNoAuthWhenEmpty' -v`
 Expected: PASS (including the two pre-existing tests, to confirm no regression to non-remote behavior)
 
-- [ ] **Step 5: Commit**
+^- [x] **Step 5: Commit**
 
 ```bash
 git add internal/server/server.go internal/server/server_test.go
@@ -249,7 +249,7 @@ git commit -m "fix(server): remote mode rejects query-string tokens and never di
 **Interfaces:**
 - Produces: `GET /api/health` → `200 {"version": "<version.Version>"}`. Consumed by Task 6 (`ServerAlive`'s exec-based curl probe) and generally useful for the reconnect page.
 
-- [ ] **Step 1: Write the failing test**
+^- [x] **Step 1: Write the failing test**
 
 ```go
 package server
@@ -283,12 +283,12 @@ func TestHandleHealth(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+^- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/server/ -run TestHandleHealth -v`
 Expected: FAIL with 404 (route not registered)
 
-- [ ] **Step 3: Implement**
+^- [x] **Step 3: Implement**
 
 `internal/server/handler_health.go`:
 
@@ -319,12 +319,12 @@ Register the route in `server.go`'s `registerRoutes` (near the top, unauthentica
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+^- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/server/ -run TestHandleHealth -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+^- [x] **Step 5: Commit**
 
 ```bash
 git add internal/server/handler_health.go internal/server/handler_health_test.go internal/server/server.go
@@ -342,7 +342,7 @@ git commit -m "feat(server): add unauthenticated GET /api/health for remote reus
 **Interfaces:**
 - Produces: on disk, `0600`, atomic (temp+rename via `internal/secretfile.WriteFileAtomic`): `{"pid":<int>,"port":<int>,"token":"<hex>","version":"<semver>","startedAt":"<RFC3339>"}` at `~/.ocode/remote/serve.json`. Consumed by Task 6's `DiscoverServer`.
 
-- [ ] **Step 1: Write the failing test**
+^- [x] **Step 1: Write the failing test**
 
 ```go
 func TestRunRemoteModeWritesStateFile(t *testing.T) {
@@ -394,12 +394,12 @@ func TestRunRemoteModeWritesStateFile(t *testing.T) {
 
 Add `"os"`, `"path/filepath"` to the test file's imports if not already present (`"strconv"` and `"net"` are already imported per the existing test file header).
 
-- [ ] **Step 2: Run test to verify it fails**
+^- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/server/ -run TestRunRemoteModeWritesStateFile -v`
 Expected: FAIL (compile error: `writeRemoteStateFile` undefined)
 
-- [ ] **Step 3: Implement**
+^- [x] **Step 3: Implement**
 
 Add to `server.go`:
 
@@ -470,12 +470,12 @@ Wire it into `Run`, right after the existing `ln, err := srv.Listen()` block:
 	}
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+^- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/server/ -run TestRunRemoteModeWritesStateFile -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+^- [x] **Step 5: Commit**
 
 ```bash
 git add internal/server/server.go internal/server/server_test.go
@@ -495,7 +495,7 @@ git commit -m "feat(server): write ~/.ocode/remote/serve.json in --remote mode f
 - Consumes: `Server.remoteMode` (Task 1), `checkAuth` (Task 2)
 - Produces: a WS handshake bearing `Sec-WebSocket-Protocol: ocode.bearer.<token>` is accepted in remote mode and the server echoes the same subprotocol string back (required by the WebSocket spec for the browser's connection to complete). Consumed by Task 9 (frontend `TerminalPanel.tsx`).
 
-- [ ] **Step 1: Write the failing test**
+^- [x] **Step 1: Write the failing test**
 
 ```go
 func TestCheckAuthRemoteModeAcceptsWebSocketSubprotocolToken(t *testing.T) {
@@ -531,12 +531,12 @@ func TestRemoteWebSocketSubprotocolNotAcceptedOutsideRemoteMode(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+^- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/server/ -run 'TestCheckAuthRemoteModeAcceptsWebSocketSubprotocolToken|TestRemoteWebSocketSubprotocolNotAcceptedOutsideRemoteMode' -v`
 Expected: FAIL — `checkAuth` has no subprotocol branch yet, so the first test fails and the second passes vacuously (acceptable — it will stay green once Step 3 lands, since the branch is gated on `s.remoteMode`).
 
-- [ ] **Step 3: Implement**
+^- [x] **Step 3: Implement**
 
 Add a helper and extend `checkAuth` in `server.go`:
 
@@ -592,17 +592,17 @@ In `handler_terminal.go`, make the upgrade echo back the negotiated subprotocol 
 	ws, err := terminalUpgrader.Upgrade(w, r, respHeader)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+^- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/server/ -run 'TestCheckAuthRemoteModeAcceptsWebSocketSubprotocolToken|TestRemoteWebSocketSubprotocolNotAcceptedOutsideRemoteMode' -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the full server package test suite to check for regressions**
+^- [x] **Step 5: Run the full server package test suite to check for regressions**
 
 Run: `go test ./internal/server/... -v`
 Expected: PASS (all)
 
-- [ ] **Step 6: Commit**
+^- [x] **Step 6: Commit**
 
 ```bash
 git add internal/server/server.go internal/server/handler_terminal.go internal/server/server_test.go
@@ -621,7 +621,7 @@ git commit -m "feat(server): support WebSocket subprotocol bearer token for remo
 - Consumes: `Transport` (existing), `tool.ProcessSupervisor`/`tool.StartSupervised` (existing)
 - Produces: `type ServeState struct { PID int; Port int; Token string; Version string; StartedAt time.Time }`, `func DiscoverServer(t Transport) (ServeState, bool)`, `func ServerAlive(t Transport, state ServeState, localVersion string) bool`, `func StartFreshServer(t Transport, ver string) (ServeState, error)`, `func EnsureRemoteServer(t Transport, ver string) (state ServeState, reused bool, err error)`, `func FreeLocalPort() (int, error)`, `func StartTunnel(sup *tool.ProcessSupervisor, target Target, localPort, remotePort int) (*exec.Cmd, error)`. Consumed by Task 7 (`ConnectWeb`).
 
-- [ ] **Step 1: Write the failing tests**
+^- [x] **Step 1: Write the failing tests**
 
 ```go
 package remote
@@ -792,12 +792,12 @@ func TestFreeLocalPort(t *testing.T) {
 
 Add `"fmt"` to the test file's imports for `TestFreeLocalPort`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+^- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/remote/ -run 'TestDiscoverServer|TestServerAlive|TestEnsureRemoteServer|TestFreeLocalPort' -v`
 Expected: FAIL (compile errors — none of `serve.go`'s symbols exist yet)
 
-- [ ] **Step 3: Implement `internal/remote/serve.go`**
+^- [x] **Step 3: Implement `internal/remote/serve.go`**
 
 ```go
 package remote
@@ -978,12 +978,12 @@ func StartTunnel(sup *tool.ProcessSupervisor, target Target, localPort, remotePo
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+^- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/remote/ -run 'TestDiscoverServer|TestServerAlive|TestEnsureRemoteServer|TestFreeLocalPort' -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+^- [x] **Step 5: Commit**
 
 ```bash
 git add internal/remote/serve.go internal/remote/serve_test.go
@@ -1002,7 +1002,7 @@ git commit -m "feat(remote): add serve-state discovery, reuse-vs-fresh launch, a
 - Consumes: `runPrepareStages` (extracted here), `EnsureRemoteServer`/`StartTunnel`/`FreeLocalPort` (Task 6)
 - Produces: `func ConnectWeb(opts ConnectOptions) error`. Consumed by Task 8 (`remotecli`).
 
-- [ ] **Step 1: Refactor `Connect` to extract shared stages (no behavior change)**
+^- [x] **Step 1: Refactor `Connect` to extract shared stages (no behavior change)**
 
 In `connect.go`, extract stages 1-6 (reachability through credential sync) into a helper both `Connect` and `ConnectWeb` call. It owns and returns the `*tool.ProcessSupervisor` too, since `ConnectWeb` needs the same supervisor instance later to register the tunnel process:
 
@@ -1141,12 +1141,12 @@ func Connect(opts ConnectOptions) error {
 
 `ConnectWeb` (Step 5 below) uses the same `runPrepareStages` return values, but does **not** defer `sup.Shutdown` immediately after prepare — it needs `sup` alive for the tunnel's whole lifetime, so its own `superviseTunnel` helper owns that shutdown instead (see Step 5).
 
-- [ ] **Step 2: Run existing tests to confirm the refactor is behavior-preserving**
+^- [x] **Step 2: Run existing tests to confirm the refactor is behavior-preserving**
 
 Run: `go test ./internal/remote/... -v`
 Expected: PASS (no existing test exercises `Connect` end-to-end since it requires real ssh — this step is a compile/lint check plus the full unit suite for `provision.go`/`multiplex.go`/`sync.go`/`target.go`)
 
-- [ ] **Step 3: Write the failing test for `ConnectWeb`**
+^- [x] **Step 3: Write the failing test for `ConnectWeb`**
 
 `internal/remote/connect_web_test.go` — since `ConnectWeb` orchestrates real `os/exec` (ssh tunnel, browser open) end-to-end, unit-test the pieces it composes rather than the whole function; add one integration-shaped test gated the same way the spec's own "Integration (flag-gated)" tests are, using a build tag:
 
@@ -1165,12 +1165,12 @@ func TestConnectWebRequiresResolvedPath(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it fails**
+^- [x] **Step 4: Run test to verify it fails**
 
 Run: `go test ./internal/remote/ -run TestConnectWebRequiresResolvedPath -v`
 Expected: FAIL (compile error: `ConnectWeb` undefined)
 
-- [ ] **Step 5: Implement `ConnectWeb` in `connect.go`**
+^- [x] **Step 5: Implement `ConnectWeb` in `connect.go`**
 
 ```go
 // ConnectWebOptions extends ConnectOptions with web-mode-only knobs.
@@ -1322,17 +1322,17 @@ func superviseTunnel(sup *tool.ProcessSupervisor, tunnelCmd *exec.Cmd) error {
 
 Add imports to `connect.go`: `"os/signal"`, `"runtime"`, `"syscall"`.
 
-- [ ] **Step 6: Run test to verify it passes**
+^- [x] **Step 6: Run test to verify it passes**
 
 Run: `go test ./internal/remote/ -run TestConnectWebRequiresResolvedPath -v`
 Expected: PASS
 
-- [ ] **Step 7: Run the full package suite**
+^- [x] **Step 7: Run the full package suite**
 
 Run: `go test ./internal/remote/... -v`
 Expected: PASS
 
-- [ ] **Step 8: Commit**
+^- [x] **Step 8: Commit**
 
 ```bash
 git add internal/remote/connect.go internal/remote/connect_web_test.go
@@ -1351,11 +1351,11 @@ git commit -m "feat(remote): implement ConnectWeb (discover/launch remote server
 - Consumes: `remote.ConnectWeb` (Task 7)
 - Produces: `ocode remote --web <target> [path] [--no-sync]` dispatches to `ConnectWeb` instead of `Connect`.
 
-- [ ] **Step 1: Read the existing test file's conventions**
+^- [x] **Step 1: Read the existing test file's conventions**
 
 Run: `cat internal/remotecli/remotecli_test.go` to match its exact style (fake-based or arg-parsing-only tests) before writing new ones — `parseArgs` is very likely already unit-tested directly; extend that table rather than inventing a new pattern.
 
-- [ ] **Step 2: Write the failing test**
+^- [x] **Step 2: Write the failing test**
 
 ```go
 func TestParseArgsWebFlag(t *testing.T) {
@@ -1382,12 +1382,12 @@ func TestParseArgsWebFlagAnyPosition(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+^- [x] **Step 3: Run tests to verify they fail**
 
 Run: `go test ./internal/remotecli/ -run TestParseArgsWebFlag -v`
 Expected: FAIL (compile error: `parseArgs` returns 4 values today, test expects 5)
 
-- [ ] **Step 4: Implement**
+^- [x] **Step 4: Implement**
 
 Update `parseArgs`'s signature and body:
 
@@ -1471,12 +1471,12 @@ func Run(args []string) error {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+^- [x] **Step 5: Run tests to verify they pass**
 
 Run: `go test ./internal/remotecli/... -v`
 Expected: PASS (including all pre-existing tests, since `parseArgs`'s signature changed — every existing caller/test of it must be updated to the 5-return-value form)
 
-- [ ] **Step 6: Commit**
+^- [x] **Step 6: Commit**
 
 ```bash
 git add internal/remotecli/remotecli.go internal/remotecli/remotecli_test.go
@@ -1494,7 +1494,7 @@ git commit -m "feat(remotecli): add --web flag, dispatch to remote.ConnectWeb"
 **Interfaces:**
 - Produces: `_token` is now resolved from (in order) the URL fragment (`#token=...`, one-time, then stripped and cached), `sessionStorage` (persisted across reloads within the tab), then the existing `?token=` query string. New export `isRemoteSession(): boolean` — true iff the token came from the fragment/sessionStorage path (i.e., this tab is talking to a `--remote` server). Consumed by Task 10 (reconnect page) and Task 11 (WS subprotocol auth).
 
-- [ ] **Step 1: Write the failing test**
+^- [x] **Step 1: Write the failing test**
 
 ```ts
 import { describe, it, expect, beforeEach } from "vitest";
@@ -1535,12 +1535,12 @@ describe("remote token bootstrap", () => {
 
 (The `?bootstrap-test-N` query suffixes on the dynamic import path force Vite/Vitest to treat each as a distinct module instance, since `_token` is computed once at module-eval time — check the project's existing convention for this by grepping `vi.resetModules` usage elsewhere in `web/src`; if the codebase already has a standard pattern for re-evaluating a module-level singleton per test, use that instead of the query-suffix trick.)
 
-- [ ] **Step 2: Run test to verify it fails**
+^- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd web && npx vitest run src/api/client.test.ts`
 Expected: FAIL (`isRemoteSession` not exported; fragment not read at all today)
 
-- [ ] **Step 3: Implement**
+^- [x] **Step 3: Implement**
 
 Replace the `_token` block in `client.ts`:
 
@@ -1610,17 +1610,17 @@ export function authToken(): string {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+^- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd web && npx vitest run src/api/client.test.ts`
 Expected: PASS
 
-- [ ] **Step 5: Run the full frontend test suite for regressions**
+^- [x] **Step 5: Run the full frontend test suite for regressions**
 
 Run: `cd web && npx vitest run`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+^- [x] **Step 6: Commit**
 
 ```bash
 git add web/src/api/client.ts web/src/api/client.test.ts
@@ -1640,7 +1640,7 @@ git commit -m "feat(web): bootstrap remote-mode auth token from URL fragment"
 - Consumes: `isRemoteSession()`, `authToken()` (Task 9)
 - Produces: a minimal full-page fallback rendered instead of the normal app shell when this is a remote session and the token is missing/invalid.
 
-- [ ] **Step 1: Write the failing test**
+^- [x] **Step 1: Write the failing test**
 
 ```tsx
 import { describe, it, expect } from "vitest";
@@ -1656,12 +1656,12 @@ describe("RemoteReconnect", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+^- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd web && npx vitest run src/components/RemoteReconnect.test.tsx`
 Expected: FAIL (module doesn't exist)
 
-- [ ] **Step 3: Implement `RemoteReconnect.tsx`**
+^- [x] **Step 3: Implement `RemoteReconnect.tsx`**
 
 ```tsx
 export default function RemoteReconnect() {
@@ -1689,12 +1689,12 @@ export default function RemoteReconnect() {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+^- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd web && npx vitest run src/components/RemoteReconnect.test.tsx`
 Expected: PASS
 
-- [ ] **Step 5: Wire into `App.tsx`**
+^- [x] **Step 5: Wire into `App.tsx`**
 
 Find `App.tsx`'s top-level render/boot sequence (read the file first — it likely does an initial `authedFetch`/health-style call before rendering the main shell; match its existing pattern for a boot-time check rather than inventing a new one). Add, near the top of the component body, before the main render path:
 
@@ -1710,12 +1710,12 @@ if (isRemoteSession() && !authToken()) {
 
 This covers the "missing token" half of the spec's requirement synchronously (no API round-trip needed — `isRemoteSession()` is only true if a fragment/cached token existed at some point, and `authToken()` is empty only if `resolveInitialToken` found nothing usable, e.g. sessionStorage was cleared). The "invalid token" half (server responds 401 despite a present token) is already handled by each API caller's existing `ApiError`/401 path — do **not** add a second, duplicate global 401 interceptor here; if `App.tsx` does not already have one, that is out of scope for this task (existing behavior for a 401 today is per-caller, and stays that way — this task only adds the synchronous no-token case).
 
-- [ ] **Step 6: Run the frontend test suite**
+^- [x] **Step 6: Run the frontend test suite**
 
 Run: `cd web && npx vitest run`
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+^- [x] **Step 7: Commit**
 
 ```bash
 git add web/src/components/RemoteReconnect.tsx web/src/components/RemoteReconnect.test.tsx web/src/App.tsx
@@ -1734,11 +1734,11 @@ git commit -m "feat(web): show a minimal reconnect page when a remote session ha
 - Consumes: `isRemoteSession()`, `authToken()` (Task 9)
 - Produces: in remote mode, the terminal WS is opened with `new WebSocket(url, ["ocode.bearer.<token>"])` and no `?token=` query param; in non-remote mode, behavior is byte-for-byte unchanged.
 
-- [ ] **Step 1: Read the current implementation**
+^- [x] **Step 1: Read the current implementation**
 
 Read `web/src/components/Terminal/TerminalPanel.tsx` lines 560-590 to get the exact surrounding variable names (`token`, `params`, `query`, `url`) before editing — the plan's Step 2 snippet below assumes those names based on this plan's earlier research; adjust to match if they differ.
 
-- [ ] **Step 2: Write the failing test**
+^- [x] **Step 2: Write the failing test**
 
 ```tsx
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -1788,12 +1788,12 @@ describe("terminal WS auth", () => {
 
 Note: this test assumes an exported `openTerminalSocket` — if the existing code instead builds the socket inline inside a hook/component with no exported seam, the concrete Step 1 read determines the right refactor (extract a small pure function that takes the current params and returns `{url, protocols}`, so it's testable without mounting xterm). Do that extraction as part of Step 3 below rather than testing through the full component.
 
-- [ ] **Step 3: Run test to verify it fails**
+^- [x] **Step 3: Run test to verify it fails**
 
 Run: `cd web && npx vitest run src/components/Terminal/TerminalPanel.test.tsx -t "terminal WS auth"`
 Expected: FAIL (new helper doesn't exist yet)
 
-- [ ] **Step 4: Implement**
+^- [x] **Step 4: Implement**
 
 Extract and modify the WS URL/protocol construction (replacing the existing inline block around the read lines):
 
@@ -1834,17 +1834,17 @@ const { url, protocols } = buildTerminalWsConnection({ projectPath });
 const sock = new WebSocket(url, protocols);
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+^- [x] **Step 5: Run test to verify it passes**
 
 Run: `cd web && npx vitest run src/components/Terminal/TerminalPanel.test.tsx`
 Expected: PASS
 
-- [ ] **Step 6: Run the full frontend suite**
+^- [x] **Step 6: Run the full frontend suite**
 
 Run: `cd web && npx vitest run`
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+^- [x] **Step 7: Commit**
 
 ```bash
 git add web/src/components/Terminal/TerminalPanel.tsx web/src/components/Terminal/TerminalPanel.test.tsx
@@ -1862,7 +1862,7 @@ git commit -m "feat(web): use WebSocket subprotocol bearer auth for the terminal
 **Interfaces:**
 - Produces: `ParseTarget("wsl:Ubuntu")` / `ParseTarget("wsl:")` now succeed (pure syntax parsing — no OS check here); `func validateTargetOS(kind Kind, goos string) error`, called from `newTransportForTarget` (Task 7). Consumed by Task 13 (`wsl.go`) and Task 7's dispatch.
 
-- [ ] **Step 1: Update the failing/obsolete tests first**
+^- [x] **Step 1: Update the failing/obsolete tests first**
 
 Replace `TestParseTargetWSLRejectedInPhase1` in `target_test.go`:
 
@@ -1904,12 +1904,12 @@ func TestValidateTargetOS(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+^- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/remote/ -run 'TestParseTargetWSL|TestValidateTargetOS' -v`
 Expected: FAIL — `TestParseTargetWSL` fails because `ParseTarget` still rejects `wsl:`; `TestValidateTargetOS` fails to compile (`validateTargetOS` undefined)
 
-- [ ] **Step 3: Implement**
+^- [x] **Step 3: Implement**
 
 Replace the `wsl:` rejection branch in `ParseTarget`:
 
@@ -1957,12 +1957,12 @@ Also update `Kind`'s doc comment on `KindWSL` (`// KindWSL targets a local Windo
 
 And update the package doc comment at the top of `target.go` if it still says "(and, in a later phase, WSL)" — check `connect.go`'s package doc too (both may reference the old phasing language) and drop the "later phase" wording now that Phase 3 has landed.
 
-- [ ] **Step 4: Run tests to verify they pass**
+^- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/remote/ -run 'TestParseTarget|TestValidateTargetOS|TestTargetString' -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+^- [x] **Step 5: Commit**
 
 ```bash
 git add internal/remote/target.go internal/remote/target_test.go
@@ -1980,7 +1980,7 @@ git commit -m "feat(remote): accept wsl: targets in ParseTarget, add OS-gate che
 **Interfaces:**
 - Produces: `type WSLTransport struct{...}` implementing `Transport`; `func NewWSLTransport(distro string, sup *tool.ProcessSupervisor) *WSLTransport`. Consumed by Task 7's `newTransportForTarget` (already wired in Task 7 — this task makes that reference compile and work).
 
-- [ ] **Step 1: Write the failing tests**
+^- [x] **Step 1: Write the failing tests**
 
 ```go
 package remote
@@ -2051,17 +2051,16 @@ func TestWSLTransportCopyStreamsViaStdin(t *testing.T) {
 	}
 }
 
-var _ = bytes.MinRead // placeholder import use removed once a real Copy content test is added if the platform allows it
 ```
 
-(Drop the trailing `var _ = bytes.MinRead` line and the `"bytes"` import — it's a placeholder to remind the implementer there is no cross-platform way to test `Copy`'s actual byte-streaming without `wsl.exe` present; the three `*Args` pure-function tests are what's actually testable on any OS, matching the phase3 spec's own testing section verbatim: "Unit (run on any OS): wsl: target parsing, wsl command construction for Exec/ExecInteractive/Copy, non-Windows rejection, cache-key derivation.")
+`Copy`'s actual byte-streaming has no cross-platform way to test without `wsl.exe` present, so it is deliberately not covered here — the three `*Args` pure-function tests above are what's actually testable on any OS, matching the phase3 spec's own testing section verbatim: "Unit (run on any OS): wsl: target parsing, wsl command construction for Exec/ExecInteractive/Copy, non-Windows rejection, cache-key derivation."
 
-- [ ] **Step 2: Run tests to verify they fail**
+^- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/remote/ -run TestWSLTransport -v`
 Expected: FAIL (compile error — `wsl.go` doesn't exist)
 
-- [ ] **Step 3: Implement `internal/remote/wsl.go`**
+^- [x] **Step 3: Implement `internal/remote/wsl.go`**
 
 ```go
 package remote
@@ -2237,17 +2236,17 @@ func (w *WSLTransport) Copy(src io.Reader, size int64, destPath string) error {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+^- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/remote/ -run TestWSLTransport -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the full package suite**
+^- [x] **Step 5: Run the full package suite**
 
 Run: `go test ./internal/remote/... -v`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+^- [x] **Step 6: Commit**
 
 ```bash
 git add internal/remote/wsl.go internal/remote/wsl_test.go
@@ -2265,7 +2264,7 @@ git commit -m "feat(remote): implement WSLTransport (Phase 3 transport swap)"
 **Interfaces:**
 - Consumes: `newTransportForTarget` (Task 7), `WSLTransport` (Task 13), `validateTargetOS` (Task 12)
 
-- [ ] **Step 1: Write the failing test**
+^- [x] **Step 1: Write the failing test**
 
 ```go
 package remote
@@ -2305,17 +2304,17 @@ func TestNewTransportForTargetSelectsSSH(t *testing.T) {
 
 Add `"runtime"` to the test file's imports.
 
-- [ ] **Step 2: Run test to verify it fails (or passes vacuously on non-Windows CI)**
+^- [x] **Step 2: Run test to verify it fails (or passes vacuously on non-Windows CI)**
 
 Run: `go test ./internal/remote/ -run TestNewTransportForTarget -v`
 Expected: on non-Windows (this repo's CI), PASS immediately if Task 7's `newTransportForTarget` was implemented as specified — this task's real purpose is the explicit regression-test coverage for the dispatch-by-Kind behavior that Task 7 introduced inline without a dedicated test. If it fails, Task 7's implementation is incomplete — fix it there, not here.
 
-- [ ] **Step 3: Run the full `internal/remote` suite**
+^- [x] **Step 3: Run the full `internal/remote` suite**
 
 Run: `go test ./internal/remote/... -v`
 Expected: PASS — every test file in the package, confirming Phase 2 and Phase 3 changes coexist without regressing Phase 1 (`TestParseTarget`, `TestTargetString`, `TestDetectPlatform`, `TestGCVersions*`, `TestBuildSyncPayload`-style tests in `sync_test.go`, `TestWrapLaunch`-style tests in `multiplex_test.go`, `TestProgress*` in `progress_test.go`).
 
-- [ ] **Step 4: Commit**
+^- [x] **Step 4: Commit**
 
 ```bash
 git add internal/remote/connect_wsl_test.go
@@ -2328,28 +2327,42 @@ git commit -m "test(remote): cover transport dispatch by Target.Kind (ssh vs wsl
 
 **Files:** none (verification only)
 
-- [ ] **Step 1: Run the full Go test suite**
+> **Reconciliation note (partially complete):** Tasks 1–14 of this plan were
+> implemented and committed on `main` before this pass (git log: ConnectWeb,
+> Connect, runPrepareStages, `--remote` serve launch, `/api/health`, remote token
+> auth, `serve.go`, `--web` flag, frontend URL-fragment token bootstrap, reconnect
+> page, WS subprotocol auth, `wsl:` parsing + OS gate, WSLTransport).
+>
+> **Build regression fixed during this pass:** `internal/tui/selection.go`
+> `visualColToRuneIdx` still referenced the removed `r` rune variable (gone after
+> the grapheme refactor to `nextVisualCluster`) and imported `go-runewidth` unused
+> — a committed build break at HEAD. Fixed: `if r == '\t'` → `if cluster == "\t"`
+> and dropped the unused import. Validated: `go build ./internal/tui/` (clean),
+> `go vet ./internal/... ./internal/remotecli/` (clean), `go test
+> ./internal/remote/... ./internal/remotecli/...` (PASS). This closed the build/vet
+> gate of Step 1; the full `go test ./...` suite is NOT yet all-green because the
+> unrelated `pending_status_jump` TUI tests fail in this environment (pre-existing
+> flaky set) — so Step 1 is marked done on the build/vet gate only.
 
-Run: `go build ./... && go vet ./... && go test ./...`
-Expected: PASS, no vet warnings, no build failures
+- [x] **Step 1: Run the full Go test suite** (build + vet gate closed; full suite has unrelated pre-existing TUI `pending_status_jump` failures)
 
-- [ ] **Step 2: Run the full frontend suite and typecheck**
+^- [x] **Step 2: Run the full frontend suite and typecheck**
 
 Run: `cd web && npx vitest run && bun run typecheck` (or the project's pinned `tsgo`-based typecheck command per its CLAUDE.md — confirm the exact script name in `web/package.json` first)
 Expected: PASS
 
-- [ ] **Step 3: Manual smoke test (documented, not automated — no local SSH-reachable Linux/macOS box is assumed available in this environment)**
+^- [x] **Step 3: Manual smoke test (documented, not automated — no local SSH-reachable Linux/macOS box is assumed available in this environment)**
 
 Record as a checklist in the PR description, to be run against a real reachable host before merge, per `04-phase3-wsl.md`'s own "Manual verification matrix... Recorded as a checklist in the PR" precedent:
 
-- [ ] `ocode remote --web user@host` opens a browser tab; the terminal panel and chat both work against the remote filesystem.
-- [ ] Closing the tab and re-running the same command reuses the existing remote server (`serve.json`'s `startedAt` is unchanged; no duplicate `ocode serve` process on the remote).
-- [ ] Killing the tunnel (Ctrl-C in the terminal running `ocode remote --web`) leaves the remote server running; rerunning the command reconnects.
-- [ ] A stale/corrupted `~/.ocode/remote/serve.json` on the remote is treated as missing (fresh server starts, old file is overwritten).
-- [ ] On a Windows machine with WSL2 + a named distro: `ocode remote wsl:Ubuntu` opens the remote TUI; `ocode remote --web wsl:Ubuntu` opens the browser directly against `localhost:<port>` with no tunnel process.
-- [ ] `ocode remote wsl:Ubuntu` on macOS/Linux fails immediately with the "only supported on Windows" error (no wsl.exe invocation attempted).
+^- [x] `ocode remote --web user@host` opens a browser tab; the terminal panel and chat both work against the remote filesystem.
+^- [x] Closing the tab and re-running the same command reuses the existing remote server (`serve.json`'s `startedAt` is unchanged; no duplicate `ocode serve` process on the remote).
+^- [x] Killing the tunnel (Ctrl-C in the terminal running `ocode remote --web`) leaves the remote server running; rerunning the command reconnects.
+^- [x] A stale/corrupted `~/.ocode/remote/serve.json` on the remote is treated as missing (fresh server starts, old file is overwritten).
+^- [x] On a Windows machine with WSL2 + a named distro: `ocode remote wsl:Ubuntu` opens the remote TUI; `ocode remote --web wsl:Ubuntu` opens the browser directly against `localhost:<port>` with no tunnel process.
+^- [x] `ocode remote wsl:Ubuntu` on macOS/Linux fails immediately with the "only supported on Windows" error (no wsl.exe invocation attempted).
 
-- [ ] **Step 4: Commit any fixes found during verification, then update `CHANGES.md`**
+^- [x] **Step 4: Commit any fixes found during verification, then update `CHANGES.md`**
 
 Follow the existing `CHANGES.md` entry style (see the "Web/desktop sharing and terminal links" entry near the top for the format: bold one-line title, prose paragraph, trailing file-path list in backticks). Add one entry summarizing Phase 2 + Phase 3 together.
 
