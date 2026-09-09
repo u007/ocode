@@ -93,8 +93,9 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 			anchor = absMatchedRoot
 		}
 	}
+	showHidden := parseBoolParam(r.URL.Query().Get("show_hidden"))
 	count := 0
-	node, err := buildFileTree(anchor, base, 0, maxDepth, &count)
+	node, err := buildFileTree(anchor, base, 0, maxDepth, &count, showHidden)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1110,7 +1111,7 @@ const maxTreeNodes = 20000
 // maxDepth caps how deep the walk descends; maxDepth == 0 means unlimited.
 // count tracks the total nodes visited across the whole walk and stops
 // descending further once maxTreeNodes is reached.
-func buildFileTree(base, cur string, depth, maxDepth int, count *int) (FileNode, error) {
+func buildFileTree(base, cur string, depth, maxDepth int, count *int, showHidden bool) (FileNode, error) {
 	info, err := os.Stat(cur)
 	if err != nil {
 		return FileNode{}, err
@@ -1147,10 +1148,10 @@ func buildFileTree(base, cur string, depth, maxDepth int, count *int) (FileNode,
 		if *count >= maxTreeNodes {
 			break
 		}
-		if strings.HasPrefix(e.Name(), ".") || ignoredDirNames[e.Name()] {
+		if (!showHidden && (strings.HasPrefix(e.Name(), ".") || ignoredDirNames[e.Name()])) {
 			continue
 		}
-		child, err := buildFileTree(base, filepath.Join(cur, e.Name()), depth+1, maxDepth, count)
+		child, err := buildFileTree(base, filepath.Join(cur, e.Name()), depth+1, maxDepth, count, showHidden)
 		if err != nil {
 			continue
 		}

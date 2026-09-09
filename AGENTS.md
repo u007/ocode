@@ -26,6 +26,11 @@ name). Do not duplicate content between the two — update here only.
   `Agent.SetOpenCodeSessionID` for TUI sessions, or one lazily resolved
   fallback on the owning agent. Compaction, replacement, and side-query
   clients inherit the same identity. New transports must call the helper too.
+- Every request to `openrouter` must carry `x-session-id` with the same
+  stable conversation ID (OpenRouter's explicit sticky-routing key: pins
+  model+provider from turn one so prompt caching engages immediately; also
+  groups the session in OpenRouter logs). `setOpenRouterAttributionHeaders`
+  sets it alongside the `HTTP-Referer`/`X-Title` attribution headers.
 
 ## Git Worktrees
 The default location for `git worktree` checkouts is `.worktrees/` in the

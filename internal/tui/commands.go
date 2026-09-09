@@ -1054,23 +1054,23 @@ func runFakeAgentCmd(m *model, args []string) tea.Cmd {
 	presets := agent.HarnessNames()
 	current := agent.ActiveHarness()
 	if len(args) == 0 || strings.ToLower(args[0]) == "status" {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Harness identity: %s (default ocode; options: %s)", current, strings.Join(presets, ", "))})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Harness identity: %s (current active agent; default ocode; options: %s)", current, strings.Join(presets, ", ")), skipLLM: true})
 		return nil
 	}
 	normalized, err := config.NormalizeFakeAgent(args[0])
 	if err != nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown harness %q (want one of: %s)", args[0], strings.Join(presets, ", "))})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown harness %q (want one of: %s)", args[0], strings.Join(presets, ", ")), skipLLM: true})
 		return nil
 	}
 	if _, err := agent.SetActiveHarness(normalized); err != nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Could not switch harness: %v", err)})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Could not switch harness: %v", err), skipLLM: true})
 		return nil
 	}
 	if err := config.SaveFakeAgent(normalized); err != nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Harness identity: %s (live for this session, but could not persist: %v)", normalized, err)})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Harness identity: %s (live for this session, but could not persist: %v)", normalized, err), skipLLM: true})
 		return nil
 	}
-	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Harness identity: %s (applies to the next LLM request)", normalized)})
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Harness identity: %s (applies to the next LLM request; current active agent)", normalized), skipLLM: true})
 	return nil
 }
 

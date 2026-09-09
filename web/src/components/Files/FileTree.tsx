@@ -54,6 +54,7 @@ import { dispatchOpenPreview, previewKindForPath } from "../../lib/previewKind";
 import SecretActionDialog from "./SecretActionDialog";
 import { loadFileTreeView, saveFileTreeView, type FileTreeViewMode } from "./fileTreeViewPersistence";
 import { loadFileSearchFilters, saveFileSearchFilters } from "./fileSearchFiltersPersistence";
+import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles } from "./showHiddenFilesPersistence";
 
 // Suppress unused-import errors for in-progress secret/file-tree work (dirty
 // working tree from parallel feature). The build is strict (`noUnusedLocals`).
@@ -291,6 +292,7 @@ interface TreeNodeProps {
   menu: FileMenuActions;
   includedPaths?: Set<string>;
   generation: number;
+  showHiddenFiles: boolean;
 }
 
 function TreeNode({
@@ -305,6 +307,7 @@ function TreeNode({
   menu,
   includedPaths,
   generation,
+  showHiddenFiles,
 }: TreeNodeProps) {
   const [expanded, setExpanded] = useState(!!forceExpanded);
   const [children, setChildren] = useState<FileNode[] | null>(node.children ?? null);
@@ -332,6 +335,12 @@ function TreeNode({
   }, [generation, forceExpanded, node.is_dir]);
 
   useEffect(() => {
+    if (!node.is_dir || forceExpanded) return;
+    abortRef.current?.abort();
+    setChildren(null);
+  }, [showHiddenFiles, node.is_dir, forceExpanded]);
+
+  useEffect(() => {
     if (!node.is_dir || !expanded || children !== null || forceExpanded) return;
     const controller = new AbortController();
     abortRef.current = controller;
@@ -340,7 +349,7 @@ function TreeNode({
       try {
         const res = await fetch(
           apiPath(
-            `/api/files/tree?path=${encodeURIComponent(treePathForRequest(projectRoot, node.path))}&depth=1`,
+            `/api/files/tree?path=${encodeURIComponent(treePathForRequest(projectRoot, node.path))}&depth=1&show_hidden=${showHiddenFiles ? "1" : "0"}`,
           ),
           { headers: authHeaders(), signal: controller.signal },
         );
@@ -360,7 +369,7 @@ function TreeNode({
     })();
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded, node.is_dir, node.path, children]);
+  }, [expanded, node.is_dir, node.path, children, showHiddenFiles]);
 
   const toggle = () => {
     if (forceExpanded) return;
@@ -527,6 +536,7 @@ function TreeNode({
               key={child.path}
               node={child}
               siblings={children}
+              showHiddenFiles={showHiddenFiles}
               depth={depth + 1}
               selectedPath={selectedPath}
               lastClickedPath={lastClickedPath}
@@ -723,6 +733,10 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
 
   // Miller-columns view (macOS Finder-style) — persisted view mode
   const [viewMode, setViewMode] = useState<FileTreeViewMode>(() => loadFileTreeView());
+  const [showHiddenFiles, setShowHiddenFiles] = useState(() => loadShowHiddenFiles());
+
+  // Sync with FilePicker (or any other surface) via storage events.
+  useEffect(() => subscribeShowHiddenFiles(setShowHiddenFiles), []);
   type ColumnEntry = { path: string; nodes: FileNode[] | null; loading: boolean; error?: string | null };
   const [columns, setColumns] = useState<ColumnEntry[]>([]);
   const [columnSelections, setColumnSelections] = useState<(string | null)[]>([]);
@@ -732,6 +746,10 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
   useEffect(() => {
     saveFileTreeView(viewMode);
   }, [viewMode]);
+
+  useEffect(() => {
+    saveShowHiddenFiles(showHiddenFiles);
+  }, [showHiddenFiles]);
 
   // Persist per-project content-search filters (exts, ignore globs, toggles)
   useEffect(() => {
@@ -779,7 +797,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
   }, [projectPath]);
 
   const fetchRootChildren = useCallback(async (root: string, signal: AbortSignal) => {
-    const query = `path=${encodeURIComponent(root)}&depth=1`;
+    const query = `path=${encodeURIComponent(root)}&depth=1&show_hidden=${showHiddenFiles ? "1" : "0"}`;
     const res = await fetch(apiPath(`/api/files/tree?${query}`), {
       headers: authHeaders(),
       signal,
@@ -790,7 +808,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
       console.warn("File tree truncated at the root; not all entries were loaded");
     }
     return data;
-  }, []);
+  }, [showHiddenFiles]);
 
   const loadRoot = useCallback(
     (root: string) => {
@@ -850,7 +868,15 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
   useEffect(() => {
     setFullTree(null);
     setFullTreeTruncated(false);
-  }, [activeRoot]);
+  }, [activeRoot, showHiddenFiles]);
+
+  // Reset column state when hidden-file visibility changes so columns
+  // are rebuilt with the new filter rather than caching old results.
+  useEffect(() => {
+    if (viewMode !== "columns") return;
+    setColumns([]);
+    setColumnSelections([]);
+  }, [showHiddenFiles, viewMode]);
 
   // Fetch full tree for keyword filtering.
   useEffect(() => {
@@ -865,7 +891,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
     setFullTreeLoading(true);
     (async () => {
       try {
-        const query = `path=${encodeURIComponent(root)}&depth=0`;
+        const query = `path=${encodeURIComponent(root)}&depth=0&show_hidden=${showHiddenFiles ? "1" : "0"}`;
         const res = await fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders(), signal: controller.signal });
         if (!res.ok) throw new Error("Failed to load full file tree for filtering");
         const data: FileTreeResponse = await res.json();
@@ -883,7 +909,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
       }
     })();
     return () => controller.abort();
-  }, [keyword, activeRoot, projectPath, fullTree]);
+  }, [keyword, activeRoot, projectPath, fullTree, showHiddenFiles]);
 
   // ---- Miller-columns state sync ----
   useEffect(() => {
@@ -920,7 +946,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
       const root = activeRoot ?? projectPath ?? "";
       const reqPath = treePathForRequest(root || undefined, dirPath);
       try {
-        const query = `path=${encodeURIComponent(reqPath)}&depth=1`;
+        const query = `path=${encodeURIComponent(reqPath)}&depth=1&show_hidden=${showHiddenFiles ? "1" : "0"}`;
         const res = await fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders() });
         if (!res.ok) throw new Error("Failed to load directory");
         if (columnFetchSeq.current !== seq) return null;
@@ -931,7 +957,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
         throw err;
       }
     },
-    [activeRoot, projectPath],
+    [activeRoot, projectPath, showHiddenFiles],
   );
 
   const handleColumnSelect = useCallback(
@@ -1415,6 +1441,14 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
         <div className="flex items-center gap-1">
           <button
             type="button"
+            onClick={() => setShowHiddenFiles((v) => !v)}
+            className={`shrink-0 h-7 px-2 text-[11px] font-medium rounded border transition-colors ${showHiddenFiles ? "bg-amber-500/20 text-amber-600 border-amber-500/30" : "bg-transparent text-muted-foreground border-border hover:bg-muted hover:text-foreground"}`}
+            title={showHiddenFiles ? "Showing hidden and ignored files (click to hide)" : "Showing normal files only (click to show hidden/ignored)"}
+          >
+            {showHiddenFiles ? "Hidden" : "Normal"}
+          </button>
+          <button
+            type="button"
             onClick={() => setSearchMode(searchMode === "content" ? "path" : "content")}
             className={`shrink-0 h-7 px-2 text-[11px] font-medium rounded border transition-colors ${
               searchMode === "content"
@@ -1619,6 +1653,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
                   key={node.path}
                   node={node}
                   siblings={filteredTree}
+                  showHiddenFiles={showHiddenFiles}
                   depth={0}
                   selectedPath={selectedPath}
                   lastClickedPath={lastClickedPath}
@@ -1805,6 +1840,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
                 key={node.path}
                 node={node}
                 siblings={tree}
+                showHiddenFiles={showHiddenFiles}
                 depth={0}
                 selectedPath={selectedPath}
                 lastClickedPath={lastClickedPath}

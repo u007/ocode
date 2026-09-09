@@ -318,6 +318,13 @@ func (c *GenericClient) isOpencodeProvider() bool {
 // from a real agentic app (see openrouter.ai/apps); the harness selected by
 // /fake-agent (default ocode) is what qualifies it. No-op for every other
 // provider — generic harness headers go through applyHarnessHeaders.
+//
+// It also stamps x-session-id, OpenRouter's explicit sticky-routing key
+// (guides/best-practices/prompt-caching, "Provider Sticky Routing"): with it
+// every turn of a conversation routes to the provider that served the first
+// turn, so prompt caching engages immediately instead of waiting for
+// OpenRouter's implicit fingerprint to observe a cache hit. The value is the
+// same stable per-conversation id used for X-Opencode-Session (≤256 chars).
 func (c *GenericClient) setOpenRouterAttributionHeaders(req *http.Request) {
 	if req == nil || c == nil || c.Provider != "openrouter" {
 		return
@@ -325,7 +332,11 @@ func (c *GenericClient) setOpenRouterAttributionHeaders(req *http.Request) {
 	preset := HarnessPresetFor(ActiveHarness())
 	req.Header.Set("HTTP-Referer", preset.Referer)
 	req.Header.Set("X-Title", preset.Title)
+	req.Header.Set(openRouterSessionHeader, c.opencodeSessionID())
 }
+
+// openRouterSessionHeader is OpenRouter's sticky-routing / log-grouping key.
+const openRouterSessionHeader = "x-session-id"
 
 // setOpencodeSessionHeader stamps the stable per-conversation session id onto
 // an outbound LLM request. It is a no-op for non-opencode providers, so every

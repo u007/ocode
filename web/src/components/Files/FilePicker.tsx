@@ -10,6 +10,7 @@ import {
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../ui/dialog";
 import { apiPath, authHeaders } from "../../api/client";
 import { parseKeywords, matchesKeywords } from "../../lib/keywordFilter";
+import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles } from "./showHiddenFilesPersistence";
 
 interface FileNode {
   name: string;
@@ -45,6 +46,9 @@ function flattenFiles(nodes: FileNode[]): string[] {
 export default function FilePicker({ open, onClose, onOpenFile, projectPath }: Props) {
   const [files, setFiles] = useState<string[]>([]);
   const [query, setQuery] = useState("");
+  const [showHiddenFiles, setShowHiddenFiles] = useState(() => loadShowHiddenFiles());
+
+  useEffect(() => subscribeShowHiddenFiles(setShowHiddenFiles), []);
 
   useEffect(() => {
     if (!open) return;
@@ -57,7 +61,7 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath }: P
     // nested deep in the project are searchable, not just the shallow ones.
     // An explicit path anchors the request to the active project instead of
     // the server's own workDir (fixed at launch, e.g. home dir on desktop).
-    const query = `path=${encodeURIComponent(projectPath)}&depth=0`;
+    const query = `path=${encodeURIComponent(projectPath)}&depth=0&show_hidden=${showHiddenFiles ? "1" : "0"}`;
     fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders(), signal: controller.signal })
       .then((res) => res.json())
       .then((data: FileTreeResponse) => {
@@ -71,11 +75,15 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath }: P
         if ((err as Error).name !== "AbortError") console.error("Failed to load file tree:", err);
       });
     return () => controller.abort();
-  }, [open, projectPath]);
+  }, [open, projectPath, showHiddenFiles]);
 
   useEffect(() => {
     if (!open) setQuery("");
   }, [open]);
+
+  useEffect(() => {
+    saveShowHiddenFiles(showHiddenFiles);
+  }, [showHiddenFiles]);
 
   const keywords = useMemo(() => parseKeywords(query), [query]);
   const filteredFiles = useMemo(() => {
@@ -97,6 +105,16 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath }: P
           shouldFilter={false}
           className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground [&_[cmdk-group]:not([hidden])_~[cmdk-group]]:pt-0 [&_[cmdk-group]]:px-2 [&_[cmdk-input-wrapper]_svg]:h-5 [&_[cmdk-input-wrapper]_svg]:w-5 [&_[cmdk-input]]:h-12 [&_[cmdk-item]]:px-2 [&_[cmdk-item]]:py-3 [&_[cmdk-item]_svg]:h-5 [&_[cmdk-item]_svg]:w-5"
         >
+          <div className="flex items-center gap-1 px-2 pt-1">
+            <button
+              type="button"
+              onClick={() => setShowHiddenFiles((v) => !v)}
+              className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${showHiddenFiles ? "bg-amber-500/20 text-amber-600 border-amber-500/30" : "bg-transparent text-muted-foreground border-border hover:bg-muted"}`}
+              title={showHiddenFiles ? "Showing hidden/ignored files" : "Showing normal files only"}
+            >
+              {showHiddenFiles ? "Hidden" : "Normal"}
+            </button>
+          </div>
           <CommandInput placeholder="Filter by keywords..." value={query} onValueChange={setQuery} />
           <CommandList>
             <CommandEmpty>{keywords.length > 0 ? "No matching files" : "No files found"}</CommandEmpty>
