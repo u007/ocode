@@ -781,6 +781,7 @@ func (m *model) rebuildAgentClient() {
 	m.agent = agent.NewAgent(client, tools, m.config, lspMgr)
 	if m.sessionID != "" {
 		m.agent.SetOpenCodeSessionID(m.sessionID)
+		m.agent.SetChangesSession(m.sessionID) // see installAgent
 	}
 	// Apply the session-level advisor toggle so the rebuilt agent respects
 	// the same runtime state as the previous agent.

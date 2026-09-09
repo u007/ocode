@@ -13,7 +13,9 @@ const fileProviderSpy = vi.fn((..._args: unknown[]) => ({ dispose: vi.fn() }));
 vi.mock("@xterm/addon-web-links", () => ({
   WebLinksAddon: class {
     dispose = vi.fn();
-    constructor() {
+    handler?: (event: MouseEvent, uri: string) => void;
+    constructor(handler?: (event: MouseEvent, uri: string) => void) {
+      this.handler = handler;
       webLinksInstances.push(this);
     }
   },
@@ -102,6 +104,7 @@ describe("TerminalPanel link wiring", () => {
   beforeEach(() => {
     webLinksInstances.length = 0;
     fileProviderSpy.mockClear();
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("", { status: 404 }))));
     // jsdom lacks ResizeObserver
     (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
       observe = vi.fn();

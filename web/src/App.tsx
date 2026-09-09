@@ -5,7 +5,7 @@ import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, findProjectPathForTab, useProjectState } from "./stores/projectStore";
 import { TerminalProvider } from "./stores/terminalStore";
-import { BrowserTabsProvider, useBrowserTabs } from "./stores/browserTabsStore";
+import { BrowserTabsProvider, useBrowserTabs, useBrowserTabsDispatch } from "./stores/browserTabsStore";
 import { BrowserPanel } from "./components/Browser/BrowserPanel";
 import PreviewHost from "./components/Preview/PreviewHost";
 import { usePreviewActivation } from "./components/Preview/usePreviewActivation";
@@ -67,6 +67,7 @@ import { useTurnWatchdogAll } from "./hooks/useTurnWatchdog";
 import FrontendMemoryReporter from "./lib/debug/frontendMemoryReporter";
 import { __setRevoker } from "./lib/browserStore";
 import { revokeBrowseSession } from "./api/client";
+import type { Project } from "./api/types";
 
 // Browse panel close → revoke the server-side browse session. Wired here
 // (module scope, once) rather than inside browserStore.ts to avoid a
@@ -74,6 +75,24 @@ import { revokeBrowseSession } from "./api/client";
 __setRevoker(revokeBrowseSession);
 
 type ModelDialogTab = "main" | "small" | "advisor" | "permission" | "recap" | "ocr" | "mask" | "commit" | "summary" | "explorer" | "context";
+
+/**
+ * Resolve terminal routing only from the latest successful project snapshot.
+ * An absent path is deliberately not treated as local: persisted tabs can
+ * outlive a project, and connecting them without trusted metadata could turn
+ * a previously remote shell into a local one.
+ */
+export function getTrustedTerminalProject(
+  projects: readonly Pick<Project, "path" | "host">[],
+  projectPath: string,
+): { known: true; host?: string } | { known: false } {
+  const matches = projects.filter((candidate) => candidate.path === projectPath);
+  // The terminal store is keyed by path, so a path shared by multiple hosts
+  // cannot be routed safely from a path-only persisted tab. Reject ambiguity
+  // rather than arbitrarily selecting a remote or local project.
+  if (matches.length !== 1) return { known: false };
+  return { known: true, host: matches[0].host || undefined };
+}
 
 function StatusMetricsHydrator() {
   const dispatch = useChatDispatch();
@@ -165,6 +184,14 @@ function HomeApp() {
   const [focusedKind, setFocusedKind] = useState<FocusedKind>("chat");
   const activeProjectPath = projectState.activeProject?.path ?? "";
   const { activeId: activeBrowserId, closeBrowserTab } = useBrowserTabs(activeProjectPath);
+  const browserTabsDispatch = useBrowserTabsDispatch();
+  // browse_newtab: file the tab under its owning project when the event
+  // names one; an unknown owner lands in the active project's strip.
+  const openBackgroundBrowserTab = useCallback(
+    (id: string, project?: string) =>
+      browserTabsDispatch({ type: "OPEN_BACKGROUND", project: project || activeProjectPath, id }),
+    [browserTabsDispatch, activeProjectPath],
+  );
   // Closing the last browser tab (X button or Cmd+W) must not leave the
   // center region blank while "browser" is still the focused kind.
   useEffect(() => {
@@ -722,7 +749,7 @@ function HomeApp() {
 
   return (
     <div className="flex flex-col h-screen bg-background">
-      <SessionTabSync />
+      <SessionTabSync onNewTab={openBackgroundBrowserTab} />
 
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
@@ -816,23 +843,45 @@ function HomeApp() {
                 return (
                   <div className={terminalFocused ? "flex flex-1 overflow-hidden m-0 flex-col" : "hidden"}>
                     <div className="relative flex-1 min-h-0 overflow-hidden">
-                      {projectPaths.map((pp) => (
-                        <div
-                          key={`${pp}:terminal`}
-                          className={
-                            pp === activeProjectPath ? "absolute inset-0" : "absolute inset-0 hidden"
-                          }
-                        >
-                          <TerminalTabs
-                            ref={(handle) => {
-                              if (handle) terminalRefs.current.set(pp, handle);
-                              else terminalRefs.current.delete(pp);
-                            }}
-                            active={pp === activeProjectPath && terminalFocused}
-                            projectPath={pp}
-                          />
-                        </div>
-                      ))}
+                      {projectState.projectsStatus !== "ready" ? (
+                        terminalFocused && (
+                          <div data-testid="terminal-project-metadata-status" className="p-4 text-sm text-muted-foreground">
+                            Project metadata is unavailable; terminals are paused until it loads successfully.
+                          </div>
+                        )
+                      ) : (
+                        projectPaths.map((pp) => {
+                          const metadata = getTrustedTerminalProject(projectState.projects, pp);
+                          return (
+                            <div
+                              key={`${pp}:terminal`}
+                              className={
+                                pp === activeProjectPath ? "absolute inset-0" : "absolute inset-0 hidden"
+                              }
+                            >
+                              {metadata.known ? (
+                                <TerminalTabs
+                                  ref={(handle) => {
+                                    if (handle) terminalRefs.current.set(pp, handle);
+                                    else terminalRefs.current.delete(pp);
+                                  }}
+                                  active={pp === activeProjectPath && terminalFocused}
+                                  projectPath={pp}
+                                  host={metadata.host}
+                                />
+                              ) : (
+                                <div
+                                  data-testid="terminal-project-unavailable"
+                                  data-project-path={pp}
+                                  className="p-4 text-sm text-muted-foreground"
+                                >
+                                  Project metadata is no longer available; this terminal was not opened locally.
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
                     </div>
                   </div>
                 );

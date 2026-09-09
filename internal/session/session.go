@@ -291,7 +291,7 @@ func AppendUserMessageForDir(projectRoot, id, content string) error {
 		if err != nil {
 			return err
 		}
-		msgs = append(msgs, agent.Message{Role: "user", Content: content})
+		msgs = append(msgs, agent.Message{Role: "user", Content: content, UserSeq: NextUserSeq(msgs)})
 		err = persistToDir(dir, id, "", msgs, nil, false, 0, false)
 		if err == nil {
 			return nil
@@ -302,6 +302,24 @@ func AppendUserMessageForDir(projectRoot, id, content string) error {
 		}
 	}
 	return fmt.Errorf("session: append user message to %s: %w", id, lastErr)
+}
+
+// NextUserSeq returns the durable per-session sequence for the NEXT user
+// message: one more than the highest UserSeq already present in the
+// transcript (1 for an empty/legacy transcript). Every writer that appends
+// a user message — the async pre-persist (AppendUserMessageForDir) and the
+// turn's in-memory append (server runTurn) — must derive the seq the same
+// way so the two copies of one message serialize byte-identically; the
+// overlap/conflict check compares persistence form, and a seq present on
+// one copy but not the other reads as a diverged transcript.
+func NextUserSeq(messages []agent.Message) int {
+	max := 0
+	for _, m := range messages {
+		if m.Role == "user" && m.UserSeq > max {
+			max = m.UserSeq
+		}
+	}
+	return max + 1
 }
 
 // loadRawMessages reads the stored transcript WITHOUT the LLM-oriented
@@ -1656,4 +1674,40 @@ func claudeContentText(raw json.RawMessage) string {
 		}
 	}
 	return strings.Join(out, "\n\n")
+}
+
+// UpdateMetadataForDir applies mutate to the stored metadata of session id
+// under projectRoot's storage dir and persists only that: for a .sqlite
+// session it rewrites the meta row's metadata_json in one immediate
+// transaction and never reads or rewrites message rows, so — like
+// AppendUserMessageForDir — it cannot trip the overlap/shrink conflict when
+// the stored transcript holds rows the load path filters out (orphan tool
+// results, PERMISSION_ASK sentinels). A full load→modify→save of a filtered
+// view conflicts forever in that state, which is what blocked per-session
+// model picks from the web sidebar. Legacy .json/.ojsonl sessions are
+// migrated through the normal save path with the RAW transcript.
+func UpdateMetadataForDir(projectRoot, id string, mutate func(map[string]any)) error {
+	dir, err := GetStorageDirForPath(projectRoot)
+	if err != nil {
+		return err
+	}
+	if fileExists(sqliteSessionPath(dir, id)) {
+		if err := updateSqliteMetadata(dir, id, mutate); err != nil {
+			return err
+		}
+		return refreshIndexMeta(dir, id)
+	}
+	s, err := loadFromDir(dir, id)
+	if err != nil {
+		return err
+	}
+	msgs, err := loadRawMessages(dir, id)
+	if err != nil {
+		return err
+	}
+	if s.Metadata == nil {
+		s.Metadata = map[string]any{}
+	}
+	mutate(s.Metadata)
+	return persistToDir(dir, id, s.Title, msgs, s.Metadata, false, 0, false)
 }

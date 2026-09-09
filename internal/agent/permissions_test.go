@@ -1769,9 +1769,10 @@ func TestPermissions_BashRedirectionInExtraAllowedPath_AutoAllows(t *testing.T) 
 	}
 }
 
-// Read (non-bash) on extra_allowed_paths must allow: the Decide path at
-// isReadOnlyTool && isWithinAllowedScope covers cache/extra roots for read-only ops.
-func TestPermissions_ReadToolOnExtraAllowedPath_Allows(t *testing.T) {
+// Read (non-bash) on extra_allowed_paths must allow existing files, while a
+// missing read target is denied before scope evaluation. Glob patterns remain
+// valid queries even when they do not currently match a filesystem entry.
+func TestPermissions_ReadToolOnExtraAllowedPath(t *testing.T) {
 	workDir := t.TempDir()
 	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
 	if err != nil {
@@ -1792,15 +1793,112 @@ func TestPermissions_ReadToolOnExtraAllowedPath_Allows(t *testing.T) {
 	pm.SetWorkDir(resolvedWorkDir)
 
 	filePath := filepath.Join(resolvedExtra, "marker.txt")
-	// The file doesn't need to exist — read/glob path resolution is the
-	// scope check, not a stat. Keeping the path inside the temp dir
-	// makes the test self-contained and order-independent.
+	if err := os.WriteFile(filePath, []byte("marker"), 0o600); err != nil {
+		t.Fatalf("create marker: %v", err)
+	}
 	args := json.RawMessage(fmt.Sprintf(`{"path":%s}`, jsonStr(filePath)))
-	for _, readTool := range []string{"read", "glob"} {
-		dec := pm.Decide(readTool, args)
-		if dec.Level != PermissionAllow {
-			t.Fatalf("Decide(%s, path in extra_allowed_paths): level=%s, want allow", readTool, dec.Level)
-		}
+	if dec := pm.Decide("read", args); dec.Level != PermissionAllow {
+		t.Fatalf("Decide(read, existing path in extra_allowed_paths): level=%s, want allow", dec.Level)
+	}
+
+	missingPath := filepath.Join(resolvedExtra, "missing.txt")
+	missingArgs := json.RawMessage(fmt.Sprintf(`{"path":%s}`, jsonStr(missingPath)))
+	if dec := pm.Decide("read", missingArgs); dec.Level != PermissionDeny {
+		t.Fatalf("Decide(read, missing path in extra_allowed_paths): level=%s, want deny", dec.Level)
+	}
+	if dec := pm.Decide("glob", missingArgs); dec.Level != PermissionAllow {
+		t.Fatalf("Decide(glob, missing path in extra_allowed_paths): level=%s, want allow", dec.Level)
+	}
+}
+
+func TestPermissions_ReadMissingTargetDenied(t *testing.T) {
+	workDir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cases := []struct {
+		name  string
+		field string
+		path  string
+	}{
+		{name: "relative file", field: "path", path: "missing-relative.txt"},
+		{name: "relative directory", field: "path", path: "missing-directory"},
+		{name: "tilde file", field: "path", path: "~/missing-tilde.txt"},
+		{name: "absolute file", field: "path", path: filepath.Join(workDir, "missing-absolute.txt")},
+		{name: "file_path", field: "file_path", path: filepath.Join(workDir, "missing-file-path.txt")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pm := NewPermissionManager()
+			pm.SetWorkDir(workDir)
+			args := json.RawMessage(fmt.Sprintf(`{"%s":%s}`, tc.field, jsonStr(tc.path)))
+			if dec := pm.Decide("read", args); dec.Level != PermissionDeny {
+				t.Fatalf("Decide(read, %q): level=%s, want deny", tc.path, dec.Level)
+			}
+		})
+	}
+}
+
+func TestPermissions_ReadMissingTargetDenialPrecedesPathRulesAndModes(t *testing.T) {
+	workDir := t.TempDir()
+	missingPath := filepath.Join(workDir, "missing.txt")
+	args := json.RawMessage(fmt.Sprintf(`{"path":%s}`, jsonStr(missingPath)))
+
+	cases := []struct {
+		name string
+		mode PermissionMode
+		rule PermissionLevel
+	}{
+		{name: "normal", mode: PermissionModeNormal},
+		{name: "yolo", mode: PermissionModeYOLO},
+		{name: "locked", mode: PermissionModeLocked},
+		{name: "explicit allow", mode: PermissionModeNormal, rule: PermissionAllow},
+		{name: "explicit ask", mode: PermissionModeNormal, rule: PermissionAsk},
+		{name: "explicit deny", mode: PermissionModeNormal, rule: PermissionDeny},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pm := NewPermissionManager()
+			pm.SetWorkDir(workDir)
+			pm.SetMode(tc.mode)
+			if tc.rule != "" {
+				pm.SetPathRule("read", missingPath, tc.rule)
+			}
+			if dec := pm.Decide("read", args); dec.Level != PermissionDeny {
+				t.Fatalf("Decide(read, missing target): level=%s, want deny", dec.Level)
+			}
+		})
+	}
+}
+
+func TestPermissions_ReadExistingTargetScopeAndStatErrors(t *testing.T) {
+	workDir := t.TempDir()
+	existingPath := filepath.Join(workDir, "existing.txt")
+	if err := os.WriteFile(existingPath, []byte("content"), 0o600); err != nil {
+		t.Fatalf("create existing file: %v", err)
+	}
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(workDir)
+	existingArgs := json.RawMessage(fmt.Sprintf(`{"path":%s}`, jsonStr(existingPath)))
+	if dec := pm.Decide("read", existingArgs); dec.Level != PermissionAllow {
+		t.Fatalf("Decide(read, existing in-scope path): level=%s, want allow", dec.Level)
+	}
+
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a stable Unix out-of-scope file")
+	}
+	outOfScopeArgs := json.RawMessage(fmt.Sprintf(`{"path":%s}`, jsonStr("/etc/hosts")))
+	if dec := pm.Decide("read", outOfScopeArgs); dec.Level != PermissionAsk {
+		t.Fatalf("Decide(read, existing out-of-scope path): level=%s, want ask", dec.Level)
+	}
+
+	// NUL is rejected by os.Stat with an invalid-argument error, not ENOENT.
+	// That error must continue through normal policy evaluation rather than
+	// being misclassified as a missing target.
+	statErrorArgs := json.RawMessage(fmt.Sprintf(`{"path":%s}`, jsonStr("\x00")))
+	if dec := pm.Decide("read", statErrorArgs); dec.Level != PermissionAllow {
+		t.Fatalf("Decide(read, stat-error path): level=%s, want allow", dec.Level)
 	}
 }
 
@@ -1902,7 +2000,7 @@ func TestPermissions_TempDirAutoAllowed(t *testing.T) {
 		{"mkdir_tmp", "mkdir -p /tmp/subdir", PermissionAllow},
 		{"rm_tmp_file", "rm /tmp/test.txt", PermissionAllow},
 		{"ls_var_tmp", "ls /var/tmp", PermissionAllow},
-		{"read_tmp_tool", "read", PermissionAllow},
+		{"read_tmp_tool", "read", PermissionDeny},
 	}
 
 	for _, tc := range cases {

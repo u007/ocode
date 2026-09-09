@@ -2,9 +2,17 @@
 // the full-width browser tab view and the side panel toggle. All heavy
 // children are stubbed; the real providers (Chat/Project/Terminal/BrowserTabs)
 // stay live so the wiring under test is genuine.
-import { render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import { MemoryRouter } from "react-router-dom";
+
+const appApi = vi.hoisted(() => ({
+  listProjects: vi.fn(),
+  getCurrentProject: vi.fn(),
+  listProjectSessions: vi.fn(),
+  listGroups: vi.fn(),
+  getSpending: vi.fn(),
+}));
 
 beforeAll(() => {
   // jsdom ships no matchMedia; useIsMobile reads it on first render.
@@ -23,18 +31,17 @@ beforeAll(() => {
 vi.mock("./api/client", () => {
   // The project-store boot path needs a coherent trio; everything else may
   // return a generic empty object (all consumers guard or the call is inert).
-  const project = { path: "/proj", name: "proj" };
-  const impl: Record<string, () => Promise<unknown>> = {
-    listProjects: async () => [project],
-    getCurrentProject: async () => ({ project }),
-    listProjectSessions: async () => [],
-    listGroups: async () => [],
-    getSpending: async () => ({ spending_usd: 0 }),
+  const impl: Record<string, unknown> = {
+    listProjects: appApi.listProjects,
+    getCurrentProject: appApi.getCurrentProject,
+    listProjectSessions: appApi.listProjectSessions,
+    listGroups: appApi.listGroups,
+    getSpending: appApi.getSpending,
   };
   const api = new Proxy({} as Record<string, unknown>, {
     get: (target, prop: string) => {
       if (!(prop in target)) {
-        target[prop] = vi.fn(impl[prop] ?? (async () => ({})));
+        target[prop] = impl[prop] ?? vi.fn(async () => ({}));
       }
       return target[prop];
     },
@@ -56,7 +63,14 @@ vi.mock("./api/client", () => {
 });
 
 vi.mock("./lib/eventBus", () => ({
-  eventBus: { on: () => () => {}, emit: () => {}, start: () => {}, stop: () => {}, setProjects: () => {} },
+  eventBus: {
+    on: () => () => {},
+    onReconnect: () => () => {},
+    emit: () => {},
+    start: () => {},
+    stop: () => {},
+    setProjects: () => {},
+  },
 }));
 
 vi.mock("./components/Browser/BrowserPanel", () => ({
@@ -77,7 +91,11 @@ vi.mock("./components/Changes/ChangesPanel", () => ({ default: () => null }));
 vi.mock("./components/Files/FileTree", () => ({ default: () => null }));
 vi.mock("./components/Files/FileEditor", () => ({ default: () => null }));
 vi.mock("./components/Logs/LogPanel", () => ({ default: () => null }));
-vi.mock("./components/Terminal/TerminalTabs", () => ({ default: () => null }));
+vi.mock("./components/Terminal/TerminalTabs", () => ({
+  default: ({ projectPath, host }: { projectPath: string; host?: string }) => (
+    <div data-testid="terminal-tabs" data-project-path={projectPath} data-host={host ?? ""} />
+  ),
+}));
 vi.mock("./components/Assets/AssetsPanel", () => ({ default: () => null }));
 vi.mock("./components/Cron/CronPanel", () => ({ default: () => null }));
 vi.mock("./components/Layout/SessionDialog", () => ({ default: () => null }));
@@ -99,7 +117,7 @@ vi.mock("./components/common/ErrorBoundary", () => ({
   default: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
-import App from "./App";
+import App, { getTrustedTerminalProject } from "./App";
 
 function renderApp() {
   return render(
@@ -111,6 +129,11 @@ function renderApp() {
 
 beforeEach(() => {
   window.localStorage.clear();
+  appApi.listProjects.mockReset().mockResolvedValue([{ path: "/proj", name: "proj" }]);
+  appApi.getCurrentProject.mockReset().mockResolvedValue({ project: { path: "/proj", name: "proj" } });
+  appApi.listProjectSessions.mockReset().mockResolvedValue([]);
+  appApi.listGroups.mockReset().mockResolvedValue([]);
+  appApi.getSpending.mockReset().mockResolvedValue({ spending_usd: 0 });
 });
 
 describe("App browser wiring", () => {
@@ -168,5 +191,108 @@ describe("App browser wiring", () => {
     expect(screen.queryByTestId("browser-panel")).toBeNull();
     // The top-row globe toggle still opens it again.
     expect(screen.queryByRole("button", { name: /toggle browser panel/i })).toBeEnabled();
+  });
+
+  it("withholds terminal trees until initial metadata resolves, then passes the resolved remote host", async () => {
+    let resolveProjects!: (projects: { path: string; name: string; host: string }[]) => void;
+    appApi.listProjects
+      .mockReset()
+      .mockReturnValueOnce(new Promise((resolve) => { resolveProjects = resolve; }))
+      .mockResolvedValue([{ path: "/remote", name: "remote", host: "dev@example.com" }]);
+    appApi.getCurrentProject.mockResolvedValue({
+      project: { path: "/remote", name: "remote", host: "dev@example.com" },
+    });
+
+    renderApp();
+    expect(screen.queryByTestId("terminal-tabs")).toBeNull();
+
+    await act(async () => {
+      resolveProjects([{ path: "/remote", name: "remote", host: "dev@example.com" }]);
+    });
+
+    await waitFor(() => expect(screen.getByTestId("terminal-tabs")).toHaveAttribute("data-host", "dev@example.com"));
+  });
+
+  it("withholds persisted terminals when the initial project metadata request fails", async () => {
+    window.localStorage.setItem(
+      "ocode.ui.tabs.v1",
+      JSON.stringify({
+        version: 1,
+        projects: {
+          "/remote": {
+            tabs: [{ id: "session-1", title: "remote", subTab: "chat" }],
+            active: "session-1",
+          },
+        },
+      }),
+    );
+    appApi.listProjects.mockReset().mockRejectedValue(new Error("metadata unavailable"));
+    appApi.getCurrentProject.mockReset().mockResolvedValue(null);
+
+    renderApp();
+
+    await waitFor(() => expect(appApi.listProjects).toHaveBeenCalled());
+    expect(screen.queryByTestId("terminal-tabs")).toBeNull();
+  });
+
+  it("keeps an orphaned persisted project unavailable instead of routing it as local", async () => {
+    window.localStorage.setItem(
+      "ocode.ui.tabs.v1",
+      JSON.stringify({
+        version: 1,
+        projects: {
+          "/removed-remote": {
+            tabs: [{ id: "session-1", title: "remote", subTab: "chat" }],
+            active: "session-1",
+          },
+        },
+      }),
+    );
+    appApi.listProjects.mockResolvedValue([{ path: "/known", name: "known" }]);
+    appApi.getCurrentProject.mockResolvedValue({ project: { path: "/known", name: "known" } });
+
+    renderApp();
+
+    const unavailable = await screen.findByTestId("terminal-project-unavailable");
+    expect(unavailable).toHaveAttribute("data-project-path", "/removed-remote");
+    expect(screen.queryAllByTestId("terminal-tabs").some((node) => node.getAttribute("data-project-path") === "/removed-remote")).toBe(false);
+  });
+
+  it("rejects path metadata that is ambiguous across hosts", () => {
+    expect(
+      getTrustedTerminalProject(
+        [
+          { path: "/shared", host: "one.example.com" },
+          { path: "/shared", host: "two.example.com" },
+        ],
+        "/shared",
+      ),
+    ).toEqual({ known: false });
+  });
+
+  it("renders an unavailable state for an ambiguous project path", async () => {
+    window.localStorage.setItem(
+      "ocode.ui.tabs.v1",
+      JSON.stringify({
+        version: 1,
+        projects: {
+          "/shared": {
+            tabs: [{ id: "session-1", title: "shared", subTab: "chat" }],
+            active: "session-1",
+          },
+        },
+      }),
+    );
+    appApi.listProjects.mockResolvedValue([
+      { path: "/shared", name: "one", host: "one.example.com" },
+      { path: "/shared", name: "two", host: "two.example.com" },
+    ]);
+    appApi.getCurrentProject.mockResolvedValue(null);
+
+    renderApp();
+
+    const unavailable = await screen.findByTestId("terminal-project-unavailable");
+    expect(unavailable).toHaveAttribute("data-project-path", "/shared");
+    expect(screen.queryByTestId("terminal-tabs")).toBeNull();
   });
 });

@@ -331,3 +331,19 @@ func TestFreeLocalPort(t *testing.T) {
 	}
 	ln.Close()
 }
+
+func TestTunnelArgsForwardsBrowsePortOnSameNumber(t *testing.T) {
+	got := tunnelArgs(5001, 4096, 39321, "user@host")
+	want := []string{"-N", "-L", "5001:127.0.0.1:4096", "-L", "39321:127.0.0.1:39321", "user@host"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("tunnelArgs = %q, want %q", got, want)
+	}
+}
+
+func TestTunnelArgsSkipsBrowseForwardWhenUnset(t *testing.T) {
+	got := tunnelArgs(5001, 4096, 0, "user@host")
+	want := []string{"-N", "-L", "5001:127.0.0.1:4096", "user@host"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("tunnelArgs = %q, want %q", got, want)
+	}
+}

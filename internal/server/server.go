@@ -322,6 +322,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/terminal/ws", s.authMiddleware(s.handleTerminalWS))
 	s.mux.HandleFunc("GET /api/terminal/processes", s.authMiddleware(s.handleTerminalProcesses))
 	s.mux.HandleFunc("DELETE /api/terminal/{id}", s.authMiddleware(s.handleTerminalKill))
+	s.mux.HandleFunc("GET /api/terminal/{id}/history", s.authMiddleware(s.handleTerminalHistory))
 	s.mux.HandleFunc("GET /api/config/advisor", s.authMiddleware(s.handleGetAdvisor))
 	s.mux.HandleFunc("PUT /api/config/advisor", s.authMiddleware(s.handleSetAdvisor))
 	s.mux.HandleFunc("GET /api/config/advisor-enabled", s.authMiddleware(s.handleGetAdvisorEnabled))
@@ -602,6 +603,9 @@ func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 	bs.SetTitlePublisher(func(_ string, ev browse.TitleEvent) {
 		s.publishBrowseTitle(ev)
 	})
+	bs.SetNewTabPublisher(func(_ string, ev browse.NewTabEvent) {
+		s.publishBrowseNewTab(ev)
+	})
 }
 
 // publishBrowseNav fans a browse NavEvent onto the unified bus as a
@@ -620,6 +624,19 @@ func (s *Server) publishBrowseNav(ev browse.NavEvent) {
 // SSE payload shape: event "browse_title", data {state_key, title, url?}.
 func (s *Server) publishBrowseTitle(ev browse.TitleEvent) {
 	s.handler.bus.Publish("browse_title", "", "", ev)
+}
+
+// publishBrowseNewTab fans a browse NewTabEvent onto the unified bus as a
+// project/global-scoped event announcing a stateKey the SPA has never seen
+// before (Cmd/Ctrl+click, target="_blank", window.open). Like browse_nav,
+// "browse_newtab" must never be added to sessionScopedEvents.
+// SSE payload shape: event "browse_newtab", data {state_key, url, project?}.
+// `project` (owning project root) is omitempty — currently unset because the
+// browse subsystem has no opener→project mapping, so the SPA files such tabs
+// under the active project. A future backend may populate it; the SPA already
+// routes by it when present, so populating it is wire-compatible.
+func (s *Server) publishBrowseNewTab(ev browse.NewTabEvent) {
+	s.handler.bus.Publish("browse_newtab", "", "", ev)
 }
 
 // BrowseOptions carries the headless-Chrome configuration for the browse
@@ -676,6 +693,21 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 	}()
 	log.Printf("browse: origin listening on %s", bBase)
 	return nil
+}
+
+// browsePort returns the port the browse origin listener bound, or 0 when
+// StartBrowse did not succeed.
+func (s *Server) browsePort() int {
+	s.shutdownMu.Lock()
+	ln := s.browseLn
+	s.shutdownMu.Unlock()
+	if ln == nil {
+		return 0
+	}
+	if addr, ok := ln.Addr().(*net.TCPAddr); ok {
+		return addr.Port
+	}
+	return 0
 }
 
 func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
@@ -1147,20 +1179,26 @@ func (s *Server) SetRemoteMode(v bool) {
 // discovery (DiscoverServer). Field names are the wire contract with that
 // package — do not rename without updating both sides.
 type remoteServeState struct {
-	PID       int       `json:"pid"`
-	Port      int       `json:"port"`
-	Token     string    `json:"token"`
-	Version   string    `json:"version"`
-	StartedAt time.Time `json:"startedAt"`
+	PID  int `json:"pid"`
+	Port int `json:"port"`
+	// BrowsePort is the second loopback port the browse origin (embedded
+	// browser panel proxy + CDP socket) bound; 0 when StartBrowse failed.
+	// `ocode remote --web` tunnels it on the same port number so the SPA's
+	// /api/browse/config base URL resolves unchanged on the client.
+	BrowsePort int       `json:"browsePort"`
+	Token      string    `json:"token"`
+	Version    string    `json:"version"`
+	StartedAt  time.Time `json:"startedAt"`
 }
 
 // writeRemoteStateFile persists this server's identity so a later
 // `ocode remote --web` reconnect can discover and reuse it instead of
-// launching a duplicate. Called once, right after Listen succeeds, only
-// when remoteMode is set. 0600 + temp-file-then-rename (secretfile's atomic
+// launching a duplicate. Called once, after Listen and StartBrowse, only
+// when remoteMode is set; browsePort is the bound browse-origin port (0 if
+// the browse origin is unavailable). 0600 + temp-file-then-rename (secretfile's atomic
 // writer) — never partially visible, never world-readable (it carries the
 // bearer token).
-func (s *Server) writeRemoteStateFile(ln net.Listener) error {
+func (s *Server) writeRemoteStateFile(ln net.Listener, browsePort int) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve home dir for remote state file: %w", err)
@@ -1178,11 +1216,12 @@ func (s *Server) writeRemoteStateFile(ln net.Listener) error {
 		return fmt.Errorf("parse bound port %q: %w", portStr, err)
 	}
 	state := remoteServeState{
-		PID:       os.Getpid(),
-		Port:      port,
-		Token:     s.password,
-		Version:   version.Version,
-		StartedAt: time.Now(),
+		PID:        os.Getpid(),
+		Port:       port,
+		BrowsePort: browsePort,
+		Token:      s.password,
+		Version:    version.Version,
+		StartedAt:  time.Now(),
 	}
 	data, err := json.Marshal(state)
 	if err != nil {
@@ -1399,12 +1438,6 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	if err != nil {
 		return err
 	}
-	if *remoteFlag {
-		if err := srv.writeRemoteStateFile(ln); err != nil {
-			return fmt.Errorf("write remote state file: %w", err)
-		}
-	}
-
 	// Browse origin for the embedded browser panel. The panel is additive:
 	// a bind failure is logged loudly but does not kill the main server.
 	// password doubles as the main-origin API token here (empty when the
@@ -1421,6 +1454,13 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	}
 	if err := StartBrowse(srv, password, "http://"+ln.Addr().String(), browseOpts); err != nil {
 		log.Printf("server: browse origin unavailable, browser panel disabled: %v", err)
+	}
+	// Written after StartBrowse so the state file carries the browse port
+	// for the client-side tunnel (see remoteServeState.BrowsePort).
+	if *remoteFlag {
+		if err := srv.writeRemoteStateFile(ln, srv.browsePort()); err != nil {
+			return fmt.Errorf("write remote state file: %w", err)
+		}
 	}
 
 	if setup != nil {
@@ -1786,6 +1826,9 @@ func (s *Server) handleTerminalProcesses(w http.ResponseWriter, r *http.Request)
 }
 func (s *Server) handleTerminalKill(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleTerminalKill(w, r)
+}
+func (s *Server) handleTerminalHistory(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleTerminalHistory(w, r)
 }
 func (s *Server) handleGetAdvisor(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetAdvisor(w, r)

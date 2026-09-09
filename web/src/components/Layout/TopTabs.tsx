@@ -5,6 +5,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/u
 import SyncStatusWidget from "./SyncStatusWidget";
 import { useProjectState } from "../../stores/projectStore";
 import { loadProjectTerminals } from "../Terminal/terminalPersistence";
+import { basename } from "@/lib/utils";
 
 interface Props {
   activeTab: string;
@@ -108,7 +109,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
         <div className="w-6 h-6 rounded bg-blue-600 flex items-center justify-center text-xs font-bold">
           o
         </div>
-        <span className="font-semibold text-sm hidden sm:inline">ocode</span>
+        <span className="font-semibold text-sm hidden sm:inline">{basename(activeProjectPath) || "ocode"}</span>
       </div>
 
       {/* Main tabs — single row, horizontally scrollable */}

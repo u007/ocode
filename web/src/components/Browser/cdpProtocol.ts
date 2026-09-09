@@ -20,12 +20,24 @@ export type CdpClientMessage =
   /** User dismissed the file picker opened for a {t:"fileChooser"}. */
   | { t: "fileChooserCancel" }
   | { t: "getResponseBody"; requestId: string }
+  /** Insert text at the page caret (Input.insertText): host-clipboard paste
+   *  and IME composition commits. */
+  | { t: "insertText"; text: string }
+  /** Ask for the page's selected text (replies {t:"selection"}) — copy bridge. */
+  | { t: "getSelection" }
+  /** Page zoom factor (1 = 100%), applied like browser zoom. */
+  | { t: "zoom"; factor: number }
+  /** Touch contacts that changed (Input.dispatchTouchEvent). */
+  | { t: "touch"; kind: "start" | "move" | "end" | "cancel"; points: { id: number; x: number; y: number }[]; modifiers?: number }
   | {
       t: "mouse";
       kind: "move" | "down" | "up" | "wheel";
       x: number;
       y: number;
       button?: string;
+      /** CDP bitmask of buttons held: left=1, right=2, middle=4. Drives
+       *  drag/selection on move events. */
+      buttons?: number;
       clickCount?: number;
       deltaX?: number;
       deltaY?: number;
@@ -38,6 +50,7 @@ export type CdpClientMessage =
       code?: string;
       text?: string;
       modifiers?: number;
+      autoRepeat?: boolean;
     };
 
 /** Server→client JSON telemetry (binary frames are handled separately). */
@@ -61,6 +74,8 @@ export type CdpServerMessage =
   /** The page opened an <input type=file>; the SPA must show a native picker
    *  and POST the chosen files to /api/browse/upload. */
   | { t: "fileChooser"; multiple: boolean }
+  /** Reply to a client "getSelection" command. */
+  | { t: "selection"; text: string }
   /** Reply to a client "getResponseBody" command. */
   | {
       t: "responseBody";

@@ -13,7 +13,7 @@ const h = vi.hoisted(() => ({
   terminals: [] as Array<{
     _bell: (() => void) | null;
     _title: ((title: string) => void) | null;
-    _osc: Record<number, () => boolean>;
+    _osc: Record<number, (title?: string) => boolean>;
   }>,
   sockets: [] as Array<{ onopen: (() => void) | null; url: string }>,
 }));
@@ -25,7 +25,7 @@ vi.mock("@xterm/xterm", () => {
     options: Record<string, unknown> = {};
     _bell: (() => void) | null = null;
     _title: ((title: string) => void) | null = null;
-    _osc: Record<number, () => boolean> = {};
+    _osc: Record<number, (title?: string) => boolean> = {};
     constructor() {
       h.terminals.push(this);
     }
@@ -43,7 +43,7 @@ vi.mock("@xterm/xterm", () => {
       return { dispose: vi.fn() };
     });
     parser = {
-      registerOscHandler: vi.fn((ident: number, cb: () => boolean) => {
+      registerOscHandler: vi.fn((ident: number, cb: (title?: string) => boolean) => {
         this._osc[ident] = cb;
         return { dispose: vi.fn() };
       }),
@@ -141,6 +141,7 @@ beforeEach(() => {
   vi.mocked(playAlertSound).mockClear();
   window.localStorage.clear();
   vi.stubGlobal("WebSocket", MockSocket as unknown as typeof WebSocket);
+  vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("", { status: 404 }))));
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -163,14 +164,19 @@ afterEach(() => {
 
 // Flips readyRef true the way the live pty socket's onopen would, so a BEL baked
 // into restored scrollback can't false-alert (the panel gates on readyRef).
-function openReady() {
+async function openReady() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(h.sockets.length).toBe(1);
   act(() => {
     (h.sockets[0].onopen as (() => void) | null)?.();
   });
 }
 
 describe("TerminalPanel bell/OSC detection", () => {
-  it("alerts the store and plays sound on BEL while the terminal is backgrounded", () => {
+  it("alerts the store and plays sound on BEL while the terminal is backgrounded", async () => {
     render(
       <TerminalProvider>
         <SeedHarness projectPath="/proj" />
@@ -178,7 +184,7 @@ describe("TerminalPanel bell/OSC detection", () => {
         <AlertReader projectPath="/proj" />
       </TerminalProvider>,
     );
-    openReady();
+    await openReady();
     const term = h.terminals[0];
     act(() => {
       term._bell?.();
@@ -187,7 +193,7 @@ describe("TerminalPanel bell/OSC detection", () => {
     expect(playAlertSound).toHaveBeenCalledTimes(1);
   });
 
-  it("alerts on the common notification OSC sequences (9 / 777 / 99)", () => {
+  it("alerts on the common notification OSC sequences (9 / 777 / 99)", async () => {
     render(
       <TerminalProvider>
         <SeedHarness projectPath="/proj" />
@@ -195,7 +201,7 @@ describe("TerminalPanel bell/OSC detection", () => {
         <AlertReader projectPath="/proj" />
       </TerminalProvider>,
     );
-    openReady();
+    await openReady();
     const term = h.terminals[0];
     act(() => {
       term._osc[9]();
@@ -217,7 +223,7 @@ describe("TerminalPanel bell/OSC detection", () => {
     expect(playAlertSound).toHaveBeenCalledTimes(3);
   });
 
-  it("does not alert while focused, but does once backgrounded", () => {
+  it("does not alert while focused, but does once backgrounded", async () => {
     render(
       <TerminalProvider>
         <SeedHarness projectPath="/proj" />
@@ -225,7 +231,7 @@ describe("TerminalPanel bell/OSC detection", () => {
         <AlertReader projectPath="/proj" />
       </TerminalProvider>,
     );
-    openReady();
+    await openReady();
     const term = h.terminals[0];
     act(() => {
       term._bell?.();
@@ -256,5 +262,21 @@ describe("TerminalPanel bell/OSC detection", () => {
       term._title?.("⦿ ocode — fix bug");
     });
     expect(screen.getByTestId("titles").textContent).toBe("⦿ ocode — fix bug");
+  });
+
+  it("forwards OSC 0 and OSC 2 titles while the terminal is backgrounded", () => {
+    render(
+      <TerminalProvider>
+        <SeedHarness projectPath="/proj" />
+        <PanelHost initialActive={false} />
+        <AlertReader projectPath="/proj" />
+      </TerminalProvider>,
+    );
+    const term = h.terminals[0];
+    act(() => {
+      term._osc[0]?.("shell title");
+      term._osc[2]?.("running command");
+    });
+    expect(screen.getByTestId("titles").textContent).toBe("running command");
   });
 });

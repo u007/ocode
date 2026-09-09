@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Seatbelt Profile Test Coverage Gap
-description: Seatbelt profile addition for /dev/null and /dev/tty now has test coverage: TestSeatbeltProfileGrantsDevNullOnly, TestSeatbeltAllowsDevNullDiscard, TestSeatbeltDeniesDevTTYFreshOpen added plus pre-existing profile tests in profile_darwin_test.go. Coverage gap closed.
+description: "Seatbelt profile addition for /dev/null and /dev/tty now has test coverage: TestSeatbeltProfileGrantsDevNullOnly, TestSeatbeltAllowsDevNullDiscard, TestSeatbeltDeniesDevTTYFreshOpen added plus pre-existing profile tests in profile_darwin_test.go. Coverage gap closed."
 tags:
   - seatbelt
   - gotcha

@@ -36,7 +36,7 @@ func (c titleStubClient) Chat(messages []Message, tools []map[string]interface{}
 func (c titleStubClient) GetProvider() string { return "stub" }
 func (c titleStubClient) GetModel() string    { return "stub" }
 func (c titleStubClient) StreamChat(messages []Message, tools []map[string]interface{}, onChunk func(string)) (*Message, error) {
-	return c.Chat(messages, tools)
+	return &Message{Role: "assistant", Content: c.reply}, nil
 }
 
 func TestGenerateTitleAsync_DeliversSanitizedResult(t *testing.T) {
@@ -69,7 +69,7 @@ func TestGenerateTitleAsync_EmptyUserSkipsCall(t *testing.T) {
 	select {
 	case r := <-got:
 		if r != "" {
-			t.Fatalf("expected empty title for empty user msg, got %q", r)
+			t.Fatalf("expected empty result for empty user msg, got %q", r)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("callback never fired")

@@ -17,6 +17,8 @@ export interface CdpSocketApi {
   onFrame(cb: (bitmap: ImageBitmap, w: number, h: number) => void): () => void;
   /** Subscribe to file-chooser requests from the page. Returns an unsubscribe fn. */
   onFileChooser(cb: (multiple: boolean) => void): () => void;
+  /** Subscribe to "selection" replies (copy bridge). Returns an unsubscribe fn. */
+  onSelection(cb: (text: string) => void): () => void;
 }
 
 // Reconnect backoff sequence; caps at the last value.
@@ -35,6 +37,7 @@ export function useCdpSocket(stateKey: StateKey, browseBase: string | null, enab
   const queueRef = useRef<CdpClientMessage[]>([]);
   const frameCbsRef = useRef(new Set<(bitmap: ImageBitmap, w: number, h: number) => void>());
   const fileChooserCbsRef = useRef(new Set<(multiple: boolean) => void>());
+  const selectionCbsRef = useRef(new Set<(text: string) => void>());
   // Serializes async JPEG decodes so onFrame fires in wire order.
   const decodeChainRef = useRef<Promise<void>>(Promise.resolve());
   const attemptRef = useRef(0);
@@ -125,6 +128,9 @@ export function useCdpSocket(stateKey: StateKey, browseBase: string | null, enab
               break;
 			case "fileChooser":
 				for (const cb of fileChooserCbsRef.current) cb(msg.multiple);
+				break;
+			case "selection":
+				for (const cb of selectionCbsRef.current) cb(msg.text);
 				break;
 			case "responseBody":
 				// Store response body for the requesting row.
@@ -236,5 +242,12 @@ export function useCdpSocket(stateKey: StateKey, browseBase: string | null, enab
     };
   }, []);
 
-  return { send, status, error, onFrame, onFileChooser };
+  const onSelection = useCallback((cb: (text: string) => void) => {
+    selectionCbsRef.current.add(cb);
+    return () => {
+      selectionCbsRef.current.delete(cb);
+    };
+  }, []);
+
+  return { send, status, error, onFrame, onFileChooser, onSelection };
 }

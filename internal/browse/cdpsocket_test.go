@@ -39,6 +39,10 @@ type fakeTarget struct {
 	perfErr       error
 	scrollToys    []float64
 	scrollY       float64
+	inserted      []string
+	selection     string
+	zooms         []float64
+	touches       []cdp.TouchEvent
 }
 
 type fakeResponseBody struct {
@@ -128,6 +132,29 @@ func (f *fakeTarget) ScrollY(_ context.Context) (float64, error) {
 	defer f.mu.Unlock()
 	return f.scrollY, nil
 }
+func (f *fakeTarget) InsertText(_ context.Context, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inserted = append(f.inserted, text)
+	return nil
+}
+func (f *fakeTarget) SetZoom(_ context.Context, factor float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.zooms = append(f.zooms, factor)
+	return nil
+}
+func (f *fakeTarget) Touch(_ context.Context, ev cdp.TouchEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.touches = append(f.touches, ev)
+	return nil
+}
+func (f *fakeTarget) SelectionText(_ context.Context) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.selection, nil
+}
 
 func (f *fakeTarget) GetResponseBody(_ context.Context, requestID string) (body string, isBase64 bool, truncated bool, err error) {
 	f.mu.Lock()
@@ -148,6 +175,14 @@ type fakeManager struct {
 	attachErr   error
 	revoked     []string
 	closeCalled bool
+	trusted     []string // "stateKey host"
+}
+
+func (m *fakeManager) TrustHost(_ context.Context, stateKey, host string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.trusted = append(m.trusted, stateKey+" "+host)
+	return nil
 }
 
 func newFakeManager() *fakeManager {
@@ -804,5 +839,110 @@ func TestCDP_ScrollToGetScroll(t *testing.T) {
 	}
 	if m["t"] != "scroll" || m["y"] != 321.0 {
 		t.Fatalf("scroll reply = %v, want {scroll 321}", m)
+	}
+}
+
+func TestCDP_InsertTextGetSelection(t *testing.T) {
+	s, fake, ts := newBrowseWithFake(t, "http://example.com")
+	grant := s.MintGrant("tab:x", "http://example.com")
+	conn, _, err := (&websocket.Dialer{}).Dial(wsURL(ts, "tab:x", grant), http.Header{"Origin": []string{"http://example.com"}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("drain perfState: %v", err)
+	}
+	target := fake.targetFor("tab:x")
+	if target == nil {
+		t.Fatal("no target")
+	}
+	target.mu.Lock()
+	target.selection = "hello"
+	target.mu.Unlock()
+	// insertText: forwarded to Input.insertText, no reply.
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"insertText","text":"pasted 日本"}`))
+	time.Sleep(50 * time.Millisecond)
+	target.mu.Lock()
+	if len(target.inserted) != 1 || target.inserted[0] != "pasted 日本" {
+		t.Fatalf("inserted = %v", target.inserted)
+	}
+	target.mu.Unlock()
+	// getSelection: replies {t:selection, text}.
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"getSelection"}`))
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read selection reply: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal %q: %v", data, err)
+	}
+	if m["t"] != "selection" || m["text"] != "hello" {
+		t.Fatalf("selection reply = %v", m)
+	}
+}
+
+func TestCDP_MouseButtonsAndKeyAutoRepeatForwarded(t *testing.T) {
+	s, fake, ts := newBrowseWithFake(t, "http://example.com")
+	grant := s.MintGrant("tab:x", "http://example.com")
+	conn, _, err := (&websocket.Dialer{}).Dial(wsURL(ts, "tab:x", grant), http.Header{"Origin": []string{"http://example.com"}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond)
+	target := fake.targetFor("tab:x")
+	if target == nil {
+		t.Fatal("no target")
+	}
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"mouse","kind":"move","x":5,"y":6,"button":"left","buttons":1}`))
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"key","kind":"down","key":"Backspace","code":"Backspace","autoRepeat":true}`))
+	time.Sleep(50 * time.Millisecond)
+	target.mu.Lock()
+	defer target.mu.Unlock()
+	if len(target.mouses) != 1 || target.mouses[0].Buttons != 1 || target.mouses[0].Button != "left" {
+		t.Fatalf("mouses = %+v", target.mouses)
+	}
+	if len(target.keys) != 1 || !target.keys[0].AutoRepeat || target.keys[0].Code != "Backspace" {
+		t.Fatalf("keys = %+v", target.keys)
+	}
+}
+
+func TestCDP_ZoomAndTouchForwarded(t *testing.T) {
+	s, fake, ts := newBrowseWithFake(t, "http://example.com")
+	grant := s.MintGrant("tab:x", "http://example.com")
+	conn, _, err := (&websocket.Dialer{}).Dial(wsURL(ts, "tab:x", grant), http.Header{"Origin": []string{"http://example.com"}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond)
+	target := fake.targetFor("tab:x")
+	if target == nil {
+		t.Fatal("no target")
+	}
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"zoom","factor":1.25}`))
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"touch","kind":"start","points":[{"id":1,"x":10,"y":20},{"id":2,"x":30,"y":40}],"modifiers":0}`))
+	time.Sleep(50 * time.Millisecond)
+	target.mu.Lock()
+	defer target.mu.Unlock()
+	if len(target.zooms) != 1 || target.zooms[0] != 1.25 {
+		t.Fatalf("zooms = %v", target.zooms)
+	}
+	if len(target.touches) != 1 || target.touches[0].Kind != "start" || len(target.touches[0].Points) != 2 || target.touches[0].Points[1].ID != 2 || target.touches[0].Points[1].X != 30 {
+		t.Fatalf("touches = %+v", target.touches)
+	}
+}
+
+func TestAllowBypassTrustsHostInChromeMode(t *testing.T) {
+	s, fake, _ := newBrowseWithFake(t, "http://example.com")
+	s.AllowBypass("tab:x", "192.168.1.5:8443")
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.trusted) != 1 || fake.trusted[0] != "tab:x 192.168.1.5:8443" {
+		t.Fatalf("trusted = %v", fake.trusted)
 	}
 }

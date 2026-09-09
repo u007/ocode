@@ -8,7 +8,6 @@ import PluginsPanel from "./PluginsPanel";
 import ReasoningLevelSelector from "./ReasoningLevelSelector";
 import {
   Bot,
-  FileText,
   ChevronDown,
   ChevronRight,
   Hash,
@@ -63,7 +62,6 @@ const DEFAULT_SECTIONS: Record<string, boolean> = {
   agent: true,
   context: true,
   lsp: false,
-  files: false,
   todo: false,
   git: true,
   permissions: true,
@@ -100,7 +98,6 @@ export default function CoworkSidebar({
     useState<Record<string, boolean>>(loadExpandedSections);
   const projectState = useProjectState();
   const [gitBranch, setGitBranch] = useState<string>("");
-  const [todoItems] = useState<string[]>([]);
   const [permLoading, setPermLoading] = useState(false);
   const [advisorLoading, setAdvisorLoading] = useState(false);
   const [smallLoading, setSmallLoading] = useState(false);
@@ -303,7 +300,6 @@ export default function CoworkSidebar({
       ? Math.min(100, Math.round((contextCurrent / contextMax) * 100))
       : 0;
   const lspServers: LSPStatus[] = tuiStatus?.lsp_servers ?? [];
-  const modifiedFiles = tuiStatus?.modified_files ?? [];
 
   // On mobile the sidebar is always mounted (so it can slide); when closed it
   // sits off-screen. On desktop it is fully removed when closed so the chat
@@ -726,6 +722,34 @@ export default function CoworkSidebar({
           )}
         </div>
 
+        {/* TODO Section — no live data source is exposed by the backend yet,
+            so this shows a stable empty state instead of a list that can never
+            update. */}
+        <div className="border-b border-border">
+          <button
+            onClick={() => toggleSection("todo")}
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
+          >
+            {expandedSections.todo ? (
+              <ChevronDown className="w-4 h-4" />
+            ) : (
+              <ChevronRight className="w-4 h-4" />
+            )}
+            <Target className="w-4 h-4 text-orange-400" />
+            TODO
+          </button>
+          {expandedSections.todo && (
+            <div className="px-4 pb-3">
+              <div className="text-xs text-muted-foreground">
+                <div>No TODO items</div>
+                <div className="mt-2 text-foreground">
+                  Agent will add items during execution
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* Permissions — mirrors TUI sidebar Allowed section + perm toggle */}
         <div className="border-b border-border">
           <button
@@ -934,55 +958,6 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
           )}
         </div>
 
-        {/* Modified Files Section */}
-        <div className="border-b border-border">
-          <button
-            onClick={() => toggleSection("files")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
-          >
-            {expandedSections.files ? (
-              <ChevronDown className="w-4 h-4" />
-            ) : (
-              <ChevronRight className="w-4 h-4" />
-            )}
-            <FileText className="w-4 h-4 text-yellow-400" />
-            Modified Files
-          </button>
-          {expandedSections.files && (
-            <div className="px-4 pb-3">
-              {modifiedFiles.length > 0 ? (
-                <div className="space-y-1">
-                  {modifiedFiles.map((f) => (
-                    <div
-                      key={f.path}
-                      className="flex items-center gap-2 text-xs text-muted-foreground p-1.5 rounded hover:bg-muted"
-                    >
-                      <span
-                        className={`flex-shrink-0 w-4 text-center font-mono ${
-                          f.status === "M"
-                            ? "text-yellow-400"
-                            : f.status === "A"
-                              ? "text-emerald-400"
-                              : f.status === "D"
-                                ? "text-red-400"
-                                : "text-muted-foreground"
-                        }`}
-                      >
-                        {f.status || "?"}
-                      </span>
-                      <span className="truncate font-mono" title={f.path}>
-                        {f.path}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-xs text-muted-foreground">No modified files</div>
-              )}
-            </div>
-          )}
-        </div>
-
         {/* Plugins Section — opens the full plugin manager dialog. */}
         <div className="border-b border-border">
           <button
@@ -993,48 +968,6 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
             <Puzzle className="w-4 h-4 text-fuchsia-400" />
             Plugins
           </button>
-        </div>
-
-        {/* TODO Section — no live data source is exposed by the backend yet,
-            so this shows a stable empty state instead of a list that can never
-            update. */}
-        <div className="border-b border-border">
-          <button
-            onClick={() => toggleSection("todo")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
-          >
-            {expandedSections.todo ? (
-              <ChevronDown className="w-4 h-4" />
-            ) : (
-              <ChevronRight className="w-4 h-4" />
-            )}
-            <Target className="w-4 h-4 text-orange-400" />
-            TODO
-          </button>
-          {expandedSections.todo && (
-            <div className="px-4 pb-3">
-              {todoItems.length > 0 ? (
-                <div className="space-y-1">
-                  {todoItems.map((item, i) => (
-                    <div
-                      key={i}
-                      className="flex items-start gap-2 text-xs text-muted-foreground p-1.5 rounded hover:bg-muted"
-                    >
-                      <Zap className="w-3 h-3 mt-0.5 flex-shrink-0 text-orange-400" />
-                      <span>{item}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-xs text-muted-foreground">
-                  <div>No TODO items</div>
-                  <div className="mt-2 text-foreground">
-                    Agent will add items during execution
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </div>
 

@@ -340,8 +340,22 @@ func (s *Store) Deprecate(relPath, reason string) error {
 }
 
 // validateDocPath checks that a bundle-relative path is valid for writing:
-// not reserved (index.md, log.md), and no path traversal ("..").
+// non-empty, bundle-relative (never absolute), no path traversal (".."),
+// and not reserved (index.md, log.md).
 func validateDocPath(relPath string) error {
+	// Reject empty paths.
+	if relPath == "" {
+		return fmt.Errorf("path is empty: must be bundle-relative (e.g. gotchas/foo.md)")
+	}
+
+	// Reject absolute paths. filepath.Join(bundleRoot, absPath) would nest a
+	// machine-specific directory tree (e.g. docs/Users/<name>/...) inside
+	// the bundle and poison the generated index with unportable links.
+	// This mirrors isValidDocPathForSnapshot in internal/agent/doc_tools.go.
+	if filepath.IsAbs(relPath) {
+		return fmt.Errorf("path %q is absolute: must be bundle-relative (e.g. gotchas/foo.md)", relPath)
+	}
+
 	// Reject path traversal.
 	if strings.Contains(relPath, "..") {
 		return fmt.Errorf("path contains \"..\"")

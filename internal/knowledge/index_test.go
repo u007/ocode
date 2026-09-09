@@ -305,6 +305,26 @@ func TestAppendLogCreatesFile(t *testing.T) {
 	}
 }
 
+func TestAppendLogNormalizesLeadingSlash(t *testing.T) {
+	b, docsDir := setupTestBundle(t)
+
+	if err := AppendLog(b, "Creation", "/gotchas/absolute.md", "Created document"); err != nil {
+		t.Fatalf("AppendLog: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(docsDir, "log.md"))
+	if err != nil {
+		t.Fatalf("read log.md: %v", err)
+	}
+	content := string(raw)
+	if strings.Contains(content, "//gotchas/absolute.md") {
+		t.Fatalf("log.md must not contain a protocol-relative link, got:\n%s", content)
+	}
+	if !strings.Contains(content, "[gotchas/absolute.md](/gotchas/absolute.md)") {
+		t.Errorf("log.md should normalize the leading slash in the link, got:\n%s", content)
+	}
+}
+
 func TestAppendLogAddsToExistingFile(t *testing.T) {
 	b, _ := setupTestBundle(t)
 

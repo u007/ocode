@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -1392,6 +1393,16 @@ func (pm *PermissionManager) LoadFromOcode(cfg config.PermissionConfig) {
 
 func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) PermissionDecision {
 	pm.emitDebug("perm", fmt.Sprintf("Decide: tool=%s mode=%s", toolName, pm.mode))
+	if toolName == "read" {
+		path := extractPathFromArgs(toolName, args)
+		if path != "" {
+			exists, err := targetExists(pm, path)
+			if !exists && errors.Is(err, os.ErrNotExist) {
+				pm.emitDebug("perm", fmt.Sprintf("Decide DENY (read: target does not exist): tool=%s path=%s", toolName, path))
+				return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+			}
+		}
+	}
 	if pm.mode == PermissionModeLocked {
 		if isReadOnlyTool(toolName) {
 			pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (locked, read-only): tool=%s", toolName))
@@ -4923,6 +4934,16 @@ func rebuildCommandLine(fields []string) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// targetExists reports whether the fully-resolved target exists on disk. The
+// resolution covers every spelling the read tool accepts — an already-absolute
+// path, a `~`-prefixed path, and a workDir-relative path — so a plain absolute
+// (non-prefixed) path is considered fully too, not just relative/prefixed ones.
+func targetExists(pm *PermissionManager, raw string) (bool, error) {
+	resolved := resolvePath(raw, pm.workDir)
+	_, err := os.Stat(resolved)
+	return err == nil, err
 }
 
 func resolvePath(path string, workDir string) string {

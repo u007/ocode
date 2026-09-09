@@ -1863,3 +1863,22 @@ Shipped in the 2026-08-30 embedded-browser-panel plan; these are explicitly NOT 
   limits): explicitly EXCLUDED from v1 acceptance — no plan part owned it.
   Needs a follow-up that adds a semaphore around handleExternal/handleLocal
   upstream work.
+
+## Chrome-mode viewport input — deferred (2026-09-08)
+
+Done: VK codes + mac editing commands, drag/selection, clipboard bridge,
+IME, blur release, chrome shortcuts, zoom (keys + pinch, now persisted
+per-surface across viewport remounts via `browserStore.zoom` + an address-bar
+reset badge), touch contacts, touch-and-hold replayed as a right-click
+context menu, chrome-mode TLS "Continue anyway" for private hosts. Still
+open:
+- Touch: no force-touch semantics (no CDP/hardware equivalent identified;
+  contacts are still forwarded raw for tap/scroll/pinch).
+
+## Browser (Chrome mode) — left open after the tab-hang fix (2026-09-09)
+
+See docs/gotchas/chrome-tab-hang-unbounded-cdp-call.md for the full analysis.
+
+- [ ] **JS dialogs are auto-accepted** (`alert`/`confirm`/`prompt`/
+  `beforeunload`) and surfaced only as a console warning. A dialog UI in the
+  browser panel that lets the user answer is a follow-up.

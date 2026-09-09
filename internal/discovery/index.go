@@ -66,7 +66,10 @@ func (c *Corpus) Rank(query []float32) []Scored {
 
 // Selection policy constants (internal — not user-tunable).
 const (
-	SelectDelta float32 = 0.15 // keep items within this of the top score
+	// SelectDelta: keep items within this of the top score. 0.15 let a vague
+	// query (all docs scoring near-identical) attach the whole corpus; 0.08
+	// keeps only the genuinely distinct top cluster.
+	SelectDelta float32 = 0.08
 	SelectMin   float32 = 0.40 // absolute minimum similarity to attach
 	SelectFloor         = 0    // always attach at least this many (0 = only delta+min matches)
 	SelectCap           = 30   // never attach more than this

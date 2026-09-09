@@ -436,7 +436,7 @@ func TestRunRemoteModeWritesStateFile(t *testing.T) {
 	}
 	defer ln.Close()
 
-	if err := s.writeRemoteStateFile(ln); err != nil {
+	if err := s.writeRemoteStateFile(ln, 45678); err != nil {
 		t.Fatalf("writeRemoteStateFile: %v", err)
 	}
 
@@ -449,13 +449,17 @@ func TestRunRemoteModeWritesStateFile(t *testing.T) {
 		t.Errorf("state file mode = %o, want 0600", info.Mode().Perm())
 	}
 	var state struct {
-		PID     int    `json:"pid"`
-		Port    int    `json:"port"`
-		Token   string `json:"token"`
-		Version string `json:"version"`
+		PID        int    `json:"pid"`
+		Port       int    `json:"port"`
+		BrowsePort int    `json:"browsePort"`
+		Token      string `json:"token"`
+		Version    string `json:"version"`
 	}
 	if err := json.Unmarshal(data, &state); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
+	}
+	if state.BrowsePort != 45678 {
+		t.Errorf("browsePort = %d, want 45678", state.BrowsePort)
 	}
 	if state.Token != "sometoken" {
 		t.Errorf("token = %q, want %q", state.Token, "sometoken")

@@ -30,10 +30,8 @@ import { clearQueue } from "../../lib/tabQueue";
 import { cancelLiveDeltas, closeSessionBackend } from "../../lib/sessionEvents";
 import { api } from "../../api/client";
 import { loadTabOrder, saveTabOrder, reconcileTabOrder, type UnifiedTabKey } from "./tabOrderPersistence";
-import { useWrappedOverflow } from "./useWrappedOverflow";
 import { focusTerminalById } from "../Terminal/terminalFocus";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
-import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Button } from "../ui/button";
 
 // While a tab's session has an in-flight turn, show what it's doing as a
@@ -126,10 +124,6 @@ interface TabPillProps {
   onCancelRename: () => void;
   onClose: (e: React.MouseEvent) => void;
   onAuxClose?: (e: React.MouseEvent) => void;
-  /** Probe mode: no sortable listeners, pointer-events-none, used for measure. */
-  disabled?: boolean;
-  /** Probe mode: merge into the root ref so the measurement hook can read geometry. */
-  elRef?: (el: HTMLElement | null) => void;
 }
 
 function TabPill({
@@ -150,19 +144,14 @@ function TabPill({
   onCancelRename,
   onClose,
   onAuxClose,
-  disabled,
-  elRef,
 }: TabPillProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: sortId, disabled });
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: sortId });
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
   const displayTitle = title || sortId;
 
   return (
     <div
-      ref={elRef ? (el) => {
-        setNodeRef(el);
-        elRef(el);
-      } : setNodeRef}
+      ref={setNodeRef}
       style={style}
       {...attributes}
       {...listeners}
@@ -191,8 +180,6 @@ function TabPill({
         }
       }}
       className={`relative flex items-center gap-1 px-2.5 py-1 rounded-md text-[13px] leading-4 cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
-        disabled ? "pointer-events-none" : ""
-      } ${
         isActive ? "bg-muted/80 text-foreground border border-border/70 shadow-sm" : "bg-card/20 text-muted-foreground border border-transparent hover:bg-muted/50 hover:text-foreground"
       }`}
     >
@@ -307,102 +294,6 @@ function BrowserTabPill({
   }, [s?.url, id, onNavigated]);
   const displayTitle = manualTitle ?? s?.pageTitle ?? fallbackTitle ?? "New tab";
   return <TabPill {...props} title={displayTitle} isLoading={!!s?.loading} />;
-}
-
-export interface HiddenPill {
-  key: string;
-  emoji: string;
-  title: string;
-  hasPending?: boolean;
-  hasAlert?: boolean;
-  onActivate: (e: React.MouseEvent) => void;
-  onClose: (e: React.MouseEvent) => void;
-}
-
-/** The "+N" overflow chip + popover listing tabs that did not fit the capped rows. */
-export function OverflowChip({ label, pills, hasActive }: { label: string; pills: HiddenPill[]; hasActive: boolean }) {
-  const [open, setOpen] = useState(false);
-  const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
-
-  // Auto-close when the hidden set empties (a hidden tab became visible or closed).
-  useEffect(() => {
-    if (pills.length === 0 && open) setOpen(false);
-  }, [pills.length, open]);
-
-  const focusRow = (idx: number) => rowRefs.current[idx]?.focus();
-  const onRowKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>, idx: number) => {
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      focusRow(idx + 1 < pills.length ? idx + 1 : 0);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      focusRow(idx > 0 ? idx - 1 : pills.length - 1);
-    } else if (e.key === "Home") {
-      e.preventDefault();
-      focusRow(0);
-    } else if (e.key === "End") {
-      e.preventDefault();
-      focusRow(pills.length - 1);
-    }
-  };
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          aria-label={`${label} more tabs`}
-          title={`Show ${label} hidden tabs`}
-          className={`flex w-10 h-6 shrink-0 items-center justify-center rounded-md border px-1.5 text-xs transition-colors ${
-            hasActive
-              ? "border-ring bg-accent/40 text-foreground"
-              : "border-border bg-card/20 text-muted-foreground hover:bg-muted hover:text-foreground"
-          }`}
-        >
-          {label}
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="start" sideOffset={6} className="w-64 max-h-72 overflow-y-auto p-1">
-        <div role="list" aria-label="Hidden tabs">
-          {pills.map((p, i) => (
-            <div key={p.key} role="listitem" className="flex items-center gap-0.5 rounded-md px-1 py-0.5 hover:bg-muted">
-              <button
-                ref={(el) => {
-                  rowRefs.current[i] = el;
-                }}
-                type="button"
-                tabIndex={0}
-                onClick={(e) => {
-                  p.onActivate(e);
-                  setOpen(false);
-                }}
-                onKeyDown={(e) => onRowKeyDown(e, i)}
-                className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-sm"
-                title={p.title}
-              >
-                <span aria-hidden className="shrink-0">{p.emoji}</span>
-                <span className="truncate">{p.title}</span>
-                {p.hasPending && <span aria-label="pending" className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />}
-                {p.hasAlert && <Bell aria-hidden className="h-3 w-3 shrink-0 text-red-500" />}
-              </button>
-              <button
-                type="button"
-                aria-label={`Close ${p.title}`}
-                title={`Close ${p.title}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  p.onClose(e);
-                }}
-                className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ))}
-        </div>
-      </PopoverContent>
-    </Popover>
-  );
 }
 
 type PendingTabClose = { kind: "chat" | "browser" | "terminal"; id: string; title: string } | null;
@@ -684,64 +575,12 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
 
   const isLoadingChatTab = (tabId: string, initialized: boolean) => !tabId.startsWith("new-") && !initialized;
 
-  // --- Multi-row wrap measurement (probe/final) ---
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-
-  // The unified key of the active tab (must match the `order` key shapes so
-  // the promotion rule can swap it into the last visible row). Processes is a
-  // pseudo-terminal not in `order` → null.
-  const activeTabKey: string | null =
-    focusedKind === "chat" && activeChatId
-      ? `chat:${activeChatId}`
-      : focusedKind === "browser" && activeBrowserId
-        ? `browser:${activeBrowserId}`
-        : focusedKind === "terminal" && activeTerminalId && activeTerminalId !== PROCESSES_TAB_ID
-          ? `term:${activeTerminalId}`
-          : null;
-
-  // Geometry-affecting pill content (titles, running command, alert badge) —
-  // a change here must re-measure because it changes pill widths.
-  const contentSignature = order
-    .map((key) => {
-      if (key.startsWith("chat:")) {
-        const id = key.slice("chat:".length);
-        const d = chatDerived.find((x) => x.id === id);
-        return `${d?.displayTitle ?? ""}\u0001${d?.processLabel ?? ""}`;
-      }
-      if (key.startsWith("browser:")) {
-        const id = key.slice("browser:".length);
-        const tab = browserTabs.find((t) => t.id === id);
-        return tab?.title ?? "";
-      }
-      const id = key.slice("term:".length);
-      const term = terminals.find((t) => t.id === id);
-      return `${term?.title ?? ""}\u0001${term?.alerted ? "1" : "0"}`;
-    })
-    .join("\u0001");
-
-  const { probe, visibleKeys, hiddenKeys, registerPillRef } = useWrappedOverflow({
-    orderedKeys: order,
-    activeKey: activeTabKey,
-    activeDragId: draggingId,
-    contentSignature,
-    containerRef: wrapRef,
-    maxRows: 2,
-    chipReservedPx: 40,
-  });
-
   if (!projectState.activeProject) return null;
 
   const chatById = new Map(chatTabs.map((t) => [t.id, t]));
   const terminalById = new Map(terminals.map((t) => [t.id, t]));
 
-  // Renders one pill for a unified key. In probe mode (`opts.disabled`) the
-  // pill is non-interactive and its ref is merged into the measurement hook;
-  // in the final frame it is a normal draggable/clickable pill.
-  const renderPill = (
-    key: string,
-    opts: { registerRef?: (el: HTMLElement | null) => void; disabled?: boolean } = {},
-  ) => {
+  const renderPill = (key: string) => {
     if (key.startsWith("chat:")) {
       const id = key.slice("chat:".length);
       const tab = chatById.get(id);
@@ -767,8 +606,6 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           onCancelRename={() => setEditing(null)}
           onClose={(e) => handleRequestCloseChat(e, id)}
           onAuxClose={(e) => handleImmediateCloseChat(e, id)}
-          disabled={opts.disabled}
-          elRef={opts.registerRef}
         />
       );
     }
@@ -795,8 +632,6 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           onCancelRename={() => setEditing(null)}
           onClose={(e) => handleRequestCloseBrowser(e, id)}
           onAuxClose={(e) => handleImmediateCloseBrowser(e, id)}
-          disabled={opts.disabled}
-          elRef={opts.registerRef}
         />
       );
     }
@@ -820,90 +655,21 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         onCancelRename={() => setEditing(null)}
         onClose={(e) => handleRequestCloseTerminal(e, id)}
         onAuxClose={(e) => handleImmediateCloseTerminal(e, id)}
-        disabled={opts.disabled}
-        elRef={opts.registerRef}
       />
     );
   };
 
-  const chipLabel = `${Math.min(hiddenKeys.length, 99)}+`;
-  const activeHidden = activeTabKey != null && hiddenKeys.includes(activeTabKey);
-
-  const hiddenPills: HiddenPill[] = hiddenKeys.map((key) => {
-    if (key.startsWith("chat:")) {
-      const id = key.slice("chat:".length);
-      const tab = chatById.get(id);
-      const d = chatDerived.find((x) => x.id === id);
-      const title = d?.displayTitle ?? tab?.title ?? id;
-      return {
-        key,
-        emoji: "💬",
-        title,
-        hasPending: d?.hasPending ?? false,
-        onActivate: (e) => handleChatClick(e, id, title),
-        onClose: () => doCloseChat(id),
-      };
-    }
-    if (key.startsWith("browser:")) {
-      const id = key.slice("browser:".length);
-      const tab = browserTabs.find((t) => t.id === id);
-      const title = tab?.manualTitle ?? tab?.title ?? id;
-      return {
-        key,
-        emoji: "🌐",
-        title,
-        onActivate: (e) => handleBrowserClick(e, id),
-        onClose: () => doCloseBrowser(id),
-      };
-    }
-    const id = key.slice("term:".length);
-    const term = terminalById.get(id);
-    const title = term ? terminalDisplayTitle(term) : id;
-    return {
-      key,
-      emoji: "⌨️",
-      title,
-      hasAlert: !!term?.alerted,
-      onActivate: (e) => handleTerminalClick(e, id),
-      onClose: () => doCloseTerminal(id),
-    };
-  });
-
   return (
-    <div className="flex items-start px-2 pt-2 gap-0.5 bg-card border-b border-border min-w-0 w-full">
-      <div
-        ref={wrapRef}
-        className="flex-1 min-w-0 flex flex-wrap gap-x-0.5 gap-y-1 items-start py-1.5"
-      >
-        <DndContext
-          sensors={dndSensors}
-          collisionDetection={closestCenter}
-          onDragStart={(e) => setDraggingId(String(e.active.id))}
-          onDragCancel={() => setDraggingId(null)}
-          onDragEnd={(e) => {
-            setDraggingId(null);
-            handleDragEnd(e);
-          }}
-        >
-          <SortableContext
-            items={probe ? order : visibleKeys}
-            strategy={rectSortingStrategy}
-          >
-            {(probe ? order : visibleKeys).map((key) =>
-              renderPill(key, probe ? { registerRef: registerPillRef(key), disabled: true } : {}),
-            )}
+    <div className="flex items-start justify-between px-2 pt-2 gap-2 bg-card border-b border-border min-w-0 w-full">
+      <div className="flex-1 min-w-0 flex flex-wrap gap-x-0.5 gap-y-1 items-start py-1.5">
+        <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={order} strategy={rectSortingStrategy}>
+            {order.map(renderPill)}
           </SortableContext>
-          {probe ? (
-            /* Chip probe: reserves the overflow chip's width so wrapping is measured correctly. */
-            <span aria-hidden className="w-10 h-6 shrink-0 pointer-events-none" />
-          ) : hiddenKeys.length > 0 ? (
-            <OverflowChip label={chipLabel} pills={hiddenPills} hasActive={activeHidden} />
-          ) : null}
         </DndContext>
       </div>
 
-
-      <div className="shrink-0 flex items-center gap-0.5">
+      <div className="shrink-0 flex flex-wrap justify-end items-center gap-0.5 py-1.5 max-w-[50%]">
       <button
         onClick={handleNewChat}
         aria-label="New chat session"

@@ -221,27 +221,25 @@ func (h *Handler) effectiveSessionModel(id string) string {
 }
 
 // setSessionModelOverride persists (or clears, when model == "") a per-session
-// model override in the session transcript metadata, then re-saves the
-// transcript so the choice survives restart and resume. It returns the model
+// model override in the session transcript metadata so the choice survives
+// restart and resume. It returns the model
 // that is now in effect for the session.
 func (h *Handler) setSessionModelOverride(id, model string) (string, error) {
 	entry, err := h.sessions.Resolve(id)
 	if err != nil {
 		return "", err
 	}
-	s, err := session.LoadForDir(entry.ProjectRoot, id)
+	// Metadata-only write: a full load→save of the transcript conflicts
+	// whenever the stored file holds rows the loader filters out (see
+	// session.UpdateMetadataForDir), which made every model pick 404.
+	err = session.UpdateMetadataForDir(entry.ProjectRoot, id, func(md map[string]any) {
+		if model == "" {
+			delete(md, "model")
+		} else {
+			md["model"] = model
+		}
+	})
 	if err != nil {
-		return "", err
-	}
-	if s.Metadata == nil {
-		s.Metadata = map[string]any{}
-	}
-	if model == "" {
-		delete(s.Metadata, "model")
-	} else {
-		s.Metadata["model"] = model
-	}
-	if err := session.SaveForDir(entry.ProjectRoot, id, s.Title, s.Messages, s.Metadata); err != nil {
 		return "", err
 	}
 	return h.effectiveSessionModel(id), nil

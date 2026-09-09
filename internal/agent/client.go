@@ -14,7 +14,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -103,9 +105,13 @@ type Message struct {
 	ToolCalls           []ToolCall               `json:"tool_calls,omitempty"`
 	ToolID              string                   `json:"tool_call_id,omitempty"`
 	OpenAIResponseItems []map[string]interface{} `json:"openai_response_items,omitempty"`
-	Model               string                   `json:"-"`
-	Usage               *TokenUsage              `json:"-"`
-	Spend               *float64                 `json:"-"`
+	// OpenAIResponseRoute identifies the provider/model/endpoint that produced
+	// OpenAIResponseItems. Encrypted reasoning content is opaque state owned by
+	// that route and must not be replayed after a model or provider switch.
+	OpenAIResponseRoute string      `json:"openai_response_route,omitempty"`
+	Model               string      `json:"-"`
+	Usage               *TokenUsage `json:"-"`
+	Spend               *float64    `json:"-"`
 	// Notice carries a user-facing message that should be displayed in the
 	// transcript but NOT sent to the LLM. Used by tools that encounter
 	// recoverable problems worth surfacing (e.g. LSP server not installed).
@@ -2753,6 +2759,10 @@ func (c *GenericClient) buildOpenAIContentWithImages(m Message) ([]map[string]in
 // ChatGPT OAuth tokens use the Codex backend; API keys use api.openai.com.
 // The chatgpt_account_id claim is extracted from the JWT and sent as ChatGPT-Account-ID.
 func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
+	return c.chatOpenAIResponsesAttempt(ctx, messages, tools, true)
+}
+
+func (c *GenericClient) chatOpenAIResponsesAttempt(ctx context.Context, messages []Message, tools []map[string]interface{}, retryInvalidEncrypted bool) (*Message, error) {
 	accountID := c.AccountID
 	// AccountID is a cached copy of the chatgpt_account_id JWT claim. When the
 	// credential was imported from an external store (e.g. another CLI) the
@@ -2766,6 +2776,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 			accountID = id
 		}
 	}
+	responseRoute := c.openAIResponseRoute()
 
 	// Map messages → Responses API input items.
 	instructions := make([]string, 0, 1)
@@ -2814,10 +2825,11 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 			input = append(input, map[string]interface{}{"type": "message", "role": m.Role, "content": content})
 		}
 		if m.Role == "assistant" {
-			for _, item := range m.OpenAIResponseItems {
+			replayItems, _ := openAIResponseItemsForReplay(m.OpenAIResponseItems, m.OpenAIResponseRoute, responseRoute)
+			for _, item := range replayItems {
 				input = append(input, sanitizeOpenAIResponsesInputItem(item))
 			}
-			presentCallIDs := openAIResponseFunctionCallIDs(m.OpenAIResponseItems)
+			presentCallIDs := openAIResponseFunctionCallIDs(replayItems)
 			for _, tc := range m.ToolCalls {
 				if _, ok := presentCallIDs[tc.ID]; ok {
 					continue
@@ -2982,6 +2994,12 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode == http.StatusUnauthorized && c.UseOAuth {
 			return nil, fmt.Errorf("ChatGPT session expired — run /connect to re-authenticate")
+		}
+		if retryInvalidEncrypted && resp.StatusCode == http.StatusBadRequest && isInvalidEncryptedContentResponse(body) {
+			retryMessages, removed := withoutOpenAIEncryptedReasoning(messages)
+			if removed {
+				return c.chatOpenAIResponsesAttempt(ctx, retryMessages, tools, false)
+			}
 		}
 		msg := fmt.Sprintf("openai responses error (%d): %s", resp.StatusCode, string(body))
 		c.emitDebug("error", msg)
@@ -3154,6 +3172,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 		Model:               resultModel,
 		ToolCalls:           toolCalls,
 		OpenAIResponseItems: responseItems,
+		OpenAIResponseRoute: responseRoute,
 	}
 	if msg.Model == "" {
 		msg.Model = c.Model
@@ -3171,21 +3190,134 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 	return msg, nil
 }
 
+// openAIResponseRoute identifies the backend context that owns encrypted
+// Responses reasoning state. It deliberately excludes credentials while
+// distinguishing provider, backend endpoint, account, and model changes.
+func (c *GenericClient) openAIResponseRoute() string {
+	model, _ := normalizeOpenAICodexModel(c.Model)
+	accountID := c.AccountID
+	if accountID == "" {
+		if id := jwtClaim(c.APIKey, "https://api.openai.com/auth", "chatgpt_account_id"); id != "" {
+			accountID = id
+		} else {
+			accountID = jwtClaim(c.APIKey, "chatgpt_account_id")
+		}
+	}
+	return strings.Join([]string{
+		c.Provider,
+		model,
+		strconv.FormatBool(c.UseOAuth),
+		normalizeOpenAIResponseEndpoint(c.openAIResponsesURL()),
+		accountID,
+	}, "\x00")
+}
+
+func normalizeOpenAIResponseEndpoint(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.User = nil
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+// openAIResponseItemsForReplay preserves ordinary Responses items while
+// removing opaque encrypted reasoning when the producing route is unknown or
+// differs from the current route. Function-call items remain available to
+// preserve tool-call history and the ToolCalls fallback.
+func openAIResponseItemsForReplay(items []map[string]interface{}, storedRoute, currentRoute string) ([]map[string]interface{}, bool) {
+	compatible := storedRoute != "" && storedRoute == currentRoute
+	filtered := make([]map[string]interface{}, 0, len(items))
+	removed := false
+	for _, item := range items {
+		itemType, _ := item["type"].(string)
+		if !compatible && itemType == "reasoning" {
+			if _, encrypted := item["encrypted_content"]; encrypted {
+				removed = true
+				continue
+			}
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered, removed
+}
+
+func withoutOpenAIEncryptedReasoning(messages []Message) ([]Message, bool) {
+	filteredMessages := messages
+	removed := false
+	for i, message := range messages {
+		if message.Role != "assistant" || len(message.OpenAIResponseItems) == 0 {
+			continue
+		}
+		items, messageRemoved := openAIResponseItemsForReplay(message.OpenAIResponseItems, "", "")
+		if !messageRemoved {
+			continue
+		}
+		if !removed {
+			filteredMessages = slices.Clone(messages)
+			removed = true
+		}
+		filteredMessages[i].OpenAIResponseItems = items
+	}
+	return filteredMessages, removed
+}
+
+func isInvalidEncryptedContentResponse(body []byte) bool {
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	return json.Unmarshal(body, &envelope) == nil && envelope.Error.Code == "invalid_encrypted_content"
+}
+
 // sanitizeOpenAIResponsesInputItem removes the output-only status field before
-// a Responses item is stored for, or replayed as, a later input. It copies the
-// item so callers retain ownership of the original map.
+// a Responses item is stored for, or replayed as, a later input. It also
+// drops an "id" that isn't valid for replay: the Responses API requires ids
+// to contain only letters, numbers, underscores, or dashes, but some
+// providers/proxies have been observed to hand back two reasoning item ids
+// joined by ":" (e.g. "rs_aaa:rs_bbb"), which the real endpoint then rejects
+// with a 400 on the next turn. Stripping the id lets the item still be
+// replayed instead of failing the whole request. It copies the item so
+// callers retain ownership of the original map.
 func sanitizeOpenAIResponsesInputItem(item map[string]interface{}) map[string]interface{} {
-	if _, ok := item["status"]; !ok {
+	_, hasStatus := item["status"]
+	id, hasID := item["id"].(string)
+	badID := hasID && !isValidOpenAIResponsesID(id)
+	if !hasStatus && !badID {
 		return item
 	}
 
-	sanitized := make(map[string]interface{}, len(item)-1)
+	sanitized := make(map[string]interface{}, len(item))
 	for key, value := range item {
-		if key != "status" {
-			sanitized[key] = value
+		if key == "status" {
+			continue
 		}
+		if key == "id" && badID {
+			continue
+		}
+		sanitized[key] = value
+	}
+	if badID {
+		emitDebug("API", fmt.Sprintf("dropping invalid responses input item id=%q type=%v", id, item["type"]))
 	}
 	return sanitized
+}
+
+// isValidOpenAIResponsesID reports whether id matches the charset the
+// Responses API requires for item ids: letters, numbers, underscores, dashes.
+func isValidOpenAIResponsesID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func openAIResponseFunctionCallIDs(items []map[string]interface{}) map[string]struct{} {

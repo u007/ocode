@@ -59,4 +59,16 @@ describe("AddressBar", () => {
     render(<AddressBar {...base} status={200} error="" />);
     expect(screen.queryByLabelText("Loading")).not.toBeInTheDocument();
   });
+
+  it("shows a zoom badge only away from 100%, and resets it on click", () => {
+    const { rerender } = render(<AddressBar {...base} zoom={1} />);
+    expect(screen.queryByLabelText("Reset zoom")).not.toBeInTheDocument();
+
+    const onResetZoom = vi.fn();
+    rerender(<AddressBar {...base} zoom={1.25} onResetZoom={onResetZoom} />);
+    const badge = screen.getByLabelText("Reset zoom");
+    expect(badge).toHaveTextContent("125%");
+    fireEvent.click(badge);
+    expect(onResetZoom).toHaveBeenCalled();
+  });
 });

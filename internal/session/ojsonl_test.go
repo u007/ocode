@@ -30,7 +30,12 @@ func TestHeaderLineRoundTrip(t *testing.T) {
 }
 
 func TestMsgLineRoundTrip(t *testing.T) {
-	m := agent.Message{Role: "user", Content: "hi there"}
+	m := agent.Message{
+		Role:                "assistant",
+		Content:             "hi there",
+		OpenAIResponseRoute: "openai\x00gpt-test\x00false\x00https://example.test/v1/responses\x00",
+		OpenAIResponseItems: []map[string]interface{}{{"type": "reasoning", "encrypted_content": "opaque"}},
+	}
 	line, err := encodeMsgLine(m)
 	if err != nil {
 		t.Fatalf("encodeMsgLine: %v", err)
@@ -46,8 +51,11 @@ func TestMsgLineRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeMsgLine: %v", err)
 	}
-	if got.Role != m.Role || got.Content != m.Content {
+	if got.Role != m.Role || got.Content != m.Content || got.OpenAIResponseRoute != m.OpenAIResponseRoute {
 		t.Fatalf("round trip mismatch: got %+v, want %+v", got, m)
+	}
+	if len(got.OpenAIResponseItems) != 1 || got.OpenAIResponseItems[0]["encrypted_content"] != "opaque" {
+		t.Fatalf("response items did not round trip: got %+v", got.OpenAIResponseItems)
 	}
 }
 

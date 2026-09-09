@@ -1138,6 +1138,10 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	if m.agent != nil {
 		if m.sessionID != "" {
 			m.agent.SetOpenCodeSessionID(m.sessionID)
+			// A replacement agent has a fresh snapshot store: bind it to the
+			// session so backups journal and journaled rows rehydrate, or the
+			// Changes tab empties on every model switch / rebuild.
+			m.agent.SetChangesSession(m.sessionID)
 		}
 		m.agent.SetSupervisor(m.supervisor)
 		m.syncRedactionRuntime()
@@ -1403,8 +1407,6 @@ type model struct {
 	btwCancel             func()         // cancels the running /btw side-query loop (stops the child agent + its processes)
 	btwGen                uint64         // monotonic counter; invalidates stale /btw responses
 	btwViewport           viewport.Model // vertically scrollable body for the /btw popup (wrapped text)
-	showURLDialog         bool           // URL open confirmation dialog
-	pendingURL            string         // URL to open when confirmed
 	banClearConfirm       bool           // /ban clear confirmation dialog
 	// sessionDeleteConfirm tracks the session deletion confirmation dialog.
 	sessionDeleteConfirm      bool   // true when confirmation dialog is showing
@@ -2845,7 +2847,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.activeTab == tabChat && !m.showConnect && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.banClearConfirm && !m.showQuestionDialog && !m.showBtwDialog && m.detail.empty() {
+		if m.activeTab == tabChat && !m.showConnect && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.banClearConfirm && !m.showQuestionDialog && !m.showBtwDialog && m.detail.empty() {
 			content := msg.Content
 			if shortcode, ok := m.shortcodePastedFiles(content); ok {
 				content = shortcode
@@ -3118,7 +3120,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.banClearConfirm && !m.showQuestionDialog && !m.showBtwDialog && m.detail.empty()
+	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.banClearConfirm && !m.showQuestionDialog && !m.showBtwDialog && m.detail.empty()
 
 	// Chat search bar takes priority over the chat input and the slash popup
 	// while it's open. The bar is only available on the chat tab; other tabs
@@ -5828,21 +5830,6 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		return m, nil
 	}
 
-	if m.showURLDialog {
-		switch keyStr {
-		case "y", "Y", "enter":
-			url := m.pendingURL
-			m.showURLDialog = false
-			m.pendingURL = ""
-			return m, openBrowserCmd(url)
-		case "n", "N", "esc":
-			m.showURLDialog = false
-			m.pendingURL = ""
-			return m, nil
-		}
-		return m, nil
-	}
-
 	if m.banClearConfirm {
 		switch keyStr {
 		case "y", "Y", "enter":
@@ -7567,24 +7554,6 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		m.applyOrClearSelectionHighlight()
 	}
 
-	// While the URL confirmation dialog is open, a click in the input area
-	// confirms and opens the URL. This lets a mouse-driven user who clicked the
-	// link complete the action without reaching for the keyboard — previously
-	// the dialog was keyboard-only (Y/N/Esc), so the input looked "frozen" and
-	// the browser never launched. Esc still cancels via the keyboard path.
-	if m.showURLDialog && m.activeTab == tabChat {
-		if pressed {
-			return m, nil, true
-		}
-		if mouse.Y >= m.inputAreaTopY() && mouse.X < m.panelWidth() {
-			url := m.pendingURL
-			m.showURLDialog = false
-			m.pendingURL = ""
-			return m, openBrowserCmd(url), true
-		}
-		return m, nil, true
-	}
-
 	if m.banClearConfirm && m.activeTab == tabChat {
 		if pressed {
 			return m, nil, true
@@ -7643,15 +7612,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		if r, ok := m.transcriptPathLinkAt(mouse); ok {
 			return m, m.openPathAtLineInEditorCmd(r.path, r.lineNo), true
 		}
-		// URL links prompt for confirmation before opening in the browser,
-		// unless the user holds Ctrl (or Cmd on macOS) to open directly.
+		// A plain left click on a URL link opens it directly in the browser.
 		if r, ok := m.transcriptUrlLinkAt(mouse); ok {
-			if mouse.Mod&tea.ModCtrl != 0 || mouse.Mod&tea.ModSuper != 0 {
-				return m, openBrowserCmd(r.url), true
-			}
-			m.pendingURL = r.url
-			m.showURLDialog = true
-			return m, nil, true
+			return m, openBrowserCmd(r.url), true
 		}
 		if idx, ok := m.toolOutputForClick(mouse); ok {
 			m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
@@ -16046,8 +16009,6 @@ func (m model) chromeBreakdown(panelWidth int) string {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
-	} else if m.showURLDialog {
-		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderURLDialog(panelWidth - 2))
 	} else if m.banClearConfirm {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderBanClearConfirmDialog(panelWidth - 2))
 	} else if m.showPermDialog {
@@ -16059,7 +16020,7 @@ func (m model) chromeBreakdown(panelWidth int) string {
 	if m.chatSearchActive {
 		b.WriteString(" find=3")
 	}
-	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog && !m.banClearConfirm {
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.banClearConfirm {
 		fmt.Fprintf(&b, " slash=%d", lipgloss.Height(m.renderSlashPopup()))
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -16099,8 +16060,6 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
-	} else if m.showURLDialog {
-		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderURLDialog(panelWidth - 2))
 	} else if m.banClearConfirm {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderBanClearConfirmDialog(panelWidth - 2))
 	} else if m.showPermDialog {
@@ -16120,7 +16079,7 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 		height += 3
 	}
 	height += lipgloss.Height(inputArea)
-	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog && !m.banClearConfirm {
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.banClearConfirm {
 		height += lipgloss.Height(m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -19502,8 +19461,6 @@ func (m model) renderTabContent() string {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
-	} else if m.showURLDialog {
-		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderURLDialog(panelWidth - 2))
 	} else if m.banClearConfirm {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderBanClearConfirmDialog(panelWidth - 2))
 	} else if m.showPermDialog {
@@ -19522,7 +19479,7 @@ func (m model) renderTabContent() string {
 	if m.chatSearchActive {
 		leftParts = append(leftParts, m.renderChatSearchBar(panelWidth-2))
 	}
-	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog && !m.banClearConfirm {
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.banClearConfirm {
 		leftParts = append(leftParts, m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -21938,7 +21895,7 @@ func (m model) agentStripTopY() int {
 		vph = 1
 	}
 	y := appHeaderHeight + vph + 2 // +2 for transcript border
-	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog && !m.banClearConfirm {
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.banClearConfirm {
 		y += lipgloss.Height(m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -22186,8 +22143,6 @@ func (m model) inputAreaHeight() int {
 	var rendered string
 	if m.showQuestionDialog {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
-	} else if m.showURLDialog {
-		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderURLDialog(panelWidth - 2))
 	} else if m.banClearConfirm {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderBanClearConfirmDialog(panelWidth - 2))
 	} else if m.showPermDialog {
@@ -22227,7 +22182,7 @@ func (m model) inputAreaTopY() int {
 }
 
 func (m model) isClickInInputArea(mouse tea.Mouse) bool {
-	if m.activeTab != tabChat || m.showPermDialog || m.showQuestionDialog || m.showURLDialog || m.banClearConfirm {
+	if m.activeTab != tabChat || m.showPermDialog || m.showQuestionDialog || m.banClearConfirm {
 		return false
 	}
 	if mouse.X >= m.panelWidth() {
@@ -22823,23 +22778,6 @@ func (m *model) renderSessionDeleteConfirmDialog(width int) string {
 	header := m.styles.Header.Render("⚠ Delete Session")
 	body := fmt.Sprintf("Are you sure you want to delete session:\n\n%s\n\n%s", m.sessionDeleteConfirmID, m.sessionDeleteConfirmTitle)
 	hint := hintStyle.Render("Press Y to delete, N/Esc to cancel")
-
-	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
-		header + "\n\n" + body + "\n\n" + hint,
-	)
-}
-
-// renderURLDialog renders the URL open confirmation dialog.
-func (m *model) renderURLDialog(width int) string {
-	if !m.showURLDialog {
-		return ""
-	}
-
-	contentWidth := max(0, width-2)
-
-	header := m.styles.Header.Render("~ Open URL?")
-	body := fmt.Sprintf("Open the following URL in your browser?\n\n%s", m.pendingURL)
-	hint := hintStyle.Render("Click here or press Y/Enter to open · N/Esc to cancel")
 
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
 		header + "\n\n" + body + "\n\n" + hint,

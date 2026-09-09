@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Auto-Permission Prompt Prose Code Audit Gap
-description: The bundled gatekeeper prompt v1.9.0 enumerated non-existent git config forms (e.g., --set) and omitted real ones. Resolved in v1.9.2: prose synced with the –c dangerous-key list and a code backstop (`gitConfigWriteArgs` in IsHarmfulBashCommand, internal/agent/permissions.go) hard-blocks git config writes; ~25 regression cases in TestIsHarmfulBashCommand_GitConfigWrites (internal/agent/permissions_test.go). Prose and code must be audited together.
+description: "The bundled gatekeeper prompt v1.9.0 enumerated non-existent git config forms (e.g., --set) and omitted real ones. Resolved in v1.9.2: prose synced with the –c dangerous-key list and a code backstop (`gitConfigWriteArgs` in IsHarmfulBashCommand, internal/agent/permissions.go) hard-blocks git config writes; ~25 regression cases in TestIsHarmfulBashCommand_GitConfigWrites (internal/agent/permissions_test.go). Prose and code must be audited together."
 tags:
   - auto-permission
   - gotcha

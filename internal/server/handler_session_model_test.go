@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
 )
 
@@ -282,5 +283,59 @@ func TestHandleChatNewSessionWithoutModelHasNoOverride(t *testing.T) {
 	h.cfg.Model = "openai/other-default"
 	if got := h.effectiveSessionModel(resp.SessionID); got != "openai/other-default" {
 		t.Fatalf("no-override session model = %q, want it to follow the global default", got)
+	}
+}
+
+// TestSetSessionModelWithFilteredTranscriptRows reproduces the live failure
+// "stale snapshot: N message(s) but N+k stored": the stored transcript holds
+// rows the load path filters out (a tool message with no ToolID — orphan /
+// PERMISSION_ASK sentinel), so a load→modify→full-save of the transcript
+// compares a shorter, shifted sequence against the stored rows and conflicts
+// forever. Setting the per-session model must touch only the metadata row and
+// leave the transcript rows alone.
+func TestSetSessionModelWithFilteredTranscriptRows(t *testing.T) {
+	h := NewHandler()
+	if h.cfg == nil {
+		t.Skip("no config loaded")
+	}
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	h.cfg.Model = "openai/global-default"
+
+	id := session.NewSessionID()
+	session.SetWorkDir(proj)
+	t.Cleanup(func() { session.SetWorkDir("") })
+	msgs := []agent.Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi"},
+		{Role: "tool", Content: "orphan result"}, // empty ToolID → filtered on load
+	}
+	if err := session.SaveForDir(proj, id, "t", msgs, nil); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if s, err := session.LoadForDir(proj, id); err != nil || len(s.Messages) >= len(msgs) {
+		t.Fatalf("precondition: loaded view must be shorter than stored (err=%v, loaded=%d, stored=%d)", err, len(s.Messages), len(msgs))
+	}
+
+	rec := setSessionModel(t, h, id, "anthropic/claude-session")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set model: %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if got := h.effectiveSessionModel(id); got != "anthropic/claude-session" {
+		t.Fatalf("effectiveSessionModel = %q, want override", got)
+	}
+	// Transcript untouched — the loaded view is the same two messages.
+	if s, err := session.LoadForDir(proj, id); err != nil || len(s.Messages) != 2 {
+		t.Fatalf("transcript changed after model set: err=%v loaded=%d, want 2", err, len(s.Messages))
+	}
+
+	clearRec := httptest.NewRecorder()
+	h.HandleClearSessionModel(clearRec, httptest.NewRequest("DELETE", "/api/sessions/"+id+"/model", nil), id)
+	if clearRec.Code != http.StatusOK {
+		t.Fatalf("clear: %d, want 200 (%s)", clearRec.Code, clearRec.Body.String())
+	}
+	if got := h.effectiveSessionModel(id); got != "openai/global-default" {
+		t.Fatalf("effectiveSessionModel after clear = %q, want global default", got)
 	}
 }

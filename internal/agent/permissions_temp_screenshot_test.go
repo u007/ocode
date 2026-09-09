@@ -71,6 +71,9 @@ func TestDecideSandboxAllowsScreenshotTempPaths(t *testing.T) {
 	}
 
 	// File-tool read of the screenshot path is temp-allowed too.
+	if err := os.WriteFile(shot, []byte("screenshot"), 0o600); err != nil {
+		t.Fatalf("create screenshot fixture: %v", err)
+	}
 	dec := pm.Decide("read", json.RawMessage(`{"file_path":`+strconv.Quote(shot)+`}`))
 	if dec.Level != PermissionAllow {
 		t.Fatalf("Decide(read %q) = %s, want Allow", shot, dec.Level)

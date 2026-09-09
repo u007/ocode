@@ -18,11 +18,15 @@ import (
 // packages don't share a type (server can't import remote without a cycle:
 // remote's CLI-side code is what drives server.Run in the first place).
 type ServeState struct {
-	PID       int       `json:"pid"`
-	Port      int       `json:"port"`
-	Token     string    `json:"token"`
-	Version   string    `json:"version"`
-	StartedAt time.Time `json:"startedAt"`
+	PID  int `json:"pid"`
+	Port int `json:"port"`
+	// BrowsePort is the browse-origin port (embedded browser panel); 0 when
+	// the remote server has no browse origin. Tunneled on the same local
+	// port number so the SPA's /api/browse/config base URL stays valid.
+	BrowsePort int       `json:"browsePort"`
+	Token      string    `json:"token"`
+	Version    string    `json:"version"`
+	StartedAt  time.Time `json:"startedAt"`
 }
 
 const remoteStateFilePath = "~/.ocode/remote/serve.json"
@@ -170,6 +174,15 @@ func EnsureRemoteServer(t Transport, ver string) (state ServeState, reused bool,
 	return fresh, false, staleVersionPID, nil
 }
 
+// tunnelArgs builds the ssh argument list for StartTunnel.
+func tunnelArgs(localPort, remotePort, browsePort int, target string) []string {
+	args := []string{"-N", "-L", fmt.Sprintf("%d:127.0.0.1:%d", localPort, remotePort)}
+	if browsePort > 0 {
+		args = append(args, "-L", fmt.Sprintf("%d:127.0.0.1:%d", browsePort, browsePort))
+	}
+	return append(args, target)
+}
+
 // FreeLocalPort asks the OS for an ephemeral free TCP port on 127.0.0.1 by
 // binding to :0 and immediately releasing it — standard technique, with the
 // usual (accepted) TOCTOU caveat that something else could grab it before
@@ -188,8 +201,11 @@ func FreeLocalPort() (int, error) {
 	return strconv.Atoi(portStr)
 }
 
-// StartTunnel starts `ssh -N -L localPort:127.0.0.1:remotePort <target>`
-// under sup's supervision. It does not wait for the tunnel to establish or
+// StartTunnel starts `ssh -N -L localPort:127.0.0.1:remotePort [-L
+// browsePort:127.0.0.1:browsePort] <target>` under sup's supervision. The
+// browse origin is forwarded on the same port number (skipped when
+// browsePort is 0) because the SPA learns that port from the remote's
+// /api/browse/config and cannot be told about a different local one. It does not wait for the tunnel to establish or
 // for it to exit — see ConnectWeb for the foreground supervise loop. Only
 // meaningful for KindSSH targets; WSL never tunnels — Windows forwards
 // WSL2 localhost natively, so the browser can reach the WSL server's port
@@ -202,8 +218,8 @@ func FreeLocalPort() (int, error) {
 // FreeLocalPort + a second StartTunnel call on the same supervisor, after a
 // first bind failure) would otherwise always fail with "already
 // registered." A fresh port on each retry makes the ID naturally unique.
-func StartTunnel(sup *tool.ProcessSupervisor, target Target, localPort, remotePort int) (*exec.Cmd, error) {
-	cmd := exec.Command("ssh", "-N", "-L", fmt.Sprintf("%d:127.0.0.1:%d", localPort, remotePort), target.String())
+func StartTunnel(sup *tool.ProcessSupervisor, target Target, localPort, remotePort, browsePort int) (*exec.Cmd, error) {
+	cmd := exec.Command("ssh", tunnelArgs(localPort, remotePort, browsePort, target.String())...)
 	if _, err := tool.StartSupervised(sup, cmd, tool.ProcessRegistration{
 		ID:      fmt.Sprintf("remote-tunnel-%d", localPort),
 		Name:    "ssh-tunnel",

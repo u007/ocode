@@ -144,3 +144,35 @@ func TestPathLinkProbeCache(t *testing.T) {
 		t.Fatalf("negative probe span not cached: %+v", c)
 	}
 }
+
+// TestPathLinkAtColUploadWithSpaces verifies that `.ocode/uploads/`-anchored
+// paths containing spaces (macOS screenshot names) resolve as one token, and
+// that the span covers the whole name so any column inside it is a hit.
+func TestPathLinkAtColUploadWithSpaces(t *testing.T) {
+	wd := t.TempDir()
+	dir := filepath.Join(wd, ".ocode", "uploads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	name := "Screenshot 2026-09-08 at 10.52.15 AM.png"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	line := "see .ocode/uploads/" + name + " here"
+	for _, col := range []int{4, 20, 30, 40} {
+		r, ok := pathLinkAtCol(line, col, wd)
+		if !ok {
+			t.Fatalf("col %d: not linked (region=%+v)", col, r)
+		}
+		if !hasSuffix(r.path, name) {
+			t.Errorf("col %d: path = %q, want suffix %q", col, r.path, name)
+		}
+		if r.startCol != 4 || r.endCol != 4+len([]rune(".ocode/uploads/"+name)) {
+			t.Errorf("col %d: span [%d,%d)", col, r.startCol, r.endCol)
+		}
+	}
+	// Prose with spaces outside uploads must stay non-link.
+	if _, ok := pathLinkAtCol("open my file.png now", 5, wd); ok {
+		t.Error("plain prose with spaces became a link")
+	}
+}

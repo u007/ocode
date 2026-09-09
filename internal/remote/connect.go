@@ -225,7 +225,7 @@ func ConnectWeb(opts ConnectOptions) error {
 	}
 
 	progress.Start("tunnel", "opening SSH tunnel")
-	localPort, tunnelCmd, err := startTunnelWithRetry(sup, opts.Target, state.Port)
+	localPort, tunnelCmd, err := startTunnelWithRetry(sup, opts.Target, state.Port, state.BrowsePort)
 	if err != nil {
 		progress.Fail(err, "")
 		return err
@@ -293,13 +293,13 @@ func openBrowserURL(url string) error {
 // process between FreeLocalPort's probe and ssh's actual bind — an
 // accepted, narrow TOCTOU race) gets exactly one retry with a fresh port
 // before the failure is surfaced with ssh's own stderr.
-func startTunnelWithRetry(sup *tool.ProcessSupervisor, target Target, remotePort int) (localPort int, tunnelCmd *exec.Cmd, err error) {
+func startTunnelWithRetry(sup *tool.ProcessSupervisor, target Target, remotePort, browsePort int) (localPort int, tunnelCmd *exec.Cmd, err error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		localPort, err = FreeLocalPort()
 		if err != nil {
 			return 0, nil, err
 		}
-		tunnelCmd, err = StartTunnel(sup, target, localPort, remotePort)
+		tunnelCmd, err = StartTunnel(sup, target, localPort, remotePort, browsePort)
 		if err == nil {
 			return localPort, tunnelCmd, nil
 		}

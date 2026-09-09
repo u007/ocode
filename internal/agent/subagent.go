@@ -367,6 +367,27 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		}
 	}
 
+	// Suppress equivalent fresh dispatches while the first one is still
+	// active. This check is intentionally separate from NoteSubagentDispatch:
+	// that counter detects feedback loops across completed calls, whereas
+	// this registry prevents concurrent duplicate work and is released when
+	// the actual dispatch finishes.
+	activeKey := activeAgentDispatchKey(spec.Name, params.Prompt, params.Context)
+	releaseActive := func() {}
+	if t.runs != nil {
+		var acquired bool
+		releaseActive, acquired = t.runs.acquireActiveDispatch(activeKey)
+		if !acquired {
+			return fmt.Sprintf("Rejected duplicate agent dispatch: agent %q is already running the same prompt and context. The existing dispatch owns the work; wait for its result instead of starting another.", spec.Name), nil
+		}
+	}
+	activeTransferred := false
+	defer func() {
+		if !activeTransferred {
+			releaseActive()
+		}
+	}()
+
 	tools := t.getToolsForDef(spec)
 
 	// Track doc tool names injected for the context subagent so we can
@@ -405,12 +426,11 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	if t.runs != nil && subAgent.runs != nil {
 		subAgent.runs.ShareLimiterFrom(t.runs)
 	}
-	// Share the parent's snapshot store so file writes flow to the same
-	// store that the TUI sidebar reads from. Without this, every sub-agent
-	// creates its own isolated store (via NewAgent → NewStore), and the
-	// sidebar — which reads from the main agent's store — would never
-	// reflect sub-agent file changes.
-	subAgent.snapshotStore = t.mainAgent.snapshotStore
+	// Share the parent's snapshot store and changes registry so file writes
+	// (write/edit tools AND bash) flow to what the Changes tab reads. Without
+	// this every sub-agent gets its own isolated store/registry from NewAgent
+	// and the tab never reflects sub-agent edits.
+	subAgent.shareChangeTrackingFrom(t.mainAgent)
 
 	// Propagate the parent's project root so the sub-agent's file writes are
 	// confined against the project (not the process cwd) and appear on the
@@ -569,7 +589,8 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		}
 		attachRunTranscript(run)
 
-		return t.runBackgroundDispatch(spec.Name, subAgent, run, subAgentMsgs, "started"), nil
+		activeTransferred = true
+		return t.runBackgroundDispatch(spec.Name, subAgent, run, subAgentMsgs, "started", releaseActive), nil
 	}
 
 	// Synchronous mode.
@@ -585,7 +606,8 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		attachRunTranscript(run)
 	}
 
-	result, err := t.runSyncDispatch(spec.Name, subAgent, run, subAgentMsgs)
+	activeTransferred = true
+	result, err := t.runSyncDispatch(spec.Name, subAgent, run, subAgentMsgs, releaseActive)
 	if err != nil {
 		return "", err
 	}
@@ -700,9 +722,9 @@ func (t TaskTool) executeResume(params taskToolParams) (string, error) {
 	subAgent.RearmMaintenance()
 
 	if params.RunInBackground {
-		return t.runBackgroundDispatch(specName, subAgent, run, messages, "resumed"), nil
+		return t.runBackgroundDispatch(specName, subAgent, run, messages, "resumed", func() {}), nil
 	}
-	return t.runSyncDispatch(specName, subAgent, run, messages)
+	return t.runSyncDispatch(specName, subAgent, run, messages, func() {})
 }
 
 // runBackgroundDispatch launches subAgent asynchronously against messages,
@@ -710,7 +732,7 @@ func (t TaskTool) executeResume(params taskToolParams) (string, error) {
 // fresh background task dispatch. Shared by fresh dispatch and task resume;
 // verb only affects the human-readable "state" line in the returned summary
 // ("started" for a fresh dispatch, "resumed" for a resume).
-func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *AgentRun, messages []Message, verb string) string {
+func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *AgentRun, messages []Message, verb string, releaseActive func()) string {
 	// Only surface a Queued state when a concurrency limit is actually
 	// configured — otherwise Acquire below is a no-op and the run goes
 	// straight to Running, same as before this limiter existed.
@@ -741,6 +763,7 @@ func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *A
 		defer func() {
 			subAgent.shutdownTransient()
 			run.markTeardownDone()
+			releaseActive()
 		}()
 
 		// Wait for a concurrency slot (no-op when unlimited). If the session
@@ -801,7 +824,18 @@ func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *A
 // run (if non-nil) through the queued/running/terminal lifecycle exactly like
 // a fresh synchronous task dispatch. Shared by fresh dispatch and task
 // resume.
-func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRun, messages []Message) (string, error) {
+func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRun, messages []Message, releaseActive func()) (string, error) {
+	defer releaseActive()
+	// Register cleanup before queue admission: AcquireForRun can return a
+	// cancellation error before the child starts, but NewAgent has already
+	// started its maintenance workers. Every exit path must tear those workers
+	// down and signal teardown completion for a later resume.
+	defer func() {
+		subAgent.shutdownTransient()
+		if run != nil {
+			run.markTeardownDone()
+		}
+	}()
 	// t.mainAgent is about to block on subAgent's full execution, so it isn't
 	// doing concurrent work itself for the duration — hand its own concurrency
 	// slot (if it holds one) back to the shared pool for the duration of this
@@ -821,36 +855,23 @@ func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRu
 		release, aerr := t.runs.AcquireForRun(run, stopCh)
 		if aerr != nil {
 			run.tryFinishCancelled()
+			t.runs.notifyDone(run)
 			return "", aerr
 		}
 		if run.statusValue() == RunCancelled || isClosed(stopCh) {
 			release()
 			run.tryFinishCancelled()
+			t.runs.notifyDone(run)
 			return "", fmt.Errorf("task cancelled while queued")
 		}
 		if !run.beginExecution() {
 			release()
+			t.runs.notifyDone(run)
 			return "", fmt.Errorf("task cancelled while queued")
 		}
 		subAgent.setOwnSlot(release)
 		defer subAgent.releaseOwnSlot()
 	}
-	// Each synchronous sub-agent dispatch builds (or, for a resume, re-arms) two
-	// maintenance-worker goroutines (memory + doc) that would otherwise leak
-	// forever — memoryMaintCh is never closed by the caller and the sync path
-	// never calls Shutdown. Tear the transient agent down once this call
-	// returns so we don't accumulate one leaked Agent + goroutines per
-	// knowledge_lookup / synchronous task. The sub-agent shares the parent's
-	// snapshotStore, so shutdownTransient stops only the goroutines/loop and
-	// must NOT Reset the shared store. Also signal run.markTeardownDone (when
-	// run is tracked) so a later resume's awaitTeardown sees this cycle's
-	// teardown as finished — see runBackgroundDispatch for why that matters.
-	defer func() {
-		subAgent.shutdownTransient()
-		if run != nil {
-			run.markTeardownDone()
-		}
-	}()
 	result, resp, err := t.executeSubAgentWithTranscript(specName, subAgent, messages)
 	if err != nil {
 		if run != nil {

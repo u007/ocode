@@ -107,16 +107,29 @@ func (a *Agent) titleChat(client LLMClient, system, prompt string) (string, erro
 // registry "title" agent's Model > Ocode.RecapModel > Ocode.SmallModel > main
 // client. Duplicate model strings are collapsed; the main client is always the
 // final fallback.
+//
+// Title generation must never use extended thinking — it produces a 5-word
+// string, so the reasoning budget is pure overhead (and often dominates the
+// request cost/latency). Both the TUI and web title paths funnel through
+// GenerateTitleAsync -> titleClients, so forcing "off" here disables reasoning
+// for every surface. This mirrors compactSummaryClient.
 func (a *Agent) titleClients() []LLMClient {
 	var clients []LLMClient
 	if a.config != nil {
+		// Shallow copy with ThinkingBudget forced to 0 — we must not mutate
+		// a.config in place, since it's shared state that may be read
+		// concurrently by the main agent, config/UI paths, or other client
+		// construction.
+		titleCfg := *a.config
+		titleCfg.ThinkingBudget = 0
+
 		var models []string
 		if def := lookupHiddenAgent("title"); def != nil {
 			models = append(models, strings.TrimSpace(def.Model))
 		}
-		models = append(models, strings.TrimSpace(a.config.Ocode.RecapModel))
-		if a.config.Ocode.SmallModelEnabled {
-			models = append(models, strings.TrimSpace(a.config.Ocode.SmallModel))
+		models = append(models, strings.TrimSpace(titleCfg.Ocode.RecapModel))
+		if titleCfg.Ocode.SmallModelEnabled {
+			models = append(models, strings.TrimSpace(titleCfg.Ocode.SmallModel))
 		}
 		seen := map[string]bool{}
 		for _, m := range models {
@@ -124,13 +137,21 @@ func (a *Agent) titleClients() []LLMClient {
 				continue
 			}
 			seen[m] = true
-			if c := NewClient(a.config, m); c != nil {
+			if c := NewClient(&titleCfg, m); c != nil {
 				clients = append(clients, c)
 			}
 		}
 	}
+	// The main client fallback may carry the user's configured thinking budget;
+	// clone it with ThinkingBudget=0 (via noThinkingClient) so it also never
+	// reasons. For non-*GenericClient implementations (custom/mock), fall back
+	// to the original — a documented limitation.
 	if a.client != nil {
-		clients = append(clients, a.client)
+		if noThink := a.noThinkingClient(); noThink != nil {
+			clients = append(clients, noThink)
+		} else {
+			clients = append(clients, a.client)
+		}
 	}
 	return clients
 }

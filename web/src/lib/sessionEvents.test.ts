@@ -31,7 +31,7 @@ function env(event: string, over: Partial<BusEnvelope> = {}): BusEnvelope {
   return { event, project: "/proj", session_id: "s1", seq: 1, data: {}, ...over };
 }
 
-function makeRouter(openIds: string[] = ["s1"]) {
+function makeRouter(openIds: string[] = ["s1"], onNewTab?: (id: string, project?: string) => void) {
   const actions: ChatAction[] = [];
   const projectActions: unknown[] = [];
   let state: ChatState = initialState;
@@ -43,6 +43,7 @@ function makeRouter(openIds: string[] = ["s1"]) {
     },
     projectDispatch: (a) => void projectActions.push(a),
     getState: () => state,
+    onNewTab,
   };
   return { router, actions, projectActions, getState: () => state };
 }
@@ -544,7 +545,7 @@ describe("browse_nav routing (Part 07/08 contract)", () => {
           url: "", status: 0, loading: true, mode: null, userMode: null, error: null,
           history: [], historyIndex: -1, panelOpen: true, collapsed: false,
           consoleEvents: [], networkEvents: [], responseBodies: {}, pageTitle: null, scrollY: 0, scrollByUrl: {},
-          perfMetrics: {}, perfRecording: true,
+          perfMetrics: {}, perfRecording: true, zoom: 1,
         },
       },
     }));
@@ -573,7 +574,7 @@ describe("browse_title routing", () => {
           url: "https://done.com/", status: 200, loading: false, mode: "chrome", userMode: null, error: null,
           history: ["https://done.com/"], historyIndex: 0, panelOpen: true, collapsed: false,
           consoleEvents: [], networkEvents: [], responseBodies: {}, pageTitle: null, scrollY: 0, scrollByUrl: {},
-          perfMetrics: {}, perfRecording: true,
+          perfMetrics: {}, perfRecording: true, zoom: 1,
         },
       },
     }));
@@ -608,5 +609,89 @@ describe("browse_title routing", () => {
     );
     expect(browserStore.state.byKey["tab:x"].pageTitle).toBeNull();
     browserStore.setState(() => ({ byKey: {} }));
+  });
+});
+
+describe("browse_newtab routing", () => {
+  it("seeds browser state and bridges the tab id without requiring a DOM", () => {
+    browserStore.setState(() => ({ byKey: {} }));
+    const onNewTab = vi.fn();
+    const { router } = makeRouter(["s1"], onNewTab);
+
+    routeBusEnvelope(
+      env("browse_newtab", {
+        project: "",
+        session_id: "",
+        data: { state_key: "tab:new-tab", url: "https://example.com/" },
+      }),
+      router,
+    );
+
+    expect(browserStore.state.byKey["tab:new-tab"]).toMatchObject({
+      url: "https://example.com/",
+      panelOpen: true,
+    });
+    expect(onNewTab).toHaveBeenCalledWith("new-tab", undefined);
+    browserStore.setState(() => ({ byKey: {} }));
+  });
+
+  it("routes the strip entry by data.project when the backend knows the owner", () => {
+    browserStore.setState(() => ({ byKey: {} }));
+    const onNewTab = vi.fn();
+    const { router } = makeRouter(["s1"], onNewTab);
+
+    routeBusEnvelope(
+      env("browse_newtab", {
+        project: "",
+        session_id: "",
+        data: { state_key: "tab:owned-tab", url: "https://example.com/", project: "/proj-a" },
+      }),
+      router,
+    );
+
+    expect(onNewTab).toHaveBeenCalledWith("owned-tab", "/proj-a");
+    browserStore.setState(() => ({ byKey: {} }));
+  });
+
+  it("falls back to the envelope project when the payload carries none", () => {
+    browserStore.setState(() => ({ byKey: {} }));
+    const onNewTab = vi.fn();
+    const { router } = makeRouter(["s1"], onNewTab);
+
+    routeBusEnvelope(
+      env("browse_newtab", {
+        project: "/proj-b",
+        session_id: "",
+        data: { state_key: "tab:env-tab", url: "https://example.com/" },
+      }),
+      router,
+    );
+
+    expect(onNewTab).toHaveBeenCalledWith("env-tab", "/proj-b");
+    browserStore.setState(() => ({ byKey: {} }));
+  });
+
+  it("logs and ignores a missing or malformed state_key", () => {
+    browserStore.setState(() => ({ byKey: {} }));
+    const onNewTab = vi.fn();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { router } = makeRouter(["s1"], onNewTab);
+
+    routeBusEnvelope(
+      env("browse_newtab", {
+        project: "",
+        session_id: "",
+        data: { state_key: "side:chat:s1", url: "https://example.com/" },
+      }),
+      router,
+    );
+
+    expect(error).toHaveBeenCalledWith(
+      "browse_newtab event missing/malformed state_key:",
+      expect.objectContaining({ state_key: "side:chat:s1" }),
+    );
+    expect(browserStore.state.byKey).toEqual({});
+    expect(onNewTab).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 });

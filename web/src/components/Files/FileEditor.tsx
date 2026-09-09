@@ -134,6 +134,13 @@ function FileEditorImpl({
   // Settings button opens the Monaco settings/extensions panel in a dialog.
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  // Incremented each time a Monaco editor instance mounts. The diff
+  // decorations effect needs to run after mount (editorRef is null during the
+  // initial render because Monaco mounts async), and grouping the effects by
+  // [path, session, diffVersion, projectRoot] means that effect only ever
+  // re-ran on save — so decorations never showed until you saved. Reading this
+  // as a dependency re-triggers the decoration fetch once the instance is real.
+  const [editorMountVersion, setEditorMountVersion] = useState(0);
   const lang = language || extensionToLanguage(path);
 
   // Refs for diff decoration cleanup
@@ -403,6 +410,7 @@ function FileEditorImpl({
       `;
       document.head.appendChild(style);
     }
+    setEditorMountVersion((v) => v + 1);
   }, [persistKey, wireSelectionTracking]);
 
 // ── Inline diff decorations ──
@@ -592,7 +600,7 @@ function FileEditorImpl({
     return () => {
       cancelled = true;
     };
-  }, [path, session, diffVersion, projectRoot]);
+  }, [path, session, diffVersion, projectRoot, editorMountVersion]);
 
   // ── Search highlight decorations (content search) ──
   // Single mechanism: pending highlight store keyed by path+projectRoot.

@@ -460,7 +460,9 @@ func TestAppendUserMessageLandsAfterFilteredTail(t *testing.T) {
 
 	// The server's in-memory transcript includes the sentinel, so its
 	// turn-end full-snapshot save must converge against the stored rows.
-	inMemory := append(append([]agent.Message(nil), seed...), agent.Message{Role: "user", Content: "second message"})
+	// runTurn stamps the appended user message with NextUserSeq over its
+	// transcript — the tail insert above must have stamped the same seq.
+	inMemory := append(append([]agent.Message(nil), seed...), agent.Message{Role: "user", Content: "second message", UserSeq: NextUserSeq(seed)})
 	if err := persistToDir(sessionsDir, id, "", inMemory, nil, false, 0, false); err != nil {
 		t.Fatalf("full-snapshot save after tail insert: %v", err)
 	}
@@ -579,5 +581,38 @@ func TestReplaceSameLengthRewritesAndBumpsGen(t *testing.T) {
 	gen2, err := readHistoryGen(dir, id)
 	if err != nil || gen2 != gen1 {
 		t.Fatalf("converging replace-append must not bump history_gen: got %d want %d (%v)", gen2, gen1, err)
+	}
+}
+
+// TestAppendUserMessageStampsUserSeq pins the seq contract between the async
+// pre-persist and the turn: the tail insert stamps max stored user_seq + 1,
+// exactly what server runTurn (NextUserSeq over the loaded transcript)
+// assigns in memory, so the two copies serialize identically and the
+// turn's live/turn-end saves never read as a diverged writer.
+func TestAppendUserMessageStampsUserSeq(t *testing.T) {
+	projectRoot, sessionsDir := isolatedProjectRoot(t)
+	id := "ses_userseq-stamp"
+
+	if err := AppendUserMessageForDir(projectRoot, id, "first"); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	got := readStoredContents(t, sessionsDir, id)
+	if len(got) != 1 || got[0].UserSeq != 1 {
+		t.Fatalf("first user message must carry user_seq 1, got %+v", got)
+	}
+	if want := NextUserSeq(nil); want != 1 {
+		t.Fatalf("NextUserSeq(empty) = %d, want 1", want)
+	}
+
+	reply := []agent.Message{got[0], {Role: "assistant", Content: "ok"}}
+	if err := persistToDir(sessionsDir, id, "", reply, nil, false, 0, false); err != nil {
+		t.Fatalf("turn-end save: %v", err)
+	}
+	if err := AppendUserMessageForDir(projectRoot, id, "second"); err != nil {
+		t.Fatalf("second append: %v", err)
+	}
+	got = readStoredContents(t, sessionsDir, id)
+	if len(got) != 3 || got[2].UserSeq != 2 || got[2].UserSeq != NextUserSeq(reply) {
+		t.Fatalf("second user message must carry user_seq 2 (= NextUserSeq(transcript)), got %+v", got)
 	}
 }

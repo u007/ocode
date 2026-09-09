@@ -36,14 +36,28 @@ detects file mutations made by the shell directly.
 
 2. **Changes registry (`internal/changes.Registry`).** On `Agent.New`, a
    `Registry` is constructed and attached to the agent's snapshot store.
-   Sub-agents spawned via the `task` tool share the same store
-   (`subagent.go:300`), so their writes are captured without extra plumbing.
+   Sub-agents spawned via the `task` tool and `ask` side queries share
+   the parent's store **and** registry (`Agent.shareChangeTrackingFrom`),
+   which also re-points their bash recorder at the shared registry —
+   sharing the store alone captured write/edit tool writes but left
+   sub-agent bash edits in a private registry nobody rendered.
+
+   The store is bound to the chat session with `Store.SwitchSession`
+   (via `Agent.SetChangesSession`) so backups journal to
+   `snapshots.sqlite` and rehydrate after a rebuild. Every agent
+   replacement in the TUI (`installAgent`, `rebuildAgentClient`) re-binds
+   the fresh store; a store bound to a different session drops its live
+   rows and rehydrates the target session's, so `/session load` on a
+   reused agent shows the loaded session's files rather than the old ones.
 
 3. **Bash detection (`internal/changes/bash.go`).** A `StatBashRecorder`
-   runs a pre/post stat-walk around the bash tool's execution. It compares
-   file mtime/size before and after, then intersects with path-shaped tokens
-   extracted from the command string. Detected changes are added to the
-   registry with `Undoable: false`.
+   runs a pre/post stat-walk around the bash tool's execution. `Pre()`
+   returns a per-call `BashBaseline` that the caller hands back to
+   `Post(base, …)` — one `BashTool` serves parallel tool calls, so the
+   baseline must not live on the recorder. It compares file mtime
+   (nanosecond) and size before and after, then intersects with path-shaped
+   tokens extracted from the command string. Detected changes are added to
+   the registry with `Undoable: false`.
 
 4. **TUI changes model (`internal/tui/changes_model.go`).** The `changesModel`
    calls `Registry.List()` on every render to get the current file list.
@@ -113,6 +127,11 @@ The pre/post stat-walk is conservative:
 - Intersects the stat diff with path-shaped tokens extracted from the
   command string (paths after `>`, `>>`, `tee`, `sed -i`, `mv`, `cp`,
   `rm`, `mkdir -p`, `touch`, `cat <<EOF >`).
+- A file whose mtime or size moved is reported as modified. The
+  pre-walk records no content hash (hashing every file per bash call is
+  too slow), so a touched-but-identical file cannot be told apart from a
+  real edit; an earlier version hashed the live file against itself and
+  therefore dropped every same-size edit (`sed -i`, in-place rewrites).
 - Misses: commands that touch files through the command's subprocesses
   (e.g. `make`), renames without a rename pattern, files modified via
   soft links outside the working dir.

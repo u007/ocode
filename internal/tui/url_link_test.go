@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 
 	textarea "charm.land/bubbles/v2/textarea"
@@ -82,11 +81,12 @@ func runURLDetect(t *testing.T, msg message, sidebar bool) {
 	fmt.Printf("detected url=%q; hits span screen X=[%d,%d]\n", hitURL, minHit, maxHit)
 }
 
-// TestURLClickOpensDialog drives the real click handler (press + release)
+// TestURLClickOpensDirectly drives the real click handler (press + release)
 // through handleMouseAction at a column where transcriptUrlLinkAt reports a
-// hit, and asserts the confirmation dialog actually opens. This exercises the
-// full path the user hits, not just the detector.
-func TestURLClickOpensDialog(t *testing.T) {
+// hit, and asserts that a plain click opens the URL directly in the browser
+// (returns a browser-open command, with no confirmation dialog). This exercises
+// the full path the user hits, not just the detector.
+func TestURLClickOpensDirectly(t *testing.T) {
 	cases := []struct {
 		name    string
 		msg     message
@@ -138,16 +138,13 @@ func TestURLClickOpensDialog(t *testing.T) {
 			// Press then release on the URL.
 			out1, _, _ := m.handleMouseAction(tea.Mouse{X: hitX, Y: clickY}, true)
 			m1 := out1.(model)
-			out2, _, handled := m1.handleMouseAction(tea.Mouse{X: hitX, Y: clickY}, false)
-			m2 := out2.(model)
+			out2, cmd, handled := m1.handleMouseAction(tea.Mouse{X: hitX, Y: clickY}, false)
+			_ = out2.(model)
 			if !handled {
 				t.Errorf("release on URL should be handled")
 			}
-			if !m2.showURLDialog {
-				t.Errorf("clicking a URL should open the confirmation dialog (showURLDialog=false)")
-			}
-			if !strings.HasPrefix(m2.pendingURL, "https://") {
-				t.Errorf("pendingURL = %q", m2.pendingURL)
+			if cmd == nil {
+				t.Errorf("plain click on a URL should open the browser directly (cmd==nil)")
 			}
 		})
 	}
@@ -188,8 +185,8 @@ func TestURLDuplicateMarkdownLabelsMapsBothLinks(t *testing.T) {
 }
 
 // TestURLModClickOpensDirectly verifies that ctrl+click (and cmd+click) on a
-// URL bypasses the confirmation dialog and returns a browser-open command
-// immediately — the plain-click path keeps the confirm dialog.
+// URL returns a browser-open command immediately — same as a plain click now
+// that the confirmation dialog has been removed entirely.
 func TestURLModClickOpensDirectly(t *testing.T) {
 	for _, mod := range []tea.KeyMod{tea.ModCtrl, tea.ModSuper} {
 		m := model{
@@ -228,12 +225,9 @@ func TestURLModClickOpensDirectly(t *testing.T) {
 		out1, _, _ := m.handleMouseAction(tea.Mouse{X: hitX, Y: clickY, Mod: mod}, true)
 		m1 := out1.(model)
 		out2, cmd, handled := m1.handleMouseAction(tea.Mouse{X: hitX, Y: clickY, Mod: mod}, false)
-		m2 := out2.(model)
+		_ = out2.(model)
 		if !handled {
 			t.Errorf("mod=%v: release on URL should be handled", mod)
-		}
-		if m2.showURLDialog {
-			t.Errorf("mod=%v: mod+click must NOT open the confirmation dialog", mod)
 		}
 		if cmd == nil {
 			t.Errorf("mod=%v: mod+click should return a browser-open command", mod)

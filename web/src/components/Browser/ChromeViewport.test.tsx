@@ -6,10 +6,12 @@ import { render, fireEvent, act } from "@testing-library/react";
 if (typeof window.PointerEvent === "undefined") {
   class PointerEventPolyfill extends MouseEvent {
     pointerId: number;
+    pointerType: string;
     isPrimary: boolean;
     constructor(type: string, params: PointerEventInit = {}) {
       super(type, params);
       this.pointerId = params.pointerId ?? 0;
+      this.pointerType = params.pointerType ?? "mouse";
       this.isPrimary = params.isPrimary ?? true;
     }
   }
@@ -32,6 +34,11 @@ const mockApi = {
     mockApi.fileChooserCbs.add(cb);
     return () => mockApi.fileChooserCbs.delete(cb);
   },
+  selectionCbs: new Set<(text: string) => void>(),
+  onSelection: (cb: (text: string) => void) => {
+    mockApi.selectionCbs.add(cb);
+    return () => mockApi.selectionCbs.delete(cb);
+  },
 };
 
 const mockUpload = vi.hoisted(() => vi.fn(async (_key: string, _files: File[]) => {}));
@@ -44,6 +51,7 @@ vi.mock("./useCdpSocket", () => ({
 }));
 
 import { ChromeViewport } from "./ChromeViewport";
+import { browserStore, browserActions } from "../../lib/browserStore";
 
 // Minimal ImageBitmap double (jsdom has neither createImageBitmap nor
 // ImageBitmap; the component only uses .width/.height/.close() + drawImage).
@@ -57,10 +65,12 @@ function fakeBitmap(w = 640, h = 480): ImageBitmap {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  browserStore.setState(() => ({ byKey: {} }));
   mockApi.status = "open";
   mockApi.error = null;
   mockApi.frameCbs.clear();
   mockApi.fileChooserCbs.clear();
+  mockApi.selectionCbs.clear();
   mockUpload.mockClear();
   vi.useFakeTimers();
   // Stub ResizeObserver: capture the callback for manual triggering.
@@ -77,6 +87,12 @@ beforeEach(() => {
       disconnect() {}
     } as unknown as typeof ResizeObserver,
   );
+  // jsdom has no pointer capture; the viewport captures on pointerdown so a
+  // drag that leaves the canvas still delivers move/up.
+  const elProto = Element.prototype as unknown as Record<string, unknown>;
+  elProto.setPointerCapture = vi.fn();
+  elProto.releasePointerCapture = vi.fn();
+  elProto.hasPointerCapture = vi.fn(() => true);
   // Canvas 2D context stub (jsdom lacks it): drawImage + clearRect tracked.
   const ctx = {
     drawImage: vi.fn(),
@@ -101,13 +117,15 @@ function fireFrame(w = 640, h = 480) {
 }
 
 describe("ChromeViewport", () => {
-  it("renders a focusable canvas + spinner until the first frame", () => {
+  it("renders a canvas + hidden keyboard target + spinner until the first frame", () => {
     const { container } = render(
       <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
     );
     const canvas = container.querySelector("canvas");
     expect(canvas).toBeTruthy();
-    expect(canvas!.getAttribute("tabindex")).toBe("0");
+    // Keyboard/IME focus lives on a hidden textarea: a canvas cannot host an
+    // input method editor or receive paste events.
+    expect(container.querySelector("textarea[data-testid='cdp-keyboard']")).toBeTruthy();
     expect(container.querySelector("[data-testid='cdp-spinner']")).toBeTruthy();
     // First frame clears the spinner and sizes the canvas.
     fireFrame(640, 480);
@@ -140,6 +158,7 @@ describe("ChromeViewport", () => {
       <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
     );
     const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
     // jsdom getBoundingClientRect returns zeros — patch to a known rect so
     // the client→canvas mapping is exercised deterministically.
     canvas.getBoundingClientRect = () =>
@@ -147,15 +166,27 @@ describe("ChromeViewport", () => {
     act(() => fireFrame());
     fireEvent.pointerDown(canvas, { clientX: 10, clientY: 20, button: 0, pointerId: 1 });
     expect(mockApi.send).toHaveBeenCalledWith({
-      t: "mouse", kind: "down", x: 10, y: 20, button: "left", clickCount: 1, modifiers: 0,
+      t: "mouse", kind: "down", x: 10, y: 20, button: "left", buttons: 1, clickCount: 1, modifiers: 0,
     });
-    expect(document.activeElement).toBe(canvas);
-    // The up event carries the clickCount of the click it completes.
-    fireEvent.pointerUp(canvas, { clientX: 10, clientY: 20, button: 0 });
+    expect(document.activeElement).toBe(keyboard);
+    // Moves while the button is held carry it: CDP decides "drag in
+    // progress" from the move event's button/buttons, not from history.
+    mockApi.send.mockClear();
+    fireEvent.pointerMove(canvas, { clientX: 30, clientY: 40 });
+    act(() => {
+      vi.advanceTimersByTime(20);
+    });
     expect(mockApi.send).toHaveBeenCalledWith({
-      t: "mouse", kind: "up", x: 10, y: 20, button: "left", clickCount: 1, modifiers: 0,
+      t: "mouse", kind: "move", x: 30, y: 40, button: "left", buttons: 1, clickCount: 0, modifiers: 0,
     });
-    // pointermove coalesces to one move per animation frame (16ms).
+    // The up event carries the clickCount of the click it completes.
+    mockApi.send.mockClear();
+    fireEvent.pointerUp(canvas, { clientX: 30, clientY: 40, button: 0, pointerId: 1 });
+    expect(mockApi.send).toHaveBeenCalledWith({
+      t: "mouse", kind: "up", x: 30, y: 40, button: "left", buttons: 0, clickCount: 1, modifiers: 0,
+    });
+    // pointermove coalesces to one move per animation frame (16ms); with no
+    // button held it is a hover.
     mockApi.send.mockClear();
     fireEvent.pointerMove(canvas, { clientX: 11, clientY: 21 });
     fireEvent.pointerMove(canvas, { clientX: 12, clientY: 22 });
@@ -164,7 +195,7 @@ describe("ChromeViewport", () => {
     });
     const moves = mockApi.send.mock.calls.filter((c) => (c[0] as { t: string }).t === "mouse" && (c[0] as { kind: string }).kind === "move");
     expect(moves.length).toBe(1);
-    expect(moves[0][0]).toMatchObject({ kind: "move", x: 12, y: 22 });
+    expect(moves[0][0]).toMatchObject({ kind: "move", x: 12, y: 22, button: "none", buttons: 0 });
     // wheel
     mockApi.send.mockClear();
     fireEvent.wheel(canvas, { deltaX: 0, deltaY: 120 });
@@ -173,28 +204,290 @@ describe("ChromeViewport", () => {
     });
   });
 
-  it("maps keyboard to CDP key events with modifiers bitmask", () => {
+  it("releases a held button on pointercancel and on blur, flushing the pending move first", () => {
     const { container } = render(
       <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
     );
     const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 }) as DOMRect;
+    act(() => fireFrame());
+    fireEvent.pointerDown(canvas, { clientX: 10, clientY: 20, button: 0, pointerId: 1 });
+    fireEvent.pointerMove(canvas, { clientX: 50, clientY: 60 });
+    mockApi.send.mockClear();
+    fireEvent.pointerCancel(canvas, { pointerId: 1 });
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([
+      { t: "mouse", kind: "move", x: 50, y: 60, button: "left", buttons: 1, clickCount: 0, modifiers: 0 },
+      { t: "mouse", kind: "up", x: 50, y: 60, button: "left", buttons: 0, clickCount: 1, modifiers: 0 },
+    ]);
+    // Blur mid-press releases the button and every key still down.
+    fireEvent.pointerDown(canvas, { clientX: 100, clientY: 200, button: 2, pointerId: 1 });
+    fireEvent.keyDown(keyboard, { key: "Shift", code: "ShiftLeft", shiftKey: true });
+    mockApi.send.mockClear();
+    fireEvent.blur(keyboard);
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([
+      { t: "key", kind: "up", key: "Shift", code: "ShiftLeft", text: "", modifiers: 0 },
+      { t: "mouse", kind: "up", x: 100, y: 200, button: "right", buttons: 0, clickCount: 1, modifiers: 0 },
+    ]);
+    // Nothing held any more: a second blur is silent.
+    mockApi.send.mockClear();
+    fireEvent.blur(keyboard);
+    expect(mockApi.send).not.toHaveBeenCalled();
+  });
+
+  it("maps keyboard to CDP key events with modifiers bitmask", () => {
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+    );
+    const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
     act(() => fireFrame());
     mockApi.send.mockClear();
-    fireEvent.keyDown(canvas, { key: "a", code: "KeyA" });
-    expect(mockApi.send).toHaveBeenCalledWith({ t: "key", kind: "down", key: "a", code: "KeyA", text: "a", modifiers: 0 });
-    expect(mockApi.send).toHaveBeenCalledWith({ t: "key", kind: "char", key: "a", code: "KeyA", text: "a", modifiers: 0 });
-    fireEvent.keyUp(canvas, { key: "a", code: "KeyA" });
+    // Printable: text rides on the down (Chrome inserts it itself); no
+    // separate "char" event.
+    fireEvent.keyDown(keyboard, { key: "a", code: "KeyA" });
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([
+      { t: "key", kind: "down", key: "a", code: "KeyA", text: "a", modifiers: 0 },
+    ]);
+    fireEvent.keyUp(keyboard, { key: "a", code: "KeyA" });
     expect(mockApi.send).toHaveBeenCalledWith({ t: "key", kind: "up", key: "a", code: "KeyA", text: "a", modifiers: 0 });
-    // Enter: text is \r on down, no char
+    // Enter: text is \r on down.
     mockApi.send.mockClear();
-    fireEvent.keyDown(canvas, { key: "Enter", code: "Enter" });
+    fireEvent.keyDown(keyboard, { key: "Enter", code: "Enter" });
     expect(mockApi.send).toHaveBeenCalledWith({ t: "key", kind: "down", key: "Enter", code: "Enter", text: "\r", modifiers: 0 });
+    // Backspace: no text; the server adds the virtual key code.
+    mockApi.send.mockClear();
+    fireEvent.keyDown(keyboard, { key: "Backspace", code: "Backspace", repeat: true });
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "key", kind: "down", key: "Backspace", code: "Backspace", text: "", modifiers: 0, autoRepeat: true });
     // Modifiers: alt=1 ctrl=2 meta=4 shift=8 (CDP)
     mockApi.send.mockClear();
-    fireEvent.keyDown(canvas, { key: "Tab", code: "Tab", altKey: true, ctrlKey: true, metaKey: false, shiftKey: true });
+    fireEvent.keyDown(keyboard, { key: "Tab", code: "Tab", altKey: true, ctrlKey: true, metaKey: false, shiftKey: true });
     expect(mockApi.send).toHaveBeenCalledWith(
       expect.objectContaining({ t: "key", kind: "down", key: "Tab", modifiers: 1 | 2 | 8 }),
     );
+    // Ctrl/Cmd chords carry no text: Chrome would otherwise type the letter.
+    mockApi.send.mockClear();
+    fireEvent.keyDown(keyboard, { key: "a", code: "KeyA", metaKey: true });
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "key", kind: "down", key: "a", code: "KeyA", text: "", modifiers: 4 });
+  });
+
+  it("bridges copy/cut and paste through the host clipboard", async () => {
+    const writeText = vi.fn(async (_t: string) => {});
+    vi.stubGlobal("navigator", { ...navigator, platform: "MacIntel", clipboard: { writeText } });
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+    );
+    const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
+    act(() => fireFrame());
+    mockApi.send.mockClear();
+    // Copy: selection requested BEFORE the key so cut still reports the text
+    // it removes; the key itself still goes to the page (its copy handlers).
+    fireEvent.keyDown(keyboard, { key: "c", code: "KeyC", metaKey: true });
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([
+      { t: "getSelection" },
+      { t: "key", kind: "down", key: "c", code: "KeyC", text: "", modifiers: 4 },
+    ]);
+    act(() => {
+      for (const cb of mockApi.selectionCbs) cb("copied text");
+    });
+    expect(writeText).toHaveBeenCalledWith("copied text");
+    // Paste: the host paste event carries the clipboard; it becomes an
+    // insertText, never a key (Chrome's own clipboard must not be pasted).
+    mockApi.send.mockClear();
+    const paste = new Event("paste", { bubbles: true, cancelable: true }) as Event & { clipboardData: unknown };
+    paste.clipboardData = { getData: (type: string) => (type === "text/plain" ? "from host" : "") };
+    act(() => {
+      keyboard.dispatchEvent(paste);
+    });
+    expect(paste.defaultPrevented).toBe(true);
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([{ t: "insertText", text: "from host" }]);
+  });
+
+  it("commits IME composition as one insertText and skips composing keys", () => {
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+    );
+    const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
+    act(() => fireFrame());
+    mockApi.send.mockClear();
+    fireEvent.compositionStart(keyboard);
+    fireEvent.keyDown(keyboard, { key: "Process", code: "KeyN" });
+    fireEvent.keyDown(keyboard, { key: "i", code: "KeyI", isComposing: true });
+    fireEvent.keyUp(keyboard, { key: "i", code: "KeyI", isComposing: true });
+    expect(mockApi.send).not.toHaveBeenCalled();
+    fireEvent.compositionEnd(keyboard, { data: "日本" });
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([{ t: "insertText", text: "日本" }]);
+    expect(keyboard.value).toBe("");
+    // A dead key (Option+E on mac) starts a composition too: not forwarded.
+    mockApi.send.mockClear();
+    fireEvent.keyDown(keyboard, { key: "Dead", code: "KeyE", altKey: true });
+    expect(mockApi.send).not.toHaveBeenCalled();
+  });
+
+  it("translates browser-chrome shortcuts into navigation commands", () => {
+    // Non-mac host: Ctrl is primary, Alt+Arrow is history.
+    vi.stubGlobal("navigator", { ...navigator, platform: "Win32" });
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+    );
+    const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
+    act(() => fireFrame());
+    mockApi.send.mockClear();
+    fireEvent.keyDown(keyboard, { key: "F5", code: "F5" });
+    fireEvent.keyDown(keyboard, { key: "ArrowLeft", code: "ArrowLeft", altKey: true });
+    fireEvent.keyDown(keyboard, { key: "ArrowRight", code: "ArrowRight", altKey: true });
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([{ t: "reload" }, { t: "back" }, { t: "forward" }]);
+    // Shift+Alt+Arrow is a page selection chord, not history.
+    mockApi.send.mockClear();
+    fireEvent.keyDown(keyboard, { key: "ArrowLeft", code: "ArrowLeft", altKey: true, shiftKey: true });
+    expect(mockApi.send).toHaveBeenCalledWith(expect.objectContaining({ t: "key", key: "ArrowLeft", modifiers: 1 | 8 }));
+  });
+
+  it("steps page zoom with Cmd/Ctrl +/-/0 and pinch (ctrl+wheel)", () => {
+    vi.stubGlobal("navigator", { ...navigator, platform: "Win32" });
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+    );
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
+    act(() => fireFrame());
+    mockApi.send.mockClear();
+    fireEvent.keyDown(keyboard, { key: "=", code: "Equal", ctrlKey: true });
+    fireEvent.keyDown(keyboard, { key: "=", code: "Equal", ctrlKey: true });
+    fireEvent.keyDown(keyboard, { key: "-", code: "Minus", ctrlKey: true });
+    fireEvent.keyDown(keyboard, { key: "0", code: "Digit0", ctrlKey: true });
+    // Reset at 100% is a no-op; zoom keys never reach the page as keys.
+    fireEvent.keyDown(keyboard, { key: "0", code: "Digit0", ctrlKey: true });
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([
+      { t: "zoom", factor: 1.1 },
+      { t: "zoom", factor: 1.25 },
+      { t: "zoom", factor: 1.1 },
+      { t: "zoom", factor: 1 },
+    ]);
+    // Pinch: ctrl+wheel zooms continuously instead of scrolling.
+    mockApi.send.mockClear();
+    fireEvent.wheel(canvas, { deltaY: -50, ctrlKey: true });
+    const pinch = mockApi.send.mock.calls[0][0] as { t: string; factor: number };
+    expect(pinch.t).toBe("zoom");
+    expect(pinch.factor).toBeCloseTo(Math.exp(0.5), 5);
+    expect(mockApi.send).toHaveBeenCalledTimes(1);
+    // Ctrl+= from an off-preset factor snaps to the next preset.
+    mockApi.send.mockClear();
+    fireEvent.keyDown(keyboard, { key: "=", code: "Equal", ctrlKey: true });
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "zoom", factor: 1.75 });
+  });
+
+  it("persists zoom across a viewport remount and reacts to an external reset", () => {
+    vi.stubGlobal("navigator", { ...navigator, platform: "Win32" });
+    browserActions.open("tab:abc");
+    const { container, unmount } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+    );
+    const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
+    act(() => fireFrame());
+    fireEvent.keyDown(keyboard, { key: "=", code: "Equal", ctrlKey: true });
+    expect(browserStore.state.byKey["tab:abc"].zoom).toBe(1.1);
+
+    // Remount (e.g. switching tabs, which remounts ChromeViewport by key): a
+    // fresh CDP target starts at 100%, so the mount effect must reapply the
+    // persisted zoom instead of leaving it at 100% with no explanation.
+    unmount();
+    mockApi.send.mockClear();
+    const { container: c2 } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+    );
+    act(() => fireFrame());
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "zoom", factor: 1.1 });
+
+    // External reset (e.g. the address bar's zoom badge) flows back in too.
+    mockApi.send.mockClear();
+    act(() => {
+      browserActions.setZoom("tab:abc", 1);
+    });
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "zoom", factor: 1 });
+    void c2;
+  });
+
+  it("forwards touch contacts as touch events, not mouse presses", () => {
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+    );
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 }) as DOMRect;
+    act(() => fireFrame());
+    mockApi.send.mockClear();
+    fireEvent.pointerDown(canvas, { clientX: 10, clientY: 20, pointerId: 7, pointerType: "touch", button: 0 });
+    fireEvent.pointerDown(canvas, { clientX: 100, clientY: 200, pointerId: 8, pointerType: "touch", button: 0 });
+    fireEvent.pointerMove(canvas, { clientX: 15, clientY: 25, pointerId: 7, pointerType: "touch" });
+    fireEvent.pointerMove(canvas, { clientX: 110, clientY: 210, pointerId: 8, pointerType: "touch" });
+    act(() => {
+      vi.advanceTimersByTime(20);
+    });
+    fireEvent.pointerUp(canvas, { clientX: 15, clientY: 25, pointerId: 7, pointerType: "touch", button: 0 });
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([
+      { t: "touch", kind: "start", points: [{ id: 7, x: 10, y: 20 }], modifiers: 0 },
+      { t: "touch", kind: "start", points: [{ id: 8, x: 100, y: 200 }], modifiers: 0 },
+      // One coalesced move carrying both changed contacts.
+      { t: "touch", kind: "move", points: [{ id: 7, x: 15, y: 25 }, { id: 8, x: 110, y: 210 }], modifiers: 0 },
+      { t: "touch", kind: "end", points: [{ id: 7, x: 15, y: 25 }], modifiers: 0 },
+    ]);
+    expect(mockApi.send.mock.calls.every((c) => (c[0] as { t: string }).t !== "mouse")).toBe(true);
+    // Blur cancels the contact still down.
+    mockApi.send.mockClear();
+    fireEvent.blur(keyboard);
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([
+      { t: "touch", kind: "cancel", points: [{ id: 8, x: 110, y: 210 }], modifiers: 0 },
+    ]);
+  });
+
+  it("replays a touch-and-hold as a right-click context menu", () => {
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+    );
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 }) as DOMRect;
+    act(() => fireFrame());
+    fireEvent.pointerDown(canvas, { clientX: 10, clientY: 20, pointerId: 1, pointerType: "touch", button: 0 });
+    mockApi.send.mockClear();
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([
+      { t: "touch", kind: "cancel", points: [{ id: 1, x: 10, y: 20 }], modifiers: 0 },
+      { t: "mouse", kind: "down", x: 10, y: 20, button: "right", buttons: 2, clickCount: 1, modifiers: 0 },
+      { t: "mouse", kind: "up", x: 10, y: 20, button: "right", buttons: 0, clickCount: 1, modifiers: 0 },
+    ]);
+    // The contact was already cancelled by the hold; lifting it sends nothing more.
+    mockApi.send.mockClear();
+    fireEvent.pointerUp(canvas, { clientX: 10, clientY: 20, pointerId: 1, pointerType: "touch", button: 0 });
+    expect(mockApi.send).not.toHaveBeenCalled();
+  });
+
+  it("does not fire a long-press context menu for a quick tap or a drag/scroll", () => {
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+    );
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 }) as DOMRect;
+    act(() => fireFrame());
+
+    // Quick tap: lifted well before the long-press threshold.
+    mockApi.send.mockClear();
+    fireEvent.pointerDown(canvas, { clientX: 10, clientY: 20, pointerId: 1, pointerType: "touch", button: 0 });
+    fireEvent.pointerUp(canvas, { clientX: 10, clientY: 20, pointerId: 1, pointerType: "touch", button: 0 });
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(mockApi.send.mock.calls.some((c) => (c[0] as { t: string }).t === "mouse")).toBe(false);
+
+    // Drag/scroll: moves past the tolerance before the threshold elapses.
+    mockApi.send.mockClear();
+    fireEvent.pointerDown(canvas, { clientX: 10, clientY: 20, pointerId: 2, pointerType: "touch", button: 0 });
+    fireEvent.pointerMove(canvas, { clientX: 40, clientY: 20, pointerId: 2, pointerType: "touch" });
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(mockApi.send.mock.calls.some((c) => (c[0] as { t: string }).t === "mouse")).toBe(false);
   });
 
   it("prevents the context menu", () => {

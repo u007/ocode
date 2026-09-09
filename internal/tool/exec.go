@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/u007/ocode/internal/changes"
 	"github.com/u007/ocode/internal/shell/sandbox"
 	"github.com/u007/ocode/internal/snapshot"
 )
@@ -38,8 +39,11 @@ const bashMaxRetainedBytes = 64 << 20 // 64MiB
 // after it returns. Implementations capture filesystem state around the
 // invocation to detect file changes made by the shell command.
 type BashRecorder interface {
-	Pre()
-	Post(command string, exitCode int)
+	// Pre returns the per-invocation baseline that Post diffs against.
+	// It is passed back rather than stored on the recorder because one
+	// BashTool serves concurrent (parallel) tool calls.
+	Pre() changes.BashBaseline
+	Post(base changes.BashBaseline, command string, exitCode int)
 }
 
 // SandboxState is the per-command sandbox decision resolved by a provider
@@ -185,8 +189,9 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 		return fmt.Sprintf("Started background process %s. Poll with bash_output(id=%q), stop with kill_shell(id=%q).", p.ID, p.ID, p.ID), nil
 	}
 
+	var bashBase changes.BashBaseline
 	if t.Recorder != nil {
-		t.Recorder.Pre()
+		bashBase = t.Recorder.Pre()
 	}
 
 	timeout := bashDefaultTimeout
@@ -322,7 +327,7 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 			finalizeManagedProcess(proc, sup, onDone, err)
 			registerBashWrites(ctx, tcID, backedUpPaths)
 			if t.Recorder != nil {
-				t.Recorder.Post(params.Command, commandExitCode(err))
+				t.Recorder.Post(bashBase, params.Command, commandExitCode(err))
 			}
 			return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, !FullOutputRetained(ctx)), nil
 		case <-proc.bgRequestCh:
@@ -361,7 +366,7 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 			}()
 			registerBashWrites(ctx, tcID, backedUpPaths)
 			if t.Recorder != nil {
-				t.Recorder.Post(params.Command, 124)
+				t.Recorder.Post(bashBase, params.Command, 124)
 			}
 			return finalizeExecResult(res, ctx.Err(), true, timeout, !FullOutputRetained(ctx)), nil
 		}
@@ -371,7 +376,7 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 	res := appendRunawayNotice(joinStdoutStderr(stdout.String(), stderr.String()), stdout.Dropped()+stderr.Dropped())
 	registerBashWrites(ctx, tcID, backedUpPaths)
 	if t.Recorder != nil {
-		t.Recorder.Post(params.Command, commandExitCode(err))
+		t.Recorder.Post(bashBase, params.Command, commandExitCode(err))
 	}
 	return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, !FullOutputRetained(ctx)), nil
 }

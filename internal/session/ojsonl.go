@@ -37,6 +37,7 @@ type ojsonlMsgRecord struct {
 	ToolCalls           []agent.ToolCall         `json:"tool_calls,omitempty"`
 	ToolID              string                   `json:"tool_call_id,omitempty"`
 	OpenAIResponseItems []map[string]interface{} `json:"openai_response_items,omitempty"`
+	OpenAIResponseRoute string                   `json:"openai_response_route,omitempty"`
 	Notice              string                   `json:"notice,omitempty"`
 }
 
@@ -76,6 +77,7 @@ func encodeMsgLine(m agent.Message) ([]byte, error) {
 		ToolCalls:           m.ToolCalls,
 		ToolID:              m.ToolID,
 		OpenAIResponseItems: m.OpenAIResponseItems,
+		OpenAIResponseRoute: m.OpenAIResponseRoute,
 		Notice:              m.Notice,
 	}
 	data, err := json.Marshal(rec)
@@ -100,6 +102,7 @@ func decodeMsgLine(line []byte) (agent.Message, error) {
 		ToolCalls:           rec.ToolCalls,
 		ToolID:              rec.ToolID,
 		OpenAIResponseItems: rec.OpenAIResponseItems,
+		OpenAIResponseRoute: rec.OpenAIResponseRoute,
 		Notice:              rec.Notice,
 	}, nil
 }

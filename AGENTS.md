@@ -651,7 +651,9 @@ the working directory of a session's work. The rules:
   session-scoped operation through `h.workDir`.
 - **Project-scoped endpoints take an explicit project param**, validated
   against `allowedProjectRoots()` (workdir + saved projects — the shared trust
-  boundary): git uses `?project=`, terminal uses `?project_path=`, file tree
+  boundary): git uses `?project=`, terminal uses `?project_path=` (plus
+  `&host=` for a registered remote project, which spawns ssh/wsl.exe instead
+  of a local shell), file tree
   confines `?path=`, command-context and uploads use `?project=` (uploads
   must land in `<project>/.ocode/uploads` — chat and terminal reference them
   by the relative path `.ocode/uploads/<name>`, which resolves against the

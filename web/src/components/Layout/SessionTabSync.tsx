@@ -30,7 +30,11 @@ import {
  *    false and neither the stall watchdog nor the MERGE_SNAPSHOT mid-turn
  *    guard would arm until the next turn.
  */
-export default function SessionTabSync() {
+interface SessionTabSyncProps {
+  onNewTab?: (id: string, project?: string) => void;
+}
+
+export default function SessionTabSync({ onNewTab }: SessionTabSyncProps) {
   const chatDispatch = useChatDispatch();
   const { state: projectState, dispatch: projectDispatch } = useProjectState();
 
@@ -61,6 +65,7 @@ export default function SessionTabSync() {
       dispatch: chatDispatch,
       projectDispatch,
       getState: () => chatStateRef.current,
+      onNewTab,
     };
     // The bus dispatches per-event-type (no wildcard) — subscribe to every
     // event routeBusEnvelope handles individually.
@@ -77,7 +82,7 @@ export default function SessionTabSync() {
       offEnvelope.forEach((off) => off());
       offReconnect();
     };
-  }, [chatDispatch, projectDispatch]);
+  }, [chatDispatch, onNewTab, projectDispatch]);
 
   // Load-time reconcile (see docblock item 4). Tab hydration is itself a
   // mount effect (projectStore RESTORE_TABS), so this cannot simply run on
@@ -94,9 +99,10 @@ export default function SessionTabSync() {
       dispatch: chatDispatch,
       projectDispatch,
       getState: () => chatStateRef.current,
+      onNewTab,
     };
     void reconcileOpenSessions(new Set(openSessionIdsRef.current), router);
-  }, [chatDispatch, realTabKey]);
+  }, [chatDispatch, onNewTab, realTabKey]);
 
   // Activation state-sync: when the active tab lands on a real session,
   // fetch its authoritative turn state once. The routing gate only maintains

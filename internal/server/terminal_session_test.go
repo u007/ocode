@@ -21,8 +21,16 @@ import (
 // leading attach control frame, returning the connection and whether the
 // server reported a resumed shell.
 func dialTerminal(t *testing.T, wsURL, terminalID string) (*websocket.Conn, bool) {
+	return dialTerminalWithQuery(t, wsURL, terminalID, "")
+}
+
+func dialTerminalWithQuery(t *testing.T, wsURL, terminalID, extraQuery string) (*websocket.Conn, bool) {
 	t.Helper()
-	conn, resp, err := websocket.DefaultDialer.Dial(wsURL+"?terminal_id="+terminalID, nil)
+	query := "?terminal_id=" + terminalID
+	if extraQuery != "" {
+		query += "&" + extraQuery
+	}
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL+query, nil)
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
@@ -47,8 +55,94 @@ func dialTerminal(t *testing.T, wsURL, terminalID string) (*websocket.Conn, bool
 	return conn, msg.Resumed
 }
 
+func TestTerminalWSHistoryCursorReplaysOnlyPostSnapshotBytes(t *testing.T) {
+	t.Setenv("SHELL", "/bin/sh")
+	h, _, wsURL := terminalTestHandler(t)
+
+	conn, resumed := dialTerminal(t, wsURL, "term-history-cursor")
+	if resumed {
+		t.Fatal("fresh terminal must not report resumed=true")
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, []byte("echo cursor-before\n")); err != nil {
+		t.Fatalf("write before snapshot: %v", err)
+	}
+	// The PTY can echo the command before the shell's initial prompt has been
+	// delivered. Wait for both the echoed command and its command output before
+	// taking the durable cursor snapshot.
+	readUntilOccurrences(t, conn, "cursor-before\r\n", 2)
+	sess := h.terminalSessions.lookup("term-history-cursor")
+	if sess == nil {
+		t.Fatal("session disappeared before snapshot")
+	}
+	snapshot := sess.history.byteLen()
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	waitFor(t, "detach", func() bool { return !sess.attached() })
+
+	// Simulate output produced after the REST snapshot but before the new
+	// websocket reaches attach. attach() must replay this suffix only.
+	if _, err := sess.ptmx.Write([]byte("echo cursor-after\n")); err != nil {
+		t.Fatalf("write detached output: %v", err)
+	}
+	waitFor(t, "post-snapshot history", func() bool { return sess.history.byteLen() > snapshot })
+
+	conn2, resumed := dialTerminalWithQuery(t, wsURL, "term-history-cursor", "history_offset="+strconv.FormatInt(snapshot, 10))
+	if !resumed {
+		t.Fatal("cursor reattach must report resumed=true")
+	}
+	replay := readUntil(t, conn2, "cursor-after\r\n")
+	if strings.Contains(replay, "cursor-before") {
+		t.Fatalf("cursor replay duplicated pre-snapshot output: %q", replay)
+	}
+}
+
+func TestTerminalSessionDeliverQueuesWhileReplaying(t *testing.T) {
+	sess := &terminalSession{
+		id:        "queued-output",
+		history:   &terminalHistory{},
+		replaying: true,
+	}
+
+	input := []byte("output while replaying")
+	sess.deliver(input)
+	input[0] = 'X'
+
+	if len(sess.pending) != 1 {
+		t.Fatalf("pending chunks = %d, want 1", len(sess.pending))
+	}
+	if got := string(sess.pending[0]); got != "output while replaying" {
+		t.Fatalf("pending output = %q, want original bytes", got)
+	}
+	if sess.pendingSize != len(sess.pending[0]) {
+		t.Fatalf("pending size = %d, want %d", sess.pendingSize, len(sess.pending[0]))
+	}
+}
+
+func TestTerminalSessionDeliverBoundsReplayPendingOutput(t *testing.T) {
+	sess := &terminalSession{
+		id:        "replay-overflow",
+		history:   &terminalHistory{},
+		replaying: true,
+	}
+
+	sess.deliver(make([]byte, terminalReplayPendingCap+1))
+
+	if !sess.replayOver {
+		t.Fatal("replay overflow was not recorded")
+	}
+	if len(sess.pending) != 0 || sess.pendingSize != 0 {
+		t.Fatalf("overflow retained pending output: chunks=%d bytes=%d", len(sess.pending), sess.pendingSize)
+	}
+}
+
 // readUntil drains binary frames until want appears (or the deadline hits).
 func readUntil(t *testing.T, conn *websocket.Conn, want string) string {
+	t.Helper()
+	return readUntilOccurrences(t, conn, want, 1)
+}
+
+func readUntilOccurrences(t *testing.T, conn *websocket.Conn, want string, count int) string {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	var seen strings.Builder
@@ -61,7 +155,7 @@ func readUntil(t *testing.T, conn *websocket.Conn, want string) string {
 			t.Fatalf("read failed before seeing %q (got %q): %v", want, seen.String(), err)
 		}
 		seen.Write(data)
-		if strings.Contains(seen.String(), want) {
+		if strings.Count(seen.String(), want) >= count {
 			return seen.String()
 		}
 	}

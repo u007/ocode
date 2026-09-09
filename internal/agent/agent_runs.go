@@ -521,6 +521,7 @@ type AgentRunRegistry struct {
 	order   []string
 	counter int
 	onDone  func(*AgentRun)
+	active  *activeAgentDispatches
 
 	// limiter caps how many dispatches (across this registry AND any
 	// registries it shares the limiter with, see ShareLimiterFrom) may hold
@@ -530,10 +531,44 @@ type AgentRunRegistry struct {
 	limiter *agentConcurrencyLimiter
 }
 
+// activeAgentDispatches suppresses equivalent subagent work while the first
+// dispatch is still alive. It is separate from runs: completed runs remain
+// queryable and resumable, while these keys exist only for the duration of
+// fresh dispatch execution.
+type activeAgentDispatches struct {
+	mu   sync.Mutex
+	keys map[string]struct{}
+}
+
+func newActiveAgentDispatches() *activeAgentDispatches {
+	return &activeAgentDispatches{keys: make(map[string]struct{})}
+}
+
+// acquire reserves key and returns false when an equivalent dispatch is
+// already active. The returned release function is idempotent so callers can
+// safely defer it across every exit path, including panic recovery.
+func (d *activeAgentDispatches) acquire(key string) (func(), bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, exists := d.keys[key]; exists {
+		return func() {}, false
+	}
+	d.keys[key] = struct{}{}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			d.mu.Lock()
+			delete(d.keys, key)
+			d.mu.Unlock()
+		})
+	}, true
+}
+
 func NewAgentRunRegistry() *AgentRunRegistry {
 	return &AgentRunRegistry{
 		runs:    make(map[string]*AgentRun),
 		limiter: &agentConcurrencyLimiter{},
+		active:  newActiveAgentDispatches(),
 	}
 }
 
@@ -544,10 +579,37 @@ func NewAgentRunRegistry() *AgentRunRegistry {
 // right after a subagent's AgentRunRegistry is constructed and before its
 // Step loop starts.
 func (r *AgentRunRegistry) ShareLimiterFrom(parent *AgentRunRegistry) {
-	if parent == nil || parent.limiter == nil {
+	if parent == nil {
 		return
 	}
-	r.limiter = parent.limiter
+	parent.mu.Lock()
+	if parent.limiter == nil {
+		parent.limiter = &agentConcurrencyLimiter{}
+	}
+	if parent.active == nil {
+		parent.active = newActiveAgentDispatches()
+	}
+	limiter := parent.limiter
+	active := parent.active
+	parent.mu.Unlock()
+
+	r.mu.Lock()
+	r.limiter = limiter
+	r.active = active
+	r.mu.Unlock()
+}
+
+func (r *AgentRunRegistry) acquireActiveDispatch(key string) (func(), bool) {
+	if r == nil {
+		return func() {}, true
+	}
+	r.mu.Lock()
+	if r.active == nil {
+		r.active = newActiveAgentDispatches()
+	}
+	active := r.active
+	r.mu.Unlock()
+	return active.acquire(key)
 }
 
 // SetMaxConcurrent sets the concurrency limit for Acquire calls. n<=0 means

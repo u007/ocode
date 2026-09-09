@@ -64,6 +64,30 @@ describe("buildTerminalWsConnection", () => {
       });
       expect(url).toContain("project_path=%2Fproj");
       expect(url).toContain("terminal_id=t1");
+      expect(url).not.toContain("host=");
     }
+  });
+
+  it("adds host for a remote (SSH/WSL) project so the server opens the shell there", () => {
+    const { url } = buildTerminalWsConnection({
+      token: "",
+      projectPath: "~/app",
+      host: "dev@box",
+      terminalId: "t1",
+      isRemote: false,
+    });
+    expect(url).toContain("host=dev%40box");
+    expect(url).toContain("project_path=%7E%2Fapp");
+  });
+
+  it("adds a history cursor for a gap-free REST-to-WebSocket handoff", () => {
+    const { url } = buildTerminalWsConnection({
+      token: "",
+      projectPath: "/proj",
+      terminalId: "t1",
+      isRemote: false,
+      historyOffset: 12345,
+    });
+    expect(url).toContain("history_offset=12345");
   });
 });

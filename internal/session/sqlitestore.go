@@ -548,7 +548,15 @@ func appendUserMessageTail(dir, id, content string) error {
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&existingCount); err != nil {
 		return fmt.Errorf("session: count messages %s: %w", id, err)
 	}
-	data, err := json.Marshal(agent.Message{Role: "user", Content: content})
+	// Stamp the same user_seq the turn will assign in memory (server
+	// nextUserSeq over the loaded transcript): max stored seq + 1. The
+	// stored copy and the in-memory copy must serialize identically or the
+	// live/turn-end overlap check reads the turn as a diverged writer.
+	var maxSeq int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(json_extract(data, '$.user_seq')), 0) FROM messages WHERE json_extract(data, '$.role') = 'user'`).Scan(&maxSeq); err != nil {
+		return fmt.Errorf("session: max user_seq %s: %w", id, err)
+	}
+	data, err := json.Marshal(agent.Message{Role: "user", Content: content, UserSeq: maxSeq + 1})
 	if err != nil {
 		return fmt.Errorf("session: marshal user message %s: %w", id, err)
 	}
@@ -694,4 +702,51 @@ func mergeMetas(legacy, indexed []ocodeMeta) []ocodeMeta {
 		}
 	}
 	return append(merged, indexed...)
+}
+
+// updateSqliteMetadata rewrites only meta.metadata_json (and updated_at) for
+// id inside one immediate transaction. Message rows, title, and history_gen
+// are untouched. See UpdateMetadataForDir for why this must not go through
+// the full-snapshot save.
+func updateSqliteMetadata(dir, id string, mutate func(map[string]any)) error {
+	mu := lockFor(dir, id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	db, err := openSessionDB(sqliteSessionPath(dir, id))
+	if err != nil {
+		return fmt.Errorf("session: open sqlite %s: %w", id, err)
+	}
+	defer db.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("session: begin tx %s: %w", id, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var metaJSON string
+	if err := tx.QueryRow(`SELECT metadata_json FROM meta WHERE id = ?`, id).Scan(&metaJSON); err != nil {
+		return fmt.Errorf("session: read metadata %s: %w", id, err)
+	}
+	// A nil-metadata save stores the literal "null", which unmarshals to a
+	// nil map; normalize so mutate can assign.
+	var metadata map[string]any
+	if metaJSON != "" {
+		if err := json.Unmarshal([]byte(metaJSON), &metadata); err != nil {
+			return fmt.Errorf("session: unmarshal metadata %s: %w", id, err)
+		}
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	mutate(metadata)
+	b, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("session: marshal metadata %s: %w", id, err)
+	}
+	if _, err := tx.Exec(`UPDATE meta SET metadata_json = ?, updated_at = ? WHERE id = ?`, string(b), time.Now(), id); err != nil {
+		return fmt.Errorf("session: update metadata %s: %w", id, err)
+	}
+	return tx.Commit()
 }

@@ -375,3 +375,66 @@ func TestQuestionEventEmittedOnRealTurn(t *testing.T) {
 		t.Fatalf("runTurn did not return after the question pause")
 	}
 }
+
+// gatedQuestionClient blocks the model round until release is closed, so a
+// test can prove an SSE frame was broadcast BEFORE the continuation ran.
+type gatedQuestionClient struct{ release <-chan struct{} }
+
+func (c gatedQuestionClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
+	<-c.release
+	return &agent.Message{Role: "assistant", Content: "thanks, deploying to staging"}, nil
+}
+func (gatedQuestionClient) GetProvider() string { return "fake" }
+func (gatedQuestionClient) GetModel() string    { return "fake-model" }
+
+// The question_resolved frame must be broadcast BEFORE the continuation round
+// runs, so the web dialog dismisses the instant the answer is applied rather
+// than lingering for the whole model round-trip. Mirrors the permission path
+// (TestHandleResolvePermissionBroadcastsResolvedBeforeContinuation).
+func TestHandleAnswerQuestionBroadcastsResolvedBeforeContinuation(t *testing.T) {
+	h := NewHandler()
+	release := make(chan struct{})
+	ag := agent.NewAgent(gatedQuestionClient{release: release}, nil, nil, nil)
+	as := &agentSession{
+		agent: ag,
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "deploy"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: questionAskContent(t, sampleQuestion())},
+		},
+	}
+	h.agents["sess-1"] = as
+
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+
+	body := `{"request_id":"call-1","answers":[{"header":"Deploy target","question":"Where should I deploy?","answers":[{"label":"Staging"}]}]}`
+	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.HandleAnswerQuestion(rec, req)
+	}()
+
+	// The model round is blocked; question_resolved must still arrive now.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-sub:
+			if ev.Event == "question_resolved" {
+				goto released
+			}
+		case <-deadline:
+			t.Fatalf("question_resolved not broadcast before the continuation round")
+		}
+	}
+released:
+	close(release)
+	<-done
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+}

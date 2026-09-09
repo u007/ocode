@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getBrowseBase, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS, isRemoteSession } from "../../api/client";
+import { getBrowseBase, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS } from "../../api/client";
 import { useBrowserStore, useBrowserActions, isPrivateHost, type StateKey } from "../../lib/browserStore";
 import { AddressBar } from "./AddressBar";
 import { DevConsole } from "./DevConsole";
@@ -146,9 +146,6 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
     if (s && s.status > 0 && !s.loading && !s.error) setEverLoaded(true);
   }, [s?.status, s?.loading, s?.error, s]);
 
-  // Only local/private navigations can show the bypass interstitial — a
-  // Chrome-mode error must never offer to bypass a public host.
-  const isTLSBypassable = !!s?.error && s.error.includes("TLS certificate") && s.mode === "local";
   const bypassHost = (() => {
     if (!s?.url) return "";
     try {
@@ -157,6 +154,14 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
       return "";
     }
   })();
+  // Only private hosts can show the bypass interstitial — local mode is
+  // private by construction; Chrome mode reaches private hosts only via the
+  // dev-server escape hatch and must never offer to bypass a public host
+  // (the server re-validates the host regardless).
+  const isTLSBypassable =
+    !!s?.error &&
+    s.error.includes("TLS certificate") &&
+    (s.mode === "local" || (s.mode === "chrome" && !!bypassHost && isPrivateHost(bypassHost)));
 
   const isLoopbackHttps = (() => {
     if (!s?.url || s.error || s.status === 0) return false;
@@ -180,6 +185,13 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
       // Guard the race: if the user navigated elsewhere while the bypass
       // POST was in flight, don't reload the stale URL.
       if (s?.url !== urlAtBypass || genAtBypass !== loadGeneration.current) return;
+      if (s?.mode === "chrome") {
+        // Chrome now ignores this host's certificate: clear the error and
+        // reload through the viewport's socket.
+        if (s.url) actions.navigate(stateKey, s.url);
+        window.dispatchEvent(new CustomEvent("cdp:send", { detail: { t: "reload", stateKey } }));
+        return;
+      }
       const iframe = iframeRef.current;
       if (iframe && s?.url && base) await loadInto(iframe, s.url);
     } catch (e) {
@@ -191,23 +203,6 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
 
   if (!s) return null;
 
-  // The browse origin runs on a second local port that isn't tunneled in
-  // `--web` remote mode (only the main server port is), so the SPA's
-  // /api/browse/config-provided base URL points at a port on the *local*
-  // machine — unrelated to (or potentially conflicting with) the remote
-  // host. Rather than embed a broken or misleading iframe, disable the
-  // panel entirely for a remote session until a second tunnel exists.
-  if (isRemoteSession()) {
-    return (
-      <div
-        className="flex flex-col items-center justify-center h-full min-h-0 min-w-0 p-4 text-center text-sm text-neutral-500 dark:text-neutral-400"
-        data-testid={`browser-${mode}-remote-unavailable`}
-      >
-        Browser panel isn't available in a remote session yet.
-      </div>
-    );
-  }
-
   return (
     <div className="flex flex-col h-full min-h-0 min-w-0" data-testid={`browser-${mode}`}>
       <AddressBar
@@ -217,6 +212,8 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
         error={s.error ?? ""}
         canBack={s.historyIndex > 0}
         canForward={s.historyIndex < s.history.length - 1}
+        zoom={effectiveMode === "chrome" ? s.zoom : undefined}
+        onResetZoom={() => actions.setZoom(stateKey, 1)}
         onNavigate={(url) => {
           try {
             actions.navigate(stateKey, normalizeBrowseURL(url));

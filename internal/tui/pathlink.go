@@ -26,7 +26,16 @@ type pathLinkRegion struct {
 // is deliberately permissive — candidates are filtered by looksLikePathToken
 // and verified against the filesystem (only existing files become links). A
 // trailing :line[-endline] or :line:col suffix is captured as part of the token.
-var pathCandidateRe = regexp.MustCompile(`[A-Za-z0-9._/+@~-]+(?::[0-9]+(?:[-:][0-9]+)?)?`)
+//
+// The first alternative mirrors UPLOAD_SOURCE in web/src/lib/fileLinks.tsx:
+// uploads are referenced as `.ocode/uploads/<name>` and macOS screenshot names
+// contain spaces (including U+00A0 / U+202F). Spaces are allowed ONLY inside an
+// `.ocode/uploads/`-anchored token ending in a media extension, so ordinary
+// prose never merges into one candidate. RE2 alternation is leftmost-first, so
+// the upload branch wins over the generic token at the same position.
+var pathCandidateRe = regexp.MustCompile(
+	`\.ocode/uploads/[A-Za-z0-9._-]+(?:[ \x{00A0}\x{202F}]+[A-Za-z0-9._-]+)*\.(?:png|jpe?g|gif|webp|bmp|tiff?|svg|pdf)(?::[0-9]+(?:[-:][0-9]+)?)?` +
+		`|[A-Za-z0-9._/+@~-]+(?::[0-9]+(?:[-:][0-9]+)?)?`)
 
 // looksLikePathToken cheaply rejects ordinary words before paying for a stat.
 func looksLikePathToken(tok string) bool {

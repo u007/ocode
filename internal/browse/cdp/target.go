@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -19,9 +21,13 @@ type Target struct {
 	manager          *Manager
 	stateKey         string
 	browserContextID string
-	targetID         string
-	sessionID        string
-	conn             *Conn
+	// sharedContext is set for tabs Chrome opened from one of ours (popup,
+	// middle-click): they live in the opener's browser context, which must
+	// not be disposed when this tab alone goes away.
+	sharedContext bool
+	targetID      string
+	sessionID     string
+	conn          *Conn
 
 	mu   sync.Mutex
 	sink FrameSink
@@ -29,6 +35,13 @@ type Target struct {
 	// viewport state
 	vpW, vpH int
 	vpDPR    float64
+	// zoom is the page zoom factor (1 = 100%). Applied like browser zoom:
+	// layout viewport shrinks by zoom, device scale grows by zoom, so the
+	// screencast stays the same pixel size.
+	zoom float64
+	// touchEmulated is set once Emulation.setTouchEmulationEnabled ran; only
+	// hosts that actually send touch contacts turn it on.
+	touchEmulated bool
 
 	// main frame tracking
 	mainFrameID string
@@ -191,10 +204,25 @@ func (t *Target) setTopLevelHost(ctx context.Context, rawURL string) {
 		}
 		proxy.AllowHost(hostport)
 	}
-	if err := t.conn.Call(ctx, t.sessionID, "Security.setIgnoreCertificateErrors",
-		map[string]bool{"ignore": isLoopbackHostname(u.Hostname())}, nil); err != nil && t.manager.opts.Log != nil {
+	if err := t.applyCertPolicy(ctx); err != nil && t.manager.opts.Log != nil {
 		t.manager.opts.Log.Printf("browse cdp: Security.setIgnoreCertificateErrors for %s: %v", hostport, err)
 	}
+}
+
+// applyCertPolicy tells Chrome whether to enforce certificates for the
+// current top-level host: ignored on loopback (self-signed dev certs, parity
+// with local mode's auto-allow) and on hosts the user explicitly trusted via
+// the "Continue anyway" interstitial; enforced everywhere else.
+func (t *Target) applyCertPolicy(ctx context.Context) error {
+	t.mu.Lock()
+	hostport := t.navHost
+	t.mu.Unlock()
+	hostname := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		hostname = h
+	}
+	ignore := isLoopbackHostname(hostname) || t.manager.isTrusted(t.stateKey, hostname, hostport)
+	return t.conn.Call(ctx, t.sessionID, "Security.setIgnoreCertificateErrors", map[string]bool{"ignore": ignore}, nil)
 }
 
 // releaseTopLevelHost drops the egress registration when the target goes away.
@@ -241,7 +269,8 @@ func (t *Target) startHandlers() {
 	chPaused, c10 := t.conn.SubscribeLossless(t.sessionID, "Fetch.requestPaused")
 	chFinished, c11 := t.conn.Subscribe(t.sessionID, "Network.loadingFinished")
 	chPerf, c12 := t.conn.Subscribe(t.sessionID, "Performance.metrics")
-	t.cancels = append(t.cancels, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12)
+	chDialog, c13 := t.conn.SubscribeLossless(t.sessionID, "Page.javascriptDialogOpening")
+	t.cancels = append(t.cancels, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13)
 	t.reqStart = make(map[string]time.Time)
 	t.pendingReqs = make(map[string]*pendingReq)
 	t.completedReqs = make(map[string]*completedReq)
@@ -259,6 +288,7 @@ func (t *Target) startHandlers() {
 	go t.handleException(chExc)
 	go t.handleAuthRequired(chAuth)
 	go t.handleRequestPaused(chPaused)
+	go t.handleJavaScriptDialog(chDialog)
 
 	// Enable Fetch auth handling (proxy 407). Must be after the subscriptions
 	// above so no auth challenge is missed before the handler is live. Also
@@ -442,6 +472,11 @@ func (t *Target) handleLoadingFailed(ch <-chan json.RawMessage) {
 			// Map tunnel/proxy errors
 			if strings.Contains(errText, "ERR_TUNNEL_CONNECTION_FAILED") || strings.Contains(errText, "ERR_PROXY_CONNECTION_FAILED") {
 				errText = errText + " not reachable from Chrome mode — open externally"
+			}
+			// Certificate failures carry the same stable prefix local mode
+			// uses so the SPA can offer its "Continue anyway" interstitial.
+			if strings.Contains(errText, "ERR_CERT_") || strings.Contains(errText, "ERR_SSL_") {
+				errText = "TLS certificate not trusted — " + errText
 			}
 			t.manager.emitNav(NavEvent{StateKey: t.stateKey, Error: errText, Status: 0})
 		}
@@ -900,6 +935,30 @@ func (t *Target) Resize(ctx context.Context, w, h int, dpr float64) error {
 	t.vpH = h
 	t.vpDPR = dpr
 	t.mu.Unlock()
+	return t.applyViewport(ctx)
+}
+
+// SetZoom applies a page zoom factor (clamped to 25%–500%) to the stored
+// viewport and re-emits device metrics. No-op before the first Resize.
+func (t *Target) SetZoom(ctx context.Context, factor float64) error {
+	factor = math.Min(5, math.Max(0.25, factor))
+	t.mu.Lock()
+	t.zoom = factor
+	sized := t.vpW > 0 && t.vpH > 0
+	t.mu.Unlock()
+	if !sized {
+		return nil
+	}
+	return t.applyViewport(ctx)
+}
+
+func (t *Target) applyViewport(ctx context.Context) error {
+	t.mu.Lock()
+	w, h, dpr, zoom := t.vpW, t.vpH, t.vpDPR, t.zoom
+	t.mu.Unlock()
+	if zoom == 0 {
+		zoom = 1
+	}
 	maxW := int(float64(w) * dpr)
 	maxH := int(float64(h) * dpr)
 	if maxW == 0 {
@@ -909,11 +968,53 @@ func (t *Target) Resize(ctx context.Context, w, h int, dpr float64) error {
 		maxH = h
 	}
 	if err := t.conn.Call(ctx, t.sessionID, "Emulation.setDeviceMetricsOverride", map[string]any{
-		"width": w, "height": h, "deviceScaleFactor": dpr, "mobile": false,
+		"width":             int(math.Round(float64(w) / zoom)),
+		"height":            int(math.Round(float64(h) / zoom)),
+		"deviceScaleFactor": dpr * zoom,
+		"mobile":            false,
 	}, nil); err != nil {
 		return err
 	}
 	return t.restartScreencastWith(ctx, maxW, maxH)
+}
+
+// Touch forwards touch contacts (Input.dispatchTouchEvent), enabling touch
+// emulation on first use so Chrome accepts them and the page sees a
+// touch-capable device.
+func (t *Target) Touch(ctx context.Context, ev TouchEvent) error {
+	t.mu.Lock()
+	enabled := t.touchEmulated
+	t.touchEmulated = true
+	t.mu.Unlock()
+	if !enabled {
+		if err := t.conn.Call(ctx, t.sessionID, "Emulation.setTouchEmulationEnabled",
+			map[string]any{"enabled": true, "maxTouchPoints": 5}, nil); err != nil {
+			t.mu.Lock()
+			t.touchEmulated = false
+			t.mu.Unlock()
+			return err
+		}
+	}
+	var typ string
+	switch ev.Kind {
+	case "start":
+		typ = "touchStart"
+	case "move":
+		typ = "touchMove"
+	case "end":
+		typ = "touchEnd"
+	case "cancel":
+		typ = "touchCancel"
+	default:
+		typ = ev.Kind
+	}
+	points := make([]map[string]any, 0, len(ev.Points))
+	for _, p := range ev.Points {
+		points = append(points, map[string]any{"x": p.X, "y": p.Y, "id": p.ID})
+	}
+	return t.conn.Call(ctx, t.sessionID, "Input.dispatchTouchEvent", map[string]any{
+		"type": typ, "touchPoints": points, "modifiers": ev.Modifiers,
+	}, nil)
 }
 
 func (t *Target) Mouse(ctx context.Context, ev MouseEvent) error {
@@ -931,7 +1032,7 @@ func (t *Target) Mouse(ctx context.Context, ev MouseEvent) error {
 		typ = ev.Kind
 	}
 	params := map[string]any{
-		"type": typ, "x": ev.X, "y": ev.Y, "button": ev.Button, "clickCount": ev.ClickCount, "modifiers": ev.Modifiers,
+		"type": typ, "x": ev.X, "y": ev.Y, "button": ev.Button, "buttons": ev.Buttons, "clickCount": ev.ClickCount, "modifiers": ev.Modifiers,
 	}
 	if ev.Kind == "wheel" {
 		params["deltaX"] = ev.DeltaX
@@ -941,20 +1042,39 @@ func (t *Target) Mouse(ctx context.Context, ev MouseEvent) error {
 }
 
 func (t *Target) Key(ctx context.Context, ev KeyEvent) error {
-	var typ string
-	switch ev.Kind {
-	case "down":
-		typ = "keyDown"
-	case "up":
-		typ = "keyUp"
-	case "char":
-		typ = "char"
-	default:
-		typ = ev.Kind
+	return t.conn.Call(ctx, t.sessionID, "Input.dispatchKeyEvent", keyEventParams(runtime.GOOS, ev), nil)
+}
+
+// InsertText inserts text at the page's caret as an IME commit would
+// (Input.insertText). Used for host-clipboard paste and composed input.
+func (t *Target) InsertText(ctx context.Context, text string) error {
+	return t.conn.Call(ctx, t.sessionID, "Input.insertText", map[string]string{"text": text}, nil)
+}
+
+// selectionTextExpr reads the page's selected text, honouring the caret
+// selection inside a focused <input>/<textarea> (getSelection() alone reports
+// "" for those in some Chrome versions).
+const selectionTextExpr = `(() => {
+	const el = document.activeElement;
+	if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && typeof el.selectionStart === 'number') {
+		return el.value.slice(el.selectionStart, el.selectionEnd);
 	}
-	return t.conn.Call(ctx, t.sessionID, "Input.dispatchKeyEvent", map[string]any{
-		"type": typ, "key": ev.Key, "code": ev.Code, "text": ev.Text, "modifiers": ev.Modifiers,
-	}, nil)
+	const s = window.getSelection();
+	return s ? s.toString() : '';
+})()`
+
+// SelectionText returns the page's current selected text.
+func (t *Target) SelectionText(ctx context.Context) (string, error) {
+	var res struct {
+		Result struct {
+			Value string `json:"value"`
+		} `json:"result"`
+	}
+	if err := t.conn.Call(ctx, t.sessionID, "Runtime.evaluate",
+		map[string]any{"expression": selectionTextExpr, "returnByValue": true}, &res); err != nil {
+		return "", err
+	}
+	return res.Result.Value, nil
 }
 
 func (t *Target) Detach() {
@@ -964,6 +1084,52 @@ func (t *Target) Detach() {
 	t.mu.Unlock()
 	if sink != nil {
 		_ = t.conn.Call(context.Background(), t.sessionID, "Page.stopScreencast", nil, nil)
+	}
+}
+
+// stopHandlers cancels every event subscription startHandlers/startFileChooser
+// registered, which closes their channels and lets the handler goroutines
+// exit. Without this a revoked tab's handlers outlived it forever, still
+// fanned-out to by the read loop and still issuing commands to a dead session.
+func (t *Target) stopHandlers() {
+	t.mu.Lock()
+	cancels := t.cancels
+	t.cancels = nil
+	t.mu.Unlock()
+	for _, c := range cancels {
+		c()
+	}
+}
+
+// handleJavaScriptDialog answers alert/confirm/prompt/beforeunload. With the
+// Page domain enabled Chrome blocks the renderer until the client replies to
+// Page.handleJavaScriptDialog — every renderer-bound command (input, evaluate,
+// navigate) hangs meanwhile. There is no UI for dialogs yet, so they are
+// auto-accepted and surfaced as a console line so the user can see what the
+// page asked.
+func (t *Target) handleJavaScriptDialog(ch <-chan json.RawMessage) {
+	for raw := range ch {
+		var ev struct {
+			Type          string `json:"type"`
+			Message       string `json:"message"`
+			DefaultPrompt string `json:"defaultPrompt"`
+		}
+		_ = json.Unmarshal(raw, &ev)
+		t.mu.Lock()
+		sink := t.sink
+		t.mu.Unlock()
+		if sink != nil {
+			sink.Console(ConsoleEvent{
+				Level: "warning",
+				Args:  []string{fmt.Sprintf("[dialog %s auto-accepted] %s", ev.Type, ev.Message)},
+				TS:    time.Now().UnixMilli(),
+			})
+		}
+		params := map[string]any{"accept": true}
+		if ev.Type == "prompt" {
+			params["promptText"] = ev.DefaultPrompt
+		}
+		_ = t.conn.Call(context.Background(), t.sessionID, "Page.handleJavaScriptDialog", params, nil)
 	}
 }
 

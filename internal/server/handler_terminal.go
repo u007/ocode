@@ -4,6 +4,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/creack/pty"
@@ -18,6 +20,7 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/remote"
 )
 
 // terminalUpgrader upgrades /api/terminal/ws. The origin check is same-origin
@@ -113,7 +116,7 @@ type terminalResizeMsg struct {
 func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	workDir := h.workDir
-	available := h.terminalAuthConfigured || h.terminalLoopback
+	available := h.terminalAccessAllowed()
 	shellOverride := ""
 	if h.cfg != nil {
 		shellOverride = h.cfg.Ocode.TerminalShell
@@ -126,42 +129,80 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "terminal requires server authentication or a loopback bind address")
 		return
 	}
-	if requested := r.URL.Query().Get("project_path"); requested != "" && requested != workDir {
-		allowed := false
-		for _, root := range h.allowedProjectRoots() {
-			if requested == root {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			log.Printf("terminal: rejected project_path %q: not a registered project root", requested)
-			writeError(w, http.StatusForbidden, "project_path is not a project registered with this server")
+	// Remote (ocode Remote SSH/WSL) projects: the path lives on another
+	// machine, so instead of a local shell the pty runs ssh/wsl.exe into it.
+	// `host` must be registered together with `project_path` in the projects
+	// store — the query string never gets to name an arbitrary ssh target.
+	// The session's project key is host:path so it can never be reattached
+	// from, or mistaken for, a same-path local project.
+	requestedPath := r.URL.Query().Get("project_path")
+	host := r.URL.Query().Get("host")
+	var (
+		project string
+		cmd     *exec.Cmd
+	)
+	if host != "" {
+		if !h.remoteProjectRegistered(host, requestedPath) {
+			log.Printf("terminal: rejected remote %s:%s: not a registered remote project", host, requestedPath)
+			writeError(w, http.StatusForbidden, "host/project_path is not a remote project registered with this server")
 			return
 		}
-		workDir = requested
-	}
-
-	if workDir == "" {
-		workDir = "."
-	}
-
-	// A registered project root can vanish from disk (deleted, renamed,
-	// unmounted). pty.Start would fail with an opaque 500, so fall back to the
-	// user's home directory and still hand out a shell.
-	if _, statErr := os.Stat(workDir); statErr != nil {
-		log.Printf("terminal: working directory %q unavailable, falling back to home dir: %v", workDir, statErr)
-		home, homeErr := os.UserHomeDir()
-		if homeErr != nil {
-			log.Printf("terminal: resolve home dir fallback failed: %v", homeErr)
-			home = "/"
+		target, err := remote.ParseTarget(host)
+		if err != nil {
+			log.Printf("terminal: rejected remote host %q: %v", host, err)
+			writeError(w, http.StatusForbidden, "invalid remote host")
+			return
 		}
-		workDir = home
-	}
+		project = host + ":" + requestedPath
+		cmd = remote.ShellCommand(target, requestedPath)
+		if cmd == nil {
+			log.Printf("terminal: rejected remote %s:%s: empty host/path", host, requestedPath)
+			writeError(w, http.StatusForbidden, "host/project_path is not a remote project registered with this server")
+			return
+		}
+	} else {
+		if requestedPath != "" && requestedPath != workDir {
+			allowed := false
+			for _, root := range h.allowedProjectRoots() {
+				if requestedPath == root {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				log.Printf("terminal: rejected project_path %q: not a registered project root", requestedPath)
+				writeError(w, http.StatusForbidden, "project_path is not a project registered with this server")
+				return
+			}
+			workDir = requestedPath
+		}
 
-	shell := shellOverride
-	if shell == "" {
-		shell = config.DefaultTerminalShell()
+		if workDir == "" {
+			workDir = "."
+		}
+		// Keep the logical project key stable even if the registered directory
+		// disappears; only cmd.Dir may fall back to the user's home directory.
+		project = workDir
+
+		// A registered project root can vanish from disk (deleted, renamed,
+		// unmounted). pty.Start would fail with an opaque 500, so fall back to the
+		// user's home directory and still hand out a shell.
+		if _, statErr := os.Stat(workDir); statErr != nil {
+			log.Printf("terminal: working directory %q unavailable, falling back to home dir: %v", workDir, statErr)
+			home, homeErr := os.UserHomeDir()
+			if homeErr != nil {
+				log.Printf("terminal: resolve home dir fallback failed: %v", homeErr)
+				home = "/"
+			}
+			workDir = home
+		}
+
+		shell := shellOverride
+		if shell == "" {
+			shell = config.DefaultTerminalShell()
+		}
+		cmd = terminalShellCommand(shell)
+		cmd.Dir = workDir
 	}
 
 	// terminal_id (the frontend's TerminalPanel `id`) is the reattach key: a
@@ -170,6 +211,11 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	// correlate a pid with the tab the browser shows it under. An empty id
 	// (old/other clients) gets a shell that dies with its socket, as before.
 	terminalID := r.URL.Query().Get("terminal_id")
+	historyOffset, hasHistoryOffset, err := terminalHistoryCursor(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "history_offset must be a non-negative integer")
+		return
+	}
 
 	// Anonymous sockets (no id) have nothing to reattach to: each spawns its
 	// own shell that dies with its socket. They skip the reservation — the
@@ -177,9 +223,9 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	// "create" — but still publish their session under the generated anon-N
 	// key so the kill/shutdown paths can reach them.
 	if terminalID == "" {
-		anonSess, anonErr := h.startTerminalShell("", workDir, shell)
+		anonSess, anonErr := h.startTerminalShell("", project, cmd)
 		if anonErr != nil {
-			log.Printf("terminal: failed to start pty shell %q in %q: %v", shell, workDir, anonErr)
+			log.Printf("terminal: failed to start pty shell %q for %q: %v", cmd.Path, project, anonErr)
 			writeError(w, http.StatusInternalServerError, "failed to start terminal")
 			return
 		}
@@ -206,9 +252,13 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if existing.project != workDir {
-			log.Printf("terminal %s: rejected reattach from project %q (owned by %q)", terminalID, workDir, existing.project)
+		if existing.project != project {
+			log.Printf("terminal %s: rejected reattach from project %q (owned by %q)", terminalID, project, existing.project)
 			writeError(w, http.StatusConflict, "terminal_id belongs to a different project")
+			return
+		}
+		if hasHistoryOffset && historyOffset > existing.history.byteLen() {
+			writeError(w, http.StatusRequestedRangeNotSatisfiable, "history_offset is past terminal history")
 			return
 		}
 		ws, err := terminalUpgrader.Upgrade(w, r, terminalUpgradeRespHeader(r))
@@ -217,7 +267,17 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ws.SetReadLimit(terminalMaxMessageSize)
-		if !existing.attach(ws, true) {
+		if hasHistoryOffset {
+			if !existing.attach(ws, true, historyOffset) {
+				// Shell exited between lookup and attach; the client will retry and
+				// get a fresh shell.
+				log.Printf("terminal %s: shell exited before reattach completed", terminalID)
+				if err := ws.Close(); err != nil {
+					log.Printf("terminal %s: failed to close websocket: %v", terminalID, err)
+				}
+				return
+			}
+		} else if !existing.attach(ws, true) {
 			// Shell exited between lookup and attach; the client will retry and
 			// get a fresh shell.
 			log.Printf("terminal %s: shell exited before reattach completed", terminalID)
@@ -232,36 +292,48 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// This caller won the reservation: spawn exactly one shell for the id.
-	sess, err := h.startTerminalShell(terminalID, workDir, shell)
+	sess, err := h.startTerminalShell(terminalID, project, cmd)
 	// Publish the session (or the failure) before doing anything else so
 	// waiters unblock promptly; on failure they re-lookup, find nothing, and
 	// return an error the client will retry.
 	h.terminalSessions.completeCreate(terminalID, sess)
 	if err != nil {
-		log.Printf("terminal: failed to start pty shell %q in %q: %v", shell, workDir, err)
+		log.Printf("terminal: failed to start pty shell %q for %q: %v", cmd.Path, project, err)
 		writeError(w, http.StatusInternalServerError, "failed to start terminal")
 		return
 	}
 	h.serveFreshTerminal(w, r, sess)
 }
 
-// startTerminalShell spawns a pty-backed shell in workDir and returns it
-// fully wired: process registered and readLoop running. It does NOT publish
-// the session to the reattach table — callers do that (completeCreate for
-// named ids, or the anonymous path) so concurrent waiters only ever see a
-// fully started shell. On failure the shell is torn down so no process,
-// pty fd, or goroutine survives.
-func (h *Handler) startTerminalShell(terminalID, workDir, shell string) (*terminalSession, error) {
-	cmd := terminalShellCommand(shell)
-	cmd.Dir = workDir
+func terminalHistoryCursor(r *http.Request) (int64, bool, error) {
+	value := r.URL.Query().Get("history_offset")
+	if value == "" {
+		return 0, false, nil
+	}
+	offset, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || offset < 0 {
+		return 0, false, errors.New("invalid history offset")
+	}
+	return offset, true, nil
+}
+
+// startTerminalShell pty-starts cmd (a local login shell with Dir set, or
+// an ssh/wsl.exe command for a remote project) and returns the session
+// fully wired: process registered and readLoop running. project is the
+// session's reattach/ownership key (local: the workdir; remote: host:path).
+// It does NOT publish the session to the reattach table — callers do that
+// (completeCreate for named ids, or the anonymous path) so concurrent
+// waiters only ever see a fully started shell. On failure the shell is
+// torn down so no process, pty fd, or goroutine survives.
+func (h *Handler) startTerminalShell(terminalID, project string, cmd *exec.Cmd) (*terminalSession, error) {
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return nil, err
 	}
-	sess := newTerminalSession(terminalID, workDir, cmd, ptmx, h.terminalSessions.detachTTL, h.terminalExited)
-	h.terminalProcs.register(terminalID, terminalProcEntry{Project: workDir, PID: int32(cmd.Process.Pid)})
+	sess := newTerminalSession(terminalID, project, cmd, ptmx, h.terminalSessions.detachTTL, h.terminalExited)
+	h.terminalProcs.register(terminalID, terminalProcEntry{Project: project, PID: int32(cmd.Process.Pid)})
 	h.notifyTerminalProcsChanged()
 	go sess.readLoop()
 	return sess, nil
@@ -348,6 +420,10 @@ func (h *Handler) terminalExited(s *terminalSession) {
 // the user actually closes the tab; otherwise the shell would linger until
 // the detach TTL.
 func (h *Handler) HandleTerminalKill(w http.ResponseWriter, r *http.Request) {
+	if !h.terminalAccessAllowed() {
+		writeError(w, http.StatusForbidden, "terminal requires server authentication or a loopback bind address")
+		return
+	}
 	id := r.PathValue("id")
 	sess := h.terminalSessions.lookup(id)
 	if sess == nil {
@@ -355,10 +431,148 @@ func (h *Handler) HandleTerminalKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("terminal %s: kill requested (pid %d)", id, sess.pid())
+	// The user is permanently discarding this terminal (closing its tab), so
+	// drop its append-only disk history along with the shell. Unlike the
+	// detach/exit path this history is no longer needed — the tab is gone.
+	sess.history.remove()
 	// terminateProcessTree waits up to the grace period for the shell to
 	// exit; don't hold the HTTP response for that.
 	go sess.kill()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type terminalHistoryResponse struct {
+	ID          string `json:"id"`
+	Offset      int64  `json:"offset"`
+	NextOffset  int64  `json:"next_offset"`
+	SnapshotEnd int64  `json:"snapshot_end"`
+	EOF         bool   `json:"eof"`
+	Data        string `json:"data"`
+	State       string `json:"state"`
+}
+
+// HandleTerminalHistory serves bounded, project-scoped pages of raw pty
+// output. The log is reopened for every request, so this remains available
+// after the shell and the server that created it have exited. Raw pty bytes
+// are base64 encoded because they are not guaranteed to be valid JSON text.
+func (h *Handler) HandleTerminalHistory(w http.ResponseWriter, r *http.Request) {
+	if !h.terminalAccessAllowed() {
+		writeError(w, http.StatusForbidden, "terminal requires server authentication or a loopback bind address")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" || strings.HasPrefix(id, "anon-") {
+		writeError(w, http.StatusNotFound, "no terminal history")
+		return
+	}
+	project, status, message := h.resolveTerminalHistoryProject(r)
+	if status != 0 {
+		writeError(w, status, message)
+		return
+	}
+
+	// An active terminal id is an ownership capability within the validated
+	// project. Reject a mismatched active session before looking at the other
+	// project's log; after a restart there is no live session to check.
+	if sess := h.terminalSessions.lookup(id); sess != nil && sess.project != project {
+		writeError(w, http.StatusConflict, "terminal_id belongs to a different project")
+		return
+	}
+
+	offset, err := historyQueryInt64(r, "offset", 0)
+	if err != nil || offset < 0 {
+		writeError(w, http.StatusBadRequest, "offset must be a non-negative integer")
+		return
+	}
+	limit, err := historyQueryInt64(r, "limit", terminalHistoryDefaultPage)
+	if err != nil || limit <= 0 || limit > terminalHistoryMaxPage {
+		writeError(w, http.StatusBadRequest, "limit must be a positive integer not exceeding 262144")
+		return
+	}
+	var requestedSnapshotEnd *int64
+	if raw := r.URL.Query().Get("snapshot_end"); raw != "" {
+		value, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || value < 0 {
+			writeError(w, http.StatusBadRequest, "snapshot_end must be a non-negative integer")
+			return
+		}
+		requestedSnapshotEnd = &value
+	}
+
+	data, snapshotEnd, err := readTerminalHistoryRangeAt(project, id, offset, limit, requestedSnapshotEnd)
+	if err != nil {
+		switch {
+		case errors.Is(err, errTerminalHistoryMissing), errors.Is(err, errTerminalHistoryDisabled):
+			writeError(w, http.StatusNotFound, "no terminal history")
+		case errors.Is(err, errTerminalHistoryPastEnd):
+			writeError(w, http.StatusRequestedRangeNotSatisfiable, "offset is past the history snapshot")
+		case errors.Is(err, errTerminalHistoryChanged):
+			writeError(w, http.StatusConflict, "terminal history changed while reading snapshot")
+		default:
+			log.Printf("terminal %s: history read failed: %v", id, err)
+			writeError(w, http.StatusInternalServerError, "failed to read terminal history")
+		}
+		return
+	}
+
+	nextOffset := offset + int64(len(data))
+	state := "exited"
+	if sess := h.terminalSessions.lookup(id); sess != nil && sess.project == project {
+		state = "active"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(terminalHistoryResponse{
+		ID:          id,
+		Offset:      offset,
+		NextOffset:  nextOffset,
+		SnapshotEnd: snapshotEnd,
+		EOF:         nextOffset >= snapshotEnd,
+		Data:        base64.StdEncoding.EncodeToString(data),
+		State:       state,
+	}); err != nil {
+		log.Printf("terminal %s: failed to encode history response: %v", id, err)
+	}
+}
+
+func historyQueryInt64(r *http.Request, name string, fallback int64) (int64, error) {
+	value := r.URL.Query().Get(name)
+	if value == "" {
+		return fallback, nil
+	}
+	return strconv.ParseInt(value, 10, 64)
+}
+
+// resolveTerminalHistoryProject mirrors the terminal websocket trust boundary.
+// Local projects must be registered roots; remote projects must be registered
+// host/path pairs and use the same host:path key as live terminal sessions.
+func (h *Handler) resolveTerminalHistoryProject(r *http.Request) (string, int, string) {
+	host := r.URL.Query().Get("host")
+	project := r.URL.Query().Get("project")
+	if path := r.URL.Query().Get("project_path"); path != "" {
+		project = path
+	}
+	if host != "" {
+		if !h.remoteProjectRegistered(host, project) {
+			return "", http.StatusForbidden, "host/project_path is not a registered remote project"
+		}
+		return host + ":" + project, 0, ""
+	}
+	if project == "" {
+		project = h.workDir
+	}
+	if project == "" {
+		project = "."
+	}
+	for _, root := range h.allowedProjectRoots() {
+		if project == root {
+			return project, 0, ""
+		}
+	}
+	return "", http.StatusForbidden, "project is not a project registered with this server"
+}
+
+func (h *Handler) terminalAccessAllowed() bool {
+	return h.terminalAuthConfigured || h.terminalLoopback
 }
 
 // terminalShellCommand starts the configured Unix shell as a login shell so
@@ -383,6 +597,10 @@ func isProcessDone(err error) bool {
 // call — callers should treat memory as the authoritative instant value and
 // let the SSE stream correct CPU on the next tick.
 func (h *Handler) HandleTerminalProcesses(w http.ResponseWriter, r *http.Request) {
+	if !h.terminalAccessAllowed() {
+		writeError(w, http.StatusForbidden, "terminal requires server authentication or a loopback bind address")
+		return
+	}
 	entries := h.terminalProcs.snapshot()
 	// Use a throwaway cache so this ad-hoc sample does not pollute the
 	// emitter's long-lived Percent cache (Percent(0) needs consecutive calls
@@ -418,4 +636,19 @@ func (h *Handler) HandleTerminalProcesses(w http.ResponseWriter, r *http.Request
 	if err := json.NewEncoder(w).Encode(stats); err != nil {
 		log.Printf("terminal processes: failed to encode response: %v", err)
 	}
+}
+
+// remoteProjectRegistered reports whether (host, path) is a remote project
+// entry in the projects store. Path is matched verbatim, as AddRemote
+// stores it (no Clean — its conventions belong to the remote).
+func (h *Handler) remoteProjectRegistered(host, path string) bool {
+	if h.projects == nil || path == "" {
+		return false
+	}
+	for _, p := range h.projects.List() {
+		if p.Host == host && p.Path == path {
+			return true
+		}
+	}
+	return false
 }

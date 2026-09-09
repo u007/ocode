@@ -15,6 +15,7 @@ interface State {
 
 type Action =
   | { type: "OPEN"; project: string; id: string }
+  | { type: "OPEN_BACKGROUND"; project: string; id: string }
   | { type: "OPEN_RESTORED"; project: string; id: string; title: string; manualTitle: string | null }
   | { type: "CLOSE"; project: string; id: string }
   | { type: "RENAME"; project: string; id: string; title: string }
@@ -29,6 +30,17 @@ function reducer(state: State, action: Action): State {
       return {
         tabsByProject: { ...state.tabsByProject, [action.project]: [...tabs, { id: action.id, title: "New tab", manualTitle: null }] },
         activeByProject: { ...state.activeByProject, [action.project]: action.id },
+      };
+    }
+    // A tab opened via Cmd/Ctrl+click, target="_blank", or window.open —
+    // appended to the strip WITHOUT activating it, mirroring how a real
+    // browser opens a modified-click link in a background tab.
+    case "OPEN_BACKGROUND": {
+      const tabs = state.tabsByProject[action.project] ?? [];
+      if (tabs.some((t) => t.id === action.id)) return state;
+      return {
+        ...state,
+        tabsByProject: { ...state.tabsByProject, [action.project]: [...tabs, { id: action.id, title: "New tab", manualTitle: null }] },
       };
     }
     case "OPEN_RESTORED": {
@@ -88,6 +100,16 @@ export function BrowserTabsProvider({ children }: { children: ReactNode }) {
   return <BrowserTabsContext.Provider value={value}>{children}</BrowserTabsContext.Provider>;
 }
 
+/** Raw strip dispatch (project-explicit). Used by the `browse_newtab` bridge
+ *  so a tab whose owning project is known lands in that project's strip even
+ *  when it isn't the active project. Prefer `useBrowserTabs(projectPath)` for
+ *  project-bound call sites. */
+export function useBrowserTabsDispatch() {
+  const ctx = useContext(BrowserTabsContext);
+  if (!ctx) throw new Error("useBrowserTabsDispatch must be used within BrowserTabsProvider");
+  return ctx.dispatch;
+}
+
 let seq = 0;
 function newId(): string {
   seq += 1;
@@ -111,6 +133,10 @@ export function useBrowserTabs(projectPath: string) {
     return id;
   }, [dispatch, projectPath]);
 
+  const openBackgroundBrowserTab = useCallback(
+    (id: string) => dispatch({ type: "OPEN_BACKGROUND", project: projectPath, id }),
+    [dispatch, projectPath],
+  );
   const closeBrowserTab = useCallback((id: string) => dispatch({ type: "CLOSE", project: projectPath, id }), [dispatch, projectPath]);
   const renameBrowserTab = useCallback((id: string, title: string) => dispatch({ type: "RENAME", project: projectPath, id, title }), [dispatch, projectPath]);
   const clearManualTitle = useCallback((id: string) => dispatch({ type: "CLEAR_MANUAL", project: projectPath, id }), [dispatch, projectPath]);
@@ -125,5 +151,5 @@ export function useBrowserTabs(projectPath: string) {
   );
   const activateBrowserTab = useCallback((id: string) => dispatch({ type: "ACTIVATE", project: projectPath, id }), [dispatch, projectPath]);
 
-  return { tabs, activeId, openBrowserTab, closeBrowserTab, renameBrowserTab, activateBrowserTab, clearManualTitle, restoreBrowserTabs, openRestoredBrowserTab };
+  return { tabs, activeId, openBrowserTab, openBackgroundBrowserTab, closeBrowserTab, renameBrowserTab, activateBrowserTab, clearManualTitle, restoreBrowserTabs, openRestoredBrowserTab };
 }

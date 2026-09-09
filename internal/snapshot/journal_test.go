@@ -208,3 +208,53 @@ func TestUnjournaledStoreWritesNoJournal(t *testing.T) {
 		t.Fatalf("journal created for sessionless store: %v", err)
 	}
 }
+
+// Loading a different session into a live (non-empty) store must show THAT
+// session's journaled snapshots, not keep the previous session's. Rehydrate
+// alone only fills an empty store, so `/session load` on a reused agent left
+// the changes tab showing the old session's files.
+func TestSwitchSessionReplacesLiveSnapshots(t *testing.T) {
+	clearJournalCache()
+	t.Cleanup(clearJournalCache)
+	dir := t.TempDir()
+	work := t.TempDir()
+	a := filepath.Join(work, "a.txt")
+	b := filepath.Join(work, "b.txt")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, []byte("v1"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Session 1 edits a.txt, session 2 edits b.txt (journaled by a
+	// separate store, as a previous process would have).
+	s := NewStore("agent1", dir)
+	s.SwitchSession("ses_1")
+	if err := s.Backup(a, "tc_a"); err != nil {
+		t.Fatal(err)
+	}
+	other := NewStore("agent2", dir)
+	other.SwitchSession("ses_2")
+	if err := other.Backup(b, "tc_b"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same live store now loads session 2.
+	s.SwitchSession("ses_2")
+	if got := s.ChangedFiles(); len(got) != 1 || got[0] != b {
+		t.Fatalf("after switch to ses_2 ChangedFiles = %v, want [%s]", got, b)
+	}
+	// And back to session 1.
+	s.SwitchSession("ses_1")
+	if got := s.ChangedFiles(); len(got) != 1 || got[0] != a {
+		t.Fatalf("after switch back to ses_1 ChangedFiles = %v, want [%s]", got, a)
+	}
+	// Re-binding the same session is a no-op for live history.
+	if err := s.Backup(b, "tc_b2"); err != nil {
+		t.Fatal(err)
+	}
+	s.SwitchSession("ses_1")
+	if got := s.ChangedFiles(); len(got) != 2 {
+		t.Fatalf("re-binding same session changed live history: %v", got)
+	}
+}

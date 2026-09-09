@@ -158,6 +158,12 @@ func AppendLog(b *Bundle, action, docPath, summary string) error {
 	logPath := filepath.Join(b.Root, "log.md")
 	today := time.Now().Format("2006-01-02")
 
+	// Normalize a stray leading slash so the entry below can never render
+	// as a protocol-relative "//..." link. Bundle paths are relative;
+	// Store.Write/Deprecate reject absolute paths outright, but AppendLog
+	// is also called from cleanup paths — normalize defensively here.
+	docPath = strings.TrimLeft(docPath, "/")
+
 	// Read existing log content.
 	existing, err := os.ReadFile(logPath)
 	var lines []string

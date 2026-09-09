@@ -10,6 +10,7 @@ okf_version: 0.1
 - [Plugin System](plugins.md) - Overview of ocode's plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, and plugin lifecycle management.
 - [Scheduled Jobs / Cron Dispatch](scheduled-jobs.md) - Persistent, disk-backed cron engine + headless agent dispatcher for ocode, modeled on nanobot's CronService and Claude Code's CronCreate/CronList/CronDelete semantics.
 - [Session Title Generation & UI Update Root Cause Analysis](title-generation-analysis.md) - Root cause analysis of session title delay/mismatch between generation and UI rendering, covering regex anchoring, Anthropic thinking blocks, and rendering cycle timing.
+- [Terminal History Persistence and Restore](terminal-history-persistence-and-restore.md) - Accurate guide to ocode's terminal history persistence and restore mechanism, aligning with source implementation
 - [Using ocode with Zed](zed.md) - Setup guide and feature matrix for integrating ocode with the Zed editor via ACP (Agent Client Protocol).
 - [Zed-compatible ACP Mode Specification](acp-zed-spec.md) - Approved architecture spec for implementing 'ocode acp' using the Agent Client Protocol, enabling ocode as a Zed editor agent.
 
@@ -27,7 +28,7 @@ okf_version: 0.1
 - [Agent Replacement — Input Queuing & Stream Event Epochs](gotchas/agent-replacement-input-queuing.md) - Architectural decision and solution pattern for queuing user input during agent replacement and using stream event epochs to prevent stale events from mutating the new session.
 - [AIHubMix Test — Global Cache State Leakage](gotchas/aihubmix-test-cache-leak.md) - AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures
 - [Auto-Permission Dependency Binaries — Policy Decision](gotchas/auto-permission-dependency-bin-policy.md) - Deliberate security-policy expansion in bundled auto-permission gatekeeper prompt v1.9.x that auto-allows direct invocation of project/toolchain dependency binaries, with accepted residual risk and maintainer rules.
-- [Auto-Permission Prompt Prose Code Audit Gap](gotchas/auto-permission-prompt-prose-code-audit-gap.md) - The bundled gatekeeper prompt v1.9.0 enumerated non-existent git config forms (e.g., --set) and omitted real ones. Resolved in v1.9.2: prose synced with the -c dangerous-key list and a code backstop (`gitConfigWriteArgs` in IsHarmfulBashCommand, internal/agent/permissions.go) hard-blocks git config writes; ~25 regression cases in TestIsHarmfulBashCommand_GitConfigWrites (internal/agent/permissions_test.go). Prose and code must be audited together.
+- [Auto-Permission Prompt Prose Code Audit Gap](gotchas/auto-permission-prompt-prose-code-audit-gap.md) - The bundled gatekeeper prompt v1.9.0 enumerated non-existent git config forms (e.g., --set) and omitted real ones. Resolved in v1.9.2: prose synced with the –c dangerous-key list and a code backstop (`gitConfigWriteArgs` in IsHarmfulBashCommand, internal/agent/permissions.go) hard-blocks git config writes; ~25 regression cases in TestIsHarmfulBashCommand_GitConfigWrites (internal/agent/permissions_test.go). Prose and code must be audited together.
 - [Auto-Permission Prompt — Load-Semantics Flip](gotchas/auto-permission-prompt-load-semantics-flip.md) - The load-semantics flip from self-healing to pure-read introduces a silent stale-gatekeeper trap with no proactive surfacing, distinct from the existing TOCTOU race gotcha.
 - [Auto-Permission Prompt — TOCTOU Install Race](gotchas/auto-permission-prompt-atomic-race.md) - TOCTOU race in auto-permission prompt install: concurrent older build can downgrade the bundled gatekeeper prompt.
 - [Auto-Permission — Interpreter Scripts in Compound Commands](gotchas/auto-permission-interpreter-scripts-in-compound-commands.md) - Auto-permission custom-script detection must cover interpreter and runner forms (python x.py, node x.js, bun run x.ts, uv run x.py, npx tsx x.ts); the structured interpreter path only sees the FIRST command, so compound commands otherwise reach the generic LLM path with no script content and no truncation guard.
@@ -38,6 +39,7 @@ okf_version: 0.1
 - [Chat Input — Queued Messages Lost on Submission Failure](gotchas/chat-input-message-loss.md) - Queued messages are lost when submission fails — sendMessage returns false but the message is already shifted from the queue
 - [ChatPanel Autoscroll Bounce/Freeze](gotchas/autoscroll-bounce.md) - Root cause analysis of the autoscroll bounce/freeze bug: smooth-scrolling every live token without at-bottom state tracking causes competing animations that lock up the scroll position.
 - [Concurrent File Editing Risk — Multiple Writers in Same Checkout](gotchas/concurrent-file-editing-risk.md) - Gotcha: multiple writers (agents + manual edits) on the same files within a single checkout can corrupt both streams. Covers the concurrent modification problem, affected scenarios, mitigation strategies, and recovery.
+- [Chrome Tab Hang — Unbounded CDP Calls, JS Dialogs, Invisible Popups](gotchas/chrome-tab-hang-unbounded-cdp-call.md) - Gotcha: embedded Chrome tab froze when a CDP command never got a reply (alert(), dead session); popups/middle-click tabs never surfaced because page-level auto-attach does not cover them.
 - [Concurrent session writers — conflict semantics and recovery](gotchas/session-writers-conflict-recovery.md)
 - [Debug Instrumentation Ships Unconditionally](gotchas/debug-instrumentation-ships-unconditionally.md) - Process gotcha: temporary Date.prototype instrumentation ships unconditionally in production builds, causing global prototype mutation, altered date behavior, and authenticated network requests.
 - [Embedded Browser — WebSocket Proxy 404](gotchas/embedded-browser-websocket-proxy-404.md) - Gotcha: WebSocket connections through the embedded browser proxy fail with 404 during handshake due to missing or unreachable upgrade path in the browse server.
@@ -48,6 +50,7 @@ okf_version: 0.1
 - [Local Model Auto-Start Hijacks the Controlling Terminal](gotchas/local-model-tty-hijack.md) - A locally-spawned model server (Setpgid only, same session as ocode) can grab the terminal foreground process group via TIOCSPGRP, crashing the TUI and corrupting the whole shell session
 - [Local Model Limiter — Stale-Slot Reclamation Race](gotchas/local-model-limiter-stale-slot-race.md) - TOCTOU race in local model slot-lock stale reclamation: reaper can delete a live lock between Stat and Remove, breaking MaxParallel limits
 - [PATH Shadowing Can Bypass Sandbox Discovery](gotchas/shell-sandbox-path-shadowing.md) - Gotcha: PATH-based sandbox-exec/bwrap discovery can be shadowed by user-writable executables, requiring hardening to prevent security bypasses.
+- [Permission Evaluation and Unknown Tool Guard](gotchas/permission-evaluation-and-unknown-tool-guard.md) - Documenting established permission-path invariants for unknown tool rejection and safe permission evaluation, including read-target existence checks to avoid TOCTOU issues (deprecated)
 - [Plugin Auto-Permission — Arbitrary Execution Risk](gotchas/plugin-auto-permission-security.md) - Updated gotcha: blanket OS temp auto-permission is now a deliberate v1.8.0 policy, not an unresolved regression. Historical v1.5.0 tightening preserved.
 - [Plugin Install Rollback Bug](gotchas/plugin-install-rollback-bug.md) - Security gotcha: failed plugin installs leave stale directories and orphaned MCP registrations due to incorrect path handling in deferred cleanup.
 - [Plugin Removal — Root Directory Deletion Risk](gotchas/plugin-removal-root-deletion.md) - Security gotcha: removal validation must reject deletion of an entire approved plugin root directory, not just validate child paths.
@@ -61,7 +64,7 @@ okf_version: 0.1
 - [Skill Tool Test Fixture Gap — expectedBuiltinTools Missing load_skill](gotchas/skill-tool-test-fixture-gap.md) - expectedBuiltinTools in tool_test.go only lists "skill" but InitBuiltinTools also registers "load_skill" as a second alias, causing a stale test failure.
 - [Subagent Feedback-Loop Guard (task tool)](gotchas/subagent-feedback-loop-guard.md) - The task/subagent dispatch refuses consecutive same-type launches without new user input to break runaway feedback loops; vary the agent type or wait for user input.
 - [Symlink Escape in Plugin Removal Validation](gotchas/plugin-removal-symlink-escape.md) - Security gotcha: filepath.EvalSymlinks must resolve both the target dir and all approved roots to prevent symlink-based path traversal in plugin removal.
-- [Version-Changelog Mismatch](gotchas/version-changelog-mismatch.md) - Version mismatch between version.go (0.8.83) and CHANGES.md resolved — CHANGES.md [Unreleased] now includes "- **Version Bump** — 0.8.82 → 0.8.83" entry; `go test ./internal/version/` passes as of this commit. Status updated to resolved-as-of-this-commit.
+- [Version-Changelog Mismatch](gotchas/version-changelog-mismatch.md) - Version mismatch between version.go (0.8.83) and CHANGES.md resolved — CHANGES.md [Unreleased] now includes –– **Version Bump** — 0.8.82 → 0.8.83 entry; `go test ./internal/version/` passes as of this commit. Status updated to resolved-as-of-this-commit.
 - [Writable-Root Validation Prevents Confinement Defeat](gotchas/shell-sandbox-writable-root-validation.md) - Gotcha: writable-root validation must canonicalize paths and reject filesystem-volume roots (/) to prevent confinement defeat from env vars like TMPDIR.
 
 # guides
@@ -159,6 +162,7 @@ okf_version: 0.1
 
 - [desktop-single-instance.md](architecture/desktop-single-instance.md)
 - [terminal-detach-reattach.md](architecture/terminal-detach-reattach.md)
+- [web-ask-dialog-resolved-before-continuation.md](gotchas/web-ask-dialog-resolved-before-continuation.md)
 - [HOW-TO-EVALUATE.md](okf/HOW-TO-EVALUATE.md)
 - [README.md](okf/README.md)
 - [conduct.md](okf/_prompts/conduct.md)
@@ -321,6 +325,7 @@ okf_version: 0.1
 - [04-docs-caveats.md](superpowers/plans/2026-08-31-shell-sandbox/04-docs-caveats.md)
 - [INDEX.md](superpowers/plans/2026-08-31-shell-sandbox/INDEX.md)
 - [2026-09-06-multirow-tab-bar.md](superpowers/plans/2026-09-06-multirow-tab-bar.md)
+- [2026-09-06-remote-web-wsl.md](superpowers/plans/2026-09-06-remote-web-wsl.md)
 - [2026-07-08-global-runtime-artifacts-design.md](superpowers/specs/2026-07-08-global-runtime-artifacts-design.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [2026-07-11-model-stack-benchmark-design.md](superpowers/specs/2026-07-11-model-stack-benchmark-design.md)

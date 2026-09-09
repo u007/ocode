@@ -37,6 +37,20 @@ type TitleEvent struct {
 	URL      string `json:"url,omitempty"`
 }
 
+// NewTabEvent announces a page opened via Cmd/Ctrl+click, target="_blank",
+// or window.open — a stateKey the SPA has never seen before. The SPA opens a
+// background browser tab for it (mirrors a real browser's new-background-tab
+// behavior for a modified-click) rather than treating it as a nav update.
+// Project is the owning project root when known (opener attribution); it is
+// omitempty so current emissions (backend has no opener→project mapping yet)
+// stay exactly {state_key, url} on the wire. The SPA files a project-less
+// event under the active project (documented active-project-scoped fallback).
+type NewTabEvent struct {
+	StateKey string `json:"state_key"`
+	URL      string `json:"url"`
+	Project  string `json:"project,omitempty"`
+}
+
 // Options configures the headless Chrome subsystem. ChromePath overrides
 // discovery; IdleTimeout is how long the shared Chrome process idles before
 // shutdown. Supervisor is the server-owned process supervisor.
@@ -156,6 +170,10 @@ type Server struct {
 	// Installed via SetTitlePublisher; nil in tests that don't need it.
 	titlePublish func(stateKey string, ev TitleEvent)
 
+	// newTabPublish fans NewTabEvents to the main server's SSE bus.
+	// Installed via SetNewTabPublisher; nil in tests that don't need it.
+	newTabPublish func(stateKey string, ev NewTabEvent)
+
 	// spaOrigin is the main (SPA) origin, set via EnableBrowse wiring; the
 	// server-wide default postMessage targetOrigin for the capture script.
 	// Real traffic uses the per-stateKey origin recorded at grant mint
@@ -240,6 +258,9 @@ func (s *Server) initManager(opts Options) {
 		EmitTitle: func(ev cdp.TitleEvent) {
 			s.emitTitle(TitleEvent{StateKey: ev.StateKey, Title: ev.Title, URL: ev.URL})
 		},
+		EmitNewTab: func(ev cdp.NewTabEvent) {
+			s.emitNewTab(NewTabEvent{StateKey: ev.StateKey, URL: ev.URL})
+		},
 	}
 	m := cdp.NewManager(mgrOpts)
 	s.cdp = &realManagerAdapter{Manager: m}
@@ -318,6 +339,14 @@ func (s *Server) SetNavPublisher(fn func(stateKey string, ev NavEvent)) { s.publ
 
 func (s *Server) SetTitlePublisher(fn func(stateKey string, ev TitleEvent)) { s.titlePublish = fn }
 
+func (s *Server) SetNewTabPublisher(fn func(stateKey string, ev NewTabEvent)) { s.newTabPublish = fn }
+
+func (s *Server) emitNewTab(ev NewTabEvent) {
+	if s.newTabPublish != nil {
+		s.newTabPublish(ev.StateKey, ev)
+	}
+}
+
 func (s *Server) emitTitle(ev TitleEvent) {
 	s.procMu.Lock()
 	if s.procTitle == nil {
@@ -365,7 +394,6 @@ func (s *Server) isBypassed(stateKey, host string) bool {
 // setBypassed records that stateKey has approved host's self-signed cert.
 func (s *Server) setBypassed(stateKey, host string) {
 	s.bypassMu.Lock()
-	defer s.bypassMu.Unlock()
 	if s.bypass == nil {
 		s.bypass = make(map[string]map[string]bool)
 	}
@@ -373,6 +401,20 @@ func (s *Server) setBypassed(stateKey, host string) {
 		s.bypass[stateKey] = make(map[string]bool)
 	}
 	s.bypass[stateKey][host] = true
+	s.bypassMu.Unlock()
+	// Chrome mode: the same decision lifts Chrome's certificate enforcement
+	// for that tab's host. Optional method — test fakes need not grow it.
+	// Runs outside bypassMu: it is a CDP round trip, and every local-mode
+	// HTTPS request takes the same lock via isBypassed.
+	if th, ok := s.cdp.(interface {
+		TrustHost(context.Context, string, string) error
+	}); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := th.TrustHost(ctx, stateKey, host); err != nil {
+			s.log.Printf("browse: trust host %s for %s in chrome mode: %v", host, stateKey, err)
+		}
+	}
 }
 
 // AllowBypass is the exported wrapper for setBypassed (used by the main

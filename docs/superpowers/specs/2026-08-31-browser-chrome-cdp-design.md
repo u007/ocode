@@ -195,14 +195,52 @@ deterministically), `Runtime.runIfWaitingForDebugger`,
 `Page.stopScreencast`, `Page.screencastFrameAck`,
 `Emulation.setDeviceMetricsOverride`, `Runtime.enable`,
 `Network.enable`, `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`,
-`Browser.close`.
+`Browser.close`, `Target.setDiscoverTargets` (browser-level, see
+"Popups" below), `Target.getTargetInfo`, `Page.handleJavaScriptDialog`.
+
+Every `Conn.Call` whose caller passes a context without a deadline gets a
+default 30 s one. The deadline covers the pipe write too (`SetWriteDeadline`
+on the `*os.File`); a timed-out write closes the connection because a
+partial frame may be on the stream, and Chrome relaunches on the next nav. Chrome can accept a command and never answer it (renderer
+blocked, session torn down mid-flight), and the callers sit on single
+serialized goroutines (websocket reader, Fetch interception loop,
+screencast ack), so an unbounded wait used to wedge the tab permanently
+while the websocket kept pinging and looked healthy.
 
 Events consumed: `Page.screencastFrame`, `Page.frameNavigated`
 (main frame only), `Page.navigatedWithinDocument`,
 `Network.responseReceived` (type `Document`, main frame → status for
 the address bar), `Network.loadingFailed` (incl. `blockedReason`),
 `Runtime.consoleAPICalled`, `Runtime.exceptionThrown`,
-`Target.attachedToTarget`, `Target.targetCrashed`.
+`Target.attachedToTarget`, `Target.targetCrashed`, `Target.targetCreated`,
+`Page.javascriptDialogOpening`.
+
+### Popups (window.open, target="_blank", middle-click)
+
+Page-level `setAutoAttach` only covers a page's own frames and workers;
+Chrome never auto-attaches a sibling page it opens. The Manager therefore
+enables `Target.setDiscoverTargets` at the browser level and, on
+`Target.targetCreated` for an unattached `page`, attaches itself when the
+target is ours: either `openerId` is set (`window.open`, `target="_blank"`)
+or it lands in the browser context of a live target (browser-initiated
+opens — middle-click, Cmd/Ctrl+click — carry no opener). Manager-created
+targets always get a fresh browser context first, so they match neither.
+The new target is registered as a tab and announced via `NewTabEvent`;
+because its document request usually precedes `Network.enable`, the URL is
+read back with `Target.getTargetInfo` and emitted as a nav. Such tabs share
+the opener's browser context (`sharedContext`), so revoking or crashing one
+closes only its target and never disposes the context. Discovery also
+delivers `Target.targetDestroyed`: a page that closes itself
+(`window.close()`) is dropped and the SPA gets nav error "tab closed".
+
+### JS dialogs
+
+With the Page domain enabled Chrome blocks the renderer on `alert`,
+`confirm`, `prompt` and `beforeunload` until the client answers
+`Page.handleJavaScriptDialog`; every renderer-bound command (input,
+evaluate, navigate) hangs meanwhile. There is no dialog UI yet: dialogs are
+auto-accepted (prompt returns its default text) and surfaced as a
+`warning` console row `[dialog <type> auto-accepted] <message>`.
 
 ### Target per stateKey
 
@@ -298,8 +336,50 @@ Client → server (JSON text):
 | `getResponseBody` | `requestId` (reply arrives as `responseBody`) |
 | `fileChooserCancel` | — (drop the pending file chooser) |
 | `resize` | `w, h, dpr` → `Emulation.setDeviceMetricsOverride` + `stopScreencast`/`startScreencast` with new `maxWidth/maxHeight` |
-| `mouse` | `kind: move\|down\|up\|wheel, x, y, button, clickCount, deltaX, deltaY, modifiers` |
-| `key` | `kind: down\|up\|char, key, code, text, modifiers` |
+| `mouse` | `kind: move\|down\|up\|wheel, x, y, button, buttons, clickCount, deltaX, deltaY, modifiers` — `buttons` (left=1, right=2, middle=4) rides on `move` while a button is held; CDP decides "drag in progress" from it, not from history |
+| `key` | `kind: down\|up, key, code, text, modifiers, autoRepeat` — `text` only for printable keys and Enter (`\r`), never for Ctrl/Cmd chords. No separate `char`: a `down` with text is dispatched as `keyDown` (Chrome inserts it), without text as `rawKeyDown` |
+| `insertText` | `text` → `Input.insertText` (host-clipboard paste, IME composition commit) |
+| `getSelection` | — (reply arrives as `selection {text}`; copy/cut bridge to the host clipboard) |
+| `zoom` | `factor` (1 = 100%, clamped 0.25–5). Applied like browser zoom: `Emulation.setDeviceMetricsOverride` with `width/height ÷ factor` and `deviceScaleFactor × factor`, so the screencast keeps its pixel size. Survives later `resize`; resets on viewport remount |
+| `touch` | `kind: start\|move\|end\|cancel, points: [{id,x,y}], modifiers` — the *changed* contacts, CSS px → `Input.dispatchTouchEvent`. First touch enables `Emulation.setTouchEmulationEnabled` for the target so the page sees a touch device and gets native scroll/pinch |
+
+Key dispatch (server, `cdp/keys.go`): every `Input.dispatchKeyEvent`
+carries `windowsVirtualKeyCode`/`nativeVirtualKeyCode` derived from
+`code` (Backspace=8, Enter=13, arrows 37–40, KeyA=65 …). Chrome keys
+its editing behaviour off the VK, so a Backspace without VK 8 is a
+no-op. On macOS hosts the `down` event also carries the NSResponder
+`commands` for the chord (`deleteBackward`, `selectAll`, `copy`,
+`moveWordLeft`, `moveLeftAndModifySelection`, …) — the browser process
+normally supplies these and CDP bypasses it. `paste` is deliberately
+absent from that table: the SPA intercepts the host `paste` event and
+sends `insertText`, so Chrome's own clipboard is never pasted.
+
+Keyboard focus lives on an invisible `<textarea>` overlaying the
+canvas (a canvas cannot host an IME or receive paste events). Keys
+with `isComposing`, `Process`, or `Dead` are not forwarded; the
+composition result arrives once via `compositionend` → `insertText`.
+Browser-chrome shortcuts never reach the renderer through CDP, so the
+SPA translates F5 / Cmd+R / Ctrl+R → `reload`, Cmd+[ / Cmd+] (mac) and
+Alt+←/→ (others) → `back`/`forward`. Blur of the textarea releases
+every held key and button so the remote page never sticks.
+
+Zoom and gestures: Cmd/Ctrl + `=`/`-`/`0` step through Chrome's zoom
+presets (25%…500%); trackpad pinch arrives as ctrl+wheel and zooms
+continuously. Touch-type pointer events go down the `touch` path
+(`touch-action: none` on the canvas keeps them flowing); mouse/pen
+pointers keep the `mouse` path.
+
+TLS in chrome mode: a top-level `net::ERR_CERT_*` / `ERR_SSL_*`
+`Network.loadingFailed` is emitted as `"TLS certificate not trusted — …"`,
+the same prefix local mode uses, so `BrowserPanel` shows its "Continue
+anyway" banner — but only when the host is private
+(`isPrivateHost`); a public host never gets the offer. Accepting POSTs
+`/api/browse/bypass` (server re-validates the host as private), which now
+also calls `Manager.TrustHost(stateKey, host)`: the trust is kept per
+stateKey on the manager (survives re-attach, dropped on revoke) and
+`Security.setIgnoreCertificateErrors` is set from
+`loopback || trusted` on every top-level host change. The SPA then
+clears the error and sends `reload` over the socket.
 
 Screencast: `Page.startScreencast {format:"jpeg", quality:70,
 maxWidth, maxHeight, everyNthFrame:1}`. Each `Page.screencastFrame`
@@ -389,6 +469,10 @@ this key).
 | Navigation error (DNS, refused, TLS) | `Network.loadingFailed` (main document) → nav `{status:0, error}` |
 | Egress blocked | request fails in-page; `network` row with `blocked`; if it was the main document → nav error "…not reachable from Chrome mode — open externally" |
 | WS drops | viewport shows "reconnecting…", backoff reconnect (new grant each time); screencast restarted on reattach |
+| Chrome accepts a command and never replies | `Conn.Call` default 30 s deadline returns `context.DeadlineExceeded` to the caller; the serialized loop it sat on moves to the next event instead of wedging the tab |
+| Page opens a JS dialog | auto-accepted, console `warning` row; renderer never stays blocked |
+| Chrome stops draining the command pipe | write fails at the caller's deadline, connection closed, all waiters released; relaunch on next nav |
+| Page closes itself (`Target.targetDestroyed`) | that key only: nav error "tab closed", target dropped |
 
 ## Testing
 

@@ -1,4 +1,5 @@
 import type { ModelPromptInfo } from "../../api/types";
+import { basename } from "@/lib/utils";
 
 interface Props {
   prompt?: ModelPromptInfo;
@@ -11,11 +12,6 @@ function formatTok(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
   return `${(n / 1_000_000).toFixed(1)}M`;
-}
-
-// Base filename of the prompt source, mirroring the TUI's filepath.Base.
-function basename(path: string): string {
-  return path.split(/[\\/]/).pop() || path;
 }
 
 /**

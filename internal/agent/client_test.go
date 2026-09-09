@@ -264,6 +264,284 @@ func TestOpenAIResponsesHandlesJSONArguments(t *testing.T) {
 	}
 }
 
+func TestSanitizeOpenAIResponsesInputItem_DropsInvalidJoinedID(t *testing.T) {
+	// Observed in the wild: two reasoning item ids joined by ":", which the
+	// Responses API rejects with "Expected an ID that contains letters,
+	// numbers, underscores, or dashes, but this value contained additional
+	// characters."
+	item := map[string]interface{}{
+		"type": "reasoning",
+		"id":   "rs_6a9fa2659691659b09ef4bad:rs_01a07f925a8b72b38905ba44db351550",
+	}
+
+	out := sanitizeOpenAIResponsesInputItem(item)
+
+	if _, ok := out["id"]; ok {
+		t.Fatalf("expected invalid id to be dropped, got: %+v", out)
+	}
+	if out["type"] != "reasoning" {
+		t.Fatalf("expected other fields preserved, got: %+v", out)
+	}
+	if _, ok := item["id"]; !ok {
+		t.Fatalf("expected original item to be left untouched")
+	}
+}
+
+func TestSanitizeOpenAIResponsesInputItem_KeepsValidID(t *testing.T) {
+	item := map[string]interface{}{
+		"type": "reasoning",
+		"id":   "rs_6a9fa2659691659b09ef4bad",
+	}
+
+	out := sanitizeOpenAIResponsesInputItem(item)
+
+	if out["id"] != "rs_6a9fa2659691659b09ef4bad" {
+		t.Fatalf("expected valid id preserved, got %v", out["id"])
+	}
+}
+
+func TestOpenAIResponseItemsForReplayFiltersOnlyOpaqueReasoningOnRouteChange(t *testing.T) {
+	items := []map[string]interface{}{
+		{"type": "reasoning", "encrypted_content": "opaque"},
+		{"type": "reasoning", "summary": []interface{}{}},
+		{"type": "function_call", "call_id": "call_1", "name": "read", "arguments": "{}"},
+	}
+
+	sameRoute, removed := openAIResponseItemsForReplay(items, "route-a", "route-a")
+	if removed || len(sameRoute) != len(items) {
+		t.Fatalf("same-route replay changed items: removed=%v items=%#v", removed, sameRoute)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		storedRoute string
+	}{
+		{name: "different route", storedRoute: "route-a"},
+		{name: "legacy route", storedRoute: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filtered, removed := openAIResponseItemsForReplay(items, tc.storedRoute, "route-b")
+			if !removed || len(filtered) != 2 {
+				t.Fatalf("route filtering = removed %v, items %#v", removed, filtered)
+			}
+			if filtered[0]["type"] != "reasoning" || filtered[1]["type"] != "function_call" {
+				t.Fatalf("route filtering removed the wrong item: %#v", filtered)
+			}
+		})
+	}
+	if _, ok := items[0]["encrypted_content"]; !ok {
+		t.Fatal("route filtering mutated the original item")
+	}
+}
+
+func TestOpenAIResponseRouteNormalizesEndpointAndIncludesBackendScope(t *testing.T) {
+	client := &GenericClient{
+		Provider:  "openai",
+		Model:     "gpt-5.6-luna",
+		UseOAuth:  true,
+		AccountID: "acct-1",
+		BaseURL:   "https://example.test/v1?token=secret",
+	}
+	route := client.openAIResponseRoute()
+	if strings.Contains(route, "secret") {
+		t.Fatalf("route contains endpoint query credentials: %q", route)
+	}
+	if !strings.Contains(route, "openai") || !strings.Contains(route, "gpt-5.6-luna") || !strings.Contains(route, "acct-1") {
+		t.Fatalf("route is missing backend scope: %q", route)
+	}
+	encoded, err := json.Marshal(Message{OpenAIResponseRoute: route})
+	if err != nil {
+		t.Fatalf("marshal route: %v", err)
+	}
+	var decoded Message
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal route: %v", err)
+	}
+	if decoded.OpenAIResponseRoute != route {
+		t.Fatalf("route persistence = %q, want %q", decoded.OpenAIResponseRoute, route)
+	}
+}
+
+func TestOpenAIResponsesRetriesInvalidEncryptedContentWithoutOpaqueReasoning(t *testing.T) {
+	var calls int32
+	var payloads []map[string]interface{}
+	stubLLMHTTP(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var payload map[string]interface{}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			return nil, err
+		}
+		payloads = append(payloads, payload)
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return statusResponse(http.StatusBadRequest, `{"error":{"code":"invalid_encrypted_content"}}`), nil
+		}
+		return statusResponse(http.StatusOK, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"recovered\"}\n\ndata: [DONE]\n"), nil
+	}))
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	route := client.openAIResponseRoute()
+	msg, err := client.chatOpenAIResponses(context.Background(), []Message{
+		{Role: "user", Content: "continue"},
+		{
+			Role:                "assistant",
+			OpenAIResponseRoute: route,
+			OpenAIResponseItems: []map[string]interface{}{{
+				"type":              "reasoning",
+				"id":                "rs_1",
+				"encrypted_content": "opaque",
+			}, {
+				"type":      "function_call",
+				"call_id":   "call_1",
+				"name":      "read",
+				"arguments": "{}",
+			}},
+		},
+		{Role: "tool", ToolID: "call_1", Content: "result"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("expected recovery retry to succeed: %v", err)
+	}
+	if msg.OpenAIResponseRoute != route {
+		t.Fatalf("response route = %q, want %q", msg.OpenAIResponseRoute, route)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected exactly one recovery retry, got %d calls", got)
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("captured %d payloads, want 2", len(payloads))
+	}
+	for i, payload := range payloads {
+		input, ok := payload["input"].([]interface{})
+		if !ok {
+			t.Fatalf("payload %d input = %#v", i, payload["input"])
+		}
+		hasEncrypted := false
+		for _, raw := range input {
+			item, _ := raw.(map[string]interface{})
+			if _, ok := item["encrypted_content"]; ok {
+				hasEncrypted = true
+			}
+		}
+		if (i == 0) != hasEncrypted {
+			t.Fatalf("payload %d encrypted reasoning = %v, want %v", i, hasEncrypted, i == 0)
+		}
+	}
+}
+
+func TestOpenAIResponsesDoesNotReplayEncryptedReasoningAcrossRoutes(t *testing.T) {
+	var payload map[string]interface{}
+	stubLLMHTTP(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			return nil, err
+		}
+		return statusResponse(http.StatusOK, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: [DONE]\n"), nil
+	}))
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	_, err := client.chatOpenAIResponses(context.Background(), []Message{
+		{Role: "user", Content: "continue"},
+		{Role: "assistant", OpenAIResponseRoute: "muse-route", OpenAIResponseItems: []map[string]interface{}{{
+			"type":              "reasoning",
+			"encrypted_content": "muse-opaque",
+		}, {
+			"type":      "function_call",
+			"call_id":   "call_1",
+			"name":      "read",
+			"arguments": "{}",
+		}}},
+		{Role: "tool", ToolID: "call_1", Content: "result"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("expected route-mismatch request to succeed: %v", err)
+	}
+
+	input, ok := payload["input"].([]interface{})
+	if !ok {
+		t.Fatalf("input = %#v", payload["input"])
+	}
+	hasEncrypted := false
+	hasFunctionCall := false
+	for _, raw := range input {
+		item, _ := raw.(map[string]interface{})
+		if _, ok := item["encrypted_content"]; ok {
+			hasEncrypted = true
+		}
+		if item["type"] == "function_call" {
+			hasFunctionCall = true
+		}
+	}
+	if hasEncrypted {
+		t.Fatal("route-mismatched encrypted reasoning was replayed")
+	}
+	if !hasFunctionCall {
+		t.Fatal("route-mismatched function call was not preserved")
+	}
+}
+
+func TestOpenAIResponsesDoesNotRetryUnrelatedBadRequest(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return statusResponse(http.StatusBadRequest, `{"error":{"code":"invalid_request_error"}}`), nil
+	}))
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	_, err := client.chatOpenAIResponses(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected unrelated bad request to fail")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected no retry for unrelated bad request, got %d calls", got)
+	}
+}
+
+func TestOpenAIResponsesDoesNotRetryInvalidEncryptedContentFromServerError(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return statusResponse(http.StatusInternalServerError, `{"error":{"code":"invalid_encrypted_content"}}`), nil
+	}))
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	route := client.openAIResponseRoute()
+	_, err := client.chatOpenAIResponses(context.Background(), []Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", OpenAIResponseRoute: route, OpenAIResponseItems: []map[string]interface{}{{
+			"type":              "reasoning",
+			"encrypted_content": "opaque",
+		}}},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected server error to fail")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected no retry for server error, got %d calls", got)
+	}
+}
+
+func TestOpenAIResponsesRetriesInvalidEncryptedContentOnlyOnce(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return statusResponse(http.StatusBadRequest, `{"error":{"code":"invalid_encrypted_content"}}`), nil
+	}))
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	route := client.openAIResponseRoute()
+	_, err := client.chatOpenAIResponses(context.Background(), []Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", OpenAIResponseRoute: route, OpenAIResponseItems: []map[string]interface{}{{
+			"type":              "reasoning",
+			"encrypted_content": "opaque",
+		}}},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected repeated invalid encrypted content to fail")
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected exactly one recovery retry, got %d calls", got)
+	}
+}
+
 func TestReconcileOpenAIResponsesToolPairs_DropsOrphanedOutput(t *testing.T) {
 	// A function_call_output whose call_id has no matching function_call
 	// must be dropped — the Responses API rejects it with "No tool call

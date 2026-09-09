@@ -14,10 +14,16 @@ ocode remote --web <[user@]host> [path] [--no-sync]
 Flow after the shared ensure-binary + sync stages:
 
 1. **Discover or start server** (see server-reuse below). Result:
-   remote loopback port + API token.
-2. **Tunnel** — `ssh -N -L <localport>:127.0.0.1:<remoteport> <host>`,
-   registered with the process supervisor. `<localport>` is an ephemeral
-   free local port.
+   remote loopback port + browse-origin port + API token.
+2. **Tunnel** — `ssh -N -L <localport>:127.0.0.1:<remoteport>
+   -L <browseport>:127.0.0.1:<browseport> <host>`, registered with the
+   process supervisor. `<localport>` is an ephemeral free local port. The
+   browse origin (embedded browser panel proxy + CDP socket, a second
+   loopback listener on the remote) is forwarded on the **same** port
+   number, because the SPA learns that port from the remote's
+   `/api/browse/config` and cannot be told about a different local one.
+   The `-L` is omitted when `browsePort` is 0 (browse origin failed to
+   bind on the remote).
 3. **Open** — print and open
    `http://localhost:<localport>/#token=<token>`. All stages render the
    same staged progress as Phase 1; a failure means the browser never
@@ -34,8 +40,10 @@ The remote server persists its identity so reconnects resume rather than
 proliferate:
 
 - On launch in remote mode, `ocode serve` writes
-  `~/.ocode/remote/serve.json` on the **remote**: `{pid, port, token,
-  version, startedAt}`, `0600`, temp+rename.
+  `~/.ocode/remote/serve.json` on the **remote**: `{pid, port,
+  browsePort, token, version, startedAt}`, `0600`, temp+rename. Written
+  after the browse origin binds so `browsePort` is known (0 if it
+  failed).
 - Discovery on connect: read the file over ssh; if present, verify the
   pid is alive and the version matches the client; probe
   `GET /api/health` through a short-lived exec check. Live + matching →
@@ -83,7 +91,9 @@ from your terminal" page, no API access.
 
 When the target is a WSL distro (Phase 3), the tunnel stage is skipped
 entirely: Windows shares localhost with WSL, so the browser opens
-`http://localhost:<remoteport>/#token=…` directly.
+`http://localhost:<remoteport>/#token=…` directly. The browse origin
+port is reachable the same way, so the browser panel needs no extra
+wiring on WSL.
 
 ## Error handling
 

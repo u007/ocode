@@ -18,7 +18,11 @@
 // fingerprint walk is bounded by the working directory (the bash tool
 // runs in workDir). This keeps the recorder testable with a tempdir
 // and a real /bin/sh invocation, and it keeps the changes tab's
-// contract with the bash tool narrow: Pre() then Post(command, exitCode).
+// contract with the bash tool narrow: base := Pre() then
+// Post(base, command, exitCode). The baseline travels with the call
+// rather than living on the recorder because parallel tool calls share
+// one BashTool (and so one recorder): a shared field let a second Pre
+// overwrite the first call's baseline, hiding that call's writes.
 
 package changes
 
@@ -44,14 +48,20 @@ type BashRecorder interface {
 	// (the recorder logs nothing — the bash tool can't surface
 	// them anyway, and the post-exec walk will still produce a
 	// useful diff against an empty baseline).
-	Pre()
+	Pre() BashBaseline
 
 	// Post computes the post-invocation fingerprint, diffs it
 	// against the Pre baseline, intersects the diff with the
 	// command's path tokens, and forwards the resulting set of
 	// touches to the registry. exitCode is the shell's exit
 	// status (0 on success).
-	Post(command string, exitCode int)
+	Post(base BashBaseline, command string, exitCode int)
+}
+
+// BashBaseline is the opaque pre-invocation fingerprint returned by
+// BashRecorder.Pre and handed back to Post. Callers never inspect it.
+type BashBaseline struct {
+	fps map[string]fileFingerprint
 }
 
 // NewStatBashRecorder returns a BashRecorder that walks workDir
@@ -95,21 +105,21 @@ func unsafeWalkRoot(workDir string) bool {
 }
 
 var noiseDirNames = map[string]struct{}{
-	".git":              {},
-	".opencode":         {},
-	"node_modules":      {},
-	"vendor":            {},
-	"build":             {},
-	"dist":              {},
-	"target":            {},
-	".next":             {},
-	".turbo":            {},
-	".cache":            {},
-	"__pycache__":       {},
-	".venv":             {},
-	"venv":              {},
-	".idea":             {},
-	".vscode":           {},
+	".git":         {},
+	".opencode":    {},
+	"node_modules": {},
+	"vendor":       {},
+	"build":        {},
+	"dist":         {},
+	"target":       {},
+	".next":        {},
+	".turbo":       {},
+	".cache":       {},
+	"__pycache__":  {},
+	".venv":        {},
+	"venv":         {},
+	".idea":        {},
+	".vscode":      {},
 }
 
 // StatBashRecorder is the default BashRecorder. It walks the working
@@ -125,11 +135,12 @@ var noiseDirNames = map[string]struct{}{
 type StatBashRecorder struct {
 	workDir string
 	reg     *Registry
-	pre     map[string]fileFingerprint // path → fingerprint
 }
 
 // fileFingerprint is the per-file snapshot the recorder takes. mtime
-// is captured to second resolution; size is in bytes. hash is only
+// is captured to nanosecond resolution (a same-size edit landing in the
+// same second as the pre-walk must not read as "unchanged"); size is in
+// bytes. hash is only
 // populated when mtime or size differ between pre and post (sha256 is
 // O(file size) and we want the common case to be cheap).
 type fileFingerprint struct {
@@ -154,10 +165,9 @@ var pathTokenRegex = regexp.MustCompile(`(?:^|\s|=|;|\|)([A-Za-z0-9_./~+-]+/[A-Z
 // for every regular file. The walk skips noise directories (vendor,
 // .git, etc.) and any directory whose name starts with a dot (to keep
 // .opencode snapshots out of the per-invocation diff).
-func (r *StatBashRecorder) Pre() {
+func (r *StatBashRecorder) Pre() BashBaseline {
 	if r.workDir == "" || unsafeWalkRoot(r.workDir) {
-		r.pre = nil
-		return
+		return BashBaseline{}
 	}
 	fps := make(map[string]fileFingerprint)
 	start := time.Now()
@@ -191,12 +201,12 @@ func (r *StatBashRecorder) Pre() {
 		// The path is relative to walk root; the absolute path is
 		// recomposed by the post-walk for matching.
 		fps[path] = fileFingerprint{
-			mtime: info.ModTime().Unix(),
+			mtime: info.ModTime().UnixNano(),
 			size:  info.Size(),
 		}
 		return nil
 	})
-	r.pre = fps
+	return BashBaseline{fps: fps}
 }
 
 // Post walks the working directory again, diffs against the pre
@@ -207,9 +217,8 @@ func (r *StatBashRecorder) Pre() {
 // so the per-row details can show "(failed: exit 2)" in a future
 // enhancement. A non-zero exit code does not change the diff: the
 // shell may have partially written files before failing.
-func (r *StatBashRecorder) Post(command string, exitCode int) {
+func (r *StatBashRecorder) Post(base BashBaseline, command string, exitCode int) {
 	if r.workDir == "" || r.reg == nil || unsafeWalkRoot(r.workDir) {
-		r.pre = nil
 		return
 	}
 	post := make(map[string]fileFingerprint)
@@ -237,7 +246,7 @@ func (r *StatBashRecorder) Post(command string, exitCode int) {
 			return nil
 		}
 		post[path] = fileFingerprint{
-			mtime: info.ModTime().Unix(),
+			mtime: info.ModTime().UnixNano(),
 			size:  info.Size(),
 		}
 		return nil
@@ -247,8 +256,7 @@ func (r *StatBashRecorder) Post(command string, exitCode int) {
 	//   1. exists now and either didn't exist before, or has
 	//      different (mtime, size, hash).
 	//   2. existed before and is gone now (deleted).
-	touches := diffFingerprints(r.pre, post)
-	r.pre = nil
+	touches := diffFingerprints(base.fps, post)
 	if len(touches) == 0 {
 		return
 	}
@@ -312,20 +320,23 @@ func diffFingerprints(pre, post map[string]fileFingerprint) []BashTouch {
 }
 
 // fileContentEqual returns true when the file at path has the same
-// bytes as the pre-captured hash (when supplied). When both hashes
-// are empty, it computes them on the fly. False is returned on any
-// error (file vanished, permission denied, etc.) — the safe default
-// is to treat the file as modified and let the registry show it.
+// bytes as the pre-captured hash. Without a pre-hash there is nothing
+// to compare against, so the answer is false: the (mtime, size) change
+// that got us here is then reported as a modification. Hashing the
+// live file "for both sides" here compared the file to itself and
+// returned true for every same-size edit (sed -i, in-place rewrites),
+// which is why those never reached the changes tab. False is also
+// returned on any read error — the safe default is to treat the file
+// as modified and let the registry show it.
 func fileContentEqual(path, preHash, postHash string) bool {
-	pre := preHash
-	post := postHash
-	if pre == "" {
-		pre = hashFile(path)
+	if preHash == "" {
+		return false
 	}
+	post := postHash
 	if post == "" {
 		post = hashFile(path)
 	}
-	return pre != "" && pre == post
+	return post != "" && preHash == post
 }
 
 // hashFile returns the hex sha256 of the file at path, or "" on

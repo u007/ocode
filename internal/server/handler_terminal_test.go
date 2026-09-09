@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -280,5 +281,95 @@ func TestTerminalWSClientCloseDoesNotHang(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("handler did not return after client closed the connection")
+	}
+}
+
+// A host that is not registered together with the path is rejected: the
+// projects store, not the query string, decides which remotes a shell may
+// be opened on.
+func TestTerminalWSRejectsUnregisteredRemoteHost(t *testing.T) {
+	h := NewHandler()
+	h.workDir = t.TempDir()
+	h.SetTerminalAccessPolicy(false, true)
+	store, err := projects.NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatalf("projects.NewStoreAt: %v", err)
+	}
+	if err := store.AddRemote("dev@box", "/srv/app"); err != nil {
+		t.Fatalf("register remote project: %v", err)
+	}
+	h.projects = store
+
+	for _, q := range []string{
+		"host=other@box&project_path=/srv/app", // wrong host
+		"host=dev@box&project_path=/srv/other", // wrong path
+		"host=dev@box",                         // no path
+	} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/api/terminal/ws?"+q, nil)
+		h.HandleTerminalWS(w, r)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("%s: status = %d, want %d", q, w.Code, http.StatusForbidden)
+		}
+	}
+}
+
+// A registered remote project gets an ssh-backed shell rather than a local
+// one: the pty runs `ssh -t <host> ...`, so an unresolvable host surfaces
+// ssh's own error in the terminal output instead of a local prompt.
+func TestTerminalWSSpawnsSSHShellForRemoteProject(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("ssh not installed")
+	}
+	h := NewHandler()
+	h.workDir = t.TempDir()
+	h.SetTerminalAccessPolicy(false, true)
+	store, err := projects.NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatalf("projects.NewStoreAt: %v", err)
+	}
+	const host = "dev@ocode-terminal-test.invalid"
+	if err := store.AddRemote(host, "~/app"); err != nil {
+		t.Fatalf("register remote project: %v", err)
+	}
+	h.projects = store
+
+	srv := httptest.NewServer(http.HandlerFunc(h.HandleTerminalWS))
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") +
+		"?terminal_id=t1&host=" + url.QueryEscape(host) + "&project_path=" + url.QueryEscape("~/app")
+
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	if resp != nil {
+		resp.Body.Close()
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(15 * time.Second)
+	var seen strings.Builder
+	for {
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			t.Fatalf("SetReadDeadline failed: %v", err)
+		}
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read failed before seeing ssh output (got %q): %v", seen.String(), err)
+		}
+		seen.Write(data)
+		if strings.Contains(strings.ToLower(seen.String()), "resolve hostname") {
+			break
+		}
+	}
+	// The session is keyed to the remote identity, never the bare path, so
+	// a same-path local project can never reattach to it.
+	sess := h.terminalSessions.lookup("t1")
+	if sess == nil {
+		t.Fatal("session t1 not published")
+	}
+	if sess.project != host+":~/app" {
+		t.Fatalf("session project = %q, want %q", sess.project, host+":~/app")
 	}
 }

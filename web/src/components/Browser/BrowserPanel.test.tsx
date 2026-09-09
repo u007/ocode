@@ -132,12 +132,35 @@ describe("BrowserPanel", () => {
     expect(container.querySelector('[data-testid="tls-bypass-banner"]')).toBeNull();
   });
 
-  it("does not show TLS bypass banner for chrome mode even with TLS error", async () => {
-    state.error = "TLS certificate not trusted — x509: unknown authority";
+  it("never shows the TLS bypass banner for a public host in chrome mode", async () => {
+    state.error = "TLS certificate not trusted — net::ERR_CERT_AUTHORITY_INVALID";
     (state as unknown as Record<string, unknown>).mode = "chrome";
-    (state as unknown as Record<string, unknown>).url = "https://192.168.0.99:3000/";
+    (state as unknown as Record<string, unknown>).url = "https://example.com/";
     const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
     expect(container.querySelector('[data-testid="tls-bypass-banner"]')).toBeNull();
+  });
+
+  it("offers the bypass for a private host in chrome mode and reloads through the socket", async () => {
+    state.error = "TLS certificate not trusted — net::ERR_CERT_AUTHORITY_INVALID";
+    (state as unknown as Record<string, unknown>).mode = "chrome";
+    (state as unknown as Record<string, unknown>).url = "https://192.168.0.99:3000/page";
+    const cdpSends: unknown[] = [];
+    const onSend = (e: Event) => cdpSends.push((e as CustomEvent).detail);
+    window.addEventListener("cdp:send", onSend);
+    try {
+      const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+      const btn = container.querySelector('[data-testid="tls-bypass-banner"] button') as HTMLButtonElement;
+      expect(btn).toBeTruthy();
+      const { fireEvent } = await import("@testing-library/react");
+      await act(async () => {
+        fireEvent.click(btn);
+      });
+      await waitFor(() => expect(mockBypass).toHaveBeenCalledWith("tab:abc", "192.168.0.99:3000"));
+      await waitFor(() => expect(cdpSends).toEqual([{ t: "reload", stateKey: "tab:abc" }]));
+      expect(actions.navigate).toHaveBeenCalledWith("tab:abc", "https://192.168.0.99:3000/page");
+    } finally {
+      window.removeEventListener("cdp:send", onSend);
+    }
   });
 
   it("shows TLS banner for IPv6 loopback with TLS error", async () => {
@@ -294,12 +317,10 @@ describe("BrowserPanel", () => {
     expect(screen.queryByTestId("browser-loading-overlay")).not.toBeInTheDocument();
   });
 
-  it("shows an explanatory message instead of an iframe/viewport in a remote session", () => {
+  it("renders the normal panel in a remote session (browse origin is tunneled)", () => {
     mockIsRemoteSession.mockReturnValue(true);
-    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
-    expect(screen.getByTestId("browser-full-remote-unavailable")).toBeInTheDocument();
-    expect(container.textContent).toContain("isn't available in a remote session");
-    expect(container.querySelector("iframe")).toBeNull();
-    expect(container.querySelector("[data-testid='chrome-viewport']")).toBeNull();
+    render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    expect(screen.queryByTestId("browser-full-remote-unavailable")).not.toBeInTheDocument();
+    expect(screen.getByTestId("browser-full")).toBeInTheDocument();
   });
 });

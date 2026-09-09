@@ -82,4 +82,4 @@ cmd/ocode-desktop/embedded-assets/*.OCODE.md
 
 # Superpowers brainstorm runtime state (generated)
 .superpowers/
-
+.ocode/uploads

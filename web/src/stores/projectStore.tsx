@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import type { Project, ProjectGroup, SessionInfo } from "../api/types";
 
 export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status";
+export type ProjectMetadataStatus = "loading" | "ready" | "error";
 
 export interface Tab {
   id: string; // session ID (or `new-<ts>` temp ID before first message)
@@ -16,9 +17,11 @@ export interface Tab {
   titleManual?: boolean;
 }
 
-interface ProjectState {
+export interface ProjectState {
   projects: Project[];
   loading: boolean;
+  /** The project list is trusted only after at least one request succeeds. */
+  projectsStatus: ProjectMetadataStatus;
   activeProject: Project | null;
   projectSessions: SessionInfo[];
   sessionsLoading: boolean;
@@ -36,6 +39,7 @@ interface ProjectState {
 
 export type ProjectAction =
   | { type: "SET_PROJECTS"; projects: Project[] }
+  | { type: "SET_PROJECTS_ERROR" }
   | { type: "SET_LOADING"; loading: boolean }
   | { type: "SET_ACTIVE_PROJECT"; project: Project | null }
   | { type: "SET_PROJECT_SESSIONS"; sessions: SessionInfo[] }
@@ -52,6 +56,7 @@ export type ProjectAction =
 const initialState: ProjectState = {
   projects: [],
   loading: false,
+  projectsStatus: "loading",
   activeProject: null,
   projectSessions: [],
   sessionsLoading: false,
@@ -88,7 +93,20 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
   const path = state.activeProject?.path || "";
   switch (action.type) {
     case "SET_PROJECTS":
-      return { ...state, projects: Array.isArray(action.projects) ? action.projects : [], loading: false };
+      return {
+        ...state,
+        projects: Array.isArray(action.projects) ? action.projects : [],
+        loading: false,
+        projectsStatus: "ready",
+      };
+    case "SET_PROJECTS_ERROR":
+      return {
+        ...state,
+        loading: false,
+        // A later refresh failure must not revoke the last trusted metadata
+        // snapshot or make live remote terminals look local.
+        projectsStatus: state.projectsStatus === "ready" ? "ready" : "error",
+      };
     case "SET_LOADING":
       return { ...state, loading: action.loading };
     case "SET_ACTIVE_PROJECT":
@@ -294,6 +312,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     (action: ProjectAction) => store.setState((prev) => projectReducer(prev, action)),
     [store],
   );
+  const projectsRequestRef = useRef(0);
 
   // Debounced persistence of tabs + active tab. Runs on every tabs change.
   useEffect(() => {
@@ -378,15 +397,18 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   }, [store]);
 
   const refreshProjects = useCallback(async () => {
+    const requestId = ++projectsRequestRef.current;
     dispatch({ type: "SET_LOADING", loading: true });
     try {
       const projects = await api.listProjects();
+      if (requestId !== projectsRequestRef.current) return;
       dispatch({ type: "SET_PROJECTS", projects });
     } catch (err) {
+      if (requestId !== projectsRequestRef.current) return;
       console.error("Failed to load projects:", err);
-      dispatch({ type: "SET_LOADING", loading: false });
+      dispatch({ type: "SET_PROJECTS_ERROR" });
     }
-  }, []);
+  }, [dispatch]);
 
   const refreshGroups = useCallback(async () => {
     try {

@@ -42,6 +42,10 @@ type discoveryState struct {
 // completes the cache is hot and per-turn warms early-return in microseconds.
 const discoveryWarmTimeout = 20 * time.Second
 
+// discoverySignalMinChars: user text shorter than this gets no project-type
+// signal appended to the discovery query (see discoveryQueryFromMessages).
+const discoverySignalMinChars = 40
+
 // ensureDiscovery lazily builds discovery state on first use (by Step time, MCP
 // tools are loaded). On any resolve error it FAILS OPEN: leaves disco disabled
 // (all tools attached, today's behavior) and logs why.
@@ -519,8 +523,13 @@ func discoveryQueryFromMessages(msgs []Message, workDir string) string {
 	q := strings.Join(userTurns, "\n")
 	// Append project type signals so the embedder can distinguish e.g. Go from
 	// Flutter when the user's text is ambiguous (e.g. "refactor this function").
-	if sig := projectSignals(workDir); sig != "" {
-		q += "\nProject context: " + sig
+	// Skipped for short text: on a query like "ignore" or "use agent browser"
+	// the signal dominates the embedding, every doc about this repo scores
+	// near-identical, and rank-relative selection attaches the whole corpus.
+	if len(strings.TrimSpace(q)) >= discoverySignalMinChars {
+		if sig := projectSignals(workDir); sig != "" {
+			q += "\nProject context: " + sig
+		}
 	}
 	if len(q) > 2048 {
 		q = q[len(q)-2048:]
@@ -752,7 +761,7 @@ type discoverMoreTool struct{ agent *Agent }
 
 func (t discoverMoreTool) Name() string { return "discover_more" }
 func (t discoverMoreTool) Description() string {
-	return "Attach additional MCP tools relevant to a described need. Call this when you need a capability whose tool is not in your current tool list."
+	return "Attach additional skills, MCP tools, or project docs relevant to a described need. Call this when the discovery names index lists something you need but its summary/tool is not yet attached."
 }
 func (t discoverMoreTool) Parallel() bool { return false }
 func (t discoverMoreTool) Definition() map[string]interface{} {

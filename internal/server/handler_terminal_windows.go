@@ -26,6 +26,12 @@ func (h *Handler) HandleTerminalKill(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotImplemented, "interactive terminal is not supported on Windows")
 }
 
+// HandleTerminalHistory mirrors the other terminal stubs so the history route
+// remains present in the Windows build even though no pty log is created.
+func (h *Handler) HandleTerminalHistory(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotImplemented, "interactive terminal is not supported on Windows")
+}
+
 // terminalSession is only ever constructed by the Unix pty bridge; the type
 // exists here so terminalSessionTable compiles on Windows.
 type terminalSession struct {

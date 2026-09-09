@@ -35,7 +35,7 @@ describe("useBrowserPersistence project switching", () => {
           url: "https://a.com/", status: 200, loading: false, mode: "local", userMode: null, error: null,
           history: ["https://a.com/"], historyIndex: 0, panelOpen: true, collapsed: false,
           consoleEvents: [], networkEvents: [], responseBodies: {}, pageTitle: "A Site", scrollY: 0, scrollByUrl: {},
-          perfMetrics: {}, perfRecording: true,
+          perfMetrics: {}, perfRecording: true, zoom: 1,
         },
       },
     }));

@@ -79,6 +79,17 @@ export interface TitleEvent {
   url?: string;
 }
 
+/** A page opened via Cmd/Ctrl+click, target="_blank", or window.open (the
+ *  `browse_newtab` bus event) — a stateKey the SPA has never seen before.
+ *  `project` is the owning project root when the backend knows it (opener
+ *  attribution); absent/empty means unknown — the SPA files the strip entry
+ *  under the active project (documented active-project-scoped fallback). */
+export interface NewTabEvent {
+  state_key: string;
+  url: string;
+  project?: string;
+}
+
 /** Rendering mode for one browser surface: local = reverse-proxy iframe
  *  (private hosts), chrome = headless-Chrome screencast (public hosts). */
 export type BrowseMode = "local" | "chrome";
@@ -112,6 +123,10 @@ export interface BrowserTabState {
    *  defaults true to match the backend's enable-on-attach. Stop only pauses
    *  collection — the last snapshot is kept, never erased. */
   perfRecording: boolean;
+  /** Chrome-mode page zoom (1 = 100%). Persisted per surface so a viewport
+   *  remount (e.g. switching tabs, which remounts ChromeViewport by key)
+   *  reapplies it instead of silently dropping back to 100%. */
+  zoom: number;
 }
 
 interface BrowserState {
@@ -147,6 +162,7 @@ function defaultTab(persistedUrl = ""): BrowserTabState {
     scrollByUrl: {},
     perfMetrics: {},
     perfRecording: true,
+    zoom: 1,
   };
 }
 
@@ -304,6 +320,14 @@ export const browserActions = {
 
   setPerfRecording(key: StateKey, recording: boolean) {
     mutate(key, (t) => ({ ...t, perfRecording: recording }));
+  },
+
+  /** Persist the Chrome-mode page zoom for a surface. ChromeViewport applies
+   *  this back to the live CDP target on mount and whenever it changes
+   *  elsewhere (e.g. the address bar's reset button). */
+  setZoom(key: StateKey, factor: number) {
+    if (!Number.isFinite(factor) || factor <= 0) return;
+    mutate(key, (t) => (t.zoom === factor ? t : { ...t, zoom: factor }));
   },
 
   clearPerformance(key: StateKey) {

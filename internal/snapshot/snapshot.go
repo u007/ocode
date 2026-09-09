@@ -83,6 +83,33 @@ func (s *Store) SetSessionID(sessionID string) {
 	s.mu.Unlock()
 }
 
+// SessionID returns the session the store is currently bound to ("" when
+// unjournaled).
+func (s *Store) SessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionID
+}
+
+// SwitchSession binds the store to sessionID and makes its in-memory
+// history reflect that session: a store already bound to a DIFFERENT
+// session drops its live snapshots first (they stay journaled under their
+// own session and come back when that session is loaded again), then
+// Rehydrate replays sessionID's journaled rows. Re-binding the current
+// session leaves live history untouched. This is the one entry point
+// agent rebuilds and session loads should use; SetSessionID+Rehydrate on
+// a non-empty store silently kept the previous session's files.
+func (s *Store) SwitchSession(sessionID string) {
+	s.mu.Lock()
+	prev := s.sessionID
+	s.sessionID = sessionID
+	s.mu.Unlock()
+	if prev != "" && prev != sessionID {
+		s.Reset()
+	}
+	s.Rehydrate()
+}
+
 // Rehydrate loads this store's session's journaled snapshots from the
 // journal in baseDir. It only fills an EMPTY store (a rebuilt agent);
 // a store that already holds in-process snapshots is left untouched so

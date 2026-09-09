@@ -128,8 +128,7 @@ func (a *Agent) SetSessionID(sessionID string) {
 	// agent rebuilds (idle eviction, restart, resume). Rehydrate is a no-op
 	// for brand-new sessions and for stores that already hold snapshots.
 	if a.snapshotStore != nil && sessionID != "" {
-		a.snapshotStore.SetSessionID(sessionID)
-		a.snapshotStore.Rehydrate()
+		a.snapshotStore.SwitchSession(sessionID)
 	}
 }
 
@@ -189,8 +188,16 @@ func (a *Agent) SetChangesSession(sessionID string) {
 	if a.snapshotStore == nil || sessionID == "" {
 		return
 	}
-	a.snapshotStore.SetSessionID(sessionID)
-	a.snapshotStore.Rehydrate()
+	a.snapshotStore.SwitchSession(sessionID)
+}
+
+// ChangesSessionID reports the session the snapshot store journals under
+// ("" when unbound).
+func (a *Agent) ChangesSessionID() string {
+	if a.snapshotStore == nil {
+		return ""
+	}
+	return a.snapshotStore.SessionID()
 }
 
 // emitDebug appends a debug-log entry tagged with this agent's session id.
@@ -627,6 +634,29 @@ func (a *Agent) ChangedFiles() []string {
 // changes TUI tab. May be nil if the agent was created without wiring
 // (e.g. sub-agents sharing the main agent's registry).
 func (a *Agent) Changes() *changes.Registry { return a.changes }
+
+// shareChangeTrackingFrom points this (child) agent's snapshot store and
+// changes registry at parent's, and rebuilds the child's bash tool so its
+// stat-bash recorder reports into the SHARED registry (the one the Changes
+// tab reads) rather than the throwaway one NewAgent created for the child.
+// Used by task sub-agents and ask-tool side queries.
+func (a *Agent) shareChangeTrackingFrom(parent *Agent) {
+	if parent.snapshotStore != nil {
+		a.snapshotStore = parent.snapshotStore
+	}
+	if parent.changes == nil {
+		return
+	}
+	a.changes = parent.changes
+	workDir := parent.workDir
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
+	if bt, ok := a.tools["bash"].(*tool.BashTool); ok {
+		bt.Recorder = changes.NewStatBashRecorder(workDir, parent.changes)
+		a.tools["bash"] = bt
+	}
+}
 
 // UndoLastChange reverts the most recently written file in this agent's
 // session (LIFO, independent of tool_call_id). Scoped to this agent's own
@@ -1351,6 +1381,49 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 
 		results := make([]Message, len(resp.ToolCalls))
 
+		// Duplicate-call rejection: within this single model batch, two+
+		// calls that share the same tool name and equivalent JSON arguments
+		// are redundant — running both is wasted upstream work, and for the
+		// task/agent tools it double-spawns identical subagents. The first
+		// occurrence (lowest original index) wins and executes normally;
+		// every later duplicate is rejected without executing, its own
+		// ToolID preserved, and its result message points at the winner and
+		// carries the winner's result. Dedup happens here, BEFORE group-bus
+		// detection and DAG validation, so duplicates never register on the
+		// bus, never trip duplicate-id validation, and never run.
+		//
+		// `rejected[index]` maps a rejected original index -> winning original
+		// index. `rejectedIdx` is the ordered list of rejected indices. The
+		// winner's result is unknown until dispatch finishes, so the
+		// rejection messages are finalized (reason + winner id + winner
+		// content) just before the results scan loop below.
+		var (
+			rejected    map[int]int
+			rejectedIdx []int
+		)
+		rejected, rejectedIdx = duplicateToolCallIndices(resp.ToolCalls)
+		for j, first := range rejected {
+			a.emitDebug("TOOL", fmt.Sprintf("rejecting duplicate %s call (replica of original index %d)", resp.ToolCalls[j].Function.Name, first))
+		}
+		if len(rejected) > 0 {
+			// Remove rejected indices from the dispatch lists so they never
+			// execute. Both lists keep original ordering.
+			keepParallel := parallelTCs[:0]
+			for _, i := range parallelTCs {
+				if _, bad := rejected[i]; !bad {
+					keepParallel = append(keepParallel, i)
+				}
+			}
+			parallelTCs = keepParallel
+			keepSeq := sequentialTCs[:0]
+			for _, i := range sequentialTCs {
+				if _, bad := rejected[i]; !bad {
+					keepSeq = append(keepSeq, i)
+				}
+			}
+			sequentialTCs = keepSeq
+		}
+
 		// Group-bus detection: a "group" exists when 2+ subagent
 		// ("task" / "agent") calls in this parallel batch carry
 		// `shared_notes:true`. The detection happens here, BEFORE
@@ -1623,6 +1696,29 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		}
 		if isCancelled() {
 			return newMsgs, nil
+		}
+		if len(rejected) > 0 {
+			// Every dispatch (parallel + sequential) has finished and the
+			// winners' results are known. Finalize each rejected call's tool
+			// message with the reason and the winner's result.
+			for _, j := range rejectedIdx {
+				first := rejected[j]
+				win := results[first]
+				results[j] = Message{
+					Role:   "tool",
+					ToolID: resp.ToolCalls[j].ID,
+					Images: win.Images,
+					Notice: win.Notice,
+					Content: fmt.Sprintf(
+						"Rejected duplicate tool call %q: identical call already accepted as tool call %q. This call was not executed.\nWinner result:\n%s",
+						resp.ToolCalls[j].Function.Name, win.ToolID, win.Content),
+				}
+				if win.DisplayContent != "" {
+					results[j].DisplayContent = fmt.Sprintf(
+						"Rejected duplicate tool call %q: winner result:\n%s",
+						resp.ToolCalls[j].Function.Name, win.DisplayContent)
+				}
+			}
 		}
 
 		pauseAfterResults := false
@@ -2782,11 +2878,21 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 // lets ContextualTool implementations (notably bash and formatters) stop when
 // recovery is cancelled or times out.
 func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
+	// A tool that doesn't exist here was never advertised to the model and is
+	// a hallucination. Respond with "tool not found" immediately — do not
+	// route it through the permission layer, which would otherwise ask the
+	// user for a tool that cannot run anyway. This check runs FIRST so every
+	// unknown-tool call returns "tool not found" regardless of malformed args.
+	if _, exists := a.tools[name]; !exists {
+		a.emitDebug("TOOL", fmt.Sprintf("tool %q not found", name))
+		return fmt.Sprintf("tool not found: %q", name), nil
+	}
+
 	// A model that writes the same argument key twice in one object gave two
 	// answers and settled on neither. encoding/json would pick the last one and
 	// run the call anyway, silently. Skip it instead and name both values: this
 	// returns as a tool result, so the turn survives and the model can re-issue
-	// the call correctly on the next loop.
+	// the call correctly.
 	if dupErr := duplicateKeySkipError(args); dupErr != nil {
 		a.emitDebug("TOOL", fmt.Sprintf("skipped %s: %v", name, dupErr))
 		return "", dupErr

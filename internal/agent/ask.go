@@ -3,12 +3,10 @@ package agent
 import (
 	"errors"
 	"fmt"
-	"os"
 	"runtime/debug"
 	"strings"
 	"sync/atomic"
 
-	"github.com/u007/ocode/internal/changes"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -200,23 +198,7 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 	}
 	// Share session-scoped state so side-query mutations are tracked and
 	// undoable in the Changes tab (same contract as subagents).
-	if a.snapshotStore != nil {
-		child.snapshotStore = a.snapshotStore
-	}
-	if a.changes != nil {
-		child.changes = a.changes
-		// Rebuild the child's bash tool so its stat-bash recorder reports into
-		// the SHARED changes registry (the one the Changes tab reads), not the
-		// throwaway registry NewAgent created for the child.
-		workDir := a.workDir
-		if workDir == "" {
-			workDir, _ = os.Getwd()
-		}
-		if bt, ok := child.tools["bash"].(*tool.BashTool); ok {
-			bt.Recorder = changes.NewStatBashRecorder(workDir, a.changes)
-			child.tools["bash"] = bt
-		}
-	}
+	child.shareChangeTrackingFrom(a)
 	// Share permissions; ASK decisions resolve to a non-blocking deny so the
 	// popup loop never waits on a dialog it cannot show. Auto-permission (LLM
 	// judge) still runs first when enabled.

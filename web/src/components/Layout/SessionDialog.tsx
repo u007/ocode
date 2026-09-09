@@ -4,7 +4,7 @@ import { useProjectState } from "../../stores/projectStore";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
 import { cancelLiveDeltas, closeSessionBackend } from "../../lib/sessionEvents";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { MessageSquare, Plus, X, Loader2, Check } from "lucide-react";
@@ -15,6 +15,7 @@ export default function SessionDialog() {
   const { projectSessions, sessionsLoading, sessionPickerOpen, activeProject } = projectState;
 
   const [searchQuery, setSearchQuery] = useState("");
+  const [pendingClose, setPendingClose] = useState<{ tabId: string; title: string } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Auto-focus search input when dialog opens
@@ -49,15 +50,34 @@ export default function SessionDialog() {
     setSearchQuery("");
   }, [activeTabId, openNewSessionTab, toggleSessionPicker]);
 
-  // Close a session tab
-  const handleCloseTab = useCallback((e: React.MouseEvent, tabId: string) => {
-    e.stopPropagation();
+  // Close a session tab immediately. Middle-click uses this path; the X button
+  // goes through the confirmation flow below.
+  const closeTabNow = useCallback((tabId: string) => {
     closeSessionBackend(tabId);
     closeSessionTab(tabId);
     cancelLiveDeltas(tabId);
     chatDispatch({ type: "RESET", sessionId: tabId });
     clearQueue(tabId);
   }, [closeSessionTab, chatDispatch]);
+
+  const handleCloseTab = useCallback((e: React.MouseEvent, tabId: string) => {
+    e.stopPropagation();
+    closeTabNow(tabId);
+  }, [closeTabNow]);
+
+  const requestCloseTab = useCallback((e: React.MouseEvent, tabId: string, title: string) => {
+    e.stopPropagation();
+    setPendingClose({ tabId, title });
+  }, []);
+
+  const confirmPendingClose = useCallback(() => {
+    if (!pendingClose) return;
+    const { tabId } = pendingClose;
+    setPendingClose(null);
+    closeTabNow(tabId);
+  }, [pendingClose, closeTabNow]);
+
+  const cancelPendingClose = useCallback(() => setPendingClose(null), []);
 
   // Check if a session is currently open as a tab
   const isTabOpen = useCallback((sessionId: string) => {
@@ -160,12 +180,13 @@ export default function SessionDialog() {
                       <span
                         role="button"
                         tabIndex={0}
+                        aria-label={`Close ${session.title || session.id}`}
                         className="shrink-0 p-1 rounded-md hover:bg-muted-foreground/20 text-muted-foreground hover:text-foreground transition-colors"
-                        onClick={(e) => handleCloseTab(e, session.id)}
+                        onClick={(e) => requestCloseTab(e, session.id, session.title || session.id)}
                         onKeyDown={(e) => {
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
-                            handleCloseTab(e as unknown as React.MouseEvent, session.id);
+                            requestCloseTab(e as unknown as React.MouseEvent, session.id, session.title || session.id);
                           }
                         }}
                       >
@@ -178,6 +199,23 @@ export default function SessionDialog() {
             </div>
           )}
         </div>
+
+        {pendingClose && (
+          <Dialog open onOpenChange={(open) => !open && cancelPendingClose()}>
+            <DialogContent className="max-w-sm">
+              <DialogHeader>
+                <DialogTitle className="text-sm">Close session tab?</DialogTitle>
+              </DialogHeader>
+              <p className="text-sm text-muted-foreground">
+                Close <span className="font-medium text-foreground">{pendingClose.title}</span>? This cannot be undone.
+              </p>
+              <DialogFooter className="gap-2">
+                <Button variant="ghost" onClick={cancelPendingClose}>Cancel</Button>
+                <Button variant="destructive" onClick={confirmPendingClose}>Close tab</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        )}
 
         {/* Footer: New Session */}
         <div className="px-4 py-3 border-t border-border flex items-center gap-2">

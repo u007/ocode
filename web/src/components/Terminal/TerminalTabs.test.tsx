@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createRef } from "react";
 import { TerminalProvider } from "../../stores/terminalStore";
 import type { TerminalTabsHandle } from "./TerminalTabs";
+import TerminalTabs from "./TerminalTabs";
 
 // Real xterm needs canvas/layout that jsdom does not have, so the terminal
 // itself is stubbed: this test covers activation/open/close behaviour and
@@ -53,6 +54,7 @@ vi.mock("@/api/client", () => ({
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
   authToken: () => "tok",
+  authHeaders: () => ({}),
   authedFetch: (...args: unknown[]) => authedFetchMock(...args),
   isRemoteSession: () => false,
 }));
@@ -77,6 +79,7 @@ vi.mock("@/lib/eventBus", () => ({
 const authedFetchMock = vi.fn((..._args: unknown[]) => Promise.resolve({ ok: true, status: 204 }));
 
 const sockets: MockSocket[] = [];
+let terminalFetchMock: ReturnType<typeof vi.fn>;
 
 class MockSocket {
   static OPEN = 1;
@@ -98,6 +101,8 @@ beforeEach(() => {
   disposeSpy.mockClear();
   window.localStorage.clear();
   vi.stubGlobal("WebSocket", MockSocket as unknown as typeof WebSocket);
+  terminalFetchMock = vi.fn(() => Promise.resolve(new Response("", { status: 404 })));
+  vi.stubGlobal("fetch", terminalFetchMock);
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -107,12 +112,11 @@ beforeEach(() => {
   );
 });
 
-async function renderTabs(projectPath = "/project") {
-  const { default: TerminalTabs } = await import("./TerminalTabs");
+async function renderTabs(projectPath = "/project", host?: string) {
   const ref = createRef<TerminalTabsHandle>();
   const utils = render(
     <TerminalProvider>
-      <TerminalTabs ref={ref} active projectPath={projectPath} />
+      <TerminalTabs ref={ref} active projectPath={projectPath} host={host} />
     </TerminalProvider>,
   );
   // First terminal is opened lazily once the panel becomes active.
@@ -124,6 +128,47 @@ describe("TerminalTabs", () => {
   it("connects each terminal socket with the tab's project_path", async () => {
     await renderTabs();
     expect(sockets[0].url).toContain(`project_path=${encodeURIComponent("/project")}`);
+  });
+
+  it("starts a remote terminal once with its trusted host", async () => {
+    await renderTabs("/remote", "dev@example.com");
+
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0].url).toContain(`host=${encodeURIComponent("dev@example.com")}`);
+    const historyRequest = terminalFetchMock.mock.calls.find(([input]) => String(input).includes("/history"));
+    expect(historyRequest?.[0]).toContain(`host=${encodeURIComponent("dev@example.com")}`);
+    expect(disposeSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not restart the lifecycle when metadata refresh keeps the same host", async () => {
+    const first = await renderTabs("/remote", "dev@example.com");
+    const socket = sockets[0];
+
+    first.rerender(
+      <TerminalProvider>
+        <TerminalTabs active projectPath="/remote" host="dev@example.com" />
+      </TerminalProvider>,
+    );
+
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(disposeSpy).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds the lifecycle when the host identity deliberately changes", async () => {
+    const first = await renderTabs("/remote", "old@example.com");
+    const oldSocket = sockets[0];
+
+    first.rerender(
+      <TerminalProvider>
+        <TerminalTabs active projectPath="/remote" host="new@example.com" />
+      </TerminalProvider>,
+    );
+
+    await waitFor(() => expect(sockets).toHaveLength(2));
+    expect(oldSocket.close).toHaveBeenCalled();
+    expect(disposeSpy).toHaveBeenCalled();
+    expect(sockets[1].url).toContain(`host=${encodeURIComponent("new@example.com")}`);
   });
 
   it("opens an additional terminal (and socket) via the imperative openTerminal() handle", async () => {

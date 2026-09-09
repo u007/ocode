@@ -185,6 +185,12 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	// continuation unwinds, exactly like the permission-resolve path.
 	defer h.drainPendingClose(sessID)
 
+	// Tell every watcher the dialog can be dismissed NOW — before the
+	// continuation round. The answer is already applied in `working`; a slow
+	// model round-trip must not keep the web/desktop dialog on screen (same
+	// ordering as HandleResolvePermission).
+	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "question_resolved", Data: map[string]string{"request_id": req.RequestID}})
+
 	resp, err := as.agent.Step(working)
 	if err != nil {
 		log.Printf("serve error: question answer step: %v", err)
@@ -211,8 +217,6 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 
 	_ = h.saveSession(sessID, "", as.messages, nil)
 
-	// Tell the mirror the dialog can be dismissed, then stream the continuation.
-	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "question_resolved", Data: map[string]string{"request_id": req.RequestID}})
 	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
 	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "turn_done", Data: DoneEvent{SessionID: sessID, Model: as.model}})
 

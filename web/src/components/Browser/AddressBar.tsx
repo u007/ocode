@@ -9,18 +9,22 @@ export interface AddressBarProps {
   error: string;
   canBack: boolean;
   canForward: boolean;
+  /** Chrome-mode page zoom (1 = 100%); omitted in local (iframe) mode, which
+   *  has no independent zoom. */
+  zoom?: number;
   onNavigate: (url: string) => void;
   onBack: () => void;
   onForward: () => void;
   onReload: () => void;
   onOpenExternal: () => void;
+  onResetZoom?: () => void;
 }
 
 // The displayed URL is authoritative store state (fed by server nav events),
 // never a value reported by the proxied page or the screencast — page JS
 // could spoof it.
 export function AddressBar(props: AddressBarProps) {
-  const { url, status, mode, error, canBack, canForward } = props;
+  const { url, status, mode, error, canBack, canForward, zoom } = props;
   const [draft, setDraft] = useState(url);
   useEffect(() => setDraft(url), [url]);
 
@@ -52,6 +56,16 @@ export function AddressBar(props: AddressBarProps) {
         </span>
       )}
       {mode && <span className="px-1 text-xs uppercase text-neutral-400">{mode}</span>}
+      {!!zoom && Math.abs(zoom - 1) > 0.001 && (
+        <button
+          aria-label="Reset zoom"
+          title="Reset zoom to 100%"
+          onClick={props.onResetZoom}
+          className="px-1 text-xs tabular-nums text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300"
+        >
+          {Math.round(zoom * 100)}%
+        </button>
+      )}
       {error && <span className="px-1 text-xs text-red-500 truncate max-w-48">{error}</span>}
       <button aria-label="Open externally" onClick={props.onOpenExternal} className="px-1">↗</button>
     </div>

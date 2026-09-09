@@ -17,6 +17,38 @@
 
 
 
+
+## 2026-09-09
+
+* **Creation**: Chrome Tab Hang — Unbounded CDP Calls, JS Dialogs, Invisible Popups ([gotchas/chrome-tab-hang-unbounded-cdp-call.md](/gotchas/chrome-tab-hang-unbounded-cdp-call.md))
+* **Update**: Browser Chrome CDP design ([docs/superpowers/specs/2026-08-31-browser-chrome-cdp-design.md](/docs/superpowers/specs/2026-08-31-browser-chrome-cdp-design.md)) — Conn.Call default deadline, JS dialog auto-accept, popup/middle-click discovery via Target.setDiscoverTargets
+* **Update**: Remote SSH Phase 2 — web ([docs/superpowers/specs/2026-08-29-remote-ssh/03-phase2-web.md](/docs/superpowers/specs/2026-08-29-remote-ssh/03-phase2-web.md)) — browse origin port now recorded in serve.json (`browsePort`) and forwarded by the SSH tunnel on the same port number; browser panel enabled in remote (SSH + WSL) sessions
+
+## 2026-09-08
+
+* **Creation**: Terminal Shells Survive Page Reload (Detach / Reattach) ([docs/architecture/terminal-detach-reattach.md](/docs/architecture/terminal-detach-reattach.md))
+* **Update**: Changes Tab ([docs/changes-tab.md](/docs/changes-tab.md)) — bash recorder: per-call baseline, ns mtime, same-size edits no longer dropped; sub-agents share the parent registry; agent rebuilds/session loads re-bind the snapshot store via Store.SwitchSession
+* **Creation**: Permission Evaluation and Unknown Tool Guard ([gotchas/permission-evaluation-and-unknown-tool-guard.md](/gotchas/permission-evaluation-and-unknown-tool-guard.md))
+* **Update**: Session Storage Critical Issues ([docs/gotchas/session-storage-critical-issues.md](/docs/gotchas/session-storage-critical-issues.md))
+* **Creation**: Test Update Doc ([docs/gotchas/test-update.md](/docs/gotchas/test-update.md))
+* **Update**: Session Storage Critical Issues ([docs/gotchas/session-storage-critical-issues.md](/docs/gotchas/session-storage-critical-issues.md))
+* **Creation**: Session Storage Critical Issues ([docs/gotchas/session-storage-critical-issues.md](/docs/gotchas/session-storage-critical-issues.md))
+* **Creation**: Web ask dialogs: broadcast resolved before continuation ([docs/gotchas/web-ask-dialog-resolved-before-continuation.md](/docs/gotchas/web-ask-dialog-resolved-before-continuation.md)) — question_resolved now fires before agent.Step so the QuestionDialog closes on answer
+* **Deprecation**: Terminal History Persistence and Restore: Replaced by corrected version at terminal-history-persistence-and-restore.md per user instructions ([docs/docs/terminal-history-persistence-and-restore.md](/docs/docs/terminal-history-persistence-and-restore.md))
+* **Update**: Terminal History Persistence and Restore ([docs/terminal-history-persistence-and-restore.md](/docs/terminal-history-persistence-and-restore.md))
+* **Creation**: Terminal History Persistence and Restore ([docs/terminal-history-persistence-and-restore.md](/docs/terminal-history-persistence-and-restore.md))
+* **Update**: Terminal History Persistence and Restore ([docs/docs/terminal-history-persistence-and-restore.md](/docs/docs/terminal-history-persistence-and-restore.md))
+* **Deprecation**: Terminal History Persistence and Restore: Replacing with corrected version per user instructions ([docs/docs/terminal-history-persistence-and-restore.md](/docs/docs/terminal-history-persistence-and-restore.md))
+* **Creation**: Terminal History Persistence and Restore ([docs/docs/terminal-history-persistence-and-restore.md](/docs/docs/terminal-history-persistence-and-restore.md))
+* **Update**: Terminal History Persistence and Restore ([docs/terminal-history-persistence-and-restore.md](/docs/terminal-history-persistence-and-restore.md))
+* **Deprecation**: Permission Evaluation and Unknown Tool Guard: Accidental deprecation from earlier call — document was just updated with new content, not deprecated. Re-verified: doc_content is current and enhanced. ([docs/gotchas/permission-evaluation-and-unknown-tool-guard.md](/docs/gotchas/permission-evaluation-and-unknown-tool-guard.md))
+* **Update**: Permission Evaluation and Unknown Tool Guard ([docs/gotchas/permission-evaluation-and-unknown-tool-guard.md](/docs/gotchas/permission-evaluation-and-unknown-tool-guard.md))
+* **Deprecation**: Permission Evaluation and Unknown Tool Guard: Already updated — no further action needed ([docs/gotchas/permission-evaluation-and-unknown-tool-guard.md](/docs/gotchas/permission-evaluation-and-unknown-tool-guard.md))
+* **Update**: Terminal History Persistence and Restore ([docs/terminal-history-persistence-and-restore.md](/docs/terminal-history-persistence-and-restore.md))
+* **Creation**: Terminal History Persistence and Restore ([docs/terminal-history-persistence-and-restore.md](/docs/terminal-history-persistence-and-restore.md))
+* **Creation**: Permission Evaluation and Unknown Tool Guard ([docs/gotchas/permission-evaluation-and-unknown-tool-guard.md](/docs/gotchas/permission-evaluation-and-unknown-tool-guard.md))
+* **Update**: Permission Evaluation and Unknown Tool Guard ([gotchas/permission-evaluation-and-unknown-tool-guard.md](/gotchas/permission-evaluation-and-unknown-tool-guard.md))
+* **Creation**: Permission Evaluation and Unknown Tool Guard ([gotchas/permission-evaluation-and-unknown-tool-guard.md](/gotchas/permission-evaluation-and-unknown-tool-guard.md))
 ## 2026-09-06
 
 * **Creation**: Worktree-Based Parallel Feature Development ([architecture/worktree-based-parallel-feature-development.md](/architecture/worktree-based-parallel-feature-development.md))

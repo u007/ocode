@@ -2,6 +2,8 @@ package cdp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -13,6 +15,16 @@ import (
 
 	"github.com/u007/ocode/internal/tool"
 )
+
+// newTabID mints an opaque id for a spontaneously-opened tab's "tab:<id>"
+// stateKey. crypto/rand failure is unrecoverable, mirroring browse.randToken.
+func newTabID() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		panic("cdp: crypto/rand failed: " + err.Error())
+	}
+	return hex.EncodeToString(b)
+}
 
 // NavEvent is cdp-local nav event (Part 05 maps to browse.NavEvent).
 type NavEvent struct {
@@ -30,6 +42,16 @@ type NavEvent struct {
 type TitleEvent struct {
 	StateKey string
 	Title    string
+	URL      string
+}
+
+// NewTabEvent announces a page target Chrome attached to on its own —
+// Cmd/Ctrl+click, target="_blank", window.open — rather than one this
+// Manager created via Attach. StateKey is freshly minted; the SPA opens a
+// background browser tab for it (mirrors a real browser's new-tab-in-
+// background behavior for a modified-click).
+type NewTabEvent struct {
+	StateKey string
 	URL      string
 }
 
@@ -70,16 +92,31 @@ type MouseEvent struct {
 	Kind           string // move|down|up|wheel
 	X, Y           float64
 	Button         string
+	Buttons        int // CDP bitmask of buttons held: left=1, right=2, middle=4
 	ClickCount     int
 	DeltaX, DeltaY float64
 	Modifiers      int
 }
 
 // KeyEvent describes a keyboard action.
+// TouchPoint is one active contact in CSS pixels.
+type TouchPoint struct {
+	ID   int
+	X, Y float64
+}
+
+// TouchEvent carries the changed contacts of one Input.dispatchTouchEvent.
+type TouchEvent struct {
+	Kind      string // start|move|end|cancel
+	Points    []TouchPoint
+	Modifiers int
+}
+
 type KeyEvent struct {
 	Kind            string // down|up|char
 	Key, Code, Text string
 	Modifiers       int
+	AutoRepeat      bool
 }
 
 var (
@@ -96,6 +133,7 @@ type ManagerOptions struct {
 	Dialer      *net.Dialer
 	EmitNav     func(NavEvent)
 	EmitTitle   func(TitleEvent)
+	EmitNewTab  func(NewTabEvent)
 	Log         *log.Logger
 }
 
@@ -120,6 +158,10 @@ type Manager struct {
 	launchFn func(context.Context) (*Conn, <-chan int, func(), error)
 
 	targets map[string]*Target
+	// trusted holds hosts the user explicitly accepted a bad certificate
+	// for ("Continue anyway"), per stateKey. Kept on the manager, not the
+	// target, so a revoke/re-attach cycle does not forget the decision.
+	trusted map[string]map[string]bool
 
 	// pending maps a freshly created Chrome targetID to its stateKey between
 	// Target.attachToTarget and the m.targets[stateKey] insert at the end of
@@ -288,10 +330,22 @@ func (m *Manager) startBrowserHandlersLocked() {
 	ch1, cancel1 := conn.Subscribe("", "Target.targetCrashed")
 	ch2, cancel2 := conn.Subscribe("", "Target.attachedToTarget")
 	ch3, cancel3 := conn.Subscribe("", "Target.targetInfoChanged")
-	m.browserCancel = append(m.browserCancel, cancel1, cancel2, cancel3)
+	ch4, cancel4 := conn.Subscribe("", "Target.targetCreated")
+	ch5, cancel5 := conn.Subscribe("", "Target.targetDestroyed")
+	m.browserCancel = append(m.browserCancel, cancel1, cancel2, cancel3, cancel4, cancel5)
 	go m.handleTargetCrashed(ch1, conn)
 	go m.handleAttachedToTarget(ch2, conn)
 	go m.handleTargetInfoChanged(ch3)
+	go m.handleTargetCreated(ch4, conn)
+	go m.handleTargetDestroyed(ch5)
+	// Page-level setAutoAttach (Attach step 4) only covers a page's own
+	// frames and workers. A popup — window.open, target="_blank",
+	// middle-click — is a sibling page with openerId set, and Chrome never
+	// auto-attaches to it, so discover targets at the browser level and
+	// attach to opened pages ourselves (handleTargetCreated).
+	go func() {
+		_ = conn.Call(context.Background(), "", "Target.setDiscoverTargets", map[string]any{"discover": true}, nil)
+	}()
 	go func(c *Conn) {
 		<-c.Done()
 		m.handleChromeExit()
@@ -328,8 +382,50 @@ func (m *Manager) handleTargetCrashed(ch <-chan json.RawMessage, conn *Conn) {
 			delete(m.targets, key)
 			delete(m.pending, ev.TargetID)
 			m.mu.Unlock()
+			matched.stopHandlers()
 			_ = conn.Call(context.Background(), "", "Target.closeTarget", map[string]string{"targetId": ev.TargetID}, nil)
-			_ = conn.Call(context.Background(), "", "Target.disposeBrowserContext", map[string]string{"browserContextId": matched.browserContextID}, nil)
+			if !matched.sharedContext {
+				_ = conn.Call(context.Background(), "", "Target.disposeBrowserContext", map[string]string{"browserContextId": matched.browserContextID}, nil)
+			}
+		}
+	}
+}
+
+// handleTargetDestroyed drops a tab whose page went away underneath us —
+// window.close(), a popup closing itself, Chrome tearing the target down.
+// Without this the Target kept its dead sessionID, every command to it
+// ran into the default deadline, and the SPA showed a frozen tab. Targets
+// we close ourselves (Revoke) are already out of m.targets by the time the
+// event arrives, so they do not match here.
+func (m *Manager) handleTargetDestroyed(ch <-chan json.RawMessage) {
+	for raw := range ch {
+		var ev struct {
+			TargetID string `json:"targetId"`
+		}
+		_ = json.Unmarshal(raw, &ev)
+		m.mu.Lock()
+		var matched *Target
+		var key string
+		for k, t := range m.targets {
+			if t.targetID == ev.TargetID {
+				matched = t
+				key = k
+				break
+			}
+		}
+		if matched != nil {
+			delete(m.targets, key)
+		}
+		delete(m.pending, ev.TargetID)
+		m.mu.Unlock()
+		if matched == nil {
+			continue
+		}
+		matched.stopHandlers()
+		matched.Detach()
+		matched.releaseTopLevelHost()
+		if m.opts.EmitNav != nil {
+			m.opts.EmitNav(NavEvent{StateKey: key, Error: "tab closed"})
 		}
 	}
 }
@@ -340,10 +436,11 @@ func (m *Manager) handleAttachedToTarget(ch <-chan json.RawMessage, conn *Conn) 
 			SessionID          string `json:"sessionId"`
 			WaitingForDebugger bool   `json:"waitingForDebugger"`
 			TargetInfo         struct {
-				TargetID string `json:"targetId"`
-				Type     string `json:"type"`
-				Title    string `json:"title"`
-				URL      string `json:"url"`
+				TargetID         string `json:"targetId"`
+				Type             string `json:"type"`
+				Title            string `json:"title"`
+				URL              string `json:"url"`
+				BrowserContextID string `json:"browserContextId"`
 			} `json:"targetInfo"`
 		}
 		_ = json.Unmarshal(raw, &ev)
@@ -351,6 +448,138 @@ func (m *Manager) handleAttachedToTarget(ch <-chan json.RawMessage, conn *Conn) 
 			_ = conn.Call(context.Background(), ev.SessionID, "Runtime.runIfWaitingForDebugger", nil, nil)
 		}
 		m.emitTargetTitle(ev.TargetInfo.TargetID, ev.TargetInfo.Type, ev.TargetInfo.Title, ev.TargetInfo.URL)
+		m.maybeRegisterNewTab(ev.TargetInfo.TargetID, ev.TargetInfo.Type, ev.TargetInfo.URL, ev.TargetInfo.BrowserContextID, ev.SessionID, conn)
+	}
+}
+
+// handleTargetCreated attaches to page targets Chrome opened on behalf of
+// one of ours and registers them as new tabs. Two shapes: window.open /
+// target="_blank" carry openerId; a browser-initiated open (middle-click,
+// Cmd/Ctrl+click) carries no opener but lands in the opener's browser
+// context. Targets this Manager creates via Attach always get a fresh
+// browser context first, so they match neither test and are ignored here,
+// as are Chrome's own internal targets (browser_ui, service_worker, ...).
+func (m *Manager) handleTargetCreated(ch <-chan json.RawMessage, conn *Conn) {
+	for raw := range ch {
+		var ev struct {
+			TargetInfo struct {
+				TargetID         string `json:"targetId"`
+				Type             string `json:"type"`
+				URL              string `json:"url"`
+				OpenerID         string `json:"openerId"`
+				Attached         bool   `json:"attached"`
+				BrowserContextID string `json:"browserContextId"`
+			} `json:"targetInfo"`
+		}
+		_ = json.Unmarshal(raw, &ev)
+		ti := ev.TargetInfo
+		if ti.Type != "page" || ti.Attached {
+			continue
+		}
+		if ti.OpenerID == "" && !m.ownsBrowserContext(ti.BrowserContextID) {
+			continue
+		}
+		var res struct {
+			SessionID string `json:"sessionId"`
+		}
+		if err := conn.Call(context.Background(), "", "Target.attachToTarget", map[string]any{"targetId": ti.TargetID, "flatten": true}, &res); err != nil {
+			continue
+		}
+		m.maybeRegisterNewTab(ti.TargetID, ti.Type, ti.URL, ti.BrowserContextID, res.SessionID, conn)
+	}
+}
+
+// ownsBrowserContext reports whether a live target already lives in bcID.
+func (m *Manager) ownsBrowserContext(bcID string) bool {
+	if bcID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.targets {
+		if t.browserContextID == bcID {
+			return true
+		}
+	}
+	return false
+}
+
+// maybeRegisterNewTab turns a spontaneous "page" target — one Chrome
+// attached to on its own — into a fresh browsable tab. Attach() records its
+// own targetID in m.pending before Chrome can echo the matching
+// attachedToTarget event back at us, so a pending (or already-registered)
+// targetID means this event is just the tail of a normal Attach() and is
+// left alone; only a targetID neither tracks is a genuine unsolicited tab
+// (Cmd/Ctrl+click, target="_blank", window.open).
+func (m *Manager) maybeRegisterNewTab(targetID, targetType, url, browserContextID, sessionID string, conn *Conn) {
+	if targetType != "page" || targetID == "" || sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	if _, pending := m.pending[targetID]; pending {
+		m.mu.Unlock()
+		return
+	}
+	for _, t := range m.targets {
+		if t.targetID == targetID {
+			m.mu.Unlock()
+			return
+		}
+	}
+	stateKey := "tab:" + newTabID()
+	m.pending[targetID] = stateKey
+	m.mu.Unlock()
+
+	// Same domain set Attach() enables for a target it creates itself. No
+	// screencast yet — that starts lazily (Attach's "existing target" branch)
+	// only once a viewer actually opens this tab.
+	_ = conn.Call(context.Background(), sessionID, "Page.enable", nil, nil)
+	_ = conn.Call(context.Background(), sessionID, "Runtime.enable", nil, nil)
+	_ = conn.Call(context.Background(), sessionID, "Network.enable", nil, nil)
+	_ = conn.Call(context.Background(), sessionID, "Performance.enable", nil, nil)
+
+	// A popup is discovered at creation with an empty URL and usually has
+	// already issued its document request by the time Network is enabled
+	// above, so no responseReceived (and no NavEvent) will follow for it.
+	// Ask Chrome where the target is now; if the navigation is still in
+	// flight this stays empty and the Network handlers report it normally.
+	if url == "" {
+		var info struct {
+			TargetInfo struct {
+				URL string `json:"url"`
+			} `json:"targetInfo"`
+		}
+		_ = conn.Call(context.Background(), "", "Target.getTargetInfo", map[string]string{"targetId": targetID}, &info)
+		url = info.TargetInfo.URL
+	}
+
+	t := &Target{
+		manager:          m,
+		stateKey:         stateKey,
+		browserContextID: browserContextID,
+		targetID:         targetID,
+		sessionID:        sessionID,
+		conn:             conn,
+		sharedContext:    true,
+	}
+	t.perfRecording = true
+	t.startHandlers()
+	t.startFileChooser()
+
+	m.mu.Lock()
+	m.targets[stateKey] = t
+	delete(m.pending, targetID)
+	if m.idleTimer != nil {
+		m.idleTimer.Stop()
+		m.idleTimer = nil
+	}
+	m.mu.Unlock()
+
+	if m.opts.EmitNewTab != nil {
+		m.opts.EmitNewTab(NewTabEvent{StateKey: stateKey, URL: url})
+	}
+	if url != "" && url != "about:blank" {
+		m.emitNav(NavEvent{StateKey: stateKey, URL: url, Status: 200})
 	}
 }
 
@@ -574,6 +803,34 @@ func (m *Manager) SetFiles(ctx context.Context, stateKey string, paths []string)
 	return t.SetFiles(ctx, paths)
 }
 
+// TrustHost records that the user accepted host's untrusted certificate for
+// stateKey (host is "name" or "name:port", as the SPA reports it) and, when
+// that tab is already on the host, tells Chrome to stop enforcing it.
+func (m *Manager) TrustHost(ctx context.Context, stateKey, host string) error {
+	host = strings.ToLower(strings.TrimSpace(host))
+	m.mu.Lock()
+	if m.trusted == nil {
+		m.trusted = make(map[string]map[string]bool)
+	}
+	if m.trusted[stateKey] == nil {
+		m.trusted[stateKey] = make(map[string]bool)
+	}
+	m.trusted[stateKey][host] = true
+	t, ok := m.targets[stateKey]
+	m.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return t.applyCertPolicy(ctx)
+}
+
+func (m *Manager) isTrusted(stateKey, hostname, hostport string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	hosts := m.trusted[stateKey]
+	return hosts[hostname] || hosts[hostport]
+}
+
 // Revoke closes target + disposes context; no-op if absent.
 func (m *Manager) Revoke(stateKey string) {
 	m.mu.Lock()
@@ -583,6 +840,7 @@ func (m *Manager) Revoke(stateKey string) {
 		return
 	}
 	delete(m.targets, stateKey)
+	delete(m.trusted, stateKey)
 	delete(m.pending, t.targetID)
 	needIdle := len(m.targets) == 0 && m.opts.IdleTimeout > 0
 	conn := m.conn
@@ -590,12 +848,15 @@ func (m *Manager) Revoke(stateKey string) {
 
 	// Stop screencast and close target
 	t.Detach()
+	t.stopHandlers()
 	t.releaseTopLevelHost()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if conn != nil {
 		_ = conn.Call(ctx, "", "Target.closeTarget", map[string]string{"targetId": t.targetID}, nil)
-		_ = conn.Call(ctx, "", "Target.disposeBrowserContext", map[string]string{"browserContextId": t.browserContextID}, nil)
+		if !t.sharedContext {
+			_ = conn.Call(ctx, "", "Target.disposeBrowserContext", map[string]string{"browserContextId": t.browserContextID}, nil)
+		}
 	}
 
 	m.mu.Lock()

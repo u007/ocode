@@ -434,6 +434,39 @@ func TestStoreWriteRejectsPathTraversal(t *testing.T) {
 	}
 }
 
+func TestStoreWriteRejectsAbsolutePath(t *testing.T) {
+	_, b, _ := setupStore(t)
+	s := NewStore(b)
+
+	// An absolute path must be rejected: filepath.Join(bundleRoot, abs)
+	// would otherwise nest a machine-specific tree (e.g. docs/Users/...)
+	// inside the bundle and poison the generated index.
+	err := s.Write("/Users/someone/www/ocode/docs/gotchas/abs.md", "concept", "Absolute", "", "", nil, "Body")
+	if err == nil {
+		t.Fatal("expected error for absolute path")
+	}
+	if !strings.Contains(err.Error(), "bundle-relative") {
+		t.Errorf("error should guide toward bundle-relative paths, got: %v", err)
+	}
+
+	// No nested machine-specific tree may have been created.
+	if _, statErr := os.Stat(filepath.Join(b.Root, "Users")); !os.IsNotExist(statErr) {
+		t.Errorf("absolute write must not create a Users tree inside the bundle")
+	}
+}
+
+func TestStoreDeprecateRejectsAbsolutePath(t *testing.T) {
+	_, b, _ := setupStore(t)
+	s := NewStore(b)
+
+	if err := s.Write("doomed.md", "concept", "Doomed", "", "", nil, "Body"); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := s.Deprecate("/Users/someone/www/ocode/docs/doomed.md", "absolute path"); err == nil {
+		t.Fatal("expected error for absolute path")
+	}
+}
+
 func TestStoreWriteCreatesLogEntry(t *testing.T) {
 	_, b, _ := setupStore(t)
 	s := NewStore(b)

@@ -26,6 +26,7 @@ type clientMsg struct {
 	X          float64 `json:"x,omitempty"`
 	Y          float64 `json:"y,omitempty"`
 	Button     string  `json:"button,omitempty"`
+	Buttons    int     `json:"buttons,omitempty"`
 	ClickCount int     `json:"clickCount,omitempty"`
 	DeltaX     float64 `json:"deltaX,omitempty"`
 	DeltaY     float64 `json:"deltaY,omitempty"`
@@ -33,6 +34,13 @@ type clientMsg struct {
 	Key        string  `json:"key,omitempty"`
 	Code       string  `json:"code,omitempty"`
 	Text       string  `json:"text,omitempty"`
+	AutoRepeat bool    `json:"autoRepeat,omitempty"`
+	Factor     float64 `json:"factor,omitempty"`
+	Points     []struct {
+		ID int     `json:"id"`
+		X  float64 `json:"x"`
+		Y  float64 `json:"y"`
+	} `json:"points,omitempty"`
 }
 
 // cdpSink implements cdp.FrameSink by forwarding to the single writer channel,
@@ -324,6 +332,7 @@ func (s *Server) handleCDP(w http.ResponseWriter, r *http.Request) {
 				X:          cm.X,
 				Y:          cm.Y,
 				Button:     cm.Button,
+				Buttons:    cm.Buttons,
 				ClickCount: cm.ClickCount,
 				DeltaX:     cm.DeltaX,
 				DeltaY:     cm.DeltaY,
@@ -331,12 +340,61 @@ func (s *Server) handleCDP(w http.ResponseWriter, r *http.Request) {
 			})
 		case "key":
 			_ = target.Key(context.Background(), cdp.KeyEvent{
-				Kind:      cm.Kind,
-				Key:       cm.Key,
-				Code:      cm.Code,
-				Text:      cm.Text,
-				Modifiers: cm.Modifiers,
+				Kind:       cm.Kind,
+				Key:        cm.Key,
+				Code:       cm.Code,
+				Text:       cm.Text,
+				Modifiers:  cm.Modifiers,
+				AutoRepeat: cm.AutoRepeat,
 			})
+		case "zoom":
+			if zt, ok := target.(interface {
+				SetZoom(context.Context, float64) error
+			}); ok {
+				if err := zt.SetZoom(context.Background(), cm.Factor); err != nil {
+					s.log.Printf("browse cdp: zoom for %s: %v", stateKey, err)
+				}
+			}
+		case "touch":
+			if tt, ok := target.(interface {
+				Touch(context.Context, cdp.TouchEvent) error
+			}); ok {
+				ev := cdp.TouchEvent{Kind: cm.Kind, Modifiers: cm.Modifiers}
+				for _, p := range cm.Points {
+					ev.Points = append(ev.Points, cdp.TouchPoint{ID: p.ID, X: p.X, Y: p.Y})
+				}
+				if err := tt.Touch(context.Background(), ev); err != nil {
+					s.log.Printf("browse cdp: touch for %s: %v", stateKey, err)
+				}
+			}
+		case "insertText":
+			// Host clipboard paste / IME commit → caret insertion. Optional
+			// method: the chromeTarget interface is intentionally not extended.
+			if it, ok := target.(interface {
+				InsertText(context.Context, string) error
+			}); ok {
+				if err := it.InsertText(context.Background(), cm.Text); err != nil {
+					s.log.Printf("browse cdp: insertText for %s: %v", stateKey, err)
+				}
+			}
+		case "getSelection":
+			// Copy bridge: report the page's selected text so the SPA can
+			// write it to the host clipboard.
+			if st, ok := target.(interface {
+				SelectionText(context.Context) (string, error)
+			}); ok {
+				text, err := st.SelectionText(context.Background())
+				if err != nil {
+					s.log.Printf("browse cdp: getSelection for %s: %v", stateKey, err)
+					break
+				}
+				if b, merr := json.Marshal(map[string]any{"t": "selection", "text": text}); merr == nil {
+					select {
+					case send <- wsOut{data: b}:
+					default:
+					}
+				}
+			}
 		case "getResponseBody":
 			body, isBase64, truncated, err := target.GetResponseBody(context.Background(), cm.RequestID)
 			resp := map[string]any{"t": "responseBody", "requestId": cm.RequestID}

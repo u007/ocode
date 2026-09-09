@@ -21,6 +21,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { registerFileLinkProvider } from "./terminalLinkProvider";
 import TerminalFindBar from "./TerminalFindBar";
+import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
 import { apiPath, apiWsPath, authHeaders, authToken, isRemoteSession } from "@/api/client";
 import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
 import { registerTerminal, unregisterTerminal } from "@/lib/debug/terminalRegistry";
@@ -44,10 +45,13 @@ import { registerTerminalFocus, unregisterTerminalFocus } from "./terminalFocus"
 export function buildTerminalWsConnection(opts: {
   token: string;
   projectPath: string | undefined;
+  /** Remote project host (`[user@]host` or `wsl:<distro>`); undefined for local. */
+  host?: string;
   terminalId: string;
   isRemote: boolean;
+  historyOffset?: number;
 }): { url: string; protocols: string[] | undefined } {
-  const { token, projectPath, terminalId, isRemote } = opts;
+  const { token, projectPath, host, terminalId, isRemote, historyOffset } = opts;
   const params = new URLSearchParams();
   let protocols: string[] | undefined;
   if (token) {
@@ -61,7 +65,11 @@ export function buildTerminalWsConnection(opts: {
   // validates it against its registered project roots. terminal_id lets the
   // terminal-processes emitter (Processes tab) correlate a pid with this tab.
   if (projectPath) params.set("project_path", projectPath);
+  // host marks an ocode Remote project: the server then pty-starts
+  // ssh/wsl.exe into host:project_path instead of a local shell.
+  if (host) params.set("host", host);
   params.set("terminal_id", terminalId);
+  if (historyOffset !== undefined) params.set("history_offset", String(historyOffset));
   const query = params.toString();
   // apiWsPath keeps the tailscale --set-path prefix and respects the
   // configured backend origin (same-origin vs hub). Handles ws/wss
@@ -81,11 +89,10 @@ export function buildTerminalWsConnection(opts: {
  * `display: none` container measures 0x0, so fitting is deferred until the tab
  * is visible again.
  *
- * `id` is also the scrollback persistence key: on mount, text saved under it
- * (if any) is painted first so a reload shows something immediately. When the
- * server reports the shell was resumed, that local copy is replaced by the
- * server's replay of the live shell's recent output; when the shell is gone
- * (server restarted, detach TTL expired) the local copy stays as history.
+ * `id` is also the scrollback persistence key. The server history endpoint is
+ * restored oldest-to-newest before the socket opens; the bounded local copy is
+ * used only when the endpoint/log is explicitly missing (404), so a restart
+ * cannot silently restore only the local tail.
  */
 export default function TerminalPanel({
   id,
@@ -94,6 +101,7 @@ export default function TerminalPanel({
   fontFamily,
   fontSize,
   projectPath,
+  host,
 }: {
   id: string;
   active: boolean;
@@ -101,6 +109,7 @@ export default function TerminalPanel({
   fontFamily: string;
   fontSize: number;
   projectPath: string;
+  host?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -433,6 +442,9 @@ export default function TerminalPanel({
     });
   });
 
+  // Keep host in this lifecycle's dependencies. HomeApp gates startup on a
+  // successful project-metadata snapshot, while a deliberate host identity
+  // change must still rebuild history and the socket with the new destination.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -475,7 +487,13 @@ export default function TerminalPanel({
     let webLinks: InstanceType<typeof WebLinksAddon> | null = null;
     let fileLinkProvider: { dispose(): void } | null = null;
     try {
-      webLinks = new WebLinksAddon();
+      // Open http(s) URLs on any left click (the addon's default only fires on
+      // ctrl/cmd+click). Only left-click (button 0) opens; right-click pastes.
+      webLinks = new WebLinksAddon((event, uri) => {
+        if (event.type === "click" && event.button === 0 && /^https?:\/\//.test(uri)) {
+          window.open(uri, "_blank", "noopener");
+        }
+      });
       term.loadAddon(webLinks);
     } catch {
       webLinks = null;
@@ -559,7 +577,20 @@ export default function TerminalPanel({
     // TUI, shells with a title-setting prompt) becomes the tab name unless
     // the user renamed the tab. Titles replayed from restored scrollback are
     // fine to apply: they are the program's last known title.
-    const titleDisp = term.onTitleChange((title) => setOscTitle(projectPath, id, title));
+    // xterm normally exposes OSC 0/2 through onTitleChange. Register the
+    // parser handlers as well so titles are captured even when a terminal is
+    // hidden in the background. This also covers terminals whose title is
+    // restored/replayed before xterm emits its public title event.
+    const applyProgramTitle = (title: string) => setOscTitle(projectPath, id, title);
+    const titleDisp = term.onTitleChange(applyProgramTitle);
+    const osc0TitleDisp = term.parser.registerOscHandler(0, (title) => {
+      applyProgramTitle(title);
+      return true;
+    });
+    const osc2TitleDisp = term.parser.registerOscHandler(2, (title) => {
+      applyProgramTitle(title);
+      return true;
+    });
     const osc9Disp = term.parser.registerOscHandler(9, () => {
       onAttention();
       return true;
@@ -572,11 +603,6 @@ export default function TerminalPanel({
       onAttention();
       return true;
     });
-
-    if (savedBuffer) {
-      term.write(savedBuffer.text);
-      term.write("\r\n\x1b[2m── restored, shell disconnected ──\x1b[0m\r\n");
-    }
 
     // Defer serialization to avoid blocking the main thread. serialize() can
     // be CPU-heavy for large scrollback buffers, so we use requestIdleCallback
@@ -611,107 +637,186 @@ export default function TerminalPanel({
     document.addEventListener("visibilitychange", onPageHide);
     window.addEventListener("pagehide", onPageHide);
 
-    const { url, protocols } = buildTerminalWsConnection({
-      token: authToken(),
-      projectPath,
-      terminalId: id,
-      isRemote: isRemoteSession(),
-    });
-    const sock = new WebSocket(url, protocols);
-    sock.binaryType = "arraybuffer";
-    socketRef.current = sock;
-
-    const decoder = new TextDecoder();
-    sock.onopen = () => {
-      readyRef.current = true;
-      fitAndResize.current();
-    };
-    // Chunk large binary writes to prevent memory spikes from one-shot decode+write.
-    const CHUNK_THRESHOLD = 64 * 1024; // 64KB
-    const CHUNK_SIZE = 16 * 1024;      // 16KB per chunk
-    const PENDING_CHUNK_CAP = 2 * 1024 * 1024;
+    let sock: WebSocket | null = null;
+    let chunkRafId = 0;
     const pendingChunks: string[] = [];
     let pendingBytes = 0;
-    let outputDropped = false;
-    let chunkRafId = 0;
-    const flushChunks = () => {
-      chunkRafId = 0;
-      // Write up to 4 chunks per frame to stay under 16ms.
-      for (let i = 0; i < 4 && pendingChunks.length > 0; i++) {
-        const chunk = pendingChunks.shift()!;
-        pendingBytes -= chunk.length;
-        term.write(chunk);
-      }
-      if (pendingChunks.length > 0) {
-        chunkRafId = requestAnimationFrame(flushChunks);
-      } else {
-        outputDropped = false;
-      }
-    };
-    sock.onmessage = (ev) => {
-      if (typeof ev.data === "string") {
-        // The only text frame the server sends is the attach control message
-        // (everything else is binary pty output). resumed=true means the
-        // shell survived the disconnect and a replay of its recent output
-        // follows — drop the locally restored scrollback so it isn't shown
-        // twice.
-        let msg: { type?: string; resumed?: boolean };
-        try {
-          msg = JSON.parse(ev.data);
-        } catch (err) {
-          console.error("terminal: unparseable control frame", ev.data, err);
+    let restoreCancelled = false;
+    const restoreController = new AbortController();
+    let serverHistoryRestored = false;
+    let serverHistoryPartial = false;
+    const terminalDecoder = new TextDecoder();
+
+    const connectSocket = (historyOffset?: number) => {
+      const { url, protocols } = buildTerminalWsConnection({
+        token: authToken(),
+        projectPath,
+        host,
+        terminalId: id,
+        isRemote: isRemoteSession(),
+        historyOffset,
+      });
+      const nextSocket = new WebSocket(url, protocols);
+      nextSocket.binaryType = "arraybuffer";
+      sock = nextSocket;
+      socketRef.current = nextSocket;
+
+      nextSocket.onopen = () => {
+        readyRef.current = true;
+        fitAndResize.current();
+      };
+      // Chunk large live writes to prevent memory spikes from one-shot decode+write.
+      // This cap only applies after the complete server restore has finished;
+      // dropped live bytes remain explicitly marked and are still persisted by
+      // the server history log.
+      const CHUNK_THRESHOLD = 64 * 1024;
+      const CHUNK_SIZE = 16 * 1024;
+      const PENDING_CHUNK_CAP = 2 * 1024 * 1024;
+      let outputDropped = false;
+      const flushChunks = () => {
+        chunkRafId = 0;
+        for (let i = 0; i < 4 && pendingChunks.length > 0; i++) {
+          const chunk = pendingChunks.shift()!;
+          pendingBytes -= chunk.length;
+          term.write(chunk);
+        }
+        if (pendingChunks.length > 0) {
+          chunkRafId = requestAnimationFrame(flushChunks);
+        } else {
+          outputDropped = false;
+        }
+      };
+      nextSocket.onmessage = (ev) => {
+        if (typeof ev.data === "string") {
+          let msg: { type?: string; resumed?: boolean };
+          try {
+            msg = JSON.parse(ev.data);
+          } catch (err) {
+            console.error("terminal: unparseable control frame", ev.data, err);
+            return;
+          }
+          // A cursor attach replays only bytes after the REST snapshot, so the
+          // restored xterm buffer must stay intact. The old no-cursor attach
+          // path still clears localStorage fallback before capped replay.
+          if (msg.type === "attach" && msg.resumed && !serverHistoryRestored) term.reset();
           return;
         }
-        if (msg.type === "attach" && msg.resumed) term.reset();
-        return;
-      }
-      const decoded = decoder.decode(new Uint8Array(ev.data as ArrayBuffer), { stream: true });
-      if (decoded.length < CHUNK_THRESHOLD && pendingChunks.length === 0) {
-        term.write(decoded);
-        return;
-      }
-      // Split into chunks and schedule incremental writes.
-      for (let i = 0; i < decoded.length; i += CHUNK_SIZE) {
-        const chunk = decoded.slice(i, i + CHUNK_SIZE);
-        if (pendingBytes + chunk.length > PENDING_CHUNK_CAP) {
-          if (!outputDropped) {
-            outputDropped = true;
-            term.write("\r\n\x1b[33m[terminal output truncated while rendering]\x1b[0m\r\n");
-          }
-          break;
+        const decoded = terminalDecoder.decode(new Uint8Array(ev.data as ArrayBuffer), { stream: true });
+        if (decoded.length < CHUNK_THRESHOLD && pendingChunks.length === 0) {
+          term.write(decoded);
+          return;
         }
-        pendingChunks.push(chunk);
-        pendingBytes += chunk.length;
-      }
-      if (chunkRafId === 0) {
-        chunkRafId = requestAnimationFrame(flushChunks);
-      }
+        for (let i = 0; i < decoded.length; i += CHUNK_SIZE) {
+          const chunk = decoded.slice(i, i + CHUNK_SIZE);
+          if (pendingBytes + chunk.length > PENDING_CHUNK_CAP) {
+            if (!outputDropped) {
+              outputDropped = true;
+              term.write("\r\n\x1b[33m[terminal output truncated while rendering]\x1b[0m\r\n");
+            }
+            break;
+          }
+          pendingChunks.push(chunk);
+          pendingBytes += chunk.length;
+        }
+        if (chunkRafId === 0) chunkRafId = requestAnimationFrame(flushChunks);
+      };
+      nextSocket.onerror = () => {
+        console.error("terminal: websocket error on", url);
+        term.write("\r\n\x1b[31m[terminal connection error]\x1b[0m\r\n");
+      };
+      nextSocket.onclose = (ev) => {
+        const remainder = terminalDecoder.decode();
+        if (remainder) term.write(remainder);
+        if (!ev.wasClean) console.error("terminal: websocket closed unexpectedly", ev.code, ev.reason);
+        term.write("\r\n\x1b[33m[terminal session ended]\x1b[0m\r\n");
+      };
     };
-    sock.onerror = () => {
-      // The browser gives no detail on WS errors; onclose carries the code.
-      console.error("terminal: websocket error on", url);
-      term.write("\r\n\x1b[31m[terminal connection error]\x1b[0m\r\n");
-    };
-    sock.onclose = (ev) => {
-      const remainder = decoder.decode();
-      if (remainder) term.write(remainder);
-      if (!ev.wasClean) {
-        console.error("terminal: websocket closed unexpectedly", ev.code, ev.reason);
+
+    // xterm's scrollback is a row count, while the history cursor is a byte
+    // count. Do not use snapshotEnd as scrollback: xterm allocates its
+    // CircularList to that size immediately, so a large byte log would cause
+    // a large, mostly empty allocation. Grow by the page's estimated row
+    // count before replaying it, then release unused headroom while retaining
+    // every row already rendered. Counting each code unit as up to two cells
+    // is conservative for wide characters and keeps the estimate bounded by
+    // the page size rather than the complete history size.
+    const prepareHistoryPage = (text: string) => {
+      const cols = Math.max(1, term.cols);
+      let newlineRows = 1;
+      for (let i = 0; i < text.length; i++) {
+        if (text[i] === "\n") newlineRows++;
       }
-      term.write("\r\n\x1b[33m[terminal session ended]\x1b[0m\r\n");
+      const wrappedRows = Math.ceil((text.length * 2) / cols);
+      const pageRows = Math.max(1, newlineRows, wrappedRows);
+      const currentLines = term.buffer.active.length;
+      const requiredScrollback = currentLines - term.rows + pageRows;
+      term.options.scrollback = Math.max(scrollbackLines, requiredScrollback);
     };
+    const trimHistoryHeadroom = () => {
+      const requiredScrollback = term.buffer.active.length - term.rows;
+      term.options.scrollback = Math.max(scrollbackLines, requiredScrollback);
+    };
+
+    void restoreTerminalHistory({
+      id,
+      projectPath,
+      host,
+      decoder: terminalDecoder,
+      signal: restoreController.signal,
+      onText: (text) => {
+        if (restoreCancelled || restoreController.signal.aborted) return;
+        serverHistoryPartial = true;
+        prepareHistoryPage(text);
+        // xterm parses writes asynchronously. Wait for the page callback
+        // before trimming headroom; doing it immediately would observe the
+        // pre-page buffer length and could evict the page just queued.
+        return new Promise<void>((resolve) => {
+          term.write(text, () => {
+            trimHistoryHeadroom();
+            resolve();
+          });
+        });
+      },
+    }).then((result) => {
+      if (restoreCancelled) return;
+      if (result.kind === "missing") {
+        // Only announce the fallback when there is actually a cached
+        // buffer to fall back to; a brand-new terminal has nothing to restore.
+        if (savedBuffer) {
+          term.write(savedBuffer.text);
+          term.write("\r\n\x1b[2m── local terminal cache fallback; server history unavailable ──\x1b[0m\r\n");
+        }
+        connectSocket();
+        return;
+      }
+      serverHistoryRestored = true;
+      connectSocket(result.snapshotEnd);
+    }).catch((err: unknown) => {
+      if (restoreCancelled || restoreController.signal.aborted) return;
+      // Do not leave a partial server replay on screen before attaching
+      // without a cursor. A resumed shell will send its capped replay, while
+      // a fresh shell starts from a clean buffer; either way this avoids
+      // overlapping partial output and live replay.
+      if (serverHistoryPartial) term.reset();
+      const message = err instanceof TerminalHistoryError ? err.message : "terminal history restore failed";
+      console.error("terminal: history restore failed", err);
+      term.write(`\r\n\x1b[31m[${message}; live terminal attached without restore]\x1b[0m\r\n`);
+      connectSocket();
+    });
 
     // Everything the client sends is text; the backend treats a frame starting
     // with {"type":"resize" as a control message and anything else as raw
     // keystrokes.
     const dataSub = term.onData((data) => {
-      if (sock.readyState === WebSocket.OPEN) sock.send(data);
+      if (sock?.readyState === WebSocket.OPEN) sock.send(data);
     });
 
     const observer = new ResizeObserver(() => fitAndResize.current());
     observer.observe(el);
 
     return () => {
+      restoreCancelled = true;
+      restoreController.abort();
       doSave();
       clearInterval(saveInterval);
       if (saveIdleId !== null) {
@@ -727,6 +832,8 @@ export default function TerminalPanel({
       dataSub.dispose();
       bellDisp.dispose();
       titleDisp.dispose();
+      osc0TitleDisp.dispose();
+      osc2TitleDisp.dispose();
       osc9Disp.dispose();
       osc777Disp.dispose();
       osc99Disp.dispose();
@@ -744,7 +851,7 @@ export default function TerminalPanel({
       // Closing the socket only detaches the shell server-side: it survives
       // for the detach TTL so a reload/remount reattaches to it. Explicit tab
       // close kills it via DELETE /api/terminal/{id} in the terminal store.
-      sock.close();
+      sock?.close();
       socketRef.current = null;
       term.dispose();
       unregisterTerminal(id);
@@ -756,7 +863,7 @@ export default function TerminalPanel({
     // Backend switches intentionally do NOT restart existing terminals:
     // the PTY is host-local and would be lost. New terminals after a switch
     // use the new apiWsPath; a full reload migrates all.
-  }, [projectPath, id]);
+  }, [projectPath, host, id]);
 
   // Apply scrollback changes without tearing down the pty.
   useEffect(() => {

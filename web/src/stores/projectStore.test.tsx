@@ -1,22 +1,46 @@
-import { describe, expect, it, vi } from "vitest";
-import { act, renderHook } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { ProjectProvider, useProjectState } from "./projectStore";
+
+const projectApi = vi.hoisted(() => ({
+  listProjects: vi.fn(),
+  getCurrentProject: vi.fn(),
+  listProjectSessions: vi.fn(),
+  listGroups: vi.fn(),
+}));
 
 // ProjectProvider fires api calls on mount (listProjects / getCurrentProject).
 // Stub them so the provider settles without network noise or a late
 // SET_PROJECTS clobbering the state the tests assert on.
 vi.mock("../api/client", () => ({
   api: {
-    listProjects: vi.fn().mockResolvedValue([]),
-    getCurrentProject: vi.fn().mockResolvedValue(null),
-    listProjectSessions: vi.fn().mockResolvedValue([]),
-    listGroups: vi.fn().mockResolvedValue([]),
+    listProjects: projectApi.listProjects,
+    getCurrentProject: projectApi.getCurrentProject,
+    listProjectSessions: projectApi.listProjectSessions,
+    listGroups: projectApi.listGroups,
   },
 }));
 
 // projectReducer is not exported — drive it through the provider + dispatch,
 // same as a real consumer would.
 const testProjectA = { path: "/proj-a", name: "a", added_at: "", last_used_at: "", order: 1, group: "" };
+const testRemoteProject = {
+  path: "/remote",
+  name: "remote",
+  host: "dev@example.com",
+  added_at: "",
+  last_used_at: "",
+  order: 1,
+  group: "",
+};
+
+beforeEach(() => {
+  projectApi.listProjects.mockReset().mockResolvedValue([]);
+  projectApi.getCurrentProject.mockReset().mockResolvedValue(null);
+  projectApi.listProjectSessions.mockReset().mockResolvedValue([]);
+  projectApi.listGroups.mockReset().mockResolvedValue([]);
+});
+
 function setup() {
   return renderHook(() => useProjectState(), {
     wrapper: ({ children }) => <ProjectProvider>{children}</ProjectProvider>,
@@ -158,6 +182,73 @@ describe("projectStore tab actions across projects", () => {
     expect(tabs.find((t) => t.id === "sess-real")?.title).toBe(
       "Renamed before first message",
     );
+  });
+});
+
+describe("project metadata readiness", () => {
+  it("does not become ready until the initial project request succeeds", async () => {
+    let resolve!: (projects: typeof testRemoteProject[]) => void;
+    projectApi.listProjects.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+
+    const { result } = setup();
+    expect(result.current.state.projectsStatus).toBe("loading");
+    expect(result.current.state.projects).toEqual([]);
+
+    await act(async () => resolve([testRemoteProject]));
+
+    await waitFor(() => expect(result.current.state.projectsStatus).toBe("ready"));
+    expect(result.current.state.projects).toEqual([testRemoteProject]);
+  });
+
+  it("keeps terminals withheld after an initial failure and allows a safe retry", async () => {
+    projectApi.listProjects.mockRejectedValueOnce(new Error("initial failure"));
+    projectApi.listProjects.mockResolvedValueOnce([testRemoteProject]);
+
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.projectsStatus).toBe("error"));
+    expect(result.current.state.projects).toEqual([]);
+
+    await act(async () => result.current.refreshProjects());
+
+    expect(result.current.state.projectsStatus).toBe("ready");
+    expect(result.current.state.projects[0]).toMatchObject({ path: "/remote", host: "dev@example.com" });
+  });
+
+  it("retains the trusted snapshot when a later refresh fails", async () => {
+    projectApi.listProjects.mockResolvedValueOnce([testRemoteProject]);
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.projectsStatus).toBe("ready"));
+
+    projectApi.listProjects.mockRejectedValueOnce(new Error("refresh failure"));
+    await act(async () => result.current.refreshProjects());
+
+    expect(result.current.state.projectsStatus).toBe("ready");
+    expect(result.current.state.projects).toEqual([testRemoteProject]);
+    expect(result.current.state.loading).toBe(false);
+  });
+
+  it("does not let an older refresh overwrite the newest host snapshot", async () => {
+    projectApi.listProjects.mockResolvedValueOnce([testRemoteProject]);
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.projectsStatus).toBe("ready"));
+
+    let resolveOlder!: (projects: typeof testRemoteProject[]) => void;
+    let resolveNewer!: (projects: typeof testRemoteProject[]) => void;
+    projectApi.listProjects
+      .mockReturnValueOnce(new Promise((r) => { resolveOlder = r; }))
+      .mockReturnValueOnce(new Promise((r) => { resolveNewer = r; }));
+    let older!: Promise<void>;
+    let newer!: Promise<void>;
+    await act(async () => {
+      older = result.current.refreshProjects();
+      newer = result.current.refreshProjects();
+      resolveNewer([{ ...testRemoteProject, host: "new.example.com" }]);
+      await newer;
+      resolveOlder([{ ...testRemoteProject, host: "old.example.com" }]);
+      await older;
+    });
+
+    expect(result.current.state.projects[0].host).toBe("new.example.com");
   });
 });
 

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // hasShell checks whether /bin/sh is available. Called by each bash-integration
@@ -42,10 +43,10 @@ func TestStatBashRecorderDetectsCreate(t *testing.T) {
 	reg := NewRegistry()
 	rec := NewStatBashRecorder(tmpDir, reg)
 
-	rec.Pre()
+	pre := rec.Pre()
 	cmd := "echo hi > foo"
 	exitCode := runShell(tmpDir, cmd)
-	rec.Post(cmd, exitCode)
+	rec.Post(pre, cmd, exitCode)
 
 	list := reg.List()
 	if len(list) != 1 {
@@ -77,10 +78,10 @@ func TestStatBashRecorderNoFalsePositiveOnPathInComment(t *testing.T) {
 	reg := NewRegistry()
 	rec := NewStatBashRecorder(tmpDir, reg)
 
-	rec.Pre()
+	pre := rec.Pre()
 	cmd := `echo "this mentions /etc/passwd but doesn't touch it"`
 	exitCode := runShell(tmpDir, cmd)
-	rec.Post(cmd, exitCode)
+	rec.Post(pre, cmd, exitCode)
 
 	list := reg.List()
 	if len(list) != 0 {
@@ -106,12 +107,12 @@ func TestStatBashRecorderSkipsNoiseDirs(t *testing.T) {
 	reg := NewRegistry()
 	rec := NewStatBashRecorder(tmpDir, reg)
 
-	rec.Pre()
+	pre := rec.Pre()
 	// This runs inside tmpDir; it should NOT detect anything under node_modules
 	// because the walk skips that dir entirely.
 	cmd := "echo 'hello'"
 	exitCode := runShell(tmpDir, cmd)
-	rec.Post(cmd, exitCode)
+	rec.Post(pre, cmd, exitCode)
 
 	list := reg.List()
 	if len(list) != 0 {
@@ -132,12 +133,12 @@ func TestStatBashRecorderSkipsNoiseDirsTouch(t *testing.T) {
 	reg := NewRegistry()
 	rec := NewStatBashRecorder(tmpDir, reg)
 
-	rec.Pre()
+	pre := rec.Pre()
 	// Touch a file inside the noise dir — should be invisible to both Pre and Post
 	// walks, therefore zero touches.
 	cmd := "touch node_modules/foo"
 	exitCode := runShell(tmpDir, cmd)
-	rec.Post(cmd, exitCode)
+	rec.Post(pre, cmd, exitCode)
 
 	list := reg.List()
 	if len(list) != 0 {
@@ -193,5 +194,73 @@ func TestNotifyBashWriteEmptyTouchesNoOp(t *testing.T) {
 
 	if len(reg.List()) != 0 {
 		t.Errorf("expected empty list after nil touches, got %d", len(reg.List()))
+	}
+}
+
+// A same-size edit that lands in the same wall-clock second as the pre-walk
+// must still be detected: the fingerprint has to use nanosecond mtimes, or
+// the (mtime, size) comparison silently reports "no change".
+func TestStatBashRecorderDetectsSameSizeEditWithinSameSecond(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg := NewRegistry()
+	rec := NewStatBashRecorder(tmpDir, reg)
+
+	target := filepath.Join(tmpDir, "foo")
+	if err := os.WriteFile(target, []byte("aaaa"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().Truncate(time.Second)
+	if err := os.Chtimes(target, base, base); err != nil {
+		t.Fatal(err)
+	}
+
+	pre := rec.Pre()
+	// Same length, different bytes, mtime advanced by less than one second.
+	if err := os.WriteFile(target, []byte("bbbb"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(target, base, base.Add(500*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	cmd := "sed -i s/a/b/g ./foo"
+	rec.Post(pre, cmd, 0)
+
+	list := reg.List()
+	if len(list) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(list))
+	}
+	if list[0].OriginalPath != target {
+		t.Errorf("path = %q, want %q", list[0].OriginalPath, target)
+	}
+}
+
+// Two overlapping bash invocations (parallel tool calls share one BashTool
+// and therefore one recorder) must each diff against their OWN baseline.
+// With a single shared baseline the second Pre overwrote the first, so the
+// first Post diffed against a baseline that already contained its write and
+// the file never reached the registry.
+func TestStatBashRecorderConcurrentCallsKeepSeparateBaselines(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg := NewRegistry()
+	rec := NewStatBashRecorder(tmpDir, reg)
+
+	preA := rec.Pre()
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Second call's baseline is taken AFTER a.txt exists.
+	preB := rec.Pre()
+	if err := os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte("b"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rec.Post(preA, "echo a > ./a.txt", 0)
+	rec.Post(preB, "echo b > ./b.txt", 0)
+
+	got := map[string]bool{}
+	for _, f := range reg.List() {
+		got[filepath.Base(f.OriginalPath)] = true
+	}
+	if !got["a.txt"] || !got["b.txt"] {
+		t.Fatalf("expected both a.txt and b.txt recorded, got %v", got)
 	}
 }

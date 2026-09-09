@@ -83,6 +83,21 @@ func TestDiscoveryQueryUsesRecentUserTurns(t *testing.T) {
 	}
 }
 
+func TestDiscoveryQuerySkipsProjectSignalForShortText(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	short := discoveryQueryFromMessages([]Message{{Role: "user", Content: "use agent browser"}}, dir)
+	if containsSubstr(short, "Project context") {
+		t.Fatalf("short query must not carry project signal, got %q", short)
+	}
+	long := discoveryQueryFromMessages([]Message{{Role: "user", Content: "refactor this function to use context cancellation properly"}}, dir)
+	if !containsSubstr(long, "Go golang project") {
+		t.Fatalf("long query must carry project signal, got %q", long)
+	}
+}
+
 func containsSubstr(s, sub string) bool { return len(s) >= len(sub) && (indexOf(s, sub) >= 0) }
 func indexOf(s, sub string) int {
 	for i := 0; i+len(sub) <= len(s); i++ {

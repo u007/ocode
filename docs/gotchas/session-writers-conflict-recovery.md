@@ -51,12 +51,34 @@ below.
   (no gen bump). Callers that legitimately replace: /compact (TUI
   compaction save, server `applyCompactResult`), transcript truncation
   (`POST /api/sessions/{id}/truncate`), TUI message-picker rewind.
+- **Metadata-only writes never touch rows.** `UpdateMetadataForDir`
+  rewrites only `meta.metadata_json` (+ `updated_at`) in one immediate tx.
+  Server `setSessionModelOverride` (PUT/DELETE `/api/sessions/{id}/model`)
+  uses it. Before (2026-09-08) it did load→set `metadata["model"]`→
+  `SaveForDir`, which hit the load-filter hazard below on any session whose
+  stored transcript had filtered rows: every web/desktop model pick 404'd
+  with "stale snapshot: 432 message(s) but 435 stored" and the sidebar
+  never changed. Any new metadata mutation must use this path, not a
+  full-snapshot save.
 - **User messages persist via tail insert.** `AppendUserMessageForDir`
   (server `persistUserMessage`) does an append-only single-row INSERT at
   seq = stored count. It never reads or rewrites rows, so it cannot trip
   the overlap check even when the stored transcript holds rows the load
   path filters out (see next section). PK violation (another writer took
   the same seq) → bounded retry re-reads the count.
+- **The pre-persisted user message must serialize identically to the
+  turn's in-memory copy.** Server `runTurn` re-appends the pending user
+  message in memory stamped with `user_seq` (`nextUserSeq` =
+  `session.NextUserSeq`, max stored user seq + 1). The tail insert stamps
+  the same value (`MAX(json_extract(data,'$.user_seq'))+1` over stored
+  user rows) so the two copies are byte-equal. Before this (2026-09-08)
+  the tail insert wrote `{role,content}` only: every live save during the
+  turn hit a differing overlap and was silently dropped, the turn-end
+  save conflicted, `rebaseAppend` saw base divergence, and memory
+  re-synced to the one-message disk copy — the streamed reply vanished
+  from the desktop/web chat mid-turn ("session auto-reset") and the
+  session showed only the user's line in history. Any new writer that
+  appends a user message must derive its seq the same way.
 - **Turn-end saves reconcile.** Server `persistTurnTranscript` /
   `commitPartialTranscript` call `session.ReconcileAppend(ForDir)`:
   on conflict the raw disk transcript is reloaded and merged — foreign
@@ -74,7 +96,8 @@ PERMISSION_ASK sentinels) and unmatched assistant tool calls. A stored
 transcript containing such rows loads SHORTER and shifted, so a
 full-snapshot "loaded view + new message" save compares a shifted sequence
 against stored rows and conflicts forever — every retry re-filters the
-same way. The tail insert dodges this for user messages; full-snapshot
+same way. The tail insert dodges this for user messages and the metadata-only
+update dodges it for per-session model overrides; full-snapshot
 saves from a filtered base (e.g. resume a session that closed mid-ask,
 then let the next turn end) still conflict — pre-existing, mitigated by
 turn-end reconcile/converge + logging. Proper fix is splitting the

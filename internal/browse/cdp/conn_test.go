@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -423,4 +426,45 @@ func TestConcurrentDispatchAndCancelNoRaceOrPanic(t *testing.T) {
 		_ = evs
 	}
 	_ = <-done
+}
+
+// TestCallWriteDeadlineOnStalledPipe: when Chrome stops draining the command
+// pipe, the write itself must fail at the caller's deadline instead of
+// blocking forever under wmu (which would stall every call in the process).
+func TestCallWriteDeadlineOnStalledPipe(t *testing.T) {
+	// Reader side of the response pipe stays open but silent.
+	respR, respW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respR.Close()
+	defer respW.Close()
+	// Nobody reads cmdR, so cmdW fills its kernel buffer and then blocks.
+	cmdR, cmdW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cmdR.Close()
+	defer cmdW.Close()
+
+	c := NewConn(respR, cmdW)
+	defer c.Close()
+
+	big := strings.Repeat("x", 1<<20) // 1 MiB, far beyond the pipe buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = c.Call(ctx, "", "Runtime.evaluate", map[string]string{"expression": big}, nil)
+	if err == nil {
+		t.Fatal("expected error from stalled pipe write")
+	}
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("expected deadline error, got %v", err)
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("write blocked %v; deadline not applied", el)
+	}
+	if !c.finished() {
+		t.Fatal("connection left open after a stalled write; stream may hold a partial frame")
+	}
 }

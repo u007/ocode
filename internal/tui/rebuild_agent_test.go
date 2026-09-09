@@ -100,3 +100,41 @@ func TestRebuildAgentClientPreservesOpenCodeSessionID(t *testing.T) {
 		t.Fatalf("rebuilt agent OpenCode session ID = %q, want %q", got, "tui-session")
 	}
 }
+
+// Every agent replacement must re-bind the fresh snapshot store to the
+// current session: a store with no session id journals nothing and
+// rehydrates nothing, so after a /model switch, MCP rebuild, or connect-flow
+// rebuild the Changes tab emptied and later edits were lost on resume.
+func TestRebuildAgentClientBindsChangesSession(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "test-key")
+
+	cfg := &config.Config{Model: "deepseek/deepseek-chat"}
+	prev := agent.NewAgent(fakeCompactSummaryClient{}, nil, cfg, nil)
+	m := model{
+		config:         cfg,
+		agent:          prev,
+		sessionID:      "ses_rebuild",
+		compactCh:      make(chan agent.CompactResult, 4),
+		compactStartCh: make(chan struct{}, 4),
+		recapCh:        make(chan recapFinishedMsg, 1),
+		usageCh:        make(chan usageEvent, 16),
+	}
+
+	m.rebuildAgentClient()
+
+	if got := m.agent.ChangesSessionID(); got != "ses_rebuild" {
+		t.Fatalf("rebuilt agent changes session = %q, want ses_rebuild", got)
+	}
+}
+
+func TestInstallAgentBindsChangesSession(t *testing.T) {
+	next := agent.NewAgent(nil, nil, nil, nil)
+	t.Cleanup(next.Shutdown)
+	m := model{config: &config.Config{}, sessionID: "ses_install"}
+
+	m.installAgent(next)
+
+	if got := m.agent.ChangesSessionID(); got != "ses_install" {
+		t.Fatalf("installed agent changes session = %q, want ses_install", got)
+	}
+}

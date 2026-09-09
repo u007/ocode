@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -85,6 +86,112 @@ func (n *navCollector) get() []NavEvent {
 	return cp
 }
 func (n *navCollector) reset() { n.mu.Lock(); n.v = nil; n.mu.Unlock() }
+
+func TestManager_MaybeRegisterNewTabIgnoresAttachEcho(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := NewManager(ManagerOptions{EmitNewTab: func(NewTabEvent) { t.Error("unexpected new-tab event") }})
+	m.pending["target-pending"] = "tab:pending"
+	m.targets["tab:registered"] = &Target{targetID: "target-registered"}
+
+	m.maybeRegisterNewTab("target-pending", "page", "https://pending.example", "ctx", "sess", stub.Conn())
+	m.maybeRegisterNewTab("target-registered", "page", "https://registered.example", "ctx", "sess", stub.Conn())
+
+	if got := len(m.targets); got != 1 {
+		t.Fatalf("target count changed for Attach echoes: got %d, want 1", got)
+	}
+	if got := len(m.pending); got != 1 {
+		t.Fatalf("pending target count changed for Attach echoes: got %d, want 1", got)
+	}
+}
+
+func TestManager_MaybeRegisterNewTabEmitsSpontaneousPageOnce(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+
+	var events []NewTabEvent
+	m := NewManager(ManagerOptions{EmitNewTab: func(event NewTabEvent) {
+		events = append(events, event)
+	}})
+	timerFired := make(chan struct{})
+	m.idleTimer = time.AfterFunc(time.Hour, func() { close(timerFired) })
+
+	const (
+		targetID  = "target-spontaneous"
+		sessionID = "sess-spontaneous"
+		pageURL   = "https://example.com/new"
+	)
+	m.maybeRegisterNewTab(targetID, "page", pageURL, "ctx-spontaneous", sessionID, stub.Conn())
+	m.maybeRegisterNewTab(targetID, "page", pageURL, "ctx-spontaneous", sessionID, stub.Conn())
+
+	if len(events) != 1 {
+		t.Fatalf("new-tab event count: got %d, want 1", len(events))
+	}
+	if !strings.HasPrefix(events[0].StateKey, "tab:") {
+		t.Errorf("state key = %q, want tab: prefix", events[0].StateKey)
+	}
+	if events[0].URL != pageURL {
+		t.Errorf("event URL = %q, want %q", events[0].URL, pageURL)
+	}
+	if got := len(m.targets); got != 1 {
+		t.Fatalf("target count: got %d, want 1", got)
+	}
+	if got := len(m.pending); got != 0 {
+		t.Fatalf("pending target count: got %d, want 0", got)
+	}
+	m.mu.Lock()
+	idleTimerCleared := m.idleTimer == nil
+	m.mu.Unlock()
+	if !idleTimerCleared {
+		t.Error("spontaneous tab did not clear the idle timer")
+	}
+
+	for _, method := range []string{"Page.enable", "Runtime.enable", "Network.enable", "Performance.enable"} {
+		calls := stub.CallsFor(method)
+		if len(calls) != 1 {
+			t.Errorf("%s call count: got %d, want 1", method, len(calls))
+			continue
+		}
+		if calls[0].SessionID != sessionID {
+			t.Errorf("%s session ID = %q, want %q", method, calls[0].SessionID, sessionID)
+		}
+	}
+}
+
+func TestManager_MaybeRegisterNewTabIgnoresNonPageOrEmptyTarget(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+
+	var events []NewTabEvent
+	m := NewManager(ManagerOptions{EmitNewTab: func(event NewTabEvent) {
+		events = append(events, event)
+	}})
+	tests := []struct {
+		name       string
+		targetID   string
+		targetType string
+		sessionID  string
+	}{
+		{name: "non-page", targetID: "target-iframe", targetType: "iframe", sessionID: "sess-iframe"},
+		{name: "empty target ID", targetType: "page", sessionID: "sess-empty-target"},
+		{name: "empty session ID", targetID: "target-no-session", targetType: "page"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m.maybeRegisterNewTab(tt.targetID, tt.targetType, "https://example.com", "ctx", tt.sessionID, stub.Conn())
+		})
+	}
+
+	if len(events) != 0 {
+		t.Fatalf("new-tab event count: got %d, want 0", len(events))
+	}
+	if len(m.targets) != 0 {
+		t.Fatalf("target count: got %d, want 0", len(m.targets))
+	}
+	if len(m.pending) != 0 {
+		t.Fatalf("pending target count: got %d, want 0", len(m.pending))
+	}
+}
 
 func (s *testSink) getNetworks() []NetworkEvent {
 	s.mu.Lock()
@@ -765,13 +872,16 @@ func TestManager_MouseKey(t *testing.T) {
 		if c.Method == "Input.dispatchKeyEvent" {
 			var p map[string]any
 			_ = json.Unmarshal(c.Params, &p)
-			if p["type"] == "keyDown" {
+			// keyDown carrying "text" makes Chromium insert the character
+			// itself; the frontend sends no separate "char" event. VK code
+			// must ride along or Chrome treats the key as unnamed.
+			if p["type"] == "keyDown" && p["text"] == "a" && p["windowsVirtualKeyCode"] == float64(65) {
 				found = true
 			}
 		}
 	}
 	if !found {
-		t.Error("missing keyDown")
+		t.Error("missing keyDown with text and VK 65")
 	}
 }
 
@@ -1370,5 +1480,149 @@ func TestManager_EmitTargetTitle_DropsNoise(t *testing.T) {
 	m.emitTargetTitle("", "page", "Empty", "https://example.com/")
 	if len(got) != 0 {
 		t.Fatalf("noise events = %+v, want none", got)
+	}
+}
+
+func lastParams(calls []stubCall, method string) map[string]any {
+	var p map[string]any
+	for _, c := range calls {
+		if c.Method == method {
+			p = nil
+			_ = json.Unmarshal(c.Params, &p)
+		}
+	}
+	return p
+}
+
+func TestManager_ZoomScalesDeviceMetricsNotScreencast(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	if err := tgt.Resize(context.Background(), 1000, 600, 2); err != nil {
+		t.Fatal(err)
+	}
+	stub.callsMu.Lock()
+	stub.calls = nil
+	stub.callsMu.Unlock()
+	if err := tgt.SetZoom(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	// Browser-zoom semantics: layout viewport halves, device scale doubles,
+	// the screencast keeps its pixel size.
+	p := lastParams(stub.Calls(), "Emulation.setDeviceMetricsOverride")
+	if p == nil || p["width"] != float64(500) || p["height"] != float64(300) || p["deviceScaleFactor"] != float64(4) {
+		t.Fatalf("zoomed metrics %v", p)
+	}
+	sc := lastParams(stub.Calls(), "Page.startScreencast")
+	if sc == nil || sc["maxWidth"] != float64(2000) || sc["maxHeight"] != float64(1200) {
+		t.Fatalf("screencast dims %v", sc)
+	}
+	// A later resize keeps the zoom.
+	if err := tgt.Resize(context.Background(), 800, 400, 1); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	p = lastParams(stub.Calls(), "Emulation.setDeviceMetricsOverride")
+	if p["width"] != float64(400) || p["deviceScaleFactor"] != float64(2) {
+		t.Fatalf("metrics after resize %v", p)
+	}
+	// Clamped to the 25%–500% range Chrome offers.
+	_ = tgt.SetZoom(context.Background(), 50)
+	time.Sleep(30 * time.Millisecond)
+	if p = lastParams(stub.Calls(), "Emulation.setDeviceMetricsOverride"); p["deviceScaleFactor"] != float64(5) {
+		t.Fatalf("clamped metrics %v", p)
+	}
+}
+
+func TestManager_TouchEnablesEmulationOnceAndDispatches(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := newTestManager(t, stub, nil, nil)
+	defer m.Close(context.Background())
+	tgt, _ := m.Attach(context.Background(), "k1", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	stub.callsMu.Lock()
+	stub.calls = nil
+	stub.callsMu.Unlock()
+	_ = tgt.Touch(context.Background(), TouchEvent{Kind: "start", Points: []TouchPoint{{ID: 1, X: 10, Y: 20}}})
+	_ = tgt.Touch(context.Background(), TouchEvent{Kind: "end", Points: []TouchPoint{{ID: 1, X: 10, Y: 20}}})
+	time.Sleep(30 * time.Millisecond)
+	if n := len(stub.CallsFor("Emulation.setTouchEmulationEnabled")); n != 1 {
+		t.Fatalf("touch emulation enabled %d times, want 1", n)
+	}
+	touches := stub.CallsFor("Input.dispatchTouchEvent")
+	if len(touches) != 2 {
+		t.Fatalf("dispatchTouchEvent calls = %d", len(touches))
+	}
+	var p map[string]any
+	_ = json.Unmarshal(touches[0].Params, &p)
+	pts, _ := p["touchPoints"].([]any)
+	if p["type"] != "touchStart" || len(pts) != 1 || pts[0].(map[string]any)["id"] != float64(1) {
+		t.Fatalf("touchStart params %v", p)
+	}
+	_ = json.Unmarshal(touches[1].Params, &p)
+	if p["type"] != "touchEnd" {
+		t.Fatalf("touchEnd params %v", p)
+	}
+}
+
+func TestManager_CertErrorClassifiedAndTrustHostLiftsEnforcement(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	var nc navCollector
+	m := newTestManager(t, stub, nc.emit, nil)
+	defer m.Close(context.Background())
+	ctx := context.Background()
+	tgt, _ := m.Attach(ctx, "k1", &testSink{})
+	time.Sleep(30 * time.Millisecond)
+	tgt.mu.Lock()
+	tgt.mainFrameID = "mf1"
+	tgt.mu.Unlock()
+	// A private host is enforced by default (only loopback auto-ignores).
+	stub.callsMu.Lock()
+	stub.calls = nil
+	stub.callsMu.Unlock()
+	_ = tgt.Navigate(ctx, "https://192.168.1.5:8443/")
+	time.Sleep(30 * time.Millisecond)
+	if p := lastParams(stub.Calls(), "Security.setIgnoreCertificateErrors"); p == nil || p["ignore"] != false {
+		t.Fatalf("private host should be enforced: %v", p)
+	}
+	nc.reset()
+	stub.InjectEvent(tgt.sessionID, "Network.loadingFailed", map[string]any{
+		"requestId": "r1", "type": "Document", "frameId": "mf1", "errorText": "net::ERR_CERT_AUTHORITY_INVALID",
+	})
+	time.Sleep(30 * time.Millisecond)
+	if evs := nc.get(); len(evs) == 0 || !containsStr(evs[0].Error, "TLS certificate not trusted") || !containsStr(evs[0].Error, "ERR_CERT_AUTHORITY_INVALID") {
+		t.Fatalf("expected classified cert error, got %v", evs)
+	}
+	// "Continue anyway" for that host flips enforcement off immediately…
+	stub.callsMu.Lock()
+	stub.calls = nil
+	stub.callsMu.Unlock()
+	if err := m.TrustHost(ctx, "k1", "192.168.1.5:8443"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if p := lastParams(stub.Calls(), "Security.setIgnoreCertificateErrors"); p == nil || p["ignore"] != true {
+		t.Fatalf("trusted host should be ignored: %v", p)
+	}
+	// …stays off across a re-navigation to it, and does not leak to others.
+	_ = tgt.Navigate(ctx, "https://example.com/")
+	time.Sleep(30 * time.Millisecond)
+	if p := lastParams(stub.Calls(), "Security.setIgnoreCertificateErrors"); p["ignore"] != false {
+		t.Fatalf("other host must be enforced: %v", p)
+	}
+	_ = tgt.Navigate(ctx, "https://192.168.1.5:8443/again")
+	time.Sleep(30 * time.Millisecond)
+	if p := lastParams(stub.Calls(), "Security.setIgnoreCertificateErrors"); p["ignore"] != true {
+		t.Fatalf("trusted host forgotten: %v", p)
+	}
+	// Trust is per stateKey.
+	if m.isTrusted("k2", "192.168.1.5", "192.168.1.5:8443") {
+		t.Fatal("trust leaked across stateKeys")
 	}
 }

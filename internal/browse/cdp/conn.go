@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
+	"time"
 )
 
 // ErrConnClosed is returned by Call when the pipe is closed (Chrome died) or
@@ -131,11 +133,24 @@ func (c *Conn) finish(err error) {
 // cancellation, or connection close. params may be nil. result, when non-nil,
 // is decoded from the response's result object. Protocol errors return
 // *CDPError; a closed pipe returns ErrConnClosed.
+// defaultCallTimeout bounds every round-trip whose caller passed a context
+// without a deadline. Chrome can accept a command and never answer it (a
+// renderer blocked on alert(), a session torn down mid-flight, a lost frame),
+// and most callers sit on single serialized goroutines — the websocket
+// reader, the Fetch interception loop, the screencast ack loop — so one
+// unanswered reply used to wedge the whole tab with no recovery path.
+const defaultCallTimeout = 30 * time.Second
+
 func (c *Conn) Call(ctx context.Context, sessionID, method string, params any, result any) error {
 	select {
 	case <-c.done:
 		return ErrConnClosed
 	default:
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultCallTimeout)
+		defer cancel()
 	}
 
 	id := c.nextID()
@@ -147,11 +162,19 @@ func (c *Conn) Call(ctx context.Context, sessionID, method string, params any, r
 	ch := c.registerPending(id)
 	defer c.removePending(id)
 
-	if err := c.write(b); err != nil {
+	deadline, _ := ctx.Deadline()
+	if err := c.write(b, deadline); err != nil {
 		select {
 		case <-c.done:
 			return ErrConnClosed
 		default:
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			// Chrome stopped draining its command pipe, and a partial frame
+			// may already be on it: the stream is unusable either way. Tear
+			// the connection down so every waiter is released and the
+			// Manager's exit watcher relaunches Chrome on the next nav.
+			_ = c.Close()
 		}
 		return err
 	}
@@ -242,9 +265,19 @@ func (c *Conn) dispatchResponse(m wireMessage) {
 	ch <- pr // buffered(1); a late reply to a removed id is dropped above
 }
 
-func (c *Conn) write(data []byte) error {
+// write serializes one command onto the pipe. Writes block when Chrome stops
+// draining fd 3 (~64 KB of buffer), and wmu serializes every call in the
+// process behind the first blocked writer, so the caller's deadline is
+// applied to the write as well as the reply wait. *os.File pipes support
+// SetWriteDeadline; other writers (test stubs) are written without one.
+func (c *Conn) write(data []byte, deadline time.Time) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	if dw, ok := c.w.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		if err := dw.SetWriteDeadline(deadline); err != nil {
+			return err
+		}
+	}
 	_, err := c.w.Write(data)
 	return err
 }

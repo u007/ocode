@@ -5,7 +5,7 @@ import type { Message, SSEPermissionEvent, TUIStatus } from "../api/types";
 import type { BusEnvelope } from "./eventBus";
 import { rekeyDraft } from "./tabDrafts";
 import { rekeyQueue } from "./tabQueue";
-import { browserActions, type NavEvent, type TitleEvent } from "./browserStore";
+import { browserActions, type NavEvent, type TitleEvent, type NewTabEvent, type StateKey } from "./browserStore";
 
 /**
  * sessionEvents — pure routing of bus envelopes into chatStore/projectStore.
@@ -35,6 +35,12 @@ export interface SessionEventRouter {
   /** Read the current chat state (the router itself never holds stale
    *  state — the caller feeds it through a ref). */
   getState: () => ChatState;
+  /** Bridge a newly discovered browser tab into the UI's tab-strip store.
+   *  The optional project is the owning project root when the event carries
+   *  one (data.project, else the envelope project); absent/empty means the
+   *  caller files it under the active project. Single-arg callbacks keep
+   *  working — the second arg is purely additive. */
+  onNewTab?: (id: string, project?: string) => void;
 }
 
 // Coalesces high-frequency "thinking"/"text" deltas into fixed-interval
@@ -154,7 +160,7 @@ const SESSION_SCOPED_EVENTS = new Set([
  *  (`session_started`, `status`) plus every session-scoped event above. The
  *  bus dispatches per-event-type (see eventBus.ts), so a consumer must
  *  subscribe to each of these individually; there's no wildcard. */
-export const ROUTABLE_EVENTS = ["session_started", "status", "browse_nav", "browse_title", ...SESSION_SCOPED_EVENTS];
+export const ROUTABLE_EVENTS = ["session_started", "status", "browse_nav", "browse_title", "browse_newtab", ...SESSION_SCOPED_EVENTS];
 
 /** Highest bus seq already applied per session, via a live envelope or a
  *  reconcile replay (see reconcileOpenSessions). Lets a mid-turn reload's
@@ -292,6 +298,28 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       browserActions.setPageTitle(t.state_key, t.title, t.url);
     } else if (t && !t.state_key) {
       console.error("browse_title event missing state_key:", data);
+    }
+    return;
+  }
+
+  // A page opened via Cmd/Ctrl+click, target="_blank", or window.open — a
+  // stateKey this client has never seen. Seed its live page state here
+  // (browserStore is a flat module store, reachable directly); the tab-strip
+  // side (browserTabsStore, Context-scoped) is bridged through the injected
+  // callback so this router remains environment-independent.
+  if (event === "browse_newtab") {
+    const nt = data as NewTabEvent;
+    if (nt && nt.state_key?.startsWith("tab:")) {
+      const id = nt.state_key.slice("tab:".length);
+      browserActions.open(nt.state_key as StateKey, nt.url);
+      // Prefer the owning project carried in the payload; fall back to the
+      // envelope project (a future backend may publish project-scoped); empty
+      // means unknown and the caller files under the active project.
+      const project =
+        (typeof nt.project === "string" && nt.project) || env.project || undefined;
+      r.onNewTab?.(id, project);
+    } else {
+      console.error("browse_newtab event missing/malformed state_key:", data);
     }
     return;
   }

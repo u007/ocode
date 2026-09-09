@@ -1101,22 +1101,12 @@ func (h *Handler) tryEnqueueInjection(sessionID, content string) bool {
 	return true
 }
 
-// nextUserSeq returns the durable per-session sequence for the NEXT user
-// message: one more than the highest UserSeq already present in the
-// transcript. Because every user message is persisted with its stamped
-// UserSeq, a reload/reconnect that rebuilds as.messages from disk preserves
-// monotonicity — the highest persisted seq is intact, so the next turn keeps
-// counting up. Zero for an empty/legacy transcript (a fresh session's first
-// user message starts at 1). Never derived from global SSE seq, timestamps,
-// or array position (compaction may rebase the slice).
+// nextUserSeq is session.NextUserSeq: the durable per-session sequence for
+// the NEXT user message. Shared with the async pre-persist
+// (session.AppendUserMessageForDir) so the on-disk and in-memory copies of
+// one user message carry the same seq and serialize identically.
 func nextUserSeq(messages []agent.Message) int {
-	max := 0
-	for _, m := range messages {
-		if m.Role == "user" && m.UserSeq > max {
-			max = m.UserSeq
-		}
-	}
-	return max + 1
+	return session.NextUserSeq(messages)
 }
 
 // flushStrandedInjections drains any message left in as.agent's injection
