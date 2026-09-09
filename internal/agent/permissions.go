@@ -2706,19 +2706,35 @@ func sandboxSensitiveTargets(command, workDir string) (paths []string, write boo
 	}
 
 	parsed, err := parseShellCommandLine(command)
-	if err == nil {
-		for _, cmd := range parsed {
-			if len(cmd.redirections) > 0 {
-				write = true // a redirection target is a write (or read) target
-			}
-			for _, r := range cmd.redirections {
-				add(r)
+	if err != nil {
+		// Parse failure (unbalanced quotes, etc.): fall back to a flat,
+		// unsplit scan so a malformed compound line still gets some
+		// sensitive-path coverage rather than none.
+		fields := splitShellFields(command)
+		if len(fields) > 0 {
+			for _, p := range extractBashCommandPaths(fields[0], fields) {
+				add(p)
 			}
 		}
+		return paths, write
 	}
-	fields := splitShellFields(command)
-	if len(fields) > 0 {
-		for _, p := range extractBashCommandPaths(fields[0], fields) {
+	// Extract per fragment, not from a flat re-split of the whole compound
+	// line: a single splitShellFields(command) pass would hand every word
+	// from every `;`/`|`-separated sub-command to extractBashCommandPaths
+	// under the FIRST sub-command's prefix, misapplying that prefix's
+	// argument-skipping rules (e.g. grep's pattern-arg skip) to unrelated
+	// commands' words and mixing their path args together.
+	for _, cmd := range parsed {
+		if len(cmd.redirections) > 0 {
+			write = true // a redirection target is a write (or read) target
+		}
+		for _, r := range cmd.redirections {
+			add(r)
+		}
+		if len(cmd.cmdWords) == 0 {
+			continue
+		}
+		for _, p := range extractBashCommandPaths(cmd.cmdWords[0], cmd.cmdWords) {
 			add(p)
 		}
 	}

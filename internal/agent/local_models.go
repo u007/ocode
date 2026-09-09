@@ -7,6 +7,7 @@ import (
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -143,12 +144,12 @@ func autoStartEnabledLocalModels(ag *Agent, cfg *config.Config) {
 			continue
 		}
 		id, lm := id, lm
-		go func() {
+		crashguard.Go(func() {
 			if err := StartLocalModelInstance(ag, id, lm.MaxParallel, lm.ContextSize); err != nil {
 				emitDebug("LOCALMODEL", fmt.Sprintf("auto-start failed for %s: %v", id, err))
 				return
 			}
 			emitDebug("LOCALMODEL", fmt.Sprintf("auto-start: %s ready (max_parallel=%d)", id, lm.MaxParallel))
-		}()
+		})
 	}
 }

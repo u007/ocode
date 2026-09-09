@@ -25,6 +25,7 @@ import (
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/discovery"
 	providerplugin "github.com/u007/ocode/internal/plugin/provider"
@@ -309,6 +310,21 @@ const opencodeSessionHeader = "X-Opencode-Session"
 // matching upstream's providerID.startsWith("opencode") predicate.
 func (c *GenericClient) isOpencodeProvider() bool {
 	return strings.HasPrefix(c.Provider, "opencode")
+}
+
+// setOpenRouterAttributionHeaders stamps the active harness identity onto
+// outbound OpenRouter requests via their documented attribution headers.
+// OpenRouter gates some free-tier models to requests it recognizes as coming
+// from a real agentic app (see openrouter.ai/apps); the harness selected by
+// /fake-agent (default ocode) is what qualifies it. No-op for every other
+// provider — generic harness headers go through applyHarnessHeaders.
+func (c *GenericClient) setOpenRouterAttributionHeaders(req *http.Request) {
+	if req == nil || c == nil || c.Provider != "openrouter" {
+		return
+	}
+	preset := HarnessPresetFor(ActiveHarness())
+	req.Header.Set("HTTP-Referer", preset.Referer)
+	req.Header.Set("X-Title", preset.Title)
 }
 
 // setOpencodeSessionHeader stamps the stable per-conversation session id onto
@@ -1007,6 +1023,7 @@ func (c *GenericClient) chatCopilot(ctx context.Context, messages []Message, too
 	req.Header.Set("Copilot-Integration-Id", "vscode-chat")
 	req.Header.Set("User-Agent", "GitHubCopilotChat/0.35.0")
 	req.Header.Set("Openai-Intent", "conversation-panel")
+	applyHarnessHeaders(req, "copilot")
 
 	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
@@ -1078,6 +1095,7 @@ func (c *GenericClient) chatGrokSubscription(ctx context.Context, messages []Mes
 			}
 		}
 	}
+	applyHarnessPayload(payload, c.Provider)
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
@@ -1104,6 +1122,7 @@ func (c *GenericClient) chatGrokSubscription(ctx context.Context, messages []Mes
 			req.Header[k] = vs
 		}
 	}
+	applyHarnessHeaders(req, c.Provider)
 	c.emitDebug("LLM", fmt.Sprintf("chatGrokSubscription: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
 
 	resp, err := llmHTTPClient.Do(req)
@@ -1200,6 +1219,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	if len(tools) > 0 {
 		payload["tools"] = openAITools(tools)
 	}
+	applyHarnessPayload(payload, c.Provider)
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
@@ -1216,6 +1236,8 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 	c.setOpencodeSessionHeader(req)
+	c.setOpenRouterAttributionHeaders(req)
+	applyHarnessHeaders(req, c.Provider)
 	c.emitDebug("LLM", fmt.Sprintf("chatOpenAI: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
 
 	resp, err := llmHTTPClient.Do(req)
@@ -1320,6 +1342,7 @@ func (c *GenericClient) chatGoogle(ctx context.Context, messages []Message, tool
 		req.Header.Set("x-goog-api-key", c.APIKey)
 	}
 	c.setOpencodeSessionHeader(req)
+	applyHarnessHeaders(req, c.Provider)
 	c.emitDebug("LLM", fmt.Sprintf("chatGoogle: url=%s model=%q", url, c.Model))
 
 	resp, err := llmHTTPClient.Do(req)
@@ -1549,7 +1572,7 @@ type stepAccum struct {
 // and assembles a single assistant Message from the steps.
 func parseGoogleInteractionsStream(body io.Reader, onDelta func(kind, text string), onUsage func(inputTokens, outputTokens int64)) (*Message, json.RawMessage, error) {
 	eventCh := make(chan googleStreamEvent, 64)
-	go parseGoogleSSE(body, eventCh)
+	crashguard.Go(func() { parseGoogleSSE(body, eventCh) })
 
 	msg := &Message{Role: "assistant"}
 
@@ -2950,6 +2973,12 @@ func (c *GenericClient) chatOpenAIResponsesAttempt(ctx context.Context, messages
 			}
 		}
 	}
+	// The ChatGPT codex backend rejects the metadata body field with
+	// 400 "Unsupported parameter: metadata"; only stamp it for API-key
+	// Responses endpoints.
+	if !(c.UseOAuth && c.Provider == "openai") {
+		applyHarnessPayload(payload, c.Provider)
+	}
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
@@ -2983,6 +3012,7 @@ func (c *GenericClient) chatOpenAIResponsesAttempt(ctx context.Context, messages
 			req.Header[k] = vs
 		}
 	}
+	applyHarnessHeaders(req, c.Provider)
 
 	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
@@ -3641,6 +3671,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 		}
 		payload["tools"] = anthropicTools
 	}
+	applyHarnessPayload(payload, c.Provider)
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
@@ -3668,6 +3699,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 			req.Header.Set("anthropic-beta", "interleaved-thinking-2025-05-14")
 		}
 	}
+	applyHarnessHeaders(req, c.Provider)
 
 	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
@@ -4199,6 +4231,13 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 }
 
 func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMClient {
+	if cfg != nil {
+		// Client construction is the common path for TUI, headless, server,
+		// compaction, and subagent loops. Seed the process-wide harness lazily
+		// when no bootstrap path has done so yet; later /fake-agent switches are
+		// never overwritten by helper-client construction.
+		syncHarnessFromConfigIfNeeded(cfg.Ocode.FakeAgent)
+	}
 	emitDebug("AGENT", fmt.Sprintf("NewClient: building client for model %q profile=%q", model, profile))
 	provider := ""
 	apiKey := ""
@@ -4750,6 +4789,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	if len(tools) > 0 {
 		payload["tools"] = openAITools(tools)
 	}
+	applyHarnessPayload(payload, c.Provider)
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
@@ -4766,6 +4806,8 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 	c.setOpencodeSessionHeader(req)
+	c.setOpenRouterAttributionHeaders(req)
+	applyHarnessHeaders(req, c.Provider)
 	c.emitDebug("LLM", fmt.Sprintf("chatOpenAIHTTP: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
 
 	resp, err := llmHTTPClient.Do(req)

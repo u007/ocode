@@ -1839,8 +1839,10 @@ async function handleLogin(ctx: CommandContext): Promise<CommandResult> {
     const r = await ctx.api.syncLoginStart();
     return ok([
       "## Device Login",
-      `Open **${r.verifyUrl}** in your browser and approve the request.`,
+      `Open [${r.verifyUrl}](${r.verifyUrl}) in your browser and approve the request.`,
       `Your code: \`${r.userCode}\``,
+      "",
+      "If the link doesn't open, copy the URL above into your browser manually.",
       "",
       "Once approved, config/auth sync links automatically (the code expires in " + Math.round(r.expiresIn / 60) + " minutes — rerun `/login` for a fresh one).",
     ].join("\n"));

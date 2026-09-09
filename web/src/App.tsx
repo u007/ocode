@@ -5,7 +5,7 @@ import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, findProjectPathForTab, useProjectState } from "./stores/projectStore";
 import { TerminalProvider } from "./stores/terminalStore";
-import { BrowserTabsProvider, useBrowserTabs, useBrowserTabsDispatch } from "./stores/browserTabsStore";
+import { BrowserTabsProvider, useAllBrowserTabs, useBrowserTabs, useBrowserTabsDispatch } from "./stores/browserTabsStore";
 import { BrowserPanel } from "./components/Browser/BrowserPanel";
 import PreviewHost from "./components/Preview/PreviewHost";
 import { usePreviewActivation } from "./components/Preview/usePreviewActivation";
@@ -68,6 +68,8 @@ import FrontendMemoryReporter from "./lib/debug/frontendMemoryReporter";
 import { __setRevoker } from "./lib/browserStore";
 import { revokeBrowseSession } from "./api/client";
 import type { Project } from "./api/types";
+import { SpeechProvider } from "./components/Speech/SpeechProvider";
+import SpeechToolbar from "./components/Speech/SpeechToolbar";
 
 // Browse panel close → revoke the server-side browse session. Wired here
 // (module scope, once) rather than inside browserStore.ts to avoid a
@@ -184,6 +186,8 @@ function HomeApp() {
   const [focusedKind, setFocusedKind] = useState<FocusedKind>("chat");
   const activeProjectPath = projectState.activeProject?.path ?? "";
   const { activeId: activeBrowserId, closeBrowserTab } = useBrowserTabs(activeProjectPath);
+  const allBrowserTabs = useAllBrowserTabs();
+  const [activatedBrowserKeys, setActivatedBrowserKeys] = useState<Set<string>>(() => new Set());
   const browserTabsDispatch = useBrowserTabsDispatch();
   // browse_newtab: file the tab under its owning project when the event
   // names one; an unknown owner lands in the active project's strip.
@@ -197,6 +201,28 @@ function HomeApp() {
   useEffect(() => {
     if (focusedKind === "browser" && !activeBrowserId) setFocusedKind("chat");
   }, [focusedKind, activeBrowserId]);
+  const activeBrowserKey = focusedKind === "browser" && activeBrowserId ? `tab:${activeBrowserId}` : null;
+  useEffect(() => {
+    if (!activeBrowserKey) return;
+    setActivatedBrowserKeys((current) => {
+      if (current.has(activeBrowserKey)) return current;
+      const next = new Set(current);
+      next.add(activeBrowserKey);
+      return next;
+    });
+  }, [activeBrowserKey]);
+  useEffect(() => {
+    const liveKeys = new Set(allBrowserTabs.map(({ tab }) => `tab:${tab.id}`));
+    setActivatedBrowserKeys((current) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const key of current) {
+        if (liveKeys.has(key)) next.add(key);
+        else changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [allBrowserTabs]);
   // The side browser panel accompanies chat/terminal focus (never the
   // full-width browser *tab*, which has its own `tab:` state surface).
   const sidePanelKind = focusedKind === "terminal" ? "term" : "chat";
@@ -971,7 +997,7 @@ function HomeApp() {
               </TabsContent>
 
               <TabsContent value="sessions" forceMount className="flex-1 overflow-hidden m-0">
-                <div className="flex flex-col h-full">
+                <div className="relative flex flex-col h-full">
                   <div className={focusedKind === "chat" ? "flex flex-col flex-1 min-h-0" : "hidden"}>
                   <SessionSubTabs />
                   <div className="relative flex-1 min-h-0 overflow-hidden">
@@ -1058,16 +1084,29 @@ function HomeApp() {
                     })}
                   </div>
                   </div>
-                  {focusedKind === "browser" && activeBrowserId && (
-                    <div className="flex flex-col flex-1 min-h-0">
-                      {/* key forces remount per tab: the browse session cookie
-                          is per-stateKey (same name, same /b/ path — the
-                          browser can only hold one), so each surface switch
-                          must re-mint its grant. Switching tabs reloads the
-                          page — the spec's accepted cost of per-tab isolation. */}
-                      <BrowserPanel key={`tab:${activeBrowserId}`} stateKey={`tab:${activeBrowserId}`} mode="full" />
-                    </div>
-                  )}
+                  <div
+                    className={
+                      activeView === "sessions" && focusedKind === "browser"
+                        ? "absolute inset-0"
+                        : "absolute inset-0 invisible pointer-events-none"
+                    }
+                  >
+                    {allBrowserTabs.map(({ projectPath, tab }) => {
+                      const stateKey = `tab:${tab.id}` as StateKey;
+                      if (!activatedBrowserKeys.has(stateKey)) return null;
+                      const isActive = activeView === "sessions" && focusedKind === "browser" &&
+                        projectPath === activeProjectPath && tab.id === activeBrowserId;
+                      return (
+                        <div
+                          key={stateKey}
+                          data-testid={`browser-surface-${tab.id}`}
+                          className={isActive ? "absolute inset-0" : "absolute inset-0 invisible pointer-events-none"}
+                        >
+                          <BrowserPanel stateKey={stateKey} mode="full" active={isActive} />
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               </TabsContent>
             </div>
@@ -1285,19 +1324,22 @@ export default function App() {
   if (isRemoteSession() && (!authToken() || remoteAuthFailed)) {
     return <RemoteReconnect />;
   }
-  return (
-    <ErrorBoundary>
-      <ChatProvider>
-        <ProjectProvider>
-          <TerminalProvider>
-            <BrowserTabsProvider>
-              <FrontendMemoryReporter />
+	return (
+	    <ErrorBoundary>
+	      <ChatProvider>
+	        <ProjectProvider>
+	          <TerminalProvider>
+	            <BrowserTabsProvider>
+	              <SpeechProvider>
+	              <FrontendMemoryReporter />
               <StatusMetricsHydrator />
               <Routes>
                 <Route path="/session/:id" element={<SessionPage />} />
-                <Route path="*" element={<HomeApp />} />
-              </Routes>
-            </BrowserTabsProvider>
+	                <Route path="*" element={<HomeApp />} />
+	              </Routes>
+	              <SpeechToolbar />
+	              </SpeechProvider>
+	            </BrowserTabsProvider>
           </TerminalProvider>
         </ProjectProvider>
       </ChatProvider>

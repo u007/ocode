@@ -119,7 +119,7 @@ function fireFrame(w = 640, h = 480) {
 describe("ChromeViewport", () => {
   it("renders a canvas + hidden keyboard target + spinner until the first frame", () => {
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const canvas = container.querySelector("canvas");
     expect(canvas).toBeTruthy();
@@ -136,7 +136,7 @@ describe("ChromeViewport", () => {
 
   it("sends resize on ResizeObserver + dpr", () => {
     render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     vi.stubGlobal("devicePixelRatio", 2);
     const roCb = (globalThis as unknown as { __roCb?: ResizeObserverCallback }).__roCb!;
@@ -155,7 +155,7 @@ describe("ChromeViewport", () => {
 
   it("forwards pointer events as mouse messages and focuses the canvas", () => {
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const canvas = container.querySelector("canvas") as HTMLCanvasElement;
     const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
@@ -206,7 +206,7 @@ describe("ChromeViewport", () => {
 
   it("releases a held button on pointercancel and on blur, flushing the pending move first", () => {
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const canvas = container.querySelector("canvas") as HTMLCanvasElement;
     const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
@@ -237,7 +237,7 @@ describe("ChromeViewport", () => {
 
   it("maps keyboard to CDP key events with modifiers bitmask", () => {
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
     act(() => fireFrame());
@@ -274,7 +274,7 @@ describe("ChromeViewport", () => {
     const writeText = vi.fn(async (_t: string) => {});
     vi.stubGlobal("navigator", { ...navigator, platform: "MacIntel", clipboard: { writeText } });
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
     act(() => fireFrame());
@@ -304,7 +304,7 @@ describe("ChromeViewport", () => {
 
   it("commits IME composition as one insertText and skips composing keys", () => {
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
     act(() => fireFrame());
@@ -327,7 +327,7 @@ describe("ChromeViewport", () => {
     // Non-mac host: Ctrl is primary, Alt+Arrow is history.
     vi.stubGlobal("navigator", { ...navigator, platform: "Win32" });
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
     act(() => fireFrame());
@@ -345,7 +345,7 @@ describe("ChromeViewport", () => {
   it("steps page zoom with Cmd/Ctrl +/-/0 and pinch (ctrl+wheel)", () => {
     vi.stubGlobal("navigator", { ...navigator, platform: "Win32" });
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const canvas = container.querySelector("canvas") as HTMLCanvasElement;
     const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
@@ -380,7 +380,7 @@ describe("ChromeViewport", () => {
     vi.stubGlobal("navigator", { ...navigator, platform: "Win32" });
     browserActions.open("tab:abc");
     const { container, unmount } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
     act(() => fireFrame());
@@ -393,7 +393,7 @@ describe("ChromeViewport", () => {
     unmount();
     mockApi.send.mockClear();
     const { container: c2 } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     act(() => fireFrame());
     expect(mockApi.send).toHaveBeenCalledWith({ t: "zoom", factor: 1.1 });
@@ -409,7 +409,7 @@ describe("ChromeViewport", () => {
 
   it("forwards touch contacts as touch events, not mouse presses", () => {
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const canvas = container.querySelector("canvas") as HTMLCanvasElement;
     const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
@@ -442,7 +442,7 @@ describe("ChromeViewport", () => {
 
   it("replays a touch-and-hold as a right-click context menu", () => {
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const canvas = container.querySelector("canvas") as HTMLCanvasElement;
     canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 }) as DOMRect;
@@ -465,7 +465,7 @@ describe("ChromeViewport", () => {
 
   it("does not fire a long-press context menu for a quick tap or a drag/scroll", () => {
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const canvas = container.querySelector("canvas") as HTMLCanvasElement;
     canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 }) as DOMRect;
@@ -492,7 +492,7 @@ describe("ChromeViewport", () => {
 
   it("prevents the context menu", () => {
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const canvas = container.querySelector("canvas") as HTMLCanvasElement;
     const ev = new Event("contextmenu", { bubbles: true, cancelable: true });
@@ -503,13 +503,13 @@ describe("ChromeViewport", () => {
   it("shows reconnecting pill and error state with open-external", () => {
     mockApi.status = "reconnecting";
     const { container, rerender } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     expect(container.querySelector("[data-testid='cdp-reconnecting']")).toBeTruthy();
     mockApi.status = "closed";
     mockApi.error = "chrome not found — set browser.chrome_path";
     rerender(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     expect(container.textContent).toContain("chrome not found");
     const open = container.querySelector("[data-testid='cdp-open-external']") as HTMLButtonElement;
@@ -520,12 +520,35 @@ describe("ChromeViewport", () => {
     expect(winOpen).toHaveBeenCalledWith("https://example.com/", "_blank", "noopener");
   });
 
-  it("sends nav when the url prop changes", () => {
+  it("sends nav when the user navigates (navSeq bumps with a new url)", () => {
     const { rerender } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://a.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://a.com/" navSeq={0} />,
     );
-    rerender(<ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://b.com/" />);
+    rerender(<ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://b.com/" navSeq={1} />);
     expect(mockApi.send).toHaveBeenCalledWith({ t: "nav", url: "https://b.com/" });
+  });
+
+  it("does NOT re-navigate when only the server-reported url changes (pushState/replaceState)", () => {
+    // A page rewriting its own query string (map lat/lng/zoom, tab=...) via
+    // history.replaceState surfaces as Page.navigatedWithinDocument → a
+    // browse_nav event → a new store url. That is a report, not a request:
+    // replaying it as {t:"nav"} would Page.navigate and reload the page on
+    // every zoom/draw.
+    const { rerender } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://a.com/?zoom=15" navSeq={0} />,
+    );
+    mockApi.send.mockClear();
+    rerender(<ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://a.com/?zoom=16" navSeq={0} />);
+    expect(mockApi.send).not.toHaveBeenCalledWith(expect.objectContaining({ t: "nav" }));
+  });
+
+  it("re-navigates on reload (navSeq bumps with the same url)", () => {
+    const { rerender } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://a.com/" navSeq={0} />,
+    );
+    mockApi.send.mockClear();
+    rerender(<ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://a.com/" navSeq={1} />);
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "nav", url: "https://a.com/" });
   });
 
   it("navigates on FIRST mount (iframe → chrome escape hatch)", () => {
@@ -533,7 +556,7 @@ describe("ChromeViewport", () => {
     // dev-server page from local proxy to Chrome/CDP mode) must still issue
     // an initial {t:"nav"}; otherwise the CDP target sits on the initial
     // page and renders blank.
-    render(<ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://dev.local/admin" />);
+    render(<ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://dev.local/admin" navSeq={0} />);
     expect(mockApi.send).toHaveBeenCalledWith({ t: "nav", url: "https://dev.local/admin" });
   });
 });
@@ -542,7 +565,7 @@ describe("ChromeViewport file chooser", () => {
   it("opens the hidden picker on fileChooser and uploads the picked files", async () => {
     const clickSpy = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const input = container.querySelector("[data-testid='cdp-file-input']") as HTMLInputElement;
     expect(input).toBeTruthy();
@@ -567,7 +590,7 @@ describe("ChromeViewport file chooser", () => {
   it("reports a dismissed picker as fileChooserCancel", () => {
     vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
     const { container } = render(
-      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" />,
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
     );
     const input = container.querySelector("[data-testid='cdp-file-input']") as HTMLInputElement;
     act(() => {
@@ -579,5 +602,19 @@ describe("ChromeViewport file chooser", () => {
     });
     expect(mockApi.send).toHaveBeenCalledWith({ t: "fileChooserCancel" });
     expect(mockUpload).not.toHaveBeenCalled();
+  });
+
+  it("ignores delayed file chooser events after the surface is backgrounded", () => {
+    const clickSpy = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
+    const { rerender } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
+    );
+    rerender(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} active={false} />,
+    );
+    act(() => {
+      for (const cb of mockApi.fileChooserCbs) cb(true);
+    });
+    expect(clickSpy).not.toHaveBeenCalled();
   });
 });

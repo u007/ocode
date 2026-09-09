@@ -74,8 +74,8 @@ vi.mock("./lib/eventBus", () => ({
 }));
 
 vi.mock("./components/Browser/BrowserPanel", () => ({
-  BrowserPanel: ({ stateKey, mode }: { stateKey: string; mode: string }) => (
-    <div data-testid="browser-panel" data-key={stateKey} data-mode={mode} />
+  BrowserPanel: ({ stateKey, mode, active }: { stateKey: string; mode: string; active?: boolean }) => (
+    <div data-testid="browser-panel" data-key={stateKey} data-mode={mode} data-active={String(active ?? true)} />
   ),
 }));
 
@@ -143,6 +143,22 @@ describe("App browser wiring", () => {
     const panel = await screen.findByTestId("browser-panel");
     expect(panel).toHaveAttribute("data-mode", "full");
     expect(panel.getAttribute("data-key")).toMatch(/^tab:/);
+  });
+
+  it("keeps activated browser surfaces mounted when switching tabs", async () => {
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: /new browser tab/i }));
+    const firstPanel = await screen.findByTestId("browser-panel");
+    const firstKey = firstPanel.getAttribute("data-key");
+
+    fireEvent.click(screen.getByRole("button", { name: /new browser tab/i }));
+    await waitFor(() => expect(screen.getAllByTestId("browser-panel")).toHaveLength(2));
+
+    const panels = screen.getAllByTestId("browser-panel");
+    const firstAfterSwitch = panels.find((panel) => panel.getAttribute("data-key") === firstKey);
+    expect(firstAfterSwitch).toBe(firstPanel);
+    expect(firstAfterSwitch).toHaveAttribute("data-active", "false");
+    expect(panels.find((panel) => panel.getAttribute("data-active") === "true")).toBeTruthy();
   });
 
   it("toggles the side browser panel open beside a chat session", async () => {

@@ -12,6 +12,7 @@ import (
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
+	"github.com/u007/ocode/internal/network"
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/redact"
 )
@@ -1365,6 +1366,67 @@ func (h *Handler) HandleSetDiscoveryConfig(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, req)
 }
 
+// permissionModeConfigDTO carries the persisted default permission mode over
+// the wire, separate from the live-only PUT /api/permissions/mode.
+type permissionModeConfigDTO struct {
+	Mode string `json:"mode"`
+	Note string `json:"note,omitempty"`
+}
+
+// HandleGetPermissionModeConfig reports the persisted default permission mode
+// (what new TUI/web/RC sessions start in), not the current live mode — see
+// GET /api/permissions for that.
+func (h *Handler) HandleGetPermissionModeConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	mode := string(agent.PermissionModeNormal)
+	if h.cfg != nil && h.cfg.Ocode.Permissions.Mode != "" {
+		mode = h.cfg.Ocode.Permissions.Mode
+	}
+	h.mu.Unlock()
+	note := ""
+	if mode == string(agent.PermissionModeSandbox) {
+		note = "sandbox = integrity-only write confinement; reads, network egress, and execution remain open — NOT secret/confidentiality protection"
+	}
+	writeJSON(w, http.StatusOK, permissionModeConfigDTO{Mode: mode, Note: note})
+}
+
+// HandleSetPermissionModeConfig persists the default permission mode that new
+// TUI/web/RC sessions start in. This does not touch any live agent — pair it
+// with PUT /api/permissions/mode to also change the mode for the current
+// session. sandbox is a valid default (Decision 2 in
+// docs/superpowers/plans/2026-08-31-shell-sandbox/INDEX.md was superseded by
+// explicit owner request); cron jobs are unaffected, as they resolve their
+// own per-job permission mode independently (scheduler_runner.go).
+func (h *Handler) HandleSetPermissionModeConfig(w http.ResponseWriter, r *http.Request) {
+	var req permissionModeConfigDTO
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	mode := agent.PermissionMode(req.Mode)
+	switch mode {
+	case agent.PermissionModeNormal, agent.PermissionModeYOLO, agent.PermissionModeLocked, agent.PermissionModeSandbox:
+		// accepted
+	default:
+		writeError(w, http.StatusBadRequest, "mode must be one of normal, yolo, locked, sandbox")
+		return
+	}
+	if err := config.SavePermissionModeSwitch(string(mode)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.Permissions.Mode = string(mode)
+	}
+	h.mu.Unlock()
+	note := ""
+	if string(mode) == string(agent.PermissionModeSandbox) {
+		note = "sandbox = integrity-only write confinement; reads, network egress, and execution remain open — NOT secret/confidentiality protection"
+	}
+	writeJSON(w, http.StatusOK, permissionModeConfigDTO{Mode: string(mode), Note: note})
+}
+
 // HandleGetTUIConfigSection reports the TUI theme/input/keybind settings.
 func (h *Handler) HandleGetTUIConfigSection(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
@@ -1560,6 +1622,135 @@ func (h *Handler) HandleSetLimitsConfig(w http.ResponseWriter, r *http.Request) 
 		"image_max_dim":         req.ImageMaxDim,
 		"max_concurrent_agents": req.MaxConcurrentAgents,
 		"undo_max_age_delta":    req.UndoMaxAgeDelta,
+	})
+}
+
+// HandleGetBrowserConfig reports the embedded-browser settings (including
+// the HTR companion; HTR port 0 means the managed 3846 default).
+func (h *Handler) HandleGetBrowserConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	chromePath, idleTimeoutMinutes, quality := "", 10, config.DefaultScreencastQuality
+	htrEnabled, htrExt, htrCli, htrSocket, htrHost, htrPort := true, "", "", "", "com.ocode.htrcontrol", 3846
+	if h.cfg != nil {
+		chromePath = h.cfg.Ocode.Browser.ChromePath
+		idleTimeoutMinutes = h.cfg.Ocode.Browser.IdleTimeoutMinutes
+		quality = config.NormalizeScreencastQuality(h.cfg.Ocode.Browser.ScreencastQuality)
+		htrEnabled = h.cfg.Ocode.Browser.HTREnabled
+		htrExt = h.cfg.Ocode.Browser.HTRExtensionPath
+		htrCli = h.cfg.Ocode.Browser.HTRCliPath
+		htrPort = h.cfg.Ocode.Browser.HTRPort
+		htrSocket = h.cfg.Ocode.Browser.HTRSocketPath
+		htrHost = h.cfg.Ocode.Browser.HTRNativeHostName
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"chrome_path":          chromePath,
+		"idle_timeout_minutes": idleTimeoutMinutes,
+		"screencast_quality":   quality,
+		"htr_enabled":          htrEnabled,
+		"htr_extension_path":   htrExt,
+		"htrcli_path":          htrCli,
+		"htr_port":             htrPort,
+		"htr_socket_path":      htrSocket,
+		"htr_native_host_name": htrHost,
+	})
+}
+
+// HandleSetBrowserConfig persists the embedded-browser settings (HTR fields
+// optional for backward compatibility).
+func (h *Handler) HandleSetBrowserConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ChromePath         string `json:"chrome_path"`
+		IdleTimeoutMinutes int    `json:"idle_timeout_minutes"`
+		ScreencastQuality  int    `json:"screencast_quality"`
+		HTREnabled         *bool  `json:"htr_enabled"`
+		HTRExtensionPath   string `json:"htr_extension_path"`
+		HTRCliPath         string `json:"htrcli_path"`
+		HTRPort            *int   `json:"htr_port"`
+		HTRSocketPath      string `json:"htr_socket_path"`
+		HTRNativeHostName  string `json:"htr_native_host_name"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ScreencastQuality < 0 || req.ScreencastQuality > 100 {
+		writeError(w, http.StatusBadRequest, "screencast_quality must be 1-100")
+		return
+	}
+	if req.IdleTimeoutMinutes < 0 {
+		writeError(w, http.StatusBadRequest, "idle_timeout_minutes must be >= 0")
+		return
+	}
+	if req.HTRPort != nil && (*req.HTRPort < 0 || *req.HTRPort > 65535) {
+		writeError(w, http.StatusBadRequest, "htr_port must be 0-65535")
+		return
+	}
+	if err := config.SaveOcodeBrowserConfig(req.ChromePath, req.IdleTimeoutMinutes, req.ScreencastQuality); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	htrEnabled := true
+	htrPort := 0
+	h.mu.Lock()
+	if h.cfg != nil {
+		htrEnabled = h.cfg.Ocode.Browser.HTREnabled
+		htrPort = h.cfg.Ocode.Browser.HTRPort
+	}
+	h.mu.Unlock()
+	if req.HTREnabled != nil || req.HTRExtensionPath != "" || req.HTRCliPath != "" || req.HTRPort != nil || req.HTRSocketPath != "" || req.HTRNativeHostName != "" {
+		if req.HTREnabled != nil {
+			htrEnabled = *req.HTREnabled
+		}
+		if req.HTRPort != nil {
+			htrPort = *req.HTRPort
+		}
+		if err := config.SaveOcodeHTRConfig(htrEnabled, req.HTRExtensionPath, req.HTRCliPath, htrPort, req.HTRSocketPath, req.HTRNativeHostName); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save htr config: "+err.Error())
+			return
+		}
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		if req.ChromePath != "" {
+			h.cfg.Ocode.Browser.ChromePath = req.ChromePath
+		}
+		if req.IdleTimeoutMinutes > 0 {
+			h.cfg.Ocode.Browser.IdleTimeoutMinutes = req.IdleTimeoutMinutes
+		}
+		if req.ScreencastQuality > 0 {
+			h.cfg.Ocode.Browser.ScreencastQuality = req.ScreencastQuality
+		}
+		if req.HTREnabled != nil {
+			h.cfg.Ocode.Browser.HTREnabled = *req.HTREnabled
+		}
+		if req.HTRExtensionPath != "" {
+			h.cfg.Ocode.Browser.HTRExtensionPath = req.HTRExtensionPath
+		}
+		if req.HTRCliPath != "" {
+			h.cfg.Ocode.Browser.HTRCliPath = req.HTRCliPath
+		}
+		if req.HTRPort != nil && *req.HTRPort > 0 {
+			h.cfg.Ocode.Browser.HTRPort = *req.HTRPort
+		}
+		if req.HTRSocketPath != "" {
+			h.cfg.Ocode.Browser.HTRSocketPath = req.HTRSocketPath
+		}
+		if req.HTRNativeHostName != "" {
+			h.cfg.Ocode.Browser.HTRNativeHostName = req.HTRNativeHostName
+		}
+		htrEnabled = h.cfg.Ocode.Browser.HTREnabled
+		htrPort = h.cfg.Ocode.Browser.HTRPort
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"chrome_path":          req.ChromePath,
+		"idle_timeout_minutes": req.IdleTimeoutMinutes,
+		"screencast_quality":   config.NormalizeScreencastQuality(req.ScreencastQuality),
+		"htr_enabled":          htrEnabled,
+		"htr_port":             htrPort,
+		"htr_socket_path":      req.HTRSocketPath,
+		"htr_native_host_name": req.HTRNativeHostName,
 	})
 }
 
@@ -1945,4 +2136,60 @@ func (h *Handler) HandleSetBackendConfig(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"backend_url": normalized,
 	})
+}
+
+// HandleGetFakeAgentConfig reports the persisted and effective harness
+// identity used for outbound LLM requests.
+func (h *Handler) HandleGetFakeAgentConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	configured := config.DefaultFakeAgent
+	if h.cfg != nil && h.cfg.Ocode.FakeAgent != "" {
+		configured = h.cfg.Ocode.FakeAgent
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"fake_agent": configured,
+		"active":     agent.ActiveHarness(),
+		"options":    agent.HarnessNames(),
+	})
+}
+
+// HandleSetFakeAgentConfig persists and immediately activates a harness
+// identity. The change applies to all subsequent LLM requests in this
+// process; existing agent clients do not need to be rebuilt.
+func (h *Handler) HandleSetFakeAgentConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		FakeAgent string `json:"fake_agent"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	normalized, err := config.NormalizeFakeAgent(req.FakeAgent)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := config.SaveFakeAgent(normalized); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	if _, err := agent.SetActiveHarness(normalized); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.FakeAgent = normalized
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"fake_agent": normalized,
+		"active":     agent.ActiveHarness(),
+		"options":    agent.HarnessNames(),
+	})
+}
+
+func (h *Handler) HandleGetNetworkIP(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ip": network.GetIP()})
 }

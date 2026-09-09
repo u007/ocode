@@ -5,10 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
 // recordingTitleClient captures the prompt passed to the LLM so we can assert
@@ -168,6 +170,7 @@ func TestSidebarTitleGenClickEndToEnd(t *testing.T) {
 		messages: []message{{role: roleUser, text: "do something"}},
 	}
 	m.sessionTitle = "Some Title"
+	m.expandedTitle = true
 	m.showSidebar = true
 	m.width = 120
 	m.height = 40
@@ -186,12 +189,132 @@ func TestSidebarTitleGenClickEndToEnd(t *testing.T) {
 		t.Fatal("expected press on gen button to arm sidebarSel.dragging")
 	}
 
-	_, cmd, handled := m2.handleMouseAction(mouse, false)
+	updated, cmd, handled := m2.handleMouseAction(mouse, false)
 	if !handled {
 		t.Fatal("release on gen button was not handled")
 	}
 	if cmd == nil {
 		t.Fatal("expected release on gen button to fire the regenerateTitle command")
+	}
+	if !updated.(model).expandedTitle {
+		t.Fatal("gen-button click must not toggle expanded title state")
+	}
+}
+
+func TestSidebarTitleLayoutReflowsFinalRowAndExpands(t *testing.T) {
+	m := &model{
+		width:        120,
+		height:       80,
+		showSidebar:  true,
+		activeTab:    tabChat,
+		sessionTitle: strings.Repeat("alpha beta ", 14) + "tailword",
+	}
+
+	collapsed := m.sidebarTitleLayout()
+	if collapsed.rows != sidebarMaxTitleLines {
+		t.Fatalf("collapsed rows = %d, want %d", collapsed.rows, sidebarMaxTitleLines)
+	}
+	if len(collapsed.wrappedLines) <= collapsed.rows {
+		t.Fatalf("collapsed layout lost full wrapped lines: wrapped=%d visible=%d", len(collapsed.wrappedLines), collapsed.rows)
+	}
+
+	m.expandedTitle = true
+	expanded := m.sidebarTitleLayout()
+	if expanded.rows <= sidebarMaxTitleLines {
+		t.Fatalf("expanded rows = %d, want more than %d", expanded.rows, sidebarMaxTitleLines)
+	}
+	if !strings.Contains(strings.Join(expanded.titleRows, " "), "tailword") {
+		t.Fatal("expanded title rows dropped the final title word")
+	}
+	buttonWidth := lipgloss.Width(sidebarTitleGenBtn)
+	textWidth := sidebarColumnWidth - 4 - lipgloss.Width("◆ ")
+	last := expanded.titleRows[len(expanded.titleRows)-1]
+	if lipgloss.Width(last) > textWidth-buttonWidth {
+		t.Fatalf("final title row width = %d, want <= %d before gen button", lipgloss.Width(last), textWidth-buttonWidth)
+	}
+	if expanded.genButtonRow != expanded.rows-1 {
+		t.Fatalf("gen button row = %d, want final row %d", expanded.genButtonRow, expanded.rows-1)
+	}
+
+	rendered := stripANSI(m.renderSidebar())
+	if !strings.Contains(rendered, "tailword") {
+		t.Fatal("expanded sidebar rendering omitted the final title word")
+	}
+}
+
+func TestSidebarTitleClickTogglesButDragDoesNot(t *testing.T) {
+	m := model{
+		width:        120,
+		height:       40,
+		showSidebar:  true,
+		activeTab:    tabChat,
+		sessionTitle: strings.Repeat("title ", 20),
+	}
+	titleY := appHeaderHeight + 1
+	titleX := m.panelWidth() + 4
+	click := tea.Mouse{X: titleX, Y: titleY, Button: tea.MouseLeft}
+	updated, _, handled := m.handleMouseAction(click, true)
+	if !handled {
+		t.Fatal("title press was not handled")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleMouseAction(click, false)
+	if !handled || !updated.(model).expandedTitle {
+		t.Fatal("no-movement title click did not expand the title")
+	}
+
+	m = updated.(model)
+	m.expandedTitle = false
+	updated, _, _ = m.handleMouseAction(click, true)
+	m = updated.(model)
+	dragX := titleX + 12
+	updated, _, handled = m.handleMouseMotion(tea.Mouse{X: dragX, Y: titleY, Button: tea.MouseLeft})
+	if !handled || !updated.(model).sidebarSel.active {
+		t.Fatal("title motion did not become an active selection drag")
+	}
+	m = updated.(model)
+	selected := extractSelectionText(m.rawSidebarLines, m.sidebarSel.startLine, m.sidebarSel.startCol, m.sidebarSel.endLine, m.sidebarSel.endCol)
+	if !strings.Contains(selected, "title") {
+		t.Fatalf("title drag selection omitted title text: %q", selected)
+	}
+	updated, _, handled = m.handleMouseAction(tea.Mouse{X: dragX, Y: titleY, Button: tea.MouseLeft}, false)
+	if !handled {
+		t.Fatal("title drag release was not handled")
+	}
+	if updated.(model).expandedTitle {
+		t.Fatal("title drag toggled expansion")
+	}
+}
+
+func TestSidebarExpandedTitleRespectsShortTerminal(t *testing.T) {
+	m := &model{
+		width:         120,
+		height:        9,
+		showSidebar:   true,
+		activeTab:     tabChat,
+		expandedTitle: true,
+		sessionTitle:  strings.Repeat("long title ", 40),
+	}
+	layout := m.sidebarTitleLayout()
+	maxRows := m.height - appHeaderHeight - 2
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	if layout.rows > maxRows {
+		t.Fatalf("expanded rows = %d, terminal budget = %d", layout.rows, maxRows)
+	}
+	if got := lipgloss.Height(m.renderSidebar()); got > m.height-appHeaderHeight {
+		t.Fatalf("sidebar height = %d, want <= %d", got, m.height-appHeaderHeight)
+	}
+
+	m.ready = true
+	m.styles = ApplyThemeColors("tokyonight")
+	m.input = textarea.New()
+	m.viewport = fastviewport.New(80, 1)
+	m.config = &config.Config{}
+	m.layout()
+	if got := lipgloss.Height(m.renderContent()); got > m.height {
+		t.Fatalf("renderContent height = %d, want <= terminal height %d", got, m.height)
 	}
 }
 

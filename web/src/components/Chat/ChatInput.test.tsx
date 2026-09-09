@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import ChatInput from "./ChatInput";
 
@@ -30,6 +30,7 @@ function getTextarea(): HTMLTextAreaElement {
 
 async function tick() {
   await act(async () => {
+    vi.advanceTimersByTime(1500);
     await Promise.resolve();
     await Promise.resolve();
   });
@@ -37,8 +38,48 @@ async function tick() {
 
 describe("ChatInput submission", () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     sendMessage.mockClear();
     sendMessage.mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("waits 1.5 seconds before sending an idle chat message", async () => {
+    render(<ChatInput sessionTabId="new-1" />);
+    const ta = getTextarea();
+    fireEvent.change(ta, { target: { value: "hello" } });
+    await act(async () => {
+      fireEvent.keyDown(ta, { key: "Enter" });
+    });
+
+    expect(sendMessage).not.toHaveBeenCalled();
+    await act(async () => {
+      vi.advanceTimersByTime(1499);
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
+    await tick();
+    expect(sendMessage).toHaveBeenCalledWith("hello");
+  });
+
+  it("consolidates idle messages submitted during the debounce window", async () => {
+    render(<ChatInput sessionTabId="new-1" />);
+    const ta = getTextarea();
+    fireEvent.change(ta, { target: { value: "first" } });
+    await act(async () => {
+      fireEvent.keyDown(ta, { key: "Enter" });
+    });
+    fireEvent.change(ta, { target: { value: "second" } });
+    await act(async () => {
+      fireEvent.keyDown(ta, { key: "Enter" });
+    });
+
+    expect(sendMessage).not.toHaveBeenCalled();
+    await tick();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith("first\n\nsecond");
   });
 
   it("sends exactly once on a single Enter", async () => {
@@ -63,6 +104,7 @@ describe("ChatInput submission", () => {
     });
     await tick();
     expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith("hello");
   });
 
   it("sends two distinct messages typed in sequence", async () => {

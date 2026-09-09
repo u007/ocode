@@ -29,7 +29,12 @@ const BACKOFF_MS = [500, 1000, 2000, 5000];
  *  redeems them one-time on the WS URL. A close without a prior
  *  {"t":"error"} is treated as transient and retried with backoff; an error
  *  message is fatal (chrome missing / unsupported / replaced). */
-export function useCdpSocket(stateKey: StateKey, browseBase: string | null, enabled: boolean): CdpSocketApi {
+export function useCdpSocket(
+  stateKey: StateKey,
+  browseBase: string | null,
+  enabled: boolean,
+  acceptFrames = true,
+): CdpSocketApi {
   const [status, setStatus] = useState<CdpSocketStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
 
@@ -44,8 +49,8 @@ export function useCdpSocket(stateKey: StateKey, browseBase: string | null, enab
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disposedRef = useRef(false);
   // Latest rendered values for the async connect loop (avoids stale reads).
-  const cfgRef = useRef({ stateKey, browseBase, enabled });
-  cfgRef.current = { stateKey, browseBase, enabled };
+  const cfgRef = useRef({ stateKey, browseBase, enabled, acceptFrames });
+  cfgRef.current = { stateKey, browseBase, enabled, acceptFrames };
 
   const connect = useCallback(() => {
     const { stateKey: key, browseBase: base, enabled: on } = cfgRef.current;
@@ -78,6 +83,9 @@ export function useCdpSocket(stateKey: StateKey, browseBase: string | null, enab
         ws.onmessage = (ev: MessageEvent) => {
           if (wsRef.current !== ws) return;
           if (ev.data instanceof ArrayBuffer) {
+            // Keep the socket and Chrome target alive for background surfaces,
+            // but avoid decoding screenshots that cannot be displayed.
+            if (!cfgRef.current.acceptFrames) return;
             const decoded = decodeFrame(ev.data);
             if (!decoded) return; // malformed: smaller than the 8-byte header
             const { width, height } = decoded.header;
@@ -87,11 +95,16 @@ export function useCdpSocket(stateKey: StateKey, browseBase: string | null, enab
               .then(() => createImageBitmap(new Blob([decoded.jpeg], { type: "image/jpeg" })))
               .then(
                 (bitmap) => {
-                  if (wsRef.current !== ws) {
+                  if (wsRef.current !== ws || !cfgRef.current.acceptFrames) {
                     bitmap.close();
-                    return; // socket superseded while decoding
+                    return; // socket superseded or surface backgrounded while decoding
                   }
-                  for (const cb of frameCbsRef.current) cb(bitmap, width, height);
+                  const callbacks = [...frameCbsRef.current];
+                  if (callbacks.length === 0) {
+                    bitmap.close();
+                    return;
+                  }
+                  for (const cb of callbacks) cb(bitmap, width, height);
                 },
                 (err: unknown) => {
                   console.error("cdp: failed to decode screencast frame", { width, height, bytes: decoded.jpeg.byteLength }, err);

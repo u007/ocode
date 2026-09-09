@@ -1,5 +1,5 @@
-import { render } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import MessageBubble, { AssistantText } from "./MessageBubble";
 
 // Regression for the github-dark "blue on blue" mess: FileLink defaults to
@@ -61,5 +61,25 @@ describe("FileLink surface overrides", () => {
     expect(th).not.toBeNull();
     expect(th!.className).toContain("bg-card");
     expect(th!.className).not.toContain("bg-accent");
+  });
+});
+
+describe("external markdown links", () => {
+  it("opens an https link from the chat message", () => {
+    const open = vi.spyOn(window, "open").mockReturnValue({} as Window);
+    const { container } = render(
+      <AssistantText content="Open [the device page](https://hub.mercstudio.com/device)." />,
+    );
+
+    const link = container.querySelector('a[href="https://hub.mercstudio.com/device"]');
+    expect(link).not.toBeNull();
+    fireEvent.click(link!);
+
+    expect(open).toHaveBeenCalledWith(
+      "https://hub.mercstudio.com/device",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    open.mockRestore();
   });
 });

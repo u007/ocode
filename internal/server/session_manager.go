@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
 )
 
@@ -421,11 +422,13 @@ func (m *SessionManager) TurnTiming(sessionID string) (startedAt, endedAt time.T
 // session remain; the agent rebuilds on the next message. Returns the ids of
 // the evicted sessions so the caller can drop mirror state.
 //
-// A session paused on an unresolved permission ask is exempt even past the
-// timeout: evicting it would delete it from the handler's session map, so a
-// later resolve request 404s ("no pending permission found") instead of
-// completing, and the dialog is left on screen with no way to actually
-// dismiss it. The turn only "goes idle" (lastActivity stamped, turnActive
+// A session paused on an unresolved permission or question ask is exempt
+// even past the timeout: evicting it would delete it from the handler's
+// session map, so a later resolve request 404s ("no pending permission
+// found") instead of completing, and the dialog is left on screen with no
+// way to actually dismiss it. The rebuilt agent would also load the
+// transcript without the ask round, so the next turn would run from a
+// filtered base (see docs/gotchas/session-writers-conflict-recovery.md). The turn only "goes idle" (lastActivity stamped, turnActive
 // cleared) the instant it pauses on the sentinel, so a long-unanswered dialog
 // is exactly the case this sweep would otherwise catch.
 func (m *SessionManager) EvictIdle() []string {
@@ -458,7 +461,7 @@ func (m *SessionManager) EvictIdle() []string {
 	var evicted []string
 	for _, c := range candidates {
 		c.as.mu.Lock()
-		pending := tailIsPermissionAsk(c.as.messages)
+		pending := tailIsPendingAsk(c.as.messages)
 		c.as.mu.Unlock()
 		if pending {
 			continue
@@ -514,7 +517,7 @@ func (m *SessionManager) ReleaseAgent(sessionID string) bool {
 	// Exempting unresolved asks mirrors EvictIdle: releasing here would 404
 	// the pending resolve and strand the dialog.
 	as.mu.Lock()
-	pending := tailIsPermissionAsk(as.messages)
+	pending := tailIsPendingAsk(as.messages)
 	as.mu.Unlock()
 	if pending {
 		return false
@@ -733,4 +736,11 @@ func (m *SessionManager) State(sessionID string) (SessionState, bool) {
 		LastSeq:        e.lastSeq,
 		LiveFrames:     frames,
 	}, true
+}
+
+// tailIsPendingAsk reports whether the most recent tool-call round is still
+// paused on an unresolved permission or question ask — the shape EvictIdle
+// and ReleaseAgent must keep resident.
+func tailIsPendingAsk(msgs []agent.Message) bool {
+	return tailIsPermissionAsk(msgs) || tailIsQuestionAsk(msgs)
 }

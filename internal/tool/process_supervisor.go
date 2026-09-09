@@ -19,6 +19,11 @@ const (
 	ProcessKindInteractiveShell ProcessKind = "interactive_shell"
 	ProcessKindEditor           ProcessKind = "editor"
 	ProcessKindBrowser          ProcessKind = "browser"
+	// ProcessKindHTR covers the supervised `htrcli serve` daemon that backs
+	// the HTR NControl browser automation (HTTP :3845 + native-messaging
+	// relay). It is owned by the server supervisor so Shutdown terminates
+	// it with the last ocode process; see internal/browse/cdp/htr.go.
+	ProcessKindHTR ProcessKind = "htr"
 	// ProcessKindRemote covers ssh/scp/go-build/wsl.exe child processes
 	// spawned by internal/remote while connecting to or provisioning a
 	// remote ocode host.
@@ -40,6 +45,7 @@ type ProcessRegistration struct {
 	PID                   int
 	OwnsProcessGroup      bool
 	AllowGracefulShutdown bool
+	RetainOnShutdown      bool
 	StartedAt             time.Time
 
 	waitFn     func() error
@@ -55,6 +61,7 @@ type ProcessRecord struct {
 	PID                   int
 	OwnsProcessGroup      bool
 	AllowGracefulShutdown bool
+	RetainOnShutdown      bool
 	StartedAt             time.Time
 	EndedAt               time.Time
 	Status                ProcStatus
@@ -194,7 +201,7 @@ func StartSupervised(sup *ProcessSupervisor, cmd *exec.Cmd, reg ProcessRegistrat
 		// Only allow automatic replacement for the stable browser ID or other
 		// browser-kind records; generic proc-N collisions remain errors as
 		// documented in process_test.go:NoPrefix_CollidesInSupervisor.
-		canReplace := isTerminal && (reg.ID == "browse-chrome" || reg.Kind == ProcessKindBrowser || recSnap.Kind == ProcessKindBrowser)
+		canReplace := isTerminal && (reg.ID == "browse-chrome" || reg.Kind == ProcessKindBrowser || recSnap.Kind == ProcessKindBrowser || reg.Kind == ProcessKindHTR || recSnap.Kind == ProcessKindHTR)
 		if !canReplace {
 			sup.mu.Unlock()
 			// Duplicate running (or non-browser terminal) — kill leaked child.
@@ -354,6 +361,9 @@ func (s *ProcessSupervisor) Shutdown(ctx context.Context) error {
 
 	var errs []error
 	for _, child := range children {
+		if child.snapshot().RetainOnShutdown {
+			continue
+		}
 		if err := s.shutdownChild(child, ctx); err != nil {
 			errs = append(errs, err)
 		}
@@ -466,6 +476,7 @@ func newSupervisedProcess(spec ProcessRegistration) *supervisedProcess {
 			PID:                   pid,
 			OwnsProcessGroup:      spec.OwnsProcessGroup,
 			AllowGracefulShutdown: spec.AllowGracefulShutdown,
+			RetainOnShutdown:      spec.RetainOnShutdown,
 			StartedAt:             startedAt,
 			Status:                ProcRunning,
 			Retained:              true,

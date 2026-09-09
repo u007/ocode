@@ -122,7 +122,7 @@ describe("TerminalPanel link wiring", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(webLinksInstances.length).toBe(1);
     expect(fileProviderSpy).toHaveBeenCalledTimes(1);
-    expect(fileProviderSpy).toHaveBeenCalledWith(expect.any(Object), "/proj");
+    expect(fileProviderSpy).toHaveBeenCalledWith(expect.any(Object), "/proj", expect.any(Function));
     const dispose = fileProviderSpy.mock.results[0].value.dispose as ReturnType<typeof vi.fn>;
     const webLinksDispose = (webLinksInstances[0] as { dispose: ReturnType<typeof vi.fn> }).dispose;
     unmount();
@@ -135,7 +135,18 @@ describe("TerminalPanel link wiring", () => {
       <TerminalPanel id="t2" active projectPath="/my/project" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
     );
     await new Promise((r) => setTimeout(r, 0));
-    expect(fileProviderSpy).toHaveBeenCalledWith(expect.any(Object), "/my/project");
+    expect(fileProviderSpy).toHaveBeenCalledWith(expect.any(Object), "/my/project", expect.any(Function));
     unmount();
   });
 });
+
+
+  it("passes drag-guard callback to file provider", async () => {
+    const { unmount } = render(
+      <TerminalPanel id="t5" active projectPath="/proj" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    const lastCall = fileProviderSpy.mock.calls[fileProviderSpy.mock.calls.length - 1];
+    expect(typeof lastCall[2]).toBe("function");
+    unmount();
+  });

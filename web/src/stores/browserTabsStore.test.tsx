@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { BrowserTabsProvider, useBrowserTabs } from "./browserTabsStore";
+import { BrowserTabsProvider, useAllBrowserTabs, useBrowserTabs } from "./browserTabsStore";
 
 function wrap({ children }: { children: ReactNode }) {
   return <BrowserTabsProvider>{children}</BrowserTabsProvider>;
@@ -30,6 +30,28 @@ describe("browserTabsStore", () => {
     act(() => { a.result.current.openBrowserTab(); });
     const b = renderHook(() => useBrowserTabs("/proj/b"), { wrapper: wrap });
     expect(b.result.current.tabs).toHaveLength(0);
+  });
+
+  it("enumerates tabs across projects without changing their active pointers", () => {
+    const { result } = renderHook(() => {
+      const a = useBrowserTabs("/proj/a");
+      const b = useBrowserTabs("/proj/b");
+      return { a, b, all: useAllBrowserTabs() };
+    }, { wrapper: wrap });
+
+    let aId = "";
+    let bId = "";
+    act(() => {
+      aId = result.current.a.openBrowserTab();
+      bId = result.current.b.openBrowserTab();
+    });
+
+    expect(result.current.all.map(({ projectPath, tab }) => `${projectPath}:${tab.id}`)).toEqual([
+      `/proj/a:${aId}`,
+      `/proj/b:${bId}`,
+    ]);
+    expect(result.current.a.activeId).toBe(aId);
+    expect(result.current.b.activeId).toBe(bId);
   });
 });
 

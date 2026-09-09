@@ -59,6 +59,7 @@ func (f *procFakeManager) Attach(ctx context.Context, _ string, _ cdp.FrameSink)
 }
 func (f *procFakeManager) Revoke(_ string)                                        {}
 func (f *procFakeManager) SetFiles(_ context.Context, _ string, _ []string) error { return nil }
+func (f *procFakeManager) SetScreencastQuality(_ int)                             {}
 func (f *procFakeManager) Close(_ context.Context) error                          { return nil }
 func (f *procFakeManager) TargetKeys() []string                                   { return f.keys }
 func (f *procFakeManager) TargetPerf() map[string]map[string]float64              { return f.perf }

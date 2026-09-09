@@ -172,6 +172,86 @@ function SyncServerForm() {
   );
 }
 
+function FakeAgentForm() {
+  const [value, setValue] = useState("ocode");
+  const [options, setOptions] = useState<string[]>(["ocode", "opencode", "claude-code", "cline", "kilo-code", "codex"]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const cfg = await api.getFakeAgentConfig();
+      setValue(cfg.fake_agent || "ocode");
+      if (cfg.options?.length) setOptions(cfg.options);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const cfg = await api.setFakeAgentConfig(value);
+      setValue(cfg.fake_agent || "ocode");
+      if (cfg.options?.length) setOptions(cfg.options);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-border pt-4 space-y-3">
+      <div>
+        <h3 className="text-sm font-semibold text-foreground">LLM harness identity</h3>
+        <p className="text-xs text-muted-foreground mt-1">
+          Controls the client fingerprint presented to providers. Default is <code>ocode</code>;
+          this changes request headers/attribution only, not the model or permissions.
+        </p>
+      </div>
+      {error && <div className="text-xs text-red-400 whitespace-pre-wrap">{error}</div>}
+      {loading ? (
+        <Loader2 className="w-4 h-4 text-muted-foreground animate-spin" />
+      ) : (
+        <>
+          <Select value={value} onValueChange={setValue}>
+            <SelectTrigger className="h-8 text-xs">
+              <SelectValue placeholder="Select harness" />
+            </SelectTrigger>
+            <SelectContent>
+              {options.map((option) => (
+                <SelectItem key={option} value={option} className="text-xs">
+                  {option}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={save} disabled={saving} className="h-8 text-xs">
+              {saving && <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />}
+              Save harness
+            </Button>
+            <Button size="sm" variant="outline" onClick={load} disabled={saving} className="h-8 text-xs">
+              Refresh
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function BackendForm() {
   const [backendUrl, setBackendUrl] = useState("");
   const [customUrl, setCustomUrl] = useState("");
@@ -313,6 +393,8 @@ export default function BackendForm() {
         <p>New API calls use the selected origin immediately; the live events stream reconnects automatically.</p>
         <p>Existing terminal sessions stay on their previous backend (PTY state is host-local and would be lost on switch). New terminals and a page reload use the new backend.</p>
       </div>
+
+      <FakeAgentForm />
 
       <div className="border-t border-border pt-4">
         <SyncServerForm />

@@ -162,8 +162,7 @@ func RunScheduledJob(ctx context.Context, cfg *config.Config, job *scheduler.Job
 //   - blank or whitespace -> normal (never sandbox; a cron job must not inherit
 //     a session-scoped toggle)
 //   - explicit normal/yolo/locked/sandbox -> the same value (SetMode accepts
-//     sandbox post Part 01; the web cron UI does not offer it, but an
-//     explicitly-authorized job payload is honored)
+//     sandbox post Part 01; the web cron UI now offers it in the job dialog)
 //   - any other value -> passed through to SetMode, which silently ignores
 //     invalid modes (preserved global constraint)
 //

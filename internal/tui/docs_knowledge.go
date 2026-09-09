@@ -90,7 +90,7 @@ func (m *model) dispatchContextAgent(prompt string) string {
 		return "Error: task tool has unexpected type"
 	}
 
-	result, err := task.ExecuteRaw("context", prompt, false)
+	result, err := task.ExecuteRaw("context", prompt, false, 0)
 	if err != nil {
 		return fmt.Sprintf("Error dispatching context agent: %v", err)
 	}

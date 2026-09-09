@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -24,7 +25,14 @@ func gitRunInDir(dir string, args ...string) (string, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			err = fmt.Errorf("%w: %s", err, msg)
+		}
+	}
 	return strings.TrimSpace(string(out)), err
 }
 
@@ -134,6 +142,32 @@ func gitStatusForDir(dir string) GitStatus {
 		if f != "" {
 			status.ChangedFiles = append(status.ChangedFiles, f)
 		}
+	}
+	// Untracked files are part of the working-tree changes (the Git workspace
+	// endpoint lists them under unstaged, and the web Git tab badge counts
+	// staged + unstaged). `git diff --name-only` omits them, so append the
+	// `??` entries from `git status --porcelain` to keep the lightweight
+	// status counts in sync with the workspace snapshot.
+	seen := make(map[string]bool, len(status.StagedFiles)+len(status.ChangedFiles))
+	for _, f := range status.StagedFiles {
+		seen[f] = true
+	}
+	for _, f := range status.ChangedFiles {
+		seen[f] = true
+	}
+	for _, line := range strings.Split(run("status", "--porcelain", "-u"), "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		if !strings.Contains(line[:2], "?") {
+			continue
+		}
+		f := strings.Trim(line[3:], `"`)
+		if f == "" || seen[f] {
+			continue
+		}
+		seen[f] = true
+		status.ChangedFiles = append(status.ChangedFiles, f)
 	}
 	status.HasChanges = len(status.StagedFiles) > 0 || len(status.ChangedFiles) > 0
 	// Same dir handling as the run closure above (empty dir = server workdir).

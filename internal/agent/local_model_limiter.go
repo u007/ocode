@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/filelock"
 )
@@ -96,7 +97,7 @@ func newSlotReleasingBody(rc io.ReadCloser, release func(), slotPath string) *sl
 		touchEvery: localSlotTouchInterval,
 		stopTouch:  make(chan struct{}),
 	}
-	go b.touchLoop()
+	crashguard.Go(func() { b.touchLoop() })
 	return b
 }
 

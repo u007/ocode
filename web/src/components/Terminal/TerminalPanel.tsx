@@ -11,6 +11,7 @@ import {
   Search,
   Plus,
   X,
+  Volume2,
 } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -28,6 +29,8 @@ import { registerTerminal, unregisterTerminal } from "@/lib/debug/terminalRegist
 import { playAlertSound } from "./terminalAlertSound";
 import { useTerminalState } from "../../stores/terminalStore";
 import { registerTerminalFocus, unregisterTerminalFocus } from "./terminalFocus";
+import { requestSpeech } from "../Speech/SpeechProvider";
+import { sanitizeSpeechText } from "../Speech/speechUtils";
 
 /**
  * Builds the URL and WebSocket subprotocols for /api/terminal/ws. In remote
@@ -118,6 +121,12 @@ export default function TerminalPanel({
   const searchRef = useRef<SearchAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const dragCounterRef = useRef(0);
+  // Drag-guard for links: suppress link activation if mouse moved between
+  // mousedown and mouseup (i.e. user dragged a selection, not a plain click).
+  const dragStartedRef = useRef(false);
+  const dragMovedRef = useRef(false);
+  const dragStartXRef = useRef(0);
+  const dragStartYRef = useRef(0);
   const [isDragging, setIsDragging] = useState(false);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; hasSelection: boolean } | null>(null);
   const ctxMenuRef = useRef<HTMLDivElement>(null);
@@ -227,6 +236,24 @@ export default function TerminalPanel({
       ta.remove();
     }
     setCtxMenu(null);
+  }, []);
+
+  const handleSpeakSelection = useCallback(() => {
+    const selection = termRef.current?.getSelection() ?? "";
+    const text = sanitizeSpeechText(selection);
+    if (text) requestSpeech(text);
+    setCtxMenu(null);
+  }, []);
+
+  const handleSpeakVisible = useCallback(() => {
+    setCtxMenu(null);
+    const term = termRef.current;
+    if (!term) return;
+    const buffer = term.buffer.active;
+    const start = buffer.viewportY;
+    const lines = Array.from({ length: term.rows }, (_, index) => buffer.getLine(start + index)?.translateToString(true) ?? "");
+    const text = sanitizeSpeechText(lines.join("\n"));
+    if (text) requestSpeech(text);
   }, []);
 
   const handlePaste = useCallback(async () => {
@@ -490,7 +517,7 @@ export default function TerminalPanel({
       // Open http(s) URLs on any left click (the addon's default only fires on
       // ctrl/cmd+click). Only left-click (button 0) opens; right-click pastes.
       webLinks = new WebLinksAddon((event, uri) => {
-        if (event.type === "click" && event.button === 0 && /^https?:\/\//.test(uri)) {
+        if (event.type === "click" && event.button === 0 && /^https?:\/\//.test(uri) && !dragMovedRef.current) {
           window.open(uri, "_blank", "noopener");
         }
       });
@@ -499,7 +526,7 @@ export default function TerminalPanel({
       webLinks = null;
     }
     try {
-      fileLinkProvider = registerFileLinkProvider(term, projectPath);
+      fileLinkProvider = registerFileLinkProvider(term, projectPath, () => dragMovedRef.current);
     } catch {
       fileLinkProvider = { dispose() {} };
     }
@@ -919,6 +946,7 @@ export default function TerminalPanel({
   }> = ctxMenu
     ? [
         { label: "Copy", icon: <Copy className="h-4 w-4" />, onClick: handleCopy, disabled: !ctxMenu.hasSelection },
+        { label: "Play selection", icon: <Volume2 className="h-4 w-4" />, onClick: handleSpeakSelection, disabled: !ctxMenu.hasSelection },
         { label: "Paste", icon: <ClipboardPaste className="h-4 w-4" />, onClick: handlePaste },
         { label: "Select All", icon: <CopyPlus className="h-4 w-4" />, onClick: handleSelectAll },
         { label: "", icon: null as unknown as React.ReactNode, onClick: () => {}, separator: true },
@@ -926,6 +954,7 @@ export default function TerminalPanel({
         { label: "Reset Terminal", icon: <RotateCcw className="h-4 w-4" />, onClick: handleReset },
         { label: "Scroll to Top", icon: <ArrowUpToLine className="h-4 w-4" />, onClick: handleScrollTop },
         { label: "Scroll to Bottom", icon: <ArrowDownToLine className="h-4 w-4" />, onClick: handleScrollBottom },
+        { label: "Speak visible", icon: <Volume2 className="h-4 w-4" />, onClick: handleSpeakVisible },
         { label: "", icon: null as unknown as React.ReactNode, onClick: () => {}, separator: true },
         { label: "Find…", icon: <Search className="h-4 w-4" />, onClick: handleFind },
         { label: "", icon: null as unknown as React.ReactNode, onClick: () => {}, separator: true },
@@ -950,6 +979,21 @@ export default function TerminalPanel({
       // fit). Horizontal overflow belongs to xterm, hence overflow-x-hidden.
       className="relative h-full w-full bg-card overflow-y-auto overflow-x-hidden [&_.xterm]:p-2"
       onContextMenu={handleContextMenu}
+      onMouseDown={(e) => {
+        dragStartedRef.current = true;
+        dragMovedRef.current = false;
+        dragStartXRef.current = e.clientX;
+        dragStartYRef.current = e.clientY;
+      }}
+      onMouseMove={(e) => {
+        if (!dragStartedRef.current) return;
+        const dx = Math.abs(e.clientX - dragStartXRef.current);
+        const dy = Math.abs(e.clientY - dragStartYRef.current);
+        if (dx > 2 || dy > 2) dragMovedRef.current = true;
+      }}
+      onMouseUp={() => {
+        dragStartedRef.current = false;
+      }}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}

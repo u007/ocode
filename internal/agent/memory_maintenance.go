@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/memory"
 )
 
@@ -214,13 +215,13 @@ func (a *Agent) runMemoryMaintenancePass(client LLMClient, req MemoryMaintenance
 		msg *Message
 		err error
 	}, 1)
-	go func() {
+	crashguard.Go(func() {
 		msg, err := client.Chat([]Message{{Role: "system", Content: prompt}}, nil)
 		respCh <- struct {
 			msg *Message
 			err error
 		}{msg: msg, err: err}
-	}()
+	})
 
 	select {
 	case <-ctx.Done():

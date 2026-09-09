@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getBrowseBase, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS } from "../../api/client";
+import { getBrowseBase, getBrowseHTRNotice, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS } from "../../api/client";
 import { useBrowserStore, useBrowserActions, isPrivateHost, type StateKey } from "../../lib/browserStore";
 import { AddressBar } from "./AddressBar";
 import { DevConsole } from "./DevConsole";
@@ -16,9 +16,10 @@ function isLoopbackHost(hostname: string): boolean {
   return false;
 }
 
-export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "side" | "full" }) {
+export function BrowserPanel({ stateKey, mode, active = true }: { stateKey: StateKey; mode: "side" | "full"; active?: boolean }) {
   const s = useBrowserStore(stateKey);
   const actions = useBrowserActions();
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [base, setBase] = useState<string | null>(null);
   const [bypassing, setBypassing] = useState(false);
@@ -27,10 +28,14 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
   // "Connecting to <host>" overlay only shows before that point — later
   // navigations keep the page visible and use just the top progress bar.
   const [everLoaded, setEverLoaded] = useState(false);
+  const [htrNotice, setHtrNotice] = useState("");
   const loadGeneration = useRef(0);
 
   useEffect(() => {
-    getBrowseBase().then(setBase).catch((e) => console.error("browse: base fetch failed:", e));
+    getBrowseBase().then((nextBase) => {
+      setBase(nextBase);
+      setHtrNotice(getBrowseHTRNotice());
+    }).catch((e) => console.error("browse: base fetch failed:", e));
   }, []);
 
   useBrowserMessages(stateKey, base, {
@@ -130,6 +135,17 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
     // chrome→local switch needs its src (re)issued, or it mounts blank.
   }, [showIframe, base, s?.url, s?.historyIndex, effectiveMode, loadInto]);
 
+  // A hidden Chrome viewport can retain focus in its IME textarea. Blur it as
+  // soon as another project/tab or a non-browser surface becomes active so
+  // keyboard input cannot continue reaching a stale browser target.
+  useEffect(() => {
+    if (active || !rootRef.current) return;
+    const focused = document.activeElement;
+    if (focused && rootRef.current.contains(focused)) {
+      (focused as HTMLElement).blur();
+    }
+  }, [active]);
+
   // Reset the dismiss flag on navigation.
   useEffect(() => {
     setDismissedLoopbackWarning(false);
@@ -204,7 +220,7 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
   if (!s) return null;
 
   return (
-    <div className="flex flex-col h-full min-h-0 min-w-0" data-testid={`browser-${mode}`}>
+    <div ref={rootRef} className="flex flex-col h-full min-h-0 min-w-0" data-testid={`browser-${mode}`} aria-hidden={!active}>
       <AddressBar
         url={s.url}
         status={s.status}
@@ -255,6 +271,12 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
           </button>
         </div>
       )}
+      {htrNotice && (
+        <div className="px-3 py-2 bg-amber-50 dark:bg-amber-950 border-b border-amber-200 dark:border-amber-800 text-sm" role="alert" data-testid="htr-fallback-banner">
+          <span className="font-medium">HTR automation unavailable</span>
+          <span className="text-neutral-600 dark:text-neutral-400"> — {htrNotice}</span>
+        </div>
+      )}
       {s.userMode === "chrome" && (
         <div className="px-3 py-1.5 bg-sky-50/70 dark:bg-sky-950/50 border-b border-sky-200/50 dark:border-sky-800/50 text-xs flex items-center gap-2" role="status" data-testid="chrome-mode-banner">
           <span className="text-sky-700 dark:text-sky-300 font-medium">Rendering in real Chrome (CDP)</span>
@@ -292,7 +314,7 @@ export function BrowserPanel({ stateKey, mode }: { stateKey: StateKey; mode: "si
           />
         )}
         {showIframe && effectiveMode === "chrome" && (
-          <ChromeViewport stateKey={stateKey} browseBase={base} url={s.url} />
+          <ChromeViewport stateKey={stateKey} browseBase={base} url={s.url} navSeq={s.historyIndex} active={active} />
         )}
         {showIframe && s.loading && (
           <div

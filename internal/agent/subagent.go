@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/knowledge"
 	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/tool"
@@ -249,6 +250,10 @@ func (t TaskTool) Definition() map[string]interface{} {
 					"type":        "boolean",
 					"description": "If true, run the subagent in the background and return immediately with the run ID. Poll with agent_status or task_status.",
 				},
+				"wait_timeout_seconds": map[string]interface{}{
+					"type":        "number",
+					"description": "Only applies when run_in_background is false. Wait up to this many seconds for the sub-agent to finish. If it hasn't finished by then, the call returns immediately with a task_id instead of blocking further — the sub-agent keeps running, poll with agent_status or task_status (which also accept a timeout_seconds to keep waiting). Omit or 0 to wait indefinitely, as before.",
+				},
 				"background": map[string]interface{}{
 					"type":        "boolean",
 					"description": "OpenCode-compatible alias for run_in_background.",
@@ -281,18 +286,19 @@ func (t TaskTool) Definition() map[string]interface{} {
 }
 
 type taskToolParams struct {
-	Prompt          string   `json:"prompt"`
-	Agent           string   `json:"agent"`
-	SubagentType    string   `json:"subagent_type"`
-	Context         string   `json:"context"`
-	Description     string   `json:"description"`
-	RunInBackground bool     `json:"run_in_background"`
-	Background      bool     `json:"background"`
-	SharedNotes     bool     `json:"shared_notes"`
-	ResumeTaskID    string   `json:"resume_task_id"`
-	ExpectedOutput  string   `json:"expected_output"`
-	DAGID           string   `json:"id"`
-	DAGDeps         []string `json:"depends_on"`
+	Prompt             string   `json:"prompt"`
+	Agent              string   `json:"agent"`
+	SubagentType       string   `json:"subagent_type"`
+	Context            string   `json:"context"`
+	Description        string   `json:"description"`
+	RunInBackground    bool     `json:"run_in_background"`
+	Background         bool     `json:"background"`
+	WaitTimeoutSeconds float64  `json:"wait_timeout_seconds"`
+	SharedNotes        bool     `json:"shared_notes"`
+	ResumeTaskID       string   `json:"resume_task_id"`
+	ExpectedOutput     string   `json:"expected_output"`
+	DAGID              string   `json:"id"`
+	DAGDeps            []string `json:"depends_on"`
 }
 
 func (t TaskTool) Execute(args json.RawMessage) (string, error) {
@@ -552,6 +558,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		if run == nil {
 			return
 		}
+		run.SessionID = childSessionID(t.parentSessionID(), spec.Name)
 		// Seed the transcript with the prompt so the TUI drill-in has useful
 		// context immediately, then stream every sub-agent assistant/tool message
 		// into the run as Step progresses. The parent agent only sees the final
@@ -559,20 +566,19 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		for _, msg := range subAgentMsgs {
 			run.appendTranscript(msg)
 		}
+		// Sub-agent messages go to the run transcript, the parent's
+		// OnSubAgentMessage hook, and the child session — NEVER to the
+		// parent's OnMessage/OnDelta. Those feed the parent's live-persist
+		// buffer and chat transcript, so forwarding there wrote every
+		// background child's turns into the parent session file (interleaved
+		// with the parent's own tool results) and, in the TUI, into the
+		// message slice replayed to the parent LLM on its next turn.
 		subAgent.OnMessage = func(msg Message) {
 			run.appendTranscript(msg)
-			// Forward to the parent session's own OnMessage/OnDelta (wired by the
-			// TUI/server to publish "thinking"/"text" for the live chat stream).
-			// Without this, sub-agent runs only ever reached run.appendTranscript
-			// (the separate runs/task panel) and never appeared in the main chat.
-			if t.mainAgent != nil && t.mainAgent.OnMessage != nil {
-				t.mainAgent.OnMessage(msg)
+			if t.mainAgent != nil && t.mainAgent.OnSubAgentMessage != nil {
+				t.mainAgent.OnSubAgentMessage(run, msg)
 			}
-		}
-		subAgent.OnDelta = func(kind, text string) {
-			if t.mainAgent != nil && t.mainAgent.OnDelta != nil {
-				t.mainAgent.OnDelta(kind, text)
-			}
+			t.persistChild(run, run.TranscriptPublic(), "running")
 		}
 		subAgent.OnUsage = func(in, out int64) { run.AddUsage(in, out) }
 	}
@@ -607,6 +613,13 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	activeTransferred = true
+	if run != nil && params.WaitTimeoutSeconds > 0 {
+		result, err := t.runSyncDispatchWithTimeout(spec.Name, subAgent, run, subAgentMsgs, releaseActive, time.Duration(params.WaitTimeoutSeconds*float64(time.Second)))
+		if err != nil {
+			return "", err
+		}
+		return fallbackWarning + result, nil
+	}
 	result, err := t.runSyncDispatch(spec.Name, subAgent, run, subAgentMsgs, releaseActive)
 	if err != nil {
 		return "", err
@@ -746,7 +759,7 @@ func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *A
 	}
 	runs := t.runs
 
-	go func() {
+	crashguard.Go(func() {
 		// Tear down the transient sub-agent's goroutines once this background
 		// run reaches a terminal state. The AgentRun record (transcript +
 		// result + run.Sub for ModelLabel) is retained so status/resume still
@@ -799,6 +812,7 @@ func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *A
 		result, resp, err := t.executeSubAgentWithTranscript(specName, subAgent, messages)
 		if err != nil {
 			run.finishErr(err.Error())
+			t.persistChild(run, append(append([]Message(nil), messages...), resp...), string(RunFailed))
 			runs.notifyDone(run)
 			return
 		}
@@ -808,10 +822,13 @@ func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *A
 		// fires on goroutine exit, so the child is still live here; a polled
 		// "done" therefore means "done and checked". The verdict is recorded
 		// on the run before finishOK so agent_status/task_status surface it.
-		result, _, _ = t.verifyAndRetryContract(specName, subAgent, messages, resp, result, run)
+		// resp is reassigned by the retry so the persisted child session
+		// reflects the final transcript.
+		result, resp, _ = t.verifyAndRetryContract(specName, subAgent, messages, resp, result, run)
 		run.finishOK(result)
+		t.persistChild(run, append(append([]Message(nil), messages...), resp...), string(RunDone))
 		runs.notifyDone(run)
-	}()
+	})
 
 	state := "running"
 	if limited {
@@ -876,6 +893,7 @@ func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRu
 	if err != nil {
 		if run != nil {
 			run.finishErr(err.Error())
+			t.persistChild(run, append(append([]Message(nil), messages...), resp...), string(RunFailed))
 			t.runs.notifyDone(run)
 		}
 		return "", err
@@ -891,22 +909,69 @@ func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRu
 	// reflects the final transcript.
 	result, resp, _ = t.verifyAndRetryContract(specName, subAgent, messages, resp, result, run)
 
-	sessionID := childSessionID("parent", specName)
-	metadata := childSessionMetadata("parent", specName)
-	if t.persistChildSess != nil {
-		if err := t.persistChildSess(sessionID, fmt.Sprintf("Child: %s", specName), resp, metadata); err != nil {
-			t.mainAgent.emitDebug("SESSION", fmt.Sprintf("failed to persist child session: %v", err))
-		}
-	}
-
+	sessionID := ""
 	if run != nil {
 		run.finishOK(result)
+		sessionID = run.SessionID
+		t.persistChild(run, append(append([]Message(nil), messages...), resp...), string(RunDone))
 		t.runs.notifyDone(run)
 	}
 	if sessionID != "" {
 		result += fmt.Sprintf("\n\n(Child session: %s)", sessionID)
 	}
 	return result, nil
+}
+
+// parentSessionID is the session the dispatching agent runs under; child
+// session ids are derived from it so a listing can group children by parent.
+func (t TaskTool) parentSessionID() string {
+	if t.mainAgent == nil {
+		return ""
+	}
+	return t.mainAgent.OpenCodeSessionID()
+}
+
+// persistChild writes messages as the child session for run (run.SessionID)
+// via the host-wired persister. Called on every streamed sub-agent message
+// with status "running" and once more at completion with the terminal
+// status and the full transcript; the host's persister is expected to be a
+// live (never-regress) async save so the per-message calls stay cheap.
+// No-op when no persister is wired or the run has no session id.
+func (t TaskTool) persistChild(run *AgentRun, messages []Message, status string) {
+	if t.persistChildSess == nil || run == nil || run.SessionID == "" || len(messages) == 0 {
+		return
+	}
+	parent := t.parentSessionID()
+	meta := childSessionMetadata(parent, run.Name, status)
+	meta["run_id"] = run.ID
+	if err := t.persistChildSess(run.SessionID, fmt.Sprintf("Child: %s", run.Name), messages, meta); err != nil {
+		t.mainAgent.emitDebug("SESSION", fmt.Sprintf("failed to persist child session %s (status=%s): %v", run.SessionID, status, err))
+	}
+}
+
+// runSyncDispatchWithTimeout races runSyncDispatch against timeout. The
+// dispatch itself always runs to completion on its own goroutine — run owns
+// its lifecycle (finishOK/finishErr, session persistence, slot release)
+// exactly as the unbounded synchronous path does, whether or not this call
+// waits for it. A timeout only changes what THIS call returns: instead of
+// blocking further, it hands back run.ID so the caller (the LLM) can poll or
+// wait again via agent_status/task_status.
+func (t TaskTool) runSyncDispatchWithTimeout(specName string, subAgent *Agent, run *AgentRun, messages []Message, releaseActive func(), timeout time.Duration) (string, error) {
+	type outcome struct {
+		result string
+		err    error
+	}
+	doneCh := make(chan outcome, 1)
+	crashguard.Go(func() {
+		result, err := t.runSyncDispatch(specName, subAgent, run, messages, releaseActive)
+		doneCh <- outcome{result, err}
+	})
+	select {
+	case o := <-doneCh:
+		return o.result, o.err
+	case <-time.After(timeout):
+		return fmt.Sprintf("task_id: %s (agent: %s)\nstate: running\n\n<task_result>\nStill running after %s — continuing in the background rather than blocking further. Poll with agent_status or task_status using this task_id; pass timeout_seconds to those to keep waiting (they return as soon as it finishes, errors, or that timeout elapses, whichever comes first).\n</task_result>", run.ID, specName, timeout.Round(time.Second)), nil
+	}
 }
 
 func (t TaskTool) executeSubAgent(name string, subAgent *Agent, messages []Message) (string, error) {
@@ -980,13 +1045,17 @@ func (t TaskTool) registrySubAgents() []AgentDefinition {
 	return result
 }
 
-// ExecuteRaw dispatches a subagent by name synchronously with the given prompt.
-// Used by the KnowledgeLookupTool for synchronous knowledge lookups.
-func (t TaskTool) ExecuteRaw(agentName, prompt string, background bool) (string, error) {
+// ExecuteRaw dispatches a subagent by name synchronously with the given
+// prompt. timeoutSeconds bounds how long this call blocks when background is
+// false: past it, the dispatch keeps running and this returns a task_id to
+// poll instead (see runSyncDispatchWithTimeout); 0 waits indefinitely, as
+// before. Used by the KnowledgeLookupTool and doc-related callers.
+func (t TaskTool) ExecuteRaw(agentName, prompt string, background bool, timeoutSeconds float64) (string, error) {
 	args, _ := json.Marshal(map[string]interface{}{
-		"agent":             agentName,
-		"prompt":            prompt,
-		"run_in_background": background,
+		"agent":                agentName,
+		"prompt":               prompt,
+		"run_in_background":    background,
+		"wait_timeout_seconds": timeoutSeconds,
 	})
 	return t.Execute(args)
 }
@@ -1062,6 +1131,19 @@ func filterMainOnlyTools(tools []tool.Tool) []tool.Tool {
 	return result
 }
 
+// waitForRunOrTimeout blocks until run reaches a terminal state or timeout
+// elapses, whichever comes first. timeout <= 0 returns immediately (the
+// original snapshot-only poll behavior).
+func waitForRunOrTimeout(run *AgentRun, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	select {
+	case <-run.Done():
+	case <-time.After(timeout):
+	}
+}
+
 // AgentStatusTool returns the status of a background agent run.
 type AgentStatusTool struct {
 	runs *AgentRunRegistry
@@ -1081,6 +1163,10 @@ func (t AgentStatusTool) Definition() map[string]interface{} {
 					"type":        "string",
 					"description": "The agent run id to check.",
 				},
+				"timeout_seconds": map[string]interface{}{
+					"type":        "number",
+					"description": "Block up to this many seconds waiting for the run to finish, error out, or be cancelled instead of returning an instant snapshot. Returns as soon as the run reaches a terminal state or this timeout elapses, whichever comes first — either way the response says which happened and how long it took. Omit or 0 for the old instant-snapshot behavior.",
+				},
 			},
 			"required": []string{"id"},
 		},
@@ -1089,7 +1175,8 @@ func (t AgentStatusTool) Definition() map[string]interface{} {
 
 func (t AgentStatusTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
-		ID string `json:"id"`
+		ID             string  `json:"id"`
+		TimeoutSeconds float64 `json:"timeout_seconds"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -1101,13 +1188,19 @@ func (t AgentStatusTool) Execute(args json.RawMessage) (string, error) {
 	if !ok {
 		return fmt.Sprintf("Error: unknown agent run %s", params.ID), nil
 	}
+	timeout := time.Duration(params.TimeoutSeconds * float64(time.Second))
+	waitForRunOrTimeout(run, timeout)
 	status := run.statusValue()
+	elapsed := run.Elapsed().Round(time.Second)
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("[agent run %s status=%s", params.ID, status))
+	b.WriteString(fmt.Sprintf("[agent run %s status=%s elapsed=%s", params.ID, status, elapsed))
 	if status != RunRunning {
 		b.WriteString(fmt.Sprintf(" agent=%s", run.Name))
 	}
 	b.WriteString("]")
+	if status == RunRunning && timeout > 0 {
+		b.WriteString(fmt.Sprintf("\n(timed out waiting %s — still running, poll again)", timeout.Round(time.Second)))
+	}
 	if status == RunRunning {
 		lines := run.LastLines(5)
 		if len(lines) > 0 {
@@ -1165,6 +1258,10 @@ func (t TaskStatusTool) Definition() map[string]interface{} {
 					"type":        "string",
 					"description": "The task_id returned by the task tool",
 				},
+				"timeout_seconds": map[string]interface{}{
+					"type":        "number",
+					"description": "Block up to this many seconds waiting for the task to finish, error out, or be cancelled instead of returning an instant snapshot. Returns as soon as the task reaches a terminal state or this timeout elapses, whichever comes first — either way the response says which happened and how long it took. Omit or 0 for the old instant-snapshot behavior.",
+				},
 			},
 			"required": []string{"task_id"},
 		},
@@ -1173,7 +1270,8 @@ func (t TaskStatusTool) Definition() map[string]interface{} {
 
 func (t TaskStatusTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
-		TaskID string `json:"task_id"`
+		TaskID         string  `json:"task_id"`
+		TimeoutSeconds float64 `json:"timeout_seconds"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -1189,17 +1287,23 @@ func (t TaskStatusTool) Execute(args json.RawMessage) (string, error) {
 	if !ok {
 		return formatTaskStatus(params.TaskID, "error", fmt.Sprintf("unknown task %s", params.TaskID)), nil
 	}
-	return formatTaskRunStatus(params.TaskID, run), nil
+	timeout := time.Duration(params.TimeoutSeconds * float64(time.Second))
+	waitForRunOrTimeout(run, timeout)
+	return formatTaskRunStatus(params.TaskID, run, timeout), nil
 }
 
-func formatTaskRunStatus(taskID string, run *AgentRun) string {
+func formatTaskRunStatus(taskID string, run *AgentRun, waited time.Duration) string {
 	status := run.statusValue()
+	elapsed := run.Elapsed().Round(time.Second)
 	switch status {
 	case RunRunning:
 		lines := run.LastLines(5)
-		text := "Task is still running."
+		text := fmt.Sprintf("Task is still running (elapsed %s).", elapsed)
+		if waited > 0 {
+			text = fmt.Sprintf("Timed out waiting %s — still running (elapsed %s total). Call again to keep waiting.", waited.Round(time.Second), elapsed)
+		}
 		if len(lines) > 0 {
-			text = strings.Join(lines, "\n")
+			text += "\n\n" + strings.Join(lines, "\n")
 		}
 		return formatTaskStatus(taskID, "running", text)
 	case RunDone:
@@ -1207,11 +1311,11 @@ func formatTaskRunStatus(taskID string, run *AgentRun) string {
 		if checked, satisfied, deficiency := run.ContractVerdict(); checked && !satisfied {
 			text = "Contract NOT satisfied" + contractDeficiencySuffix(deficiency) + "\n\n" + text
 		}
-		return formatTaskStatus(taskID, "completed", text)
+		return formatTaskStatus(taskID, "completed", fmt.Sprintf("Completed in %s.\n\n%s", elapsed, text))
 	case RunFailed:
-		return formatTaskStatus(taskID, "error", run.Err)
+		return formatTaskStatus(taskID, "error", fmt.Sprintf("Failed after %s: %s", elapsed, run.Err))
 	default:
-		return formatTaskStatus(taskID, string(status), "")
+		return formatTaskStatus(taskID, string(status), fmt.Sprintf("(elapsed %s)", elapsed))
 	}
 }
 

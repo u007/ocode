@@ -206,8 +206,30 @@ function ProjectBadges({ indicators }: { indicators: ProjectIndicators }) {
   const { sessionCount, streamingCount, stalledCount, pendingCount, terminalAlertCount } = indicators;
   const hasAny = sessionCount > 0 || streamingCount > 0 || stalledCount > 0 || pendingCount > 0 || terminalAlertCount > 0;
   if (!hasAny) return null;
+  // Unified attention signal: chat stopped (stalled), waiting for input
+  // (pending permission/question), or terminal emitted a bell/notification
+  // sound. A single Bell badge makes the "needs you" state scannable while
+  // the detailed badges below preserve the exact breakdown.
+  const attentionTotal = stalledCount + pendingCount + terminalAlertCount;
+  const hasAttention = attentionTotal > 0;
+  const attentionTitle = [
+    stalledCount > 0 ? `${stalledCount} stopped` : null,
+    pendingCount > 0 ? `${pendingCount} waiting for input` : null,
+    terminalAlertCount > 0 ? `${terminalAlertCount} notification sound` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <span className="flex items-center gap-1 shrink-0">
+      {hasAttention && (
+        <span
+          className="inline-flex items-center gap-0.5 rounded-full bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-red-600 dark:text-red-400 border border-red-500/30"
+          title={`${attentionTotal} need attention (${attentionTitle})`}
+        >
+          <Bell className="w-2.5 h-2.5" />
+          {attentionTotal}
+        </span>
+      )}
       {/* # sessions open */}
       {sessionCount > 0 && (
         <span
@@ -713,11 +735,17 @@ function CollapsedProjectButton({
 }) {
   const indicators = useProjectIndicators(project.path);
   const showCount = indicators.sessionCount > 0;
-  // Prioritize overlays: pending > terminal alert > streaming > stalled
+  // Prioritize overlays: pending > terminal alert > streaming > stalled.
+  // Any attention state (chat stopped / waiting for input / terminal bell)
+  // renders a Bell glyph so the collapsed rail signals "needs you" at a
+  // glance; pure streaming keeps the pulsing dot.
   const hasPending = indicators.pendingCount > 0;
   const hasAlert = indicators.terminalAlertCount > 0;
   const hasStreaming = indicators.streamingCount > 0;
   const hasStalled = indicators.stalledCount > 0;
+  const hasAttention = hasPending || hasAlert || hasStalled;
+  const attentionTotal =
+    indicators.pendingCount + indicators.terminalAlertCount + indicators.stalledCount;
   const overlayColor = hasPending
     ? "bg-amber-500"
     : hasAlert
@@ -728,13 +756,13 @@ function CollapsedProjectButton({
           ? "bg-amber-400"
           : null;
   const overlayTitle = hasPending
-    ? `${indicators.pendingCount} pending permission`
+    ? `${indicators.pendingCount} waiting for input`
     : hasAlert
-      ? `${indicators.terminalAlertCount} terminal beep`
-      : hasStreaming
+      ? `${indicators.terminalAlertCount} notification sound`
+      : hasStreaming && !hasStalled
         ? `${indicators.streamingCount} streaming`
         : hasStalled
-          ? `${indicators.stalledCount} stalled`
+          ? `${indicators.stalledCount} stopped`
           : "";
   const tooltipDetails = [
     `${indicators.sessionCount} session${indicators.sessionCount === 1 ? "" : "s"}`,
@@ -765,9 +793,15 @@ function CollapsedProjectButton({
           )}
           {overlayColor && (
             <span
-              title={overlayTitle}
-              className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-background ${overlayColor} ${hasStreaming ? "animate-pulse" : ""}`}
-            />
+              title={hasAttention ? `${attentionTotal} need attention (${overlayTitle})` : overlayTitle}
+              className={`absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full border-2 border-background text-white ${overlayColor} ${hasStreaming && !hasAttention ? "animate-pulse" : ""}`}
+            >
+              {hasAttention ? (
+                <Bell className="h-2 w-2" />
+              ) : (
+                <span className="h-2.5 w-2.5 rounded-full" />
+              )}
+            </span>
           )}
         </Button>
       </TooltipTrigger>

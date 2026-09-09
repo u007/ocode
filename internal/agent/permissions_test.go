@@ -1267,6 +1267,21 @@ func TestPermissions_AdvancedBashFeatures(t *testing.T) {
 		if dec2.Level != PermissionAsk {
 			t.Fatalf("expected ask for compound command with unsafe subcommand, got %s", dec2.Level)
 		}
+
+		// Longer real-world pipeline: multiple `;`-chained statements, each
+		// containing its own `|` pipeline, mixing read-only find/sort/tail/printf
+		// with a read-only git subcommand. Every fragment is individually
+		// auto-allowed, so the whole compound line must resolve to Allow with
+		// no Ask surfaced for any segment.
+		findGitCmd := `find . -path './.git' -prune -o -type f \( -iname '*tts*' -o -iname '*speech*' \) -print | sort; printf '%s\n' '--- plans ---'; find . -path './.git' -prune -o -type f -path '*/plans/*' -print | sort | tail -80; printf '%s\n' '--- recent commits ---'; git log -8 --oneline --decorate`
+		b, err := json.Marshal(map[string]string{"command": findGitCmd})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		dec3 := pm.Decide("bash", json.RawMessage(b))
+		if dec3.Level != PermissionAllow {
+			t.Fatalf("expected allow for read-only find/sort/printf/tail/git-log pipeline, got %s (request=%+v)", dec3.Level, dec3.Request)
+		}
 	})
 
 	t.Run("auto_permission_default_off", func(t *testing.T) {
@@ -2590,6 +2605,35 @@ func writeTargetsInCommand(t *testing.T, pm *PermissionManager, cmd string) []st
 	t.Helper()
 	tn, _ := sandboxSensitiveTargets(cmd, pm.workDir)
 	return tn
+}
+
+// TestSandboxSensitiveTargets_PerFragmentScoping guards against
+// sandboxSensitiveTargets re-splitting the whole compound command with a flat
+// splitShellFields(command) and handing every word to extractBashCommandPaths
+// under the FIRST sub-command's prefix. That bug let "cd"'s blanket
+// (no-flag-skip) path-arg rule swallow a later, unrelated sub-command's own
+// words (e.g. grep's flag value) as bogus "cd paths". Per-fragment extraction
+// must scope each sub-command's args to its own prefix rules only.
+func TestSandboxSensitiveTargets_PerFragmentScoping(t *testing.T) {
+	work := t.TempDir()
+	pm := NewPermissionManager()
+	pm.SetWorkDir(work)
+
+	cmd := "cd /some/dir; grep -e pat notes.txt"
+	targets, _ := sandboxSensitiveTargets(cmd, pm.workDir)
+
+	want := map[string]bool{
+		resolvePath("/some/dir", work): true,
+		resolvePath("notes.txt", work): true,
+	}
+	if len(targets) != len(want) {
+		t.Fatalf("expected %d targets, got %d: %v", len(want), len(targets), targets)
+	}
+	for _, tgt := range targets {
+		if !want[tgt] {
+			t.Errorf("unexpected target %q — a sub-command's prefix rule leaked into another fragment's args", tgt)
+		}
+	}
 }
 
 // TestWriteToProjectSettingsAsks: a redirect/tee/cp/editor write to

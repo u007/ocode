@@ -747,13 +747,36 @@ func TestManager_ScreencastStart(t *testing.T) {
 			if p["format"] != "jpeg" {
 				t.Errorf("format %v", p["format"])
 			}
-			if p["quality"] != float64(70) {
+			if p["quality"] != float64(DefaultScreencastQuality) {
 				t.Errorf("quality %v", p["quality"])
 			}
 			if p["maxWidth"] != float64(1280) || p["maxHeight"] != float64(800) {
 				t.Errorf("max dims %v %v", p["maxWidth"], p["maxHeight"])
 			}
 		}
+	}
+}
+
+func TestManager_ScreencastQualityOption(t *testing.T) {
+	m := NewManager(ManagerOptions{})
+	if got := m.effectiveQuality(); got != DefaultScreencastQuality {
+		t.Fatalf("default quality = %d, want %d", got, DefaultScreencastQuality)
+	}
+	m = NewManager(ManagerOptions{ScreencastQuality: 95})
+	if got := m.effectiveQuality(); got != 95 {
+		t.Fatalf("quality = %d, want 95", got)
+	}
+	m = NewManager(ManagerOptions{ScreencastQuality: 500})
+	if got := m.effectiveQuality(); got != 100 {
+		t.Fatalf("clamped quality = %d, want 100", got)
+	}
+	m.SetScreencastQuality(60)
+	if got := m.effectiveQuality(); got != 60 {
+		t.Fatalf("live quality = %d, want 60", got)
+	}
+	m.SetScreencastQuality(0)
+	if got := m.effectiveQuality(); got != DefaultScreencastQuality {
+		t.Fatalf("reset quality = %d, want %d", got, DefaultScreencastQuality)
 	}
 }
 

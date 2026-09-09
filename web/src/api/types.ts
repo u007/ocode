@@ -10,6 +10,11 @@ export interface Message {
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   reasoning_content?: string;
+  /** Durable per-session sequence stamped on user-role messages by the
+   *  server, identical on the persisted copy and the `user_message` SSE echo.
+   *  Dedup identity for the snapshot-before-SSE race; absent/0 on legacy
+   *  messages, which are never deduplicated. */
+  user_seq?: number;
 }
 
 // A part of the in-progress turn, streamed live before the authoritative
@@ -83,6 +88,43 @@ export interface ModelInfo {
   has_kaizen?: boolean;
 }
 
+export type TTSEngineId = "browser-native" | "piper" | "kokoro" | "fish-audio" | "breeze";
+export type TTSPlaybackMode = "manual" | "at-bottom";
+
+export interface TTSEngine {
+  id: TTSEngineId;
+  label: string;
+  availability: "ready" | "unavailable";
+  reason?: string;
+  browser_only: boolean;
+  voice_id?: string;
+}
+
+export interface TTSConfig {
+  engine: TTSEngineId;
+  voice: string;
+  mode: TTSPlaybackMode;
+}
+
+export interface TTSPlayback {
+  generation: number;
+  engine: TTSEngineId;
+  status: string;
+  text?: string;
+  error?: string;
+}
+
+export interface TTSStatus {
+  config: TTSConfig;
+  engine: TTSEngine;
+  host: string;
+  state: string;
+  hardware?: string;
+  error?: string;
+  playback: TTSPlayback;
+  selection_generation: number;
+}
+
 export interface AgentInfo {
   name: string;
   description: string;
@@ -91,7 +133,7 @@ export interface AgentInfo {
 
 export type CronScheduleKind = "at" | "every" | "cron";
 
-export type CronPermissionMode = "normal" | "yolo" | "locked";
+export type CronPermissionMode = "normal" | "yolo" | "locked" | "sandbox";
 
 export interface CronSchedule {
   kind: CronScheduleKind;
@@ -592,6 +634,12 @@ export interface PermissionsResponse {
   effective_behavior?: string;
   rules: PermissionRule[];
   bash_rules: PermissionRule[];
+}
+
+/** The persisted default permission mode new TUI/web/RC sessions start in —
+ * distinct from the live mode in PermissionsResponse. */
+export interface PermissionModeConfigResponse {
+  mode: string;
 }
 
 // ── Memory status (GET /api/memory/status, backing /mem) ──

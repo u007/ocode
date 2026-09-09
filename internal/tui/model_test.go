@@ -652,6 +652,7 @@ func TestHandleCommandSlashDispatchRejectsHiddenHelper(t *testing.T) {
 }
 
 func TestSlashCommandExcludedFromPersistedAndLLM(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // /sidebar persists show_sidebar; isolate from other tests
 	m := model{input: newTestTextarea(), viewport: fastviewport.New(80, 20)}
 
 	updated, cmd := m.handleCommand("/sidebar")
@@ -1541,6 +1542,7 @@ func TestRenderUserTextConstrainsBubbleWidth(t *testing.T) {
 }
 
 func TestLeaderSTogglesSidebar(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // toggleSidebar persists show_sidebar; isolate from other tests
 	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20), leaderActive: true}
 
 	consumed, updated, _ := m.handleModalKeys(tea.KeyPressMsg{Code: 's'})
@@ -6162,15 +6164,16 @@ func TestHandleSessionLoadRestoresSidebarUsageAndTodoState(t *testing.T) {
 
 	currentSpend := 0.01
 	m := model{
-		sessionID:    "current-session",
-		sessionTitle: "Current Session",
-		width:        140,
-		height:       40,
-		showSidebar:  true,
-		input:        textarea.New(),
-		viewport:     fastviewport.New(100, 20),
-		config:       &config.Config{Model: "gpt-4o"},
-		messages:     []message{{role: roleAssistant, text: "current reply"}},
+		sessionID:     "current-session",
+		sessionTitle:  "Current Session",
+		expandedTitle: true,
+		width:         140,
+		height:        40,
+		showSidebar:   true,
+		input:         textarea.New(),
+		viewport:      fastviewport.New(100, 20),
+		config:        &config.Config{Model: "gpt-4o"},
+		messages:      []message{{role: roleAssistant, text: "current reply"}},
 		sessionTelemetry: sidebarTelemetry{
 			inputTokens:  1,
 			outputTokens: 2,
@@ -6188,6 +6191,9 @@ func TestHandleSessionLoadRestoresSidebarUsageAndTodoState(t *testing.T) {
 	}
 	if m.sessionTitle != "Saved Usage" {
 		t.Fatalf("expected session title to restore, got %q", m.sessionTitle)
+	}
+	if m.expandedTitle {
+		t.Fatal("expected /session load to reset transient expanded title state")
 	}
 	if !m.titleRequested {
 		t.Fatal("expected restored titled session to mark titleRequested")

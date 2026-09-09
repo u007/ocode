@@ -81,6 +81,17 @@ export interface ChromeViewportProps {
   stateKey: StateKey;
   browseBase: string | null;
   url: string;
+  /** Whether this viewport is the visible, interactive browser surface. The
+   * socket remains connected while false so the remote page stays alive, but
+   * background surfaces do not paint frames or poll page metrics. */
+  active?: boolean;
+  /** User-intent navigation counter (the store's historyIndex): bumped only
+   *  by navigate/back/forward/reload, never by server-reported nav events.
+   *  The viewport navigates on THIS, not on `url` — a page rewriting its own
+   *  URL via history.pushState/replaceState (map lat/lng/zoom, ?tab=) also
+   *  changes the store url, and replaying that as {t:"nav"} would
+   *  Page.navigate → full reload on every zoom/draw. */
+  navSeq: number;
 }
 
 /** Chrome-mode viewport: renders the CDP screencast on a canvas and forwards
@@ -88,8 +99,8 @@ export interface ChromeViewportProps {
  *  page — chrome is only the address bar's status row above it. Coordinates
  *  are CSS pixels relative to the canvas rect (Chrome expects CSS px; the
  *  screencast frames are device px and are only used for the backing store). */
-export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProps) {
-  const { send, status, error, onFrame, onFileChooser, onSelection } = useCdpSocket(stateKey, browseBase, true);
+export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = true }: ChromeViewportProps) {
+  const { send, status, error, onFrame, onFileChooser, onSelection } = useCdpSocket(stateKey, browseBase, true, active);
   const actions = useBrowserActions();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // Invisible keyboard/IME target. A canvas cannot host an input method
@@ -98,11 +109,13 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
   const keyboardRef = useRef<HTMLTextAreaElement | null>(null);
   // Hidden native picker answering the page's intercepted <input type=file>.
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const [hasFrame, setHasFrame] = useState(false);
-  // Start empty so the FIRST mount always navigates (iframe → chrome switches,
+  // Start unset so the FIRST mount always navigates (iframe → chrome switches,
   // e.g. the dev-server escape hatch, would otherwise mount a target sitting
   // on the initial URL with no nav command and render blank).
-  const lastUrlRef = useRef("");
+  const lastNavSeqRef = useRef<number | null>(null);
   // Pending pointermove, coalesced to one per animation frame (~16ms).
   const pendingMove = useRef<{ x: number; y: number; mods: number } | null>(null);
   const moveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -130,14 +143,17 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
   const longPressPointerId = useRef<number | null>(null);
   const longPressOrigin = useRef<{ x: number; y: number } | null>(null);
 
-  // Navigate whenever the authoritative store URL changes (address bar,
-  // back/forward, chrome hand-off). The store is the single source of truth.
+  // Navigate whenever the user requests it (address bar, back/forward,
+  // reload, chrome hand-off) — i.e. when navSeq moves. The store is the
+  // single source of truth for the URL, but a url change alone is not a
+  // request: server-reported same-document navigations (pushState /
+  // replaceState) also update it and must not be replayed as a Page.navigate.
   useEffect(() => {
-    if (url && url !== lastUrlRef.current) {
-      lastUrlRef.current = url;
+    if (url && navSeq !== lastNavSeqRef.current) {
+      lastNavSeqRef.current = navSeq;
       send({ t: "nav", url });
     }
-  }, [url, send]);
+  }, [url, navSeq, send]);
 
   // Listen for cdp:send events from DevConsole (e.g., getResponseBody).
   // Events are stateKey-scoped: each mounted viewport only forwards commands
@@ -173,7 +189,14 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
   useEffect(() => {
     return onFrame((bitmap, w, h) => {
       const canvas = canvasRef.current;
-      if (!canvas) return;
+      if (!canvas) {
+        (bitmap as unknown as { close?: () => void }).close?.();
+        return;
+      }
+      if (!active) {
+        (bitmap as unknown as { close?: () => void }).close?.();
+        return;
+      }
       if (canvas.width !== w) canvas.width = w;
       if (canvas.height !== h) canvas.height = h;
       const ctx = canvas.getContext("2d");
@@ -183,13 +206,14 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
       (bitmap as unknown as { close?: () => void }).close?.();
       setHasFrame(true);
     });
-  }, [onFrame]);
+  }, [active, onFrame]);
 
   // Page opened a file chooser → open our own picker. The click that opened
   // it is still a transient user activation (Chrome allows ~5s), which
   // input.click() needs.
   useEffect(() => {
     return onFileChooser((multiple) => {
+      if (!activeRef.current) return;
       const input = fileInputRef.current;
       if (!input) return;
       input.multiple = multiple;
@@ -215,15 +239,15 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
   // SPA content renders late and early scrollTo calls land short.
   const surface = useBrowserStore(stateKey);
   useEffect(() => {
-    if (status !== "open") return;
+    if (status !== "open" || !active) return;
     const timer = setInterval(() => send({ t: "getScroll" }), 2000);
     return () => clearInterval(timer);
-  }, [status, send]);
+  }, [active, status, send]);
 
   const restoredChromeScroll = useRef("");
   useEffect(() => {
     const y = surface?.scrollByUrl?.[url] ?? 0;
-    if (status !== "open" || !(y > 0)) {
+    if (!active || status !== "open" || !(y > 0)) {
       if (!(y > 0)) restoredChromeScroll.current = "";
       return;
     }
@@ -244,7 +268,7 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
     }, 750);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, url, stateKey, send]);
+  }, [active, status, url, stateKey, send]);
 
   const onFilesPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
@@ -260,7 +284,7 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
   // Container resize → Emulation.setDeviceMetricsOverride via the socket.
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || typeof ResizeObserver === "undefined") return;
+    if (!active || !canvas || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver((entries) => {
       const rect = entries[0].contentRect;
       const w = Math.round(rect.width);
@@ -271,7 +295,7 @@ export function ChromeViewport({ stateKey, browseBase, url }: ChromeViewportProp
     });
     ro.observe(canvas);
     return () => ro.disconnect();
-  }, [send]);
+  }, [active, send]);
 
   const canvasPos = useCallback((e: { clientX: number; clientY: number }) => {
     const canvas = canvasRef.current;

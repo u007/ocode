@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/models"
 	"github.com/u007/ocode/internal/pricing"
 )
@@ -643,7 +644,7 @@ func loadRegistry() map[string]providerEntry {
 // PreloadRegistry fetches the models.dev registry in the background so it is
 // warm before the first call to ModelWindow or ProviderModels.
 func PreloadRegistry() {
-	go loadRegistry()
+	crashguard.Go(func() { loadRegistry() })
 }
 
 // PreloadNovitaModels fetches Novita's live model list in the background so the
@@ -652,7 +653,7 @@ func PreloadRegistry() {
 // particular the sidebar's "context used / max context" line. It is a no-op when
 // no Novita credential is configured or a fetch is already cached.
 func PreloadNovitaModels() {
-	go fetchNovitaLiveModels()
+	crashguard.Go(func() { fetchNovitaLiveModels() })
 }
 
 // NovitaModelsLoaded reports whether the Novita live model cache has been
@@ -1653,7 +1654,7 @@ func aiHubMixCacheFresh() bool {
 // picker as soon as the UI needs them. No-op until the key is configured;
 // degrades gracefully when the network is unavailable.
 func PreloadAIHubMixModels() {
-	go fetchAIHubMixLiveModels()
+	crashguard.Go(func() { fetchAIHubMixLiveModels() })
 }
 
 const groqCacheTTL = 5 * time.Minute
@@ -1758,7 +1759,7 @@ func groqCacheFresh() bool {
 // PreloadGroqModels fetches Groq's live model list in the background so models
 // absent from the snapshot appear in the picker. No-op until the key is configured.
 func PreloadGroqModels() {
-	go fetchGroqLiveModels()
+	crashguard.Go(func() { fetchGroqLiveModels() })
 }
 
 // GroqModelsLoaded reports whether the Groq live cache has been populated.
@@ -1907,7 +1908,7 @@ func openRouterLiveModelEntry(name string) (modelEntry, bool) {
 // / max context" line. It is a no-op once the cache is populated, and degrades
 // gracefully when the network is unavailable.
 func PreloadOpenRouterModels() {
-	go fetchOpenRouterLiveModels()
+	crashguard.Go(func() { fetchOpenRouterLiveModels() })
 }
 
 // OpenRouterModelsLoaded reports whether the OpenRouter live model cache has been

@@ -308,9 +308,69 @@ type CompactConfig struct {
 // (internal/browse/cdp). ChromePath is an optional explicit path to the Chrome
 // binary; IdleTimeoutMinutes is how long the shared Chrome process stays
 // alive with zero active targets before it is reaped and relaunched lazily.
+// ScreencastQuality is the JPEG quality (1-100) for CDP Page.startScreencast
+// frames; higher is sharper text at the cost of bandwidth. 0 means default.
+//
+// HTR fields configure the HTR NControl companion (cross-platform):
+// HTREnabled turns on the supervised `htrcli serve` daemon + extension
+// preload; HTRExtensionPath is the unpacked MV3 extension directory
+// (must contain manifest.json, e.g. the how-to-recorder build output);
+// HTRCliPath is an optional explicit path to the htrcli binary (else
+// HTRCLI_PATH/OCODE_HTRCLI_PATH env, then PATH); HTRPort is the daemon
+// HTTP port (0 means the managed 3846 default).
+// HTRSocketPath and HTRNativeHostName are optional development overrides. The
+// defaults are deliberately namespaced away from a user's standalone htrcli.
 type BrowserConfig struct {
 	ChromePath         string `json:"chrome_path"`
 	IdleTimeoutMinutes int    `json:"idle_timeout_minutes"`
+	ScreencastQuality  int    `json:"screencast_quality"`
+	HTREnabled         bool   `json:"htr_enabled"`
+	HTRExtensionPath   string `json:"htr_extension_path"`
+	HTRCliPath         string `json:"htrcli_path"`
+	HTRPort            int    `json:"htr_port"`
+	HTRSocketPath      string `json:"htr_socket_path"`
+	HTRNativeHostName  string `json:"htr_native_host_name"`
+}
+
+// DefaultBrowserConfig returns the canonical embedded-browser defaults. Callers
+// that start the browser outside the normal config load path must use this so
+// HTR remains enabled by default and all runtime overrides have one source.
+func DefaultBrowserConfig() BrowserConfig {
+	return defaultOcodeConfig().Browser
+}
+
+func validHTRNativeHostName(name string) bool {
+	name = strings.TrimSpace(name)
+	return name != "" && name != "com.htrcontrol.host" && strings.HasPrefix(name, "com.ocode.") && !strings.ContainsAny(name, `/\\`)
+}
+
+// TTSConfig stores the shared web/desktop speech selection. Browser Native is
+// the default and is intentionally implemented in the browser; local engines
+// remain visible in the selector even when their manifest is unavailable.
+type TTSConfig struct {
+	Engine string `json:"engine"`
+	Voice  string `json:"voice,omitempty"`
+	Mode   string `json:"mode"`
+}
+
+// DefaultScreencastQuality is the default CDP screencast JPEG quality.
+// 70 (the old hardcoded value) smeared small text; 85 is visibly sharper
+// at roughly 2x the per-frame bytes.
+const DefaultScreencastQuality = 85
+
+// NormalizeScreencastQuality clamps q into Chrome's accepted 1-100 range,
+// mapping 0 (unset) to the default.
+func NormalizeScreencastQuality(q int) int {
+	if q == 0 {
+		return DefaultScreencastQuality
+	}
+	if q < 1 {
+		return 1
+	}
+	if q > 100 {
+		return 100
+	}
+	return q
 }
 
 const (
@@ -417,6 +477,7 @@ type OcodeConfig struct {
 	Permissions PermissionConfig
 	Plugins     PluginsConfig
 	Browser     BrowserConfig
+	TTS         TTSConfig
 	// ExternalPlugins holds installable/loadable plugin packages (source,
 	// dir, ref, enabled) such as the "orchestrator" plugin. Distinct from
 	// PluginsConfig, which only gates built-in opt-in tools. Persisted under
@@ -515,6 +576,12 @@ type OcodeConfig struct {
 	// (https://hub.mercstudio.com). Unlike BackendURL, this never affects
 	// general API routing — only internal/sync's client.
 	SyncURL string `json:"sync_url,omitempty"`
+	// FakeAgent selects which harness identity the LLM loop presents to
+	// providers (User-Agent, OpenRouter attribution, Anthropic beta, etc.).
+	// Default "ocode"; case-insensitive aliases accepted on write.
+	// Switch via /fake-agent <name> (TUI), Settings > Backend (web), or
+	// OCODE_FAKE_AGENT env override (not persisted).
+	FakeAgent string `json:"fake_agent,omitempty"`
 	// Ocr holds the OCR tool configuration (backend, model, endpoint).
 	// Backend accepts openai-compat, paddle, and the lmstudio alias.
 	Ocr      ocr.OcrConfig           `json:"ocr"`
@@ -658,6 +725,7 @@ type tuiConfigFile struct {
 	Keybinds      map[string]string `json:"keybinds"`
 	LeaderTimeout int               `json:"leader_timeout"`
 	Branchless    *bool             `json:"branchless"`
+	ShowSidebar   *bool             `json:"show_sidebar"`
 }
 
 type advisorConfigFile struct {
@@ -702,6 +770,13 @@ type discoveryConfigFile struct {
 type browserConfigFile struct {
 	ChromePath         string          `json:"chrome_path,omitempty"`
 	IdleTimeoutMinutes *int            `json:"idle_timeout_minutes,omitempty"`
+	ScreencastQuality  *int            `json:"screencast_quality,omitempty"`
+	HTREnabled         *bool           `json:"htr_enabled,omitempty"`
+	HTRExtensionPath   string          `json:"htr_extension_path,omitempty"`
+	HTRCliPath         string          `json:"htrcli_path,omitempty"`
+	HTRPort            *int            `json:"htr_port,omitempty"`
+	HTRSocketPath      string          `json:"htr_socket_path,omitempty"`
+	HTRNativeHostName  string          `json:"htr_native_host_name,omitempty"`
 	Extensions         json.RawMessage `json:"extensions,omitempty"`
 }
 
@@ -711,6 +786,7 @@ type ocodeConfigFile struct {
 	Permissions             permissionConfigFile        `json:"permissions"`
 	Plugins                 pluginsConfigFile           `json:"plugins"`
 	Browser                 browserConfigFile           `json:"browser"`
+	TTS                     TTSConfig                   `json:"tts,omitempty"`
 	ExternalPlugins         map[string]PluginConfig     `json:"external_plugins,omitempty"`
 	LocalModels             map[string]LocalModelConfig `json:"local_models,omitempty"`
 	Security                securityConfigFile          `json:"security"`
@@ -747,6 +823,7 @@ type ocodeConfigFile struct {
 	UploadDir               string                      `json:"upload_dir,omitempty"`
 	BackendURL              string                      `json:"backend_url,omitempty"`
 	SyncURL                 string                      `json:"sync_url,omitempty"`
+	FakeAgent               string                      `json:"fake_agent,omitempty"`
 	Ocr                     *ocr.OcrConfig              `json:"ocr,omitempty"`
 	ImageGen                *ImageGenConfig             `json:"imagegen,omitempty"`
 	Profiles                map[string]ProfileDelta     `json:"profiles,omitempty"`
@@ -769,10 +846,12 @@ func defaultCompactConfig() CompactConfig {
 
 func defaultTUIConfig() TUIConfig {
 	mouseDefault := true
+	sidebarDefault := true
 	return TUIConfig{
 		Mouse:         &mouseDefault,
 		Scroll:        3.0,
 		LeaderTimeout: 2000,
+		ShowSidebar:   &sidebarDefault,
 	}
 }
 
@@ -794,7 +873,8 @@ func defaultOcodeConfig() OcodeConfig {
 		Compact:                 defaultCompactConfig(),
 		Advisor:                 defaultAdvisorConfig(),
 		Permissions:             defaultPermissionConfig(),
-		Browser:                 BrowserConfig{IdleTimeoutMinutes: 10},
+		Browser:                 BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol"},
+		TTS:                     TTSConfig{Engine: "browser-native", Mode: "manual"},
 		MemoryEnabled:           true,
 		SmallModelEnabled:       true,
 		RecapModelEnabled:       false,
@@ -805,6 +885,7 @@ func defaultOcodeConfig() OcodeConfig {
 		RecapTimeoutSeconds:     120,
 		UndoMaxAgeDelta:         10,
 		MaxConcurrentAgents:     2,
+		FakeAgent:               DefaultFakeAgent,
 		TerminalScrollbackLines: DefaultTerminalScrollbackLines,
 		TUI:                     defaultTUIConfig(),
 		Ocr:                     ocr.DefaultOcrConfig(),
@@ -1098,6 +1179,19 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "browser")
 	}
 
+	if _, ok := raw["tts"]; ok {
+		if file.TTS.Engine != "" {
+			cfg.TTS.Engine = file.TTS.Engine
+		}
+		if file.TTS.Voice != "" {
+			cfg.TTS.Voice = file.TTS.Voice
+		}
+		if file.TTS.Mode != "" {
+			cfg.TTS.Mode = file.TTS.Mode
+		}
+		delete(raw, "tts")
+	}
+
 	if _, ok := raw["extra_allowed_paths"]; ok {
 		cfg.ExtraAllowedPaths = append([]string{}, file.ExtraAllowedPaths...)
 		delete(raw, "extra_allowed_paths")
@@ -1319,6 +1413,15 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		}
 	}
 
+	if _, ok := raw["fake_agent"]; ok {
+		if normalized, err := NormalizeFakeAgent(file.FakeAgent); err == nil {
+			cfg.FakeAgent = normalized
+			delete(raw, "fake_agent")
+		} else {
+			log.Printf("config: invalid fake_agent %q on disk, preserving raw value: %v", file.FakeAgent, err)
+		}
+	}
+
 	if rawOcr, ok := raw["ocr"]; ok && rawOcr != nil {
 		var ocrCfg ocr.OcrConfig
 		if data, err := json.Marshal(rawOcr); err == nil {
@@ -1502,6 +1605,9 @@ func applyTUIConfig(dst *TUIConfig, src tuiConfigFile) {
 	if src.Branchless != nil {
 		dst.Branchless = *src.Branchless
 	}
+	if src.ShowSidebar != nil {
+		dst.ShowSidebar = src.ShowSidebar
+	}
 	if dst.Keybinds == nil {
 		dst.Keybinds = make(map[string]string)
 	}
@@ -1603,6 +1709,39 @@ func applyBrowserConfig(dst *BrowserConfig, src browserConfigFile) error {
 			dst.IdleTimeoutMinutes = *src.IdleTimeoutMinutes
 		}
 	}
+	if src.ScreencastQuality != nil {
+		if *src.ScreencastQuality < 0 || *src.ScreencastQuality > 100 {
+			return fmt.Errorf("browser.screencast_quality must be 1-100, got %d", *src.ScreencastQuality)
+		}
+		// Explicit 0 keeps the default in dst — it does not mean "worst quality".
+		if *src.ScreencastQuality > 0 {
+			dst.ScreencastQuality = *src.ScreencastQuality
+		}
+	}
+	if src.HTREnabled != nil {
+		dst.HTREnabled = *src.HTREnabled
+	}
+	if src.HTRExtensionPath != "" {
+		dst.HTRExtensionPath = src.HTRExtensionPath
+	}
+	if src.HTRCliPath != "" {
+		dst.HTRCliPath = src.HTRCliPath
+	}
+	if src.HTRPort != nil {
+		if *src.HTRPort < 0 || *src.HTRPort > 65535 {
+			return fmt.Errorf("browser.htr_port must be 0-65535, got %d", *src.HTRPort)
+		}
+		dst.HTRPort = *src.HTRPort
+	}
+	if src.HTRSocketPath != "" {
+		dst.HTRSocketPath = src.HTRSocketPath
+	}
+	if src.HTRNativeHostName != "" {
+		if !validHTRNativeHostName(src.HTRNativeHostName) {
+			return fmt.Errorf("browser.htr_native_host_name must use the com.ocode.* namespace")
+		}
+		dst.HTRNativeHostName = src.HTRNativeHostName
+	}
 	return nil
 }
 
@@ -1632,6 +1771,15 @@ func SaveOcodeConfig(cfg *OcodeConfig) error {
 		return err
 	}
 	return writeOcodeConfigFile(path, cfg)
+}
+
+// SaveOcodeTTSConfig updates only the persisted speech selection while
+// preserving the other ocode configuration sections.
+func SaveOcodeTTSConfig(tts TTSConfig) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.TTS = tts
+		return nil
+	})
 }
 
 // lockOcodeConfig acquires a cross-process advisory lock on ocodeconfig.json
@@ -1733,6 +1881,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		"security":    cfg.Security,
 		"discovery":   discoveryMap,
 		"browser":     cfg.Browser,
+		"tts":         cfg.TTS,
 	}
 	if cfg.Plugins.AST {
 		payload["plugins"] = cfg.Plugins
@@ -1846,6 +1995,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	if cfg.SyncURL != "" {
 		payload["sync_url"] = cfg.SyncURL
+	}
+	if cfg.FakeAgent != "" {
+		payload["fake_agent"] = cfg.FakeAgent
 	}
 
 	data, err := json.MarshalIndent(payload, "", "  ")
@@ -2341,6 +2493,61 @@ func SaveSyncURL(raw string) error {
 	}
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.SyncURL = normalized
+		return nil
+	})
+}
+
+// DefaultFakeAgent is the harness identity ocode presents by default.
+const DefaultFakeAgent = "ocode"
+
+// FakeAgentPresets lists the harness identities /fake-agent and the
+// Settings UI accept. Canonical ids only; NormalizeFakeAgent maps
+// user-facing aliases onto these.
+func FakeAgentPresets() []string {
+	return []string{"ocode", "opencode", "claude-code", "cline", "kilo-code", "codex"}
+}
+
+// NormalizeFakeAgent canonicalizes a harness name. Empty means default
+// (ocode). Accepts case-insensitive ids plus common aliases:
+// "claudecode", "claude_code", "claude" → claude-code;
+// "kilo", "kilocode", "kilo_code" → kilo-code;
+// "codex-cli", "codex_cli", "openai-codex" → codex;
+// "" → ocode.
+func NormalizeFakeAgent(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return DefaultFakeAgent, nil
+	}
+	lowered := strings.ToLower(trimmed)
+	canonical := strings.ReplaceAll(strings.ReplaceAll(lowered, "_", "-"), " ", "-")
+	switch canonical {
+	case "ocode":
+		return "ocode", nil
+	case "opencode", "opencode-ai":
+		return "opencode", nil
+	case "claude-code", "claudecode", "claude-code-cli", "claude":
+		return "claude-code", nil
+	case "cline":
+		return "cline", nil
+	case "kilo-code", "kilocode", "kilo", "kilo-code-ai", "kilocode-ai":
+		return "kilo-code", nil
+	case "codex", "codex-cli", "openai-codex", "codexcli":
+		return "codex", nil
+	default:
+		return "", fmt.Errorf("unknown fake_agent %q (want one of: ocode, opencode, claude-code, cline, kilo-code, codex)", raw)
+	}
+}
+
+// SaveFakeAgent persists the fake_agent harness identity after
+// normalization, using load-modify-write so it cannot clobber a concurrent
+// session's other config (see withOcodeConfigLock).
+func SaveFakeAgent(raw string) error {
+	normalized, err := NormalizeFakeAgent(raw)
+	if err != nil {
+		return err
+	}
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.FakeAgent = normalized
 		return nil
 	})
 }
@@ -3046,6 +3253,16 @@ func SaveOcodeTUIConfig(cfg TUIConfig) error {
 	})
 }
 
+// SaveOcodeTUIShowSidebar persists only the sidebar-visibility default via
+// load-modify-write, so a TUI toggle never clobbers other TUI fields a
+// concurrent session (or an in-flight web settings PUT) may have changed.
+func SaveOcodeTUIShowSidebar(show bool) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.TUI.ShowSidebar = &show
+		return nil
+	})
+}
+
 // SaveOcodeEditorConfig persists the editor/editor-mode/ide-mode settings.
 func SaveOcodeEditorConfig(editor, editorMode, ideMode string) error {
 	return withOcodeConfigLock(func(c *OcodeConfig) error {
@@ -3074,6 +3291,61 @@ func SaveOcodeLimits(maxSteps, maxImageDim, maxConcurrentAgents, undoMaxAgeDelta
 		c.MaxImageDim = maxImageDim
 		c.MaxConcurrentAgents = maxConcurrentAgents
 		c.UndoMaxAgeDelta = undoMaxAgeDelta
+		return nil
+	})
+}
+
+// SaveOcodeBrowserConfig persists the embedded-browser settings in one atomic
+// lock-held write. Quality is validated 1-100 before writing.
+func SaveOcodeBrowserConfig(chromePath string, idleTimeoutMinutes, screencastQuality int) error {
+	if screencastQuality < 0 || screencastQuality > 100 {
+		return fmt.Errorf("browser.screencast_quality must be 1-100, got %d", screencastQuality)
+	}
+	if idleTimeoutMinutes < 0 {
+		return fmt.Errorf("browser.idle_timeout_minutes must be >= 0, got %d", idleTimeoutMinutes)
+	}
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		if chromePath != "" {
+			c.Browser.ChromePath = chromePath
+		}
+		if idleTimeoutMinutes > 0 {
+			c.Browser.IdleTimeoutMinutes = idleTimeoutMinutes
+		}
+		if screencastQuality > 0 {
+			c.Browser.ScreencastQuality = screencastQuality
+		}
+		return nil
+	})
+}
+
+// SaveOcodeHTRConfig persists the HTR NControl companion settings in one
+// atomic lock-held write. The optional runtimeOverrides are socket path and
+// native-host name, in that order, and preserve backward compatibility for
+// existing callers when omitted.
+func SaveOcodeHTRConfig(enabled bool, extensionPath, cliPath string, port int, runtimeOverrides ...string) error {
+	if port < 0 || port > 65535 {
+		return fmt.Errorf("browser.htr_port must be 0-65535, got %d", port)
+	}
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.Browser.HTREnabled = enabled
+		if extensionPath != "" {
+			c.Browser.HTRExtensionPath = extensionPath
+		}
+		if cliPath != "" {
+			c.Browser.HTRCliPath = cliPath
+		}
+		if port > 0 {
+			c.Browser.HTRPort = port
+		}
+		if len(runtimeOverrides) > 0 && runtimeOverrides[0] != "" {
+			c.Browser.HTRSocketPath = runtimeOverrides[0]
+		}
+		if len(runtimeOverrides) > 1 && runtimeOverrides[1] != "" {
+			if !validHTRNativeHostName(runtimeOverrides[1]) {
+				return fmt.Errorf("browser.htr_native_host_name must use the com.ocode.* namespace")
+			}
+			c.Browser.HTRNativeHostName = runtimeOverrides[1]
+		}
 		return nil
 	})
 }

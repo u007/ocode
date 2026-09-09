@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -507,7 +508,7 @@ func (s *dagScheduler) run(groupBus *notebus.Bus, groupAgentIDs []string, groupT
 	// when the node is on the frontier — its predecessor waits are
 	// the only correctness gate.
 	launchNode := func(n *dagNode) {
-		go func() {
+		crashguard.Go(func() {
 			defer func() {
 				// Release dependents: close doneCh so any
 				// successor blocked on it can proceed.
@@ -602,7 +603,7 @@ func (s *dagScheduler) run(groupBus *notebus.Bus, groupAgentIDs []string, groupT
 				s.failed[n] = true
 				s.mu.Unlock()
 			}
-		}()
+		})
 	}
 
 	// Main scheduler loop. We pop ready nodes off the frontier
@@ -736,6 +737,12 @@ func (s *dagScheduler) recordSkip(n *dagNode, reason string) {
 // predecessor's id. If a predecessor produced an error or was itself
 // skipped, we still surface a labelled block — saying so is more useful to
 // the child than silently dropping the edge.
+//
+// DESIGN NOTE (trust/influence boundary): predecessor output is bounded by
+// `TruncateToolResult` (disk-cached, bounded length) but is NOT sanitized or
+// escaped; it is treated as trusted session work-product within the agent
+// session boundary. A malicious predecessor can craft text that influences
+// the child's LLM behavior when coalesced into the `Context` parameter.
 func (s *dagScheduler) buildPredecessorContext(n *dagNode) string {
 	if len(n.deps) == 0 {
 		return ""

@@ -697,6 +697,10 @@ func TestOpenAIResponsesUsesCodexBackendForOAuth(t *testing.T) {
 	if gotPayload["store"] != false {
 		t.Fatalf("store = %#v", gotPayload["store"])
 	}
+	// The codex backend rejects metadata with 400 "Unsupported parameter".
+	if _, ok := gotPayload["metadata"]; ok {
+		t.Fatalf("metadata must not be sent to the codex backend: %#v", gotPayload["metadata"])
+	}
 	input, ok := gotPayload["input"].([]interface{})
 	if !ok || len(input) != 1 {
 		t.Fatalf("input = %#v", gotPayload["input"])

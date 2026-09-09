@@ -36,6 +36,7 @@ import (
 	"github.com/u007/ocode/internal/secretfile"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/tts"
 	"github.com/u007/ocode/internal/version"
 )
 
@@ -111,6 +112,7 @@ type Server struct {
 	// EnableBrowse, before the server starts serving.
 	browse     *browse.Server
 	browseBase string
+	htrNotice  string
 
 	// procSup supervises long-lived child processes owned by the server (e.g.
 	// the headless Chrome backing the browser panel). Created in New, shut
@@ -118,6 +120,7 @@ type Server struct {
 	// Browser.close (installed as a shutdown callback) can run over a live
 	// CDP pipe. Exposed via ProcessSupervisor() for the browse subsystem.
 	procSup *tool.ProcessSupervisor
+	tts     *tts.Supervisor
 
 	// ln and httpServer are populated by Serve so Shutdown can stop accepting
 	// new connections and drain in-flight ones. Guarded by shutdownMu.
@@ -142,6 +145,7 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 		webFS:         webFS,
 		workDir:       ".",
 		procSup:       tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 3 * time.Second}),
+		tts:           tts.NewSupervisor(tts.DefaultConfig()),
 		startedAt:     time.Now(),
 	}
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
@@ -154,6 +158,11 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 func (s *Server) ProcessSupervisor() *tool.ProcessSupervisor {
 	return s.procSup
 }
+
+// SetHTRNotice stores a startup failure for the browser UI. The notice is
+// intentionally persistent for the lifetime of this server so a later browser
+// panel mount cannot hide a best-effort HTR failure.
+func (s *Server) SetHTRNotice(notice string) { s.htrNotice = notice }
 
 func isLoopbackBind(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
@@ -272,7 +281,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/shell", s.authMiddleware(s.handleShellCommand))
 
 	// Config
-	s.mux.HandleFunc("GET /api/config/model", s.authMiddleware(s.handleGetModel))
+	s.mux.HandleFunc("GET /api/network-ip", s.authMiddleware(s.handleGetNetworkIP))
+s.mux.HandleFunc("GET /api/config/model", s.authMiddleware(s.handleGetModel))
 	s.mux.HandleFunc("PUT /api/config/model", s.authMiddleware(s.handleSetModel))
 	s.mux.HandleFunc("GET /api/config/thinking-budget", s.authMiddleware(s.handleGetThinkingBudget))
 	s.mux.HandleFunc("PUT /api/config/thinking-budget", s.authMiddleware(s.handleSetThinkingBudget))
@@ -296,6 +306,16 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/permissions-auto", s.authMiddleware(s.handleSetAutoPermissionConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/discovery", s.authMiddleware(s.handleGetDiscoveryConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/discovery", s.authMiddleware(s.handleSetDiscoveryConfig))
+	s.mux.HandleFunc("GET /api/tts/engines", s.authMiddleware(s.handleTTSEngines))
+	s.mux.HandleFunc("GET /api/tts/status", s.authMiddleware(s.handleTTSStatus))
+	s.mux.HandleFunc("GET /api/config/ocode/tts", s.authMiddleware(s.handleGetTTSConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/tts", s.authMiddleware(s.handleSetTTSConfig))
+	s.mux.HandleFunc("POST /api/tts/select", s.authMiddleware(s.handleTTSSelect))
+	s.mux.HandleFunc("POST /api/tts/speak", s.authMiddleware(s.handleTTSSpeak))
+	s.mux.HandleFunc("POST /api/tts/stop", s.authMiddleware(s.handleTTSStop))
+	s.mux.HandleFunc("GET /api/tts/audio/{id}", s.authMiddleware(s.handleTTSAudio))
+	s.mux.HandleFunc("GET /api/config/ocode/permissions-mode", s.authMiddleware(s.handleGetPermissionModeConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/permissions-mode", s.authMiddleware(s.handleSetPermissionModeConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/tui", s.authMiddleware(s.handleGetTUIConfigSection))
 	s.mux.HandleFunc("PUT /api/config/ocode/tui", s.authMiddleware(s.handleSetTUIConfigSection))
 	s.mux.HandleFunc("GET /api/config/ocode/editor", s.authMiddleware(s.handleGetEditorConfig))
@@ -308,6 +328,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/autocontinue", s.authMiddleware(s.handleSetAutoContinue))
 	s.mux.HandleFunc("GET /api/config/ocode/limits", s.authMiddleware(s.handleGetLimitsConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/limits", s.authMiddleware(s.handleSetLimitsConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/browser", s.authMiddleware(s.handleGetBrowserConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/browser", s.authMiddleware(s.handleSetBrowserConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/features", s.authMiddleware(s.handleGetFeaturesConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/features", s.authMiddleware(s.handleSetFeaturesConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/profile-debug", s.authMiddleware(s.handleGetProfileDebugConfig))
@@ -316,6 +338,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/plugins-enabled", s.authMiddleware(s.handleSetPluginsEnabledConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/local-models", s.authMiddleware(s.handleGetLocalModelsConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/local-models", s.authMiddleware(s.handleSetLocalModelsConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/fake-agent", s.authMiddleware(s.handler.HandleGetFakeAgentConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/fake-agent", s.authMiddleware(s.handler.HandleSetFakeAgentConfig))
 	// Interactive pty terminal (always enabled). The browser cannot set an
 	// Authorization header on a WebSocket, so this relies on
 	// authMiddleware's ?token= support.
@@ -642,12 +666,46 @@ func (s *Server) publishBrowseNewTab(ev browse.NewTabEvent) {
 // BrowseOptions carries the headless-Chrome configuration for the browse
 // origin. ChromePath overrides binary discovery; IdleTimeoutMinutes is how
 // long the shared Chrome process idles before shutdown (0 → package default);
+// ScreencastQuality is the CDP screencast JPEG quality 1-100 (0 → default 85);
 // Supervisor is the server-owned process supervisor Chrome is launched
 // through (srv.ProcessSupervisor()).
+// HTR carries the HTR NControl companion (supervised `htrcli serve` daemon
+// + extension preload); zero value disables it.
 type BrowseOptions struct {
 	ChromePath         string
 	IdleTimeoutMinutes int
+	ScreencastQuality  int
+	HTREnabled         bool
+	HTRExtensionPath   string
+	HTRCliPath         string
+	HTRPort            int
+	HTRSocketPath      string
+	HTRNativeHostName  string
 	Supervisor         *tool.ProcessSupervisor
+}
+
+// LoadBrowseOptions loads the complete embedded-browser configuration while
+// retaining canonical defaults when the on-disk config is unavailable or
+// invalid. All startup paths use this helper so HTR overrides cannot diverge.
+func LoadBrowseOptions(supervisor *tool.ProcessSupervisor) *BrowseOptions {
+	browser := config.DefaultBrowserConfig()
+	if ocfg, err := config.LoadOcodeConfigCopy(); err == nil && ocfg != nil {
+		browser = ocfg.Browser
+	} else if err != nil {
+		log.Printf("server: load ocode config for browser options: %v (using defaults)", err)
+	}
+	return &BrowseOptions{
+		ChromePath:         browser.ChromePath,
+		IdleTimeoutMinutes: browser.IdleTimeoutMinutes,
+		ScreencastQuality:  browser.ScreencastQuality,
+		HTREnabled:         browser.HTREnabled,
+		HTRExtensionPath:   browser.HTRExtensionPath,
+		HTRCliPath:         browser.HTRCliPath,
+		HTRPort:            browser.HTRPort,
+		HTRSocketPath:      browser.HTRSocketPath,
+		HTRNativeHostName:  browser.HTRNativeHostName,
+		Supervisor:         supervisor,
+	}
 }
 
 // StartBrowse stands up the isolated browse origin: a second loopback
@@ -666,11 +724,58 @@ type BrowseOptions struct {
 func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOptions) error {
 	var bOpts browse.Options
 	if opts != nil {
-		bOpts = browse.Options{
-			ChromePath:  opts.ChromePath,
-			IdleTimeout: time.Duration(opts.IdleTimeoutMinutes) * time.Minute,
-			Supervisor:  opts.Supervisor,
+		htr := cdp.HTROptions{
+			Enabled:        opts.HTREnabled,
+			CliPath:        opts.HTRCliPath,
+			ExtensionDir:   opts.HTRExtensionPath,
+			Port:           opts.HTRPort,
+			SocketPath:     opts.HTRSocketPath,
+			NativeHostName: opts.HTRNativeHostName,
+			BrowserPath:    opts.ChromePath,
 		}
+		htrNotice := ""
+		if htr.Enabled {
+			if htr.BrowserPath == "" {
+				if browserPath, findErr := cdp.FindChrome(""); findErr == nil {
+					htr.BrowserPath = browserPath
+				}
+			}
+			if notice := cdp.HTRBrowserCompatibilityNotice(htr.BrowserPath); notice != "" {
+				htr.Enabled = false
+				htrNotice = notice
+			}
+			if htr.Enabled {
+				if socketPath, err := cdp.ResolveHTRSocketPath(htr.SocketPath); err != nil {
+					htr.Enabled = false
+					htrNotice = "HTR automation is unavailable: " + err.Error() + ". Browsing continues without the HTR extension."
+				} else {
+					htr.SocketPath = socketPath
+				}
+			}
+			if htr.Enabled {
+				hostName := htr.NativeHostName
+				if hostName == "" {
+					hostName = cdp.DefaultHTRNativeHostName
+				}
+				assets, err := cdp.ResolveHTRAssetsForHost(htr.ExtensionDir, htr.CliPath, hostName)
+				if err != nil {
+					htr.Enabled = false
+					htrNotice = "HTR automation is unavailable: " + err.Error() + ". Browsing continues without the HTR extension."
+				} else {
+					htr.ExtensionDir = assets.ExtensionDir
+					htr.CliPath = assets.CliPath
+				}
+			}
+		}
+		bOpts = browse.Options{
+			ChromePath:        opts.ChromePath,
+			IdleTimeout:       time.Duration(opts.IdleTimeoutMinutes) * time.Minute,
+			ScreencastQuality: opts.ScreencastQuality,
+			Supervisor:        opts.Supervisor,
+			HTR:               htr,
+			HTRNotice:         htrNotice,
+		}
+		srv.SetHTRNotice(htrNotice)
 	}
 	bs := browse.New(token, log.Default(), bOpts)
 	bs.SetSPAOrigin(spaOrigin)
@@ -692,6 +797,18 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 		}
 	}()
 	log.Printf("browse: origin listening on %s", bBase)
+	// HTR companion (non-fatal): supervised `htrcli serve` daemon. Enabled by
+	// default for managed Chrome; shared leases keep it alive while another
+	// ocode process is using it. A healthy existing daemon is reused.
+	if opts != nil && bOpts.HTR.Enabled {
+		if st, err := cdp.EnsureHTRServe(srv.ProcessSupervisor(), bOpts.HTR, log.Default()); err != nil {
+			notice := "HTR automation is unavailable: " + err.Error() + ". Browsing continues without the HTR extension."
+			srv.SetHTRNotice(notice)
+			log.Printf("browse: %s", notice)
+		} else {
+			log.Printf("browse: htr daemon %s running=%v owned=%v", st.Addr, st.Running, st.Owned)
+		}
+	}
 	return nil
 }
 
@@ -711,7 +828,10 @@ func (s *Server) browsePort() int {
 }
 
 func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"base_url": sameSiteBrowseBase(s.browseBase, r.Host)})
+	writeJSON(w, http.StatusOK, map[string]string{
+		"base_url":   sameSiteBrowseBase(s.browseBase, r.Host),
+		"htr_notice": s.htrNotice,
+	})
 }
 
 // sameSiteBrowseBase rewrites base's hostname to the loopback hostname the
@@ -1163,6 +1283,9 @@ func (s *Server) SetWorkDir(dir string) {
 	if s.handler != nil {
 		s.handler.SetWorkDir(dir)
 	}
+	if cfg, err := config.LoadOcodeConfigCopy(); err == nil && cfg != nil {
+		s.tts.Select(tts.Config{Engine: tts.EngineID(cfg.TTS.Engine), Voice: cfg.TTS.Voice, Mode: tts.PlaybackMode(cfg.TTS.Mode)})
+	}
 }
 
 // SetRemoteMode marks the server as launched in `--remote` mode. Must be
@@ -1281,6 +1404,9 @@ func (s *Server) serveHandler() http.Handler {
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s.handler != nil {
 		s.handler.Shutdown(ctx)
+	}
+	if s.tts != nil {
+		s.tts.Stop()
 	}
 	s.shutdownMu.Lock()
 	hs := s.httpServer
@@ -1445,13 +1571,8 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	// bound listener — with -port 0 the requested addr is not the real one.
 	// Chrome-mode options come from the ocode config; a load failure keeps
 	// defaults rather than blocking serve.
-	browseOpts := &BrowseOptions{Supervisor: srv.ProcessSupervisor()}
-	if ocfg, err := config.LoadOcodeConfigCopy(); err == nil && ocfg != nil {
-		browseOpts.ChromePath = ocfg.Browser.ChromePath
-		browseOpts.IdleTimeoutMinutes = ocfg.Browser.IdleTimeoutMinutes
-	} else if err != nil {
-		log.Printf("server: load ocode config for chrome options: %v (using defaults)", err)
-	}
+	browseOpts := LoadBrowseOptions(srv.ProcessSupervisor())
+
 	if err := StartBrowse(srv, password, "http://"+ln.Addr().String(), browseOpts); err != nil {
 		log.Printf("server: browse origin unavailable, browser panel disabled: %v", err)
 	}
@@ -1665,6 +1786,9 @@ func (s *Server) rc() *RCBridge {
 func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetModel(w, r)
 }
+func (s *Server) handleGetNetworkIP(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetNetworkIP(w, r)
+}
 func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetModel(w, r)
 }
@@ -1734,6 +1858,12 @@ func (s *Server) handleGetDiscoveryConfig(w http.ResponseWriter, r *http.Request
 func (s *Server) handleSetDiscoveryConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetDiscoveryConfig(w, r)
 }
+func (s *Server) handleGetPermissionModeConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPermissionModeConfig(w, r)
+}
+func (s *Server) handleSetPermissionModeConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPermissionModeConfig(w, r)
+}
 func (s *Server) handleGetTUIConfigSection(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetTUIConfigSection(w, r)
 }
@@ -1793,6 +1923,20 @@ func (s *Server) handleGetLimitsConfig(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleSetLimitsConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetLimitsConfig(w, r)
+}
+func (s *Server) handleGetBrowserConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetBrowserConfig(w, r)
+}
+func (s *Server) handleSetBrowserConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetBrowserConfig(w, r)
+	// Live-apply the screencast quality: existing Chrome targets pick it up
+	// on their next restartScreencast (resize, zoom, or re-attach). The
+	// persisted value is re-read so a 0 ("keep existing") still resolves.
+	if ocfg, err := config.LoadOcodeConfigCopy(); err == nil && ocfg != nil {
+		if s.browse != nil {
+			s.browse.SetScreencastQuality(config.NormalizeScreencastQuality(ocfg.Browser.ScreencastQuality))
+		}
+	}
 }
 func (s *Server) handleGetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetFeaturesConfig(w, r)

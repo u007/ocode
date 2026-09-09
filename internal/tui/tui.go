@@ -10,6 +10,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/mattn/go-isatty"
+
+	"github.com/u007/ocode/internal/crashguard"
 )
 
 // RunOptions controls startup behavior of the TUI. Fields are zero-value
@@ -48,6 +50,7 @@ func Run(opts RunOptions) error {
 	m := newModel(opts)
 
 	reclaimTTYForeground()
+	installCrashTerminalReset()
 
 	// If an explicitly requested session (-session / -continue) failed to
 	// load, abort before the TUI starts. Continuing here would silently open
@@ -92,7 +95,7 @@ func watchProgramSignals(p *tea.Program) func() {
 	sigCh := make(chan os.Signal, 1)
 	done := make(chan struct{})
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	go func() {
+	crashguard.Go(func() {
 		for {
 			select {
 			case <-done:
@@ -101,7 +104,7 @@ func watchProgramSignals(p *tea.Program) func() {
 				p.Send(cleanupRequestMsg{})
 			}
 		}
-	}()
+	})
 	return func() {
 		signal.Stop(sigCh)
 		close(done)

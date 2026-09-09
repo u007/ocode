@@ -23,6 +23,10 @@ okf_version: 0.1
 - [V1 Connection Cap Exclusion — Embedded Browser Panel](architecture/v1-connection-cap-exclusion.md) - Decision to exclude the per-stateKey concurrent upstream connection cap (32) from v1 embedded browser panel. The exclusion applied at v1 ship; the follow-up implementation has since landed.
 - [Worktree-Based Parallel Feature Development](architecture/worktree-based-parallel-feature-development.md) - Integration pattern for parallel feature development using git worktrees to avoid collisions when multiple features touch shared files
 
+# docs
+
+- [TUI Sidebar Title Expand/Collapse Design](docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md) - Design for sidebar title expand/collapse behavior with transient expansion, reset on session changes, and no session JSON persistence (deprecated)
+
 # gotchas
 
 - [Agent Replacement — Input Queuing & Stream Event Epochs](gotchas/agent-replacement-input-queuing.md) - Architectural decision and solution pattern for queuing user input during agent replacement and using stream event epochs to prevent stale events from mutating the new session.
@@ -38,8 +42,8 @@ okf_version: 0.1
 - [Bubble Tea Cleanup Race — Orphaned Goroutines on Shutdown](gotchas/bubbletea-cleanup-race.md) - Bubble Tea runs tea.Cmd in untracked goroutines and does not wait for them during Program.Run shutdown, causing cleanup races with model-switch or /new commands that orphan agents or supervisors.
 - [Chat Input — Queued Messages Lost on Submission Failure](gotchas/chat-input-message-loss.md) - Queued messages are lost when submission fails — sendMessage returns false but the message is already shifted from the queue
 - [ChatPanel Autoscroll Bounce/Freeze](gotchas/autoscroll-bounce.md) - Root cause analysis of the autoscroll bounce/freeze bug: smooth-scrolling every live token without at-bottom state tracking causes competing animations that lock up the scroll position.
+- [Chrome Tab Hang — Unbounded CDP Calls, JS Dialogs, Invisible Popups](gotchas/chrome-tab-hang-unbounded-cdp-call.md) - Gotcha: an embedded Chrome tab froze permanently when a CDP command never got a reply (alert() blocking the renderer, dead session); popups and middle-click tabs were never surfaced because page-level auto-attach does not cover them.
 - [Concurrent File Editing Risk — Multiple Writers in Same Checkout](gotchas/concurrent-file-editing-risk.md) - Gotcha: multiple writers (agents + manual edits) on the same files within a single checkout can corrupt both streams. Covers the concurrent modification problem, affected scenarios, mitigation strategies, and recovery.
-- [Chrome Tab Hang — Unbounded CDP Calls, JS Dialogs, Invisible Popups](gotchas/chrome-tab-hang-unbounded-cdp-call.md) - Gotcha: embedded Chrome tab froze when a CDP command never got a reply (alert(), dead session); popups/middle-click tabs never surfaced because page-level auto-attach does not cover them.
 - [Concurrent session writers — conflict semantics and recovery](gotchas/session-writers-conflict-recovery.md)
 - [Debug Instrumentation Ships Unconditionally](gotchas/debug-instrumentation-ships-unconditionally.md) - Process gotcha: temporary Date.prototype instrumentation ships unconditionally in production builds, causing global prototype mutation, altered date behavior, and authenticated network requests.
 - [Embedded Browser — WebSocket Proxy 404](gotchas/embedded-browser-websocket-proxy-404.md) - Gotcha: WebSocket connections through the embedded browser proxy fail with 404 during handshake due to missing or unreachable upgrade path in the browse server.
@@ -156,7 +160,8 @@ okf_version: 0.1
 
 # superpowers
 
-- [Stabilize web and desktop chat streaming](superpowers/specs/2026-08-05-web-desktop-chat-streaming-design.md)
+- [TTS Speech Playback Design Specification](superpowers/specs/2026-09-09-tts-speech-playback-design.md) - User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing.
+- [TUI Sidebar Title Expand/Collapse Design](superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md) - Design for sidebar title expand/collapse behavior, updated to match user decision: transient expansion, reset on session changes, no session JSON persistence. (deprecated)
 
 # Unclassified
 
@@ -326,39 +331,12 @@ okf_version: 0.1
 - [INDEX.md](superpowers/plans/2026-08-31-shell-sandbox/INDEX.md)
 - [2026-09-06-multirow-tab-bar.md](superpowers/plans/2026-09-06-multirow-tab-bar.md)
 - [2026-09-06-remote-web-wsl.md](superpowers/plans/2026-09-06-remote-web-wsl.md)
-- [2026-07-08-global-runtime-artifacts-design.md](superpowers/specs/2026-07-08-global-runtime-artifacts-design.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
-- [2026-07-11-model-stack-benchmark-design.md](superpowers/specs/2026-07-11-model-stack-benchmark-design.md)
-- [2026-07-14-tool-result-smart-sizing-design.md](superpowers/specs/2026-07-14-tool-result-smart-sizing-design.md)
-- [2026-07-21-session-storage-ojsonl-design.md](superpowers/specs/2026-07-21-session-storage-ojsonl-design.md)
-- [2026-07-22-changes-tab-design.md](superpowers/specs/2026-07-22-changes-tab-design.md)
-- [2026-07-24-web-changes-parity-design.md](superpowers/specs/2026-07-24-web-changes-parity-design.md)
-- [2026-07-24-web-cron-parity-design.md](superpowers/specs/2026-07-24-web-cron-parity-design.md)
-- [2026-07-24-web-editor-context-diff-design.md](superpowers/specs/2026-07-24-web-editor-context-diff-design.md)
-- [2026-07-24-web-editor-core-design.md](superpowers/specs/2026-07-24-web-editor-core-design.md)
-- [2026-07-28-account-login-config-sync-design.md](superpowers/specs/2026-07-28-account-login-config-sync-design.md)
-- [2026-07-30-terminal-bench-harness-design.md](superpowers/specs/2026-07-30-terminal-bench-harness-design.md)
-- [2026-08-01-local-model-instance-manager-design.md](superpowers/specs/2026-08-01-local-model-instance-manager-design.md)
-- [2026-08-02-resume-cancelled-subagent-design.md](superpowers/specs/2026-08-02-resume-cancelled-subagent-design.md)
-- [2026-08-06-web-agents-tab-design.md](superpowers/specs/2026-08-06-web-agents-tab-design.md)
-- [2026-08-08-per-tab-chat-state-design.md](superpowers/specs/2026-08-08-per-tab-chat-state-design.md)
-- [2026-08-09-web-session-tab-hierarchy-design.md](superpowers/specs/2026-08-09-web-session-tab-hierarchy-design.md)
-- [2026-08-11-configuration-ui-design.md](superpowers/specs/2026-08-11-configuration-ui-design.md)
-- [2026-08-12-multiproject-event-architecture-design.md](superpowers/specs/2026-08-12-multiproject-event-architecture-design.md)
-- [2026-08-18-debug-helper-design.md](superpowers/specs/2026-08-18-debug-helper-design.md)
-- [2026-08-19-desktop-sharing-design.md](superpowers/specs/2026-08-19-desktop-sharing-design.md)
-- [2026-08-20-desktop-profiles-sparse-design.md](superpowers/specs/2026-08-20-desktop-profiles-sparse-design.md)
-- [2026-08-20-shared-lsp-broker-design.md](superpowers/specs/2026-08-20-shared-lsp-broker-design.md)
 - [01-architecture.md](superpowers/specs/2026-08-29-remote-ssh/01-architecture.md)
 - [02-phase1-connect.md](superpowers/specs/2026-08-29-remote-ssh/02-phase1-connect.md)
 - [03-phase2-web.md](superpowers/specs/2026-08-29-remote-ssh/03-phase2-web.md)
 - [04-phase3-wsl.md](superpowers/specs/2026-08-29-remote-ssh/04-phase3-wsl.md)
 - [INDEX.md](superpowers/specs/2026-08-29-remote-ssh/INDEX.md)
-- [2026-08-29-unified-session-terminal-tabs-design.md](superpowers/specs/2026-08-29-unified-session-terminal-tabs-design.md)
-- [2026-08-30-embedded-browser-panel-design.md](superpowers/specs/2026-08-30-embedded-browser-panel-design.md)
-- [2026-08-31-browser-chrome-cdp-design.md](superpowers/specs/2026-08-31-browser-chrome-cdp-design.md)
-- [2026-09-03-sidebar-preview-design.md](superpowers/specs/2026-09-03-sidebar-preview-design.md)
-- [2026-09-06-multirow-tab-bar-design.md](superpowers/specs/2026-09-06-multirow-tab-bar-design.md)
 - [telegram-bot.md](telegram-bot.md)
 - [web-desktop-parity-todo.md](web-desktop-parity-todo.md)
 

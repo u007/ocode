@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/skill"
@@ -372,7 +373,7 @@ func (a *Agent) startBackgroundWarm(docs []discovery.Doc) {
 	if d == nil || !d.warming.CompareAndSwap(false, true) {
 		return // already warming
 	}
-	go func() {
+	crashguard.Go(func() {
 		defer d.warming.Store(false)
 		ctx, cancel := context.WithTimeout(context.Background(), discoveryWarmTimeout)
 		defer cancel()
@@ -381,7 +382,7 @@ func (a *Agent) startBackgroundWarm(docs []discovery.Doc) {
 			return
 		}
 		a.emitDebug("DISCOVERY", "background corpus warm complete (cache hot; ranking resumes next turn)")
-	}()
+	})
 }
 
 type DiscoveryStatusInfo struct {

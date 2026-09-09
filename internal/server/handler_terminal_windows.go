@@ -37,3 +37,5 @@ func (h *Handler) HandleTerminalHistory(w http.ResponseWriter, r *http.Request) 
 type terminalSession struct {
 	resumable bool
 }
+
+func (s *terminalSession) hasExited() bool { return true }

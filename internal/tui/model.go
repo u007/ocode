@@ -30,8 +30,10 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/network"
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/hooks"
@@ -43,6 +45,7 @@ import (
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/plugins"
+	clitools "github.com/u007/ocode/internal/plugins/clitools"
 	"github.com/u007/ocode/internal/rc"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/secretfile"
@@ -852,6 +855,18 @@ type pluginSyncAllMsg struct{}
 type pluginSyncAllDoneMsg struct {
 	results []plugins.SyncStatusResult
 }
+
+// clitoolInstallMsg requests installation of one CLI utility (fd, rg, fzf,
+// eza, bat, grep) via the platform package manager. Handled in model.Update
+// (see pluginClitool*Msg handlers).
+type clitoolInstallMsg struct{ name string }
+type clitoolInstalledMsg struct {
+	name   string
+	result clitools.InstallResult
+}
+type clitoolListMsg struct {
+	statuses []clitools.ToolStatus
+}
 type streamStartedMsg struct {
 	cancel chan struct{}
 	epoch  uint64
@@ -860,6 +875,13 @@ type streamStartedMsg struct {
 type streamDoneMsg struct {
 	err   error
 	epoch uint64
+}
+
+// delayedChatInputMsg fires after the quiet period for ordinary idle chat
+// submissions. Its generation makes stale Bubble Tea ticks harmless when a
+// newer submission or a session reset superseded them.
+type delayedChatInputMsg struct {
+	generation uint64
 }
 
 type compactStartedMsg struct{}
@@ -1304,6 +1326,7 @@ type model struct {
 	config             *config.Config
 	sessionID          string
 	sessionTitle       string
+	expandedTitle      bool // transient sidebar title state; reset when the active session changes
 	sessionCreatedAt   time.Time
 	titleRegenerating  bool // true while a manual title regeneration (gen button) is in flight
 	// sessionLoadErr records a failure to load an explicitly requested
@@ -1446,6 +1469,8 @@ type model struct {
 	inputHistoryIndex        int
 	unsavedInput             string
 	inputAtFirstLineUpNotice bool
+	delayedChatInputs        []string
+	delayedChatGeneration    uint64
 	queuedItems              []queuedItem // unified queue preserving insertion order
 	pendingJobMsgs           []message
 	expandedToolOutputs      map[int]bool
@@ -1485,45 +1510,46 @@ type model struct {
 	// textinput, the last non-empty query, the ordered list of message indices
 	// that match, the cursor into that list, and the index of the message
 	// currently being flashed (bumped to -1 once the flash window expires).
-	chatSearchActive      bool
-	chatSearchInput       textinput.Model
-	chatSearchQuery       string
-	chatSearchMatches     []int
-	chatSearchCursor      int
-	chatSearchFlashMsg    int
-	chatSearchNoMatch     bool // true when the bar is open with a non-empty query that has zero matches; used for the inline counter styling
-	filesSel              selectionState
-	inputSel              selectionState
-	gitSel                selectionState
-	sidebarSel            selectionState
-	rawSidebarLines       []string
-	statusSel             selectionState
-	statusRawLines        []string
-	statusPermColStart    int            // column where permission text starts on status line 0
-	statusPermColEnd      int            // column where permission text ends on status line 0
-	hoverSidebarFile      string         // file path hovered by mouse in sidebar, empty when no hover
-	hoverSidebarCWD       bool           // true when the mouse hovers the clickable "cwd:" sidebar row
-	hoverSidebarTitleGen  bool           // true when the mouse hovers the clickable "gen" title button
-	hoverLink             pathLinkRegion // file-path link hovered in the transcript
-	hoverLinkActive       bool           // whether hoverLink is set
-	hoverLinkProbe        pathLinkProbeCache
-	hoverUrlLink          urlLinkRegion // URL link (markdown or raw) hovered in the transcript
-	hoverUrlLinkActive    bool          // whether hoverUrlLink is set
-	hoverUrlLinkProbe     urlLinkProbeCache
-	hoverDetailLink       pathLinkRegion // file-path link hovered in the agent-detail view
-	hoverDetailLinkActive bool           // whether hoverDetailLink is set
-	hoverDetailLinkProbe  pathLinkProbeCache
-	hoverPickerIdx        int // index of hovered picker row, -1 for none
-	hoverSlashIdx         int // index of hovered slash popup row, -1 for none
-	hoverTabIdx           int // index of hovered tab, -1 for none
-	rawInputLines         []string
-	rawInputLinesDirty    bool
-	inputThemeApplied     bool
-	inputThemeShellMode   bool
-	sidebarCache          *sidebarComputeCache
-	compactCh             chan agent.CompactResult
-	compactStartCh        chan struct{}
-	advisorCkptCh         chan advisorCheckpointMsg
+	chatSearchActive         bool
+	chatSearchInput          textinput.Model
+	chatSearchQuery          string
+	chatSearchMatches        []int
+	chatSearchCursor         int
+	chatSearchFlashMsg       int
+	chatSearchNoMatch        bool // true when the bar is open with a non-empty query that has zero matches; used for the inline counter styling
+	filesSel                 selectionState
+	inputSel                 selectionState
+	gitSel                   selectionState
+	sidebarSel               selectionState
+	rawSidebarLines          []string
+	sidebarSelIncludesHeader bool
+	statusSel                selectionState
+	statusRawLines           []string
+	statusPermColStart       int            // column where permission text starts on status line 0
+	statusPermColEnd         int            // column where permission text ends on status line 0
+	hoverSidebarFile         string         // file path hovered by mouse in sidebar, empty when no hover
+	hoverSidebarCWD          bool           // true when the mouse hovers the clickable "cwd:" sidebar row
+	hoverSidebarTitleGen     bool           // true when the mouse hovers the clickable "gen" title button
+	hoverLink                pathLinkRegion // file-path link hovered in the transcript
+	hoverLinkActive          bool           // whether hoverLink is set
+	hoverLinkProbe           pathLinkProbeCache
+	hoverUrlLink             urlLinkRegion // URL link (markdown or raw) hovered in the transcript
+	hoverUrlLinkActive       bool          // whether hoverUrlLink is set
+	hoverUrlLinkProbe        urlLinkProbeCache
+	hoverDetailLink          pathLinkRegion // file-path link hovered in the agent-detail view
+	hoverDetailLinkActive    bool           // whether hoverDetailLink is set
+	hoverDetailLinkProbe     pathLinkProbeCache
+	hoverPickerIdx           int // index of hovered picker row, -1 for none
+	hoverSlashIdx            int // index of hovered slash popup row, -1 for none
+	hoverTabIdx              int // index of hovered tab, -1 for none
+	rawInputLines            []string
+	rawInputLinesDirty       bool
+	inputThemeApplied        bool
+	inputThemeShellMode      bool
+	sidebarCache             *sidebarComputeCache
+	compactCh                chan agent.CompactResult
+	compactStartCh           chan struct{}
+	advisorCkptCh            chan advisorCheckpointMsg
 	// advisorCkptIdx is the transcript index of the "advisor reviewing…" line
 	// so the finish event can rewrite it in place instead of adding a second
 	// line. -1 when no checkpoint is in flight.
@@ -1942,6 +1968,117 @@ const (
 	sidebarMaxTitleLines = 3
 )
 
+const sidebarSelectionDragThreshold = 3
+
+type titleRect struct {
+	x int
+	y int
+	w int
+	h int
+}
+
+// titleLayout is the single geometry source for the sidebar title. Coordinates
+// are relative to the sidebar box: titleStartX/genButtonStartX are columns and
+// genButtonRow is relative to the first title row. Screen-Y translation belongs
+// to the mouse/layout helpers below.
+type titleLayout struct {
+	rows            int
+	genButtonRow    int
+	genButtonStartX int
+	genButtonBounds titleRect
+	titleStartX     int
+	titleRows       []string
+	wrappedLines    []string
+}
+
+func splitWrappedLines(text string) []string {
+	if text == "" {
+		return []string{""}
+	}
+	return strings.Split(text, "\n")
+}
+
+// reflowTitleFinalRow gives the gen button its fixed space without reducing
+// the normal title wrap width. Only the final full-width row is rewrapped; all
+// earlier rows retain the normal title width and no title text is discarded.
+func reflowTitleFinalRow(lines []string, width int, buttonWidth int) []string {
+	if len(lines) == 0 || width <= buttonWidth {
+		return lines
+	}
+	last := len(lines) - 1
+	if ansi.StringWidth(lines[last]) <= width-buttonWidth {
+		return lines
+	}
+	reflowed := splitWrappedLines(wordWrap(lines[last], width-buttonWidth))
+	result := make([]string, 0, last+len(reflowed))
+	result = append(result, lines[:last]...)
+	result = append(result, reflowed...)
+	return result
+}
+
+func titleRowEllipsis(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if width == 1 {
+		return "…"
+	}
+	return ansi.Truncate(line, width-1, "") + "…"
+}
+
+func (m model) sidebarTitleLayout() titleLayout {
+	title := m.sidebarDisplayTitle()
+	if title == "" && len(m.messages) == 0 {
+		return titleLayout{}
+	}
+
+	title = strings.ReplaceAll(title, "\n", " ")
+	const prefixWidth = 2 // visual width of "◆ "
+	const sidebarInnerStart = 2
+	titleWidth := sidebarColumnWidth - 4 - prefixWidth
+	buttonWidth := lipgloss.Width(sidebarTitleGenBtn)
+	fullLines := splitWrappedLines(wordWrap(title, titleWidth))
+	wrappedLines := reflowTitleFinalRow(fullLines, titleWidth, buttonWidth)
+	rows := wrappedLines
+	truncated := false
+	if !m.expandedTitle && len(rows) > sidebarMaxTitleLines {
+		rows = append([]string(nil), rows[:sidebarMaxTitleLines]...)
+		truncated = true
+	}
+
+	// The title owns the available sidebar height in expanded mode. This keeps
+	// the sidebar itself inside the terminal before the surrounding chat layout
+	// has a chance to apply its transcript safety net.
+	if m.height > 0 {
+		maxRows := m.height - appHeaderHeight - 2
+		if maxRows < 1 {
+			maxRows = 1
+		}
+		if len(rows) > maxRows {
+			rows = append([]string(nil), rows[:maxRows]...)
+			truncated = true
+		}
+	}
+	if truncated {
+		rows[len(rows)-1] = titleRowEllipsis(rows[len(rows)-1], titleWidth-buttonWidth)
+	}
+	if len(rows) == 0 {
+		rows = []string{""}
+	}
+
+	genRow := len(rows) - 1
+	genStart := sidebarColumnWidth - 2 - buttonWidth
+	return titleLayout{
+		rows:            len(rows),
+		genButtonRow:    genRow,
+		genButtonStartX: genStart,
+		genButtonBounds: titleRect{x: genStart, y: genRow, w: buttonWidth, h: 1},
+		titleStartX:     sidebarInnerStart + prefixWidth,
+		titleRows:       rows,
+		wrappedLines:    wrappedLines,
+	}
+}
+
 func (m *model) applyTheme() {
 	if m.config != nil && m.config.Ocode.TUI.Theme != "" {
 		m.styles = ApplyThemeColors(m.config.Ocode.TUI.Theme)
@@ -2004,6 +2141,13 @@ func (m *model) applyInputTheme() {
 func (m *model) toggleSidebar() {
 	m.showSidebar = !m.showSidebar
 	m.layout()
+	show := m.showSidebar
+	if m.config != nil {
+		m.config.Ocode.TUI.ShowSidebar = &show
+	}
+	if err := config.SaveOcodeTUIShowSidebar(show); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to persist sidebar visibility: %v (in-memory value still active for this session)", err)})
+	}
 }
 
 func (m *model) backgroundLatestForegroundBash() bool {
@@ -2101,7 +2245,7 @@ func (m *model) getInitialTools() ([]tool.Tool, *lsp.Manager) {
 		// build caches into the temp dir, racing t.TempDir cleanup. Servers still
 		// start lazily on first LSP-tool use; real runs are unaffected.
 		if !testing.Testing() {
-			go m.lspMgr.WarmUp(".")
+			crashguard.Go(func() { m.lspMgr.WarmUp(".") })
 		}
 	}
 	tools := tool.InitBuiltinTools(m.lspMgr, m.config, nil)
@@ -2183,6 +2327,11 @@ func newModel(opts ...RunOptions) model {
 		o = opts[0]
 	}
 	cfg, _ := config.Load()
+	// Seed the LLM harness identity from persisted config so /fake-agent
+	// survives restarts; per-request reads stay lock-free after this.
+	if cfg != nil {
+		agent.SyncHarnessFromConfig(cfg.Ocode.FakeAgent)
+	}
 	// Skills-as-slash (incl. Kaizen admit) need workDir + active model; use
 	// cwd + config model here before m is constructed. Re-refreshed below once
 	// m.workDir / m.activeModel are set, and again on /model or /cd.
@@ -2417,12 +2566,17 @@ func newModel(opts ...RunOptions) model {
 		// MCP tools load in the background (Init kicks off LoadMCPTools); the
 		// UI paints immediately and chat submission is gated on mcpReady until
 		// the enumeration completes (or when there is no agent / no MCP servers).
-		mcpReady:         (a == nil) || !hasEnabledMCPServers(cfg),
-		mcpLoading:       (a != nil) && hasEnabledMCPServers(cfg),
-		showThinking:     true,
-		soundEnabled:     true,
-		bellNotifier:     defaultBellNotifier,
-		showSidebar:      true,
+		mcpReady:     (a == nil) || !hasEnabledMCPServers(cfg),
+		mcpLoading:   (a != nil) && hasEnabledMCPServers(cfg),
+		showThinking: true,
+		soundEnabled: true,
+		bellNotifier: defaultBellNotifier,
+		showSidebar: func() bool {
+			if cfg != nil && cfg.Ocode.TUI.ShowSidebar != nil {
+				return *cfg.Ocode.TUI.ShowSidebar
+			}
+			return true
+		}(),
 		redactionEnabled: cfg != nil && cfg.Ocode.Security.Redaction.Enabled,
 		redactionModel: func() string {
 			if cfg != nil {
@@ -3358,6 +3512,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fileListCache = msg.items
 		m, _ = m.updateSlashPopupState()
 		return m, nil
+	case delayedChatInputMsg:
+		if msg.generation != m.delayedChatGeneration || !m.hasDelayedChatInput() {
+			return m, nil
+		}
+		text := m.takeDelayedChatInput()
+		if m.streaming {
+			m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemInput, text: text})
+			if m.agent != nil {
+				m.agent.EnqueueInjection(agent.Message{Role: "user", Content: text})
+			}
+			return m, nil
+		}
+		if m.compacting || len(m.pendingCompactUIIdx) > 0 {
+			m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemCompactInput, text: text})
+			return m, nil
+		}
+		return m, m.processFileReferences(text)
 	case fileSearchFinishedMsg:
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error processing files: %v", msg.err)})
@@ -4105,6 +4276,64 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text.WriteString(fmt.Sprintf("  %s %s [%s] — %s\n", icon, r.Name, r.State, r.Message))
 		}
 		text.WriteString("\nUse /plugin update <name> to update a plugin.")
+		m.messages = append(m.messages, message{role: roleAssistant, text: text.String()})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
+	case clitoolListMsg:
+		var b strings.Builder
+		pm := clitools.Manager()
+		if pm == "" {
+			pm = clitools.PackageManager("(none found)")
+		}
+		b.WriteString(fmt.Sprintf("CLI tools (platform: %s, package manager: %s):\n\n", runtime.GOOS, pm))
+		for _, st := range msg.statuses {
+			state, icon := "not installed", "○"
+			hint := fmt.Sprintf("      install with: /plugin tools %s\n", st.Tool.Name)
+			if st.Found {
+				state, icon = "installed", "●"
+				hint = ""
+			}
+			b.WriteString(fmt.Sprintf("  %s %-6s [%s]\n", icon, st.Tool.Name, state))
+			b.WriteString(fmt.Sprintf("      %s\n", st.Tool.Description))
+			if st.Found && st.Command != st.Tool.Name {
+				b.WriteString(fmt.Sprintf("      found as: %s\n", st.Command))
+			}
+			if hint != "" {
+				b.WriteString("      " + hint)
+			}
+		}
+		b.WriteString("\nInstall with: /plugin tools <name> (installs via the platform package manager)")
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
+	case clitoolInstalledMsg:
+		name := msg.name
+		res := msg.result
+		if res.Err != nil {
+			var text strings.Builder
+			text.WriteString(fmt.Sprintf("Install of %q failed: %v", name, res.Err))
+			if res.Output != "" {
+				text.WriteString("\n" + res.Output)
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: text.String()})
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, nil
+		}
+		var text strings.Builder
+		text.WriteString(fmt.Sprintf("Installed %s via %s.\n", res.Tool, res.Manager))
+		// Re-probe so the user sees the resolved command (may be an alias).
+		if tool, ok := clitools.FindTool(name); ok {
+			if cmd, ok := tool.Detect(); ok {
+				if cmd != tool.Name {
+					text.WriteString(fmt.Sprintf("Note: command is available as %q (not %q).\n", cmd, tool.Name))
+				}
+			} else {
+				text.WriteString("Note: install command succeeded but the binary is not on PATH yet — open a new shell or update PATH.\n")
+			}
+		}
+		if res.Output != "" {
+			text.WriteString("\n" + res.Output)
+		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: text.String()})
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
@@ -6159,6 +6388,13 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 
 		if strings.HasPrefix(text, "!") {
+			if m.hasDelayedChatInput() {
+				flush := m.processFileReferences(m.takeDelayedChatInput())
+				m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemCommand, text: text})
+				m.input.Reset()
+				m.layout()
+				return m, flush
+			}
 			if m.modelSwitchPending || m.sessionResetPending || m.replacementQueuePending {
 				m.input.Reset()
 				m.queueReplacementWork(queueItemCommand, text)
@@ -6268,7 +6504,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			return m, nil
 		}
 		m.input.Reset()
-		return m, m.processFileReferences(text)
+		return m, m.queueDelayedChatInput(text)
 	}
 
 	return m, tea.Batch(tiCmd, vpCmd)
@@ -7090,8 +7326,27 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			m.sidebarSel.dragging = false
 			if m.sidebarSel.active {
 				text := extractSelectionText(m.rawSidebarLines, m.sidebarSel.startLine, m.sidebarSel.startCol, m.sidebarSel.endLine, m.sidebarSel.endCol)
-				_ = clipboard.WriteAll(text)
+				if err := clipboard.WriteAll(text); err != nil {
+					log.Printf("sidebar copy failed: %v", err)
+				}
 				m.sidebarSel = selectionState{}
+				m.sidebarSelIncludesHeader = false
+				return m, nil, true
+			}
+			// The gen button is a dedicated target and must win over title
+			// selection/toggle handling.
+			if m.sidebarTitleGenForClick(mouse) {
+				m.sidebarSel = selectionState{}
+				m.sidebarSelIncludesHeader = false
+				if m.titleRegenerating {
+					return m, nil, true
+				}
+				return m, m.regenerateTitle(), true
+			}
+			if m.sidebarSelIncludesHeader && m.sidebarTitleForClick(mouse) {
+				m.expandedTitle = !m.expandedTitle
+				m.sidebarSel = selectionState{}
+				m.sidebarSelIncludesHeader = false
 				return m, nil, true
 			}
 			// Simple click (no drag): try to open a file at the click position,
@@ -7110,16 +7365,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			// Plain click on the "gen" button regenerates the session title from
 			// the latest task. A drag there still selects/copies text (the
 			// active branch above returns first).
-			if m.sidebarTitleGenForClick(mouse) {
-				m.sidebarSel = selectionState{}
-				if m.titleRegenerating {
-					return m, nil, true
-				}
-				return m, m.regenerateTitle(), true
-			}
 			if m.sidebarAllowedHeaderForClick(mouse) && m.agent != nil {
 				perm := m.agent.Permissions()
-				// Cycle: normal → normal·auto → yolo → locked → sandbox → normal
+				// Cycle: normal → normal·auto → yolo → locked → sandbox → sandbox·auto → normal
 				switch {
 				case perm.Mode() == agent.PermissionModeNormal && !perm.AutoPermissionEnabled():
 					perm.SetAutoPermissionEnabled(true)
@@ -7134,6 +7382,18 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 					m.permDirty.mode = true
 				case perm.Mode() == agent.PermissionModeLocked:
 					perm.SetMode(agent.PermissionModeSandbox)
+					m.permDirty.mode = true
+				case perm.Mode() == agent.PermissionModeSandbox && !perm.AutoPermissionEnabled():
+					// A second, sandbox-scoped stop mirroring normal·auto above —
+					// entering sandbox itself never touches AutoPermissionEnabled
+					// (Decision 9), this is a distinct cycle step the user can
+					// reach, not an automatic side effect of the mode change.
+					perm.SetAutoPermissionEnabled(true)
+					m.permDirty.autoEnabled = true
+				case perm.Mode() == agent.PermissionModeSandbox && perm.AutoPermissionEnabled():
+					perm.SetAutoPermissionEnabled(false)
+					m.permDirty.autoEnabled = true
+					perm.SetMode(agent.PermissionModeNormal)
 					m.permDirty.mode = true
 				default:
 					perm.SetMode(agent.PermissionModeNormal)
@@ -7322,7 +7582,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 		if mouse.Y >= statusTop && mouse.Y < statusTop+2 && mouse.X >= m.statusPermColStart && mouse.X < m.statusPermColEnd && mouse.Y == statusTop && m.agent != nil {
 			perm := m.agent.Permissions()
-			// Cycle: normal → normal·auto → yolo → locked → sandbox → normal
+			// Cycle: normal → normal·auto → yolo → locked → sandbox → sandbox·auto → normal
 			switch {
 			case perm.Mode() == agent.PermissionModeNormal && !perm.AutoPermissionEnabled():
 				perm.SetAutoPermissionEnabled(true)
@@ -7337,6 +7597,14 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.permDirty.mode = true
 			case perm.Mode() == agent.PermissionModeLocked:
 				perm.SetMode(agent.PermissionModeSandbox)
+				m.permDirty.mode = true
+			case perm.Mode() == agent.PermissionModeSandbox && !perm.AutoPermissionEnabled():
+				perm.SetAutoPermissionEnabled(true)
+				m.permDirty.autoEnabled = true
+			case perm.Mode() == agent.PermissionModeSandbox && perm.AutoPermissionEnabled():
+				perm.SetAutoPermissionEnabled(false)
+				m.permDirty.autoEnabled = true
+				perm.SetMode(agent.PermissionModeNormal)
 				m.permDirty.mode = true
 			default:
 				perm.SetMode(agent.PermissionModeNormal)
@@ -7660,7 +7928,28 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	// the button is recognized as a click rather than silently unhandled.
 	if pressed && m.sidebarTitleGenForClick(mouse) {
 		m.sidebarSel = selectionState{dragging: true}
+		m.sidebarSelIncludesHeader = false
 		return m, nil, true
+	}
+	if pressed && m.sidebarTitleForClick(mouse) {
+		raw, contentTopY := m.sidebarSelectableLinesWithHeader()
+		row := mouse.Y - contentTopY
+		if row >= 0 && row < len(raw) {
+			col := mouse.X - m.panelWidth() - 2
+			if col < 0 {
+				col = 0
+			}
+			m.rawSidebarLines = raw
+			m.sidebarSel = selectionState{
+				dragging:  true,
+				startLine: row,
+				startCol:  col,
+				endLine:   row,
+				endCol:    col,
+			}
+			m.sidebarSelIncludesHeader = true
+			return m, nil, true
+		}
 	}
 	// Sidebar text selection — always start dragging on press so a subsequent
 	// release can distinguish a simple click (no drag) from a selection drag.
@@ -7675,6 +7964,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			// Persist the on-screen buffer so release can extract the copied text
 			// (renderSidebar runs on a value copy and can't store it for us).
 			m.rawSidebarLines = raw
+			m.sidebarSelIncludesHeader = false
 			m.sidebarSel = selectionState{
 				dragging:  true,
 				startLine: row,
@@ -8026,7 +8316,10 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	}
 
 	if m.sidebarSel.dragging {
-		_, contentTopY := m.sidebarSelectableLines()
+		contentTopY := appHeaderHeight + 1
+		if !m.sidebarSelIncludesHeader {
+			_, contentTopY = m.sidebarSelectableLines()
+		}
 		row := mouse.Y - contentTopY
 		if row < 0 {
 			row = 0
@@ -8035,12 +8328,27 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 			row = len(m.rawSidebarLines) - 1
 		}
 		col := mouse.X - m.panelWidth()
+		if m.sidebarSelIncludesHeader {
+			col -= 2
+		}
 		if col < 0 {
 			col = 0
 		}
 		m.sidebarSel.endLine = row
 		m.sidebarSel.endCol = col
-		m.sidebarSel.active = m.sidebarSel.startLine != m.sidebarSel.endLine || m.sidebarSel.startCol != m.sidebarSel.endCol
+		startX := m.panelWidth() + m.sidebarSel.startCol
+		if m.sidebarSelIncludesHeader {
+			startX += 2
+		}
+		dx := mouse.X - startX
+		if dx < 0 {
+			dx = -dx
+		}
+		dy := mouse.Y - (contentTopY + m.sidebarSel.startLine)
+		if dy < 0 {
+			dy = -dy
+		}
+		m.sidebarSel.active = dx+dy >= sidebarSelectionDragThreshold
 		return m, nil, true
 	}
 
@@ -8220,6 +8528,17 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	// queue-decision below.
 	goalAlias := cmd == "/goal"
 	isExitCmd := cmd == "/exit" || cmd == "/quit" || cmd == "/q"
+	if cmd == "/new" || cmd == "/clear" || isExitCmd {
+		m.invalidateDelayedChatInput()
+	} else if m.hasDelayedChatInput() {
+		// Keep input order for commands invoked from the palette or other
+		// non-composer paths as well as commands submitted from the composer.
+		flush := m.processFileReferences(m.takeDelayedChatInput())
+		m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemCommand, text: text})
+		m.input.Reset()
+		m.layout()
+		return m, flush
+	}
 	if (m.modelSwitchPending || m.sessionResetPending ||
 		(m.replacementQueuePending && cmd != "/model" && cmd != "/new")) && !isExitCmd {
 		m.input.Reset()
@@ -8232,14 +8551,15 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	// Instant commands are local UI / config / auth actions that never need to
 	// wait for the current stream or compaction turn, so they can run immediately
 	// even while busy.
-	// /btw is deliberately NOT instant: it starts an independent side-query
-	// agent loop (its own client) on the shared workdir, and running it
-	// mid-stream would interleave a second concurrent LLM loop with the main
-	// turn — the popup also blocks input while open. Queued, it runs after
-	// the stream ends — naturally serialized. (Its child agent has its own
-	// client, so unlike the old shared-client version there is no OnDelta
-	// race; queuing is about stream interleaving and UI, not token leakage.)
+	// /btw is instant: it runs an independent side-query loop on its own
+	// child agent + client (Agent.AskLoopAsync), so it never touches the main
+	// turn's OnDelta/OnUsage callbacks and can run concurrently with an
+	// in-flight stream. The snapshot it sends may contain an assistant
+	// tool_call whose result has not landed yet; repairToolCallSequence
+	// synthesises a placeholder result before send, so the request stays
+	// valid. The popup blocks input only until dismissed.
 	isInstantCmd := cmd == "/model" || cmd == "/models" ||
+		cmd == "/btw" || cmd == "/by-the-way" ||
 		cmd == "/help" || cmd == "/thinking" || cmd == "/details" || cmd == "/sound" ||
 		cmd == "/login" ||
 		cmd == "/logout" ||
@@ -8276,6 +8596,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		// request, so they must remain usable mid-stream.
 		cmd == "/explorer-model" ||
 		cmd == "/context-model" ||
+		cmd == "/fake-agent" ||
 		cmd == "/goal"
 	// Agent status is a local inspection command and must remain usable while
 	// the stream is busy. Changing the persistent limit is deliberately queued,
@@ -8720,6 +9041,7 @@ func (m model) renderPluginList() string {
 	b.WriteString("  /plugin info <name>          — show plugin details\n")
 	b.WriteString("  /plugin sync [name]          — check sync status\n")
 	b.WriteString("  /plugin update [name]        — update plugin(s)\n")
+	b.WriteString("  /plugin tools [name]         — detect/install CLI utilities (fd, rg, fzf, eza, bat, grep)\n")
 	return strings.TrimRight(builtins.String()+b.String(), "\n")
 }
 
@@ -10429,6 +10751,7 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error loading session: %v", err)})
 		} else {
 			m.saveSession()
+			m.invalidateDelayedChatInput()
 			m.sessionID = sess.ID
 			m.sessionCreatedAt = sess.CreatedAt
 			if m.agent != nil {
@@ -10825,6 +11148,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	}
 
 	m.messages = []message{}
+	m.invalidateDelayedChatInput()
 	m.transcriptLines = nil
 	m.rawTranscriptLines = nil
 	m.urlLinkRegions = nil
@@ -11283,11 +11607,11 @@ func (m *model) runStreamingShell(command string, dir string, toolCallID string)
 	ch := make(chan string, 64)
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go streamPipeLines(stdout, ch, &wg)
-	go streamPipeLines(stderr, ch, &wg)
+	crashguard.Go(func() { streamPipeLines(stdout, ch, &wg) })
+	crashguard.Go(func() { streamPipeLines(stderr, ch, &wg) })
 
 	var runErr error
-	go func() {
+	crashguard.Go(func() {
 		defer cancel()
 		wg.Wait()
 		runErr = c.Wait()
@@ -11309,7 +11633,7 @@ func (m *model) runStreamingShell(command string, dir string, toolCallID string)
 			}
 		}
 		close(ch)
-	}()
+	})
 
 	// The streaming reader command: each invocation returns the next chunk, or
 	// the final shellFinishedMsg once the channel is closed (process done).
@@ -11984,10 +12308,10 @@ func (m *model) runInstaller(subcmd string, names []string) string {
 	// Drain the pipe concurrently so skill.Run never blocks on a full buffer.
 	var buf bytes.Buffer
 	drainDone := make(chan struct{})
-	go func() {
+	crashguard.Go(func() {
 		defer close(drainDone)
 		io.Copy(&buf, r) //nolint:errcheck — pipe read; errors surface as empty output
-	}()
+	})
 
 	runErr := skill.Run(args)
 	// Skills changed on disk (install/upgrade): drop cache so /<skill-name> sees updates.
@@ -13807,12 +14131,12 @@ func (m *model) enqueueAsyncSessionSave(id, title string, msgs []agent.Message, 
 	}
 	wg := m.ensurePendingSavesWG()
 	wg.Add(1)
-	go func() {
+	crashguard.Go(func() {
 		defer wg.Done()
 		if err := session.Flush(id, 30*time.Second); err != nil {
 			log.Printf("async save session %s: flush: %v", id, err)
 		}
-	}()
+	})
 }
 
 func (m *model) waitForPendingSaves(timeout time.Duration) {
@@ -13820,10 +14144,10 @@ func (m *model) waitForPendingSaves(timeout time.Duration) {
 		return
 	}
 	done := make(chan struct{})
-	go func() {
+	crashguard.Go(func() {
 		m.pendingSavesWG.Wait()
 		close(done)
-	}()
+	})
 	select {
 	case <-done:
 	case <-time.After(timeout):
@@ -14270,11 +14594,11 @@ func (m *model) recordUsage(am agent.Message) {
 	}
 
 	// Write asynchronously to avoid blocking the chat
-	go func() {
+	crashguard.Go(func() {
 		if err := usage.RecordUsage(time.Now(), model, "", promptTokens, completionTokens, cacheReadTokens, totalTokens, spend); err != nil {
 			log.Printf("usage: record: %v", err)
 		}
-	}()
+	})
 }
 
 func parsePermissionRequest(content string) (agent.PermissionRequest, bool) {
@@ -14654,15 +14978,13 @@ func (m *model) persistPermissions() {
 		}
 	}
 	if m.permDirty.mode {
-		persistMode := string(pm.Mode())
-		if pm.Mode() == agent.PermissionModeSandbox {
-			// Sandbox is a deliberate per-session opt-in (Decision 2): it must
-			// never be written as the durable default. The live agent stays
-			// sandboxed; only the on-disk mode field is clamped to normal so a
-			// restart / fresh agent / cron job starts unconfined.
-			persistMode = string(agent.PermissionModeNormal)
-		}
-		if err := config.SavePermissionModeSwitch(persistMode); err != nil {
+		// Decision 2 (docs/superpowers/plans/2026-08-31-shell-sandbox/INDEX.md)
+		// previously clamped sandbox to normal here so it could never become
+		// the durable default. That has been superseded: sandbox now persists
+		// like any other mode. Cron jobs are unaffected — they resolve their
+		// own per-job permission mode independently of this config field
+		// (internal/server/scheduler_runner.go resolveCronPermissionMode).
+		if err := config.SavePermissionModeSwitch(string(pm.Mode())); err != nil {
 			errs = append(errs, "mode: "+err.Error())
 		} else {
 			m.permDirty.mode = false
@@ -14918,7 +15240,7 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 	a := m.agent
 	epoch := m.agentEpoch
 	pending := []deltaEvent{}
-	go func() {
+	crashguard.Go(func() {
 		// Panic recovery: if a.Step (or any callback) panics, the goroutine
 		// would otherwise exit without closing msgCh or writing errCh, leaving
 		// waitStreamEvent blocked forever on <-msgCh / <-errCh — a permanent
@@ -15064,7 +15386,7 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 		a.SetPreloadedContext("")
 		close(msgCh)
 		errCh <- err
-	}()
+	})
 	return tea.Batch(
 		func() tea.Msg { return streamStartedMsg{cancel: cancel, epoch: epoch} },
 		m.waitStreamEventWithEpoch(msgCh, deltaCh, errCh, cancel, epoch, &pending),
@@ -15277,7 +15599,7 @@ func tailscaleExpose(tailscalePath, cmd, target, pathPrefix string) (string, *ex
 
 	// Wait in background so the process is reaped; capture exit code.
 	done := make(chan error, 1)
-	go func() { done <- serveCmd.Wait() }()
+	crashguard.Go(func() { done <- serveCmd.Wait() })
 
 	// Give it a moment to output the URL, then parse.
 	select {
@@ -16742,6 +17064,7 @@ func (m *model) transcriptHiddenCount() int {
 // from scratch. Called on /new, /clear, and session-load paths where the
 // message list is rebuilt rather than appended to.
 func (m *model) resetTranscriptWindow() {
+	m.resetSidebarTitleState()
 	m.transcriptWindowStart = 0
 	m.transcriptWindowInit = false
 	m.transcriptRenderedLen = 0
@@ -17832,6 +18155,10 @@ func (m *model) wireCompactCallbacks() {
 	if m.agent == nil {
 		return
 	}
+	// Child (sub-agent) sessions: same live async save the TUI uses for its
+	// own transcript (session.SaveAsync resolves the /cd-aware storage dir).
+	// Called per streamed sub-agent message plus once at completion.
+	m.agent.SetChildSessionPersistence(session.SaveAsync)
 	startCh := m.compactStartCh
 	doneCh := m.compactCh
 	m.agent.OnCompactStart = func() {
@@ -19827,9 +20154,21 @@ func (m model) renderStoppedIndicator() string {
 }
 
 func (m model) renderQueueRow() string {
-	if len(m.queuedItems) == 0 {
-		return ""
+	pendingText := ""
+	if m.hasDelayedChatInput() {
+		pendingText = fmt.Sprintf(" Pending (%d): waiting to consolidate", len(m.delayedChatInputs))
 	}
+	if len(m.queuedItems) == 0 {
+		if pendingText == "" {
+			return ""
+		}
+		return m.styles.Status.Width(m.statusContentWidth()).MaxHeight(1).Render(pendingText)
+	}
+
+	if pendingText != "" {
+		pendingText += " ·"
+	}
+
 	items := make([]string, 0, len(m.queuedItems))
 	hasCompact := false
 	for i, item := range m.queuedItems {
@@ -19845,6 +20184,7 @@ func (m model) renderQueueRow() string {
 	} else {
 		text = fmt.Sprintf(" Queued (%d): %s", len(m.queuedItems), strings.Join(items, " | "))
 	}
+	text = pendingText + text
 	// Clamp to a single line so a long queue can't wrap and push the bottom
 	// chrome past the terminal height.
 	w := m.statusContentWidth()
@@ -20682,40 +21022,14 @@ func (m model) renderSidebar() string {
 		data.topLines[data.cwdTopIdx] = data.cwdLabel + hoverStyle.Render(data.cwdPath)
 	}
 
-	title := m.sidebarDisplayTitle()
+	layout := m.sidebarTitleLayout()
 	var header string
-	// Render header whenever there is a display title, or when the session has
-	// any messages (so the gen button stays visible even for slash-only
-	// sessions where the display title is intentionally empty).
-	shouldRenderHeader := title != "" || len(m.messages) > 0
-	if shouldRenderHeader {
-		// Collapse newlines so a multi-line title wraps cleanly.
-		title = strings.ReplaceAll(title, "\n", " ")
+	if layout.rows > 0 {
 		innerWidth := sidebarColumnWidth - 4
-		btnW := lipgloss.Width(sidebarTitleGenBtn)
-		// Wrap the FULL title across up to sidebarMaxTitleLines rows so the
-		// entire title is visible (no mid-word "…" cut-off). The gen button
-		// rides the LAST row, right-aligned, so it never steals width from the
-		// text on the rows above it.
-		// Reserve the "◆ " / indent prefix width (2 cols) added to every row
-		// below — otherwise a fully-packed wrapped row plus prefix overflows the
-		// bordered box by 2 cols, and lipgloss silently wraps that overflow onto
-		// a phantom extra line, desyncing the on-screen row count from
-		// sidebarHeaderHeight() (breaking the gen-button hit-test for any title
-		// spanning more than one line).
-		prefixW := ansi.StringWidth("◆ ")
-		wrapped := wordWrap(title, innerWidth-prefixW)
-		rows := strings.Split(wrapped, "\n")
-		overflow := len(rows) > sidebarMaxTitleLines
-		if overflow {
-			rows = rows[:sidebarMaxTitleLines]
-		}
+		prefixWidth := ansi.StringWidth("◆ ")
+		btnWidth := lipgloss.Width(sidebarTitleGenBtn)
 		btnStyle := sidebarAccentStyle.Copy()
-		btnLabel := sidebarTitleGenBtn
 		if m.titleRegenerating {
-			// Blink the button in place (same width) while a generation is in
-			// flight, so a rapid re-click reads as "already running" rather
-			// than "did my click register?".
 			if m.dotFrame%2 == 0 {
 				btnStyle = btnStyle.Faint(true)
 			} else {
@@ -20724,37 +21038,27 @@ func (m model) renderSidebar() string {
 		} else if m.hoverSidebarTitleGen {
 			btnStyle = btnStyle.Underline(true)
 		}
-		for i := range rows {
-			// "◆ " prefix on the first row; continuation rows align under the
-			// title text (past the 2-col prefix width).
+
+		rows := make([]string, 0, layout.rows)
+		for i, titleRow := range layout.titleRows {
+			prefix := strings.Repeat(" ", prefixWidth)
 			if i == 0 {
-				rows[i] = sidebarHeaderStyle.Render("◆ ") + m.styles.Header.Render(rows[i])
-			} else {
-				rows[i] = strings.Repeat(" ", ansi.StringWidth("◆ ")) + m.styles.Header.Render(rows[i])
+				prefix = sidebarHeaderStyle.Render("◆ ")
 			}
+			row := prefix + m.styles.Header.Render(titleRow)
+			if i == layout.genButtonRow {
+				pad := innerWidth - prefixWidth - lipgloss.Width(titleRow) - btnWidth
+				if pad < 0 {
+					pad = 0
+				}
+				row += strings.Repeat(" ", pad) + btnStyle.Render(sidebarTitleGenBtn)
+			}
+			rows = append(rows, row)
 		}
-		// Reserve btnW columns on the last row for the gen button. If the title
-		// spilled past the 3-line budget, mark the final row with "…".
-		last := len(rows) - 1
-		if overflow {
-			rows[last] = ansi.Truncate(rows[last], innerWidth-btnW-ansi.StringWidth("…"), "…")
-		} else {
-			rows[last] = ansi.Truncate(rows[last], innerWidth-btnW, "…")
-		}
-		// Right-align the button within innerWidth so the visual position
-		// matches the far-right hit-box used by sidebarTitleGenForClick.
-		// Without padding a short title like "Untitled" leaves the button
-		// flush after the title on the left, while the hit-box stays at
-		// innerRight — the click then lands on empty padding and looks dead.
-		pad := innerWidth - lipgloss.Width(rows[last]) - btnW
-		if pad < 0 {
-			pad = 0
-		}
-		rows[last] = rows[last] + strings.Repeat(" ", pad) + btnStyle.Render(btnLabel)
 		header = strings.Join(rows, "\n")
 	}
 
-	headerHeight := lipgloss.Height(header)
+	headerHeight := layout.rows
 	effectiveHeaderHeight := maxInt(1, headerHeight)
 	// The sidebar column renders BELOW the app header (appHeaderHeight rows),
 	// so its total height budget is m.height - appHeaderHeight. Omitting that
@@ -20764,8 +21068,15 @@ func (m model) renderSidebar() string {
 	// pinned bottom lines. sidebarScrollBoxHeight / sidebarScreenLayout /
 	// sidebarVisibleScrollLines mirror this budget — keep them in lockstep.
 	contentHeight := m.height - appHeaderHeight - 2 - effectiveHeaderHeight
-	if contentHeight < 1 {
-		contentHeight = 1
+	if contentHeight < 0 {
+		contentHeight = 0
+	}
+	if contentHeight == 0 {
+		// Expanded titles are prioritized on short terminals. Do not let pinned
+		// body rows push the sidebar past the terminal boundary.
+		data.topLines = nil
+		data.scrollLines = nil
+		data.bottomLines = nil
 	}
 
 	// Reserve space for topLines and bottomLines, rest goes to scrollBox.
@@ -20803,36 +21114,51 @@ func (m model) renderSidebar() string {
 		}
 	}
 	// User requested no border/padding on Git/Files/TODO/Tools (2026-05-25)
-	scrollContent := strings.Join(visible, "\n")
-	scrollBox := lipgloss.NewStyle().
-		Width(sidebarColumnWidth - 4).
-		Render(constrainView(scrollContent, sidebarColumnWidth-4, visibleScrollLines))
+	var scrollBox string
+	if visibleScrollLines > 0 {
+		scrollContent := strings.Join(visible, "\n")
+		scrollBox = lipgloss.NewStyle().
+			Width(sidebarColumnWidth - 4).
+			Render(constrainView(scrollContent, sidebarColumnWidth-4, visibleScrollLines))
+	}
 
 	// Compose the full on-screen column (pinned top + scroll viewport + pinned
 	// bottom) and apply the selection highlight in screen-row space so any
 	// sidebar text — not just the scroll section — can be highlighted/copied.
 	// These indices match sidebarSelectableLines used by the mouse handlers.
-	allLines := append([]string{}, data.topLines...)
-	allLines = append(allLines, strings.Split(scrollBox, "\n")...)
-	allLines = append(allLines, data.bottomLines...)
+	headerLines := []string{}
+	if header != "" {
+		headerLines = strings.Split(header, "\n")
+	}
+	bodyLines := append([]string{}, data.topLines...)
+	if scrollBox != "" {
+		bodyLines = append(bodyLines, strings.Split(scrollBox, "\n")...)
+	}
+	bodyLines = append(bodyLines, data.bottomLines...)
+	if len(bodyLines) > contentHeight {
+		bodyLines = strings.Split(constrainViewPreservingBottom(strings.Join(bodyLines, "\n"), sidebarColumnWidth-4, contentHeight, len(data.bottomLines)), "\n")
+		if contentHeight == 0 {
+			bodyLines = nil
+		}
+	}
+	allLines := append(append([]string{}, headerLines...), bodyLines...)
 	if m.sidebarSel.active {
 		rawAll := make([]string, len(allLines))
 		for i, line := range allLines {
 			rawAll[i] = stripANSI(line)
 		}
 		sl, sc, el, ec := normaliseSelection(m.sidebarSel.startLine, m.sidebarSel.startCol, m.sidebarSel.endLine, m.sidebarSel.endCol)
+		if !m.sidebarSelIncludesHeader {
+			sl += len(headerLines)
+			el += len(headerLines)
+		}
 		allLines = applySelectionHighlight(allLines, rawAll, sl, sc, el, ec)
 	}
 	sections := strings.Join(allLines, "\n")
-
-	// Only constrain if needed and prefer to keep bottom lines
-	if len(allLines) > contentHeight {
-		sections = constrainViewPreservingBottom(sections, sidebarColumnWidth-4, contentHeight, len(data.bottomLines))
-	}
 	return borderStyle.
 		BorderForeground(headerStyle.GetForeground()).
 		Width(sidebarColumnWidth).
-		Render(header + "\n" + sections)
+		Render(sections)
 }
 
 func (m model) sidebarScrollBoxHeight(data sidebarRenderData, headerHeight int) int {
@@ -20874,10 +21200,14 @@ func (m model) sidebarScreenLayout(data sidebarRenderData) sidebarScreenLayout {
 	// First sections row sits below the app header, the sidebar's top border, and
 	// the sidebar header line(s) — the same Y renderSidebar composes from.
 	contentTopY := appHeaderHeight + 1 + effectiveHeaderHeight
-	contentHeight := maxInt(1, m.height-appHeaderHeight-2-effectiveHeaderHeight)
+	contentHeight := max(0, m.height-appHeaderHeight-2-effectiveHeaderHeight)
 	visibleScroll := m.sidebarVisibleScrollLines(data, headerHeight)
 	top := len(data.topLines)
 	bottom := len(data.bottomLines)
+	if contentHeight == 0 {
+		top = 0
+		bottom = 0
+	}
 
 	topCount, scrollCount := top, visibleScroll
 	if top+visibleScroll+bottom > contentHeight {
@@ -20913,7 +21243,6 @@ func (m model) sidebarVisibleScrollLines(data sidebarRenderData, headerHeight in
 	return minInt(scrollBoxHeight, spaceForScroll)
 }
 
-// sidebarHeaderHeight returns the number of rows (1..sidebarMaxTitleLines) the
 // sidebarDisplayTitle returns the text shown in the sidebar title row: the
 // session title if set, else the first user prompt as a fallback, else a
 // neutral "Untitled" placeholder only for a genuinely empty session (no
@@ -20936,32 +21265,75 @@ func (m model) sidebarDisplayTitle() string {
 	return title
 }
 
-// sidebarHeaderHeight returns the number of rows (1..sidebarMaxTitleLines) the
-// wrapped session title occupies in the sidebar header. It mirrors the wrap
-// performed in renderSidebar so layout, the selectable-line map, and the
-// gen-button hit-test all agree on the header's on-screen height. When the
-// display title is empty but the session has messages (e.g. slash-only),
-// a one-row header is still reserved so the "✦ gen" button remains visible
-// and clickable — title text is just empty.
+func (m *model) resetSidebarTitleState() {
+	m.expandedTitle = false
+	m.sidebarSel = selectionState{}
+	m.sidebarSelIncludesHeader = false
+	m.rawSidebarLines = nil
+}
+
 func (m model) sidebarHeaderHeight() int {
-	title := m.sidebarDisplayTitle()
-	if title == "" {
-		if len(m.messages) > 0 {
-			return 1
+	return m.sidebarTitleLayout().rows
+}
+
+func (m model) sidebarTitleForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) {
+		return false
+	}
+	layout := m.sidebarTitleLayout()
+	if layout.rows == 0 {
+		return false
+	}
+	relY := mouse.Y - (appHeaderHeight + 1)
+	return relY >= 0 && relY < layout.rows &&
+		mouse.X >= m.panelWidth()+layout.titleStartX-ansi.StringWidth("◆ ") &&
+		mouse.X < m.panelWidth()+layout.genButtonStartX
+}
+
+func (m model) sidebarSelectableLinesWithHeader() (raw []string, contentTopY int) {
+	data := m.buildSidebarRenderData()
+	layout := m.sidebarTitleLayout()
+	if m.height > 0 && m.height-appHeaderHeight-2-max(1, layout.rows) <= 0 {
+		return append([]string(nil), layout.titleRows...), appHeaderHeight + 1
+	}
+	visibleScroll := m.sidebarVisibleScrollLines(data, layout.rows)
+	scrollOffset := clampInt(m.sidebarScroll, 0, maxInt(0, len(data.scrollLines)-visibleScroll))
+	visible := sliceLines(data.scrollLines, scrollOffset, visibleScroll)
+
+	contentTopY = appHeaderHeight + 1
+	raw = make([]string, 0, layout.rows+len(data.topLines)+visibleScroll+len(data.bottomLines))
+	innerWidth := sidebarColumnWidth - 4
+	prefixWidth := ansi.StringWidth("◆ ")
+	buttonWidth := lipgloss.Width(sidebarTitleGenBtn)
+	for i, line := range layout.titleRows {
+		prefix := strings.Repeat(" ", prefixWidth)
+		if i == 0 {
+			prefix = "◆ "
 		}
-		return 0
+		row := prefix + line
+		if i == layout.genButtonRow {
+			pad := innerWidth - prefixWidth - ansi.StringWidth(line) - buttonWidth
+			if pad < 0 {
+				pad = 0
+			}
+			row += strings.Repeat(" ", pad) + sidebarTitleGenBtn
+		}
+		raw = append(raw, row)
 	}
-	title = strings.ReplaceAll(title, "\n", " ")
-	// Reserve the "◆ " / indent prefix width (2 cols) that renderSidebar adds to
-	// every wrapped row on top of this wrap — otherwise the prefixed row is 2
-	// cols wider than the bordered box, and lipgloss silently wraps the overflow
-	// onto a phantom extra line the caller never accounts for.
-	wrapped := wordWrap(title, sidebarColumnWidth-4-ansi.StringWidth("◆ "))
-	n := len(strings.Split(wrapped, "\n"))
-	if n > sidebarMaxTitleLines {
-		return sidebarMaxTitleLines
+	for _, line := range data.topLines {
+		raw = append(raw, stripANSI(line))
 	}
-	return n
+	for i := 0; i < visibleScroll; i++ {
+		if i < len(visible) {
+			raw = append(raw, stripANSI(visible[i]))
+		} else {
+			raw = append(raw, "")
+		}
+	}
+	for _, line := range data.bottomLines {
+		raw = append(raw, stripANSI(line))
+	}
+	return raw, contentTopY
 }
 
 // sidebarSelectableLines returns the ANSI-stripped sidebar lines exactly as laid
@@ -21132,20 +21504,17 @@ func (m model) sidebarCWDForClick(mouse tea.Mouse) (string, bool) {
 // session via the "Untitled" placeholder, or for slash-only sessions via an
 // empty-title row that still reserves the hitbox.
 func (m model) sidebarTitleGenForClick(mouse tea.Mouse) bool {
-	if !m.mouseOverSidebar(mouse) || m.sidebarHeaderHeight() == 0 {
+	if !m.mouseOverSidebar(mouse) {
 		return false
 	}
-	// The header occupies rows appHeaderHeight+1 .. appHeaderHeight+headerLines;
-	// the gen button rides the LAST header row. The button occupies the last
-	// btnW columns of the inner content area — the sidebar starts at
-	// panelWidth(), with a 1-col border + 1-col padding, so inner content runs
-	// from panelWidth()+2 to panelWidth()+sidebarColumnWidth-2.
-	if mouse.Y != appHeaderHeight+m.sidebarHeaderHeight() {
+	layout := m.sidebarTitleLayout()
+	if layout.rows == 0 {
 		return false
 	}
-	innerRight := m.panelWidth() + sidebarColumnWidth - 2
-	btnW := lipgloss.Width(sidebarTitleGenBtn)
-	return mouse.X >= innerRight-btnW && mouse.X < innerRight
+	boxTopY := appHeaderHeight + 1
+	return mouse.Y == boxTopY+layout.genButtonBounds.y &&
+		mouse.X >= m.panelWidth()+layout.genButtonBounds.x &&
+		mouse.X < m.panelWidth()+layout.genButtonBounds.x+layout.genButtonBounds.w
 }
 
 // sidebarAllowedHeaderForClick returns true when the click lands on the
@@ -22852,7 +23221,11 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		cronCh := make(chan server.CronDelivery, 8)
 		m.cronDeliveryCh = cronCh
 
-		addr := fmt.Sprintf("localhost:%d", port)
+		networkIP := network.GetIP()
+		if networkIP == "localhost" {
+			networkIP = "127.0.0.1"
+		}
+		addr := fmt.Sprintf("%s:%d", networkIP, port)
 		srv := server.New(addr, "ocode", token, m.webFS)
 		srv.SetWorkDir(m.workDir)
 
@@ -22872,11 +23245,8 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		// main listener; this also keeps local-dev navigation working when
 		// the UI is opened through /rc. Chrome options come from the ocode
 		// config; a load failure keeps defaults.
-		rcBrowseOpts := &server.BrowseOptions{Supervisor: srv.ProcessSupervisor()}
-		if ocfg, err := config.LoadOcodeConfigCopy(); err == nil && ocfg != nil {
-			rcBrowseOpts.ChromePath = ocfg.Browser.ChromePath
-			rcBrowseOpts.IdleTimeoutMinutes = ocfg.Browser.IdleTimeoutMinutes
-		}
+		rcBrowseOpts := server.LoadBrowseOptions(srv.ProcessSupervisor())
+
 		if err := server.StartBrowse(srv, token, "http://"+ln.Addr().String(), rcBrowseOpts); err != nil {
 			_ = ln.Close()
 			return message{role: roleAssistant, text: fmt.Sprintf("Failed to start remote control browser: %v", err)}
@@ -22887,11 +23257,11 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		m.rcLn = ln
 
 		// Start the server in a goroutine using the actual bound port.
-		go func() {
+		crashguard.Go(func() {
 			if err := srv.Serve(ln); err != nil {
 				log.Printf("RC server error: %v", err)
 			}
-		}()
+		})
 
 		boundAddr := srv.Addr()
 
@@ -22915,7 +23285,7 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 				log.Printf("rc: register instance: %v", err)
 			}
 			m.rcHBStop = make(chan struct{})
-			go m.rcHeartbeat(id)
+			crashguard.Go(func() { m.rcHeartbeat(id) })
 		} else {
 			log.Printf("rc: generate instance id: %v", err)
 		}
@@ -22943,7 +23313,7 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		}
 		m.rcTailscaleURL = tailscaleURL
 
-		go openBrowser(url)
+		crashguard.Go(func() { openBrowser(url) })
 
 		return rcStartedMsg{url: url, tailscaleURL: tailscaleURL, setupHint: setupHint, bridge: bridge}
 	}
@@ -23107,7 +23477,7 @@ func (m *model) startIDEClient() *ideStartedMsg {
 	ch := make(chan ide.Update, 16)
 	client := ide.NewClient(lock, ch)
 	ctx, cancel := context.WithCancel(context.Background())
-	go client.Run(ctx)
+	crashguard.Go(func() { client.Run(ctx) })
 	return &ideStartedMsg{ch: ch, client: client, cancel: cancel}
 }
 

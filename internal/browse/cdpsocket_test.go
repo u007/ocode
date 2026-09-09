@@ -222,6 +222,8 @@ func (m *fakeManager) Close(_ context.Context) error {
 	return nil
 }
 
+func (m *fakeManager) SetScreencastQuality(_ int) {}
+
 func (m *fakeManager) sinkFor(key string) cdp.FrameSink {
 	m.mu.Lock()
 	defer m.mu.Unlock()

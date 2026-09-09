@@ -69,6 +69,41 @@ describe("routeBusEnvelope", () => {
     vi.useRealTimers();
   });
 
+  // Snapshot-before-SSE race on a brand-new session: POST /api/chat persists
+  // the user message to disk BEFORE returning 202, and the tab's rekey makes
+  // ChatPanel fetch that snapshot while the agent is still bootstrapping. The
+  // later `user_message` echo must not append a second copy. Both copies
+  // carry the same durable user_seq (server stamps it identically), which is
+  // the dedup identity — plain content equality would conflate two
+  // legitimate identical consecutive messages.
+  it("does not append a user_message echo already present by user_seq", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    router.dispatch({
+      type: "MERGE_SNAPSHOT",
+      sessionId: "s1",
+      messages: [{ role: "user", content: "hi", user_seq: 1 }],
+      total: 1,
+    });
+    routeBusEnvelope(env("user_message", { data: { content: "hi", user_seq: 1 } }), router);
+    const slice = getState().sessions["s1"];
+    expect(slice.messages).toHaveLength(1);
+    expect(slice.isStreaming).toBe(true);
+  });
+
+  it("still appends identical consecutive user messages with distinct user_seq", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("user_message", { data: { content: "again", user_seq: 1 } }), router);
+    routeBusEnvelope(env("user_message", { data: { content: "again", user_seq: 2 } }), router);
+    expect(getState().sessions["s1"].messages).toHaveLength(2);
+  });
+
+  it("never dedupes a legacy user_message without user_seq", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("user_message", { data: { content: "x" } }), router);
+    routeBusEnvelope(env("user_message", { data: { content: "x" } }), router);
+    expect(getState().sessions["s1"].messages).toHaveLength(2);
+  });
+
   // Guards the fix for the desktop-app CPU spike: a reasoning stream can
   // emit far more, smaller deltas than plain text — without coalescing, each
   // one dispatched (and re-rendered) individually. See TODO.md's TUI

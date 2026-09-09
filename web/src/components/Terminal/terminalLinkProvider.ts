@@ -113,7 +113,7 @@ function computeFileLinks(
   return result;
 }
 
-export function registerFileLinkProvider(terminal: Terminal, projectPath: string | undefined) {
+export function registerFileLinkProvider(terminal: Terminal, projectPath: string | undefined, guard?: () => boolean) {
   if (typeof (terminal as unknown as { registerLinkProvider?: unknown }).registerLinkProvider !== "function") {
     return { dispose() {} };
   }
@@ -125,6 +125,7 @@ export function registerFileLinkProvider(terminal: Terminal, projectPath: string
         baseRegex,
         terminal,
         (_e, text) => {
+          if (guard && guard()) return;
           const { path, line } = splitPathToken(text);
           const detail: OpenFileDetail = { path, line };
           if (projectPath) detail.projectRoot = projectPath;

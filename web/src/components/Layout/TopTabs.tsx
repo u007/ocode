@@ -6,6 +6,8 @@ import SyncStatusWidget from "./SyncStatusWidget";
 import { useProjectState } from "../../stores/projectStore";
 import { loadProjectTerminals } from "../Terminal/terminalPersistence";
 import { basename } from "@/lib/utils";
+import { api } from "@/api/client";
+import { eventBus } from "@/lib/eventBus";
 
 interface Props {
   activeTab: string;
@@ -57,6 +59,47 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
   const tabsRef = useRef<HTMLDivElement | null>(null);
   const activeRef = useRef<HTMLButtonElement | null>(null);
   const [overflowing, setOverflowing] = useState(false);
+
+  // Git working-tree counts for the active project. Lightweight
+  // GET /api/git/status poll (staged_files + changed_files, untracked
+  // included since the backend fix) plus instant refresh on the
+  // server-push `git_status` bus event — same wording as GitPanel's
+  // "N staged · M unstaged" header so the tab badge always matches.
+  const [gitStaged, setGitStaged] = useState(0);
+  const [gitUnstaged, setGitUnstaged] = useState(0);
+  useEffect(() => {
+    if (!activeProjectPath) {
+      setGitStaged(0);
+      setGitUnstaged(0);
+      return;
+    }
+    let cancelled = false;
+    const fetchCounts = async () => {
+      try {
+        const status = await api.getGitStatus(activeProjectPath);
+        if (cancelled) return;
+        setGitStaged(status.staged_files?.length ?? 0);
+        setGitUnstaged(status.changed_files?.length ?? 0);
+      } catch {
+        if (!cancelled) {
+          setGitStaged(0);
+          setGitUnstaged(0);
+        }
+      }
+    };
+    fetchCounts();
+    const interval = setInterval(fetchCounts, 10000);
+    const off = eventBus.on("git_status", (env) => {
+      if (!env.project || env.project === activeProjectPath) fetchCounts();
+    });
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      off();
+    };
+  }, [activeProjectPath]);
+  const gitTotal = gitStaged + gitUnstaged;
+  const gitTitle = `${gitStaged} staged · ${gitUnstaged} unstaged`;
 
   // Detect whether the tab strip overflows its container so the "More" menu
   // can be shown. Re-measured on resize.
@@ -123,6 +166,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
           const count = tab.id === "sessions" ? sessionsCount + terminalCount : undefined;
+          const gitCount = tab.id === "git" && gitTotal > 0 ? gitTotal : undefined;
           return (
             <TabsTrigger
               key={tab.id}
@@ -140,6 +184,15 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
                   aria-label={`${tab.label} count ${count}`}
                 >
                   {count}
+                </span>
+              )}
+              {gitCount !== undefined && (
+                <span
+                  title={gitTitle}
+                  className="inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full text-xs font-semibold leading-none bg-muted text-foreground"
+                  aria-label={`Git count ${gitCount}`}
+                >
+                  {gitCount}
                 </span>
               )}
             </TabsTrigger>
@@ -161,6 +214,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
               {mainTabs.map((tab) => {
                 const Icon = tab.icon;
                 const count = tab.id === "sessions" ? sessionsCount + terminalCount : undefined;
+                const gitCount = tab.id === "git" && gitTotal > 0 ? gitTotal : undefined;
                 return (
                   <SelectItem key={tab.id} value={tab.id}>
                     <span className="flex items-center gap-2">
@@ -169,6 +223,14 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
                       {count !== undefined && (
                         <span className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-accent text-[10px] font-semibold text-accent-foreground">
                           {count}
+                        </span>
+                      )}
+                      {gitCount !== undefined && (
+                        <span
+                          title={gitTitle}
+                          className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-accent text-[10px] font-semibold text-accent-foreground"
+                        >
+                          {gitCount}
                         </span>
                       )}
                     </span>

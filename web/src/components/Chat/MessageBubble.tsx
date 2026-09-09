@@ -11,7 +11,7 @@ import { ThinkingBlock, ToolBlock } from "./TurnParts";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
 import { dispatchRestore } from "../../lib/inputRestore";
-import { RotateCcw } from "lucide-react";
+import { RotateCcw, Volume2 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -21,6 +21,8 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Button } from "../ui/button";
+import { openExternalURL } from "../../lib/externalLinks";
+import { requestSpeech } from "../Speech/SpeechProvider";
 
 interface Props {
   message: Message;
@@ -39,11 +41,11 @@ interface Props {
 
 // AssistantText renders markdown assistant output. Shared by committed messages
 // and the live text stream so rendering stays consistent.
-export function AssistantText({ content }: { content: string }) {
+export function AssistantText({ content, onSpeak }: { content: string; onSpeak?: () => void }) {
   return (
     <div className="flex justify-start mb-3">
       <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-muted text-foreground">
-        <div className="prose prose-invert prose-sm max-w-none text-sm">
+        <div className="relative prose prose-invert prose-sm max-w-none text-sm">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeFileLinks]}
@@ -112,6 +114,11 @@ export function AssistantText({ content }: { content: string }) {
                   href={href}
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={(event) => {
+                    if (!href) return;
+                    event.preventDefault();
+                    openExternalURL(href);
+                  }}
                   className="text-link hover:underline"
                 >
                   {children}
@@ -139,6 +146,11 @@ export function AssistantText({ content }: { content: string }) {
           >
             {content}
           </ReactMarkdown>
+          {onSpeak && (
+            <button type="button" aria-label="Speak message" title="Speak message" onClick={onSpeak} className="mt-2 inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-muted-foreground hover:bg-background hover:text-foreground">
+              <Volume2 className="h-3.5 w-3.5" /> Speak
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -177,7 +189,7 @@ function MessageBubble({ message, highlight = "", toolName = "", sessionId, mess
             highlight={highlight}
           />
         ))}
-        {message.content ? <AssistantText content={message.content} /> : null}
+        {message.content ? <AssistantText content={message.content} onSpeak={() => requestSpeech(message.content)} /> : null}
       </>
     );
   }
@@ -188,7 +200,7 @@ function MessageBubble({ message, highlight = "", toolName = "", sessionId, mess
     );
   }
 
-  return <AssistantText content={message.content} />;
+  return <AssistantText content={message.content} onSpeak={() => requestSpeech(message.content)} />;
 }
 
 function UserBubble({

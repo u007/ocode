@@ -129,13 +129,27 @@ var (
 type ManagerOptions struct {
 	ChromePath  string
 	IdleTimeout time.Duration
-	Supervisor  *tool.ProcessSupervisor
-	Dialer      *net.Dialer
-	EmitNav     func(NavEvent)
-	EmitTitle   func(TitleEvent)
-	EmitNewTab  func(NewTabEvent)
-	Log         *log.Logger
+	// ScreencastQuality is the JPEG quality (1-100) for Page.startScreencast.
+	// 0 means DefaultScreencastQuality (85): sharper text than the old hardcoded 70.
+	ScreencastQuality int
+	// HTRExtensionDir is an optional unpacked-extension directory preloaded
+	// into ocode's headless Chrome via --load-extension (see chromeArgsFor).
+	// Empty preserves the default --disable-extensions behavior. Resolved
+	// cross-platform (absolute or ~-relative path); validated at launch.
+	HTRExtensionDir   string
+	HTRSocketPath     string
+	HTRNativeHostName string
+	Supervisor        *tool.ProcessSupervisor
+	Dialer            *net.Dialer
+	EmitNav           func(NavEvent)
+	EmitTitle         func(TitleEvent)
+	EmitNewTab        func(NewTabEvent)
+	Log               *log.Logger
 }
+
+// DefaultScreencastQuality is the CDP screencast JPEG quality used when
+// ManagerOptions.ScreencastQuality is 0.
+const DefaultScreencastQuality = 85
 
 // Manager owns the single Chrome process and per-stateKey targets.
 type Manager struct {
@@ -197,6 +211,40 @@ func (m *Manager) SetLauncher(fn func(context.Context) (*Conn, <-chan int, func(
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.launchFn = fn
+}
+
+// effectiveQuality returns the screencast JPEG quality clamped to Chrome's
+// accepted 1-100 range, mapping 0 (unset) to DefaultScreencastQuality.
+func (m *Manager) effectiveQuality() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return normalizeQuality(m.opts.ScreencastQuality)
+}
+
+func normalizeQuality(q int) int {
+	if q == 0 {
+		return DefaultScreencastQuality
+	}
+	if q < 1 {
+		return 1
+	}
+	if q > 100 {
+		return 100
+	}
+	return q
+}
+
+// SetScreencastQuality updates the screencast JPEG quality live: existing
+// targets pick it up on their next restartScreencast (resize, zoom, or
+// re-attach). Out-of-range values are clamped, 0 restores the default.
+func (m *Manager) SetScreencastQuality(q int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if q == 0 {
+		m.opts.ScreencastQuality = DefaultScreencastQuality
+		return
+	}
+	m.opts.ScreencastQuality = normalizeQuality(q)
 }
 
 // ensureChrome launches Chrome if not already running.
@@ -268,7 +316,7 @@ func (m *Manager) defaultLaunch(ctx context.Context) (*Conn, <-chan int, func(),
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return launchChrome(ctx, path, m.opts.Supervisor, m.opts.Log)
+	return launchChromeWithOptions(ctx, path, m.opts.Supervisor, m.opts.Log, resolveExtensionDir(m.opts.HTRExtensionDir), m.opts.HTRSocketPath, m.opts.HTRNativeHostName)
 }
 
 func (m *Manager) watchExited(exited <-chan int) {

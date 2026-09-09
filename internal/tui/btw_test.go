@@ -4,9 +4,11 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
@@ -249,5 +251,31 @@ func TestBtwViewportScrollKeys(t *testing.T) {
 	m2 = got.(model)
 	if m2.showBtwDialog {
 		t.Fatal("esc should still dismiss the popup after scrolling")
+	}
+}
+
+// /btw runs an independent side-query loop on its own child agent + client,
+// so it must fire immediately while the main turn streams instead of queuing
+// behind it.
+func TestBtwIsInstantWhileStreaming(t *testing.T) {
+	m := model{
+		streaming: true,
+		input:     textarea.New(),
+		agent:     agent.NewAgent(nil, nil, &config.Config{}, nil),
+		btwCh:     make(chan btwResultMsg, 64),
+	}
+	t.Cleanup(func() {
+		if m.btwCancel != nil {
+			m.btwCancel()
+		}
+	})
+
+	updated, _ := m.handleCommand("/btw is this safe")
+	got := updated.(*model)
+	if len(got.queuedItems) != 0 {
+		t.Fatalf("/btw was queued while streaming: %#v", got.queuedItems)
+	}
+	if !got.showBtwDialog {
+		t.Fatal("expected /btw popup to open immediately while streaming")
 	}
 }

@@ -1166,9 +1166,13 @@ func (t *Target) restartScreencast(ctx context.Context) error {
 }
 
 func (t *Target) restartScreencastWith(ctx context.Context, maxW, maxH int) error {
+	quality := DefaultScreencastQuality
+	if t.manager != nil {
+		quality = t.manager.effectiveQuality()
+	}
 	_ = t.conn.Call(ctx, t.sessionID, "Page.stopScreencast", nil, nil)
 	return t.conn.Call(ctx, t.sessionID, "Page.startScreencast", map[string]any{
-		"format": "jpeg", "quality": 70, "maxWidth": maxW, "maxHeight": maxH, "everyNthFrame": 1,
+		"format": "jpeg", "quality": quality, "maxWidth": maxW, "maxHeight": maxH, "everyNthFrame": 1,
 	}, nil)
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/knowledge"
 )
 
@@ -123,13 +124,13 @@ func (a *Agent) runDocMaintenance(req DocMaintenanceRequest) {
 		msg *Message
 		err error
 	}, 1)
-	go func() {
+	crashguard.Go(func() {
 		msg, err := client.Chat([]Message{{Role: "system", Content: prompt}}, nil)
 		respCh <- struct {
 			msg *Message
 			err error
 		}{msg: msg, err: err}
-	}()
+	})
 
 	var decision docMaintTriageResult
 	select {
@@ -200,7 +201,7 @@ For each action:
 5. Never delete. Deprecate instead.
 6. After all actions, summarise what was done.`, actionText)
 
-	result, err := task.ExecuteRaw("context", execPrompt, false)
+	result, err := task.ExecuteRaw("context", execPrompt, false, 0)
 	if err != nil {
 		a.emitDebug("DOCMAINT", fmt.Sprintf("execution failed: %v", err))
 		return

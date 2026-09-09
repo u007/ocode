@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/u007/ocode/internal/crashguard"
 )
 
 // contractVerdict is the result of verifying a dispatch's final result against
@@ -84,13 +86,13 @@ func (t TaskTool) verifyContract(contract, result string) contractVerdict {
 		msg *Message
 		err error
 	}, 1)
-	go func() {
+	crashguard.Go(func() {
 		msg, err := client.Chat([]Message{{Role: "user", Content: prompt}}, nil)
 		respCh <- struct {
 			msg *Message
 			err error
 		}{msg: msg, err: err}
-	}()
+	})
 
 	var text string
 	select {

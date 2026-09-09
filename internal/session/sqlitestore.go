@@ -359,12 +359,32 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 		return false, nil
 	}
 
-	if live && existingCount >= len(messages) {
-		// No new messages (stale or identical queued snapshot) — leave
-		// everything untouched, including title, metadata, updated_at, and
-		// the index row. Title/metadata ride along only with genuinely new
-		// messages so an older snapshot can never regress them.
-		return false, nil
+	// startIdx is the first index of messages to insert; rows before it are
+	// already stored (or, for a loader-view live base, filtered out of the
+	// caller's transcript but still on disk).
+	startIdx := existingCount
+	if live {
+		// A live snapshot carries no baseLen, so decide what is new here:
+		// either the stored rows are a byte-identical prefix of the snapshot
+		// (the ordinary case), or the LOADER's filtered view of them is (the
+		// caller resumed from a transcript whose unanswered ask round the
+		// loader dropped — see rebaseAppend). Anything else is a stale or
+		// foreign snapshot and drops silently: the turn-end sync save is
+		// authoritative.
+		stored, err := readStoredRows(tx, id)
+		if err != nil {
+			return false, err
+		}
+		n, ok := liveAppendStart(stored, messages)
+		if !ok || n >= len(messages) {
+			// No new messages (stale or identical queued snapshot) — leave
+			// everything untouched, including title, metadata, updated_at,
+			// and the index row. Title/metadata ride along only with
+			// genuinely new messages so an older snapshot can never
+			// regress them.
+			return false, nil
+		}
+		startIdx = n
 	}
 
 	resolvedTitle := existingTitle
@@ -389,7 +409,7 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 	}
 
 	newGen := existingGen
-	shrinking := existingCount > len(messages)
+	shrinking := !live && existingCount > len(messages)
 	if shrinking && !replace {
 		// An ordinary save must never delete stored history. A shorter
 		// snapshot here means the caller's in-memory copy is stale relative
@@ -398,8 +418,8 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 		// other writer's rows in exactly that case, so report a conflict and
 		// let the caller reload; only the explicit replace path
 		// (Replace/ReplaceForDir: compaction, truncation, transcript rewind)
-		// may shrink history. Live writes never reach this: they returned
-		// early above.
+		// may shrink history. Live writes never reach this: liveAppendStart
+		// already decided their suffix above.
 		return false, fmt.Errorf("session: stale snapshot for %s: %d message(s) but %d stored (another writer appended; reload and retry): %w", id, len(messages), existingCount, ErrTranscriptConflict)
 	}
 
@@ -416,7 +436,7 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 	// queued pre-replacement live snapshots drop instead of resurrecting
 	// replaced rows).
 	rewrite := shrinking
-	if overlap := min(existingCount, len(messages)); overlap > 0 {
+	if overlap := min(existingCount, len(messages)); overlap > 0 && !live {
 		stored := make([]string, 0, overlap)
 		rows, err := tx.Query(`SELECT data FROM messages ORDER BY seq ASC LIMIT ?`, overlap)
 		if err != nil {
@@ -446,9 +466,6 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 				if replace {
 					rewrite = true
 					break
-				}
-				if live {
-					return false, nil
 				}
 				return false, fmt.Errorf("session: conflicting message at seq %d of %s (concurrent writers diverged): %w", i, id, ErrTranscriptConflict)
 			}
@@ -480,6 +497,7 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 			return false, fmt.Errorf("session: clear messages %s: %w", id, err)
 		}
 		existingCount = 0
+		startIdx = 0
 	}
 
 	// A plain INSERT surfaces any residual primary-key race as an error
@@ -491,13 +509,14 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 		return false, fmt.Errorf("session: prepare insert %s: %w", id, err)
 	}
 	defer stmt.Close()
-	for i := existingCount; i < len(messages); i++ {
+	for i := startIdx; i < len(messages); i++ {
 		data, err := json.Marshal(messages[i])
 		if err != nil {
 			return false, fmt.Errorf("session: marshal message %d of %s: %w", i, id, err)
 		}
-		if _, err := stmt.Exec(i, string(data)); err != nil {
-			return false, fmt.Errorf("session: insert message %d of %s: %w", i, id, err)
+		seq := existingCount + (i - startIdx)
+		if _, err := stmt.Exec(seq, string(data)); err != nil {
+			return false, fmt.Errorf("session: insert message %d of %s: %w", seq, id, err)
 		}
 	}
 
@@ -749,4 +768,45 @@ func updateSqliteMetadata(dir, id string, mutate func(map[string]any)) error {
 		return fmt.Errorf("session: update metadata %s: %w", id, err)
 	}
 	return tx.Commit()
+}
+
+// readStoredRows returns every stored message of the open transaction's
+// session in seq order.
+func readStoredRows(tx *sql.Tx, id string) ([]agent.Message, error) {
+	rows, err := tx.Query(`SELECT data FROM messages ORDER BY seq ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("session: read rows %s: %w", id, err)
+	}
+	defer rows.Close()
+	var out []agent.Message
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("session: scan row %s: %w", id, err)
+		}
+		var m agent.Message
+		if err := json.Unmarshal([]byte(data), &m); err != nil {
+			return nil, fmt.Errorf("session: decode row %s: %w", id, err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("session: iterate rows %s: %w", id, err)
+	}
+	return out, nil
+}
+
+// liveAppendStart decides where a live snapshot's unsaved suffix begins:
+// the stored rows must be a byte-identical prefix of the snapshot, or the
+// loader's filtered view of them must be. Returns ok=false for any other
+// shape (stale or foreign snapshot).
+func liveAppendStart(stored, snapshot []agent.Message) (int, bool) {
+	if samePrefix(stored, snapshot, len(stored)) {
+		return len(stored), true
+	}
+	filtered := removeIncompleteToolRequests(stored)
+	if len(filtered) < len(stored) && samePrefix(filtered, snapshot, len(filtered)) {
+		return len(filtered), true
+	}
+	return 0, false
 }

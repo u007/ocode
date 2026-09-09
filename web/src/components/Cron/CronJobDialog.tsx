@@ -178,6 +178,7 @@ export default function CronJobDialog({ open, job, onOpenChange, onSave }: Props
               <option value="normal">normal</option>
               <option value="yolo">yolo</option>
               <option value="locked">locked</option>
+              <option value="sandbox">sandbox</option>
             </select>
           </label>
           <label className="grid gap-2 text-sm md:col-span-2">

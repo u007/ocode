@@ -192,22 +192,30 @@ function TabPill({
           <Bell className="h-2.5 w-2.5" />
         </span>
       )}
-      {/* Leading icon slot: while loading, the tab's glyph is replaced by a
-          spinner (browser favicon convention — the identity icon yields to
-          the in-flight state) instead of rendering both side by side. */}
-      {isLoading ? (
-        <Loader2
-          aria-hidden
-          className="w-3 h-3 animate-spin motion-reduce:animate-none text-muted-foreground shrink-0"
-        />
-      ) : (
-        <span aria-hidden className="shrink-0">
-          {emoji}
-        </span>
-      )}
-      {hasPending && (
-        <span className="h-1.5 w-1.5 rounded-full bg-amber-400 shrink-0" title="Waiting for a response in this tab" />
-      )}
+      {/* Leading icon slot: fixed-size box so the pill width is identical
+          whether the tab's glyph or the loading spinner is shown (browser
+          favicon convention — the identity icon yields to the in-flight
+          state). Without this, spinner↔emoji swaps resize the pill and, in a
+          wrapping bar, reshuffle every other tab's row on each switch. */}
+      <span aria-hidden data-testid="tab-icon" className="flex h-4 w-4 shrink-0 items-center justify-center">
+        {isLoading ? (
+          <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-muted-foreground" />
+        ) : (
+          <span className="text-[13px] leading-none">{emoji}</span>
+        )}
+      </span>
+      {/* Pending dot slot: always rendered (transparent when idle) so toggling
+          the "waiting for response" indicator never resizes the pill. The dot
+          flips on exactly the two tabs involved in a tab switch (the old tab
+          gains it, the new one loses it), so a conditional render reflowed the
+          wrapping bar on every single switch. */}
+      <span
+        aria-hidden
+        data-testid="tab-pending"
+        data-active={hasPending ? "true" : "false"}
+        title={hasPending ? "Waiting for a response in this tab" : undefined}
+        className={`h-1.5 w-1.5 rounded-full shrink-0 ${hasPending ? "bg-amber-400" : "bg-transparent"}`}
+      />
       {isEditing ? (
         <input
           autoFocus

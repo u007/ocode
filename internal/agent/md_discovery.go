@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/knowledge"
 	"github.com/u007/ocode/internal/paths"
@@ -272,6 +273,7 @@ func (a *Agent) mdSummarizePass(root string) {
 			wg.Add(1)
 			sem <- struct{}{}
 			go func(i int, r mdRef) {
+				defer crashguard.Recover()
 				defer wg.Done()
 				defer func() { <-sem }()
 				content, err := os.ReadFile(r.abs)
@@ -386,7 +388,7 @@ func (a *Agent) summarizeMarkdown(rel string, content []byte) string {
 		content string
 		err     error
 	}, 1)
-	go func() {
+	crashguard.Go(func() {
 		resp, err := client.Chat([]Message{
 			{Role: "system", Content: mdSummarySystemPrompt},
 			{Role: "user", Content: prompt},
@@ -403,7 +405,7 @@ func (a *Agent) summarizeMarkdown(rel string, content []byte) string {
 			content string
 			err     error
 		}{resp.Content, nil}
-	}()
+	})
 
 	select {
 	case <-ctx.Done():

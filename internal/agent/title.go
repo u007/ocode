@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/u007/ocode/internal/crashguard"
 )
 
 const (
@@ -35,10 +37,10 @@ func (a *Agent) GenerateTitleAsync(userMsg, assistantMsg string, onResult func(s
 		onResult("")
 		return
 	}
-	go func() {
+	crashguard.Go(func() {
 		title := a.generateTitle(userMsg, assistantMsg)
 		onResult(title)
-	}()
+	})
 }
 
 func (a *Agent) generateTitle(userMsg, assistantMsg string) string {
@@ -76,7 +78,7 @@ func (a *Agent) titleChat(client LLMClient, system, prompt string) (string, erro
 		content string
 		err     error
 	}, 1)
-	go func() {
+	crashguard.Go(func() {
 		resp, err := client.Chat([]Message{
 			{Role: "system", Content: system},
 			{Role: "user", Content: prompt},
@@ -93,7 +95,7 @@ func (a *Agent) titleChat(client LLMClient, system, prompt string) (string, erro
 			content string
 			err     error
 		}{resp.Content, nil}
-	}()
+	})
 
 	select {
 	case <-ctx.Done():

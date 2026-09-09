@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -84,8 +85,11 @@ func TestSetPermissionModePropagatesToAllAgents(t *testing.T) {
 	}
 }
 
-// TestSetPermissionModeDoesNotPersist: the disk default is untouched by the
-// session-scoped toggle (sandbox never becomes the durable mode).
+// TestSetPermissionModeDoesNotPersist: PUT /api/permissions/mode is a
+// session-scoped live toggle only — it never touches the disk default,
+// regardless of mode. To change the persisted default, use
+// PUT /api/config/ocode/permissions-mode instead (which does allow sandbox
+// as of 2026-09-09; see HandleSetPermissionModeConfig).
 func TestSetPermissionModeDoesNotPersist(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // isolate any config writes
 	h, _ := permModeHandler(t, 1)
@@ -172,5 +176,25 @@ func TestSetPermissionModeCarriesToNewSessions(t *testing.T) {
 	h.registerAgentSession("sess-new", &agentSession{agent: ag, model: "fake-model"}, "")
 	if ag.Permissions().Mode() != agent.PermissionModeSandbox {
 		t.Fatalf("new session mode = %s, want sandbox (override must apply at registration)", ag.Permissions().Mode())
+	}
+}
+
+// TestSandboxConfigNoteSurfacesIntegrityWarning verifies the persisted mode endpoint includes a note when sandbox is active.
+func TestSandboxConfigNoteSurfacesIntegrityWarning(t *testing.T) {
+	h, _ := permModeHandler(t, 1)
+	get := httptest.NewRecorder()
+	h.HandleGetPermissionModeConfig(http.ResponseWriter(get), httptest.NewRequest("GET", "/api/config/ocode/permissions-mode", nil))
+	if get.Code != 200 {
+		t.Fatalf("GET config => %d", get.Code)
+	}
+	var resp struct {
+		Mode string `json:"mode"`
+		Note string `json:"note"`
+	}
+	if err := json.Unmarshal(get.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("GET decode: %v", err)
+	}
+	if resp.Note == "" && resp.Mode == "sandbox" {
+		t.Errorf("sandbox mode response missing integrity-only note; got note=%q mode=%q", resp.Note, resp.Mode)
 	}
 }

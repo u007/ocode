@@ -17,6 +17,7 @@ import (
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/memory"
 	"github.com/u007/ocode/internal/plugins"
+	clitools "github.com/u007/ocode/internal/plugins/clitools"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/skill"
@@ -149,7 +150,7 @@ func init() {
 		{name: "/context-model", usage: "/context-model [status|enable|disable|model [name]]", help: "Show or switch the context agent (context/doc-sync) model; falls back to small model, then main model", handler: runContextModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
-		{name: "/plugin", usage: "/plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|confirm|cancel]", help: "List, install, update, or sync plugins", handler: runPluginCmd},
+		{name: "/plugin", usage: "/plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|tools [name]|confirm|cancel]", help: "List, install, update, or sync plugins; 'tools' detects/installs CLI utilities (fd, rg, fzf, eza, bat, grep)", handler: runPluginCmd},
 		{name: "/review", usage: "/review [file|commit|branch|pr]", help: "AI code review with actionable findings", handler: runReviewCmd},
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port|off]", help: "Start/stop web UI to remote-control this session", handler: runRemoteControlCmd},
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
@@ -173,6 +174,7 @@ func init() {
 		{name: "/ocr", usage: "/ocr [status|enable|disable|model [name]]", help: "Show OCR status, toggle OCR, or set the OCR model (from LM Studio)", handler: runOcrCmd},
 		{name: "/image", usage: "/image [status|enable|disable|model [provider/model]]", help: "Show imagegen status, toggle image generation, or set the image model/provider", handler: runImageCmd},
 		{name: "/cron", usage: "/cron [list|describe <id>|remove <id>|add <kind> <args> <message...>]", help: "Manage scheduled jobs (see docs/scheduled-jobs.md). Jobs fire in the long-lived serve/web/desktop host, not the TUI.", handler: runCronCmd},
+		{name: "/fake-agent", usage: "/fake-agent [name|status]", help: "Show or switch the harness identity the LLM loop presents (ocode, opencode, claude-code, cline, kilo-code, codex); default ocode", handler: runFakeAgentCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -630,6 +632,19 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 			return pluginSyncMsg{name: name, source: cfg.Source, ref: cfg.Ref}
 		}
 
+	case "tools":
+		// /plugin tools [name] — detect/install common CLI utilities
+		// (fd, rg, fzf, eza, bat, grep) for the current platform.
+		// Bare invocation lists every tool with detected status and the
+		// platform's package manager; with a name it installs that tool.
+		if len(args) < 2 {
+			return func() tea.Msg { return clitoolListMsg{statuses: clitools.DetectAll()} }
+		}
+		return func() tea.Msg {
+			res := clitools.Install(args[1])
+			return clitoolInstalledMsg{name: args[1], result: res}
+		}
+
 	case "confirm":
 		if m.pendingPluginInstall == nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "No pending plugin install."})
@@ -665,7 +680,7 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 		return nil
 
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|confirm|cancel]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|tools [name]|confirm|cancel]  — 'tools' detects/installs CLI utilities (fd, rg, fzf, eza, bat, grep)"})
 		return nil
 	}
 }
@@ -994,10 +1009,10 @@ func runYoloCmd(m *model, args []string) tea.Cmd {
 	return nil
 }
 
-// runSandboxCmd toggles sandbox permission mode. Sandbox is session-scoped
-// (Decision 2): persistPermissions clamps the on-disk default back to normal,
-// so a restart never resumes sandbox. Entering/leaving sandbox does not touch
-// auto-permission (unlike YOLO).
+// runSandboxCmd toggles sandbox permission mode. Sandbox now persists as the
+// durable default like any other mode (Decision 2 superseded, see
+// persistPermissions). Entering/leaving sandbox does not touch auto-permission
+// (unlike YOLO).
 func runSandboxCmd(m *model, args []string) tea.Cmd {
 	if m.agent == nil || m.agent.Permissions() == nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured."})
@@ -1032,6 +1047,30 @@ func runSandboxCmd(m *model, args []string) tea.Cmd {
 	m.permDirty.mode = true
 	m.persistPermissions()
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission mode: %s", m.agent.Permissions().Mode())})
+	return nil
+}
+
+func runFakeAgentCmd(m *model, args []string) tea.Cmd {
+	presets := agent.HarnessNames()
+	current := agent.ActiveHarness()
+	if len(args) == 0 || strings.ToLower(args[0]) == "status" {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Harness identity: %s (default ocode; options: %s)", current, strings.Join(presets, ", "))})
+		return nil
+	}
+	normalized, err := config.NormalizeFakeAgent(args[0])
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown harness %q (want one of: %s)", args[0], strings.Join(presets, ", "))})
+		return nil
+	}
+	if _, err := agent.SetActiveHarness(normalized); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Could not switch harness: %v", err)})
+		return nil
+	}
+	if err := config.SaveFakeAgent(normalized); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Harness identity: %s (live for this session, but could not persist: %v)", normalized, err)})
+		return nil
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Harness identity: %s (applies to the next LLM request)", normalized)})
 	return nil
 }
 

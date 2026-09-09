@@ -214,6 +214,7 @@ func TestThemePickerSelectionSwitchesTheme(t *testing.T) {
 }
 
 func TestSidebarCommandRecordsTranscriptMessage(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // /sidebar persists show_sidebar; isolate from other tests
 	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20)}
 
 	updated, cmd := m.handleCommand("/sidebar")
@@ -422,13 +423,14 @@ func TestLocalModelAndAutoContinueBypassBusyQueue(t *testing.T) {
 
 func TestNewCommandBypassesBusyQueue(t *testing.T) {
 	m := model{
-		width:     80,
-		height:    20,
-		input:     textarea.New(),
-		viewport:  fastviewport.New(80, 20),
-		streaming: true,
-		sessionID: "old-session",
-		messages:  []message{{role: roleUser, text: "keep me busy"}},
+		width:         80,
+		height:        20,
+		input:         textarea.New(),
+		viewport:      fastviewport.New(80, 20),
+		streaming:     true,
+		sessionID:     "old-session",
+		expandedTitle: true,
+		messages:      []message{{role: roleUser, text: "keep me busy"}},
 		queuedItems: []queuedItem{
 			{kind: queueItemInput, text: "pending user input"},
 			{kind: queueItemCommand, text: "/sidebar"},
@@ -442,6 +444,9 @@ func TestNewCommandBypassesBusyQueue(t *testing.T) {
 	}
 	if got.sessionID == "old-session" {
 		t.Fatal("expected /new to start a fresh session immediately")
+	}
+	if got.expandedTitle {
+		t.Fatal("expected /new to reset the expanded sidebar title")
 	}
 	if len(got.messages) != 1 || got.messages[0].role != roleAssistant || got.messages[0].text != "Started new session." {
 		t.Fatalf("expected /new to reset the transcript immediately, got %#v", got.messages)

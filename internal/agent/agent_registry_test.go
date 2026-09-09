@@ -588,7 +588,7 @@ func TestChildAgentSession(t *testing.T) {
 		t.Fatalf("child ID %q should encode parent and agent", childID)
 	}
 
-	meta := childSessionMetadata("parent-123", "helper")
+	meta := childSessionMetadata("parent-123", "helper", "completed")
 	if meta["parent_session_id"] != "parent-123" {
 		t.Fatalf("expected parent_session_id in metadata")
 	}

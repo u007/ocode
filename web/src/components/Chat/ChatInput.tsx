@@ -10,6 +10,7 @@ import { apiPath, authHeaders } from "@/api/client";
 import { useProjectState } from "../../stores/projectStore";
 import EditorContextChip from "./EditorContextChip";
 import { RESTORE_EVENT } from "../../lib/inputRestore";
+import { CHAT_INPUT_DEBOUNCE_MS, joinChatInputBatch } from "../../lib/chatInputBatch";
 
 interface ChatInputProps {
   /** Called when a slash command is entered. */
@@ -70,6 +71,7 @@ export default function ChatInput({
   // output of msg1, producing confusing turn ordering.
   const [shellInFlight, setShellInFlight] = useState(false);
   const [queueCount, setQueueCount] = useState(0);
+  const [delayedCount, setDelayedCount] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const dragCounterRef = useRef(0);
   // In-flight submission guard: an accidental double-fire of the same physical
@@ -80,6 +82,9 @@ export default function ChatInput({
   // is dropped — while a later, DISTINCT message (different tick, after the
   // previous send resolved and busy flipped) is never blocked.
   const submittingRef = useRef(false);
+  const delayedInputsRef = useRef<string[]>([]);
+  const delayedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const delayedGenerationRef = useRef(0);
   const { sendMessage, executeShell, stop, resume, wasInterrupted, isStreaming, pendingPermission } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
@@ -96,6 +101,16 @@ export default function ChatInput({
   useEffect(() => {
     setInput(getDraft(sessionTabId));
     setQueueCount(getQueue(sessionTabId).length);
+
+    return () => {
+      if (delayedTimerRef.current !== null) {
+        clearTimeout(delayedTimerRef.current);
+        delayedTimerRef.current = null;
+      }
+      delayedInputsRef.current = [];
+      delayedGenerationRef.current++;
+      setDelayedCount(0);
+    };
   }, [sessionTabId]);
 
   // Reinjection: a file the user X'd off stays excluded UNTIL a genuinely new
@@ -208,6 +223,39 @@ export default function ChatInput({
     }
     const accepted = await sendMessage(text);
     return { startedTurn: true, accepted };
+  };
+
+  const flushDelayedMessages = async (): Promise<boolean> => {
+    if (delayedInputsRef.current.length === 0) return true;
+    if (delayedTimerRef.current !== null) {
+      clearTimeout(delayedTimerRef.current);
+      delayedTimerRef.current = null;
+    }
+    delayedGenerationRef.current++;
+    const combined = joinChatInputBatch(delayedInputsRef.current);
+    delayedInputsRef.current = [];
+    setDelayedCount(0);
+
+    const accepted = await sendMessage(combined);
+    if (!accepted) {
+      setInput(combined);
+      setDraft(sessionTabId, combined);
+    }
+    return accepted;
+  };
+
+  const scheduleDelayedMessage = (text: string) => {
+    delayedInputsRef.current.push(text);
+    setDelayedCount(delayedInputsRef.current.length);
+    if (delayedTimerRef.current !== null) {
+      clearTimeout(delayedTimerRef.current);
+    }
+    const generation = ++delayedGenerationRef.current;
+    delayedTimerRef.current = setTimeout(() => {
+      if (generation !== delayedGenerationRef.current) return;
+      delayedTimerRef.current = null;
+      void flushDelayedMessages();
+    }, CHAT_INPUT_DEBOUNCE_MS);
   };
 
   const drainQueue = useCallback(async () => {
@@ -340,6 +388,7 @@ export default function ChatInput({
     const trimmed = input.trim();
     if (!trimmed) return;
     submittingRef.current = true;
+    let delayedSubmission = false;
     try {
       setInput("");
       clearDraft(sessionTabId);
@@ -350,6 +399,14 @@ export default function ChatInput({
     // queuedItems, drained by the effect once the turn frees up and the
     // interrupt barrier is cleared via Resume.
       if (trimmed.startsWith("/") || trimmed.startsWith("!")) {
+        if (delayedInputsRef.current.length > 0) {
+          // Keep submission order: the command waits behind the consolidated
+          // chat turn rather than overtaking it.
+          pushQueued(sessionTabId, { kind: "command", text: trimmed });
+          setQueueCount(getQueue(sessionTabId).length);
+          await flushDelayedMessages();
+          return;
+        }
         if (effectiveBusy) {
           pushQueued(sessionTabId, { kind: "command", text: trimmed });
           setQueueCount(getQueue(sessionTabId).length);
@@ -430,17 +487,21 @@ export default function ChatInput({
         setQueueCount(getQueue(sessionTabId).length);
         return;
       }
-      const ok = await sendMessage(finalMessage);
-      if (!ok) {
-        // Restore the draft so the user can retry without retyping. The
-        // error is already set in the store's SET_ERROR path.
-        setInput(trimmed);
-        setDraft(sessionTabId, trimmed);
-      }
+      scheduleDelayedMessage(finalMessage);
+      delayedSubmission = true;
     } finally {
       // Release the in-flight guard. The previous send has now settled, so a
       // subsequent, distinct submit is allowed (even if it repeats the text).
-      submittingRef.current = false;
+      if (delayedSubmission) {
+        // A duplicate physical key event can arrive before React applies the
+        // setInput("") update. Hold the guard through the current event turn,
+        // but allow the next real user event to submit normally.
+        queueMicrotask(() => {
+          submittingRef.current = false;
+        });
+      } else {
+        submittingRef.current = false;
+      }
     }
   };
 
@@ -593,6 +654,11 @@ export default function ChatInput({
       {queueCount > 0 && (
         <div className="text-xs text-muted-foreground mb-1">
           {queueCount} queued — press ↑ in an empty box to edit the last one
+        </div>
+      )}
+      {delayedCount > 0 && (
+        <div className="text-xs text-muted-foreground mb-1" role="status">
+          {delayedCount} message{delayedCount === 1 ? "" : "s"} waiting to be consolidated…
         </div>
       )}
       <input

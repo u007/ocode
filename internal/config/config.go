@@ -129,6 +129,7 @@ type TUIConfig struct {
 	Keybinds      map[string]string `json:"keybinds"`
 	LeaderTimeout int               `json:"leader_timeout"`
 	Branchless    bool              `json:"branchless"`
+	ShowSidebar   *bool             `json:"show_sidebar"`
 }
 
 type WatcherConfig struct {

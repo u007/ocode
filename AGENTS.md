@@ -203,6 +203,17 @@ session, plugins, auth, config reload):
   long content can't wrap and grow the bottom chrome past the terminal
   height.
 - **Never use double-width emoji as inline status prefixes** (e.g. `⏳`, `⌛`, `⚙️`). Wide emoji are 2-cell characters; VS Code's terminal renderer shifts all following text right, making rows appear crooked/misaligned. Use single-width ASCII symbols (`~`, `*`, `>`) for inline status indicators in `appendDiscoveryNotice` and similar helpers.
+- **Spawn goroutines through `crashguard.Go(fn)`** (or `defer
+  crashguard.Recover()` first thing in a `go func(args…)`) in `internal/tui`
+  and `internal/agent` — never a bare `go func()`. Bubble Tea only recovers
+  panics in `Update`/`View` and its own cmd goroutines; a panic in a raw
+  goroutine kills the process before it can disable mouse tracking and leave
+  the alt-screen, so the user's shell fills with `[<35;20;10M` garbage on
+  every mouse move. `tui.Run` registers the terminal-reset hook via
+  `installCrashTerminalReset`; the crash still terminates the process and
+  prints the original stack. Sites that intentionally `recover()` to turn a
+  panic into an error (stream goroutine, `ask.go`, `subagent.go`, scheduler)
+  keep their own recover — that is a different contract.
 
 ## TUI Mouse: clickable chrome vs selectable content
 Terminal mouse capture is **global per frame** — `tea.View.MouseMode` is
@@ -290,13 +301,12 @@ The list is not git-based — it derives from the snapshot store
     local command, add it there (the single chokepoint covering every
     caller: enter key, palette, keybinds, leader shortcuts, hotkeys); this
     doc only explains the *category*, not the membership.
-  - `/btw`/`/by-the-way` is deliberately NOT instant: it starts an independent
-    side-query agent loop (its own child agent with its own client — see
-    `Agent.AskLoopAsync`), and running it mid-stream would interleave a second
-    concurrent LLM loop with the main turn (the popup also blocks input while
-    open), so it queues like any other work. Unlike the old shared-client
-    one-shot, there is no `OnDelta` race — the child's client is fresh — so
-    queuing is about stream interleaving and UI, not token leakage.
+  - `/btw`/`/by-the-way` IS instant: it runs an independent side-query loop
+    on its own child agent + client (`Agent.AskLoopAsync`), so it never touches
+    the main turn's `OnDelta`/`OnUsage` callbacks and runs concurrently with an
+    in-flight stream. A mid-stream snapshot may carry an assistant tool_call
+    with no result yet; `repairToolCallSequence` synthesises a placeholder
+    before send so the request stays valid.
   - **Queued by design (mutates persistent state mid-stream, so it must
     wait for the current turn to end):** `/add-dir`, `/add-dirs`, `/doc-sync`,
     `/agents limit <n>`.
@@ -447,6 +457,25 @@ across long runs and post-compaction turns. The store lives in
   delete the file, because the call sites move to a *different* session id,
   and deleting the outgoing session's plan would destroy exactly the state
   this mechanism exists to preserve.
+
+## Sub-agent transcripts: `OnSubAgentMessage` + child sessions
+A dispatched child's messages must NEVER reach the parent's `OnMessage` /
+`OnDelta`. Both hosts hang their transcript on `OnMessage` — the server's
+`wireLivePersist` appends every message to the parent session file, the TUI
+appends to `m.messages` (whose `raw` is replayed to the parent LLM next turn)
+— so forwarding there wrote background children's turns into the parent as
+if the parent had done the work (and misordered tool results against the
+parent's own `agent_status` call). `internal/agent/subagent.go`
+(`attachRunTranscript`) instead routes each child message to
+`run.appendTranscript`, `Agent.OnSubAgentMessage(run, msg)`, and
+`TaskTool.persistChild`, which saves the run under its own child session
+`run.SessionID` = `<parent>_child_<agent>_<ts>` (title `Child: <agent>`;
+metadata `parent_session_id`, `agent_name`, `run_id`, `status` =
+`running` → `done`/`failed`). The persister comes from
+`Agent.SetChildSessionPersistence` and MUST be a live async save (server:
+`session.SaveAsyncForDir(projectRoot, …)`; TUI: `session.SaveAsync`) — it
+fires per streamed child message. Live sub-agent UI comes from the run
+transcript (`/api/agents/runs/stream`, TUI agent strip), not the parent chat.
 
 ## In-batch task DAG (`id` / `depends_on`)
 

@@ -20,6 +20,30 @@
 
 ## 2026-09-09
 
+* **Update**: TUI Sidebar Title Expand/Collapse Design ([docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Deprecation**: TUI Sidebar Title Expand/Collapse Design: Resetting to active status per user redesign decision ([docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Update**: TUI Sidebar Title Expand/Collapse Design ([docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Update**: TUI Sidebar Title Expand/Collapse Design ([docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Creation**: TUI Sidebar Title Expand/Collapse Design ([docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Update**: TUI Sidebar Title Expand/Collapse Design ([superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Deprecation**: TUI Sidebar Title Expand/Collapse Design: User decided: expansion is transient; /new, /clear, /session load, and active-session replacement all reset to collapsed; no session JSON persistence. Contradictory phrases about session JSON restoration need updating. ([superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Update**: TUI Sidebar Title Expand/Collapse Design ([superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Update**: TTS Speech Playback Design Specification ([superpowers/specs/2026-09-09-tts-speech-playback-design.md](/superpowers/specs/2026-09-09-tts-speech-playback-design.md))
+* **Update**: TTS Speech Playback Design Specification ([superpowers/specs/2026-09-09-tts-speech-playback-design.md](/superpowers/specs/2026-09-09-tts-speech-playback-design.md))
+* **Update**: TTS Speech Playback Design Specification ([superpowers/specs/2026-09-09-tts-speech-playback-design.md](/superpowers/specs/2026-09-09-tts-speech-playback-design.md))
+* **Update**: TTS Speech Playback Design Specification ([superpowers/specs/2026-09-09-tts-speech-playback-design.md](/superpowers/specs/2026-09-09-tts-speech-playback-design.md))
+* **Fix**: TTS Speech Playback Design Specification deprecation corrected - removed `status: deprecated` and `deprecated_reason` from frontmatter; restored to active status. Index and log updated. ([superpowers/specs/2026-09-09-tts-speech-playback-design.md](/superpowers/specs/2026-09-09-tts-speech-playback-design.md))
+* **Update**: TTS Speech Playback Design Specification ([superpowers/specs/2026-09-09-tts-speech-playback-design.md](/superpowers/specs/2026-09-09-tts-speech-playback-design.md))
+* **Update**: TTS Speech Playback Design Specification ([docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md](/docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md))
+* **Update**: TTS Speech Playback Design Specification ([docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md](/docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md))
+
+* **Creation**: TTS Speech Playback Design Specification ([docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md](/docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md))
+* **Update**:  ([docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Update**: TUI Sidebar Title Expand/Collapse Design (Updated) ([docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Update**: TUI Sidebar Title Expand/Collapse Design (Updated) ([docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Creation**: TUI Sidebar Title Expand/Collapse Design (Updated) ([docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Update**: TUI Sidebar Title Expand/Collapse Design ([docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
+* **Creation**: TUI Sidebar Title Expand/Collapse Design ([docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))
 * **Creation**: Chrome Tab Hang — Unbounded CDP Calls, JS Dialogs, Invisible Popups ([gotchas/chrome-tab-hang-unbounded-cdp-call.md](/gotchas/chrome-tab-hang-unbounded-cdp-call.md))
 * **Update**: Browser Chrome CDP design ([docs/superpowers/specs/2026-08-31-browser-chrome-cdp-design.md](/docs/superpowers/specs/2026-08-31-browser-chrome-cdp-design.md)) — Conn.Call default deadline, JS dialog auto-accept, popup/middle-click discovery via Target.setDiscoverTargets
 * **Update**: Remote SSH Phase 2 — web ([docs/superpowers/specs/2026-08-29-remote-ssh/03-phase2-web.md](/docs/superpowers/specs/2026-08-29-remote-ssh/03-phase2-web.md)) — browse origin port now recorded in serve.json (`browsePort`) and forwarded by the SSH tunnel on the same port number; browser panel enabled in remote (SSH + WSL) sessions

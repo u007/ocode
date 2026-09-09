@@ -290,6 +290,7 @@ interface TreeNodeProps {
   forceExpanded?: boolean;
   menu: FileMenuActions;
   includedPaths?: Set<string>;
+  generation: number;
 }
 
 function TreeNode({
@@ -303,6 +304,7 @@ function TreeNode({
   forceExpanded,
   menu,
   includedPaths,
+  generation,
 }: TreeNodeProps) {
   const [expanded, setExpanded] = useState(!!forceExpanded);
   const [children, setChildren] = useState<FileNode[] | null>(node.children ?? null);
@@ -315,6 +317,19 @@ function TreeNode({
       if (node.children !== undefined) setChildren(node.children ?? []);
     }
   }, [forceExpanded, node.children]);
+
+  // A parent-level refresh (e.g. after deleting/moving files elsewhere in the
+  // tree) bumps `generation`. Invalidate this node's cached children so the
+  // effect below refetches them — without unmounting the node, so its own
+  // `expanded` state (and any deeper expanded descendants) survive the refresh.
+  const seenGenerationRef = useRef(generation);
+  useEffect(() => {
+    if (seenGenerationRef.current === generation) return;
+    seenGenerationRef.current = generation;
+    if (forceExpanded || !node.is_dir) return;
+    abortRef.current?.abort();
+    setChildren(null);
+  }, [generation, forceExpanded, node.is_dir]);
 
   useEffect(() => {
     if (!node.is_dir || !expanded || children !== null || forceExpanded) return;
@@ -345,7 +360,7 @@ function TreeNode({
     })();
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded, node.is_dir, node.path]);
+  }, [expanded, node.is_dir, node.path, children]);
 
   const toggle = () => {
     if (forceExpanded) return;
@@ -520,6 +535,7 @@ function TreeNode({
               forceExpanded={forceExpanded}
               menu={menu}
               includedPaths={includedPaths}
+              generation={generation}
             />
           ))}
       </div>
@@ -762,22 +778,27 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
     setActiveRoot(projectPath);
   }, [projectPath]);
 
+  const fetchRootChildren = useCallback(async (root: string, signal: AbortSignal) => {
+    const query = `path=${encodeURIComponent(root)}&depth=1`;
+    const res = await fetch(apiPath(`/api/files/tree?${query}`), {
+      headers: authHeaders(),
+      signal,
+    });
+    if (!res.ok) throw new Error("Failed to load file tree");
+    const data: FileTreeResponse = await res.json();
+    if (data.truncated) {
+      console.warn("File tree truncated at the root; not all entries were loaded");
+    }
+    return data;
+  }, []);
+
   const loadRoot = useCallback(
     (root: string) => {
       setLoading(true);
       const controller = new AbortController();
       (async () => {
         try {
-          const query = `path=${encodeURIComponent(root)}&depth=1`;
-          const res = await fetch(apiPath(`/api/files/tree?${query}`), {
-            headers: authHeaders(),
-            signal: controller.signal,
-          });
-          if (!res.ok) throw new Error("Failed to load file tree");
-          const data: FileTreeResponse = await res.json();
-          if (data.truncated) {
-            console.warn("File tree truncated at the root; not all entries were loaded");
-          }
+          const data = await fetchRootChildren(root, controller.signal);
           if (!controller.signal.aborted) {
             setTree(data.children);
             setIsGitRepo(!!data.is_git_repo);
@@ -790,18 +811,30 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
       })();
       return () => controller.abort();
     },
-    [],
+    [fetchRootChildren],
   );
 
+  // Re-fetches the root listing and bumps `refreshKey` (which each TreeNode
+  // watches to invalidate its own cached children) — without touching
+  // `loading`, so the tree list itself never unmounts and every node's local
+  // `expanded` state survives a delete/move/git refresh.
   const refresh = useCallback(() => {
     const root = activeRoot ?? projectPath;
-    if (!root) {
-      setRefreshKey((k) => k + 1);
-      return;
-    }
-    loadRoot(root);
     setRefreshKey((k) => k + 1);
-  }, [activeRoot, projectPath, loadRoot]);
+    if (!root) return;
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const data = await fetchRootChildren(root, controller.signal);
+        if (!controller.signal.aborted) {
+          setTree(data.children);
+          setIsGitRepo(!!data.is_git_repo);
+        }
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") console.error("File tree refresh error:", err);
+      }
+    })();
+  }, [activeRoot, projectPath, fetchRootChildren]);
 
   useEffect(() => {
     const root = activeRoot ?? projectPath;
@@ -1580,7 +1613,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
           ) : !filteredTree || filteredTree.length === 0 ? (
             <div className="px-4 py-12 text-center text-xs text-muted-foreground">No matching files</div>
           ) : (
-            <div className="py-1" key={refreshKey}>
+            <div className="py-1">
               {filteredTree.map((node) => (
                 <TreeNode
                   key={node.path}
@@ -1594,6 +1627,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
                   forceExpanded
                   menu={menu}
                   includedPaths={includedSet}
+                  generation={refreshKey}
                 />
               ))}
             </div>
@@ -1765,7 +1799,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
             </div>
           </div>
         ) : (
-          <div className="py-1" key={refreshKey}>
+          <div className="py-1">
             {tree.map((node) => (
               <TreeNode
                 key={node.path}
@@ -1778,6 +1812,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
                 projectRoot={activeRoot}
                 menu={menu}
                 includedPaths={includedSet}
+                generation={refreshKey}
               />
             ))}
           </div>

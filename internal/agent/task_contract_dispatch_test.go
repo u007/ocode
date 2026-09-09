@@ -172,7 +172,7 @@ func TestTaskStatusSurfacesContractVerdict(t *testing.T) {
 	run := &AgentRun{ID: "run-1", Name: "general", Status: RunDone, Result: "the child result"}
 	run.SetContractVerdict(false, "missing file list")
 
-	out := formatTaskRunStatus("run-1", run)
+	out := formatTaskRunStatus("run-1", run, 0)
 	if !strings.Contains(out, "Contract NOT satisfied") {
 		t.Errorf("task_status output should surface the failed contract, got: %q", out)
 	}

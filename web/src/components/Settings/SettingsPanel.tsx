@@ -22,9 +22,13 @@ import OpencodeReadOnlyForm from "./OpencodeReadOnlyForm";
 import ProfilesManager from "./ProfilesManager";
 import ProfileDebugForm from "./ProfileDebugForm";
 import BackendForm from "./BackendForm";
+import BrowserForm from "./BrowserForm";
+import TTSForm from "./TTSForm";
 
 export type SettingsGroupId =
   | "backend"
+  | "browser"
+  | "tts"
   | "profiles"
   | "profile-debug"
   | "model-defaults"
@@ -56,6 +60,8 @@ interface GroupDef {
 
 const OCODE_GROUPS: GroupDef[] = [
   { id: "backend", label: "Backend" },
+  { id: "browser", label: "Browser" },
+  { id: "tts", label: "Speech playback" },
   { id: "profiles", label: "Profiles" },
   { id: "profile-debug", label: "Profile Debug" },
   { id: "model-defaults", label: "Model Defaults & Recap" },
@@ -91,6 +97,10 @@ function renderGroup(id: SettingsGroupId) {
   switch (id) {
     case "backend":
       return <BackendForm />;
+    case "browser":
+      return <BrowserForm />;
+    case "tts":
+      return <TTSForm />;
     case "profiles":
       return <ProfilesManager />;
     case "profile-debug":
@@ -138,7 +148,7 @@ function renderGroup(id: SettingsGroupId) {
         <OpencodeReadOnlyForm
           title="Legacy Plugins Key"
           note="opencode.json's legacy plugins key is read by ocode for migration only and is never written back — this value is informational."
-          data={{ note: "not yet exposed via API — see docs/superpowers/specs/2026-08-11-configuration-ui-design.md section 7" }}
+          data={{ note: "not yet exposed via API" }}
         />
       );
     case "opencode-model-state":
@@ -146,7 +156,7 @@ function renderGroup(id: SettingsGroupId) {
         <OpencodeReadOnlyForm
           title="Model Selection State"
           note="opencode/model.json (recent/favorite model selections) is owned exclusively by opencode — ocode only reads it as a fallback."
-          data={{ note: "not yet exposed via API — see docs/superpowers/specs/2026-08-11-configuration-ui-design.md section 7" }}
+          data={{ note: "not yet exposed via API" }}
         />
       );
     default:

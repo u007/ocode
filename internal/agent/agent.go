@@ -17,6 +17,7 @@ import (
 
 	"github.com/u007/ocode/internal/changes"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/hooks"
 	"github.com/u007/ocode/internal/lsp"
@@ -344,8 +345,8 @@ type Agent struct {
 	// runtime (e.g. from the web sidebar) WITHOUT persisting to config.
 	advisorEnabled atomic.Bool
 	// parentAdvisorEnabled, when non-nil, makes the advisor gate reactive:
-	// isToolAllowed dereferences this pointer instead of reading the agent's
-	// own advisorEnabled. Sub-agents set this to point at the parent agent's
+	// executeToolCallWithContext dereferences this pointer instead of reading
+	// the agent's own advisorEnabled. Sub-agents set this to point at the parent agent's
 	// advisorEnabled field so mid-run toggles propagate immediately.
 	parentAdvisorEnabled *atomic.Bool
 	// advisorInFlight is the root guard for this logical session. Rebuilt agents
@@ -391,6 +392,13 @@ type Agent struct {
 	// (assistant replies and tool results) as soon as they are generated,
 	// enabling live UI updates between iterations of the tool-call loop.
 	OnMessage func(Message)
+	// OnSubAgentMessage, if set, is invoked for each message a dispatched
+	// sub-agent produces (assistant replies and tool results), tagged with the
+	// owning run. It is deliberately separate from OnMessage: sub-agent
+	// messages must never enter the parent's transcript, live-persist
+	// buffer, or LLM context — they belong to the child session recorded
+	// under run.SessionID (see TaskTool.persistChild).
+	OnSubAgentMessage func(run *AgentRun, msg Message)
 	// injectQueue holds plain user messages submitted (via EnqueueInjection)
 	// while Step is running. It is drained at the top of every loop iteration
 	// — after a tool-call round has fully completed, before the next LLM
@@ -984,8 +992,8 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	a.docMaintDone = make(chan struct{})
 	a.memoryMaintDone = make(chan struct{})
 	a.retryEvents = make(chan *RetryStatusEvent, 32)
-	go a.memoryMaintenanceWorker()
-	go a.docMaintenanceWorker()
+	crashguard.Go(func() { a.memoryMaintenanceWorker() })
+	crashguard.Go(func() { a.docMaintenanceWorker() })
 	a.procs.SetOnDone(func(p *tool.Process) {
 		text, status, code, _ := a.procs.Output(p.ID)
 		a.emitJob(JobEvent{
@@ -1044,9 +1052,11 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	// "agent" tool retired in favor of "task". AgentTool the type is kept
 	// only so existing transcripts/back-compat permission entries still
 	// resolve. It is no longer registered on new agents.
-	// Always register the advisor tool; whether it is exposed to the model is
-	// gated at runtime by advisorEnabled (seeded from config, default enabled,
-	// flippable from the web sidebar without touching config).
+	// Always register (and advertise) the advisor tool; whether a call actually
+	// runs is gated at execution time by advisorEnabled (seeded from config,
+	// default enabled, flippable from the web sidebar without touching
+	// config). Gating at execution rather than advertisement keeps the tools
+	// block identical across toggles so the provider prompt cache survives.
 	a.tools["advisor"] = AdvisorTool{cfg: cfg, mainAgent: a}
 	a.advisorEnabled.Store(cfg == nil || cfg.Ocode.Advisor.Enabled)
 	a.tools["task"] = &TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
@@ -1560,6 +1570,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 						}
 						wg.Add(1)
 						go func(idx, k int, tc ToolCall) {
+							defer crashguard.Recover()
 							defer wg.Done()
 							if isCancelled() {
 								return
@@ -1592,6 +1603,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				for k, i := range parallelTCs {
 					wg.Add(1)
 					go func(idx int, k int, tc ToolCall, cancelled func() bool) {
+						defer crashguard.Recover()
 						defer wg.Done()
 						if cancelled() {
 							return
@@ -1948,13 +1960,13 @@ func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, focus, 
 	if a.OnCompactStart != nil {
 		a.OnCompactStart()
 	}
-	go func() {
+	crashguard.Go(func() {
 		defer a.compactMu.Unlock()
 		result := a.runCompact(snapshot, rt, focus, force)
 		if a.OnCompact != nil {
 			a.OnCompact(result)
 		}
-	}()
+	})
 	return true
 }
 
@@ -1978,13 +1990,13 @@ func (a *Agent) recapAsync(messages []Message, gen uint64, instruction string, s
 	}
 	snapshot := make([]Message, len(messages))
 	copy(snapshot, messages)
-	go func() {
+	crashguard.Go(func() {
 		defer a.recapMu.Unlock()
 		text := a.runRecap(snapshot, instruction, short)
 		if a.OnRecap != nil {
 			a.OnRecap(RecapResult{Gen: gen, Text: text, Short: short})
 		}
-	}()
+	})
 	return true
 }
 
@@ -2080,7 +2092,7 @@ func (a *Agent) runRecap(messages []Message, instruction string, short bool) str
 		content string
 		err     error
 	}, 1)
-	go func() {
+	crashguard.Go(func() {
 		resp, err := client.Chat([]Message{{Role: "user", Content: prompt}}, nil)
 		if err != nil {
 			done <- struct {
@@ -2094,7 +2106,7 @@ func (a *Agent) runRecap(messages []Message, instruction string, short bool) str
 			content string
 			err     error
 		}{resp.Content, nil}
-	}()
+	})
 	select {
 	case <-ctx.Done():
 		return "Recap timed out."
@@ -2226,13 +2238,13 @@ func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64) bool {
 	}
 	snapshot := make([]Message, len(messages))
 	copy(snapshot, messages)
-	go func() {
+	crashguard.Go(func() {
 		defer a.autoContinueJudgeMu.Unlock()
 		resume, err := a.runAutoContinueJudge(client, snapshot)
 		if a.OnAutoContinueJudge != nil {
 			a.OnAutoContinueJudge(AutoContinueJudgeResult{Gen: gen, Resume: resume, Err: err})
 		}
-	}()
+	})
 	return true
 }
 
@@ -4306,6 +4318,11 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	if !a.isToolAllowed(name) {
 		return fmt.Sprintf("denied: tool %q is not allowed for this agent. Do not retry; use a different tool or approach.", name), nil
 	}
+	if name == "advisor" && !a.AdvisorEnabled() {
+		// Execution-time gate (not advertise-time) keeps the tools block
+		// stable across toggles so the provider prompt cache survives.
+		return "advisor is currently disabled by the user. Do not call it again until the user re-enables it; continue without advisor input.", nil
+	}
 
 	t, ok := a.tools[name]
 	if !ok {
@@ -4535,18 +4552,14 @@ func (a *Agent) GetTools() []tool.Tool {
 	return tools
 }
 
+// isToolAllowed decides whether a tool is advertised to the model. The
+// advisor on/off toggle is deliberately NOT checked here: dropping "advisor"
+// from the tool list changes the provider's tools block, which invalidates the
+// whole prompt-cache prefix on every toggle. The advisor stays advertised and
+// the gate is enforced at execution time instead (see
+// executeToolCallWithContext), where a refusal lands in the message tail and
+// leaves the cached prefix intact.
 func (a *Agent) isToolAllowed(name string) bool {
-	if name == "advisor" {
-		// Prefer the parent's reactive pointer so mid-run toggles propagate
-		// immediately to sub-agents. Fall back to the agent's own static flag.
-		enabled := a.advisorEnabled.Load()
-		if a.parentAdvisorEnabled != nil {
-			enabled = a.parentAdvisorEnabled.Load()
-		}
-		if !enabled {
-			return false
-		}
-	}
 	if a.spec != nil && len(a.spec.Tools) > 0 {
 		found := false
 		for _, allowed := range a.spec.Tools {
@@ -4658,8 +4671,8 @@ func (a *Agent) resolveSmallModel() string {
 }
 
 // SetParentAdvisorEnabled wires this agent's advisor gate to the parent's
-// atomic flag. When set, isToolAllowed and AdvisorEnabled dereference the
-// parent pointer so mid-run toggles propagate immediately.
+// atomic flag. When set, the execution gate and AdvisorEnabled dereference
+// the parent pointer so mid-run toggles propagate immediately.
 func (a *Agent) SetParentAdvisorEnabled(parent *atomic.Bool) {
 	a.parentAdvisorEnabled = parent
 }
@@ -4687,7 +4700,8 @@ func (a *Agent) advisorGuard() *atomic.Bool {
 	return &a.advisorInFlight
 }
 
-// AdvisorEnabled reports whether the advisor tool is currently exposed.
+// AdvisorEnabled reports whether advisor calls currently execute (the tool is
+// always advertised; see isToolAllowed).
 // When a parent pointer is set, it reads from the parent (reactive);
 // otherwise it reads the agent's own static flag.
 func (a *Agent) AdvisorEnabled() bool {
@@ -5092,8 +5106,8 @@ func (a *Agent) RearmMaintenance() {
 	a.docMaintShutdownOnce = sync.Once{}
 	a.memoryMaintShutdownOnce = sync.Once{}
 
-	go a.memoryMaintenanceWorker()
-	go a.docMaintenanceWorker()
+	crashguard.Go(func() { a.memoryMaintenanceWorker() })
+	crashguard.Go(func() { a.docMaintenanceWorker() })
 
 	a.ResetCancellation()
 }
@@ -5139,13 +5153,13 @@ func stopChContext(ch <-chan struct{}) (context.Context, context.CancelFunc) {
 	default:
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
+	crashguard.Go(func() {
 		defer cancel()
 		select {
 		case <-ch:
 		case <-ctx.Done():
 		}
-	}()
+	})
 	return ctx, cancel
 }
 
@@ -5402,11 +5416,11 @@ func (a *Agent) recoverOneOrphanedToolCall(tc ToolCall, stopCh <-chan struct{}) 
 	defer cancel()
 	done := make(chan outcome, 1)
 	a.orphanRecoveryWG.Add(1)
-	go func() {
+	crashguard.Go(func() {
 		defer a.orphanRecoveryWG.Done()
 		result, err := a.handleToolCallWithContext(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments), nil, tc.ID)
 		done <- outcome{result, err}
-	}()
+	})
 
 	select {
 	case o := <-done:

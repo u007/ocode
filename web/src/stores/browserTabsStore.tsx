@@ -110,6 +110,20 @@ export function useBrowserTabsDispatch() {
   return ctx.dispatch;
 }
 
+/**
+ * Enumerate browser-strip tabs across all projects. The strip is metadata only;
+ * callers that render live surfaces should still decide which tabs have been
+ * activated so persisted-but-never-opened tabs stay lazy.
+ */
+export function useAllBrowserTabs(): Array<{ projectPath: string; tab: BrowserTab }> {
+  const ctx = useContext(BrowserTabsContext);
+  if (!ctx) throw new Error("useAllBrowserTabs must be used within BrowserTabsProvider");
+  return useMemo(
+    () => Object.entries(ctx.state.tabsByProject).flatMap(([projectPath, tabs]) => tabs.map((tab) => ({ projectPath, tab }))),
+    [ctx.state.tabsByProject],
+  );
+}
+
 let seq = 0;
 function newId(): string {
   seq += 1;

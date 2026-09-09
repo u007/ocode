@@ -133,14 +133,15 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const isRunning = isStreaming || turnActive;
 
   // Live tick for elapsed counters — updates once per second while a turn is
-  // active or a session timer is displayed, otherwise idle.
+  // running, otherwise idle. Frozen labels (done at / took) need no tick, and
+  // the session timer is only shown while running (see below) so there is
+  // nothing to tick when idle.
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
-    const needsTick = isRunning || !!tuiStatus?.session_created_at || !!tuiStatus?.turn_started_at || !!tuiStatus?.turn_ended_at;
-    if (!needsTick) return;
+    if (!isRunning) return;
     const id = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [isRunning, tuiStatus?.session_created_at, tuiStatus?.turn_started_at, tuiStatus?.turn_ended_at]);
+  }, [isRunning]);
 
   // Pull every field from the consolidated snapshot when present; fall back to
   // the per-field store state for older TUI builds that don't push "status".
@@ -233,8 +234,11 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
               {lastEndedLabel ? `✓ done at ${lastEndedLabel} · took ${lastTookLabel}` : `took ${lastTookLabel}`}
             </span>
           )}
-          {/* Entire-session elapsed — always visible when session_created_at is known */}
-          {sessionElapsedLabel && (
+          {/* Entire-session elapsed — only while a turn is running. When the
+              turn is done the row shows the frozen "✓ done at … · took …"
+              label; keeping a live session clock next to it looks like the
+              timer never stopped and keeps re-rendering every second. */}
+          {isRunning && sessionElapsedLabel && (
             <span className="text-muted-foreground" title={`Session created at ${snap?.session_created_at}`}>
               session {sessionElapsedLabel}
             </span>

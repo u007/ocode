@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/u007/ocode/internal/crashguard"
 )
 
 // Token estimation constants. The base heuristic is ~4 chars per token for regular
@@ -793,7 +795,7 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 			content string
 			err     error
 		}, 1)
-		go func() {
+		crashguard.Go(func() {
 			var resp *Message
 			var err error
 			if gc, ok := client.(*GenericClient); ok {
@@ -815,7 +817,7 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 				content string
 				err     error
 			}{resp.Content, nil}
-		}()
+		})
 		select {
 		case <-ctx.Done():
 			return "", fmt.Errorf("compact: summary timed out: %w", ctx.Err())
@@ -974,7 +976,7 @@ func inactivityContext(seconds int) (context.Context, context.CancelFunc, func()
 		mu.Unlock()
 	}
 	// Watchdog goroutine: periodically check if the deadline has passed.
-	go func() {
+	crashguard.Go(func() {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -991,7 +993,7 @@ func inactivityContext(seconds int) (context.Context, context.CancelFunc, func()
 				mu.Unlock()
 			}
 		}
-	}()
+	})
 	return ctx, cancel, reset
 }
 

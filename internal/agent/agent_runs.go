@@ -60,6 +60,7 @@ type AgentRun struct {
 	Background bool                  // true if the LLM launched this with run_in_background; false means the parent's task tool call already received the full result synchronously
 	ToolCallID string                // the originating task tool_call id (best-effort; empty if unknown)
 	Dispatcher string                // identity of the agent that dispatched this run
+	SessionID  string                // child session id the run's transcript is persisted under (childSessionID); empty when no parent session is known
 
 	mu           sync.Mutex
 	transcript   []Message
@@ -143,6 +144,18 @@ func (r *AgentRun) closeDone() {
 // callers that resume a run and then need to wait again must call Done()
 // again afterward to get the current cycle's channel.
 func (r *AgentRun) Done() <-chan struct{} { return r.done }
+
+// Elapsed returns how long this run has been executing: EndedAt-StartedAt
+// once it reaches a terminal state, or time-since-StartedAt while still
+// queued/running.
+func (r *AgentRun) Elapsed() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.EndedAt.IsZero() {
+		return r.EndedAt.Sub(r.StartedAt)
+	}
+	return time.Since(r.StartedAt)
+}
 
 // markTeardownDone signals that the current dispatch's shutdownTransient()
 // call has finished. Called from the dispatch goroutine (background or sync)

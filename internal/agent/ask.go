@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -89,7 +90,7 @@ func (a *Agent) AskLoopAsync(messages []Message, opts AskLoopOptions, onResult f
 		}
 	}
 
-	go func() {
+	crashguard.Go(func() {
 		defer func() {
 			if r := recover(); r != nil {
 				stack := string(debug.Stack())
@@ -116,7 +117,7 @@ func (a *Agent) AskLoopAsync(messages []Message, opts AskLoopOptions, onResult f
 			}
 		}
 		onResult(b.String(), nil)
-	}()
+	})
 	return cancel
 }
 

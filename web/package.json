@@ -6,9 +6,11 @@
   "packageManager": "pnpm@10.27.0",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsgo && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsgo --noEmit",
+    "typecheck:legacy": "tsc --noEmit"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -61,13 +63,14 @@
     "@testing-library/react": "^16.0.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "@typescript/native-preview": "7.0.0-dev.20260707.2",
     "@vitejs/plugin-react": "^6.0.2",
     "autoprefixer": "^10.4.20",
     "jsdom": "^25.0.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
-    "typescript": "^5.7.2",
-    "vite": "^8.0.16",
+    "typescript": "^5.9.3",
+    "vite": "^8.2.2",
     "vitest": "^3.0.0"
   },
   "pnpm": {

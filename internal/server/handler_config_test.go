@@ -156,6 +156,67 @@ func TestHandleSetDiscoveryConfigPersists(t *testing.T) {
 	}
 }
 
+func TestHandleGetPermissionModeConfigDefaultsToNormal(t *testing.T) {
+	h := testConfigHandler(t)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/config/ocode/permissions-mode", nil)
+	h.HandleGetPermissionModeConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp permissionModeConfigDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Mode != "normal" {
+		t.Errorf("mode = %q, want normal", resp.Mode)
+	}
+}
+
+func TestHandleSetPermissionModeConfigPersistsSandbox(t *testing.T) {
+	h := testConfigHandler(t)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/permissions-mode", strings.NewReader(`{"mode":"sandbox"}`))
+	h.HandleSetPermissionModeConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.Permissions.Mode
+	h.mu.Unlock()
+	if got != "sandbox" {
+		t.Errorf("in-memory cfg mode = %q, want sandbox (Decision 2 override: sandbox may persist as default)", got)
+	}
+
+	// Confirm it round-trips through GET too.
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("GET", "/api/config/ocode/permissions-mode", nil)
+	h.HandleGetPermissionModeConfig(w2, r2)
+	var resp permissionModeConfigDTO
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Mode != "sandbox" {
+		t.Errorf("GET mode = %q, want sandbox", resp.Mode)
+	}
+}
+
+func TestHandleSetPermissionModeConfigRejectsInvalid(t *testing.T) {
+	h := testConfigHandler(t)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/permissions-mode", strings.NewReader(`{"mode":"bogus"}`))
+	h.HandleSetPermissionModeConfig(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleSetTUIConfigSectionPersists(t *testing.T) {
 	h := testConfigHandler(t)
 
@@ -254,6 +315,36 @@ func TestHandleSetLimitsConfigPersists(t *testing.T) {
 	}
 	if got.UndoMaxAgeDelta != 8 {
 		t.Errorf("undo_max_age_delta not updated: %d", got.UndoMaxAgeDelta)
+	}
+}
+
+func TestHandleSetBrowserConfigPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"chrome_path":"","idle_timeout_minutes":5,"screencast_quality":92}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/browser", strings.NewReader(body))
+	h.HandleSetBrowserConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.Browser
+	h.mu.Unlock()
+	if got.IdleTimeoutMinutes != 5 {
+		t.Errorf("idle_timeout_minutes not updated: %d", got.IdleTimeoutMinutes)
+	}
+	if got.ScreencastQuality != 92 {
+		t.Errorf("screencast_quality not updated: %d", got.ScreencastQuality)
+	}
+
+	// Out-of-range quality is rejected.
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("PUT", "/api/config/ocode/browser", strings.NewReader(`{"screencast_quality":101}`))
+	h.HandleSetBrowserConfig(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", w.Code, w.Body.String())
 	}
 }
 

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/tool"
 )
 
 func mustSeedSession(t *testing.T, dir, id string, contents ...string) {
@@ -615,4 +616,118 @@ func TestAppendUserMessageStampsUserSeq(t *testing.T) {
 	if len(got) != 3 || got[2].UserSeq != 2 || got[2].UserSeq != NextUserSeq(reply) {
 		t.Fatalf("second user message must carry user_seq 2 (= NextUserSeq(transcript)), got %+v", got)
 	}
+}
+
+// TestReconcileAppendFromFilteredBase: the caller's base is the LOADER's
+// view of disk (loadFromDir → removeIncompleteToolRequests dropped an
+// unanswered question/permission round), so it is shorter and shifted
+// relative to the stored rows. That is not a diverged base: the stored
+// rows stay in place and the caller's new suffix lands after them, so the
+// loader view of the result equals the caller's transcript. Before this,
+// the merge reported base divergence, the server re-synced memory to the
+// filtered disk copy, and the whole turn's streamed output vanished
+// (desktop "streamed reply disappeared at turn end", 2026-09-09).
+func TestReconcileAppendFromFilteredBase(t *testing.T) {
+	dir := t.TempDir()
+	id := "ses_conflict-filtered-base"
+
+	askCall := agent.ToolCall{ID: "q-1", Type: "function"}
+	askCall.Function.Name = "question"
+	askCall.Function.Arguments = "{}"
+	stored := []agent.Message{
+		{Role: "user", Content: "u0", UserSeq: 1},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{askCall}},
+		{Role: "tool", ToolID: "q-1", Content: tool.SentinelQuestionPrompt + "\n[]\n\n" + tool.SentinelWaitingForUser},
+		{Role: "user", Content: "u1", UserSeq: 2},
+	}
+	if err := saveToDir(dir, id, "", stored, nil, false, 0); err != nil {
+		t.Fatalf("seed disk: %v", err)
+	}
+	loaded, err := loadFromDir(dir, id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	assertContents(t, loaded.Messages, "u0", "u1")
+
+	// The turn ran from the loader view and produced one reply.
+	ours := append(append([]agent.Message(nil), loaded.Messages...), agent.Message{Role: "assistant", Content: "r0"})
+	if err := reconcileAppendToDir(dir, id, "", ours, len(loaded.Messages), nil); err != nil {
+		t.Fatalf("reconcileAppendToDir: %v", err)
+	}
+	assertContents(t, readStoredContents(t, dir, id), "u0", "", stored[2].Content, "u1", "r0")
+
+	// The loader view of the merged file is exactly the caller's transcript,
+	// and a second turn from that view converges the same way.
+	loaded, err = loadFromDir(dir, id)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	assertContents(t, loaded.Messages, "u0", "u1", "r0")
+	ours = append(append([]agent.Message(nil), loaded.Messages...), agent.Message{Role: "assistant", Content: "r1"})
+	if err := reconcileAppendToDir(dir, id, "", ours, len(loaded.Messages), nil); err != nil {
+		t.Fatalf("reconcileAppendToDir (second turn): %v", err)
+	}
+	assertContents(t, readStoredContents(t, dir, id), "u0", "", stored[2].Content, "u1", "r0", "r1")
+}
+
+// TestLiveSaveFromFilteredBaseAppends: live (mid-turn) snapshots from a
+// loader-view base must land on disk, not drop — otherwise a crash
+// mid-turn loses the whole turn on any session resumed past an
+// unanswered ask round. Same shape as TestReconcileAppendFromFilteredBase
+// but through the live path (no baseLen).
+func TestLiveSaveFromFilteredBaseAppends(t *testing.T) {
+	dir := t.TempDir()
+	id := "ses_conflict-filtered-live"
+
+	askCall := agent.ToolCall{ID: "q-1", Type: "function"}
+	askCall.Function.Name = "question"
+	askCall.Function.Arguments = "{}"
+	stored := []agent.Message{
+		{Role: "user", Content: "u0", UserSeq: 1},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{askCall}},
+		{Role: "tool", ToolID: "q-1", Content: tool.SentinelQuestionPrompt + "\n[]\n\n" + tool.SentinelWaitingForUser},
+		{Role: "user", Content: "u1", UserSeq: 2},
+	}
+	if err := saveToDir(dir, id, "", stored, nil, false, 0); err != nil {
+		t.Fatalf("seed disk: %v", err)
+	}
+	loaded, err := loadFromDir(dir, id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	gen, err := readHistoryGen(dir, id)
+	if err != nil {
+		t.Fatalf("readHistoryGen: %v", err)
+	}
+
+	// Base snapshot (shorter than disk): nothing new, must not error.
+	live := append([]agent.Message(nil), loaded.Messages...)
+	if changed, err := appendSqliteSession(dir, id, "", live, nil, true, gen, false); err != nil || changed {
+		t.Fatalf("base live snapshot: changed=%v err=%v", changed, err)
+	}
+	// Two streamed messages land in order after the raw rows.
+	live = append(live, agent.Message{Role: "assistant", Content: "r0"})
+	if changed, err := appendSqliteSession(dir, id, "", live, nil, true, gen, false); err != nil || !changed {
+		t.Fatalf("live snapshot r0: changed=%v err=%v", changed, err)
+	}
+	live = append(live, agent.Message{Role: "assistant", Content: "r1"})
+	if changed, err := appendSqliteSession(dir, id, "", live, nil, true, gen, false); err != nil || !changed {
+		t.Fatalf("live snapshot r1: changed=%v err=%v", changed, err)
+	}
+	assertContents(t, readStoredContents(t, dir, id), "u0", "", stored[2].Content, "u1", "r0", "r1")
+
+	// A stale re-queued snapshot is a no-op, and the turn-end sync save
+	// converges without conflict.
+	if changed, err := appendSqliteSession(dir, id, "", live[:len(live)-1], nil, true, gen, false); err != nil || changed {
+		t.Fatalf("stale live snapshot: changed=%v err=%v", changed, err)
+	}
+	if err := reconcileAppendToDir(dir, id, "", live, len(loaded.Messages), nil); err != nil {
+		t.Fatalf("turn-end reconcile: %v", err)
+	}
+	assertContents(t, readStoredContents(t, dir, id), "u0", "", stored[2].Content, "u1", "r0", "r1")
+	loaded, err = loadFromDir(dir, id)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	assertContents(t, loaded.Messages, "u0", "u1", "r0", "r1")
 }

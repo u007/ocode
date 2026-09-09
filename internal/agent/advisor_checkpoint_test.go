@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -414,5 +415,52 @@ func TestRunAdvisorCheckpoint_ReportsProgress(t *testing.T) {
 	}
 	if len(events) != 2 || !events[0] || events[1] {
 		t.Fatalf("expected start(true) then finish(false), got %v", events)
+	}
+}
+
+// TestAdvisorToggleKeepsToolListStable locks in the cache-safety contract:
+// flipping advisor on/off must not change the advertised tool set (a tools
+// block change invalidates the provider prompt-cache prefix). The gate lives
+// at execution time instead.
+func TestAdvisorToggleKeepsToolListStable(t *testing.T) {
+	a := NewAgent(nil, nil, nil, nil)
+	if !a.AdvisorEnabled() {
+		t.Fatal("expected advisor enabled by default")
+	}
+	names := func() []string {
+		var out []string
+		for _, t := range a.GetTools() {
+			out = append(out, t.Name())
+		}
+		sort.Strings(out)
+		return out
+	}
+	before := names()
+	a.SetAdvisorEnabled(false)
+	after := names()
+	if len(before) != len(after) {
+		t.Fatalf("tool list changed on advisor toggle: before=%v after=%v", before, after)
+	}
+	for i := range before {
+		if before[i] != after[i] {
+			t.Fatalf("tool list changed on advisor toggle at %d: before=%v after=%v", i, before, after)
+		}
+	}
+	hasAdvisor := false
+	for _, n := range after {
+		if n == "advisor" {
+			hasAdvisor = true
+		}
+	}
+	if !hasAdvisor {
+		t.Fatalf("advisor must stay advertised while disabled, got %v", after)
+	}
+
+	out, err := a.executeToolCall("advisor", []byte(`{"question":"x"}`), nil, "tc1")
+	if err != nil {
+		t.Fatalf("expected soft refusal, got err %v", err)
+	}
+	if !strings.Contains(out, "disabled") {
+		t.Fatalf("expected disabled notice, got %q", out)
 	}
 }

@@ -372,30 +372,52 @@ func loadRawMessages(dir, id string) ([]agent.Message, error) {
 // the same position) has no safe merge and returns the conflict. See
 // rebaseAppend for the merge rule.
 func ReconcileAppend(id, title string, messages []agent.Message, baseLen int, metadata map[string]any) error {
+	_, err := ReconcileAppendWithMessages(id, title, messages, baseLen, metadata)
+	return err
+}
+
+// ReconcileAppendWithMessages is ReconcileAppend, but returns the filtered
+// transcript when a concurrent append required a rebase. The returned slice is
+// nil when the initial save succeeded without a rebase. Callers that keep a
+// resident transcript can replace it with the returned slice to stay aligned
+// with rows inserted by another writer.
+func ReconcileAppendWithMessages(id, title string, messages []agent.Message, baseLen int, metadata map[string]any) ([]agent.Message, error) {
 	dir, err := GetStorageDir()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return reconcileAppendToDir(dir, id, title, messages, baseLen, metadata)
+	return reconcileAppendToDirWithMessages(dir, id, title, messages, baseLen, metadata)
 }
 
 // ReconcileAppendForDir is ReconcileAppend targeting the storage dir of wd
 // (the session-owning project).
 func ReconcileAppendForDir(projectRoot, id, title string, messages []agent.Message, baseLen int, metadata map[string]any) error {
+	_, err := ReconcileAppendForDirWithMessages(projectRoot, id, title, messages, baseLen, metadata)
+	return err
+}
+
+// ReconcileAppendForDirWithMessages is the project-root-scoped form of
+// ReconcileAppendWithMessages.
+func ReconcileAppendForDirWithMessages(projectRoot, id, title string, messages []agent.Message, baseLen int, metadata map[string]any) ([]agent.Message, error) {
 	dir, err := GetStorageDirForPath(projectRoot)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return reconcileAppendToDir(dir, id, title, messages, baseLen, metadata)
+	return reconcileAppendToDirWithMessages(dir, id, title, messages, baseLen, metadata)
 }
 
 func reconcileAppendToDir(dir, id, title string, messages []agent.Message, baseLen int, metadata map[string]any) error {
+	_, err := reconcileAppendToDirWithMessages(dir, id, title, messages, baseLen, metadata)
+	return err
+}
+
+func reconcileAppendToDirWithMessages(dir, id, title string, messages []agent.Message, baseLen int, metadata map[string]any) ([]agent.Message, error) {
 	err := persistToDir(dir, id, title, messages, metadata, false, 0, false)
 	if err == nil {
-		return nil
+		return nil, nil
 	}
 	if !isConflictErr(err) {
-		return err
+		return nil, err
 	}
 	var lastErr = err
 	for attempt := 0; attempt < 8; attempt++ {
@@ -404,7 +426,7 @@ func reconcileAppendToDir(dir, id, title string, messages []agent.Message, baseL
 		}
 		stored, err := loadRawMessages(dir, id)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		merged, ok := rebaseAppend(stored, messages, baseLen)
 		if !ok {
@@ -412,18 +434,18 @@ func reconcileAppendToDir(dir, id, title string, messages []agent.Message, baseL
 			// content for the same position. No safe merge exists; the
 			// caller (server) converges to disk and logs the dropped
 			// suffix instead of silently staying diverged forever.
-			return fmt.Errorf("session: reconcile append to %s: base diverged from stored transcript: %w", id, lastErr)
+			return nil, fmt.Errorf("session: reconcile append to %s: base diverged from stored transcript: %w", id, lastErr)
 		}
 		err = persistToDir(dir, id, title, merged, metadata, false, 0, false)
 		if err == nil {
-			return nil
+			return removeIncompleteToolRequests(merged), nil
 		}
 		lastErr = err
 		if !isConflictErr(err) && !isConstraintErr(err) {
-			return err
+			return nil, err
 		}
 	}
-	return fmt.Errorf("session: reconcile append to %s: %w", id, lastErr)
+	return nil, fmt.Errorf("session: reconcile append to %s: %w", id, lastErr)
 }
 
 // rebaseAppend merges ours (a transcript whose first baseLen messages are
@@ -436,23 +458,45 @@ func reconcileAppendToDir(dir, id, title string, messages []agent.Message, baseL
 // kept). Rows of ours never matched stay in order at the tail. Returns
 // ok=false when the base itself diverged — same-position content written by
 // two writers cannot be merged without dropping one side.
+//
+// The caller's base may also be the LOADER's view of stored (loadFromDir →
+// removeIncompleteToolRequests dropped an unanswered ask round), which is
+// shorter and shifted relative to the raw rows. That is not a divergence:
+// the raw rows are kept in place and the unsaved suffix lands after them,
+// so the loader view of the result equals the caller's transcript.
 func rebaseAppend(stored, ours []agent.Message, baseLen int) ([]agent.Message, bool) {
-	if baseLen < 0 || baseLen > len(ours) || len(stored) < baseLen {
+	if baseLen < 0 || baseLen > len(ours) {
 		return nil, false
 	}
-	for i := 0; i < baseLen; i++ {
-		if !sameMessage(stored[i], ours[i]) {
+	view := stored
+	if !samePrefix(view, ours, baseLen) {
+		view = removeIncompleteToolRequests(stored)
+		if !samePrefix(view, ours, baseLen) {
 			return nil, false
 		}
 	}
 	merged := append([]agent.Message(nil), stored...)
 	next := baseLen
-	for i := baseLen; i < len(stored); i++ {
-		if next < len(ours) && sameMessage(stored[i], ours[next]) {
+	for i := baseLen; i < len(view); i++ {
+		if next < len(ours) && sameMessage(view[i], ours[next]) {
 			next++
 		}
 	}
 	return append(merged, ours[next:]...), true
+}
+
+// samePrefix reports whether the first n messages of a and b are byte-equal
+// in persistence form (false when either is shorter than n).
+func samePrefix(a, b []agent.Message, n int) bool {
+	if len(a) < n || len(b) < n {
+		return false
+	}
+	for i := 0; i < n; i++ {
+		if !sameMessage(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // sameMessage reports byte-equal persistence form (the overlap check's

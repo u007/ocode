@@ -44,11 +44,14 @@ write-integrity confinement itself:
   capability-SID ACLs and breaks Node/Python toolchains. Revisit if a viable
   Windows FS-confinement path appears. The web UI surfaces this honestly via
   `sandbox_supported`/`effective_behavior` ("degraded_normal").
-- **cron sandbox**: scheduled jobs cannot select sandbox from the web UI
-  (`CronPermissionMode` is normal/yolo/locked); blank jobs are pinned to
-  `normal` (authoritative `resolveCronPermissionMode` in
-  `internal/server/scheduler_runner.go`). Decide later whether to expose
-  explicit cron sandbox.
+- **cron sandbox**: ~~scheduled jobs cannot select sandbox from the web UI~~
+  fixed 2026-09-09 — `CronPermissionMode` (`web/src/api/types.ts`) and the
+  job dialog select (`web/src/components/Cron/CronJobDialog.tsx`) now offer
+  `sandbox`, alongside the new `scheduler.PermSandbox` constant
+  (`internal/scheduler/types.go`). Blank jobs are still pinned to `normal`
+  (authoritative `resolveCronPermissionMode` in
+  `internal/server/scheduler_runner.go`) — only an explicit `sandbox` choice
+  opts a job in.
 
 ## Pending permission asks do not survive a server restart (2026-08-31)
 

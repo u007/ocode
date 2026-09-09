@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -339,13 +340,13 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 	// call.
 	watchDone := make(chan struct{})
 	defer close(watchDone)
-	go func() {
+	crashguard.Go(func() {
 		select {
 		case <-ctx.Done():
 			advisorAgent.Cancel()
 		case <-watchDone:
 		}
-	}()
+	})
 
 	// Run the agentic tool loop with the user's context prompt.
 	messages := []Message{{Role: "user", Content: params.Prompt}}

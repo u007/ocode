@@ -37,6 +37,10 @@ const (
 	PermYOLO PermissionMode = "yolo"
 	// PermLocked denies everything (read-only).
 	PermLocked PermissionMode = "locked"
+	// PermSandbox runs without prompts but confines writes to the job's
+	// working/writable roots at the OS level (see agent.PermissionModeSandbox).
+	// Degrades to normal (prompts) on platforms without a confinement backend.
+	PermSandbox PermissionMode = "sandbox"
 )
 
 // Schedule describes when a job fires.

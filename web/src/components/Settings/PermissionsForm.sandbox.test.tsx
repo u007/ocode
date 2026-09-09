@@ -15,6 +15,8 @@ vi.mock("../../api/client", () => ({
     getPermissions: vi.fn(),
     getAutoPermissionConfig: vi.fn(),
     setPermissionMode: vi.fn(),
+    getPermissionModeConfig: vi.fn(),
+    setPermissionModeConfig: vi.fn(),
     setAutoPermissionConfig: vi.fn(),
     setPermissionModel: vi.fn(),
     setYolo: vi.fn(),
@@ -24,6 +26,8 @@ vi.mock("../../api/client", () => ({
 const mockGetPermissions = vi.mocked(api.getPermissions);
 const mockGetAuto = vi.mocked(api.getAutoPermissionConfig);
 const mockSetPermissionMode = vi.mocked(api.setPermissionMode);
+const mockGetPermissionModeConfig = vi.mocked(api.getPermissionModeConfig);
+const mockSetPermissionModeConfig = vi.mocked(api.setPermissionModeConfig);
 const mockSetAuto = vi.mocked(api.setAutoPermissionConfig);
 const mockSetPermissionModel = vi.mocked(api.setPermissionModel);
 
@@ -48,6 +52,7 @@ beforeEach(() => {
     bash_rules: [],
   } as never);
   mockGetAuto.mockResolvedValue(EMPTY_AUTO as never);
+  mockGetPermissionModeConfig.mockResolvedValue({ mode: "normal" } as never);
 });
 
 describe("PermissionsForm sandbox preservation", () => {
@@ -74,5 +79,25 @@ describe("PermissionsForm sandbox preservation", () => {
 
     await waitFor(() => expect(mockSetPermissionMode).toHaveBeenCalledWith("yolo"));
     expect(mockSetPermissionModel).not.toHaveBeenCalled(); // no model change
+  });
+
+  it("does not persist the default mode when the user did not change it", async () => {
+    render(<PermissionsForm />);
+    await screen.findByText("Permissions");
+
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(mockSetAuto).toHaveBeenCalled());
+    expect(mockSetPermissionModeConfig).not.toHaveBeenCalled();
+  });
+
+  it("calls setPermissionModeConfig('sandbox') when the user picks Sandbox as the default and saves", async () => {
+    render(<PermissionsForm />);
+    await screen.findByText("Permissions");
+
+    fireEvent.click(screen.getByLabelText(/^Sandbox$/i));
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(mockSetPermissionModeConfig).toHaveBeenCalledWith("sandbox"));
   });
 });

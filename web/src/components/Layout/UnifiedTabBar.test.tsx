@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 import { api } from "../../api/client";
-import { ChatProvider } from "../../stores/chatStore";
+import { ChatProvider, useChatDispatch } from "../../stores/chatStore";
 import { TerminalProvider, useTerminalState } from "../../stores/terminalStore";
 import { BrowserTabsProvider } from "../../stores/browserTabsStore";
 import { browserStore, browserActions } from "../../lib/browserStore";
@@ -117,6 +117,84 @@ describe("UnifiedTabBar", () => {
       }),
     );
     expect(within(pill).getByText("🌐")).toBeInTheDocument();
+  });
+
+  it("keeps the leading icon slot a fixed size across loading and idle states", () => {
+    // Regression: the spinner used to replace the emoji with a differently
+    // sized element, resizing the pill and reflowing the wrapping bar.
+    renderBar();
+    fireEvent.click(screen.getByRole("button", { name: /new browser tab/i }));
+    const key = Object.keys(browserStore.state.byKey).find((k) => k.startsWith("tab:"))!;
+    const pill = screen.getByRole("tab", { name: /new tab/i });
+    const slotClass = () => within(pill).getByTestId("tab-icon").className;
+    const idleClass = slotClass();
+    expect(idleClass).toMatch(/h-4/);
+    expect(idleClass).toMatch(/w-4/);
+    act(() => browserActions.navigate(key as never, "https://example.com/"));
+    expect(slotClass()).toBe(idleClass);
+    act(() =>
+      browserActions.applyNavEvent(key as never, {
+        state_key: key,
+        url: "https://example.com/",
+        status: 200,
+        mode: "local",
+      }),
+    );
+    expect(slotClass()).toBe(idleClass);
+  });
+
+  it("keeps the pending-dot slot rendered across tab switches so the bar never reflows", () => {
+    // Regression: the pending dot was conditionally rendered, and it flips on
+    // exactly the two tabs involved in a switch (old gains it, new loses it),
+    // so every tab switch resized two pills and reshuffled the wrapping bar.
+    projectFake.tabs = [
+      { id: "s1", projectPath: "/proj", title: "Chat One", activeSubTab: "chat" },
+      { id: "s2", projectPath: "/proj", title: "Chat Two", activeSubTab: "chat" },
+    ];
+    projectFake.activeTabId = "s1";
+    function SeedPending() {
+      const dispatch = useChatDispatch();
+      useEffect(() => {
+        // Pending on s1, which starts ACTIVE so its dot is hidden; switching
+        // to s2 flips that same pill's slot to visible.
+        dispatch({ type: "PERMISSION_REQUEST", sessionId: "s1", permission: { tool: "bash", request_id: "r1" } });
+      }, [dispatch]);
+      return null;
+    }
+    const onFocusKindChange = vi.fn();
+    // Fresh elements per render: reusing one element object lets React's
+    // context bailout skip the whole subtree (provider values unchanged), so
+    // the mocked project state flip below would never reach the bar.
+    const makeTree = () => (
+      <ChatProvider>
+        <TerminalProvider>
+          <BrowserTabsProvider>
+            <SeedPending />
+            <UnifiedTabBar focusedKind={("chat" as FocusedKind)} onFocusKindChange={onFocusKindChange} />
+          </BrowserTabsProvider>
+        </TerminalProvider>
+      </ChatProvider>
+    );
+    const utils = render(makeTree());
+    const dotIn = (name: RegExp) => within(screen.getByRole("tab", { name })).getByTestId("tab-pending");
+    // s1 starts active so its pending ask stays hidden behind a transparent
+    // placeholder of identical size; s2 has nothing pending.
+    expect(dotIn(/chat one/i).dataset.active).toBe("false");
+    expect(dotIn(/chat one/i).className).toMatch(/bg-transparent/);
+    expect(dotIn(/chat two/i).dataset.active).toBe("false");
+    const orderBefore = screen.getAllByRole("tab").map((t) => t.getAttribute("aria-label"));
+    const geometry = (el: HTMLElement) => el.className.replace(/bg-\S+/g, "").trim();
+    const geomBefore = [geometry(dotIn(/chat one/i)), geometry(dotIn(/chat two/i))];
+
+    // Switch tabs: the dot flips sides, but no slot is added/removed and the
+    // geometry classes are unchanged, so pill widths (and wrap rows) hold.
+    projectFake.activeTabId = "s2";
+    utils.rerender(makeTree());
+    expect(dotIn(/chat one/i).dataset.active).toBe("true");
+    expect(dotIn(/chat one/i).className).toMatch(/bg-amber-400/);
+    expect(dotIn(/chat two/i).dataset.active).toBe("false");
+    expect([geometry(dotIn(/chat one/i)), geometry(dotIn(/chat two/i))]).toEqual(geomBefore);
+    expect(screen.getAllByRole("tab").map((t) => t.getAttribute("aria-label"))).toEqual(orderBefore);
   });
 
   it("lists a persisted-but-never-activated terminal as a pill (peek, no pty)", () => {

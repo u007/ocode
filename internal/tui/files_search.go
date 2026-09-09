@@ -12,6 +12,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
+
+	"github.com/u007/ocode/internal/crashguard"
 )
 
 // filesContentSearchBatchMsg delivers a batch of incremental search results.
@@ -88,7 +90,7 @@ func startContentSearchCmdWithOptions(workDir, query, exts string, includeIgnore
 	cancel := make(chan struct{})
 	ch := make(chan filesContentSearchBatchMsg, 4)
 
-	go func() {
+	crashguard.Go(func() {
 		defer close(ch)
 
 		re, err := compileContentSearchPattern(query, options)
@@ -234,7 +236,7 @@ func startContentSearchCmdWithOptions(workDir, query, exts string, includeIgnore
 
 		// Flush remaining buffered results.
 		flush()
-	}()
+	})
 
 	return waitSearchEventWithGeneration(ch, cancel, options.generation), cancel
 }

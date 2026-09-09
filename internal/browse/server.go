@@ -54,10 +54,16 @@ type NewTabEvent struct {
 // Options configures the headless Chrome subsystem. ChromePath overrides
 // discovery; IdleTimeout is how long the shared Chrome process idles before
 // shutdown. Supervisor is the server-owned process supervisor.
+// ScreencastQuality is the CDP screencast JPEG quality (1-100, 0 = default).
+// HTR carries the HTR NControl companion (supervised `htrcli serve` daemon
+// + extension preload); zero value disables it. See cdp.HTROptions.
 type Options struct {
-	ChromePath  string
-	IdleTimeout time.Duration
-	Supervisor  *tool.ProcessSupervisor
+	ChromePath        string
+	IdleTimeout       time.Duration
+	ScreencastQuality int
+	Supervisor        *tool.ProcessSupervisor
+	HTR               cdp.HTROptions
+	HTRNotice         string
 }
 
 // chromeTarget is the subset of cdp.Target used by the browse WS. Defined
@@ -83,11 +89,16 @@ type chromeManager interface {
 	Attach(ctx context.Context, stateKey string, sink cdp.FrameSink) (chromeTarget, error)
 	Revoke(stateKey string)
 	SetFiles(ctx context.Context, stateKey string, paths []string) error
+	SetScreencastQuality(quality int)
 	Close(ctx context.Context) error
 }
 
 // realManagerAdapter wraps *cdp.Manager to satisfy chromeManager.
 type realManagerAdapter struct{ *cdp.Manager }
+
+func (r *realManagerAdapter) SetScreencastQuality(quality int) {
+	r.Manager.SetScreencastQuality(quality)
+}
 
 func (r *realManagerAdapter) Attach(ctx context.Context, stateKey string, sink cdp.FrameSink) (chromeTarget, error) {
 	t, err := r.Manager.Attach(ctx, stateKey, sink)
@@ -246,12 +257,22 @@ func (s *Server) initManager(opts Options) {
 	if s.cdp != nil {
 		return
 	}
+	htrExtensionDir, htrSocketPath, htrNativeHostName := "", "", ""
+	if opts.HTR.Enabled {
+		htrExtensionDir = opts.HTR.ExtensionDir
+		htrSocketPath = opts.HTR.SocketPath
+		htrNativeHostName = opts.HTR.NativeHostName
+	}
 	mgrOpts := cdp.ManagerOptions{
-		ChromePath:  opts.ChromePath,
-		IdleTimeout: opts.IdleTimeout,
-		Supervisor:  opts.Supervisor,
-		Dialer:      NewSafeDialer(false),
-		Log:         s.log,
+		ChromePath:        opts.ChromePath,
+		IdleTimeout:       opts.IdleTimeout,
+		ScreencastQuality: opts.ScreencastQuality,
+		HTRExtensionDir:   htrExtensionDir,
+		HTRSocketPath:     htrSocketPath,
+		HTRNativeHostName: htrNativeHostName,
+		Supervisor:        opts.Supervisor,
+		Dialer:            NewSafeDialer(false),
+		Log:               s.log,
 		EmitNav: func(ev cdp.NavEvent) {
 			s.emitNav(NavEvent{StateKey: ev.StateKey, URL: ev.URL, Status: ev.Status, Mode: "chrome", Error: ev.Error})
 		},
@@ -272,6 +293,15 @@ func (s *Server) Configure(opts Options) { s.initManager(opts) }
 
 // SetCDPManager installs a fake manager for tests.
 func (s *Server) SetCDPManager(m chromeManager) { s.cdp = m }
+
+// SetScreencastQuality updates the CDP screencast JPEG quality live.
+// Existing targets pick it up on their next restartScreencast (resize,
+// zoom, or re-attach). No-op before the manager exists.
+func (s *Server) SetScreencastQuality(quality int) {
+	if s.cdp != nil {
+		s.cdp.SetScreencastQuality(quality)
+	}
+}
 
 // SetSPAOrigin records the main (SPA) origin so local HTML can carry the
 // exact postMessage targetOrigin for capture-script telemetry.

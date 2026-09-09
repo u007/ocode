@@ -39,6 +39,10 @@ below.
   converges (idempotent retry). Differing overlap: sync save →
   `ErrTranscriptConflict` (typed, via `session.IsConflictErr`); live write
   → silent drop (by design; the turn-end sync save is authoritative).
+  Live writes decide their suffix via `liveAppendStart` (2026-09-09): the
+  stored rows, or the loader's filtered view of them, must be a
+  byte-identical prefix of the snapshot; the rows past that prefix are
+  appended at the raw tail. Any other shape drops.
 - **Ordinary saves never shrink.** A sync save with FEWER messages than
   stored conflicts (`ErrTranscriptConflict`). The old delete-all-and-rewrite
   for shorter snapshots silently destroyed another writer's appended rows
@@ -84,6 +88,11 @@ below.
   on conflict the raw disk transcript is reloaded and merged — foreign
   rows kept in place, our not-yet-stored suffix appended after them
   (`rebaseAppend` greedy-matches our own live-written rows in order).
+  A base that equals the LOADER's filtered view of the stored rows (see
+  the next section) is not a divergence (2026-09-09): `rebaseAppend`
+  retries the prefix match against `removeIncompleteToolRequests(stored)`,
+  keeps the raw rows in place and appends the unsaved suffix after them,
+  so the loader view of the result equals the caller's transcript.
   Divergence INSIDE the base has no safe merge: memory re-syncs to disk
   and the dropped in-memory suffix is logged explicitly, so the session
   stays writable instead of every later save conflicting forever.
@@ -97,12 +106,25 @@ transcript containing such rows loads SHORTER and shifted, so a
 full-snapshot "loaded view + new message" save compares a shifted sequence
 against stored rows and conflicts forever — every retry re-filters the
 same way. The tail insert dodges this for user messages and the metadata-only
-update dodges it for per-session model overrides; full-snapshot
-saves from a filtered base (e.g. resume a session that closed mid-ask,
-then let the next turn end) still conflict — pre-existing, mitigated by
-turn-end reconcile/converge + logging. Proper fix is splitting the
-transcript view (raw, for persistence) from the LLM view (filtered, for
-requests) — follow-up.
+update dodges it for per-session model overrides; turn-end saves from a
+filtered base (resume a session that closed mid-ask, then let the next
+turn end) reconcile through the loader-view match in `rebaseAppend`.
+
+Incident (2026-09-09, ses_2026-09-09-111131-f098f1cb and
+ses_2026-09-09-102110-ab14279d): both sessions paused on a `question`
+prompt, the user typed a chat message instead of answering, and the next
+turn ran from an agent rebuilt off the filtered disk copy (9 rows on disk,
+7 in memory). Every live save dropped on the differing overlap, the
+turn-end save hit "base diverged", memory re-synced to the filtered disk
+copy, and the `messages` snapshot wiped the streamed turn from the
+desktop chat; each later turn repeated it ("adding new messages, stuck").
+Fixed by the loader-view match above, for both the turn-end reconcile
+and live saves (`TestLiveSaveFromFilteredBaseAppends`). Idle eviction and
+`ReleaseAgent` now also keep a session paused on a `question` ask
+resident (`tailIsPendingAsk`), matching the permission-ask exemption, so
+the common way into a filtered base (30-min idle on an unanswered dialog)
+is closed too. Splitting the transcript views — raw for persistence,
+filtered for LLM requests — remains the structural follow-up.
 
 ## Test hygiene
 

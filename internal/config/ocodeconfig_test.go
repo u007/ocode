@@ -1738,6 +1738,45 @@ func TestBrowserConfigDefaultWhenAbsent(t *testing.T) {
 	if cfg.Ocode.Browser.ChromePath != "" {
 		t.Fatalf("default ChromePath = %q, want empty", cfg.Ocode.Browser.ChromePath)
 	}
+	if cfg.Ocode.Browser.ScreencastQuality != DefaultScreencastQuality {
+		t.Fatalf("default ScreencastQuality = %d, want %d", cfg.Ocode.Browser.ScreencastQuality, DefaultScreencastQuality)
+	}
+}
+
+func TestBrowserConfigScreencastQuality(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initial := `{"browser":{"screencast_quality":92}}`
+	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	if cfg.Ocode.Browser.ScreencastQuality != 92 {
+		t.Fatalf("ScreencastQuality = %d, want 92", cfg.Ocode.Browser.ScreencastQuality)
+	}
+	if got := NormalizeScreencastQuality(0); got != DefaultScreencastQuality {
+		t.Fatalf("NormalizeScreencastQuality(0) = %d, want %d", got, DefaultScreencastQuality)
+	}
+	if got := NormalizeScreencastQuality(500); got != 100 {
+		t.Fatalf("NormalizeScreencastQuality(500) = %d, want 100", got)
+	}
+
+	// Out-of-range quality is rejected.
+	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(`{"browser":{"screencast_quality":101}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var bad Config
+	if err := LoadOcodeConfig(&bad); err == nil {
+		t.Fatal("expected error for screencast_quality 101")
+	}
 }
 
 func TestBrowserConfigRejectsExtensions(t *testing.T) {

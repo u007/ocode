@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -48,10 +49,11 @@ func modelPtr(v tea.Model) *model {
 	}
 }
 
-// TestPermClickCycleIncludesSandbox locks the new cycle order:
-// normal(auto on) → yolo → locked → sandbox → normal. The status-bar
-// permission text only exists when the mode label is non-empty, so the model
-// starts in normal·auto (visible "normal · auto-permission on" label).
+// TestPermClickCycleIncludesSandbox locks the cycle order:
+// normal(auto on) → yolo → locked → sandbox → sandbox·auto → normal. The
+// status-bar permission text only exists when the mode label is non-empty,
+// so the model starts in normal·auto (visible "normal · auto-permission on"
+// label).
 func TestPermClickCycleIncludesSandbox(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // isolate persist writes
 
@@ -69,19 +71,107 @@ func TestPermClickCycleIncludesSandbox(t *testing.T) {
 	if pm.Mode() != agent.PermissionModeLocked {
 		t.Fatalf("after click 2 mode=%s, want locked", pm.Mode())
 	}
-	// Click 3: locked → sandbox (the new step)
+	// Click 3: locked → sandbox
 	m = clickPerm(m)
 	if pm.Mode() != agent.PermissionModeSandbox {
 		t.Fatalf("after click 3 mode=%s, want sandbox (cycle must reach it)", pm.Mode())
 	}
-	// Entering sandbox must not resurrect auto-permission (yolo forced it off).
+	// Entering sandbox must not resurrect auto-permission (yolo forced it off;
+	// Decision 9 — a mode change alone never touches AutoPermissionEnabled).
 	if pm.AutoPermissionEnabled() {
 		t.Fatal("entering sandbox re-enabled auto-permission")
 	}
-	// Click 4: sandbox → normal (full wrap-around)
+	// Click 4: sandbox → sandbox·auto (the new step — reachable by cycling
+	// alone, mirroring the normal·auto stop, not a side effect of the mode
+	// change itself).
+	m = clickPerm(m)
+	if pm.Mode() != agent.PermissionModeSandbox {
+		t.Fatalf("after click 4 mode=%s, want sandbox (still sandbox, auto toggled)", pm.Mode())
+	}
+	if !pm.AutoPermissionEnabled() {
+		t.Fatal("after click 4, expected auto-permission enabled (sandbox·auto step)")
+	}
+	// Click 5: sandbox·auto → normal (full wrap-around), turning auto back off.
 	m = clickPerm(m)
 	if pm.Mode() != agent.PermissionModeNormal {
-		t.Fatalf("after click 4 mode=%s, want normal (full cycle)", pm.Mode())
+		t.Fatalf("after click 5 mode=%s, want normal (full cycle)", pm.Mode())
+	}
+	if pm.AutoPermissionEnabled() {
+		t.Fatal("after click 5, expected auto-permission disabled (wrap to normal)")
+	}
+}
+
+// TestSidebarPermClickCycleIncludesSandboxAuto locks the sidebar "Allowed"
+// header's click-cycle handler (handleMouseAction, sidebarAllowedHeaderForClick
+// branch) against the same normal → normal·auto → yolo → locked → sandbox →
+// sandbox·auto → normal order as the status-bar handler. The two handlers
+// duplicate the same switch — this guards them from silently diverging if only
+// one copy is edited in the future.
+func TestSidebarPermClickCycleIncludesSandboxAuto(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate persist writes
+
+	a := agent.NewAgent(nil, nil, nil, nil)
+	m := &model{
+		agent:       a,
+		ready:       true,
+		width:       140,
+		height:      40,
+		activeTab:   tabChat,
+		showSidebar: true,
+		input:       newTestTextarea(),
+		styles:      ApplyThemeColors("tokyonight"),
+	}
+	m.layout()
+	pm := m.agent.Permissions()
+	pm.SetAutoPermissionEnabled(true)
+
+	clickSidebarAllowed := func(m *model) *model {
+		t.Helper()
+		rows := strings.Split(stripANSI(m.renderContent()), "\n")
+		sidebarX := m.panelWidth() + 1
+		allowedY := -1
+		for y, r := range rows {
+			if strings.Contains(r, "Allowed") {
+				allowedY = y
+				break
+			}
+		}
+		if allowedY < 0 {
+			t.Fatal("Allowed header not found in rendered sidebar")
+		}
+		upd, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: sidebarX, Y: allowedY})
+		m = modelPtr(upd)
+		upd, _ = m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: sidebarX, Y: allowedY})
+		return modelPtr(upd)
+	}
+
+	// Click 1: normal(auto on) → yolo
+	m = clickSidebarAllowed(m)
+	if pm.Mode() != agent.PermissionModeYOLO {
+		t.Fatalf("after click 1 mode=%s, want yolo", pm.Mode())
+	}
+	// Click 2: yolo → locked
+	m = clickSidebarAllowed(m)
+	if pm.Mode() != agent.PermissionModeLocked {
+		t.Fatalf("after click 2 mode=%s, want locked", pm.Mode())
+	}
+	// Click 3: locked → sandbox
+	m = clickSidebarAllowed(m)
+	if pm.Mode() != agent.PermissionModeSandbox {
+		t.Fatalf("after click 3 mode=%s, want sandbox", pm.Mode())
+	}
+	if pm.AutoPermissionEnabled() {
+		t.Fatal("entering sandbox re-enabled auto-permission")
+	}
+	// Click 4: sandbox → sandbox·auto
+	m = clickSidebarAllowed(m)
+	if pm.Mode() != agent.PermissionModeSandbox || !pm.AutoPermissionEnabled() {
+		t.Fatalf("after click 4 mode=%s auto=%v, want sandbox·auto", pm.Mode(), pm.AutoPermissionEnabled())
+	}
+	// Click 5: sandbox·auto → normal (full wrap-around)
+	m = clickSidebarAllowed(m)
+	if pm.Mode() != agent.PermissionModeNormal || pm.AutoPermissionEnabled() {
+		t.Fatalf("after click 5 mode=%s auto=%v, want normal (auto off)", pm.Mode(), pm.AutoPermissionEnabled())
 	}
 }
 
@@ -109,10 +199,14 @@ func TestSandboxCommandSetsMode(t *testing.T) {
 	}
 }
 
-// TestSandboxNotPersistedAsDefault locks Decision 2: a live sandbox mode is
-// persisted as `normal` — sandbox never outlives the session as the durable
-// default.
-func TestSandboxNotPersistedAsDefault(t *testing.T) {
+// TestSandboxPersistsAsDefault locks the current contract: Decision 2
+// ("sandbox must never be the persisted default") was superseded by explicit
+// owner request on 2026-09-09 — see
+// docs/superpowers/plans/2026-08-31-shell-sandbox/INDEX.md. A live sandbox
+// mode now persists as `sandbox`, like any other mode. Cron jobs are
+// unaffected: they resolve their own per-job permission mode independently
+// (internal/server/scheduler_runner.go resolveCronPermissionMode).
+func TestSandboxPersistsAsDefault(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	m := model{
 		agent:  agent.NewAgent(nil, nil, nil, nil),
@@ -130,10 +224,9 @@ func TestSandboxNotPersistedAsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load persisted config: %v", err)
 	}
-	if cfg.Permissions.Mode != "normal" {
-		t.Fatalf("persisted mode = %q, want normal (sandbox must not persist)", cfg.Permissions.Mode)
+	if cfg.Permissions.Mode != "sandbox" {
+		t.Fatalf("persisted mode = %q, want sandbox", cfg.Permissions.Mode)
 	}
-	// The LIVE agent stays sandboxed — only the disk default is clamped.
 	if m.agent.Permissions().Mode() != agent.PermissionModeSandbox {
 		t.Fatalf("live mode = %s, want sandbox preserved", m.agent.Permissions().Mode())
 	}

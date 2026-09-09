@@ -8,8 +8,8 @@ const { useCdpSocket } = await import("./useCdpSocket");
 const { browserActions, browserStore } = await import("../../lib/browserStore");
 
 let lastApi: ReturnType<typeof useCdpSocket> | null = null;
-function Harness(props: { stateKey: "tab:abc"; base: string | null; enabled: boolean }) {
-  const api = useCdpSocket(props.stateKey, props.base, props.enabled);
+function Harness(props: { stateKey: "tab:abc"; base: string | null; enabled: boolean; acceptFrames?: boolean }) {
+  const api = useCdpSocket(props.stateKey, props.base, props.enabled, props.acceptFrames);
   lastApi = api;
   const [status, setStatus] = useState(api.status);
   // keep a re-render on status change
@@ -219,6 +219,32 @@ describe("useCdpSocket", () => {
     expect(blob).toBeInstanceOf(Blob);
     expect(blob.type).toBe("image/jpeg");
     expect(blob.size).toBe(4);
+  });
+
+  it("does not decode background frames while keeping the socket connected", async () => {
+    const create = vi.fn(async (_blob: Blob) => ({ close: vi.fn() } as unknown as ImageBitmap));
+    (globalThis as unknown as { createImageBitmap: typeof create }).createImageBitmap = create;
+    const { rerender } = render(
+      <Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled acceptFrames={false} />,
+    );
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    const ws = lastSocket();
+    act(() => ws.serverOpen());
+
+    const buf = new ArrayBuffer(12);
+    const dv = new DataView(buf);
+    dv.setUint32(0, 640);
+    dv.setUint32(4, 480);
+    new Uint8Array(buf, 8).set([0xff, 0xd8, 0xff, 0xd9]);
+    act(() => ws.serverMessage(buf));
+    await Promise.resolve();
+    expect(create).not.toHaveBeenCalled();
+    expect(ws.closed).toBe(false);
+
+    rerender(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled acceptFrames />);
+    act(() => ws.serverMessage(buf));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    expect(ws.closed).toBe(false);
   });
 
   it("reconnects with new grant + backoff on close without error", async () => {

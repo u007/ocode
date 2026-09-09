@@ -10,6 +10,8 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { isDesktopShell } from "../../lib/desktopShell";
+import { openExternalURL } from "../../lib/externalLinks";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -29,9 +31,11 @@ export default function SyncStatusWidget() {
   const [loginState, setLoginState] = useState<
     | { phase: "idle" }
     | { phase: "starting" }
-    | { phase: "waiting"; userCode: string; verifyUrl: string; deviceCode: string }
+    | { phase: "waiting"; userCode: string; verifyUrl: string; deviceCode: string; autoOpened: boolean }
     | { phase: "error"; message: string }
   >({ phase: "idle" });
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState(false);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refreshStatus = () => {
@@ -57,24 +61,31 @@ export default function SyncStatusWidget() {
 
   const startLogin = async () => {
     setLoginState({ phase: "starting" });
+    setCopiedCode(false);
+    setCopiedUrl(false);
     // Open the tab synchronously, inside the click handler, so browsers treat
     // it as a user-gesture navigation instead of a popup. Opening it after
     // the `await` below breaks that chain and Chrome/Safari silently block
     // it — the dialog said "a browser tab opened" but nothing did.
-    const popup = window.open("", "_blank");
+    // WKWebView does not reliably create external windows for window.open;
+    // let openExternalURL use Wails' native browser bridge in the desktop
+    // shell instead.
+    const popup = isDesktopShell() ? null : window.open("", "_blank");
     if (popup) popup.opener = null;
     try {
       const result = await api.syncLoginStart();
+      const autoOpened = !!popup;
       setLoginState({
         phase: "waiting",
         userCode: result.userCode,
         verifyUrl: result.verifyUrl,
         deviceCode: result.deviceCode,
+        autoOpened,
       });
       if (popup) {
         popup.location.href = result.verifyUrl;
       } else {
-        window.open(result.verifyUrl, "_blank", "noopener,noreferrer");
+        openExternalURL(result.verifyUrl);
       }
 
       pollTimer.current = setInterval(async () => {
@@ -166,19 +177,61 @@ export default function SyncStatusWidget() {
           {loginState.phase === "waiting" && (
             <div className="space-y-3 text-center">
               <p className="text-sm text-muted-foreground">
-                A browser tab opened — enter this code to authorize:
+                {loginState.autoOpened
+                  ? "A browser tab opened — enter this code to authorize:"
+                  : "Your popup blocker stopped the automatic tab — click below to open the verification page:"}
               </p>
-              <div className="font-mono text-lg tracking-widest bg-muted rounded-md py-3">
+              <div className="font-mono text-lg tracking-widest bg-muted rounded-md py-3 select-all">
                 {loginState.userCode}
               </div>
-              <a
-                href={loginState.verifyUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-blue-400 hover:underline break-all"
-              >
-                {loginState.verifyUrl}
-              </a>
+              <div className="flex gap-2">
+                <Button
+                  onClick={() => openExternalURL(loginState.verifyUrl)}
+                  className="flex-1"
+                >
+                  Open verification page
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(loginState.userCode).then(
+                      () => {
+                        setCopiedCode(true);
+                        setTimeout(() => setCopiedCode(false), 2000);
+                      },
+                      () => {},
+                    );
+                  }}
+                >
+                  {copiedCode ? "Copied!" : "Copy code"}
+                </Button>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={loginState.verifyUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-1 text-xs text-blue-400 hover:underline break-all"
+                >
+                  {loginState.verifyUrl}
+                </a>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs shrink-0"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(loginState.verifyUrl).then(
+                      () => {
+                        setCopiedUrl(true);
+                        setTimeout(() => setCopiedUrl(false), 2000);
+                      },
+                      () => {},
+                    );
+                  }}
+                >
+                  {copiedUrl ? "Copied!" : "Copy link"}
+                </Button>
+              </div>
               <p className="text-xs text-muted-foreground">Waiting for approval…</p>
             </div>
           )}

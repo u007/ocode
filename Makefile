@@ -1,9 +1,20 @@
-.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release
+.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
 LDFLAGS  := -ldflags="-s -w"
 OUTDIR   := release
+
+# HTR is bundled only into managed-Chrome builds. Source checkouts are kept
+# outside this repository so ordinary contributors can build ocode with HTR
+# disabled/fallback behavior; install/desktop builds fail with an actionable
+# message when the approved sibling assets are unavailable.
+HTRCLI_ROOT       ?= ../how-to-recorder/htrcli
+HTR_EXTENSION_DIR ?= ../how-to-recorder/build
+HTR_GOOS          ?= $(shell go env GOOS)
+HTR_GOARCH        ?= $(shell go env GOARCH)
+HTRCLI_BIN        ?=
+HTR_BUNDLE        := internal/browse/cdp/htr-assets.zip
 
 # ── Default: build for current platform ──────────────────────────────────────
 
@@ -12,7 +23,7 @@ build: web-build
 
 # ── Install ──────────────────────────────────────────────────────────────────
 
-install: web-build
+install: web-build prepare-htr-assets
 	go build $(LDFLAGS) -o bin/$(APP) .
 	go install $(LDFLAGS) .
 
@@ -49,7 +60,7 @@ bundle-desktop-assets:
 	# the exact-name bundled fallback.
 	find . -maxdepth 1 -name '*.OCODE.md' ! -name '*[*]*' -exec cp -f {} cmd/ocode-desktop/embedded-assets/ \;
 
-desktop: web-build bundle-desktop-assets
+desktop: web-build bundle-desktop-assets prepare-htr-assets
 	$(DESKTOP_BUILD)
 
 install-desktop: web-build desktop desktop-app
@@ -58,6 +69,22 @@ install-desktop: web-build desktop desktop-app
 ## desktop-app: build and bundle ocode.app (macOS only)
 desktop-app: desktop
 	./scripts/bundle-macos.sh bin/ocode-desktop bin/ocode.app
+
+# prepare-htr-assets creates the archive consumed by internal/browse/cdp's
+# go:embed. It builds the sibling daemon for the selected target and copies the
+# extension without modifying the sibling checkout or installing native-host
+# registrations. Override HTR_GOOS/HTR_GOARCH for a release target.
+prepare-htr-assets:
+	@test -f "$(HTR_EXTENSION_DIR)/manifest.json" || (echo "HTR extension missing: $(HTR_EXTENSION_DIR)/manifest.json (set HTR_EXTENSION_DIR)" >&2; exit 1)
+	@if [ -z "$(HTRCLI_BIN)" ]; then test -f "$(HTRCLI_ROOT)/go.mod" || (echo "htrcli source missing: $(HTRCLI_ROOT) (set HTRCLI_ROOT), or set HTRCLI_BIN to a prebuilt target binary" >&2; exit 1); else test -f "$(HTRCLI_BIN)" || (echo "prebuilt htrcli missing: $(HTRCLI_BIN)" >&2; exit 1); fi
+	@command -v zip >/dev/null 2>&1 || (echo "zip is required to bundle HTR assets" >&2; exit 1)
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+		mkdir -p "$$tmp/extension" "$$tmp/htrcli"; \
+		cp -R "$(HTR_EXTENSION_DIR)/." "$$tmp/extension/"; \
+		find "$$tmp/extension" -name .DS_Store -type f -delete; \
+		if [ -n "$(HTRCLI_BIN)" ]; then cp "$(HTRCLI_BIN)" "$$tmp/htrcli/$(HTR_GOOS)-$(HTR_GOARCH)"; else (cd "$(HTRCLI_ROOT)" && GOOS=$(HTR_GOOS) GOARCH=$(HTR_GOARCH) go build -o "$$tmp/htrcli/$(HTR_GOOS)-$(HTR_GOARCH)" ./cmd/htrcli) || { echo "failed to build htrcli for $(HTR_GOOS)/$(HTR_GOARCH); install the sibling repo's toolchain/dependencies or provide HTRCLI_BIN" >&2; exit 1; }; fi; \
+		rm -f "$(HTR_BUNDLE)"; (cd "$$tmp" && zip -qr "$(CURDIR)/$(HTR_BUNDLE)" extension htrcli); \
+		echo "Prepared HTR assets for $(HTR_GOOS)/$(HTR_GOARCH)"
 
 ## desktop-icon-windows: regenerate the committed Windows .exe icon resource
 ## (cmd/ocode-desktop/rsrc_windows_*.syso) from cmd/ocode-desktop/winres/.

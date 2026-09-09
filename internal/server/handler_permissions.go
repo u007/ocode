@@ -202,9 +202,10 @@ func (h *Handler) HandleSetYolo(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleSetPermissionMode sets the live permission mode on every agent
-// (session-scoped, never persisted — matching HandleSetYolo). Valid modes:
-// normal, yolo, locked, sandbox. sandbox is the fourth mode; like yolo it is
-// live-only (Decision 2) so a restart resumes normal.
+// (session-scoped, matching HandleSetYolo — it never touches the persisted
+// default). Valid modes: normal, yolo, locked, sandbox. To also change the
+// persisted default a new session starts in, see
+// PUT /api/config/ocode/permissions-mode (HandleSetPermissionModeConfig).
 func (h *Handler) HandleSetPermissionMode(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Mode string `json:"mode"`

@@ -310,6 +310,9 @@ func NewHandler() *Handler {
 	}
 	agent.ApplyAgentConfig(cfg)
 	advisorEnabled := cfg == nil || cfg.Ocode.Advisor.Enabled
+	if cfg != nil {
+		agent.SyncHarnessFromConfig(cfg.Ocode.FakeAgent)
+	}
 	// Direct Handler users (including tests) still need a useful project root.
 	// The desktop/server boot path replaces this with its explicit project root
 	// through SetWorkDir before serving requests.

@@ -8,6 +8,8 @@ import { StatusBlock, ThinkingBlock, ToolBlock } from "./TurnParts";
 import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
 import ModelPromptRow from "./ModelPromptRow";
 import { RESTORE_EVENT } from "../../lib/inputRestore";
+import { requestSpeech } from "../Speech/SpeechProvider";
+import { Volume2 } from "lucide-react";
 
 const PAGE_SIZE = 50;
 
@@ -40,6 +42,22 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
   // user is already at the bottom (and resume reliably after they return).
   const atBottomRef = useRef(true);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  const [selectedText, setSelectedText] = useState("");
+  const lastCompletedAssistantRef = useRef<string | null>(null);
+  const wasTurnActiveRef = useRef(false);
+
+  useEffect(() => {
+    const wasTurnActive = wasTurnActiveRef.current;
+    wasTurnActiveRef.current = slice.turnActive;
+    if (!initialized || !wasTurnActive || slice.isStreaming || slice.turnActive) return;
+    const assistant = [...messages].reverse().find((message) => message.role === "assistant" && message.content.trim());
+    if (!assistant) return;
+    const text = assistant.content.trim();
+    const key = `${messages.length}:${text}`;
+    if (lastCompletedAssistantRef.current === key) return;
+    lastCompletedAssistantRef.current = key;
+    window.dispatchEvent(new CustomEvent("ocode:assistant-complete", { detail: { text, atBottom: atBottomRef.current } }));
+  }, [initialized, messages, slice.isStreaming, slice.turnActive]);
 
   // Display-only feedback for /compact (and any auto-compaction completion).
   // This banner is ephemeral UI only — it does not mutate chatStore messages,
@@ -599,10 +617,30 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
           />
         </div>
       )}
+      <div className="flex shrink-0 items-center justify-end gap-2 border-b border-border px-3 py-1">
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+          disabled={!selectedText}
+          title="Speak selected chat text"
+          onClick={() => requestSpeech(selectedText)}
+        >
+          <Volume2 className="h-3.5 w-3.5" /> Speak selection
+        </button>
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+          title="Speak visible chat text"
+          onClick={() => requestSpeech(Array.from(scrollRef.current?.querySelectorAll(".prose") ?? []).map((node) => node.textContent ?? "").join("\n").slice(0, 100_000))}
+        >
+          <Volume2 className="h-3.5 w-3.5" /> Speak visible
+        </button>
+      </div>
       <div
         ref={scrollRef}
         className="relative flex-1 min-h-0 overflow-y-auto p-4"
         onScroll={handleScroll}
+        onMouseUp={() => setSelectedText(window.getSelection()?.toString().trim() ?? "")}
       >
         {compactNotice && (
           <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100 flex items-center justify-between gap-2">

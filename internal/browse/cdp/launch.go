@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"runtime"
@@ -81,24 +83,98 @@ func FindChrome(configured string) (string, error) {
 }
 
 func chromeArgs(tmpDir string) []string {
-	return []string{
+	return chromeArgsFor(tmpDir, "")
+}
+
+// chromeArgsFor builds the Chrome argument list. When extDir points at an
+// unpacked extension directory (containing manifest.json), --disable-extensions
+// is replaced with --load-extension=<dir> so the extension's content scripts
+// and background service worker run inside ocode's headless Chrome. The
+// profile stays ephemeral (fresh tmpDir per launch), so extension storage
+// does not persist; native-messaging relay additionally needs a stable
+// extension ID (pinned manifest key), which unpacked loads without a key do
+// not provide — see htr.go for the documented limits. Branded Google Chrome
+// 137+ ignores --load-extension; Chromium/Canary/Edge/Brave still honor it
+// (a warning is logged at launch).
+func chromeArgsFor(tmpDir, extDir string) []string {
+	args := []string{
 		"--headless=new",
 		"--remote-debugging-pipe",
 		"--user-data-dir=" + tmpDir,
 		"--no-first-run",
 		"--no-default-browser-check",
-		"--disable-extensions",
+	}
+	if hasExtensionDir(extDir) {
+		args = append(args, "--load-extension="+extDir)
+	} else {
+		args = append(args, "--disable-extensions")
+	}
+	return append(args,
 		"--disable-background-networking",
 		"--disable-sync",
 		"--disable-component-update",
 		"--window-size=1280,800",
+	)
+}
+
+// hasExtensionDir reports whether dir looks like an unpacked extension.
+func hasExtensionDir(dir string) bool {
+	if dir == "" {
+		return false
 	}
+	fi, err := os.Stat(dir)
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	mfi, err := os.Stat(filepath.Join(dir, "manifest.json"))
+	if err != nil || mfi.IsDir() {
+		return false
+	}
+	return true
+}
+
+// isBrandedChrome reports whether chromePath looks like branded Google Chrome
+// (as opposed to Chromium/Canary/Edge/Brave), which ignores --load-extension.
+func isBrandedChrome(chromePath string) bool {
+	base := strings.ToLower(filepath.Base(chromePath))
+	if strings.Contains(base, "chromium") || strings.Contains(base, "canary") ||
+		strings.Contains(base, "edge") || strings.Contains(base, "brave") {
+		return false
+	}
+	// macOS .app bundle paths carry the edition in the full path.
+	lower := strings.ToLower(chromePath)
+	if strings.Contains(lower, "canary") || strings.Contains(lower, "chromium") ||
+		strings.Contains(lower, "edge") || strings.Contains(lower, "brave") {
+		return false
+	}
+	return true
+}
+
+// HTRBrowserCompatibilityNotice reports the known branded-Chrome extension
+// preload incompatibility. The browser remains usable, but HTR must be
+// disabled rather than silently pretending the extension loaded.
+func HTRBrowserCompatibilityNotice(chromePath string) string {
+	if chromePath != "" && isBrandedChrome(chromePath) {
+		return "HTR automation is unavailable with branded Google Chrome; use Chromium, Chrome Canary, Edge, or Brave for extension preload. Browsing continues without the HTR extension."
+	}
+	return ""
 }
 
 // launchChrome starts a headless Chrome process via the supervisor and returns
 // a CDP Conn over the pipe. The caller must call cleanup when done.
 // It is the production launcher injected into Manager; tests replace it.
-func launchChrome(ctx context.Context, chromePath string, sup *tool.ProcessSupervisor, lg *log.Logger) (*Conn, <-chan int, func(), error) {
+// extDir is an optional unpacked-extension directory ("" = none); when it
+// points at a directory containing manifest.json, --load-extension is used
+// instead of --disable-extensions (see chromeArgsFor).
+func launchChrome(ctx context.Context, chromePath string, sup *tool.ProcessSupervisor, lg *log.Logger, extDir ...string) (*Conn, <-chan int, func(), error) {
+	ext := ""
+	if len(extDir) > 0 {
+		ext = extDir[0]
+	}
+	return launchChromeWithOptions(ctx, chromePath, sup, lg, ext, "", "")
+}
+
+func launchChromeWithOptions(ctx context.Context, chromePath string, sup *tool.ProcessSupervisor, lg *log.Logger, ext, socketPath, nativeHostName string) (*Conn, <-chan int, func(), error) {
 	tmpDir, err := os.MkdirTemp("", "ocode-browse-*")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("launch failed: %w", err)
@@ -126,7 +202,23 @@ func launchChrome(ctx context.Context, chromePath string, sup *tool.ProcessSuper
 	// request meant the first socket close (React StrictMode double-mount,
 	// tab switch) killed Chrome and every panel saw "chrome exited". ctx
 	// still bounds the handshake below.
-	cmd := exec.Command(chromePath, chromeArgs(tmpDir)...)
+	if ext != "" {
+		if !hasExtensionDir(ext) {
+			if lg != nil {
+				lg.Printf("browse: htr extension dir %q missing manifest.json — launching without extensions", ext)
+			}
+			ext = ""
+		} else if isBrandedChrome(chromePath) && lg != nil {
+			lg.Printf("browse: branded Google Chrome may ignore --load-extension (removed 2025); prefer Chromium/Canary/Edge for extension preload: %s", ext)
+		}
+	}
+	cmd := exec.Command(chromePath, chromeArgsFor(tmpDir, ext)...)
+	if socketPath != "" {
+		cmd.Env = append(os.Environ(), "HTR_SOCKET_PATH="+socketPath)
+		if nativeHostName != "" {
+			cmd.Env = append(cmd.Env, "HTR_NATIVE_HOST_NAME="+nativeHostName)
+		}
+	}
 	cmd.ExtraFiles = []*os.File{r3Read, r4Write}
 	if lg != nil {
 		cmd.Stderr = &logWriter{lg: lg}

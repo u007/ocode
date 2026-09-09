@@ -21,6 +21,7 @@ import type {
   ProjectGroup,
   BrowseResponse,
   PermissionsResponse,
+  PermissionModeConfigResponse,
   MemoryStatusResponse,
   UsageSummary,
   PluginInfo,
@@ -39,7 +40,11 @@ import type {
   SyncStatusResponse,
   SyncLoginStartResponse,
   SyncLoginPollResponse,
-  PermissionDecision,
+	PermissionDecision,
+	TTSEngine,
+	TTSConfig,
+	TTSStatus,
+	TTSPlayback,
 } from "./types";
 
 export interface CompactConfig {
@@ -627,11 +632,20 @@ export const api = {
   setMaskAdvanced: (fields: { base_url: string; fail_mode: string; allow_remote_tier2: boolean; custom_words: string[] }) =>
     fetchJSON<typeof fields>("/api/config/mask/advanced", { method: "PUT", body: JSON.stringify(fields) }),
 
-  getDiscoveryConfig: () => fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery"),
-  setDiscoveryConfig: (cfg: DiscoveryConfig) =>
-    fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery", { method: "PUT", body: JSON.stringify(cfg) }),
+	getDiscoveryConfig: () => fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery"),
+	setDiscoveryConfig: (cfg: DiscoveryConfig) =>
+	  fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery", { method: "PUT", body: JSON.stringify(cfg) }),
 
-  getTUISettings: () => fetchJSON<TUISettings>("/api/config/ocode/tui"),
+	getTTSEngines: () => fetchJSON<{ engines: TTSEngine[] }>("/api/tts/engines"),
+	getTTSStatus: () => fetchJSON<TTSStatus>("/api/tts/status"),
+	getTTSConfig: () => fetchJSON<TTSConfig>("/api/config/ocode/tts"),
+	setTTSConfig: (cfg: TTSConfig) =>
+	  fetchJSON<TTSStatus>("/api/config/ocode/tts", { method: "PUT", body: JSON.stringify(cfg) }),
+	ttsSpeak: (text: string) =>
+	  fetchJSON<TTSPlayback>("/api/tts/speak", { method: "POST", body: JSON.stringify({ text }) }),
+	ttsStop: () => fetchJSON<TTSPlayback>("/api/tts/stop", { method: "POST" }),
+
+	getTUISettings: () => fetchJSON<TUISettings>("/api/config/ocode/tui"),
   setTUISettings: (cfg: TUISettings) =>
     fetchJSON<TUISettings>("/api/config/ocode/tui", { method: "PUT", body: JSON.stringify(cfg) }),
 
@@ -661,6 +675,13 @@ export const api = {
     ),
   setLimitsConfig: (fields: { max_steps: number; image_max_dim: number; max_concurrent_agents: number; undo_max_age_delta: number }) =>
     fetchJSON<typeof fields>("/api/config/ocode/limits", { method: "PUT", body: JSON.stringify(fields) }),
+
+  getBrowserConfig: () =>
+    fetchJSON<{ chrome_path: string; idle_timeout_minutes: number; screencast_quality: number }>(
+      "/api/config/ocode/browser",
+    ),
+  setBrowserConfig: (fields: { chrome_path: string; idle_timeout_minutes: number; screencast_quality: number }) =>
+    fetchJSON<typeof fields>("/api/config/ocode/browser", { method: "PUT", body: JSON.stringify(fields) }),
 
   getFeaturesConfig: () =>
     fetchJSON<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>("/api/config/ocode/features"),
@@ -705,6 +726,14 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ sync_url }),
     }),
+  getFakeAgentConfig: () =>
+    fetchJSON<{ fake_agent: string; active: string; options: string[] }>("/api/config/ocode/fake-agent"),
+  setFakeAgentConfig: (fake_agent: string) =>
+    fetchJSON<{ fake_agent: string; active: string; options: string[] }>("/api/config/ocode/fake-agent", {
+      method: "PUT",
+      body: JSON.stringify({ fake_agent }),
+    }),
+
   getGitDiff: (path?: string, project?: string, staged?: boolean) => {
     const params = new URLSearchParams();
     if (path) params.set("path", path);
@@ -1271,6 +1300,15 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ mode }),
     }),
+  /** The persisted default permission mode new TUI/web/RC sessions start in. */
+  getPermissionModeConfig: () =>
+    fetchJSON<PermissionModeConfigResponse>("/api/config/ocode/permissions-mode"),
+  /** Persist the default permission mode: normal|yolo|locked|sandbox. */
+  setPermissionModeConfig: (mode: string) =>
+    fetchJSON<PermissionModeConfigResponse>("/api/config/ocode/permissions-mode", {
+      method: "PUT",
+      body: JSON.stringify({ mode }),
+    }),
 
   // ── Agent selection ──
   setAgent: (name: string, sessionId?: string) =>
@@ -1527,10 +1565,12 @@ export type SSEEventHandler = (
 // ---- Embedded browser (see internal/browse) --------------------------------
 
 let _browseBase: string | null = null;
+let _browseHTRNotice = "";
 
 /** Test-only: clear the cached browse base URL. */
 export function __resetBrowseBaseCache(): void {
-  _browseBase = null;
+	_browseBase = null;
+	_browseHTRNotice = "";
 }
 
 /** Fetches (once, then cached) the browse-origin base URL from the main
@@ -1540,9 +1580,14 @@ export async function getBrowseBase(): Promise<string> {
   if (_browseBase) return _browseBase;
   const res = await authedFetch("/api/browse/config", { method: "GET" });
   if (!res.ok) throw new Error(`browse config: ${res.status}`);
-  const body = (await res.json()) as { base_url: string };
-  _browseBase = body.base_url;
-  return _browseBase;
+	const body = (await res.json()) as { base_url: string; htr_notice?: string };
+	_browseBase = body.base_url;
+	_browseHTRNotice = body.htr_notice ?? "";
+	return _browseBase;
+}
+
+export function getBrowseHTRNotice(): string {
+	return _browseHTRNotice;
 }
 
 /** Mints a one-time grant for a stateKey; the first iframe navigation carries

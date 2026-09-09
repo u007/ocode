@@ -405,14 +405,31 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         r.dispatch({ type: "SET_TOTAL", sessionId, total: snapshot.length });
         return;
       }
-      case "user_message":
-        r.dispatch({
-          type: "ADD_MESSAGE",
-          sessionId,
-          message: { role: "user", content: (data as { content: string }).content },
-        });
+      case "user_message": {
+        const { content, user_seq } = data as { content: string; user_seq?: number };
+        // Snapshot-before-SSE dedup: on a brand-new session POST /api/chat
+        // persists the user message before its 202, and the tab rekey makes
+        // ChatPanel fetch that snapshot while the agent still bootstraps — so
+        // this echo can arrive after the same message already landed from
+        // disk. Both copies carry the server-stamped user_seq; skip the
+        // append when it is already present. Legacy echoes (no seq) are
+        // never deduped, and identical consecutive messages keep distinct
+        // seqs so they are both kept.
+        const slice = r.getState().sessions[sessionId];
+        const already =
+          !!user_seq &&
+          slice !== undefined &&
+          slice.messages.some((m) => m.role === "user" && m.user_seq === user_seq);
+        if (!already) {
+          r.dispatch({
+            type: "ADD_MESSAGE",
+            sessionId,
+            message: { role: "user", content, user_seq },
+          });
+        }
         r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
         return;
+      }
       case "thinking":
         bufferLiveDelta(sessionId, "thinking", (data as { delta: string }).delta, r.dispatch);
         if (!r.getState().sessions[sessionId]?.isStreaming) {

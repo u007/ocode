@@ -9,6 +9,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // TestAppendLiveFrameBuffersDuringActiveTurn reproduces the reload-loses-
@@ -333,5 +334,38 @@ func TestReleaseAgentSkipsActiveTurn(t *testing.T) {
 	}
 	if entry.agent != nil {
 		t.Fatal("agent still attached after post-turn release")
+	}
+}
+
+// TestEvictIdleKeepsPendingQuestionAsk: a session idle past the timeout but
+// paused on an unanswered `question` prompt stays resident, exactly like a
+// pending permission ask — evicting it would strand the dialog and make the
+// next turn run from a transcript the loader filtered.
+func TestEvictIdleKeepsPendingQuestionAsk(t *testing.T) {
+	mgr := NewSessionManager(time.Minute, func() []string { return nil }, nil)
+
+	ask := agent.Message{Role: "tool", ToolID: "q-1", Content: questionAskContent(t, sampleQuestion())}
+	for _, tc := range []struct {
+		name string
+		msgs []agent.Message
+		keep bool
+	}{
+		{"question ask", []agent.Message{{Role: "user", Content: "hi"}, {Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "q-1"}}}, ask}, true},
+		{"permission ask", []agent.Message{{Role: "user", Content: "hi"}, {Role: "tool", ToolID: "p-1", Content: tool.SentinelPermissionAsk + "{}"}}, true},
+		{"no ask", []agent.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "done"}}, false},
+	} {
+		id := session.NewSessionID()
+		e := mgr.Register(id, t.TempDir())
+		mgr.setAgent(id, &agentSession{messages: tc.msgs})
+		e.lastActivity = time.Now().Add(-2 * time.Minute)
+
+		evicted := mgr.EvictIdle()
+		kept := mgr.Lookup(id).agent != nil
+		if kept != tc.keep {
+			t.Fatalf("%s: agent kept=%v, want %v (evicted=%v)", tc.name, kept, tc.keep, evicted)
+		}
+		if mgr.ReleaseAgent(id) == tc.keep && tc.keep {
+			t.Fatalf("%s: ReleaseAgent must refuse a pending ask", tc.name)
+		}
 	}
 }

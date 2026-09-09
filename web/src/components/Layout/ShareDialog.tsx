@@ -14,11 +14,27 @@ export default function ShareDialog() {
   // "session-only" link would silently grant control over all sessions,
   // projects, files, terminals, and configuration. Until scoped capability
   // tokens exist, do not present session-only sharing.
+  const [networkIP, setNetworkIP] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/network-ip", { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: any) => {
+        if (data && data.ip && data.ip !== "localhost") {
+          setNetworkIP(data.ip);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   const desktopUrl = (() => {
     const token = authToken();
-    const origin = window.location.origin;
     const base = window.location.pathname.match(/^(.*?)\/session\/[^/]+$/)?.[1] ?? "";
     const suffix = token ? `?token=${encodeURIComponent(token)}` : "";
+    const ip = networkIP || (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" ? "localhost" : window.location.hostname);
+    const port = window.location.port ? `:${window.location.port}` : "";
+    const protocol = window.location.protocol;
+    const origin = `${protocol}//${ip}${port}`;
     return `${origin}${base}/${suffix}`.replace(/\/\//g, "/").replace(":/", "://");
   })();
 

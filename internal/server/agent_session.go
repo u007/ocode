@@ -138,6 +138,14 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		projectRoot = h.workDir
 	}
 	ag.SetWorkDir(projectRoot)
+	// Child (sub-agent) sessions persist next to their parent, in the same
+	// project's storage dir. The task tool calls this on every streamed
+	// sub-agent message and once at completion, so it must be the live
+	// (never-regress, coalescing) async save — a synchronous write per
+	// message would stall the child's Step loop.
+	ag.SetChildSessionPersistence(func(childID, title string, msgs []agent.Message, meta map[string]any) error {
+		return session.SaveAsyncForDir(projectRoot, childID, title, msgs, meta)
+	})
 
 	// Wire secret redaction (tier-1 regex hook + tier-2 LLM scanner) from the
 	// effective config, mirroring the TUI. This makes the Security & Redaction
@@ -356,8 +364,8 @@ func (h *Handler) publishTurnStarted(sessionID string) {
 	}
 	sessionCreatedAt := h.sessionCreatedAt(sessionID)
 	data := map[string]string{
-		"session_id":     sessionID,
-		"started_at":     startedAt.UTC().Format(time.RFC3339Nano),
+		"session_id": sessionID,
+		"started_at": startedAt.UTC().Format(time.RFC3339Nano),
 	}
 	if !sessionCreatedAt.IsZero() {
 		data["session_created_at"] = sessionCreatedAt.UTC().Format(time.RFC3339Nano)
@@ -732,8 +740,14 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 // the dropped in-memory suffix is logged explicitly, so the session stays
 // writable and the loss is visible rather than silently permanent.
 func (h *Handler) persistTurnTranscript(sessionID string, as *agentSession, baseLen int, label string) {
-	err := h.reconcileTurnSave(sessionID, as, baseLen)
+	merged, err := h.reconcileTurnSave(sessionID, as, baseLen)
 	if err == nil {
+		if merged != nil {
+			// A successful rebase may have inserted another writer's rows
+			// between this turn's base and suffix. Keep the resident agent on
+			// the same filtered view that the next reload will use.
+			as.messages = merged
+		}
 		return
 	}
 	if session.IsConflictErr(err) {
@@ -755,11 +769,11 @@ func (h *Handler) persistTurnTranscript(sessionID string, as *agentSession, base
 
 // reconcileTurnSave resolves the session's owning project exactly like
 // saveSession, then persists with the bounded concurrent-writer rebase.
-func (h *Handler) reconcileTurnSave(sessionID string, as *agentSession, baseLen int) error {
+func (h *Handler) reconcileTurnSave(sessionID string, as *agentSession, baseLen int) ([]agent.Message, error) {
 	if e, ok := h.sessions.SnapshotEntry(sessionID); ok && e.ProjectRoot != "" {
-		return session.ReconcileAppendForDir(e.ProjectRoot, sessionID, "", as.messages, baseLen, nil)
+		return session.ReconcileAppendForDirWithMessages(e.ProjectRoot, sessionID, "", as.messages, baseLen, nil)
 	}
-	return session.ReconcileAppend(sessionID, "", as.messages, baseLen, nil)
+	return session.ReconcileAppendWithMessages(sessionID, "", as.messages, baseLen, nil)
 }
 
 // commitPartialTranscript keeps whatever the turn produced before it

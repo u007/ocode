@@ -2,6 +2,7 @@ import { render, waitFor, act, fireEvent, screen } from "@testing-library/react"
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockBypass = vi.hoisted(() => vi.fn(async () => {}));
+const mockHtrNotice = vi.hoisted(() => vi.fn(() => ""));
 
 const state = {
   url: "https://example.com/",
@@ -35,6 +36,7 @@ vi.mock("../../lib/browserStore", async (importOriginal) => {
 const mockIsRemoteSession = vi.hoisted(() => vi.fn(() => false));
 vi.mock("../../api/client", () => ({
   getBrowseBase: vi.fn(async () => "http://127.0.0.1:54321"),
+  getBrowseHTRNotice: mockHtrNotice,
   mintBrowseGrant: vi.fn(async () => "GRANT123"),
   bypassBrowseTLS: (...args: unknown[]) => (mockBypass as unknown as (...a: unknown[]) => unknown)(...args),
   normalizeBrowseURL: (u: string) => u,
@@ -50,13 +52,16 @@ import { BrowserPanel } from "./BrowserPanel";
 // socket stack.
 vi.mock("./ChromeViewport", () => ({
   ChromeViewport: (props: Record<string, unknown>) => (
-    <div data-testid="chrome-viewport" data-url={String(props.url)} />
+    <div data-testid="chrome-viewport" data-url={String(props.url)}>
+      <input data-testid="chrome-focus-target" />
+    </div>
   ),
 }));
 
 describe("BrowserPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockHtrNotice.mockReturnValue("");
     mockIsRemoteSession.mockReturnValue(false);
     state.error = "";
     state.url = "https://example.com/";
@@ -71,6 +76,23 @@ describe("BrowserPanel", () => {
     const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
     await waitFor(() => expect(container.querySelector("[data-testid='chrome-viewport']")).toBeTruthy());
     expect(container.querySelector("iframe")).toBeNull();
+  });
+
+  it("blurs a backgrounded viewport so stale browser focus cannot capture input", async () => {
+    const view = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" active />);
+    const input = await screen.findByTestId("chrome-focus-target");
+    input.focus();
+    expect(document.activeElement).toBe(input);
+
+    view.rerender(<BrowserPanel stateKey={"tab:abc" as any} mode="full" active={false} />);
+    await waitFor(() => expect(document.activeElement).not.toBe(input));
+  });
+
+  it("keeps an HTR startup failure visible while browsing continues", async () => {
+    mockHtrNotice.mockReturnValue("daemon failed to start");
+    render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+    expect(await screen.findByTestId("htr-fallback-banner")).toHaveTextContent("daemon failed to start");
+    expect(screen.getByTestId("chrome-viewport")).toBeTruthy();
   });
 
   it("local mode mounts the iframe and no chrome viewport", async () => {

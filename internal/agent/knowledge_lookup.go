@@ -5,9 +5,17 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/u007/ocode/internal/knowledge"
 )
+
+// knowledgeLookupTimeout bounds how long knowledge_lookup blocks the calling
+// LLM turn before it converts into a pollable background run. The context
+// subagent doc_search's, and falls back to grep/glob/read of the codebase
+// when the docs alone don't answer the question — that verification pass can
+// run long, so this is generous rather than tight.
+const knowledgeLookupTimeout = 60 * time.Second
 
 // KnowledgeLookupTool dispatches the context subagent to answer a knowledge
 // question from the OKF bundle. It is always registered (stable tool-definition
@@ -85,7 +93,7 @@ Guidelines:
 - Cite document paths for every claim.
 - If the knowledge bundle has no relevant information, state that clearly.`, params.Question)
 
-	result, err := task.ExecuteRaw("context", prompt, false)
+	result, err := task.ExecuteRaw("context", prompt, false, knowledgeLookupTimeout.Seconds())
 	if err != nil {
 		return "", fmt.Errorf("knowledge_lookup: context agent error: %w", err)
 	}
