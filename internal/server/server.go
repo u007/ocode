@@ -32,6 +32,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/browse"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/secretfile"
 	"github.com/u007/ocode/internal/snapshot"
@@ -282,7 +283,7 @@ func (s *Server) registerRoutes() {
 
 	// Config
 	s.mux.HandleFunc("GET /api/network-ip", s.authMiddleware(s.handleGetNetworkIP))
-s.mux.HandleFunc("GET /api/config/model", s.authMiddleware(s.handleGetModel))
+	s.mux.HandleFunc("GET /api/config/model", s.authMiddleware(s.handleGetModel))
 	s.mux.HandleFunc("PUT /api/config/model", s.authMiddleware(s.handleSetModel))
 	s.mux.HandleFunc("GET /api/config/thinking-budget", s.authMiddleware(s.handleGetThinkingBudget))
 	s.mux.HandleFunc("PUT /api/config/thinking-budget", s.authMiddleware(s.handleSetThinkingBudget))
@@ -314,6 +315,11 @@ s.mux.HandleFunc("GET /api/config/model", s.authMiddleware(s.handleGetModel))
 	s.mux.HandleFunc("POST /api/tts/speak", s.authMiddleware(s.handleTTSSpeak))
 	s.mux.HandleFunc("POST /api/tts/stop", s.authMiddleware(s.handleTTSStop))
 	s.mux.HandleFunc("GET /api/tts/audio/{id}", s.authMiddleware(s.handleTTSAudio))
+	s.mux.HandleFunc("POST /api/tts/license", s.authMiddleware(s.handleTTSAcceptLicense))
+	s.mux.HandleFunc("POST /api/tts/pin", s.authMiddleware(s.handleTTSPin))
+	s.mux.HandleFunc("POST /api/tts/download", s.authMiddleware(s.handleTTSDownload))
+	s.mux.HandleFunc("POST /api/tts/install", s.authMiddleware(s.handleTTSInstall))
+	s.mux.HandleFunc("POST /api/tts/enable", s.authMiddleware(s.handleTTSEnable))
 	s.mux.HandleFunc("GET /api/config/ocode/permissions-mode", s.authMiddleware(s.handleGetPermissionModeConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/permissions-mode", s.authMiddleware(s.handleSetPermissionModeConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/tui", s.authMiddleware(s.handleGetTUIConfigSection))
@@ -777,6 +783,14 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 		}
 		srv.SetHTRNotice(htrNotice)
 	}
+	// Persistent Chrome profile so cookies/logins survive restarts. One
+	// profile per data dir (Chrome is one process per ocode server, shared
+	// across projects), like a normal browser profile.
+	dataDir, err := paths.GlobalDataDir()
+	if err != nil {
+		return fmt.Errorf("browse profile dir: %w", err)
+	}
+	bOpts.ProfileDir = filepath.Join(dataDir, "browse", "chrome-profile")
 	bs := browse.New(token, log.Default(), bOpts)
 	bs.SetSPAOrigin(spaOrigin)
 	bln, bBase, err := bs.Listen("127.0.0.1:0")

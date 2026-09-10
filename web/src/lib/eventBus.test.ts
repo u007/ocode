@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { eventBus, RECONNECT_BASE_MS, RECONNECT_MAX_MS } from "./eventBus";
+import { eventBus, LIVENESS_TIMEOUT_MS, RECONNECT_BASE_MS, RECONNECT_MAX_MS } from "./eventBus";
 import type { BusEnvelope } from "./eventBus";
 
 // eventBus is now fetch()+readSSEStream based (not EventSource) so it can
@@ -240,5 +240,44 @@ describe("eventBus", () => {
     eventBus.stop(); // aborts the in-flight fetch; its reject(AbortError) must not retry
     await vi.advanceTimersByTimeAsync(RECONNECT_MAX_MS);
     expect(calls.length).toBe(1);
+  });
+  // Liveness: the server writes a `: ping` comment every 20s on an idle
+  // stream. A body that goes silent past LIVENESS_TIMEOUT_MS is a dead
+  // connection the browser never reports (WKWebView suspend, sleep/wake,
+  // interface change) — the bus must tear it down and reconnect itself.
+  it("reconnects when the stream receives no bytes for LIVENESS_TIMEOUT_MS", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const reconnect = vi.fn();
+    eventBus.onReconnect(reconnect);
+    await openWithStream();
+    await vi.advanceTimersByTimeAsync(LIVENESS_TIMEOUT_MS - 1);
+    expect(calls.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls.length).toBe(2); // dead stream replaced immediately, no backoff
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("liveness"));
+    await openWithStream(1);
+    expect(reconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("keepalive comment frames keep the stream alive", async () => {
+    eventBus.on("text", () => {});
+    const stream = await openWithStream();
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(LIVENESS_TIMEOUT_MS / 2);
+      stream.push(": ping\n\n");
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(calls.length).toBe(1);
+  });
+
+  it("restarts the stream when the browser comes back online", async () => {
+    const reconnect = vi.fn();
+    eventBus.onReconnect(reconnect);
+    await openWithStream();
+    window.dispatchEvent(new Event("online"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.length).toBe(2);
+    await openWithStream(1);
+    expect(reconnect).toHaveBeenCalledTimes(1);
   });
 });

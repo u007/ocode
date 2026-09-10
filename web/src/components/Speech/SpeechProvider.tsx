@@ -22,6 +22,9 @@ interface SpeechContextValue {
   position: number;
   duration: number;
   seek: (position: number) => void;
+  toolbarVisible: boolean;
+  setToolbarVisible: (visible: boolean) => void;
+  toggleToolbar: () => void;
 }
 
 const defaultConfig: TTSConfig = { engine: "browser-native", voice: "", mode: "manual" };
@@ -41,6 +44,8 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
   const [currentText, setCurrentText] = useState("");
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [toolbarVisible, setToolbarVisible] = useState(true);
+  const toggleToolbar = useCallback(() => setToolbarVisible((v) => !v), [setToolbarVisible]);
   const generation = useRef(0);
   const localRequestGeneration = useRef(0);
   const selectionRequestGeneration = useRef(0);
@@ -256,7 +261,8 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
     resume: () => { if (browserSpeechAvailable()) { window.speechSynthesis.resume(); setPaused(false); } },
     skip, position, duration, seek,
     selectEngine, setMode, retry,
-  }), [config, currentText, duration, engines, error, isSpeaking, paused, position, retry, seek, selectEngine, setMode, skip, speak, status, stop]);
+    toolbarVisible, setToolbarVisible, toggleToolbar,
+  }), [config, currentText, duration, engines, error, isSpeaking, paused, position, retry, seek, selectEngine, setMode, skip, speak, status, stop, toolbarVisible, setToolbarVisible, toggleToolbar]);
 
   return <SpeechContext.Provider value={value}>{children}</SpeechContext.Provider>;
 }

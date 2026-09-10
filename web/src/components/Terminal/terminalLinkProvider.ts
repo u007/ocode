@@ -124,7 +124,8 @@ export function registerFileLinkProvider(terminal: Terminal, projectPath: string
         bufferLineNumber,
         baseRegex,
         terminal,
-        (_e, text) => {
+        (_e: MouseEvent, text: string) => {
+          if (!(_e.ctrlKey || _e.metaKey)) return;
           if (guard && guard()) return;
           const { path, line } = splitPathToken(text);
           const detail: OpenFileDetail = { path, line };

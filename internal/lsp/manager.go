@@ -200,6 +200,14 @@ func (m *Manager) BrokerAttached(ext string) bool {
 	return ok
 }
 
+// Root returns the project root this manager was constructed with.
+func (m *Manager) Root() string {
+	if m == nil {
+		return ""
+	}
+	return m.root
+}
+
 // SharedBrokerEnabled reports the construction-time broker policy.
 func (m *Manager) SharedBrokerEnabled() bool {
 	return m != nil && m.sharedBroker

@@ -1,10 +1,11 @@
-import { FastForward, Pause, Play, Rewind, RotateCcw, Square, Volume2 } from "lucide-react";
+import { FastForward, Pause, Play, Rewind, RotateCcw, Square, Volume2, X } from "lucide-react";
 import { useSpeech, playbackLabel } from "./SpeechProvider";
 
 export default function SpeechToolbar() {
-  const { config, status, isSpeaking, paused, error, currentText, position, duration, speak, stop, pause, resume, skip, seek, retry } = useSpeech();
+  const { config, status, isSpeaking, paused, error, currentText, position, duration, speak, stop, pause, resume, skip, seek, retry, toolbarVisible, setToolbarVisible } = useSpeech();
   const activeText = currentText || status?.playback?.text;
   const canRetry = status?.engine?.availability !== "unavailable" && Boolean(error);
+  if (!toolbarVisible) return null;
   return (
     <div className="fixed bottom-2 left-1/2 z-40 flex max-w-[calc(100vw-1rem)] -translate-x-1/2 items-center gap-2 rounded-lg border border-border bg-card/95 px-3 py-2 text-xs shadow-lg backdrop-blur">
       <Volume2 className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -37,6 +38,7 @@ export default function SpeechToolbar() {
       )}
       {error && <span className="max-w-64 truncate text-destructive" title={error}>{error}</span>}
       {canRetry && <button type="button" className="rounded border border-border px-2 py-1 hover:bg-muted" onClick={() => void retry()}>Retry</button>}
+      <button type="button" className="rounded p-1 hover:bg-muted ml-auto" title="Hide speech toolbar" aria-label="Hide speech toolbar" onClick={() => setToolbarVisible(false)}><X className="h-4 w-4" /></button>
     </div>
   );
 }

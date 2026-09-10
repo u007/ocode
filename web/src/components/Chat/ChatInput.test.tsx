@@ -410,3 +410,16 @@ describe("ChatInput submission", () => {
     expect(sendMessage).toHaveBeenNthCalledWith(2, "@src/a.ts @src/b.ts s2");
   });
 });
+
+it("typing / does not render autocomplete suggestions and Enter submits the literal command", async () => {
+  render(<ChatInput sessionTabId="new-1" />);
+  const ta = getTextarea();
+  fireEvent.change(ta, { target: { value: "/fake-agent status" } });
+  // No SlashCommandMenu should appear (autocomplete disabled).
+  expect(screen.queryByRole("listbox")).toBeNull();
+  await act(async () => {
+    fireEvent.keyDown(ta, { key: "Enter" });
+  });
+  // Submits the literal text through the normal pipeline.
+  expect(sendMessage).toHaveBeenCalledWith("/fake-agent status");
+});

@@ -43,6 +43,12 @@ type ReconnectHandler = () => void;
 
 export const RECONNECT_BASE_MS = 1_000;
 export const RECONNECT_MAX_MS = 30_000;
+/** The server writes a `: ping` comment every 20s on an idle stream
+ *  (handler_events.go sseKeepaliveInterval). A body silent for longer than
+ *  two missed pings is a dead connection the browser will never report —
+ *  WKWebView suspending the fetch body, sleep/wake, an interface change —
+ *  so the bus tears it down and reconnects itself. */
+export const LIVENESS_TIMEOUT_MS = 45_000;
 
 class EventBus {
   /** Identifies the in-flight stream attempt. Aborting it (via closeStream)
@@ -59,7 +65,13 @@ class EventBus {
   private hasOpenedOnce = false;
   private reconnectDelay = RECONNECT_BASE_MS;
   private reconnectTimer: number | undefined;
+  private livenessTimer: number | undefined;
   private started = false;
+  private readonly onOnline = () => {
+    // Interface change / network back: a stream opened on the old route
+    // may be silently dead; don't wait out the liveness window.
+    this.restart();
+  };
 
   /** Subscribe to one event type. Returns an unsubscribe function. Auto-starts
    *  the connection on first subscriber. */
@@ -118,6 +130,7 @@ class EventBus {
   start(): void {
     if (this.started || typeof fetch === "undefined") return;
     this.started = true;
+    window.addEventListener("online", this.onOnline);
     this.openStream();
   }
 
@@ -125,6 +138,7 @@ class EventBus {
    *  resets every piece of state so a fresh start behaves like first boot. */
   stop(): void {
     this.started = false;
+    window.removeEventListener("online", this.onOnline);
     this.closeStream();
     if (this.reconnectTimer !== undefined) {
       clearTimeout(this.reconnectTimer);
@@ -193,7 +207,7 @@ class EventBus {
         }
         this.hasOpenedOnce = true;
 
-        await readSSEStream<BusEnvelope>(res, {
+        await readSSEStream<BusEnvelope>(this.withLiveness(res, controller), {
           envelope: (env) => {
             if (this.abortController !== controller) return;
             if (typeof env.seq !== "number" || typeof env.event !== "string") {
@@ -231,9 +245,47 @@ class EventBus {
   }
 
   private closeStream(): void {
+    this.clearLiveness();
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
+    }
+  }
+
+  /** Returns a Response whose body re-arms the liveness timer on every chunk
+   *  (keepalive comments included — the SSE parser discards those, so
+   *  liveness is measured on raw bytes, not parsed frames). When the timer
+   *  fires the attempt is torn down and a fresh one opened immediately: the
+   *  connection is known dead, so backoff would only delay recovery. */
+  private withLiveness(res: Response, controller: AbortController): Response {
+    if (!res.body) return res;
+    const arm = () => {
+      this.clearLiveness();
+      this.livenessTimer = window.setTimeout(() => {
+        this.livenessTimer = undefined;
+        if (this.abortController !== controller) return;
+        console.warn(
+          `eventBus: liveness timeout — no bytes for ${LIVENESS_TIMEOUT_MS / 1000}s; reconnecting`,
+        );
+        this.restart();
+      }, LIVENESS_TIMEOUT_MS);
+    };
+    arm();
+    const body = res.body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform: (chunk, ctrl) => {
+          arm();
+          ctrl.enqueue(chunk);
+        },
+      }),
+    );
+    return new Response(body, { status: res.status, headers: res.headers });
+  }
+
+  private clearLiveness(): void {
+    if (this.livenessTimer !== undefined) {
+      clearTimeout(this.livenessTimer);
+      this.livenessTimer = undefined;
     }
   }
 

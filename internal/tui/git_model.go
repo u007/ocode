@@ -604,11 +604,40 @@ func (m *gitModel) parseStatus(out string) {
 	m.stagedFiles = nil
 	m.unstagedFiles = nil
 	m.untrackedFiles = nil
-	for _, line := range strings.Split(out, "\n") {
-		if len(line) < 3 {
+	// Prefer -z (NUL-delimited) output; fall back to newline.
+	delim := "\n"
+	if strings.Contains(out, "\x00") {
+		delim = "\x00"
+	}
+	recs := strings.Split(out, delim)
+	for i := 0; i < len(recs); i++ {
+		// Do not TrimSpace: the leading column is significant (" M" = unstaged).
+		rec := strings.TrimRight(recs[i], "\r\n")
+		if strings.TrimSpace(rec) == "" {
 			continue
 		}
-		x, y, path := string(line[0]), string(line[1]), strings.TrimSpace(line[2:])
+		// At minimum need 3 chars: two status codes and a separator.
+		if len(rec) < 3 {
+			continue
+		}
+		x, y := string(rec[0]), string(rec[1])
+		path := strings.TrimSpace(rec[2:])
+		// With -z, rename/copy entries are followed by a second NUL-terminated
+		// record holding the original path; skip it so it is not parsed as a
+		// status line.
+		if delim == "\x00" && (x == "R" || x == "C" || y == "R" || y == "C") {
+			i++
+		}
+		// Decode C-quoted path (legacy --porcelain without -z may quote paths).
+		if len(path) > 0 && path[0] == '"' {
+			if unquoted, err := strconv.Unquote(path); err == nil {
+				path = unquoted
+			} else {
+				path = strings.Trim(path, `"`)
+			}
+		}
+		// For -z format, path may include spaces; trim only leading space after codes.
+		// The format with -z is "XY path" (no leading quote unless special chars present).
 		switch {
 		case x == "?" && y == "?":
 			m.untrackedFiles = append(m.untrackedFiles, gitFile{status: "?", path: path})
@@ -624,7 +653,7 @@ func (m *gitModel) parseStatus(out string) {
 }
 
 func (m *gitModel) loadChanges() {
-	out, err := m.gitRun("status", "--porcelain")
+	out, err := m.gitRun("status", "--porcelain", "-z", "--untracked-files=all")
 	if err != nil {
 		m.statusMsg = "status: " + err.Error()
 		return

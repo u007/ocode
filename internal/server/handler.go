@@ -275,6 +275,7 @@ func (h *Handler) collectLSPStatuses() []LSPStatus {
 			out = append(out, LSPStatus{
 				Cmd:                 s.Cmd,
 				LangID:              s.LangID,
+				Root:                mgr.Root(),
 				State:               "running",
 				DiagnosticsErrors:   errByCmd[s.Cmd],
 				DiagnosticsWarnings: warnByCmd[s.Cmd],

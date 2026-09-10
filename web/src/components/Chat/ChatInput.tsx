@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent, useRef, useEffect, useCallback } from "react";
+import { useState, type KeyboardEvent, useRef, useEffect, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
 import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, type QueuedItem } from "../../lib/tabQueue";
@@ -31,6 +31,12 @@ interface ChatInputProps {
   previewContext?: { path: string; label: string; excerpt: string } | null;
   /** Called when the user X's the preview chip off this message. */
   onClearPreviewContext?: () => void;
+  /** Whether this chat input belongs to the currently active session tab. */
+  isActive?: boolean;
+}
+
+export interface ChatInputHandle {
+  focus: () => void;
 }
 
 export interface SlashCommandResult {
@@ -39,7 +45,7 @@ export interface SlashCommandResult {
   accepted?: boolean;
 }
 
-export default function ChatInput({
+export default forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
   onSlashCommand,
   activeEditorContext,
   contextFilePaths,
@@ -47,7 +53,10 @@ export default function ChatInput({
   onSessionCreated,
   previewContext,
   onClearPreviewContext,
-}: ChatInputProps) {
+  isActive,
+}: ChatInputProps,
+  ref: ForwardedRef<ChatInputHandle>
+) {
   const [input, setInput] = useState("");
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
@@ -94,6 +103,19 @@ export default function ChatInput({
   });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachRef = useRef<HTMLInputElement>(null);
+
+  useImperativeHandle(ref, () => ({
+    focus: () => {
+      textareaRef.current?.focus();
+    },
+  }));
+
+  // Auto-focus the chat input when this session tab becomes active.
+  useEffect(() => {
+    if (isActive && textareaRef.current) {
+      textareaRef.current.focus();
+    }
+  }, [isActive]);
 
   // Per-tab draft: restore this tab's typed-but-unsent text whenever the active
   // session tab changes (the draft map also lets the "New session" button tell
@@ -750,4 +772,4 @@ export default function ChatInput({
       </div>
     </div>
   );
-}
+})

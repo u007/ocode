@@ -68,7 +68,7 @@ describe("terminalLinkProvider", () => {
     expect(links![0].text).toBe("src/foo/bar.ts:12");
   });
 
-  it("dispatches OPEN_FILE_EVENT with projectRoot on activate", () => {
+  it("dispatches OPEN_FILE_EVENT with projectRoot on ctrl/cmd click", () => {
     mock = makeMockTerminal(["open file web/src/App.tsx:42"]);
     registerFileLinkProvider(mock, "/my/proj");
     const provider = mock._provider!;
@@ -79,12 +79,46 @@ describe("terminalLinkProvider", () => {
     window.addEventListener(OPEN_FILE_EVENT, handler as EventListener);
     try {
       const link = links![0];
-      link.activate(new MouseEvent("click"), link.text);
+      link.activate(new MouseEvent("click", { ctrlKey: true }), link.text);
       expect(handler).toHaveBeenCalledTimes(1);
       const ev = handler.mock.calls[0][0] as unknown as CustomEvent<OpenFileDetail>;
       expect(ev.detail.path).toBe("web/src/App.tsx");
       expect(ev.detail.line).toBe(42);
       expect(ev.detail.projectRoot).toBe("/my/proj");
+    } finally {
+      window.removeEventListener(OPEN_FILE_EVENT, handler as EventListener);
+    }
+  });
+
+  it("dispatches OPEN_FILE_EVENT with metaKey", () => {
+    mock = makeMockTerminal(["open file web/src/App.tsx:42"]);
+    registerFileLinkProvider(mock, "/my/proj");
+    const provider = mock._provider!;
+    let links: MockCall[] | undefined;
+    provider.provideLinks(1, (l) => (links = l));
+    expect(links!.length).toBe(1);
+    const handler = vi.fn((_e: Event) => {});
+    window.addEventListener(OPEN_FILE_EVENT, handler as EventListener);
+    try {
+      links![0].activate(new MouseEvent("click", { metaKey: true }), links![0].text);
+      expect(handler).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener(OPEN_FILE_EVENT, handler as EventListener);
+    }
+  });
+
+  it("does not dispatch OPEN_FILE_EVENT on ordinary click", () => {
+    mock = makeMockTerminal(["open file web/src/App.tsx:42"]);
+    registerFileLinkProvider(mock, "/my/proj");
+    const provider = mock._provider!;
+    let links: MockCall[] | undefined;
+    provider.provideLinks(1, (l) => (links = l));
+    expect(links!.length).toBe(1);
+    const handler = vi.fn((_e: Event) => {});
+    window.addEventListener(OPEN_FILE_EVENT, handler as EventListener);
+    try {
+      links![0].activate(new MouseEvent("click"), links![0].text);
+      expect(handler).not.toHaveBeenCalled();
     } finally {
       window.removeEventListener(OPEN_FILE_EVENT, handler as EventListener);
     }

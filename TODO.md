@@ -1885,3 +1885,5 @@ See docs/gotchas/chrome-tab-hang-unbounded-cdp-call.md for the full analysis.
 - [ ] **JS dialogs are auto-accepted** (`alert`/`confirm`/`prompt`/
   `beforeunload`) and surfaced only as a console warning. A dialog UI in the
   browser panel that lets the user answer is a follow-up.
+- [ ] Browse (headless Chrome): `<input type=color>` has no picker in headless and its value cannot be set from the embedded tab; needs a page-side or viewer-side picker that writes the value over CDP (see docs/gotchas/chrome-select-popup-invisible-headless.md) (2026-09-10)
+- [ ] Browse (headless Chrome): `<datalist>` suggestions cannot be picked by keyboard since nativeVirtualKeyCode was dropped to stop the macOS key-redispatch freeze; typing still works (see docs/gotchas/chrome-headless-mac-key-redispatch-freeze.md) (2026-09-10)

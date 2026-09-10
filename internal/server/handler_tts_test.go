@@ -9,6 +9,15 @@ import (
 	"github.com/u007/ocode/internal/tts"
 )
 
+func TestValidateTTSConfigRejectsUnavailableEngines(t *testing.T) {
+	for _, engine := range []tts.EngineID{tts.EnginePiper, tts.EngineKokoro, tts.EngineFishAudio, tts.EngineBreeze} {
+		cfg := tts.Config{Engine: engine, Mode: tts.PlaybackManual}
+		if err := validateTTSConfig(cfg); err == nil {
+			t.Errorf("validateTTSConfig accepted unavailable engine %q", engine)
+		}
+	}
+}
+
 func TestValidateTTSConfigRejectsUnsafeVoice(t *testing.T) {
 	for _, voice := range []string{"../escape", "voice/name", strings.Repeat("v", 129)} {
 		cfg := tts.Config{Engine: tts.EngineBrowserNative, Mode: tts.PlaybackManual, Voice: voice}

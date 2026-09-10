@@ -47,7 +47,7 @@ export default function ProfileDebugForm() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="p-6 space-y-6">
       <div>
         <h3 className="text-sm font-semibold text-foreground">Profile Debug</h3>
         <p className="text-xs text-muted-foreground mt-1">

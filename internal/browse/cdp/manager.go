@@ -139,12 +139,16 @@ type ManagerOptions struct {
 	HTRExtensionDir   string
 	HTRSocketPath     string
 	HTRNativeHostName string
-	Supervisor        *tool.ProcessSupervisor
-	Dialer            *net.Dialer
-	EmitNav           func(NavEvent)
-	EmitTitle         func(TitleEvent)
-	EmitNewTab        func(NewTabEvent)
-	Log               *log.Logger
+	// ProfileDir is Chrome's --user-data-dir. When set it is created and
+	// reused across launches so cookies/logins survive an ocode restart.
+	// Empty launches with an ephemeral temp profile (removed on exit).
+	ProfileDir string
+	Supervisor *tool.ProcessSupervisor
+	Dialer     *net.Dialer
+	EmitNav    func(NavEvent)
+	EmitTitle  func(TitleEvent)
+	EmitNewTab func(NewTabEvent)
+	Log        *log.Logger
 }
 
 // DefaultScreencastQuality is the CDP screencast JPEG quality used when
@@ -316,7 +320,7 @@ func (m *Manager) defaultLaunch(ctx context.Context) (*Conn, <-chan int, func(),
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return launchChromeWithOptions(ctx, path, m.opts.Supervisor, m.opts.Log, resolveExtensionDir(m.opts.HTRExtensionDir), m.opts.HTRSocketPath, m.opts.HTRNativeHostName)
+	return launchChromeWithOptions(ctx, path, m.opts.Supervisor, m.opts.Log, resolveExtensionDir(m.opts.HTRExtensionDir), m.opts.HTRSocketPath, m.opts.HTRNativeHostName, m.opts.ProfileDir)
 }
 
 func (m *Manager) watchExited(exited <-chan int) {
@@ -585,6 +589,7 @@ func (m *Manager) maybeRegisterNewTab(targetID, targetType, url, browserContextI
 	_ = conn.Call(context.Background(), sessionID, "Runtime.enable", nil, nil)
 	_ = conn.Call(context.Background(), sessionID, "Network.enable", nil, nil)
 	_ = conn.Call(context.Background(), sessionID, "Performance.enable", nil, nil)
+	m.injectInPageSelectPicker(context.Background(), conn, sessionID)
 
 	// A popup is discovered at creation with an empty URL and usually has
 	// already issued its document request by the time Network is enabled
@@ -773,6 +778,7 @@ func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (
 	_ = conn.Call(ctx, sessionID, "Runtime.enable", nil, nil)
 	_ = conn.Call(ctx, sessionID, "Network.enable", nil, nil)
 	_ = conn.Call(ctx, sessionID, "Performance.enable", nil, nil)
+	m.injectInPageSelectPicker(ctx, conn, sessionID)
 
 	t := &Target{
 		manager:          m,
@@ -1078,4 +1084,41 @@ func (m *Manager) EmitNavForTest(ev NavEvent) { m.emitNav(ev) }
 // isHTTPSScheme checks http/https
 func isHTTPSScheme(u string) bool {
 	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
+}
+
+// inPageSelectPickerScript switches every <select> to Chrome's customizable
+// select (appearance: base-select) so its picker renders in the page's top
+// layer. Headless Chrome draws the native <select> popup as a separate OS
+// widget: the screencast never shows it and Input.dispatchKeyEvent on the
+// page session never reaches it, so clicking a dropdown or pressing
+// ArrowDown appeared to do nothing. With base-select the picker is part of
+// the frame and mouse/arrow/Enter work as in-page DOM events. Uses
+// adoptedStyleSheets because the script runs before <head> exists.
+//
+// The second rule hides the date/time picker icon: its calendar/clock popup
+// is the same kind of invisible off-frame widget, and opening then dismissing
+// it can freeze the page session for ~10s. Without the icon the value is
+// still editable per segment (click a segment, ArrowUp/Down or type digits).
+const inPageSelectPickerScript = `(() => {
+	try {
+		const s = new CSSStyleSheet();
+		s.replaceSync(
+			'select, ::picker(select) { appearance: base-select; }' +
+			'input::-webkit-calendar-picker-indicator { display: none; }');
+		document.adoptedStyleSheets = [...document.adoptedStyleSheets, s];
+	} catch (e) {
+		console.warn('ocode: in-page select picker unavailable', e);
+	}
+})();`
+
+// injectInPageSelectPicker registers inPageSelectPickerScript for every
+// document (all frames) of the session, including one already loaded
+// (runImmediately). Failure is non-fatal: the tab still works, only native
+// <select> dropdowns stay invisible.
+func (m *Manager) injectInPageSelectPicker(ctx context.Context, conn *Conn, sessionID string) {
+	if err := conn.Call(ctx, sessionID, "Page.addScriptToEvaluateOnNewDocument", map[string]any{
+		"source": inPageSelectPickerScript, "runImmediately": true,
+	}, nil); err != nil && m.opts.Log != nil {
+		m.opts.Log.Printf("browse: addScriptToEvaluateOnNewDocument (select picker) failed: %v", err)
+	}
 }

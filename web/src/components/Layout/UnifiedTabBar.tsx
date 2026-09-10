@@ -231,7 +231,7 @@ function TabPill({
         />
       ) : (
         <span
-          className="max-w-48 truncate shrink-0"
+          className="max-w-48 truncate whitespace-nowrap shrink-0"
           title={displayTitle}
           onDoubleClick={(e) => {
             e.stopPropagation();

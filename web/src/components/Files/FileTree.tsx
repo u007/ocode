@@ -645,41 +645,48 @@ function PromptDialog({ state, onCancel }: { state: PromptState | null; onCancel
   useEffect(() => {
     setValue(state?.defaultValue ?? "");
   }, [state]);
-  if (!state) return null;
   return (
     <Dialog
-      open={!!state}
+      open={state !== null}
       onOpenChange={(o) => !o && onCancel()}
     >
-      <DialogContent className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle className="text-sm">{state.title}</DialogTitle>
-        </DialogHeader>
-        <Input
-          autoFocus
-          value={value}
-          placeholder={state.label}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") state.onConfirm(value.trim());
-            if (e.key === "Escape") onCancel();
-          }}
-        />
-        <div className="flex justify-end gap-2 mt-3">
-          <Button variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button
-            onClick={() => state.onConfirm(value.trim())}
-            disabled={value.trim().length === 0}
-          >
-            OK
-          </Button>
-        </div>
-      </DialogContent>
+      {state ? (
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm">{state.title}</DialogTitle>
+          </DialogHeader>
+          <Input
+            autoFocus
+            value={value}
+            placeholder={state.label}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                state?.onConfirm(value.trim());
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                onCancel();
+              }
+            }}
+          />
+          <div className="flex justify-end gap-2 mt-3">
+            <Button variant="ghost" onClick={onCancel}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => state.onConfirm(value.trim())}
+              disabled={value.trim().length === 0}
+            >
+              OK
+            </Button>
+          </div>
+        </DialogContent>
+      ) : null}
     </Dialog>
   );
 }
+
 
 export default function FileTree({ onOpenFile, projectPath, includedPaths }: FileTreeProps) {
   const includedSet = new Set(includedPaths ?? []);

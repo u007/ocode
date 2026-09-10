@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import pkg from "../package.json";
 import { Routes, Route } from "react-router-dom";
 import { PanelLeft, PanelLeftClose, PanelRight, PanelRightClose, Plus, X } from "lucide-react";
 import { useIsMobile } from "./hooks/useIsMobile";
@@ -145,6 +146,11 @@ function HomeApp() {
   // token) just to keep this reference "fresh" — see useChatStateRef's docs.
   const chatStateRef = useChatStateRef();
   const { state: projectState, tabs, activeTabId, dispatch: projectDispatch, openSessionTab, openNewSessionTab, closeSessionTab } = useProjectState();
+  useEffect(() => {
+    const activeTab = activeTabId ? tabs.find((t) => t.id === activeTabId) || Object.values(projectState.tabsByProject).flat().find((t) => t.id === activeTabId) : null;
+    const sessionTitle = activeTab?.title?.trim() || projectState.activeProject?.path?.split("/").pop() || "";
+    document.title = sessionTitle ? "ocode - " + sessionTitle : ("ocode - " + (pkg.version || ""));
+  }, [activeTabId, projectState.activeProject, tabs, projectState.tabsByProject]);
   const { resolvePermission, pendingPermission, pendingQuestion, submitQuestionAnswers } = useChat(activeTabId);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [coworkOpen, setCoworkOpen] = useState(true);
@@ -772,6 +778,7 @@ function HomeApp() {
   // Keyed by project path (terminal is project-scoped, not session-scoped,
   // so switching chat sessions never kills the pty).
   const terminalRefs = useRef<Map<string, TerminalTabsHandle>>(new Map());
+  const chatInputRefs = useRef<Map<string, import("./components/Chat/ChatInput").ChatInputHandle>>(new Map());
 
   return (
     <div className="flex flex-col h-screen bg-background">
@@ -1027,6 +1034,10 @@ function HomeApp() {
                           </div>
                           <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
                           <ChatInput
+                            ref={(handle) => {
+                              if (handle) chatInputRefs.current.set(tab.id, handle);
+                              else chatInputRefs.current.delete(tab.id);
+                            }}
                             onSlashCommand={handleCommand}
                             activeEditorContext={
                               effectiveActiveEditorContext && (effectiveActiveEditorContext.projectRoot ?? "") === (tab.projectPath ?? "") ? effectiveActiveEditorContext : null

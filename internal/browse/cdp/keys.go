@@ -194,9 +194,15 @@ func keyEventParams(goos string, ev KeyEvent) map[string]any {
 	if ev.Text != "" {
 		params["unmodifiedText"] = ev.Text
 	}
+	// windowsVirtualKeyCode only: nativeVirtualKeyCode makes Chrome build an
+	// OS event and re-dispatch any key the page did not handle to the hidden
+	// browser window (input_handler.cc: os_event vs skip_if_unhandled). On
+	// macOS headless that path blocks the browser main thread in AppKit
+	// key-equivalent routing (SLSObscureCursor / NSMenu validation), freezing
+	// every tab until a real mouse move. Without it, unhandled keys stop at
+	// the renderer, which is what a remote-viewed page wants anyway.
 	if vk := virtualKeyCode(ev.Code); vk != 0 {
 		params["windowsVirtualKeyCode"] = vk
-		params["nativeVirtualKeyCode"] = vk
 	}
 	if ev.AutoRepeat {
 		params["autoRepeat"] = true

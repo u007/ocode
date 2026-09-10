@@ -1,17 +1,39 @@
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import FilePicker from "./FilePicker";
 
-// cmdk uses ResizeObserver which is not available in jsdom
-beforeAll(() => {
-  if (!globalThis.ResizeObserver) {
-    globalThis.ResizeObserver = class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    } as unknown as typeof ResizeObserver;
+// Layout shim for @tanstack/react-virtual in jsdom (no layout engine)
+class ResizeObserverMock {
+  el: Element | null = null;
+  constructor(private cb: (entries: unknown[]) => void) {}
+  observe(el: Element) {
+    this.el = el;
+    this.cb([
+      {
+        target: el,
+        contentRect: { width: 400, height: 300 },
+        borderBoxSize: [{ inlineSize: 400, blockSize: 300 }],
+      },
+    ]);
   }
+  unobserve() {}
+  disconnect() {}
+}
+
+let originalGBCR: () => DOMRect;
+
+beforeAll(() => {
+  if (!(globalThis as any).ResizeObserver) (globalThis as any).ResizeObserver = ResizeObserverMock;
+  originalGBCR = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    return { width: 400, height: 300, top: 0, left: 0, right: 400, bottom: 300, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+  };
 });
+
+afterAll(() => {
+  if (originalGBCR) HTMLElement.prototype.getBoundingClientRect = originalGBCR;
+});
+
 
 vi.mock("@/api/client", async () => {
   const actual = await vi.importActual<typeof import("@/api/client")>("@/api/client");

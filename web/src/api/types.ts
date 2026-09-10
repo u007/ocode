@@ -533,6 +533,10 @@ export interface TUIStatus {
   context_max_tokens?: number;
   context_model?: string;
   spending_usd?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cached_tokens?: number;
+  total_tokens?: number;
   modified_files?: FileStatus[];
   lsp_servers?: LSPStatus[];
   extra_allowed_paths?: string[];

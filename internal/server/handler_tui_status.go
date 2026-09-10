@@ -143,17 +143,25 @@ func (h *Handler) HandleGetSpending(w http.ResponseWriter, r *http.Request) {
 // from the TUI's bridge snapshot (when attached) or from the handler's own
 // shared LSP manager (headless web/desktop).
 func (h *Handler) HandleGetLSPStatuses(w http.ResponseWriter, r *http.Request, rc *RCBridge) {
+	var servers []LSPStatus
 	if rc == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"lsp_servers": h.collectLSPStatuses()})
-		return
+		servers = h.collectLSPStatuses()
+	} else {
+		servers = rc.TUIStatus().LSPServers
 	}
-	servers := rc.TUIStatus().LSPServers
 	if servers == nil {
 		servers = []LSPStatus{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"lsp_servers": servers,
-	})
+	if filterRoot := r.URL.Query().Get("root"); filterRoot != "" {
+		filtered := make([]LSPStatus, 0, len(servers))
+		for _, s := range servers {
+			if s.Root == filterRoot {
+				filtered = append(filtered, s)
+			}
+		}
+		servers = filtered
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"lsp_servers": servers})
 }
 
 // HandleGetModifiedFiles returns the list of files the TUI knows are modified

@@ -78,6 +78,10 @@ type TUIStatus struct {
 	// Spending (USD) accumulated for the current session / day. Sourced from
 	// the usage package; nil if no usage has been recorded yet.
 	SpendingUSD float64 `json:"spending_usd,omitempty"`
+	InputTokens  int64 `json:"input_tokens,omitempty"`
+	OutputTokens int64 `json:"output_tokens,omitempty"`
+	CachedTokens int64 `json:"cached_tokens,omitempty"`
+	TotalTokens  int64 `json:"total_tokens,omitempty"`
 	// Files modified in the session (path, status). Status is the single-char
 	// git status code (M/A/D/??/U etc.) when available, otherwise "".
 	ModifiedFiles []FileStatus `json:"modified_files,omitempty"`

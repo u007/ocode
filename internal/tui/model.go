@@ -15908,6 +15908,12 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 	if m.lastInputTokens > 0 {
 		snap.ContextCurrentTokens = int(m.lastInputTokens)
 	}
+	// Telemetry — mirror the TUI sidebar telemetry (sidebarTelemetry) so the
+	// web can show input/cached/output/total token counts separately.
+	snap.InputTokens = m.sessionTelemetry.inputTokens
+	snap.OutputTokens = m.sessionTelemetry.outputTokens
+	snap.CachedTokens = m.sessionTelemetry.cachedTokens
+	snap.TotalTokens = m.sessionTelemetry.totalTokens
 	// Modified files + LSP servers come from the embedded helpers.
 	snap.ModifiedFiles = m.collectModifiedFiles()
 	snap.LSPServers = m.collectLSPStatuses()
@@ -16055,6 +16061,7 @@ func (m *model) collectLSPStatuses() []server.LSPStatus {
 		out = append(out, server.LSPStatus{
 			Cmd:                 s.Cmd,
 			LangID:              s.LangID,
+			Root:                m.lspMgr.Root(),
 			State:               state,
 			DiagnosticsErrors:   errByCmd[s.Cmd],
 			DiagnosticsWarnings: warnByCmd[s.Cmd],

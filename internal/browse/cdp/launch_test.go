@@ -122,6 +122,87 @@ func TestFindChrome_ProbeOrder(t *testing.T) {
 	})
 }
 
+func TestFindChrome_NonBrandedPreferredOverBranded(t *testing.T) {
+	origStat := chromeStat
+	origGOOS := chromeGOOS
+	origLook := chromeLookPath
+	defer func() {
+		chromeStat = origStat
+		chromeGOOS = origGOOS
+		chromeLookPath = origLook
+	}()
+
+	chromeGOOS = "darwin"
+	chromeLookPath = func(string) (string, error) { return "", errors.New("no") }
+	t.Setenv("OCODE_CHROME_PATH", "")
+
+	// When Chromium (.app) exists, it must be selected before branded Chrome.
+	chromeStat = func(p string) (os.FileInfo, error) {
+		if strings.Contains(p, "/Chromium.app/") {
+			return nil, nil // exists
+		}
+		return nil, os.ErrNotExist
+	}
+
+	got, err := FindChrome("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, "Chromium") {
+		t.Fatalf("expected Chromium selected over branded Chrome, got %q", got)
+	}
+}
+
+func TestFindChrome_CandidateOrderTable(t *testing.T) {
+	cases := []struct {
+		name     string
+		exists   []string // which candidates exist (by base name)
+		wantName string    // expected selected binary base name
+	}{
+		{"chromium_first", []string{"Chromium"}, "Chromium"},
+		{"canary_before_branded", []string{"Canary"}, "Canary"},
+		{"edge_before_branded", []string{"Edge"}, "Edge"},
+		{"brave_before_branded", []string{"Brave"}, "Brave"},
+		{"branded_fallback", []string{"Google Chrome"}, "Google Chrome"},
+		{"chromium_wins_over_all", []string{"Chromium", "Canary", "Edge", "Brave", "Google Chrome"}, "Chromium"},
+	}
+
+	origStat := chromeStat
+	origGOOS := chromeGOOS
+	origLook := chromeLookPath
+	defer func() {
+		chromeStat = origStat
+		chromeGOOS = origGOOS
+		chromeLookPath = origLook
+	}()
+
+	chromeGOOS = "darwin"
+	chromeLookPath = func(string) (string, error) { return "", errors.New("no") }
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("OCODE_CHROME_PATH", "")
+			chromeStat = func(p string) (os.FileInfo, error) {
+				base := filepath.Base(p)
+				for _, e := range c.exists {
+					if strings.Contains(strings.ToLower(base), strings.ToLower(e)) {
+						return nil, nil
+					}
+				}
+				return nil, os.ErrNotExist
+			}
+			got, err := FindChrome("")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			gotBase := filepath.Base(got)
+			if !strings.Contains(strings.ToLower(gotBase), strings.ToLower(c.wantName)) {
+				t.Fatalf("expected %q to contain %q, got %q", gotBase, c.wantName, got)
+			}
+		})
+	}
+}
+
 func TestFindChrome_Windows(t *testing.T) {
 	origGOOS := chromeGOOS
 	defer func() { chromeGOOS = origGOOS }()

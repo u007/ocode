@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"time"
@@ -46,7 +47,11 @@ func Build(ctx context.Context, command string, dir string) *exec.Cmd {
 	if runtime.GOOS == "windows" {
 		c = exec.CommandContext(ctx, "cmd", "/C", command)
 	} else {
-		c = exec.CommandContext(ctx, "bash", "-c", command)
+		shell := os.Getenv("SHELL")
+		if shell == "" {
+			shell = "bash"
+		}
+		c = exec.CommandContext(ctx, shell, "-l", "-c", command)
 	}
 	if dir != "" {
 		c.Dir = dir

@@ -1,37 +1,94 @@
+import { apiPath, authHeaders } from "@/api/client";
 import { useSpeech } from "../Speech/SpeechProvider";
 
+async function postTTS(path: string, body: Record<string, string>): Promise<void> {
+  const res = await fetch(apiPath(path), {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = (await res.text()).trim();
+    throw new Error(`${path} failed (${res.status})${text ? ": " + text : ""}`);
+  }
+}
+
 export default function TTSForm() {
-  const { engines, config, status, error, selectEngine, setMode, retry } = useSpeech();
+  const { engines, config, status, error, setMode, retry } = useSpeech();
   const canRetry = status?.engine.availability !== "unavailable" && Boolean(status?.error || error);
+
+  const engineStatus = (id: string) => {
+    const s = status?.engine;
+    return s?.id === id ? s.availability : "unavailable";
+  };
+
   return (
     <section className="space-y-4 rounded-lg border border-border p-4">
       <div>
         <h2 className="text-sm font-semibold">Speech playback</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Browser Native is the default and stays in this browser tab. Local engines are shown only when a verified runtime and model manifest is available.
+          Browser Native is the default. Local engines require: license acceptance → pin manifest → download → install → enable. Only Browser Native is active in v1 until pinned artifacts land.
         </p>
       </div>
-      <label className="block space-y-1 text-sm">
-        <span className="font-medium">Voice engine</span>
-        <select
-          className="w-full rounded-md border border-input bg-background px-3 py-2"
-          value={config.engine}
-          onChange={(event) => void selectEngine(event.target.value as typeof config.engine)}
-        >
-          {engines.map((engine) => (
-            <option key={engine.id} value={engine.id}>
-              {engine.label}{engine.availability === "unavailable" ? " — unavailable" : ""}
-            </option>
-          ))}
-        </select>
-      </label>
-      <div className="space-y-2 text-xs">
-        {engines.filter((engine) => engine.availability === "unavailable").map((engine) => (
-          <div key={engine.id} className="rounded-md border border-border p-2 text-muted-foreground">
-            <span className="font-medium text-foreground">{engine.label}:</span> {engine.reason}
-          </div>
-        ))}
+
+      {/* Per-engine install cards */}
+      <div className="space-y-3">
+        {engines.map((engine) => {
+          const isBrowser = engine.id === "browser-native";
+          const avail = engine.availability;
+          return (
+            <div key={engine.id} className="rounded-md border border-border bg-card p-3 text-xs shadow-sm">
+              <div className="flex items-center justify-between">
+                <div className="font-medium text-sm">{engine.label}</div>
+                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {avail === "ready" ? "ready" : avail === "unavailable" ? "unavailable" : engineStatus(engine.id)}
+                </span>
+              </div>
+
+              {!isBrowser && (
+                <>
+                  {/* License prompt */}
+                  <div className="mt-2 rounded-md bg-muted/40 p-2 text-[11px] leading-relaxed text-muted-foreground">
+                    License: {engine.reason ? engine.reason.split(".")[0] + "." : "Separate license required."}
+                    <p className="mt-1 text-[10px]">Accept the license to pin the manifest and begin download.</p>
+                    <button
+                      type="button"
+                      className="mt-2 rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted"
+                      onClick={async () => {
+                        // Full pipeline: accept → pin → download → install → enable
+                        try {
+                          // License acceptance (placeholder hash/name for demonstration)
+                          await postTTS("/api/tts/license", { engine: engine.id, license_hash: "sha256-" + engine.id, license_name: engine.label + " License" });
+                          await postTTS("/api/tts/pin", { engine: engine.id, manifest_version: "v1" });
+                          await postTTS("/api/tts/download", { engine: engine.id });
+                          await postTTS("/api/tts/install", { engine: engine.id });
+                          await postTTS("/api/tts/enable", { engine: engine.id });
+                          alert("Installed and enabled: " + engine.label);
+                        } catch (e) {
+                          alert("Install failed: " + (e instanceof Error ? e.message : String(e)));
+                        }
+                      }}
+                    >
+                      Accept License → Pin → Download → Install → Enable
+                    </button>
+                  </div>
+
+                  {/* Progress / status row for download/install — placeholder until backend pipeline lands */}
+                  <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground italic">
+                    <span>Pipeline blocked: pinned manifest/checksum/download endpoint not implemented (Phase 0).</span>
+                  </div>
+                </>
+              )}
+
+              {isBrowser && (
+                <p className="mt-1 text-[10px] text-muted-foreground">No server artifact required. Runs in this browser tab.</p>
+              )}
+            </div>
+          );
+        })}
       </div>
+
+      {/* Playback mode */}
       <label className="block space-y-1 text-sm">
         <span className="font-medium">Playback mode</span>
         <select
@@ -43,6 +100,7 @@ export default function TTSForm() {
           <option value="at-bottom">Auto-play when at bottom</option>
         </select>
       </label>
+
       <div className="rounded-md bg-muted/50 p-3 text-xs">
         <div className="font-medium">Status: {status?.state ?? "loading"}</div>
         {status?.error && <div className="mt-1 text-destructive">{status.error}</div>}

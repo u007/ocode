@@ -315,3 +315,84 @@ func sinkErrors(r *recordingSink) []string {
 	defer r.mu.Unlock()
 	return append([]string(nil), r.errors...)
 }
+
+// TestIntegrationSelectPickerInPage guards the in-page <select> picker
+// (Manager.injectInPageSelectPicker). Headless Chrome draws the native
+// <select> popup as a separate OS widget the screencast never shows and CDP
+// key events never reach, so click + ArrowDown + Enter used to leave the
+// value unchanged. Gated on OCODE_CHROME_PATH like TestIntegrationRealChrome.
+func TestIntegrationSelectPickerInPage(t *testing.T) {
+	chromePath := os.Getenv("OCODE_CHROME_PATH")
+	if chromePath == "" {
+		t.Skip("OCODE_CHROME_PATH not set; skipping real-Chrome integration test")
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!doctype html><body style="margin:0"><select id="s" style="position:absolute;left:20px;top:20px;width:200px;height:30px"><option>one</option><option>two</option><option>three</option></select></body>`)
+	}))
+	defer upstream.Close()
+
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 2 * time.Second})
+	m := NewManager(ManagerOptions{ChromePath: chromePath, Supervisor: sup})
+	defer func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer ccancel()
+		_ = m.Close(cctx)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	target, err := m.Attach(ctx, "tab:select", &recordingSink{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if err := target.Navigate(ctx, upstream.URL+"/"); err != nil {
+		t.Fatalf("Navigate: %v", err)
+	}
+	selectValue := func() string {
+		var res struct {
+			Result struct {
+				Value string `json:"value"`
+			} `json:"result"`
+		}
+		if err := target.conn.Call(ctx, target.sessionID, "Runtime.evaluate",
+			map[string]any{"expression": "document.getElementById('s') && document.getElementById('s').value", "returnByValue": true}, &res); err != nil {
+			t.Fatalf("Runtime.evaluate: %v", err)
+		}
+		return res.Result.Value
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for selectValue() != "one" {
+		if time.Now().After(deadline) {
+			t.Fatal("page did not load the <select>")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Click the select, move to the next option, confirm — all via the same
+	// CDP path the web viewer uses.
+	for _, ev := range []MouseEvent{
+		{Kind: "move", X: 60, Y: 35},
+		{Kind: "down", X: 60, Y: 35, Button: "left", Buttons: 1, ClickCount: 1},
+		{Kind: "up", X: 60, Y: 35, Button: "left", ClickCount: 1},
+	} {
+		if err := target.Mouse(ctx, ev); err != nil {
+			t.Fatalf("Mouse %s: %v", ev.Kind, err)
+		}
+	}
+	time.Sleep(500 * time.Millisecond)
+	for _, code := range []string{"ArrowDown", "Enter"} {
+		for _, kind := range []string{"down", "up"} {
+			if err := target.Key(ctx, KeyEvent{Kind: kind, Key: code, Code: code}); err != nil {
+				t.Fatalf("Key %s %s: %v", kind, code, err)
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for selectValue() != "two" {
+		if time.Now().After(deadline) {
+			t.Fatalf("select value = %q, want %q: picker did not open in-page", selectValue(), "two")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

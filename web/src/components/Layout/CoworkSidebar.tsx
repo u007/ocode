@@ -299,7 +299,14 @@ export default function CoworkSidebar({
     contextMax > 0
       ? Math.min(100, Math.round((contextCurrent / contextMax) * 100))
       : 0;
-  const lspServers: LSPStatus[] = tuiStatus?.lsp_servers ?? [];
+  const inputTokens = tuiStatus?.input_tokens ?? 0;
+  const outputTokens = tuiStatus?.output_tokens ?? 0;
+  const cachedTokens = tuiStatus?.cached_tokens ?? 0;
+  const totalTokens = tuiStatus?.total_tokens ?? 0;
+  const activeRoot = tuiStatus?.cwd ?? "";
+  const lspServers: LSPStatus[] = (tuiStatus?.lsp_servers ?? []).filter(
+    (s) => activeRoot === "" || s.root === activeRoot || (s.root === "" && activeRoot === ".")
+  );
 
   // On mobile the sidebar is always mounted (so it can slide); when closed it
   // sits off-screen. On desktop it is fully removed when closed so the chat
@@ -712,6 +719,26 @@ export default function CoworkSidebar({
                       </span>
                     )}
                   </div>
+                  {(inputTokens > 0 || outputTokens > 0 || cachedTokens > 0 || totalTokens > 0) && (
+                    <div className="mt-2 space-y-0.5 text-[11px] text-muted-foreground">
+                      <div className="flex justify-between">
+                        <span>Input</span>
+                        <span className="font-mono">{formatTokenCount(inputTokens)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Cached</span>
+                        <span className="font-mono">{formatTokenCount(cachedTokens)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Output</span>
+                        <span className="font-mono">{formatTokenCount(outputTokens)}</span>
+                      </div>
+                      <div className="flex justify-between border-t border-border pt-0.5 mt-0.5 font-medium text-foreground">
+                        <span>Total</span>
+                        <span className="font-mono">{formatTokenCount(totalTokens > 0 ? totalTokens : inputTokens + outputTokens)}</span>
+                      </div>
+                    </div>
+                  )}
                 </>
               ) : (
                 <div className="text-xs text-muted-foreground">
@@ -929,7 +956,7 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
                       color = "text-yellow-400";
                     }
                     return (
-                      <div key={s.cmd} className="rounded bg-muted p-2">
+                      <div key={`${(s.root || ".")}-${s.cmd}`} className="rounded bg-muted p-2">
                         <div className="flex items-center gap-2">
                           <span className="text-xs font-mono text-muted-foreground truncate flex-1">
                             {s.cmd}

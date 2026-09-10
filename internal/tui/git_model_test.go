@@ -406,3 +406,21 @@ func gitOutputForTest(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+func TestParseStatusZ(t *testing.T) {
+	raw := "M  staged.go\x00 M unstaged.go\x00 D deleted.go\x00R  new.go\x00old.go\x00?? new file.go\x00"
+	m := gitModel{}
+	m.parseStatus(raw)
+	if len(m.stagedFiles) != 2 {
+		t.Fatalf("want 2 staged got %+v", m.stagedFiles)
+	}
+	if m.stagedFiles[1].status != "R" || m.stagedFiles[1].path != "new.go" {
+		t.Fatalf("unexpected rename entry: %+v", m.stagedFiles[1])
+	}
+	if len(m.unstagedFiles) != 2 || m.unstagedFiles[0].path != "unstaged.go" || m.unstagedFiles[1].status != "D" {
+		t.Fatalf("want unstaged [M unstaged.go, D deleted.go] got %+v", m.unstagedFiles)
+	}
+	if len(m.untrackedFiles) != 1 || m.untrackedFiles[0].path != "new file.go" {
+		t.Fatalf("unexpected untracked: %+v", m.untrackedFiles)
+	}
+}

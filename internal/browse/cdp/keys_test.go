@@ -10,8 +10,13 @@ func TestKeyEventParams_BackspaceCarriesVirtualKeyCode(t *testing.T) {
 	if p["type"] != "rawKeyDown" {
 		t.Fatalf("type = %v, want rawKeyDown", p["type"])
 	}
-	if p["windowsVirtualKeyCode"] != 8 || p["nativeVirtualKeyCode"] != 8 {
-		t.Fatalf("VK = %v/%v, want 8", p["windowsVirtualKeyCode"], p["nativeVirtualKeyCode"])
+	if p["windowsVirtualKeyCode"] != 8 {
+		t.Fatalf("VK = %v, want 8", p["windowsVirtualKeyCode"])
+	}
+	// nativeVirtualKeyCode must stay absent: it makes Chrome re-dispatch
+	// unhandled keys to the native window, which freezes macOS headless.
+	if _, ok := p["nativeVirtualKeyCode"]; ok {
+		t.Fatalf("nativeVirtualKeyCode present: %v", p["nativeVirtualKeyCode"])
 	}
 	if _, ok := p["commands"]; ok {
 		t.Fatalf("linux must not carry mac editing commands: %v", p["commands"])

@@ -1,4 +1,5 @@
 import React from "react";
+import pkg from "../package.json";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
@@ -11,6 +12,8 @@ import "./index.css";
 // render on this promise so the first eventBus connection and initial
 // fetches use the correct origin; failure falls back to same-origin.
 function start() {
+  const titleText = "ocode - " + pkg.version;
+  document.title = titleText;
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
       <BrowserRouter basename={_basePath || undefined}>

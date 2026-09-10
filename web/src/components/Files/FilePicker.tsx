@@ -1,4 +1,5 @@
-import { useEffect, useState, useMemo } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { useEffect, useState, useMemo, useRef } from "react";
 import {
   Command,
   CommandEmpty,
@@ -91,6 +92,15 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath }: P
     return files.filter((p) => matchesKeywords(p, keywords));
   }, [files, keywords]);
 
+  const listRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: filteredFiles.length,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: () => 42,
+    overscan: 8,
+  });
+
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
       <DialogContent className="overflow-hidden p-0 shadow-lg">
@@ -116,23 +126,42 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath }: P
             </button>
           </div>
           <CommandInput placeholder="Filter by keywords..." value={query} onValueChange={setQuery} />
-          <CommandList>
+          <CommandList ref={scrollContainerRef}>
             <CommandEmpty>{keywords.length > 0 ? "No matching files" : "No files found"}</CommandEmpty>
             <CommandGroup
               heading={`Files${keywords.length > 0 ? ` — ${filteredFiles.length} match${filteredFiles.length === 1 ? "" : "es"}${filteredFiles.length !== files.length ? ` of ${files.length}` : ""}` : ""}`}
             >
-              {filteredFiles.map((path) => (
-                <CommandItem
-                  key={path}
-                  value={path}
-                  onSelect={() => {
-                    onOpenFile(path, projectPath);
-                    onClose();
-                  }}
-                >
-                  <span className="font-mono text-sm">{path}</span>
-                </CommandItem>
-              ))}
+              <div
+                ref={listRef}
+                style={{ height: virtualizer.getTotalSize(), width: "100%", position: "relative" }}
+              >
+                {virtualizer.getVirtualItems().map((item) => {
+                  const path = filteredFiles[item.index];
+                  return (
+                    <div
+                      key={item.key}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        width: "100%",
+                        transform: `translateY(${item.start}px)`,
+                        height: item.size,
+                      }}
+                    >
+                      <CommandItem
+                        value={path}
+                        onSelect={() => {
+                          onOpenFile(path, projectPath);
+                          onClose();
+                        }}
+                      >
+                        <span className="font-mono text-sm">{path}</span>
+                      </CommandItem>
+                    </div>
+                  );
+                })}
+              </div>
             </CommandGroup>
           </CommandList>
         </Command>

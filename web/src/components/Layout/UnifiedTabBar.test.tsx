@@ -453,4 +453,17 @@ describe("terminal alert badge auto-clear timer", () => {
     // Timer was cancelled when activeTerminalId changed; badge on Terminal 1 remains.
     expect(alertLabel()).toContain("has unread activity");
   });
+
+  it("allows a long session title to wrap within the pill instead of truncating", () => {
+    projectFake.tabs = [
+      { id: "long", projectPath: "/proj", title: "This is an extremely long session title that should wrap to two lines inside the pill", activeSubTab: "chat" },
+    ];
+    projectFake.activeTabId = "long";
+    renderBar();
+    const pill = screen.getByRole("tab", { name: /this is an extremely long/i });
+    const titleSpan = within(pill).getByText(/this is an extremely long session title/i);
+    expect(titleSpan.className).toMatch(/break-words/);
+    expect(titleSpan.className).toMatch(/whitespace-normal/);
+    expect(titleSpan.className).not.toMatch(/truncate/);
+  });
 });

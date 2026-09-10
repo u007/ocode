@@ -121,6 +121,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [sections, setSections] = useState<PanelSections>(loadPanelSections);
+  const [fileFilter, setFileFilter] = useState("");
 
   const load = useCallback(async () => {
     setRefreshing(true);
@@ -326,6 +327,13 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
   const stagedFiles = workspace.staged ?? [];
   const unstagedFiles = workspace.unstaged ?? [];
   const status = workspace.status;
+  const filterLower = fileFilter.trim().toLowerCase();
+  const filteredStaged = filterLower
+    ? stagedFiles.filter((f) => f.path.toLowerCase().includes(filterLower))
+    : stagedFiles;
+  const filteredUnstaged = filterLower
+    ? unstagedFiles.filter((f) => f.path.toLowerCase().includes(filterLower))
+    : unstagedFiles;
 
   // Which diff is shown in the right pane? Resolution is pane-aware: a
   // partially staged file appears in both lists, and clicking the row in the
@@ -365,8 +373,15 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          <input
+            type="text"
+            placeholder="Filter file..."
+            value={fileFilter}
+            onChange={(e) => setFileFilter(e.target.value)}
+            className="h-7 px-2 rounded-md bg-muted/40 border border-border text-xs focus:outline-none focus:ring-2 focus:ring-ring w-36 md:w-48"
+          />
           <span className="text-xs text-muted-foreground">
-            {stagedFiles.length} staged · {unstagedFiles.length} unstaged
+            {filteredStaged.length} staged · {filteredUnstaged.length} unstaged
           </span>
           <button
             onClick={load}
@@ -392,7 +407,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
           <FileSection
             title="Staged changes"
             stagedPane
-            files={stagedFiles}
+            files={filteredStaged}
             selected={selection}
             busy={busy}
             onSelect={(f) => selectFile(f, true)}
@@ -400,8 +415,8 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
             onToggle={() => toggleSection("staged")}
             menuItems={(f) => fileMenuItems(f, true)}
             onSectionAction={
-              stagedFiles.length > 1
-                ? { label: "Unstage all", fn: () => unstageAll(stagedFiles.map((f) => f.path)) }
+              filteredStaged.length > 1
+                ? { label: "Unstage all", fn: () => unstageAll(filteredStaged.map((f) => f.path)) }
                 : undefined
             }
             rowActions={(f) => (
@@ -422,7 +437,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
           <FileSection
             title="Unstaged changes"
             stagedPane={false}
-            files={unstagedFiles}
+            files={filteredUnstaged}
             selected={selection}
             busy={busy}
             onSelect={(f) => selectFile(f, false)}
@@ -430,8 +445,8 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
             onToggle={() => toggleSection("unstaged")}
             menuItems={(f) => fileMenuItems(f, false)}
             onSectionAction={
-              unstagedFiles.length > 1
-                ? { label: "Stage all", fn: () => stageAll(unstagedFiles.map((f) => f.path)) }
+              filteredUnstaged.length > 1
+                ? { label: "Stage all", fn: () => stageAll(filteredUnstaged.map((f) => f.path)) }
                 : undefined
             }
             rowActions={(f) => (
@@ -521,7 +536,9 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
         {/* Right: diff pane */}
         <div className="flex-1 min-h-0 flex flex-col">
           {selection?.kind === "commit" && commitDiff ? (
-            <CommitDiff files={commitDiff} />
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              <CommitDiff files={commitDiff} />
+            </div>
           ) : shownFile ? (
             <>
               {showBoth && (

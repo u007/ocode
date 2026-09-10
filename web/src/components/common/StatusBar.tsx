@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { Button } from "@/components/ui/button";
-import { PanelRight } from "lucide-react";
+import { PanelRight, Mic, MicOff } from "lucide-react";
+import { useSpeech } from "../../components/Speech/SpeechProvider";
 import type { ToolActivityStatus } from "../../api/types";
 
 interface Props {
@@ -269,6 +270,7 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
               <PanelRight className="h-4 w-4" />
             </Button>
           )}
+          <SpeechToolbarToggle />
           <span>ocode web</span>
         </div>
       </div>
@@ -335,5 +337,21 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+function SpeechToolbarToggle() {
+  const { toolbarVisible, toggleToolbar } = useSpeech();
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      onClick={() => toggleToolbar()}
+      title={toolbarVisible ? "Hide speech toolbar" : "Show speech toolbar"}
+      aria-label={toolbarVisible ? "Hide speech toolbar" : "Show speech toolbar"}
+    >
+      {toolbarVisible ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+    </Button>
   );
 }

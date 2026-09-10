@@ -32,22 +32,27 @@ var chromeStat = func(path string) (os.FileInfo, error) {
 var chromeLookPath = exec.LookPath
 
 var macOSCandidates = []string{
-	"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 	"/Applications/Chromium.app/Contents/MacOS/Chromium",
 	"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-	"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
 	"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+	"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+	"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 }
 
 var linuxCandidates = []string{
-	"google-chrome",
-	"google-chrome-stable",
 	"chromium",
 	"chromium-browser",
+	"google-chrome",
+	"google-chrome-stable",
 }
 
 // FindChrome locates the Chrome binary.
-// Order: configured path → OCODE_CHROME_PATH env → platform defaults.
+// Order: configured path → OCODE_CHROME_PATH env → platform defaults (non-branded preferred).
+// Non-branded Chromium/Canary/Edge/Brave are prioritized over branded Google Chrome,
+// which from v137 ignores --load-extension and breaks HTR extension preload.
+// Canary is included in the non-branded group because the source (launch.go:100)
+// confirms Canary honors --load-extension, unlike branded Chrome.
+// Explicit chrome_path or OCODE_CHROME_PATH always overrides discovery.
 // Returns ErrChromeNotFound or ErrUnsupportedPlatform as appropriate.
 func FindChrome(configured string) (string, error) {
 	if chromeGOOS == "windows" {
@@ -90,8 +95,8 @@ func chromeArgs(tmpDir string) []string {
 // unpacked extension directory (containing manifest.json), --disable-extensions
 // is replaced with --load-extension=<dir> so the extension's content scripts
 // and background service worker run inside ocode's headless Chrome. The
-// profile stays ephemeral (fresh tmpDir per launch), so extension storage
-// does not persist; native-messaging relay additionally needs a stable
+// profile is persistent when ManagerOptions.ProfileDir is set (so extension
+// storage survives restarts); native-messaging relay additionally needs a stable
 // extension ID (pinned manifest key), which unpacked loads without a key do
 // not provide — see htr.go for the documented limits. Branded Google Chrome
 // 137+ ignores --load-extension; Chromium/Canary/Edge/Brave still honor it
@@ -171,15 +176,16 @@ func launchChrome(ctx context.Context, chromePath string, sup *tool.ProcessSuper
 	if len(extDir) > 0 {
 		ext = extDir[0]
 	}
-	return launchChromeWithOptions(ctx, chromePath, sup, lg, ext, "", "")
+	return launchChromeWithOptions(ctx, chromePath, sup, lg, ext, "", "", "")
 }
 
-func launchChromeWithOptions(ctx context.Context, chromePath string, sup *tool.ProcessSupervisor, lg *log.Logger, ext, socketPath, nativeHostName string) (*Conn, <-chan int, func(), error) {
-	tmpDir, err := os.MkdirTemp("", "ocode-browse-*")
+// profileDir is the persistent --user-data-dir ("" = ephemeral temp profile);
+// see prepareProfileDir for lock handling.
+func launchChromeWithOptions(ctx context.Context, chromePath string, sup *tool.ProcessSupervisor, lg *log.Logger, ext, socketPath, nativeHostName, profileDir string) (*Conn, <-chan int, func(), error) {
+	tmpDir, cleanupDir, err := prepareProfileDir(profileDir, lg)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("launch failed: %w", err)
 	}
-	cleanupDir := func() { _ = os.RemoveAll(tmpDir) }
 
 	r3Read, r3Write, err := os.Pipe()
 	if err != nil {

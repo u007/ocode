@@ -254,5 +254,14 @@ from the top-level `browser` section of `ocodeconfig.json`:
   (`browser.extensions is not supported yet`) — load fails rather than
   silently ignoring it.
 
+**Profile persistence.** Chrome runs with a stable `--user-data-dir` at
+`<global data dir>/browse/chrome-profile` (e.g.
+`~/.local/share/opencode/browse/chrome-profile`), so cookies, localStorage
+and logins survive ocode restarts and idle reaps. Stale `Singleton*` lock
+files left by a crash are cleared at launch; if another live ocode process
+holds the profile, that launch falls back to a throwaway temp profile and
+logs it. Rendered page state is not persisted — the panel re-navigates to
+the saved URL on restore.
+
 Private / loopback hosts never use Chrome mode; they keep the local-mode
 iframe reverse proxy.

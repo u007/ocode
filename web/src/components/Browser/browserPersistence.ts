@@ -4,11 +4,13 @@
 // offsets per URL). Mirrors terminalPersistence.ts (same versioned-file
 // shape, same project-scoped key discipline).
 //
-// What is NOT persisted (documented limitation): the server-side browse
-// session (grants, cookies, Chrome targets) and Chrome's profile — headless
-// Chrome launches with a temp --user-data-dir, so logins/sessions do not
-// survive a restart. On restore the panel simply re-navigates to the saved
-// URL; scroll offsets restore best-effort after the page renders.
+// Chrome's profile (cookies, localStorage, logins) persists server-side:
+// headless Chrome launches with a stable --user-data-dir under the global
+// data dir (<data>/browse/chrome-profile), so logins survive a restart.
+// What is NOT persisted: the server-side browse session (grants, Chrome
+// targets) and rendered page state. On restore the panel simply
+// re-navigates to the saved URL; scroll offsets restore best-effort after
+// the page renders.
 
 import { useEffect, useRef } from "react";
 import { useSelector } from "@tanstack/react-store";

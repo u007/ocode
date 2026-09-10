@@ -64,6 +64,8 @@ type Options struct {
 	Supervisor        *tool.ProcessSupervisor
 	HTR               cdp.HTROptions
 	HTRNotice         string
+	// ProfileDir is the persistent Chrome --user-data-dir ("" = ephemeral).
+	ProfileDir string
 }
 
 // chromeTarget is the subset of cdp.Target used by the browse WS. Defined
@@ -270,6 +272,7 @@ func (s *Server) initManager(opts Options) {
 		HTRExtensionDir:   htrExtensionDir,
 		HTRSocketPath:     htrSocketPath,
 		HTRNativeHostName: htrNativeHostName,
+		ProfileDir:        opts.ProfileDir,
 		Supervisor:        opts.Supervisor,
 		Dialer:            NewSafeDialer(false),
 		Log:               s.log,

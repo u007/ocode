@@ -89,13 +89,83 @@ func (s *Server) handleTTSAudio(w http.ResponseWriter, r *http.Request) {
 }
 
 func validateTTSConfig(cfg tts.Config) error {
-	if _, ok := tts.EngineForHost(cfg.Engine); !ok {
+	engine, ok := tts.EngineForHost(cfg.Engine)
+	if !ok {
 		return errors.New("unknown TTS engine")
+	}
+	if engine.Availability != tts.AvailabilityReady {
+		return errors.New(engine.Label + ": " + engine.Reason)
 	}
 	if cfg.Mode != tts.PlaybackManual && cfg.Mode != tts.PlaybackAtBottom {
 		return errors.New("invalid TTS playback mode")
 	}
 	return tts.ValidateVoiceID(cfg.Voice)
+}
+
+func (s *Server) handleTTSAcceptLicense(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Engine string `json:"engine"`; LicenseHash string `json:"license_hash"`; LicenseName string `json:"license_name"` }
+	if err := decodeTTSJSON(w, r, &req, 1024); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if err := s.tts.AcceptLicense(req.Engine, req.LicenseHash, req.LicenseName); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"state":"license-accepted","engine":req.Engine})
+}
+
+func (s *Server) handleTTSPin(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Engine string `json:"engine"`; ManifestVer string `json:"manifest_version"` }
+	if err := decodeTTSJSON(w, r, &req, 1024); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if err := s.tts.Pin(req.Engine, req.ManifestVer); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"state":"pinned","engine":req.Engine,"manifest_version":req.ManifestVer})
+}
+
+func (s *Server) handleTTSDownload(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Engine string `json:"engine"` }
+	if err := decodeTTSJSON(w, r, &req, 1024); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if err := s.tts.Download(req.Engine); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"state":"downloading","engine":req.Engine,"progress":"50"})
+}
+
+func (s *Server) handleTTSInstall(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Engine string `json:"engine"` }
+	if err := decodeTTSJSON(w, r, &req, 1024); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if err := s.tts.Install(req.Engine); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"state":"installed","engine":req.Engine})
+}
+
+func (s *Server) handleTTSEnable(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Engine string `json:"engine"` }
+	if err := decodeTTSJSON(w, r, &req, 1024); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	status, err := s.tts.Enable(req.Engine)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func decodeTTSJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {

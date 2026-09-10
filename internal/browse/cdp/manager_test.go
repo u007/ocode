@@ -146,7 +146,7 @@ func TestManager_MaybeRegisterNewTabEmitsSpontaneousPageOnce(t *testing.T) {
 		t.Error("spontaneous tab did not clear the idle timer")
 	}
 
-	for _, method := range []string{"Page.enable", "Runtime.enable", "Network.enable", "Performance.enable"} {
+	for _, method := range []string{"Page.enable", "Runtime.enable", "Network.enable", "Performance.enable", "Page.addScriptToEvaluateOnNewDocument"} {
 		calls := stub.CallsFor(method)
 		if len(calls) != 1 {
 			t.Errorf("%s call count: got %d, want 1", method, len(calls))
@@ -255,6 +255,9 @@ func TestManager_LazyLaunch(t *testing.T) {
 	}
 	if !has("Page.enable") {
 		t.Error("missing Page.enable")
+	}
+	if !has("Page.addScriptToEvaluateOnNewDocument") {
+		t.Error("missing Page.addScriptToEvaluateOnNewDocument (in-page select picker)")
 	}
 	// Check proxyServer param
 	for _, c := range calls {
