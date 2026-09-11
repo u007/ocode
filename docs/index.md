@@ -23,10 +23,6 @@ okf_version: 0.1
 - [V1 Connection Cap Exclusion — Embedded Browser Panel](architecture/v1-connection-cap-exclusion.md) - Decision to exclude the per-stateKey concurrent upstream connection cap (32) from v1 embedded browser panel. The exclusion applied at v1 ship; the follow-up implementation has since landed.
 - [Worktree-Based Parallel Feature Development](architecture/worktree-based-parallel-feature-development.md) - Integration pattern for parallel feature development using git worktrees to avoid collisions when multiple features touch shared files
 
-# docs
-
-- [TUI Sidebar Title Expand/Collapse Design](docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md) - Design for sidebar title expand/collapse behavior with transient expansion, reset on session changes, and no session JSON persistence (deprecated)
-
 # gotchas
 
 - [Agent Replacement — Input Queuing & Stream Event Epochs](gotchas/agent-replacement-input-queuing.md) - Architectural decision and solution pattern for queuing user input during agent replacement and using stream event epochs to prevent stale events from mutating the new session.
@@ -50,9 +46,11 @@ okf_version: 0.1
 - [FilePicker.test.tsx Stale Build Status — Corrected](gotchas/filepicker-stale-todo.md) - Stale TODO item: FilePicker.test.tsx now has no user-event import and build passes
 - [Foreground Bash Commands — Parent-Death Protection Before Start](gotchas/foreground-bash-parent-death-protection.md) - Foreground POSIX Bash commands must be wrapped with WrapWithParentMonitor before cmd.Start() to ensure promotion to background does not orphan processes; the monitor must be applied at spawn time, not at promotion time.
 - [Git ext:: Transport Auto-Permission Bypass](gotchas/git-ext-transport-auto-allow-bypass.md) - Critical security gotcha: transparent stripping of git -c config overrides in IsHarmfulBashCommand allows ext:: transport to bypass auto-permission allowlist, enabling arbitrary shell command execution via read-only git subcommands like ls-remote.
+- [Headless Chrome <select> Dropdown Invisible and Unreachable via CDP](gotchas/chrome-select-popup-invisible-headless.md) - Gotcha: in the embedded Chrome tab, clicking a <select> or pressing ArrowDown appeared to do nothing. Headless Chrome draws the native select popup as a separate OS widget that the screencast never captures and page-session Input.dispatchKeyEvent never reaches.
 - [Journal DB Connection Pool Leak](gotchas/journal-db-connection-pool-leak.md) - Architectural gotcha: journal.go caches *sql.DB connection pools in a module-global journalCache but never closes them, causing a slow connection-pool leak per distinct project dir in long-running processes.
 - [Local Model Auto-Start Hijacks the Controlling Terminal](gotchas/local-model-tty-hijack.md) - A locally-spawned model server (Setpgid only, same session as ocode) can grab the terminal foreground process group via TIOCSPGRP, crashing the TUI and corrupting the whole shell session
 - [Local Model Limiter — Stale-Slot Reclamation Race](gotchas/local-model-limiter-stale-slot-race.md) - TOCTOU race in local model slot-lock stale reclamation: reaper can delete a live lock between Stat and Remove, breaking MaxParallel limits
+- [macOS Headless Chrome Freezes on Page-Unhandled Keys (nativeVirtualKeyCode)](gotchas/chrome-headless-mac-key-redispatch-freeze.md) - Gotcha: in the embedded Chrome tab, a second Escape/Tab/Enter or a letter typed outside an input froze the whole browser process (all tabs, screencast, every CDP call) until a real mouse move. Cause: Input.dispatchKeyEvent with nativeVirtualKeyCode makes Chrome re-dispatch unhandled keys to its hidden AppKit window, which blocks in SLSObscureCursor.
 - [PATH Shadowing Can Bypass Sandbox Discovery](gotchas/shell-sandbox-path-shadowing.md) - Gotcha: PATH-based sandbox-exec/bwrap discovery can be shadowed by user-writable executables, requiring hardening to prevent security bypasses.
 - [Permission Evaluation and Unknown Tool Guard](gotchas/permission-evaluation-and-unknown-tool-guard.md) - Documenting established permission-path invariants for unknown tool rejection and safe permission evaluation, including read-target existence checks to avoid TOCTOU issues (deprecated)
 - [Plugin Auto-Permission — Arbitrary Execution Risk](gotchas/plugin-auto-permission-security.md) - Updated gotcha: blanket OS temp auto-permission is now a deliberate v1.8.0 policy, not an unresolved regression. Historical v1.5.0 tightening preserved.
@@ -68,7 +66,9 @@ okf_version: 0.1
 - [Skill Tool Test Fixture Gap — expectedBuiltinTools Missing load_skill](gotchas/skill-tool-test-fixture-gap.md) - expectedBuiltinTools in tool_test.go only lists "skill" but InitBuiltinTools also registers "load_skill" as a second alias, causing a stale test failure.
 - [Subagent Feedback-Loop Guard (task tool)](gotchas/subagent-feedback-loop-guard.md) - The task/subagent dispatch refuses consecutive same-type launches without new user input to break runaway feedback loops; vary the agent type or wait for user input.
 - [Symlink Escape in Plugin Removal Validation](gotchas/plugin-removal-symlink-escape.md) - Security gotcha: filepath.EvalSymlinks must resolve both the target dir and all approved roots to prevent symlink-based path traversal in plugin removal.
+- [TTS License Acceptance Must Validate the Exact License Text Hash](gotchas/tts-license-acceptance-hash-validation.md) - TTS license acceptance must validate engine and exact license text/hash instead of trusting client-supplied or synthetic metadata.
 - [Version-Changelog Mismatch](gotchas/version-changelog-mismatch.md) - Version mismatch between version.go (0.8.83) and CHANGES.md resolved — CHANGES.md [Unreleased] now includes –– **Version Bump** — 0.8.82 → 0.8.83 entry; `go test ./internal/version/` passes as of this commit. Status updated to resolved-as-of-this-commit.
+- [Web/Desktop Chat Went Stale Because a Dead SSE Body Never Errors](gotchas/web-sse-stream-silent-death-liveness.md) - Gotcha: desktop/web chat "lost streaming, then loaded the reply from storage, then stopped updating". The fetch-based /api/events body can go silently dead (WKWebView suspend, sleep/wake, interface change) without erroring or ending, and the client ignored the server keepalive pings, so nothing ever reconnected.
 - [Writable-Root Validation Prevents Confinement Defeat](gotchas/shell-sandbox-writable-root-validation.md) - Gotcha: writable-root validation must canonicalize paths and reject filesystem-volume roots (/) to prevent confinement defeat from env vars like TMPDIR.
 
 # guides
@@ -160,8 +160,9 @@ okf_version: 0.1
 
 # superpowers
 
+- [Delayed Chat Input Consolidation](superpowers/specs/2026-09-09-chat-input-consolidation-design.md)
 - [TTS Speech Playback Design Specification](superpowers/specs/2026-09-09-tts-speech-playback-design.md) - User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing.
-- [TUI Sidebar Title Expand/Collapse Design](superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md) - Design for sidebar title expand/collapse behavior, updated to match user decision: transient expansion, reset on session changes, no session JSON persistence. (deprecated)
+- [TUI Sidebar Title Expand/Collapse Design](superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md) - Design for sidebar title expand/collapse behavior, updated to match user decision: transient expansion, reset on session changes, no session JSON persistence.
 
 # Unclassified
 
@@ -331,12 +332,25 @@ okf_version: 0.1
 - [INDEX.md](superpowers/plans/2026-08-31-shell-sandbox/INDEX.md)
 - [2026-09-06-multirow-tab-bar.md](superpowers/plans/2026-09-06-multirow-tab-bar.md)
 - [2026-09-06-remote-web-wsl.md](superpowers/plans/2026-09-06-remote-web-wsl.md)
+- [2026-09-09-chat-input-consolidation.md](superpowers/plans/2026-09-09-chat-input-consolidation.md)
+- [2026-09-09-tts-phase0-feasibility.md](superpowers/plans/2026-09-09-tts-phase0-feasibility.md)
+- [2026-09-10-chrome-tab-context-menu-plan.md](superpowers/plans/2026-09-10-chrome-tab-context-menu-plan.md)
+- [2026-09-10-desktop-login-shell-plan.md](superpowers/plans/2026-09-10-desktop-login-shell-plan.md)
+- [2026-09-10-preview-multipurpose-plan.md](superpowers/plans/2026-09-10-preview-multipurpose-plan.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [01-architecture.md](superpowers/specs/2026-08-29-remote-ssh/01-architecture.md)
 - [02-phase1-connect.md](superpowers/specs/2026-08-29-remote-ssh/02-phase1-connect.md)
 - [03-phase2-web.md](superpowers/specs/2026-08-29-remote-ssh/03-phase2-web.md)
 - [04-phase3-wsl.md](superpowers/specs/2026-08-29-remote-ssh/04-phase3-wsl.md)
 - [INDEX.md](superpowers/specs/2026-08-29-remote-ssh/INDEX.md)
+- [2026-09-09-embedded-htr-extension-design.md](superpowers/specs/2026-09-09-embedded-htr-extension-design.md)
+- [2026-09-09-tts-speech-playback-design-update.md](superpowers/specs/2026-09-09-tts-speech-playback-design-update.md)
+- [2026-09-10-chrome-tab-context-menu-design.md](superpowers/specs/2026-09-10-chrome-tab-context-menu-design.md)
+- [2026-09-10-desktop-login-shell-env.md](superpowers/specs/2026-09-10-desktop-login-shell-env.md)
+- [2026-09-10-preview-multipurpose-design.md](superpowers/specs/2026-09-10-preview-multipurpose-design.md)
+- [2026-09-11-desktop-remote-ssh-workspace-design.md](superpowers/specs/2026-09-11-desktop-remote-ssh-workspace-design.md)
+- [2026-09-11-tts-license-acceptance-feedback.md](superpowers/specs/2026-09-11-tts-license-acceptance-feedback.md)
 - [telegram-bot.md](telegram-bot.md)
+- [tts-speech-playback.md](tts-speech-playback.md)
 - [web-desktop-parity-todo.md](web-desktop-parity-todo.md)
 

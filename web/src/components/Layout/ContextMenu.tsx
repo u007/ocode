@@ -4,7 +4,8 @@ import { createPortal } from "react-dom";
 export interface ContextMenuItem {
   label: string;
   icon?: React.ReactNode;
-  onClick: () => void;
+  /** Return false (or resolve false) to keep the menu open, e.g. to show an error. */
+  onClick: () => void | boolean | Promise<void | boolean>;
   destructive?: boolean;
   disabled?: boolean;
   separator?: boolean;
@@ -12,33 +13,45 @@ export interface ContextMenuItem {
 
 interface ContextMenuProps {
   items: ContextMenuItem[];
-  children: React.ReactNode;
+  /** Controlled mode, used by browser surfaces that own the menu state. */
+  open?: boolean;
+  position?: { x: number; y: number };
+  onClose?: () => void;
+  /** Legacy wrapper mode for existing application context menus. */
+  children?: React.ReactNode;
   onOpen?: () => void;
 }
 
-export function ContextMenu({ items, children, onOpen }: ContextMenuProps) {
-  const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState({ x: 0, y: 0 });
+export function ContextMenu({ items, open, position, onClose, children, onOpen }: ContextMenuProps) {
+  const [internalOpen, setInternalOpen] = useState(false);
+  const [internalPosition, setInternalPosition] = useState({ x: 0, y: 0 });
   const menuRef = useRef<HTMLDivElement>(null);
+  const controlled = open !== undefined;
+  const visibleOpen = controlled ? open : internalOpen;
+  const visiblePosition = position ?? internalPosition;
+  const close = useCallback(() => {
+    setInternalOpen(false);
+    onClose?.();
+  }, [onClose]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    setPosition({ x: e.clientX, y: e.clientY });
-    setOpen(true);
+    setInternalPosition({ x: e.clientX, y: e.clientY });
+    setInternalOpen(true);
     onOpen?.();
   }, [onOpen]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!visibleOpen) return;
 
     const handleClick = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setOpen(false);
+        close();
       }
     };
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") close();
     };
 
     document.addEventListener("mousedown", handleClick);
@@ -47,20 +60,22 @@ export function ContextMenu({ items, children, onOpen }: ContextMenuProps) {
       document.removeEventListener("mousedown", handleClick);
       document.removeEventListener("keydown", handleEscape);
     };
-  }, [open]);
+  }, [visibleOpen, close]);
 
   // Clamp menu position to viewport
   const clampedPosition = {
-    x: Math.min(position.x, window.innerWidth - 200),
-    y: Math.min(position.y, window.innerHeight - items.length * 36),
+    x: Math.max(0, Math.min(visiblePosition.x, window.innerWidth - 200)),
+    y: Math.max(0, Math.min(visiblePosition.y, window.innerHeight - items.length * 36)),
   };
 
   return (
     <>
-      <div onContextMenu={handleContextMenu} className="contents">
-        {children}
-      </div>
-      {open &&
+      {children && (
+        <div onContextMenu={handleContextMenu} className="contents">
+          {children}
+        </div>
+      )}
+      {visibleOpen &&
         createPortal(
           <div
             ref={menuRef}
@@ -79,9 +94,11 @@ export function ContextMenu({ items, children, onOpen }: ContextMenuProps) {
                       ? "text-destructive hover:bg-destructive/10"
                       : "text-foreground hover:bg-accent hover:text-accent-foreground"
                   } ${item.disabled ? "opacity-50 pointer-events-none" : ""}`}
-                  onClick={() => {
-                    item.onClick();
-                    setOpen(false);
+                  disabled={item.disabled}
+                  onClick={async () => {
+                    if (item.disabled) return;
+                    const shouldClose = await item.onClick();
+                    if (shouldClose !== false) close();
                   }}
                 >
                   {item.icon && <span className="w-4 h-4 shrink-0">{item.icon}</span>}

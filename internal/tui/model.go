@@ -5050,8 +5050,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// pendingCompactUIIdx must not be overwritten before its result is
 		// spliced, or the result applies against the wrong mapping and is
 		// silently discarded (context never shrinks → compaction runs forever).
+		//
+		// The check also runs when the turn ended with a provider error: a
+		// context-length rejection (e.g. after a runaway completion pushed
+		// the prompt past the window) is exactly when compaction is needed,
+		// and skipping it here left every retry re-sending the same oversized
+		// prompt until a manual /compact. Only a user cancel is excluded.
 		compactionBarrier := false
-		if msg.err == nil && m.agent != nil && len(m.pendingCompactUIIdx) == 0 {
+		if !errors.Is(msg.err, context.Canceled) && m.agent != nil && len(m.pendingCompactUIIdx) == 0 {
 			agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 			// Only update the pending uiIdx mapping if the agent actually
 			// started a compaction goroutine. Otherwise an earlier in-flight

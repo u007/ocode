@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from "react";
 import { apiPath, authHeaders, api } from "@/api/client";
 import { useSpeech } from "../Speech/SpeechProvider";
 
@@ -15,7 +16,47 @@ async function postTTS(path: string, body: Record<string, string>): Promise<void
 
 export default function TTSForm() {
   const { engines, config, status, error, setMode, retry } = useSpeech();
+  const [installStates, setInstallStates] = useState<Record<string, string>>({});
+  const [stateError, setStateError] = useState<string | null>(null);
+  const [submittingEngine, setSubmittingEngine] = useState<string | null>(null);
+  const [licenseErrors, setLicenseErrors] = useState<Record<string, string>>({});
+  const [licenseSuccess, setLicenseSuccess] = useState<Record<string, boolean>>({});
   const canRetry = status?.engine.availability !== "unavailable" && Boolean(status?.error || error);
+
+  const refreshInstallStates = useCallback(async () => {
+    try {
+      setInstallStates(await api.getTTSState());
+      setStateError(null);
+    } catch (err) {
+      setStateError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshInstallStates();
+  }, [refreshInstallStates]);
+
+  const acceptLicense = async (engine: (typeof engines)[number]) => {
+    setSubmittingEngine(engine.id);
+    setLicenseErrors((previous) => ({ ...previous, [engine.id]: "" }));
+    setLicenseSuccess((previous) => ({ ...previous, [engine.id]: false }));
+    try {
+      await postTTS("/api/tts/license", {
+        engine: engine.id,
+        license_hash: "sha256-" + engine.id,
+        license_name: engine.label + " License",
+      });
+      await refreshInstallStates();
+      setLicenseSuccess((previous) => ({ ...previous, [engine.id]: true }));
+    } catch (err) {
+      setLicenseErrors((previous) => ({
+        ...previous,
+        [engine.id]: err instanceof Error ? err.message : String(err),
+      }));
+    } finally {
+      setSubmittingEngine(null);
+    }
+  };
 
   const engineStatus = (id: string) => {
     const s = status?.engine;
@@ -27,7 +68,7 @@ export default function TTSForm() {
       <div>
         <h2 className="text-sm font-semibold">Speech playback</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Browser Native is the default. Local engines require: license acceptance → pin manifest → download → install → enable. Only Browser Native is active in v1 until pinned artifacts land.
+          Browser Native is the default. Local engines can record license acceptance, but pinning, downloading, installing, and enabling remain unavailable until verified artifacts land.
         </p>
       </div>
 
@@ -36,8 +77,10 @@ export default function TTSForm() {
         {engines.map((engine) => {
           const isBrowser = engine.id === "browser-native";
           const avail = engine.availability;
+          const installState = installStates[engine.id] || "not-accepted";
+          const licenseAccepted = installState !== "not-accepted" && installState !== "failed";
           return (
-            <div key={engine.id} className="rounded-md border border-border bg-card p-3 text-xs shadow-sm">
+            <div data-testid={`tts-engine-${engine.id}`} key={engine.id} className="rounded-md border border-border bg-card p-3 text-xs shadow-sm">
               <div className="flex items-center justify-between">
                 <div className="font-medium text-sm">{engine.label}</div>
                 <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
@@ -50,46 +93,36 @@ export default function TTSForm() {
                   {/* License prompt */}
                   <div className="mt-2 rounded-md bg-muted/40 p-2 text-[11px] leading-relaxed text-muted-foreground">
                     License: {engine.reason ? engine.reason.split(".")[0] + "." : "Separate license required."}
-                    <p className="mt-1 text-[10px]">Accept the license to pin the manifest and begin download.</p>
-                    <button
-                      type="button"
-                      className="mt-2 rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted"
-                      onClick={async () => {
-                        try {
-                          const states: Record<string, string> = await api.getTTSState();
-                          const current = states[engine.id] || "";
-                          if (!current || current === "not-accepted" || current === "failed") {
-                            await postTTS("/api/tts/license", { engine: engine.id, license_hash: "sha256-" + engine.id, license_name: engine.label + " License" });
-                          }
-                          const afterLicense = (await api.getTTSState())[engine.id] || "";
-                          if (afterLicense === "license-accepted" || afterLicense === "failed") {
-                            await postTTS("/api/tts/pin", { engine: engine.id, manifest_version: "v1" });
-                          }
-                          const afterPin = (await api.getTTSState())[engine.id] || "";
-                          if (afterPin === "pinned" || afterPin === "failed") {
-                            await postTTS("/api/tts/download", { engine: engine.id });
-                          }
-                          const afterDownload = (await api.getTTSState())[engine.id] || "";
-                          if (afterDownload === "downloading" || afterDownload === "failed") {
-                            await postTTS("/api/tts/install", { engine: engine.id });
-                          }
-                          const afterInstall = (await api.getTTSState())[engine.id] || "";
-                          if (afterInstall === "installed" || afterInstall === "enabled") {
-                            await postTTS("/api/tts/enable", { engine: engine.id });
-                          }
-                          alert("Pipeline completed: " + engine.label);
-                        } catch (e) {
-                          alert("Install failed: " + (e instanceof Error ? e.message : String(e)));
-                        }
-                      }}
-                    >
-                      Accept License → Pin → Download → Install → Enable
-                    </button>
+                    <p className="mt-1 text-[10px]">Accept the license to record your choice. Installation is unavailable until verified artifacts land.</p>
+                    <div className="mt-2 flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={licenseAccepted || submittingEngine === engine.id}
+                        className="rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => void acceptLicense(engine)}
+                      >
+                        {submittingEngine === engine.id ? "Accepting…" : licenseAccepted ? "License Accepted" : "Accept License"}
+                      </button>
+                      <span className="text-[10px] text-muted-foreground">
+                        Install state: {installState}
+                      </span>
+                    </div>
+                    {licenseSuccess[engine.id] && (
+                      <p className="mt-2 text-[10px] text-green-600 dark:text-green-400">
+                        License accepted. This engine remains unavailable until its verified runtime and model manifest are available.
+                      </p>
+                    )}
+                    {licenseErrors[engine.id] && (
+                      <p className="mt-2 text-[10px] text-destructive">{licenseErrors[engine.id]}</p>
+                    )}
+                    {stateError && (
+                      <p className="mt-2 text-[10px] text-destructive">Install state unavailable: {stateError}</p>
+                    )}
                   </div>
 
-                  {/* Progress / status row for download/install — placeholder until backend pipeline lands */}
+                  {/* Progress / status row for download/install — unavailable until verified artifacts land */}
                   <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground italic">
-                    <span>Pipeline blocked: pinned manifest/checksum/download endpoint not implemented (Phase 0).</span>
+                    <span>Pin, download, install, and enable are unavailable until a verified runtime and model manifest land.</span>
                   </div>
                 </>
               )}

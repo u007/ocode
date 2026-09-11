@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -246,5 +248,45 @@ func TestEnterDuringPendingCompactApplyIsQueued(t *testing.T) {
 	}
 	if got.input.Value() != "" {
 		t.Fatalf("input should be reset after queueing, got %q", got.input.Value())
+	}
+}
+
+// A turn that ends with a provider error (e.g. a context-length rejection
+// after a runaway completion pushed the prompt past the window) is exactly
+// when compaction is needed most. The stream-done handler used to skip the
+// compaction check whenever msg.err != nil, so every retry re-sent the same
+// oversized prompt until the user ran /compact by hand.
+func TestStreamDoneWithProviderErrorStillTriggersCompaction(t *testing.T) {
+	m := model{
+		viewport:          fastviewport.New(80, 20),
+		styles:            ApplyThemeColors("tokyonight"),
+		agent:             agent.NewAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
+		streaming:         true,
+		recapModelEnabled: true,
+		messages: []message{
+			{role: roleUser, text: "one"}, {role: roleAssistant, text: "two"},
+			{role: roleUser, text: "three"}, {role: roleAssistant, text: "four"},
+		},
+	}
+
+	err := errors.New("novita-ai returned 400: This model's maximum context length is 262144 tokens")
+	updated, _ := m.Update(streamDoneMsg{err: err})
+	got := updated.(model)
+	if !got.pendingCompactResume || len(got.pendingCompactUIIdx) == 0 {
+		t.Fatal("expected compaction to start after a provider error")
+	}
+	last := got.messages[len(got.messages)-1]
+	if !last.skipLLM || !strings.Contains(last.text, "maximum context length") {
+		t.Fatalf("error should still be rendered as a skipLLM transcript message, got %+v", last)
+	}
+
+	// A user cancel is not an error the model can compact its way out of.
+	m.pendingCompactUIIdx = nil
+	m.pendingCompactResume = false
+	m.streaming = true
+	updated, _ = m.Update(streamDoneMsg{err: context.Canceled})
+	got = updated.(model)
+	if got.pendingCompactResume || len(got.pendingCompactUIIdx) != 0 {
+		t.Fatal("cancel must not start a compaction")
 	}
 }

@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"github.com/u007/ocode/internal/browse/cdp"
+	"github.com/u007/ocode/internal/crashguard"
 )
 
 // clientMsg is the inbound JSON from the browser panel.
@@ -44,6 +46,9 @@ type clientMsg struct {
 		X  float64 `json:"x"`
 		Y  float64 `json:"y"`
 	} `json:"points,omitempty"`
+	// CDP request fields (DOM.getNodeForLocation / DOM.describeNode).
+	Method string                 `json:"method,omitempty"`
+	Params map[string]interface{} `json:"params,omitempty"`
 }
 
 // cdpSink implements cdp.FrameSink by forwarding to the single writer channel,
@@ -438,6 +443,57 @@ func (s *Server) handleCDP(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+		case "cdp_request":
+			// DOM.getNodeForLocation / DOM.describeNode (context-menu lookup).
+			// Reuse string requestId correlation from the client.
+			reqCtx, reqCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			crashguard.Go(func() {
+				defer reqCancel()
+				resp := map[string]any{"t": "cdp_response", "requestId": cm.RequestID}
+				switch cm.Method {
+				case "DOM.getNodeForLocation":
+					if nl, ok := target.(nodeLocationTarget); ok {
+						loc, err := nl.GetNodeForLocation(reqCtx, int(cm.X), int(cm.Y))
+						if err != nil {
+							resp["error"] = err.Error()
+						} else {
+							resp["result"] = loc
+						}
+					} else {
+						resp["error"] = cdp.ErrDisconnected
+					}
+				case "DOM.describeNode":
+					if dn, ok := target.(describeNodeTarget); ok {
+						nodeId := 0
+						if nid, ok := cm.Params["nodeId"]; ok {
+							switch v := nid.(type) {
+							case float64:
+								nodeId = int(v)
+							case int:
+								nodeId = v
+							case string:
+								if n, err := strconv.Atoi(v); err == nil {
+									nodeId = n
+								}
+							}
+						}
+						opts := map[string]any{"depth": 0, "pierce": false}
+						result, err := dn.DescribeNode(reqCtx, nodeId, opts)
+						if err != nil {
+							resp["error"] = err.Error()
+						} else {
+							resp["result"] = result
+						}
+					} else {
+						resp["error"] = cdp.ErrDisconnected
+					}
+				default:
+					resp["error"] = "unknown_method: " + cm.Method
+				}
+				if b, merr := json.Marshal(resp); merr == nil {
+					entry.trySend(wsOut{data: b})
+				}
+			})
 		case "perfStart", "perfStop":
 			// Toggle metrics collection. Errors are reported back in the
 			// perfState ack (not discarded) so the tab stays in sync with

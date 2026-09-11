@@ -18,6 +18,10 @@
 
 
 
+
+## 2026-09-11
+
+* **Creation**: TTS License Acceptance Must Validate the Exact License Text Hash ([gotchas/tts-license-acceptance-hash-validation.md](/gotchas/tts-license-acceptance-hash-validation.md))
 ## 2026-09-09
 
 * **Update**: TUI Sidebar Title Expand/Collapse Design ([docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md](/docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md))

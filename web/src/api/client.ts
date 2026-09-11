@@ -799,6 +799,26 @@ export const api = {
       body: JSON.stringify({ paths, message }),
     }),
 
+  // ── Git network actions ──
+  gitFetch: (project?: string) =>
+    fetchJSON<GitStatus>(`/api/git/fetch${projQuery(project)}`, {
+      method: "POST",
+    }),
+  gitPull: (project?: string) =>
+    fetchJSON<GitStatus>(`/api/git/pull${projQuery(project)}`, {
+      method: "POST",
+    }),
+  gitPush: (project?: string, force = false) =>
+    fetchJSON<GitStatus>(`/api/git/push${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ force }),
+    }),
+  gitResetRemote: (project?: string) =>
+    fetchJSON<GitStatus>(`/api/git/reset-remote${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ force: true }),
+    }),
+
   // ── File-system actions (web file-tree context menu) ──
   fsCopy: (paths: string[], destDir: string, project?: string) =>
     fetchJSON<{ success: boolean }>(`/api/fs/copy${projQuery(project)}`, {

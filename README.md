@@ -125,7 +125,10 @@ Full git capability built into the TUI — no context-switching to a separate to
 | **Stash Operations** | Stash, apply, list stashes |
 | **AI Code Review** | `/review` reviews working directory, files, commits, branches, or GitHub PRs |
 
-Web parity: the **Git** tab (`GET /api/git/*`) renders the same diff with file status.
+Web parity: the **Git** tab (`GET /api/git/*`) renders the same diff with file status
+and provides Fetch, Pull, Push, and confirmed destructive actions. Force push uses
+`--force-with-lease`; the explicit **Reset to remote** action fetches and hard-resets
+to the current branch's upstream.
 
 ### 📁 File Browser
 
@@ -533,7 +536,7 @@ The server exposes a REST + SSE surface under `/api/*` (see `internal/server/ser
 
 - **Chat & sessions:** `POST /api/chat`, `GET /api/sessions`, `GET /api/sessions/{id}/state`, `POST /api/sessions/{id}/message`, `POST /api/sessions/{id}/compact`, `GET /api/sessions/{id}/export*`, `GET /api/chat/stream` (SSE)
 - **Models & agents:** `GET /api/models`, `GET /api/agents/runs/stream`
-- **Files & git:** `GET /api/files/tree`, `GET/PUT /api/files/content`, `GET /api/git/status|diff`, `GET /api/changes`, `POST /api/changes/undo-*`
+- **Files & git:** `GET /api/files/tree`, `GET/PUT /api/files/content`, `GET /api/git/status|diff`, `POST /api/git/fetch|pull|push|reset-remote`, `GET /api/changes`, `POST /api/changes/undo-*`
 - **Terminal & shell:** `POST /api/shell`, `GET /api/terminal/ws` (WebSocket), `GET /api/terminal/processes`
 - **Config:** `GET/PUT /api/config/ocode/*` (11 sections: recap, commit-msg, compact, permissions-auto, discovery, tui, editor, imagegen, paths, limits, features) + `/api/config/{model,thinking-budget,small-model,terminal,advisor,ocr,mask,agents}`
 - **Permissions / questions / RC:** `GET/POST /api/permissions`, `POST /api/questions`, `POST /api/permissions/resolve`, `POST /api/rc/*`

@@ -668,8 +668,8 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   };
 
   return (
-    <div className="flex items-start justify-between px-2 pt-2 gap-2 bg-card border-b border-border min-w-0 w-full">
-      <div className="flex-1 min-w-0 flex flex-wrap gap-x-0.5 gap-y-1 items-start py-1.5">
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start px-2 pt-2 gap-2 bg-card border-b border-border min-w-0 w-full">
+      <div className="min-w-0 flex flex-wrap gap-x-0.5 gap-y-1 items-start py-1.5">
         <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           <SortableContext items={order} strategy={rectSortingStrategy}>
             {order.map(renderPill)}
@@ -677,7 +677,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         </DndContext>
       </div>
 
-      <div className="shrink-0 flex flex-wrap justify-end items-center gap-0.5 py-1.5 max-w-[50%]">
+      <div className="shrink-0 flex justify-end items-center gap-0.5 py-1.5">
       <button
         onClick={handleNewChat}
         aria-label="New chat session"

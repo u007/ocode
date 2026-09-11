@@ -4,6 +4,34 @@ import type { CdpClientMessage, CdpServerMessage } from "./cdpProtocol";
 import { decodeFrame } from "./cdpProtocol";
 import { browserActions, type StateKey } from "../../lib/browserStore";
 
+/** Result of DOM.getNodeForLocation via the cdp_request wire path. */
+export interface NodeResult {
+  nodeId: number;
+  backendNodeId?: number;
+  frameId?: string;
+  href?: string;
+  src?: string;
+  error?: string;
+}
+
+export interface NodeDescription {
+  nodeId: number;
+  backendNodeId?: number;
+  nodeName?: string;
+  nodeValue?: string;
+  attributes?: Record<string, string> | string[];
+  frameId?: string;
+  contentDocument?: { nodeId: number };
+}
+
+/** A pending cdp_request awaiting a cdp_response. */
+type PendingRequest = {
+  resolve: (result: unknown) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+  socket: WebSocket;
+};
+
 /** Connection lifecycle: connecting = dialing/redeeming grant; open = live;
  *  reconnecting = closed without a fatal error, retry scheduled; closed =
  *  fatal (server sent {"t":"error"}) or disabled. */
@@ -21,6 +49,10 @@ export interface CdpSocketApi {
   onSelection(cb: (text: string) => void): () => void;
   /** Subscribe to "findResult" replies (find-in-page bar). Returns an unsubscribe fn. */
   onFindResult(cb: (res: { query?: string; found: boolean; active: number; total: number }) => void): () => void;
+  /** Ask the page for the deepest node at (x,y). Resolves with node info; rejects with timeout/disconnected/error. */
+  getNodeAt(x: number, y: number): Promise<NodeResult>;
+  /** Describe a node returned by getNodeAt. */
+  describeNode(nodeId: number): Promise<NodeDescription>;
 }
 
 // Reconnect backoff sequence; caps at the last value.
@@ -46,23 +78,44 @@ export function useCdpSocket(
   const fileChooserCbsRef = useRef(new Set<(multiple: boolean) => void>());
   const selectionCbsRef = useRef(new Set<(text: string) => void>());
   const findResultCbsRef = useRef(new Set<(res: { query?: string; found: boolean; active: number; total: number }) => void>());
+  // Pending cdp_request → resolver. Tracked so ws close / stale responses
+  // can reject or ignore them instead of leaking or double-resolving.
+  const pendingRef = useRef<Map<string, PendingRequest>>(new Map());
+  const requestSeqRef = useRef(0);
   // Serializes async JPEG decodes so onFrame fires in wire order.
   const decodeChainRef = useRef<Promise<void>>(Promise.resolve());
   const attemptRef = useRef(0);
+  const connectionGenerationRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disposedRef = useRef(false);
   // Latest rendered values for the async connect loop (avoids stale reads).
   const cfgRef = useRef({ stateKey, browseBase, enabled, acceptFrames });
   cfgRef.current = { stateKey, browseBase, enabled, acceptFrames };
 
+  const rejectPending = useCallback((err: Error, socket?: WebSocket) => {
+    for (const [requestId, pending] of pendingRef.current) {
+      if (socket && pending.socket !== socket) continue;
+      clearTimeout(pending.timer);
+      pendingRef.current.delete(requestId);
+      pending.reject(err);
+    }
+  }, []);
+
+  useEffect(() => {
+    const onBeforeUnload = () => rejectPending(new Error("disconnected"));
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [rejectPending]);
+
   const connect = useCallback(() => {
     const { stateKey: key, browseBase: base, enabled: on } = cfgRef.current;
     if (disposedRef.current || !on || !base) return;
+    const generation = connectionGenerationRef.current;
     setStatus("connecting");
     const grantPromise = mintBrowseGrant(key);
     grantPromise
       .then((grant) => {
-        if (disposedRef.current || !cfgRef.current.enabled) return;
+        if (disposedRef.current || generation !== connectionGenerationRef.current || !cfgRef.current.enabled) return;
         const wsUrl =
           base.replace(/^http/, "ws") +
           "/b/" +
@@ -181,12 +234,29 @@ export function useCdpSocket(
 				wsRef.current = null;
 				ws.close();
 				break;
+            case "cdp_response": {
+              // Reply to a getNodeAt request (DOM.getNodeForLocation / DOM.describeNode).
+              const pending = pendingRef.current.get(msg.requestId);
+              if (!pending) return; // already resolved/timeout/closed
+              pendingRef.current.delete(msg.requestId);
+              clearTimeout(pending.timer);
+              if (msg.error) {
+                pending.reject(new Error(msg.error));
+              } else {
+                pending.resolve(msg.result as NodeResult);
+              }
+              break;
+            }
           }
         };
 
         ws.onclose = () => {
-          if (wsRef.current !== ws) return; // superseded or intentionally closed
-          wsRef.current = null;
+          const current = wsRef.current === ws;
+          if (current) wsRef.current = null;
+          // Reject requests even when this socket was superseded or closed by
+          // effect cleanup; otherwise callers can wait forever for a response.
+          rejectPending(new Error("disconnected"), ws);
+          if (!current) return; // superseded socket
           if (disposedRef.current || !cfgRef.current.enabled) return;
           setStatus("reconnecting");
           scheduleReconnect();
@@ -197,13 +267,13 @@ export function useCdpSocket(
       })
       .catch((err) => {
         // Grant mint failed (main server down?) — retry with backoff.
-        if (disposedRef.current || !cfgRef.current.enabled) return;
+        if (disposedRef.current || generation !== connectionGenerationRef.current || !cfgRef.current.enabled) return;
         setStatus("reconnecting");
         setError(err instanceof Error ? err.message : String(err));
         scheduleReconnect();
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [rejectPending]);
 
   const scheduleReconnect = useCallback(() => {
     const delay = BACKOFF_MS[Math.min(attemptRef.current, BACKOFF_MS.length - 1)];
@@ -216,11 +286,13 @@ export function useCdpSocket(
 
   useEffect(() => {
     disposedRef.current = false;
+    connectionGenerationRef.current += 1;
     if (enabled && browseBase) {
       attemptRef.current = 0;
       connect();
     } else {
       setStatus("closed");
+      rejectPending(new Error("disconnected"));
       // Dropping the connection also stops the server-side screencast via
       // Detach on socket close (Part 05).
       wsRef.current?.close();
@@ -228,6 +300,7 @@ export function useCdpSocket(
     }
     return () => {
       disposedRef.current = true;
+      rejectPending(new Error("disconnected"));
       if (timerRef.current) {
         clearTimeout(timerRef.current);
         timerRef.current = null;
@@ -237,7 +310,7 @@ export function useCdpSocket(
       ws?.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stateKey, browseBase, enabled]);
+  }, [stateKey, browseBase, enabled, rejectPending]);
 
   const send = useCallback((msg: CdpClientMessage) => {
     const ws = wsRef.current;
@@ -276,6 +349,62 @@ export function useCdpSocket(
       selectionCbsRef.current.delete(cb);
     };
   }, []);
+  /** Send one context-menu CDP request, correlated by string requestId with
+   *  a 5s timeout. All terminal paths remove the pending entry and timer. */
+  const requestCdp = useCallback(
+    (method: "DOM.getNodeForLocation" | "DOM.describeNode", params: Record<string, unknown>): Promise<unknown> => {
+      return new Promise((resolve, reject) => {
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          reject(new Error("disconnected"));
+          return;
+        }
+        const requestId = `node:${Date.now()}:${requestSeqRef.current++}`;
+        // 5s timeout — matches the server-side context in cdpsocket.go.
+        const timer = setTimeout(() => {
+          const pending = pendingRef.current.get(requestId);
+          if (!pending) return;
+          pendingRef.current.delete(requestId);
+          reject(new Error("timeout"));
+        }, 5000);
+        const pending: PendingRequest = { resolve, reject, timer, socket: ws };
+        pendingRef.current.set(requestId, pending);
 
-  return { send, status, error, onFrame, onFileChooser, onSelection, onFindResult };
+        const msg = {
+          t: "cdp_request" as const,
+          method,
+          params,
+          requestId,
+        };
+
+        try {
+          ws.send(JSON.stringify(msg));
+        } catch (err) {
+          clearTimeout(timer);
+          pendingRef.current.delete(requestId);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
+    },
+    [],
+  );
+
+  const getNodeAt = useCallback(
+    (x: number, y: number) => requestCdp("DOM.getNodeForLocation", { x, y }).then((result) => {
+      const location = result as Partial<NodeResult> | undefined;
+      if (typeof location?.nodeId !== "number") throw new Error("no_node");
+      return location as NodeResult;
+    }),
+    [requestCdp],
+  );
+
+  const describeNode = useCallback(
+    (nodeId: number) => requestCdp("DOM.describeNode", { nodeId, depth: 0, pierce: false }).then((result) => {
+      const response = result as { node?: NodeDescription } | NodeDescription;
+      return ("node" in response && response.node ? response.node : response) as NodeDescription;
+    }),
+    [requestCdp],
+  );
+
+  return { send, status, error, onFrame, onFileChooser, onSelection, onFindResult, getNodeAt, describeNode };
 }

@@ -265,6 +265,64 @@ describe("useCdpSocket", () => {
     expect(ws.closed).toBe(false);
   });
 
+  it("correlates DOM requests and unwraps describeNode responses", async () => {
+    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    const ws = lastSocket();
+    act(() => ws.serverOpen());
+
+    let nodePromise!: Promise<unknown>;
+    act(() => {
+      nodePromise = lastApi!.getNodeAt(12, 34);
+    });
+    const request = JSON.parse(ws.sent[0] as string) as { requestId: string; method: string; params: unknown };
+    expect(request.method).toBe("DOM.getNodeForLocation");
+    expect(request.params).toEqual({ x: 12, y: 34 });
+    act(() => ws.serverMessage(JSON.stringify({ t: "cdp_response", requestId: request.requestId, result: { nodeId: 7 } })));
+    await expect(nodePromise).resolves.toEqual({ nodeId: 7 });
+
+    let descriptionPromise!: Promise<unknown>;
+    act(() => {
+      descriptionPromise = lastApi!.describeNode(7);
+    });
+    const descriptionRequest = JSON.parse(ws.sent[1] as string) as { requestId: string; method: string; params: unknown };
+    expect(descriptionRequest.method).toBe("DOM.describeNode");
+    act(() => ws.serverMessage(JSON.stringify({
+      t: "cdp_response",
+      requestId: descriptionRequest.requestId,
+      result: { node: { nodeId: 7, nodeName: "A", attributes: ["href", "https://example.com/"] } },
+    })));
+    await expect(descriptionPromise).resolves.toEqual({ nodeId: 7, nodeName: "A", attributes: ["href", "https://example.com/"] });
+  });
+
+  it("rejects DOM requests on timeout and ignores late responses", async () => {
+    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    const ws = lastSocket();
+    act(() => ws.serverOpen());
+    let requestPromise!: Promise<unknown>;
+    act(() => {
+      requestPromise = lastApi!.getNodeAt(1, 2);
+    });
+    const request = JSON.parse(ws.sent[0] as string) as { requestId: string };
+    act(() => vi.advanceTimersByTime(5000));
+    await expect(requestPromise).rejects.toThrow("timeout");
+    act(() => ws.serverMessage(JSON.stringify({ t: "cdp_response", requestId: request.requestId, result: { nodeId: 9 } })));
+  });
+
+  it("rejects pending DOM requests when the socket disconnects", async () => {
+    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    const ws = lastSocket();
+    act(() => ws.serverOpen());
+    let requestPromise!: Promise<unknown>;
+    act(() => {
+      requestPromise = lastApi!.getNodeAt(1, 2);
+      ws.serverClose();
+    });
+    await expect(requestPromise).rejects.toThrow("disconnected");
+  });
+
   it("reconnects with new grant + backoff on close without error", async () => {
     render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));

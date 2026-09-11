@@ -14,12 +14,19 @@ const mirrorMaxBytes = 2 << 20 // 2MB
 // append-only file at path, one timestamped line per entry. The in-memory ring
 // buffer holds only the last 500 entries, so rare-but-critical events (e.g.
 // compaction decisions) need a durable sink to be diagnosable after the fact.
-// Passing an empty path disables mirroring.
+// Each kind has its own sink, so registering a second kind never replaces
+// the first. Passing an empty path disables mirroring for that kind only.
 func (l *log) MirrorKindToFile(kind EntryKind, path string) {
 	l.mu.Lock()
-	l.mirrorKind = kind
-	l.mirrorPath = path
-	l.mu.Unlock()
+	defer l.mu.Unlock()
+	if path == "" {
+		delete(l.mirrors, kind)
+		return
+	}
+	if l.mirrors == nil {
+		l.mirrors = map[EntryKind]string{}
+	}
+	l.mirrors[kind] = path
 }
 
 // mirror appends e to the mirror file. Called from Append outside l.mu (file

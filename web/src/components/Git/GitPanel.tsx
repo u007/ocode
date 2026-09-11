@@ -9,11 +9,14 @@ import {
   GitCommitVertical,
   ChevronDown,
   ChevronRight,
+  AlertTriangle,
 } from "lucide-react";
 import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
 import { ContextMenu } from "@/components/Layout/ContextMenu";
 import type { ContextMenuItem } from "@/components/Layout/ContextMenu";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import type {
   GitCommit,
   GitDiffFile,
@@ -122,6 +125,10 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
   const [refreshing, setRefreshing] = useState(false);
   const [sections, setSections] = useState<PanelSections>(loadPanelSections);
   const [fileFilter, setFileFilter] = useState("");
+  const [contextMenu, setContextMenu] = useState<{
+    items: ContextMenuItem[];
+    position: { x: number; y: number };
+  } | null>(null);
 
   const load = useCallback(async () => {
     setRefreshing(true);
@@ -217,6 +224,23 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
     runMutation(() => api.gitStage(paths, projectPath));
   const unstageAll = (paths: string[]) =>
     runMutation(() => api.gitUnstage(paths, projectPath));
+
+  // Network actions
+  const doFetch = () => runMutation(() => api.gitFetch(projectPath));
+  const doPull = () => runMutation(() => api.gitPull(projectPath));
+  const doPush = () => runMutation(() => api.gitPush(projectPath, false));
+
+  // Force-push confirmation flow
+  const [pendingForcePush, setPendingForcePush] = useState(false);
+  const [pendingResetRemote, setPendingResetRemote] = useState(false);
+  const doForcePush = () => {
+    setPendingForcePush(false);
+    runMutation(() => api.gitPush(projectPath, true));
+  };
+  const doResetRemote = () => {
+    setPendingResetRemote(false);
+    runMutation(() => api.gitResetRemote(projectPath));
+  };
 
   // Right-click menu per file row. Actions mirror the row's hover buttons
   // (plus "Open in editor"); the set depends on which pane was clicked —
@@ -360,7 +384,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
     unstagedFiles.some((f) => f.path === selection.path);
 
   return (
-    <div className="flex flex-col h-full">
+      <div className="flex flex-col h-full">
       {/* Header */}
       <div className="px-3 py-2 border-b border-border flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
@@ -383,6 +407,51 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
           <span className="text-xs text-muted-foreground">
             {filteredStaged.length} staged · {filteredUnstaged.length} unstaged
           </span>
+          <button
+            onClick={doFetch}
+            disabled={busy}
+            aria-label="Fetch all remotes"
+            title="Fetch all remotes"
+            className="p-1 rounded hover:bg-muted/60 text-muted-foreground hover:text-foreground disabled:opacity-40"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={doPull}
+            disabled={busy}
+            aria-label="Pull from remote"
+            title="Pull from remote"
+            className="p-1 rounded hover:bg-muted/60 text-muted-foreground hover:text-foreground disabled:opacity-40"
+          >
+            <ArrowDownToLine className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={doPush}
+            disabled={busy}
+            aria-label="Push to remote"
+            title="Push to remote"
+            className="p-1 rounded hover:bg-muted/60 text-muted-foreground hover:text-foreground disabled:opacity-40"
+          >
+            <ArrowUpToLine className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => setPendingForcePush(true)}
+            disabled={busy}
+            aria-label="Force push with lease"
+            title="Force push with lease"
+            className="p-1 rounded hover:bg-muted/60 text-amber-500 hover:text-amber-400 disabled:opacity-40"
+          >
+            <AlertTriangle className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => setPendingResetRemote(true)}
+            disabled={busy}
+            aria-label="Reset to remote"
+            title="Reset to remote (discard local commits and changes)"
+            className="p-1 rounded hover:bg-muted/60 text-red-400 hover:text-red-300 disabled:opacity-40"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
           <button
             onClick={load}
             disabled={refreshing}
@@ -414,6 +483,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
             collapsed={!sections.staged}
             onToggle={() => toggleSection("staged")}
             menuItems={(f) => fileMenuItems(f, true)}
+            onContextMenu={(items, position) => setContextMenu({ items, position })}
             onSectionAction={
               filteredStaged.length > 1
                 ? { label: "Unstage all", fn: () => unstageAll(filteredStaged.map((f) => f.path)) }
@@ -444,6 +514,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
             collapsed={!sections.unstaged}
             onToggle={() => toggleSection("unstaged")}
             menuItems={(f) => fileMenuItems(f, false)}
+            onContextMenu={(items, position) => setContextMenu({ items, position })}
             onSectionAction={
               filteredUnstaged.length > 1
                 ? { label: "Stage all", fn: () => stageAll(filteredUnstaged.map((f) => f.path)) }
@@ -611,6 +682,61 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
           Commit
         </button>
       </div>
+
+      {/* Force-push confirmation dialog */}
+      <Dialog open={pendingForcePush} onOpenChange={(open) => !open && setPendingForcePush(false)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-500" />
+              Force push
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground mt-2">
+            This may overwrite remote history with your local commits. The lease protects remote
+            changes that appeared after your last fetch by rejecting the push instead of overwriting
+            them. Are you sure you want to continue?
+          </p>
+          <DialogFooter className="mt-4">
+            <Button variant="outline" onClick={() => setPendingForcePush(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={doForcePush}>
+              Force Push
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={pendingResetRemote} onOpenChange={(open) => !open && setPendingResetRemote(false)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Trash2 className="w-4 h-4 text-red-400" />
+              Reset to remote
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground mt-2">
+            This fetches the upstream branch and hard-resets the current branch to it. All local
+            commits and tracked working-tree changes not on the remote will be permanently discarded.
+          </p>
+          <DialogFooter className="mt-4">
+            <Button variant="outline" onClick={() => setPendingResetRemote(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={doResetRemote}>
+              Reset to Remote
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {contextMenu && (
+        <ContextMenu
+          items={contextMenu.items}
+          open
+          position={contextMenu.position}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 }
@@ -629,6 +755,7 @@ function FileSection({
   collapsed,
   onToggle,
   menuItems,
+  onContextMenu,
 }: {
   title: string;
   stagedPane: boolean;
@@ -641,6 +768,7 @@ function FileSection({
   collapsed?: boolean;
   onToggle?: () => void;
   menuItems?: (f: GitDiffFile) => ContextMenuItem[];
+  onContextMenu?: (items: ContextMenuItem[], position: { x: number; y: number }) => void;
 }) {
   return (
     <div className="shrink-0 max-h-[34%] min-h-0 flex flex-col">
@@ -708,12 +836,18 @@ function FileSection({
                     {rowActions?.(f)}
                   </div>
                 );
-                return menuItems ? (
-                  <ContextMenu key={f.path} items={menuItems(f)}>
+                if (!menuItems) return <div key={f.path}>{row}</div>;
+                return (
+                  <div
+                    key={f.path}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onContextMenu?.(menuItems(f), { x: event.clientX, y: event.clientY });
+                    }}
+                  >
                     {row}
-                  </ContextMenu>
-                ) : (
-                  row
+                  </div>
                 );
               })}
             </div>

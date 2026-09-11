@@ -65,3 +65,47 @@ func TestMirrorRotatesWhenOversized(t *testing.T) {
 		t.Errorf("fresh mirror file missing new entry: %q", string(data))
 	}
 }
+
+// TestMirrorMultipleKinds guards the regression where a second
+// MirrorKindToFile call silently replaced the first: the TUI registers
+// COMPACT then TOKENS, and compact.log stopped receiving entries.
+func TestMirrorMultipleKinds(t *testing.T) {
+	dir := t.TempDir()
+	compactPath := filepath.Join(dir, "compact.log")
+	tokensPath := filepath.Join(dir, "tokens.log")
+
+	l := newLog()
+	l.MirrorKindToFile(EntryKind("COMPACT"), compactPath)
+	l.MirrorKindToFile(EntryKind("TOKENS"), tokensPath)
+
+	l.Append(Entry{Kind: "COMPACT", Message: "triggered"})
+	l.Append(Entry{Kind: "TOKENS", Message: "input=1"})
+
+	compact, err := os.ReadFile(compactPath)
+	if err != nil {
+		t.Fatalf("compact mirror not written: %v", err)
+	}
+	if !strings.Contains(string(compact), "[COMPACT] triggered") || strings.Contains(string(compact), "TOKENS") {
+		t.Errorf("compact mirror content wrong: %q", compact)
+	}
+	tokens, err := os.ReadFile(tokensPath)
+	if err != nil {
+		t.Fatalf("tokens mirror not written: %v", err)
+	}
+	if !strings.Contains(string(tokens), "[TOKENS] input=1") || strings.Contains(string(tokens), "COMPACT") {
+		t.Errorf("tokens mirror content wrong: %q", tokens)
+	}
+
+	// Empty path disables that kind only.
+	l.MirrorKindToFile(EntryKind("TOKENS"), "")
+	l.Append(Entry{Kind: "TOKENS", Message: "input=2"})
+	l.Append(Entry{Kind: "COMPACT", Message: "done"})
+	tokens, _ = os.ReadFile(tokensPath)
+	if strings.Contains(string(tokens), "input=2") {
+		t.Errorf("tokens mirror should be disabled: %q", tokens)
+	}
+	compact, _ = os.ReadFile(compactPath)
+	if !strings.Contains(string(compact), "[COMPACT] done") {
+		t.Errorf("compact mirror should still be active: %q", compact)
+	}
+}

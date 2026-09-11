@@ -156,6 +156,24 @@ func (f *fakeTarget) SelectionText(_ context.Context) (string, error) {
 	return f.selection, nil
 }
 
+func (f *fakeTarget) GetNodeForLocation(_ context.Context, x, y int) (*cdp.NodeLocation, error) {
+	if x < 0 || y < 0 {
+		return nil, errors.New(cdp.ErrNoNode)
+	}
+	return &cdp.NodeLocation{NodeId: 7, BackendNodeId: 8, FrameId: "frame-1"}, nil
+}
+
+func (f *fakeTarget) DescribeNode(_ context.Context, nodeID int, opts any) (map[string]any, error) {
+	return map[string]any{
+		"node": map[string]any{
+			"nodeId":     nodeID,
+			"nodeName":   "A",
+			"attributes": []string{"href", "https://example.com/linked"},
+			"opts":       opts,
+		},
+	}, nil
+}
+
 func (f *fakeTarget) GetResponseBody(_ context.Context, requestID string) (body string, isBase64 bool, truncated bool, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -336,6 +354,57 @@ func drainAttachPerfState(t *testing.T, conn *websocket.Conn) {
 	_ = json.Unmarshal(data, &got)
 	if got["t"] != "perfState" || got["recording"] != true {
 		t.Fatalf("attach frame = %s, want perfState recording=true", string(data))
+	}
+}
+
+func TestCDP_ContextMenuRequests(t *testing.T) {
+	s, _, ts := newBrowseWithFake(t, "http://example.com")
+	grant := s.MintGrant("tab:x", "http://example.com")
+	conn, _, err := (&websocket.Dialer{}).Dial(wsURL(ts, "tab:x", grant), http.Header{"Origin": []string{"http://example.com"}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	readJSON := func() map[string]any {
+		t.Helper()
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, rerr := conn.ReadMessage()
+		if rerr != nil {
+			t.Fatalf("read: %v", rerr)
+		}
+		var msg map[string]any
+		if err := json.Unmarshal(data, &msg); err != nil {
+			t.Fatalf("decode %q: %v", data, err)
+		}
+		return msg
+	}
+	if msg := readJSON(); msg["t"] != "perfState" {
+		t.Fatalf("initial message = %v, want perfState", msg)
+	}
+
+	if err := conn.WriteJSON(map[string]any{
+		"t": "cdp_request", "method": "DOM.getNodeForLocation",
+		"params": map[string]any{"x": 12, "y": 34}, "requestId": "node:1",
+	}); err != nil {
+		t.Fatalf("write getNodeForLocation: %v", err)
+	}
+	if msg := readJSON(); msg["t"] != "cdp_response" || msg["requestId"] != "node:1" {
+		t.Fatalf("node response = %v", msg)
+	} else if result, ok := msg["result"].(map[string]any); !ok || result["nodeId"] != float64(7) {
+		t.Fatalf("node result = %v, want nodeId 7", msg["result"])
+	}
+
+	if err := conn.WriteJSON(map[string]any{
+		"t": "cdp_request", "method": "DOM.describeNode",
+		"params": map[string]any{"nodeId": 7}, "requestId": "node:2",
+	}); err != nil {
+		t.Fatalf("write describeNode: %v", err)
+	}
+	if msg := readJSON(); msg["t"] != "cdp_response" || msg["requestId"] != "node:2" {
+		t.Fatalf("describe response = %v", msg)
+	} else if result, ok := msg["result"].(map[string]any); !ok || result["node"] == nil {
+		t.Fatalf("describe result = %v, want node payload", msg["result"])
 	}
 }
 

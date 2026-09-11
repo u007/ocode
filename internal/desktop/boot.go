@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/projects"
+	"github.com/u007/ocode/internal/remote"
 	"github.com/u007/ocode/internal/server"
 )
 
@@ -52,13 +54,21 @@ type Handle struct {
 // saved one is taken.
 //
 // webFS is the embedded SPA (web.FS()). workDir is the project root the
-// server resolves relative paths from.
-func StartServer(webFS fs.FS, workDir string) (*Handle, error) {
+// server resolves relative paths from. workspace is optional: when non-nil,
+// /api/* requests are proxied to that remote SSH workspace's server
+// instead of being handled locally. In remote mode the listener binds
+// 127.0.0.1:0 (not 0.0.0.0) to avoid LAN exposure, and no browse
+// panel is started.
+func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace) (*Handle, error) {
 	tokenBytes := make([]byte, 16)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return nil, fmt.Errorf("desktop: generate token: %w", err)
 	}
 	token := hex.EncodeToString(tokenBytes)
+
+	if workspace != nil {
+		return startRemoteServer(webFS, workspace, token)
+	}
 
 	bindAddr := "0.0.0.0:0"
 	if p := loadSavedPort(); p > 0 {
@@ -290,4 +300,80 @@ func ResolveFallbackWorkDir() string {
 	tmp := os.TempDir()
 	log.Printf("desktop: Finder launch — using temp dir %q as safe workDir", tmp)
 	return tmp
+}
+
+// startRemoteServer boots a minimal server for remote SSH workspaces:
+// serves the embedded SPA at /, proxies /api/* to the remote server
+// through the SSH tunnel, binds 127.0.0.1:0 (never LAN), and skips
+// the browse panel. No agent/LSP/git infrastructure runs locally —
+// all execution is on the remote server.
+func startRemoteServer(webFS fs.FS, workspace *remote.RemoteWorkspace, localToken string) (*Handle, error) {
+	proxy, err := NewRemoteProxy(workspace, localToken)
+	if err != nil {
+		return nil, fmt.Errorf("create proxy: %w", err)
+	}
+	bindAddr := "127.0.0.1:0"
+	if p := loadSavedPort(); p > 0 {
+		bindAddr = fmt.Sprintf("127.0.0.1:%d", p)
+	}
+
+	mux := http.NewServeMux()
+	// Proxy all API traffic to the remote server
+	mux.Handle("/api/", proxy)
+	// Serve SPA (fallback to index.html for client-side routing)
+	mux.Handle("/", remoteSPAHandler(webFS))
+
+	srv := &http.Server{Addr: bindAddr, Handler: mux}
+
+	ln, err := net.Listen("tcp", bindAddr)
+	if err != nil {
+		return nil, fmt.Errorf("desktop: remote listen: %w", err)
+	}
+
+	_, portStr, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		return nil, fmt.Errorf("desktop: parse bound address %s: %w", ln.Addr().String(), err)
+	}
+	addr := ln.Addr().String()
+	url := fmt.Sprintf("http://127.0.0.1:%s", portStr)
+	saveBoundPort(addr)
+	saveDebugHandle(url, localToken)
+
+	go func() {
+		log.Printf("desktop: serving remote workspace on %s (proxy → remote)", url)
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("desktop: serve error: %v", err)
+		}
+	}()
+
+	// Srv is nil in remote mode (no local server; the remote
+	// server is the authority). main.go guards handle.Srv == nil.
+	return &Handle{
+		URL:   url,
+		Token: localToken,
+		Srv:   nil,
+	}, nil
+}
+
+// remoteSPAHandler serves the embedded React SPA for remote
+// workspaces. Mirrors internal/server.spaHandler but lives here
+// to avoid a server→desktop dependency.
+func remoteSPAHandler(webFS fs.FS) http.Handler {
+	if webFS == nil {
+		return http.NotFoundHandler()
+	}
+	fileServer := http.FileServer(http.FS(webFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if f, err := webFS.(fs.ReadFileFS).Open(path); err == nil {
+			f.Close()
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		r.URL.Path = "/"
+		fileServer.ServeHTTP(w, r)
+	})
 }

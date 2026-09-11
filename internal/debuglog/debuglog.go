@@ -50,11 +50,10 @@ type log struct {
 	// diff correctly across ring-buffer drops (len stops growing at cap, so
 	// a count-based diff would stall) and across clears (no re-emits).
 	seq uint64
-	// mirrorKind/mirrorPath route entries of one kind to an on-disk file (see
+	// mirrors routes entries of each registered kind to an on-disk file (see
 	// MirrorKindToFile); mirrorFailOnce keeps a broken mirror from spamming the
 	// in-memory log with one error per append.
-	mirrorKind     EntryKind
-	mirrorPath     string
+	mirrors        map[EntryKind]string
 	mirrorFailOnce sync.Once
 }
 
@@ -74,8 +73,8 @@ func (l *log) Append(e Entry) {
 	l.entries = append(l.entries, e)
 	l.seq++
 	mirrorPath := ""
-	if l.mirrorPath != "" && e.Kind == l.mirrorKind && e.Kind != KindError {
-		mirrorPath = l.mirrorPath
+	if e.Kind != KindError {
+		mirrorPath = l.mirrors[e.Kind]
 	}
 	l.mu.Unlock()
 	if mirrorPath != "" {

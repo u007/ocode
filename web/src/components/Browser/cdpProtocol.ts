@@ -6,6 +6,7 @@
 
 /** Client→server command union. Exactly one message per JSON object. */
 export type CdpClientMessage =
+  | CdpRequest
   | { t: "nav"; url: string }
   | { t: "back" }
   | { t: "forward" }
@@ -66,12 +67,23 @@ export type CdpRequest =
   | { t: "cdp_request"; method: "DOM.describeNode"; params: { nodeId: number; depth?: number; pierce?: boolean }; requestId: string };
 
 /** CDP response messages (server→client) for the above requests. */
+type CdpNodePayload = {
+  nodeId: number;
+  backendNodeId?: number;
+  frameId?: string;
+  nodeName?: string;
+  nodeValue?: string;
+  attributes?: Record<string, string> | string[];
+  contentDocument?: { nodeId: number };
+};
+
 export type CdpResponse =
-  | { t: "cdp_response"; requestId: string; result: { nodeId: number; backendNodeId?: number; frameId?: string; nodeName?: string; nodeValue?: string; attributes?: Record<string, string>; contentDocument?: { nodeId: number } }; error?: never }
+  | { t: "cdp_response"; requestId: string; result: CdpNodePayload | { node: CdpNodePayload }; error?: never }
   | { t: "cdp_response"; requestId: string; result?: never; error: string };
 
 /** Server→client JSON telemetry (binary frames are handled separately). */
 export type CdpServerMessage =
+  | CdpResponse
   | { t: "console"; level: string; args: string[]; ts: number }
   | {
       t: "network";

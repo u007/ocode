@@ -11,10 +11,57 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 )
+
+// knownCandidates lists common installation paths for the tailscale
+// CLI, in priority order. The desktop shell launches with a minimal
+// PATH that does not include /usr/local/bin, where tailscale is
+// typically installed, so we search these locations as a fallback
+// after PATH resolution.
+var knownCandidates = []string{
+	"/usr/local/bin/tailscale",
+	"/opt/homebrew/bin/tailscale",
+	"/usr/bin/tailscale",
+	"/usr/sbin/tailscale",
+}
+
+// findCLIImpl is the testable implementation. candidates is the list
+// of known installation paths to check after PATH lookup fails.
+// lookPath is injected so tests can simulate PATH resolution without
+// touching the real filesystem.
+func findCLIImpl(candidates []string, lookPath func(string) (string, error)) string {
+	if lookPath != nil {
+		if p, err := lookPath("tailscale"); err == nil {
+			return p
+		}
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
+			continue
+		}
+		if info.Mode().Perm()&0111 == 0 {
+			continue
+		}
+		return candidate
+	}
+	return ""
+}
+
+// findCLI resolves the tailscale CLI path. It first tries exec.LookPath
+// (PATH lookup), then checks knownCandidates. Each candidate is
+// verified as executable before being returned; a non-executable or
+// stale file is skipped.
+func findCLI() string {
+	return findCLIImpl(knownCandidates, exec.LookPath)
+}
 
 // SanitizePath returns a tailscale-safe --set-path component derived from an
 // id (session ID, or "desktop" for the server share). It strips characters
@@ -95,8 +142,8 @@ func DNSName(tailscalePath string) string {
 // Running reports whether the tailscale CLI exists and the daemon answers
 // `tailscale status`.
 func Running() (string, bool) {
-	p, err := exec.LookPath("tailscale")
-	if err != nil {
+	p := findCLI()
+	if p == "" {
 		return "", false
 	}
 	if err := exec.Command(p, "status").Run(); err != nil {
@@ -182,8 +229,8 @@ func RemoveSetPath(pathPrefix string) {
 	if pathPrefix == "" {
 		return
 	}
-	tailscalePath, err := exec.LookPath("tailscale")
-	if err != nil {
+	tailscalePath := findCLI()
+	if tailscalePath == "" {
 		return
 	}
 	for _, cmd := range []string{"funnel", "serve"} {

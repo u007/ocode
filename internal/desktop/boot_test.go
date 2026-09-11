@@ -11,7 +11,7 @@ import (
 
 func TestStartServerServesAuthedAPI(t *testing.T) {
 	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir()) // keep the sticky-port file out of the real config dir
-	h, err := StartServer(nil, t.TempDir())      // nil webFS: API still works, SPA 404s
+	h, err := StartServer(nil, t.TempDir(), nil) // nil webFS: API still works, SPA 404s
 	if err != nil {
 		t.Fatalf("StartServer: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestSaveDebugHandleWritesURLAndToken(t *testing.T) {
 
 func TestStartServerRejectsUnauthed(t *testing.T) {
 	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir()) // keep the sticky-port file out of the real config dir
-	h, err := StartServer(nil, t.TempDir())
+	h, err := StartServer(nil, t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("StartServer: %v", err)
 	}

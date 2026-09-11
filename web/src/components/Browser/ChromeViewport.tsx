@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { useCdpSocket } from "./useCdpSocket";
+import { useCdpSocket, type NodeDescription } from "./useCdpSocket";
 import { useBrowserStore, useBrowserActions, type StateKey } from "../../lib/browserStore";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { uploadBrowseFiles } from "../../api/client";
+import { ContextMenu, type ContextMenuItem } from "../Layout/ContextMenu";
 
 /** CDP modifier bitmask (Input.dispatchMouseEvent/KeyEvent convention). */
 const MOD_ALT = 1;
@@ -77,6 +78,18 @@ function chromeShortcut(e: { key: string; code: string; altKey: boolean; ctrlKey
   return null;
 }
 
+function nodeAttribute(node: NodeDescription | null, name: string): string | undefined {
+  if (!node?.attributes) return undefined;
+  if (Array.isArray(node.attributes)) {
+    for (let i = 0; i + 1 < node.attributes.length; i += 2) {
+      if (node.attributes[i].toLowerCase() === name) return node.attributes[i + 1];
+    }
+    return undefined;
+  }
+  const key = Object.keys(node.attributes).find((candidate) => candidate.toLowerCase() === name);
+  return key ? node.attributes[key] : undefined;
+}
+
 export interface ChromeViewportProps {
   stateKey: StateKey;
   browseBase: string | null;
@@ -100,7 +113,8 @@ export interface ChromeViewportProps {
  *  are CSS pixels relative to the canvas rect (Chrome expects CSS px; the
  *  screencast frames are device px and are only used for the backing store). */
 export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = true }: ChromeViewportProps) {
-  const { send, status, error, onFrame, onFileChooser, onSelection, onFindResult } = useCdpSocket(stateKey, browseBase, true, active);
+  const { send, status, error, onFrame, onFileChooser, onSelection, onFindResult, getNodeAt, describeNode } = useCdpSocket(stateKey, browseBase, true, active);
+  const surface = useBrowserStore(stateKey);
   const actions = useBrowserActions();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // Invisible keyboard/IME target. A canvas cannot host an input method
@@ -142,6 +156,7 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressPointerId = useRef<number | null>(null);
   const longPressOrigin = useRef<{ x: number; y: number } | null>(null);
+  const longPressScreenOrigin = useRef<{ x: number; y: number } | null>(null);
   // Find-in-page bar (Chrome canvas has no native find UI).
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
@@ -158,6 +173,8 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
   // keyup the remote page never saw a keydown for.
   const findConsumedRef = useRef(new Set<string>());
   const findDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const contextRequestRef = useRef(0);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: NodeDescription | null; loading: boolean; error: string | null } | null>(null);
 
   // Navigate whenever the user requests it (address bar, back/forward,
   // reload, chrome hand-off) — i.e. when navSeq moves. The store is the
@@ -327,7 +344,6 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
   // from there into per-URL persistence. Chrome-mode scroll restore: re-send
   // the persisted offset with bounded retries after (re)mount/navigation —
   // SPA content renders late and early scrollTo calls land short.
-  const surface = useBrowserStore(stateKey);
   useEffect(() => {
     if (status !== "open" || !active) return;
     const timer = setInterval(() => send({ t: "getScroll" }), 2000);
@@ -391,8 +407,122 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    const clientX = Number.isFinite(e.clientX) ? e.clientX : 0;
+    const clientY = Number.isFinite(e.clientY) ? e.clientY : 0;
+    return { x: clientX - rect.left, y: clientY - rect.top };
   }, []);
+
+  const closeContextMenu = useCallback(() => {
+    contextRequestRef.current += 1;
+    setContextMenu(null);
+  }, []);
+
+  const openContextMenuAt = useCallback((clientX: number, clientY: number) => {
+    if (!active) return;
+    const { x, y } = canvasPos({ clientX, clientY });
+    const request = ++contextRequestRef.current;
+    setContextMenu({
+      x: Number.isFinite(clientX) ? clientX : 0,
+      y: Number.isFinite(clientY) ? clientY : 0,
+      node: null,
+      loading: true,
+      error: null,
+    });
+    void getNodeAt(x, y)
+      .then((location) => {
+        if (location.nodeId === 0) throw new Error("no_node");
+        return describeNode(location.nodeId);
+      })
+      .then((node) => {
+        if (contextRequestRef.current !== request) return;
+        setContextMenu((current) => current ? { ...current, node, loading: false, error: null } : current);
+      })
+      .catch((err: unknown) => {
+        if (contextRequestRef.current !== request) return;
+        setContextMenu((current) => current ? { ...current, node: null, loading: false, error: err instanceof Error ? err.message : String(err) } : current);
+      });
+  }, [active, canvasPos, describeNode, getNodeAt]);
+
+  const onContextMenu = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenuAt(e.clientX, e.clientY);
+  }, [openContextMenuAt]);
+
+  const pageUrl = surface?.url || url;
+  const contextNodeName = contextMenu?.node?.nodeName?.toUpperCase() ?? "";
+  const contextIsLinkOrMedia = ["A", "AREA", "IMG", "VIDEO", "SOURCE", "IFRAME"].includes(contextNodeName);
+  const contextLink = contextIsLinkOrMedia
+    ? nodeAttribute(contextMenu?.node ?? null, contextNodeName === "A" || contextNodeName === "AREA" ? "href" : "src") ?? null
+    : null;
+  const contextReady = status === "open" && !contextMenu?.loading;
+
+  const copyContextText = async (text: string): Promise<boolean> => {
+    if (!navigator.clipboard) {
+      setContextMenu((current) => current ? { ...current, error: "clipboard unavailable" } : current);
+      return false;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err: unknown) {
+      actions.pushConsole(stateKey, { level: "error", text: `Clipboard: ${err instanceof Error ? err.message : String(err)}`, ts: Date.now() });
+      setContextMenu((current) => current ? { ...current, error: "clipboard write failed" } : current);
+      return false;
+    }
+  };
+
+  const contextItems: ContextMenuItem[] = [
+    {
+      label: "Back",
+      disabled: status !== "open" || !surface || surface.historyIndex <= 0,
+      onClick: () => actions.back(stateKey),
+    },
+    {
+      label: "Forward",
+      disabled: status !== "open" || !surface || surface.historyIndex >= surface.history.length - 1,
+      onClick: () => actions.forward(stateKey),
+    },
+    {
+      label: "Reload",
+      disabled: status !== "open",
+      onClick: () => send({ t: "reload" }),
+    },
+    ...(contextMenu?.error
+      ? [{
+          label: `Context lookup unavailable: ${contextMenu.error}`,
+          disabled: true,
+          onClick: () => undefined,
+        }]
+      : []),
+    { label: "", separator: true, onClick: () => undefined },
+    {
+      label: "Copy URL",
+      disabled: status !== "open" || !pageUrl,
+      onClick: () => copyContextText(pageUrl),
+    },
+    {
+      label: "Copy Link or Image",
+      disabled: !contextReady || !contextLink,
+      onClick: () => contextLink && copyContextText(contextLink),
+    },
+    {
+      label: "Inspect",
+      disabled: !contextReady || !contextMenu?.node,
+      onClick: () => {
+        if (!contextMenu?.node) return;
+        actions.pushConsole(stateKey, { level: "info", text: `Inspect: ${JSON.stringify(contextMenu.node)}`, ts: Date.now() });
+      },
+    },
+    { label: "", separator: true, onClick: () => undefined },
+    {
+      label: "Open External",
+      disabled: status !== "open" || !pageUrl,
+      onClick: () => {
+        window.open(pageUrl, "_blank", "noopener");
+      },
+    },
+  ];
 
   const buttonName = (b: number): string =>
     b === 2 ? "right" : b === 1 ? "middle" : "left";
@@ -462,6 +592,7 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
     }
     longPressPointerId.current = null;
     longPressOrigin.current = null;
+    longPressScreenOrigin.current = null;
   };
 
   const onTouchDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -479,6 +610,7 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
     const mods = modifiersOf(e);
     longPressPointerId.current = pointerId;
     longPressOrigin.current = { x, y };
+    longPressScreenOrigin.current = { x: e.clientX, y: e.clientY };
     longPressTimer.current = setTimeout(() => {
       longPressTimer.current = null;
       const t = touches.current.get(pointerId);
@@ -490,6 +622,8 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
       touches.current.delete(pointerId);
       send({ t: "mouse", kind: "down", x: t.x, y: t.y, button: "right", buttons: 2, clickCount: 1, modifiers: mods });
       send({ t: "mouse", kind: "up", x: t.x, y: t.y, button: "right", buttons: 0, clickCount: 1, modifiers: mods });
+      const screen = longPressScreenOrigin.current;
+      if (screen) openContextMenuAt(screen.x, screen.y);
     }, LONG_PRESS_MS);
   };
 
@@ -818,7 +952,13 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
         onPointerCancel={onPointerCancel}
         onPointerMove={onPointerMove}
         onWheel={onWheel}
-        onContextMenu={(e) => e.preventDefault()}
+        onContextMenu={onContextMenu}
+      />
+      <ContextMenu
+        items={contextItems}
+        open={contextMenu !== null}
+        position={contextMenu ?? { x: 0, y: 0 }}
+        onClose={closeContextMenu}
       />
       <textarea
         ref={keyboardRef}

@@ -44,6 +44,8 @@ const mockApi = {
     mockApi.findResultCbs.add(cb);
     return () => mockApi.findResultCbs.delete(cb);
   },
+  getNodeAt: vi.fn((_x: number, _y: number): Promise<{ nodeId: number }> => new Promise(() => {})),
+  describeNode: vi.fn((_nodeId: number): Promise<{ nodeId: number; nodeName?: string; attributes?: string[] }> => new Promise(() => {})),
 };
 
 const mockUpload = vi.hoisted(() => vi.fn(async (_key: string, _files: File[]) => {}));
@@ -77,6 +79,8 @@ beforeEach(() => {
   mockApi.fileChooserCbs.clear();
   mockApi.selectionCbs.clear();
   mockApi.findResultCbs.clear();
+  mockApi.getNodeAt.mockClear();
+  mockApi.describeNode.mockClear();
   mockUpload.mockClear();
   vi.useFakeTimers();
   // Stub ResizeObserver: capture the callback for manual triggering.
@@ -502,8 +506,57 @@ describe("ChromeViewport", () => {
     );
     const canvas = container.querySelector("canvas") as HTMLCanvasElement;
     const ev = new Event("contextmenu", { bubbles: true, cancelable: true });
-    canvas.dispatchEvent(ev);
+    act(() => canvas.dispatchEvent(ev));
     expect(ev.defaultPrevented).toBe(true);
+  });
+
+  it("opens the host menu after resolving the node under the pointer", async () => {
+    mockApi.getNodeAt.mockResolvedValue({ nodeId: 7 });
+    mockApi.describeNode.mockResolvedValue({
+      nodeId: 7,
+      nodeName: "A",
+      attributes: ["href", "https://linked.example/"],
+    });
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
+    );
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+
+    await act(async () => {
+      fireEvent.contextMenu(canvas, { clientX: 40, clientY: 50 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockApi.getNodeAt).toHaveBeenCalledWith(40, 50);
+    expect(mockApi.describeNode).toHaveBeenCalledWith(7);
+    expect(document.body.textContent).toContain("Copy Link or Image");
+  });
+
+  it("keeps the menu open with an inline clipboard error", async () => {
+    mockApi.getNodeAt.mockResolvedValue({ nodeId: 7 });
+    mockApi.describeNode.mockResolvedValue({
+      nodeId: 7,
+      nodeName: "A",
+      attributes: ["href", "https://linked.example/"],
+    });
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
+    );
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    await act(async () => {
+      fireEvent.contextMenu(canvas, { clientX: 40, clientY: 50 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      fireEvent.click(Array.from(document.querySelectorAll("button")).find((button) => button.textContent === "Copy Link or Image")!);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith("https://linked.example/");
+    expect(document.body.textContent).toContain("Context lookup unavailable: clipboard write failed");
   });
 
   it("shows reconnecting pill and error state with open-external", () => {

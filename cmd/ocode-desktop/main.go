@@ -29,6 +29,7 @@ import (
 	"github.com/u007/ocode/internal/bundled"
 	"github.com/u007/ocode/internal/desktop"
 	"github.com/u007/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/remote"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/web"
 	// Register provider plugins in the desktop binary as well as the CLI. Without
@@ -146,10 +147,32 @@ func main() {
 		agent.SetBundledModelConfigFS(assetsSub)
 	}
 
-	// Boot the ocode API server on a random loopback port with a fresh token.
-	// On failure a native dialog is shown after the app is created below —
-	// stderr alone is invisible from a Finder-launched .app.
-	handle, bootErr := desktop.StartServer(web.FS(), workDir)
+	// Boot the ocode API server. If a remote SSH workspace is saved
+	// on disk, connect to it; otherwise start locally.
+	var (
+		handle  *desktop.Handle
+		bootErr error
+	)
+	if cfg, err := desktop.LoadWorkspaceConfig(); err == nil && cfg.Mode == desktop.WorkspaceRemoteSSH && cfg.TargetHost != "" {
+		log.Printf("ocode-desktop: booting remote workspace %s:%d %s", cfg.TargetHost, cfg.TargetPort, cfg.RemotePath)
+		target := remote.Target{Kind: remote.KindSSH, Host: cfg.TargetHost, User: ""}
+		ws, err := desktop.OpenRemoteWorkspace(target, cfg.RemotePath)
+		if err != nil {
+			bootErr = fmt.Errorf("open remote workspace: %w", err)
+		} else {
+			handle, bootErr = desktop.StartServer(web.FS(), workDir, ws.Remote)
+			if bootErr == nil {
+				// Persist the target for reconnect on next launch.
+				_ = desktop.SaveWorkspaceConfig(desktop.WorkspaceConfig{
+					Mode:       desktop.WorkspaceRemoteSSH,
+					TargetHost: cfg.TargetHost,
+					RemotePath: cfg.RemotePath,
+				})
+			}
+		}
+	} else {
+		handle, bootErr = desktop.StartServer(web.FS(), workDir, nil)
+	}
 	if bootErr != nil {
 		log.Printf("ocode-desktop: server boot failed: %v", bootErr)
 	} else {
@@ -158,7 +181,10 @@ func main() {
 		// agent sessions created in the desktop-hosted server, and /api/cron
 		// routes are live. This is the desktop counterpart of the
 		// schedulerSetup() hook in cmd/ocode's serve/web paths.
-		desktop.AttachScheduler(handle.Srv, workDir)
+		// Skipped in remote mode (handle.Srv == nil) — scheduler runs on the remote server.
+		if handle.Srv != nil {
+			desktop.AttachScheduler(handle.Srv, workDir)
+		}
 	}
 
 	// The Wails app (badge + notification services) was created above, ahead

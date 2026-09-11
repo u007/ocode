@@ -1247,21 +1247,27 @@ function HomeApp() {
           )}
         </main>
 
-        {/* Right sidebar - cowork panel (only on Sessions view with the active session's sub-tab on Chat).
-            Hidden while the terminal is focused so the right rail doesn't crowd the shell. */}
-        {shouldRenderCoworkSidebar({
-          activeView,
-          activeSubTab: activeSessionTab?.activeSubTab,
-          focusedKind,
-        }) && (
-          <CoworkSidebar
-            isOpen={coworkOpen}
-            onClose={() => setCoworkOpen(false)}
-            activeAgent="build"
-            onModelClick={openModelDialog}
-            isMobile={isMobile}
-          />
-        )}
+        {/* Right sidebar - cowork panel. Always mounted with a stable w-72 slot so
+            <main>'s width (and the unified tab bar above it) never reflows when
+            the active session's sub-tab or focus kind changes. Visibility is
+            toggled by shouldRenderCoworkSidebar + coworkOpen. */}
+        <div className="w-72 flex-shrink-0">
+          {shouldRenderCoworkSidebar({
+            activeView,
+            activeSubTab: activeSessionTab?.activeSubTab,
+            focusedKind,
+          }) && coworkOpen ? (
+            <CoworkSidebar
+              isOpen={coworkOpen}
+              onClose={() => setCoworkOpen(false)}
+              activeAgent="build"
+              onModelClick={openModelDialog}
+              isMobile={isMobile}
+            />
+          ) : (
+            <div className="invisible h-full" aria-hidden="true" />
+          )}
+        </div>
       </div>
 
       {/* Dialogs */}

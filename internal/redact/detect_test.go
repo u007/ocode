@@ -205,6 +205,126 @@ func TestDetectEnvSecretAssignments(t *testing.T) {
 	}
 }
 
+func TestDetectEnvSecretEmptyValue(t *testing.T) {
+	// Empty values on secret-named variables must still produce spans.
+	// Regression test for: mask fail on .env with variable AGENT48_PASS=
+	cases := []struct {
+		name   string
+		quoted byte
+	}{
+		{"AGENT48_PASS", 0},
+		{"DB_PASSWORD", 0},
+		{"API_KEY", 0},
+		{"ENCRYPTION_KEY", '"'},
+		{"DB_PASSWORD", '\''},
+	}
+
+	var lines []string
+	for _, c := range cases {
+		switch c.quoted {
+		case '"':
+			lines = append(lines, c.name+`=""`)
+		case '\'':
+			lines = append(lines, c.name+"=''")
+		default:
+			lines = append(lines, c.name+"=")
+		}
+	}
+	text := strings.Join(lines, "\n")
+
+	for _, mode := range []struct {
+		name string
+		opts DetectOpts
+	}{
+		{"chat", DetectOpts{FileContent: false}},
+		{"file", DetectOpts{FileContent: true}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			spans := Detect(text, nil, mode.opts)
+			for _, c := range cases {
+				// Find the line start for this assignment
+				var lineStart int
+				switch c.quoted {
+				case '"':
+					lineStart = strings.Index(text, c.name+`=""`)
+				case '\'':
+					lineStart = strings.Index(text, c.name+"=''")
+				default:
+					lineStart = strings.Index(text, c.name+"=")
+				}
+				if lineStart < 0 {
+					t.Fatalf("[%s] could not find line for %s", mode.name, c.name)
+				}
+				// Value position is after the `=` (for unquoted) or after opening quote (for quoted)
+				valPos := lineStart + len(c.name) + 1 // after `=`
+				if c.quoted == '"' {
+					valPos++ // after `="`
+				} else if c.quoted == '\'' {
+					valPos++ // after `='`
+				}
+				// For empty values, the span is zero-length at valPos.
+				// For non-empty values, the span covers valPos..valPos+len(value).
+				// We just verify there's an env_secret span starting at valPos.
+				found := false
+				var gotKinds []string
+				for _, s := range spans {
+					if strings.HasPrefix(s.Kind, "env_secret:") {
+						gotKinds = append(gotKinds, s.Kind)
+						if s.Start == valPos {
+							found = true
+						}
+					}
+				}
+				if !found {
+					t.Errorf("[%s] expected env_secret span at position %d for %s, got kinds %v spans %v", mode.name, valPos, c.name, gotKinds, spans)
+				}
+			}
+		})
+	}
+}
+
+func TestDetectEnvSecretNoNewlineLeak(t *testing.T) {
+	// Regression test: an empty value must not cause the regex to "leak"
+	// into the next line, consuming the next assignment as the value of
+	// the current line. Each assignment must produce its own span.
+	text := "AGENT48_PASS=\nDB_PASSWORD=actual-secret"
+
+	for _, mode := range []struct {
+		name string
+		opts DetectOpts
+	}{
+		{"chat", DetectOpts{FileContent: false}},
+		{"file", DetectOpts{FileContent: true}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			spans := Detect(text, nil, mode.opts)
+			// Must find exactly 2 env_secret spans (one per line).
+			var envSpans []Span
+			for _, s := range spans {
+				if strings.HasPrefix(s.Kind, "env_secret:") {
+					envSpans = append(envSpans, s)
+				}
+			}
+			if len(envSpans) != 2 {
+				t.Fatalf("expected 2 env_secret spans, got %d: %v", len(envSpans), spans)
+			}
+			// First span (AGENT48_PASS) must not extend past position 13
+			// (i.e., must not include the newline or the next line).
+			if envSpans[0].Start != 13 || envSpans[0].End != 13 {
+				t.Errorf("span[0] for AGENT48_PASS should be zero-length at pos 13, got %d:%d", envSpans[0].Start, envSpans[0].End)
+			}
+			// Second span (DB_PASSWORD) must cover "actual-secret".
+			if envSpans[1].Start != 26 || envSpans[1].End != 39 {
+				t.Errorf("span[1] for DB_PASSWORD should cover actual-secret at 26:39, got %d:%d", envSpans[1].Start, envSpans[1].End)
+			}
+			// Verify the second span's kind references DB_PASSWORD.
+			if !strings.Contains(envSpans[1].Kind, "DB_PASSWORD") {
+				t.Errorf("span[1] Kind should reference DB_PASSWORD, got %q", envSpans[1].Kind)
+			}
+		})
+	}
+}
+
 func TestDetectEnvSecretFalsePositives(t *testing.T) {
 	// These must NOT be redacted: non-secret names, low-entropy weak ids,
 	// and prose containing "KEY" as a non-secret word.

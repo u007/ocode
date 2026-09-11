@@ -70,9 +70,10 @@ var (
 	// alternatives: double-quoted inner (group 2), single-quoted inner (group 3),
 	// or an unquoted run (group 4) that stops at whitespace — so a trailing
 	// `# comment` is excluded and the value can contain `:@/#$%=+` and env
-	// interpolation (`${OTHER}`). Unquoted values need >=4 chars to align with the
-	// strong-name minimum; quoted values may be any non-empty length.
-	envAssignRe = regexp.MustCompile(`(?im)^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|([^\s"']{4,}))`)
+	// interpolation (`${OTHER}`). Unquoted values may be any length; quoted
+	// values may be any non-empty length. [ \t]* around the separator
+	// (instead of \s*) prevents the value from spilling across newlines.
+	envAssignRe = regexp.MustCompile(`(?im)^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*[:=][ \t]*(?:"([^"]*)"|'([^']*)'|([^\s"']*))`)
 )
 
 // envSecretTokens are trailing underscore-delimited name segments that mark a
@@ -83,7 +84,7 @@ var (
 // tier-2 scan trigger.
 var envSecretTokens = []string{
 	"SECRET", "SECRET_KEY", "PRIVATE", "PRIVATE_KEY", "PASSWORD", "PASSWD",
-	"PWD", "PASSPHRASE", "TOKEN", "CREDENTIAL", "CREDENTIALS", "ENCRYPTION",
+	"PASS", "PWD", "PASSPHRASE", "TOKEN", "CREDENTIAL", "CREDENTIALS", "ENCRYPTION",
 	"ENCRYPTION_KEY", "AUTH", "AUTH_TOKEN", "AUTH_KEY", "CLIENT_SECRET",
 	"SESSION", "SESSION_SECRET", "ACCESS_TOKEN", "ACCESS_KEY", "API_KEY",
 	"APIKEY", "KEY", "SALT",
@@ -214,7 +215,8 @@ func addSpansFromKeywordMatches(spans *[]Span, text string, matches [][]int) {
 // redacted. The value arrives in one of three capture groups (see envAssignRe):
 // group 2 = double-quoted inner, group 3 = single-quoted inner, group 4 =
 // unquoted run. Strong names (e.g. *_SECRET, *_KEY, *_TOKEN) are redacted
-// whenever the value is non-trivial (len >= 4). Weak names (e.g. *_ID) are only
+// regardless of value length — even empty values (AGENT48_PASS=) are tracked,
+// since the variable name itself marks it as sensitive. Weak names (e.g. *_ID) are only
 // redacted when the value is high-entropy, to avoid masking ordinary identifiers
 // like PROJECT_ID / ACCOUNT_ID / CLIENT_ID.
 func addSpansFromEnvMatches(spans *[]Span, text string, matches [][]int) {
@@ -245,9 +247,8 @@ func addSpansFromEnvMatches(spans *[]Span, text string, matches [][]int) {
 			continue
 		}
 		if strong {
-			if len(value) < 4 {
-				continue
-			}
+			// Strong names are redacted regardless of value length — even
+			// empty values (AGENT48_PASS=) are tracked; the name itself is sensitive.
 		} else {
 			// Weak name (e.g. *_ID): only redact genuinely secret-looking
 			// values. Require length, high entropy, AND at least one letter so
