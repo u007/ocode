@@ -477,6 +477,136 @@ func TestOpenAIResponsesDoesNotReplayEncryptedReasoningAcrossRoutes(t *testing.T
 	}
 }
 
+func TestOpenAIResponsesMuseSparkOutboundCacheContract(t *testing.T) {
+	// Pins the observable request contract for muse-spark on opencode/opencode-go:
+	// Responses route, stable X-Opencode-Session across turns, no GPT-only
+	// fields, and — currently — no prompt_cache_key (only the OpenAI OAuth
+	// codex path sends one). If Zen/Console later documents cache-key support
+	// for these routes, this test is the place that must change first.
+	for _, provider := range []string{"opencode", "opencode-go"} {
+		var payloads []map[string]interface{}
+		var headers []http.Header
+		var urls []string
+		stubLLMHTTP(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			var p map[string]interface{}
+			if err := json.NewDecoder(req.Body).Decode(&p); err != nil {
+				return nil, err
+			}
+			payloads = append(payloads, p)
+			headers = append(headers, req.Header.Clone())
+			urls = append(urls, req.URL.String())
+			return statusResponse(http.StatusOK, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: [DONE]\n"), nil
+		}))
+		client := &GenericClient{Provider: provider, Model: "muse-spark-1.3-contributor-free", BaseURL: "https://example.test/v1"}
+		client.setOpencodeSessionID("ses_muse-cache-probe")
+		msgs := []Message{{Role: "system", Content: "be terse"}, {Role: "user", Content: "hi"}}
+		for i := 0; i < 2; i++ {
+			if _, err := client.chatOpenAIResponses(context.Background(), msgs, nil); err != nil {
+				t.Fatalf("%s turn %d request failed: %v", provider, i, err)
+			}
+		}
+		if len(payloads) != 2 {
+			t.Fatalf("%s: expected 2 captured payloads, got %d", provider, len(payloads))
+		}
+		for i, p := range payloads {
+			if p["store"] != false {
+				t.Fatalf("%s turn %d: store = %#v, want false", provider, i, p["store"])
+			}
+			if _, ok := p["prompt_cache_key"]; ok {
+				t.Fatalf("%s turn %d: prompt_cache_key present (%#v) — contract changed, update this test and the caching analysis", provider, i, p["prompt_cache_key"])
+			}
+			if _, ok := p["include"]; ok {
+				t.Fatalf("%s turn %d: include must be omitted for muse-spark, got %#v", provider, i, p["include"])
+			}
+			if _, ok := p["text"]; ok {
+				t.Fatalf("%s turn %d: text.verbosity must be omitted for muse-spark, got %#v", provider, i, p["text"])
+			}
+			if !strings.HasSuffix(urls[i], "/responses") {
+				t.Fatalf("%s turn %d: url = %q, want .../responses", provider, i, urls[i])
+			}
+			if got := headers[i].Get(opencodeSessionHeader); got != "ses_muse-cache-probe" {
+				t.Fatalf("%s turn %d: %s = %q, want stable session id", provider, i, opencodeSessionHeader, got)
+			}
+		}
+		if headers[0].Get(opencodeSessionHeader) != headers[1].Get(opencodeSessionHeader) {
+			t.Fatalf("%s: session header not stable across turns: %q vs %q", provider, headers[0].Get(opencodeSessionHeader), headers[1].Get(opencodeSessionHeader))
+		}
+		// instructions + input prefix must be byte-stable across identical turns;
+		// any drift here busts server-side implicit prefix caching.
+		first, _ := json.Marshal(payloads[0]["instructions"])
+		second, _ := json.Marshal(payloads[1]["instructions"])
+		if string(first) != string(second) {
+			t.Fatalf("%s: instructions drifted across identical turns: %s vs %s", provider, first, second)
+		}
+		firstIn, _ := json.Marshal(payloads[0]["input"])
+		secondIn, _ := json.Marshal(payloads[1]["input"])
+		if string(firstIn) != string(secondIn) {
+			t.Fatalf("%s: input drifted across identical turns: %s vs %s", provider, firstIn, secondIn)
+		}
+	}
+}
+
+func TestOpenAIResponsesMuseSparkOmitsGPTFields(t *testing.T) {
+	capture := func(model string) map[string]interface{} {
+		var payload map[string]interface{}
+		stubLLMHTTP(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			var p map[string]interface{}
+			if err := json.NewDecoder(req.Body).Decode(&p); err != nil {
+				return nil, err
+			}
+			payload = p
+			return statusResponse(http.StatusOK, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: [DONE]\n"), nil
+		}))
+		client := &GenericClient{Provider: "opencode", Model: model, BaseURL: "https://example.test/v1"}
+		route := client.openAIResponseRoute()
+		_, err := client.chatOpenAIResponses(context.Background(), []Message{
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", OpenAIResponseRoute: route, OpenAIResponseItems: []map[string]interface{}{{
+				"type":              "reasoning",
+				"id":                "rs_1",
+				"encrypted_content": "opaque",
+			}, {
+				"type":      "function_call",
+				"call_id":   "call_1",
+				"name":      "bash",
+				"arguments": "{}",
+			}}},
+			{Role: "tool", ToolID: "call_1", Content: "ok"},
+		}, nil)
+		if err != nil {
+			t.Fatalf("%s request failed: %v", model, err)
+		}
+		return payload
+	}
+
+	musePayload := capture("muse-spark-1.3-contributor-free")
+	if _, ok := musePayload["include"]; ok {
+		t.Fatalf("muse-spark payload must omit include, got %#v", musePayload["include"])
+	}
+	if _, ok := musePayload["text"]; ok {
+		t.Fatalf("muse-spark payload must omit text.verbosity, got %#v", musePayload["text"])
+	}
+	if input, ok := musePayload["input"].([]interface{}); ok {
+		for _, raw := range input {
+			if item, _ := raw.(map[string]interface{}); item != nil {
+				if _, ok := item["encrypted_content"]; ok {
+					t.Fatalf("muse-spark input must strip encrypted_content, got %#v", item)
+				}
+			}
+		}
+	} else {
+		t.Fatalf("muse input = %#v", musePayload["input"])
+	}
+
+	gptPayload := capture("gpt-5.6-luna")
+	if _, ok := gptPayload["include"]; !ok {
+		t.Fatal("gpt payload must keep include")
+	}
+	if _, ok := gptPayload["text"]; !ok {
+		t.Fatal("gpt payload must keep text")
+	}
+}
+
 func TestOpenAIResponsesDoesNotRetryUnrelatedBadRequest(t *testing.T) {
 	var calls int32
 	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {

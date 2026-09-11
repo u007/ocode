@@ -51,7 +51,7 @@ function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
   }
 }
 
-function parseQuestionFromMessage(msg: Message): QuestionRequest | null {
+export function parseQuestionFromMessage(msg: Message): QuestionRequest | null {
   if (msg.role !== "tool") return null;
   const idx = msg.content.indexOf(SENTINEL_QUESTION_PROMPT);
   if (idx === -1) return null;

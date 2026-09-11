@@ -3,7 +3,7 @@ import { Store, useSelector } from "@tanstack/react-store";
 import { api } from "../api/client";
 import type { Project, ProjectGroup, SessionInfo } from "../api/types";
 
-export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status";
+export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "preview";
 export type ProjectMetadataStatus = "loading" | "ready" | "error";
 
 export interface Tab {
@@ -232,7 +232,7 @@ function loadPersistedTabs(): { tabsByProject: Record<string, Tab[]>; activeTabB
           id: t.id,
           projectPath: path,
           title: typeof t.title === "string" ? t.title : t.id,
-          activeSubTab: (t.subTab === "agents" || t.subTab === "changes" || t.subTab === "logs" || t.subTab === "status" ? t.subTab : "chat") as SessionSubTabId,
+          activeSubTab: (t.subTab === "agents" || t.subTab === "changes" || t.subTab === "logs" || t.subTab === "status" || t.subTab === "preview" ? t.subTab : "chat") as SessionSubTabId,
         }));
       if (tabs.length === 0) continue;
       tabsByProject[path] = tabs;

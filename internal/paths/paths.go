@@ -180,6 +180,55 @@ func GlobalConfigDir() (string, error) {
 	return filepath.Join(home, ".config", AppName), nil
 }
 
+// GitIgnoreFiles returns the standard global git-ignore file candidates:
+//   - $XDG_CONFIG_HOME/git/ignore when XDG_CONFIG_HOME is set (absolute),
+//     else ~/.config/git/ignore (git's core.excludesFile default)
+//   - ~/.gitignore_global and ~/.gitignore (common legacy global files)
+//
+// It follows git/XDG semantics deliberately separate from GlobalConfigDir
+// (which ignores XDG_CONFIG_HOME on macOS). Only these exact files are
+// returned — never a parent directory — so callers grant exact-file scope,
+// not broad ~/.config or $HOME access. An arbitrary core.excludesFile value
+// is intentionally NOT honored: a user-configurable path must not become a
+// permission/sandbox bypass.
+//
+// Side-effect-free (no disk writes, no existence probe): missing candidates
+// are still returned. The permission scope treats them as in-scope via its
+// Clean fallback, while the sandbox backends skip missing paths (fail-closed;
+// create the file outside sandbox once, then it is writable inside).
+func GitIgnoreFiles() []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		clean := filepath.Clean(p)
+		if clean == "" || clean == "/" || clean == "." {
+			return
+		}
+		if _, ok := seen[clean]; ok {
+			return
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		if filepath.IsAbs(xdg) && filepath.Clean(xdg) != "/" {
+			add(filepath.Join(xdg, "git", "ignore"))
+		} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+			add(filepath.Join(home, ".config", "git", "ignore"))
+		}
+	} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+		add(filepath.Join(home, ".config", "git", "ignore"))
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		add(filepath.Join(home, ".gitignore_global"))
+		add(filepath.Join(home, ".gitignore"))
+	}
+	return out
+}
+
 // ProjectSessionsDir returns the per-project sessions directory under the
 // global data dir. The slug is an opaque identifier derived from the project
 // root (e.g. a SHA-256 prefix).

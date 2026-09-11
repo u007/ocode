@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { Button } from "@/components/ui/button";
-import { PanelRight, Mic, MicOff } from "lucide-react";
+import { PanelRight, Mic, MicOff, Activity } from "lucide-react";
 import { useSpeech } from "../../components/Speech/SpeechProvider";
 import type { ToolActivityStatus } from "../../api/types";
 
@@ -251,12 +251,12 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
             <Button
               type="button"
               variant="ghost"
-              size="sm"
+              size="icon"
               onClick={onStatusClick}
-              title="Show full status (modified files, LSP servers, extra paths, spending)"
-              className="h-6 px-2 text-xs"
+              title="Show status details"
+              aria-label="Show status details"
             >
-              status
+              <Activity className="h-4 w-4" />
             </Button>
           )}
           {onCoworkToggle && (

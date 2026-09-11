@@ -33,19 +33,21 @@ export default function ChangesDiffView({ session, path }: Props) {
   return (
     <div className="p-2">
       <div className="text-xs text-muted-foreground mb-2 font-mono">{path}</div>
-      <pre className="text-xs font-mono whitespace-pre-wrap">
+      <div className="font-mono text-xs whitespace-pre-wrap">
         {patch.split("\n").map((line, i) => {
+          const lineNo = i + 1;
           let color = "text-muted-foreground";
           if (line.startsWith("+") && !line.startsWith("+++")) color = "text-green-400";
           else if (line.startsWith("-") && !line.startsWith("---")) color = "text-red-400";
           else if (line.startsWith("@@")) color = "text-blue-400";
           return (
-            <div key={i} className={color}>
-              {line}
+            <div key={i} className={`flex ${color}`}>
+              <span className="select-none text-neutral-600 w-8 text-right pr-2 shrink-0 text-[10px] leading-4">{lineNo}</span>
+              <span className="whitespace-pre-wrap break-words">{line}</span>
             </div>
           );
         })}
-      </pre>
+      </div>
     </div>
   );
 }

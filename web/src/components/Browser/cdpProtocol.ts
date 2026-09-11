@@ -25,6 +25,12 @@ export type CdpClientMessage =
   | { t: "insertText"; text: string }
   /** Ask for the page's selected text (replies {t:"selection"}) — copy bridge. */
   | { t: "getSelection" }
+  /** Find-in-page step on the remote page (replies {t:"findResult"}). The
+   *  headless screencast has no native find UI, so the SPA renders its own
+   *  find bar. forward defaults to true; caseSensitive defaults to false. */
+  | { t: "find"; query: string; backwards?: boolean; caseSensitive?: boolean }
+  /** Clear the remote find selection/state (no reply). */
+  | { t: "findClose" }
   /** Page zoom factor (1 = 100%), applied like browser zoom. */
   | { t: "zoom"; factor: number }
   /** Touch contacts that changed (Input.dispatchTouchEvent). */
@@ -52,6 +58,17 @@ export type CdpClientMessage =
       modifiers?: number;
       autoRepeat?: boolean;
     };
+
+/** CDP request messages (client→server) for DOM.getNodeForLocation /
+ *  DOM.describeNode. These reuse the string requestId correlation. */
+export type CdpRequest =
+  | { t: "cdp_request"; method: "DOM.getNodeForLocation"; params: { x: number; y: number }; requestId: string }
+  | { t: "cdp_request"; method: "DOM.describeNode"; params: { nodeId: number; depth?: number; pierce?: boolean }; requestId: string };
+
+/** CDP response messages (server→client) for the above requests. */
+export type CdpResponse =
+  | { t: "cdp_response"; requestId: string; result: { nodeId: number; backendNodeId?: number; frameId?: string; nodeName?: string; nodeValue?: string; attributes?: Record<string, string>; contentDocument?: { nodeId: number } }; error?: never }
+  | { t: "cdp_response"; requestId: string; result?: never; error: string };
 
 /** Server→client JSON telemetry (binary frames are handled separately). */
 export type CdpServerMessage =
@@ -92,6 +109,9 @@ export type CdpServerMessage =
    *  the ack to perfStart/perfStop. `error` carries a failed toggle's reason
    *  while `recording` stays the authoritative backend value. */
   | { t: "perfState"; recording: boolean; error?: string }
+  /** Reply to a client "find" command. active is 1-based ("3 of 10"), 0 when
+   *  nothing matches; total is best-effort and may be 0 when counting fails. */
+  | { t: "findResult"; query?: string; found: boolean; active: number; total: number; error?: string }
   | { t: "error"; message: string };
 
 /** Decoded screencast frame header: CSS-pixel dimensions of the JPEG body. */

@@ -22,9 +22,8 @@ function stripTruncationFooter(content: string): string {
 // Language to highlight a tool's raw result with. Keyed on what the Go tools in
 // internal/tool actually return, not on the file they touched:
 // the write/edit family returns FormatDiff output, bash returns raw combined
-// stdout/stderr. `read`'s output is source code, so its language is derived
-// per-call from the file extension in its command params (see readLang
-// below) rather than being a fixed entry here. Everything else (grep, glob,
+// stdout/stderr. `read`'s output is source code, rendered plain here (the
+// editor surfaces the language). Everything else (grep, glob,
 // list, todo*) has no grammar that renders it correctly — those stay plain.
 // Only the live stream (ChatPanel) supplies a real tool name alongside output;
 // replayed history arrives as a role-"tool" message with no name, so it is
@@ -36,23 +35,6 @@ const TOOL_OUTPUT_LANG: Record<string, string> = {
   multiedit: "diff",
   replace_lines: "diff",
 };
-
-// readLang derives a Shiki language hint from the `path` field of a `read`
-// tool call's JSON command, e.g. {"path":"worker/protocol/messages.go"} ->
-// "go". Returns "" when the command isn't parseable JSON, has no path, or
-// the path has no extension — HighlightedCode falls back to plain text.
-function readLang(command: string | undefined): string {
-  if (!command) return "";
-  try {
-    const parsed = JSON.parse(command) as Record<string, unknown>;
-    const path = parsed.path ?? parsed.file_path ?? parsed.filePath;
-    if (typeof path !== "string") return "";
-    const ext = path.split(".").pop();
-    return ext && ext !== path ? ext : "";
-  } catch {
-    return "";
-  }
-}
 
 // ThinkingBlock renders reasoning tokens in a muted panel. The content is shown
 // expanded by default so reasoning is visible immediately in the web UI.
@@ -114,6 +96,7 @@ export const ToolBlock = memo(function ToolBlock({
   output,
   stream,
   highlight = "",
+  onOpenQuestion,
 }: {
   tool: string;
   command?: string;
@@ -122,6 +105,9 @@ export const ToolBlock = memo(function ToolBlock({
    *  authoritative `output` arrives, which then replaces it. */
   stream?: string;
   highlight?: string;
+  /** Set for a `question` call still waiting on the user: re-opens its dialog
+   *  (the dialog can be lost to a reload/reconcile while the ask is pending). */
+  onOpenQuestion?: () => void;
 }) {
   const displayOutput =
     output !== undefined ? stripTruncationFooter(output) : output;
@@ -136,6 +122,10 @@ export const ToolBlock = memo(function ToolBlock({
       ? outputLines.slice(-TOOL_OUTPUT_PREVIEW_LINES).join("\n")
       : displayOutput;
   const hiddenLineCount = outputLines.length - TOOL_OUTPUT_PREVIEW_LINES;
+  // Diff coloring only for FormatDiff output: known by tool name on the live
+  // stream, or by the "DIFF:" first line on replayed history (no tool name).
+  const isDiffOutput =
+    TOOL_OUTPUT_LANG[tool] === "diff" || (displayOutput ?? "").startsWith("DIFF:");
   return (
     <div className="mb-3 flex justify-start">
       <div className="max-w-[95%] md:max-w-[80%] w-full rounded-lg border border-amber-700/40 bg-amber-950/20 px-3 py-2">
@@ -146,8 +136,18 @@ export const ToolBlock = memo(function ToolBlock({
         >
           <span>{open ? "▾" : "▸"}</span>
           <span>🔧 {tool || "tool"}{lineCount > 0 ? ` · ${lineCount} lines` : ""}</span>
-          {pending && <span className="ml-1 animate-pulse text-amber-400/70">running…</span>}
+          {pending && !onOpenQuestion && <span className="ml-1 animate-pulse text-amber-400/70">running…</span>}
+          {onOpenQuestion && <span className="ml-1 text-amber-400/70">awaiting your answer</span>}
         </button>
+        {onOpenQuestion && (
+          <button
+            type="button"
+            onClick={onOpenQuestion}
+            className="mt-2 rounded border border-amber-500/50 px-2 py-0.5 text-[11px] text-amber-200 hover:bg-amber-500/15"
+          >
+            Open question
+          </button>
+        )}
         {open && (
           <div className="mt-2 space-y-2">
             {command && (
@@ -168,19 +168,23 @@ export const ToolBlock = memo(function ToolBlock({
             )}
             {output !== undefined && output !== "" && (
               <div className="rounded bg-card/70 p-2">
-                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">
-                  {highlight.trim() ? (
-                    highlightMatches(visibleOutput ?? "", highlight)
-                  ) : (
-                    <HighlightedCode
-                      code={visibleOutput ?? ""}
-                      lang={
-                        TOOL_OUTPUT_LANG[tool] ??
-                        (tool === "read" ? readLang(command) : "")
-                      }
-                    />
-                  )}
-                </pre>
+                <div className="font-mono text-[11px] text-muted-foreground whitespace-pre">
+                  {(visibleOutput ?? "").split("\n").map((line, i) => {
+                    const colorClass = !isDiffOutput
+                      ? "text-muted-foreground"
+                      : line.startsWith("+") && !line.startsWith("+++") ? "text-green-400"
+                      : line.startsWith("-") && !line.startsWith("---") ? "text-red-400"
+                      : line.startsWith("@@") ? "text-blue-400"
+                      : line.startsWith("DIFF:") ? "text-amber-400 font-bold"
+                      : "text-muted-foreground";
+                    return (
+                      <div key={i} className={`flex ${colorClass}`}>
+                        <span className="select-none text-neutral-600 w-10 text-right pr-2 shrink-0 text-[10px] leading-4">{isDiffOutput ? String(i + 1) : ""}</span>
+                        <span className="whitespace-pre-wrap break-words">{highlight.trim() ? highlightMatches(line, highlight) : line}</span>
+                      </div>
+                    );
+                  })
+                }</div>
                 {collapsible && (
                   <button
                     type="button"

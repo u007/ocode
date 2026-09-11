@@ -143,6 +143,8 @@ type ManagerOptions struct {
 	// reused across launches so cookies/logins survive an ocode restart.
 	// Empty launches with an ephemeral temp profile (removed on exit).
 	ProfileDir string
+	// NoSandbox passes --no-sandbox to Chrome (browser.no_sandbox config).
+	NoSandbox  bool
 	Supervisor *tool.ProcessSupervisor
 	Dialer     *net.Dialer
 	EmitNav    func(NavEvent)
@@ -320,7 +322,7 @@ func (m *Manager) defaultLaunch(ctx context.Context) (*Conn, <-chan int, func(),
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return launchChromeWithOptions(ctx, path, m.opts.Supervisor, m.opts.Log, resolveExtensionDir(m.opts.HTRExtensionDir), m.opts.HTRSocketPath, m.opts.HTRNativeHostName, m.opts.ProfileDir)
+	return launchChromeWithOptions(ctx, path, m.opts.Supervisor, m.opts.Log, resolveExtensionDir(m.opts.HTRExtensionDir), m.opts.HTRSocketPath, m.opts.HTRNativeHostName, m.opts.ProfileDir, m.opts.NoSandbox)
 }
 
 func (m *Manager) watchExited(exited <-chan int) {

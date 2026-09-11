@@ -191,3 +191,13 @@ func (s *Supervisor) Enable(engine string) (Status, error) {
 	cfg.Engine = EngineID(engine)
 	return s.Select(cfg), nil
 }
+func (s *Supervisor) InstallStates() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	states := s.installer.All()
+	out := make(map[string]string, len(states))
+	for _, st := range states {
+		out[st.EngineID] = string(st.State)
+	}
+	return out
+}

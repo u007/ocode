@@ -190,3 +190,76 @@ func TestGlobalConfigDir(t *testing.T) {
 		t.Fatalf("GlobalConfigDir(XDG) = %q, want %q", dir, want)
 	}
 }
+
+func TestGitIgnoreFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	// Default (no XDG): git default + legacy globals, exact files only.
+	t.Setenv("XDG_CONFIG_HOME", "")
+	got := GitIgnoreFiles()
+	want := []string{
+		filepath.Join(home, ".config", "git", "ignore"),
+		filepath.Join(home, ".gitignore_global"),
+		filepath.Join(home, ".gitignore"),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("GitIgnoreFiles() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("GitIgnoreFiles() = %v, want %v", got, want)
+		}
+	}
+	// Must be side-effect-free: none of the candidates may be created.
+	for _, p := range got {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("GitIgnoreFiles() must not create %q (stat err = %v)", p, err)
+		}
+	}
+
+	// XDG set: first candidate follows XDG; legacy globals unchanged.
+	xdg := filepath.Join(home, "xdg-config")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	got = GitIgnoreFiles()
+	want = []string{
+		filepath.Join(xdg, "git", "ignore"),
+		filepath.Join(home, ".gitignore_global"),
+		filepath.Join(home, ".gitignore"),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("GitIgnoreFiles(XDG) = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("GitIgnoreFiles(XDG) = %v, want %v", got, want)
+		}
+	}
+
+	// Exact-file scope: never the parent ~/.config, a sibling dir, or $HOME.
+	for _, p := range got {
+		parent := filepath.Dir(filepath.Dir(p))
+		if parent == home || parent == filepath.Dir(p) {
+			t.Fatalf("GitIgnoreFiles() candidate %q too broad", p)
+		}
+	}
+	for _, over := range []string{
+		filepath.Join(home, ".config"),
+		home,
+		filepath.Join(home, ".config", "other-app", "file"),
+	} {
+		for _, p := range got {
+			if over == p {
+				t.Fatalf("GitIgnoreFiles() must not grant broad dir %q (got exact %q)", over, p)
+			}
+		}
+	}
+
+	// Relative/invalid XDG falls back to ~/.config/git/ignore.
+	t.Setenv("XDG_CONFIG_HOME", "relative/path")
+	got = GitIgnoreFiles()
+	if got[0] != filepath.Join(home, ".config", "git", "ignore") {
+		t.Fatalf("GitIgnoreFiles(relative XDG) first = %q, want fallback %q", got[0], filepath.Join(home, ".config", "git", "ignore"))
+	}
+}

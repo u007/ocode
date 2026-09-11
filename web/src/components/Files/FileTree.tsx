@@ -1282,11 +1282,29 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
     rangeSelect,
     setSelection: (paths) => setSelectedPaths(new Set(paths)),
     open: (p) => onOpenFile(p, activeRoot),
-    copyPath: (p) => {
-      navigator.clipboard?.writeText(p).then(
-        () => showNotice("Path copied"),
-        () => showNotice("Copy failed"),
-      );
+    copyPath: async (p) => {
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(p);
+          showNotice("Path copied");
+          return;
+        }
+      } catch {
+        // fall through
+      }
+      const ta = document.createElement("textarea");
+      ta.value = p;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+        showNotice("Path copied");
+      } catch {
+        showNotice("Copy failed");
+      }
+      ta.remove();
     },
     copy: (paths) => {
       setClipboard({ op: "copy", paths });

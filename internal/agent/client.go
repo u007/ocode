@@ -2886,6 +2886,23 @@ func (c *GenericClient) chatOpenAIResponsesAttempt(ctx context.Context, messages
 	// to GPT-5.6 models on the OpenAI OAuth codex backend AND on opencode-go /
 	// opencode, which proxy the same responses-lite endpoint.
 	liteMode := openAICodexResponsesLite(model) && (c.UseOAuth && c.Provider == "openai" || c.Provider == "opencode-go" || c.Provider == "opencode")
+	// Muse Spark via Zen/Console is a plain Responses model. Console rejects
+	// GPT/Codex-specific fields (include reasoning.encrypted_content,
+	// text.verbosity) and encrypted reasoning items with generic
+	// invalid_request_error (muse-only 400). Omit them for muse-spark.
+	isMuseSpark := strings.HasPrefix(model, "muse-spark")
+	if isMuseSpark && len(input) > 0 {
+		kept := input[:0]
+		for _, item := range input {
+			if t, _ := item["type"].(string); t == "reasoning" {
+				if _, enc := item["encrypted_content"]; enc {
+					continue
+				}
+			}
+			kept = append(kept, item)
+		}
+		input = kept
+	}
 
 	payload := map[string]interface{}{
 		"model":        model,
@@ -2893,8 +2910,10 @@ func (c *GenericClient) chatOpenAIResponsesAttempt(ctx context.Context, messages
 		"input":        input,
 		"store":        false,
 		"stream":       true,
-		"include":      []string{"reasoning.encrypted_content"},
-		"text":         map[string]interface{}{"verbosity": "medium"},
+	}
+	if !isMuseSpark {
+		payload["include"] = []string{"reasoning.encrypted_content"}
+		payload["text"] = map[string]interface{}{"verbosity": "medium"}
 	}
 	// The codex backend keys its prompt cache on this; mirror Codex CLI which
 	// sends its thread id. Session id when available, else a process-stable
@@ -3219,6 +3238,7 @@ func (c *GenericClient) chatOpenAIResponsesAttempt(ctx context.Context, messages
 		msg.Model = c.Model
 	}
 	if len(responseUsage) > 0 {
+		c.emitDebug("TOKENS", fmt.Sprintf("responses usage from provider=%s model=%s: %s", c.Provider, c.Model, string(responseUsage)))
 		usage, err := parseOpenAIResponsesUsage(responseUsage)
 		if err != nil {
 			c.emitDebug("error", fmt.Sprintf("parse openai responses usage: %v", err))

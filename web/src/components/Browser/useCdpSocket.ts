@@ -19,6 +19,8 @@ export interface CdpSocketApi {
   onFileChooser(cb: (multiple: boolean) => void): () => void;
   /** Subscribe to "selection" replies (copy bridge). Returns an unsubscribe fn. */
   onSelection(cb: (text: string) => void): () => void;
+  /** Subscribe to "findResult" replies (find-in-page bar). Returns an unsubscribe fn. */
+  onFindResult(cb: (res: { query?: string; found: boolean; active: number; total: number }) => void): () => void;
 }
 
 // Reconnect backoff sequence; caps at the last value.
@@ -43,6 +45,7 @@ export function useCdpSocket(
   const frameCbsRef = useRef(new Set<(bitmap: ImageBitmap, w: number, h: number) => void>());
   const fileChooserCbsRef = useRef(new Set<(multiple: boolean) => void>());
   const selectionCbsRef = useRef(new Set<(text: string) => void>());
+  const findResultCbsRef = useRef(new Set<(res: { query?: string; found: boolean; active: number; total: number }) => void>());
   // Serializes async JPEG decodes so onFrame fires in wire order.
   const decodeChainRef = useRef<Promise<void>>(Promise.resolve());
   const attemptRef = useRef(0);
@@ -145,6 +148,11 @@ export function useCdpSocket(
 			case "selection":
 				for (const cb of selectionCbsRef.current) cb(msg.text);
 				break;
+			case "findResult": {
+				const m = msg as { query?: string; found: boolean; active: number; total: number };
+				for (const cb of findResultCbsRef.current) cb({ query: m.query, found: !!m.found, active: m.active ?? 0, total: m.total ?? 0 });
+				break;
+			}
 			case "responseBody":
 				// Store response body for the requesting row.
 				browserActions.setResponseBody(key, msg.requestId, {
@@ -255,6 +263,13 @@ export function useCdpSocket(
     };
   }, []);
 
+  const onFindResult = useCallback((cb: (res: { query?: string; found: boolean; active: number; total: number }) => void) => {
+    findResultCbsRef.current.add(cb);
+    return () => {
+      findResultCbsRef.current.delete(cb);
+    };
+  }, []);
+
   const onSelection = useCallback((cb: (text: string) => void) => {
     selectionCbsRef.current.add(cb);
     return () => {
@@ -262,5 +277,5 @@ export function useCdpSocket(
     };
   }, []);
 
-  return { send, status, error, onFrame, onFileChooser, onSelection };
+  return { send, status, error, onFrame, onFileChooser, onSelection, onFindResult };
 }

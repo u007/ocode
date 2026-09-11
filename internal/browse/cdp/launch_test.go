@@ -222,16 +222,36 @@ func TestFindChrome_Windows(t *testing.T) {
 }
 
 func TestFindChrome_NoSandboxNoPort(t *testing.T) {
-	// grep package for forbidden flags
+	// Verify sandbox-opt-out contract: noSandbox=true (config default) adds
+	// --no-sandbox; noSandbox=false omits it. (Security trade-off: disabled by
+	// default for remote/WSL/container compatibility; opt-in to re-enable.)
+	args := chromeArgsFor(t.TempDir(), "", true)
+	found := false
+	for _, a := range args {
+		if a == "--no-sandbox" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("default chromeArgsFor missing --no-sandbox (sandbox opt-out by default)")
+	}
+	args = chromeArgsFor(t.TempDir(), "", false)
+	found = false
+	for _, a := range args {
+		if a == "--no-sandbox" {
+			found = true
+			break
+		}
+	}
+	if found {
+		t.Errorf("noSandbox=false should omit --no-sandbox")
+	}
 	data, err := os.ReadFile("launch.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := string(data)
-	if strings.Contains(s, "--no-sandbox") {
-		t.Error("launch.go must not contain --no-sandbox")
-	}
-	if strings.Contains(s, "--remote-debugging-port") {
+	if strings.Contains(string(data), "--remote-debugging-port") {
 		t.Error("launch.go must not contain --remote-debugging-port")
 	}
 }

@@ -168,6 +168,10 @@ func (s *Server) handleTTSEnable(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
+func (s *Server) handleTTSInstallStates(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.tts.InstallStates())
+}
+
 func decodeTTSJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)

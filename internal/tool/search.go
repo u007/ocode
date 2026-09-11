@@ -110,6 +110,16 @@ func resolveSearchRoot(ctx context.Context, path string) (string, error) {
 			return resolved, nil
 		}
 	}
+	// Allow walks rooted at the fixed global git-ignore files. The permission
+	// layer pre-authorizes these exact files; search scoping must agree.
+	// Exact-file match only (normalize + equality), so ~/.config and $HOME
+	// stay out of scope. The match is on the file itself — a directory walk
+	// rooted at its parent dir still resolves outside and stays confined.
+	for _, ignoreFile := range paths.GitIgnoreFiles() {
+		if ignoreResolved, ok := normalizeRootPath(ignoreFile); ok && resolved == ignoreResolved {
+			return resolved, nil
+		}
+	}
 	return "", fmt.Errorf("path %q is outside the working directory", path)
 }
 

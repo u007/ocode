@@ -249,6 +249,79 @@ func TestTelemetryDoesNotMarshalIntoRequests(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIResponsesUsageInputTokensDetails(t *testing.T) {
+	usage, err := parseOpenAIResponsesUsage(json.RawMessage(`{"input_tokens":12,"output_tokens":34,"total_tokens":46,"input_tokens_details":{"cached_tokens":9}}`))
+	if err != nil {
+		t.Fatalf("parseOpenAIResponsesUsage failed: %v", err)
+	}
+
+	if got := usage.CacheReadTokens; got == nil || *got != 9 {
+		t.Fatalf("expected cached tokens 9, got %#v", got)
+	}
+	if !usage.PromptIncludesCacheRead {
+		t.Fatalf("expected OpenAI responses usage to mark prompt tokens as cache-inclusive")
+	}
+	if usage.CacheWriteTokens != nil {
+		t.Fatalf("expected no cache write tokens, got %#v", usage.CacheWriteTokens)
+	}
+}
+
+func TestParseOpenAIResponsesUsageAnthropicFlatShape(t *testing.T) {
+	usage, err := parseOpenAIResponsesUsage(json.RawMessage(`{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":7}`))
+	if err != nil {
+		t.Fatalf("parseOpenAIResponsesUsage failed: %v", err)
+	}
+
+	if got := usage.PromptTokens; got == nil || *got != 10 {
+		t.Fatalf("expected input tokens mapped to prompt tokens 10, got %#v", got)
+	}
+	if got := usage.CacheReadTokens; got == nil || *got != 5 {
+		t.Fatalf("expected cache read tokens 5, got %#v", got)
+	}
+	if got := usage.CacheWriteTokens; got == nil || *got != 7 {
+		t.Fatalf("expected cache write tokens 7, got %#v", got)
+	}
+	// Flat Anthropic shape: input_tokens excludes cache reads.
+	if usage.PromptIncludesCacheRead {
+		t.Fatalf("expected anthropic-flat responses usage to exclude cache reads from prompt tokens")
+	}
+}
+
+func TestParseOpenAIResponsesUsageMixedShapePrefersOpenAICounters(t *testing.T) {
+	// Gateway forwards both shapes: OpenAI-shape cached_tokens plus flat
+	// Anthropic counters. input_tokens already includes the OpenAI-shape hit,
+	// so PromptIncludesCacheRead must stay true and cached_tokens must win.
+	usage, err := parseOpenAIResponsesUsage(json.RawMessage(`{"input_tokens":100,"output_tokens":5,"prompt_tokens_details":{"cached_tokens":60},"cache_read_input_tokens":60,"cache_creation_input_tokens":10}`))
+	if err != nil {
+		t.Fatalf("parseOpenAIResponsesUsage failed: %v", err)
+	}
+
+	if got := usage.CacheReadTokens; got == nil || *got != 60 {
+		t.Fatalf("expected cached tokens 60, got %#v", got)
+	}
+	if got := usage.CacheWriteTokens; got == nil || *got != 10 {
+		t.Fatalf("expected cache write tokens 10, got %#v", got)
+	}
+	if !usage.PromptIncludesCacheRead {
+		t.Fatalf("expected mixed-shape responses usage to keep prompt tokens cache-inclusive")
+	}
+}
+
+func TestParseOpenAIResponsesUsageCacheOnlyCounters(t *testing.T) {
+	// Some gateways may emit only cache counters without input/output totals.
+	// Must not return nil usage — the hit is still observable.
+	usage, err := parseOpenAIResponsesUsage(json.RawMessage(`{"cache_read_input_tokens":5}`))
+	if err != nil {
+		t.Fatalf("parseOpenAIResponsesUsage failed: %v", err)
+	}
+	if usage == nil {
+		t.Fatal("expected non-nil usage for cache-only payload")
+	}
+	if got := usage.CacheReadTokens; got == nil || *got != 5 {
+		t.Fatalf("expected cache read tokens 5, got %#v", got)
+	}
+}
+
 func TestPricingLookupIsExplicitForUnknownModels(t *testing.T) {
 	if _, ok := pricing.Lookup("does-not-exist"); ok {
 		t.Fatal("expected unknown model pricing lookup to return false")

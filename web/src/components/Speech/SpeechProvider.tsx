@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { api } from "../../api/client";
 import type { TTSConfig, TTSEngine, TTSPlayback, TTSStatus } from "../../api/types";
 import { chunkSpeechText, sanitizeSpeechText } from "./speechUtils";
+import { loadSpeechToolbarVisible, saveSpeechToolbarVisible } from "./speechToolbarPersistence";
 
 interface SpeechContextValue {
   engines: TTSEngine[];
@@ -44,8 +45,16 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
   const [currentText, setCurrentText] = useState("");
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [toolbarVisible, setToolbarVisible] = useState(true);
-  const toggleToolbar = useCallback(() => setToolbarVisible((v) => !v), [setToolbarVisible]);
+  const [toolbarVisible, setToolbarVisibleState] = useState<boolean>(() => loadSpeechToolbarVisible());
+  const setToolbarVisible = useCallback((visible: boolean) => {
+    setToolbarVisibleState(visible);
+    saveSpeechToolbarVisible(visible);
+  }, []);
+  const toggleToolbar = useCallback(() => {
+    const next = !toolbarVisible;
+    setToolbarVisibleState(next);
+    saveSpeechToolbarVisible(next);
+  }, [toolbarVisible]);
   const generation = useRef(0);
   const localRequestGeneration = useRef(0);
   const selectionRequestGeneration = useRef(0);

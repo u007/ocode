@@ -358,6 +358,17 @@ func confinedPath(ctx context.Context, p string) (string, error) {
 			return resolved, nil
 		}
 	}
+	// Allow access to the fixed global git-ignore files (core.excludesFile
+	// default + legacy globals). The permission layer pre-authorizes these
+	// exact files (not their parent dirs); confinement must agree or an
+	// auto-grant would hard-error at execution. Exact-file match only —
+	// normalize + equality, never a subtree prefix, so ~/.config and $HOME
+	// stay confined.
+	for _, ignoreFile := range paths.GitIgnoreFiles() {
+		if ignoreResolved, ok := normalizeRootPath(ignoreFile); ok && resolved == ignoreResolved {
+			return resolved, nil
+		}
+	}
 	return "", fmt.Errorf("path %q is outside the working directory", p)
 }
 

@@ -153,6 +153,24 @@ describe("useCdpSocket", () => {
     expect(seen).toEqual([true]);
   });
 
+  it("routes findResult messages to onFindResult subscribers", async () => {
+    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    const ws = lastSocket();
+    act(() => ws.serverOpen());
+    const seen: { query?: string; found: boolean; active: number; total: number }[] = [];
+    const off = lastApi!.onFindResult((res) => seen.push(res));
+    act(() => {
+      ws.serverMessage(JSON.stringify({ t: "findResult", query: "hello", found: true, active: 2, total: 5 }));
+    });
+    expect(seen).toEqual([{ query: "hello", found: true, active: 2, total: 5 }]);
+    off();
+    act(() => {
+      ws.serverMessage(JSON.stringify({ t: "findResult", query: "hello", found: false, active: 0, total: 0 }));
+    });
+    expect(seen).toEqual([{ query: "hello", found: true, active: 2, total: 5 }]);
+  });
+
   it("routes console telemetry into browserActions.pushConsole", async () => {
     render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));

@@ -330,6 +330,7 @@ type BrowserConfig struct {
 	HTRPort            int    `json:"htr_port"`
 	HTRSocketPath      string `json:"htr_socket_path"`
 	HTRNativeHostName  string `json:"htr_native_host_name"`
+	NoSandbox          bool   `json:"no_sandbox"`
 }
 
 // DefaultBrowserConfig returns the canonical embedded-browser defaults. Callers
@@ -873,7 +874,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Compact:                 defaultCompactConfig(),
 		Advisor:                 defaultAdvisorConfig(),
 		Permissions:             defaultPermissionConfig(),
-		Browser:                 BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol"},
+		Browser:                 BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", NoSandbox: true},
 		TTS:                     TTSConfig{Engine: "browser-native", Mode: "manual"},
 		MemoryEnabled:           true,
 		SmallModelEnabled:       true,

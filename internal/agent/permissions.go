@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/paths"
@@ -1457,12 +1458,14 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		// having returned above. Only when the OS has a backend — on Windows
 		// sandbox degrades to normal (asks).
 		//
-		// The sensitive set (auth.json, ocode config/data-dir writes, ~/.ssh,
+		// The sensitive set (auth.json, ocode config-dir writes, ~/.ssh,
 		// .env) stays authoritative in sandbox (Decision 3/9): it is ASK, NOT
 		// auto-allowed. The OS write-wall does not protect it — auth.json/ssh
 		// are readable globally and config/.env live in writable roots — so the
 		// permission layer must. Reroutes to the auto-permission judge when auto
-		// is on, else a human prompt (sandbox never disables auto).
+		// is on, else a human prompt (sandbox never disables auto). Ordinary
+		// shared/project writes under the data dir auto-allow; only auth.json
+		// inside it stays Ask.
 		// Force-flagged git push/pull must not ride the sandbox auto-allow:
 		// the harmful set's contract is "always require explicit human
 		// approval and must never auto-allow" (see decideSingleCommand), and
@@ -1825,6 +1828,14 @@ func (pm *PermissionManager) AllowedRoots() []string {
 	if configDir, err := paths.GlobalConfigDir(); err == nil {
 		add(configDir)
 	}
+	// Global git-ignore files (core.excludesFile default
+	// $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore, plus the legacy
+	// ~/.gitignore_global and ~/.gitignore): exact files only, never the
+	// parent ~/.config or $HOME. Git reads these on every invocation, so
+	// sandboxed git must be able to read them without prompting.
+	for _, p := range paths.GitIgnoreFiles() {
+		add(p)
+	}
 	// Cross-tool agent state (~/.claude): the user granted Claude Code read/write
 	// access to this dir; keep it in the same shared scope. Note this widens the
 	// write surface to that agent's state.
@@ -1920,15 +1931,35 @@ func (pm *PermissionManager) AllowedRootsClassified() []sandbox.RootSpec {
 	for _, r := range tool.CacheRoots() {
 		add(r, false)
 	}
-	// Global data dir (~/.local/share/opencode: auth.json, sessions, memory)
-	// and config dir (~/.config/opencode): classified READ-ONLY so sandbox
-	// preserves their integrity (auth + session store must never be mutated
-	// by a sandboxed command).
+	// Global data dir (~/.local/share/opencode: sessions, memory, usage,
+	// project/{slug}/ state) and config dir (~/.config/opencode): the data dir
+	// is classified WRITABLE so sandboxed bash has full access to the opencode
+	// shared dir and per-project state (project/** — sessions, snapshots,
+	// md-summaries, memory). auth.json lives here too; the permission-layer
+	// Ask gate (sandboxSensitivePath flags any auth.json read/write) is one
+	// layer, but a command that builds its path dynamically could evade a
+	// static scanner, so auth.json is ALSO marked non-writable here — NewRootSet
+	// honors a non-writable spec nested inside a writable one as a carve-out,
+	// expanding the data dir into its other entries so the OS boundary itself
+	// blocks the write regardless of Ask-gate detection. The config dir stays
+	// READ-ONLY so sandbox preserves its integrity (the agent must not
+	// silently self-grant a permission rule by rewriting its own config).
 	if dataDir, err := paths.GlobalDataDir(); err == nil {
-		add(dataDir, false)
+		add(dataDir, true)
+		if authPath, err := auth.AuthPath(); err == nil {
+			add(authPath, false)
+		}
 	}
 	if configDir, err := paths.GlobalConfigDir(); err == nil {
 		add(configDir, false)
+	}
+	// Global git-ignore files: exact-file writable so sandboxed git can create
+	// or update the default excludes file (git reads it on every invocation).
+	// The candidates are fixed standard paths (paths.GitIgnoreFiles), never a
+	// parent dir, so ~/.config and $HOME stay out of scope and an arbitrary
+	// core.excludesFile cannot widen the boundary.
+	for _, p := range paths.GitIgnoreFiles() {
+		add(p, true)
 	}
 	// Cross-tool agent state (~/.claude): writable — the user explicitly
 	// granted read/write access to this dir (same rationale as the flat union).
@@ -2656,9 +2687,13 @@ func isSensitivePath(path string) bool {
 // disables auto, Decision 9) when the command statically touches:
 //
 //   - ocode's auth.json (read or write) — the agent never legitimately needs it
-//   - ocode's global config dir or data dir (WRITE only) — guards the agent
+//   - ocode's global config dir (WRITE only) — guards the agent
 //     silently self-granting a permission rule by rewriting its own config
 //   - ~/.ssh and .env files (read or write)
+//
+// Ordinary writes under the shared data dir (~/.local/share/opencode,
+// including project/**) are NOT sensitive and auto-allow in sandbox; only
+// auth.json inside it stays Ask.
 //
 // It returns nil when no sensitive target is statically found, letting the
 // caller auto-allow. Static extraction can't see a read hidden inside an
@@ -2742,7 +2777,7 @@ func sandboxSensitiveTargets(command, workDir string) (paths []string, write boo
 }
 
 // sandboxSensitivePath classifies a resolved path against the sandbox sensitive
-// set. isWrite distinguishes write-only entries (config/data dirs) from
+// set. isWrite distinguishes write-only entries (config dir) from
 // read-or-write entries (auth.json, ~/.ssh, .env).
 func sandboxSensitivePath(resolved string, write bool) bool {
 	if resolved == "" {
@@ -2750,20 +2785,22 @@ func sandboxSensitivePath(resolved string, write bool) bool {
 	}
 	clean := filepath.Clean(resolved)
 
-	// ocode's global config/data dirs: write-only for the self-escalation guard.
-	// (data dir holds auth.json, which is additionally covered by the auth.json
-	// rule below; config dir writes guard self-granting a permission rule.)
+	// ocode's global config dir: write-only for the self-escalation guard
+	// (config writes guard self-granting a permission rule). The shared data
+	// dir (~/.local/share/opencode, including project/**) is intentionally NOT
+	// sensitive: sandboxed bash has full OS-level access there, and only
+	// auth.json inside it stays protected via the rule below.
 	if write {
 		if cfgDir, err := paths.GlobalConfigDir(); err == nil && pathUnderRoot(clean, cfgDir) {
 			return true
 		}
-		if dataDir, err := paths.GlobalDataDir(); err == nil && pathUnderRoot(clean, dataDir) {
-			return true
-		}
 	}
 
-	// auth.json, wherever it lives (always read-or-write).
-	if base := filepath.Base(clean); base == "auth.json" {
+	// auth.json / auth.profiles.json, wherever they live (always read-or-write).
+	// auth.profiles.json is the ocode-only per-profile credentials sidecar
+	// (internal/auth.ProfileAuthPath) — same sensitivity class as auth.json,
+	// just a different basename.
+	if base := filepath.Base(clean); base == "auth.json" || base == "auth.profiles.json" {
 		return true
 	}
 

@@ -39,6 +39,11 @@ const mockApi = {
     mockApi.selectionCbs.add(cb);
     return () => mockApi.selectionCbs.delete(cb);
   },
+  findResultCbs: new Set<(res: { query?: string; found: boolean; active: number; total: number }) => void>(),
+  onFindResult: (cb: (res: { query?: string; found: boolean; active: number; total: number }) => void) => {
+    mockApi.findResultCbs.add(cb);
+    return () => mockApi.findResultCbs.delete(cb);
+  },
 };
 
 const mockUpload = vi.hoisted(() => vi.fn(async (_key: string, _files: File[]) => {}));
@@ -71,6 +76,7 @@ beforeEach(() => {
   mockApi.frameCbs.clear();
   mockApi.fileChooserCbs.clear();
   mockApi.selectionCbs.clear();
+  mockApi.findResultCbs.clear();
   mockUpload.mockClear();
   vi.useFakeTimers();
   // Stub ResizeObserver: capture the callback for manual triggering.
@@ -616,5 +622,143 @@ describe("ChromeViewport file chooser", () => {
       for (const cb of mockApi.fileChooserCbs) cb(true);
     });
     expect(clickSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("ChromeViewport find-in-page", () => {
+  function renderViewport() {
+    const utils = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" url="https://example.com/" navSeq={0} />,
+    );
+    const keyboard = utils.container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
+    return { ...utils, keyboard };
+  }
+  function emitFindResult(res: { query?: string; found: boolean; active: number; total: number }) {
+    act(() => {
+      for (const cb of (mockApi as unknown as { findResultCbs: Set<(r: typeof res) => void> }).findResultCbs) cb(res);
+    });
+  }
+
+  it("opens the find bar on Cmd+F without forwarding the key to the page", () => {
+    const { container, keyboard } = renderViewport();
+    mockApi.send.mockClear();
+    fireEvent.keyDown(keyboard, { key: "f", code: "KeyF", metaKey: true });
+    expect(container.querySelector("[data-testid='cdp-find-bar']")).toBeTruthy();
+    expect(mockApi.send).not.toHaveBeenCalledWith(expect.objectContaining({ t: "key" }));
+    // Keyup for the same chord is also swallowed, never forwarded.
+    mockApi.send.mockClear();
+    fireEvent.keyUp(keyboard, { key: "f", code: "KeyF", metaKey: true });
+    expect(mockApi.send).not.toHaveBeenCalledWith(expect.objectContaining({ t: "key" }));
+  });
+
+  it("opens on Ctrl+F (non-Mac) and debounces typing into a find request", () => {
+    const { container, keyboard } = renderViewport();
+    fireEvent.keyDown(keyboard, { key: "f", code: "KeyF", ctrlKey: true });
+    const input = container.querySelector("[data-testid='cdp-find-input']") as HTMLInputElement;
+    expect(input).toBeTruthy();
+    mockApi.send.mockClear();
+    fireEvent.change(input, { target: { value: "hello" } });
+    expect(mockApi.send).not.toHaveBeenCalled();
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "find", query: "hello", backwards: false, caseSensitive: false });
+    emitFindResult({ query: "hello", found: true, active: 1, total: 3 });
+    expect(container.querySelector("[data-testid='cdp-find-count']")?.textContent).toBe("1 of 3");
+  });
+
+  it("steps next/prev via Enter, F3 and Cmd+G, and shows No results", () => {
+    const { container, keyboard } = renderViewport();
+    fireEvent.keyDown(keyboard, { key: "f", code: "KeyF", metaKey: true });
+    const input = container.querySelector("[data-testid='cdp-find-input']") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "q" } });
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+    mockApi.send.mockClear();
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "find", query: "q", backwards: false, caseSensitive: false });
+    mockApi.send.mockClear();
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", shiftKey: true });
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "find", query: "q", backwards: true, caseSensitive: false });
+    mockApi.send.mockClear();
+    fireEvent.keyDown(keyboard, { key: "F3", code: "F3" });
+    // keyboard is blurred while the input is focused in a real browser, but the
+    // hidden textarea handler still routes F3 to find-next when the bar is open.
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "find", query: "q", backwards: false, caseSensitive: false });
+    emitFindResult({ query: "q", found: false, active: 0, total: 0 });
+    expect(container.querySelector("[data-testid='cdp-find-count']")?.textContent).toBe("No results");
+  });
+
+  it("closes on Escape from both input and textarea, clearing remote selection", () => {
+    const { container, keyboard } = renderViewport();
+    fireEvent.keyDown(keyboard, { key: "f", code: "KeyF", metaKey: true });
+    expect(container.querySelector("[data-testid='cdp-find-bar']")).toBeTruthy();
+    const input = container.querySelector("[data-testid='cdp-find-input']") as HTMLInputElement;
+    mockApi.send.mockClear();
+    fireEvent.keyDown(input, { key: "Escape", code: "Escape" });
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "findClose" });
+    expect(container.querySelector("[data-testid='cdp-find-bar']")).toBeNull();
+    // Reopen then close from the hidden textarea.
+    fireEvent.keyDown(keyboard, { key: "f", code: "KeyF", metaKey: true });
+    expect(container.querySelector("[data-testid='cdp-find-bar']")).toBeTruthy();
+    mockApi.send.mockClear();
+    fireEvent.keyDown(keyboard, { key: "Escape", code: "Escape" });
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "findClose" });
+    expect(container.querySelector("[data-testid='cdp-find-bar']")).toBeNull();
+  });
+
+  it("toggles case sensitivity and re-searches, and next/prev buttons work", () => {
+    const { container, keyboard } = renderViewport();
+    fireEvent.keyDown(keyboard, { key: "f", code: "KeyF", metaKey: true });
+    const input = container.querySelector("[data-testid='cdp-find-input']") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "Ab" } });
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+    mockApi.send.mockClear();
+    fireEvent.click(container.querySelector("[data-testid='cdp-find-case']") as HTMLElement);
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "find", query: "Ab", backwards: false, caseSensitive: true });
+    mockApi.send.mockClear();
+    fireEvent.click(container.querySelector("[data-testid='cdp-find-next']") as HTMLElement);
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "find", query: "Ab", backwards: false, caseSensitive: true });
+    mockApi.send.mockClear();
+    fireEvent.click(container.querySelector("[data-testid='cdp-find-prev']") as HTMLElement);
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "find", query: "Ab", backwards: true, caseSensitive: true });
+  });
+
+  it("swallows the Enter keyup after find navigation (no stray key up to the page)", () => {
+    const { keyboard } = renderViewport();
+    fireEvent.keyDown(keyboard, { key: "f", code: "KeyF", metaKey: true });
+    mockApi.send.mockClear();
+    fireEvent.keyDown(keyboard, { key: "Enter", code: "Enter" });
+    fireEvent.keyUp(keyboard, { key: "Enter", code: "Enter" });
+    const keys = mockApi.send.mock.calls.filter((c) => (c[0] as { t: string }).t === "key");
+    expect(keys).toEqual([]);
+  });
+
+  it("swallows the F keyup even when the modifier is released first", () => {
+    const { keyboard } = renderViewport();
+    mockApi.send.mockClear();
+    fireEvent.keyDown(keyboard, { key: "f", code: "KeyF", metaKey: true });
+    // Modifier released before the key itself: keyup arrives without metaKey.
+    fireEvent.keyUp(keyboard, { key: "f", code: "KeyF" });
+    const keys = mockApi.send.mock.calls.filter((c) => (c[0] as { t: string }).t === "key");
+    expect(keys).toEqual([]);
+  });
+
+  it("explicit Enter navigation supersedes the pending type-debounce (single find)", () => {
+    const { container, keyboard } = renderViewport();
+    fireEvent.keyDown(keyboard, { key: "f", code: "KeyF", metaKey: true });
+    const input = container.querySelector("[data-testid='cdp-find-input']") as HTMLInputElement;
+    mockApi.send.mockClear();
+    fireEvent.change(input, { target: { value: "hello" } });
+    // Before the 250ms debounce fires, the user hits Enter.
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    const finds = mockApi.send.mock.calls.filter((c) => (c[0] as { t: string }).t === "find");
+    expect(finds.length).toBe(1);
   });
 });

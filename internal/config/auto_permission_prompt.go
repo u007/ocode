@@ -27,7 +27,7 @@ import (
 // This text is intentionally separate from permissions.auto.prompt in
 // ocodeconfig.json: that field is the user's own free-form override and
 // must never be silently overwritten by a bundled update.
-const BundledAutoPermissionPromptVersion = "1.9.2"
+const BundledAutoPermissionPromptVersion = "1.9.3"
 
 // BundledAutoPermissionPromptBody is the shipped default addendum. Bump
 // BundledAutoPermissionPromptVersion whenever this changes.
@@ -75,6 +75,8 @@ Executing project and toolchain dependency binaries directly is normal, everyday
 If the action is permissible (build, test, lint, format, codegen, local file processing), ALLOW regardless of the binary's directory. If the action itself is not (writes to sensitive paths such as .git/, data exfiltration, destructive commands), DENY regardless — a dependency-local interpreter does not sanitize the action. If you cannot establish what the command does from its arguments and the tool's known semantics (opaque flags, an unreadable script, an unfamiliar tool), do not guess safety from the binary's path or basename — require human approval. A familiar-looking name (e.g. "test", "build") inside a dependency bin dir proves nothing about what the script actually executes. This covers direct invocation only: package-manager subcommands (npm/pnpm/bun install/run/exec/dlx) still follow the package-manager rules above.
 
 Always ALLOW reading and manipulation of any OS temporary directory, including /tmp, /var/tmp, $TMPDIR, $TMP, and the platform-specific os.TempDir() (and any path beneath them). This covers listing, creating, reading, writing, modifying, moving, copying, and deleting files/directories under temp. This exception applies only to temporary directories; it does not grant unrestricted access to the rest of the filesystem or to the network.
+
+Always ALLOW reading the global git-ignore files — the core.excludesFile default ($XDG_CONFIG_HOME/git/ignore, else ~/.config/git/ignore) and the legacy ~/.gitignore_global and ~/.gitignore. Git reads these on every invocation, including read-only commands, so denying them would break ordinary git use. This covers reading these exact files only — it never grants their parent dirs (~/.config, $HOME) or an arbitrary core.excludesFile path outside the fixed candidates.
 `
 
 // AutoPermissionPromptStatus mirrors internal/skill's skill status states,

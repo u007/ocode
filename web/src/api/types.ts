@@ -89,7 +89,7 @@ export interface ModelInfo {
 }
 
 export type TTSEngineId = "browser-native" | "piper" | "kokoro" | "fish-audio" | "breeze";
-export type TTSPlaybackMode = "manual" | "at-bottom";
+export type TTSPlaybackMode = "manual" | "at-bottom" | "auto";
 
 export interface TTSEngine {
   id: TTSEngineId;

@@ -96,6 +96,10 @@ func parseAnthropicUsage(raw json.RawMessage) (*TokenUsage, error) {
 
 // parseOpenAIResponsesUsage parses usage from the OpenAI Responses API,
 // which uses input_tokens/output_tokens instead of prompt_tokens/completion_tokens.
+// Zen gateways in front of non-OpenAI upstreams (e.g. Muse Spark via Console)
+// may forward Anthropic-shaped cache fields on the same object, so accept
+// those aliases too. OpenAI-shape hits keep PromptIncludesCacheRead=true;
+// Anthropic-flat-shape hits keep it false (input_tokens excludes cache reads).
 func parseOpenAIResponsesUsage(raw json.RawMessage) (*TokenUsage, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -108,25 +112,53 @@ func parseOpenAIResponsesUsage(raw json.RawMessage) (*TokenUsage, error) {
 		PromptTokensDetails  *struct {
 			CachedTokens *int64 `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
+		InputTokensDetails *struct {
+			CachedTokens *int64 `json:"cached_tokens"`
+		} `json:"input_tokens_details"`
+		CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, err
 	}
-	if payload.InputTokens == nil && payload.OutputTokens == nil && payload.TotalTokens == nil {
+	if payload.InputTokens == nil && payload.OutputTokens == nil && payload.TotalTokens == nil &&
+		payload.CacheReadInputTokens == nil && payload.CacheCreationInputTokens == nil {
 		return nil, nil
 	}
 	var cacheRead *int64
-	if payload.PromptTokensDetails != nil && payload.PromptTokensDetails.CachedTokens != nil {
+	switch {
+	case payload.PromptTokensDetails != nil && payload.PromptTokensDetails.CachedTokens != nil:
 		cacheRead = payload.PromptTokensDetails.CachedTokens
-	} else if payload.PromptCacheHitTokens != nil {
+	case payload.InputTokensDetails != nil && payload.InputTokensDetails.CachedTokens != nil:
+		cacheRead = payload.InputTokensDetails.CachedTokens
+	case payload.PromptCacheHitTokens != nil:
 		cacheRead = payload.PromptCacheHitTokens
+	case payload.CacheReadInputTokens != nil:
+		cacheRead = payload.CacheReadInputTokens
+	}
+	var cacheWrite *int64
+	if payload.CacheCreationInputTokens != nil {
+		cacheWrite = payload.CacheCreationInputTokens
+	}
+	// OpenAI-shape cache counters (cached_tokens subsets of input_tokens)
+	// dominate when both shapes are present: input_tokens already includes
+	// the hit, so PromptIncludesCacheRead stays true. Only a purely flat
+	// Anthropic shape (no OpenAI-shape counter) means input_tokens excludes
+	// cache reads.
+	hasOpenAICache := (payload.PromptTokensDetails != nil && payload.PromptTokensDetails.CachedTokens != nil) ||
+		(payload.InputTokensDetails != nil && payload.InputTokensDetails.CachedTokens != nil) ||
+		payload.PromptCacheHitTokens != nil
+	includesCacheRead := true
+	if !hasOpenAICache && (payload.CacheReadInputTokens != nil || payload.CacheCreationInputTokens != nil) {
+		includesCacheRead = false
 	}
 	return &TokenUsage{
 		PromptTokens:            payload.InputTokens,
 		CompletionTokens:        payload.OutputTokens,
 		TotalTokens:             payload.TotalTokens,
 		CacheReadTokens:         cacheRead,
-		PromptIncludesCacheRead: true,
+		CacheWriteTokens:        cacheWrite,
+		PromptIncludesCacheRead: includesCacheRead,
 	}, nil
 }
 

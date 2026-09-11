@@ -8,6 +8,7 @@ import { apiPath } from "../api/client";
 export const PREVIEW_OPEN_SENTINEL = "PREVIEW_OPEN:";
 export const OPEN_PREVIEW_EVENT = "ocode:open-preview";
 export const PREVIEW_CONTEXT_EVENT = "ocode:preview-context";
+export const PREVIEW_PROMOTE_EVENT = "ocode:preview-promote";
 
 export type PreviewKind =
   | "pdf"

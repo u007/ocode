@@ -11,9 +11,6 @@ vi.mock("../Browser/BrowserPanel", () => ({
   BrowserPanel: () => <div data-testid="browser-panel" />,
 }));
 
-// FileEditor pulls monaco-editor (unresolvable under vitest); the repo's
-// convention (App.browser.test.tsx) is to stub it — the fallback path
-// under test never renders an editor anyway.
 vi.mock("../Files/FileEditor", () => ({ default: () => <div data-testid="file-editor" /> }));
 
 describe("PreviewHost legacy fallback", () => {
@@ -31,5 +28,13 @@ describe("PreviewHost legacy fallback", () => {
     expect(await screen.findByText("old.doc")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Open in app" }));
     expect(api.openFileWithOS).toHaveBeenCalledWith("old.doc", "/proj");
+  });
+});
+
+describe("PreviewHost regression (after PreviewSurface extraction)", () => {
+  it("renders sidebar shell with browser/preview tabs", () => {
+    const { container } = render(<PreviewHost stateKey="tab:test" request={null} nonce={0} />);
+    expect(container.textContent).toContain("Browser");
+    expect(container.textContent).toContain("Preview");
   });
 });

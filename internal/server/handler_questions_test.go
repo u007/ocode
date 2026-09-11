@@ -204,6 +204,7 @@ func TestHandleAnswerQuestionResolvesAndContinues(t *testing.T) {
 		},
 	}
 	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir()) // keep test saves out of the real sessions dir
 
 	// Subscribe to the mirror so we can assert the question_resolved frame fires.
 	sub := h.subscribeHeadless()
@@ -405,6 +406,7 @@ func TestHandleAnswerQuestionBroadcastsResolvedBeforeContinuation(t *testing.T) 
 		},
 	}
 	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir()) // keep test saves out of the real sessions dir
 
 	sub := h.subscribeHeadless()
 	defer h.unsubscribeHeadless(sub)
@@ -436,5 +438,54 @@ released:
 	<-done
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// Regression for ses_2026-09-10-153254-b55bec37: answering a question rewrote
+// the sentinel row in memory only, so the continuation's saves conflicted
+// with the stored sentinel and the disk transcript froze at the ask. Every
+// disk-backed reload/reconcile then replayed the already-answered question
+// and the continuation (including a second question) never surfaced.
+func TestHandleAnswerQuestionPersistsContinuationToDisk(t *testing.T) {
+	h := NewHandler()
+	projectRoot := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, projectRoot)
+
+	ask := []agent.Message{
+		{Role: "user", Content: "deploy", UserSeq: 1},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+		{Role: "tool", ToolID: "call-1", Content: questionAskContent(t, sampleQuestion())},
+	}
+	if err := session.SaveForDir(projectRoot, id, "", ask, nil); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	as := &agentSession{
+		agent:    agent.NewAgent(questionFakeClient{}, nil, nil, nil),
+		model:    "fake-model",
+		messages: append([]agent.Message(nil), ask...),
+	}
+	h.agents[id] = as
+
+	body := `{"request_id":"call-1","session_id":"` + id + `","answers":[{"header":"Deploy target","question":"Where should I deploy?","answers":[{"label":"Staging"}]}]}`
+	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleAnswerQuestion(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	loaded, err := session.LoadForDir(projectRoot, id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(loaded.Messages) != 4 {
+		t.Fatalf("stored transcript has %d messages, want 4 (answer + continuation persisted): %v", len(loaded.Messages), messageContents(loaded.Messages))
+	}
+	if isQuestionAsk(loaded.Messages[2].Content) || !strings.Contains(loaded.Messages[2].Content, `"label":"Staging"`) {
+		t.Fatalf("stored ask row not rewritten with the answer: %q", loaded.Messages[2].Content)
+	}
+	if got := loaded.Messages[3].Content; got != "thanks, deploying to staging" {
+		t.Fatalf("continuation not persisted: %q", got)
 	}
 }

@@ -648,16 +648,27 @@ func TestConfinedPathExpandsTildeToToolResults(t *testing.T) {
 // isolateConfigHome points HOME at a temp dir so paths.GlobalConfigDir()
 // resolves to <home>/.config/opencode without touching the live config.
 //
-// TMPDIR is then re-pointed at a sibling dir: temp roots are pre-authorized
-// in confinement/scope checks, so a test home under the default $TMPDIR would
-// make every path under it (including the boundary cases) vacuously allowed.
+// The home lives under the package source dir, NOT t.TempDir(): temp dirs
+// (and on macOS the per-user /var/folders T dir regardless of $TMPDIR) are
+// pre-authorized roots, so a test home there would make every path under it
+// (including the boundary cases) vacuously allowed. TMPDIR stays at its
+// ambient value: re-pointing it (e.g. at a second t.TempDir) would recruit a
+// second pre-authorized root and let the boundary cases escape through it;
+// see TestConfinedPathAllowsGlobalConfigDir.
 func isolateConfigHome(t *testing.T) {
 	t.Helper()
-	home := t.TempDir()
+	home, err := os.MkdirTemp(".", ".isolated-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err = filepath.Abs(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(home) })
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("TMPDIR", t.TempDir())
 }
 
 func TestConfinedPathAllowsGlobalConfigDir(t *testing.T) {
@@ -670,11 +681,17 @@ func TestConfinedPathAllowsGlobalConfigDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Scope the call to an unrelated workdir so workDir containment cannot
+	// vacuously allow the boundary paths below: only the config-dir-exactness
+	// may pass them. The context workdir must exist (confinedPath resolves
+	// it); a sibling temp dir keeps the isolated home outside of it.
+	ctx := WithWorkDir(context.Background(), t.TempDir())
+
 	// Children of the config dir must pass confinement — the auto-LLM
 	// permission layer pre-authorizes this root, so a hard "outside the
 	// working directory" error here would make the grant unexecutable.
 	target := filepath.Join(cfgDir, "ocodeconfig.json")
-	got, err := confinedPath(context.Background(), target)
+	got, err := confinedPath(ctx, target)
 	if err != nil {
 		t.Fatalf("confinedPath(%q) error: %v", target, err)
 	}
@@ -683,13 +700,15 @@ func TestConfinedPathAllowsGlobalConfigDir(t *testing.T) {
 	}
 
 	// Boundary: the parent ~/.config itself and sibling dirs stay confined.
+	// The isolated home sits under the package dir (NOT t.TempDir) so ambient
+	// temp pre-authorization cannot vacuously allow these boundary paths.
 	parent := filepath.Dir(cfgDir)
 	sibling := filepath.Join(parent, "other-app")
 	if err := os.MkdirAll(sibling, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []string{filepath.Join(parent, "secrets"), filepath.Join(sibling, "conf")} {
-		if _, err := confinedPath(context.Background(), p); err == nil {
+		if _, err := confinedPath(ctx, p); err == nil {
 			t.Errorf("confinedPath(%q) must fail: scope leak beyond ~/.config/opencode", p)
 		}
 	}
@@ -722,5 +741,84 @@ func TestResolveSearchRootAllowsGlobalConfigDir(t *testing.T) {
 	// The parent ~/.config itself must stay outside search scope.
 	if _, err := resolveSearchRoot(ctx, filepath.Dir(cfgDir)); err == nil {
 		t.Errorf("resolveSearchRoot(%q) must fail: only ~/.config/opencode is pre-authorized", filepath.Dir(cfgDir))
+	}
+}
+
+func TestConfinedPathAllowsGitIgnoreFiles(t *testing.T) {
+	isolateConfigHome(t)
+	// Scope the call to an unrelated workdir so workDir containment cannot
+	// vacuously allow the boundary paths below: only the git-ignore
+	// exact-file match may pass them. The context workdir must exist
+	// (confinedPath resolves it); a sibling temp dir keeps the isolated home
+	// outside of it.
+	ctx := WithWorkDir(context.Background(), t.TempDir())
+	files := paths.GitIgnoreFiles()
+	if len(files) == 0 {
+		t.Fatal("GitIgnoreFiles() returned no candidates")
+	}
+	for _, f := range files {
+		if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f, []byte("*.log\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := confinedPath(ctx, f)
+		if err != nil {
+			t.Fatalf("confinedPath(%q) error: %v", f, err)
+		}
+		if filepath.Base(got) != filepath.Base(f) {
+			t.Fatalf("confinedPath(%q) = %q", f, got)
+		}
+		if err := os.Remove(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		home,
+		filepath.Join(home, ".config"),
+		filepath.Join(home, ".config", "other-app", "file"),
+	} {
+		if _, err := confinedPath(ctx, p); err == nil {
+			t.Errorf("confinedPath(%q) must fail: git-ignore scope is exact files", p)
+		}
+	}
+}
+
+func TestResolveSearchRootAllowsGitIgnoreFiles(t *testing.T) {
+	isolateConfigHome(t)
+	files := paths.GitIgnoreFiles()
+	if len(files) == 0 {
+		t.Fatal("GitIgnoreFiles() returned no candidates")
+	}
+	target := files[0]
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("*.log\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(target) })
+
+	ctx := WithWorkDir(context.Background(), t.TempDir())
+	got, err := resolveSearchRoot(ctx, target)
+	if err != nil {
+		t.Fatalf("resolveSearchRoot(%q) error: %v", target, err)
+	}
+	want, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(got) != filepath.Clean(want) {
+		t.Fatalf("resolveSearchRoot(%q) = %q, want %q", target, got, want)
+	}
+
+	// The parent dir of the ignore file stays outside search scope.
+	if _, err := resolveSearchRoot(ctx, filepath.Dir(target)); err == nil {
+		t.Errorf("resolveSearchRoot(%q) must fail: git-ignore scope is the exact file", filepath.Dir(target))
 	}
 }

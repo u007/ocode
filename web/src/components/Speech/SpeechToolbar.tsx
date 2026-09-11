@@ -2,7 +2,7 @@ import { FastForward, Pause, Play, Rewind, RotateCcw, Square, Volume2, X } from 
 import { useSpeech, playbackLabel } from "./SpeechProvider";
 
 export default function SpeechToolbar() {
-  const { config, status, isSpeaking, paused, error, currentText, position, duration, speak, stop, pause, resume, skip, seek, retry, toolbarVisible, setToolbarVisible } = useSpeech();
+  const { config, status, isSpeaking, paused, error, currentText, position, duration, speak, stop, pause, resume, skip, seek, retry, toolbarVisible, setToolbarVisible, setMode } = useSpeech();
   const activeText = currentText || status?.playback?.text;
   const canRetry = status?.engine?.availability !== "unavailable" && Boolean(error);
   if (!toolbarVisible) return null;
@@ -13,6 +13,7 @@ export default function SpeechToolbar() {
         {status?.engine?.label ?? "Browser Native"}
       </span>
       <span className="text-muted-foreground">{isSpeaking ? "Playing" : playbackLabel(status?.playback)}</span>
+      <button type="button" className="rounded px-2 py-1 text-xs hover:bg-muted border border-border" title={`Mode: ${config?.mode ?? "manual"}. Click to cycle.`} aria-label="Cycle speech mode" onClick={() => setMode ? setMode(config?.mode === "auto" ? "manual" : config?.mode === "manual" ? "at-bottom" : "auto") : undefined}>{config?.mode === "auto" ? "Auto" : config?.mode === "at-bottom" ? "At Bottom" : "Manual"}</button>
       <button type="button" className="rounded p-1 hover:bg-muted disabled:opacity-40" title="Back approximately 10 seconds" aria-label="Back approximately 10 seconds" disabled={!isSpeaking} onClick={() => skip(-10)}><Rewind className="h-4 w-4" /></button>
       {isSpeaking && !paused ? (
         <button type="button" className="rounded p-1 hover:bg-muted" title="Pause speech" aria-label="Pause speech" onClick={pause}><Pause className="h-4 w-4" /></button>

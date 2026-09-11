@@ -66,6 +66,20 @@ type Options struct {
 	HTRNotice         string
 	// ProfileDir is the persistent Chrome --user-data-dir ("" = ephemeral).
 	ProfileDir string
+	// NoSandbox passes --no-sandbox to Chrome (browser.no_sandbox config).
+	NoSandbox bool
+}
+
+// Optional interface: DOM.getNodeForLocation (used by context-menu lookup).
+// Tests that inject a fake chromeTarget are NOT required to implement it.
+type nodeLocationTarget interface {
+	GetNodeForLocation(ctx context.Context, x, y int) (*cdp.NodeLocation, error)
+}
+
+// Optional interface: DOM.describeNode (used by context-menu lookup).
+// Tests that inject a fake chromeTarget are NOT required to implement it.
+type describeNodeTarget interface {
+	DescribeNode(ctx context.Context, nodeId int, opts any) (map[string]any, error)
 }
 
 // chromeTarget is the subset of cdp.Target used by the browse WS. Defined
@@ -273,6 +287,7 @@ func (s *Server) initManager(opts Options) {
 		HTRSocketPath:     htrSocketPath,
 		HTRNativeHostName: htrNativeHostName,
 		ProfileDir:        opts.ProfileDir,
+		NoSandbox:         opts.NoSandbox,
 		Supervisor:        opts.Supervisor,
 		Dialer:            NewSafeDialer(false),
 		Log:               s.log,

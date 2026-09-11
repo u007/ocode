@@ -173,6 +173,7 @@ func TestHandleResolvePermissionDeniesAndContinues(t *testing.T) {
 		},
 	}
 	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir()) // keep test saves out of the real sessions dir
 
 	sub := h.subscribeHeadless()
 	defer h.unsubscribeHeadless(sub)
@@ -229,6 +230,7 @@ func TestHandleResolvePermissionAlreadyResolved(t *testing.T) {
 		},
 	}
 	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir()) // keep test saves out of the real sessions dir
 
 	// The tail is no longer a permission ask, so lookup finds nothing → 404.
 	body := `{"request_id":"call-1","approved":false}`
@@ -276,6 +278,7 @@ func savedOcodeConfig(t *testing.T) (map[string]any, bool) {
 func resolveBody(t *testing.T, h *Handler, as *agentSession, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir()) // keep test saves out of the real sessions dir
 	req := httptest.NewRequest("POST", "/api/permissions/resolve", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.HandleResolvePermission(rec, req)
@@ -570,6 +573,7 @@ func TestHandleResolvePermissionBroadcastsResolvedBeforeContinuation(t *testing.
 		},
 	}
 	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir()) // keep test saves out of the real sessions dir
 
 	sub := h.subscribeHeadless()
 	defer h.unsubscribeHeadless(sub)

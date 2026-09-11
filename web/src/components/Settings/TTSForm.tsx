@@ -1,4 +1,4 @@
-import { apiPath, authHeaders } from "@/api/client";
+import { apiPath, authHeaders, api } from "@/api/client";
 import { useSpeech } from "../Speech/SpeechProvider";
 
 async function postTTS(path: string, body: Record<string, string>): Promise<void> {
@@ -55,15 +55,29 @@ export default function TTSForm() {
                       type="button"
                       className="mt-2 rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted"
                       onClick={async () => {
-                        // Full pipeline: accept → pin → download → install → enable
                         try {
-                          // License acceptance (placeholder hash/name for demonstration)
-                          await postTTS("/api/tts/license", { engine: engine.id, license_hash: "sha256-" + engine.id, license_name: engine.label + " License" });
-                          await postTTS("/api/tts/pin", { engine: engine.id, manifest_version: "v1" });
-                          await postTTS("/api/tts/download", { engine: engine.id });
-                          await postTTS("/api/tts/install", { engine: engine.id });
-                          await postTTS("/api/tts/enable", { engine: engine.id });
-                          alert("Installed and enabled: " + engine.label);
+                          const states: Record<string, string> = await api.getTTSState();
+                          const current = states[engine.id] || "";
+                          if (!current || current === "not-accepted" || current === "failed") {
+                            await postTTS("/api/tts/license", { engine: engine.id, license_hash: "sha256-" + engine.id, license_name: engine.label + " License" });
+                          }
+                          const afterLicense = (await api.getTTSState())[engine.id] || "";
+                          if (afterLicense === "license-accepted" || afterLicense === "failed") {
+                            await postTTS("/api/tts/pin", { engine: engine.id, manifest_version: "v1" });
+                          }
+                          const afterPin = (await api.getTTSState())[engine.id] || "";
+                          if (afterPin === "pinned" || afterPin === "failed") {
+                            await postTTS("/api/tts/download", { engine: engine.id });
+                          }
+                          const afterDownload = (await api.getTTSState())[engine.id] || "";
+                          if (afterDownload === "downloading" || afterDownload === "failed") {
+                            await postTTS("/api/tts/install", { engine: engine.id });
+                          }
+                          const afterInstall = (await api.getTTSState())[engine.id] || "";
+                          if (afterInstall === "installed" || afterInstall === "enabled") {
+                            await postTTS("/api/tts/enable", { engine: engine.id });
+                          }
+                          alert("Pipeline completed: " + engine.label);
                         } catch (e) {
                           alert("Install failed: " + (e instanceof Error ? e.message : String(e)));
                         }

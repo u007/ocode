@@ -227,6 +227,28 @@ func TestBundledAutoPermissionPrompt_CoversLanguageToolBins(t *testing.T) {
 	}
 }
 
+// TestBundledAutoPermissionPrompt_GlobalGitIgnore pins the judge-facing rule
+// for the fixed global git-ignore files (core.excludesFile default +
+// legacy globals): reads are always allowed, parent dirs and arbitrary
+// excludesFile paths are never granted.
+func TestBundledAutoPermissionPrompt_GlobalGitIgnore(t *testing.T) {
+	for _, want := range []string{
+		"global git-ignore files",
+		"core.excludesFile default",
+		"$XDG_CONFIG_HOME/git/ignore",
+		"~/.config/git/ignore",
+		"~/.gitignore_global",
+		"~/.gitignore",
+		"these exact files only",
+		"never grants their parent dirs",
+		"arbitrary core.excludesFile",
+	} {
+		if !strings.Contains(BundledAutoPermissionPromptBody, want) {
+			t.Fatalf("bundled auto-permission prompt missing %q", want)
+		}
+	}
+}
+
 // TestBundledAutoPermissionPrompt_GitConfigBoundary pins the judge-facing
 // wording for the two decision surfaces the code allowlist deliberately
 // defers to it ("git config" is absent from bashSubcommandAllow, so every

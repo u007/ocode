@@ -81,8 +81,14 @@ What it confines:
 - Only the agent **shell tool** (`bash`) is wrapped. The interactive PTY
   terminal (`handler_terminal.go`) and the web `!shell` path run unsandboxed.
 - Filesystem **writes** fail at the OS level unless the target is under a
-  writable root: workspace/`extra_allowed_paths`, language dependency caches
-  (npm/pip/cargo/go/maven/gradle), `~/.claude`, and temp dirs
+  writable root: workspace/`extra_allowed_paths`, the opencode shared data dir
+  (`~/.local/share/opencode`, including per-project `project/**` state —
+  sessions, snapshots, md-summaries, memory), language dependency caches
+  (npm/pip/cargo/go/maven/gradle), `~/.claude`, the fixed global git-ignore
+  files (`paths.GitIgnoreFiles`: `$XDG_CONFIG_HOME/git/ignore` else
+  `~/.config/git/ignore`, plus `~/.gitignore_global` and `~/.gitignore` —
+  exact files only, never `~/.config`/`$HOME`, never an arbitrary
+  `core.excludesFile`), and temp dirs
   (`/tmp`, `/var/tmp`, `os.TempDir()`, plus on macOS the uid-owned
   `/var/folders/*/*/{T,C}` confstr dirs — found by ownership, not `$TMPDIR`,
   so `mktemp`/Python/Node/clang caches work even when ocode runs without
@@ -93,7 +99,7 @@ What it confines:
 
 What still asks (permission layer, not the OS):
 - `auth.json` (read or write) → Ask
-- ocode config/data dir (writes only) → Ask
+- ocode config dir (writes only) → Ask
 - `~/.ssh`, `.env` (read or write) → Ask
 - danger-`rm` heuristics → Ask
 - writes to permission-defining files (`.ocode/settings.json`,
@@ -313,7 +319,7 @@ The list is not git-based — it derives from the snapshot store
     with no result yet; `repairToolCallSequence` synthesises a placeholder
     before send so the request stays valid.
   - **Queued by design (mutates persistent state mid-stream, so it must
-    wait for the current turn to end):** `/add-dir`, `/add-dirs`, `/doc-sync`,
+    wait for the current turn to end):** `/doc-sync`,
     `/agents limit <n>`.
 - Use `ctrl+x` for leader keys and `ctrl+p` for palette.
 - Avoid introducing raw shortcuts that are likely to conflict with host

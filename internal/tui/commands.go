@@ -151,6 +151,7 @@ func init() {
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
 		{name: "/plugin", usage: "/plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|tools [name]|confirm|cancel]", help: "List, install, update, or sync plugins; 'tools' detects/installs CLI utilities (fd, rg, fzf, eza, bat, grep)", handler: runPluginCmd},
+		{name: "/tools", aliases: []string{"/tool"}, usage: "/tools [name]", help: "Detect/install CLI utilities (fd, rg, fzf, eza, bat, grep); bare lists status, with name installs it", handler: runToolsCmd},
 		{name: "/review", usage: "/review [file|commit|branch|pr]", help: "AI code review with actionable findings", handler: runReviewCmd},
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port|off]", help: "Start/stop web UI to remote-control this session", handler: runRemoteControlCmd},
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
@@ -637,13 +638,8 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 		// (fd, rg, fzf, eza, bat, grep) for the current platform.
 		// Bare invocation lists every tool with detected status and the
 		// platform's package manager; with a name it installs that tool.
-		if len(args) < 2 {
-			return func() tea.Msg { return clitoolListMsg{statuses: clitools.DetectAll()} }
-		}
-		return func() tea.Msg {
-			res := clitools.Install(args[1])
-			return clitoolInstalledMsg{name: args[1], result: res}
-		}
+		emitCliToolsProgress(m, args[1:])
+		return runCliToolsCmd(args[1:])
 
 	case "confirm":
 		if m.pendingPluginInstall == nil {
@@ -683,6 +679,49 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|tools [name]|confirm|cancel]  — 'tools' detects/installs CLI utilities (fd, rg, fzf, eza, bat, grep)"})
 		return nil
 	}
+}
+
+// runCliToolsCmd is the shared handler for CLI utility detection/installation.
+// Both /tools [name] and /plugin tools [name] route here so /tools rg
+// is not misinterpreted as a plugin action. Bare invocation lists every
+// tool with detected status; with a name it installs that tool.
+// The documented syntax is exactly `/tools <name>` (no verb, no slashes:
+// `/tools/eza install` is rejected with a visible usage message by the
+// caller — see handleCommand's /tools/ prefix guard).
+func runCliToolsCmd(args []string) tea.Cmd {
+	if len(args) < 1 {
+		return func() tea.Msg { return clitoolListMsg{statuses: clitools.DetectAll()} }
+	}
+	name := args[0]
+	return func() tea.Msg {
+		res := clitools.Install(name)
+		return clitoolInstalledMsg{name: name, result: res}
+	}
+}
+
+// emitCliToolsProgress prints an immediate "Installing …" line so a slow
+// package-manager run (brew can take minutes) never looks silent while the
+// async install tea.Cmd works. List (no args) needs no progress line.
+func emitCliToolsProgress(m *model, args []string) {
+	if len(args) < 1 || m == nil {
+		return
+	}
+	name := args[0]
+	if _, ok := clitools.FindTool(name); !ok {
+		return
+	}
+	pm := clitools.Manager()
+	if pm == "" {
+		return
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Installing %s via %s… (output will follow when done)", name, pm)})
+	m.rerenderTranscriptAndMaybeScroll()
+}
+
+// runToolsCmd handles the top-level /tools (alias /tool) command.
+func runToolsCmd(m *model, args []string) tea.Cmd {
+	emitCliToolsProgress(m, args)
+	return runCliToolsCmd(args)
 }
 
 func runExitCmd(m *model, args []string) tea.Cmd {

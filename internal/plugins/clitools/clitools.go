@@ -132,6 +132,34 @@ func Manager() PackageManager {
 	return ""
 }
 
+// MissingManagerHint tells the user how to get a supported package manager
+// when none was detected on PATH. It names the platform-preferred managers
+// without assuming any of their binaries exist (on a bare machine even the
+// native installer may be absent, so the hint points at installers/docs, not
+// at commands that themselves need the missing manager).
+func MissingManagerHint() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "No supported package manager found on PATH (tried brew, cargo, npm, go).\n" +
+			"Install one, then retry — e.g. Homebrew:\n" +
+			"  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+	case "linux":
+		return "No supported package manager found on PATH (tried apt, dnf, pacman, apk, cargo, npm, go).\n" +
+			"Install your distro's package manager or another supported backend, then retry — e.g.:\n" +
+			"  Debian/Ubuntu: see https://wiki.debian.org/Apt\n" +
+			"  Fedora/RHEL:  see https://docs.fedoraproject.org/en-US/quick-docs/dnf/\n" +
+			"  Arch:         see https://wiki.archlinux.org/title/Pacman\n" +
+			"  Any distro:   https://rustup.rs (cargo) works for fd, rg, fzf, eza, bat"
+	case "windows":
+		return "No supported package manager found on PATH (tried winget, choco, scoop, cargo, npm, go).\n" +
+			"Install one, then retry — e.g. WinGet ships with Windows 11, else:\n" +
+			"  https://chocolatey.org/install  or  https://scoop.sh"
+	default:
+		return "No supported package manager found on PATH (tried cargo, npm, go).\n" +
+			"Install one (e.g. https://rustup.rs for cargo), then retry."
+	}
+}
+
 // Detect reports whether the tool is installed on PATH. It checks Name and
 // every Alias; returns the resolved command name ("" when absent).
 func (t Tool) Detect() (string, bool) {
@@ -182,6 +210,10 @@ type InstallResult struct {
 	Ok      bool
 	Output  string // captured stdout+stderr (tail)
 	Err     error
+	// NoManager is true when no supported package manager was found on PATH.
+	// Callers render MissingManagerHint() only for this condition (never by
+	// string-matching Err).
+	NoManager bool
 }
 
 // installTimeout bounds a single package-manager invocation. Some managers
@@ -199,7 +231,7 @@ func Install(toolName string) InstallResult {
 
 	managers := availableManagers()
 	if len(managers) == 0 {
-		return InstallResult{Tool: tool.Name, Err: fmt.Errorf("no supported package manager found on PATH for %s (tried %v)", runtime.GOOS, orderNames(installOrder[runtime.GOOS]))}
+		return InstallResult{Tool: tool.Name, NoManager: true, Err: fmt.Errorf("no supported package manager found on PATH for %s (tried %v)", runtime.GOOS, orderNames(installOrder[runtime.GOOS]))}
 	}
 
 	var combined bytes.Buffer

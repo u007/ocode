@@ -14,7 +14,6 @@ import (
 	"io/fs"
 	"log"
 	"net"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,7 +29,6 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
-	"github.com/u007/ocode/internal/network"
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
@@ -41,6 +39,7 @@ import (
 	"github.com/u007/ocode/internal/knowledge"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/memory"
+	"github.com/u007/ocode/internal/network"
 	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/paths"
@@ -55,6 +54,7 @@ import (
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/snapshot"
 	syncpkg "github.com/u007/ocode/internal/sync"
+	"github.com/u007/ocode/internal/tailscale"
 	"github.com/u007/ocode/internal/tool"
 	"github.com/u007/ocode/internal/tui/fastviewport"
 	"github.com/u007/ocode/internal/usage"
@@ -4288,7 +4288,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		b.WriteString(fmt.Sprintf("CLI tools (platform: %s, package manager: %s):\n\n", runtime.GOOS, pm))
 		for _, st := range msg.statuses {
 			state, icon := "not installed", "○"
-			hint := fmt.Sprintf("      install with: /plugin tools %s\n", st.Tool.Name)
+			hint := fmt.Sprintf("      install with: /tools %s\n", st.Tool.Name)
 			if st.Found {
 				state, icon = "installed", "●"
 				hint = ""
@@ -4302,7 +4302,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				b.WriteString("      " + hint)
 			}
 		}
-		b.WriteString("\nInstall with: /plugin tools <name> (installs via the platform package manager)")
+		b.WriteString("\nInstall with: /tools <name> (or /plugin tools <name>; installs via the platform package manager)")
+		if clitools.Manager() == "" {
+			b.WriteString("\n\n" + clitools.MissingManagerHint())
+		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
@@ -4314,6 +4317,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text.WriteString(fmt.Sprintf("Install of %q failed: %v", name, res.Err))
 			if res.Output != "" {
 				text.WriteString("\n" + res.Output)
+			}
+			if _, ok := clitools.FindTool(name); !ok {
+				var names []string
+				for _, t := range clitools.Catalog() {
+					names = append(names, t.Name)
+				}
+				text.WriteString(fmt.Sprintf("\n\nUnknown tool %q. Available tools: %s\nUsage: /tools <name> (e.g. /tools eza)", name, strings.Join(names, ", ")))
+			}
+			if res.NoManager {
+				text.WriteString("\n\n" + clitools.MissingManagerHint())
 			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: text.String()})
 			m.rerenderTranscriptAndMaybeScroll()
@@ -8519,6 +8532,18 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	cmd := parts[0]
 	args := parts[1:]
 
+	// Slash-form guard: the documented syntax is `/tools <name>` (space, no
+	// verb). `/tools/eza install` is not a registered command — reject it
+	// with a visible usage message rather than falling through to "Unknown
+	// command" or silently doing nothing.
+	if strings.HasPrefix(cmd, "/tools/") || strings.HasPrefix(cmd, "/tool/") {
+		m.input.Reset()
+		m.messages = append(m.messages, message{role: roleUser, text: text, skipLLM: true})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /tools <name> (e.g. /tools eza) — bare /tools lists status. Slashes and verbs are not accepted: use a space, e.g. /tools eza, not /tools/eza install."})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
+	}
+
 	// /goal is a convenience alias for the orchestrator pipeline. It behaves
 	// exactly like `/orchestrator <goal>`: switch to the orchestrator primary
 	// agent and immediately send <goal> as its first prompt, which runs the
@@ -8597,6 +8622,21 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/explorer-model" ||
 		cmd == "/context-model" ||
 		cmd == "/fake-agent" ||
+		// /tools, /tool, and /plugin are local detection/install commands:
+		// list probes PATH and install shells out to the platform package
+		// manager on a tea.Cmd goroutine, never touching the in-flight
+		// turn's callbacks. Queuing them while streaming made `/tools eza`
+		// appear to do nothing until the stream ended, so run them at once.
+		cmd == "/tools" || cmd == "/tool" || cmd == "/plugin" ||
+		// /add-dir and /add-dirs are synchronous local scope mutations:
+		// they validate the directory, update the runtime allowlist via
+		// tool.AddExtraAllowedPath (mutex-guarded, read live by
+		// confinedPath/AllowedRoots on every permission check), persist via
+		// config.SaveExtraAllowedPath, and never touch the in-flight turn's
+		// callbacks. Queuing them mid-stream forces the user to wait for the
+		// turn to end before unblocking an out-of-scope path prompt, so run
+		// them at once like /tools.
+		cmd == "/add-dir" || cmd == "/add-dirs" ||
 		cmd == "/goal"
 	// Agent status is a local inspection command and must remain usable while
 	// the stream is busy. Changing the persistent limit is deliberately queued,
@@ -9042,6 +9082,7 @@ func (m model) renderPluginList() string {
 	b.WriteString("  /plugin sync [name]          — check sync status\n")
 	b.WriteString("  /plugin update [name]        — update plugin(s)\n")
 	b.WriteString("  /plugin tools [name]         — detect/install CLI utilities (fd, rg, fzf, eza, bat, grep)\n")
+	b.WriteString("  /tools [name]                — detect/install CLI utilities (fd, rg, fzf, eza, bat, grep)\n")
 	return strings.TrimRight(builtins.String()+b.String(), "\n")
 }
 
@@ -15539,40 +15580,7 @@ func drainStreamDeltas(ch chan deltaEvent) []deltaEvent {
 // setupHint is a one-time enable URL shown when
 // funnel or serve isn't enabled on the tailnet yet.
 func startTailscaleExpose(port int, sessionID string) (url string, proc *exec.Cmd, setupHint string) {
-	tailscalePath, err := exec.LookPath("tailscale")
-	if err != nil {
-		return "", nil, ""
-	}
-
-	// Check if tailscale is running.
-	statusCmd := exec.Command(tailscalePath, "status")
-	if err := statusCmd.Run(); err != nil {
-		return "", nil, ""
-	}
-
-	target := fmt.Sprintf("localhost:%d", port)
-
-	// Use --set-path so each session gets its own tailscale path,
-	// avoiding the global root overwrite that breaks other instances.
-	// sessionID is sanitized to letters/digits/underscore/dash: tailscale
-	// treats "/" as a path separator and "." can break path normalization,
-	// so embedded separators would either be rejected by tailscale or, worse,
-	// silently route to a sibling path. Empty IDs fall back to a stable
-	// per-process tag to avoid all sessions collapsing onto the root.
-	pathPrefix := sanitizeTailscalePath(sessionID)
-
-	// Try tailscale funnel first — this gives a public internet URL.
-	if u, p, hint := tailscaleExpose(tailscalePath, "funnel", target, pathPrefix); u != "" {
-		return tailscaleURLWithPathPrefix(u, pathPrefix), p, hint
-	}
-
-	// Fall back to tailscale serve — this gives a tailnet-only URL.
-	if u, p, hint := tailscaleExpose(tailscalePath, "serve", target, pathPrefix); u != "" {
-		return tailscaleURLWithPathPrefix(u, pathPrefix), p, hint
-	}
-
-	// Last resort: get the tailnet DNS name from status.
-	return tailscaleURLWithPathPrefix(tailscaleDNSName(tailscalePath), pathPrefix), nil, ""
+	return tailscale.StartExpose(port, sessionID)
 }
 
 // tailscaleExpose runs `tailscale <cmd> --bg [--set-path /path] <target>` and
@@ -15582,66 +15590,8 @@ func startTailscaleExpose(port int, sessionID string) (url string, proc *exec.Cm
 // overwriting the global tailscale serve/funnel config. When the feature isn't
 // enabled on the tailnet, setupHint contains the one-time enable URL.
 func tailscaleExpose(tailscalePath, cmd, target, pathPrefix string) (string, *exec.Cmd, string) {
-	args := []string{cmd, "--bg"}
-	if pathPrefix != "" {
-		args = append(args, "--set-path", pathPrefix)
-	}
-	args = append(args, target)
-	serveCmd := exec.Command(tailscalePath, args...)
-	var out bytes.Buffer
-	serveCmd.Stdout = &out
-	serveCmd.Stderr = &out
-
-	if err := serveCmd.Start(); err != nil {
-		log.Printf("tailscale %s failed to start: %v", cmd, err)
-		return "", nil, ""
-	}
-
-	// Wait in background so the process is reaped; capture exit code.
-	done := make(chan error, 1)
-	crashguard.Go(func() { done <- serveCmd.Wait() })
-
-	// Give it a moment to output the URL, then parse.
-	select {
-	case <-time.After(2 * time.Second):
-	case <-done:
-	}
-
-	output := out.String()
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
-			return line, serveCmd, ""
-		}
-	}
-
-	// The command may have already exited successfully — it's still running in
-	// the background. If we got no URL line, check the output for the URL.
-	// tailscale funnel output looks like:
-	//   Funnel on:
-	//     https://hostname.tailnet-name.ts.net
-	// tailscale serve output looks like:
-	//   Available within your tailnet:
-	//     https://hostname.tailnet-name.ts.net:443
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "https://") || strings.HasPrefix(line, "http://") {
-			return line, serveCmd, ""
-		}
-	}
-
-	// Parse setup hint: tailscale outputs "To enable, visit:\n  <URL>" when
-	// funnel or serve isn't enabled on the tailnet yet.
-	var setupHint string
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "https://") || strings.HasPrefix(line, "http://") {
-			setupHint = line
-			break
-		}
-	}
-
-	return "", nil, setupHint
+	wait := func(cmd *exec.Cmd) error { return cmd.Wait() }
+	return tailscale.Expose(tailscalePath, cmd, target, pathPrefix, wait)
 }
 
 // sanitizeTailscalePath returns a tailscale-safe path component derived from
@@ -15650,21 +15600,7 @@ func tailscaleExpose(tailscalePath, cmd, target, pathPrefix string) (string, *ex
 // per-process tag when the input is empty. The returned value is prefixed with
 // "/" so it's always a valid --set-path argument.
 func sanitizeTailscalePath(sessionID string) string {
-	const fallback = "ocode"
-	cleaned := make([]rune, 0, len(sessionID))
-	for _, r := range sessionID {
-		switch {
-		case r >= 'a' && r <= 'z',
-			r >= 'A' && r <= 'Z',
-			r >= '0' && r <= '9',
-			r == '-' || r == '_':
-			cleaned = append(cleaned, r)
-		}
-	}
-	if len(cleaned) == 0 {
-		cleaned = []rune(fallback)
-	}
-	return "/" + string(cleaned)
+	return tailscale.SanitizePath(sessionID)
 }
 
 // tailscaleReset clears any active tailscale serve/funnel config.
@@ -15690,80 +15626,23 @@ func tailscaleReset() {
 // don't track which one succeeded at start time; the unused one is a harmless
 // no-op. Best-effort: errors are logged, not surfaced.
 func removeTailscaleSetPath(pathPrefix string) {
-	if pathPrefix == "" {
-		return
-	}
-	tailscalePath, err := exec.LookPath("tailscale")
-	if err != nil {
-		return
-	}
-	for _, cmd := range []string{"funnel", "serve"} {
-		c := exec.Command(tailscalePath, cmd, "--set-path", pathPrefix, "off")
-		var out bytes.Buffer
-		c.Stdout = &out
-		c.Stderr = &out
-		if err := c.Run(); err != nil {
-			// Expected for whichever mode wasn't in use; log at debug-ish level.
-			log.Printf("tailscale %s --set-path %s off: %v\n  output: %s", cmd, pathPrefix, err, strings.TrimRight(out.String(), "\n"))
-		}
-	}
+	tailscale.RemoveSetPath(pathPrefix)
 }
 
 // tailscaleDNSName returns the tailnet DNS name (e.g. "host.tailnet.ts.net")
 // from tailscale status, or empty string on failure.
 func tailscaleDNSName(tailscalePath string) string {
-	statusCmd := exec.Command(tailscalePath, "status", "--json")
-	var statusOut bytes.Buffer
-	statusCmd.Stdout = &statusOut
-	if err := statusCmd.Run(); err != nil {
-		return ""
-	}
-	var status struct {
-		SELF struct {
-			DNSName string `json:"DNSName"`
-		} `json:"Self"`
-	}
-	if json.Unmarshal(statusOut.Bytes(), &status) != nil {
-		return ""
-	}
-	dnsName := strings.TrimSuffix(status.SELF.DNSName, ".")
-	if dnsName != "" {
-		return fmt.Sprintf("https://%s", dnsName)
-	}
-	return ""
+	return tailscale.DNSName(tailscalePath)
 }
 
 // tailscaleURLWithPathPrefix appends the per-session tailscale mount path to the
 // public URL returned by tailscale serve/funnel.
 func tailscaleURLWithPathPrefix(baseURL, pathPrefix string) string {
-	baseURL = strings.TrimRight(baseURL, "/")
-	if baseURL == "" {
-		return ""
-	}
-	if pathPrefix == "" {
-		return baseURL
-	}
-
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return baseURL + pathPrefix
-	}
-
-	// Mount at exactly pathPrefix. tailscale serve/funnel output can carry a
-	// sibling session's existing --set-path entry in the URL line we parse;
-	// appending to it would yield a doubled, unroutable prefix
-	// (…/<stale>/<ours>) that tailscale longest-prefix-matches to the stale
-	// route, breaking the page. We own the path, so replace whatever was parsed.
-	u.Path = pathPrefix
-	return u.String()
+	return tailscale.URLWithPathPrefix(baseURL, pathPrefix)
 }
 
 func buildRCSessionURL(baseURL, sessionID, token string) string {
-	baseURL = strings.TrimRight(baseURL, "/")
-	if baseURL == "" {
-		return ""
-	}
-	return fmt.Sprintf("%s/session/%s?token=%s", baseURL, sessionID, token)
+	return tailscale.BuildSessionURL(baseURL, sessionID, token)
 }
 
 // broadcastRC pushes a live mirror event to all connected /rc web clients. It is

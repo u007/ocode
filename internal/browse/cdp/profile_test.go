@@ -104,7 +104,7 @@ func TestPersistentProfile_CookieSurvivesRelaunch_Gated(t *testing.T) {
 
 	launch := func() (*Conn, func()) {
 		sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{})
-		conn, exited, cleanup, err := launchChromeWithOptions(ctx, chromePath, sup, lg, "", "", "", profile)
+		conn, exited, cleanup, err := launchChromeWithOptions(ctx, chromePath, sup, lg, "", "", "", profile, true)
 		if err != nil {
 			t.Fatalf("launch: %v", err)
 		}

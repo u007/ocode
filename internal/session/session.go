@@ -237,6 +237,33 @@ func ReplaceForDir(wd, id string, title string, messages []agent.Message, metada
 	return persistToDir(dir, id, title, messages, metadata, false, 0, true)
 }
 
+// RewriteAskResultForDir rewrites the stored row at seq — which must be a
+// tool result still holding an ask sentinel (PERMISSION_ASK / QUESTION_PROMPT)
+// for msg.ToolID — with msg, the resolved tool result. The server's resolve
+// handlers mutate that row in memory when the user answers; the stored copy
+// must change identically BEFORE the continuation runs, or every later save
+// of the transcript overlaps the stored sentinel with different bytes: the
+// sync save conflicts (ErrTranscriptConflict) and live snapshots drop, so the
+// disk transcript freezes at the sentinel while memory moves on and every
+// disk-backed reload/reconcile shows the already-answered ask again
+// (ses_2026-09-10-153254-b55bec37). Like appendUserMessageTail it touches
+// only that one row plus updated_at, so it cannot trip the overlap check.
+// Any shape other than "sentinel row for this tool id at this seq" is an
+// error, never a rewrite.
+func RewriteAskResultForDir(projectRoot, id string, seq int, msg agent.Message) error {
+	dir, err := GetStorageDirForPath(projectRoot)
+	if err != nil {
+		return err
+	}
+	if !fileExists(sqliteSessionPath(dir, id)) {
+		return fmt.Errorf("session: rewrite ask result %s: no sqlite transcript on disk", id)
+	}
+	if err := rewriteAskResultRow(dir, id, seq, msg); err != nil {
+		return err
+	}
+	return refreshIndexMeta(dir, id)
+}
+
 // AppendUserMessageForDir durably appends a single user message to session
 // id before its turn is dispatched (the server path's persist-before-202
 // rule). The .sqlite fast path is an append-only tail insert
@@ -1043,6 +1070,12 @@ func removeIncompleteToolRequests(messages []agent.Message) []agent.Message {
 		out = append(out, msg)
 	}
 	return out
+}
+
+// isAskSentinel reports whether a tool result is a pending ask the user has
+// not answered yet (a permission or question prompt).
+func isAskSentinel(content string) bool {
+	return strings.HasPrefix(content, tool.SentinelPermissionAsk) || strings.HasPrefix(content, tool.SentinelQuestionPrompt)
 }
 
 func isIncompleteToolResult(content string) bool {

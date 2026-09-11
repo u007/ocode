@@ -173,6 +173,10 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Mirror the answered sentinel onto disk before anything else persists
+	// this transcript (see rewriteAskResult).
+	h.rewriteAskResult(sessID, working, len(working)-1)
+
 	h.wireHeadlessAgentCallbacks(sessID, as.agent)
 	h.wireLivePersist(sessID, as, working)
 	// Mirrors runTurn: turnActive true only while Step actually runs, so a
@@ -206,7 +210,7 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	as.messages = append(working, resp...)
+	as.messages = append(append([]agent.Message(nil), working...), resp...)
 
 	var content strings.Builder
 	for _, m := range resp {
@@ -215,7 +219,7 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	_ = h.saveSession(sessID, "", as.messages, nil)
+	h.persistTurnTranscript(sessID, as, len(working), "question-continuation")
 
 	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
 	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "turn_done", Data: DoneEvent{SessionID: sessID, Model: as.model}})

@@ -28,12 +28,21 @@ type Handle struct {
 	Srv   *server.Server
 }
 
-// StartServer boots an ocode HTTP/SSE API server on 127.0.0.1 with a fresh
-// auth token, and returns the handle the desktop shell needs to open its
-// webview window. The server runs in a background goroutine; on desktop quit
-// the shell calls handle.Srv.Shutdown(ctx) (bounded by a TTL) to drain agent
-// sessions and gracefully terminate any running terminal ptys before the
-// process exits. See desktopShutdownTimeout in cmd/ocode-desktop/main.go.
+// StartServer boots an ocode HTTP/SSE API server with a fresh auth token,
+// and returns the handle the desktop shell needs to open its webview window.
+// The server runs in a background goroutine; on desktop quit the shell calls
+// handle.Srv.Shutdown(ctx) (bounded by a TTL) to drain agent sessions and
+// gracefully terminate any running terminal ptys before the process exits.
+// See desktopShutdownTimeout in cmd/ocode-desktop/main.go.
+//
+// The listener binds all interfaces (0.0.0.0), not just loopback, so the
+// Share dialog's advertised URLs actually connect: the tailscale serve
+// target and — when tailscale is unavailable — the LAN URL
+// (http://<lan-ip>:<port>) must be reachable from other devices. Exposure is
+// token-gated (128-bit random token per launch, auth required on every API
+// route, rate-limited), the same posture as the TUI's /rc server which also
+// binds the LAN IP. The webview itself still opens http://127.0.0.1:PORT,
+// preserving the localStorage origin the sticky port exists for.
 //
 // The port is sticky across launches: the webview's localStorage (terminal
 // tabs, editor tabs, session tabs) is scoped to the http://127.0.0.1:PORT
@@ -51,20 +60,20 @@ func StartServer(webFS fs.FS, workDir string) (*Handle, error) {
 	}
 	token := hex.EncodeToString(tokenBytes)
 
-	bindAddr := "127.0.0.1:0"
+	bindAddr := "0.0.0.0:0"
 	if p := loadSavedPort(); p > 0 {
-		bindAddr = fmt.Sprintf("127.0.0.1:%d", p)
+		bindAddr = fmt.Sprintf("0.0.0.0:%d", p)
 	}
 
 	srv := server.New(bindAddr, "ocode", token, webFS)
 	srv.SetWorkDir(workDir)
 
 	ln, err := srv.Listen()
-	if err != nil && bindAddr != "127.0.0.1:0" {
+	if err != nil && bindAddr != "0.0.0.0:0" {
 		// Saved port unavailable (another process grabbed it, or a second
 		// desktop instance) — persisted UI state won't be visible this run.
 		log.Printf("desktop: saved port %s unavailable, falling back to a random port: %v", bindAddr, err)
-		srv = server.New("127.0.0.1:0", "ocode", token, webFS)
+		srv = server.New("0.0.0.0:0", "ocode", token, webFS)
 		srv.SetWorkDir(workDir)
 		ln, err = srv.Listen()
 	}
@@ -72,10 +81,15 @@ func StartServer(webFS fs.FS, workDir string) (*Handle, error) {
 		return nil, fmt.Errorf("desktop: listen: %w", err)
 	}
 
-	// Read the actual bound address (Listen writes the *requested* address
-	// back to s.addr, so we must use ln.Addr()).
+	// The webview always opens the loopback origin (stable localStorage
+	// scope); the listener itself is on 0.0.0.0 so LAN/tailscale share URLs
+	// connect. Read the actual bound port from the listener.
+	_, portStr, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		return nil, fmt.Errorf("desktop: parse bound address %s: %w", ln.Addr().String(), err)
+	}
 	addr := ln.Addr().String()
-	url := fmt.Sprintf("http://%s", addr)
+	url := fmt.Sprintf("http://127.0.0.1:%s", portStr)
 	saveBoundPort(addr)
 	saveDebugHandle(url, token)
 

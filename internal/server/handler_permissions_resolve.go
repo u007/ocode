@@ -278,10 +278,16 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// up). Instead, persist just this one resolution and wait for the
 	// remaining ask(s) — the client already has them queued from the earlier
 	// `permission` SSE frames.
+	// Mirror the answered sentinel onto disk before anything else persists
+	// this transcript (see rewriteAskResult).
+	h.rewriteAskResult(sessID, working, askIdx)
+
 	for i := trailingToolRunStart(as.messages); i < len(as.messages); i++ {
 		if i != askIdx && isPermissionAskMsg(working[i]) {
 			as.messages = working
-			_ = h.saveSession(sessID, "", as.messages, nil)
+			if err := h.saveSession(sessID, "", as.messages, nil); err != nil {
+				log.Printf("serve: save after permission resolve for %s: %v", sessID, err)
+			}
 			h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
 			writeJSON(w, http.StatusOK, ChatResponse{SessionID: sessID, Model: as.model})
 			return
@@ -316,7 +322,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	as.messages = append(working, resp...)
+	as.messages = append(append([]agent.Message(nil), working...), resp...)
 
 	var content strings.Builder
 	for _, m := range resp {
@@ -325,7 +331,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	_ = h.saveSession(sessID, "", as.messages, nil)
+	h.persistTurnTranscript(sessID, as, len(working), "permission-continuation")
 
 	// Stream the continuation.
 	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})

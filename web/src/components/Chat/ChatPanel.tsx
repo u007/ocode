@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useChatSelector, useChatDispatch, getSessionSlice } from "../../stores/chatStore";
+import { useChatSelector, useChatDispatch, getSessionSlice, parseQuestionFromMessage, type QuestionRequest } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { api } from "../../api/client";
 import MessageBubble, { AssistantText } from "./MessageBubble";
@@ -65,13 +65,22 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
   // immediately after compaction and would otherwise wipe a synthetic ADD_MESSAGE.
   const [compactNotice, setCompactNotice] = useState<string | null>(null);
   useEffect(() => {
-    const handler = (e: Event) => {
+    const startHandler = (e: Event) => {
+      const ce = e as CustomEvent<{ sessionId: string }>;
+      if (!ce.detail || ce.detail.sessionId !== sessionId) return;
+      setCompactNotice("Compacting conversation…");
+    };
+    const doneHandler = (e: Event) => {
       const ce = e as CustomEvent<{ sessionId: string; originalLen: number; compactedLen: number }>;
       if (!ce.detail || ce.detail.sessionId !== sessionId) return;
       setCompactNotice(`Compacted: ${ce.detail.originalLen} → ${ce.detail.compactedLen} messages`);
     };
-    window.addEventListener("ocode:compact", handler as EventListener);
-    return () => window.removeEventListener("ocode:compact", handler as EventListener);
+    window.addEventListener("ocode:compact-start", startHandler as EventListener);
+    window.addEventListener("ocode:compact", doneHandler as EventListener);
+    return () => {
+      window.removeEventListener("ocode:compact-start", startHandler as EventListener);
+      window.removeEventListener("ocode:compact", doneHandler as EventListener);
+    };
   }, [sessionId]);
   useEffect(() => {
     if (!compactNotice) return;
@@ -142,6 +151,9 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
           tc: import("../../api/types").ToolCall;
           resultContent?: string;
           resultIdx?: number;
+          /** The unanswered `question` prompt this call is paused on, so the
+           *  card can re-open its dialog on demand. */
+          pendingQuestion?: QuestionRequest;
         }>;
       };
 
@@ -172,9 +184,14 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
   // virtualization so they never claim a slot.
   const renderEntries: RenderEntry[] = useMemo(() => {
     const resultById = new Map<string, { content: string; idx: number }>();
+    const pendingQuestionById = new Map<string, QuestionRequest>();
     messages.forEach((m, idx) => {
       if (m.role === "tool" && m.tool_call_id && !isSentinelToolContent(m.content)) {
         resultById.set(m.tool_call_id, { content: m.content, idx });
+      }
+      if (m.role === "tool" && m.tool_call_id) {
+        const q = parseQuestionFromMessage(m);
+        if (q) pendingQuestionById.set(m.tool_call_id, q);
       }
     });
     const entries: RenderEntry[] = [];
@@ -208,7 +225,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
             // Duplicate id — show the call without a second copy of the same result.
             return { tc, resultContent: undefined, resultIdx: undefined };
           }
-          return { tc, resultContent: undefined, resultIdx: undefined };
+          return { tc, resultContent: undefined, resultIdx: undefined, pendingQuestion: pendingQuestionById.get(tc.id) };
         });
         entries.push({ kind: "tool-group", assistant: msg, originalIndex: i, calls });
         continue;
@@ -726,13 +743,18 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
                         {entry.assistant.reasoning_content ? (
                           <ThinkingBlock text={entry.assistant.reasoning_content} highlight={highlight} />
                         ) : null}
-                        {entry.calls.map(({ tc, resultContent }) => (
+                        {entry.calls.map(({ tc, resultContent, pendingQuestion }) => (
                           <ToolBlock
                             key={tc.id}
                             tool={tc.function.name}
                             command={tc.function.arguments}
                             output={resultContent}
                             highlight={highlight}
+                            onOpenQuestion={
+                              pendingQuestion
+                                ? () => dispatch({ type: "QUESTION_REQUEST", sessionId, question: pendingQuestion })
+                                : undefined
+                            }
                           />
                         ))}
                         {entry.assistant.content ? (

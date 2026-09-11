@@ -638,6 +638,7 @@ export const api = {
 
 	getTTSEngines: () => fetchJSON<{ engines: TTSEngine[] }>("/api/tts/engines"),
 	getTTSStatus: () => fetchJSON<TTSStatus>("/api/tts/status"),
+	getTTSState: () => fetchJSON<Record<string, string>>("/api/tts/state"),
 	getTTSConfig: () => fetchJSON<TTSConfig>("/api/config/ocode/tts"),
 	setTTSConfig: (cfg: TTSConfig) =>
 	  fetchJSON<TTSStatus>("/api/config/ocode/tts", { method: "PUT", body: JSON.stringify(cfg) }),
@@ -1212,7 +1213,7 @@ export const api = {
 
   // ── File content load (GET) for the sidebar PreviewHost text/markdown
   // viewer (same endpoint the editor tabs use).
-  getFileContent: async (path: string, projectRoot?: string): Promise<string> => {
+  getFileContent: async (path: string, projectRoot?: string): Promise<{ content: string; is_binary: boolean }> => {
     const query = new URLSearchParams({ path });
     if (projectRoot) query.set("project_root", projectRoot);
     const res = await fetch(apiPath(`/api/files/content?${query.toString()}`), { headers: authHeaders() });
@@ -1221,7 +1222,7 @@ export const api = {
       throw new Error(err.error || res.statusText);
     }
     const data = await res.json();
-    return data.content as string;
+    return { content: data.content as string, is_binary: !!data.is_binary };
   },
 
   // ── Sidebar preview: open with the OS default app (native-fidelity

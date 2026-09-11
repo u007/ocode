@@ -588,6 +588,53 @@ func appendUserMessageTail(dir, id, content string) error {
 	return tx.Commit()
 }
 
+// rewriteAskResultRow replaces the data of the row at seq in one immediate
+// transaction, guarded so only a tool-result row still holding an ask
+// sentinel for msg.ToolID is ever rewritten. See RewriteAskResultForDir.
+func rewriteAskResultRow(dir, id string, seq int, msg agent.Message) error {
+	if msg.Role != "tool" || msg.ToolID == "" {
+		return fmt.Errorf("session: rewrite ask result %s seq %d: replacement is not a tool result", id, seq)
+	}
+	mu := lockFor(dir, id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	db, err := openSessionDB(sqliteSessionPath(dir, id))
+	if err != nil {
+		return fmt.Errorf("session: open sqlite %s: %w", id, err)
+	}
+	defer db.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("session: begin tx %s: %w", id, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var data string
+	if err := tx.QueryRow(`SELECT data FROM messages WHERE seq = ?`, seq).Scan(&data); err != nil {
+		return fmt.Errorf("session: rewrite ask result %s seq %d: read row: %w", id, seq, err)
+	}
+	var stored agent.Message
+	if err := json.Unmarshal([]byte(data), &stored); err != nil {
+		return fmt.Errorf("session: rewrite ask result %s seq %d: decode row: %w", id, seq, err)
+	}
+	if stored.Role != "tool" || stored.ToolID != msg.ToolID || !isAskSentinel(stored.Content) {
+		return fmt.Errorf("session: rewrite ask result %s seq %d: stored row is not a pending ask for tool call %q", id, seq, msg.ToolID)
+	}
+	out, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("session: marshal ask result %s: %w", id, err)
+	}
+	if _, err := tx.Exec(`UPDATE messages SET data = ? WHERE seq = ?`, string(out), seq); err != nil {
+		return fmt.Errorf("session: rewrite ask result %s seq %d: %w", id, seq, err)
+	}
+	if _, err := tx.Exec(`UPDATE meta SET updated_at = ? WHERE id = ?`, time.Now(), id); err != nil {
+		return fmt.Errorf("session: update meta %s: %w", id, err)
+	}
+	return tx.Commit()
+}
+
 // readSqliteSession loads the full session (meta + all messages) from a
 // .sqlite file.
 func readSqliteSession(path string) (*Session, error) {

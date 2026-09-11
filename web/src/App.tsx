@@ -9,6 +9,7 @@ import { TerminalProvider } from "./stores/terminalStore";
 import { BrowserTabsProvider, useAllBrowserTabs, useBrowserTabs, useBrowserTabsDispatch } from "./stores/browserTabsStore";
 import { BrowserPanel } from "./components/Browser/BrowserPanel";
 import PreviewHost from "./components/Preview/PreviewHost";
+import PreviewTabPage from "./components/Preview/PreviewTabPage";
 import { usePreviewActivation } from "./components/Preview/usePreviewActivation";
 import { PREVIEW_CONTEXT_EVENT, type PreviewSelection } from "./lib/previewKind";
 import { useBrowserStore, browserActions, type StateKey } from "./lib/browserStore";
@@ -974,6 +975,7 @@ function HomeApp() {
                           projectRoot={et.projectRoot}
                           persistKey={et.id}
                           content={et.content}
+                          isBinary={et.isBinary}
                           onChange={(value) => handleEditorChange(et.id, value)}
                           readOnly={false}
                           session={activeTabId ?? undefined}
@@ -1093,7 +1095,16 @@ function HomeApp() {
                         </div>
                       );
                     })}
-                  </div>
+                    {allChatTabs.map((tab) => {
+                      const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "preview";
+                      const key = `${tab.id}:preview`;
+                      if (!visitedTabsRef.current.has(key) && !isActive) return null;
+                      return (
+                        <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
+                          <PreviewTabPage />
+                        </div>
+                      );
+                    })}
                   </div>
                   <div
                     className={
@@ -1118,6 +1129,7 @@ function HomeApp() {
                       );
                     })}
                   </div>
+                </div>
                 </div>
               </TabsContent>
             </div>

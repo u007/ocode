@@ -3,14 +3,7 @@ import { BrowserPanel } from "../Browser/BrowserPanel";
 import type { StateKey } from "../../lib/browserStore";
 import { previewKindForPath, resolvePreviewDoc, type PreviewOpenRequest } from "../../lib/previewKind";
 import { api } from "../../api/client";
-import PdfViewer from "./PdfViewer";
-import DocxViewer from "./DocxViewer";
-import PptxViewer from "./PptxViewer";
-import ExcelViewer from "./ExcelViewer";
-import MmdViewer from "./MmdViewer";
-import MarkdownViewer from "./MarkdownViewer";
-import TextViewer from "./TextViewer";
-import ImageViewer from "./ImageViewer";
+import PreviewSurface from "./PreviewSurface";
 import { dispatchOpenPreview } from "../../lib/previewKind";
 
 type Surface = "browser" | "preview";
@@ -163,14 +156,16 @@ export default function PreviewHost({
             </button>
           </div>
           <div className="min-h-0 flex-1">
-            {doc.kind === "pdf" && <PdfViewer path={doc.path} projectRoot={doc.projectRoot} page={page} onPageChange={setPage} />}
-            {doc.kind === "docx" && <DocxViewer path={doc.path} projectRoot={doc.projectRoot} />}
-            {doc.kind === "pptx" && <PptxViewer path={doc.path} projectRoot={doc.projectRoot} slide={page} onSlideChange={setPage} />}
-            {doc.kind === "excel" && <ExcelViewer path={doc.path} projectRoot={doc.projectRoot} />}
-            {doc.kind === "mermaid" && <MmdViewer path={doc.path} projectRoot={doc.projectRoot} onOpenFile={openLinked} />}
-            {doc.kind === "markdown" && <MarkdownViewer path={doc.path} projectRoot={doc.projectRoot} onOpenFile={openLinked} />}
-            {doc.kind === "text" && <TextViewer path={doc.path} projectRoot={doc.projectRoot} />}
-            {doc.kind === "image" && <ImageViewer path={doc.path} projectRoot={doc.projectRoot} />}
+          <PreviewSurface
+            path={doc.path}
+            kind={doc.kind}
+            projectRoot={doc.projectRoot}
+            page={page}
+            onPageChange={setPage}
+            slide={page}
+            onSlideChange={setPage}
+            onOpenFile={openLinked}
+          />
           </div>
         </div>
       ) : (

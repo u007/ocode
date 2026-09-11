@@ -1205,6 +1205,30 @@ func (h *Handler) saveSession(sessionID, title string, msgs []agent.Message, met
 	return session.Save(sessionID, title, msgs, metadata)
 }
 
+// rewriteAskResult mirrors an in-memory ask resolution (the user answered a
+// PERMISSION_ASK / QUESTION_PROMPT tool result at msgs[seq]) onto the stored
+// row BEFORE the continuation Steps. The resolve handlers rewrite that row's
+// content in place; unless disk changes identically, every later live/sync
+// save overlaps the stored sentinel with different bytes and drops or
+// conflicts, freezing the on-disk transcript at the already-answered ask
+// while the agent keeps going (ses_2026-09-10-153254-b55bec37). Failure is
+// logged, not fatal: the continuation still runs and its turn-end save
+// reports the divergence itself.
+func (h *Handler) rewriteAskResult(sessionID string, msgs []agent.Message, seq int) {
+	if seq < 0 || seq >= len(msgs) {
+		log.Printf("serve: rewrite ask result for %s: seq %d out of range (%d msgs)", sessionID, seq, len(msgs))
+		return
+	}
+	e, ok := h.sessions.SnapshotEntry(sessionID)
+	if !ok || e.ProjectRoot == "" {
+		log.Printf("serve: rewrite ask result for %s: session has no project root", sessionID)
+		return
+	}
+	if err := session.RewriteAskResultForDir(e.ProjectRoot, sessionID, seq, msgs[seq]); err != nil {
+		log.Printf("serve: rewrite ask result for %s seq %d: %v", sessionID, seq, err)
+	}
+}
+
 // replaceSession persists an authoritative transcript replacement into the
 // session's owning project's storage dir. Compaction must go through this
 // path: ordinary saves can no longer shrink the transcript — a shorter

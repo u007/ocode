@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import FileEditor from "../Files/FileEditor";
 import { api } from "../../api/client";
+import { previewKindForPath } from "../../lib/previewKind";
+import { Button } from "../ui/button";
 
 function languageFor(path: string): string {
   const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
@@ -12,11 +14,6 @@ function languageFor(path: string): string {
   return map[ext] ?? "plaintext";
 }
 
-/**
- * Editable text/code file inside the sidebar preview (Monaco — the same
- * editor component the Files tab uses). Save writes through
- * PUT /api/files/content with the project's save guard.
- */
 export default function TextViewer({ path, projectRoot }: { path: string; projectRoot?: string }) {
   const [content, setContent] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -24,18 +21,23 @@ export default function TextViewer({ path, projectRoot }: { path: string; projec
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedTick, setSavedTick] = useState(false);
+  const [isBinary, setIsBinary] = useState(false);
+  const [forceEdit, setForceEdit] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setContent(null);
     setDirty(false);
     setError(null);
+    setIsBinary(false);
+    setForceEdit(false);
     api
       .getFileContent(path, projectRoot)
       .then((c) => {
         if (cancelled) return;
-        setContent(c);
-        setDraft(c);
+        setContent(c.content);
+        setDraft(c.content);
+        setIsBinary(c.is_binary);
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -61,8 +63,33 @@ export default function TextViewer({ path, projectRoot }: { path: string; projec
     }
   };
 
+  const previewSupported = previewKindForPath(path) !== null;
+  const unsupported = !isBinary && !previewSupported && !forceEdit;
+
   if (error && content === null) return <div className="p-4 text-xs text-red-400">Load failed: {error}</div>;
   if (content === null) return <div className="p-4 text-xs text-muted-foreground">Loading file…</div>;
+
+  // Binary file detected: show binary indicator + edit button
+  if (isBinary && !forceEdit) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+        <div className="text-2xl font-bold text-amber-500">Binary File</div>
+        <p className="text-sm text-muted-foreground">This file contains binary data and cannot be previewed as text.</p>
+        <Button onClick={() => setForceEdit(true)} variant="outline">Edit as text</Button>
+      </div>
+    );
+  }
+
+  // Unsupported format: show unsupported message + edit button
+  if (unsupported && !forceEdit) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+        <div className="text-2xl font-bold text-muted-foreground">Format Not Supported</div>
+        <p className="text-sm text-muted-foreground">This file format is not supported for preview.</p>
+        <Button onClick={() => setForceEdit(true)} variant="outline">Edit via file editor</Button>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">

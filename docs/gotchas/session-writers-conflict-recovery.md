@@ -70,6 +70,23 @@ below.
   the overlap check even when the stored transcript holds rows the load
   path filters out (see next section). PK violation (another writer took
   the same seq) → bounded retry re-reads the count.
+- **Ask resolutions rewrite the stored sentinel row in place.** Answering a
+  permission or question prompt replaces the PERMISSION_ASK / QUESTION_PROMPT
+  tool result's content in memory. `RewriteAskResultForDir` (server
+  `rewriteAskResult`, called by both resolve handlers before the
+  continuation Steps) applies the same rewrite to the stored row — guarded:
+  only a tool row still holding an ask sentinel for that tool-call id at
+  that seq. Without it every later save overlapped the stored sentinel with
+  different bytes: live snapshots dropped and the turn-end sync save
+  conflicted (and the handlers discarded that error), so the disk transcript
+  froze at the already-answered ask while memory moved on. Every disk-backed
+  reload/reconcile (GET /api/sessions/:id, the turn watchdog, tab
+  activation) then replayed the stale answered question and wiped the
+  continuation — the 2026-09-10 "streamed, stopped, reverted to input, next
+  question never prompted" desktop report (ses_2026-09-10-153254-b55bec37:
+  memory 66 rows, disk stuck at 62). The resolve handlers now persist the
+  continuation through `persistTurnTranscript` so conflicts are logged and
+  re-synced like an ordinary turn.
 - **The pre-persisted user message must serialize identically to the
   turn's in-memory copy.** Server `runTurn` re-appends the pending user
   message in memory stamped with `user_seq` (`nextUserSeq` =

@@ -17,6 +17,82 @@ import (
 )
 
 // Target represents one browser context + page target for a stateKey.
+// NodeLocation is the result of DOM.getNodeForLocation.
+type NodeLocation struct {
+	NodeId        int    `json:"nodeId"`
+	BackendNodeId int    `json:"backendNodeId,omitempty"`
+	FrameId       string `json:"frameId,omitempty"`
+	Href          string `json:"href,omitempty"`
+	Src           string `json:"src,omitempty"`
+}
+
+// DOM error codes for node lookup / describe failures.
+const (
+	ErrTargetUnavailable = "target_unavailable"
+	ErrTimeout           = "timeout"
+	ErrDisconnected      = "disconnected"
+	ErrProtocolError     = "protocol_error"
+	ErrNoNode            = "no_node"
+)
+
+// GetNodeForLocation asks Chrome for the deepest visible node at (x,y).
+func (t *Target) GetNodeForLocation(ctx context.Context, x, y int) (*NodeLocation, error) {
+	var res struct {
+		NodeId         int    `json:"nodeId"`
+		BackendNodeId int    `json:"backendNodeId,omitempty"`
+		FrameId       string `json:"frameId,omitempty"`
+	}
+	if err := t.conn.Call(ctx, t.sessionID, "DOM.getNodeForLocation", map[string]any{
+		"x": float64(x),
+		"y": float64(y),
+	}, &res); err != nil {
+		if errors.Is(err, ErrConnClosed) {
+			return nil, errors.New(ErrDisconnected)
+		}
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, errors.New(ErrTimeout)
+		}
+		if ce, ok := err.(*CDPError); ok && ce != nil {
+			return nil, errors.New(ErrProtocolError + ": " + ce.Message)
+		}
+		return nil, errors.New(ErrTargetUnavailable + ": " + err.Error())
+	}
+	if res.NodeId == 0 {
+		return nil, errors.New(ErrNoNode)
+	}
+	return &NodeLocation{
+		NodeId:         res.NodeId,
+		BackendNodeId: res.BackendNodeId,
+		FrameId:       res.FrameId,
+	}, nil
+}
+
+// DescribeNode asks Chrome to describe a node by its nodeId.
+func (t *Target) DescribeNode(ctx context.Context, nodeId int, opts any) (map[string]any, error) {
+	params := map[string]any{"nodeId": nodeId}
+	if opts != nil {
+		if o, ok := opts.(map[string]any); ok {
+			for k, v := range o {
+				params[k] = v
+			}
+		}
+	}
+	var res map[string]any
+	if err := t.conn.Call(ctx, t.sessionID, "DOM.describeNode", params, &res); err != nil {
+		if errors.Is(err, ErrConnClosed) {
+			return nil, errors.New(ErrDisconnected)
+		}
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, errors.New(ErrTimeout)
+		}
+		if ce, ok := err.(*CDPError); ok && ce != nil {
+			return nil, errors.New(ErrProtocolError + ": " + ce.Message)
+		}
+		return nil, errors.New(ErrTargetUnavailable + ": " + err.Error())
+	}
+	return res, nil
+}
+
 type Target struct {
 	manager          *Manager
 	stateKey         string
@@ -1075,6 +1151,115 @@ func (t *Target) SelectionText(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return res.Result.Value, nil
+}
+
+// FindResult is the outcome of one find-in-page step for the Chrome canvas
+// surface. The headless screencast has no native find UI, so the SPA renders
+// its own find bar and drives the page via window.find (selection + scroll
+// show up in the next screencast frames). Found reports whether window.find
+// matched; total/active are best-effort and may be 0 when counting fails.
+type FindResult struct {
+	Found  bool `json:"found"`
+	Active int  `json:"active"`
+	Total  int  `json:"total"`
+}
+
+// findExprTemplate evaluates one find step. queryJSON is the JSON-encoded
+// query (safe JS string literal), caseSensitive/backwards are JS booleans.
+// State lives on window.__ocodeFind ({key, total, index}) so consecutive
+// next/prev steps keep a stable "i of N" without the SPA tracking it.
+const findExprTemplate = `(() => {
+	const q = %s;
+	const caseSensitive = %s;
+	const backwards = %s;
+	const key = (caseSensitive ? "S:" : "I:") + q;
+	const prev = window.__ocodeFind;
+	const isNew = !prev || prev.key !== key;
+	function countTotal(query, cs) {
+		if (!query) return 0;
+		try {
+			if (!document.body) return 0;
+			const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+			let total = 0;
+			let node;
+			const needle = cs ? query : query.toLowerCase();
+			while ((node = walker.nextNode())) {
+				const parent = node.parentElement;
+				if (parent && (parent.tagName === "SCRIPT" || parent.tagName === "STYLE" || parent.tagName === "NOSCRIPT")) continue;
+				const hay = cs ? (node.nodeValue || "") : (node.nodeValue || "").toLowerCase();
+				if (!hay || hay.indexOf(needle) === -1) continue;
+				let idx = 0;
+				const step = needle.length || 1;
+				while ((idx = hay.indexOf(needle, idx)) !== -1) { total++; idx += step; if (total > 10000) return total; }
+			}
+			return total;
+		} catch (e) { return 0; }
+	}
+	if (!q) {
+		try { const s = window.getSelection(); if (s) s.removeAllRanges(); } catch (e) {}
+		window.__ocodeFind = null;
+		return {found: false, active: 0, total: 0};
+	}
+	let total;
+	if (isNew) { total = countTotal(q, caseSensitive); window.__ocodeFind = {key: key, total: total, index: 0}; }
+	else { total = prev.total; }
+	let found = false;
+	try { found = window.find(q, caseSensitive, backwards, true, false, true, false); } catch (e) { found = false; }
+	const st = window.__ocodeFind;
+	if (found) {
+		if (total <= 0) { st.total = 1; total = 1; }
+		if (isNew) { st.index = 1; }
+		else if (!backwards) { st.index = (st.index %% Math.max(1, total)) + 1; }
+		else { st.index = ((st.index - 2 + total) %% Math.max(1, total)) + 1; }
+	}
+	return {found: found, active: st.index, total: total};
+})()`
+
+// findClearExpr removes the find selection and drops the remembered query so
+// the next find starts fresh at "1 of N".
+const findClearExpr = `(() => { try { const s = window.getSelection(); if (s) s.removeAllRanges(); } catch (e) {} window.__ocodeFind = null; return true; })()`
+
+// findExpr builds the Runtime.evaluate expression for one find step.
+// queryJSON is the JSON-encoded query (safe JS string literal).
+func findExpr(query string, backwards, caseSensitive bool) (string, error) {
+	qJSON, err := json.Marshal(query)
+	if err != nil {
+		return "", err
+	}
+	cs := "false"
+	if caseSensitive {
+		cs = "true"
+	}
+	bw := "false"
+	if backwards {
+		bw = "true"
+	}
+	return fmt.Sprintf(findExprTemplate, string(qJSON), cs, bw), nil
+}
+
+// Find runs one find-in-page step in the remote page.
+func (t *Target) Find(ctx context.Context, query string, backwards, caseSensitive bool) (FindResult, error) {
+	var out FindResult
+	expr, err := findExpr(query, backwards, caseSensitive)
+	if err != nil {
+		return out, err
+	}
+	var res struct {
+		Result struct {
+			Value FindResult `json:"value"`
+		} `json:"result"`
+	}
+	if err := t.conn.Call(ctx, t.sessionID, "Runtime.evaluate",
+		map[string]any{"expression": expr, "returnByValue": true}, &res); err != nil {
+		return out, err
+	}
+	return res.Result.Value, nil
+}
+
+// FindClear clears the find selection/state in the remote page.
+func (t *Target) FindClear(ctx context.Context) error {
+	return t.conn.Call(ctx, t.sessionID, "Runtime.evaluate",
+		map[string]any{"expression": findClearExpr, "returnByValue": true}, nil)
 }
 
 func (t *Target) Detach() {

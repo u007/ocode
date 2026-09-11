@@ -10,6 +10,7 @@ import (
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/skill"
+	"github.com/u007/ocode/internal/tool"
 	"github.com/u007/ocode/internal/tui/fastviewport"
 
 	"charm.land/bubbles/v2/textarea"
@@ -57,6 +58,14 @@ func TestLookupCommandResolvesAliases(t *testing.T) {
 
 	if got := lookupCommand("/export-claude"); got == nil || got.name != "/export-claude" {
 		t.Fatalf("expected /export-claude to resolve to itself, got %#v", got)
+	}
+
+	if got := lookupCommand("/tools"); got == nil || got.name != "/tools" {
+		t.Fatalf("expected /tools to resolve to /tools, got %#v", got)
+	}
+
+	if got := lookupCommand("/tool"); got == nil || got.name != "/tools" {
+		t.Fatalf("expected /tool to resolve to /tools, got %#v", got)
 	}
 }
 
@@ -116,6 +125,10 @@ func TestSlashAutocompleteResolvesCommand(t *testing.T) {
 		t.Fatalf("expected /m to resolve to /models, got %#v", got)
 	}
 
+	if got := autocompleteSlashInput(&m, "/tool"); len(got) == 0 || got[0] != "/tools" {
+		t.Fatalf("expected /tool to resolve to /tools, got %#v", got)
+	}
+
 	got := autocompleteSlashInput(&m, "/models ")
 	if len(got) == 0 {
 		t.Fatalf("expected /models autocomplete to return at least one model, got empty")
@@ -145,6 +158,22 @@ func TestTabOnModelOpensPicker(t *testing.T) {
 	got := updated.(model)
 	if !got.showPicker {
 		t.Fatal("expected tab on /models to open picker")
+	}
+}
+
+func TestToolsListCmdReturnsListMsg(t *testing.T) {
+	cmd := runCliToolsCmd(nil)
+	if cmd == nil {
+		t.Fatal("expected /tools list to return a command")
+	}
+	msg := cmd()
+	if _, ok := msg.(clitoolListMsg); !ok {
+		t.Fatalf("expected clitoolListMsg, got %T", msg)
+	}
+
+	m := &model{}
+	if cmd := runToolsCmd(m, nil); cmd == nil {
+		t.Fatal("expected runToolsCmd with no args to return a command")
 	}
 }
 
@@ -418,6 +447,78 @@ func TestLocalModelAndAutoContinueBypassBusyQueue(t *testing.T) {
 	got := updated.(*model)
 	if len(got.queuedItems) != 1 || got.queuedItems[0].text != "/doc-sync" {
 		t.Fatalf("control /doc-sync should still queue while streaming, got %#v", got.queuedItems)
+	}
+}
+
+// TestToolsBypassBusyQueue guards that /tools, /tool, and /plugin run
+// immediately while the agent streams. They are local detection/install
+// commands (PATH probes + package-manager tea.Cmd work) that never touch the
+// in-flight turn's callbacks. Before the instant fix, `/tools eza` queued
+// silently mid-stream and appeared to do nothing.
+func TestToolsBypassBusyQueue(t *testing.T) {
+	for _, command := range []string{
+		"/tools",
+		"/tools eza",
+		"/tool",
+		"/plugin",
+		"/plugin tools",
+		"/plugin tools eza",
+	} {
+		m := model{
+			width:     80,
+			height:    20,
+			input:     textarea.New(),
+			viewport:  fastviewport.New(80, 20),
+			streaming: true,
+			config:    &config.Config{},
+		}
+
+		updated, _ := m.handleCommand(command)
+		got := updated.(*model)
+		if len(got.queuedItems) != 0 {
+			t.Fatalf("expected %s to run immediately while streaming, got queued %#v", command, got.queuedItems)
+		}
+		if len(got.messages) == 0 || got.messages[0].role != roleUser || got.messages[0].text != command {
+			t.Fatalf("expected %s to be recorded immediately, got %#v", command, got.messages)
+		}
+	}
+
+	// Control: a mutating non-instant command still queues while streaming.
+	m := model{
+		streaming: true,
+		input:     textarea.New(),
+	}
+	updated, _ := m.handleCommand("/doc-sync")
+	got := updated.(*model)
+	if len(got.queuedItems) != 1 || got.queuedItems[0].text != "/doc-sync" {
+		t.Fatalf("control /doc-sync should still queue while streaming, got %#v", got.queuedItems)
+	}
+}
+
+// TestToolsSlashFormShowsUsage guards that the undocumented `/tools/eza
+// install` slash form is rejected with a visible usage message — never
+// silent, never "Unknown command" confusion.
+func TestToolsSlashFormShowsUsage(t *testing.T) {
+	m := model{
+		width:    80,
+		height:   20,
+		input:    textarea.New(),
+		viewport: fastviewport.New(80, 20),
+		config:   &config.Config{},
+	}
+	updated, _ := m.handleCommand("/tools/eza install")
+	got := updated.(*model)
+	if len(got.queuedItems) != 0 {
+		t.Fatalf("slash form must not queue, got %#v", got.queuedItems)
+	}
+	found := false
+	for _, msg := range got.messages {
+		if msg.role == roleAssistant && strings.Contains(msg.text, "Usage: /tools <name>") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected visible /tools usage message, got %#v", got.messages)
 	}
 }
 
@@ -1362,4 +1463,93 @@ func TestLocalModelNeedsWarmRetriesAfterStaleStoppedRecord(t *testing.T) {
 	// Leave the shared in-process instance map in a neutral state so other
 	// tests in this package don't observe the record.
 	discovery.SetModelInstanceStateForTest(modelID, discovery.InstanceStopped)
+}
+
+// TestAddDirBypassesBusyQueue guards that /add-dir and /add-dirs run
+// immediately while the agent is streaming or compacting. They are
+// synchronous local scope mutations (runtime allowlist + persisted config)
+// that never touch the in-flight turn's callbacks, so queuing them forces
+// the user to wait for the turn to end before unblocking an out-of-scope
+// path prompt.
+func TestAddDirBypassesBusyQueue(t *testing.T) {
+	for _, cmd := range []string{"/add-dir", "/add-dirs"} {
+		extra := t.TempDir()
+		workDir := t.TempDir()
+		// Isolate HOME so SaveExtraAllowedPath does not touch real config.
+		t.Setenv("HOME", t.TempDir())
+		config.SetWorkDir(workDir)
+		t.Cleanup(func() {
+			config.SetWorkDir("")
+			tool.RemoveExtraAllowedPath(extra)
+		})
+
+		m := model{
+			width:     80,
+			height:    20,
+			input:     newTestTextarea(),
+			viewport:  fastviewport.New(80, 20),
+			workDir:   workDir,
+			streaming: true,
+			config:    &config.Config{},
+		}
+		updated, _ := m.handleCommand(cmd + " " + extra)
+		got := derefTestModel(t, updated)
+		if len(got.queuedItems) != 0 {
+			t.Fatalf("expected %s to run immediately while streaming, got queued %#v", cmd, got.queuedItems)
+		}
+		if !tool.HasExtraAllowedPath(extra) {
+			t.Fatalf("expected runtime allowlist to contain %q after %s", extra, cmd)
+		}
+		if len(got.messages) == 0 || got.messages[0].role != roleUser {
+			t.Fatalf("expected %s to be recorded immediately, got %#v", cmd, got.messages)
+		}
+		found := false
+		for _, msg := range got.messages {
+			if msg.role == roleAssistant && strings.Contains(msg.text, "extra allowed paths") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected %s confirmation message, got %#v", cmd, got.messages)
+		}
+	}
+
+	// Control: a mutating non-instant command still queues while streaming.
+	m := model{
+		streaming: true,
+		input:     newTestTextarea(),
+	}
+	updated, _ := m.handleCommand("/doc-sync")
+	got := derefTestModel(t, updated)
+	if len(got.queuedItems) != 1 || got.queuedItems[0].text != "/doc-sync" {
+		t.Fatalf("control /doc-sync should still queue while streaming, got %#v", got.queuedItems)
+	}
+}
+
+// TestAddDirBypassesCompactingQueue guards the same immediacy while the
+// agent is compacting rather than streaming.
+func TestAddDirBypassesCompactingQueue(t *testing.T) {
+	extra := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	config.SetWorkDir(workDir)
+	t.Cleanup(func() {
+		config.SetWorkDir("")
+		tool.RemoveExtraAllowedPath(extra)
+	})
+
+	m := model{
+		width:      80,
+		height:     20,
+		input:      newTestTextarea(),
+		viewport:   fastviewport.New(80, 20),
+		workDir:    workDir,
+		compacting: true,
+		config:     &config.Config{},
+	}
+	updated, _ := m.handleCommand("/add-dir " + extra)
+	got := derefTestModel(t, updated)
+	if len(got.queuedItems) != 0 {
+		t.Fatalf("expected /add-dir to run immediately while compacting, got queued %#v", got.queuedItems)
+	}
 }

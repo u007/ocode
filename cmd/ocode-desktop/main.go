@@ -246,7 +246,7 @@ func main() {
 	// which closes the active session tab — and Cmd/Ctrl+Q asks for
 	// confirmation before quitting. The menu needs the window reference for
 	// the confirmation dialog, so it is built after window creation.
-	app.Menu.SetApplicationMenu(buildAppMenu(app, window))
+	app.Menu.SetApplicationMenu(buildAppMenu(app, window, handle))
 
 	// Closing the window quits the app. Without this, the system tray below
 	// keeps the process (and its in-process server) alive after the window
@@ -289,7 +289,7 @@ func main() {
 		}),
 		application.NewMenuItemSeparator(),
 		application.NewMenuItem("Quit").OnClick(func(ctx *application.Context) {
-			app.Quit()
+			confirmQuit(app, window, handle)
 		}),
 	))
 
@@ -380,9 +380,9 @@ func desktopShutdownTimeout() time.Duration {
 //
 // The standard Edit/View/Window menus are kept for text editing (Cmd+C/V),
 // reload/devtools, and window management.
-func buildAppMenu(app *application.App, window *application.WebviewWindow) *application.Menu {
+func buildAppMenu(app *application.App, window *application.WebviewWindow, handle *desktop.Handle) *application.Menu {
 	menu := application.NewMenu()
-	quitHandler := rapidQuitHandler(app, window)
+	quitHandler := rapidQuitHandler(app, window, handle)
 
 	// macOS application menu (first menu, named after the app).
 	if runtime.GOOS == "darwin" {
@@ -484,7 +484,7 @@ const rapidQuitThreshold = 1500 * time.Millisecond
 // rapidQuitHandler returns a quit handler that quits immediately if invoked
 // twice within rapidQuitThreshold, and otherwise shows the confirmation
 // dialog (see confirmQuit).
-func rapidQuitHandler(app *application.App, window *application.WebviewWindow) func() {
+func rapidQuitHandler(app *application.App, window *application.WebviewWindow, handle *desktop.Handle) func() {
 	var mu sync.Mutex
 	var lastPress time.Time
 	return func() {
@@ -498,22 +498,57 @@ func rapidQuitHandler(app *application.App, window *application.WebviewWindow) f
 			app.Quit()
 			return
 		}
-		confirmQuit(app, window)
+		confirmQuit(app, window, handle)
 	}
 }
 
 // confirmQuit asks for explicit confirmation before quitting. Quit is
 // cancelled by default (Enter/Escape dismisses safely); the app only exits
 // when the user clicks the "Quit" button.
-func confirmQuit(app *application.App, window *application.WebviewWindow) {
+func confirmQuit(app *application.App, window *application.WebviewWindow, handle *desktop.Handle) {
+	message := "Are you sure you want to quit ocode?"
+	title := "Quit ocode?"
+	buttonLabel := "Quit"
+
+	// Build graceful-shutdown status from the live server state.
+	if handle != nil && handle.Srv != nil {
+		runs := handle.Srv.RunStates()
+		pendingAsks := handle.Srv.PendingPermissionAsks()
+		activeRuns := 0
+		runNames := []string{}
+		for _, r := range runs {
+			if !r.Ended && !r.Failed {
+				activeRuns++
+				runNames = append(runNames, r.Name)
+			}
+		}
+		if activeRuns > 0 || pendingAsks > 0 {
+			title = "Graceful shutdown — still working"
+			buttonLabel = "Force Close"
+			parts := []string{}
+			if activeRuns > 0 {
+				parts = append(parts, fmt.Sprintf("%d active agent run(s)", activeRuns))
+				for _, n := range runNames {
+					if n != "" {
+						parts = append(parts, fmt.Sprintf("  • %s", n))
+					}
+				}
+			}
+			if pendingAsks > 0 {
+				parts = append(parts, fmt.Sprintf("%d session(s) waiting for permission approval", pendingAsks))
+			}
+			message = strings.Join(parts, "\n")
+		}
+	}
+
 	dlg := app.Dialog.Question().
-		SetTitle("Quit ocode?").
-		SetMessage("Are you sure you want to quit ocode?").
+		SetTitle(title).
+		SetMessage(message).
 		AttachToWindow(window)
 	cancel := dlg.AddButton("Cancel")
 	cancel.SetAsCancel()
 	cancel.SetAsDefault()
-	dlg.AddButton("Quit").OnClick(func() {
+	dlg.AddButton(buttonLabel).OnClick(func() {
 		app.Quit()
 	})
 	dlg.Show()

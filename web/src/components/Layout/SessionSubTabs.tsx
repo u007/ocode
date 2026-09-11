@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { MessageSquare, Bot, History, ScrollText, Activity } from "lucide-react";
+import { MessageSquare, Bot, History, ScrollText, Activity, Eye } from "lucide-react";
 import { useProjectState, type SessionSubTabId } from "../../stores/projectStore";
 import { getSessionSlice, useChatSelector } from "../../stores/chatStore";
 
@@ -9,6 +9,7 @@ const subTabs: { id: SessionSubTabId; label: string; icon: typeof MessageSquare 
   { id: "changes", label: "Changes", icon: History },
   { id: "logs", label: "Logs", icon: ScrollText },
   { id: "status", label: "Status", icon: Activity },
+  { id: "preview", label: "Preview", icon: Eye },
 ];
 
 export default function SessionSubTabs() {

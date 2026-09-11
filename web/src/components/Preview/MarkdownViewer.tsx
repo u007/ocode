@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import { api } from "../../api/client";
 import MermaidViewer from "./MermaidViewer";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
+import FileEditor from "../Files/FileEditor";
 
 function extractMermaid(md: string): string | null {
   const m = md.match(/```mermaid\s+([\s\S]*?)```/);
@@ -26,16 +27,23 @@ export default function MarkdownViewer({
 }) {
   const [md, setMd] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isBinary, setIsBinary] = useState(false);
+  const [forceEdit, setForceEdit] = useState(false);
   const { ref, sel, clear } = usePreviewSelection<HTMLDivElement>(() => "doc");
 
   useEffect(() => {
     let cancelled = false;
     setMd(null);
     setError(null);
+    setIsBinary(false);
+    setForceEdit(false);
     api
       .getFileContent(path, projectRoot)
       .then((c) => {
-        if (!cancelled) setMd(c);
+        if (!cancelled) {
+          setIsBinary(c.is_binary);
+          setMd(c.content);
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -48,7 +56,22 @@ export default function MarkdownViewer({
   const diagram = useMemo(() => (md ? extractMermaid(md) : null), [md]);
 
   if (error) return <div className="p-4 text-xs text-red-400">Load failed: {error}</div>;
-  if (md === null) return <div className="p-4 text-xs text-muted-foreground">Loading…</div>;
+  if (isBinary && !forceEdit) return (
+    <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+      <div className="text-2xl font-bold text-amber-500">Binary File</div>
+      <p className="text-sm text-muted-foreground">This file contains binary data and cannot be previewed as markdown.</p>
+      <button type="button" onClick={() => setForceEdit(true)} className="rounded border border-border px-3 py-1.5 text-sm hover:bg-accent">Edit as text</button>
+    </div>
+  );
+  if (md === null && !isBinary) return <div className="p-4 text-xs text-muted-foreground">Loading…</div>;
+
+  if (forceEdit) {
+    return (
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <FileEditor path={path} projectRoot={projectRoot} content={md || ""} language="plaintext" />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">

@@ -14,7 +14,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from "vitest
 import { render, screen, fireEvent, act, within, cleanup } from "@testing-library/react";
 import { useLayoutEffect, useEffect } from "react";
 import ChatPanel from "./ChatPanel";
-import { ChatProvider, useChatDispatch } from "../../stores/chatStore";
+import { ChatProvider, useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import type { Message } from "../../api/types";
 
 // --- Mock the API so the initial load + prepend pagination are controllable.
@@ -742,6 +742,47 @@ describe("ChatPanel", () => {
     expect(groupedItem?.textContent).toContain('content of a.go');
     expect(groupedItem?.textContent).toContain('b.go');
     expect(toolHeaders.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("shows an 'Open question' button on a pending question call that re-arms the dialog", async () => {
+    const prompt = `QUESTION_PROMPT:\n${JSON.stringify([
+      { header: "Deploy target", question: "Where?", options: [{ label: "Staging", description: "" }] },
+    ])}\nWAITING_FOR_USER_RESPONSE`;
+    const msgs: Message[] = [
+      mk("user", "deploy"),
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "q-1", function: { name: "question", arguments: "{}" } }],
+      },
+      { role: "tool", content: prompt, tool_call_id: "q-1" },
+    ];
+    let pending: unknown = null;
+    let probeDispatch: ReturnType<typeof useChatDispatch> | null = null;
+    function Probe() {
+      probeDispatch = useChatDispatch();
+      pending = useChatSelector((s) => getSessionSlice(s, "sess-q").pendingQuestion);
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <LiveSeed sessionId="sess-q" messages={msgs} />
+        <ChatPanel sessionId="sess-q" />
+        <Probe />
+      </ChatProvider>,
+    );
+    await tick();
+    await flushRAF();
+    // Simulate the dialog being lost while the ask is still pending (a
+    // reconcile/reload that dropped it); the card offers to re-open it.
+    act(() => probeDispatch!({ type: "QUESTION_RESOLVED", sessionId: "sess-q" }));
+    expect(pending).toBeNull();
+    const btn = screen.getByRole("button", { name: "Open question" });
+    fireEvent.click(btn);
+    expect(pending).toEqual({
+      request_id: "q-1",
+      questions: [{ header: "Deploy target", question: "Where?", options: [{ label: "Staging", description: "" }] }],
+    });
   });
 
   it("renders orphan tool result as single when parent not loaded", async () => {

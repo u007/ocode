@@ -88,7 +88,7 @@ func FindChrome(configured string) (string, error) {
 }
 
 func chromeArgs(tmpDir string) []string {
-	return chromeArgsFor(tmpDir, "")
+	return chromeArgsFor(tmpDir, "", true)
 }
 
 // chromeArgsFor builds the Chrome argument list. When extDir points at an
@@ -101,7 +101,9 @@ func chromeArgs(tmpDir string) []string {
 // not provide — see htr.go for the documented limits. Branded Google Chrome
 // 137+ ignores --load-extension; Chromium/Canary/Edge/Brave still honor it
 // (a warning is logged at launch).
-func chromeArgsFor(tmpDir, extDir string) []string {
+// noSandbox adds --no-sandbox (browser.no_sandbox in ocode config, default
+// true for remote/WSL/container compatibility).
+func chromeArgsFor(tmpDir, extDir string, noSandbox bool) []string {
 	args := []string{
 		"--headless=new",
 		"--remote-debugging-pipe",
@@ -113,6 +115,9 @@ func chromeArgsFor(tmpDir, extDir string) []string {
 		args = append(args, "--load-extension="+extDir)
 	} else {
 		args = append(args, "--disable-extensions")
+	}
+	if noSandbox {
+		args = append(args, "--no-sandbox")
 	}
 	return append(args,
 		"--disable-background-networking",
@@ -176,12 +181,12 @@ func launchChrome(ctx context.Context, chromePath string, sup *tool.ProcessSuper
 	if len(extDir) > 0 {
 		ext = extDir[0]
 	}
-	return launchChromeWithOptions(ctx, chromePath, sup, lg, ext, "", "", "")
+	return launchChromeWithOptions(ctx, chromePath, sup, lg, ext, "", "", "", true)
 }
 
 // profileDir is the persistent --user-data-dir ("" = ephemeral temp profile);
 // see prepareProfileDir for lock handling.
-func launchChromeWithOptions(ctx context.Context, chromePath string, sup *tool.ProcessSupervisor, lg *log.Logger, ext, socketPath, nativeHostName, profileDir string) (*Conn, <-chan int, func(), error) {
+func launchChromeWithOptions(ctx context.Context, chromePath string, sup *tool.ProcessSupervisor, lg *log.Logger, ext, socketPath, nativeHostName, profileDir string, noSandbox bool) (*Conn, <-chan int, func(), error) {
 	tmpDir, cleanupDir, err := prepareProfileDir(profileDir, lg)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("launch failed: %w", err)
@@ -218,7 +223,7 @@ func launchChromeWithOptions(ctx context.Context, chromePath string, sup *tool.P
 			lg.Printf("browse: branded Google Chrome may ignore --load-extension (removed 2025); prefer Chromium/Canary/Edge for extension preload: %s", ext)
 		}
 	}
-	cmd := exec.Command(chromePath, chromeArgsFor(tmpDir, ext)...)
+	cmd := exec.Command(chromePath, chromeArgsFor(tmpDir, ext, noSandbox)...)
 	if socketPath != "" {
 		cmd.Env = append(os.Environ(), "HTR_SOCKET_PATH="+socketPath)
 		if nativeHostName != "" {

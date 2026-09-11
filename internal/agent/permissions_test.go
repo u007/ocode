@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/paths"
+	"github.com/u007/ocode/internal/shell/sandbox"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -271,10 +273,13 @@ func TestClassifiedRootsExtraPathsWritable(t *testing.T) {
 	}
 }
 
-// TestClassifiedRootsDataDirReadOnly proves the global data dir (auth.json,
-// sessions, memory) is classified read-only — write-integrity of the auth and
-// session store is preserved under sandbox (review point 5).
-func TestClassifiedRootsDataDirReadOnly(t *testing.T) {
+// TestClassifiedRootsDataDirWritable proves the global shared data dir
+// (~/.local/share/opencode, including project/** sessions, snapshots,
+// md-summaries, memory) is classified writable so sandboxed bash has full
+// access to opencode shared dir and per-project state. auth.json lives here
+// too but stays protected by the permission-layer Ask gate
+// (sandboxSensitivePath), not by OS read-only confinement.
+func TestClassifiedRootsDataDirWritable(t *testing.T) {
 	dataDir, err := paths.GlobalDataDir()
 	if err != nil {
 		t.Fatal(err)
@@ -285,8 +290,8 @@ func TestClassifiedRootsDataDirReadOnly(t *testing.T) {
 	for _, spec := range pm.AllowedRootsClassified() {
 		if spec.Path == resolvedForScopeCheckPath(dataDir) {
 			found = true
-			if spec.Writable {
-				t.Fatalf("data dir %q classified writable, want read-only", spec.Path)
+			if !spec.Writable {
+				t.Fatalf("data dir %q classified read-only, want writable (shared + project/** access)", spec.Path)
 			}
 		}
 	}
@@ -2253,6 +2258,67 @@ func TestVerifyAutoGrantAcceptsGlobalConfigDir(t *testing.T) {
 	})
 }
 
+func TestAllowedRootsIncludesGitIgnoreFiles(t *testing.T) {
+	isolateConfigHome(t)
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+
+	// Every fixed candidate is in scope as an exact file.
+	files := paths.GitIgnoreFiles()
+	if len(files) == 0 {
+		t.Fatal("GitIgnoreFiles() returned no candidates")
+	}
+	for _, f := range files {
+		if !pm.IsPathWithinAllowedRoots(f) {
+			t.Errorf("expected %q within allowed roots (global git ignore)", f)
+		}
+	}
+
+	// Exact-file scope: the parent ~/.config, $HOME, and sibling dirs stay out.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		home,
+		filepath.Join(home, ".config"),
+		filepath.Join(home, ".config", "other-app", "file"),
+	} {
+		if pm.IsPathWithinAllowedRoots(p) {
+			t.Errorf("path %q must stay OUTSIDE allowed roots (git-ignore scope is exact files)", p)
+		}
+	}
+}
+
+func TestClassifiedRootsGitIgnoreFilesWritable(t *testing.T) {
+	isolateConfigHome(t)
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+
+	files := paths.GitIgnoreFiles()
+	if len(files) == 0 {
+		t.Fatal("GitIgnoreFiles() returned no candidates")
+	}
+	seen := map[string]bool{}
+	for _, spec := range pm.AllowedRootsClassified() {
+		seen[spec.Path] = spec.Writable
+	}
+	for _, f := range files {
+		resolved, err := filepath.EvalSymlinks(f)
+		if err != nil {
+			resolved = filepath.Clean(f)
+		}
+		writable, ok := seen[resolved]
+		if !ok {
+			t.Errorf("git ignore file %q (%q) missing from classified roots", f, resolved)
+			continue
+		}
+		if !writable {
+			t.Errorf("git ignore file %q classified read-only, want writable", resolved)
+		}
+	}
+}
+
 func TestWebfetchLocalhostAutoAllow(t *testing.T) {
 	cases := []struct {
 		url  string
@@ -2346,11 +2412,12 @@ func TestTempRootAliasesResolveToRoots(t *testing.T) {
 // Part 02 Task 5 — sandbox sensitive-set stays authoritative (Ask, not auto-allow)
 //
 // Decision 3/9: in sandbox mode the YOLO-style prompt-bypass does NOT extend to
-// the sensitive set. auth.json (read+write), ocode config-dir/data-dir writes,
+// the sensitive set. auth.json (read+write), ocode config-dir writes,
 // and ~/.ssh/.env (read+write) all resolve to Ask and route through the
-// auto-permission judge when auto is enabled (else a human prompt). Only the
-// OS write-confinement (approved Ask -> run wrapped) and the permit of ordinary
-// workspace commands change.
+// auto-permission judge when auto is enabled (else a human prompt). Ordinary
+// writes under the shared data dir (including project/**) auto-allow; only
+// auth.json inside it stays Ask. Only the OS write-confinement (approved Ask
+// -> run wrapped) and the permit of ordinary workspace commands change.
 // ---------------------------------------------------------------------------
 
 // TestDecideSandboxAuthJsonAsks: reading or writing auth.json (ocode's token)
@@ -2379,6 +2446,35 @@ func TestDecideSandboxAuthJsonAsks(t *testing.T) {
 		dec := pm.Decide("bash", json.RawMessage(`{"command":"`+cmd+`"}`))
 		if dec.Level != PermissionAsk {
 			t.Errorf("sandbox command %q = %s, want Ask (auth.json sensitive)", cmd, dec.Level)
+		}
+	}
+}
+
+// TestDecideSandboxAuthProfilesJsonAsks mirrors TestDecideSandboxAuthJsonAsks
+// for the ocode-only per-profile credentials sidecar (auth.profiles.json):
+// same sensitivity class as auth.json, just a different basename and a
+// different parent dir (OcodeGlobalDataDir, not GlobalDataDir).
+func TestDecideSandboxAuthProfilesJsonAsks(t *testing.T) {
+	isolateConfigHome(t)
+	ocodeDataDir, err := paths.OcodeGlobalDataDir()
+	if err != nil {
+		t.Fatalf("OcodeGlobalDataDir: %v", err)
+	}
+	profilesPath := filepath.Join(ocodeDataDir, "auth.profiles.json")
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	pm.SetMode(PermissionModeSandbox)
+
+	cases := []string{
+		"cat " + profilesPath,
+		"cat > " + profilesPath,
+		"tee " + profilesPath + " </dev/null",
+	}
+	for _, cmd := range cases {
+		dec := pm.Decide("bash", json.RawMessage(`{"command":"`+cmd+`"}`))
+		if dec.Level != PermissionAsk {
+			t.Errorf("sandbox command %q = %s, want Ask (auth.profiles.json sensitive)", cmd, dec.Level)
 		}
 	}
 }
@@ -2497,6 +2593,138 @@ func TestDecideSandboxNonSensitiveStillAutoAllows(t *testing.T) {
 	dec := pm.Decide("bash", json.RawMessage(`{"command":"echo hi > notes.txt && cat notes.txt"}`))
 	if dec.Level != PermissionAllow {
 		t.Fatalf("sandbox ordinary command = %s, want Allow", dec.Level)
+	}
+}
+
+// TestDecideSandboxSharedProjectWritesAllow: ordinary writes under the shared
+// data dir (GlobalDataDir/project/<slug>/** — sessions, snapshots,
+// md-summaries, memory) auto-allow in sandbox, while auth.json in the same
+// dir stays Ask (covered by TestDecideSandboxAuthJsonAsks).
+func TestDecideSandboxSharedProjectWritesAllow(t *testing.T) {
+	dataDir, err := paths.GlobalDataDir()
+	if err != nil {
+		t.Fatalf("GlobalDataDir: %v", err)
+	}
+	projectFile := filepath.Join(dataDir, "project", "testslug123", "sessions", "ses_test.json")
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	pm.SetMode(PermissionModeSandbox)
+
+	for _, cmd := range []string{
+		"echo hi > " + projectFile,
+		"cat " + projectFile,
+		"echo hi > " + filepath.Join(dataDir, "memory", "global.md"),
+	} {
+		dec := pm.Decide("bash", json.RawMessage(`{"command":"`+cmd+`"}`))
+		if dec.Level != PermissionAllow {
+			t.Errorf("sandbox shared/project command %q = %s, want Allow", cmd, dec.Level)
+		}
+	}
+
+	// Config-dir writes stay Ask (self-escalation guard).
+	cfgDir, err := paths.GlobalConfigDir()
+	if err != nil {
+		t.Fatalf("GlobalConfigDir: %v", err)
+	}
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"echo x > `+filepath.Join(cfgDir, "ocodeconfig.json")+`"}`))
+	if dec.Level != PermissionAsk {
+		t.Errorf("sandbox config-dir write = %s, want Ask (self-escalation guard)", dec.Level)
+	}
+}
+
+// TestSandboxOSBoundaryGrantsSharedProjectWrites verifies the OS-level
+// boundary end to end: the shared data dir from AllowedRootsClassified flows
+// through sandbox.NewRootSet into the real backend wrapper, and a sandboxed
+// command can actually create files under GlobalDataDir/project/** (and the
+// sibling memory dir). This is the write-integrity proof that a Writable:true
+// classification plus an Allow decision are not enough on their own — the
+// backend profile must permit the write at the OS level.
+//
+// Skips when no backend is available (Windows, or Seatbelt/Landlock/bwrap
+// missing): on those platforms Decide degrades to normal prompting and there
+// is no OS boundary to verify.
+func TestSandboxOSBoundaryGrantsSharedProjectWrites(t *testing.T) {
+	if !sandbox.Supported() {
+		t.Skip("no sandbox backend on this GOOS")
+	}
+	w := sandbox.New()
+	if !w.Available() {
+		t.Skip("sandbox backend not available (sandbox-exec/Landlock/bwrap missing)")
+	}
+	dataDir, err := paths.GlobalDataDir()
+	if err != nil {
+		t.Fatalf("GlobalDataDir: %v", err)
+	}
+	// This test writes probe files into the REAL shared store, so it must not
+	// run nested inside an outer sandbox (the dev shell itself may be
+	// sandboxed, e.g. an outer Seatbelt profile denying writes to the data
+	// dir). Fail fast with a skip instead of a misleading boundary failure.
+	outerProbe := filepath.Join(dataDir, ".sandbox-outer-probe")
+	if f, err := os.OpenFile(outerProbe, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600); err != nil {
+		t.Skipf("outer environment cannot write data dir %q (err %v); skipping OS-boundary verification", dataDir, err)
+	} else {
+		f.Close()
+		os.Remove(outerProbe)
+	}
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	roots := sandbox.NewRootSet(pm.AllowedRootsClassified())
+
+	// The shared data dir's contents must survive into the OS boundary as
+	// writable — but auth.json is a protected carve-out (see NewRootSet), so
+	// the data dir itself is expanded into its other entries rather than
+	// granted wholesale. Assert the carve-out held: some writable root lives
+	// under the data dir (the expansion happened), but none of them is (or
+	// contains as an ancestor-equal path) auth.json itself.
+	dataResolved, err := filepath.EvalSymlinks(dataDir)
+	if err != nil {
+		dataResolved = filepath.Clean(dataDir)
+	}
+	authResolved := filepath.Join(dataResolved, "auth.json")
+	foundChild := false
+	for _, r := range roots.WritableRoots {
+		if r == authResolved {
+			t.Fatalf("auth.json %q must never be an OS writable root; got %v", authResolved, roots.WritableRoots)
+		}
+		if rel, err := filepath.Rel(dataResolved, r); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+			foundChild = true
+		}
+	}
+	if !foundChild {
+		t.Fatalf("no writable root found under data dir %q; got %v", dataResolved, roots.WritableRoots)
+	}
+
+	// Write through the real wrapper into project/** and memory/: wrap a
+	// sandboxed `touch <target>` with the same wrapper + RootSet the bash tool
+	// uses, and require the file to exist afterwards. Probe files use a
+	// test-only slug subdir plus cleanup so the shared store is untouched.
+	projectFile := filepath.Join(dataDir, "project", "sandbox-boundary-probe", "probe.txt")
+	memoryFile := filepath.Join(dataDir, "memory", "sandbox-boundary-probe.txt")
+	t.Cleanup(func() {
+		os.Remove(projectFile)
+		os.Remove(filepath.Dir(projectFile))
+		os.Remove(memoryFile)
+	})
+	for _, target := range []string{projectFile, memoryFile} {
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			// Mkdir runs outside the sandbox (test setup, like the agent's own
+			// session-save path); only the file create below is sandboxed.
+			t.Fatalf("mkdir probe dir: %v", err)
+		}
+		os.Remove(target)
+		plain := exec.Command("bash", "-c", "touch "+strconv.Quote(target))
+		cmd, err := w.Wrap(plain, roots)
+		if err != nil {
+			t.Fatalf("sandbox wrap failed: %v", err)
+		}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("sandboxed write to %q failed: %v (output %q); writable roots %v", target, err, string(out), roots.WritableRoots)
+		}
+		if _, err := os.Stat(target); err != nil {
+			t.Fatalf("sandboxed write to %q left no file: %v", target, err)
+		}
 	}
 }
 

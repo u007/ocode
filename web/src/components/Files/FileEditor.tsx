@@ -30,6 +30,9 @@ interface FileEditorProps {
   path: string;
   projectRoot?: string;
   content: string;
+  /** Server-computed binary detection for `content`. When omitted, falls back
+   *  to a NUL-byte heuristic (callers that don't fetch via the files API). */
+  isBinary?: boolean;
   language?: string;
   onChange?: (value: string) => void;
   readOnly?: boolean;
@@ -110,6 +113,7 @@ function FileEditorImpl({
   path,
   projectRoot,
   content,
+  isBinary: isBinaryProp,
   language,
   onChange,
   readOnly = false,
@@ -141,7 +145,10 @@ function FileEditorImpl({
   // re-ran on save — so decorations never showed until you saved. Reading this
   // as a dependency re-triggers the decoration fetch once the instance is real.
   const [editorMountVersion, setEditorMountVersion] = useState(0);
+  // Binary / unsupported format detection
+  const [forceEdit, setForceEdit] = useState(false);
   const lang = language || extensionToLanguage(path);
+  const isBinary = isBinaryProp ?? (content !== null && content !== undefined && content.indexOf("\0") >= 0);
 
   // Refs for diff decoration cleanup
   const decorationIdsRef = useRef<string[]>([]);
@@ -828,24 +835,34 @@ function FileEditorImpl({
       {/* Editor help & shortcuts */}
       <EditorHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
 
-      {/* Monaco editor */}
-      <div className="flex-1 overflow-hidden">
-        <Editor
-          key={projectRoot ? `${projectRoot}::${path}` : path}
-          path={projectRoot ? `${projectRoot}::${path}` : path}
-          language={lang}
-          defaultValue={content}
-          onChange={stableOnChange}
-          onMount={handleEditorMount}
-          loading={
-            <div className="flex items-center justify-center h-full">
-              <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
-            </div>
-          }
-          options={editorOptions}
-          theme={persistedTheme}
-        />
-      </div>
+      {/* Binary / unsupported detection */}
+      {isBinary && !forceEdit && (
+        <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+          <div className="text-2xl font-bold text-amber-500">Binary File</div>
+          <p className="text-sm text-muted-foreground">This file contains binary data and cannot be edited as text.</p>
+          <Button onClick={() => setForceEdit(true)} variant="outline">Edit anyway</Button>
+          <p className="text-xs text-muted-foreground">Note: editing binary content as text cannot preserve original bytes when saved.</p>
+        </div>
+      )}
+      {(forceEdit || !isBinary) && (
+        <div className="flex-1 overflow-hidden">
+          <Editor
+            key={projectRoot ? `${projectRoot}::${path}` : path}
+            path={projectRoot ? `${projectRoot}::${path}` : path}
+            language={lang}
+            defaultValue={content}
+            onChange={stableOnChange}
+            onMount={handleEditorMount}
+            loading={
+              <div className="flex items-center justify-center h-full">
+                <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
+              </div>
+            }
+            options={editorOptions}
+            theme={persistedTheme}
+          />
+        </div>
+      )}
     </div>
   );
 }

@@ -15,6 +15,9 @@ export interface EditorTab {
   projectRoot?: string;
   content: string;
   originalContent: string;
+  /** Server-computed binary detection (bytes.IndexByte(data, 0) >= 0), from
+   *  the same /api/files/content response as `content`. */
+  isBinary: boolean;
   isDirty: boolean;
   diffVersion: number;
   /** The file changed (or vanished) on disk outside this app while this tab
@@ -73,7 +76,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     activeEditorTabIdRef.current = activeEditorTabId;
   }, [activeEditorTabId]);
 
-  const fetchFileContent = useCallback(async (path: string, projectRoot?: string): Promise<string> => {
+  const fetchFileContent = useCallback(async (path: string, projectRoot?: string): Promise<{ content: string; isBinary: boolean }> => {
     const query = new URLSearchParams({ path });
     if (projectRoot) query.set("project_root", projectRoot);
     const res = await fetch(apiPath(`/api/files/content?${query.toString()}`), {
@@ -81,7 +84,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     });
     if (!res.ok) throw new Error("Failed to load file");
     const data = await res.json();
-    return data.content as string;
+    return { content: data.content as string, isBinary: !!data.is_binary };
   }, []);
 
   const handleOpenFile = useCallback(async (path: string, projectRoot?: string) => {
@@ -100,7 +103,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     let tab: EditorTab;
     try {
       const disk = await fetchFileContent(path, projectRoot);
-      if (draft && draft.content !== disk) {
+      if (draft && draft.content !== disk.content) {
         // Unsaved edits survive the reload. If the on-disk content no longer
         // matches what the draft was edited against, the file moved under the
         // draft — flag it so the tab shows a conflict banner.
@@ -112,10 +115,11 @@ export function useEditorTabs(): UseEditorTabsResult {
           path,
           projectRoot,
           content: draft.content,
-          originalContent: disk,
+          originalContent: disk.content,
+          isBinary: disk.isBinary,
           isDirty: true,
           diffVersion: 0,
-          externalChange: draft.baseHash !== hashContent(disk),
+          externalChange: draft.baseHash !== hashContent(disk.content),
           includeInContext: true,
           baseHash: draft.baseHash,
         };
@@ -125,13 +129,14 @@ export function useEditorTabs(): UseEditorTabsResult {
           id,
           path,
           projectRoot,
-          content: disk,
-          originalContent: disk,
+          content: disk.content,
+          originalContent: disk.content,
+          isBinary: disk.isBinary,
           isDirty: false,
           diffVersion: 0,
           externalChange: false,
           includeInContext: true,
-          baseHash: hashContent(disk),
+          baseHash: hashContent(disk.content),
         };
       }
     } catch (err) {
@@ -152,6 +157,7 @@ export function useEditorTabs(): UseEditorTabsResult {
         projectRoot,
         content: draft.content,
         originalContent: "",
+        isBinary: false,
         isDirty: true,
         diffVersion: 0,
         externalChange: true,
@@ -392,7 +398,7 @@ export function useEditorTabs(): UseEditorTabsResult {
         setEditorTabs((prev) =>
           prev.map((t) =>
             t.id === id
-              ? { ...t, content: disk, originalContent: disk, isDirty: false, diffVersion: t.diffVersion + 1, externalChange: false, baseHash: hashContent(disk) }
+              ? { ...t, content: disk.content, originalContent: disk.content, isBinary: disk.isBinary, isDirty: false, diffVersion: t.diffVersion + 1, externalChange: false, baseHash: hashContent(disk.content) }
               : t,
           ),
         );
@@ -467,19 +473,19 @@ export function useEditorTabs(): UseEditorTabsResult {
         // Use baseHash for change detection so dirty tabs that haven't rebased
         // don't compare against a stale originalContent that was already
         // updated to the new disk.
-        const diskHash = hashContent(disk);
+        const diskHash = hashContent(disk.content);
         if (diskHash === tab.baseHash) return;
         setEditorTabs((prev) =>
           prev.map((t) => {
-            if (t.id !== tab.id || hashContent(disk) === t.baseHash) return t;
+            if (t.id !== tab.id || hashContent(disk.content) === t.baseHash) return t;
             if (!t.isDirty) {
-              return { ...t, content: disk, originalContent: disk, baseHash: diskHash, diffVersion: t.diffVersion + 1 };
+              return { ...t, content: disk.content, originalContent: disk.content, isBinary: disk.isBinary, baseHash: diskHash, diffVersion: t.diffVersion + 1 };
             }
             // Dirty: if external edit happens to match the buffer, resolve
             // to clean; otherwise keep the user's edits and flag conflict
             // without rebasing baseHash/originalContent so the save guard 409s.
-            if (t.content === disk) {
-              return { ...t, originalContent: disk, baseHash: diskHash, isDirty: false, externalChange: false, diffVersion: t.diffVersion + 1 };
+            if (t.content === disk.content) {
+              return { ...t, originalContent: disk.content, isBinary: disk.isBinary, baseHash: diskHash, isDirty: false, externalChange: false, diffVersion: t.diffVersion + 1 };
             }
             return { ...t, externalChange: true };
           }),
@@ -530,16 +536,16 @@ export function useEditorTabs(): UseEditorTabsResult {
       try {
         const disk = await fetchFileContent(tab.path, tab.projectRoot);
         if (cancelled) return;
-        const diskHash = hashContent(disk);
+        const diskHash = hashContent(disk.content);
         if (diskHash === tab.baseHash) return;
         setEditorTabs((prev) =>
           prev.map((t) => {
-            if (t.id !== tab.id || hashContent(disk) === t.baseHash) return t;
+            if (t.id !== tab.id || hashContent(disk.content) === t.baseHash) return t;
             if (!t.isDirty) {
-              return { ...t, content: disk, originalContent: disk, baseHash: diskHash, diffVersion: t.diffVersion + 1 };
+              return { ...t, content: disk.content, originalContent: disk.content, isBinary: disk.isBinary, baseHash: diskHash, diffVersion: t.diffVersion + 1 };
             }
-            if (t.content === disk) {
-              return { ...t, originalContent: disk, baseHash: diskHash, isDirty: false, externalChange: false, diffVersion: t.diffVersion + 1 };
+            if (t.content === disk.content) {
+              return { ...t, originalContent: disk.content, isBinary: disk.isBinary, baseHash: diskHash, isDirty: false, externalChange: false, diffVersion: t.diffVersion + 1 };
             }
             return { ...t, externalChange: true };
           }),

@@ -321,6 +321,90 @@ func sinkErrors(r *recordingSink) []string {
 // <select> popup as a separate OS widget the screencast never shows and CDP
 // key events never reach, so click + ArrowDown + Enter used to leave the
 // value unchanged. Gated on OCODE_CHROME_PATH like TestIntegrationRealChrome.
+func TestIntegrationFindInPage(t *testing.T) {
+	chromePath := os.Getenv("OCODE_CHROME_PATH")
+	if chromePath == "" {
+		t.Skip("OCODE_CHROME_PATH not set; skipping real-Chrome integration test")
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!doctype html><html><body><p id="p">alpha beta alpha gamma alpha</p></body></html>`)
+	}))
+	defer upstream.Close()
+
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 2 * time.Second})
+	m := NewManager(ManagerOptions{ChromePath: chromePath, Supervisor: sup})
+	defer func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer ccancel()
+		_ = m.Close(cctx)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	target, err := m.Attach(ctx, "tab:find", &recordingSink{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if err := target.Navigate(ctx, upstream.URL+"/"); err != nil {
+		t.Fatalf("Navigate: %v", err)
+	}
+	// Wait for the paragraph to render.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var res struct {
+			Result struct {
+				Value string `json:"value"`
+			} `json:"result"`
+		}
+		if err := target.conn.Call(ctx, target.sessionID, "Runtime.evaluate",
+			map[string]any{"expression": "document.getElementById('p') ? document.getElementById('p').innerText : ''", "returnByValue": true}, &res); err != nil {
+			t.Fatalf("Runtime.evaluate: %v", err)
+		}
+		if strings.Contains(res.Result.Value, "alpha") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("page did not render the find paragraph")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// First step finds and selects the first match.
+	got, err := target.Find(ctx, "alpha", false, false)
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if !got.Found || got.Total < 3 || got.Active != 1 {
+		t.Fatalf("Find first = %+v, want found with active=1 total>=3", got)
+	}
+	if sel, err := target.SelectionText(ctx); err != nil || sel != "alpha" {
+		t.Fatalf("SelectionText after find = %q, err=%v; want the selected match", sel, err)
+	}
+	// Next step advances the active index.
+	got, err = target.Find(ctx, "alpha", false, false)
+	if err != nil {
+		t.Fatalf("Find next: %v", err)
+	}
+	if !got.Found || got.Active != 2 {
+		t.Fatalf("Find next = %+v, want active=2", got)
+	}
+	// Missing query reports not-found.
+	got, err = target.Find(ctx, "zzz-no-such-text", false, false)
+	if err != nil {
+		t.Fatalf("Find missing: %v", err)
+	}
+	if got.Found {
+		t.Fatalf("Find missing = %+v, want found=false", got)
+	}
+	// Clear drops the selection.
+	if err := target.FindClear(ctx); err != nil {
+		t.Fatalf("FindClear: %v", err)
+	}
+	if sel, err := target.SelectionText(ctx); err != nil || sel != "" {
+		t.Fatalf("SelectionText after clear = %q, err=%v; want empty", sel, err)
+	}
+}
+
 func TestIntegrationSelectPickerInPage(t *testing.T) {
 	chromePath := os.Getenv("OCODE_CHROME_PATH")
 	if chromePath == "" {

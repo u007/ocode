@@ -138,6 +138,19 @@ func TestInstallUnknownTool(t *testing.T) {
 	if !strings.Contains(res.Err.Error(), "unknown tool") {
 		t.Fatalf("unexpected error: %v", res.Err)
 	}
+	if res.NoManager {
+		t.Fatal("unknown-tool failure must not set NoManager (hint is for missing managers only)")
+	}
+}
+
+func TestMissingManagerHintNonEmpty(t *testing.T) {
+	hint := MissingManagerHint()
+	if hint == "" {
+		t.Fatal("MissingManagerHint() must not be empty")
+	}
+	if !strings.Contains(hint, "No supported package manager found on PATH") {
+		t.Fatalf("hint missing expected prefix, got: %q", hint)
+	}
 }
 
 func TestManagerCommandInstallForms(t *testing.T) {

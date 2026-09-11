@@ -100,7 +100,7 @@ export interface ChromeViewportProps {
  *  are CSS pixels relative to the canvas rect (Chrome expects CSS px; the
  *  screencast frames are device px and are only used for the backing store). */
 export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = true }: ChromeViewportProps) {
-  const { send, status, error, onFrame, onFileChooser, onSelection } = useCdpSocket(stateKey, browseBase, true, active);
+  const { send, status, error, onFrame, onFileChooser, onSelection, onFindResult } = useCdpSocket(stateKey, browseBase, true, active);
   const actions = useBrowserActions();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // Invisible keyboard/IME target. A canvas cannot host an input method
@@ -142,6 +142,22 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressPointerId = useRef<number | null>(null);
   const longPressOrigin = useRef<{ x: number; y: number } | null>(null);
+  // Find-in-page bar (Chrome canvas has no native find UI).
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findCase, setFindCase] = useState(false);
+  const [findResult, setFindResult] = useState<{ found: boolean; active: number; total: number } | null>(null);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const findQueryRef = useRef("");
+  findQueryRef.current = findQuery;
+  const findCaseRef = useRef(false);
+  findCaseRef.current = findCase;
+  // Codes consumed by the find bar on keydown (open, next/prev, Enter, Esc).
+  // Keyup is matched by code alone so releasing the modifier first (Ctrl/Cmd
+  // up before F/G) still swallows the release instead of forwarding a stray
+  // keyup the remote page never saw a keydown for.
+  const findConsumedRef = useRef(new Set<string>());
+  const findDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Navigate whenever the user requests it (address bar, back/forward,
   // reload, chrome hand-off) — i.e. when navSeq moves. The store is the
@@ -151,6 +167,9 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
   useEffect(() => {
     if (url && navSeq !== lastNavSeqRef.current) {
       lastNavSeqRef.current = navSeq;
+      setFindOpen(false);
+      setFindResult(null);
+      send({ t: "findClose" });
       send({ t: "nav", url });
     }
   }, [url, navSeq, send]);
@@ -184,6 +203,77 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
       });
     });
   }, [onSelection, stateKey]);
+
+  const doFind = useCallback((query: string, backwards: boolean, caseSensitive: boolean) => {
+    if (!query) {
+      setFindResult(null);
+      send({ t: "findClose" });
+      return;
+    }
+    send({ t: "find", query, backwards, caseSensitive });
+  }, [send]);
+
+  const cancelFindDebounce = useCallback(() => {
+    if (findDebounceRef.current) {
+      clearTimeout(findDebounceRef.current);
+      findDebounceRef.current = null;
+    }
+  }, []);
+
+  // Explicit navigation (Enter/F3/Cmd+G/buttons) supersedes the pending
+  // type-debounce so one keypress never produces two find requests.
+  const doFindNow = useCallback((query: string, backwards: boolean, caseSensitive: boolean) => {
+    cancelFindDebounce();
+    doFind(query, backwards, caseSensitive);
+  }, [cancelFindDebounce, doFind]);
+
+  const closeFind = useCallback(() => {
+    cancelFindDebounce();
+    setFindOpen(false);
+    setFindResult(null);
+    send({ t: "findClose" });
+    keyboardRef.current?.focus({ preventScroll: true });
+  }, [cancelFindDebounce, send]);
+
+  const openFind = useCallback(() => {
+    setFindOpen(true);
+  }, []);
+
+  useEffect(() => {
+    if (!onFindResult) return;
+    return onFindResult((res) => {
+      if (typeof res.query === "string" && res.query !== findQueryRef.current) return;
+      setFindResult({ found: res.found, active: res.active, total: res.total });
+    });
+  }, [onFindResult]);
+
+  useEffect(() => {
+    if (!findOpen) return;
+    if (!findQuery) {
+      setFindResult(null);
+      send({ t: "findClose" });
+      return;
+    }
+    const timer = setTimeout(() => {
+      findDebounceRef.current = null;
+      doFind(findQuery, false, findCaseRef.current);
+    }, 250);
+    findDebounceRef.current = timer;
+    return () => {
+      clearTimeout(timer);
+      if (findDebounceRef.current === timer) findDebounceRef.current = null;
+    };
+  }, [findQuery, findOpen, send, doFind]);
+
+  useEffect(() => {
+    if (findOpen) {
+      const t = setTimeout(() => {
+        findInputRef.current?.focus();
+        findInputRef.current?.select();
+      }, 0);
+      return () => clearTimeout(t);
+    }
+  }, [findOpen]);
 
   // Frames → backing store + paint.
   useEffect(() => {
@@ -545,11 +635,55 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
     });
   };
 
+  const isFindOpenKey = (ev: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean; code: string }) => {
+    // Accept either Cmd or Ctrl on all platforms (jsdom tests report a
+    // non-Mac platform, and keyboards vary) — never forwarded to the page.
+    return (ev.ctrlKey || ev.metaKey) && !ev.shiftKey && !ev.altKey && ev.code === "KeyF";
+  };
+  const isFindNextKey = (ev: { key: string; code: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }) => {
+    if (ev.key === "F3" && !ev.ctrlKey && !ev.metaKey && !ev.altKey) return true;
+    return (ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.code === "KeyG";
+  };
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // IME in progress (or a dead key starting one): let the host compose;
     // the result arrives via onCompositionEnd as one insertText.
     if (e.nativeEvent.isComposing || e.key === "Process" || e.key === "Dead") return;
     const primary = isMac() ? e.metaKey : e.ctrlKey;
+    // Find-in-page: the canvas has no native find UI, so consume Cmd/Ctrl+F
+    // here (both down and up) and never forward it to the remote page.
+    if (isFindOpenKey(e)) {
+      e.preventDefault();
+      findConsumedRef.current.add(e.code);
+      openFind();
+      return;
+    }
+    if (findOpen) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        findConsumedRef.current.add(e.code);
+        closeFind();
+        return;
+      }
+      if (isFindNextKey(e)) {
+        e.preventDefault();
+        findConsumedRef.current.add(e.code);
+        if (findQuery) doFindNow(findQuery, e.shiftKey, findCaseRef.current);
+        return;
+      }
+      if (e.key === "Enter" && !e.altKey && !primary) {
+        e.preventDefault();
+        findConsumedRef.current.add(e.code);
+        if (findQuery) doFindNow(findQuery, e.shiftKey, findCaseRef.current);
+        return;
+      }
+    } else if (isFindNextKey(e) && findQuery) {
+      e.preventDefault();
+      findConsumedRef.current.add(e.code);
+      setFindOpen(true);
+      doFindNow(findQuery, e.shiftKey, findCaseRef.current);
+      return;
+    }
     // Paste: leave the keydown alone so the host fires a "paste" event on the
     // textarea, which carries the host clipboard without a permission prompt.
     if (primary && !e.shiftKey && !e.altKey && e.code === "KeyV") return;
@@ -579,9 +713,69 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
 
   const onKeyUp = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing || e.key === "Process" || e.key === "Dead") return;
+    // Swallow releases for chords consumed on keydown, matched by code alone:
+    // the user may release the modifier (Ctrl/Cmd) before the key itself, and
+    // Enter navigation must not leak a stray keyup to the remote page either.
+    // Never added to pressedKeys.
+    if (findConsumedRef.current.has(e.code)) {
+      findConsumedRef.current.delete(e.code);
+      e.preventDefault();
+      return;
+    }
+    if (isFindOpenKey(e)) {
+      e.preventDefault();
+      return;
+    }
+    if (findOpen && (e.key === "Escape" || e.key === "Enter" || isFindNextKey(e))) {
+      e.preventDefault();
+      return;
+    }
     e.preventDefault();
     pressedKeys.current.delete(e.code);
     send({ t: "key", kind: "up", key: e.key, code: e.code, text: keyText(e), modifiers: modifiersOf(e) });
+  };
+
+  const findCountLabel = (): string => {
+    if (!findQuery) return "";
+    if (!findResult) return "...";
+    if (!findResult.found || findResult.total <= 0) return "No results";
+    if (findResult.total > 0 && findResult.active > 0) return `${findResult.active} of ${findResult.total}`;
+    return `${findResult.total} matches`;
+  };
+
+  const onFindInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeFind();
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (findQuery) doFindNow(findQuery, e.shiftKey, findCase);
+      return;
+    }
+    if (e.key === "F3") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (findQuery) doFindNow(findQuery, e.shiftKey, findCase);
+      return;
+    }
+    const prim = e.ctrlKey || e.metaKey;
+    if (prim && !e.altKey && e.code === "KeyG") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (findQuery) doFindNow(findQuery, e.shiftKey, findCase);
+      return;
+    }
+    if (prim && !e.shiftKey && !e.altKey && e.code === "KeyF") {
+      e.preventDefault();
+      e.stopPropagation();
+      findInputRef.current?.select();
+      return;
+    }
+    e.stopPropagation();
   };
 
   const onCompositionEnd = (e: React.CompositionEvent<HTMLTextAreaElement>) => {
@@ -598,6 +792,8 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
   // Focus left the viewport (tab switch, alt-tab, click elsewhere): release
   // whatever is still held so the remote page never sees a stuck key/button.
   const onBlur = () => {
+    findConsumedRef.current.clear();
+    cancelFindDebounce();
     clearLongPress();
     for (const k of pressedKeys.current.values()) {
       send({ t: "key", kind: "up", key: k.key, code: k.code, text: "", modifiers: 0 });
@@ -650,6 +846,94 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
       {!hasFrame && status !== "closed" && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none" data-testid="cdp-spinner">
           <LoadingSpinner className="w-6 h-6" />
+        </div>
+      )}
+      {!findOpen && (
+        <button
+          data-testid="cdp-find-open"
+          title="Find in page (Cmd/Ctrl+F)"
+          aria-label="Find in page"
+          className="absolute top-1 right-1 px-1.5 py-0.5 text-xs rounded border border-neutral-300 dark:border-neutral-700 bg-white/90 dark:bg-neutral-900/90 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+          onClick={(e) => {
+            e.preventDefault();
+            openFind();
+          }}
+        >
+          {"\u2315"}
+        </button>
+      )}
+      {findOpen && (
+        <div
+          data-testid="cdp-find-bar"
+          className="absolute top-1 right-1 flex items-center gap-1 px-2 py-1 text-xs rounded border border-neutral-300 dark:border-neutral-700 bg-white/95 dark:bg-neutral-900/95 shadow"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <input
+            ref={findInputRef}
+            data-testid="cdp-find-input"
+            value={findQuery}
+            placeholder="Find in page"
+            aria-label="Find in page"
+            className="w-40 px-1.5 py-0.5 text-xs rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 outline-none"
+            onChange={(e) => setFindQuery(e.target.value)}
+            onKeyDown={onFindInputKeyDown}
+          />
+          <span data-testid="cdp-find-count" className="min-w-14 text-center tabular-nums text-neutral-500 dark:text-neutral-400">
+            {findCountLabel()}
+          </span>
+          <button
+            data-testid="cdp-find-prev"
+            title="Previous (Shift+Enter)"
+            aria-label="Previous match"
+            className="px-1.5 py-0.5 rounded hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-40"
+            disabled={!findQuery}
+            onClick={(e) => {
+              e.preventDefault();
+              if (findQuery) doFindNow(findQuery, true, findCase);
+            }}
+          >
+            {"\u25B2"}
+          </button>
+          <button
+            data-testid="cdp-find-next"
+            title="Next (Enter)"
+            aria-label="Next match"
+            className="px-1.5 py-0.5 rounded hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-40"
+            disabled={!findQuery}
+            onClick={(e) => {
+              e.preventDefault();
+              if (findQuery) doFindNow(findQuery, false, findCase);
+            }}
+          >
+            {"\u25BC"}
+          </button>
+          <button
+            data-testid="cdp-find-case"
+            title="Match case"
+            aria-label="Match case"
+            aria-pressed={findCase}
+            className={findCase ? "px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-600 dark:text-blue-400" : "px-1.5 py-0.5 rounded hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-500"}
+            onClick={(e) => {
+              e.preventDefault();
+              const next = !findCase;
+              setFindCase(next);
+              if (findQuery) doFindNow(findQuery, false, next);
+            }}
+          >
+            Aa
+          </button>
+          <button
+            data-testid="cdp-find-close"
+            title="Close (Esc)"
+            aria-label="Close find"
+            className="px-1.5 py-0.5 rounded hover:bg-neutral-100 dark:hover:bg-neutral-800"
+            onClick={(e) => {
+              e.preventDefault();
+              closeFind();
+            }}
+          >
+            {"\u2715"}
+          </button>
         </div>
       )}
       {status === "reconnecting" && (

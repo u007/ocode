@@ -130,6 +130,7 @@ type Server struct {
 	httpServer       *http.Server
 	browseLn         net.Listener
 	browseHTTPServer *http.Server
+	tsShare          *tailscaleShare
 }
 
 func New(addr, username, password string, webFS fs.FS) *Server {
@@ -148,6 +149,7 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 		procSup:       tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 3 * time.Second}),
 		tts:           tts.NewSupervisor(tts.DefaultConfig()),
 		startedAt:     time.Now(),
+		tsShare:       &tailscaleShare{},
 	}
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
@@ -283,6 +285,7 @@ func (s *Server) registerRoutes() {
 
 	// Config
 	s.mux.HandleFunc("GET /api/network-ip", s.authMiddleware(s.handleGetNetworkIP))
+	s.mux.HandleFunc("GET /api/tailscale-url", s.authMiddleware(s.handleGetTailscaleURL))
 	s.mux.HandleFunc("GET /api/config/model", s.authMiddleware(s.handleGetModel))
 	s.mux.HandleFunc("PUT /api/config/model", s.authMiddleware(s.handleSetModel))
 	s.mux.HandleFunc("GET /api/config/thinking-budget", s.authMiddleware(s.handleGetThinkingBudget))
@@ -309,6 +312,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/discovery", s.authMiddleware(s.handleSetDiscoveryConfig))
 	s.mux.HandleFunc("GET /api/tts/engines", s.authMiddleware(s.handleTTSEngines))
 	s.mux.HandleFunc("GET /api/tts/status", s.authMiddleware(s.handleTTSStatus))
+s.mux.HandleFunc("GET /api/tts/state", s.authMiddleware(s.handleTTSInstallStates))
 	s.mux.HandleFunc("GET /api/config/ocode/tts", s.authMiddleware(s.handleGetTTSConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/tts", s.authMiddleware(s.handleSetTTSConfig))
 	s.mux.HandleFunc("POST /api/tts/select", s.authMiddleware(s.handleTTSSelect))
@@ -687,6 +691,7 @@ type BrowseOptions struct {
 	HTRPort            int
 	HTRSocketPath      string
 	HTRNativeHostName  string
+	NoSandbox          bool
 	Supervisor         *tool.ProcessSupervisor
 }
 
@@ -710,6 +715,7 @@ func LoadBrowseOptions(supervisor *tool.ProcessSupervisor) *BrowseOptions {
 		HTRPort:            browser.HTRPort,
 		HTRSocketPath:      browser.HTRSocketPath,
 		HTRNativeHostName:  browser.HTRNativeHostName,
+		NoSandbox:          browser.NoSandbox,
 		Supervisor:         supervisor,
 	}
 }
@@ -777,6 +783,7 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 			ChromePath:        opts.ChromePath,
 			IdleTimeout:       time.Duration(opts.IdleTimeoutMinutes) * time.Minute,
 			ScreencastQuality: opts.ScreencastQuality,
+			NoSandbox:         opts.NoSandbox,
 			Supervisor:        opts.Supervisor,
 			HTR:               htr,
 			HTRNotice:         htrNotice,
@@ -1421,6 +1428,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.tts != nil {
 		s.tts.Stop()
+	}
+	if s.tsShare != nil {
+		s.tsShare.cleanup()
 	}
 	s.shutdownMu.Lock()
 	hs := s.httpServer

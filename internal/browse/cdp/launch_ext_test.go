@@ -17,7 +17,7 @@ func writeManifest(t *testing.T, dir string) {
 func TestChromeArgsFor_Extension(t *testing.T) {
 	dir := t.TempDir()
 	writeManifest(t, dir)
-	args := chromeArgsFor(t.TempDir(), dir)
+	args := chromeArgsFor(t.TempDir(), dir, true)
 	if !slices.Contains(args, "--load-extension="+dir) {
 		t.Fatalf("args missing --load-extension: %v", args)
 	}
@@ -28,7 +28,7 @@ func TestChromeArgsFor_Extension(t *testing.T) {
 
 func TestChromeArgsFor_Default(t *testing.T) {
 	for _, ext := range []string{"", t.TempDir(), filepath.Join(t.TempDir(), "missing")} {
-		args := chromeArgsFor(t.TempDir(), ext)
+		args := chromeArgsFor(t.TempDir(), ext, true)
 		if !slices.Contains(args, "--disable-extensions") {
 			t.Fatalf("ext %q: args missing --disable-extensions: %v", ext, args)
 		}

@@ -16,27 +16,30 @@ import (
 
 // clientMsg is the inbound JSON from the browser panel.
 type clientMsg struct {
-	T          string  `json:"t"`
-	RequestID  string  `json:"requestId,omitempty"`
-	URL        string  `json:"url,omitempty"`
-	W          int     `json:"w,omitempty"`
-	H          int     `json:"h,omitempty"`
-	DPR        float64 `json:"dpr,omitempty"`
-	Kind       string  `json:"kind,omitempty"`
-	X          float64 `json:"x,omitempty"`
-	Y          float64 `json:"y,omitempty"`
-	Button     string  `json:"button,omitempty"`
-	Buttons    int     `json:"buttons,omitempty"`
-	ClickCount int     `json:"clickCount,omitempty"`
-	DeltaX     float64 `json:"deltaX,omitempty"`
-	DeltaY     float64 `json:"deltaY,omitempty"`
-	Modifiers  int     `json:"modifiers,omitempty"`
-	Key        string  `json:"key,omitempty"`
-	Code       string  `json:"code,omitempty"`
-	Text       string  `json:"text,omitempty"`
-	AutoRepeat bool    `json:"autoRepeat,omitempty"`
-	Factor     float64 `json:"factor,omitempty"`
-	Points     []struct {
+	T             string  `json:"t"`
+	RequestID     string  `json:"requestId,omitempty"`
+	URL           string  `json:"url,omitempty"`
+	W             int     `json:"w,omitempty"`
+	H             int     `json:"h,omitempty"`
+	DPR           float64 `json:"dpr,omitempty"`
+	Kind          string  `json:"kind,omitempty"`
+	X             float64 `json:"x,omitempty"`
+	Y             float64 `json:"y,omitempty"`
+	Button        string  `json:"button,omitempty"`
+	Buttons       int     `json:"buttons,omitempty"`
+	ClickCount    int     `json:"clickCount,omitempty"`
+	DeltaX        float64 `json:"deltaX,omitempty"`
+	DeltaY        float64 `json:"deltaY,omitempty"`
+	Modifiers     int     `json:"modifiers,omitempty"`
+	Key           string  `json:"key,omitempty"`
+	Code          string  `json:"code,omitempty"`
+	Text          string  `json:"text,omitempty"`
+	AutoRepeat    bool    `json:"autoRepeat,omitempty"`
+	Factor        float64 `json:"factor,omitempty"`
+	Query         string  `json:"query,omitempty"`
+	Backwards     bool    `json:"backwards,omitempty"`
+	CaseSensitive bool    `json:"caseSensitive,omitempty"`
+	Points        []struct {
 		ID int     `json:"id"`
 		X  float64 `json:"x"`
 		Y  float64 `json:"y"`

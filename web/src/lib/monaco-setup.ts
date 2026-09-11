@@ -41,13 +41,17 @@ loader.config({ monaco });
 // Without this, files like `ChatPanel.tsx` opened as `typescript` get no JSX
 // tokenization and show spurious diagnostics ("Cannot use JSX unless --jsx").
 // `allowNonTsExtensions` lets the TS worker handle .tsx/.jsx URIs, and `jsx`
-// enables JSX emit so the tokenizer recognises `<Tag>` syntax.
+// enables JSX parsing so the tokenizer recognises `<Tag>` syntax.
+// `Preserve` (not `ReactJSX`): ReactJSX injects an implicit
+// `import "react/jsx-runtime"` into any JSX-containing file, which the
+// in-browser worker cannot resolve (no node_modules) and reports as TS2792
+// on line 1. Preserve keeps JSX parsing/tokenization without that import.
 monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
   target: monaco.languages.typescript.ScriptTarget.Latest,
   module: monaco.languages.typescript.ModuleKind.ESNext,
   allowNonTsExtensions: true,
   allowJs: true,
-  jsx: monaco.languages.typescript.JsxEmit.ReactJSX,
+  jsx: monaco.languages.typescript.JsxEmit.Preserve,
   jsxFactory: "React.createElement",
   reactNamespace: "React",
   esModuleInterop: true,
@@ -60,7 +64,7 @@ monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
   module: monaco.languages.typescript.ModuleKind.ESNext,
   allowNonTsExtensions: true,
   allowJs: true,
-  jsx: monaco.languages.typescript.JsxEmit.ReactJSX,
+  jsx: monaco.languages.typescript.JsxEmit.Preserve,
 });
 monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
   noSemanticValidation: false,
