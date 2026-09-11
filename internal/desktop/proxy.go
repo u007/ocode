@@ -87,22 +87,20 @@ func injectAuth(req *http.Request, remoteToken string) {
 //   5. Request goes through SSH tunnel to remote server
 //   6. Remote server validates REMOTE token
 func (rp *RemoteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Local token validation (defense-in-depth)
-	if rp.localToken != "" {
-		local := r.URL.Query().Get("token")
-		if local == "" {
-			auth := r.Header.Get("Authorization")
-			if strings.HasPrefix(auth, "Bearer ") {
-				local = strings.TrimPrefix(auth, "Bearer ")
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		if rp.localToken != "" {
+			local := r.URL.Query().Get("token")
+			if local == "" {
+				auth := r.Header.Get("Authorization")
+				if strings.HasPrefix(auth, "Bearer ") {
+					local = strings.TrimPrefix(auth, "Bearer ")
+				}
+			}
+			if local != rp.localToken {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
 			}
 		}
-		if local != rp.localToken {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-	}
-
-	if strings.HasPrefix(r.URL.Path, "/api/") {
 		rp.apiProxy.ServeHTTP(w, r)
 		return
 	}
