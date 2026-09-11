@@ -88,3 +88,5 @@ internal/browse/cdp/htr-assets.zip
 ocode-desktop.exe
 ocode.app
 ocode.exe
+.ocode/uploads
+
