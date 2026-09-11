@@ -145,6 +145,21 @@ describe("App browser wiring", () => {
     expect(panel.getAttribute("data-key")).toMatch(/^tab:/);
   });
 
+  it("does not nest the focused browser surface under the hidden chat container", async () => {
+    // Regression: a misplaced </div> in App.tsx once put the browser-surface
+    // container inside the chat sub-tab wrapper, which is display:none while a
+    // browser tab is focused — the Chrome viewport rendered blank at 0x0.
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: /new browser tab/i }));
+    const panel = await screen.findByTestId("browser-panel");
+    expect(panel).toHaveAttribute("data-active", "true");
+    let el: HTMLElement | null = panel;
+    while (el) {
+      expect(el.classList.contains("hidden")).toBe(false);
+      el = el.parentElement;
+    }
+  });
+
   it("keeps activated browser surfaces mounted when switching tabs", async () => {
     renderApp();
     fireEvent.click(await screen.findByRole("button", { name: /new browser tab/i }));

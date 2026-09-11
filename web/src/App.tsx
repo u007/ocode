@@ -825,7 +825,6 @@ function HomeApp() {
 
         {/* Center content */}
         <main className="flex flex-1 flex-col overflow-hidden">
-         <div className="flex flex-1 min-h-0">
           <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)} className="flex flex-col flex-1 overflow-hidden">
             <div className="flex items-center justify-between gap-2 border-b pr-2">
               <div className="flex-1 min-w-0">
@@ -834,10 +833,12 @@ function HomeApp() {
               <ProfileSwitcher />
             </div>
 
-            <div className="flex-1 overflow-hidden flex flex-col pb-2">
               {/* The unified tab bar must live outside both the terminal container and the
                   chat content wrapper: each of those is hidden when the other kind is focused,
-                  so a bar nested in either would vanish with it. */}
+                  so a bar nested in either would vanish with it. It also sits above the
+                  content+side-panel row so its width never depends on the per-tab side
+                  browser panel: with the bar inside the center column, switching to a tab
+                  whose side panel is open/closed/wider re-wrapped every pill. */}
               {activeView === "sessions" && (
                 <div className="flex items-center p-1">
                   <div className="flex-1 min-w-0">
@@ -859,6 +860,8 @@ function HomeApp() {
                   </button>
                 </div>
               )}
+            <div className="flex flex-1 min-h-0">
+            <div className="flex-1 min-w-0 overflow-hidden flex flex-col pb-2">
               {/* Terminal is project-scoped and must stay mounted even when not visible. It lives inside the Tabs root
                   so TopTabs (which uses TabsList/TabsTrigger) keeps its Radix context, but outside the non-terminal
                   content region so switching away never unmounts the WebSocket/pty. Visibility is toggled via CSS only. */}
@@ -1106,6 +1109,7 @@ function HomeApp() {
                       );
                     })}
                   </div>
+                  </div>
                   <div
                     className={
                       activeView === "sessions" && focusedKind === "browser"
@@ -1130,11 +1134,9 @@ function HomeApp() {
                     })}
                   </div>
                 </div>
-                </div>
               </TabsContent>
+              </div>
             </div>
-          </div>
-          </Tabs>
 
           {/* Side browser panel — resizable/collapsible, accompanies the focused
               chat/terminal session (never the full-width browser tab). Its live
@@ -1223,7 +1225,8 @@ function HomeApp() {
               )}
             </>
           )}
-          </div>
+            </div>
+          </Tabs>
 
           {/* Status bar — only on chat sub-tab; hidden when terminal is focused */}
           {activeView === "sessions" && activeSessionTab?.activeSubTab === "chat" && focusedKind === "chat" && (
