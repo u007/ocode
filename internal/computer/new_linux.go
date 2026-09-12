@@ -8,6 +8,6 @@ import (
 
 // newPlatformDriver returns an unsupported-platform driver on linux;
 // the real Linux driver is implemented in Part 09.
-func newPlatformDriver(sup *tool.ProcessSupervisor) (tool.ComputerDriver, error) {
+func newPlatformDriver(r commandRunner) (tool.ComputerDriver, error) {
 	return nil, ErrUnsupportedPlatform
 }

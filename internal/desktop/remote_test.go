@@ -13,8 +13,10 @@ import (
 // TestWorkspaceConfigRoundTrip proves the saved config carries the target,
 // remote path, and stable workspace ID needed for reconnect.
 func TestWorkspaceConfigRoundTrip(t *testing.T) {
-	if home, err := os.UserHomeDir(); err == nil {
-		_ = os.MkdirAll(filepath.Join(home, ".local", "share", "ocode"), 0o700)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".local", "share", "ocode"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
 	}
 	cfg := WorkspaceConfig{
 		Mode:       WorkspaceRemoteSSH,

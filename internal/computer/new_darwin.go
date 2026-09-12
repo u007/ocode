@@ -6,8 +6,7 @@ import (
 	"github.com/u007/ocode/internal/tool"
 )
 
-// newPlatformDriver returns an unsupported-platform driver on darwin;
-// the real macOS driver is implemented in Part 07.
-func newPlatformDriver(sup *tool.ProcessSupervisor) (tool.ComputerDriver, error) {
-	return nil, ErrUnsupportedPlatform
+// newPlatformDriver creates the macOS computer driver.
+func newPlatformDriver(r commandRunner) (tool.ComputerDriver, error) {
+	return &darwinDriver{r: r}, nil
 }

@@ -41,6 +41,11 @@ func (h *Handler) HandleGetWallpaper(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "image/svg+xml")
+	// Uploaded SVGs are user content served on the API origin. Uploads are
+	// sanitized at registration; this CSP is the second layer so a direct
+	// navigation to the file can never run script or load remote resources.
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	w.Write(data)
 }

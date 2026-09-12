@@ -1561,7 +1561,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 					}
 					return result, images, err
 				}
-				dagMsgs, dagErr := runDAGFromValidated(parallelCalls, stopCh, isCancelled, groupBus, groupAgentIDs, groupTracker, dispatch)
+				dagMsgs, dagErr := runDAGFromValidated(parallelCalls, stopCh, isCancelled, groupBus, groupAgentIDs, groupTracker, dispatch, a.scanToolResult)
 				if dagErr != nil {
 					// Validation failed. Scope the error to the
 					// subagent dispatches that own the id
@@ -1594,6 +1594,11 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 								binding = &taskBinding{bus: groupBus, agentID: groupAgentIDs[k], tracker: groupTracker}
 							}
 							result, images, err := dispatch(tc, binding, tc.ID, "")
+							// Redact BEFORE shapeToolResult: it truncates and
+							// disk-caches the full text via TruncateToolResult,
+							// so secrets must be masked first or the cache file
+							// (and its read-back notice) hand back raw content.
+							result = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result)
 							content, display, notice := shapeToolResult(tc.Function.Name, tc.ID, result, err)
 							results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: content, Images: images, Notice: notice, DisplayContent: display}
 						}(i, k, tc)
@@ -1656,6 +1661,10 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 							}, tc.Function.Name, tc.Function.Arguments)
 						}
 						a.activity.toolDone(tc.Function.Name)
+						// Redact BEFORE shapeToolResult/TruncateToolResult caches
+						// the full text to disk — see comment at the DAG-fallback
+						// call site above.
+						result = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result)
 						content, display, notice := shapeToolResult(tc.Function.Name, tc.ID, result, err)
 						results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: content, Images: images, Notice: notice, DisplayContent: display}
 					}(i, k, resp.ToolCalls[i], isCancelled)
@@ -1713,6 +1722,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 					result = result[idx+len(tool.SuccessNoticeSeparator):]
 				}
 			}
+			// Redact BEFORE truncation/disk-caching — see comment at the
+			// parallel-dispatch call sites above.
+			result = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result)
 			fullResult := result
 			result = TruncateToolResult(tc.ID, result)
 			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result, Images: images, Notice: notice}
@@ -1748,14 +1760,12 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		}
 
 		pauseAfterResults := false
-		for i, toolMsg := range results {
-			// Scan tool results for secrets before appending.
-			// For "read" of sensitive files, run tier-2 LLM scan (both modes).
-			// For all other results, run tier-1 chat-mode regex (keyword+entropy, no LLM).
-			if i < len(resp.ToolCalls) && a.redactionRegistry != nil {
-				tc := resp.ToolCalls[i]
-				toolMsg.Content = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, toolMsg.Content)
-			}
+		for _, toolMsg := range results {
+			// Secret redaction already ran on each result's raw content at
+			// its dispatch site (sequential, parallel, and DAG-scheduler
+			// paths all call scanToolResult before TruncateToolResult can
+			// disk-cache anything), so Content and DisplayContent here are
+			// already clean.
 			newMsgs = append(newMsgs, toolMsg)
 			messages = append(messages, toolMsg)
 			if a.OnMessage != nil {
@@ -2826,6 +2836,19 @@ func (a *Agent) handleToolCallWithImages(name string, args json.RawMessage, b *t
 	if !a.currentModelSupportsVision() {
 		return text, nil, nil
 	}
+	// Tool that produces an image without a file path (e.g. screenshot).
+	if ipt, ok := a.tools[name].(tool.ImageProducingTool); ok && ipt.ProducesImage(args) {
+		raw, mime, ierr := ipt.ExecuteImage(args)
+		if ierr != nil {
+			return text, nil, nil
+		}
+		enc, ierr := NewImageFromBytes(raw, mime, a.imageMaxDim())
+		if ierr != nil {
+			return text, nil, nil
+		}
+		return "[computer image — shown below]", []Image{enc.Image}, nil
+	}
+	// Tool that returns an image via a file path (e.g. read).
 	irt, ok := a.tools[name].(tool.ImageResultTool)
 	if !ok {
 		return text, nil, nil

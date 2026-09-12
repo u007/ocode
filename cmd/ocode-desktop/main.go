@@ -216,11 +216,22 @@ func main() {
 	// notifier is only created when supported: on macOS, touching
 	// UNUserNotificationCenter from a non-.app binary aborts the process.
 	if bootErr != nil {
-		// Native dialog so a double-clicked .app surfaces the failure.
-		app.Dialog.Error().
-			SetTitle("ocode failed to start").
-			SetMessage(bootErr.Error()).
-			Show()
+		// Native dialog so a double-clicked .app surfaces the failure. Dialog
+		// dispatch requires the Wails main-thread run loop, which only starts
+		// inside app.Run() below — calling Show() any earlier dereferences a
+		// nil dispatcher and crashes the whole process instead of reporting
+		// the error. events.Common.ApplicationStarted fires once that loop is
+		// live, so the dialog is deferred to there and the app quits after.
+		app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
+			app.Dialog.Error().
+				SetTitle("ocode failed to start").
+				SetMessage(bootErr.Error()).
+				Show()
+			app.Quit()
+		})
+		if err := app.Run(); err != nil {
+			log.Printf("ocode-desktop: app run error: %v", err)
+		}
 		os.Exit(1)
 	}
 

@@ -84,7 +84,7 @@ func TestDAGFailureDoesNotSkipIndependentNodes(t *testing.T) {
 		return "ok:" + p.ID, nil, nil
 	}
 
-	msgs, err := runDAGFromValidated(calls, nil, func() bool { return false }, nil, nil, nil, dispatch)
+	msgs, err := runDAGFromValidated(calls, nil, func() bool { return false }, nil, nil, nil, dispatch, nil)
 	if err != nil {
 		t.Fatalf("validation should pass: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestDAGResultsCarryNoticeAndDisplayContent(t *testing.T) {
 	dispatch := func(tc ToolCall, _ *taskBinding, _ string, _ string) (string, []Image, error) {
 		return long, nil, nil
 	}
-	msgs, err := runDAGFromValidated(calls, nil, func() bool { return false }, nil, nil, nil, dispatch)
+	msgs, err := runDAGFromValidated(calls, nil, func() bool { return false }, nil, nil, nil, dispatch, nil)
 	if err != nil {
 		t.Fatalf("unexpected validation error: %v", err)
 	}

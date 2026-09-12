@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -141,8 +142,14 @@ func WallpaperPath(id string) (string, error) {
 	return "", fmt.Errorf("wallpaper %q not found", id)
 }
 
+// uploadIDPattern matches exactly the IDs RegisterUserUpload generates
+// ("upload-" + 32 hex chars). Anything else (path separators, "..", a
+// truncated or foreign id) is rejected before it can reach filepath.Join,
+// which would otherwise let an id like "upload-../../x" escape the upload dir.
+var uploadIDPattern = regexp.MustCompile(`^upload-[0-9a-f]{32}$`)
+
 func isUserUpload(id string) bool {
-	return strings.HasPrefix(id, "upload-")
+	return uploadIDPattern.MatchString(id)
 }
 
 func GenerateBuiltinWallpapers() ([]string, error) {
@@ -247,6 +254,9 @@ func RegisterUserUpload(filename string, data []byte) (WallpaperMeta, error) {
 	path := filepath.Join(dir, safeID+".svg")
 	contentType := detectContentType(data)
 	if contentType == "image/svg+xml" {
+		if err := rejectActiveSVG(data); err != nil {
+			return WallpaperMeta{}, err
+		}
 		if err := os.WriteFile(path, data, 0644); err != nil {
 			return WallpaperMeta{}, fmt.Errorf("write upload: %w", err)
 		}
@@ -346,9 +356,22 @@ func encodeBase64(dst, src []byte) int {
 	return j
 }
 
+// activeSVGPattern flags SVG constructs that execute script or embed
+// arbitrary HTML when the file is opened as a document on the ocode origin:
+// <script>, on* event-handler attributes, <foreignObject>, and javascript:
+// URLs. Uploaded SVGs are served raw, so they are rejected at upload time.
+var activeSVGPattern = regexp.MustCompile(`(?i)<\s*script|<\s*foreignObject|\son[a-z]+\s*=|javascript\s*:`)
+
+func rejectActiveSVG(data []byte) error {
+	if loc := activeSVGPattern.FindIndex(data); loc != nil {
+		return fmt.Errorf("svg upload rejected: active content %q is not allowed", string(data[loc[0]:loc[1]]))
+	}
+	return nil
+}
+
 func detectContentType(data []byte) string {
 	if len(data) < 4 { return "application/octet-stream" }
-	if string(data[:5]) == "<?xml" || string(data[:4]) == "<svg" { return "image/svg+xml" }
+	if strings.HasPrefix(string(data), "<?xml") || string(data[:4]) == "<svg" { return "image/svg+xml" }
 	if data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 { return "image/png" }
 	if data[0] == 0xFF && data[1] == 0xD8 { return "image/jpeg" }
 	if data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 { return "image/gif" }

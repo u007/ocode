@@ -250,7 +250,7 @@ func TestScheduleDAGIndependentOverlap(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		return "slow:" + tc.ID, nil, nil
 	}
-	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch)
+	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, nil)
 	sched.run(nil, nil, nil)
 	if sched.perNode[0] == nil || sched.perNode[1] == nil {
 		t.Fatalf("perNode entries missing: 0=%v 1=%v", sched.perNode[0], sched.perNode[1])
@@ -302,7 +302,7 @@ func TestScheduleDAGOrderingNoOverlapForChain(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 		return "ok-" + tc.ID, nil, nil
 	}
-	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch)
+	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, nil)
 	sched.run(nil, nil, nil)
 	// No errors expected.
 	for i, p := range sched.perNode {
@@ -392,7 +392,7 @@ func TestScheduleDAGSlotInvariantChainUnderLimit1(t *testing.T) {
 	// as a fatal test, not a hang.
 	done := make(chan struct{})
 	go func() {
-		sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch)
+		sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, nil)
 		sched.run(nil, nil, nil)
 		close(done)
 	}()
@@ -453,7 +453,7 @@ func TestScheduleDAGPredecessorContextInjection(t *testing.T) {
 		// the test can assert the labelling.
 		return "CTX:" + predecessorContext, nil, nil
 	}
-	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch)
+	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, nil)
 	sched.run(nil, nil, nil)
 	if sched.perNode[2] == nil {
 		t.Fatalf("perNode[c] is nil")
@@ -499,7 +499,7 @@ func TestScheduleDAGPredecessorContextTruncation(t *testing.T) {
 		}
 		return "", nil, nil
 	}
-	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch)
+	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, nil)
 	sched.run(nil, nil, nil)
 	got := sched.perNode[1].result
 	if !strings.Contains(got, TruncationMarkerPrefix) {
@@ -534,7 +534,7 @@ func TestScheduleDAGSkipOnFailedDependency(t *testing.T) {
 		}
 		return "", nil, nil
 	}
-	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch)
+	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, nil)
 	sched.run(nil, nil, nil)
 
 	// a ran successfully.
@@ -600,7 +600,7 @@ func TestScheduleDAGCancellationMidWave(t *testing.T) {
 	}()
 	done := make(chan struct{})
 	go func() {
-		sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch)
+		sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, nil)
 		sched.run(nil, nil, nil)
 		close(done)
 	}()
@@ -628,7 +628,7 @@ func schedFor(parsed *dagParsed, t *testing.T) *dagScheduler {
 		return "ok-" + tc.ID, nil, nil
 	}
 	isCancelled := func() bool { return false }
-	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch)
+	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, nil)
 	sched.run(nil, nil, nil)
 	return sched
 }
@@ -659,7 +659,7 @@ func TestScheduleDAGNodeFailureDoesNotDeadlockSuccessors(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch)
+		sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, nil)
 		sched.run(nil, nil, nil)
 		close(done)
 	}()
@@ -682,7 +682,7 @@ func TestBuildResultsAlignment(t *testing.T) {
 		dagToolCall("c", nil),
 	}
 	parsed, _, dispatch, stopCh, isCancelled := dagTestSetup(t, tcs)
-	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch)
+	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, nil)
 	sched.run(nil, nil, nil)
 	// Reorder parallelIdx to put c first, then a, then b.
 	reorder := []int{2, 0, 1}
@@ -762,7 +762,7 @@ func TestRunDAGFromValidatedValidationError(t *testing.T) {
 	dispatch := func(tc ToolCall, binding *taskBinding, toolCallID string, predecessorContext string) (string, []Image, error) {
 		return "", nil, nil
 	}
-	_, err := runDAGFromValidated(tcs, stopCh, isCancelled, nil, nil, nil, dispatch)
+	_, err := runDAGFromValidated(tcs, stopCh, isCancelled, nil, nil, nil, dispatch, nil)
 	if err == nil {
 		t.Fatal("expected validation error, got nil")
 	}

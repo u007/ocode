@@ -355,6 +355,14 @@ type dagScheduler struct {
 	isCancelled func() bool
 	dispatch    dagDispatchFn
 
+	// redact, when non-nil, masks secrets in a node's raw result — called
+	// immediately when the result is captured (before it lands in perNode),
+	// so both buildResults (via shapeToolResult/TruncateToolResult, which
+	// disk-caches overflow verbatim) and buildPredecessorContext (which
+	// stitches raw perNode output into a dependent node's context) only ever
+	// see already-masked text.
+	redact func(toolName, toolArgs, content string) string
+
 	// perNode stores the final per-node outcome; the caller reads it
 	// once we return and copies into the `results []Message` slice.
 	perNode []*dagNodeResult
@@ -383,12 +391,13 @@ type dagScheduler struct {
 // newDAGScheduler wires the parsed graph, the stop channel, and the
 // dispatch closure. It does not start any work — the caller invokes
 // `run`.
-func newDAGScheduler(parsed *dagParsed, stopCh <-chan struct{}, isCancelled func() bool, dispatch dagDispatchFn) *dagScheduler {
+func newDAGScheduler(parsed *dagParsed, stopCh <-chan struct{}, isCancelled func() bool, dispatch dagDispatchFn, redact func(toolName, toolArgs, content string) string) *dagScheduler {
 	s := &dagScheduler{
 		parsed:      parsed,
 		stopCh:      stopCh,
 		isCancelled: isCancelled,
 		dispatch:    dispatch,
+		redact:      redact,
 		perNode:     make([]*dagNodeResult, len(parsed.nodes)),
 		doneCh:      make(map[*dagNode]chan struct{}, len(parsed.nodes)),
 		failed:      make(map[*dagNode]bool, len(parsed.nodes)),
@@ -582,7 +591,16 @@ func (s *dagScheduler) run(groupBus *notebus.Bus, groupAgentIDs []string, groupT
 
 			result, images, err := s.dispatch(n.toolCall, binding, n.toolCall.ID, predecessorCtx)
 
-			// Store the RAW result and the error; the error-text
+			// Redact before storing: perNode is read both by buildResults
+			// (which truncates via shapeToolResult, disk-caching overflow
+			// verbatim) and by buildPredecessorContext (which stitches this
+			// node's raw output straight into a dependent's context). Both
+			// must only ever see already-masked text.
+			if s.redact != nil && err == nil {
+				result = s.redact(n.toolCall.Function.Name, n.toolCall.Function.Arguments, result)
+			}
+
+			// Store the (now-redacted) result and the error; the error-text
 			// rendering, the notice extraction, and the truncation all
 			// happen once in buildResults via shapeToolResult, so this
 			// path produces the same Message shape as the legacy fan-out.
@@ -876,6 +894,7 @@ func runDAGFromValidated(
 	groupAgentIDs []string,
 	groupTracker *groupTracker,
 	dispatch dagDispatchFn,
+	redact func(toolName, toolArgs, content string) string,
 ) ([]Message, error) {
 	parsed, err := buildDAG(parallelCalls)
 	if err != nil {
@@ -889,7 +908,7 @@ func runDAGFromValidated(
 		// dropping the work.
 		return nil, fmt.Errorf("%sbatch passed the gate but contains no declared dependencies", errDAGValidationPrefix)
 	}
-	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch)
+	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, redact)
 	sched.run(groupBus, groupAgentIDs, groupTracker)
 	// parallelIdx is the position-to-result mapping: every entry is
 	// just `i` because the caller passed the parallel slice directly

@@ -8,6 +8,6 @@ import (
 
 // newPlatformDriver returns the unsupported-platform error for any
 // OS not covered by the per-platform build-tagged files.
-func newPlatformDriver(sup *tool.ProcessSupervisor) (tool.ComputerDriver, error) {
+func newPlatformDriver(r commandRunner) (tool.ComputerDriver, error) {
 	return nil, ErrUnsupportedPlatform
 }

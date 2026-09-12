@@ -367,3 +367,28 @@ func TestDetectEnvSecretPaddedBase64AndPunct(t *testing.T) {
 		t.Errorf("expected env_secret span covering padded base64 value %q, got %v", value, spans)
 	}
 }
+
+func TestDetectEnvSecretJSONBlobValue(t *testing.T) {
+	// Regression test: rclone (and other OAuth-based CLI configs) store the
+	// live access/refresh token as a bare JSON object under an INI-style
+	// `token = {...}` assignment. The unquoted-value alternative used to stop
+	// at the value's first '"', capturing only the opening '{' and leaving the
+	// actual access_token/refresh_token unmasked.
+	value := `{"access_token":"` + hiEntropy(24) + `","refresh_token":"` + hiEntropy(24) + `","expiry":"2026-01-01T00:00:00Z"}`
+	text := "client_id = 12345.apps.googleusercontent.com\ntoken = " + value + "\n"
+
+	for _, mode := range []struct {
+		name string
+		opts DetectOpts
+	}{
+		{"chat", DetectOpts{FileContent: false}},
+		{"file", DetectOpts{FileContent: true}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			spans := Detect(text, nil, mode.opts)
+			if !hasEnvSecretSpan(spans, text, value) {
+				t.Errorf("[%s] expected env_secret span covering full JSON blob %q, got %v", mode.name, value, spans)
+			}
+		})
+	}
+}

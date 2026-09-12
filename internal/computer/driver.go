@@ -17,5 +17,5 @@ func New(sup *tool.ProcessSupervisor) (tool.ComputerDriver, error) {
 	if sup == nil {
 		return nil, ErrSupervisorRequired
 	}
-	return newPlatformDriver(sup)
+	return newPlatformDriver(&execRunner{sup: sup})
 }

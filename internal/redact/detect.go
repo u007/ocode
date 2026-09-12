@@ -66,14 +66,20 @@ var (
 	// Env-var / assignment-style secrets (both modes). Line-anchored so the
 	// match is an actual `KEY = value` assignment, not a substring inside prose.
 	// Group 1 = variable name. The value is captured without its surrounding
-	// quotes (so quotes survive in the redacted output) via one of three
+	// quotes (so quotes survive in the redacted output) via one of four
 	// alternatives: double-quoted inner (group 2), single-quoted inner (group 3),
-	// or an unquoted run (group 4) that stops at whitespace — so a trailing
+	// a brace-delimited JSON object (group 4, e.g. rclone/OAuth configs that
+	// store `token = {"access_token":"...","refresh_token":"..."}` as a bare
+	// JSON blob — without this branch the unquoted alternative stops at the
+	// value's first `"` and everything past the opening `{` leaks unmasked),
+	// or an unquoted run (group 5) that stops at whitespace — so a trailing
 	// `# comment` is excluded and the value can contain `:@/#$%=+` and env
 	// interpolation (`${OTHER}`). Unquoted values may be any length; quoted
 	// values may be any non-empty length. [ \t]* around the separator
-	// (instead of \s*) prevents the value from spilling across newlines.
-	envAssignRe = regexp.MustCompile(`(?im)^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*[:=][ \t]*(?:"([^"]*)"|'([^']*)'|([^\s"']*))`)
+	// (instead of \s*) prevents the value from spilling across newlines. The
+	// brace alternative is greedy to the last `}` on the line, so it only
+	// handles single-line JSON (the common case for INI-style config values).
+	envAssignRe = regexp.MustCompile(`(?im)^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*[:=][ \t]*(?:"([^"]*)"|'([^']*)'|(\{[^\r\n]*\})|([^\s"']*))`)
 )
 
 // envSecretTokens are trailing underscore-delimited name segments that mark a
@@ -212,19 +218,20 @@ func addSpansFromKeywordMatches(spans *[]Span, text string, matches [][]int) {
 
 // addSpansFromEnvMatches appends spans for env-var/assignment-detected secrets.
 // The variable name is gated by isEnvSecretName; the *value* is what gets
-// redacted. The value arrives in one of three capture groups (see envAssignRe):
+// redacted. The value arrives in one of four capture groups (see envAssignRe):
 // group 2 = double-quoted inner, group 3 = single-quoted inner, group 4 =
-// unquoted run. Strong names (e.g. *_SECRET, *_KEY, *_TOKEN) are redacted
-// regardless of value length — even empty values (AGENT48_PASS=) are tracked,
-// since the variable name itself marks it as sensitive. Weak names (e.g. *_ID) are only
-// redacted when the value is high-entropy, to avoid masking ordinary identifiers
-// like PROJECT_ID / ACCOUNT_ID / CLIENT_ID.
+// brace-delimited JSON object, group 5 = unquoted run. Strong names (e.g.
+// *_SECRET, *_KEY, *_TOKEN) are redacted regardless of value length — even
+// empty values (AGENT48_PASS=) are tracked, since the variable name itself
+// marks it as sensitive. Weak names (e.g. *_ID) are only redacted when the
+// value is high-entropy, to avoid masking ordinary identifiers like
+// PROJECT_ID / ACCOUNT_ID / CLIENT_ID.
 func addSpansFromEnvMatches(spans *[]Span, text string, matches [][]int) {
 	for _, m := range matches {
-		if len(m) < 10 {
+		if len(m) < 12 {
 			continue
 		}
-		// m[0]:m[1] = full match, m[2]:m[3] = name, value in groups 2/3/4.
+		// m[0]:m[1] = full match, m[2]:m[3] = name, value in groups 2/3/4/5.
 		name := text[m[2]:m[3]]
 
 		// Pick the value group that actually matched (others are -1).
@@ -235,7 +242,9 @@ func addSpansFromEnvMatches(spans *[]Span, text string, matches [][]int) {
 		case m[6] >= 0 && m[7] >= 0:
 			valStart, valEnd = m[6], m[7] // single-quoted inner
 		case m[8] >= 0 && m[9] >= 0:
-			valStart, valEnd = m[8], m[9] // unquoted run
+			valStart, valEnd = m[8], m[9] // brace-delimited JSON object
+		case m[10] >= 0 && m[11] >= 0:
+			valStart, valEnd = m[10], m[11] // unquoted run
 		}
 		if valStart < 0 {
 			continue
