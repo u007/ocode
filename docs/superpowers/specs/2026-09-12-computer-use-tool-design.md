@@ -34,8 +34,11 @@ via the package manager (Linux), spawned through the shared
 type Button int // Left, Right, Middle
 
 type Driver interface {
-    // Screenshot captures the primary display as PNG at physical resolution.
-    Screenshot(ctx context.Context) (png []byte, width, height int, err error)
+    // Screenshot captures the primary display as PNG. screenW/screenH are the
+    // display size in the OS input coordinate space (macOS points, Windows
+    // DPI-aware pixels, X11 pixels), which may differ from the PNG's pixel
+    // size on HiDPI displays.
+    Screenshot(ctx context.Context) (png []byte, screenW, screenH int, err error)
     Click(ctx context.Context, x, y int, button Button, count int) error
     Move(ctx context.Context, x, y int) error
     Drag(ctx context.Context, x1, y1, x2, y2 int) error
@@ -50,21 +53,29 @@ type Driver interface {
 func New(sup *tool.ProcessSupervisor) (Driver, error) // build-tag selected
 ```
 
-Every driver call gets a 10s context timeout and a capped stdout buffer.
-All coordinates crossing the Driver boundary are physical pixels.
+Every driver call gets a 10s context timeout (60s for `Type`) and a capped
+stdout buffer. All coordinates crossing the Driver boundary are in the OS
+input coordinate space reported by `Screenshot`.
 
 ### darwin
 
-- Screenshot: `screencapture -x -t png <tmpfile>` under `os.TempDir()` (the
-  sandbox already guarantees that dir is writable). Zero-byte or missing
-  output means Screen Recording was denied; return `NoticedError` pointing
-  to System Settings → Privacy & Security → Screen Recording.
+- Screenshot: `screencapture -x -D 1 -t png <tmpfile>` under `os.TempDir()`
+  (the sandbox already guarantees that dir is writable). Display size in
+  points comes from `$.NSScreen.mainScreen.frame` in the same JXA helper.
+  A denied Screen Recording grant does not fail: macOS silently captures
+  the wallpaper only. There is no reliable signal, so the grant is
+  documented in `docs/computer-use.md` and printed by `/computer status`
+  on darwin (System Settings → Privacy & Security → Screen Recording, for
+  the terminal or ocode-desktop app).
 - Input: `osascript -l JavaScript` executing an embedded JXA script that uses
   the ObjC bridge (`$.CGEventCreateMouseEvent`, `$.CGEventPost`,
   `$.CGEventCreateKeyboardEvent`, `$.CGEventKeyboardSetUnicodeString`,
   `$.CGEventCreateScrollWheelEvent`). One script, parameters passed as argv.
   Event-post failures map to a `NoticedError` naming the Accessibility
-  permission.
+  permission. Struct arguments (`CGPoint`) through the JXA bridge are
+  reported to work but unverified here: implementation starts with a
+  throwaway spike; if it fails, fall back to AppleScript `System Events`
+  (`click at {x, y}`, `keystroke`, `key code`).
 - Cursor: same JXA path via `$.CGEventGetLocation($.CGEventCreate(null))`.
 - Key names: table maps xdotool-style names (`Return`, `Tab`, `Escape`,
   `ctrl`, `cmd`, `alt`, `shift`, arrows, F-keys, letters/digits) to macOS
@@ -84,7 +95,9 @@ All coordinates crossing the Driver boundary are physical pixels.
 ### linux
 
 - Session detection: `XDG_SESSION_TYPE == "wayland"` → `ydotool` + `grim`;
-  otherwise `xdotool` + `scrot`.
+  otherwise `xdotool` + `scrot`. Wayland support is wlroots-only (`grim`
+  does not work on GNOME/KDE; `ydotool` needs its daemon and uinput
+  access). Documented as a limitation.
 - Missing binary → `NoticedError` with an install hint
   (`apt install xdotool scrot` / `apt install ydotool grim`).
 - Screenshot to temp PNG, read, delete.
@@ -117,13 +130,16 @@ duration: number seconds  (wait, max 10)
 
 ### Scaling
 
-Screenshots are downscaled in pure Go (`golang.org/x/image/draw`, already a
-transitive dependency; verify in go.mod) so the longest side is ≤ 1568px.
-The tool remembers `scale = physical / scaled` from the last screenshot and
-multiplies incoming coordinates by it before calling the driver. Before any
-screenshot has been taken, scale is derived by a throwaway capture on first
-input action. The text result of `screenshot` reports
-`screen 2880x1800 physical, image 1568x980, scale 1.84`.
+Screenshots are downscaled in pure Go (`golang.org/x/image/draw`, a direct
+dependency) so the longest side is ≤ 1568px. The tool remembers
+`scale = screenW / scaledW` from the last screenshot (screenW in the OS
+input space, per the Driver contract) and multiplies incoming coordinates
+by it before calling the driver. Before any screenshot has been taken,
+scale is derived by a throwaway capture on the first input action. The
+text result of `screenshot` reports
+`screen 1440x900, image 1440x900, scale 1.00` (macOS Retina example: the
+PNG arrives at 2880x1800 pixels, is scaled to 1568x980, and the reported
+scale is 1440/1568 = 0.92).
 
 ### Results
 
