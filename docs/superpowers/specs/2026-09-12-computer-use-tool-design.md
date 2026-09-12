@@ -72,10 +72,10 @@ input coordinate space reported by `Screenshot`.
   `$.CGEventCreateKeyboardEvent`, `$.CGEventKeyboardSetUnicodeString`,
   `$.CGEventCreateScrollWheelEvent`). One script, parameters passed as argv.
   Event-post failures map to a `NoticedError` naming the Accessibility
-  permission. Struct arguments (`CGPoint`) through the JXA bridge are
-  reported to work but unverified here: implementation starts with a
-  throwaway spike; if it fails, fall back to AppleScript `System Events`
-  (`click at {x, y}`, `keystroke`, `key code`).
+  permission. Struct arguments (`CGPoint`) through the JXA bridge
+  work: spike 2026-09-12 on macOS 26.6.2 confirmed `$.CGPointMake`
+  as the point-construction form, cursor round-trips correctly,
+  no TCC/accessibility error.
 - Cursor: same JXA path via `$.CGEventGetLocation($.CGEventCreate(null))`.
 - Key names: table maps xdotool-style names (`Return`, `Tab`, `Escape`,
   `ctrl`, `cmd`, `alt`, `shift`, arrows, F-keys, letters/digits) to macOS
