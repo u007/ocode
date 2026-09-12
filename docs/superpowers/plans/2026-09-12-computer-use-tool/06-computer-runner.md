@@ -4,6 +4,7 @@
 - Modify: `internal/computer/driver.go` (replace the Part 04 stub: keep `New`, move the platform selection behind build tags)
 - Create: `internal/computer/runner.go`
 - Create: `internal/computer/runner_test.go`
+- Create: `internal/computer/runner_stub_test.go`
 - Create: `internal/computer/new_darwin.go`, `internal/computer/new_windows.go`, `internal/computer/new_linux.go`, `internal/computer/new_other.go` (build tag `!darwin && !windows && !linux`)
 - Create: `internal/computer/tempfile.go`
 
@@ -11,11 +12,13 @@
 - Consumes: `tool.StartSupervised`, `tool.ProcessRegistration`, `tool.ProcessKindComputer`, `tool.ComputerDriver`.
 - Produces, in package `computer`:
   - `func New(sup *tool.ProcessSupervisor) (tool.ComputerDriver, error)` — returns an error when `sup` is nil (`computer: process supervisor required`), otherwise the GOOS driver via `newPlatformDriver(sup)` defined in each `new_<os>.go`; `new_other.go` returns the unsupported-platform error.
-  - `type runner struct { sup *tool.ProcessSupervisor }` with `func (r runner) run(ctx context.Context, name string, args ...string) (stdout string, err error)` and `func (r runner) runStdin(ctx context.Context, stdin string, name string, args ...string) (string, error)`.
+  - `type commandRunner interface { run(ctx context.Context, name string, args ...string) (stdout string, err error); runStdin(ctx context.Context, stdin string, name string, args ...string) (string, error) }` — drivers in later parts hold a `commandRunner` so tests can substitute a recording stub.
+  - `type execRunner struct { sup *tool.ProcessSupervisor }` implementing `commandRunner` via `tool.StartSupervised`.
+  - `type stubRunner` lives in `runner_stub_test.go` (test-only): records `[]string{name, args...}` per call and returns a configurable `(stdout, err)`; shared by the driver tests in later parts.
   - `func tempPNGPath() (string, error)` creating a unique path under `os.TempDir()` with prefix `ocode-computer-` and `.png` suffix.
   - `func readAndRemove(path string) ([]byte, error)`.
 
-## Behaviour of `run`
+## Behaviour of `execRunner.run`
 
 - Builds `exec.CommandContext`, captures stdout into a `tool.BoundedBuffer`-style limit of 1 MiB (reuse `internal/tool/bounded_buffer.go` if exported; otherwise a local `io.LimitReader` into a `bytes.Buffer`), stderr into a separate buffer.
 - Registers via `tool.StartSupervised` with `ID: "computer-<name>-<unix nano>"`, `Name: "computer " + name`, `Command: name + " " + strings.Join(args, " ")`, `Kind: tool.ProcessKindComputer`.

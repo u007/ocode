@@ -6,10 +6,10 @@
 - Create: `internal/computer/keymap_darwin.go`
 - Create: `internal/computer/driver_darwin_test.go`
 - Create: `internal/computer/driver_darwin_live_test.go` (skipped unless `OCODE_COMPUTER_LIVE=1`)
-- Modify: `internal/computer/new_darwin.go` (`newPlatformDriver` returns `&darwinDriver{r: runner{sup}}`)
+- Modify: `internal/computer/new_darwin.go` (`newPlatformDriver(r commandRunner)` returns `&darwinDriver{r: r}`)
 
 **Interfaces:**
-- Consumes: `runner.run`, `tempPNGPath`, `readAndRemove` (Part 06); `tool.ComputerDriver`, `tool.MouseButton` (Part 03); the spike decision recorded in the spec's darwin section (Part 01) selecting JXA CGEvent or System Events.
+- Consumes: `commandRunner`, `stubRunner` (test), `tempPNGPath`, `readAndRemove` (Part 06); `tool.ComputerDriver`, `tool.MouseButton` (Part 03); the spike decision recorded in the spec's darwin section (Part 01) selecting JXA CGEvent or System Events.
 - Produces: `darwinDriver` implementing `tool.ComputerDriver`; `func darwinKeyCode(name string) (code int, isModifier bool, ok bool)`; `func darwinArgs(op string, params ...string) []string` returning the argv used for `osascript` so tests can assert it.
 
 ## Behaviour (JXA path; if the spike chose System Events, replace the input ops below with an embedded AppleScript that uses `tell application "System Events"` `click at {x, y}`, `keystroke`, `key code`, keeping the same Go interface and tests)
@@ -25,9 +25,9 @@
 - [ ] **Step 1: Write failing tests** in `driver_darwin_test.go`:
   - `TestDarwinKeyCode_KnownAndUnknown`: `ctrl`, `cmd`, `Return`, `a`, `F5` map; `Bogus` → ok false.
   - `TestDarwinArgs_Click`: `darwinArgs("click", "10", "20", "left", "2")` equals `[]string{"-l","JavaScript","<embedded script path>","click","10","20","left","2"}` — assert the tail after the script path, since the script is written to a temp file at driver construction (or passed with `-e`; choose one and assert it).
-  - `TestDarwinKeyCombo_OrdersModifiers`: `Key` on a driver whose runner is stubbed (make `runner` an interface `commandRunner` in Part 06's file if not already; add that refactor here if needed) records argv `key 59 56 0` for `ctrl+shift+a`.
+  - `TestDarwinKeyCombo_OrdersModifiers`: `Key` on a driver built over `stubRunner` records argv `key 59 56 0` for `ctrl+shift+a`.
   - `TestDarwinKeyCombo_RejectsTwoMainKeys`: `a+b` → error.
-  - `TestDarwinAccessibilityErrorIsNoticed`: stubbed runner returns an error containing `not allowed to send keystrokes` → returned error `errors.As` a `*tool.NoticedError`.
+  - `TestDarwinAccessibilityErrorIsNoticed`: `stubRunner` returns an error containing `not allowed to send keystrokes` → returned error `errors.As` a `*tool.NoticedError`.
 
 - [ ] **Step 2: Run** `go test ./internal/computer -run 'Darwin' -v`. Expected: FAIL.
 

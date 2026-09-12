@@ -9,7 +9,7 @@
 - Modify: `internal/computer/new_windows.go`
 
 **Interfaces:**
-- Consumes: `runner.run`, `tempPNGPath`, `readAndRemove`, `tool.ComputerDriver`, `tool.MouseButton`, `tool.NoticedError`.
+- Consumes: `commandRunner`, `stubRunner` (test), `tempPNGPath`, `readAndRemove`, `tool.ComputerDriver`, `tool.MouseButton`, `tool.NoticedError`.
 - Produces: `windowsDriver`; `func windowsArgs(scriptPath, op string, params ...string) []string` returning `[]string{"-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",scriptPath,op,params...}`; `func windowsVirtualKey(name string) (vk int, isModifier bool, ok bool)`.
 
 ## Behaviour
@@ -22,7 +22,7 @@
 
 ## Steps
 
-- [ ] **Step 1: Write failing tests**: `TestWindowsArgs_Type` (base64 of text present), `TestWindowsVirtualKey_KnownAndUnknown`, `TestWindowsKeyCombo_Order` (`ctrl+s` → `key 17 83`), `TestWindowsMissingPowershellIsNoticed` (stubbed runner returns `exec.ErrNotFound`).
+- [ ] **Step 1: Write failing tests**: `TestWindowsArgs_Type` (base64 of text present), `TestWindowsVirtualKey_KnownAndUnknown`, `TestWindowsKeyCombo_Order` (`ctrl+s` → `key 17 83`), `TestWindowsMissingPowershellIsNoticed` (`stubRunner` returns `exec.ErrNotFound`).
 - [ ] **Step 2: Run** `go test ./internal/computer -run 'Windows' -v`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** unit tests on the host; `GOOS=windows go vet ./internal/computer/`. If a Windows machine or VM is available run `OCODE_COMPUTER_LIVE=1 go test ./internal/computer -run WindowsLive -v` (screenshot decodes; move then cursor round-trips). Otherwise state in the commit message that live verification is pending and add a TODO.md line under a "Computer use" heading.

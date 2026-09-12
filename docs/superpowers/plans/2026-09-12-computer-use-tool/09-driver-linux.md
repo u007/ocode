@@ -8,7 +8,7 @@
 - Modify: `internal/computer/new_linux.go`
 
 **Interfaces:**
-- Consumes: `runner.run`, `tempPNGPath`, `readAndRemove`, `tool.ComputerDriver`, `tool.MouseButton`, `tool.NoticedError`.
+- Consumes: `commandRunner`, `stubRunner` (test), `tempPNGPath`, `readAndRemove`, `tool.ComputerDriver`, `tool.MouseButton`, `tool.NoticedError`.
 - Produces: `linuxDriver{backend string}`; `func xdotoolArgs(op string, ...) []string`, `func ydotoolArgs(op string, ...) []string`; `func linuxInstallHint(backend string) string`.
 
 ## Behaviour
