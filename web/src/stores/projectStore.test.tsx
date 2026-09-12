@@ -7,6 +7,10 @@ const projectApi = vi.hoisted(() => ({
   getCurrentProject: vi.fn(),
   listProjectSessions: vi.fn(),
   listGroups: vi.fn(),
+  renameProject: vi.fn(),
+  reorderProjects: vi.fn(),
+  setProjectGroup: vi.fn(),
+  removeRemoteProject: vi.fn(),
 }));
 
 // ProjectProvider fires api calls on mount (listProjects / getCurrentProject).
@@ -18,6 +22,10 @@ vi.mock("../api/client", () => ({
     getCurrentProject: projectApi.getCurrentProject,
     listProjectSessions: projectApi.listProjectSessions,
     listGroups: projectApi.listGroups,
+    renameProject: projectApi.renameProject,
+    reorderProjects: projectApi.reorderProjects,
+    setProjectGroup: projectApi.setProjectGroup,
+    removeRemoteProject: projectApi.removeRemoteProject,
   },
 }));
 
@@ -39,6 +47,10 @@ beforeEach(() => {
   projectApi.getCurrentProject.mockReset().mockResolvedValue(null);
   projectApi.listProjectSessions.mockReset().mockResolvedValue([]);
   projectApi.listGroups.mockReset().mockResolvedValue([]);
+  projectApi.renameProject.mockReset().mockResolvedValue({ status: "ok" });
+  projectApi.reorderProjects.mockReset().mockResolvedValue({ status: "ok" });
+  projectApi.setProjectGroup.mockReset().mockResolvedValue({ status: "ok" });
+  projectApi.removeRemoteProject.mockReset().mockResolvedValue({ status: "ok" });
 });
 
 function setup() {
@@ -249,6 +261,60 @@ describe("project metadata readiness", () => {
     });
 
     expect(result.current.state.projects[0].host).toBe("new.example.com");
+  });
+});
+
+describe("projectStore remote mutations stay host-scoped", () => {
+  it("renameProject forwards host for an SSH entry", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.renameProject("/home/user/app", "renamed", "devbox");
+    });
+    expect(projectApi.renameProject).toHaveBeenCalledWith("/home/user/app", "renamed", "devbox");
+  });
+
+  it("renameProject forwards host for a WSL entry", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.renameProject(`C:\\Users\\james\\app`, "wsl-app", "wsl:Ubuntu");
+    });
+    expect(projectApi.renameProject).toHaveBeenCalledWith(
+      `C:\\Users\\james\\app`,
+      "wsl-app",
+      "wsl:Ubuntu",
+    );
+  });
+
+  it("setProjectGroup forwards host for a remote entry", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.setProjectGroup("/home/user/app", "g", "devbox");
+    });
+    expect(projectApi.setProjectGroup).toHaveBeenCalledWith("/home/user/app", "g", "devbox");
+  });
+
+  it("reorderProjects forwards scoped refs with verbatim remote paths", async () => {
+    const { result } = setup();
+    const refs = [
+      { path: "/home/user/app", host: "wsl:Ubuntu" },
+      { path: "/local" },
+      { path: "/home/user/app", host: "devbox" },
+    ];
+    await act(async () => {
+      await result.current.reorderProjects(refs);
+    });
+    expect(projectApi.reorderProjects).toHaveBeenCalledWith(refs);
+  });
+
+  it("renameProject propagates errors so the inline editor can display them", async () => {
+    projectApi.renameProject.mockRejectedValueOnce(new Error("server rejected rename"));
+    const { result } = setup();
+    await act(async () => {
+      await expect(
+        result.current.renameProject("/home/user/app", "renamed", "devbox"),
+      ).rejects.toThrow("server rejected rename");
+    });
+    expect(projectApi.renameProject).toHaveBeenCalledWith("/home/user/app", "renamed", "devbox");
   });
 });
 

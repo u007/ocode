@@ -2738,6 +2738,12 @@ func newModel(opts ...RunOptions) model {
 	m.agentsViewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	m.agentsViewport.SoftWrap = true
 	m.sidebarCache = &sidebarComputeCache{}
+	// Wire the changes tab to the initial agent (installAgent only runs on
+	// later swaps). Without this, a session that never switches models shows
+	// "no changes in this session yet" forever.
+	if a != nil {
+		m.changes = m.changes.withRegistry(a.Changes)
+	}
 
 	// Transfer the LSP manager and notification channels from the temporary
 	// model used to build the tool set. Without this, m.lspMgr stays nil and
@@ -6857,13 +6863,15 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		// throwaway copy), otherwise clicks use stale rows and indices.
 		// refreshFiles also clamps the selection and evicts diffs for
 		// removed/updated paths.
+		// The status bar (last two rows) belongs to status-bar handlers,
+		// not to the changes panes.
 		m.changes = m.changes.refreshFiles()
 		contentTop := appHeaderHeight + 1
 		leftW := m.width * 35 / 100
 		if leftW < 10 {
 			leftW = 10
 		}
-		if mouse.X >= 0 && mouse.X < leftW && mouse.Y >= contentTop {
+		if mouse.X >= 0 && mouse.X < leftW && mouse.Y >= contentTop && mouse.Y < m.statusBarTopY() {
 			row := mouse.Y - contentTop
 			itemIdx := m.changes.list.HitTest(0, row)
 			if itemIdx >= 0 && itemIdx < len(m.changes.files) {
@@ -6898,7 +6906,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 
 		// scrollbar for diff panel
 		gitTrackH := m.git.diff.Height()
-		if mouse.X == scrollX && mouse.Y >= gitBodyTop && mouse.Y < gitBodyTop+gitTrackH {
+		if mouse.X == scrollX && mouse.Y >= gitBodyTop && mouse.Y < gitBodyTop+gitTrackH && mouse.Y < m.statusBarTopY() {
 			if thumbOffset, ok := scrollbarThumbOffset(mouse.Y, gitBodyTop, gitTrackH, m.git.diff.TotalLineCount(), m.git.diff.VisibleLineCount(), m.git.diff.YOffset()); ok {
 				m.scrollbarDrag = scrollbarDragGitDiff
 				m.scrollbarDragOffset = thumbOffset
@@ -6908,8 +6916,11 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			return m, nil, true
 		}
 
-		// section panel click
-		if mouse.X >= 0 && mouse.X < sectRight && mouse.Y >= gitBodyTop {
+		// section panel click. The tab content starts at gitBodyTop and
+		// the status bar occupies the last two rows — clicks there belong
+		// to status-bar handlers (pending hint jump, mode cycle), not to
+		// the git panes.
+		if mouse.X >= 0 && mouse.X < sectRight && mouse.Y >= gitBodyTop && mouse.Y < m.statusBarTopY() {
 			row := mouse.Y - gitBodyTop
 			var diffCmd tea.Cmd
 			if row >= 0 && row < 4 {
@@ -6923,7 +6934,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 
 		// file list panel click
-		if mouse.X >= sectRight && mouse.X < filesRight && mouse.Y >= gitBodyTop {
+		if mouse.X >= sectRight && mouse.X < filesRight && mouse.Y >= gitBodyTop && mouse.Y < m.statusBarTopY() {
 			row := mouse.Y - gitBodyTop
 			if row >= 0 {
 				isDoubleClick := time.Since(m.lastClickTime) < 400*time.Millisecond && mouse.X == m.lastClickX && mouse.Y == m.lastClickY
@@ -7049,7 +7060,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 
 		// diff panel text selection
 		diffLeft := filesRight + 1 // after files pane border
-		if mouse.X >= diffLeft && mouse.X < scrollX && mouse.Y >= gitBodyTop {
+		if mouse.X >= diffLeft && mouse.X < scrollX && mouse.Y >= gitBodyTop && mouse.Y < m.statusBarTopY() {
 			gutterWidth := 0
 			if m.git.diff.LeftGutterFunc != nil {
 				gutterWidth = lipgloss.Width(m.git.diff.LeftGutterFunc(viewport.GutterContext{Soft: m.git.diff.SoftWrap}))
@@ -7575,6 +7586,24 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	}
 
 	// Status bar: complete text selection drag, or handle permission click.
+	// Pending permission/question on a non-Chat tab: the dialog only
+	// renders on Chat, so a click on the status-bar pending hint jumps
+	// back to Chat instead of stranding the user with no popup.
+	// This check sits OUTSIDE the dragging block on purpose: non-Chat tabs
+	// never start a status selection drag (the drag starter below is gated
+	// on tabChat), so a release-based handler would never fire there.
+	// Press-only: the release then goes through the normal status-bar path
+	// under the Chat tab and never re-triggers this branch.
+	if pressed && (m.showPermDialog || m.showQuestionDialog) && m.activeTab != tabChat &&
+		mouse.Y == m.statusBarTopY()+1 &&
+		mouse.X >= statusContentLeftX && mouse.X < statusContentLeftX+m.statusContentWidth() {
+		m.activeTab = tabChat
+		m.chatUnread = false
+		m.layout() // shrink the viewport for the now-visible dialog, mirroring the dialog open paths
+		m.statusSel = selectionState{}
+		return m, nil, true
+	}
+
 	if m.statusSel.dragging {
 		// Ensure the status bar cache is populated for permission click detection.
 		m.renderStatus()
@@ -7586,19 +7615,11 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			return m, nil, true
 		}
 		// Plain click (no drag): check if click is on the permission text
-		// and cycle the permission mode.
+		// and cycle the permission mode. This stays release-based (inside
+		// the dragging block): press starts the drag, release with no
+		// distance cycles exactly once. Hoisting it out would double-fire
+		// on press+release and break drag-select on the status bar.
 		statusTop := m.statusBarTopY()
-		// Pending permission/question on a non-Chat tab: the dialog only
-		// renders on Chat, so a click on the status-bar pending hint jumps
-		// back to Chat instead of stranding the user with no popup.
-		if (m.showPermDialog || m.showQuestionDialog) && m.activeTab != tabChat &&
-			mouse.Y == statusTop+1 {
-			m.activeTab = tabChat
-			m.chatUnread = false
-			m.layout()
-			m.statusSel = selectionState{}
-			return m, nil, true
-		}
 		if mouse.Y >= statusTop && mouse.Y < statusTop+2 && mouse.X >= m.statusPermColStart && mouse.X < m.statusPermColEnd && mouse.Y == statusTop && m.agent != nil {
 			perm := m.agent.Permissions()
 			// Cycle: normal → normal·auto → yolo → locked → sandbox → sandbox·auto → normal

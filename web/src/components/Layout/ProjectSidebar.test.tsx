@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { SessionSlice } from "../../stores/chatStore";
 import type { Project, ProjectGroup } from "../../api/types";
 import ProjectSidebar, { buildProjectSidebarOrder } from "./ProjectSidebar";
@@ -113,20 +113,24 @@ const terminalStateFake = vi.hoisted(() => ({
   byProject: {} as Record<string, { alerts?: Record<string, boolean> }>,
 }));
 
+const actionsFake = vi.hoisted(() => ({
+  selectProject: vi.fn(),
+  addProject: vi.fn(),
+  removeProject: vi.fn(),
+  renameProject: vi.fn(),
+  reorderProjects: vi.fn(),
+  setProjectGroup: vi.fn(),
+  createGroup: vi.fn(),
+  deleteGroup: vi.fn(),
+  renameGroup: vi.fn(),
+  reorderGroups: vi.fn(),
+  setGroupCollapsed: vi.fn(),
+}));
+
 vi.mock("../../stores/projectStore", () => ({
   useProjectState: () => ({
     state: stateFake,
-    selectProject: vi.fn(),
-    addProject: vi.fn(),
-    removeProject: vi.fn(),
-    renameProject: vi.fn(),
-    reorderProjects: vi.fn(),
-    setProjectGroup: vi.fn(),
-    createGroup: vi.fn(),
-    deleteGroup: vi.fn(),
-    renameGroup: vi.fn(),
-    reorderGroups: vi.fn(),
-    setGroupCollapsed: vi.fn(),
+    ...actionsFake,
   }),
 }));
 
@@ -289,5 +293,124 @@ describe("ProjectSidebar project indicators", () => {
     expect(screen.queryByTitle(/streaming/)).toBeNull();
     expect(screen.queryByTitle(/pending/)).toBeNull();
     expect(screen.queryByTitle(/beep/)).toBeNull();
+  });
+});
+
+// ── Remote project right-click edit tests ────────────────────────────────────
+// The expanded row's context menu + inline rename is the edit entry point
+// for SSH/WSL entries: right-click → Rename edits the display name inline,
+// and group/remove actions must be scoped by (host, path).
+// The store mock returns fresh vi.fn()s per call, so tests assert against
+// the component's onRename/onRemove wiring via the row callbacks.
+
+const remoteProject = (path: string, host: string, group = ""): Project => ({
+  path,
+  name: `${host}:${path}`,
+  added_at: "",
+  last_used_at: "",
+  order: 0,
+  group,
+  host,
+});
+
+describe("ProjectSidebar remote right-click edit", () => {
+  beforeEach(() => {
+    stateFake.projects = [
+      remoteProject("/home/user/app", "devbox"),
+      remoteProject("/home/user/app", "wsl:Ubuntu"),
+    ];
+    stateFake.groups = [{ name: "g", order: 1, collapsed: false }];
+    stateFake.activeProject = null;
+    stateFake.tabsByProject = {};
+    Object.keys(chatSessionsFake).forEach((k) => delete chatSessionsFake[k]);
+    terminalStateFake.byProject = {};
+    actionsFake.renameProject.mockClear();
+  });
+
+  it("typing a new name in the inline editor and pressing Enter calls renameProject with host scope", async () => {
+    actionsFake.renameProject.mockResolvedValue(undefined);
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    // Open context menu on the SSH row and click Rename.
+    const nameNode = document.querySelector(".group.relative .truncate.font-medium");
+    expect(nameNode?.textContent).toBe("devbox:/home/user/app");
+    fireEvent.contextMenu(nameNode!);
+    fireEvent.click(screen.getByText("Rename"));
+    // Type a new name and press Enter.
+    const input = screen.getByRole("textbox") as HTMLInputElement;
+    expect(input.value).toBe("devbox:/home/user/app");
+    fireEvent.change(input, { target: { value: "renamed-ssh" } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    // The store action receives the new name with host scope.
+    expect(actionsFake.renameProject).toHaveBeenCalledWith(
+      "/home/user/app",
+      "renamed-ssh",
+      "devbox",
+    );
+  });
+
+  it("rename error from the store is displayed inline", async () => {
+    actionsFake.renameProject.mockRejectedValueOnce(new Error("server rejected rename"));
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    const nameNode = document.querySelector(".group.relative .truncate.font-medium")!;
+    fireEvent.contextMenu(nameNode);
+    fireEvent.click(screen.getByText("Rename"));
+    const input = screen.getByRole("textbox") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "renamed-ssh" } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(screen.getByText("server rejected rename")).toBeDefined());
+    expect(actionsFake.renameProject).toHaveBeenCalledWith(
+      "/home/user/app",
+      "renamed-ssh",
+      "devbox",
+    );
+  });
+
+  it("right-click Rename on an SSH row opens the inline editor for that row only", () => {
+    const { container } = render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    // ContextMenu attaches onContextMenu to the `contents` wrapper around the
+    // row, so fire on the row's name node (bubbles to the wrapper). The
+    // host:path subtitle also matches the text, so scope to the name node.
+    const nameNode = container.querySelector(".group.relative .truncate.font-medium");
+    expect(nameNode?.textContent).toBe("devbox:/home/user/app");
+    fireEvent.contextMenu(nameNode!);
+    fireEvent.click(screen.getByText("Rename"));
+    // Inline editor appears for the first (SSH) row only.
+    const inputs = container.querySelectorAll("input");
+    expect(inputs.length).toBe(1);
+    expect((inputs[0] as HTMLInputElement).value).toBe("devbox:/home/user/app");
+  });
+
+  it("right-click Rename on a WSL row opens the inline editor with the WSL name", () => {
+    const { container } = render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    const nameNodes = container.querySelectorAll(".group.relative .truncate.font-medium");
+    expect(nameNodes.length).toBe(2);
+    fireEvent.contextMenu(nameNodes[1]);
+    fireEvent.click(screen.getByText("Rename"));
+    const inputs = container.querySelectorAll("input");
+    expect(inputs.length).toBe(1);
+    expect((inputs[0] as HTMLInputElement).value).toBe("wsl:Ubuntu:/home/user/app");
+  });
+
+  it("remote rows expose a host-scoped Move-to-group menu entry", () => {
+    const { container } = render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    // Both remotes share the path; the menu must still offer the group move.
+    const nameNode = container.querySelector(".group.relative .truncate.font-medium");
+    fireEvent.contextMenu(nameNode!);
+    expect(screen.getByText('Move to "g"')).toBeDefined();
+  });
+
+  it("collapsed rail exposes Remove for a remote entry", () => {
+    render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} />);
+    const railButton = screen.getByLabelText("devbox:/home/user/app");
+    fireEvent.contextMenu(railButton);
+    expect(screen.getByText("Remove")).toBeDefined();
+  });
+
+  it("collapsed rail exposes group moves for a grouped remote entry", () => {
+    stateFake.projects = [remoteProject("/home/user/app", "devbox", "g")];
+    render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} />);
+    const railButton = screen.getByLabelText("devbox:/home/user/app");
+    fireEvent.contextMenu(railButton);
+    expect(screen.getByText("Remove from group")).toBeDefined();
   });
 });

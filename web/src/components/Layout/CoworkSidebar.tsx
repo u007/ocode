@@ -443,7 +443,7 @@ export default function CoworkSidebar({
   const content = (
     <>
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
         <h2 className="text-sm font-semibold text-foreground">Cowork</h2>
         <button
           onClick={onClose}
@@ -454,7 +454,7 @@ export default function CoworkSidebar({
       </div>
 
       {/* Session title — mirrors TUI sidebar header (◆ title + ✦ gen) */}
-      <div className="border-b border-border px-4 py-3">
+      <div className="border-b border-border px-4 py-3 shrink-0">
         <div className="flex items-start gap-2">
           <span className="text-[#7DCFFF] font-bold text-sm leading-5 select-none" aria-hidden>◆</span>
           <span
@@ -485,7 +485,7 @@ export default function CoworkSidebar({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
         {/* Agent Section */}
         <div className="border-b border-border">
           <button
@@ -1014,7 +1014,7 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
           />
         )}
         <aside
-          className={`fixed inset-y-0 right-0 z-50 w-72 border-l border-border bg-card flex flex-col overflow-hidden transition-transform duration-200 ${
+          className={`fixed inset-y-0 right-0 z-50 w-72 border-l border-border bg-card flex flex-col min-h-0 overflow-hidden transition-transform duration-200 ${
             isOpen ? "translate-x-0" : "translate-x-full"
           }`}
         >
@@ -1025,7 +1025,7 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
   }
 
   return (
-    <aside className="w-72 flex-shrink-0 border-l border-border bg-card flex flex-col overflow-hidden">
+    <aside className="w-full flex-1 min-h-0 border-l border-border bg-card flex flex-col overflow-hidden">
       {content}
     </aside>
   );

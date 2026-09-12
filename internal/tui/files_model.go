@@ -243,10 +243,20 @@ func loadDirChildren(dir string, depth int, showHidden bool) ([]fileNode, error)
 			continue
 		}
 		info, infoErr := e.Info()
+		// DirEntry.IsDir reports the link itself, so a symlink to a
+		// directory reports false. Follow the target so linked folders
+		// expand like regular folders; a broken/unreadable target stays
+		// a file.
+		isDir := e.IsDir()
+		if !isDir && e.Type()&os.ModeSymlink != 0 {
+			if st, err := os.Stat(filepath.Join(dir, name)); err == nil && st.IsDir() {
+				isDir = true
+			}
+		}
 		nodes = append(nodes, fileNode{
 			path:    filepath.Join(dir, name),
 			name:    name,
-			isDir:   e.IsDir(),
+			isDir:   isDir,
 			size:    fileSize(info, infoErr),
 			modTime: fileModTime(info, infoErr),
 			depth:   depth,

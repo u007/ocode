@@ -20,6 +20,7 @@ interface SpeechContextValue {
   selectEngine: (engine: TTSConfig["engine"]) => Promise<void>;
   setMode: (mode: TTSConfig["mode"]) => Promise<void>;
   retry: () => Promise<void>;
+  refresh: () => Promise<void>;
   position: number;
   duration: number;
   seek: (position: number) => void;
@@ -62,6 +63,28 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
   const chunks = useRef<string[]>([]);
   const chunkIndex = useRef(0);
   const lastText = useRef("");
+  // Local-engine playback: one <audio> element fed by a blob fetched from
+  // /api/tts/audio once the server reports the rendering ready.
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
+  const isLocal = config.engine !== "browser-native";
+
+  const releaseAudio = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.onended = null;
+      audio.onerror = null;
+      audio.ontimeupdate = null;
+      audio.onloadedmetadata = null;
+      audio.removeAttribute("src");
+      audioRef.current = null;
+    }
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -91,6 +114,7 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
   useEffect(() => () => {
     generation.current++;
     window.speechSynthesis?.cancel();
+    releaseAudio();
     chunks.current = [];
     chunkIndex.current = 0;
     setPosition(0);
@@ -103,6 +127,7 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
     chunks.current = [];
     chunkIndex.current = 0;
     if (browserSpeechAvailable()) window.speechSynthesis.cancel();
+    releaseAudio();
     if (config.engine !== "browser-native") {
       const requestGeneration = localRequestGeneration.current;
       void enqueueLocalMutation(() => api.ttsStop()).then((playback) => {
@@ -113,7 +138,7 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
     }
     setIsSpeaking(false);
     setPaused(false);
-  }, [config.engine, enqueueLocalMutation]);
+  }, [config.engine, enqueueLocalMutation, releaseAudio]);
 
   const beginBrowserPlayback = useCallback((parts: string[], startAt: number) => {
     const currentGeneration = ++generation.current;
@@ -173,16 +198,59 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
     }
     stop();
     const requestGeneration = ++localRequestGeneration.current;
+    const current = () => requestGeneration === localRequestGeneration.current;
     try {
-      const playback = await enqueueLocalMutation(() => api.ttsSpeak(normalized));
-      if (requestGeneration === localRequestGeneration.current) {
-        setStatus((previous) => previous ? { ...previous, playback } : previous);
+      let playback = await enqueueLocalMutation(() => api.ttsSpeak(normalized));
+      if (!current()) return;
+      setStatus((previous) => previous ? { ...previous, playback } : previous);
+      setIsSpeaking(true);
+      setPaused(false);
+      setPosition(0);
+      setDuration(0);
+      // Synthesis runs server-side; poll until this generation is ready.
+      while (current() && playback.status === "synthesizing") {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        if (!current()) return;
+        const next = await api.getTTSStatus();
+        if (next.playback.generation !== playback.generation) {
+          throw new Error("speech request was replaced");
+        }
+        playback = next.playback;
+        setStatus(next);
       }
+      if (!current()) return;
+      if (playback.status !== "ready" || !playback.audio_id) {
+        throw new Error(playback.error || `speech synthesis ${playback.status}`);
+      }
+      const blob = await api.ttsAudioBlob(playback.audio_id);
+      if (!current()) return;
+      releaseAudio();
+      const url = URL.createObjectURL(blob);
+      audioUrlRef.current = url;
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.onloadedmetadata = () => { if (current()) setDuration(Math.round(audio.duration)); };
+      audio.ontimeupdate = () => { if (current()) setPosition(Math.round(audio.currentTime)); };
+      audio.onended = () => {
+        if (!current()) return;
+        setIsSpeaking(false);
+        setPaused(false);
+        setPosition(Math.round(audio.duration));
+      };
+      audio.onerror = () => {
+        if (!current()) return;
+        setError("Audio playback failed");
+        setIsSpeaking(false);
+      };
+      await audio.play();
     } catch (err) {
+      if (!current()) return;
       // Deliberately do not switch to Browser Native on local-engine failure.
       setError(err instanceof Error ? err.message : String(err));
+      setIsSpeaking(false);
+      setPaused(false);
     }
-  }, [config.engine, enqueueLocalMutation, speakBrowser, stop]);
+  }, [config.engine, enqueueLocalMutation, releaseAudio, speakBrowser, stop]);
 
   useEffect(() => {
     const onRequest = (event: Event) => {
@@ -232,18 +300,28 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
   }, [config, enqueueLocalMutation]);
 
   const skip = useCallback((seconds: number) => {
-    if (!isSpeaking || config.engine !== "browser-native" || !lastText.current) return;
+    const audio = audioRef.current;
+    if (isLocal) {
+      if (audio && isSpeaking) audio.currentTime = Math.max(0, Math.min(audio.duration || 0, audio.currentTime + seconds));
+      return;
+    }
+    if (!isSpeaking || !lastText.current) return;
     const parts = chunkSpeechText(lastText.current, 240);
     const delta = Math.max(1, Math.round(Math.abs(seconds) / 10)) * (seconds < 0 ? -1 : 1);
     beginBrowserPlayback(parts, Math.max(0, Math.min(parts.length, chunkIndex.current + delta)));
-  }, [beginBrowserPlayback, config.engine, isSpeaking]);
+  }, [beginBrowserPlayback, isLocal, isSpeaking]);
 
   const seek = useCallback((nextPosition: number) => {
-    if (config.engine !== "browser-native" || !lastText.current) return;
+    const audio = audioRef.current;
+    if (isLocal) {
+      if (audio) audio.currentTime = Math.max(0, Math.min(audio.duration || 0, nextPosition));
+      return;
+    }
+    if (!lastText.current) return;
     const parts = chunkSpeechText(lastText.current, 240);
     const target = Math.max(0, Math.min(parts.length, Math.round(nextPosition)));
     beginBrowserPlayback(parts, target);
-  }, [beginBrowserPlayback, config.engine]);
+  }, [beginBrowserPlayback, isLocal]);
 
   const retry = useCallback(async () => {
     setError(null);
@@ -266,12 +344,18 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<SpeechContextValue>(() => ({
     engines, status, config, isSpeaking, paused, error, currentText, speak, stop,
-    pause: () => { if (browserSpeechAvailable()) { window.speechSynthesis.pause(); setPaused(true); } },
-    resume: () => { if (browserSpeechAvailable()) { window.speechSynthesis.resume(); setPaused(false); } },
+    pause: () => {
+      if (isLocal) { audioRef.current?.pause(); setPaused(true); return; }
+      if (browserSpeechAvailable()) { window.speechSynthesis.pause(); setPaused(true); }
+    },
+    resume: () => {
+      if (isLocal) { void audioRef.current?.play(); setPaused(false); return; }
+      if (browserSpeechAvailable()) { window.speechSynthesis.resume(); setPaused(false); }
+    },
     skip, position, duration, seek,
-    selectEngine, setMode, retry,
+    selectEngine, setMode, retry, refresh,
     toolbarVisible, setToolbarVisible, toggleToolbar,
-  }), [config, currentText, duration, engines, error, isSpeaking, paused, position, retry, seek, selectEngine, setMode, skip, speak, status, stop, toolbarVisible, setToolbarVisible, toggleToolbar]);
+  }), [config, currentText, duration, engines, error, isLocal, isSpeaking, paused, position, refresh, retry, seek, selectEngine, setMode, skip, speak, status, stop, toolbarVisible, setToolbarVisible, toggleToolbar]);
 
   return <SpeechContext.Provider value={value}>{children}</SpeechContext.Provider>;
 }
@@ -283,7 +367,10 @@ export function useSpeech() {
 }
 
 export function playbackLabel(playback: TTSPlayback | undefined) {
-  if (!playback || playback.status === "stopped") return "Idle";
+  // "ready" is the server's rendered-audio state; once the client finished
+  // playing it the toolbar is idle again.
+  if (!playback || playback.status === "stopped" || playback.status === "ready") return "Idle";
+  if (playback.status === "synthesizing") return "Synthesizing";
   return playback.status === "playing" ? "Playing" : playback.status;
 }
 

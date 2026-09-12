@@ -1866,9 +1866,12 @@ func TestOnPermissionAskPersistToolUpdatesCurrentAgent(t *testing.T) {
 }
 
 // TestHandleToolCallEmitsSentinelWithoutCallback verifies the main-agent path
-// is unchanged: with no OnPermissionAsk, an Ask tool yields the sentinel.
+// is unchanged: with no OnPermissionAsk, an Ask tool that IS registered yields
+// the PERMISSION_ASK sentinel (the unknown-tool guard short-circuits only for
+// tools that are not in the tool map).
 func TestHandleToolCallEmitsSentinelWithoutCallback(t *testing.T) {
 	a := NewAgent(nil, nil, nil, nil)
+	a.AddTools([]tool.Tool{&fakeTool{name: "delete"}})
 	a.Permissions().SetRule("delete", PermissionAsk)
 	res, err := a.HandleToolCall("delete", json.RawMessage(`{"path":"x"}`))
 	if err != nil {

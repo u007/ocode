@@ -82,3 +82,28 @@ func TestCleanupToolResults(t *testing.T) {
 		t.Errorf("fresh file should still exist: %v", err)
 	}
 }
+
+// TestTruncateToolResultCharCapHintsActualCutLine guards the resume hint: when
+// the char cap trips inside line 3 of a 200-line output, the model must be told
+// to continue at line 3 (and the byte offset of the cut), not at line 101.
+func TestTruncateToolResultCharCapHintsActualCutLine(t *testing.T) {
+	long := strings.Repeat("y", maxToolResultChars*2)
+	input := "a\nb\n" + long + "\n" + strings.Repeat("c\n", 197)
+	got := TruncateToolResult("tool-cutline", input)
+
+	if strings.Contains(got, `"start_line": 101`) {
+		t.Fatalf("hint must not skip to line 101 when cut happened at line 3, got tail: %q", got[len(got)-400:])
+	}
+	if !strings.Contains(got, `"start_line": 3`) {
+		t.Fatalf("expected resume hint at line 3, got tail: %q", got[len(got)-400:])
+	}
+	// Cut lands at rune index maxToolResultChars; with ASCII input the byte
+	// offset equals it. The hint must expose a byte-window continuation.
+	want := fmt.Sprintf(`"offset_bytes": %d`, maxToolResultChars)
+	if !strings.Contains(got, want) {
+		t.Fatalf("expected byte-offset hint %s, got tail: %q", want, got[len(got)-400:])
+	}
+	if !strings.Contains(got, "showing 3/200 lines") {
+		t.Fatalf("expected 3/200 lines shown, got tail: %q", got[len(got)-400:])
+	}
+}

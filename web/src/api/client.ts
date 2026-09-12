@@ -45,6 +45,7 @@ import type {
 	TTSConfig,
 	TTSStatus,
 	TTSPlayback,
+	TTSInstallState,
 } from "./types";
 
 export interface CompactConfig {
@@ -638,7 +639,20 @@ export const api = {
 
 	getTTSEngines: () => fetchJSON<{ engines: TTSEngine[] }>("/api/tts/engines"),
 	getTTSStatus: () => fetchJSON<TTSStatus>("/api/tts/status"),
-	getTTSState: () => fetchJSON<Record<string, string>>("/api/tts/state"),
+	getTTSState: () => fetchJSON<Record<string, TTSInstallState>>("/api/tts/state"),
+	ttsAcceptLicense: (engine: string, license_name: string) =>
+	  fetchJSON<{ state: string }>("/api/tts/license", { method: "POST", body: JSON.stringify({ engine, license_hash: "manifest:" + engine, license_name }) }),
+	ttsPin: (engine: string, manifest_version: string) =>
+	  fetchJSON<{ state: string }>("/api/tts/pin", { method: "POST", body: JSON.stringify({ engine, manifest_version }) }),
+	ttsDownload: (engine: string) =>
+	  fetchJSON<{ state: string }>("/api/tts/download", { method: "POST", body: JSON.stringify({ engine }) }),
+	ttsEnable: (engine: string) =>
+	  fetchJSON<TTSStatus>("/api/tts/enable", { method: "POST", body: JSON.stringify({ engine }) }),
+	ttsAudioBlob: async (audioId: string): Promise<Blob> => {
+	  const res = await fetch(apiPath(`/api/tts/audio/${encodeURIComponent(audioId)}`), { headers: authHeaders() });
+	  if (!res.ok) throw new Error(`audio fetch failed (${res.status})`);
+	  return res.blob();
+	},
 	getTTSConfig: () => fetchJSON<TTSConfig>("/api/config/ocode/tts"),
 	setTTSConfig: (cfg: TTSConfig) =>
 	  fetchJSON<TTSStatus>("/api/config/ocode/tts", { method: "PUT", body: JSON.stringify(cfg) }),
@@ -1114,20 +1128,23 @@ export const api = {
     ),
   listProjectSessions: (path: string) =>
     fetchJSON<SessionInfo[]>("/api/projects/sessions?path=" + encodeURIComponent(path)),
-  renameProject: (path: string, name: string) =>
+  renameProject: (path: string, name: string, host?: string) =>
     fetchJSON<{ status: string }>("/api/projects/rename", {
       method: "POST",
-      body: JSON.stringify({ path, name }),
+      body: JSON.stringify(host ? { path, host, name } : { path, name }),
     }),
-  reorderProjects: (paths: string[]) =>
+  reorderProjects: (refs: Array<{ path: string; host?: string }>) =>
     fetchJSON<{ status: string }>("/api/projects/reorder", {
       method: "POST",
-      body: JSON.stringify({ paths }),
+      // Scoped form: remote entries are keyed by (host, verbatim path) so
+      // the same path on two hosts (or local vs remote) keeps its own
+      // position. Local entries omit host, preserving legacy semantics.
+      body: JSON.stringify({ projects: refs.map((r) => ({ path: r.path, host: r.host ?? "" })) }),
     }),
-  setProjectGroup: (path: string, group: string) =>
+  setProjectGroup: (path: string, group: string, host?: string) =>
     fetchJSON<{ status: string }>("/api/projects/group", {
       method: "POST",
-      body: JSON.stringify({ path, group }),
+      body: JSON.stringify(host ? { path, host, group } : { path, group }),
     }),
   listGroups: () => fetchJSON<ProjectGroup[]>("/api/projects/groups"),
   createGroup: (name: string) =>

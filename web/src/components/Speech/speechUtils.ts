@@ -6,6 +6,16 @@ export function sanitizeSpeechText(text: string) {
     .trim();
 }
 
+/**
+ * Computes the next playback mode in the two-state cycle:
+ * manual ↔ at-bottom. Any unknown or legacy value (e.g. "auto")
+ * normalizes to "at-bottom" on click, never sending "auto" to the server
+ * which does not accept it.
+ */
+export function nextSpeechMode(current: string | undefined): "manual" | "at-bottom" {
+  return current === "at-bottom" ? "manual" : "at-bottom";
+}
+
 export function chunkSpeechText(text: string, maxLength = 240) {
   const normalized = sanitizeSpeechText(text);
   if (!normalized || maxLength <= 0) return [];

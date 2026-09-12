@@ -45,6 +45,19 @@ var embeddedAssets embed.FS
 //go:embed appicon.png
 var appIcon []byte
 
+// showQuittingIndicator updates the native window title and injects a visible
+// DOM overlay so the user sees an immediate, non-blocking indicator that the
+// app is quitting — before the synchronous OnShutdown drains agents.
+func showQuittingIndicator(win *application.WebviewWindow) {
+	if win == nil {
+		return
+	}
+	win.SetTitle("ocode — Quitting…")
+	// The overlay runs async (InvokeAsync inside ExecJS) so it paints even
+	// when the main thread is about to block in OnShutdown.
+	win.ExecJS(`(function(){if(window.__ocodeQuittingOverlay)return;var d=document.createElement('div');d.id='ocode-quitting';d.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:#0a0a0aff;color:#e8e8e8;font-family:system-ui,sans-serif;z-index:2147483646;display:flex;align-items:center;justify-content:center;flex-direction:column;font-size:20px;letter-spacing:0.5px;pointer-events:none;';d.innerHTML='<div style="font-size:28px;margin-bottom:12px;">ocode</div><div>Quitting — finishing active tasks</div><div style="margin-top:18px;font-size:13px;color:#999;">Please wait a moment</div>';document.body.appendChild(d);window.__ocodeQuittingOverlay=true;})();`)
+}
+
 func main() {
 	// Hidden subcommand: internal/lsp/manager.go's spawnDaemonProcess re-execs
 	// os.Executable() with "lsp-daemon" to start a detached broker. In this
@@ -97,6 +110,17 @@ func main() {
 		Description: "AI coding agent",
 		Icon:        appIcon,
 		Services:    services,
+		ShouldQuit: func() bool {
+			// Show the quitting indicator synchronously (before any block in OnShutdown)
+			// and return true so Wails proceeds with Quit(). The indicator uses the
+			// atomic pointer set after window creation; it may be nil on very early
+			// signals before the window exists, so it is a no-op in that case.
+			dw := mainWin.Load()
+			if dw != nil && dw.window != nil {
+				showQuittingIndicator(dw.window)
+			}
+			return true
+		},
 		SingleInstance: &application.SingleInstanceOptions{
 			UniqueID: "com.ocode.desktop",
 			OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
@@ -279,12 +303,14 @@ func main() {
 	// closes — surprising on macOS where closing the last window normally
 	// terminates a non-tray app.
 	window.OnWindowEvent(events.Common.WindowClosing, func(*application.WindowEvent) {
+		showQuittingIndicator(window)
 		app.Quit()
 	})
 
 	// System tray for show/hide and quit.
 	tray := app.SystemTray.New()
 	tray.SetLabel("ocode")
+	tray.SetIcon(appIcon)
 	tray.SetMenu(application.NewMenuFromItems(
 		application.NewMenuItem("Show ocode").OnClick(func(ctx *application.Context) {
 			window.Show()
@@ -521,6 +547,7 @@ func rapidQuitHandler(app *application.App, window *application.WebviewWindow, h
 		mu.Unlock()
 
 		if rapid {
+			showQuittingIndicator(window)
 			app.Quit()
 			return
 		}
@@ -575,6 +602,7 @@ func confirmQuit(app *application.App, window *application.WebviewWindow, handle
 	cancel.SetAsCancel()
 	cancel.SetAsDefault()
 	dlg.AddButton(buttonLabel).OnClick(func() {
+		showQuittingIndicator(window)
 		app.Quit()
 	})
 	dlg.Show()

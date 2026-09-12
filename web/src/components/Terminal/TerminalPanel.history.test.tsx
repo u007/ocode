@@ -232,4 +232,36 @@ describe("TerminalPanel history restore handoff", () => {
     expect(h.sockets[0].url).not.toContain("history_offset=");
     unmount();
   });
+
+  it("persists the rendered buffer when the shell exits (desktop-quit path)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(jsonResponse(page("t1", 0, "hello", 11, false)))
+        .mockResolvedValueOnce(jsonResponse(page("t1", 5, " world", 11, true))),
+    );
+
+    const { unmount } = render(
+      <TerminalPanel id="t1" active projectPath="/project" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
+    );
+
+    await waitFor(() => expect(h.sockets).toHaveLength(1));
+    // A large final frame arrives right before the exit close and lands in
+    // the chunked render queue; the close must flush it before saving, or
+    // the persisted buffer would miss the last output.
+    const finalOutput = `FINAL-${"x".repeat(70 * 1024)}`;
+    h.sockets[0].onmessage?.({ data: new TextEncoder().encode(finalOutput).buffer });
+    h.sockets[0].onclose?.({ wasClean: true, code: 1000, reason: "" });
+
+    // xterm.write is async (mock invokes the callback synchronously, real
+    // xterm defers it); wait for the save the close handler schedules.
+    await waitFor(() => expect(window.localStorage.getItem("ocode.term.buf.t1")).not.toBeNull());
+
+    const writes = h.terminals[0].write.mock.calls.map(([text]) => String(text)).join("");
+    expect(writes).toContain("FINAL-");
+    expect(writes).toContain("[terminal session ended]");
+    const saved = window.localStorage.getItem("ocode.term.buf.t1");
+    expect(saved).not.toBeNull();
+    unmount();
+  });
 });

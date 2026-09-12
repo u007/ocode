@@ -17,6 +17,7 @@ import (
 	"github.com/u007/ocode/internal/hook"
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/wallpaper"
 )
 
 const (
@@ -479,6 +480,9 @@ type OcodeConfig struct {
 	Plugins     PluginsConfig
 	Browser     BrowserConfig
 	TTS         TTSConfig
+	// Wallpaper holds the chat background wallpaper selection
+	// (enabled, light/dark image IDs, auto/manual mode).
+	Wallpaper wallpaper.WallpaperConfig
 	// ExternalPlugins holds installable/loadable plugin packages (source,
 	// dir, ref, enabled) such as the "orchestrator" plugin. Distinct from
 	// PluginsConfig, which only gates built-in opt-in tools. Persisted under
@@ -1779,6 +1783,15 @@ func SaveOcodeConfig(cfg *OcodeConfig) error {
 func SaveOcodeTTSConfig(tts TTSConfig) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.TTS = tts
+		return nil
+	})
+}
+
+// SaveOcodeWallpaperConfig updates only the persisted wallpaper config
+// while preserving the other ocode configuration sections.
+func SaveOcodeWallpaperConfig(cfg wallpaper.WallpaperConfig) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.Wallpaper = cfg
 		return nil
 	})
 }

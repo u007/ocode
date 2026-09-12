@@ -422,6 +422,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config, t.mainAgent.lspMgr)
+	subAgent.toolBatchDelay = 0
 	// Draw concurrency slots from the same pool as the dispatcher instead of
 	// NewAgent's fresh per-agent default. Without this, max_concurrent_agents
 	// only caps direct dispatches at each nesting level independently, and

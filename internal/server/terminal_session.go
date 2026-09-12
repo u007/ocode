@@ -4,6 +4,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log"
 	"os"
@@ -67,6 +68,12 @@ type terminalSession struct {
 	pending     [][]byte
 	pendingSize int
 	replayOver  bool
+	// done is closed by exit() after the pty read loop has drained final
+	// output, synced/closed history, closed the socket, and run the exit
+	// hook. Shutdown waits on it to guarantee the last bytes are persisted
+	// before the process exits.
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 func newTerminalSession(id, project string, cmd *exec.Cmd, ptmx *os.File, detachTTL time.Duration, onExit func(*terminalSession)) *terminalSession {
@@ -79,6 +86,7 @@ func newTerminalSession(id, project string, cmd *exec.Cmd, ptmx *os.File, detach
 		detachTTL: detachTTL,
 		history:   newTerminalHistory(project, id),
 		onExit:    onExit,
+		done:      make(chan struct{}),
 	}
 	if s.id == "" {
 		// Anonymous sockets still need a table key so shutdown/kill paths
@@ -420,6 +428,9 @@ func (s *terminalSession) kill() {
 // exit runs exactly once when the pty read loop ends: reap the process (Kill
 // alone leaves a zombie), close the pty fd, close the live socket so the
 // browser shows "session ended", and let the handler drop its registrations.
+// It closes done() last so shutdown waiters observe a fully drained session:
+// final output delivered, history synced/closed, socket closed, registry
+// entries removed.
 func (s *terminalSession) exit() {
 	s.mu.Lock()
 	s.exited = true
@@ -449,4 +460,47 @@ func (s *terminalSession) exit() {
 		}
 	}
 	s.onExit(s)
+	s.doneOnce.Do(func() { close(s.done) })
+}
+
+// waitDone reports whether the session fully exited before ctx expired.
+func (s *terminalSession) waitDone(ctx context.Context) bool {
+	select {
+	case <-s.done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// shutdownGracefully sends SIGTERM to the shell's process group so a running
+// command can trap it, flush its last output, and exit; the read loop then
+// drains those final bytes into history before exit() closes done. It waits
+// for done (bounded by ctx) and escalates to SIGKILL only when the deadline
+// expires. Detach timers are cancelled so shutdown — unlike a socket drop —
+// never leaves a shell lingering for the TTL.
+func (s *terminalSession) shutdownGracefully(ctx context.Context) {
+	s.mu.Lock()
+	if s.detachTimer != nil {
+		s.detachTimer.Stop()
+		s.detachTimer = nil
+	}
+	exited := s.exited
+	s.mu.Unlock()
+	if exited {
+		s.waitDone(ctx)
+		return
+	}
+	log.Printf("server: terminating terminal %s (pid %d)", s.id, s.pid())
+	terminateProcessTreeSignal(s.pid())
+	select {
+	case <-s.done:
+	case <-ctx.Done():
+		log.Printf("terminal %s: shutdown timed out, force-killing pid %d", s.id, s.pid())
+		terminateProcessTreeKill(s.pid())
+		select {
+		case <-s.done:
+		case <-ctx.Done():
+		}
+	}
 }

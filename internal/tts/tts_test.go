@@ -10,19 +10,45 @@ import (
 	"testing"
 )
 
-func TestCatalogKeepsLocalEnginesExplicitlyUnavailable(t *testing.T) {
+func TestCatalogLocalEnginesAreNeverReadyWithoutInstall(t *testing.T) {
 	for _, engine := range Catalog() {
 		if engine.ID == EngineBrowserNative {
 			continue
 		}
-		if engine.Availability != AvailabilityUnavailable || engine.Reason == "" {
-			t.Fatalf("engine %q must be explicitly unavailable with a reason: %#v", engine.ID, engine)
+		if engine.Availability == AvailabilityReady || engine.Reason == "" {
+			t.Fatalf("engine %q must not be ready before install and needs a reason: %#v", engine.ID, engine)
+		}
+		_, hasManifest := ManifestFor(engine.ID)
+		if engine.Availability == AvailabilityInstallable && !hasManifest {
+			t.Fatalf("engine %q is installable without a manifest", engine.ID)
+		}
+	}
+}
+
+func TestPiperManifestPinsEveryArtifactAndRuntime(t *testing.T) {
+	m, ok := ManifestFor(EnginePiper)
+	if !ok {
+		t.Fatal("piper manifest missing")
+	}
+	for _, a := range m.VoiceFiles {
+		if a.URL == "" || len(a.SHA256) != 64 || a.Size <= 0 {
+			t.Fatalf("artifact %q is not fully pinned: %#v", a.Name, a)
+		}
+	}
+	for host, rt := range m.Runtime {
+		if len(rt.Requirements) == 0 || rt.MinPython[0] == 0 {
+			t.Fatalf("runtime for %s is not pinned: %#v", host, rt)
+		}
+		for _, req := range rt.Requirements {
+			if !strings.Contains(req, "==") {
+				t.Fatalf("runtime for %s has an unpinned requirement %q", host, req)
+			}
 		}
 	}
 }
 
 func TestSupervisorSelectionInvalidatesPreviousPlayback(t *testing.T) {
-	s := NewSupervisor(Config{Engine: EngineBrowserNative, Mode: PlaybackManual})
+	s := NewSupervisor(Config{Engine: EngineBrowserNative, Mode: PlaybackManual}, Options{})
 
 	started, err := s.Replace("first")
 	if err != nil {
@@ -49,7 +75,7 @@ func TestSupervisorSelectionInvalidatesPreviousPlayback(t *testing.T) {
 }
 
 func TestSupervisorReplaceAndStopUseCurrentSelectionGeneration(t *testing.T) {
-	s := NewSupervisor(Config{Engine: EngineBrowserNative, Mode: PlaybackManual})
+	s := NewSupervisor(Config{Engine: EngineBrowserNative, Mode: PlaybackManual}, Options{})
 	s.Select(Config{Engine: EngineBrowserNative, Mode: PlaybackManual})
 
 	playing, err := s.Replace("current")

@@ -479,9 +479,10 @@ func TestBridgeNonStreamingNoDuplicateChunk(t *testing.T) {
 
 func TestBridgeToolCallFlow(t *testing.T) {
 	// Fake client: first call returns a tool call, second returns final text.
-	// "nonexistent_tool" is not in the agent's tool map — HandleToolCall wraps
-	// the "tool not found" error as the result string, which becomes a tool
-	// result message (role=tool).
+	// "nonexistent_tool" is not in the agent's tool map — the unknown-tool
+	// guard (handleToolCallWithContext) answers "tool not found" immediately
+	// without routing through the permission layer, so permAsked stays empty
+	// and the turn still completes normally.
 	cli := &fakeClient{calls: []*agent.Message{
 		{
 			Role: "assistant",
@@ -512,8 +513,8 @@ func TestBridgeToolCallFlow(t *testing.T) {
 	if stopReason != "end_turn" {
 		t.Errorf("stopReason = %q, want \"end_turn\"", stopReason)
 	}
-	if permAsked != "nonexistent_tool" {
-		t.Errorf("expected permission ask for nonexistent_tool, got %q", permAsked)
+	if permAsked != "" {
+		t.Errorf("expected no permission ask for unknown tool, got %q", permAsked)
 	}
 
 	kinds := updateKinds(updates)
@@ -599,11 +600,14 @@ func TestBridgePermissionDeny(t *testing.T) {
 	if stopReason != "end_turn" {
 		t.Errorf("stopReason = %q, want \"end_turn\"", stopReason)
 	}
-	if permAsked != "nonexistent_tool" {
-		t.Errorf("expected permission ask, got %q", permAsked)
+	// Unknown tool never reaches the permission layer (the unknown-tool
+	// guard short-circuits before permissions.Decide), so no ask is recorded.
+	if permAsked != "" {
+		t.Errorf("expected no permission ask for unknown tool, got %q", permAsked)
 	}
 	kinds := updateKinds(updates)
-	// Deny still produces tool_call + tool_call_update (with denied message as content).
+	// Deny still produces tool_call + tool_call_update (with tool-not-found
+	// content, since the tool never executed).
 	found := false
 	for _, k := range kinds {
 		if k == "tool_call_update" {

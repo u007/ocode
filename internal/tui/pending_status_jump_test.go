@@ -43,10 +43,42 @@ func TestStatusPendingClickJumpsToChat_Perm(t *testing.T) {
 		if got := m.statusRawLines[1]; !strings.Contains(got, "permission pending") || !strings.Contains(got, "click Chat to answer") {
 			t.Fatalf("tab %d: status line missing pending hint: %q", tab, got)
 		}
+		vpBefore := m.viewport.Height()
 		m = clickStatusLine(t, m, 1)
 		if m.activeTab != tabChat {
 			t.Fatalf("tab %d: status pending click left activeTab=%d, want Chat(%d)", tab, m.activeTab, tabChat)
 		}
+		// The dialog must survive the jump (the click must not have
+		// answered/dismissed it), and the viewport must have been
+		// re-laid-out to make room for it.
+		if !m.showPermDialog {
+			t.Fatalf("tab %d: pending click dismissed showPermDialog", tab)
+		}
+		if m.viewport.Height() >= vpBefore {
+			t.Fatalf("tab %d: viewport height %d not shrunk below %d after layout", tab, m.viewport.Height(), vpBefore)
+		}
+	}
+}
+
+// A sidebar click on the same status row must NOT jump to Chat: the
+// pending-hint hit test is limited to the status content width.
+func TestStatusPendingClickSidebarDoesNotJump(t *testing.T) {
+	m := pendingTestModel(t)
+	m.activeTab = tabFiles
+	m.showPermDialog = true
+	m.pendingPermission = agent.PermissionRequest{ToolName: "bash", Command: "rm -rf build", Rule: "bash(rm*)"}
+	m.renderStatus()
+	statusTop := m.statusBarTopY()
+	x := m.panelWidth() + 2 // sidebar region, past the status content width
+	upd, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: statusTop + 1})
+	m = modelPtr(upd)
+	upd, _ = m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: x, Y: statusTop + 1})
+	m = modelPtr(upd)
+	if m.activeTab != tabFiles {
+		t.Fatalf("sidebar click switched to tab %d, want Files(%d)", m.activeTab, tabFiles)
+	}
+	if !m.showPermDialog {
+		t.Fatal("sidebar click dismissed a pending permission dialog")
 	}
 }
 
@@ -61,9 +93,18 @@ func TestStatusPendingClickJumpsToChat_Question(t *testing.T) {
 		if got := m.statusRawLines[1]; !strings.Contains(got, "question pending") || !strings.Contains(got, "click Chat to answer") {
 			t.Fatalf("tab %d: status line missing question hint: %q", tab, got)
 		}
+		vpBefore := m.viewport.Height()
 		m = clickStatusLine(t, m, 1)
 		if m.activeTab != tabChat {
 			t.Fatalf("tab %d: status question click left activeTab=%d, want Chat(%d)", tab, m.activeTab, tabChat)
+		}
+		// Question layout must have run: the dialog needs its slice state
+		// (questionCursor, questionSelected) allocated before the next render.
+		if !m.showQuestionDialog {
+			t.Fatalf("tab %d: pending click dismissed showQuestionDialog", tab)
+		}
+		if m.viewport.Height() >= vpBefore {
+			t.Fatalf("tab %d: viewport height %d not shrunk below %d after layout", tab, m.viewport.Height(), vpBefore)
 		}
 	}
 }

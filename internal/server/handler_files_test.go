@@ -218,6 +218,105 @@ func TestHandleFileTreeNestedPathInSelectedProject(t *testing.T) {
 	}
 }
 
+func TestHandleFileTreeSymlinkedDir(t *testing.T) {
+	h, tmpDir := newFilesHandler(t)
+	// Real directory with a file, linked into the project root.
+	target := filepath.Join(t.TempDir(), "realdir")
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "inside.txt"), []byte("linked"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tmpDir, "linkdir")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "aaa.txt"), []byte("top"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Root listing: the symlinked dir must be a directory with children.
+	w := httptest.NewRecorder()
+	h.HandleFileTree(w, httptest.NewRequest("GET", "/api/files/tree?depth=2", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp FileTreeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var linkNode *FileNode
+	var fileIdx, linkIdx = -1, -1
+	for i, n := range resp.Children {
+		if n.Name == "linkdir" {
+			linkNode = &resp.Children[i]
+			linkIdx = i
+		}
+		if n.Name == "aaa.txt" {
+			fileIdx = i
+		}
+	}
+	if linkNode == nil {
+		t.Fatalf("expected linkdir in tree, got %+v", resp.Children)
+	}
+	if !linkNode.IsDir {
+		t.Fatalf("expected linkdir IsDir=true, got %+v", linkNode)
+	}
+	if !contains(flattenTree(t, resp.Children), filepath.Join("linkdir", "inside.txt")) {
+		t.Fatalf("expected linkdir/inside.txt in tree, got %+v", resp.Children)
+	}
+	// Linked folders sort with directories, before plain files.
+	if fileIdx < 0 {
+		t.Fatalf("expected aaa.txt in tree, got %+v", resp.Children)
+	}
+	if linkIdx > fileIdx {
+		t.Fatalf("expected linkdir (dir) before aaa.txt (file), got %+v", resp.Children)
+	}
+
+	// Expansion through the symlink must resolve (depth=1 on the link path).
+	w2 := httptest.NewRecorder()
+	h.HandleFileTree(w2, httptest.NewRequest("GET", "/api/files/tree?path="+url.QueryEscape(link)+"&depth=1", nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200 expanding symlink dir, got %d: %s", w2.Code, w2.Body.String())
+	}
+
+	// Reading a file through the symlink must work with project_root.
+	query := "/api/files/content?path=" + url.QueryEscape(filepath.Join("linkdir", "inside.txt")) + "&project_root=" + url.QueryEscape(tmpDir)
+	w3 := httptest.NewRecorder()
+	h.HandleFileContent(w3, httptest.NewRequest("GET", query, nil))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("expected 200 reading through symlink, got %d: %s", w3.Code, w3.Body.String())
+	}
+
+	// A direct request at the outside target (not via the project link)
+	// must still be rejected.
+	w4 := httptest.NewRecorder()
+	h.HandleFileTree(w4, httptest.NewRequest("GET", "/api/files/tree?path="+url.QueryEscape(target)+"&depth=1", nil))
+	if w4.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for direct outside path, got %d: %s", w4.Code, w4.Body.String())
+	}
+
+	// Traversal through the link ("link/../x") must be rejected even though
+	// it collapses lexically: the OS resolves ".." after following the link.
+	// NOTE: build the path by concatenation, not filepath.Join — Join cleans
+	// ".." away client-side and would not exercise the server guard.
+	travQuery := "/api/files/tree?path=" + url.QueryEscape(link+"/../aaa.txt") + "&depth=1"
+	w5 := httptest.NewRecorder()
+	h.HandleFileTree(w5, httptest.NewRequest("GET", travQuery, nil))
+	if w5.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for link/../ traversal, got %d: %s", w5.Code, w5.Body.String())
+	}
+
+	// Same traversal guard on file reads.
+	travContent := "/api/files/content?path=" + url.QueryEscape("linkdir/../aaa.txt") + "&project_root=" + url.QueryEscape(tmpDir)
+	w6 := httptest.NewRecorder()
+	h.HandleFileContent(w6, httptest.NewRequest("GET", travContent, nil))
+	if w6.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for content link/../ traversal, got %d: %s", w6.Code, w6.Body.String())
+	}
+}
+
 func TestHandleFileContentResolvesAgainstWorkDir(t *testing.T) {
 	h, tmpDir := newFilesHandler(t)
 	if err := os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("hello"), 0644); err != nil {

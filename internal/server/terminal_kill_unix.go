@@ -15,6 +15,27 @@ import (
 // then escalates to SIGKILL. This lets a foreground command flush/clean up before
 // the desktop app exits, instead of being slaughtered mid-write.
 func terminateProcessTree(pid int, grace time.Duration) {
+	terminateProcessTreeSignal(pid)
+
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
+			return // group leader exited
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Grace window elapsed: force-kill the group and the direct child.
+	terminateProcessTreeKill(pid)
+}
+
+// terminateProcessTreeSignal sends SIGTERM to the whole process group rooted
+// at pid (plus the direct child as a sandbox fallback). Shutdown calls this
+// first and then waits on the session's done channel — which only closes after
+// the read loop has drained final output and synced history — instead of
+// polling the pid. terminateProcessTree above keeps the old poll-based shape
+// for detach-TTL and explicit-close paths.
+func terminateProcessTreeSignal(pid int) {
 	if pid <= 0 {
 		return
 	}
@@ -30,16 +51,16 @@ func terminateProcessTree(pid int, grace time.Duration) {
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
 		log.Printf("terminal: SIGTERM to pid %d failed: %v", pid, err)
 	}
+}
 
-	deadline := time.Now().Add(grace)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
-			return // group leader exited
-		}
-		time.Sleep(50 * time.Millisecond)
+// terminateProcessTreeKill force-kills the process group rooted at pid. It is
+// the escalation half of terminateProcessTree, split out so shutdown can wait
+// on session completion first and only escalate when the shutdown context
+// expires.
+func terminateProcessTreeKill(pid int) {
+	if pid <= 0 {
+		return
 	}
-
-	// Grace window elapsed: force-kill the group and the direct child.
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 		log.Printf("terminal: SIGKILL to process group %d failed: %v", pid, err)
 	}

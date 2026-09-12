@@ -94,10 +94,32 @@ export type TTSPlaybackMode = "manual" | "at-bottom" | "auto";
 export interface TTSEngine {
   id: TTSEngineId;
   label: string;
-  availability: "ready" | "unavailable";
+  availability: "ready" | "installable" | "unavailable";
   reason?: string;
   browser_only: boolean;
   voice_id?: string;
+  manifest_version?: string;
+  license_name?: string;
+  license_url?: string;
+}
+
+export type TTSInstallStatus =
+  | "not-accepted"
+  | "license-accepted"
+  | "pinned"
+  | "downloading"
+  | "installed"
+  | "failed"
+  | "enabled";
+
+export interface TTSInstallState {
+  engine_id: string;
+  state: TTSInstallStatus;
+  progress: number;
+  step?: string;
+  error?: string;
+  manifest_version?: string;
+  pinned: boolean;
 }
 
 export interface TTSConfig {
@@ -112,6 +134,7 @@ export interface TTSPlayback {
   status: string;
   text?: string;
   error?: string;
+  audio_id?: string;
 }
 
 export interface TTSStatus {

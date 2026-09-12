@@ -242,6 +242,8 @@ export interface CommandResult {
   prompt?: string;
   /** Open the model picker dialog (web equivalent of the TUI's no-arg /model). */
   openModelPicker?: boolean;
+  /** Updated session title for tab label updates. */
+  title?: string;
 }
 
 /**
@@ -825,6 +827,7 @@ async function handleTitle(args: string, ctx: CommandContext): Promise<CommandRe
     return {
       handled: true,
       messages: [{ role: "assistant", content: `Session title set to **${title}**.` }],
+      title,
     };
   } catch (err) {
     return errorMessage("Failed to set title", err);

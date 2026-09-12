@@ -244,6 +244,21 @@ func (m *model) clampQuestionCursor() {
 	if len(m.questionPrompts) == 0 || m.questionTab < 0 || m.questionTab >= len(m.questionPrompts) {
 		return
 	}
+	// Dialog slice state is allocated by startQuestionPrompt; a direct
+	// showQuestionDialog + questionPrompts setup (tests, or any path that
+	// skips startQuestionPrompt) must not panic on the next render.
+	if len(m.questionCursor) != len(m.questionPrompts) {
+		m.questionCursor = make([]int, len(m.questionPrompts))
+	}
+	if len(m.questionSelected) != len(m.questionPrompts) {
+		m.questionSelected = make([]map[int]bool, len(m.questionPrompts))
+		for i := range m.questionPrompts {
+			m.questionSelected[i] = map[int]bool{}
+		}
+	}
+	if len(m.questionCustom) != len(m.questionPrompts) {
+		m.questionCustom = make([]string, len(m.questionPrompts))
+	}
 	count := questionOptionCount(m.questionPrompts[m.questionTab])
 	if count <= 0 {
 		m.questionCursor[m.questionTab] = 0

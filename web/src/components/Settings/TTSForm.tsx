@@ -1,26 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
-import { apiPath, authHeaders, api } from "@/api/client";
+import { api } from "@/api/client";
+import type { TTSEngine, TTSInstallState } from "@/api/types";
 import { useSpeech } from "../Speech/SpeechProvider";
 
-async function postTTS(path: string, body: Record<string, string>): Promise<void> {
-  const res = await fetch(apiPath(path), {
-    method: "POST",
-    headers: { ...authHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = (await res.text()).trim();
-    throw new Error(`${path} failed (${res.status})${text ? ": " + text : ""}`);
-  }
+const POLL_MS = 1000;
+
+function errorText(err: unknown) {
+  return err instanceof Error ? err.message : String(err);
 }
 
 export default function TTSForm() {
-  const { engines, config, status, error, setMode, retry } = useSpeech();
-  const [installStates, setInstallStates] = useState<Record<string, string>>({});
+  const { engines, config, status, error, setMode, retry, selectEngine, refresh } = useSpeech();
+  const [installStates, setInstallStates] = useState<Record<string, TTSInstallState>>({});
   const [stateError, setStateError] = useState<string | null>(null);
-  const [submittingEngine, setSubmittingEngine] = useState<string | null>(null);
-  const [licenseErrors, setLicenseErrors] = useState<Record<string, string>>({});
-  const [licenseSuccess, setLicenseSuccess] = useState<Record<string, boolean>>({});
+  const [busyEngine, setBusyEngine] = useState<string | null>(null);
+  const [engineErrors, setEngineErrors] = useState<Record<string, string>>({});
   const canRetry = status?.engine.availability !== "unavailable" && Boolean(status?.error || error);
 
   const refreshInstallStates = useCallback(async () => {
@@ -28,7 +22,7 @@ export default function TTSForm() {
       setInstallStates(await api.getTTSState());
       setStateError(null);
     } catch (err) {
-      setStateError(err instanceof Error ? err.message : String(err));
+      setStateError(errorText(err));
     }
   }, []);
 
@@ -36,31 +30,102 @@ export default function TTSForm() {
     void refreshInstallStates();
   }, [refreshInstallStates]);
 
-  const acceptLicense = async (engine: (typeof engines)[number]) => {
-    setSubmittingEngine(engine.id);
-    setLicenseErrors((previous) => ({ ...previous, [engine.id]: "" }));
-    setLicenseSuccess((previous) => ({ ...previous, [engine.id]: false }));
+  // Poll while any engine is downloading/installing so progress is visible.
+  const installing = Object.values(installStates).some((s) => s.state === "downloading");
+  useEffect(() => {
+    if (!installing) return;
+    const id = window.setInterval(() => void refreshInstallStates(), POLL_MS);
+    return () => window.clearInterval(id);
+  }, [installing, refreshInstallStates]);
+
+  const run = async (engine: TTSEngine, action: () => Promise<void>) => {
+    setBusyEngine(engine.id);
+    setEngineErrors((previous) => ({ ...previous, [engine.id]: "" }));
     try {
-      await postTTS("/api/tts/license", {
-        engine: engine.id,
-        license_hash: "sha256-" + engine.id,
-        license_name: engine.label + " License",
-      });
+      await action();
       await refreshInstallStates();
-      setLicenseSuccess((previous) => ({ ...previous, [engine.id]: true }));
     } catch (err) {
-      setLicenseErrors((previous) => ({
-        ...previous,
-        [engine.id]: err instanceof Error ? err.message : String(err),
-      }));
+      setEngineErrors((previous) => ({ ...previous, [engine.id]: errorText(err) }));
     } finally {
-      setSubmittingEngine(null);
+      setBusyEngine(null);
     }
   };
 
-  const engineStatus = (id: string) => {
-    const s = status?.engine;
-    return s?.id === id ? s.availability : "unavailable";
+  const acceptLicense = (engine: TTSEngine) =>
+    run(engine, async () => {
+      await api.ttsAcceptLicense(engine.id, engine.license_name ?? engine.label + " license");
+    });
+
+  const install = (engine: TTSEngine, current: TTSInstallState | undefined) =>
+    run(engine, async () => {
+      if (!engine.manifest_version) throw new Error("engine has no pinned manifest");
+      if (current?.state !== "pinned") await api.ttsPin(engine.id, engine.manifest_version);
+      await api.ttsDownload(engine.id);
+    });
+
+  const enable = (engine: TTSEngine) =>
+    run(engine, async () => {
+      await api.ttsEnable(engine.id);
+      await refresh();
+    });
+
+  const renderLocalEngine = (engine: TTSEngine) => {
+    const inst = installStates[engine.id];
+    const state = inst?.state ?? "not-accepted";
+    const busy = busyEngine === engine.id;
+    const isCurrent = config.engine === engine.id;
+    if (engine.availability === "unavailable") {
+      return <p className="mt-2 text-[11px] text-muted-foreground">{engine.reason}</p>;
+    }
+    return (
+      <div className="mt-2 space-y-2 text-[11px] text-muted-foreground">
+        <p>
+          Voice: <span className="font-mono">{engine.voice_id}</span> · Manifest <span className="font-mono">{engine.manifest_version}</span>
+        </p>
+        <p>
+          License: {engine.license_name}
+          {engine.license_url && (
+            <>
+              {" "}
+              <a className="underline" href={engine.license_url} target="_blank" rel="noreferrer">view</a>
+            </>
+          )}
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {state === "not-accepted" && (
+            <button type="button" disabled={busy} className="rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" onClick={() => void acceptLicense(engine)}>
+              {busy ? "Accepting…" : "Accept License"}
+            </button>
+          )}
+          {(state === "license-accepted" || state === "pinned" || state === "failed") && (
+            <button type="button" disabled={busy} className="rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" onClick={() => void install(engine, inst)}>
+              {busy ? "Starting…" : state === "failed" ? "Retry Install" : "Install"}
+            </button>
+          )}
+          {state === "installed" && (
+            <button type="button" disabled={busy} className="rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" onClick={() => void enable(engine)}>
+              {busy ? "Enabling…" : "Enable"}
+            </button>
+          )}
+          {state === "enabled" && !isCurrent && (
+            <button type="button" disabled={busy} className="rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" onClick={() => void selectEngine(engine.id)}>
+              Use
+            </button>
+          )}
+          <span>Install state: {state}</span>
+        </div>
+        {state === "downloading" && (
+          <div>
+            <div className="h-1.5 w-full overflow-hidden rounded bg-muted">
+              <div className="h-full bg-primary transition-[width]" style={{ width: `${inst?.progress ?? 0}%` }} />
+            </div>
+            <p className="mt-1">{inst?.progress ?? 0}% {inst?.step ? `· ${inst.step}` : ""}</p>
+          </div>
+        )}
+        {inst?.error && <p className="text-destructive">{inst.error}</p>}
+        {engineErrors[engine.id] && <p className="text-destructive">{engineErrors[engine.id]}</p>}
+      </div>
+    );
   };
 
   return (
@@ -68,74 +133,37 @@ export default function TTSForm() {
       <div>
         <h2 className="text-sm font-semibold">Speech playback</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Browser Native is the default. Local engines can record license acceptance, but pinning, downloading, installing, and enabling remain unavailable until verified artifacts land.
+          Browser Native is the default. Local engines download a pinned runtime and voice into the ocode data directory after you accept their license.
         </p>
       </div>
 
-      {/* Per-engine install cards */}
       <div className="space-y-3">
         {engines.map((engine) => {
           const isBrowser = engine.id === "browser-native";
-          const avail = engine.availability;
-          const installState = installStates[engine.id] || "not-accepted";
-          const licenseAccepted = installState !== "not-accepted" && installState !== "failed";
+          const isCurrent = config.engine === engine.id;
           return (
             <div data-testid={`tts-engine-${engine.id}`} key={engine.id} className="rounded-md border border-border bg-card p-3 text-xs shadow-sm">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <div className="font-medium text-sm">{engine.label}</div>
-                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {avail === "ready" ? "ready" : avail === "unavailable" ? "unavailable" : engineStatus(engine.id)}
-                </span>
+                <div className="flex items-center gap-2">
+                  {isCurrent && <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">current</span>}
+                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{engine.availability}</span>
+                </div>
               </div>
-
-              {!isBrowser && (
-                <>
-                  {/* License prompt */}
-                  <div className="mt-2 rounded-md bg-muted/40 p-2 text-[11px] leading-relaxed text-muted-foreground">
-                    License: {engine.reason ? engine.reason.split(".")[0] + "." : "Separate license required."}
-                    <p className="mt-1 text-[10px]">Accept the license to record your choice. Installation is unavailable until verified artifacts land.</p>
-                    <div className="mt-2 flex items-center gap-2">
-                      <button
-                        type="button"
-                        disabled={licenseAccepted || submittingEngine === engine.id}
-                        className="rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-                        onClick={() => void acceptLicense(engine)}
-                      >
-                        {submittingEngine === engine.id ? "Accepting…" : licenseAccepted ? "License Accepted" : "Accept License"}
-                      </button>
-                      <span className="text-[10px] text-muted-foreground">
-                        Install state: {installState}
-                      </span>
-                    </div>
-                    {licenseSuccess[engine.id] && (
-                      <p className="mt-2 text-[10px] text-green-600 dark:text-green-400">
-                        License accepted. This engine remains unavailable until its verified runtime and model manifest are available.
-                      </p>
-                    )}
-                    {licenseErrors[engine.id] && (
-                      <p className="mt-2 text-[10px] text-destructive">{licenseErrors[engine.id]}</p>
-                    )}
-                    {stateError && (
-                      <p className="mt-2 text-[10px] text-destructive">Install state unavailable: {stateError}</p>
-                    )}
-                  </div>
-
-                  {/* Progress / status row for download/install — unavailable until verified artifacts land */}
-                  <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground italic">
-                    <span>Pin, download, install, and enable are unavailable until a verified runtime and model manifest land.</span>
-                  </div>
-                </>
-              )}
-
-              {isBrowser && (
-                <p className="mt-1 text-[10px] text-muted-foreground">No server artifact required. Runs in this browser tab.</p>
-              )}
+              {isBrowser ? (
+                <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+                  <span>No server artifact required. Runs in this browser tab.</span>
+                  {!isCurrent && (
+                    <button type="button" className="rounded border border-border bg-background px-2 py-0.5 hover:bg-muted" onClick={() => void selectEngine(engine.id)}>Use</button>
+                  )}
+                </div>
+              ) : renderLocalEngine(engine)}
             </div>
           );
         })}
+        {stateError && <p className="text-[10px] text-destructive">Install state unavailable: {stateError}</p>}
       </div>
 
-      {/* Playback mode */}
       <label className="block space-y-1 text-sm">
         <span className="font-medium">Playback mode</span>
         <select

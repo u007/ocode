@@ -713,6 +713,21 @@ export default function TerminalPanel({
           outputDropped = false;
         }
       };
+      // Drain every queued render chunk synchronously, then report whether
+      // anything is still in flight. onclose uses this so the final
+      // localStorage save observes the complete last output — not whatever
+      // happened to be rendered when the socket closed.
+      const flushChunksSync = (): boolean => {
+        if (chunkRafId) cancelAnimationFrame(chunkRafId);
+        chunkRafId = 0;
+        while (pendingChunks.length > 0) {
+          const chunk = pendingChunks.shift()!;
+          pendingBytes -= chunk.length;
+          term.write(chunk);
+        }
+        outputDropped = false;
+        return pendingBytes === 0 && pendingChunks.length === 0;
+      };
       nextSocket.onmessage = (ev) => {
         if (typeof ev.data === "string") {
           let msg: { type?: string; resumed?: boolean };
@@ -753,9 +768,29 @@ export default function TerminalPanel({
       };
       nextSocket.onclose = (ev) => {
         const remainder = terminalDecoder.decode();
-        if (remainder) term.write(remainder);
+        // Flush every queued render chunk BEFORE the ended banner and the
+        // final save: WebSocket frames are decoded into pendingChunks and
+        // painted via requestAnimationFrame, so without this the save would
+        // capture only whatever happened to be rendered when the socket
+        // closed. xterm.write queues its own async parse, so await its
+        // callback before serializing — that is what guarantees the saved
+        // buffer contains the complete last output.
+        flushChunksSync();
+        const finalize = () => {
+          term.write("\r\n\x1b[33m[terminal session ended]\x1b[0m\r\n", () => {
+            // The server persists the full pty transcript to history before
+            // it closes this socket (exit teardown syncs/closes the log
+            // first), so the rendered buffer on screen IS the complete last
+            // output. Save it synchronously: desktop quit tears down the
+            // webview right after the server drains the shells, so the
+            // deferred idle save may never run — this is what keeps the last
+            // output in the tab after restart.
+            doSave();
+          });
+        };
+        if (remainder) term.write(remainder, () => finalize());
+        else finalize();
         if (!ev.wasClean) console.error("terminal: websocket closed unexpectedly", ev.code, ev.reason);
-        term.write("\r\n\x1b[33m[terminal session ended]\x1b[0m\r\n");
       };
     };
 

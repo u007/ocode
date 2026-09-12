@@ -1,11 +1,17 @@
+import { useEffect, useState } from "react";
 import { FastForward, Pause, Play, Rewind, RotateCcw, Square, Volume2, X } from "lucide-react";
+import { nextSpeechMode } from "./speechUtils";
 import { useSpeech, playbackLabel } from "./SpeechProvider";
 
 export default function SpeechToolbar() {
   const { config, status, isSpeaking, paused, error, currentText, position, duration, speak, stop, pause, resume, skip, seek, retry, toolbarVisible, setToolbarVisible, setMode } = useSpeech();
+  // Local mirror of visibility so the X button can hide it; always kept in sync
+  // with context so external toggleToolbar() calls (e.g. from StatusBar) also hide it.
+  const [visible, setVisible] = useState(toolbarVisible);
+  useEffect(() => { setVisible(toolbarVisible); }, [toolbarVisible]);
   const activeText = currentText || status?.playback?.text;
   const canRetry = status?.engine?.availability !== "unavailable" && Boolean(error);
-  if (!toolbarVisible) return null;
+  if (!visible) return null;
   return (
     <div className="fixed bottom-2 left-1/2 z-40 flex max-w-[calc(100vw-1rem)] -translate-x-1/2 items-center gap-2 rounded-lg border border-border bg-card/95 px-3 py-2 text-xs shadow-lg backdrop-blur">
       <Volume2 className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -13,7 +19,7 @@ export default function SpeechToolbar() {
         {status?.engine?.label ?? "Browser Native"}
       </span>
       <span className="text-muted-foreground">{isSpeaking ? "Playing" : playbackLabel(status?.playback)}</span>
-      <button type="button" className="rounded px-2 py-1 text-xs hover:bg-muted border border-border" title={`Mode: ${config?.mode ?? "manual"}. Click to cycle.`} aria-label="Cycle speech mode" onClick={() => setMode ? setMode(config?.mode === "auto" ? "manual" : config?.mode === "manual" ? "at-bottom" : "auto") : undefined}>{config?.mode === "auto" ? "Auto" : config?.mode === "at-bottom" ? "At Bottom" : "Manual"}</button>
+      <button type="button" className="rounded px-2 py-1 text-xs hover:bg-muted border border-border" title={`Mode: ${config?.mode ?? "manual"}. Click to cycle.`} aria-label="Cycle speech mode" onClick={() => setMode(nextSpeechMode(config?.mode))}>{config?.mode === "at-bottom" ? "At Bottom" : "Manual"}</button>
       <button type="button" className="rounded p-1 hover:bg-muted disabled:opacity-40" title="Back approximately 10 seconds" aria-label="Back approximately 10 seconds" disabled={!isSpeaking} onClick={() => skip(-10)}><Rewind className="h-4 w-4" /></button>
       {isSpeaking && !paused ? (
         <button type="button" className="rounded p-1 hover:bg-muted" title="Pause speech" aria-label="Pause speech" onClick={pause}><Pause className="h-4 w-4" /></button>
@@ -39,7 +45,7 @@ export default function SpeechToolbar() {
       )}
       {error && <span className="max-w-64 truncate text-destructive" title={error}>{error}</span>}
       {canRetry && <button type="button" className="rounded border border-border px-2 py-1 hover:bg-muted" onClick={() => void retry()}>Retry</button>}
-      <button type="button" className="rounded p-1 hover:bg-muted ml-auto" title="Hide speech toolbar" aria-label="Hide speech toolbar" onClick={() => setToolbarVisible(false)}><X className="h-4 w-4" /></button>
+      <button type="button" className="rounded p-1 hover:bg-muted ml-auto" title="Hide speech toolbar" aria-label="Hide speech toolbar" onClick={() => { setVisible(false); setToolbarVisible(false); }}><X className="h-4 w-4" /></button>
     </div>
   );
 }

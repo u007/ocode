@@ -147,13 +147,24 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 		webFS:         webFS,
 		workDir:       ".",
 		procSup:       tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 3 * time.Second}),
-		tts:           tts.NewSupervisor(tts.DefaultConfig()),
 		startedAt:     time.Now(),
 		tsShare:       &tailscaleShare{},
 	}
+	s.tts = tts.NewSupervisor(tts.DefaultConfig(), tts.Options{Root: ttsCacheRoot(), ProcSup: s.procSup})
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
 	return s
+}
+
+// ttsCacheRoot is the data dir that holds models/tts. An unresolvable data
+// dir is logged and leaves local engines unavailable (Root == "").
+func ttsCacheRoot() string {
+	dir, err := paths.OcodeGlobalDataDir()
+	if err != nil {
+		log.Printf("tts: resolve data dir: %v (local speech engines unavailable)", err)
+		return ""
+	}
+	return dir
 }
 
 // ProcessSupervisor returns the server's process supervisor, used by the browse

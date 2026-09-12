@@ -278,9 +278,9 @@ interface ProjectContextType {
   addProject: (path: string) => Promise<void>;
   addRemoteProject: (host: string, path: string) => Promise<void>;
   removeProject: (path: string, host?: string) => Promise<void>;
-  renameProject: (path: string, name: string) => Promise<void>;
-  reorderProjects: (paths: string[]) => Promise<void>;
-  setProjectGroup: (path: string, group: string) => Promise<void>;
+  renameProject: (path: string, name: string, host?: string) => Promise<void>;
+  reorderProjects: (refs: Array<{ path: string; host?: string }>) => Promise<void>;
+  setProjectGroup: (path: string, group: string, host?: string) => Promise<void>;
   createGroup: (name: string) => Promise<void>;
   deleteGroup: (name: string) => Promise<void>;
   renameGroup: (oldName: string, newName: string) => Promise<void>;
@@ -515,27 +515,28 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshProjects]);
 
-  const renameProject = useCallback(async (path: string, name: string) => {
+  const renameProject = useCallback(async (path: string, name: string, host?: string) => {
     try {
-      await api.renameProject(path, name);
+      await api.renameProject(path, name, host);
       await refreshProjects();
     } catch (err) {
       console.error("Failed to rename project:", err);
+      throw err;
     }
   }, [refreshProjects]);
 
-  const reorderProjects = useCallback(async (paths: string[]) => {
+  const reorderProjects = useCallback(async (refs: Array<{ path: string; host?: string }>) => {
     try {
-      await api.reorderProjects(paths);
+      await api.reorderProjects(refs);
       await refreshProjects();
     } catch (err) {
       console.error("Failed to reorder projects:", err);
     }
   }, [refreshProjects]);
 
-  const setProjectGroup = useCallback(async (path: string, group: string) => {
+  const setProjectGroup = useCallback(async (path: string, group: string, host?: string) => {
     try {
-      await api.setProjectGroup(path, group);
+      await api.setProjectGroup(path, group, host);
       await refreshProjects();
     } catch (err) {
       console.error("Failed to set project group:", err);

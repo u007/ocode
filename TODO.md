@@ -1,5 +1,21 @@
 # TODO
 
+## Piper TTS — deferred follow-ups (2026-09-12)
+
+- **pip wheels are version-pinned, not hash-pinned.** `internal/tts/manifest.go`
+  pins `piper-tts==1.8.0`, `onnxruntime==<per host>`, `pathvalidate==3.3.1`;
+  pip verifies each wheel against the PyPI index digest over TLS, but ocode
+  does not carry its own SHA-256 for every wheel (transitive deps × 5 hosts ×
+  4 CPython ABIs). Only the voice `.onnx`/`.json` files are ocode-verified.
+  Full `--require-hashes` lockfiles per host would close this.
+- **Untested hosts.** Only darwin/arm64 was exercised live. darwin/amd64
+  (pinned to `onnxruntime==1.22.1`, the last universal2 wheel), linux/amd64,
+  linux/arm64 and windows/amd64 rely on published wheel availability and
+  `findPython` candidate paths; Windows `py -3` / `Scripts\python.exe`
+  handling is unverified.
+- **Single voice.** The manifest ships one voice; adding voices needs a
+  voice picker and per-voice artifacts.
+
 ## ocode Remote (SSH) Phase 1 — picker UI not wired (2026-09-02)
 
 `ocode remote <[user@]host> [path]` (`internal/remote`, `internal/remotecli`)

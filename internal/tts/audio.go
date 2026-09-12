@@ -19,6 +19,8 @@ func ServeAudio(w http.ResponseWriter, r *http.Request, path string) error {
 	if err != nil {
 		return fmt.Errorf("stat audio: %w", err)
 	}
+	w.Header().Set("Content-Type", "audio/wav")
+	w.Header().Set("Cache-Control", "no-store")
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 	return nil
 }

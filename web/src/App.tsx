@@ -1251,7 +1251,7 @@ function HomeApp() {
             <main>'s width (and the unified tab bar above it) never reflows when
             the active session's sub-tab or focus kind changes. Visibility is
             toggled by shouldRenderCoworkSidebar + coworkOpen. */}
-        <div className="w-72 flex-shrink-0">
+        <div className="w-72 flex-shrink-0 flex flex-col min-h-0 self-stretch overflow-hidden">
           {shouldRenderCoworkSidebar({
             activeView,
             activeSubTab: activeSessionTab?.activeSubTab,

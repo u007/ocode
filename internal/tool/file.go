@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	// Register decoders so image.DecodeConfig can report dimensions in the
 	// image stub for the common raster formats.
@@ -27,6 +29,14 @@ import (
 
 const defaultReadLines = 50
 const maxReadLines = 250
+
+// maxReadLineChars clamps a single line in line mode; the clamp hint carries
+// the byte offset so the rest is reachable via offset_bytes.
+const maxReadLineChars = 2000
+
+// maxReadOutputChars bounds one read result (line or byte mode) so a wide
+// file cannot build a multi-MB string only for the agent layer to discard it.
+const maxReadOutputChars = 12000
 const maxImageBytes = 20 * 1024 * 1024 // 20 MB — max embedded image size
 
 var (
@@ -380,7 +390,7 @@ func (t ReadTool) Parallel() bool      { return true }
 func (t ReadTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "read",
-		"description": fmt.Sprintf("Read file contents. Returns up to %d lines by default (max %d). Use start_line/end_line to paginate large files. Image files (png/jpg/gif/webp/etc.) are handled automatically: a vision-capable model receives the image itself, others get a text description — no need to route images to a separate tool.", defaultReadLines, maxReadLines),
+		"description": fmt.Sprintf("Read file contents. Returns up to %d lines by default (max %d). Use start_line/end_line to paginate large files. Lines longer than %d chars are clamped with an offset_bytes hint; use offset_bytes/max_bytes to page inside them. Image files (png/jpg/gif/webp/etc.) are handled automatically: a vision-capable model receives the image itself, others get a text description — no need to route images to a separate tool.", defaultReadLines, maxReadLines, maxReadLineChars),
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -404,6 +414,14 @@ func (t ReadTool) Definition() map[string]interface{} {
 					"type":        "integer",
 					"description": fmt.Sprintf("Alias for a line count from start: reads `limit` lines (max %d)", maxReadLines),
 				},
+				"offset_bytes": map[string]interface{}{
+					"type":        "integer",
+					"description": "Byte mode: 0-based byte offset to start from. Returns a raw byte window instead of numbered lines. Use to page inside a very long line (minified JS, JSON blobs) that line mode clamps.",
+				},
+				"max_bytes": map[string]interface{}{
+					"type":        "integer",
+					"description": fmt.Sprintf("Byte mode: window size in bytes (default %d, max %d). Only meaningful with offset_bytes.", maxReadOutputChars, maxReadOutputChars),
+				},
 			},
 			"required": []string{"path"},
 		},
@@ -421,6 +439,10 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 		// returns lines 1..50 again. offset → start line, limit → line count.
 		Offset int `json:"offset"`
 		Limit  int `json:"limit"`
+		// Byte mode: page by byte window, bypassing line splitting. The only
+		// way to reach the interior of a line longer than maxReadLineChars.
+		OffsetBytes *int `json:"offset_bytes"`
+		MaxBytes    int  `json:"max_bytes"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -429,6 +451,10 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 	safe, err := confinedPath(context.Background(), params.Path)
 	if err != nil {
 		return "", err
+	}
+
+	if params.OffsetBytes != nil {
+		return readByteWindow(params.Path, safe, *params.OffsetBytes, params.MaxBytes)
 	}
 
 	content, err := os.ReadFile(safe)
@@ -474,12 +500,84 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 		end = total
 	}
 
+	// Byte offset of line `start` so clamp hints can name an absolute offset.
+	lineStart := 0
+	for i := 1; i < start; i++ {
+		lineStart += len(lines[i-1]) + 1
+	}
+
 	var sb strings.Builder
+	last := start - 1
 	for i := start; i <= end; i++ {
-		sb.WriteString(fmt.Sprintf("%d\t%s\n", i, lines[i-1]))
+		line := lines[i-1]
+		if sb.Len() >= maxReadOutputChars {
+			sb.WriteString(fmt.Sprintf("…(stopped at line %d: output budget of %d chars reached; continue with start_line=%d)\n", last, maxReadOutputChars, i))
+			return sb.String(), nil
+		}
+		if utf8.RuneCountInString(line) > maxReadLineChars {
+			cut := runeByteIndex(line, maxReadLineChars)
+			sb.WriteString(fmt.Sprintf("%d\t%s…[line %d is %d chars, showing %d; read offset_bytes=%d for the rest]\n",
+				i, line[:cut], i, utf8.RuneCountInString(line), maxReadLineChars, lineStart+cut))
+		} else {
+			sb.WriteString(fmt.Sprintf("%d\t%s\n", i, line))
+		}
+		lineStart += len(line) + 1
+		last = i
 	}
 	if end < total {
 		sb.WriteString(fmt.Sprintf("…(use start_line=%d, end_line=%d to continue)\n", end+1, end+defaultReadLines))
+	}
+	return sb.String(), nil
+}
+
+// runeByteIndex returns the byte index of the n-th rune in s (len(s) if s has
+// fewer than n runes).
+func runeByteIndex(s string, n int) int {
+	count := 0
+	for i := range s {
+		if count == n {
+			return i
+		}
+		count++
+	}
+	return len(s)
+}
+
+// readByteWindow returns a raw [offset, offset+size) slice of the file with a
+// header naming the window and a hint for the next one. Only the window is
+// read from disk, so a multi-MB file costs one seek plus size bytes.
+func readByteWindow(displayPath, safe string, offset, size int) (string, error) {
+	if offset < 0 {
+		return "", fmt.Errorf("offset_bytes must be >= 0, got %d", offset)
+	}
+	if size <= 0 || size > maxReadOutputChars {
+		size = maxReadOutputChars
+	}
+	f, err := os.Open(safe)
+	if err != nil {
+		return "", fmt.Errorf("failed to open file %s: %w", displayPath, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("failed to stat file %s: %w", displayPath, err)
+	}
+	total := int(info.Size())
+	if offset >= total {
+		return fmt.Sprintf("(file is %d bytes, offset_bytes=%d is out of range)", total, offset), nil
+	}
+	buf := make([]byte, size)
+	n, err := f.ReadAt(buf, int64(offset))
+	if err != nil && err != io.EOF {
+		return "", fmt.Errorf("failed to read file %s at offset %d: %w", displayPath, offset, err)
+	}
+	end := offset + n
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("[bytes %d-%d of %d]\n", offset, end, total))
+	sb.Write(buf[:n])
+	sb.WriteString("\n")
+	if end < total {
+		sb.WriteString(fmt.Sprintf("…(use offset_bytes=%d to continue)\n", end))
 	}
 	return sb.String(), nil
 }

@@ -63,10 +63,13 @@ describe("syntax highlighting", () => {
       />,
     );
     await waitFor(() => {
-      const spans = Array.from(
-        container.querySelectorAll('span[style*="color"]'),
+      // Diff output is rendered with Tailwind color classes
+      // (text-green-400 / text-red-400 / text-blue-400 / text-amber-400)
+      // on each diff row div, not inline style.
+      const colored = Array.from(
+        container.querySelectorAll('div.text-green-400, div.text-red-400, div.text-blue-400, div.text-amber-400'),
       ).map((s) => s.textContent);
-      expect(spans.some((t) => t?.includes("+const a = 1;"))).toBe(true);
+      expect(colored.some((t) => t?.includes("+const a = 1;"))).toBe(true);
     });
   });
 
@@ -103,7 +106,11 @@ describe("syntax highlighting", () => {
       />,
     );
     await waitFor(() => {
-      expect(container.querySelector('span[style*="color"]')).not.toBeNull();
+      // Diff output is rendered with Tailwind color classes
+      // on each diff row div.
+      expect(
+        container.querySelector('div.text-green-400, div.text-red-400, div.text-blue-400, div.text-amber-400'),
+      ).not.toBeNull();
     });
   });
 
@@ -112,8 +119,11 @@ describe("syntax highlighting", () => {
       <ToolBlock tool="read" output={"1\tconst a = 1;"} />,
     );
     await new Promise((r) => setTimeout(r, 200));
-    const outputPre = container.querySelectorAll("pre")[0];
-    expect(outputPre.querySelector('span[style*="color"]')).toBeNull();
-    expect(outputPre.textContent).toContain("1\tconst a = 1;");
+    // Read output is rendered in a `div.font-mono` block (no syntax
+    // highlight), not a `pre` element.
+    const outputBlock = container.querySelector("div.font-mono");
+    expect(outputBlock).not.toBeNull();
+    expect(outputBlock?.querySelector('span[style*="color"]')).toBeNull();
+    expect(outputBlock?.textContent).toContain("1\tconst a = 1;");
   });
 });

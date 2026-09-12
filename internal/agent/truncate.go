@@ -97,22 +97,32 @@ func TruncateToolResult(toolUseID, result string) string {
 	}
 	head := strings.TrimRight(result[:headEnd], "\n")
 
+	// Resume point: the line containing the cut (1-based). When the cut falls
+	// exactly on a line boundary the next unseen line starts there; when the
+	// char cap bit mid-line, that partially shown line must be re-read, so the
+	// hint points at it rather than skipping ahead to a fixed line number.
+	shownLines := strings.Count(head, "\n")
+	if head != "" {
+		shownLines++
+	}
+	resumeLine := shownLines + 1
+	if headEnd > 0 && headEnd < len(result) && result[headEnd-1] != '\n' {
+		resumeLine = shownLines
+	}
+
 	notice := fmt.Sprintf(
 		"\n\n[output truncated: showing %d/%d lines, %d/%d chars]\n"+
 			"Full output saved to: %s\n"+
 			"Retrieve remaining content with:\n"+
-			"  read tool: {\"path\": %q, \"start_line\": %d, \"end_line\": <n>}\n"+
-			"  or bash:   sed -n '%d,%dp' %s",
-		strings.Count(head, "\n")+func() int {
-			if head == "" {
-				return 0
-			}
-			return 1
-		}(), totalLines,
+			"  read tool (by line): {\"path\": %q, \"start_line\": %d, \"end_line\": <n>}\n"+
+			"  read tool (by byte): {\"path\": %q, \"offset_bytes\": %d, \"max_bytes\": %d}\n"+
+			"  or bash:             sed -n '%d,%dp' %s",
+		shownLines, totalLines,
 		utf8.RuneCountInString(head), totalChars,
 		path,
-		path, maxToolResultLines+1,
-		maxToolResultLines+1, totalLines, path,
+		path, resumeLine,
+		path, headEnd, maxToolResultChars,
+		resumeLine, totalLines, path,
 	)
 	return head + notice
 }

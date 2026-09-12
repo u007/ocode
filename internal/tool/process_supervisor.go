@@ -28,6 +28,9 @@ const (
 	// spawned by internal/remote while connecting to or provisioning a
 	// remote ocode host.
 	ProcessKindRemote ProcessKind = "remote"
+	// ProcessKindTTS covers one-shot local speech synthesis runs spawned by
+	// internal/tts (e.g. python -m piper).
+	ProcessKindTTS ProcessKind = "tts"
 )
 
 var ErrProcessSupervisorClosed = errors.New("process supervisor is shutting down")

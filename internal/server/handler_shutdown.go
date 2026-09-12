@@ -128,16 +128,43 @@ func (h *Handler) shutdownAgentSessions(ctx context.Context) {
 
 // shutdownTerminals gracefully terminates every open terminal pty. pty.Start
 // makes each shell a session leader (pgid == pid), so signaling the negative
-// pid reaches the shell and its children. terminateProcessTree sends SIGTERM,
-// waits up to grace, then escalates to SIGKILL.
+// pid reaches the shell and its children. Each session is signaled with
+// SIGTERM concurrently; shutdown then waits for that session's read loop to
+// drain final output into history, sync/close the log, close the socket, and
+// remove registry entries before escalating that session to SIGKILL. Waiting
+// on per-session completion (not just pid liveness) is what guarantees the
+// terminal tab can still page the last output after desktop restart.
+//
+// Admission is synchronized with the snapshot: sealForShutdown refuses all
+// future reserve/put admissions and returns the live sessions. A reservation
+// winner whose pty.Start raced the seal is refused by completeCreate (stores
+// nothing) and torn down by its owner, so shutdown terminates exactly the
+// sealed set and never depends on the shutdown context still being live when
+// a racing reservation publishes. Owner-side teardown is what closes the race
+// under a cancelled deadline: the shell is reaped by the owner's kill path
+// even when shutdown has already moved on.
 func (h *Handler) shutdownTerminals(ctx context.Context) {
-	grace := terminalGraceDuration(ctx)
-	for id, entry := range h.terminalProcs.snapshot() {
-		if entry.PID <= 0 {
-			continue
-		}
-		log.Printf("server: terminating terminal %s (pid %d, grace %s)", id, entry.PID, grace)
-		terminateProcessTree(int(entry.PID), grace)
+	sessions := h.terminalSessions.sealForShutdown()
+	if len(sessions) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, sess := range sessions {
+		wg.Add(1)
+		go func(s *terminalSession) {
+			defer wg.Done()
+			s.shutdownGracefully(ctx)
+		}(sess)
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		log.Printf("server: terminal shutdown timed out with %d session(s) pending, proceeding with exit", len(sessions))
 	}
 }
 

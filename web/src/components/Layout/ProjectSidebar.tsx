@@ -49,7 +49,9 @@ import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "../ui/
 import { Separator } from "../ui/separator";
 import DirectoryBrowser from "./DirectoryBrowser";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
-import { computeProjectDrag } from "../../lib/projectDrag";
+import { computeProjectDrag, projectDragKey } from "../../lib/projectDrag";
+import { buttonVariants } from "../ui/button";
+import { cn } from "@/lib/utils";
 
 type SessionStatus = "none" | "idle" | "running";
 
@@ -293,6 +295,7 @@ function useInlineRename(
 ) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(initialName);
+  const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -304,23 +307,31 @@ function useInlineRename(
 
   const start = useCallback(() => {
     setValue(initialName);
+    setError(null);
     setEditing(true);
   }, [initialName]);
 
   const commit = useCallback(async () => {
     const trimmed = value.trim();
     if (trimmed && trimmed !== initialName) {
-      await onRename(trimmed);
+      try {
+        await onRename(trimmed);
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        return;
+      }
     }
     setEditing(false);
   }, [value, initialName, onRename]);
 
   const cancel = useCallback(() => {
     setEditing(false);
+    setError(null);
     setValue(initialName);
   }, [initialName]);
 
-  return { editing, value, setValue, inputRef, start, commit, cancel };
+  return { editing, value, setValue, inputRef, start, commit, cancel, error };
 }
 
 // ── Sortable Project Row ────────────────────────────────────────────────────
@@ -403,7 +414,7 @@ function SortableProjectRow({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: project.path });
+  } = useSortable({ id: projectDragKey(project.path, project.host) });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -414,14 +425,18 @@ function SortableProjectRow({
   return (
     <div ref={setNodeRef} style={style} className="group relative px-1">
       <ContextMenu items={contextItems}>
-        <Button
-          variant="ghost"
-          className={`w-full justify-start gap-2 px-2 h-auto py-2 text-sm ${
-            isActive
-              ? "bg-primary/15 text-foreground border-l-2 border-primary"
-              : "text-muted-foreground border-l-2 border-transparent"
-          }`}
-      onClick={onSelect}
+        <div
+          className={cn(
+            buttonVariants({ variant: "ghost" }),
+            `w-full justify-start gap-2 px-2 h-auto py-2 text-sm ${
+              isActive
+                ? "bg-primary/15 text-foreground border-l-2 border-primary"
+                : "text-muted-foreground border-l-2 border-transparent"
+            }`
+          )}
+          onClick={onSelect}
+          role="button"
+          tabIndex={0}
         >
           <span
             className="shrink-0 cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-60 hover:!opacity-100 touch-none"
@@ -437,18 +452,24 @@ function SortableProjectRow({
           )}
           <div className="min-w-0 flex-1 text-left">
             {rename.editing ? (
-              <Input
-                ref={rename.inputRef}
-                value={rename.value}
-                onChange={(e) => rename.setValue(e.target.value)}
-                onBlur={rename.commit}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") rename.commit();
-                  if (e.key === "Escape") rename.cancel();
-                }}
-                className="h-5 py-0 px-1 text-sm"
-                onClick={(e) => e.stopPropagation()}
-              />
+              <>
+                <Input
+                  ref={rename.inputRef}
+                  value={rename.value}
+                  onChange={(e) => rename.setValue(e.target.value)}
+                  onBlur={rename.commit}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") rename.commit();
+                    if (e.key === "Escape") rename.cancel();
+                  }}
+                  className="h-5 py-0 px-1 text-sm"
+                  onClick={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.preventDefault()}
+                />
+                {rename.error && (
+                  <div className="text-xs text-destructive truncate">{rename.error}</div>
+                )}
+              </>
             ) : (
               <>
                 <div className="truncate font-medium text-foreground">
@@ -471,17 +492,17 @@ function SortableProjectRow({
             <ProjectBadges indicators={indicators} />
             <SessionDot status={status} />
           </span>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="p-1 h-5 w-5 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0"
-            onClick={(e) => {
-              e.stopPropagation();
-              onRemove();
-            }}
-          >
-            <Trash2 className="w-3 h-3" />
-          </Button>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="p-1 h-5 w-5 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+        >
+          <Trash2 className="w-3 h-3" />
         </Button>
       </ContextMenu>
     </div>
@@ -553,18 +574,24 @@ function SortableGroupHeader({
               <ChevronDown className="w-3 h-3" />
             )}
             {rename.editing ? (
-              <Input
-                ref={rename.inputRef}
-                value={rename.value}
-                onChange={(e) => rename.setValue(e.target.value)}
-                onBlur={rename.commit}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") rename.commit();
-                  if (e.key === "Escape") rename.cancel();
-                }}
-                className="h-4 py-0 px-1 text-xs w-24"
-                onClick={(e) => e.stopPropagation()}
-              />
+              <>
+                <Input
+                  ref={rename.inputRef}
+                  value={rename.value}
+                  onChange={(e) => rename.setValue(e.target.value)}
+                  onBlur={rename.commit}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") rename.commit();
+                    if (e.key === "Escape") rename.cancel();
+                  }}
+                  className="h-4 py-0 px-1 text-xs w-24"
+                  onClick={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.preventDefault()}
+                />
+                {rename.error && (
+                  <div className="text-xs text-destructive truncate">{rename.error}</div>
+                )}
+              </>
             ) : (
               <span className="uppercase tracking-wider">{group.name}</span>
             )}
@@ -728,10 +755,20 @@ function CollapsedProjectButton({
   project,
   isActive,
   onSelect,
+  onToggleExpand,
+  onRemove,
+  onAddToGroup,
+  onRemoveFromGroup,
+  groups,
 }: {
   project: Project;
   isActive: boolean;
   onSelect: () => void;
+  onToggleExpand: () => void;
+  onRemove: () => void;
+  onAddToGroup: (group: string) => void;
+  onRemoveFromGroup: () => void;
+  groups: ProjectGroup[];
 }) {
   const indicators = useProjectIndicators(project.path);
   const showCount = indicators.sessionCount > 0;
@@ -773,7 +810,42 @@ function CollapsedProjectButton({
   ]
     .filter(Boolean)
     .join(" · ");
+  // Collapsed rail has no inline editor, so rename can't complete here;
+  // expanding lets the rename finish in the expanded row (the expanded
+  // row's Rename is the inline-edit entry point for remote SSH/WSL).
+  const contextItems: ContextMenuItem[] = useMemo(() => {
+    const items: ContextMenuItem[] = [
+      {
+        label: "Rename",
+        icon: <Pencil className="w-3.5 h-3.5" />,
+        onClick: () => {
+          onSelect();
+          onToggleExpand();
+        },
+      },
+      { label: "Remove", icon: <Trash2 className="w-3.5 h-3.5" />, onClick: onRemove, destructive: true },
+      { separator: true, label: "", onClick: () => {} },
+    ];
+    const availableGroups = (groups || []).filter((g) => g.name !== project.group);
+    for (const g of availableGroups) {
+      items.push({
+        label: `Move to "${g.name}"`,
+        icon: <FolderTree className="w-3.5 h-3.5" />,
+        onClick: () => onAddToGroup(g.name),
+      });
+    }
+    if (project.group) {
+      items.push({
+        label: "Remove from group",
+        icon: <X className="w-3.5 h-3.5" />,
+        onClick: onRemoveFromGroup,
+      });
+    }
+    return items;
+  }, [groups, project.group, onRemove, onAddToGroup, onRemoveFromGroup, onSelect, onToggleExpand]);
+
   return (
+    <ContextMenu items={contextItems}>
     <Tooltip>
       <TooltipTrigger asChild>
         <Button
@@ -813,6 +885,7 @@ function CollapsedProjectButton({
         </div>
       </TooltipContent>
     </Tooltip>
+    </ContextMenu>
   );
 }
 
@@ -898,27 +971,29 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
 
       // Project drop — resolve to a reorder (same bucket) or a cross-bucket
       // move (group change + position). Dropping on a group header moves the
-      // project into that group.
+      // project into that group. Refs carry {path, host?} so remote (host,
+      // verbatim path) entries keep their own identity and order.
       const result = computeProjectDrag(state.projects, state.groups || [], activeId, overId);
       if (result.type === "reorder") {
-        reorderProjects(result.paths);
+        reorderProjects(result.refs);
       } else if (result.type === "move") {
         void (async () => {
-          await setProjectGroup(result.path, result.group);
-          await reorderProjects(result.paths);
+          await setProjectGroup(result.ref.path, result.group, result.ref.host);
+          await reorderProjects(result.refs);
         })();
       }
     },
     [state.groups, state.projects, reorderGroups, reorderProjects, setProjectGroup],
   );
 
-  // Unique sortable IDs — remote projects use host:path composite to avoid
-  // collisions when the same path exists on two hosts.
+  // Shared sortable identity for projects: local entries key on the path,
+  // remote (SSH/WSL) entries on (host, verbatim path) — the same key
+  // computeProjectDrag uses, so DnD ids always resolve.
   const sortableIds = useMemo(
     () => sortedItems.map((item) => {
       if (item.type === "group") return `group:${(item.data as ProjectGroup).name}`;
       const p = item.data as Project;
-      return p.host ? `${p.host}:${p.path}` : p.path;
+      return projectDragKey(p.path, p.host);
     }),
     [sortedItems],
   );
@@ -928,7 +1003,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
       await createGroup(name);
       // Move active project into the new group if one is selected
       if (state.activeProject) {
-        await setProjectGroup(state.activeProject.path, name);
+        await setProjectGroup(state.activeProject.path, name, state.activeProject.host);
       }
     },
     [createGroup, setProjectGroup, state.activeProject],
@@ -952,10 +1027,15 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
             <div className="flex flex-col gap-1">
               {orderedProjects.slice(0, 5).map((p) => (
                 <CollapsedProjectButton
-                  key={p.path}
+                  key={projectDragKey(p.path, p.host)}
                   project={p}
-                  isActive={state.activeProject?.path === p.path}
+                  isActive={state.activeProject?.path === p.path && (state.activeProject?.host ?? "") === (p.host ?? "")}
                   onSelect={() => selectProject(p)}
+                  onToggleExpand={onToggle}
+                  onRemove={() => removeProject(p.path, p.host)}
+                  onAddToGroup={(group) => setProjectGroup(p.path, group, p.host)}
+                  onRemoveFromGroup={() => setProjectGroup(p.path, "", p.host)}
+                  groups={state.groups}
                 />
               ))}
             </div>
@@ -1014,18 +1094,18 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
                   const project = item.data as Project;
                   return (
                     <SortableProjectRow
-                      key={project.host ? `${project.host}:${project.path}` : project.path}
+                      key={projectDragKey(project.path, project.host)}
                       project={project}
                       isActive={state.activeProject?.path === project.path && (state.activeProject?.host ?? "") === (project.host ?? "")}
                       onSelect={() => selectProject(project)}
                       onRemove={() => removeProject(project.path, project.host)}
-                      onRename={(name) => renameProject(project.path, name)}
+                      onRename={(name) => renameProject(project.path, name, project.host)}
                       onCreateGroup={async (name) => {
                         await createGroup(name);
-                        await setProjectGroup(project.path, name);
+                        await setProjectGroup(project.path, name, project.host);
                       }}
-                      onAddToGroup={(group) => setProjectGroup(project.path, group)}
-                      onRemoveFromGroup={() => setProjectGroup(project.path, "")}
+                      onAddToGroup={(group) => setProjectGroup(project.path, group, project.host)}
+                      onRemoveFromGroup={() => setProjectGroup(project.path, "", project.host)}
                       groups={state.groups}
                     />
                   );

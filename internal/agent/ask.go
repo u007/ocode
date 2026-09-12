@@ -171,6 +171,7 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 	}
 
 	child := NewAgent(client, tools, a.config, a.lspMgr)
+	child.toolBatchDelay = 0
 	child.SetMaxSteps(maxSteps)
 	child.skipDiscovery = true
 	// Side-query agents belong to the same logical session. Share the root

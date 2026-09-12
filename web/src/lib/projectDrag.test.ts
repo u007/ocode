@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeProjectDrag } from "./projectDrag";
+import { computeProjectDrag, projectDragKey } from "./projectDrag";
 
 // Mirrors the real data shape: groups render first (by order), then ungrouped.
 const groups = [
@@ -16,68 +16,117 @@ const projects = [
   { path: "/u/nanobot", group: "" },
 ];
 
+// Callers must pass scoped keys (projectDragKey): local entries key on the
+// path, remote entries on (host, verbatim path), so the same path on two
+// hosts never collides.
+const k = (path: string, host?: string) => projectDragKey(path, host);
+const ref = (path: string, host?: string) => (host ? { path, host } : { path });
+
 describe("computeProjectDrag", () => {
   it("reorders within the ungrouped bucket (drag up)", () => {
-    const res = computeProjectDrag(projects, groups, "/u/nanobot", "/u/ocode");
+    const res = computeProjectDrag(projects, groups, k("/u/nanobot"), k("/u/ocode"));
     expect(res).toEqual({
       type: "reorder",
-      paths: ["/g/james", "/g/tmp", "/a/aimsai2", "/u/nanobot", "/u/ocode", "/u/kakiit"],
+      refs: [ref("/g/james"), ref("/g/tmp"), ref("/a/aimsai2"), ref("/u/nanobot"), ref("/u/ocode"), ref("/u/kakiit")],
     });
   });
 
   it("reorders within the ungrouped bucket (drag down)", () => {
-    const res = computeProjectDrag(projects, groups, "/u/ocode", "/u/nanobot");
+    const res = computeProjectDrag(projects, groups, k("/u/ocode"), k("/u/nanobot"));
     expect(res).toEqual({
       type: "reorder",
-      paths: ["/g/james", "/g/tmp", "/a/aimsai2", "/u/kakiit", "/u/nanobot", "/u/ocode"],
+      refs: [ref("/g/james"), ref("/g/tmp"), ref("/a/aimsai2"), ref("/u/kakiit"), ref("/u/nanobot"), ref("/u/ocode")],
     });
   });
 
   it("reorders within a group bucket", () => {
-    const res = computeProjectDrag(projects, groups, "/g/tmp", "/g/james");
+    const res = computeProjectDrag(projects, groups, k("/g/tmp"), k("/g/james"));
     expect(res).toEqual({
       type: "reorder",
-      paths: ["/g/tmp", "/g/james", "/a/aimsai2", "/u/ocode", "/u/kakiit", "/u/nanobot"],
+      refs: [ref("/g/tmp"), ref("/g/james"), ref("/a/aimsai2"), ref("/u/ocode"), ref("/u/kakiit"), ref("/u/nanobot")],
     });
   });
 
   it("moves an ungrouped project into a group when dropped on a grouped project", () => {
-    const res = computeProjectDrag(projects, groups, "/u/ocode", "/g/tmp");
+    const res = computeProjectDrag(projects, groups, k("/u/ocode"), k("/g/tmp"));
     expect(res).toEqual({
       type: "move",
-      path: "/u/ocode",
+      ref: ref("/u/ocode"),
       group: "old",
-      paths: ["/g/james", "/u/ocode", "/g/tmp", "/a/aimsai2", "/u/kakiit", "/u/nanobot"],
+      refs: [ref("/g/james"), ref("/u/ocode"), ref("/g/tmp"), ref("/a/aimsai2"), ref("/u/kakiit"), ref("/u/nanobot")],
     });
   });
 
   it("moves a grouped project out to ungrouped when dropped on an ungrouped project", () => {
-    const res = computeProjectDrag(projects, groups, "/a/aimsai2", "/u/kakiit");
+    const res = computeProjectDrag(projects, groups, k("/a/aimsai2"), k("/u/kakiit"));
     expect(res).toEqual({
       type: "move",
-      path: "/a/aimsai2",
+      ref: ref("/a/aimsai2"),
       group: "",
-      paths: ["/g/james", "/g/tmp", "/u/ocode", "/u/kakiit", "/a/aimsai2", "/u/nanobot"],
+      refs: [ref("/g/james"), ref("/g/tmp"), ref("/u/ocode"), ref("/u/kakiit"), ref("/a/aimsai2"), ref("/u/nanobot")],
     });
   });
 
   it("moves a project into a group when dropped on the group header (appended at end)", () => {
-    const res = computeProjectDrag(projects, groups, "/u/ocode", "group:old");
+    const res = computeProjectDrag(projects, groups, k("/u/ocode"), "group:old");
     expect(res).toEqual({
       type: "move",
-      path: "/u/ocode",
+      ref: ref("/u/ocode"),
       group: "old",
-      paths: ["/g/james", "/g/tmp", "/u/ocode", "/a/aimsai2", "/u/kakiit", "/u/nanobot"],
+      refs: [ref("/g/james"), ref("/g/tmp"), ref("/u/ocode"), ref("/a/aimsai2"), ref("/u/kakiit"), ref("/u/nanobot")],
     });
   });
 
   it("dropping on the header of the project's own group is a no-op", () => {
-    const res = computeProjectDrag(projects, groups, "/g/tmp", "group:old");
+    const res = computeProjectDrag(projects, groups, k("/g/tmp"), "group:old");
     expect(res).toEqual({ type: "none" });
   });
 
   it("returns none for unknown ids", () => {
-    expect(computeProjectDrag(projects, groups, "/nope", "/u/ocode")).toEqual({ type: "none" });
-    expect(computeProjectDrag(projects, groups, "/u/ocode", "/nope")).toEqual({ type: "none" });
+    expect(computeProjectDrag(projects, groups, k("/nope"), k("/u/ocode"))).toEqual({ type: "none" });
+    expect(computeProjectDrag(projects, groups, k("/u/ocode"), k("/nope"))).toEqual({ type: "none" });
+  });
+
+  it("keeps same-path projects on different hosts distinct", () => {
+    const mixed = [
+      { path: "/home/user/app", group: "" },
+      { path: "/home/user/app", group: "", host: "devbox" },
+      { path: "/home/user/app", group: "", host: "wsl:Ubuntu" },
+    ];
+    // Dragging the SSH entry onto the WSL entry reorders by scoped identity.
+    const res = computeProjectDrag(mixed, [], k("/home/user/app", "devbox"), k("/home/user/app", "wsl:Ubuntu"));
+    expect(res).toEqual({
+      type: "reorder",
+      refs: [
+        ref("/home/user/app"),
+        ref("/home/user/app", "wsl:Ubuntu"),
+        ref("/home/user/app", "devbox"),
+      ],
+    });
+  });
+
+  it("moves a remote entry into a group with its host preserved", () => {
+    const mixed = [
+      { path: "/g/james", group: "old" },
+      { path: "/home/user/app", group: "", host: "devbox" },
+    ];
+    const res = computeProjectDrag(
+      mixed,
+      [{ name: "old", order: 1 }],
+      k("/home/user/app", "devbox"),
+      "group:old",
+    );
+    expect(res).toEqual({
+      type: "move",
+      ref: ref("/home/user/app", "devbox"),
+      group: "old",
+      refs: [ref("/g/james"), ref("/home/user/app", "devbox")],
+    });
+  });
+
+  it("projectDragKey keeps local and remote identities distinct", () => {
+    expect(k("/home/user/app")).not.toBe(k("/home/user/app", "devbox"));
+    expect(k("/home/user/app", "devbox")).not.toBe(k("/home/user/app", "wsl:Ubuntu"));
+    expect(k("/home/user/app")).toBe(projectDragKey("/home/user/app"));
   });
 });

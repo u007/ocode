@@ -43,6 +43,12 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 	// Resolve relative roots against the anchored workDir so they are stable
 	// regardless of the process CWD, and confine an explicit ?path= to the
 	// workDir so the endpoint cannot be used to list arbitrary directories.
+	// Traversal is checked on the raw query value: Join+Cleans would collapse
+	// "link/../escape" and hide the ".." the OS resolves after the symlink.
+	if raw := r.URL.Query().Get("path"); raw != "" && containsDotDot(raw) {
+		writeError(w, http.StatusBadRequest, "path outside working directory")
+		return
+	}
 	if !filepath.IsAbs(root) && h.workDir != "" {
 		root = filepath.Join(h.workDir, root)
 	}
@@ -630,17 +636,19 @@ func searchFiles(ctx context.Context, params fileSearchParams, maxTotal int, emi
 }
 
 // HandleFileSearch searches file contents within the anchored project root.
+//
 // Query params:
-//   q / query : keywords (whitespace-AND when regex=0, single pattern when regex=1)
-//   path      : project root (same anchoring as HandleFileTree)
-//   exts      : comma-separated include extensions, e.g. "*.go,*.ts" (normalized)
-//   ignore / exclude : comma-separated ignore globs, e.g. "*.log,dist/**,*.min.js"
-//                      patterns without "/" match basename at any depth so "*.log" ignores all logs;
-//                      "dist/**" ignores subtree. Wildcards * ? and ** are supported.
-//   regex / match : when regex=1 or match=regex, query is a single RE2 regex instead of keywords-AND
-//   caseSensitive / case : when 1, matching is case-sensitive (default case-insensitive)
-//   wholeWord     : when 1, matches must be whole words (Unicode \pL\pN_ boundaries)
-//   includeIgnored: when 1, hidden files/dirs are walked; default walks only visible files (skips .git, node_modules, dotfiles)
+//
+//	q / query : keywords (whitespace-AND when regex=0, single pattern when regex=1)
+//	path      : project root (same anchoring as HandleFileTree)
+//	exts      : comma-separated include extensions, e.g. "*.go,*.ts" (normalized)
+//	ignore / exclude : comma-separated ignore globs, e.g. "*.log,dist/**,*.min.js"
+//	                   patterns without "/" match basename at any depth so "*.log" ignores all logs;
+//	                   "dist/**" ignores subtree. Wildcards * ? and ** are supported.
+//	regex / match : when regex=1 or match=regex, query is a single RE2 regex instead of keywords-AND
+//	caseSensitive / case : when 1, matching is case-sensitive (default case-insensitive)
+//	wholeWord     : when 1, matches must be whole words (Unicode \pL\pN_ boundaries)
+//	includeIgnored: when 1, hidden files/dirs are walked; default walks only visible files (skips .git, node_modules, dotfiles)
 //
 // Pagination: `limit` is page size (default 50, max 100, see maxSearchPageSize) with `offset`.
 // Stream variant `limit` is a total-result cap instead (see HandleFileSearchStream).
@@ -703,7 +711,10 @@ func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
 // fileTreeRootFor reports whether root may be browsed by HandleFileTree —
 // inside the server's workDir, inside a saved project root
 // (allowedProjectRoots), or inside a configured extra-allowed-path — and, if
-// so, returns the specific containing root. Desktop users switch the file
+// so, returns the specific containing root. A path reached through a symlink
+// inside the project (e.g. /proj/link/child where link points outside) is
+// accepted on its lexical position so linked folders expand; a direct request
+// at the outside target stays rejected. Desktop users switch the file
 // tree between the active project and their extra dirs, so the boundary
 // can't be workDir alone, and the matched root (not workDir) is what the
 // returned tree's Path values must be anchored to: HandleFileTree anchors
@@ -726,7 +737,7 @@ func (h *Handler) fileTreeRootFor(root string) (string, bool) {
 	// returned Path values to the wrong directory.
 	best := ""
 	for _, dir := range candidates {
-		if dir == "" || !containedIn(root, dir) {
+		if dir == "" || (!containedIn(root, dir) && !containedLexical(root, dir)) {
 			continue
 		}
 		absDir, err := filepath.Abs(dir)
@@ -774,6 +785,59 @@ func containedIn(p, dir string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
+// containedLexical reports whether path p is lexically inside dir, without
+// resolving symlinks. It exists for read-only browsing of paths that pass
+// through a symlink inside the project: e.g. /proj/link/child where link ->
+// /elsewhere. containedIn resolves to /elsewhere/child and rejects it, but
+// the request path itself was chosen by navigating inside the project tree,
+// so listing/reading it is the expected Files-tab behavior. Mutations must
+// keep using containedIn — this helper is for read endpoints only, and only
+// after the caller has already matched the project root itself.
+//
+// The RAW request path must contain no ".." component at all (checked before
+// any Clean): filepath.Clean("link/../secret") collapses lexically to
+// "secret" (inside), but the OS resolves ".." after following "link", so it
+// can escape the project. Callers pass the un-cleaned joined path, so this
+// check sees the original components.
+func containedLexical(p, dir string) bool {
+	// Reject any ".." component in the raw request path before Clean can
+	// collapse it through a symlink component (see above). Absolute ".."
+	// above the filesystem root is impossible after Abs, but that form is
+	// rejected here anyway for uniformity.
+	for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+		if part == ".." {
+			return false
+		}
+	}
+	absP, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absDir, filepath.Clean(absP))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// containsDotDot reports whether the raw request path carries a ".."
+// component. Callers check this on the UNJOINED query value (before
+// filepath.Join with the project root), so the check sees the client's
+// original components — Join+Cleans would otherwise collapse "link/../x"
+// and hide the traversal through the symlink.
+func containsDotDot(p string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
@@ -787,10 +851,21 @@ func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "project_root is not an allowed project root")
 			return
 		}
+		// Check traversal on the raw query value before Join cleans it:
+		// "link/../escape" would otherwise collapse and hide the ".."
+		// that the OS resolves AFTER following "link".
+		if containsDotDot(path) {
+			writeError(w, http.StatusBadRequest, "path is outside the project root")
+			return
+		}
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(root, path)
 		}
-		if !containedIn(path, root) {
+		// Read access follows symlinks inside the project (the Files tab
+		// shows linked folders as navigable). containedIn alone would
+		// reject link/child when link points outside the root, so accept
+		// either resolved or lexical containment. Writes stay strict.
+		if !containedIn(path, root) && !containedLexical(path, root) {
 			writeError(w, http.StatusBadRequest, "path is outside the project root")
 			return
 		}
@@ -861,10 +936,16 @@ func (h *Handler) HandleFileRaw(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "project_root is not an allowed project root")
 			return
 		}
+		// Same raw-query traversal check as HandleFileContent above.
+		if containsDotDot(path) {
+			writeError(w, http.StatusBadRequest, "path is outside the project root")
+			return
+		}
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(root, path)
 		}
-		if !containedIn(path, root) {
+		// Same symlink-through-project rule as HandleFileContent above.
+		if !containedIn(path, root) && !containedLexical(path, root) {
 			writeError(w, http.StatusBadRequest, "path is outside the project root")
 			return
 		}
@@ -1141,18 +1222,39 @@ func buildFileTree(base, cur string, depth, maxDepth int, count *int, showHidden
 		return node, nil
 	}
 
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].IsDir() != entries[j].IsDir() {
-			return entries[i].IsDir()
+	// DirEntry.IsDir reports the link itself, so a symlink to a directory
+	// reports false here even though buildFileTree (via os.Stat) treats it
+	// as a directory. Classify symlinks by their target so linked folders
+	// sort with directories. A broken/unreadable target stays a file.
+	type sortableEntry struct {
+		entry fs.DirEntry
+		isDir bool
+	}
+	sortable := make([]sortableEntry, len(entries))
+	for i, e := range entries {
+		isDir := e.IsDir()
+		if !isDir && e.Type()&fs.ModeSymlink != 0 {
+			if st, err := os.Stat(filepath.Join(cur, e.Name())); err == nil && st.IsDir() {
+				isDir = true
+			}
 		}
-		return entries[i].Name() < entries[j].Name()
+		sortable[i] = sortableEntry{entry: e, isDir: isDir}
+	}
+	sort.Slice(sortable, func(i, j int) bool {
+		if sortable[i].isDir != sortable[j].isDir {
+			return sortable[i].isDir
+		}
+		return sortable[i].entry.Name() < sortable[j].entry.Name()
 	})
+	for i := range entries {
+		entries[i] = sortable[i].entry
+	}
 
 	for _, e := range entries {
 		if *count >= maxTreeNodes {
 			break
 		}
-		if (!showHidden && (strings.HasPrefix(e.Name(), ".") || ignoredDirNames[e.Name()])) {
+		if !showHidden && (strings.HasPrefix(e.Name(), ".") || ignoredDirNames[e.Name()]) {
 			continue
 		}
 		child, err := buildFileTree(base, filepath.Join(cur, e.Name()), depth+1, maxDepth, count, showHidden)

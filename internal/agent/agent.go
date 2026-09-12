@@ -307,6 +307,15 @@ type Agent struct {
 	runs        *AgentRunRegistry
 	stopCh      chan struct{}
 	stopMu      sync.Mutex
+	// toolBatchDelay is the minimum time between the model's tool-call batch
+	// being surfaced (OnMessage) and any tool in that batch actually
+	// executing, so the user can read what the model is about to call. Time
+	// spent inside the permission path (auto-permission judge model, human
+	// ask) counts toward the minimum. Zero for child agents.
+	toolBatchDelay time.Duration
+	// toolBatchNotBefore holds the UnixNano deadline of the current batch;
+	// written by the Step loop before dispatch, read by tool goroutines.
+	toolBatchNotBefore atomic.Int64
 	// slotRelease, slotMu, nestedTaskCalls, slotPendingReacq back this
 	// agent's reentrant hold on its own concurrency-limiter slot. See
 	// pauseOwnSlotForNestedCall in subagent.go: while this agent is blocked
@@ -986,6 +995,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 
 	a.stopCh = make(chan struct{})
 	a.jobEvents = make(chan JobEvent, 32)
+	a.toolBatchDelay = mainToolBatchDelay
 
 	a.memoryMaintCh = make(chan MemoryMaintenanceRequest, 64)
 	a.docMaintCh = make(chan DocMaintenanceRequest, docMaintChannelCap)
@@ -1373,6 +1383,10 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		}
 
 		ckpt.countBatch(resp.ToolCalls)
+
+		// Batch surfaced above via OnMessage; no tool in it runs before this
+		// deadline (see waitToolBatchDelay).
+		a.toolBatchNotBefore.Store(time.Now().Add(a.toolBatchDelay).UnixNano())
 
 		type tcResult struct {
 			idx int
@@ -4405,6 +4419,10 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	// output unless this is set. See Agent.RetainFullToolOutput.
 	toolCtx = tool.WithFullOutputRetained(toolCtx, a.RetainFullToolOutput)
 
+	if err := a.waitToolBatchDelay(toolCtx); err != nil {
+		return "", err
+	}
+
 	var result string
 	var err error
 	// If the tool can stream incremental output and the UI has registered a
@@ -5116,6 +5134,30 @@ func (a *Agent) RearmMaintenance() {
 // cancellation for the lifetime of a single operation should capture this
 // once at the start of the operation so that a later ResetCancellation call
 // does not affect their check.
+// mainToolBatchDelay is the default toolBatchDelay for a top-level agent.
+const mainToolBatchDelay = time.Second
+
+// waitToolBatchDelay blocks until the current batch's toolBatchNotBefore
+// deadline has passed, returning early on ctx cancellation or agent stop.
+// It is called after the permission decision so any judge-model or human
+// wait already elapsed counts toward the minimum.
+func (a *Agent) waitToolBatchDelay(ctx context.Context) error {
+	remaining := time.Until(time.Unix(0, a.toolBatchNotBefore.Load()))
+	if remaining <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-a.StopCh():
+		return context.Canceled
+	}
+}
+
 func (a *Agent) StopCh() <-chan struct{} {
 	a.stopMu.Lock()
 	ch := a.stopCh

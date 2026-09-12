@@ -324,8 +324,18 @@ func TestShellExecCommandUsesPlatformShell(t *testing.T) {
 		}
 		return
 	}
-	if cmd.Path == "" || len(cmd.Args) != 3 || cmd.Args[1] != "-c" || cmd.Args[2] != "echo hello" {
-		t.Fatalf("expected bash -c invocation, got path=%q args=%v", cmd.Path, cmd.Args)
+	// The platform shell comes from $SHELL (bash as the fallback). The
+	// command is invoked as <shell> -l -c <command> (login shell, single
+	// command argument) — not hardcoded to bash, and not a bare -c.
+	wantShell := os.Getenv("SHELL")
+	if wantShell == "" {
+		wantShell = "bash"
+	}
+	if cmd.Path == "" || cmd.Path != wantShell {
+		t.Fatalf("expected shell path %q, got %q", wantShell, cmd.Path)
+	}
+	if len(cmd.Args) != 4 || cmd.Args[1] != "-l" || cmd.Args[2] != "-c" || cmd.Args[3] != "echo hello" {
+		t.Fatalf("expected %q -l -c echo hello, got path=%q args=%v", wantShell, cmd.Path, cmd.Args)
 	}
 }
 

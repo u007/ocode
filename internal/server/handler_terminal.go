@@ -129,6 +129,18 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "terminal requires server authentication or a loopback bind address")
 		return
 	}
+	// Fast-path refusal once shutdown has begun. This is best-effort only:
+	// a request that passes this check can still race the seal below; the
+	// table-level seal (reserve/put refusal + shutdown's two-phase snapshot)
+	// is what deterministically closes the race. Mirrors the dispatchTurn
+	// shutdownStarted admission check.
+	h.shutdownMu.Lock()
+	shuttingDown := h.shutdownStarted
+	h.shutdownMu.Unlock()
+	if shuttingDown {
+		writeError(w, http.StatusServiceUnavailable, "server is shutting down")
+		return
+	}
 	// Remote (ocode Remote SSH/WSL) projects: the path lives on another
 	// machine, so instead of a local shell the pty runs ssh/wsl.exe into it.
 	// `host` must be registered together with `project_path` in the projects
@@ -229,7 +241,15 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to start terminal")
 			return
 		}
-		h.terminalSessions.put(anonSess.id, anonSess)
+		// put refuses (false) when the table was sealed for shutdown between
+		// the admission check and pty.Start: tear the just-spawned shell down
+		// immediately so it cannot escape termination, and report 503 so the
+		// client retries only if the server is still alive.
+		if !h.terminalSessions.put(anonSess.id, anonSess) {
+			anonSess.kill()
+			writeError(w, http.StatusServiceUnavailable, "server is shutting down")
+			return
+		}
 		h.serveFreshTerminal(w, r, anonSess)
 		return
 	}
@@ -242,6 +262,13 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	// created=false and a done channel, then reattach to the winner.
 	existing, created, done := h.terminalSessions.reserve(terminalID)
 	if !created {
+		// Sealed for shutdown (reserve refuses with nil/nil) and spawn failure
+		// share one retryable refusal. done==nil with existing==nil means the
+		// seal; done!=nil means a racing winner failed.
+		if existing == nil && done == nil {
+			writeError(w, http.StatusServiceUnavailable, "server is shutting down")
+			return
+		}
 		if existing == nil {
 			// Another socket is spawning right now; wait for it to publish.
 			<-done
@@ -296,10 +323,22 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	// Publish the session (or the failure) before doing anything else so
 	// waiters unblock promptly; on failure they re-lookup, find nothing, and
 	// return an error the client will retry.
-	h.terminalSessions.completeCreate(terminalID, sess)
+	accepted := h.terminalSessions.completeCreate(terminalID, sess)
 	if err != nil {
 		log.Printf("terminal: failed to start pty shell %q for %q: %v", cmd.Path, project, err)
 		writeError(w, http.StatusInternalServerError, "failed to start terminal")
+		return
+	}
+	// completeCreate refuses (false, storing nothing) when the table was
+	// sealed for shutdown between reserve and pty.Start: terminate the
+	// just-spawned shell immediately so it cannot escape termination, and
+	// report 503 so the client retries only if the server is still alive.
+	// The shell was never published, so shutdown's snapshot cannot reach it;
+	// owner-side teardown is what guarantees it is reaped. Mirrors the
+	// anonymous put-refusal path above.
+	if !accepted {
+		sess.kill()
+		writeError(w, http.StatusServiceUnavailable, "server is shutting down")
 		return
 	}
 	h.serveFreshTerminal(w, r, sess)
@@ -333,7 +372,11 @@ func (h *Handler) startTerminalShell(terminalID, project string, cmd *exec.Cmd) 
 		return nil, err
 	}
 	sess := newTerminalSession(terminalID, project, cmd, ptmx, h.terminalSessions.detachTTL, h.terminalExited)
-	h.terminalProcs.register(terminalID, terminalProcEntry{Project: project, PID: int32(cmd.Process.Pid)})
+	// Register under the session's table key, not the raw terminalID: anonymous
+	// sockets get a generated anon-N id in newTerminalSession, and the exit
+	// hook unregisters by s.id — so register and unregister must use the same
+	// key or the Processes tab keeps a stale row for the exited shell.
+	h.terminalProcs.register(sess.id, terminalProcEntry{Project: project, PID: int32(cmd.Process.Pid)})
 	h.notifyTerminalProcsChanged()
 	go sess.readLoop()
 	return sess, nil
@@ -407,12 +450,14 @@ func (h *Handler) serveTerminalSocket(sess *terminalSession, ws *websocket.Conn)
 
 // terminalExited is the session exit hook: drop the shell from the reattach
 // table and the processes registry once its pty read loop has reaped it.
+// Anonymous sessions (resumable=false) are registered in terminalProcs too
+// (under their anon-N table key) so the Processes tab can show them while
+// alive — so they must be unregistered here as well, or the tab keeps a
+// stale row for the exited shell.
 func (h *Handler) terminalExited(s *terminalSession) {
 	h.terminalSessions.remove(s.id, s)
-	if s.resumable {
-		h.terminalProcs.unregister(s.id)
-		h.notifyTerminalProcsChanged()
-	}
+	h.terminalProcs.unregister(s.id)
+	h.notifyTerminalProcsChanged()
 }
 
 // HandleTerminalKill is the explicit close for a terminal tab. Because a

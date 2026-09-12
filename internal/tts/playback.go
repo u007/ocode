@@ -17,7 +17,20 @@ type Playback struct {
 	Status              string   `json:"status"`
 	Text                string   `json:"text,omitempty"`
 	Error               string   `json:"error,omitempty"`
+	// AudioID names the server-rendered audio for local engines; the client
+	// fetches /api/tts/audio/{AudioID} once Status is "ready".
+	AudioID string `json:"audio_id,omitempty"`
 }
+
+// Playback statuses. Browser Native never leaves "playing"/"stopped" on the
+// server; local engines move playing -> synthesizing -> ready | error.
+const (
+	PlaybackStatusPlaying      = "playing"
+	PlaybackStatusSynthesizing = "synthesizing"
+	PlaybackStatusReady        = "ready"
+	PlaybackStatusError        = "error"
+	PlaybackStatusStopped      = "stopped"
+)
 
 type PlaybackManager struct {
 	mu         sync.Mutex
@@ -63,6 +76,19 @@ func (p *PlaybackManager) StopForSelection(selectionGeneration uint64) Playback 
 	active := p.active
 	p.mu.Unlock()
 	return active
+}
+
+// Transition updates the active playback only if it still has the given
+// generation, so a finished synthesis job for a replaced or stopped request
+// can never overwrite the newer state. It reports whether the update applied.
+func (p *PlaybackManager) Transition(generation uint64, fn func(*Playback)) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.active.Generation != generation {
+		return false
+	}
+	fn(&p.active)
+	return true
 }
 
 func (p *PlaybackManager) Status() Playback {

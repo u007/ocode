@@ -47,14 +47,16 @@ func TestCompositeOverlayANSIBackdrop(t *testing.T) {
 
 func TestCompositeOverlayCJKWidth(t *testing.T) {
 	// CJK chars are double-width. Backdrop: 5 CJK chars = 10 cells.
+	// spliceLine treats x as a visual column, so at x=4 the left side
+	// holds 2 CJK chars (4 cells), the box holds 1 cell, and the
+	// right side is truncated to 2 CJK chars (4 cells): 4 + 1 + 4 = 9.
 	backdrop := "ＡＢＣＤＥ" // each is 2 cells wide = 10 total
 	box := "X"
 	got := compositeOverlay(backdrop, box, 4, 0)
 	stripped := stripANSI(got)
-	// Splice at col 4: left 4 CJK (8 cells), box 1 cell, right 1 CJK (2 cells) = 11 cells
 	visualWidth := ansi.StringWidth(stripped)
-	if visualWidth != 11 {
-		t.Errorf("CJK splice visual width: got %d, want 11 (line: %q)", visualWidth, stripped)
+	if visualWidth != 9 {
+		t.Errorf("CJK splice visual width: got %d, want 9 (line: %q)", visualWidth, stripped)
 	}
 }
 

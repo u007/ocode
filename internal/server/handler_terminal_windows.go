@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 )
@@ -39,3 +40,8 @@ type terminalSession struct {
 }
 
 func (s *terminalSession) hasExited() bool { return true }
+
+// shutdownGracefully is a no-op on Windows: no pty processes exist (see
+// terminal_kill_windows.go), so there is nothing to signal or drain. Present
+// so Handler.shutdownTerminals compiles on every platform.
+func (s *terminalSession) shutdownGracefully(_ context.Context) {}

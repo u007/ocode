@@ -274,7 +274,10 @@ func listRoots() ([]DirectoryEntry, error) {
 
 // ── Rename / Reorder / Group endpoints ─────────────────────────────────────
 
-// HandleRenameProject changes the display name of a project.
+// HandleRenameProject changes the display name of a project. Pass `host`
+// to scope the rename to a remote (host, path) entry (SSH `user@host` or
+// `wsl:<distro>`); without `host` the legacy local-only match is used and
+// a remote entry sharing the same path string is never touched.
 func (h *Handler) HandleRenameProject(w http.ResponseWriter, r *http.Request) {
 	if h.projects == nil {
 		writeError(w, http.StatusInternalServerError, "project store not available")
@@ -282,6 +285,7 @@ func (h *Handler) HandleRenameProject(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Path string `json:"path"`
+		Host string `json:"host"`
 		Name string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -296,7 +300,7 @@ func (h *Handler) HandleRenameProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if err := h.projects.Rename(body.Path, body.Name); err != nil {
+	if err := h.projects.RenameRef(projects.ProjectRef{Path: body.Path, Host: body.Host}, body.Name); err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("rename project: %v", err))
 		return
 	}
@@ -304,16 +308,40 @@ func (h *Handler) HandleRenameProject(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleReorderProjects sets the manual sort order for all projects.
+// Accepts either the legacy `{paths: [...]}` (local entries, cleaned) or
+// the scoped `{projects: [{path, host?}, ...]}` form, which orders remote
+// entries by (host, path) identity so the same path on two hosts (or local
+// vs remote) keeps its own position. Remote paths are never Cleaned.
 func (h *Handler) HandleReorderProjects(w http.ResponseWriter, r *http.Request) {
 	if h.projects == nil {
 		writeError(w, http.StatusInternalServerError, "project store not available")
 		return
 	}
 	var body struct {
-		Paths []string `json:"paths"`
+		Paths    []string `json:"paths"`
+		Projects []struct {
+			Path string `json:"path"`
+			Host string `json:"host"`
+		} `json:"projects"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if len(body.Projects) > 0 {
+		refs := make([]projects.ProjectRef, 0, len(body.Projects))
+		for _, p := range body.Projects {
+			if p.Path == "" {
+				writeError(w, http.StatusBadRequest, "projects entries require path")
+				return
+			}
+			refs = append(refs, projects.ProjectRef{Path: p.Path, Host: p.Host})
+		}
+		if err := h.projects.ReorderRefs(refs); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("reorder projects: %v", err))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 	if len(body.Paths) == 0 {
@@ -327,7 +355,9 @@ func (h *Handler) HandleReorderProjects(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// HandleSetProjectGroup assigns a project to a group (or clears it).
+// HandleSetProjectGroup assigns a project to a group (or clears it). Pass
+// `host` to scope the move to a remote (host, path) entry; without `host`
+// the legacy local-only match is used.
 func (h *Handler) HandleSetProjectGroup(w http.ResponseWriter, r *http.Request) {
 	if h.projects == nil {
 		writeError(w, http.StatusInternalServerError, "project store not available")
@@ -335,6 +365,7 @@ func (h *Handler) HandleSetProjectGroup(w http.ResponseWriter, r *http.Request) 
 	}
 	var body struct {
 		Path  string `json:"path"`
+		Host  string `json:"host"`
 		Group string `json:"group"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -345,7 +376,7 @@ func (h *Handler) HandleSetProjectGroup(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
-	if err := h.projects.SetGroup(body.Path, body.Group); err != nil {
+	if err := h.projects.SetGroupRef(projects.ProjectRef{Path: body.Path, Host: body.Host}, body.Group); err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("set group: %v", err))
 		return
 	}
@@ -407,7 +438,7 @@ func (h *Handler) HandleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	if h.projects != nil {
 		for _, p := range h.projects.List() {
 			if p.Group == name {
-				_ = h.projects.SetGroup(p.Path, "")
+				_ = h.projects.SetGroupRef(projects.ProjectRef{Path: p.Path, Host: p.Host}, "")
 			}
 		}
 	}

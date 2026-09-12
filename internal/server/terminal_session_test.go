@@ -102,6 +102,7 @@ func TestTerminalSessionDeliverQueuesWhileReplaying(t *testing.T) {
 		id:        "queued-output",
 		history:   &terminalHistory{},
 		replaying: true,
+		done:      make(chan struct{}),
 	}
 
 	input := []byte("output while replaying")
@@ -124,6 +125,7 @@ func TestTerminalSessionDeliverBoundsReplayPendingOutput(t *testing.T) {
 		id:        "replay-overflow",
 		history:   &terminalHistory{},
 		replaying: true,
+		done:      make(chan struct{}),
 	}
 
 	sess.deliver(make([]byte, terminalReplayPendingCap+1))
@@ -430,7 +432,7 @@ func (r shellRecorder) readPIDs() ([]int32, error) {
 // must not clobber the new session.
 func TestTerminalSessionTableReserveClaimsStaleEntry(t *testing.T) {
 	tab := newTerminalSessionTable()
-	stale := &terminalSession{id: "term-stale", resumable: true, exited: true}
+	stale := &terminalSession{id: "term-stale", resumable: true, exited: true, done: make(chan struct{})}
 	tab.put("term-stale", stale)
 
 	existing, created, done := tab.reserve("term-stale")
@@ -446,7 +448,7 @@ func TestTerminalSessionTableReserveClaimsStaleEntry(t *testing.T) {
 
 	// The stale teardown may still call remove(id, stale) — identity check must
 	// keep the new session.
-	fresh := &terminalSession{id: "term-stale", resumable: true}
+	fresh := &terminalSession{id: "term-stale", resumable: true, done: make(chan struct{})}
 	tab.completeCreate("term-stale", fresh)
 	tab.remove("term-stale", stale)
 	if got := tab.lookup("term-stale"); got != fresh {

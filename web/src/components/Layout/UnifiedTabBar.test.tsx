@@ -454,7 +454,7 @@ describe("terminal alert badge auto-clear timer", () => {
     expect(alertLabel()).toContain("has unread activity");
   });
 
-  it("allows a long session title to wrap within the pill instead of truncating", () => {
+  it("truncates a long session title to one line with full title in tooltip", () => {
     projectFake.tabs = [
       { id: "long", projectPath: "/proj", title: "This is an extremely long session title that should wrap to two lines inside the pill", activeSubTab: "chat" },
     ];
@@ -462,8 +462,13 @@ describe("terminal alert badge auto-clear timer", () => {
     renderBar();
     const pill = screen.getByRole("tab", { name: /this is an extremely long/i });
     const titleSpan = within(pill).getByText(/this is an extremely long session title/i);
-    expect(titleSpan.className).toMatch(/break-words/);
-    expect(titleSpan.className).toMatch(/whitespace-normal/);
-    expect(titleSpan.className).not.toMatch(/truncate/);
+    // Single-line truncation: truncate (overflow-hidden + text-ellipsis + whitespace-nowrap)
+    expect(titleSpan.className).toMatch(/truncate/);
+    expect(titleSpan.className).toMatch(/whitespace-nowrap/);
+    expect(titleSpan.className).not.toMatch(/break-words/);
+    // Full title available via tooltip attribute
+    expect(titleSpan.getAttribute("title")).toBe("This is an extremely long session title that should wrap to two lines inside the pill");
+    // Pill renders correctly with long title (truncated, not overflowing)
+    expect(pill).toBeInTheDocument();
   });
 });

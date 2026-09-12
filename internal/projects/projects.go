@@ -32,6 +32,16 @@ type Project struct {
 	Host string `json:"host,omitempty"`
 }
 
+// ProjectRef identifies a project entry for scoped mutations (rename,
+// group, reorder, remote update). Host scopes the match: "" targets a
+// local project (path is filepath.Cleaned), non-empty targets a remote
+// (host, path) entry (path matched verbatim — remote separator
+// conventions are the remote's, not this machine's).
+type ProjectRef struct {
+	Path string
+	Host string
+}
+
 // ProjectGroup represents a named group of projects.
 type ProjectGroup struct {
 	Name      string `json:"name"`
@@ -224,19 +234,49 @@ func (s *Store) Touch(path string) error {
 	return nil
 }
 
+// matchRef reports whether a cached entry matches a ProjectRef.
+// Local refs (Host == "") match by cleaned path against local entries
+// only. Remote refs match (Host, Path) verbatim — never Cleaned, since
+// remote separator conventions are the remote's, not this machine's.
+func matchRef(p Project, ref ProjectRef) bool {
+	if ref.Host != "" {
+		return p.Host == ref.Host && p.Path == ref.Path
+	}
+	return p.Host == "" && p.Path == filepath.Clean(ref.Path)
+}
+
+// refOrderKey is the identity key for reorder maps. Local entries key on
+// the cleaned path, remote entries on host + verbatim path, so the same
+// path on two hosts (or local vs remote) never collides.
+func refOrderKey(host, path string) string {
+	if host != "" {
+		return host + "\x00" + path
+	}
+	return "\x00" + filepath.Clean(path)
+}
+
 // Rename changes the display name of a project.
 func (s *Store) Rename(path, name string) error {
+	return s.RenameRef(ProjectRef{Path: path}, name)
+}
+
+// RenameRef changes the display name of the project identified by ref.
+// A local ref (Host == "") never matches a remote entry sharing the same
+// path string, and vice versa.
+func (s *Store) RenameRef(ref ProjectRef, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cleaned := filepath.Clean(path)
 	for i := range s.cache {
-		if s.cache[i].Path == cleaned && s.cache[i].Host == "" {
+		if matchRef(s.cache[i], ref) {
 			s.cache[i].Name = name
 			return s.save()
 		}
 	}
-	return fmt.Errorf("project %q not found", path)
+	if ref.Host != "" {
+		return fmt.Errorf("remote project %s:%s not found", ref.Host, ref.Path)
+	}
+	return fmt.Errorf("project %q not found", ref.Path)
 }
 
 // AddRemote upserts a remote project entry, identified by (host, path)
@@ -310,25 +350,30 @@ func (s *Store) FindLastRemote(host string) (Project, bool) {
 // Reorder sets the manual sort order for all projects. The paths slice
 // defines the new order (first = lowest Order value = highest position).
 func (s *Store) Reorder(paths []string) error {
+	refs := make([]ProjectRef, 0, len(paths))
+	for _, p := range paths {
+		refs = append(refs, ProjectRef{Path: p})
+	}
+	return s.ReorderRefs(refs)
+}
+
+// ReorderRefs sets the manual sort order for all projects, keyed by
+// scoped identity so remote entries sharing a path string with a local
+// project (or with a project on another host) keep their own order.
+func (s *Store) ReorderRefs(refs []ProjectRef) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Build a lookup of path → index for the incoming order.
-	orderMap := make(map[string]int, len(paths))
-	for i, p := range paths {
-		orderMap[filepath.Clean(p)] = i + 1 // 1-based
+	// Build a lookup of identity key → index for the incoming order.
+	orderMap := make(map[string]int, len(refs))
+	for i, r := range refs {
+		orderMap[refOrderKey(r.Host, r.Path)] = i + 1 // 1-based
 	}
 
 	// Apply order to cache. Projects not in the reorder list keep their
-	// existing order (but this shouldn't happen in normal usage). Scoped to
-	// Host=="" like every other local mutator — a remote entry that happens
-	// to share a Path string with a local project must never have its
-	// Order silently overwritten by a local reorder call.
+	// existing order (but this shouldn't happen in normal usage).
 	for i := range s.cache {
-		if s.cache[i].Host != "" {
-			continue
-		}
-		if order, ok := orderMap[s.cache[i].Path]; ok {
+		if order, ok := orderMap[refOrderKey(s.cache[i].Host, s.cache[i].Path)]; ok {
 			s.cache[i].Order = order
 		}
 	}
@@ -337,17 +382,26 @@ func (s *Store) Reorder(paths []string) error {
 
 // SetGroup assigns a project to a group, or clears its group if group is "".
 func (s *Store) SetGroup(path, group string) error {
+	return s.SetGroupRef(ProjectRef{Path: path}, group)
+}
+
+// SetGroupRef assigns the project identified by ref to a group, or clears
+// its group if group is "". Scoped like RenameRef: a local ref never
+// touches a remote entry sharing the same path string, and vice versa.
+func (s *Store) SetGroupRef(ref ProjectRef, group string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cleaned := filepath.Clean(path)
 	for i := range s.cache {
-		if s.cache[i].Path == cleaned && s.cache[i].Host == "" {
+		if matchRef(s.cache[i], ref) {
 			s.cache[i].Group = group
 			return s.save()
 		}
 	}
-	return fmt.Errorf("project %q not found", path)
+	if ref.Host != "" {
+		return fmt.Errorf("remote project %s:%s not found", ref.Host, ref.Path)
+	}
+	return fmt.Errorf("project %q not found", ref.Path)
 }
 
 // ── GroupStore ─────────────────────────────────────────────────────────────

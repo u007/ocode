@@ -81,4 +81,22 @@ describe("CoworkSidebar collapse (React error #300 regression)", () => {
     // Mobile keeps the surface mounted off-screen instead of returning null.
     expect(container.firstChild).not.toBeNull();
   });
+
+  it("uses a constrained scroll layout on desktop (vertical scroll regression)", () => {
+    const { container } = renderSidebar({ isOpen: true });
+    const aside = container.querySelector("aside");
+    expect(aside).not.toBeNull();
+    // The aside must fill the fixed-height App wrapper and allow shrinking.
+    expect(aside!.className).toMatch(/flex-1/);
+    expect(aside!.className).toMatch(/min-h-0/);
+    // Header/title rows stay fixed; only the section body scrolls.
+    const header = container.querySelector("h2");
+    expect(header?.parentElement?.className ?? "").toMatch(/shrink-0/);
+    const scroller = Array.from(container.querySelectorAll("div")).find((d) =>
+      d.className.includes("overflow-y-auto"),
+    );
+    expect(scroller).toBeDefined();
+    expect(scroller!.className).toMatch(/flex-1/);
+    expect(scroller!.className).toMatch(/min-h-0/);
+  });
 });
