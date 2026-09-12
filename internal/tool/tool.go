@@ -28,6 +28,15 @@ type ImageResultTool interface {
 	ExecuteImage(args json.RawMessage) (raw []byte, mimeType string, err error)
 }
 
+// ImageProducingTool is an optional extension of ImageResultTool for
+// tools that may return an image result for a call that has no file
+// path. ProducesImage lets the agent decide whether a given call
+// should be treated as producing an image for vision context.
+type ImageProducingTool interface {
+	ImageResultTool
+	ProducesImage(args json.RawMessage) bool
+}
+
 // ContextualTool is an optional extension of Tool for tools that need a
 // context to access the per-agent snapshot store and tool call ID. The agent
 // calls ExecuteCtx when available; Execute is the fallback for callers that
@@ -159,6 +168,10 @@ func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any) []Tool {
 	// PreviewHost (pdf/docx/pptx/mermaid/image/text). The result carries a
 	// PREVIEW_OPEN sentinel the SPA auto-opens; no server push needed.
 	builtins = append(builtins, &PreviewOpenTool{})
+	// Computer tool — opt-in via cfg.Ocode.ComputerUse.Enabled.
+	if cfg != nil && cfg.Ocode.ComputerUse.Enabled {
+		builtins = append(builtins, &ComputerTool{})
+	}
 	// Scheduled-job management — only included when a scheduler service is
 	// attached. The indirection through any (resolved in cron.go) avoids a
 	// tool ↔ scheduler import cycle, since internal/scheduler/dispatch.go
