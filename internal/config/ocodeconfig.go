@@ -589,9 +589,10 @@ type OcodeConfig struct {
 	FakeAgent string `json:"fake_agent,omitempty"`
 	// Ocr holds the OCR tool configuration (backend, model, endpoint).
 	// Backend accepts openai-compat, paddle, and the lmstudio alias.
-	Ocr      ocr.OcrConfig           `json:"ocr"`
-	ImageGen ImageGenConfig          `json:"imagegen"`
-	Profiles map[string]ProfileDelta `json:"profiles,omitempty"`
+	Ocr        ocr.OcrConfig           `json:"ocr"`
+	ImageGen   ImageGenConfig          `json:"imagegen"`
+	ComputerUse ComputerUseConfig       `json:"computer_use"`
+	Profiles   map[string]ProfileDelta `json:"profiles,omitempty"`
 	Extra    map[string]json.RawMessage
 }
 
@@ -831,6 +832,7 @@ type ocodeConfigFile struct {
 	FakeAgent               string                      `json:"fake_agent,omitempty"`
 	Ocr                     *ocr.OcrConfig              `json:"ocr,omitempty"`
 	ImageGen                *ImageGenConfig             `json:"imagegen,omitempty"`
+	ComputerUse             *ComputerUseConfig          `json:"computer_use,omitempty"`
 	Profiles                map[string]ProfileDelta     `json:"profiles,omitempty"`
 	// Legacy fields (read from old configs for migration)
 	OcrModel   string `json:"ocr_model,omitempty"`
@@ -896,6 +898,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Ocr:                     ocr.DefaultOcrConfig(),
 		Extra:                   make(map[string]json.RawMessage),
 		ImageGen:                DefaultImageGenConfig(),
+		ComputerUse:             DefaultComputerUseConfig(),
 	}
 }
 
@@ -1465,6 +1468,16 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "imagegen")
 	}
 
+	if rawCU, ok := raw["computer_use"]; ok && rawCU != nil {
+		var cuCfg ComputerUseConfig
+		if data, err := json.Marshal(rawCU); err == nil {
+			if json.Unmarshal(data, &cuCfg) == nil {
+				cfg.ComputerUse = cuCfg
+			}
+		}
+		delete(raw, "computer_use")
+	}
+
 	if _, ok := raw["profiles"]; ok {
 		if len(file.Profiles) > 0 {
 			if cfg.Profiles == nil {
@@ -1988,6 +2001,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	payload["ocr"] = cfg.Ocr
 	payload["imagegen"] = cfg.ImageGen
+	payload["computer_use"] = cfg.ComputerUse
 	if cfg.TUI.Theme != "" || cfg.TUI.Mouse != nil || cfg.TUI.Scroll != 0 || cfg.TUI.LeaderTimeout != 0 || len(cfg.TUI.Keybinds) > 0 {
 		payload["tui"] = cfg.TUI
 	}
