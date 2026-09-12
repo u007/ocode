@@ -1302,7 +1302,7 @@ func NewPermissionManager() *PermissionManager {
 	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format", "imagegen"} {
 		pm.SetRule(name, PermissionAllow)
 	}
-	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*"} {
+	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*", "computer"} {
 		pm.SetRule(name, PermissionAsk)
 	}
 	// No bash prefixes are banned by default — bans are opt-in via
@@ -1639,6 +1639,32 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 				ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "webfetch.domain." + domain,
 			}}
+		}
+	}
+
+	// Computer tool: observation actions (screenshot, cursor_position, wait)
+	// are allowed without asking; input actions (left_click, type, key, scroll)
+	// require explicit approval unless the user overrode the rule.
+	if toolName == "computer" {
+		var params struct {
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal(args, &params); err != nil {
+			params.Action = ""
+		}
+		switch params.Action {
+		case "screenshot", "cursor_position", "wait":
+			pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (computer observe): action=%s", params.Action))
+			return PermissionDecision{Level: PermissionAllow}
+		default:
+			level := pm.Check(toolName)
+			pm.emitDebug("perm", fmt.Sprintf("Decide %s (computer input): action=%s", level, params.Action))
+			if level == PermissionAsk {
+				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
+					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool.computer", Command: computerAction(args),
+				}}
+			}
+			return PermissionDecision{Level: level}
 		}
 	}
 
@@ -4117,6 +4143,63 @@ func bashCommand(args json.RawMessage) string {
 		return ""
 	}
 	return strings.TrimSpace(params.Command)
+}
+
+// computerAction builds a one-line summary of a computer tool call
+// for the permission dialog, e.g. "left_click at 412,300" or "type hello".
+func computerAction(args json.RawMessage) string {
+	var params struct {
+		Action     string   `json:"action"`
+		Coordinate []int    `json:"coordinate"`
+		Text       string   `json:"text"`
+		Key        string   `json:"key"`
+		Direction  string   `json:"direction"`
+		Amount     int      `json:"amount"`
+		Duration   int      `json:"duration"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "computer"
+	}
+	switch params.Action {
+	case "left_click", "right_click", "middle_click", "double_click":
+		if len(params.Coordinate) == 2 {
+			return fmt.Sprintf("%s at %d,%d", params.Action, params.Coordinate[0], params.Coordinate[1])
+		}
+		return params.Action
+	case "mouse_move":
+		if len(params.Coordinate) == 2 {
+			return fmt.Sprintf("move to %d,%d", params.Coordinate[0], params.Coordinate[1])
+		}
+		return "mouse move"
+	case "mouse_drag":
+		if len(params.Coordinate) == 4 {
+			return fmt.Sprintf("drag %d,%d to %d,%d", params.Coordinate[0], params.Coordinate[1], params.Coordinate[2], params.Coordinate[3])
+		}
+		return "mouse drag"
+	case "scroll":
+		if params.Direction != "" {
+			return fmt.Sprintf("scroll %s", params.Direction)
+		}
+		return "scroll"
+	case "type":
+		return fmt.Sprintf("type %q", params.Text)
+	case "key":
+		return fmt.Sprintf("key %q", params.Key)
+	case "screenshot":
+		return "screenshot"
+	case "cursor_position":
+		return "cursor position"
+	case "wait":
+		if params.Duration > 0 {
+			return fmt.Sprintf("wait %ds", params.Duration)
+		}
+		return "wait"
+	default:
+		if params.Action != "" {
+			return params.Action
+		}
+		return "computer"
+	}
 }
 
 func bashPrefix(command string) (string, bool) {
