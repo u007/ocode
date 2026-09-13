@@ -6,8 +6,8 @@ import (
 	"github.com/u007/ocode/internal/tool"
 )
 
-// newPlatformDriver returns an unsupported-platform driver on linux;
-// the real Linux driver is implemented in Part 09.
+// newPlatformDriver creates the Linux computer driver
+// (xdotool/scrot on X11, ydotool/grim on Wayland).
 func newPlatformDriver(r commandRunner, _ *tool.ProcessSupervisor) (tool.ComputerDriver, error) {
-	return nil, ErrUnsupportedPlatform
+	return newLinuxDriver(r, nil)
 }
