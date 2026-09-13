@@ -173,6 +173,7 @@ func init() {
 		{name: "/goal", usage: "/goal <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runGoalCmd},
 		{name: "/autocontinue", usage: "/autocontinue [on|off|status|model [name]]", help: "Auto-resume any turn cut off by /max-step (or judged interrupted by an optional judge model), general-purpose across TUI and /rc web turns", handler: runAutoContinueCmd},
 		{name: "/ocr", usage: "/ocr [status|enable|disable|model [name]]", help: "Show OCR status, toggle OCR, or set the OCR model (from LM Studio)", handler: runOcrCmd},
+		{name: "/computer", usage: "/computer [status|enable|disable]", help: "Show computer-use status or enable/disable desktop control for new sessions", handler: runComputerCmd},
 		{name: "/image", usage: "/image [status|enable|disable|model [provider/model]]", help: "Show imagegen status, toggle image generation, or set the image model/provider", handler: runImageCmd},
 		{name: "/cron", usage: "/cron [list|describe <id>|remove <id>|add <kind> <args> <message...>]", help: "Manage scheduled jobs (see docs/scheduled-jobs.md). Jobs fire in the long-lived serve/web/desktop host, not the TUI.", handler: runCronCmd},
 		{name: "/fake-agent", usage: "/fake-agent [name|status]", help: "Show or switch the harness identity the LLM loop presents (ocode, opencode, claude-code, cline, kilo-code, codex); default ocode", handler: runFakeAgentCmd},
@@ -1799,6 +1800,10 @@ func runDocsCmd(m *model, args []string) tea.Cmd {
 
 func runOcrCmd(m *model, args []string) tea.Cmd {
 	return m.handleOcrCmd(args)
+}
+
+func runComputerCmd(m *model, args []string) tea.Cmd {
+	return m.handleComputerCmd(args)
 }
 
 func runExplorerModelCmd(m *model, args []string) tea.Cmd {

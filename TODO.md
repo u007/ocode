@@ -1,5 +1,31 @@
 # TODO
 
+## Web tabs
+
+- Terminal tabs (`web/src/components/Terminal/terminalPersistence.ts`) are
+  still per-origin `localStorage`; a shared Tailscale URL opens with no
+  terminal tabs even though the pty shells are alive server-side
+  (`terminal_session_table.go`). Syncing them like session tabs needs a
+  decision on two windows attaching to one pty at once.
+
+## Computer use
+
+- Add a web Settings toggle for the opt-in computer-use tool; `/computer
+  enable|disable` and the config API currently cover TUI/web chat only.
+- Add multi-display selection and region zoom to computer screenshots.
+- Run the opt-in live driver checks on Windows and Linux/X11 or Wayland
+  (`OCODE_COMPUTER_LIVE=1`). macOS is verified (2026-09-14): screenshot,
+  cursor, and move pass under `OCODE_COMPUTER_LIVE=1`; click, type (ASCII and
+  unicode), key chords, scroll, drag, and double-click were exercised against
+  a throwaway TextEdit document. The TextEdit input test is gated behind
+  `OCODE_COMPUTER_LIVE_INPUT=1` and aborts unless TextEdit is frontmost.
+- `ProcessSupervisor` never prunes terminal records; every computer action
+  registers a new one, so a long session grows the supervisor map and every
+  `Snapshot()`. Add pruning of exited one-shot records (kind `computer`, `tts`).
+- macOS `type` leaves non-ASCII text on the clipboard (paste path; restoring
+  the pasteboard races the asynchronous paste). Consider a per-character
+  keycode path via `UCKeyTranslate` if a CGO-free route appears.
+
 ## Piper TTS — deferred follow-ups (2026-09-12)
 
 - **pip wheels are version-pinned, not hash-pinned.** `internal/tts/manifest.go`
@@ -1906,5 +1932,5 @@ See docs/gotchas/chrome-tab-hang-unbounded-cdp-call.md for the full analysis.
 
 ## Computer use (2026-09-12)
 
-- [ ] **Windows driver live verification pending.** Windows driver implemented via PowerShell SendInput (`internal/computer/driver_windows.go`). Unit tests pass on all platforms; cross-compilation (`GOOS=windows go build/vet`) passes. Live driver tests (`TestWindowsLive_*` in `driver_windows_live_test.go`) require a Windows machine or VM with `OCODE_COMPUTER_LIVE=1` and are skipped on darwin.
-- [ ] **Linux driver live verification pending.** Linux driver implemented via xdotool/scrot (X11) and ydotool/grim (Wayland) (`internal/computer/driver_linux.go`). Unit tests pass on all platforms; cross-compilation (`GOOS=linux go build/vet`) passes. Live driver tests (`TestLinuxLive_*` in `driver_linux_live_test.go`) require a Linux desktop (X11 preferred) with `OCODE_COMPUTER_LIVE=1`; Wayland cursor, drag, and scroll behaviors are not exercised on X11 and remain unverified.
+- [ ] **Windows driver live verification pending.** Windows driver implemented via PowerShell SendInput (`internal/computer/driver_windows.go`, `input_windows.ps1`). Unit tests pass on all platforms and `GOOS=windows go vet` passes, but no Windows host was available: the PowerShell script has never been parsed or executed. Live driver tests (`TestWindowsLive_*` in `driver_windows_live_test.go`) require a Windows machine or VM with `OCODE_COMPUTER_LIVE=1` and are skipped on darwin.
+- [ ] **Linux driver live verification pending.** Linux driver implemented via xdotool/scrot (X11) and ydotool/grim (Wayland) (`internal/computer/linux_driver.go`). Unit tests pass on all platforms; cross-compilation (`GOOS=linux go build/vet`) passes. Live driver tests (`TestLinuxLive_*` in `driver_linux_live_test.go`) require a Linux desktop (X11 preferred) with `OCODE_COMPUTER_LIVE=1`; Wayland cursor, drag, and scroll behaviors are not exercised on X11 and remain unverified.

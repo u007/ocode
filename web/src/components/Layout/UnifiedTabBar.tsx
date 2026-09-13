@@ -179,7 +179,7 @@ function TabPill({
           onClick({ button: 0, detail: 1 } as unknown as React.MouseEvent);
         }
       }}
-      className={`inline relative flex items-center gap-1 px-2.5 py-1 rounded-md text-[13px] leading-4 cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+      className={`relative flex w-52 items-center gap-1 overflow-hidden px-2.5 py-1 rounded-md text-[13px] leading-4 cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
         isActive ? "bg-muted/80 text-foreground border border-border/70 shadow-sm" : "bg-card/20 text-muted-foreground border border-transparent hover:bg-muted/50 hover:text-foreground"
       }`}
     >
@@ -227,11 +227,11 @@ function TabPill({
             if (e.key === "Enter") onCommitRename();
             else if (e.key === "Escape") onCancelRename();
           }}
-          className="max-w-48 w-44 bg-background text-foreground rounded px-1 outline-none border border-blue-500"
+          className="min-w-0 flex-1 bg-background text-foreground rounded px-1 outline-none border border-blue-500"
         />
       ) : (
         <span
-          className="max-w-48 truncate whitespace-nowrap shrink-0"
+          className="min-w-0 flex-1 truncate whitespace-nowrap"
           title={displayTitle}
           onDoubleClick={(e) => {
             e.stopPropagation();
@@ -243,7 +243,8 @@ function TabPill({
       )}
       {processLabel && (
         <span
-          className="max-w-24 truncate text-[10px] leading-none px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0"
+          data-testid="tab-process"
+          className="max-w-24 shrink-0 truncate text-[10px] leading-none px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30"
           title={processLabel}
         >
           {processLabel}

@@ -72,7 +72,7 @@ func (r *execRunner) runStdin(ctx context.Context, stdin string, name string, ar
 	_, err := tool.StartSupervised(r.sup, cmd, tool.ProcessRegistration{
 		ID:      id,
 		Name:    "computer " + name,
-		Command: name + " " + strings.Join(args, " "),
+		Command: name + " " + strings.Join(redactTypedText(args), " "),
 		Kind:    tool.ProcessKindComputer,
 	})
 	if err != nil {
@@ -94,4 +94,23 @@ func (r *execRunner) runStdin(ctx context.Context, stdin string, name string, ar
 	}
 	r.sup.MarkExited(id, code)
 	return stdoutBuf.String(), nil
+}
+
+// redactTypedText hides every argument after a "type" op so text the model
+// types (which may be a password) never lands in supervisor records, process
+// listings, or logs. Drivers that feed text via stdin are unaffected.
+func redactTypedText(args []string) []string {
+	out := make([]string, len(args))
+	redact := false
+	for i, a := range args {
+		if redact {
+			out[i] = "<redacted>"
+			continue
+		}
+		out[i] = a
+		if a == "type" {
+			redact = true
+		}
+	}
+	return out
 }

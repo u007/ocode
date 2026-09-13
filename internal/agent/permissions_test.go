@@ -2815,6 +2815,57 @@ func TestSandboxAskRoutesThroughAutoPermission(t *testing.T) {
 	})
 }
 
+// TestSandboxSensitiveDecisionCarriesArgs: when a sandbox-sensitive bash
+// command triggers an Ask, the PermissionRequest must carry the original
+// tool-call args JSON and the parsed Command so that renderPermissionRequestBody
+// can surface the actual tool call + parameters to the user. Regression test
+// for: sandbox ask prompt showed "⚙ tool action" instead of the real command.
+func TestSandboxSensitiveDecisionCarriesArgs(t *testing.T) {
+	isolateConfigHome(t)
+	dataDir, err := paths.GlobalDataDir()
+	if err != nil {
+		t.Fatalf("GlobalDataDir: %v", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(dataDir, "auth.json")
+	rawArgs := json.RawMessage(`{"command":"cat ` + authPath + `"}`)
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	pm.SetMode(PermissionModeSandbox)
+
+	dec := pm.Decide("bash", rawArgs)
+	if dec.Level != PermissionAsk {
+		t.Fatalf("sandbox sensitive command = %s, want Ask", dec.Level)
+	}
+	if dec.Request == nil {
+		t.Fatal("expected a PermissionRequest, got nil")
+	}
+	if dec.Request.Args == nil {
+		t.Fatal("PermissionRequest.Args is nil — the original tool-call args JSON must be preserved")
+	}
+	if string(dec.Request.Args) != string(rawArgs) {
+		t.Fatalf("PermissionRequest.Args = %q, want %q", string(dec.Request.Args), string(rawArgs))
+	}
+	if dec.Request.Command != bashCommand(rawArgs) {
+		t.Fatalf("PermissionRequest.Command = %q, want %q", dec.Request.Command, bashCommand(rawArgs))
+	}
+	if dec.Request.ToolName != "bash" {
+		t.Fatalf("PermissionRequest.ToolName = %q, want %q", dec.Request.ToolName, "bash")
+	}
+
+	// Verify both the command and the full args payload reach the
+	// request so the rendered permission prompt can show the user
+	// exactly what they are being asked to approve.
+	payload, _ := json.Marshal(*dec.Request)
+	payloadStr := string(payload)
+	if strings.Contains(payloadStr, "null") || !strings.Contains(payloadStr, authPath) {
+		t.Fatalf("request payload does not carry command + args: %q", payloadStr)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Part 02 Task 6 — self-escalation guard
 //

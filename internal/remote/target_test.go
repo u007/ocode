@@ -36,6 +36,18 @@ func TestParseTarget(t *testing.T) {
 	}
 }
 
+func TestTargetValidatePort(t *testing.T) {
+	if err := (Target{Kind: KindSSH, Host: "h", Port: 2222}).Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Target{Kind: KindSSH, Host: "h", Port: 65536}).Validate(); err == nil {
+		t.Fatal("expected invalid port")
+	}
+	if err := (Target{Kind: KindWSL, Distro: "Ubuntu", Port: 22}).Validate(); err == nil {
+		t.Fatal("expected WSL port rejection")
+	}
+}
+
 func TestParseTargetWSL(t *testing.T) {
 	cases := []struct {
 		in         string

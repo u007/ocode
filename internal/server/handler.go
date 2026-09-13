@@ -27,14 +27,17 @@ import (
 	"github.com/u007/ocode/internal/skill"
 	ocodesync "github.com/u007/ocode/internal/sync"
 	"github.com/u007/ocode/internal/tabs"
+	"github.com/u007/ocode/internal/tool"
 )
 
 type Handler struct {
-	mu        sync.Mutex
-	agents    map[string]*agentSession
-	cfg       *config.Config
-	rc        *RCBridge          // set when proxying to a TUI session
-	scheduler *scheduler.Service // when set, the `cron` tool is wired into agent sessions
+	mu            sync.Mutex
+	computerUseMu sync.Mutex
+	computerSup   *tool.ProcessSupervisor
+	agents        map[string]*agentSession
+	cfg           *config.Config
+	rc            *RCBridge          // set when proxying to a TUI session
+	scheduler     *scheduler.Service // when set, the `cron` tool is wired into agent sessions
 	// sessions is the single authority for session ID → project root + agent
 	// lifecycle. Every session-scoped handler resolves through it, so sessions
 	// from any registered project load and run (no more cross-project 404s).
@@ -95,6 +98,10 @@ type Handler struct {
 	// terminalSessions owns the live pty shells so a reconnecting socket can
 	// reattach to its shell after a page reload instead of respawning it.
 	terminalSessions *terminalSessionTable
+	// remoteProjectMu serializes remote terminal admission with edits to the
+	// saved remote-project identity. This closes the check-then-reserve race
+	// where an old terminal could be published after an edit commits.
+	remoteProjectMu sync.Mutex
 	// terminalProcsWake is a one-slot wake signal for the
 	// terminal-processes emitter so a newly opened terminal pushes its
 	// memory footprint immediately instead of waiting for the next ticker

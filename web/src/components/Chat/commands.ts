@@ -1,4 +1,5 @@
 import type {
+  ComputerUseConfig,
   Message,
   OcrConfig,
   OcrModelsResponse,
@@ -69,6 +70,7 @@ export const COMMANDS: CommandDef[] = [
   { name: "/session", description: "List, load, or resume sessions", icon: History },
   { name: "/title", description: "Set the current session title", icon: Type },
   { name: "/ocr", description: "Show OCR status, enable/disable, set model", icon: Eye },
+  { name: "/computer", description: "Show computer-use status, enable/disable", icon: Eye },
   { name: "/search", description: "Find a message by keyword", icon: Search },
   { name: "/btw", description: "Add a quick aside to the conversation", icon: MessageCircle },
   { name: "/mask", description: "Show secret redaction status", icon: Shield },
@@ -260,6 +262,8 @@ export interface CommandContext {
     getSession: (id: string) => Promise<{ messages?: Message[]; title?: string }>;
     getOcrConfig: () => Promise<OcrConfig>;
     setOcrConfig: (cfg: OcrConfig) => Promise<OcrConfig>;
+    getComputerUseConfig: () => Promise<ComputerUseConfig>;
+    setComputerUseConfig: (enabled: boolean) => Promise<ComputerUseConfig>;
     getOcrModels: () => Promise<OcrModelsResponse>;
     getOcrEnabled: () => Promise<{ enabled: boolean; model: string }>;
     setOcrEnabled: (enabled: boolean) => Promise<unknown>;
@@ -361,6 +365,9 @@ export async function dispatchCommand(
 
     case "/ocr":
       return handleOcr(args, ctx);
+
+    case "/computer":
+      return handleComputer(args, ctx);
 
     // ── Session export (server-side) ──
     case "/export":
@@ -750,6 +757,61 @@ async function handleOcr(
     messages: [{
       role: "assistant",
       content: "Usage: \`/ocr [status\\|enable\\|disable\\|model [<backend>/]<name>]\`",
+    }],
+  };
+}
+
+async function handleComputer(
+  args: string,
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const subcommand = args.trim().toLowerCase() || "status";
+
+  if (subcommand === "status") {
+    try {
+      const cfg = await ctx.api.getComputerUseConfig();
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: cfg.status_lines.join("\n") }],
+      };
+    } catch (err) {
+      return {
+        handled: true,
+        messages: [{
+          role: "assistant",
+          content: `**Error reading computer-use status:** ${err instanceof Error ? err.message : String(err)}`,
+        }],
+      };
+    }
+  }
+
+  if (subcommand === "enable" || subcommand === "disable") {
+    try {
+      const enabled = subcommand === "enable";
+      await ctx.api.setComputerUseConfig(enabled);
+      return {
+        handled: true,
+        messages: [{
+          role: "assistant",
+          content: `Computer use: ${enabled ? "enabled" : "disabled"}. Takes effect in new sessions.`,
+        }],
+      };
+    } catch (err) {
+      return {
+        handled: true,
+        messages: [{
+          role: "assistant",
+          content: `**Error updating computer use:** ${err instanceof Error ? err.message : String(err)}`,
+        }],
+      };
+    }
+  }
+
+  return {
+    handled: true,
+    messages: [{
+      role: "assistant",
+      content: "Usage: `/computer [status|enable|disable]`",
     }],
   };
 }

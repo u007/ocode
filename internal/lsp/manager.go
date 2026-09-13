@@ -747,3 +747,20 @@ func InstallHint(cmd string) string {
 	}
 	return "check your package manager for a language server that supports this language"
 }
+
+// WaitDiagnosticsForPath opens (or re-syncs) path with its language server
+// and waits until the server publishes diagnostics for it newer than since,
+// or ctx is done. It returns the fresh diagnostics for that file and whether
+// a fresh publish arrived. An error means no server could be used for the
+// file (no server for its extension, binary missing, or the open failed).
+func (m *Manager) WaitDiagnosticsForPath(ctx context.Context, path string, since time.Time) ([]Diagnostic, bool, error) {
+	if err := m.EnsureOpen(path); err != nil {
+		return nil, false, err
+	}
+	uri, err := absURI(path)
+	if err != nil {
+		return nil, false, err
+	}
+	diags, fresh := m.Diagnostics().WaitURI(ctx, uri, since)
+	return diags, fresh, nil
+}

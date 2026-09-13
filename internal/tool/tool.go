@@ -107,6 +107,17 @@ const NoticeSentinel = "NOTICE:"
 // TUI running without a server/desktop host — the tool is omitted; jobs can
 // still be authored via the `/cron` slash command.
 func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any) []Tool {
+	return initBuiltinTools(lspMgr, cfg, svc, nil, nil)
+}
+
+// InitBuiltinToolsWithComputerDriver is the process-aware variant used by
+// hosts that can construct a platform computer driver. The legacy initializer
+// remains available for tests and hosts without a process supervisor.
+func InitBuiltinToolsWithComputerDriver(lspMgr *lsp.Manager, cfg *config.Config, svc any, driver ComputerDriver, driverErr error) []Tool {
+	return initBuiltinTools(lspMgr, cfg, svc, driver, driverErr)
+}
+
+func initBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any, computerDriver ComputerDriver, computerDriverErr error) []Tool {
 	if cfg != nil {
 		setExtraAllowedPaths(cfg.Ocode.ExtraAllowedPaths)
 	} else {
@@ -170,7 +181,7 @@ func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any) []Tool {
 	builtins = append(builtins, &PreviewOpenTool{})
 	// Computer tool — opt-in via cfg.Ocode.ComputerUse.Enabled.
 	if cfg != nil && cfg.Ocode.ComputerUse.Enabled {
-		builtins = append(builtins, &ComputerTool{})
+		builtins = append(builtins, &ComputerTool{Config: cfg, Driver: computerDriver, DriverErr: computerDriverErr})
 	}
 	// Scheduled-job management — only included when a scheduler service is
 	// attached. The indirection through any (resolved in cron.go) avoids a

@@ -24,7 +24,7 @@ type terminalSessionTable struct {
 	// a channel here before the caller runs pty.Start, and completeCreate
 	// closes it after the shell is published (or the spawn failed), so
 	// concurrent sockets for the same brand-new id serialize on one spawn.
-	creating map[string]chan struct{}
+	creating map[string]*terminalReservation
 	// sealed, once set by sealForShutdown, refuses all new admissions
 	// (reserve/put). Winners that already hold a reservation still publish
 	// via completeCreate so shutdown's second snapshot can terminate them.
@@ -32,10 +32,16 @@ type terminalSessionTable struct {
 	detachTTL time.Duration
 }
 
+type terminalReservation struct {
+	done        chan struct{}
+	project     string
+	invalidated bool
+}
+
 func newTerminalSessionTable() *terminalSessionTable {
 	return &terminalSessionTable{
 		sessions:  make(map[string]*terminalSession),
-		creating:  make(map[string]chan struct{}),
+		creating:  make(map[string]*terminalReservation),
 		detachTTL: terminalDetachTTL,
 	}
 }
@@ -75,6 +81,10 @@ func (t *terminalSessionTable) lookup(id string) *terminalSession {
 // for the same never-seen id still spawn exactly one shell; losers never own
 // a process to clean up.
 func (t *terminalSessionTable) reserve(id string) (existing *terminalSession, created bool, done <-chan struct{}) {
+	return t.reserveForProject(id, "")
+}
+
+func (t *terminalSessionTable) reserveForProject(id, project string) (existing *terminalSession, created bool, done <-chan struct{}) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.sealed {
@@ -90,11 +100,11 @@ func (t *terminalSessionTable) reserve(id string) (existing *terminalSession, cr
 		// so it cannot clobber the session we publish here.
 	}
 	if d, ok := t.creating[id]; ok {
-		return nil, false, d
+		return nil, false, d.done
 	}
-	d := make(chan struct{})
+	d := &terminalReservation{done: make(chan struct{}), project: project}
 	t.creating[id] = d
-	return nil, true, d
+	return nil, true, d.done
 }
 
 // completeCreate publishes the freshly spawned session for id (or marks the
@@ -113,13 +123,13 @@ func (t *terminalSessionTable) completeCreate(id string, sess *terminalSession) 
 	t.mu.Lock()
 	done, ok := t.creating[id]
 	delete(t.creating, id)
-	if sess != nil && !t.sealed {
+	if sess != nil && !t.sealed && ok && !done.invalidated {
 		t.sessions[id] = sess
 	}
-	accepted := sess == nil || !t.sealed
+	accepted := sess == nil || (!t.sealed && ok && !done.invalidated)
 	t.mu.Unlock()
 	if ok {
-		close(done)
+		close(done.done)
 	}
 	return accepted
 }
@@ -145,6 +155,28 @@ func (t *terminalSessionTable) remove(id string, s *terminalSession) {
 	if t.sessions[id] == s {
 		delete(t.sessions, id)
 	}
+}
+
+// invalidateProject removes and returns sessions attached to a project before
+// its remote connection identity changes. Callers must kill the returned
+// sessions outside the table lock; removing them first prevents a reconnect
+// racing the update from reattaching to the old host/path.
+func (t *terminalSessionTable) invalidateProject(project string) []*terminalSession {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var invalidated []*terminalSession
+	for id, session := range t.sessions {
+		if session != nil && session.project == project {
+			invalidated = append(invalidated, session)
+			delete(t.sessions, id)
+		}
+	}
+	for _, reservation := range t.creating {
+		if reservation.project == project {
+			reservation.invalidated = true
+		}
+	}
+	return invalidated
 }
 
 func (t *terminalSessionTable) count() int {

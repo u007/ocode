@@ -86,7 +86,7 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 | **Persistent Todo Plans** | `todowrite` / `todoread` / `todo_update` backed by `.ocode/todo/<session>.md` (revision + flock, snapshot-captured, re-anchored every turn) |
 | **In-Chat Find Bar** | `Ctrl+F` / `/search` / `/find` on the chat tab |
 
-### 🔧 Tool System — 39 Built-ins
+### 🔧 Tool System — 40 Built-ins
 
 | Tool | Description |
 |------|-------------|
@@ -102,6 +102,7 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 | `github_pr`, `github_issue`, `github_workflow` | GitHub PR / issue / workflow inspection |
 | `ocr` | Extract text from images (openai-compat, LM Studio native chat, or paddle); reuses stored `auth.json` creds |
 | `imagegen` | Generate images via configured provider |
+| `computer` | Opt-in host desktop screenshots and input actions; enable with `/computer enable` (takes effect in new sessions) |
 | `cron` | Manage scheduled jobs from the agent (create/list/remove) |
 | `plan_enter`, `plan_exit` | Structured planning phase (creates `plan.md`) |
 | `todowrite`, `todoread`, `todo_update` | Persistent todo list (see above) |
@@ -544,6 +545,7 @@ The server exposes a REST + SSE surface under `/api/*` (see `internal/server/ser
 - **Events & logs:** `GET /api/events` (SSE, multiproject tagged bus), `GET /api/logs/stream`, `GET /api/tui-status`, `GET /api/spending`, `GET /api/lsp/statuses`
 - **Cron:** `GET/POST /api/cron/*` (jobs, outbox, targets)
 - **Projects:** `GET/POST /api/projects`, `DELETE /api/projects/{path...}`
+- **Open tabs:** `GET/PUT /api/tabs` — every project's open session tabs, server-side so all windows/origins share one tab bar (`tabs_changed` bus event on write)
 - **Uploads:** `POST /api/uploads` → `<project>/.ocode/uploads`
 - Auth via `?token=` for EventSource/WS; rate-limited; loopback-bound by default.
 
@@ -679,7 +681,7 @@ internal/session/          Session management (save, resume, export, migrate, oj
 internal/skill/            Skill loader, installer, discovery corpus
 internal/snapshot/         Per-agent snapshot store for undo_file_change
 internal/theme/            Theme system (JSON loading, definitions)
-internal/tool/             39 built-in tools
+internal/tool/             40 built-in tools
 internal/tui/              Bubble Tea TUI (model, view, update, components, commands)
 internal/usage/            Token usage tracking
 internal/version/          Version info

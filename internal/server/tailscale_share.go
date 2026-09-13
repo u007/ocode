@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"os/exec"
@@ -14,8 +15,10 @@ import (
 // desktop server share. A fixed path (instead of the server root) keeps
 // cleanup scoped: Shutdown removes only this mount instead of resetting the
 // global serve/funnel config that TUI /rc sessions share on the same node.
-// The public URL becomes https://<tailnet-host>/desktop, and the SPA base
-// path logic (client.ts _basePath) already resolves /desktop/session/<id>.
+// The public URL becomes https://<tailnet-host>/desktop/. The SPA base path
+// logic (client.ts _basePath and the <base> script in web/index.html) treats
+// any non-/session/<id> path as the mount prefix, so /desktop/ resolves
+// assets and API calls under the mount instead of the tailnet root.
 const desktopTailscalePath = "desktop"
 
 // tailscaleShare caches one tailscale exposure per server process. The first
@@ -40,7 +43,7 @@ func (t *tailscaleShare) ensure(port int) (url, hint string) {
 		return t.url, t.hint
 	}
 	t.started = true
-	u, proc, hint := tailscale.StartExpose(port, desktopTailscalePath)
+	u, proc, hint := tailscale.StartExpose(fmt.Sprintf("localhost:%d", port), desktopTailscalePath)
 	t.url = u
 	t.hint = hint
 	t.proc = proc

@@ -5,6 +5,7 @@ okf_version: 0.1
 # Concepts
 
 - [Changes Tab](changes-tab.md) - A per-session TUI tab listing files added or edited by the current chat session (main agent + sub-agents), with unified diffs and undo.
+- [Computer use](computer-use.md) - User-facing guide to enabling and using the opt-in computer desktop-control tool, including actions, coordinate mapping, permissions, platform setup, limitations, and privacy.
 - [File-Edit Snapshot & Undo Mechanism](file-edit-snapshot.md) - ocode takes a per-agent file snapshot before every write/edit/patch and provides an undo_file_change tool to revert by tool_call_id.
 - [Knowledge Bundle System](knowledge-bundle.md) - Internal architecture of the OKF v0.1 knowledge bundle — bundle detection, scanning, frontmatter parsing, doc search, .okfignore exclusion, and store CRUD with documented edge cases and gotchas.
 - [Plugin System](plugins.md) - Overview of ocode's plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, and plugin lifecycle management.
@@ -22,6 +23,10 @@ okf_version: 0.1
 - [Sidebar TUI/Web Parity Gaps](architecture/sidebar-tui-parity-gaps.md) - Gap analysis of web frontend sidebar features missing relative to the TUI sidebar, covering backend fields not consumed and missing TS types.
 - [V1 Connection Cap Exclusion — Embedded Browser Panel](architecture/v1-connection-cap-exclusion.md) - Decision to exclude the per-stateKey concurrent upstream connection cap (32) from v1 embedded browser panel. The exclusion applied at v1 ship; the follow-up implementation has since landed.
 - [Worktree-Based Parallel Feature Development](architecture/worktree-based-parallel-feature-development.md) - Integration pattern for parallel feature development using git worktrees to avoid collisions when multiple features touch shared files
+
+# docs
+
+- [Computer use](docs/computer-use.md) - User-facing guide to enabling and using the opt-in computer desktop-control tool, including actions, coordinate mapping, permissions, platform setup, limitations, privacy, and supported session surfaces. (deprecated)
 
 # gotchas
 
@@ -337,6 +342,18 @@ okf_version: 0.1
 - [2026-09-10-chrome-tab-context-menu-plan.md](superpowers/plans/2026-09-10-chrome-tab-context-menu-plan.md)
 - [2026-09-10-desktop-login-shell-plan.md](superpowers/plans/2026-09-10-desktop-login-shell-plan.md)
 - [2026-09-10-preview-multipurpose-plan.md](superpowers/plans/2026-09-10-preview-multipurpose-plan.md)
+- [01-darwin-spike.md](superpowers/plans/2026-09-12-computer-use-tool/01-darwin-spike.md)
+- [02-config.md](superpowers/plans/2026-09-12-computer-use-tool/02-config.md)
+- [03-tool-core.md](superpowers/plans/2026-09-12-computer-use-tool/03-tool-core.md)
+- [04-agent-wiring.md](superpowers/plans/2026-09-12-computer-use-tool/04-agent-wiring.md)
+- [05-permissions.md](superpowers/plans/2026-09-12-computer-use-tool/05-permissions.md)
+- [06-computer-runner.md](superpowers/plans/2026-09-12-computer-use-tool/06-computer-runner.md)
+- [07-driver-darwin.md](superpowers/plans/2026-09-12-computer-use-tool/07-driver-darwin.md)
+- [08-driver-windows.md](superpowers/plans/2026-09-12-computer-use-tool/08-driver-windows.md)
+- [09-driver-linux.md](superpowers/plans/2026-09-12-computer-use-tool/09-driver-linux.md)
+- [10-commands-and-web.md](superpowers/plans/2026-09-12-computer-use-tool/10-commands-and-web.md)
+- [11-docs.md](superpowers/plans/2026-09-12-computer-use-tool/11-docs.md)
+- [INDEX.md](superpowers/plans/2026-09-12-computer-use-tool/INDEX.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [01-architecture.md](superpowers/specs/2026-08-29-remote-ssh/01-architecture.md)
 - [02-phase1-connect.md](superpowers/specs/2026-08-29-remote-ssh/02-phase1-connect.md)
@@ -350,6 +367,8 @@ okf_version: 0.1
 - [2026-09-10-preview-multipurpose-design.md](superpowers/specs/2026-09-10-preview-multipurpose-design.md)
 - [2026-09-11-desktop-remote-ssh-workspace-design.md](superpowers/specs/2026-09-11-desktop-remote-ssh-workspace-design.md)
 - [2026-09-11-tts-license-acceptance-feedback.md](superpowers/specs/2026-09-11-tts-license-acceptance-feedback.md)
+- [2026-09-12-computer-use-tool-design.md](superpowers/specs/2026-09-12-computer-use-tool-design.md)
+- [2026-09-13-remote-project-editing.md](superpowers/specs/2026-09-13-remote-project-editing.md)
 - [telegram-bot.md](telegram-bot.md)
 - [tts-speech-playback.md](tts-speech-playback.md)
 - [web-desktop-parity-todo.md](web-desktop-parity-todo.md)

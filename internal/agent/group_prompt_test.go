@@ -23,7 +23,7 @@ func TestGroupChildPrompt_Present(t *testing.T) {
 	child := NewAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
 
-	msgs := child.BasePromptMessages("")
+	msgs := child.BasePromptMessages()
 	joined := joinContents(msgs)
 
 	if !strings.Contains(joined, "[ocode:notes]") {
@@ -47,7 +47,7 @@ func TestGroupChildPrompt_Present(t *testing.T) {
 func TestGroupChildPrompt_AbsentForSoloRun(t *testing.T) {
 	child := NewAgent(&MockClient{}, nil, nil, nil)
 	// No SetNoteBus.
-	msgs := child.BasePromptMessages("")
+	msgs := child.BasePromptMessages()
 	joined := joinContents(msgs)
 	if strings.Contains(joined, "[ocode:notes]") {
 		t.Errorf("solo child has [ocode:notes] fragment; got:\n%s", joined)
@@ -66,7 +66,7 @@ func TestGroupChildPrompt_SeqBySystemFiled(t *testing.T) {
 
 	child := NewAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
-	msgs := child.BasePromptMessages("")
+	msgs := child.BasePromptMessages()
 	joined := joinContents(msgs)
 	// The fragment must say that seq and by are filled by
 	// the system (so a child that authors them anyway is
@@ -91,7 +91,7 @@ func TestGroupChildPrompt_PolicyFragment(t *testing.T) {
 
 	child := NewAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
-	msgs := child.BasePromptMessages("")
+	msgs := child.BasePromptMessages()
 	joined := joinContents(msgs)
 	// The wording doesn't have to match verbatim; we check
 	// the SEMANTIC anchor: "cross-agent" or "shared" or
@@ -116,8 +116,8 @@ func TestGroupChildPrompt_StableForReuse(t *testing.T) {
 
 	child := NewAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
-	first := child.BasePromptMessages("")
-	second := child.BasePromptMessages("")
+	first := child.BasePromptMessages()
+	second := child.BasePromptMessages()
 	if !messagesEqual(first, second) {
 		t.Errorf("[ocode:notes] fragment not stable across calls:\n--- first ---\n%s\n--- second ---\n%s",
 			dumpMessages(first), dumpMessages(second))
@@ -135,7 +135,7 @@ func TestGroupChildPrompt_IdFromAgent(t *testing.T) {
 
 	a7 := NewAgent(&MockClient{}, nil, nil, nil)
 	a7.SetNoteBus(bus, "a7")
-	got := joinContents(a7.BasePromptMessages(""))
+	got := joinContents(a7.BasePromptMessages())
 	if !strings.Contains(got, "a7") {
 		t.Errorf("agent a7's prompt missing 'a7':\n%s", got)
 	}

@@ -1,6 +1,7 @@
 package computer
 
 import (
+	"log"
 	"os"
 )
 
@@ -15,11 +16,16 @@ func tempPNGPath() (string, error) {
 	return f.Name(), nil
 }
 
-// readAndRemove reads the file at path and removes it.
+// readAndRemove reads the file at path and removes it. A failed remove is
+// logged rather than returned: the capture already succeeded and callers
+// also defer a remove of their own.
 func readAndRemove(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return data, os.Remove(path)
+	if err := os.Remove(path); err != nil {
+		log.Printf("[COMPUTER] remove temp capture %s: %v", path, err)
+	}
+	return data, nil
 }

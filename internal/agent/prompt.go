@@ -64,12 +64,14 @@ func (a *Agent) PrepareMessages(messages []Message, selectionContext string) []M
 	if today := time.Now().Format("Mon Jan 2 2006"); a.envPromptDate != "" && a.envPromptDate != today {
 		messages = stripMarker(messages, promptEnvMarker)
 	}
-	base := a.BasePromptMessages(selectionContext)
-	if len(base) == 0 {
-		return messages
-	}
+	// The selection is per-turn UI state (sidebar file picks). It rides the
+	// volatile user-role tail, never the system block: every system-role
+	// message is hoisted into the cached system prompt by the provider
+	// builders, so a selection change would bust the whole prefix.
+	messages = stripMarker(messages, promptSelectionMarker)
+	base := a.BasePromptMessages()
 	existing := existingPromptMarkers(messages)
-	out := make([]Message, 0, len(base)+len(messages))
+	out := make([]Message, 0, len(base)+len(messages)+1)
 	for _, msg := range base {
 		marker := promptMarker(msg.Content)
 		if marker != "" && existing[marker] {
@@ -78,13 +80,16 @@ func (a *Agent) PrepareMessages(messages []Message, selectionContext string) []M
 		out = append(out, msg)
 	}
 	out = append(out, messages...)
+	if sel := strings.TrimSpace(selectionContext); sel != "" {
+		out = append(out, Message{Role: "user", Content: promptSelectionMarker + "\n" + sel})
+	}
 	return out
 }
 
-// stripMarker removes the first system message with the given marker from messages.
+// stripMarker removes the first message with the given marker from messages.
 func stripMarker(messages []Message, marker string) []Message {
 	for i, msg := range messages {
-		if msg.Role == "system" && promptMarker(msg.Content) == marker {
+		if promptMarker(msg.Content) == marker {
 			return append(messages[:i:i], messages[i+1:]...)
 		}
 	}
@@ -92,8 +97,9 @@ func stripMarker(messages []Message, marker string) []Message {
 }
 
 // BasePromptMessages returns the base system fragments shared by TUI, CLI,
-// server, ACP, and subagent entrypoints.
-func (a *Agent) BasePromptMessages(selectionContext string) []Message {
+// server, ACP, and subagent entrypoints. Everything here is system-role and
+// therefore part of the cached prefix; per-turn state must not be added.
+func (a *Agent) BasePromptMessages() []Message {
 	var msgs []Message
 	if env := a.environmentPrompt(); env != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptEnvMarker + "\n" + env})
@@ -156,9 +162,6 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 				msgs = append(msgs, Message{Role: "system", Content: "[ocode:knowledge]\n" + string(content)})
 			}
 		}
-	}
-	if sel := strings.TrimSpace(selectionContext); sel != "" {
-		msgs = append(msgs, Message{Role: "system", Content: promptSelectionMarker + "\n" + sel})
 	}
 	// Notes protocol fragment. Gate strictly on bus presence:
 	// a child not in a group has no bus, and the prompt must

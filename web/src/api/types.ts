@@ -282,6 +282,11 @@ export interface OcrConfig {
   paddle: { endpoint: string; variant: string };
 }
 
+export interface ComputerUseConfig {
+  enabled: boolean;
+  status_lines: string[];
+}
+
 export interface OcrModelsResponse {
   backends: { name: string; models: string[]; error?: string }[];
 }
@@ -637,6 +642,17 @@ export interface Project {
   group: string;
   /** Optional remote host for ocode Remote SSH/WSL projects. Empty for local projects. */
   host?: string;
+  remote_kind?: "ssh" | "wsl";
+  remote_user?: string;
+  remote_host?: string;
+  remote_port?: number;
+  remote_distro?: string;
+}
+
+/** One project's persisted open-session tabs (GET/PUT /api/tabs). */
+export interface ServerProjectTabs {
+  tabs: { id: string; title: string; sub_tab?: string }[];
+  active: string;
 }
 
 export interface ProjectGroup {

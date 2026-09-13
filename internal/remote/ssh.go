@@ -83,7 +83,7 @@ func asExitError(err error, target **exec.ExitError) bool {
 // stderr separately (never inheriting the terminal — house rule, see
 // AGENTS.md "capture subprocess output").
 func (s *SSHTransport) Exec(command string) (ExecResult, error) {
-	cmd := exec.Command("ssh", s.Target.String(), command)
+	cmd := exec.Command("ssh", append(s.Target.SSHArgs(), command)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -106,7 +106,7 @@ func (s *SSHTransport) Exec(command string) (ExecResult, error) {
 // remote process's stdin — never interpolated into the command string, so
 // its content never appears in this (or the remote's) process argv.
 func (s *SSHTransport) ExecStdin(command string, stdin io.Reader) (ExecResult, error) {
-	cmd := exec.Command("ssh", s.Target.String(), command)
+	cmd := exec.Command("ssh", append(s.Target.SSHArgs(), command)...)
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -129,7 +129,9 @@ func (s *SSHTransport) ExecStdin(command string, stdin io.Reader) (ExecResult, e
 // ExecInteractive runs a command over `ssh -t`, attached to the local
 // terminal, and blocks until it exits.
 func (s *SSHTransport) ExecInteractive(command string) error {
-	cmd := exec.Command("ssh", "-t", s.Target.String(), command)
+	args := append([]string{"-t"}, s.Target.SSHArgs()...)
+	args = append(args, command)
+	cmd := exec.Command("ssh", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -156,7 +158,12 @@ func (s *SSHTransport) Copy(src io.Reader, size int64, destPath string) error {
 	}
 
 	dest := s.Target.String() + ":" + destPath
-	cmd := exec.Command("scp", tmpPath, dest)
+	args := []string{}
+	if s.Target.Port > 0 {
+		args = append(args, "-P", strconv.Itoa(s.Target.Port))
+	}
+	args = append(args, tmpPath, dest)
+	cmd := exec.Command("scp", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 

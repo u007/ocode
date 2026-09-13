@@ -503,3 +503,10 @@ func uriToPath(uri string) string {
 	}
 	return strings.TrimPrefix(uri, "file://")
 }
+
+// AbsURI returns the file:// URI for path (made absolute). It is the key
+// the diagnostic store uses, exported for callers outside the package that
+// correlate a tool's path argument with published diagnostics.
+func AbsURI(path string) (string, error) {
+	return absURI(path)
+}

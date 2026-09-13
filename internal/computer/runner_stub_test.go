@@ -10,7 +10,7 @@ import (
 // call as a slice of {name, args...} and returns a configurable
 // (stdout, err). It is shared by driver tests in later parts.
 type stubRunner struct {
-	Calls []string
+	Calls  []string
 	Stdout string
 	Err    error
 }

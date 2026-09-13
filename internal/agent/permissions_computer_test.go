@@ -44,14 +44,15 @@ func TestPermissions_ComputerObserveActionsAllowed(t *testing.T) {
 // decision carrying Rule "tool.computer" and a Command summary.
 func TestPermissions_ComputerInputActionsAsk(t *testing.T) {
 	cases := []struct {
-		name       string
-		args       string
-		cmdSubstr  string
+		name      string
+		args      string
+		cmdSubstr string
 	}{
 		{"left_click", `{"action":"left_click","coordinate":[412,300]}`, "left_click at 412,300"},
-		{"type", `{"action":"type","text":"hello"}`, "type"},
-		{"key", `{"action":"key","key":"ctrl+s"}`, "key"},
-		{"scroll", `{"action":"scroll","direction":"down"}`, "scroll"},
+		{"type", `{"action":"type","text":"hello"}`, `type "hello"`},
+		{"key", `{"action":"key","text":"ctrl+s"}`, `key "ctrl+s"`},
+		{"scroll", `{"action":"scroll","coordinate":[5,6],"scroll_direction":"down","scroll_amount":3}`, "scroll down 3 at 5,6"},
+		{"drag", `{"action":"left_click_drag","start_coordinate":[1,2],"coordinate":[3,4]}`, "left_click_drag 1,2 -> 3,4"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,5 +100,3 @@ func TestPermissions_ComputerLockedDenied(t *testing.T) {
 		t.Fatalf("locked mode screenshot: expected Deny, got %s", dec.Level)
 	}
 }
-
-

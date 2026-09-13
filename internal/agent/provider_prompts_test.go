@@ -179,7 +179,7 @@ func (c providerStubClient) StreamChat(messages []Message, tools []map[string]in
 
 func TestBasePromptIncludesProviderFragment(t *testing.T) {
 	a := &Agent{client: providerStubClient{provider: "anthropic", model: "claude-opus-4-7"}}
-	msgs := a.BasePromptMessages("")
+	msgs := a.BasePromptMessages()
 	var found bool
 	for _, m := range msgs {
 		if strings.HasPrefix(m.Content, promptProviderMarker) {
@@ -196,7 +196,7 @@ func TestBasePromptIncludesProviderFragment(t *testing.T) {
 
 func TestBasePromptOmitsProviderFragmentForUnknown(t *testing.T) {
 	a := &Agent{client: providerStubClient{provider: "acme", model: "x"}}
-	for _, m := range a.BasePromptMessages("") {
+	for _, m := range a.BasePromptMessages() {
 		if strings.HasPrefix(m.Content, promptProviderMarker) {
 			t.Fatalf("unexpected provider fragment for unknown provider: %s", m.Content)
 		}
@@ -205,7 +205,7 @@ func TestBasePromptOmitsProviderFragmentForUnknown(t *testing.T) {
 
 func TestBasePromptReasoningFragmentForOSeries(t *testing.T) {
 	a := &Agent{client: providerStubClient{provider: "openai", model: "o3-mini"}}
-	msgs := a.BasePromptMessages("")
+	msgs := a.BasePromptMessages()
 	var found bool
 	for _, m := range msgs {
 		if strings.HasPrefix(m.Content, promptProviderMarker) && strings.Contains(m.Content, "reasoning") {

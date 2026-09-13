@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -149,26 +150,41 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	// from, or mistaken for, a same-path local project.
 	requestedPath := r.URL.Query().Get("project_path")
 	host := r.URL.Query().Get("host")
+	port, err := remotePortQuery(r)
 	var (
 		project string
 		cmd     *exec.Cmd
 	)
+	remoteAdmissionLocked := false
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if host != "" {
-		if !h.remoteProjectRegistered(host, requestedPath) {
-			log.Printf("terminal: rejected remote %s:%s: not a registered remote project", host, requestedPath)
-			writeError(w, http.StatusForbidden, "host/project_path is not a remote project registered with this server")
-			return
-		}
 		target, err := remote.ParseTarget(host)
 		if err != nil {
 			log.Printf("terminal: rejected remote host %q: %v", host, err)
 			writeError(w, http.StatusForbidden, "invalid remote host")
 			return
 		}
+		target.Port = port
+		if err := target.Validate(); err != nil {
+			writeError(w, http.StatusForbidden, "invalid remote target")
+			return
+		}
 		project = host + ":" + requestedPath
 		cmd = remote.ShellCommand(target, requestedPath)
 		if cmd == nil {
 			log.Printf("terminal: rejected remote %s:%s: empty host/path", host, requestedPath)
+			writeError(w, http.StatusForbidden, "host/project_path is not a remote project registered with this server")
+			return
+		}
+		h.remoteProjectMu.Lock()
+		remoteAdmissionLocked = true
+		if !h.remoteProjectRegistered(host, requestedPath, port) {
+			h.remoteProjectMu.Unlock()
+			remoteAdmissionLocked = false
+			log.Printf("terminal: rejected remote %s:%s: not a registered remote project", host, requestedPath)
 			writeError(w, http.StatusForbidden, "host/project_path is not a remote project registered with this server")
 			return
 		}
@@ -260,7 +276,11 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	// paths can never orphan a shell they didn't spawn, and N concurrent
 	// sockets for the same brand-new id spawn exactly one shell: losers get
 	// created=false and a done channel, then reattach to the winner.
-	existing, created, done := h.terminalSessions.reserve(terminalID)
+	existing, created, done := h.terminalSessions.reserveForProject(terminalID, project)
+	if remoteAdmissionLocked {
+		h.remoteProjectMu.Unlock()
+		remoteAdmissionLocked = false
+	}
 	if !created {
 		// Sealed for shutdown (reserve refuses with nil/nil) and spawn failure
 		// share one retryable refusal. done==nil with existing==nil means the
@@ -592,12 +612,16 @@ func historyQueryInt64(r *http.Request, name string, fallback int64) (int64, err
 // host/path pairs and use the same host:path key as live terminal sessions.
 func (h *Handler) resolveTerminalHistoryProject(r *http.Request) (string, int, string) {
 	host := r.URL.Query().Get("host")
+	port, err := remotePortQuery(r)
+	if err != nil {
+		return "", http.StatusBadRequest, err.Error()
+	}
 	project := r.URL.Query().Get("project")
 	if path := r.URL.Query().Get("project_path"); path != "" {
 		project = path
 	}
 	if host != "" {
-		if !h.remoteProjectRegistered(host, project) {
+		if !h.remoteProjectRegistered(host, project, port) {
 			return "", http.StatusForbidden, "host/project_path is not a registered remote project"
 		}
 		return host + ":" + project, 0, ""
@@ -686,14 +710,29 @@ func (h *Handler) HandleTerminalProcesses(w http.ResponseWriter, r *http.Request
 // remoteProjectRegistered reports whether (host, path) is a remote project
 // entry in the projects store. Path is matched verbatim, as AddRemote
 // stores it (no Clean — its conventions belong to the remote).
-func (h *Handler) remoteProjectRegistered(host, path string) bool {
+func (h *Handler) remoteProjectRegistered(host, path string, ports ...int) bool {
 	if h.projects == nil || path == "" {
 		return false
 	}
 	for _, p := range h.projects.List() {
-		if p.Host == host && p.Path == path {
+		if p.Host != host || p.Path != path {
+			continue
+		}
+		if len(ports) == 0 || p.RemotePort == ports[0] {
 			return true
 		}
 	}
 	return false
+}
+
+func remotePortQuery(r *http.Request) (int, error) {
+	value := r.URL.Query().Get("port")
+	if value == "" {
+		return 0, nil
+	}
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("remote port must be between 1 and 65535")
+	}
+	return port, nil
 }

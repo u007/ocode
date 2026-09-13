@@ -68,7 +68,7 @@ vi.mock("./api/client", () => {
 
 const eventBusStop = vi.hoisted(() => vi.fn());
 vi.mock("./lib/eventBus", () => ({
-  eventBus: { on: () => () => {}, emit: () => {}, start: () => {}, stop: eventBusStop, setProjects: () => {} },
+  eventBus: { on: () => () => {}, onReconnect: () => () => {}, emit: () => {}, start: () => {}, stop: eventBusStop, setProjects: () => {} },
 }));
 
 vi.mock("./components/Browser/BrowserPanel", () => ({

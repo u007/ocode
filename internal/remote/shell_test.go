@@ -21,6 +21,14 @@ func TestShellCommandSSHAbsolutePath(t *testing.T) {
 	}
 }
 
+func TestShellCommandSSHPort(t *testing.T) {
+	cmd := ShellCommand(Target{Kind: KindSSH, User: "u", Host: "h", Port: 2222}, "/srv/app")
+	want := []string{"ssh", "-t", "-p", "2222", "u@h", `cd '/srv/app' && exec "${SHELL:-/bin/sh}" -l`}
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("args = %q, want %q", cmd.Args, want)
+	}
+}
+
 func TestShellCommandWSL(t *testing.T) {
 	cmd := ShellCommand(Target{Kind: KindWSL, Distro: "Ubuntu"}, "~/proj")
 	want := []string{"wsl.exe", "-d", "Ubuntu", "--cd", "~/proj"}

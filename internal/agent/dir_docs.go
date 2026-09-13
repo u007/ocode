@@ -12,12 +12,48 @@ import (
 var dirDocNames = []string{"CLAUDE.md", "AGENTS.md", "OCODE.md"}
 
 // dirTouchingTools maps a tool name to the JSON arg key holding the file/dir
-// path it operates on. Only tools that take a single path are covered — this
-// is Claude Code's "touched a file in a subdirectory" trigger, not a general
-// path-argument scanner.
+// path it operates on. multi_file_edit (edits[].path) is handled separately
+// in dirTouchPaths; apply_patch is not covered because its paths live inside
+// the patch text.
 var dirTouchingTools = map[string]string{
 	"read": "path", "write": "path", "edit": "path",
 	"multiedit": "file_path", "glob": "path", "list": "path", "grep": "path",
+	"replace_lines": "path", "format": "path", "lsp": "path", "ast": "path",
+}
+
+// dirTouchPaths extracts the file/dir paths a tool call operated on, for the
+// subdirectory-doc trigger. Nil when the tool is not path-touching.
+func dirTouchPaths(toolName string, args json.RawMessage) []string {
+	if toolName == "multi_file_edit" {
+		var params struct {
+			Edits []struct {
+				Path string `json:"path"`
+			} `json:"edits"`
+		}
+		if err := json.Unmarshal(args, &params); err != nil {
+			return nil
+		}
+		var out []string
+		for _, e := range params.Edits {
+			if strings.TrimSpace(e.Path) != "" {
+				out = append(out, e.Path)
+			}
+		}
+		return out
+	}
+	pathKey, ok := dirTouchingTools[toolName]
+	if !ok {
+		return nil
+	}
+	var params map[string]json.RawMessage
+	if err := json.Unmarshal(args, &params); err != nil {
+		return nil
+	}
+	var pathValue string
+	if err := json.Unmarshal(params[pathKey], &pathValue); err != nil || strings.TrimSpace(pathValue) == "" {
+		return nil
+	}
+	return []string{pathValue}
 }
 
 // trackDirMDTouch is called from executeToolCall after a tool that reads or
@@ -27,19 +63,11 @@ var dirTouchingTools = map[string]string{
 // model iteration (see injectDirMDTail). Root-level docs are skipped —
 // LoadContext already injects those into the stable system prompt.
 func (a *Agent) trackDirMDTouch(toolName string, args json.RawMessage) {
-	pathKey, ok := dirTouchingTools[toolName]
-	if !ok {
-		return
-	}
 	if strings.TrimSpace(a.workDir) == "" {
 		return
 	}
-	var params map[string]json.RawMessage
-	if err := json.Unmarshal(args, &params); err != nil {
-		return
-	}
-	var pathValue string
-	if err := json.Unmarshal(params[pathKey], &pathValue); err != nil || strings.TrimSpace(pathValue) == "" {
+	paths := dirTouchPaths(toolName, args)
+	if len(paths) == 0 {
 		return
 	}
 	root := a.effectiveWorkDir()
@@ -47,6 +75,23 @@ func (a *Agent) trackDirMDTouch(toolName string, args json.RawMessage) {
 	if err != nil {
 		return
 	}
+	for _, p := range paths {
+		a.trackDirMDPath(absRoot, p)
+	}
+}
+
+// resetDirMDSeen forgets which subdirectories have had their docs injected.
+// Called when the transcript is compacted: the injected blocks were never
+// persisted, so after the splice the model no longer has them, and the next
+// touch of each directory must re-surface its docs.
+func (a *Agent) resetDirMDSeen() {
+	a.dirMDMu.Lock()
+	defer a.dirMDMu.Unlock()
+	a.dirMDSeen = nil
+	a.dirMDPending = nil
+}
+
+func (a *Agent) trackDirMDPath(absRoot, pathValue string) {
 	target := pathValue
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(absRoot, target)

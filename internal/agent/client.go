@@ -3651,17 +3651,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 		}
 	}
 
-	// Add cache_control to first user message content for prompt caching
-	for i := range anthropicMsgs {
-		if anthropicMsgs[i]["role"] == "user" {
-			if content, ok := anthropicMsgs[i]["content"].([]interface{}); ok && len(content) > 0 {
-				if last, ok := content[len(content)-1].(map[string]interface{}); ok {
-					last["cache_control"] = map[string]interface{}{"type": "ephemeral"}
-				}
-			}
-			break
-		}
-	}
+	applyAnthropicConversationBreakpoints(anthropicMsgs)
 
 	maxTokens := 4096
 	if c.ThinkingBudget > 0 {
@@ -4003,6 +3993,39 @@ func (c *GenericClient) supportsVision() bool {
 // system messages) into the Anthropic messages array. Extracted from
 // chatAnthropic so the tool_result / image-block serialization is unit-testable
 // without an HTTP round trip.
+// anthropicConversationBreakpoints is how many trailing user-role messages
+// carry a cache_control marker. Anthropic allows 4 breakpoints per request;
+// the tools array and the system block take one each, leaving two for the
+// conversation.
+const anthropicConversationBreakpoints = 2
+
+// applyAnthropicConversationBreakpoints marks the last content block of the
+// last anthropicConversationBreakpoints user-role messages (tool results are
+// user-role too) with cache_control. Caching is a prefix match that walks
+// back from each breakpoint, so a marker on the most recently appended turn
+// lets the next request read the entire prior conversation from cache. The
+// marker on the previous user turn keeps a nearby read point when a single
+// turn appends many positions (long sequential tool loops). The old
+// placement on the FIRST user message cached nothing past turn one.
+func applyAnthropicConversationBreakpoints(msgs []map[string]interface{}) {
+	marked := 0
+	for i := len(msgs) - 1; i >= 0 && marked < anthropicConversationBreakpoints; i-- {
+		if msgs[i]["role"] != "user" {
+			continue
+		}
+		content, ok := msgs[i]["content"].([]interface{})
+		if !ok || len(content) == 0 {
+			continue
+		}
+		last, ok := content[len(content)-1].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		last["cache_control"] = map[string]interface{}{"type": "ephemeral"}
+		marked++
+	}
+}
+
 func (c *GenericClient) buildAnthropicMessages(messages []Message) ([]map[string]interface{}, error) {
 	vision := c.supportsVision()
 	var anthropicMsgs []map[string]interface{}

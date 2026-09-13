@@ -5,6 +5,7 @@ package remote
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -26,11 +27,48 @@ type Target struct {
 	// User, Host: KindSSH only. User may be empty (ssh_config/agent decides).
 	User string
 	Host string
+	// Port is an optional SSH port. It is ignored for WSL targets.
+	Port int
 	// Distro: KindWSL only. Empty means the default distro.
 	Distro string
 	// Raw is the original, unparsed target string — used as the stable
 	// identity for caches and recent-project entries keyed by host.
 	Raw string
+}
+
+// Validate checks the fields that are supplied separately by saved project
+// configuration. ParseTarget validates the target string form; this method
+// additionally validates an optional SSH port and rejects it for WSL.
+func (t Target) Validate() error {
+	if t.Kind == KindWSL {
+		if t.Port != 0 {
+			return fmt.Errorf("WSL targets cannot specify an SSH port")
+		}
+		if strings.ContainsAny(t.Distro, " \t\n/") {
+			return fmt.Errorf("invalid WSL distribution")
+		}
+		return nil
+	}
+	if t.Host == "" {
+		return fmt.Errorf("SSH host is required")
+	}
+	if strings.ContainsAny(t.User, "@/ \t\n") || strings.ContainsAny(t.Host, "@/ \t\n") {
+		return fmt.Errorf("invalid SSH user or host")
+	}
+	if t.Port < 0 || t.Port > 65535 {
+		return fmt.Errorf("SSH port must be between 1 and 65535")
+	}
+	return nil
+}
+
+// SSHArgs returns the target portion of an ssh command, including the
+// optional port flag. Callers prepend command-specific flags such as -t.
+func (t Target) SSHArgs() []string {
+	args := make([]string, 0, 3)
+	if t.Port > 0 {
+		args = append(args, "-p", strconv.Itoa(t.Port))
+	}
+	return append(args, t.String())
 }
 
 // String returns the canonical [user@]host form for an SSH target, or

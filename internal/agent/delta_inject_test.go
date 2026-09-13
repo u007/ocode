@@ -153,10 +153,11 @@ func TestDeltaInjection_BlockAtTail(t *testing.T) {
 	if len(out) != len(base)+1 {
 		t.Fatalf("out len = %d, want %d (base + 1 block)", len(out), len(base)+1)
 	}
-	// Last message must be the <oc-log> system message.
+	// Last message must be the <oc-log> user-role message (system-role
+	// would be hoisted into the cached system block).
 	last := out[len(out)-1]
-	if last.Role != "system" {
-		t.Errorf("last message role = %q, want system", last.Role)
+	if last.Role != "user" {
+		t.Errorf("last message role = %q, want user", last.Role)
 	}
 	if !strings.Contains(last.Content, "<oc-log ") {
 		t.Errorf("last message missing <oc-log>:\n%s", last.Content)

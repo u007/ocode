@@ -1,8 +1,11 @@
 package projects
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/u007/ocode/internal/remote"
 )
 
 // NewStoreAt must persist additions across instances (same JSON path).
@@ -291,5 +294,61 @@ func TestReorderRefsScopedByHost(t *testing.T) {
 		byKey["\x00/home/user/local"] != 2 ||
 		byKey["devbox\x00/home/user/app"] != 3 {
 		t.Fatalf("orders = %+v, want wsl=1 local=2 devbox=3", byKey)
+	}
+}
+
+func TestLegacyRemoteProjectMigratesStructuredFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "projects.json")
+	data := `[ {"path":"/srv/app","name":"app","host":"alice@example.com"} ]`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStoreAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := store.List()[0]
+	if got.RemoteKind != "ssh" || got.RemoteUser != "alice" || got.RemoteHost != "example.com" {
+		t.Fatalf("migration = %+v", got)
+	}
+}
+
+func TestUpdateRemotePreservesMetadataAndRejectsCollision(t *testing.T) {
+	store, err := NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRemote("alice@old.example", "/srv/app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetGroupRef(ProjectRef{Host: "alice@old.example", Path: "/srv/app"}, "work"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRemote("bob@example.com", "/srv/other"); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.UpdateRemote(ProjectRef{Host: "alice@old.example", Path: "/srv/app"}, remote.Target{Kind: remote.KindSSH, User: "carol", Host: "new.example", Port: 2222}, "/srv/new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Host != "carol@new.example" || updated.RemotePort != 2222 || updated.Path != "/srv/new" || updated.Group != "work" {
+		t.Fatalf("updated = %+v", updated)
+	}
+	_, err = store.UpdateRemote(ProjectRef{Host: "carol@new.example", Path: "/srv/new"}, remote.Target{Kind: remote.KindSSH, Host: "bob@example.com"}, "/srv/other")
+	if err == nil {
+		t.Fatal("expected collision")
+	}
+}
+
+func TestUpdateRemoteRejectsWSLPort(t *testing.T) {
+	store, err := NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRemote("wsl:Ubuntu", `/home/app`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateRemote(ProjectRef{Host: "wsl:Ubuntu", Path: "/home/app"}, remote.Target{Kind: remote.KindWSL, Distro: "Debian", Port: 22}, `/home/app`); err == nil {
+		t.Fatal("expected WSL port validation error")
 	}
 }

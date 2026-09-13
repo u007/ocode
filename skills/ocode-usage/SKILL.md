@@ -562,7 +562,7 @@ Always allow:  read, glob, grep, list, lsp, lsp_diagnostics, skill, load_skill,
 Default allow: write, edit, multiedit, multi_file_edit, replace_lines,
               apply_patch, format
 
-Default ask:  delete, bash, webfetch, websearch, repo_clone, mcp_*
+Default ask:  delete, bash, webfetch, websearch, repo_clone, mcp_*, computer
 ```
 
 Override per-tool in `ocodeconfig.json`:
@@ -571,6 +571,17 @@ Override per-tool in `ocodeconfig.json`:
 ```
 
 ---
+
+## Computer use
+
+The opt-in `computer` tool lets the agent capture and operate the desktop on
+the machine running ocode. Use `/computer status` to inspect the platform,
+`/computer enable` or `/computer disable` to change the persisted setting;
+changes take effect in new sessions. See [docs/computer-use.md](../../docs/computer-use.md)
+for actions, permissions, platform prerequisites, limitations, and privacy
+details. macOS requires Screen Recording and Accessibility grants; Linux uses
+`xdotool`/`scrot` on X11 or `ydotool`/`grim` on supported wlroots Wayland
+compositors; Windows requires PowerShell on `PATH`.
 
 ## 11. Secret Redaction (`/mask`)
 

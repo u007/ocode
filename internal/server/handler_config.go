@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/network"
@@ -648,6 +650,65 @@ func (h *Handler) HandleGetOcrConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, cfg)
+}
+
+// HandleGetComputerUseConfig returns the persisted computer-use setting and
+// the platform-specific status lines shared with the TUI.
+func (h *Handler) HandleGetComputerUseConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	cfg := config.DefaultComputerUseConfig()
+	if h.cfg != nil {
+		cfg = h.cfg.Ocode.ComputerUse
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":      cfg.Enabled,
+		"status_lines": computer.StatusLines(cfg),
+	})
+}
+
+// HandleSetComputerUseConfig persists the computer-use setting and returns
+// the resulting setting plus the shared platform status lines.
+func (h *Handler) HandleSetComputerUseConfig(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	var payload struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decoder.Decode(&payload); err != nil || payload.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	req := config.ComputerUseConfig{Enabled: *payload.Enabled}
+
+	h.mu.Lock()
+	if h.cfg == nil {
+		h.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, "config not loaded")
+		return
+	}
+	h.mu.Unlock()
+
+	h.computerUseMu.Lock()
+	defer h.computerUseMu.Unlock()
+
+	if err := config.SaveComputerUseConfig(req); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	h.mu.Lock()
+	h.cfg.Ocode.ComputerUse = req
+	h.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":      req.Enabled,
+		"status_lines": computer.StatusLines(req),
+	})
 }
 
 // HandleSetOcrConfig updates the full OCR configuration.

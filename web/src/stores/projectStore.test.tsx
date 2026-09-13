@@ -11,6 +11,8 @@ const projectApi = vi.hoisted(() => ({
   reorderProjects: vi.fn(),
   setProjectGroup: vi.fn(),
   removeRemoteProject: vi.fn(),
+  getTabs: vi.fn(),
+  setTabs: vi.fn(),
 }));
 
 // ProjectProvider fires api calls on mount (listProjects / getCurrentProject).
@@ -26,6 +28,21 @@ vi.mock("../api/client", () => ({
     reorderProjects: projectApi.reorderProjects,
     setProjectGroup: projectApi.setProjectGroup,
     removeRemoteProject: projectApi.removeRemoteProject,
+    getTabs: projectApi.getTabs,
+    setTabs: projectApi.setTabs,
+  },
+}));
+
+// The provider subscribes to the server event bus for cross-window tab sync;
+// capture handlers so tests can fire `tabs_changed` without a real stream.
+const busHandlers = vi.hoisted(() => new Map<string, (env: unknown) => void>());
+vi.mock("../lib/eventBus", () => ({
+  eventBus: {
+    on: (event: string, handler: (env: unknown) => void) => {
+      busHandlers.set(event, handler);
+      return () => busHandlers.delete(event);
+    },
+    onReconnect: () => () => {},
   },
 }));
 
@@ -51,6 +68,10 @@ beforeEach(() => {
   projectApi.reorderProjects.mockReset().mockResolvedValue({ status: "ok" });
   projectApi.setProjectGroup.mockReset().mockResolvedValue({ status: "ok" });
   projectApi.removeRemoteProject.mockReset().mockResolvedValue({ status: "ok" });
+  projectApi.getTabs.mockReset().mockResolvedValue({ projects: {} });
+  projectApi.setTabs.mockReset().mockResolvedValue({ status: "ok" });
+  busHandlers.clear();
+  window.localStorage.clear();
 });
 
 function setup() {
@@ -385,5 +406,84 @@ describe("no auto-ensured New session tab", () => {
     expect(result.current.activeTabId).toBe(
       result.current.state.tabsByProject["/proj-a"][0].id,
     );
+  });
+});
+
+describe("projectStore server-side tab persistence", () => {
+  it("restores open tabs from the server on mount, mapping sub_tab", async () => {
+    projectApi.getTabs.mockResolvedValue({
+      projects: { "/proj-a": { tabs: [{ id: "s1", title: "One", sub_tab: "changes" }, { id: "s2", title: "Two" }], active: "s1" } },
+    });
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    expect(result.current.state.tabsByProject["/proj-a"].map((t) => t.id)).toEqual(["s1", "s2"]);
+    expect(result.current.state.tabsByProject["/proj-a"][0].activeSubTab).toBe("changes");
+    expect(result.current.state.activeTabByProject["/proj-a"]).toBe("s1");
+  });
+
+  it("persists tab changes to the server as a full projects map", async () => {
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    await act(async () => {
+      result.current.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "sess-1", projectPath: "/proj-a", title: "One", activeSubTab: "logs" },
+      });
+    });
+    await waitFor(() => expect(projectApi.setTabs).toHaveBeenCalled());
+    const last = projectApi.setTabs.mock.calls[projectApi.setTabs.mock.calls.length - 1]?.[0];
+    expect(last).toEqual({ "/proj-a": { tabs: [{ id: "sess-1", title: "One", sub_tab: "logs" }], active: "sess-1" } });
+  });
+
+  it("never writes to the server before the restore settled", async () => {
+    let resolveGet: (v: { projects: Record<string, never> }) => void = () => {};
+    projectApi.getTabs.mockReturnValue(new Promise((r) => { resolveGet = r; }));
+    const { result } = setup();
+    await act(async () => {
+      result.current.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "sess-1", projectPath: "/proj-a", title: "One", activeSubTab: "chat" },
+      });
+      await new Promise((r) => setTimeout(r, 500));
+    });
+    expect(projectApi.setTabs).not.toHaveBeenCalled();
+    await act(async () => { resolveGet({ projects: {} }); });
+    // The locally-added tab survives the restore and is then written through.
+    await waitFor(() => expect(projectApi.setTabs).toHaveBeenCalled());
+    expect(result.current.state.tabsByProject["/proj-a"][0].id).toBe("sess-1");
+  });
+
+  it("migrates legacy localStorage tabs once when the server has none", async () => {
+    window.localStorage.setItem(
+      "ocode.ui.tabs.v1",
+      JSON.stringify({ version: 1, projects: { "/proj-a": { tabs: [{ id: "old", title: "Old", subTab: "agents" }], active: "old" } } }),
+    );
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    expect(result.current.state.tabsByProject["/proj-a"][0]).toMatchObject({ id: "old", activeSubTab: "agents" });
+    expect(window.localStorage.getItem("ocode.ui.tabs.v1")).toBeNull();
+    await waitFor(() => expect(projectApi.setTabs).toHaveBeenCalled());
+  });
+
+  it("refetches and merges on a tabs_changed bus event, keeping local new-* tabs", async () => {
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    await act(async () => {
+      result.current.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "new-1", projectPath: "/proj-a", title: "New", activeSubTab: "chat" },
+      });
+    });
+    await waitFor(() => expect(projectApi.setTabs).toHaveBeenCalled());
+    projectApi.getTabs.mockResolvedValue({
+      projects: { "/proj-a": { tabs: [{ id: "remote-1", title: "Opened elsewhere" }], active: "remote-1" } },
+    });
+    await act(async () => {
+      busHandlers.get("tabs_changed")?.({ event: "tabs_changed", seq: 1, data: null });
+    });
+    await waitFor(() =>
+      expect(result.current.state.tabsByProject["/proj-a"].map((t) => t.id)).toEqual(["remote-1", "new-1"]),
+    );
+    expect(result.current.state.activeTabByProject["/proj-a"]).toBe("new-1");
   });
 });

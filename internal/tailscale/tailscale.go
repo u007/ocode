@@ -201,16 +201,19 @@ func Expose(tailscalePath, cmd, target, pathPrefix string, wait func(cmd *exec.C
 	return "", nil, ""
 }
 
-// StartExpose makes port reachable via tailscale funnel (public) then serve
-// (tailnet-only), mounted at the sanitized id path so instances coexist.
-// Returns the public URL including the path prefix, the background process
-// for cleanup, and a one-time setup hint when the tailnet needs enabling.
-func StartExpose(port int, id string) (url string, proc *exec.Cmd, setupHint string) {
+// StartExpose makes the local target (host:port) reachable via tailscale
+// funnel (public) then serve (tailnet-only), mounted at the sanitized id path
+// so instances coexist. The target must be the address the server actually
+// listens on: a server bound to the LAN IP only is unreachable at
+// localhost:<port>, and tailscale would silently proxy to whatever else owns
+// that loopback port. Returns the public URL including the path prefix, the
+// background process for cleanup, and a one-time setup hint when the tailnet
+// needs enabling.
+func StartExpose(target, id string) (url string, proc *exec.Cmd, setupHint string) {
 	tailscalePath, ok := Running()
 	if !ok {
 		return "", nil, ""
 	}
-	target := fmt.Sprintf("localhost:%d", port)
 	pathPrefix := SanitizePath(id)
 	wait := func(cmd *exec.Cmd) error { return cmd.Wait() }
 

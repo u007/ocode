@@ -150,6 +150,7 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 		startedAt:     time.Now(),
 		tsShare:       &tailscaleShare{},
 	}
+	h.computerSup = s.procSup
 	s.tts = tts.NewSupervisor(tts.DefaultConfig(), tts.Options{Root: ttsCacheRoot(), ProcSup: s.procSup})
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
@@ -327,7 +328,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/discovery", s.authMiddleware(s.handleSetDiscoveryConfig))
 	s.mux.HandleFunc("GET /api/tts/engines", s.authMiddleware(s.handleTTSEngines))
 	s.mux.HandleFunc("GET /api/tts/status", s.authMiddleware(s.handleTTSStatus))
-s.mux.HandleFunc("GET /api/tts/state", s.authMiddleware(s.handleTTSInstallStates))
+	s.mux.HandleFunc("GET /api/tts/state", s.authMiddleware(s.handleTTSInstallStates))
 	s.mux.HandleFunc("GET /api/config/ocode/tts", s.authMiddleware(s.handleGetTTSConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/tts", s.authMiddleware(s.handleSetTTSConfig))
 	s.mux.HandleFunc("POST /api/tts/select", s.authMiddleware(s.handleTTSSelect))
@@ -381,6 +382,8 @@ s.mux.HandleFunc("GET /api/tts/state", s.authMiddleware(s.handleTTSInstallStates
 	s.mux.HandleFunc("PUT /api/config/ocr-model", s.authMiddleware(s.handleSetOcrModel))
 	s.mux.HandleFunc("GET /api/config/ocr", s.authMiddleware(s.handleGetOcrConfig))
 	s.mux.HandleFunc("PUT /api/config/ocr", s.authMiddleware(s.handleSetOcrConfig))
+	s.mux.HandleFunc("GET /api/config/computer-use", s.authMiddleware(s.handleGetComputerUseConfig))
+	s.mux.HandleFunc("PUT /api/config/computer-use", s.authMiddleware(s.handleSetComputerUseConfig))
 	s.mux.HandleFunc("GET /api/ocr/models", s.authMiddleware(s.handleGetOcrModels))
 	// Mask (secret redaction) config
 	s.mux.HandleFunc("GET /api/config/mask", s.authMiddleware(s.handleGetMaskConfig))
@@ -449,6 +452,7 @@ s.mux.HandleFunc("GET /api/tts/state", s.authMiddleware(s.handleTTSInstallStates
 	s.mux.HandleFunc("DELETE /api/projects/{path...}", s.authMiddleware(s.handleRemoveProject))
 	s.mux.HandleFunc("GET /api/projects/sessions", s.authMiddleware(s.handleListProjectSessions))
 	s.mux.HandleFunc("POST /api/projects/rename", s.authMiddleware(s.handleRenameProject))
+	s.mux.HandleFunc("PATCH /api/projects/remote", s.authMiddleware(s.handleUpdateRemoteProject))
 	s.mux.HandleFunc("POST /api/projects/reorder", s.authMiddleware(s.handleReorderProjects))
 	s.mux.HandleFunc("POST /api/projects/group", s.authMiddleware(s.handleSetProjectGroup))
 	s.mux.HandleFunc("GET /api/projects/groups", s.authMiddleware(s.handleListGroups))
@@ -2040,6 +2044,12 @@ func (s *Server) handleGetOcrConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSetOcrConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetOcrConfig(w, r)
 }
+func (s *Server) handleGetComputerUseConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetComputerUseConfig(w, r)
+}
+func (s *Server) handleSetComputerUseConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetComputerUseConfig(w, r)
+}
 func (s *Server) handleGetOcrModels(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetOcrModels(w, r)
 }
@@ -2196,6 +2206,9 @@ func (s *Server) handleListProjectSessions(w http.ResponseWriter, r *http.Reques
 }
 func (s *Server) handleRenameProject(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleRenameProject(w, r)
+}
+func (s *Server) handleUpdateRemoteProject(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleUpdateRemoteProject(w, r)
 }
 func (s *Server) handleReorderProjects(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleReorderProjects(w, r)

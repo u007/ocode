@@ -124,3 +124,22 @@ func TestTempPNGPathUnderTempDir(t *testing.T) {
 		t.Fatalf("expected prefix ocode-computer in %q", path)
 	}
 }
+
+func TestRunner_RedactsTypedTextInRecord(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("echo is a cmd builtin on windows")
+	}
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{})
+	r := &execRunner{sup: sup}
+	if _, err := r.run(context.Background(), "echo", "type", "hunter2"); err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range sup.Snapshot() {
+		if strings.Contains(rec.Command, "hunter2") {
+			t.Fatalf("typed text leaked into supervisor record: %q", rec.Command)
+		}
+		if !strings.Contains(rec.Command, "<redacted>") {
+			t.Fatalf("expected redaction marker, got %q", rec.Command)
+		}
+	}
+}

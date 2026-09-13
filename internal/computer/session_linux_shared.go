@@ -19,21 +19,17 @@ func linuxBackend(env func(string) string) string {
 // xdotoolArgs returns the argv for xdotool with the
 // given op and parameters: ["xdotool", op, params...].
 func xdotoolArgs(op string, params ...string) []string {
-	args := []string{"xdotool", op}
-	for _, p := range params {
-		args = append(args, p)
-	}
-	return args
+	args := make([]string, 0, len(params)+2)
+	args = append(args, "xdotool", op)
+	return append(args, params...)
 }
 
 // ydotoolArgs returns the argv for ydotool with the
 // given op and parameters: ["ydotool", op, params...].
 func ydotoolArgs(op string, params ...string) []string {
-	args := []string{"ydotool", op}
-	for _, p := range params {
-		args = append(args, p)
-	}
-	return args
+	args := make([]string, 0, len(params)+2)
+	args = append(args, "ydotool", op)
+	return append(args, params...)
 }
 
 // linuxInstallHint returns the apt install hint for

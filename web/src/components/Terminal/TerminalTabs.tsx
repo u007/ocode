@@ -23,8 +23,8 @@ export interface TerminalTabsHandle {
  * never just from the project becoming active) and stays always-mounted per
  * open project so ptys survive tab/project switches (see App.tsx).
  */
-const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPath: string; host?: string }>(
-  function TerminalTabs({ active, projectPath, host }, ref) {
+const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPath: string; host?: string; remotePort?: number }>(
+  function TerminalTabs({ active, projectPath, host, remotePort }, ref) {
     const { available, loading, error, scrollbackLines, fontFamily, fontSize } = useTerminalConfig();
     const { state: terminalState, activate, openTerminal, closeTerminal } = useTerminalState();
     const { terminals: peekedTerminals, activeId, live } = getProjectTerminals(terminalState, projectPath);
@@ -91,6 +91,7 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
               fontSize={fontSize}
               projectPath={projectPath}
               host={host}
+              remotePort={remotePort}
             />
           </div>
         ))}

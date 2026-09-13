@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/paths"
+	"github.com/u007/ocode/internal/remote"
 )
 
 // Project represents a saved project root.
@@ -30,6 +31,14 @@ type Project struct {
 	// scoped to Host so a remote project never collides with a local one,
 	// or with a same-path project on a different host.
 	Host string `json:"host,omitempty"`
+	// Structured remote fields are persisted alongside Host so older clients
+	// can continue to use the canonical target while newer clients can edit a
+	// username, hostname, port, or WSL distro independently.
+	RemoteKind   string `json:"remote_kind,omitempty"`
+	RemoteUser   string `json:"remote_user,omitempty"`
+	RemoteHost   string `json:"remote_host,omitempty"`
+	RemotePort   int    `json:"remote_port,omitempty"`
+	RemoteDistro string `json:"remote_distro,omitempty"`
 }
 
 // ProjectRef identifies a project entry for scoped mutations (rename,
@@ -104,8 +113,36 @@ func (s *Store) load() error {
 	if err := json.Unmarshal(data, &list); err != nil {
 		return fmt.Errorf("parse %s: %w", s.path, err)
 	}
+	migrated := false
+	for i := range list {
+		if list[i].Host == "" || list[i].RemoteKind != "" {
+			continue
+		}
+		target, parseErr := remote.ParseTarget(list[i].Host)
+		if parseErr != nil {
+			return fmt.Errorf("migrate remote project %q: %w", list[i].Host, parseErr)
+		}
+		setRemoteFields(&list[i], target)
+		migrated = true
+	}
 	s.cache = list
+	if migrated {
+		if err := s.save(); err != nil {
+			return fmt.Errorf("save migrated projects: %w", err)
+		}
+	}
 	return nil
+}
+
+func setRemoteFields(p *Project, target remote.Target) {
+	p.RemoteKind = "ssh"
+	if target.Kind == remote.KindWSL {
+		p.RemoteKind = "wsl"
+	}
+	p.RemoteUser = target.User
+	p.RemoteHost = target.Host
+	p.RemotePort = target.Port
+	p.RemoteDistro = target.Distro
 }
 
 func (s *Store) save() error {
@@ -285,29 +322,83 @@ func (s *Store) RenameRef(ref ProjectRef, name string) error {
 // different hosts stays two distinct entries. path is used verbatim (no
 // filepath.Clean — a remote path's separator conventions are the remote's,
 // not this machine's, and "~" is meaningful only to the remote shell).
-func (s *Store) AddRemote(host, path string) error {
-	if host == "" {
-		return fmt.Errorf("projects: AddRemote requires a non-empty host")
+func (s *Store) AddRemote(host, path string, ports ...int) error {
+	target, err := remote.ParseTarget(host)
+	if err != nil {
+		return fmt.Errorf("projects: add remote: %w", err)
 	}
+	if len(ports) > 0 {
+		target.Port = ports[0]
+	}
+	if err := target.Validate(); err != nil {
+		return fmt.Errorf("projects: add remote: %w", err)
+	}
+	canonicalHost := target.String()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now()
 	for i := range s.cache {
-		if s.cache[i].Host == host && s.cache[i].Path == path {
+		if s.cache[i].Host == canonicalHost && s.cache[i].Path == path {
 			s.cache[i].LastUsedAt = now
+			setRemoteFields(&s.cache[i], target)
 			return s.save()
 		}
 	}
 
-	s.cache = append(s.cache, Project{
+	project := Project{
 		Path:       path,
-		Name:       host + ":" + path,
-		Host:       host,
+		Name:       canonicalHost + ":" + path,
+		Host:       target.String(),
 		AddedAt:    now,
 		LastUsedAt: now,
-	})
+	}
+	setRemoteFields(&project, target)
+	s.cache = append(s.cache, project)
 	return s.save()
+}
+
+// UpdateRemote atomically changes a saved remote project's connection and/or
+// remote path. Identity is located by the old (host, path) pair; collisions
+// with another saved project are rejected without changing either entry.
+func (s *Store) UpdateRemote(oldRef ProjectRef, target remote.Target, path string) (Project, error) {
+	if oldRef.Host == "" || oldRef.Path == "" {
+		return Project{}, fmt.Errorf("projects: old remote reference is required")
+	}
+	if path == "" {
+		return Project{}, fmt.Errorf("projects: remote path is required")
+	}
+	if err := target.Validate(); err != nil {
+		return Project{}, fmt.Errorf("projects: invalid remote target: %w", err)
+	}
+	newHost := target.String()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := -1
+	for i := range s.cache {
+		if s.cache[i].Host == oldRef.Host && s.cache[i].Path == oldRef.Path {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Project{}, fmt.Errorf("remote project %s:%s not found", oldRef.Host, oldRef.Path)
+	}
+	for i := range s.cache {
+		if i != idx && s.cache[i].Host == newHost && s.cache[i].Path == path {
+			return Project{}, fmt.Errorf("remote project %s:%s already exists", newHost, path)
+		}
+	}
+	updated := s.cache[idx]
+	updated.Host = newHost
+	updated.Path = path
+	setRemoteFields(&updated, target)
+	s.cache[idx] = updated
+	if err := s.save(); err != nil {
+		return Project{}, err
+	}
+	return updated, nil
 }
 
 // TouchRemote updates LastUsedAt for a remote (host, path) entry. Unlike

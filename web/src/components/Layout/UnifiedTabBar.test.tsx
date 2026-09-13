@@ -471,4 +471,43 @@ describe("terminal alert badge auto-clear timer", () => {
     // Pill renders correctly with long title (truncated, not overflowing)
     expect(pill).toBeInTheDocument();
   });
+
+  it("keeps a fixed pill width with or without the active tool-call badge", () => {
+    function BarWithLiveTool() {
+      const dispatch = useChatDispatch();
+      useEffect(() => {
+        dispatch({ type: "SET_TURN_STATE", sessionId: "s1", turnActive: true });
+        dispatch({ type: "LIVE_TOOL_START", sessionId: "s1", tool: "read", command: JSON.stringify({ command: "ls" }) });
+      }, [dispatch]);
+      return <UnifiedTabBar focusedKind="chat" onFocusKindChange={() => {}} />;
+    }
+
+    // Idle: no tool running → no badge, but the pill already has its fixed width.
+    const idle = renderBar();
+    const idlePill = screen.getByRole("tab", { name: /chat one/i });
+    expect(idlePill.className).toMatch(/w-52/);
+    expect(idlePill.className).toMatch(/overflow-hidden/);
+    expect(idlePill.querySelector('[data-testid="tab-process"]')).toBeNull();
+    idle.unmount();
+
+    // Active tool call: badge mounts, pill width classes must be identical.
+    render(
+      <ChatProvider>
+        <TerminalProvider>
+          <BrowserTabsProvider>
+            <BarWithLiveTool />
+          </BrowserTabsProvider>
+        </TerminalProvider>
+      </ChatProvider>,
+    );
+    const activePill = screen.getByRole("tab", { name: /chat one/i });
+    expect(activePill.className).toMatch(/w-52/);
+    expect(activePill.className).toMatch(/overflow-hidden/);
+    // Badge is capped and the title flexes to absorb it instead of growing the pill.
+    const badge = within(activePill).getByTestId("tab-process");
+    expect(badge.className).toMatch(/max-w-24/);
+    const titleSpan = within(activePill).getByText("Chat One");
+    expect(titleSpan.className).toMatch(/flex-1/);
+    expect(titleSpan.className).toMatch(/min-w-0/);
+  });
 });

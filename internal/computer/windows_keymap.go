@@ -4,11 +4,11 @@ package computer
 // virtual-key codes.
 var windowsVirtualKeyMap = map[string]int{
 	// modifiers
-	"ctrl":   0x11,
-	"alt":    0x12,
-	"shift":  0x10,
-	"super":  0x5B,
-	"cmd":    0x5B,
+	"ctrl":  0x11,
+	"alt":   0x12,
+	"shift": 0x10,
+	"super": 0x5B,
+	"cmd":   0x5B,
 	// return / enter
 	"Return": 0x0D,
 	"Enter":  0x0D,
@@ -22,14 +22,24 @@ var windowsVirtualKeyMap = map[string]int{
 	"End":       0x23,
 	"Page_Up":   0x21,
 	"Page_Down": 0x22,
-	"Up":    0x25,
-	"Down":  0x26,
-	"Left":  0x27,
-	"Right": 0x28,
+	"Left":      0x25,
+	"Up":        0x26,
+	"Right":     0x27,
+	"Down":      0x28,
 	// function keys
 	"F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73,
 	"F5": 0x74, "F6": 0x75, "F7": 0x76, "F8": 0x77,
 	"F9": 0x78, "F10": 0x79, "F11": 0x7A, "F12": 0x7B,
+}
+
+// windowsModifiers is the set of key names that are held down around the
+// main key of a combo.
+var windowsModifiers = map[string]bool{
+	"ctrl":  true,
+	"alt":   true,
+	"shift": true,
+	"super": true,
+	"cmd":   true,
 }
 
 // windowsVirtualKey looks up a key name in windowsVirtualKeyMap.
@@ -37,7 +47,8 @@ var windowsVirtualKeyMap = map[string]int{
 func windowsVirtualKey(name string) (vk int, isModifier bool, ok bool) {
 	vk, ok = windowsVirtualKeyMap[name]
 	if !ok {
-		// Fallback: single letter (a-z, A-Z) or digit (0-9) → ASCII uppercase
+		// Letters and digits are not in the table: their virtual-key code
+		// is the ASCII uppercase value.
 		if len(name) == 1 {
 			c := name[0]
 			if c >= 'a' && c <= 'z' {
@@ -52,6 +63,5 @@ func windowsVirtualKey(name string) (vk int, isModifier bool, ok bool) {
 		}
 		return 0, false, false
 	}
-	isModifier = name == "ctrl" || name == "alt" || name == "shift" || name == "super" || name == "cmd"
-	return vk, isModifier, true
+	return vk, windowsModifiers[name], true
 }

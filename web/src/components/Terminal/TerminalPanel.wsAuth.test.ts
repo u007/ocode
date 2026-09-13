@@ -91,3 +91,15 @@ describe("buildTerminalWsConnection", () => {
     expect(url).toContain("history_offset=12345");
   });
 });
+
+  it("includes an edited SSH port for remote terminal connections", () => {
+    const { url } = buildTerminalWsConnection({
+      token: "",
+      projectPath: "/srv/app",
+      host: "bob@new.example",
+      remotePort: 2222,
+      terminalId: "t1",
+      isRemote: false,
+    });
+    expect(url).toContain("port=2222");
+  });

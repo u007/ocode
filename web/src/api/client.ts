@@ -19,6 +19,7 @@ import type {
   FileStatus,
   Project,
   ProjectGroup,
+  ServerProjectTabs,
   BrowseResponse,
   PermissionsResponse,
   PermissionModeConfigResponse,
@@ -105,11 +106,16 @@ export interface ImageGenConfig {
 // proxy routes them to whichever session owns the root path. The /rc command
 // embeds the same prefix in the opened URL, so derive BASE from the current
 // location: everything before the trailing "/session/<id>" is the prefix.
-// The same value is passed to <BrowserRouter basename=...> in main.tsx so client
+// Any other path is a mount root (the desktop share lands on /desktop/, the
+// only other SPA route is "*" = home), so the whole path minus its trailing
+// slash is the prefix; plain "/" yields "". web/index.html applies the same
+// rule to inject <base href> before the relative asset tags are parsed, and
+// the value is passed to <BrowserRouter basename=...> in main.tsx so client
 // navigation stays in sync.
 export const _basePath = (() => {
-  const m = window.location.pathname.match(/^(.*?)\/session\/[^/]+$/);
-  return m && m[1] ? m[1] : "";
+  const path = window.location.pathname;
+  const m = path.match(/^(.*?)\/session\/[^/]+$/);
+  return m ? m[1] : path.replace(/\/+$/, "");
 })();
 const BASE = _basePath;
 
@@ -1029,6 +1035,15 @@ export const api = {
   getOcrModels: () =>
     fetchJSON<import("../api/types").OcrModelsResponse>("/api/ocr/models"),
 
+  // ── Computer use ──
+  getComputerUseConfig: () =>
+    fetchJSON<import("../api/types").ComputerUseConfig>("/api/config/computer-use"),
+  setComputerUseConfig: (enabled: boolean) =>
+    fetchJSON<import("../api/types").ComputerUseConfig>("/api/config/computer-use", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+
   // ── OCR (legacy API, deprecated) ──
   getOcrEnabled: () =>
     fetchJSON<{ enabled: boolean; model: string }>("/api/config/ocr-enabled"),
@@ -1111,10 +1126,24 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
   /** Add a remote (SSH/WSL) project. Host is `[user@]host` or `wsl:<distro>`. */
-  addRemoteProject: (host: string, path: string) =>
+  addRemoteProject: (host: string, path: string, port?: number) =>
     fetchJSON<{ status: string }>("/api/projects", {
       method: "POST",
-      body: JSON.stringify({ host, path }),
+      body: JSON.stringify({ host, path, ...(port ? { port } : {}) }),
+    }),
+  updateRemoteProject: (input: {
+    old_host: string;
+    old_path: string;
+    path: string;
+    kind: "ssh" | "wsl";
+    user?: string;
+    host?: string;
+    port?: number;
+    distro?: string;
+  }) =>
+    fetchJSON<Project>("/api/projects/remote", {
+      method: "PATCH",
+      body: JSON.stringify(input),
     }),
   removeProject: (path: string) =>
     fetchJSON<{ status: string }>("/api/projects/" + encodeURIComponent(path), {
@@ -1126,8 +1155,8 @@ export const api = {
       `/api/projects/${encodeURIComponent(path)}?host=${encodeURIComponent(host)}`,
       { method: "DELETE" },
     ),
-  listProjectSessions: (path: string) =>
-    fetchJSON<SessionInfo[]>("/api/projects/sessions?path=" + encodeURIComponent(path)),
+  listProjectSessions: (path: string, host?: string) =>
+    fetchJSON<SessionInfo[]>("/api/projects/sessions?path=" + encodeURIComponent(path) + (host ? "&host=" + encodeURIComponent(host) : "")),
   renameProject: (path: string, name: string, host?: string) =>
     fetchJSON<{ status: string }>("/api/projects/rename", {
       method: "POST",
@@ -1147,6 +1176,12 @@ export const api = {
       body: JSON.stringify(host ? { path, host, group } : { path, group }),
     }),
   listGroups: () => fetchJSON<ProjectGroup[]>("/api/projects/groups"),
+  /** Every project's open-session tabs, server-side so every window/origin
+   *  sees the same tab bar. */
+  getTabs: () => fetchJSON<{ projects: Record<string, ServerProjectTabs> }>("/api/tabs"),
+  /** Full replacement of every project's open-session tabs. */
+  setTabs: (projects: Record<string, ServerProjectTabs>) =>
+    fetchJSON<{ status: string }>("/api/tabs", { method: "PUT", body: JSON.stringify({ projects }) }),
   createGroup: (name: string) =>
     fetchJSON<{ status: string }>("/api/projects/groups", {
       method: "POST",

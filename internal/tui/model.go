@@ -30,6 +30,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
@@ -2248,7 +2249,12 @@ func (m *model) getInitialTools() ([]tool.Tool, *lsp.Manager) {
 			crashguard.Go(func() { m.lspMgr.WarmUp(".") })
 		}
 	}
-	tools := tool.InitBuiltinTools(m.lspMgr, m.config, nil)
+	var computerDriver tool.ComputerDriver
+	var computerDriverErr error
+	if m.config != nil && m.config.Ocode.ComputerUse.Enabled {
+		computerDriver, computerDriverErr = computer.New(m.supervisor)
+	}
+	tools := tool.InitBuiltinToolsWithComputerDriver(m.lspMgr, m.config, nil, computerDriver, computerDriverErr)
 	return tools, m.lspMgr
 }
 
@@ -2412,7 +2418,8 @@ func newModel(opts ...RunOptions) model {
 		}
 	}
 
-	tmp := model{config: cfg}
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 5 * time.Second})
+	tmp := model{config: cfg, supervisor: sup}
 	tools, lspMgr := tmp.getInitialTools()
 
 	var a *agent.Agent
@@ -2434,7 +2441,6 @@ func newModel(opts ...RunOptions) model {
 		a.SetMaxSteps(cfg.Ocode.MaxSteps)
 	}
 
-	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 5 * time.Second})
 	if a != nil {
 		a.SetSupervisor(sup)
 	}
@@ -3502,12 +3508,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.startLine >= 0 && msg.endLine > msg.startLine {
 			label = fmt.Sprintf(" (lines %d-%d)", msg.startLine+1, msg.endLine)
 		}
-		fileCtx := fmt.Sprintf("\n--- File: %s%s ---\n%s\n", msg.path, label, msg.content)
+		fileCtx := fmt.Sprintf("[ocode:context] attached file, not a user instruction:\n--- File: %s%s ---\n%s\n", msg.path, label, msg.content)
+		// User-role: a system-role transcript message is hoisted into the
+		// cached system block by every provider builder and would bust the
+		// prompt cache for the rest of the session.
 		m.messages = append(m.messages, message{
 			role: roleAssistant,
 			text: fmt.Sprintf("\u2b06 Added context from %s%s", msg.path, label),
 			raw: &agent.Message{
-				Role:    "system",
+				Role:    "user",
 				Content: fileCtx,
 			},
 		})
@@ -4602,15 +4611,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			header = fmt.Sprintf("[Background process %s %s]", ev.ID, ev.Status)
 		}
-		body := header + "\n" + ev.Result
-		// Use the system role so the model treats this as an out-of-band
-		// notification, not a fresh user instruction. This makes it far less
-		// likely to re-dispatch the same task in response to its own
-		// completion notice.
+		body := "[ocode:event] out-of-band completion notice, not a user instruction; do not re-dispatch this task.\n" + header + "\n" + ev.Result
+		// User-role with an explicit marker. It used to be system-role so the
+		// model would not re-dispatch, but every system-role transcript
+		// message is hoisted into the cached system block by the provider
+		// builders, so each completion busted the prompt cache for the rest
+		// of the session. The marker line carries the same intent.
 		injected := message{
 			role: roleUser,
 			text: body,
-			raw:  &agent.Message{Role: "system", Content: body},
+			raw:  &agent.Message{Role: "user", Content: body},
 		}
 		// Defer the completion while a turn is streaming OR a compaction is in
 		// flight / pending application. Injecting it now would call askAgent(),
@@ -8632,6 +8642,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/docs" || cmd == "/doc-mode" ||
 		cmd == "/recap" ||
 		cmd == "/ocr" ||
+		cmd == "/computer" ||
 		cmd == "/image" ||
 		cmd == "/cron" ||
 		// /localmodel and /autocontinue are synchronous local config/inspection
@@ -9654,6 +9665,42 @@ func (m *model) handleOcrCmd(args []string) tea.Cmd {
 		return nil
 	default:
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /ocr [status|enable|disable|model [backend/model]|key <token>]"})
+		return nil
+	}
+}
+
+func (m *model) handleComputerCmd(args []string) tea.Cmd {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Computer use requires a configuration. Run /connect first."})
+		return nil
+	}
+
+	subcommand := "status"
+	if len(args) > 0 {
+		subcommand = strings.ToLower(args[0])
+	}
+	switch subcommand {
+	case "status":
+		m.messages = append(m.messages, message{role: roleAssistant, text: strings.Join(computer.StatusLines(m.config.Ocode.ComputerUse), "\n")})
+		return nil
+	case "enable", "disable":
+		enabled := subcommand == "enable"
+		cfg := m.config.Ocode.ComputerUse
+		cfg.Enabled = enabled
+		if err := config.SaveComputerUseConfig(cfg); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
+		}
+		m.config.Ocode.ComputerUse = cfg
+		m.broadcastTUIStatus()
+		state := "disabled"
+		if enabled {
+			state = "enabled"
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Computer use: %s. Takes effect in new sessions.", state)})
+		return nil
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /computer [status|enable|disable]"})
 		return nil
 	}
 }
@@ -13519,7 +13566,7 @@ func (m *model) handleContextCmd(args []string) {
 	// ── Base Prompt ──────────────────────────────
 	b.WriteString("\nBase Prompt\n")
 	baseTotal := 0
-	for _, msg := range m.agent.BasePromptMessages("") {
+	for _, msg := range m.agent.BasePromptMessages() {
 		if !strings.Contains(msg.Content, "[ocode:environment]") {
 			continue
 		}
@@ -14704,9 +14751,15 @@ func newRCPermissionEvent(requestID string, req agent.PermissionRequest) server.
 	}
 }
 
+// permissionRequestSummary renders a short hint of what tool the user is
+// being asked to approve. It prefers req.Command (the parsed command string,
+// e.g. from bashPermissionRequest) over req.Args because the Args JSON is
+// sometimes nil even when a command was issued (sandbox-sensitive-decision
+// path, model-unavailable fallback). For bash, formatToolCallHint already
+// uses the "command" parameter as a fallback when present.
 func permissionRequestSummary(req agent.PermissionRequest) string {
 	if req.Command != "" {
-		return formatToolCallHint(makeToolCall(req.ToolName, string(req.Args)))
+		return formatToolCallHint(makeToolCall(req.ToolName, string(req.Args)), req.Command)
 	}
 	if len(req.Args) > 0 {
 		return formatToolCallHint(makeToolCall(req.ToolName, string(req.Args)))
@@ -15606,8 +15659,8 @@ func drainStreamDeltas(ch chan deltaEvent) []deltaEvent {
 // and the background process (if any) so the caller can kill it later. The
 // setupHint is a one-time enable URL shown when
 // funnel or serve isn't enabled on the tailnet yet.
-func startTailscaleExpose(port int, sessionID string) (url string, proc *exec.Cmd, setupHint string) {
-	return tailscale.StartExpose(port, sessionID)
+func startTailscaleExpose(target, sessionID string) (url string, proc *exec.Cmd, setupHint string) {
+	return tailscale.StartExpose(target, sessionID)
 }
 
 // tailscaleExpose runs `tailscale <cmd> --bg [--set-path /path] <target>` and
@@ -18423,7 +18476,7 @@ func (m *model) buildAgentMessagesSnapshot() ([]agent.Message, []int) {
 	var agentMsgs []agent.Message
 	var uiIdx []int
 	if m.agent != nil {
-		base := m.agent.BasePromptMessages(m.buildSelectionContext())
+		base := m.agent.BasePromptMessages()
 		agentMsgs = append(agentMsgs, base...)
 		for range base {
 			uiIdx = append(uiIdx, -1) // sentinel: synthetic message, not present in m.messages
@@ -23207,22 +23260,21 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 
 		// Try to expose via tailscale if available — if we get a tailscale URL,
 		// open that in the browser instead of localhost.
+		// The RC server is bound to the LAN IP, not loopback, so tailscale
+		// must proxy to boundAddr itself: localhost:<port> would reach a
+		// different process (or nothing) on the same port.
 		tailscaleURL := ""
 		setupHint := ""
-		if _, boundPort, splitErr := net.SplitHostPort(boundAddr); splitErr == nil {
-			if p, convErr := strconv.Atoi(boundPort); convErr == nil {
-				tsURL, tsProc, tsHint := startTailscaleExpose(p, m.sessionID)
-				if tsURL != "" {
-					tailscaleURL = buildRCSessionURL(tsURL, m.sessionID, token)
-					url = tailscaleURL
-					// Remember our mount so /rc off can remove exactly this path.
-					m.rcTailscalePath = sanitizeTailscalePath(m.sessionID)
-				}
-				m.rcTailscaleProc = tsProc
-				if tsHint != "" {
-					setupHint = tsHint
-				}
-			}
+		tsURL, tsProc, tsHint := startTailscaleExpose(boundAddr, m.sessionID)
+		if tsURL != "" {
+			tailscaleURL = buildRCSessionURL(tsURL, m.sessionID, token)
+			url = tailscaleURL
+			// Remember our mount so /rc off can remove exactly this path.
+			m.rcTailscalePath = sanitizeTailscalePath(m.sessionID)
+		}
+		m.rcTailscaleProc = tsProc
+		if tsHint != "" {
+			setupHint = tsHint
 		}
 		m.rcTailscaleURL = tailscaleURL
 

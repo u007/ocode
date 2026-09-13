@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/u007/ocode/internal/projects"
+	"github.com/u007/ocode/internal/remote"
 	"github.com/u007/ocode/internal/session"
 )
 
@@ -38,6 +40,7 @@ func (h *Handler) HandleAddProject(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Path string `json:"path"`
 		Host string `json:"host"`
+		Port int    `json:"port"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
@@ -50,12 +53,16 @@ func (h *Handler) HandleAddProject(w http.ResponseWriter, r *http.Request) {
 
 	var err error
 	if body.Host != "" {
-		err = h.projects.AddRemote(body.Host, body.Path)
+		err = h.projects.AddRemote(body.Host, body.Path, body.Port)
 	} else {
 		err = h.projects.Add(body.Path)
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("add project: %v", err))
+		status := http.StatusInternalServerError
+		if body.Host != "" {
+			status = http.StatusBadRequest
+		}
+		writeError(w, status, fmt.Sprintf("add project: %v", err))
 		return
 	}
 
@@ -97,6 +104,7 @@ func (h *Handler) HandleRemoveProject(w http.ResponseWriter, r *http.Request) {
 // The project root is passed as a query parameter `path` (URL-encoded).
 func (h *Handler) HandleListProjectSessions(w http.ResponseWriter, r *http.Request) {
 	projectPath := r.URL.Query().Get("path")
+	projectHost := r.URL.Query().Get("host")
 	if projectPath == "" {
 		writeError(w, http.StatusBadRequest, "path query parameter is required")
 		return
@@ -106,7 +114,7 @@ func (h *Handler) HandleListProjectSessions(w http.ResponseWriter, r *http.Reque
 	if h.projects != nil {
 		found := false
 		for _, p := range h.projects.List() {
-			if p.Path == projectPath {
+			if p.Path == projectPath && p.Host == projectHost {
 				found = true
 				break
 			}
@@ -115,6 +123,13 @@ func (h *Handler) HandleListProjectSessions(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusNotFound, "project not found in saved list")
 			return
 		}
+	}
+	// Remote sessions live on the remote ocode instance, not in this server's
+	// local session directory. Never return local sessions for a same-named
+	// remote path.
+	if projectHost != "" {
+		writeJSON(w, http.StatusOK, []SessionInfo{})
+		return
 	}
 
 	refs, err := session.ListRefsForDir(projectPath)
@@ -307,6 +322,70 @@ func (h *Handler) HandleRenameProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// HandleUpdateRemoteProject updates a saved SSH/WSL project. The old host/path
+// identifies the entry; the new structured target and path become its new
+// identity. Existing terminal sessions for the old identity are invalidated
+// immediately after the update commits, so they cannot reconnect to stale
+// details and a failed update leaves them untouched.
+func (h *Handler) HandleUpdateRemoteProject(w http.ResponseWriter, r *http.Request) {
+	if h.projects == nil {
+		writeError(w, http.StatusInternalServerError, "project store not available")
+		return
+	}
+	var body struct {
+		OldHost string `json:"old_host"`
+		OldPath string `json:"old_path"`
+		Path    string `json:"path"`
+		Kind    string `json:"kind"`
+		User    string `json:"user"`
+		Host    string `json:"host"`
+		Port    int    `json:"port"`
+		Distro  string `json:"distro"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if body.OldHost == "" || body.OldPath == "" || body.Path == "" {
+		writeError(w, http.StatusBadRequest, "old_host, old_path, and path are required")
+		return
+	}
+	var target remote.Target
+	switch body.Kind {
+	case "ssh":
+		target = remote.Target{Kind: remote.KindSSH, User: body.User, Host: body.Host, Port: body.Port}
+	case "wsl":
+		target = remote.Target{Kind: remote.KindWSL, Distro: body.Distro, Port: body.Port}
+	default:
+		writeError(w, http.StatusBadRequest, "kind must be ssh or wsl")
+		return
+	}
+	if err := target.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.remoteProjectMu.Lock()
+	defer h.remoteProjectMu.Unlock()
+	updated, err := h.projects.UpdateRemote(projects.ProjectRef{Host: body.OldHost, Path: body.OldPath}, target, body.Path)
+	if err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			writeError(w, http.StatusConflict, err.Error())
+		} else if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	if h.terminalSessions != nil {
+		oldProject := body.OldHost + ":" + body.OldPath
+		for _, session := range h.terminalSessions.invalidateProject(oldProject) {
+			session.kill()
+		}
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
 // HandleReorderProjects sets the manual sort order for all projects.
 // Accepts either the legacy `{paths: [...]}` (local entries, cleaned) or
 // the scoped `{projects: [{path, host?}, ...]}` form, which orders remote
@@ -442,7 +521,6 @@ func (h *Handler) HandleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
 	if err := h.projectGroups.DeleteGroup(name); err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("delete group: %v", err))
 		return

@@ -1,6 +1,10 @@
 package lsp
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+)
 
 func TestDiagnosticStoreClearsOnEmptyPublishDiagnostics(t *testing.T) {
 	store := newDiagnosticStore()
@@ -71,5 +75,43 @@ func TestDiagnosticStoreIgnoresStaleGenerationWrites(t *testing.T) {
 	all := store.All()
 	if len(all) != 1 || all[0].Message != "first" {
 		t.Fatalf("store mutated by stale write: %+v", all)
+	}
+}
+
+func TestDiagnosticStoreWaitURIReturnsFreshPublishOnly(t *testing.T) {
+	store := newDiagnosticStore()
+	uri := "file:///tmp/wait.go"
+	store.SetURI(uri, []Diagnostic{{URI: uri, Path: "/tmp/wait.go", Message: "old"}})
+	since := time.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	if got, fresh := store.WaitURI(ctx, uri, since); fresh || got != nil {
+		t.Fatalf("WaitURI returned stale publish: fresh=%v got=%#v", fresh, got)
+	}
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		store.SetURI(uri, []Diagnostic{{URI: uri, Path: "/tmp/wait.go", Message: "new"}})
+	}()
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	got, fresh := store.WaitURI(ctx2, uri, since)
+	if !fresh || len(got) != 1 || got[0].Message != "new" {
+		t.Fatalf("WaitURI after publish: fresh=%v got=%#v", fresh, got)
+	}
+
+	// A clean publish (empty list) is still "fresh": the caller must learn
+	// the file no longer has diagnostics.
+	since2 := time.Now()
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		store.SetURI(uri, nil)
+	}()
+	ctx3, cancel3 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel3()
+	got, fresh = store.WaitURI(ctx3, uri, since2)
+	if !fresh || len(got) != 0 {
+		t.Fatalf("WaitURI after clean publish: fresh=%v got=%#v", fresh, got)
 	}
 }

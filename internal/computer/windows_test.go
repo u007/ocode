@@ -1,126 +1,190 @@
 package computer
 
 import (
+	"encoding/base64"
 	"errors"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/tool"
 )
 
-func TestWindowsArgs_Type(t *testing.T) {
-	args := windowsArgs("C:\\tmp\\script.ps1", "type", "hello")
+const winScript = "C:\\tmp\\script.ps1"
+
+func TestWindowsArgs_Order(t *testing.T) {
+	args := windowsArgs(winScript, "move", "10", "20")
+	want := []string{
+		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+		"-File", winScript, "move", "10", "20",
+	}
+	if len(args) != len(want) {
+		t.Fatalf("expected %d args got %d: %v", len(want), len(args), args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d] = %q want %q", i, args[i], want[i])
+		}
+	}
+}
+
+func TestWindowsTypeArgs_Base64(t *testing.T) {
+	const text = "héllo \"wörld\" & 😀"
+	args := windowsTypeArgs(winScript, text)
 	if len(args) != 8 {
-		t.Fatalf("expected 8 args got %d", len(args))
-	}
-	if args[0] != "-NoProfile" {
-		t.Fatalf("args[0] = %q", args[0])
-	}
-	if args[1] != "-NonInteractive" {
-		t.Fatalf("args[1] = %q", args[1])
-	}
-	if args[2] != "-ExecutionPolicy" {
-		t.Fatalf("args[2] = %q", args[2])
-	}
-	if args[3] != "Bypass" {
-		t.Fatalf("args[3] = %q", args[3])
-	}
-	if args[4] != "-File" {
-		t.Fatalf("args[4] = %q", args[4])
-	}
-	if args[5] != "C:\\tmp\\script.ps1" {
-		t.Fatalf("args[5] = %q", args[5])
+		t.Fatalf("expected 8 args got %d: %v", len(args), args)
 	}
 	if args[6] != "type" {
-		t.Fatalf("args[6] = %q", args[6])
+		t.Fatalf("args[6] = %q want %q", args[6], "type")
+	}
+	want := base64.StdEncoding.EncodeToString([]byte(text))
+	if args[7] != want {
+		t.Fatalf("args[7] = %q want %q", args[7], want)
+	}
+	if strings.Contains(strings.Join(args, " "), text) {
+		t.Fatalf("raw text must not appear in argv: %v", args)
+	}
+}
+
+func TestWindowsKeyArgs_CtrlS(t *testing.T) {
+	args, err := windowsKeyArgs(winScript, "ctrl+s")
+	if err != nil {
+		t.Fatalf("windowsKeyArgs error: %v", err)
+	}
+	got := strings.Join(args[6:], " ")
+	if got != "key 17 83" {
+		t.Fatalf("key argv = %q want %q", got, "key 17 83")
+	}
+}
+
+func TestWindowsKeyArgs_ModifiersFirst(t *testing.T) {
+	args, err := windowsKeyArgs(winScript, "s+ctrl+shift")
+	if err != nil {
+		t.Fatalf("windowsKeyArgs error: %v", err)
+	}
+	got := strings.Join(args[6:], " ")
+	if got != "key 17 16 83" {
+		t.Fatalf("key argv = %q want %q", got, "key 17 16 83")
+	}
+}
+
+func TestWindowsKeyArgs_RejectsTwoMainKeys(t *testing.T) {
+	if _, err := windowsKeyArgs(winScript, "a+b"); err == nil {
+		t.Fatal("expected error for two non-modifier keys")
+	}
+}
+
+func TestWindowsKeyArgs_RejectsModifiersOnly(t *testing.T) {
+	if _, err := windowsKeyArgs(winScript, "ctrl+shift"); err == nil {
+		t.Fatal("expected error for a combo with no main key")
+	}
+}
+
+func TestWindowsKeyArgs_RejectsUnknownKey(t *testing.T) {
+	if _, err := windowsKeyArgs(winScript, "ctrl+Bogus"); err == nil {
+		t.Fatal("expected error for unknown key")
 	}
 }
 
 func TestWindowsVirtualKey_KnownAndUnknown(t *testing.T) {
-	vk, _, ok := windowsVirtualKey("ctrl")
-	if vk != 0x11 || !ok {
-		t.Fatalf("ctrl: expected (0x11, _, true) got (%d, _, %v)", vk, ok)
+	cases := map[string]int{
+		"ctrl":      0x11,
+		"alt":       0x12,
+		"shift":     0x10,
+		"super":     0x5B,
+		"cmd":       0x5B,
+		"Return":    0x0D,
+		"Tab":       0x09,
+		"Escape":    0x1B,
+		"space":     0x20,
+		"BackSpace": 0x08,
+		"Delete":    0x2E,
+		"Left":      0x25,
+		"Up":        0x26,
+		"Right":     0x27,
+		"Down":      0x28,
+		"Home":      0x24,
+		"End":       0x23,
+		"Page_Up":   0x21,
+		"Page_Down": 0x22,
+		"F1":        0x70,
+		"F12":       0x7B,
+		"a":         0x41,
+		"z":         0x5A,
+		"0":         0x30,
+		"9":         0x39,
 	}
-	vk, _, ok = windowsVirtualKey("Return")
-	if vk != 0x0D || !ok {
-		t.Fatalf("Return: expected (0x0D, _, true) got (%d, _, %v)", vk, ok)
+	for name, want := range cases {
+		vk, _, ok := windowsVirtualKey(name)
+		if !ok {
+			t.Fatalf("%s: expected ok", name)
+		}
+		if vk != want {
+			t.Fatalf("%s: vk = 0x%02X want 0x%02X", name, vk, want)
+		}
 	}
-	vk, _, ok = windowsVirtualKey("F1")
-	if vk != 0x70 || !ok {
-		t.Fatalf("F1: expected (0x70, _, true) got (%d, _, %v)", vk, ok)
-	}
-	vk, _, ok = windowsVirtualKey("a")
-	if vk != 0x41 || !ok {
-		t.Fatalf("a: expected (0x41, _, true) got (%d, _, %v)", vk, ok)
-	}
-	vk, _, ok = windowsVirtualKey("0")
-	if vk != 0x30 || !ok {
-		t.Fatalf("0: expected (0x30, _, true) got (%d, _, %v)", vk, ok)
-	}
-	_, _, ok = windowsVirtualKey("Bogus")
-	if ok {
-		t.Fatalf("Bogus: expected (_, _, false) got (_, _, %v)", ok)
+	if _, _, ok := windowsVirtualKey("Bogus"); ok {
+		t.Fatal("Bogus: expected ok=false")
 	}
 }
 
 func TestWindowsVirtualKey_ModifierFlag(t *testing.T) {
-	_, isMod, _ := windowsVirtualKey("ctrl")
-	if !isMod {
-		t.Fatalf("ctrl: expected isModifier=true")
+	for _, name := range []string{"ctrl", "alt", "shift", "super", "cmd"} {
+		if _, isMod, _ := windowsVirtualKey(name); !isMod {
+			t.Fatalf("%s: expected isModifier=true", name)
+		}
 	}
-	_, isMod, _ = windowsVirtualKey("alt")
-	if !isMod {
-		t.Fatalf("alt: expected isModifier=true")
-	}
-	_, isMod, _ = windowsVirtualKey("shift")
-	if !isMod {
-		t.Fatalf("shift: expected isModifier=true")
-	}
-	_, isMod, _ = windowsVirtualKey("super")
-	if !isMod {
-		t.Fatalf("super: expected isModifier=true")
-	}
-	_, isMod, _ = windowsVirtualKey("cmd")
-	if !isMod {
-		t.Fatalf("cmd: expected isModifier=true")
-	}
-	_, isMod, _ = windowsVirtualKey("Return")
-	if isMod {
-		t.Fatalf("Return: expected isModifier=false")
-	}
-	_, isMod, _ = windowsVirtualKey("a")
-	if isMod {
-		t.Fatalf("a: expected isModifier=false")
-	}
-}
-
-func TestWindowsKeyCombo_Order(t *testing.T) {
-	codes, err := windowsKeyCombo("ctrl+s")
-	if err != nil {
-		t.Fatalf("windowsKeyCombo error: %v", err)
-	}
-	if len(codes) != 2 || codes[0] != 0x11 || codes[1] != 0x53 {
-		t.Fatalf("expected [17, 83] got %v", codes)
-	}
-}
-
-func TestWindowsKeyCombo_RejectsTwoMainKeys(t *testing.T) {
-	_, err := windowsKeyCombo("a+b")
-	if err == nil {
-		t.Fatal("expected error")
+	for _, name := range []string{"Return", "a", "F1", "Left"} {
+		if _, isMod, _ := windowsVirtualKey(name); isMod {
+			t.Fatalf("%s: expected isModifier=false", name)
+		}
 	}
 }
 
 func TestWindowsMissingPowershellIsNoticed(t *testing.T) {
 	err := windowsError(exec.ErrNotFound)
-	if err == nil {
-		t.Fatal("expected error")
-	}
 	var ne *tool.NoticedError
 	if !errors.As(err, &ne) {
 		t.Fatalf("expected *tool.NoticedError, got %T: %v", err, err)
 	}
 	if ne.Notice != "PowerShell not found on PATH" {
-		t.Fatalf("expected 'PowerShell not found on PATH' notice, got %q", ne.Notice)
+		t.Fatalf("notice = %q", ne.Notice)
+	}
+}
+
+// TestWindowsScript_ParamIsFirstStatement guards the PowerShell rule that
+// param() must precede every other statement; only comments may come before.
+func TestWindowsScript_ParamIsFirstStatement(t *testing.T) {
+	for _, line := range strings.Split(string(windowsScript), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "param(") {
+			t.Fatalf("first non-comment line is %q, want a param( declaration", trimmed)
+		}
+		return
+	}
+	t.Fatal("script has no statements")
+}
+
+func TestWindowsScript_RequiredCalls(t *testing.T) {
+	script := string(windowsScript)
+	for _, want := range []string{
+		"[OcodeInput]::SetProcessDPIAware()",
+		"MOUSEEVENTF_WHEEL",
+		"MOUSEEVENTF_HWHEEL",
+		"KEYEVENTF_UNICODE",
+		"$ErrorActionPreference = 'Stop'",
+		"exit 1",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script is missing %q", want)
+		}
+	}
+	// Buttons and the wheel act on the cursor position set by SetCursorPos,
+	// so no input event may carry a relative MOUSEEVENTF_MOVE.
+	if strings.Contains(script, "MOUSEEVENTF_MOVE") {
+		t.Fatal("script must not use MOUSEEVENTF_MOVE; it moves relatively")
 	}
 }

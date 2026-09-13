@@ -22,7 +22,7 @@ const (
 
 // formatToolCallHint returns a single-line summary of a tool call,
 // pulling the most informative argument (path, command, pattern) into the line.
-func formatToolCallHint(tc agent.ToolCall) string {
+func formatToolCallHint(tc agent.ToolCall, command ...string) string {
 	name := tc.Function.Name
 	var args map[string]interface{}
 	_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
@@ -46,8 +46,21 @@ func formatToolCallHint(tc agent.ToolCall) string {
 		}
 		return ""
 	}
+	cmdFallback := ""
+	if len(command) > 0 {
+		cmdFallback = command[0]
+	}
 
 	switch name {
+	case "bash":
+		cmd := first("command")
+		if cmd == "" {
+			cmd = cmdFallback
+		}
+		if cmd == "" {
+			return ""
+		}
+		return fmt.Sprintf("$ %s", cmd)
 	case "read":
 		p := first("path", "file_path", "filePath")
 		offset := first("offset", "start_line")
@@ -77,9 +90,6 @@ func formatToolCallHint(tc agent.ToolCall) string {
 		return fmt.Sprintf("✏  replace_lines %s:%s-%s", p, start, end)
 	case "delete":
 		return fmt.Sprintf("∅  delete %s", first("path", "file_path"))
-	case "bash":
-		cmd := first("command")
-		return fmt.Sprintf("$ %s", cmd)
 	case "grep":
 		return fmt.Sprintf("⌾ grep %q", first("pattern"))
 	case "glob":

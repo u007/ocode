@@ -11,6 +11,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/session"
@@ -124,7 +125,12 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		})
 	}
 	lspMgr := h.lspManagerFor(projectRoot)
-	tools := tool.InitBuiltinTools(lspMgr, effCfg, h.scheduler)
+	var computerDriver tool.ComputerDriver
+	var computerDriverErr error
+	if effCfg != nil && effCfg.Ocode.ComputerUse.Enabled {
+		computerDriver, computerDriverErr = computer.New(h.computerSup)
+	}
+	tools := tool.InitBuiltinToolsWithComputerDriver(lspMgr, effCfg, h.scheduler, computerDriver, computerDriverErr)
 	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
 	ag.SetSessionID(sessionID)
 	// The agent's workdir comes from the registry entry's project root, not

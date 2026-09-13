@@ -19,6 +19,11 @@
 
 
 
+
+## 2026-09-13
+
+* **Update**: AGENTS.md Data Storage / README API list — open session tabs now server-side via bulk `GET/PUT /api/tabs` (`tabs.json`), replacing per-origin `localStorage`; fixes empty tab bar on shared Tailscale URL
+* **Update**: Computer use ([docs/computer-use.md](/docs/computer-use.md))
 ## 2026-09-11
 
 * **Creation**: TTS License Acceptance Must Validate the Exact License Text Hash ([gotchas/tts-license-acceptance-hash-validation.md](/gotchas/tts-license-acceptance-hash-validation.md))

@@ -50,11 +50,12 @@ export function buildTerminalWsConnection(opts: {
   projectPath: string | undefined;
   /** Remote project host (`[user@]host` or `wsl:<distro>`); undefined for local. */
   host?: string;
+  remotePort?: number;
   terminalId: string;
   isRemote: boolean;
   historyOffset?: number;
 }): { url: string; protocols: string[] | undefined } {
-  const { token, projectPath, host, terminalId, isRemote, historyOffset } = opts;
+  const { token, projectPath, host, remotePort, terminalId, isRemote, historyOffset } = opts;
   const params = new URLSearchParams();
   let protocols: string[] | undefined;
   if (token) {
@@ -71,6 +72,7 @@ export function buildTerminalWsConnection(opts: {
   // host marks an ocode Remote project: the server then pty-starts
   // ssh/wsl.exe into host:project_path instead of a local shell.
   if (host) params.set("host", host);
+  if (host && remotePort) params.set("port", String(remotePort));
   params.set("terminal_id", terminalId);
   if (historyOffset !== undefined) params.set("history_offset", String(historyOffset));
   const query = params.toString();
@@ -105,6 +107,7 @@ export default function TerminalPanel({
   fontSize,
   projectPath,
   host,
+  remotePort,
 }: {
   id: string;
   active: boolean;
@@ -113,6 +116,7 @@ export default function TerminalPanel({
   fontSize: number;
   projectPath: string;
   host?: string;
+  remotePort?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -823,6 +827,7 @@ export default function TerminalPanel({
       id,
       projectPath,
       host,
+      remotePort,
       decoder: terminalDecoder,
       signal: restoreController.signal,
       onText: (text) => {
@@ -925,7 +930,7 @@ export default function TerminalPanel({
     // Backend switches intentionally do NOT restart existing terminals:
     // the PTY is host-local and would be lost. New terminals after a switch
     // use the new apiWsPath; a full reload migrates all.
-  }, [projectPath, host, id]);
+  }, [projectPath, host, remotePort, id]);
 
   // Apply scrollback changes without tearing down the pty.
   useEffect(() => {

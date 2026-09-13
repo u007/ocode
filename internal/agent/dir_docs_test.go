@@ -218,3 +218,60 @@ func TestAgentStepInjectsToolDiscoveredDocsBeforeNextLLMCall(t *testing.T) {
 		t.Fatalf("next LLM call did not receive discovered directory docs: %#v", client.calls[1])
 	}
 }
+
+func TestTrackDirMDTouch_ReplaceLinesAndMultiFileEdit(t *testing.T) {
+	root := t.TempDir()
+	for _, sub := range []string{"a", "b"} {
+		dir := filepath.Join(root, sub)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(sub+" rules"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := &Agent{workDir: root}
+
+	args, _ := json.Marshal(map[string]string{"path": filepath.Join(root, "a", "x.go")})
+	a.trackDirMDTouch("replace_lines", args)
+	blocks := a.drainDirMDPending()
+	if len(blocks) != 1 || !strings.Contains(blocks[0], "a rules") {
+		t.Fatalf("replace_lines did not surface a/AGENTS.md: %v", blocks)
+	}
+
+	mfe, _ := json.Marshal(map[string]interface{}{"edits": []map[string]string{
+		{"path": filepath.Join(root, "b", "y.go"), "search": "s", "replace": "r"},
+	}})
+	a.trackDirMDTouch("multi_file_edit", mfe)
+	blocks = a.drainDirMDPending()
+	if len(blocks) != 1 || !strings.Contains(blocks[0], "b rules") {
+		t.Fatalf("multi_file_edit did not surface b/AGENTS.md: %v", blocks)
+	}
+}
+
+func TestResetDirMDSeen_ResurfacesDocsAfterCompaction(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "pkg")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "CLAUDE.md"), []byte("pkg rules"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{workDir: root}
+	args, _ := json.Marshal(map[string]string{"path": filepath.Join(sub, "f.go")})
+
+	a.trackDirMDTouch("read", args)
+	if got := a.drainDirMDPending(); len(got) != 1 {
+		t.Fatalf("first touch: %d blocks", len(got))
+	}
+	a.trackDirMDTouch("read", args)
+	if got := a.drainDirMDPending(); len(got) != 0 {
+		t.Fatalf("second touch must be silent: %d blocks", len(got))
+	}
+	a.resetDirMDSeen()
+	a.trackDirMDTouch("read", args)
+	if got := a.drainDirMDPending(); len(got) != 1 || !strings.Contains(got[0], "pkg rules") {
+		t.Fatalf("after reset the docs must resurface: %v", got)
+	}
+}

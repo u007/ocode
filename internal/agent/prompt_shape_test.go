@@ -26,7 +26,7 @@ func TestBasePromptShape_PerPrimaryAgent(t *testing.T) {
 				client: providerStubClient{provider: "anthropic", model: "claude-opus-4-7"},
 				mode:   mode,
 			}
-			msgs := a.BasePromptMessages("")
+			msgs := a.BasePromptMessages()
 
 			wantOrder := []string{
 				promptEnvMarker,
@@ -50,18 +50,28 @@ func TestBasePromptShape_PerPrimaryAgent(t *testing.T) {
 	}
 }
 
-func TestBasePromptShape_SelectionAppendedLast(t *testing.T) {
+func TestPrepareMessages_SelectionAppendedLastAsUser(t *testing.T) {
 	a := &Agent{
 		client: providerStubClient{provider: "anthropic", model: "claude-opus-4-7"},
 		mode:   ModeBuild,
 	}
-	msgs := a.BasePromptMessages("user-selected text here")
+	msgs := a.PrepareMessages([]Message{{Role: "user", Content: "hello"}}, "user-selected text here")
 	markers := collectMarkers(msgs)
 	if len(markers) == 0 {
 		t.Fatal("no markers")
 	}
 	if markers[len(markers)-1] != promptSelectionMarker {
 		t.Errorf("selection marker should be last; got order %v", markers)
+	}
+	// Per-turn UI state must not ride the cached system block.
+	last := msgs[len(msgs)-1]
+	if last.Role != "user" {
+		t.Errorf("selection role = %q, want user", last.Role)
+	}
+	for _, m := range a.BasePromptMessages() {
+		if promptMarker(m.Content) == promptSelectionMarker {
+			t.Error("BasePromptMessages must not contain the selection")
+		}
 	}
 }
 
@@ -141,7 +151,7 @@ func TestBasePromptMessages_IncludesMemoryContextWhenEnabled(t *testing.T) {
 	a := &Agent{client: providerStubClient{provider: "anthropic", model: "claude-opus-4-7"}, mode: ModeBuild}
 	a.SetMemoryEnabled(true)
 
-	base := a.BasePromptMessages("")
+	base := a.BasePromptMessages()
 	ctx := findMarker(base, promptContextMarker)
 	if ctx == "" {
 		t.Fatal("expected base prompt to include the context fragment")
@@ -157,7 +167,7 @@ func TestBasePromptMessages_IncludesDocPromptWhenEnabled(t *testing.T) {
 	a := &Agent{client: providerStubClient{provider: "anthropic", model: "claude-opus-4-7"}, mode: ModeBuild}
 	a.SetDocPromptEnabled(true)
 
-	base := a.BasePromptMessages("")
+	base := a.BasePromptMessages()
 	doc := findMarker(base, promptDocPromptMarker)
 	if doc == "" {
 		t.Fatal("expected base prompt to include the doc prompt fragment when DocPromptEnabled is true")
@@ -181,7 +191,7 @@ func TestBasePromptMessages_DoesNotIncludeDocPromptWhenDisabled(t *testing.T) {
 	a := &Agent{client: providerStubClient{provider: "anthropic", model: "claude-opus-4-7"}, mode: ModeBuild}
 	a.SetDocPromptEnabled(false)
 
-	base := a.BasePromptMessages("")
+	base := a.BasePromptMessages()
 	doc := findMarker(base, promptDocPromptMarker)
 	if doc != "" {
 		t.Fatal("expected base prompt to NOT include the doc prompt fragment when DocPromptEnabled is false")
@@ -236,7 +246,7 @@ func TestDocPrompt_IsConditionalGuidance(t *testing.T) {
 	a := &Agent{client: providerStubClient{provider: "anthropic", model: "claude-opus-4-7"}, mode: ModeBuild}
 	a.SetDocPromptEnabled(true)
 
-	base := a.BasePromptMessages("")
+	base := a.BasePromptMessages()
 	doc := findMarker(base, promptDocPromptMarker)
 	if doc == "" {
 		t.Fatal("expected base prompt to include the doc prompt fragment when DocPromptEnabled is true")
@@ -320,7 +330,7 @@ func TestEnvironmentPrompt_UsesWorkDirOverride(t *testing.T) {
 	}
 
 	// Without workDir override, should use os.Getwd()
-	msgs := a.BasePromptMessages("")
+	msgs := a.BasePromptMessages()
 	envMsg := findMarker(msgs, promptEnvMarker)
 	if envMsg == "" {
 		t.Fatal("environment prompt missing")
@@ -332,7 +342,7 @@ func TestEnvironmentPrompt_UsesWorkDirOverride(t *testing.T) {
 	// With workDir override, should use the overridden directory
 	overrideDir := "/tmp/test-override-dir"
 	a.SetWorkDir(overrideDir)
-	msgs = a.BasePromptMessages("")
+	msgs = a.BasePromptMessages()
 	envMsg = findMarker(msgs, promptEnvMarker)
 	if envMsg == "" {
 		t.Fatal("environment prompt missing after SetWorkDir")

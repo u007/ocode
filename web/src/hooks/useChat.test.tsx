@@ -17,9 +17,14 @@ vi.mock("../api/client", async () => {
       getCurrentProject: vi.fn().mockResolvedValue(null),
       listProjectSessions: vi.fn().mockResolvedValue([]),
       listGroups: vi.fn().mockResolvedValue([]),
+      getTabs: vi.fn().mockResolvedValue({ projects: {} }),
+      setTabs: vi.fn().mockResolvedValue({ status: "ok" }),
     },
   };
 });
+vi.mock("../lib/eventBus", () => ({
+  eventBus: { on: () => () => {}, onReconnect: () => () => {} },
+}));
 
 function Wrapper({ children }: { children: ReactNode }) {
   return (

@@ -293,6 +293,8 @@ The list is not git-based — it derives from the snapshot store
 (`internal/snapshot.Store`) and a pre/post-stat bash detection hook. See
 `docs/changes-tab.md` and `docs/superpowers/specs/2026-07-22-changes-tab-design.md`.
 
+The opt-in host desktop-control tool is documented in `docs/computer-use.md`.
+
 ## User Interaction
 - TUI supports `/commands` and `!shell`.
 - **Slash command queuing.** All slash commands entered while the agent is
@@ -728,6 +730,11 @@ Sub-directories:
 - `project/{slug}/sessions/` — chat session JSON files (one per session)
 - `usage/` — LLM token usage records (`records.jsonl`)
 - `auth.json` — provider API keys and OAuth tokens
+- `projects.json` / `project_groups.json` — web sidebar project list
+- `tabs.json` — open session tabs per project for the web/desktop UI
+  (`GET/PUT /api/tabs`). Server-side, never `localStorage`: localStorage is
+  per-origin, so a shared URL or a different port would otherwise open with
+  zero tabs.
 
 The `{slug}` is a SHA-256 prefix of the git repo root path, making sessions
 project-scoped even when working from different checkouts. The TUI's
@@ -788,9 +795,43 @@ Rules for any change that touches tools or the base prompt:
   `system`-role message appended at the tail is NOT in the uncached suffix; it
   rides the **cached** system block. Consequence: any tail `system` injection
   whose content **varies per turn** (e.g. growing) rewrites and busts the whole
-  cached system prompt. `injectLSPDiagnostics` and `injectNotesTail` are
-  system-role and carry this cost when their content changes — keep their content
-  stable across turns, or move the volatile part to user-role.
+  cached system prompt. Every volatile tail injector is therefore user-role:
+  `injectNotesTail`, `injectTodoTail`, `injectDirMDTail`, `injectLSPDelta`.
+- **LSP diagnostics are message-level, never system-role** (`internal/agent/
+  lsp_inject.go`). A single-file write tool (`write`, `edit`, `multiedit`,
+  `replace_lines`, `format`) re-syncs its file with the language server and
+  waits up to 2s for a fresh publish; non-empty diagnostics are appended to
+  that tool's result (transcript history, byte-stable once persisted). Files
+  whose diagnostics changed elsewhere (package-level fallout, user edits
+  between turns) are rendered once as a `[ocode:lsp]` user-role tail block by
+  `injectLSPDelta` before each model call; the agent keeps a per-URI
+  fingerprint of what it last reported, so an unchanged store adds nothing.
+  LSP server problems (binary missing) stay out of the prompt entirely: they
+  ride `Message.Notice` via `NoticedError` and show only in the transcript UI.
+- **Per-turn UI state and transcript notices are user-role too.** The TUI file
+  selection (`[ocode:selection]`) is appended by `PrepareMessages` at the
+  tail as user-role, not by `BasePromptMessages` (which is system-only and
+  takes no per-turn arguments). Background agent/process completion notices
+  (`[ocode:event]`) and "add file to context" blocks (`[ocode:context]`) are
+  persisted as user-role transcript messages with an explicit marker line so
+  the model still reads them as out-of-band. Never persist a `system`-role
+  transcript message for anything that can happen more than once per session.
+- **Subdirectory `CLAUDE.md`/`AGENTS.md`/`OCODE.md` are lazy and volatile**
+  (`internal/agent/dir_docs.go`). After a path-touching tool succeeds
+  (`read`, `write`, `edit`, `multiedit`, `replace_lines`, `format`, `lsp`,
+  `ast`, `glob`, `list`, `grep`, and every `edits[].path` of
+  `multi_file_edit`; `apply_patch` is not covered), the agent walks from the
+  touched path up to the project root, exclusive, and queues each unseen
+  directory's docs for one user-role `[ocode:discovery]` tail block before the
+  next model call. A directory is seen once per session; compaction
+  (`runCompact`) clears the seen set because the injected blocks were never
+  persisted and are gone with the splice.
+- **Anthropic breakpoints (`applyAnthropicConversationBreakpoints` in
+  `client.go`):** tools (last tool), system (single block), and the last two
+  user-role messages (tool results are user-role). The marker on the most
+  recently appended turn is what lets the next request read the whole prior
+  transcript from cache; the old placement on the FIRST user message cached
+  nothing after turn one. Do not add a fifth marker — Anthropic allows four.
 - **Split tail injection by volatility (`injectDiscoveryContext` is the model):**
   - *Stable* content (e.g. the discovery name index + prompt contract — names
     don't change turn to turn) → **`system`-role** → hoisted into the cached

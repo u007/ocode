@@ -23,14 +23,15 @@ const ComputerMaxImageSide = 1568
 // keyboard. It is opt-in via cfg.Ocode.ComputerUse.Enabled and is
 // not advertised by InitBuiltinTools when disabled.
 type ComputerTool struct {
-	Config  *config.Config
-	Driver  ComputerDriver
-	mu      sync.Mutex // guards scaleState below
-	screenW int  // OS input space width from last Screenshot
-	screenH int  // OS input space height from last Screenshot
-	imgW    int  // scaled PNG width
-	imgH    int  // scaled PNG height
-	lastPNG []byte // scaled PNG bytes (nil until first screenshot)
+	Config    *config.Config
+	Driver    ComputerDriver
+	DriverErr error
+	mu        sync.Mutex // guards scaleState below
+	screenW   int        // OS input space width from last Screenshot
+	screenH   int        // OS input space height from last Screenshot
+	imgW      int        // scaled PNG width
+	imgH      int        // scaled PNG height
+	lastPNG   []byte     // scaled PNG bytes (nil until first screenshot)
 }
 
 // scaleState holds the ratio between OS input coordinates and
@@ -58,32 +59,32 @@ func (t *ComputerTool) Definition() map[string]interface{} {
 					"description": "The action to perform.",
 				},
 				"coordinate": map[string]interface{}{
-					"type": "array",
-					"items": map[string]interface{}{"type": "integer"},
+					"type":        "array",
+					"items":       map[string]interface{}{"type": "integer"},
 					"description": "Target [x, y] in the pixel space of the most recent screenshot.",
 				},
 				"start_coordinate": map[string]interface{}{
-					"type": "array",
-					"items": map[string]interface{}{"type": "integer"},
+					"type":        "array",
+					"items":       map[string]interface{}{"type": "integer"},
 					"description": "Start [x, y] for drag actions, in screenshot pixel space.",
 				},
 				"text": map[string]interface{}{
-					"type": "string",
+					"type":        "string",
 					"description": "Text to type (action=type) or key combo (action=key).",
 				},
 				"scroll_direction": map[string]interface{}{
-					"type": "string",
-					"enum": []string{"up", "down", "left", "right"},
+					"type":        "string",
+					"enum":        []string{"up", "down", "left", "right"},
 					"description": "Direction to scroll (action=scroll).",
 				},
 				"scroll_amount": map[string]interface{}{
-					"type": "integer",
-					"default": 3,
+					"type":        "integer",
+					"default":     3,
 					"description": "Number of scroll ticks (action=scroll).",
 				},
 				"duration": map[string]interface{}{
-					"type": "number",
-					"maximum": 10,
+					"type":        "number",
+					"maximum":     10,
 					"description": "Seconds to wait (action=wait).",
 				},
 			},
@@ -108,14 +109,20 @@ func (t *ComputerTool) Execute(args json.RawMessage) (string, error) {
 // ExecuteCtx validates the action, scales coordinates, calls the
 // driver, and returns a one-line result.
 func (t *ComputerTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
+	if t.Driver == nil {
+		if t.DriverErr != nil {
+			return "", fmt.Errorf("computer: driver unavailable: %w", t.DriverErr)
+		}
+		return "", fmt.Errorf("computer: driver unavailable")
+	}
 	var params struct {
-		Action          string   `json:"action"`
-		Coordinate      []int    `json:"coordinate"`
-		StartCoordinate []int    `json:"start_coordinate"`
-		Text            string   `json:"text"`
-		ScrollDirection string   `json:"scroll_direction"`
-		ScrollAmount    int      `json:"scroll_amount"`
-		Duration        float64  `json:"duration"`
+		Action          string  `json:"action"`
+		Coordinate      []int   `json:"coordinate"`
+		StartCoordinate []int   `json:"start_coordinate"`
+		Text            string  `json:"text"`
+		ScrollDirection string  `json:"scroll_direction"`
+		ScrollAmount    int     `json:"scroll_amount"`
+		Duration        float64 `json:"duration"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", fmt.Errorf("computer: invalid arguments: %w", err)
@@ -129,41 +136,50 @@ func (t *ComputerTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 		return "", err
 	}
 
+	parentCtx := ctx
+	timeout := 10 * time.Second
+	if params.Action == "type" {
+		timeout = 60 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
+	defer cancel()
+
 	t.mu.Lock()
-	hasScreenshot := t.lastPNG != nil
 	sw, sh := t.screenW, t.screenH
 	iw, ih := t.imgW, t.imgH
 	t.mu.Unlock()
 
-	if !hasScreenshot && params.Action != "screenshot" && params.Action != "wait" {
-		// Seed scale state with a throwaway screenshot.
+	if iw == 0 && params.Action != "screenshot" && params.Action != "wait" {
+		// Seed scale state with a throwaway capture. The PNG is not retained:
+		// ExecuteImage must only ever return a screenshot the model asked for.
 		rawPNG, w, h, err := t.Driver.Screenshot(ctx)
 		if err != nil {
 			return "", fmt.Errorf("computer: screenshot seed failed: %w", err)
 		}
-		scaled, iw2, ih2, err := scalePNG(rawPNG, ComputerMaxImageSide)
+		_, iw2, ih2, err := scalePNG(rawPNG, ComputerMaxImageSide)
 		if err != nil {
 			return "", fmt.Errorf("computer: scale seed failed: %w", err)
 		}
 		t.mu.Lock()
 		t.screenW, t.screenH = w, h
 		t.imgW, t.imgH = iw2, ih2
-		t.lastPNG = scaled
 		t.mu.Unlock()
 		sw, sh, iw, ih = w, h, iw2, ih2
 	}
 
-	var state scaleState
-	if iw > 0 {
-		state = scaleState{scaleX: float64(sw) / float64(iw), scaleY: float64(sh) / float64(ih)}
+	state := scaleState{scaleX: float64(sw) / float64(iw), scaleY: float64(sh) / float64(ih)}
+	if params.Action == "screenshot" || params.Action == "wait" {
+		state = scaleState{}
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	if params.Action == "type" {
-		cancel()
-		ctx, cancel = context.WithTimeout(ctx, 60*time.Second)
+	// imgCoord validates a model-supplied coordinate against the image the
+	// model saw, then maps it into the driver's input space.
+	imgCoord := func(coord []int) (int, int, error) {
+		if err := validateCoord(coord[0], coord[1], iw, ih); err != nil {
+			return 0, 0, err
+		}
+		x, y := toDriverCoords(coord, state)
+		return x, y, nil
 	}
-	defer cancel()
 
 	switch params.Action {
 	case "screenshot":
@@ -180,12 +196,12 @@ func (t *ComputerTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 		t.imgW, t.imgH = iw2, ih2
 		t.lastPNG = scaled
 		t.mu.Unlock()
-		scale := float64(sw) / float64(iw2)
-		return fmt.Sprintf("screen %dx%d, image %dx%d, scale %.2f", sw, sh, iw2, ih2, scale), nil
+		scale := float64(w) / float64(iw2)
+		return fmt.Sprintf("screen %dx%d, image %dx%d, scale %.2f", w, h, iw2, ih2, scale), nil
 
 	case "left_click":
-		x, y := toDriverCoords(params.Coordinate, state)
-		if err := validateCoord(x, y, iw, ih); err != nil {
+		x, y, err := imgCoord(params.Coordinate)
+		if err != nil {
 			return "", err
 		}
 		if err := t.Driver.Click(ctx, x, y, MouseLeft, 1); err != nil {
@@ -194,8 +210,8 @@ func (t *ComputerTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 		return fmt.Sprintf("left_click at %d,%d", params.Coordinate[0], params.Coordinate[1]), nil
 
 	case "right_click":
-		x, y := toDriverCoords(params.Coordinate, state)
-		if err := validateCoord(x, y, iw, ih); err != nil {
+		x, y, err := imgCoord(params.Coordinate)
+		if err != nil {
 			return "", err
 		}
 		if err := t.Driver.Click(ctx, x, y, MouseRight, 1); err != nil {
@@ -204,8 +220,8 @@ func (t *ComputerTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 		return fmt.Sprintf("right_click at %d,%d", params.Coordinate[0], params.Coordinate[1]), nil
 
 	case "middle_click":
-		x, y := toDriverCoords(params.Coordinate, state)
-		if err := validateCoord(x, y, iw, ih); err != nil {
+		x, y, err := imgCoord(params.Coordinate)
+		if err != nil {
 			return "", err
 		}
 		if err := t.Driver.Click(ctx, x, y, MouseMiddle, 1); err != nil {
@@ -214,8 +230,8 @@ func (t *ComputerTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 		return fmt.Sprintf("middle_click at %d,%d", params.Coordinate[0], params.Coordinate[1]), nil
 
 	case "double_click":
-		x, y := toDriverCoords(params.Coordinate, state)
-		if err := validateCoord(x, y, iw, ih); err != nil {
+		x, y, err := imgCoord(params.Coordinate)
+		if err != nil {
 			return "", err
 		}
 		if err := t.Driver.Click(ctx, x, y, MouseLeft, 2); err != nil {
@@ -224,8 +240,8 @@ func (t *ComputerTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 		return fmt.Sprintf("double_click at %d,%d", params.Coordinate[0], params.Coordinate[1]), nil
 
 	case "mouse_move":
-		x, y := toDriverCoords(params.Coordinate, state)
-		if err := validateCoord(x, y, iw, ih); err != nil {
+		x, y, err := imgCoord(params.Coordinate)
+		if err != nil {
 			return "", err
 		}
 		if err := t.Driver.Move(ctx, x, y); err != nil {
@@ -234,12 +250,12 @@ func (t *ComputerTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 		return fmt.Sprintf("moved to %d,%d", params.Coordinate[0], params.Coordinate[1]), nil
 
 	case "left_click_drag":
-		x1, y1 := toDriverCoords(params.StartCoordinate, state)
-		x2, y2 := toDriverCoords(params.Coordinate, state)
-		if err := validateCoord(x1, y1, iw, ih); err != nil {
+		x1, y1, err := imgCoord(params.StartCoordinate)
+		if err != nil {
 			return "", err
 		}
-		if err := validateCoord(x2, y2, iw, ih); err != nil {
+		x2, y2, err := imgCoord(params.Coordinate)
+		if err != nil {
 			return "", err
 		}
 		if err := t.Driver.Drag(ctx, x1, y1, x2, y2); err != nil {
@@ -248,8 +264,8 @@ func (t *ComputerTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 		return fmt.Sprintf("dragged %d,%d -> %d,%d", params.StartCoordinate[0], params.StartCoordinate[1], params.Coordinate[0], params.Coordinate[1]), nil
 
 	case "scroll":
-		x, y := toDriverCoords(params.Coordinate, state)
-		if err := validateCoord(x, y, iw, ih); err != nil {
+		x, y, err := imgCoord(params.Coordinate)
+		if err != nil {
 			return "", err
 		}
 		if err := t.Driver.Scroll(ctx, x, y, params.ScrollDirection, params.ScrollAmount); err != nil {
@@ -314,20 +330,23 @@ func (t *ComputerTool) ProducesImage(args json.RawMessage) bool {
 }
 
 func validateAction(p struct {
-	Action          string   `json:"action"`
-	Coordinate      []int    `json:"coordinate"`
-	StartCoordinate []int    `json:"start_coordinate"`
-	Text            string   `json:"text"`
-	ScrollDirection string   `json:"scroll_direction"`
-	ScrollAmount    int      `json:"scroll_amount"`
-	Duration        float64  `json:"duration"`
+	Action          string  `json:"action"`
+	Coordinate      []int   `json:"coordinate"`
+	StartCoordinate []int   `json:"start_coordinate"`
+	Text            string  `json:"text"`
+	ScrollDirection string  `json:"scroll_direction"`
+	ScrollAmount    int     `json:"scroll_amount"`
+	Duration        float64 `json:"duration"`
 }) error {
 	switch p.Action {
-	case "screenshot", "wait":
+	case "screenshot", "wait", "cursor_position":
 		// No required coordinates/text
 	case "left_click", "right_click", "middle_click", "double_click", "mouse_move", "scroll":
 		if len(p.Coordinate) != 2 || p.Coordinate[0] < 0 || p.Coordinate[1] < 0 {
 			return fmt.Errorf("computer: %s requires a valid coordinate [x,y]", p.Action)
+		}
+		if p.Action == "scroll" && p.ScrollDirection == "" {
+			return fmt.Errorf("computer: scroll requires scroll_direction")
 		}
 	case "left_click_drag":
 		if len(p.StartCoordinate) != 2 || p.StartCoordinate[0] < 0 || p.StartCoordinate[1] < 0 {

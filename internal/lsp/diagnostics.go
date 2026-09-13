@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -371,7 +372,7 @@ func FilteredByMinSeverity(in []Diagnostic, min DiagnosticSeverity) []Diagnostic
 }
 
 // Snapshot is a compact, allocation-free-ish view returned by Manager
-// helpers. Used by the auto-inject path in the agent loop, which doesn't
+// helpers. Used by TUI/status views, which don't
 // need the full slice — just a count and the first N rendered lines.
 type Snapshot struct {
 	Total     int // total diagnostics across all files
@@ -381,9 +382,9 @@ type Snapshot struct {
 	UpdatedAt time.Time    // when the store was last modified; zero means empty
 }
 
-// Snapshot returns a point-in-time summary used by the agent's
-// auto-inject. n caps the number of diagnostics included in FirstN; the
-// agent's default is 50, matching the lsp_diagnostics tool default.
+// Snapshot returns a point-in-time summary. n caps the number of
+// diagnostics included in FirstN; the default is 50, matching the
+// lsp_diagnostics tool default.
 func (s *DiagnosticStore) Snapshot(n int) Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -425,7 +426,7 @@ func (s *DiagnosticStore) Snapshot(n int) Snapshot {
 }
 
 // IsEmpty reports whether the store currently has any diagnostics at all.
-// Cheap O(1) check used by the agent loop to skip the auto-inject
+// Cheap O(1) check used by status views to skip rendering
 // entirely when there's nothing to report.
 func (s *DiagnosticStore) IsEmpty() bool {
 	s.mu.RLock()
@@ -507,4 +508,32 @@ func pluralize(n int, singular, plural string) string {
 		return fmt.Sprintf("%d %s", n, singular)
 	}
 	return fmt.Sprintf("%d %s", n, plural)
+}
+
+// UpdatedAtURI returns when the store last received a publish for uri
+// (including an empty "clean" publish). The zero time means the server
+// has never reported on that file.
+func (s *DiagnosticStore) UpdatedAtURI(uri string) time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.updatedByURI[uri]
+}
+
+// WaitURI blocks until the store receives a publish for uri newer than
+// since, or ctx is done. It returns the diagnostics for uri and whether a
+// fresh publish arrived. Callers that need a post-edit result (the agent's
+// tool-result attachment) use this so they never report the pre-edit set.
+func (s *DiagnosticStore) WaitURI(ctx context.Context, uri string, since time.Time) ([]Diagnostic, bool) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if s.UpdatedAtURI(uri).After(since) {
+			return s.FilteredByURI(uri), true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-ticker.C:
+		}
+	}
 }

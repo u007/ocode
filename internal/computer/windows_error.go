@@ -21,29 +21,34 @@ func windowsError(err error) error {
 	return err
 }
 
-// windowsKeyCombo parses an xdotool-style combo (e.g. "ctrl+s")
-// into a list of virtual-key codes, checking that exactly one
-// non-modifier is present.
+// windowsKeyCombo parses an xdotool-style combo (e.g. "ctrl+s") into
+// virtual-key codes: the modifiers in the order given, then the single
+// main key last. The script presses them in that order and releases in
+// reverse, so a combo with no main key or more than one is an error.
 func windowsKeyCombo(combo string) ([]int, error) {
 	parts := splitCombo(combo)
-	var codes []int
-	nonModifiers := 0
+	var modifiers []int
+	mainKey := 0
+	mainCount := 0
 	for _, p := range parts {
 		code, isMod, ok := windowsVirtualKey(p)
 		if !ok {
 			return nil, fmt.Errorf("computer key: unknown key %q", p)
 		}
-		if !isMod {
-			nonModifiers++
+		if isMod {
+			modifiers = append(modifiers, code)
+			continue
 		}
-		codes = append(codes, code)
+		mainKey = code
+		mainCount++
 	}
-	if nonModifiers != 1 {
+	if mainCount != 1 {
 		return nil, fmt.Errorf("computer key: exactly one non-modifier required in %q", combo)
 	}
-	return codes, nil
+	return append(modifiers, mainKey), nil
 }
 
+// splitCombo splits an xdotool-style combo on "+" into its key names.
 func splitCombo(combo string) []string {
 	var parts []string
 	current := ""

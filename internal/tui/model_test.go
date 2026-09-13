@@ -1225,6 +1225,11 @@ func TestRenderPermissionModelUnavailableIsNotShownAsDenial(t *testing.T) {
 	if !strings.Contains(body, "did not become healthy") {
 		t.Fatalf("expected unavailable detail text, got %q", body)
 	}
+	// The command must still be visible alongside the model-unavailable
+	// notice so the user can decide what they are approving.
+	if !strings.Contains(body, req.Command) {
+		t.Fatalf("command %q must be visible when model is unavailable, got %q", req.Command, body)
+	}
 
 	prompt := renderPermissionPrompt(req)
 	if !strings.Contains(prompt, "Allow this action?") {

@@ -26,11 +26,13 @@
 //     reasoning, and (b) moving it to the tail would not
 //     reduce cache churn (it would still change per day).
 //
-// The LSP diagnostics injection is NOT an exception: it was
-// moved from "after system, before transcript" to "at the
-// tail" as part of the Part 04 audit. The prefix is now
-// stable across loops that have no LSP change (in addition
-// to no transcript / no notes change).
+// LSP diagnostics are NOT an exception: they are attached to
+// write-tool results and, for out-of-band changes, rendered
+// as a user-role tail block (lsp_inject.go). They were once a
+// system-role tail message, which the provider builders hoist
+// into the cached system block — so every diagnostic change
+// re-cached the whole system prompt. The same hoist is why
+// injectNotesTail is user-role.
 //
 // These exceptions are listed here so a future contributor
 // can find them via grep and not be surprised when a

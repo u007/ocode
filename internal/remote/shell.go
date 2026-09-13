@@ -36,5 +36,6 @@ func ShellCommand(t Target, path string) *exec.Cmd {
 		return exec.Command("wsl.exe", args...)
 	}
 	remoteCmd := "cd " + shellQuotePath(path) + ` && exec "${SHELL:-/bin/sh}" -l`
-	return exec.Command("ssh", "-t", t.String(), remoteCmd)
+	args := append([]string{"-t"}, t.SSHArgs()...)
+	return exec.Command("ssh", append(args, remoteCmd)...)
 }

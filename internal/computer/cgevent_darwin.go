@@ -3,39 +3,22 @@
 package computer
 
 import (
-	"context"
-	"embed"
-	"fmt"
-	"os"
+	_ "embed"
+
+	"github.com/u007/ocode/internal/tool"
 )
 
 //go:embed cgevent_darwin.js
-var cgeventJS embed.FS
+var cgeventJS []byte
 
-// darwinDisplaySize runs the embedded JXA script with
-// the "screen" op to get display width and height in points.
-func darwinDisplaySize(ctx context.Context, r commandRunner) (int, int, error) {
-	out, err := r.run(ctx, "osascript", darwinArgs("screen")...)
-	if err != nil {
-		return 0, 0, err
-	}
-	var w, h int
-	_, err = fmt.Sscanf(out, "%d %d", &w, &h)
-	if err != nil {
-		return 0, 0, fmt.Errorf("parse screen size: %w", err)
-	}
-	return w, h, nil
-}
+// darwinHelper is the process-wide JXA helper file (see helperScript).
+var darwinHelper = &helperScript{name: "ocode-cgevent-%d.js", data: cgeventJS}
 
-func init() {
-	// Write the embedded JXA script to a temp file at startup.
-	f, err := os.CreateTemp("", "cgevent-*.js")
+// newPlatformDriver creates the macOS computer driver.
+func newPlatformDriver(r commandRunner, sup *tool.ProcessSupervisor) (tool.ComputerDriver, error) {
+	script, err := darwinHelper.ensure(sup)
 	if err != nil {
-		return
+		return nil, err
 	}
-	name := f.Name()
-	b, _ := cgeventJS.ReadFile("cgevent_darwin.js")
-	f.Write(b)
-	f.Close()
-	scriptPath = name
+	return &darwinDriver{r: r, script: script}, nil
 }

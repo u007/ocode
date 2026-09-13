@@ -8,6 +8,7 @@ package cdp
 //	ocode server (supervisor owner)
 //	  └─ `htrcli serve --no-tray` (ProcessKindHTR, ID "htr-serve")
 //	       ├─ HTTP API on 127.0.0.1:<port> (default 3846, /api/health)
+//	       │  bearer-protected: HTR_BEARER_TOKEN = the managed identity
 //	       └─ native-messaging relay to the preloaded extension
 //	ocode headless Chrome --load-extension=<HTRExtensionDir> (see launch.go)
 //
@@ -220,21 +221,34 @@ func newHTRIdentity() (string, error) {
 	return hex.EncodeToString(raw[:]), nil
 }
 
+// htrHealthResponse is the daemon's GET /api/health body. htrcli wraps every
+// API reply as {"ok":bool,"data":...}.
 type htrHealthResponse struct {
-	Service  string `json:"service"`
-	Managed  bool   `json:"managed"`
-	Identity string `json:"identity"`
-	Port     int    `json:"port"`
-	Socket   string `json:"socket"`
+	OK   bool `json:"ok"`
+	Data struct {
+		Service  string `json:"service"`
+		Managed  bool   `json:"managed"`
+		Identity string `json:"identity"`
+		Port     int    `json:"port"`
+		Socket   string `json:"socket"`
+	} `json:"data"`
 }
 
+// htrHealthyForInstance probes the daemon HTTP API. The managed daemon is
+// started with HTR_BEARER_TOKEN set to its identity, and htrcli enforces the
+// bearer on every route including /api/health, so the probe must present it.
 func htrHealthyForInstance(port int, socket, identity string) bool {
 	p, err := NormalizeHTRPort(port)
 	if err != nil {
 		return false
 	}
+	req, err := http.NewRequest(http.MethodGet, "http://"+htrAddr(p)+"/api/health", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+identity)
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get("http://" + htrAddr(p) + "/api/health")
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
@@ -246,7 +260,8 @@ func htrHealthyForInstance(port int, socket, identity string) bool {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&health); err != nil {
 		return false
 	}
-	return health.Service == "htrcli" && health.Managed && health.Identity == identity && health.Port == p && health.Socket == socket
+	h := health.Data
+	return health.OK && h.Service == "htrcli" && h.Managed && h.Identity == identity && h.Port == p && h.Socket == socket
 }
 
 // HTRHealthy probes the daemon HTTP API and accepts only the managed daemon
@@ -705,6 +720,7 @@ func EnsureHTRServe(sup *tool.ProcessSupervisor, opts HTROptions, lg *log.Logger
 		"HTR_SOCKET_PATH="+socketPath,
 		"HTR_NATIVE_HOST_NAME="+effectiveHTRNativeHostName(opts.NativeHostName),
 		"HTR_MANAGED_ID="+identity,
+		"HTR_BEARER_TOKEN="+identity,
 	)
 	var rec tool.ProcessRecord
 	started := false

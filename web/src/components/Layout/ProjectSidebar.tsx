@@ -340,6 +340,7 @@ interface SortableProjectRowProps {
   project: Project;
   isActive: boolean;
   onSelect: () => void;
+  onEdit?: () => void;
   onRemove: () => void;
   onRename: (name: string) => Promise<void>;
   onCreateGroup: (name: string) => Promise<void>;
@@ -352,6 +353,7 @@ function SortableProjectRow({
   project,
   isActive,
   onSelect,
+  onEdit,
   onRemove,
   onRename,
   onCreateGroup,
@@ -365,6 +367,7 @@ function SortableProjectRow({
 
   const contextItems: ContextMenuItem[] = useMemo(() => {
     const items: ContextMenuItem[] = [
+      ...(project.host && onEdit ? [{ label: "Edit connection", icon: <Pencil className="w-3.5 h-3.5" />, onClick: onEdit }] : []),
       { label: "Rename", icon: <Pencil className="w-3.5 h-3.5" />, onClick: rename.start },
       { label: "Remove", icon: <Trash2 className="w-3.5 h-3.5" />, onClick: onRemove, destructive: true },
       { separator: true, label: "", onClick: () => {} },
@@ -492,18 +495,18 @@ function SortableProjectRow({
             <ProjectBadges indicators={indicators} />
             <SessionDot status={status} />
           </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="p-1 h-5 w-5 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove();
+            }}
+          >
+            <Trash2 className="w-3 h-3" />
+          </Button>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="p-1 h-5 w-5 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0"
-          onClick={(e) => {
-            e.stopPropagation();
-            onRemove();
-          }}
-        >
-          <Trash2 className="w-3 h-3" />
-        </Button>
       </ContextMenu>
     </div>
   );
@@ -672,10 +675,11 @@ function AddRemoteDialog({
 }: {
   open: boolean;
   onClose: () => void;
-  onAdd: (host: string, path: string) => Promise<void>;
+  onAdd: (host: string, path: string, port?: number) => Promise<void>;
 }) {
   const [host, setHost] = useState("");
   const [path, setPath] = useState("");
+  const [port, setPort] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const hostRef = useRef<HTMLInputElement>(null);
@@ -684,6 +688,7 @@ function AddRemoteDialog({
     if (open) {
       setHost("");
       setPath("");
+      setPort("");
       setError(null);
       setLoading(false);
       setTimeout(() => hostRef.current?.focus(), 50);
@@ -697,10 +702,12 @@ function AddRemoteDialog({
     const p = path.trim();
     if (!h) { setError("Host is required (e.g. user@host or wsl:Ubuntu)"); return; }
     if (!p) { setError("Remote path is required"); return; }
+    const parsedPort = port.trim() ? Number(port) : undefined;
+    if (parsedPort !== undefined && (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535)) { setError("SSH port must be between 1 and 65535"); return; }
     setLoading(true);
     setError(null);
     try {
-      await onAdd(h, p);
+      await onAdd(h, p, parsedPort);
       onClose();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -731,6 +738,7 @@ function AddRemoteDialog({
           className="h-7 text-xs"
           onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); if (e.key === "Escape") onClose(); }}
         />
+        <Input value={port} onChange={(e) => setPort(e.target.value)} placeholder="SSH port (optional; ignored for WSL)" inputMode="numeric" className="h-7 text-xs" />
         {error && <div className="text-[11px] text-destructive">{error}</div>}
         <div className="text-[11px] text-muted-foreground">
           SSH: uses system <code className="bg-muted px-1 rounded">ssh</code> config. WSL: <code className="bg-muted px-1 rounded">wsl:</code>distro on Windows.
@@ -749,12 +757,107 @@ function AddRemoteDialog({
   );
 }
 
+type RemoteEditInput = {
+  old_host: string;
+  old_path: string;
+  path: string;
+  kind: "ssh" | "wsl";
+  user?: string;
+  host?: string;
+  port?: number;
+  distro?: string;
+};
+
+function remoteEditDefaults(project: Project) {
+  const kind = project.remote_kind ?? (project.host?.startsWith("wsl:") ? "wsl" : "ssh");
+  if (kind === "wsl") {
+    return { kind: "wsl" as const, user: "", host: "", port: "", distro: project.remote_distro ?? project.host?.slice(4) ?? "", path: project.path };
+  }
+  const target = project.host ?? "";
+  const at = target.indexOf("@");
+  return {
+    kind: "ssh" as const,
+    user: project.remote_user ?? (at >= 0 ? target.slice(0, at) : ""),
+    host: project.remote_host ?? (at >= 0 ? target.slice(at + 1) : target),
+    port: project.remote_port ? String(project.remote_port) : "",
+    distro: "",
+    path: project.path,
+  };
+}
+
+function EditRemoteDialog({
+  project,
+  onClose,
+  onSave,
+}: {
+  project: Project | null;
+  onClose: () => void;
+  onSave: (input: RemoteEditInput) => Promise<void>;
+}) {
+  const [form, setForm] = useState(() => project ? remoteEditDefaults(project) : remoteEditDefaults({ path: "", host: "", name: "", added_at: "", last_used_at: "", order: 0, group: "" }));
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (project) {
+      setForm(remoteEditDefaults(project));
+      setError(null);
+    }
+  }, [project]);
+
+  if (!project) return null;
+  const set = (key: string, value: string) => setForm((current) => ({ ...current, [key]: value }));
+  const handleSave = async () => {
+    if (!form.path.trim()) { setError("Remote path is required"); return; }
+    if (form.kind === "ssh" && !form.host.trim()) { setError("SSH host is required"); return; }
+    // An empty WSL distro selects the Windows default distribution.
+    const port = form.kind === "ssh" && form.port ? Number(form.port) : undefined;
+    if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) { setError("SSH port must be between 1 and 65535"); return; }
+    setLoading(true);
+    setError(null);
+    try {
+      await onSave({
+        old_host: project.host ?? "",
+        old_path: project.path,
+        path: form.path.trim(),
+        kind: form.kind,
+        ...(form.kind === "ssh" ? { user: form.user.trim() || undefined, host: form.host.trim(), port } : { distro: form.distro.trim() }),
+      });
+      onClose();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+  return (
+    <div className="px-3 py-2 border-t border-border bg-muted/30">
+      <div className="text-xs font-semibold text-foreground mb-2 flex items-center gap-1.5"><Server className="w-3.5 h-3.5 text-sky-600" />Edit Remote Project</div>
+      <div className="flex flex-col gap-2">
+        <select value={form.kind} onChange={(e) => set("kind", e.target.value)} className="h-7 rounded-md border border-input bg-background px-2 text-xs">
+          <option value="ssh">SSH</option><option value="wsl">WSL</option>
+        </select>
+        {form.kind === "ssh" ? <>
+          <Input value={form.user} onChange={(e) => set("user", e.target.value)} placeholder="Username (optional)" className="h-7 text-xs" />
+          <Input value={form.host} onChange={(e) => set("host", e.target.value)} placeholder="Hostname or SSH alias" className="h-7 text-xs" />
+          <Input value={form.port} onChange={(e) => set("port", e.target.value)} placeholder="SSH port (optional, default 22)" inputMode="numeric" className="h-7 text-xs" />
+        </> : <Input value={form.distro} onChange={(e) => set("distro", e.target.value)} placeholder="WSL distribution (blank = default)" className="h-7 text-xs" />}
+        <Input value={form.path} onChange={(e) => set("path", e.target.value)} placeholder="Remote project path" className="h-7 text-xs" />
+        {error && <div className="text-[11px] text-destructive">{error}</div>}
+        <div className="text-[11px] text-muted-foreground">Saving disconnects existing terminals for this project; open terminals reconnect with the new destination.</div>
+        <div className="flex gap-2"><Button size="sm" className="flex-1 h-7 text-xs" onClick={handleSave} disabled={loading}>{loading ? <Loader2 className="w-3 h-3 animate-spin" /> : null}Save</Button><Button variant="outline" size="sm" className="h-7 text-xs" onClick={onClose} disabled={loading}>Cancel</Button></div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Sidebar ────────────────────────────────────────────────────────────
 
 function CollapsedProjectButton({
   project,
   isActive,
   onSelect,
+  onEdit,
   onToggleExpand,
   onRemove,
   onAddToGroup,
@@ -764,6 +867,7 @@ function CollapsedProjectButton({
   project: Project;
   isActive: boolean;
   onSelect: () => void;
+  onEdit?: () => void;
   onToggleExpand: () => void;
   onRemove: () => void;
   onAddToGroup: (group: string) => void;
@@ -815,6 +919,7 @@ function CollapsedProjectButton({
   // row's Rename is the inline-edit entry point for remote SSH/WSL).
   const contextItems: ContextMenuItem[] = useMemo(() => {
     const items: ContextMenuItem[] = [
+      ...(onEdit ? [{ label: "Edit connection", icon: <Pencil className="w-3.5 h-3.5" />, onClick: onEdit }] : []),
       {
         label: "Rename",
         icon: <Pencil className="w-3.5 h-3.5" />,
@@ -842,7 +947,7 @@ function CollapsedProjectButton({
       });
     }
     return items;
-  }, [groups, project.group, onRemove, onAddToGroup, onRemoveFromGroup, onSelect, onToggleExpand]);
+  }, [groups, project.group, onRemove, onAddToGroup, onRemoveFromGroup, onSelect, onToggleExpand, onEdit]);
 
   return (
     <ContextMenu items={contextItems}>
@@ -902,6 +1007,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
     selectProject,
     addProject,
     addRemoteProject,
+    updateRemoteProject,
     removeProject,
     renameProject,
     reorderProjects,
@@ -917,6 +1023,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
   const [browserOpen, setBrowserOpen] = useState(false);
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [addingRemote, setAddingRemote] = useState(false);
+  const [editingRemote, setEditingRemote] = useState<Project | null>(null);
 
   const toggleGroupCollapse = useCallback((name: string, currentlyCollapsed: boolean) => {
     setGroupCollapsed(name, !currentlyCollapsed);
@@ -930,8 +1037,8 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
     setAdding(false);
   };
 
-  const handleAddRemote = useCallback(async (host: string, path: string) => {
-    await addRemoteProject(host, path);
+  const handleAddRemote = useCallback(async (host: string, path: string, port?: number) => {
+    await addRemoteProject(host, path, port);
   }, [addRemoteProject]);
 
   // Build the sorted list: groups first (in group order), then ungrouped projects
@@ -1031,6 +1138,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
                   project={p}
                   isActive={state.activeProject?.path === p.path && (state.activeProject?.host ?? "") === (p.host ?? "")}
                   onSelect={() => selectProject(p)}
+                  onEdit={p.host ? () => setEditingRemote(p) : undefined}
                   onToggleExpand={onToggle}
                   onRemove={() => removeProject(p.path, p.host)}
                   onAddToGroup={(group) => setProjectGroup(p.path, group, p.host)}
@@ -1098,6 +1206,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
                       project={project}
                       isActive={state.activeProject?.path === project.path && (state.activeProject?.host ?? "") === (project.host ?? "")}
                       onSelect={() => selectProject(project)}
+                      onEdit={project.host ? () => setEditingRemote(project) : undefined}
                       onRemove={() => removeProject(project.path, project.host)}
                       onRename={(name) => renameProject(project.path, name, project.host)}
                       onCreateGroup={async (name) => {
@@ -1188,6 +1297,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
       </div>
 
       <AddRemoteDialog open={addingRemote} onClose={() => setAddingRemote(false)} onAdd={handleAddRemote} />
+      <EditRemoteDialog project={editingRemote} onClose={() => setEditingRemote(null)} onSave={updateRemoteProject} />
       <CreateGroupDialog open={creatingGroup} onClose={() => setCreatingGroup(false)} onCreate={handleCreateGroup} />
       <DirectoryBrowser open={browserOpen} onOpenChange={setBrowserOpen} onSelect={(path) => { setNewPath(path); setBrowserOpen(false); }} />
     </div>

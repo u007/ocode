@@ -1,5 +1,76 @@
 # Changelog
 
+- **Version 0.8.96 — Computer-use review fixes, docs updates, version bump (2026-09-14)** — `internal/version/version.go` bumped to 0.8.96; `docs/computer-use.md` updates (macOS JXA typing paths, permission notes, keymap); `docs/index.md` and `docs/log.md` refreshed with computer-use references and superpowers plan links; `CHANGES.md` and `AGENTS.md` updated; `internal/computer/` driver and runner adjustments; `internal/agent/` permissions, prompt, and client fixes; `internal/tool/computer.go` and diagnostics updates; server, TUI, web sidebar/tab/store fixes (`internal/server/*`, `internal/tui/*`, `web/src/*`); Linux driver removed/replaced (`internal/computer/driver_linux.go` deleted); `skills/ocode-usage/SKILL.md` refreshed.
+
+- **Computer use: review fixes across tool core and all three drivers
+  (2026-09-14)** — bounds are now checked in image space before scaling
+  (the right third of a 1080p screen was rejected), the seed capture is no
+  longer exposed as an image result and runs under the 10s timeout,
+  `cursor_position` validates, the agent keeps the `computer` tool hidden
+  until a supervisor attaches instead of deleting it, permission dialog
+  summaries read the real schema fields, typed text is redacted from
+  supervisor records, and a shared temp-helper lifecycle re-creates the
+  darwin/windows helper after a supervisor shutdown. macOS: JXA entry point
+  and imports fixed (every op was a silent no-op), correct ANSI keymap,
+  modifier flags on key chords, drag with down/up, scroll signature,
+  ASCII typing via System Events and non-ASCII via pasteboard paste,
+  Accessibility check, temp PNG cleanup; live-verified. Windows: `param`
+  first, DPI aware, `SetCursorPos` + button flags, wheel scroll, base64
+  unicode typing, single `INPUT` union; unverified without a Windows host.
+  Linux: Wayland click/drag/scroll move to the target first and split
+  subcommands, X11 scroll moves first, keymap corrected against
+  input-event-codes.h, argv built through the tested builders. Live input
+  test gated behind `OCODE_COMPUTER_LIVE_INPUT=1` with a frontmost guard.
+  (`internal/tool/computer.go`, `internal/agent/agent.go`,
+  `internal/agent/permissions.go`, `internal/computer/`)
+
+- **Subdirectory docs trigger on more tools and survive compaction
+  (2026-09-13)** — `replace_lines`, `format`, `lsp`, `ast`, and every path in
+  `multi_file_edit` now surface the touched package's
+  `CLAUDE.md`/`AGENTS.md`/`OCODE.md` like `read`/`edit` already did, and
+  compaction resets the once-per-session seen set so those docs re-surface
+  after the splice removes them.
+
+- **Prompt cache: transcript now cached on Anthropic, and no more per-turn
+  system-block churn (2026-09-13)** — the Anthropic builder put its
+  conversation `cache_control` marker on the *first* user message, so nothing
+  after turn one was ever read from cache. Markers now sit on the last two
+  user-role turns (`applyAnthropicConversationBreakpoints`). Three system-role
+  producers that changed mid-session and re-cached the whole system block are
+  user-role now: the TUI file selection (`[ocode:selection]`, appended at the
+  tail by `PrepareMessages`; `BasePromptMessages` no longer takes it),
+  background agent/process completion notices (`[ocode:event]`), and
+  "add file to context" blocks (`[ocode:context]`).
+
+- **LSP diagnostics moved out of the system prompt (2026-09-13)** — the
+  per-Step `system`-role diagnostics block is gone. Provider builders hoist
+  every system-role message into the cached `system` field, so each
+  diagnostic change re-cached the whole system prompt. Diagnostics now reach
+  the model on the message level only: a single-file write tool waits up to
+  2s for the language server to republish and appends that file's
+  diagnostics to its own result, and files whose diagnostics changed
+  elsewhere are reported once as a `[ocode:lsp]` user-role tail block
+  (`internal/agent/lsp_inject.go`). `injectNotesTail` is user-role for the
+  same reason. Store gains `UpdatedAtURI`/`WaitURI`; manager gains
+  `WaitDiagnosticsForPath`.
+
+- **Open session tabs persist server-side (2026-09-13)** — the web/desktop
+  project store now restores and saves its open session tabs through
+  `GET/PUT /api/tabs` (bulk `{projects}` form, `internal/tabs` → `tabs.json`
+  in the global data dir) instead of origin-scoped `localStorage`. A shared
+  Tailscale URL, a second browser, or the desktop shell's per-launch port now
+  all show the same tab bar; every PUT publishes an unscoped `tabs_changed`
+  bus event so other windows refetch and converge. Existing `localStorage`
+  tabs are migrated once when the server holds none. Terminal tabs remain
+  per-origin (tracked in `TODO.md`).
+
+- **Computer-use tool and configuration controls (2026-09-13)** — added the
+  opt-in `computer` tool across macOS, Windows, and Linux drivers; `/computer
+  status|enable|disable` in TUI and web chat; `GET/PUT
+  /api/config/computer-use`; platform-specific status and setup guidance; and
+  focused driver, permission, config, and command tests. Live desktop checks
+  remain pending on non-macOS hosts and are tracked in `TODO.md`.
+
 ## [Unreleased]
 
 ## 2026-09-13 — Security hardening: SVG sanitization, CSP headers, secret redaction order fix

@@ -1,7 +1,8 @@
 import { createContext, useContext, useEffect, useCallback, useRef, type ReactNode } from "react";
 import { Store, useSelector } from "@tanstack/react-store";
 import { api } from "../api/client";
-import type { Project, ProjectGroup, SessionInfo } from "../api/types";
+import type { Project, ProjectGroup, SessionInfo, ServerProjectTabs } from "../api/types";
+import { eventBus } from "../lib/eventBus";
 
 export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "preview";
 export type ProjectMetadataStatus = "loading" | "ready" | "error";
@@ -194,8 +195,23 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         },
       };
     }
-    case "RESTORE_TABS":
-      return { ...state, tabsByProject: action.tabsByProject, activeTabByProject: action.activeTabByProject, tabsRestored: true };
+    case "RESTORE_TABS": {
+      // The restore is async (server fetch); a deep link or user action may
+      // have already opened tabs. Restored tabs come first, locally-added
+      // ones that the server doesn't know yet are kept after them.
+      const tabsByProject: Record<string, Tab[]> = { ...action.tabsByProject };
+      const activeTabByProject: Record<string, string | null> = { ...action.activeTabByProject };
+      for (const [path, local] of Object.entries(state.tabsByProject)) {
+        const merged = [...(tabsByProject[path] || [])];
+        for (const t of local) if (!merged.some((m) => m.id === t.id)) merged.push(t);
+        if (merged.length === 0) continue;
+        tabsByProject[path] = merged;
+        const localActive = state.activeTabByProject[path];
+        if (localActive && merged.some((m) => m.id === localActive)) activeTabByProject[path] = localActive;
+        else if (!activeTabByProject[path]) activeTabByProject[path] = merged[merged.length - 1].id;
+      }
+      return { ...state, tabsByProject, activeTabByProject, tabsRestored: true };
+    }
     case "SET_GROUPS":
       return { ...state, groups: Array.isArray(action.groups) ? action.groups : [] };
     default:
@@ -204,63 +220,141 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
 }
 
 // ── Persistence ────────────────────────────────────────────────────────────
-// One versioned key holds every project's open tabs + active tab. Versioned so
-// a future shape change can migrate rather than silently drop state. Writes
-// are debounced; failures are swallowed (tabs are a convenience, not data).
-const STORAGE_KEY = "ocode.ui.tabs.v1";
+// Open tabs + active tab live server-side (GET/PUT /api/tabs → internal/tabs,
+// tabs.json under the global data dir), not in localStorage: localStorage is
+// per-origin, so a shared Tailscale URL, a second browser, or the desktop
+// shell's per-launch random port each saw an empty tab bar. The server is
+// the single source of truth; every window converges via the `tabs_changed`
+// bus event. Writes are debounced; failures are logged (tabs are a
+// convenience, not data).
+//
+// LEGACY_STORAGE_KEY is the pre-server localStorage key, read once when the
+// server has no state yet so existing users keep their tabs, then removed.
+const LEGACY_STORAGE_KEY = "ocode.ui.tabs.v1";
 
-interface PersistedTabs {
-  version: 1;
-  projects: Record<string, { tabs: { id: string; title: string; subTab?: SessionSubTabId }[]; active: string | null }>;
+interface RestoredTabs {
+  tabsByProject: Record<string, Tab[]>;
+  activeTabByProject: Record<string, string | null>;
 }
 
-function loadPersistedTabs(): { tabsByProject: Record<string, Tab[]>; activeTabByProject: Record<string, string | null> } {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { tabsByProject: {}, activeTabByProject: {} };
-    const parsed = JSON.parse(raw) as PersistedTabs;
-    if (!parsed || parsed.version !== 1 || typeof parsed.projects !== "object") {
-      return { tabsByProject: {}, activeTabByProject: {} };
-    }
-    const tabsByProject: Record<string, Tab[]> = {};
-    const activeTabByProject: Record<string, string | null> = {};
-    for (const [path, entry] of Object.entries(parsed.projects)) {
-      if (!entry || !Array.isArray(entry.tabs)) continue;
-      const tabs = entry.tabs
-        .filter((t) => t && typeof t.id === "string" && !t.id.startsWith("new-"))
-        .map((t) => ({
-          id: t.id,
-          projectPath: path,
-          title: typeof t.title === "string" ? t.title : t.id,
-          activeSubTab: (t.subTab === "agents" || t.subTab === "changes" || t.subTab === "logs" || t.subTab === "status" || t.subTab === "preview" ? t.subTab : "chat") as SessionSubTabId,
-        }));
-      if (tabs.length === 0) continue;
-      tabsByProject[path] = tabs;
-      activeTabByProject[path] = entry.active && tabs.some((t) => t.id === entry.active) ? entry.active : tabs[tabs.length - 1].id;
-    }
-    return { tabsByProject, activeTabByProject };
-  } catch (err) {
-    console.error("Failed to load persisted tabs:", err);
-    return { tabsByProject: {}, activeTabByProject: {} };
+const EMPTY_RESTORE: RestoredTabs = { tabsByProject: {}, activeTabByProject: {} };
+
+function toSubTab(v: unknown): SessionSubTabId {
+  return (v === "agents" || v === "changes" || v === "logs" || v === "status" || v === "preview" ? v : "chat") as SessionSubTabId;
+}
+
+/** Converts the server's `{root: {tabs, active}}` map into store shape,
+ *  dropping malformed entries and never-persisted `new-*` tabs. */
+function fromServerTabs(projects: Record<string, ServerProjectTabs> | null | undefined): RestoredTabs {
+  const tabsByProject: Record<string, Tab[]> = {};
+  const activeTabByProject: Record<string, string | null> = {};
+  if (!projects || typeof projects !== "object") return { tabsByProject, activeTabByProject };
+  for (const [path, entry] of Object.entries(projects)) {
+    if (!entry || !Array.isArray(entry.tabs)) continue;
+    const tabs = entry.tabs
+      .filter((t) => t && typeof t.id === "string" && !t.id.startsWith("new-"))
+      .map((t) => ({
+        id: t.id,
+        projectPath: path,
+        title: typeof t.title === "string" ? t.title : t.id,
+        activeSubTab: toSubTab(t.sub_tab),
+      }));
+    if (tabs.length === 0) continue;
+    tabsByProject[path] = tabs;
+    activeTabByProject[path] = entry.active && tabs.some((t) => t.id === entry.active) ? entry.active : tabs[tabs.length - 1].id;
   }
+  return { tabsByProject, activeTabByProject };
 }
 
-function persistTabs(state: ProjectState) {
-  if (state.tabsRestored === false) return; // never write before a restore settled
-  const projects: PersistedTabs["projects"] = {};
+function toServerTabs(state: ProjectState): Record<string, ServerProjectTabs> {
+  const projects: Record<string, ServerProjectTabs> = {};
   for (const [path, tabs] of Object.entries(state.tabsByProject)) {
     const real = tabs.filter((t) => !t.id.startsWith("new-"));
     if (real.length === 0) continue;
     projects[path] = {
-      tabs: real.map((t) => ({ id: t.id, title: t.title, subTab: t.activeSubTab })),
-      active: state.activeTabByProject[path] ?? null,
+      tabs: real.map((t) => ({ id: t.id, title: t.title, sub_tab: t.activeSubTab })),
+      active: state.activeTabByProject[path] ?? "",
     };
   }
+  return projects;
+}
+
+/** One-time read of the pre-server localStorage state (shape
+ *  `{version:1, projects:{path:{tabs:[{id,title,subTab}], active}}}`). */
+function loadLegacyLocalTabs(): RestoredTabs {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 1, projects } satisfies PersistedTabs));
+    const raw = window.localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!raw) return EMPTY_RESTORE;
+    const parsed = JSON.parse(raw) as {
+      version: number;
+      projects: Record<string, { tabs: { id: string; title: string; subTab?: string }[]; active: string | null }>;
+    };
+    if (!parsed || parsed.version !== 1 || typeof parsed.projects !== "object") return EMPTY_RESTORE;
+    const projects: Record<string, ServerProjectTabs> = {};
+    for (const [path, entry] of Object.entries(parsed.projects)) {
+      if (!entry || !Array.isArray(entry.tabs)) continue;
+      projects[path] = {
+        tabs: entry.tabs.map((t) => ({ id: t.id, title: t.title, sub_tab: t.subTab })),
+        active: entry.active ?? "",
+      };
+    }
+    return fromServerTabs(projects);
   } catch (err) {
-    console.error("Failed to persist tabs:", err);
+    console.error("Failed to load legacy persisted tabs:", err);
+    return EMPTY_RESTORE;
   }
+}
+
+function clearLegacyLocalTabs() {
+  try {
+    window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch (err) {
+    console.error("Failed to clear legacy persisted tabs:", err);
+  }
+}
+
+/** Merges tab state fetched from the server into the current state: real
+ *  tabs come from the server, local `new-*` tabs stay. Returns null when the
+ *  merge would not change anything. */
+function mergeExternalTabs(prev: ProjectState, external: RestoredTabs): RestoredTabs | null {
+  const mergedByProject: Record<string, Tab[]> = {};
+  const mergedActive: Record<string, string | null> = { ...prev.activeTabByProject };
+  const allProjects = new Set<string>([
+    ...Object.keys(prev.tabsByProject),
+    ...Object.keys(external.tabsByProject),
+  ]);
+  for (const path of allProjects) {
+    const local = prev.tabsByProject[path] || [];
+    const localNew = local.filter((t: Tab) => t.id.startsWith("new-"));
+    const extReal = external.tabsByProject[path] || [];
+    if (extReal.length === 0 && localNew.length === 0) continue;
+    const merged = [...extReal];
+    for (const nt of localNew) {
+      if (!merged.some((t) => t.id === nt.id)) merged.push(nt);
+    }
+    if (merged.length > 0) mergedByProject[path] = merged;
+    const extActive = external.activeTabByProject[path];
+    const localActive = prev.activeTabByProject[path] || null;
+    // Keep a local new-* active tab over the external active.
+    if (localActive && localActive.startsWith("new-") && localNew.some((t: Tab) => t.id === localActive)) {
+      mergedActive[path] = localActive;
+    } else if (extActive && merged.some((t) => t.id === extActive)) {
+      mergedActive[path] = extActive;
+    } else if (localActive && merged.some((t) => t.id === localActive)) {
+      mergedActive[path] = localActive;
+    } else {
+      mergedActive[path] = merged.length > 0 ? merged[merged.length - 1].id : null;
+      if (merged.length === 0) delete mergedActive[path];
+    }
+  }
+  // Remove projects that were deleted externally (no real nor new tabs)
+  for (const path of Object.keys(mergedActive)) {
+    if (!mergedByProject[path]) delete mergedActive[path];
+  }
+  const prevStr = JSON.stringify({ tbp: prev.tabsByProject, atb: prev.activeTabByProject });
+  const nextStr = JSON.stringify({ tbp: mergedByProject, atb: mergedActive });
+  if (prevStr === nextStr) return null;
+  return { tabsByProject: mergedByProject, activeTabByProject: mergedActive };
 }
 
 interface ProjectContextType {
@@ -276,7 +370,17 @@ interface ProjectContextType {
   openSessionTab: (sessionId: string, sessionTitle: string) => void;
   closeSessionTab: (sessionId: string) => void;
   addProject: (path: string) => Promise<void>;
-  addRemoteProject: (host: string, path: string) => Promise<void>;
+  addRemoteProject: (host: string, path: string, port?: number) => Promise<void>;
+  updateRemoteProject: (input: {
+    old_host: string;
+    old_path: string;
+    path: string;
+    kind: "ssh" | "wsl";
+    user?: string;
+    host?: string;
+    port?: number;
+    distro?: string;
+  }) => Promise<void>;
   removeProject: (path: string, host?: string) => Promise<void>;
   renameProject: (path: string, name: string, host?: string) => Promise<void>;
   reorderProjects: (refs: Array<{ path: string; host?: string }>) => Promise<void>;
@@ -314,87 +418,108 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   );
   const projectsRequestRef = useRef(0);
 
-  // Debounced persistence of tabs + active tab. Runs on every tabs change.
+  // Server sync state shared by the persist, restore, and bus effects below.
+  // `dirty` = a debounced write is scheduled, `writing` = a PUT is in flight,
+  // `refetchQueued` = a tabs_changed event arrived mid-write; the refetch is
+  // deferred until the write lands so the server reply can't clobber newer
+  // local state with what it held a moment earlier.
+  const syncRef = useRef({ dirty: false, writing: false, refetchQueued: false });
+
+  const applyServerTabs = useCallback(
+    (projects: Record<string, ServerProjectTabs>) => {
+      const merged = mergeExternalTabs(store.state, fromServerTabs(projects));
+      if (merged) store.setState((s) => ({ ...s, ...merged }));
+    },
+    [store],
+  );
+
+  const refetchTabs = useCallback(async () => {
+    const sync = syncRef.current;
+    if (sync.dirty || sync.writing) {
+      sync.refetchQueued = true;
+      return;
+    }
+    try {
+      const res = await api.getTabs();
+      // A write may have started while the GET was in flight; its completion
+      // re-runs this via refetchQueued, so don't apply a now-stale snapshot.
+      if (sync.dirty || sync.writing) {
+        sync.refetchQueued = true;
+        return;
+      }
+      applyServerTabs(res.projects);
+    } catch (err) {
+      console.error("Failed to refetch tabs from server:", err);
+    }
+  }, [applyServerTabs]);
+
+  // Debounced persistence of tabs + active tab to the server. Runs on every
+  // tabs change once the initial restore settled.
   useEffect(() => {
-    const t = setTimeout(() => persistTabs(state), 400);
+    if (!state.tabsRestored) return; // never write before a restore settled
+    const sync = syncRef.current;
+    sync.dirty = true;
+    const t = setTimeout(async () => {
+      sync.dirty = false;
+      sync.writing = true;
+      try {
+        await api.setTabs(toServerTabs(store.state));
+      } catch (err) {
+        console.error("Failed to persist tabs to server:", err);
+      } finally {
+        sync.writing = false;
+        if (sync.refetchQueued && !sync.dirty) {
+          sync.refetchQueued = false;
+          void refetchTabs();
+        }
+      }
+    }, 400);
     return () => clearTimeout(t);
-  }, [state.tabsByProject, state.activeTabByProject, state.tabsRestored]);
+  }, [state.tabsByProject, state.activeTabByProject, state.tabsRestored, store, refetchTabs]);
 
   // Restore persisted tabs once on mount (before projects load; applied for
-  // whatever projects the server reports).
-  useEffect(() => {
-    const restored = loadPersistedTabs();
-    if (restored.tabsByProject && Object.keys(restored.tabsByProject).length > 0) {
+  // whatever projects the server reports). If the server holds nothing yet,
+  // the pre-server localStorage state is migrated once; the persist effect
+  // then writes it through. A failed fetch leaves tabsRestored false (so no
+  // write can wipe the server copy) and retries on the next bus reconnect.
+  const restoreTabs = useCallback(async () => {
+    try {
+      const res = await api.getTabs();
+      let restored = fromServerTabs(res.projects);
+      if (Object.keys(restored.tabsByProject).length === 0) {
+        const legacy = loadLegacyLocalTabs();
+        if (Object.keys(legacy.tabsByProject).length > 0) restored = legacy;
+      }
       dispatch({ type: "RESTORE_TABS", ...restored });
-    } else {
-      dispatch({ type: "RESTORE_TABS", tabsByProject: {}, activeTabByProject: {} });
+      clearLegacyLocalTabs();
+    } catch (err) {
+      console.error("Failed to restore tabs from server (will retry on reconnect):", err);
     }
-  }, []);
+  }, [dispatch]);
 
-  // Keep tabs in sync across same-origin windows/tabs. localStorage's
-  // `storage` event fires in every *other* browsing context when one tab
-  // writes — without this, opening or closing a chat tab in window A
-  // never appears in window B until a full reload.
   useEffect(() => {
-    const handler = (e: StorageEvent) => {
-      if (e.key !== STORAGE_KEY) return;
-      const external = loadPersistedTabs();
-      const prev = store.state;
-      // Don't clobber state before the initial restore settled.
-      if (!prev.tabsRestored) return;
-      const mergedByProject: Record<string, Tab[]> = {};
-      const mergedActive: Record<string, string | null> = { ...prev.activeTabByProject };
-      const allProjects = new Set<string>([
-        ...Object.keys(prev.tabsByProject),
-        ...Object.keys(external.tabsByProject),
-      ]);
-      for (const path of allProjects) {
-        const local = prev.tabsByProject[path] || [];
-        const localNew = local.filter((t: Tab) => t.id.startsWith("new-"));
-        const extReal = external.tabsByProject[path] || [];
-        if (extReal.length === 0 && localNew.length === 0) continue;
-        // Real tabs come from storage; new-* tabs stay local.
-        const merged = [...extReal];
-        for (const nt of localNew) {
-          if (!merged.some((t) => t.id === nt.id)) merged.push(nt);
-        }
-        if (merged.length > 0) mergedByProject[path] = merged;
-        const extActive = external.activeTabByProject[path];
-        const localActive = prev.activeTabByProject[path] || null;
-        // Keep a local new-* active tab over the external active.
-        if (localActive && localActive.startsWith("new-") && localNew.some((t: Tab) => t.id === localActive)) {
-          mergedActive[path] = localActive;
-        } else if (extActive && merged.some((t) => t.id === extActive)) {
-          mergedActive[path] = extActive;
-        } else if (localActive && merged.some((t) => t.id === localActive)) {
-          mergedActive[path] = localActive;
-        } else {
-          mergedActive[path] = merged.length > 0 ? merged[merged.length - 1].id : null;
-          if (merged.length === 0) delete mergedActive[path];
-        }
-      }
-      // Include projects that only exist in external (new project added elsewhere)
-      for (const [path, tabs] of Object.entries(external.tabsByProject)) {
-        if (mergedByProject[path]) continue;
-        mergedByProject[path] = tabs;
-        mergedActive[path] = external.activeTabByProject[path] ?? tabs[tabs.length - 1]?.id ?? null;
-      }
-      // Remove projects that were deleted externally (no real nor new tabs)
-      for (const path of Object.keys(mergedByProject)) {
-        if (mergedByProject[path].length === 0) {
-          delete mergedByProject[path];
-          delete mergedActive[path];
-        }
-      }
-      const prevStr = JSON.stringify({ tbp: prev.tabsByProject, atb: prev.activeTabByProject });
-      const nextStr = JSON.stringify({ tbp: mergedByProject, atb: mergedActive });
-      if (prevStr !== nextStr) {
-        store.setState((s) => ({ ...s, tabsByProject: mergedByProject, activeTabByProject: mergedActive }));
-      }
+    void restoreTabs();
+  }, [restoreTabs]);
+
+  // Keep tabs in sync across every window on this server — another browser,
+  // a shared Tailscale URL, the desktop shell. The server publishes an
+  // unscoped `tabs_changed` bus event after each PUT; on it (and on every bus
+  // reconnect, which may have missed one) refetch and merge.
+  useEffect(() => {
+    const onChanged = () => {
+      if (!store.state.tabsRestored) return; // initial restore still pending
+      void refetchTabs();
     };
-    window.addEventListener("storage", handler);
-    return () => window.removeEventListener("storage", handler);
-  }, [store]);
+    const offEvent = eventBus.on("tabs_changed", onChanged);
+    const offReconnect = eventBus.onReconnect(() => {
+      if (!store.state.tabsRestored) void restoreTabs();
+      else void refetchTabs();
+    });
+    return () => {
+      offEvent();
+      offReconnect();
+    };
+  }, [store, refetchTabs, restoreTabs]);
 
   const refreshProjects = useCallback(async () => {
     const requestId = ++projectsRequestRef.current;
@@ -430,7 +555,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "SET_ACTIVE_PROJECT", project });
     dispatch({ type: "SET_SESSIONS_LOADING", loading: true });
     try {
-      const sessions = await api.listProjectSessions(project.path);
+      const sessions = await api.listProjectSessions(project.path, project.host);
       dispatch({ type: "SET_PROJECT_SESSIONS", sessions });
     } catch (err) {
       console.error("Failed to load project sessions:", err);
@@ -492,15 +617,30 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshProjects]);
 
-  const addRemoteProject = useCallback(async (host: string, path: string) => {
+  const addRemoteProject = useCallback(async (host: string, path: string, port?: number) => {
     try {
-      await api.addRemoteProject(host, path);
+      await api.addRemoteProject(host, path, port);
       await refreshProjects();
     } catch (err) {
       console.error("Failed to add remote project:", err);
       throw err;
     }
   }, [refreshProjects]);
+
+  const updateRemoteProject = useCallback(async (input: Parameters<NonNullable<typeof api.updateRemoteProject>>[0]) => {
+    const updated = await api.updateRemoteProject(input);
+    dispatch({
+      type: "SET_PROJECTS",
+      projects: state.projects.map((project) =>
+        project.host === input.old_host && project.path === input.old_path ? updated : project,
+      ),
+    });
+    const active = state.activeProject;
+    if (active?.host === input.old_host && active.path === input.old_path) {
+      dispatch({ type: "SET_ACTIVE_PROJECT", project: updated });
+    }
+    await refreshProjects();
+  }, [dispatch, refreshProjects, state.activeProject, state.projects]);
 
   const removeProject = useCallback(async (path: string, host?: string) => {
     try {
@@ -707,6 +847,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         closeSessionTab,
         addProject,
         addRemoteProject,
+        updateRemoteProject,
         removeProject,
         renameProject,
         reorderProjects,

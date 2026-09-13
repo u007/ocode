@@ -25,6 +25,9 @@ import (
 type Tab struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
+	// SubTab is the session sub-tab (chat/agents/changes/...) the tab was
+	// last viewing, so a restore lands where the user left off.
+	SubTab string `json:"sub_tab,omitempty"`
 }
 
 // ProjectTabs is the tab state for a single project root.
@@ -46,8 +49,14 @@ func NewStore() (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tabs: resolve global data dir: %w", err)
 	}
+	return NewStoreAt(filepath.Join(globalDir, "tabs.json"))
+}
+
+// NewStoreAt creates or loads a tab store at an explicit JSON path. Used by
+// the server tests to keep the store out of the real global data dir.
+func NewStoreAt(path string) (*Store, error) {
 	s := &Store{
-		path:  filepath.Join(globalDir, "tabs.json"),
+		path:  path,
 		cache: map[string]ProjectTabs{},
 	}
 	if err := s.load(); err != nil {
@@ -98,6 +107,30 @@ func (s *Store) Get(path string) ProjectTabs {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cache[filepath.Clean(path)]
+}
+
+// All returns a copy of every project's tab state, keyed by project root.
+func (s *Store) All() map[string]ProjectTabs {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]ProjectTabs, len(s.cache))
+	for k, v := range s.cache {
+		out[k] = v
+	}
+	return out
+}
+
+// ReplaceAll swaps the entire tab state for the given map — a full
+// replacement, so projects absent from all are dropped.
+func (s *Store) ReplaceAll(all map[string]ProjectTabs) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := make(map[string]ProjectTabs, len(all))
+	for k, v := range all {
+		next[filepath.Clean(k)] = v
+	}
+	s.cache = next
+	return s.save()
 }
 
 // Set stores the tab state for a project root.

@@ -37,9 +37,11 @@ func (h *Handler) HandleTerminalHistory(w http.ResponseWriter, r *http.Request) 
 // exists here so terminalSessionTable compiles on Windows.
 type terminalSession struct {
 	resumable bool
+	project   string
 }
 
 func (s *terminalSession) hasExited() bool { return true }
+func (s *terminalSession) kill() {}
 
 // shutdownGracefully is a no-op on Windows: no pty processes exist (see
 // terminal_kill_windows.go), so there is nothing to signal or drain. Present

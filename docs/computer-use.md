@@ -82,12 +82,20 @@ The computer driver operates on the host desktop; it is not a shell command and 
 
 ### macOS
 
-The driver uses the built-in `screencapture` command for screenshots and macOS event APIs for input. Grant both permissions to the terminal that launched ocode or to `ocode-desktop`:
+The driver uses the built-in `screencapture` command for screenshots and a JXA helper (run through `osascript`) that posts CoreGraphics events for mouse and key input. Grant these permissions to the terminal that launched ocode or to `ocode-desktop`:
 
 - **Screen Recording** — System Settings > Privacy & Security > Screen Recording
 - **Accessibility** — System Settings > Privacy & Security > Accessibility
+- **Automation → System Events** — macOS prompts for this the first time `type` is used; approve it once.
 
-Without Screen Recording, macOS may return a wallpaper-only screenshot without an error. Without Accessibility, input actions are rejected with a permission notice.
+Without Screen Recording, macOS returns a wallpaper-only screenshot without an error. Without Accessibility, input actions fail with a permission notice (the helper checks `AXIsProcessTrusted` before posting any event).
+
+Typing on macOS has two paths, because CoreGraphics unicode typing cannot be driven from the JXA bridge:
+
+- Printable ASCII, newlines, and tabs are typed through System Events `keystroke`, with Return and Tab sent as key events.
+- Text containing any other character is placed on the general pasteboard and pasted with cmd+v. The pasteboard is **not restored** afterwards (a restore races the asynchronous paste), so the typed text stays on the clipboard.
+
+Key combinations use `+` and xdotool-style names: modifiers `cmd`, `ctrl`, `alt`, `shift`; keys such as `Return`, `Tab`, `Escape`, `space`, `BackSpace`, `Delete`, arrows, `Home`, `End`, `Page_Up`, `Page_Down`, `F1`–`F12`, letters, digits, and `minus`, `equal`, `comma`, `period`, `slash`, `semicolon`, `apostrophe`, `bracketleft`, `bracketright`, `backslash`, `grave`.
 
 ### Windows
 

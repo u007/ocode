@@ -47,7 +47,7 @@ func (t *LSPDiagnosticsTool) Definition() map[string]interface{} {
 				"Returns the first %d diagnostics by default, sorted by file then line. "+
 				"Use `offset` and `limit` to paginate, `path` to filter to a single file (the file is also re-opened with the server so fresh diagnostics are pulled), and `severity` to filter to a minimum level "+
 				"(one of %q). The output header always shows the total count and file count so you can decide whether to paginate. "+
-				"This tool reads the same cache that is auto-injected into the system message on every turn; call it when you need entries beyond the first %d, or want to filter by file/severity.",
+				"Diagnostics for a file you just wrote are appended to that tool's result automatically, and changes elsewhere are reported before your next turn; call this tool when you need entries beyond the first %d, or want to filter by file/severity.",
 			lspDiagnosticsDefaultLimit,
 			[]string{"error", "warning", "info", "hint"},
 			lspDiagnosticsDefaultLimit,
@@ -171,7 +171,7 @@ func RenderDiagnosticsPage(filtered []lsp.Diagnostic, offset, limit int) string 
 
 	// Compose the response. Header shows the total + file count so the
 	// agent can decide whether to paginate; the rendered lines are
-	// identical to the format injected into the system message.
+	// identical to the format the agent attaches to write-tool results.
 	header := renderDiagnosticsHeader(filtered, len(page), offset)
 	var b strings.Builder
 	b.WriteString(header)
@@ -288,8 +288,8 @@ func renderDiagnosticsHeader(filtered []lsp.Diagnostic, shown, offset int) strin
 //
 //	internal/foo.go:42:7  [error unusedvar]  variable 'x' is unused
 //
-// Used by both the tool (full output) and the agent-loop auto-inject
-// (system message). Kept as a small helper so the two paths can never
+// Used by both the tool (full output) and the agent's message-level
+// attachments. Kept as a small helper so the two paths can never
 // drift in formatting.
 func renderDiagnosticLine(d lsp.Diagnostic) string {
 	loc := fmt.Sprintf("%s:%d:%d", displayPath(d.Path), d.Range.Start.Line+1, d.Range.Start.Character+1)

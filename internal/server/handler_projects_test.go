@@ -165,3 +165,43 @@ func TestHandleReorderProjectsLegacyPaths(t *testing.T) {
 		t.Fatalf("order = %s, want [/b /a]", raw)
 	}
 }
+
+func TestHandleUpdateRemoteProjectSSH(t *testing.T) {
+	h := testProjectHandler(t)
+	if err := h.projects.AddRemote("alice@old.example", "/srv/app"); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/projects/remote", strings.NewReader(`{"old_host":"alice@old.example","old_path":"/srv/app","kind":"ssh","user":"bob","host":"new.example","port":2222,"path":"/srv/new"}`))
+	h.HandleUpdateRemoteProject(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	got := projectByRef(t, h, "bob@new.example", "/srv/new")
+	if got.RemotePort != 2222 || got.RemoteUser != "bob" {
+		t.Fatalf("updated = %+v", got)
+	}
+}
+
+func TestHandleUpdateRemoteProjectRejectsInvalidWSLPort(t *testing.T) {
+	h := testProjectHandler(t)
+	if err := h.projects.AddRemote("wsl:Ubuntu", "/home/app"); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/projects/remote", strings.NewReader(`{"old_host":"wsl:Ubuntu","old_path":"/home/app","kind":"wsl","distro":"Debian","port":22,"path":"/home/app"}`))
+	h.HandleUpdateRemoteProject(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+	if _, ok := func() (projects.Project, bool) {
+		for _, p := range h.projects.List() {
+			if p.Host == "wsl:Ubuntu" {
+				return p, true
+			}
+		}
+		return projects.Project{}, false
+	}(); !ok {
+		t.Fatal("original project was changed")
+	}
+}

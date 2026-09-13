@@ -476,11 +476,16 @@ func TestStepInjectsLSPDiagnostics(t *testing.T) {
 		t.Fatalf("Step() error = %v", err)
 	}
 
+	// Diagnostics must reach the model as a user-role tail block: a
+	// system-role message is hoisted into the cached system prompt by every
+	// provider builder and would bust the cache on each change.
 	var found bool
 	for _, msg := range client.Messages {
-		if msg.Role == "system" && strings.Contains(msg.Content, "LSP diagnostics:") && strings.Contains(msg.Content, "unused variable") {
+		if strings.Contains(msg.Content, "unused variable") {
+			if msg.Role != "user" {
+				t.Fatalf("LSP diagnostics carried in %q role, want user", msg.Role)
+			}
 			found = true
-			break
 		}
 	}
 	if !found {
@@ -494,15 +499,23 @@ func TestPrepareMessagesDoesNotDuplicateMarkedBasePrompt(t *testing.T) {
 	twice := a.PrepareMessages(once, "selected")
 
 	counts := map[string]int{}
+	roles := map[string]string{}
 	for _, msg := range twice {
-		if msg.Role == "system" {
-			counts[promptMarker(msg.Content)]++
-		}
+		counts[promptMarker(msg.Content)]++
+		roles[promptMarker(msg.Content)] = msg.Role
 	}
 	for _, marker := range []string{promptEnvMarker, promptModeMarker, promptSelectionMarker} {
 		if counts[marker] != 1 {
 			t.Fatalf("marker %s count = %d, want 1 in %#v", marker, counts[marker], twice)
 		}
+	}
+	// The selection is per-turn state: user-role, at the tail, never in the
+	// cached system block.
+	if roles[promptSelectionMarker] != "user" {
+		t.Fatalf("selection role = %q, want user", roles[promptSelectionMarker])
+	}
+	if last := twice[len(twice)-1]; promptMarker(last.Content) != promptSelectionMarker {
+		t.Fatalf("selection must be the tail message, got %q", last.Content)
 	}
 }
 

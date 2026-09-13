@@ -219,7 +219,11 @@ func FreeLocalPort() (int, error) {
 // first bind failure) would otherwise always fail with "already
 // registered." A fresh port on each retry makes the ID naturally unique.
 func StartTunnel(sup *tool.ProcessSupervisor, target Target, localPort, remotePort, browsePort int) (*exec.Cmd, error) {
-	cmd := exec.Command("ssh", tunnelArgs(localPort, remotePort, browsePort, target.String())...)
+	args := tunnelArgs(localPort, remotePort, browsePort, target.String())
+	if target.Port > 0 {
+		args = append(args[:len(args)-1], "-p", strconv.Itoa(target.Port), args[len(args)-1])
+	}
+	cmd := exec.Command("ssh", args...)
 	if _, err := tool.StartSupervised(sup, cmd, tool.ProcessRegistration{
 		ID:      fmt.Sprintf("remote-tunnel-%d", localPort),
 		Name:    "ssh-tunnel",

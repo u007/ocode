@@ -4,6 +4,7 @@ export interface TerminalHistoryRestoreOptions {
   id: string;
   projectPath: string;
   host?: string;
+  remotePort?: number;
   pageSize?: number;
   signal?: AbortSignal;
   /** Share decoder state with the following WebSocket byte stream. */
@@ -78,6 +79,7 @@ export async function restoreTerminalHistory({
   id,
   projectPath,
   host,
+  remotePort,
   pageSize = 64 * 1024,
   signal,
   onSnapshotEnd,
@@ -99,6 +101,7 @@ export async function restoreTerminalHistory({
     if (snapshotEnd !== undefined) params.set("snapshot_end", String(snapshotEnd));
     if (host) {
       params.set("host", host);
+      if (remotePort) params.set("port", String(remotePort));
       params.set("project_path", projectPath);
     } else {
       params.set("project", projectPath);

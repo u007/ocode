@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/changes"
+	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
@@ -296,11 +297,19 @@ type Agent struct {
 	// process-global debug log while still sending a stable request identity.
 	opencodeSessionID string
 	opencodeSessionMu sync.Mutex
-	// lspMgr, when non-nil, is the project-wide LSP manager. The agent
-	// loop reads its diagnostic store on every Step to build a
-	// transient system-message fragment (see injectLSPDiagnostics) — it
-	// is never persisted to message history. nil disables the inject.
-	lspMgr      *lsp.Manager
+	// lspMgr, when non-nil, is the project-wide LSP manager. Diagnostics
+	// reach the model on the message level only: appended to write-tool
+	// results (appendEditDiagnostics) and as a user-role delta block in
+	// the volatile tail (injectLSPDelta). Never system-role — see
+	// lsp_inject.go. nil disables both.
+	lspMgr *lsp.Manager
+	// lspWait resolves post-edit diagnostics for a path; nil when there is
+	// no LSP manager. Tests stub it.
+	lspWait lspDiagnosticWaiter
+	// lspSeen maps file URI → fingerprint of the diagnostics last reported
+	// to the model, so injectLSPDelta emits only real changes.
+	lspSeen     map[string]string
+	lspSeenMu   sync.Mutex
 	permissions *PermissionManager
 	activity    *ActivityTracker
 	procs       *tool.ProcessRegistry
@@ -429,6 +438,10 @@ type Agent struct {
 	// not set OnToolOutput, so their streaming tools fall back to the synchronous
 	// Execute path.
 	OnToolOutput func(toolCallID, chunk string)
+	// reflectState holds the agent-owned last-reflected preview/browser
+	// snapshot. Updated each loop after comparison; only actual changes
+	// emit a new user message at the tail, preserving the cached prefix.
+	reflectState ReflectState
 
 	// RetainFullToolOutput declares that this agent's UI renders the streamed
 	// tool text AS the transcript and therefore needs the canonical tool result
@@ -957,12 +970,10 @@ func (a *Agent) getPreloadedContext() string {
 	return a.preloadedContext
 }
 
-// NewAgent constructs an agent. lspMgr is optional: when non-nil the
-// agent loop auto-injects a transient system-message fragment with the
-// current LSP diagnostics on every Step (see injectLSPDiagnostics). The
-// fragment is rebuilt every turn from the manager's DiagnosticStore and
-// is never persisted to message history. Pass nil to disable the
-// auto-inject (e.g. for tests with no LSP setup).
+// NewAgent constructs an agent. lspMgr is optional: when non-nil, write
+// tools attach fresh diagnostics to their results and out-of-band changes
+// are reported as a user-role tail block (see lsp_inject.go). Pass nil to
+// disable both (e.g. for tests with no LSP setup).
 func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *lsp.Manager) *Agent {
 	toolMap := make(map[string]tool.Tool)
 	for _, t := range tools {
@@ -975,6 +986,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 		config:         cfg,
 		mode:           ModeBuild,
 		lspMgr:         lspMgr,
+		lspWait:        lspWaiterFor(lspMgr),
 		permissions:    NewPermissionManager(),
 		activity:       newActivityTracker(),
 		noteBusFactory: defaultNoteBusFactory,
@@ -1098,7 +1110,34 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	}
 	a.memoryEnabled = cfg == nil || cfg.Ocode.MemoryEnabled
 	a.docPromptEnabled = cfg != nil && cfg.Ocode.DocPromptEnabled
+	a.attachComputerDriver()
 	return a
+}
+
+// attachComputerDriver wires the platform driver into an enabled computer
+// tool. A tool without a process supervisor cannot safely own platform
+// subprocesses, so it is removed rather than advertised with a nil driver.
+func (a *Agent) attachComputerDriver() {
+	computerTool, ok := a.tools["computer"].(*tool.ComputerTool)
+	if !ok || computerTool.Driver != nil {
+		return
+	}
+	sup := a.Supervisor()
+	if sup == nil {
+		// Hosts attach the supervisor after construction (SetSupervisor), so a
+		// missing one is transient: keep the tool, hide it from the model via
+		// isToolAllowed until a driver is attached.
+		computerTool.DriverErr = fmt.Errorf("process supervisor not attached")
+		return
+	}
+	driver, err := computer.New(sup)
+	if err != nil {
+		a.emitDebug("WARN", fmt.Sprintf("computer tool unavailable: %v", err))
+		delete(a.tools, "computer")
+		return
+	}
+	computerTool.Driver = driver
+	computerTool.DriverErr = nil
 }
 
 func (a *Agent) SetChildSessionPersistence(persist func(sessionID, title string, messages []Message, metadata map[string]any) error) {
@@ -1203,14 +1242,14 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	messages = a.PrepareMessages(messages, "")
 	// Order matters for cache stability: stable content
 	// (PrepareMessages output) is followed by the volatile
-	// tail (LSP diagnostics, notes delta). Both injectors
-	// append at the end so the prefix bytes are unchanged
-	// across loops that have no new diagnostic / no new
-	// notes. See append_stable.go for the documented
-	// contract.
-	messages = a.injectLSPDiagnostics(messages)
+	// tail (notes delta, LSP delta, todo re-anchor). Every
+	// injector appends at the end, and every volatile one is
+	// user-role: system-role messages are hoisted into the
+	// cached system block by the provider builders. See
+	// append_stable.go for the documented contract.
+	//
 	// Notes delta: when this agent is in a notes group, the
-	// bus's per-loop delta is appended as one <oc-log> system
+	// bus's per-loop delta is appended as one <oc-log> user
 	// message at the very tail. The block is added ONLY when
 	// the delta is non-empty (the cache-stability invariant:
 	// nothing new → no block → no prefix change). See
@@ -1229,6 +1268,15 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// is user-role, not system-role, because every system-role message rides
 	// the cached system block — see AGENTS.md "## Persistent todo plan".
 	messages = injectTodoTail(messages)
+	// LSP diagnostics that changed since the agent last reported them
+	// (user edits between turns, package-level fallout). User-role, tail,
+	// absent when nothing changed. See lsp_inject.go.
+	messages = a.injectLSPDelta(messages)
+	// Reflection hook: append user message only when canonical preview
+	// and browser snapshot changed vs agent-owned baseline. Wired to take
+	// the current external snapshot; passes agent's own snapshot when no
+	// external source is connected, yielding no emission and stable prefix.
+	messages = a.reflectTail(messages, a.reflectState)
 	// Note: GetToolDefinitions is invoked inside the iteration loop below so
 	// a mid-turn discover_more (Part 08) is visible on the next iteration.
 	var newMsgs []Message
@@ -1254,6 +1302,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		// prompt preparation. Inject them before each model iteration so the
 		// next LLM call sees instructions for files touched in this turn.
 		messages = injectDirMDTail(messages, a)
+		// Same seam for LSP fallout in files the last tool round did not
+		// write (a write tool's own file is attached to its result).
+		messages = a.injectLSPDelta(messages)
 		// Slot in any plain messages the user queued (EnqueueInjection) while
 		// this turn's tool calls were running. This boundary — after a
 		// completed tool round, before the next LLM call — is the same seam
@@ -1811,35 +1862,6 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		a.maybePostTaskDiscoveryOptimization(sig, userGoal)
 	}
 	return newMsgs, nil
-}
-
-const lspDiagnosticsAutoInjectLimit = 50
-
-// injectLSPDiagnostics appends a transient system message with
-// the current project LSP diagnostics at the very tail of the
-// message list. The message is rebuilt on every Step and is
-// never persisted to history. The injection is at the tail
-// (not interleaved with stable content) so the cached prefix
-// is byte-identical across loops that have no diagnostic
-// change. See append_stable.go for the cache-stability
-// contract.
-func (a *Agent) injectLSPDiagnostics(messages []Message) []Message {
-	if a == nil || a.lspMgr == nil {
-		return messages
-	}
-	store := a.lspMgr.Diagnostics()
-	if store == nil || store.IsEmpty() {
-		return messages
-	}
-	rendered := tool.RenderDiagnosticsPage(store.All(), 0, lspDiagnosticsAutoInjectLimit)
-	if strings.TrimSpace(rendered) == "" {
-		return messages
-	}
-	msg := Message{Role: "system", Content: rendered}
-	out := make([]Message, 0, len(messages)+1)
-	out = append(out, messages...)
-	out = append(out, msg)
-	return out
 }
 
 // warnIfNearWindow emits a debug warning when the most recent prompt token
@@ -2461,6 +2483,9 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 		),
 	}
 	res.OK = true
+	// Subdirectory docs surfaced during the compacted span were volatile
+	// (never persisted) and are gone with the splice; let them re-surface.
+	a.resetDirMDSeen()
 	res.ReplaceFrom = replaceFrom
 	res.ReplaceTo = tailStart
 	res.Summary = summaryMsg
@@ -4448,6 +4473,7 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 
 	var result string
 	var err error
+	editStart := time.Now()
 	// If the tool can stream incremental output and the UI has registered a
 	// sink, run it via ExecuteStream so chunks render live. Otherwise fall back
 	// to the synchronous Execute.
@@ -4488,6 +4514,10 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 		result, err = ct.ExecuteCtx(toolCtx, args)
 	} else {
 		result, err = t.Execute(args)
+	}
+
+	if err == nil {
+		result = a.appendEditDiagnostics(name, args, result, editStart)
 	}
 
 	if hooksCfg != nil {
@@ -4631,7 +4661,14 @@ func (a *Agent) isToolAllowed(name string) bool {
 	// this check, isToolAllowed returns true for unknown tools, which causes
 	// executeToolCall to emit a confusing "tool not found" error instead of
 	// the clearer "not allowed" message.
-	if _, exists := a.tools[name]; !exists {
+	t, exists := a.tools[name]
+	if !exists {
+		return false
+	}
+	// The computer tool is only usable once a platform driver is attached
+	// (see attachComputerDriver); advertising it earlier would hand the model
+	// a tool that fails on every call.
+	if ct, ok := t.(*tool.ComputerTool); ok && ct.Driver == nil {
 		return false
 	}
 	return true
@@ -4919,6 +4956,7 @@ func (a *Agent) Supervisor() *tool.ProcessSupervisor {
 func (a *Agent) SetSupervisor(sup *tool.ProcessSupervisor) {
 	if a.procs != nil {
 		a.procs.SetSupervisor(sup)
+		a.attachComputerDriver()
 	}
 }
 

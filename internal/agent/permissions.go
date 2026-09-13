@@ -1476,7 +1476,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful force): tool=bash command=%q", command))
 			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_force")}
 		}
-		if sd := pm.sensitiveSandboxDecision(command); sd != nil {
+		if sd := pm.sensitiveSandboxDecision(command, args); sd != nil {
 			return *sd
 		}
 		if pm.mode == PermissionModeSandbox && sandboxSupported() {
@@ -2726,7 +2726,7 @@ func isSensitivePath(path string) bool {
 // interpreter (`python -c`); that residual is documented (Part 04). The OS
 // write-wall does not protect this set (auth.json/ssh are globally readable,
 // config/.env sit in writable roots), so the permission layer is the gate.
-func (pm *PermissionManager) sensitiveSandboxDecision(command string) *PermissionDecision {
+func (pm *PermissionManager) sensitiveSandboxDecision(command string, args json.RawMessage) *PermissionDecision {
 	// Only meaningful in sandbox mode; never applies in normal/yolo/locked.
 	if pm.mode != PermissionModeSandbox {
 		return nil
@@ -2741,7 +2741,7 @@ func (pm *PermissionManager) sensitiveSandboxDecision(command string) *Permissio
 			pm.emitDebug("perm", fmt.Sprintf("sandbox sensitive ASK: command=%q", command))
 			return &PermissionDecision{
 				Level:   PermissionAsk,
-				Request: bashPermissionRequest(nil, command, "sandbox.sensitive"),
+				Request: bashPermissionRequest(args, command, "sandbox.sensitive"),
 			}
 		}
 	}
@@ -4149,49 +4149,49 @@ func bashCommand(args json.RawMessage) string {
 // for the permission dialog, e.g. "left_click at 412,300" or "type hello".
 func computerAction(args json.RawMessage) string {
 	var params struct {
-		Action     string   `json:"action"`
-		Coordinate []int    `json:"coordinate"`
-		Text       string   `json:"text"`
-		Key        string   `json:"key"`
-		Direction  string   `json:"direction"`
-		Amount     int      `json:"amount"`
-		Duration   int      `json:"duration"`
+		Action          string  `json:"action"`
+		Coordinate      []int   `json:"coordinate"`
+		StartCoordinate []int   `json:"start_coordinate"`
+		Text            string  `json:"text"`
+		ScrollDirection string  `json:"scroll_direction"`
+		ScrollAmount    int     `json:"scroll_amount"`
+		Duration        float64 `json:"duration"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "computer"
 	}
+	at := func() string {
+		if len(params.Coordinate) == 2 {
+			return fmt.Sprintf(" at %d,%d", params.Coordinate[0], params.Coordinate[1])
+		}
+		return ""
+	}
 	switch params.Action {
 	case "left_click", "right_click", "middle_click", "double_click":
-		if len(params.Coordinate) == 2 {
-			return fmt.Sprintf("%s at %d,%d", params.Action, params.Coordinate[0], params.Coordinate[1])
-		}
-		return params.Action
+		return params.Action + at()
 	case "mouse_move":
-		if len(params.Coordinate) == 2 {
-			return fmt.Sprintf("move to %d,%d", params.Coordinate[0], params.Coordinate[1])
+		return "mouse_move" + at()
+	case "left_click_drag":
+		if len(params.StartCoordinate) == 2 && len(params.Coordinate) == 2 {
+			return fmt.Sprintf("left_click_drag %d,%d -> %d,%d", params.StartCoordinate[0], params.StartCoordinate[1], params.Coordinate[0], params.Coordinate[1])
 		}
-		return "mouse move"
-	case "mouse_drag":
-		if len(params.Coordinate) == 4 {
-			return fmt.Sprintf("drag %d,%d to %d,%d", params.Coordinate[0], params.Coordinate[1], params.Coordinate[2], params.Coordinate[3])
-		}
-		return "mouse drag"
+		return "left_click_drag"
 	case "scroll":
-		if params.Direction != "" {
-			return fmt.Sprintf("scroll %s", params.Direction)
+		if params.ScrollDirection != "" {
+			return fmt.Sprintf("scroll %s %d%s", params.ScrollDirection, params.ScrollAmount, at())
 		}
-		return "scroll"
+		return "scroll" + at()
 	case "type":
 		return fmt.Sprintf("type %q", params.Text)
 	case "key":
-		return fmt.Sprintf("key %q", params.Key)
+		return fmt.Sprintf("key %q", params.Text)
 	case "screenshot":
 		return "screenshot"
 	case "cursor_position":
-		return "cursor position"
+		return "cursor_position"
 	case "wait":
 		if params.Duration > 0 {
-			return fmt.Sprintf("wait %ds", params.Duration)
+			return fmt.Sprintf("wait %.0fs", params.Duration)
 		}
 		return "wait"
 	default:

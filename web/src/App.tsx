@@ -87,15 +87,15 @@ type ModelDialogTab = "main" | "small" | "advisor" | "permission" | "recap" | "o
  * a previously remote shell into a local one.
  */
 export function getTrustedTerminalProject(
-  projects: readonly Pick<Project, "path" | "host">[],
+  projects: readonly Pick<Project, "path" | "host" | "remote_port">[],
   projectPath: string,
-): { known: true; host?: string } | { known: false } {
+): { known: true; host?: string; remotePort?: number } | { known: false } {
   const matches = projects.filter((candidate) => candidate.path === projectPath);
   // The terminal store is keyed by path, so a path shared by multiple hosts
   // cannot be routed safely from a path-only persisted tab. Reject ambiguity
   // rather than arbitrarily selecting a remote or local project.
   if (matches.length !== 1) return { known: false };
-  return { known: true, host: matches[0].host || undefined };
+  return { known: true, host: matches[0].host || undefined, remotePort: matches[0].remote_port || undefined };
 }
 
 function StatusMetricsHydrator() {
@@ -340,6 +340,26 @@ function HomeApp() {
   useEffect(() => {
     setPreviewContext(null);
   }, [activeTabId]);
+
+  // When the active chat/terminal tab changes, the sideStateKey changes.
+  // Propagate the browser open state so the right-pane browser doesn't
+  // disappear just because the session/tab switched.
+  const prevSideTabStateRef = useRef<ReturnType<typeof useBrowserStore>>(undefined);
+  useEffect(() => {
+    const prevState = prevSideTabStateRef.current;
+    const prevOpen = prevState?.panelOpen ?? false;
+    const prevCollapsed = prevState?.collapsed ?? false;
+    if (!sideStateKey) {
+      prevSideTabStateRef.current = sideTabState;
+      return;
+    }
+    const currentExists = !!sideTabState;
+    if (prevOpen && !currentExists) {
+      browserActions.open(sideStateKey);
+      if (prevCollapsed) browserActions.setCollapsed(sideStateKey, true);
+    }
+    prevSideTabStateRef.current = sideTabState;
+  }, [sideStateKey, sideTabState]);
 
   useEffect(() => {
     const onDelete = (e: Event) => {
@@ -663,6 +683,8 @@ function HomeApp() {
         getSession: (id) => api.getSession(id),
         getOcrConfig: () => api.getOcrConfig(),
         setOcrConfig: (cfg) => api.setOcrConfig(cfg),
+        getComputerUseConfig: () => api.getComputerUseConfig(),
+        setComputerUseConfig: (enabled) => api.setComputerUseConfig(enabled),
         getOcrModels: () => api.getOcrModels(),
         getOcrEnabled: () => api.getOcrEnabled(),
         setOcrEnabled: (enabled) => api.setOcrEnabled(enabled),
@@ -905,6 +927,7 @@ function HomeApp() {
                                   active={pp === activeProjectPath && terminalFocused}
                                   projectPath={pp}
                                   host={metadata.host}
+                                  remotePort={metadata.remotePort}
                                 />
                               ) : (
                                 <div
@@ -1247,16 +1270,15 @@ function HomeApp() {
           )}
         </main>
 
-        {/* Right sidebar - cowork panel. Always mounted with a stable w-72 slot so
-            <main>'s width (and the unified tab bar above it) never reflows when
-            the active session's sub-tab or focus kind changes. Visibility is
-            toggled by shouldRenderCoworkSidebar + coworkOpen. */}
-        <div className="w-72 flex-shrink-0 flex flex-col min-h-0 self-stretch overflow-hidden">
-          {shouldRenderCoworkSidebar({
-            activeView,
-            activeSubTab: activeSessionTab?.activeSubTab,
-            focusedKind,
-          }) && coworkOpen ? (
+        {/* Right sidebar - cowork panel. Only mounted on the chat sub-tab
+            (shouldRenderCoworkSidebar) and only while open, so terminal and every
+            other view get the full width. */}
+        {shouldRenderCoworkSidebar({
+          activeView,
+          activeSubTab: activeSessionTab?.activeSubTab,
+          focusedKind,
+        }) && coworkOpen && (
+          <div className="w-72 flex-shrink-0 flex flex-col min-h-0 self-stretch overflow-hidden">
             <CoworkSidebar
               isOpen={coworkOpen}
               onClose={() => setCoworkOpen(false)}
@@ -1264,10 +1286,8 @@ function HomeApp() {
               onModelClick={openModelDialog}
               isMobile={isMobile}
             />
-          ) : (
-            <div className="invisible h-full" aria-hidden="true" />
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
       {/* Dialogs */}

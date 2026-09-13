@@ -76,14 +76,26 @@ func TestResolveHTRCliBinary(t *testing.T) {
 	_ = name
 }
 
+// serveHTRHealth mirrors the real htrcli daemon: every route (health included)
+// requires the bearer token and the body is wrapped as {"ok":true,"data":{...}}.
+// The managed daemon's token is its identity.
+func serveHTRHealth(w http.ResponseWriter, r *http.Request, identity, socket string) {
+	if r.Header.Get("Authorization") != "Bearer "+identity {
+		w.WriteHeader(401)
+		_, _ = fmt.Fprint(w, `{"error":"unauthorized","ok":false}`)
+		return
+	}
+	w.WriteHeader(200)
+	_, _ = fmt.Fprintf(w, `{"ok":true,"data":{"service":"htrcli","managed":true,"identity":%q,"port":%d,"socket":%q,"status":"running","connectedTabs":0,"uptime":0}}`, identity, testPort(r), socket)
+}
+
 func TestHTRHealthy(t *testing.T) {
 	lg := log.Default()
 	identity := "test-managed"
 	socket := "test-socket"
 	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/health" {
-			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"service":"htrcli","managed":true,"identity":%q,"port":%d,"socket":%q}`, identity, testPort(r), socket)
+			serveHTRHealth(w, r, identity, socket)
 			return
 		}
 		w.WriteHeader(404)
@@ -113,8 +125,7 @@ func TestEnsureHTRServe_ReusesHealthy(t *testing.T) {
 	socket := "reuse-socket"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/health" {
-			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"service":"htrcli","managed":true,"identity":%q,"port":%d,"socket":%q}`, identity, testPort(r), socket)
+			serveHTRHealth(w, r, identity, socket)
 			return
 		}
 		w.WriteHeader(404)

@@ -9,21 +9,22 @@ import (
 )
 
 // ocLogMarker is the prefix we use on the injected block.
-// It is a system-role message (not user/assistant) so the
-// LLM treats it as a system-side signal, but we use a
-// dedicated marker instead of one of the existing
-// [ocode:*] markers so callers can grep for it and so the
-// "this is volatile" intent is clear.
+// The block is user-role: every system-role message is
+// hoisted into the cached system block by the provider
+// builders (collectAndRemoveSystemMessages in client.go),
+// so a system-role delta that changes per loop would bust
+// the cached system prompt. The marker tells the LLM this
+// is a system-side signal, and lets callers grep for it.
 const ocLogMarker = "[ocode:notes]"
 
-// injectNotesTail returns base + (optionally) one system
+// injectNotesTail returns base + (optionally) one user-role
 // message at the very tail that contains a single
 // <oc-log since="N">…</oc-log> block with the agent's
 // per-loop delta. The block is appended ONLY when the delta
 // is non-empty — the empty-delta case is the cache-stability
 // invariant, and the function never alters base.
 //
-// The block is the LAST system message so:
+// The block is at the tail so:
 //   - All stable content (system prompt, transcript, prior
 //     <oc-log> blocks) precedes it.
 //   - Cached prefix is byte-identical across loops with no
@@ -57,7 +58,7 @@ func injectNotesTail(base []Message, a *Agent) []Message {
 	rendered := renderOcLog(delta, head)
 	out := make([]Message, 0, len(base)+1)
 	out = append(out, base...)
-	out = append(out, Message{Role: "system", Content: ocLogMarker + "\n" + rendered})
+	out = append(out, Message{Role: "user", Content: ocLogMarker + "\n" + rendered})
 	return out
 }
 
