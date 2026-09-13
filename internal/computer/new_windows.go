@@ -6,8 +6,7 @@ import (
 	"github.com/u007/ocode/internal/tool"
 )
 
-// newPlatformDriver returns an unsupported-platform driver on windows;
-// the real Windows driver is implemented in Part 08.
-func newPlatformDriver(r commandRunner) (tool.ComputerDriver, error) {
-	return nil, ErrUnsupportedPlatform
+// newPlatformDriver creates the Windows computer driver.
+func newPlatformDriver(r commandRunner, sup *tool.ProcessSupervisor) (tool.ComputerDriver, error) {
+	return newWindowsDriver(r, sup)
 }

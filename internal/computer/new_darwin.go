@@ -7,6 +7,6 @@ import (
 )
 
 // newPlatformDriver creates the macOS computer driver.
-func newPlatformDriver(r commandRunner) (tool.ComputerDriver, error) {
+func newPlatformDriver(r commandRunner, _ *tool.ProcessSupervisor) (tool.ComputerDriver, error) {
 	return &darwinDriver{r: r}, nil
 }
