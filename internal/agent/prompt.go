@@ -68,6 +68,14 @@ func (a *Agent) PrepareMessages(messages []Message, selectionContext string) []M
 	// volatile user-role tail, never the system block: every system-role
 	// message is hoisted into the cached system prompt by the provider
 	// builders, so a selection change would bust the whole prefix.
+	// Preserve an existing selection marker already in messages (the TUI
+	// builds selection context via PrepareMessages then re-enters
+	// agent.Step, which would otherwise strip it every turn).
+	if selectionContext == "" {
+		if sel := extractSelectionContext(messages); sel != "" {
+			selectionContext = sel
+		}
+	}
 	messages = stripMarker(messages, promptSelectionMarker)
 	base := a.BasePromptMessages()
 	existing := existingPromptMarkers(messages)
@@ -84,6 +92,20 @@ func (a *Agent) PrepareMessages(messages []Message, selectionContext string) []M
 		out = append(out, Message{Role: "user", Content: promptSelectionMarker + "\n" + sel})
 	}
 	return out
+}
+
+// extractSelectionContext pulls the content of an existing
+// promptSelectionMarker block from messages, so a caller that already
+// ran PrepareMessages with a selection context can re-enter
+// PrepareMessages (e.g. agent.Step) without losing it.
+func extractSelectionContext(messages []Message) string {
+	for _, msg := range messages {
+		if promptMarker(msg.Content) == promptSelectionMarker {
+			trimmed := strings.TrimPrefix(msg.Content, promptSelectionMarker)
+			return strings.TrimSpace(trimmed)
+		}
+	}
+	return ""
 }
 
 // stripMarker removes the first message with the given marker from messages.

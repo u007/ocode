@@ -32,6 +32,20 @@ const terminalReplayPendingCap = 256 * 1024
 // the user closes its tab or its detach TTL expires.
 const terminalKillGrace = 2 * time.Second
 
+// terminalPingInterval is how often the server sends a WebSocket ping
+// frame on a live terminal socket. This serves two purposes:
+//   - Keepalive: prevents NATs, proxies, and load balancers from silently
+//     dropping idle connections (especially critical for remote SSH/WSL
+//     tunnels which traverse many hops).
+//   - Dead connection detection: if a ping write fails, the connection is
+//     considered dead and the shell is detached — much faster than waiting
+//     for the 30-minute detach TTL or a stuck TCP half-open state.
+const terminalPingInterval = 30 * time.Second
+
+// terminalPingWriteTimeout bounds a single ping control-frame write so a
+// stalled peer cannot block the ping loop indefinitely.
+const terminalPingWriteTimeout = 10 * time.Second
+
 // terminalAttachMsg is the text control frame sent to the browser first on
 // every (re)connect. Every other server -> client frame is binary pty output,
 // so the client can key on frame type alone. resumed=true tells the client a
@@ -47,7 +61,12 @@ var anonTerminalSeq atomic.Int64
 // terminalSession is one pty-backed shell and whichever websocket is
 // currently driving it. The shell outlives the socket: on disconnect the
 // session detaches and arms a TTL timer; a new socket for the same id
-// reattaches and cancels it.
+// reattaches and cancels it. A ping goroutine in serveTerminalSocket
+// sends periodic WebSocket pings (terminalPingInterval) for keepalive
+// and dead-connection detection; a failed ping detaches the shell.
+// Client auto-reconnect (TerminalPanel.tsx) reconnects with exponential
+// backoff on unexpected closes (network failures, server crashes),
+// but not on clean 1000 closures or user-initiated closes.
 type terminalSession struct {
 	id        string
 	project   string

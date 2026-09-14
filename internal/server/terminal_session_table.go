@@ -10,6 +10,11 @@ import (
 // and transient socket drops; a browser tab that is simply closed in web mode
 // still gets reaped once the window elapses. Desktop app exit sweeps every
 // shell immediately via shutdownTerminals regardless of this timer.
+//
+// With the WebSocket ping mechanism (terminalPingInterval in
+// terminal_session.go), dead connections are detected and detached
+// far sooner than the TTL — the TTL serves as a final safety net for
+// sessions where the ping goroutine itself couldn't detect the failure.
 const terminalDetachTTL = 30 * time.Minute
 
 // terminalSessionTable owns every live pty shell keyed by the frontend's

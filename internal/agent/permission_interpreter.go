@@ -444,12 +444,20 @@ func (a *Agent) verifyInterpreterEffects(ie *InterpreterExec, resp *interpreterM
 			return false, "subprocess has network capability: " + sub
 		}
 	}
+	// Network targets: loopback is always local (mirrors the subprocess rule
+	// above); anything else must be an explicitly allowed webfetch domain.
+	// The model may report "host:port" or a full URL, so normalize to the
+	// bare hostname before consulting policy.
 	for _, host := range resp.Effects.Network {
 		host = strings.TrimSpace(host)
 		if host == "" {
 			continue
 		}
-		if pm.webfetchDomains[host] != PermissionAllow {
+		domain := normalizeNetworkEffectHost(host)
+		if isLocalhostDomain(domain) {
+			continue
+		}
+		if pm.webfetchDomains[domain] != PermissionAllow {
 			return false, "network target not allowed by policy: " + host
 		}
 	}
@@ -727,6 +735,33 @@ func isInterpreterSubprocessBinary(bin string) bool {
 
 func isNetworkSubprocessBinary(bin string) bool {
 	return interpreterSubprocessNetworkBinaries[strings.ToLower(bin)]
+}
+
+// normalizeNetworkEffectHost reduces a model-reported network target
+// ("127.0.0.1:8765", "https://api.example.com/v1", "[::1]:8080") to its bare
+// hostname so it can be matched against the webfetch domain policy.
+func normalizeNetworkEffectHost(target string) string {
+	if strings.Contains(target, "://") {
+		if d := extractDomainFromURL(target); d != "" {
+			return d
+		}
+	}
+	host := target
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		host = host[at+1:]
+	}
+	if slash := strings.IndexByte(host, '/'); slash >= 0 {
+		host = host[:slash]
+	}
+	if strings.HasPrefix(host, "[") {
+		if end := strings.IndexByte(host, ']'); end > 0 {
+			return host[1:end]
+		}
+	}
+	if colon := strings.IndexByte(host, ':'); colon > 0 && strings.Count(host, ":") == 1 {
+		host = host[:colon]
+	}
+	return host
 }
 
 func subprocessTargetsLocalhost(command string) bool {

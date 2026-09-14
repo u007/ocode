@@ -143,6 +143,13 @@ export default function TerminalPanel({
   // False during the initial scrollback replay; flipped true once the live pty
   // socket opens so a BEL baked into restored history can't false-alert.
   const readyRef = useRef(false);
+  // Reconnection state (refs, not state, to avoid re-renders).
+  const reconnectingRef = useRef(false);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<number | null>(null);
+  // Set true when the close was intentional (user closed the tab or the
+  // server confirmed the shell is gone) so we don't try to reconnect.
+  const manualCloseRef = useRef(false);
 
   const findOpenRef = useRef(findOpen);
   const findQueryRef = useRef(findQuery);
@@ -373,6 +380,10 @@ export default function TerminalPanel({
   }, [openTerminal, projectPath]);
 
   const handleCloseTerminal = useCallback(() => {
+    // Mark this close as intentional so the WebSocket onclose handler
+    // does not attempt to reconnect — the server has been told to kill
+    // the shell (DELETE /api/terminal/{id}) and the shell is gone.
+    manualCloseRef.current = true;
     closeTerminal(projectPath, id);
     setCtxMenu(null);
   }, [closeTerminal, projectPath, id]);
@@ -683,6 +694,7 @@ export default function TerminalPanel({
         token: authToken(),
         projectPath,
         host,
+        remotePort,
         terminalId: id,
         isRemote: isRemoteSession(),
         historyOffset,
@@ -691,10 +703,20 @@ export default function TerminalPanel({
       nextSocket.binaryType = "arraybuffer";
       sock = nextSocket;
       socketRef.current = nextSocket;
+      reconnectingRef.current = false;
+      reconnectAttemptRef.current = 0;
 
       nextSocket.onopen = () => {
         readyRef.current = true;
         fitAndResize.current();
+        // A fresh connection succeeded — cancel any pending reconnect
+        // timer and reset attempt counter so backoff starts from scratch
+        // on the next unexpected drop.
+        if (reconnectTimerRef.current !== null) {
+          clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = null;
+        }
+        reconnectAttemptRef.current = 0;
       };
       // Chunk large live writes to prevent memory spikes from one-shot decode+write.
       // This cap only applies after the complete server restore has finished;
@@ -781,20 +803,50 @@ export default function TerminalPanel({
         // buffer contains the complete last output.
         flushChunksSync();
         const finalize = () => {
-          term.write("\r\n\x1b[33m[terminal session ended]\x1b[0m\r\n", () => {
-            // The server persists the full pty transcript to history before
-            // it closes this socket (exit teardown syncs/closes the log
-            // first), so the rendered buffer on screen IS the complete last
-            // output. Save it synchronously: desktop quit tears down the
-            // webview right after the server drains the shells, so the
-            // deferred idle save may never run — this is what keeps the last
-            // output in the tab after restart.
-            doSave();
-          });
+          if (manualCloseRef.current || (ev.wasClean && ev.code === 1000)) {
+            // Intentional close (user tab close, server kill) or natural
+            // shell exit: session is definitively over — show ended banner,
+            // no reconnect. A clean 1000 close with no manual flag means
+            // the pty read loop ended (the shell itself exited); reconnecting
+            // here would spawn a fresh shell under a different id.
+            term.write("\r\n\x1b[33m[terminal session ended]\x1b[0m\r\n", () => {
+              // The server persists the full pty transcript to history before
+              // it closes this socket (exit teardown syncs/closes the log
+              // first), so the rendered buffer on screen IS the complete last
+              // output. Save it synchronously: desktop quit tears down the
+              // webview right after the server drains the shells, so the
+              // deferred idle save may never run — this is what keeps the last
+              // output in the tab after restart.
+              doSave();
+            });
+          } else {
+            // Unexpected close — attempt to reconnect with exponential
+            // backoff so a transient network blip (common with remote
+            // SSH/WSL tunnels) doesn't cost the user their terminal.
+            // This covers abnormal closures (code 1006, network drops,
+            // server crashes) and server-detected dead connections.
+            const attempt = reconnectAttemptRef.current;
+            const backoff = Math.min(1000 * Math.pow(2, attempt), 32000);
+            reconnectAttemptRef.current = attempt + 1;
+            reconnectingRef.current = true;
+            term.write(
+              "\r\n\x1b[33m[terminal connection lost — reconnecting in " +
+                (backoff / 1000).toFixed(0) +
+                "s…]\x1b[0m\r\n",
+            );
+            console.error(
+              `terminal: websocket closed unexpectedly (attempt ${attempt + 1}, reconnecting in ${(backoff / 1000).toFixed(0)}s)`,
+              ev.code,
+              ev.reason,
+            );
+            reconnectTimerRef.current = window.setTimeout(() => {
+              reconnectTimerRef.current = null;
+              connectSocket();
+            }, backoff);
+          }
         };
         if (remainder) term.write(remainder, () => finalize());
         else finalize();
-        if (!ev.wasClean) console.error("terminal: websocket closed unexpectedly", ev.code, ev.reason);
       };
     };
 
@@ -915,6 +967,13 @@ export default function TerminalPanel({
       // Cancel any pending chunk writes.
       if (chunkRafId) cancelAnimationFrame(chunkRafId);
       pendingChunks.length = 0;
+      // Stop any pending reconnection attempts — component is
+      // unmounting so there's no audience for a reconnect.
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      reconnectingRef.current = false;
       // Closing the socket only detaches the shell server-side: it survives
       // for the detach TTL so a reload/remount reattaches to it. Explicit tab
       // close kills it via DELETE /api/terminal/{id} in the terminal store.

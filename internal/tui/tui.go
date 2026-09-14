@@ -68,6 +68,9 @@ func Run(opts RunOptions) error {
 		}
 	}
 
+	crashLogf, crashLogPath := installCrashLog()
+	crashLogf("start pid=%d %s", os.Getpid(), ttyStateLine())
+
 	p := tea.NewProgram(m, tea.WithFilter(newInputFilter()))
 	var finalModel tea.Model
 	defer func() {
@@ -76,10 +79,16 @@ func Run(opts RunOptions) error {
 		}
 		cleanupProgramModel(finalModel)
 	}()
-	stopSignals := watchProgramSignals(p)
+	stopSignals := watchProgramSignals(p, crashLogf)
 	defer stopSignals()
 	finalModel, err := p.Run()
+	crashLogf("run returned err=%v %s", err, ttyStateLine())
 	if err != nil {
+		// stderr is redirected into the crash log, so main's print of this
+		// error would otherwise be invisible; the terminal is restored here.
+		if crashLogPath != "" {
+			fmt.Fprintf(os.Stdout, "ocode: %v (details: %s)\n", err, crashLogPath)
+		}
 		return err
 	}
 	switch m := finalModel.(type) {
@@ -91,16 +100,25 @@ func Run(opts RunOptions) error {
 	return nil
 }
 
-func watchProgramSignals(p *tea.Program) func() {
+// watchProgramSignals turns termination signals into a graceful quit and
+// records every one in the crash log with the terminal's job-control state.
+// SIGHUP is included so a dropped terminal quits through bubbletea (which
+// restores the tty) instead of the default silent kill; SIGCONT is logged
+// only, as evidence of a stop/resume cycle.
+func watchProgramSignals(p *tea.Program, logf func(string, ...interface{})) func() {
 	sigCh := make(chan os.Signal, 1)
 	done := make(chan struct{})
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGCONT)
 	crashguard.Go(func() {
 		for {
 			select {
 			case <-done:
 				return
-			case <-sigCh:
+			case sig := <-sigCh:
+				logf("signal %v %s", sig, ttyStateLine())
+				if sig == syscall.SIGCONT {
+					continue
+				}
 				p.Send(cleanupRequestMsg{})
 			}
 		}

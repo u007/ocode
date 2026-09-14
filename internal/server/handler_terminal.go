@@ -4,6 +4,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
@@ -109,6 +111,14 @@ type terminalResizeMsg struct {
 // the shell is detached and kept for terminalDetachTTL, and the next socket
 // with the same id reattaches and gets the recent output replayed. Explicit
 // tab close goes through DELETE /api/terminal/{id} (HandleTerminalKill).
+//
+// The server sends WebSocket ping frames every terminalPingInterval (30s)
+// to keep the connection alive through NATs/proxies and detect dead
+// connections (common with remote SSH/WSL tunnels). A failed ping detaches
+// the shell immediately. The web client (TerminalPanel.tsx) auto-reconnects
+// with exponential backoff on unexpected closes — network failures, server
+// crashes, and dead-connection detection — but not on clean 1000 closures
+// (natural shell exit) or user-initiated closes (tab close).
 //
 // Framing: client -> server frames are raw keystrokes unless they start with
 // `{"type":"resize"`, in which case they are parsed as a resize control
@@ -437,8 +447,42 @@ func (h *Handler) serveFreshTerminal(w http.ResponseWriter, r *http.Request, ses
 // resize control frames) until the socket goes away, then detaches the shell.
 // The pty -> websocket direction lives in the session's own read loop, which
 // outlives any single socket.
+//
+// A ping goroutine sends periodic WebSocket ping frames to keep the
+// connection alive through NATs/proxies and to detect dead connections
+// (common with remote SSH/WSL tunnels that can silently drop). If a
+// ping write fails, the shell is detached immediately — far faster
+// than the 30-minute detach TTL.
 func (h *Handler) serveTerminalSocket(sess *terminalSession, ws *websocket.Conn) {
 	defer sess.detach(ws)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Ping loop: sends WebSocket ping frames periodically. A failed
+	// ping means the connection is dead — detach so the shell's TTL
+	// timer starts, and cancel the context so the ping loop exits.
+	go func() {
+		ticker := time.NewTicker(terminalPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// WriteControl is safe to call concurrently with the session read
+				// loop's WriteMessage (which holds sess.writeMu); WriteMessage here
+				// would race it and panic with "concurrent write to websocket connection".
+				if err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(terminalPingWriteTimeout)); err != nil {
+					log.Printf("terminal %s: ping failed, detaching: %v", sess.id, err)
+					sess.detach(ws)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
 	for {
 		_, data, err := ws.ReadMessage()
 		if err != nil {

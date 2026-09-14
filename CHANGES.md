@@ -73,6 +73,16 @@
 
 ## [Unreleased]
 
+- **Agent: remove state reflection feature** (`internal/agent/`) — deleted `state_reflect.go`, `state_reflect_test.go`, `agent_state_reflect_methods.go` and the `reflectState` field / `reflectTail` call from `agent.go`; the reflection hook that appended user messages on preview/browser snapshot changes is removed entirely
+- **LSP diagnostics: fingerprint only emitted diagnostics** (`internal/agent/lsp_inject.go`) — `injectLSPDelta` now records `a.lspSeen[uri]` after the line-cap check and rendering, so diagnostics that were skipped or never delivered are not permanently marked as reported
+- **Auto-permission: normalize network targets and exempt loopback** (`internal/agent/permission_interpreter.go`) — `verifyInterpreterEffects` normalizes model-reported hosts (`127.0.0.1:8765`, `https://api.example.com/v1`) to bare hostnames via `normalizeNetworkEffectHost` and skips loopback (`isLocalhostDomain`) before consulting the webfetch allowlist; regression tests added
+- **Prompt: preserve selection context across double preparation** (`internal/agent/prompt.go`) — `PrepareMessages` now extracts and reuses an existing `[ocode:selection]` marker when called with an empty selection, preventing `Agent.Step` from stripping TUI-selected file/line context
+- **TUI: crash log for silent exits** (`internal/tui/`) — new `crash_log.go` redirects fd 2 to `~/.local/share/ocode/logs/tui-crash.log`; `tui.go` logs start/exit with tty job-control state, catches SIGHUP/SIGCONT, and prints the error to stdout with the log path; `tty_foreground_unix.go`/`windows.go` add `ttyForegroundPgrp()`
+- **Terminal: WebSocket ping for keepalive and dead-connection detection** (`internal/server/`) — `terminalPingInterval` (30s) in `terminal_session.go`; ping goroutine in `serveTerminalSocket` detaches the shell on ping failure; docs updated in `handler_terminal.go` and `terminal_session_table.go`; `daemon_spawn_unix.go` switches `Setpgid` → `Setsid`
+- **Web: browser panel close no longer reopens** (`web/src/App.tsx`) — `panelClosedByUser` ref tracks deliberate closes so tab-switch effects don't recreate the panel
+- **Web: remote terminal port and manual close** (`web/src/components/Terminal/TerminalPanel.tsx`) — `remotePort` now propagated to `buildTerminalWsConnection`; `manualCloseRef` prevents reconnect on user-initiated close
+- **Web: tab rekeying on remote project path change** (`web/src/stores/projectStore.tsx`) — new `REKEY_TABS` reducer action and dispatch in project edit handler
+
 ## 2026-09-13 — Security hardening: SVG sanitization, CSP headers, secret redaction order fix
 
 - **Secret redaction before truncation (2026-09-13)** — `internal/agent/` redacts tool results for secrets BEFORE `TruncateToolResult` disk-caches the full text, preventing leaks to cache files and dependent nodes' context injection. Parallel and DAG-scheduled tool calls now call `scanToolResult` immediately at dispatch (before `shapeToolResult`); sequential calls do the same. Regression tests added.

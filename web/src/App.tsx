@@ -236,6 +236,10 @@ function HomeApp() {
   const sideStateKey: StateKey | null =
     activeTabId && focusedKind !== "browser" ? `side:${sidePanelKind}:${activeTabId}` : null;
   const sideTabState = useBrowserStore(sideStateKey ?? ("side:chat:" as StateKey));
+  // Tracks keys whose panel was explicitly closed by the user (via
+  // the close button or toggle), so the tab-switch effect below does
+  // not immediately reopen it.
+  const panelClosedByUser = useRef<Set<string>>(new Set());
   const browserOpen = !!sideStateKey && !!sideTabState?.panelOpen;
   const browserPane = useResizableSidebar({
     storageKey: "ocode.ui.browser_width",
@@ -325,6 +329,7 @@ function HomeApp() {
 
   useEffect(() => {
     if (previewNonce === 0 || !sideStateKey) return;
+    panelClosedByUser.current.delete(sideStateKey);
     browserActions.open(sideStateKey);
   }, [previewNonce, sideStateKey]);
 
@@ -354,10 +359,11 @@ function HomeApp() {
       return;
     }
     const currentExists = !!sideTabState;
-    if (prevOpen && !currentExists) {
+    if (prevOpen && !currentExists && !panelClosedByUser.current.has(sideStateKey)) {
       browserActions.open(sideStateKey);
       if (prevCollapsed) browserActions.setCollapsed(sideStateKey, true);
     }
+    panelClosedByUser.current.delete(sideStateKey);
     prevSideTabStateRef.current = sideTabState;
   }, [sideStateKey, sideTabState]);
 
@@ -873,8 +879,13 @@ function HomeApp() {
                     disabled={focusedKind === "browser" || !sideStateKey}
                     onClick={() => {
                       if (!sideStateKey) return;
-                      if (browserOpen) browserActions.close(sideStateKey);
-                      else browserActions.open(sideStateKey);
+                      if (browserOpen) {
+                        panelClosedByUser.current.add(sideStateKey);
+                        browserActions.close(sideStateKey);
+                      } else {
+                        panelClosedByUser.current.delete(sideStateKey);
+                        browserActions.open(sideStateKey);
+                      }
                     }}
                     className="mx-1 flex shrink-0 items-center rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors border border-border disabled:opacity-40"
                   >
@@ -1225,7 +1236,10 @@ function HomeApp() {
                         </button>
                         <button
                           type="button"
-                          onClick={() => browserActions.close(sideStateKey)}
+                          onClick={() => {
+                            panelClosedByUser.current.add(sideStateKey);
+                            browserActions.close(sideStateKey);
+                          }}
                           title="Close browser panel"
                           aria-label="Close browser panel"
                           className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"

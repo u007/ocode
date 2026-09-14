@@ -143,10 +143,10 @@ func (a *Agent) injectLSPDelta(messages []Message) []Message {
 	lines := 0
 	for _, uri := range changed {
 		diags := current[uri]
-		a.lspSeen[uri] = fingerprintDiagnostics(diags)
 		if lines >= lspDeltaLineLimit {
 			continue
 		}
+		a.lspSeen[uri] = fingerprintDiagnostics(diags)
 		remaining := lspDeltaLineLimit - lines
 		b.WriteString(tool.RenderDiagnosticsPage(diags, 0, remaining))
 		b.WriteByte('\n')

@@ -20,6 +20,17 @@
 
 
 
+
+## 2026-09-14
+
+* **Creation**: TUI Leaves Mouse Tracking On After Silent Exit — Diagnose via tui-crash.log ([gotchas/tui-mouse-garbage-after-idle-crash-log.md](/gotchas/tui-mouse-garbage-after-idle-crash-log.md))
+* **Creation**: Auto-Permission — Interpreter Network Effects Denied Loopback and host:port Targets ([gotchas/auto-permission-interpreter-network-loopback.md](/gotchas/auto-permission-interpreter-network-loopback.md))
+* **Creation**: Remote Terminal Custom Port Omitted from WebSocket ([gotchas/remote-terminal-custom-port-omitted.md](/gotchas/remote-terminal-custom-port-omitted.md))
+* **Creation**: Browser Panel Close Reopens Deleted State ([gotchas/browser-panel-close-reopens-state.md](/gotchas/browser-panel-close-reopens-state.md))
+* **Update**: Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary ([gotchas/remote-project-path-trust-boundary.md](/gotchas/remote-project-path-trust-boundary.md))
+* **Creation**: Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary ([gotchas/remote-project-path-trust-boundary.md](/gotchas/remote-project-path-trust-boundary.md))
+* **Creation**: LSP Diagnostics Marked Reported Before Emission ([gotchas/lsp-diagnostics-marked-reported-before-emission.md](/gotchas/lsp-diagnostics-marked-reported-before-emission.md))
+* **Creation**: TUI Selection Context Lost on Double Preparation ([gotchas/tui-selection-context-lost-on-double-preparation.md](/gotchas/tui-selection-context-lost-on-double-preparation.md))
 ## 2026-09-13
 
 * **Update**: AGENTS.md Data Storage / README API list — open session tabs now server-side via bulk `GET/PUT /api/tabs` (`tabs.json`), replacing per-origin `localStorage`; fixes empty tab bar on shared Tailscale URL

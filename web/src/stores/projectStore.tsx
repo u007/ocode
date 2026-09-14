@@ -53,7 +53,8 @@ export type ProjectAction =
   | { type: "UPDATE_TAB_ID"; oldId: string; newId: string; newTitle?: string }
   | { type: "RESTORE_TABS"; tabsByProject: Record<string, Tab[]>; activeTabByProject: Record<string, string | null> }
   | { type: "SET_SESSION_PICKER"; open: boolean }
-  | { type: "SET_GROUPS"; groups: ProjectGroup[] };
+  | { type: "SET_GROUPS"; groups: ProjectGroup[] }
+  | { type: "REKEY_TABS"; oldPath: string; newPath: string };
 const initialState: ProjectState = {
   projects: [],
   loading: false,
@@ -214,6 +215,29 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
     }
     case "SET_GROUPS":
       return { ...state, groups: Array.isArray(action.groups) ? action.groups : [] };
+    case "REKEY_TABS": {
+      // When a remote project's path changes, its tabs must move
+      // to the new path key; otherwise they are orphaned under the
+      // old path. Local + remote sharing one path still share one
+      // tab list (the broader identity fix is tracked separately).
+      const { oldPath, newPath } = action;
+      if (!oldPath || !newPath || oldPath === newPath) return state;
+      const tabs = state.tabsByProject[oldPath];
+      if (!tabs || tabs.length === 0) return state;
+      const nextTabs = { ...state.tabsByProject };
+      delete nextTabs[oldPath];
+      nextTabs[newPath] = [...(nextTabs[newPath] || []), ...tabs];
+      const nextActive = { ...state.activeTabByProject };
+      if (nextActive[oldPath] != null) {
+        nextActive[newPath] = nextActive[oldPath];
+        delete nextActive[oldPath];
+      }
+      return {
+        ...state,
+        tabsByProject: nextTabs,
+        activeTabByProject: nextActive,
+      };
+    }
     default:
       return state;
   }
@@ -638,6 +662,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     const active = state.activeProject;
     if (active?.host === input.old_host && active.path === input.old_path) {
       dispatch({ type: "SET_ACTIVE_PROJECT", project: updated });
+    }
+    // Rekey tabs when a remote project's path changes so they
+    // are not orphaned under the old path.
+    if (input.old_host && input.old_path !== updated.path) {
+      dispatch({ type: "REKEY_TABS", oldPath: input.old_path, newPath: updated.path });
     }
     await refreshProjects();
   }, [dispatch, refreshProjects, state.activeProject, state.projects]);

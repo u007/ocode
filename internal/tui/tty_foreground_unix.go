@@ -46,3 +46,22 @@ func reclaimTTYForeground() {
 	}
 	_ = unix.IoctlSetInt(int(f.Fd()), unix.TIOCSPGRP, pgrp)
 }
+
+// ttyForegroundPgrp reports this process's process group and the group the
+// controlling terminal currently has in the foreground. A mismatch means
+// ocode is running in the background of its own terminal: every tty read
+// returns EIO and every write is dropped, which is what a "silent exit with
+// mouse tracking left on" looks like from the outside.
+func ttyForegroundPgrp() (self, fg int, err error) {
+	self, err = syscall.Getpgid(0)
+	if err != nil {
+		return 0, 0, err
+	}
+	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return self, 0, err
+	}
+	defer f.Close()
+	fg, err = unix.IoctlGetInt(int(f.Fd()), unix.TIOCGPGRP)
+	return self, fg, err
+}

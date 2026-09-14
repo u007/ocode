@@ -11350,6 +11350,17 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	} else {
 		if ptools := prev.GetTools(); len(ptools) > 0 {
 			tools = ptools
+			// Strip the driver from any reused ComputerTool so
+			// attachComputerDriver can reattach one wired to the
+			// new supervisor. Otherwise the old driver holds a
+			// helper-script path that oldSupervisor.Shutdown
+			// already deleted (helper_script.go remove).
+			for _, t := range tools {
+				if ct, ok := t.(*tool.ComputerTool); ok {
+					ct.Driver = nil
+					ct.DriverErr = fmt.Errorf("process supervisor not attached")
+				}
+			}
 		} else {
 			// No tools to reuse — start fresh but keep LSP dropped for /new.
 			tools = []tool.Tool{}

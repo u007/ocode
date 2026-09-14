@@ -438,11 +438,6 @@ type Agent struct {
 	// not set OnToolOutput, so their streaming tools fall back to the synchronous
 	// Execute path.
 	OnToolOutput func(toolCallID, chunk string)
-	// reflectState holds the agent-owned last-reflected preview/browser
-	// snapshot. Updated each loop after comparison; only actual changes
-	// emit a new user message at the tail, preserving the cached prefix.
-	reflectState ReflectState
-
 	// RetainFullToolOutput declares that this agent's UI renders the streamed
 	// tool text AS the transcript and therefore needs the canonical tool result
 	// to keep its FULL, uncapped output (read back via Message.DisplayContent).
@@ -1272,11 +1267,6 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// (user edits between turns, package-level fallout). User-role, tail,
 	// absent when nothing changed. See lsp_inject.go.
 	messages = a.injectLSPDelta(messages)
-	// Reflection hook: append user message only when canonical preview
-	// and browser snapshot changed vs agent-owned baseline. Wired to take
-	// the current external snapshot; passes agent's own snapshot when no
-	// external source is connected, yielding no emission and stable prefix.
-	messages = a.reflectTail(messages, a.reflectState)
 	// Note: GetToolDefinitions is invoked inside the iteration loop below so
 	// a mid-turn discover_more (Part 08) is visible on the next iteration.
 	var newMsgs []Message

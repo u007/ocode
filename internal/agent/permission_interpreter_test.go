@@ -523,6 +523,26 @@ func TestVerifyInterpreterEffects(t *testing.T) {
 			t.Fatal("expected ask for unapproved network host")
 		}
 	})
+	t.Run("loopback network targets auto-allow", func(t *testing.T) {
+		for _, host := range []string{"127.0.0.1:8765", "localhost", "http://localhost:3000/api", "[::1]:8080", "https://127.0.0.1:8765"} {
+			r := base()
+			r.Effects.Writes = nil
+			r.Effects.Network = []string{host}
+			if ok, reason := a.verifyInterpreterEffects(ie, r, 0.85, true, false); !ok {
+				t.Fatalf("expected allow for loopback host %q, got %q", host, reason)
+			}
+		}
+	})
+	t.Run("allowed webfetch domain with port auto-allows", func(t *testing.T) {
+		a.permissions.webfetchDomains["api.example.com"] = PermissionAllow
+		defer delete(a.permissions.webfetchDomains, "api.example.com")
+		r := base()
+		r.Effects.Writes = nil
+		r.Effects.Network = []string{"api.example.com:443", "https://api.example.com/v1"}
+		if ok, reason := a.verifyInterpreterEffects(ie, r, 0.85, true, false); !ok {
+			t.Fatalf("expected allow for allowed domain, got %q", reason)
+		}
+	})
 	t.Run("file write inside roots is not destructive", func(t *testing.T) {
 		// base() writes to out.json inside the allowed root. A plain write must
 		// auto-allow even without allow_destructive.
