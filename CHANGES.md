@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-14 — Remote SSH workspace browse tunnel readiness and browser panel docs
+
+- `internal/desktop/boot.go` — Clarified comment: browse origin (embedded browser panel + CDP socket) routes directly to the remote server via SSH tunnel in remote mode, not skipped by the desktop server
+- `internal/remote/workspace.go` — `Connect()` now waits for browsePort tunnel readiness before reporting connected; rolls back on failure
+- `web/src/components/Browser/BrowserPanel.tsx` — Chrome mode banner notes remote-host egress when running in remote workspace mode
+
 - **Version 0.8.96 — Computer-use review fixes, docs updates, version bump (2026-09-14)** — `internal/version/version.go` bumped to 0.8.96; `docs/computer-use.md` updates (macOS JXA typing paths, permission notes, keymap); `docs/index.md` and `docs/log.md` refreshed with computer-use references and superpowers plan links; `CHANGES.md` and `AGENTS.md` updated; `internal/computer/` driver and runner adjustments; `internal/agent/` permissions, prompt, and client fixes; `internal/tool/computer.go` and diagnostics updates; server, TUI, web sidebar/tab/store fixes (`internal/server/*`, `internal/tui/*`, `web/src/*`); Linux driver removed/replaced (`internal/computer/driver_linux.go` deleted); `skills/ocode-usage/SKILL.md` refreshed.
 
 - **Computer use: review fixes across tool core and all three drivers

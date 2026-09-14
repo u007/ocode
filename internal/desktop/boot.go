@@ -304,8 +304,11 @@ func ResolveFallbackWorkDir() string {
 
 // startRemoteServer boots a minimal server for remote SSH workspaces:
 // serves the embedded SPA at /, proxies /api/* to the remote server
-// through the SSH tunnel, binds 127.0.0.1:0 (never LAN), and skips
-// the browse panel. No agent/LSP/git infrastructure runs locally —
+// through the SSH tunnel, binds 127.0.0.1:0 (never LAN). The browse
+// origin (embedded browser panel + CDP socket) is NOT proxied through
+// the desktop server in V1: it reaches the remote server directly via
+// the SSH tunnel (same-number -L; see remote serve spec and workspace
+// tunnel contract). No agent/LSP/git infrastructure runs locally —
 // all execution is on the remote server.
 func startRemoteServer(webFS fs.FS, workspace *remote.RemoteWorkspace, localToken string) (*Handle, error) {
 	proxy, err := NewRemoteProxy(workspace, localToken)

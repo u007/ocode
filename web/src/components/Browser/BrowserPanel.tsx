@@ -280,7 +280,7 @@ export function BrowserPanel({ stateKey, mode, active = true }: { stateKey: Stat
       {s.userMode === "chrome" && (
         <div className="px-3 py-1.5 bg-sky-50/70 dark:bg-sky-950/50 border-b border-sky-200/50 dark:border-sky-800/50 text-xs flex items-center gap-2" role="status" data-testid="chrome-mode-banner">
           <span className="text-sky-700 dark:text-sky-300 font-medium">Rendering in real Chrome (CDP)</span>
-          <span className="text-neutral-600 dark:text-neutral-400">— this page loads natively, outside the embedded proxy.</span>
+          <span className="text-neutral-600 dark:text-neutral-400">— this page loads natively via headless Chrome (remote-host egress in remote workspace mode).</span>
           <button
             onClick={() => actions.setUserMode(stateKey, null)}
             className="ml-auto rounded bg-sky-600 hover:bg-sky-700 text-white px-2 py-0.5 text-xs font-medium"

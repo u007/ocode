@@ -93,6 +93,13 @@ func (rw *RemoteWorkspace) Connect() error {
 	rw.APIPort = apiPort
 	rw.localAPIURL = fmt.Sprintf("http://127.0.0.1:%d", apiPort)
 
+	if rw.State.BrowsePort > 0 {
+		if err := waitForTunnelReady(rw.State.BrowsePort); err != nil {
+			_ = rw.Disconnect()
+			return fmt.Errorf("browse tunnel not ready (port %d): %w", rw.State.BrowsePort, err)
+		}
+	}
+
 	return nil
 }
 
