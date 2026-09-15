@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -33,6 +34,12 @@ type ConnectOptions struct {
 	ModuleDir string
 	// Out receives staged progress; nil defaults to os.Stdout.
 	Out io.Writer
+	// PortMapHook, when set, is consulted by ConnectWeb (KindSSH targets
+	// only — see PortMapHook doc) to auto-start persisted extra port
+	// forwards and to run "/port ..." commands typed at the foreground
+	// wait prompt. nil means no port-map support (Connect/plain TUI mode
+	// never sets it; there is no local tunnel to manage there).
+	PortMapHook PortMapHook
 }
 
 // Connect runs the full Phase-1 connect flow: reachability, platform
@@ -255,8 +262,29 @@ func ConnectWeb(opts ConnectOptions) error {
 	}
 	progress.Done("")
 
+	fm := NewForwardManager(sup, opts.Target)
+	if opts.PortMapHook != nil {
+		if maps, err := opts.PortMapHook.Load(); err != nil {
+			fmt.Fprintf(out, "port maps: load failed: %v\n", err)
+		} else {
+			for _, pm := range maps {
+				if !pm.Enabled {
+					continue
+				}
+				if err := fm.Start(pm); err != nil {
+					fmt.Fprintf(out, "port maps: %v\n", err)
+				} else {
+					fmt.Fprintf(out, "port map active: localhost:%d → remote:%d\n", pm.LocalPort, pm.RemotePort)
+				}
+			}
+		}
+	}
+
 	fmt.Fprintln(out, "Tunnel active. Press Ctrl-C to close it (the remote server keeps running).")
-	return superviseTunnel(sup, tunnelCmd)
+	if opts.PortMapHook != nil {
+		fmt.Fprintln(out, "Type /port for extra port forwards (add/remove/enable/disable/status).")
+	}
+	return superviseTunnel(sup, tunnelCmd, fm, opts.PortMapHook, out)
 }
 
 // shutdownSupervisor shuts sup down with the standard 5s grace timeout used
@@ -340,7 +368,12 @@ func waitForTunnelReady(localPort int) error {
 // tunnel's own process group (StartSupervised via setProcGroup) is separate
 // from this process's, so a terminal Ctrl-C does not reach it automatically
 // — this signal handler explicitly kills it on the way out.
-func superviseTunnel(sup *tool.ProcessSupervisor, tunnelCmd *exec.Cmd) error {
+// superviseTunnel waits for the fixed tunnel to die or Ctrl-C, meanwhile
+// running any "/port ..." line typed on stdin against hook (nil hook: stdin
+// is simply not read, matching the pre-/port behavior exactly). fm is always
+// constructed (even with a nil hook) so a future line-reading feature has
+// somewhere to act; today it only ever gets used via hook.Handle.
+func superviseTunnel(sup *tool.ProcessSupervisor, tunnelCmd *exec.Cmd, fm *ForwardManager, hook PortMapHook, out io.Writer) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
@@ -348,16 +381,44 @@ func superviseTunnel(sup *tool.ProcessSupervisor, tunnelCmd *exec.Cmd) error {
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- tunnelCmd.Wait() }()
 
-	select {
-	case err := <-waitCh:
-		if err != nil {
-			return fmt.Errorf("tunnel closed unexpectedly: %w", err)
+	var lineCh chan string
+	if hook != nil {
+		lineCh = make(chan string)
+		go func() {
+			defer close(lineCh)
+			scanner := bufio.NewScanner(os.Stdin)
+			for scanner.Scan() {
+				lineCh <- scanner.Text()
+			}
+		}()
+	}
+
+	for {
+		select {
+		case err := <-waitCh:
+			if err != nil {
+				return fmt.Errorf("tunnel closed unexpectedly: %w", err)
+			}
+			return fmt.Errorf("tunnel closed unexpectedly")
+		case <-sigCh:
+			shutdownSupervisor(sup)
+			<-waitCh
+			return nil
+		case line, ok := <-lineCh:
+			if !ok {
+				// stdin closed (e.g. piped/non-interactive invocation):
+				// stop reading it, keep supervising the tunnel.
+				lineCh = nil
+				continue
+			}
+			output, handled := hook.Handle(fm, line)
+			if !handled {
+				output = "unrecognized command; try: /port [status|add <remotePort>[:<localPort>]|remove <remotePort>|enable <remotePort>|disable <remotePort>]"
+			}
+			if output != "" {
+				fmt.Fprintln(out, output)
+			}
 		}
-		return fmt.Errorf("tunnel closed unexpectedly")
-	case <-sigCh:
-		shutdownSupervisor(sup)
-		<-waitCh
-		return nil
 	}
 }
 

@@ -394,6 +394,12 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
           <span className="text-xs text-muted-foreground font-mono truncate flex items-center gap-1">
             <GitBranch className="w-3.5 h-3.5 shrink-0" />
             {status.branch || "no branch"}
+            {status.has_upstream && (
+              <span className="inline-flex items-center gap-0.5 text-xs font-semibold leading-none text-amber-500 ml-1">
+                {status.ahead > 0 && <span title={`${status.ahead} to push`}>↑{status.ahead}</span>}
+                {status.behind > 0 && <span title={`${status.behind} to pull`}>↓{status.behind}</span>}
+              </span>
+            )}
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">

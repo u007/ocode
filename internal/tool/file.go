@@ -189,6 +189,31 @@ func normalizeRootPath(p string) (string, bool) {
 	return filepath.Clean(resolved), true
 }
 
+// resolveExistingAncestor resolves symlinks on abs, walking up to the
+// nearest ancestor that actually exists when abs itself (or its immediate
+// parent) hasn't been created yet — e.g. a first write into a brand-new
+// nested directory like ".ocode/plans/". A single-level fallback would
+// wrongly report a legitimate in-project path as outside the working
+// directory whenever more than one path component is still missing.
+func resolveExistingAncestor(abs string) (string, error) {
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved, nil
+	}
+	var missing []string
+	dir := abs
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("path %q does not resolve under any existing ancestor", abs)
+		}
+		missing = append([]string{filepath.Base(dir)}, missing...)
+		if resolvedParent, err := filepath.EvalSymlinks(parent); err == nil {
+			return filepath.Join(append([]string{resolvedParent}, missing...)...), nil
+		}
+		dir = parent
+	}
+}
+
 func pathWithinRoot(path, root string) bool {
 	if path == root {
 		return true
@@ -316,14 +341,9 @@ func confinedPath(ctx context.Context, p string) (string, error) {
 	if pathscope.IsTempDir(abs) {
 		return abs, nil
 	}
-	resolved, err := filepath.EvalSymlinks(abs)
+	resolved, err := resolveExistingAncestor(abs)
 	if err != nil {
-		dir := filepath.Dir(abs)
-		resolvedDir, dirErr := filepath.EvalSymlinks(dir)
-		if dirErr != nil {
-			return "", fmt.Errorf("path %q is outside the working directory", p)
-		}
-		resolved = filepath.Join(resolvedDir, filepath.Base(abs))
+		return "", fmt.Errorf("path %q is outside the working directory", p)
 	}
 	resolved = filepath.Clean(resolved)
 	wdResolved, ok := normalizeRootPath(wd)

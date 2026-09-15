@@ -1,4 +1,5 @@
 import { memo, useState } from "react";
+import { Volume2 } from "lucide-react";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
 
@@ -41,23 +42,38 @@ const TOOL_OUTPUT_LANG: Record<string, string> = {
 export function ThinkingBlock({
   text,
   highlight = "",
+  onSpeak,
 }: {
   text: string;
   highlight?: string;
+  onSpeak?: () => void;
 }) {
   const [open, setOpen] = useState(true);
   if (!text) return null;
   return (
     <div className="mb-3 flex justify-start">
       <div className="max-w-[95%] md:max-w-[80%] w-full rounded-lg border border-border/60 bg-card/40 px-3 py-2">
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
-        >
-          <span>{open ? "▾" : "▸"}</span>
-          <span>🧠 Thinking</span>
-        </button>
+        <div className="flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+          >
+            <span>{open ? "▾" : "▸"}</span>
+            <span>🧠 Thinking</span>
+          </button>
+          {onSpeak && (
+            <button
+              type="button"
+              aria-label="Speak thinking"
+              title="Speak thinking"
+              onClick={onSpeak}
+              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-background hover:text-foreground"
+            >
+              <Volume2 className="h-3.5 w-3.5" /> Speak
+            </button>
+          )}
+        </div>
         {open && (
           <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-muted-foreground">
             {highlight.trim() ? highlightMatches(text, highlight) : text}

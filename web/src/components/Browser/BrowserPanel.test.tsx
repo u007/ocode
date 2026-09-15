@@ -34,9 +34,11 @@ vi.mock("../../lib/browserStore", async (importOriginal) => {
   };
 });
 const mockIsRemoteSession = vi.hoisted(() => vi.fn(() => false));
+const mockBrowseRemoteMode = vi.hoisted(() => vi.fn(() => false));
 vi.mock("../../api/client", () => ({
   getBrowseBase: vi.fn(async () => "http://127.0.0.1:54321"),
   getBrowseHTRNotice: mockHtrNotice,
+  getBrowseRemoteMode: mockBrowseRemoteMode,
   mintBrowseGrant: vi.fn(async () => "GRANT123"),
   bypassBrowseTLS: (...args: unknown[]) => (mockBypass as unknown as (...a: unknown[]) => unknown)(...args),
   normalizeBrowseURL: (u: string) => u,
@@ -63,6 +65,7 @@ describe("BrowserPanel", () => {
     vi.clearAllMocks();
     mockHtrNotice.mockReturnValue("");
     mockIsRemoteSession.mockReturnValue(false);
+    mockBrowseRemoteMode.mockReturnValue(false);
     state.error = "";
     state.url = "https://example.com/";
     state.status = 200;

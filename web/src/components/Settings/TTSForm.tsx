@@ -15,6 +15,8 @@ export default function TTSForm() {
   const [stateError, setStateError] = useState<string | null>(null);
   const [busyEngine, setBusyEngine] = useState<string | null>(null);
   const [engineErrors, setEngineErrors] = useState<Record<string, string>>({});
+  const [modelId, setModelId] = useState<string>("default");
+  const [modelVoiceState, setModelVoiceState] = useState<Record<string, string>>({});
   const canRetry = status?.engine.availability !== "unavailable" && Boolean(status?.error || error);
 
   const refreshInstallStates = useCallback(async () => {
@@ -53,7 +55,8 @@ export default function TTSForm() {
 
   const acceptLicense = (engine: TTSEngine) =>
     run(engine, async () => {
-      await api.ttsAcceptLicense(engine.id, engine.license_name ?? engine.label + " license");
+      if (!engine.license_hash || !engine.license_name) throw new Error("engine has no authoritative license metadata");
+      await api.ttsAcceptLicense(engine.id, engine.license_hash, engine.license_name);
     });
 
   const install = (engine: TTSEngine, current: TTSInstallState | undefined) =>
@@ -63,19 +66,52 @@ export default function TTSForm() {
       await api.ttsDownload(engine.id);
     });
 
-  const enable = (engine: TTSEngine) =>
+	const enable = (engine: TTSEngine) =>
     run(engine, async () => {
-      await api.ttsEnable(engine.id);
-      await refresh();
-    });
+      await api.ttsEnable(engine.id, modelId);
+		await refresh();
+		});
 
   const renderLocalEngine = (engine: TTSEngine) => {
     const inst = installStates[engine.id];
     const state = inst?.state ?? "not-accepted";
     const busy = busyEngine === engine.id;
     const isCurrent = config.engine === engine.id;
+    const modelKey = `${engine.id}/${modelId}`;
+    const selectedVoice = modelVoiceState[modelKey] ?? config.model_voice?.[modelKey] ?? engine.voice_id;
     if (engine.availability === "unavailable") {
-      return <p className="mt-2 text-[11px] text-muted-foreground">{engine.reason}</p>;
+      return (
+        <div className="mt-2 space-y-2 text-[11px] text-muted-foreground">
+          <p>{engine.reason}</p>
+          {engine.license_text && (
+            <p>
+              License: {engine.license_text}
+              {engine.license_url && (
+                <>
+                  {" "}
+                  <a className="underline" href={engine.license_url} target="_blank" rel="noreferrer">view</a>
+                </>
+              )}
+            </p>
+          )}
+          {state === "not-accepted" && engine.license_hash && engine.license_name && (
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" disabled={busy} className="rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" onClick={() => void acceptLicense(engine)}>
+                {busy ? "Accepting…" : "Accept License"}
+              </button>
+            </div>
+          )}
+          {(state === "license-accepted" || state === "failed") && (
+            <p className="text-[10px]">License accepted; runtime and voice artifacts are not yet available for installation.</p>
+          )}
+          {state === "installed" && (
+            <p className="text-[10px]">Installed but unavailable.</p>
+          )}
+          <span>Install state: {state}</span>
+          {inst?.error && <p className="text-destructive">{inst.error}</p>}
+          {engineErrors[engine.id] && <p className="text-destructive">{engineErrors[engine.id]}</p>}
+        </div>
+      );
     }
     return (
       <div className="mt-2 space-y-2 text-[11px] text-muted-foreground">
@@ -83,7 +119,7 @@ export default function TTSForm() {
           Voice: <span className="font-mono">{engine.voice_id}</span> · Manifest <span className="font-mono">{engine.manifest_version}</span>
         </p>
         <p>
-          License: {engine.license_name}
+          License: {engine.license_text ?? engine.license_name}
           {engine.license_url && (
             <>
               {" "}
@@ -91,6 +127,42 @@ export default function TTSForm() {
             </>
           )}
         </p>
+        {engine.voice_id && (engine.availability === "installable" || engine.availability === "ready") && (
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <label className="text-[10px] text-muted-foreground">Voice for model:</label>
+            <input
+              type="text"
+              value={modelId}
+              onChange={(e) => setModelId(e.target.value)}
+              placeholder="model id"
+              className="rounded border border-input bg-background px-2 py-0.5 text-[10px] w-28"
+            />
+            <select
+              value={selectedVoice}
+              onChange={(e) => setModelVoiceState((previous) => ({ ...previous, [modelKey]: e.target.value }))}
+              className="rounded border border-input bg-background px-2 py-0.5 text-[10px]"
+            >
+              {(engine.voices && engine.voices.length > 0 ? engine.voices : [engine.voice_id]).map((v) => (
+                <option key={v} value={v}>{v}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={busy}
+              className="rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => void run(engine, async () => {
+                if (!selectedVoice) return;
+                await api.ttsModelVoice(engine.id, modelId, selectedVoice);
+                await refresh();
+              })}
+            >
+              Save
+            </button>
+            {config.model_voice?.[modelKey] && (
+              <span className="text-[10px] text-primary">Override: {config.model_voice[modelKey]}</span>
+            )}
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           {state === "not-accepted" && (
             <button type="button" disabled={busy} className="rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" onClick={() => void acceptLicense(engine)}>

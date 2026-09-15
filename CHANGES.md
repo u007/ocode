@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-15 — Port maps, Kokoro TTS engine, git divergence, browse remote mode
+
+- `internal/projects/projects.go` +5 new files — Port maps feature: user-added SSH port forwards for remote workspaces (PortMap type, Store AddPortMap/RemovePortMap/SetPortMapEnabled/PortMaps, forward manager in `internal/remote/portmap.go`, `/port` command in `internal/remotecli/portcmd.go`, desktop auto-start in `internal/desktop/portmaps.go`)
+- `internal/tts/kokoro.go` (new), `internal/tts/manifest.go`, `internal/tts/supervisor.go`, `internal/tts/piper.go`, `internal/tts/cache.go` — Kokoro installable TTS engine added; manifest pins `kokoro-onnx==0.6.1` with host-specific onnxruntime, model/voice checksums; supervisor integrates Kokoro synthesis; cache no longer requires SHA-256 when unpinned
+- `internal/config/ocodeconfig.go`, `internal/server/handler_tts.go`, `internal/server/server.go`, `internal/remotecli/remotecli.go`, `web/src/api/client.ts`, `web/src/api/types.ts`, `web/src/components/Settings/TTSForm.tsx`, `web/src/components/Settings/TTSForm.test.tsx` — Model-voice per model: `TTSConfig.ModelVoice` map, `/api/tts/model-voice` endpoint, `ttsModelVoice` API, `Model` parameter on `ttsEnable`/`ttsSpeak`
+- `internal/server/handler_git.go`, `web/src/components/Git/GitPanel.tsx`, `web/src/components/Git/GitPanel.test.tsx`, `web/src/components/Layout/TopTabs.tsx`, `web/src/lib/editorDiffSource.test.ts`, `web/src/api/types.ts` — Git status divergence: ahead/behind/has_upstream fields, UI indicators (↑push/↓pull)
+- `internal/agent/agent.go`, `internal/agent/redaction_test.go` — `HandleApprovedToolCall` now scans tool results through `scanToolResult` (post-approval secret redaction)
+- `internal/browse/local.go`, `internal/browse/auth.go`, `internal/browse/server.go`, `internal/browse/server_test.go`, `internal/server/server.go`, `internal/server/handler_tts.go`, `internal/server/handler_tts_test.go`, `web/src/components/Browser/BrowserPanel.tsx`, `web/src/components/Browser/BrowserPanel.test.tsx`, `web/src/components/Chat/ChatPanel.tsx`, `web/src/components/Chat/MessageBubble.tsx`, `web/src/components/Chat/TurnParts.tsx`, `web/src/components/Chat/TurnParts.test.tsx`, `web/src/components/Speech/SpeechProvider.tsx`, `web/src/components/common/StatusBar.tsx` — Browse remote-workspace mode: public hosts route through local transport (SSRF-safe external transport), `remote_mode` flag in `/api/browse/config`, BrowserPanel renders local in remote mode, ThinkingBlock gains onSpeak prop for Browser Native speech
+- `.dockerignore`, `.gitignore`, `Dockerfile` — `.medusa/` gitignored and dockerignored; Dockerfile uses WORKDIR consistently; .dockerignore excludes test files and docs (with OCODE.md exceptions)
+
 ## 2026-09-14 — Remote SSH workspace browse tunnel readiness and browser panel docs
 
 - `internal/desktop/boot.go` — Clarified comment: browse origin (embedded browser panel + CDP socket) routes directly to the remote server via SSH tunnel in remote mode, not skipped by the desktop server

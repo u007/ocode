@@ -323,6 +323,34 @@ func startRemoteServer(webFS fs.FS, workspace *remote.RemoteWorkspace, localToke
 	mux := http.NewServeMux()
 	// Proxy all API traffic to the remote server
 	mux.Handle("/api/", proxy)
+	// Extra user-added port forwards (Ports panel), served locally — never
+	// proxied to remote (ServeMux resolves these more specific patterns
+	// ahead of the "/api/" catch-all above). Best-effort: a store that
+	// fails to open just means the panel shows an empty/unavailable list
+	// rather than blocking the workspace from opening.
+	store, _, storeErr := projects.NewStore()
+	if storeErr != nil {
+		log.Printf("desktop: port maps: open project store: %v", storeErr)
+		store = nil
+	}
+	ref := projects.ProjectRef{Host: workspace.Target.String(), Path: workspace.RemotePath}
+	fm := remote.NewForwardManager(workspace.Sup, workspace.Target)
+	pmHandler := &portMapsHandler{fm: fm, store: store, ref: ref, localToken: localToken}
+	pmHandler.register(mux)
+	if store != nil {
+		if maps, err := store.PortMaps(ref); err != nil {
+			log.Printf("desktop: port maps: load: %v", err)
+		} else {
+			for _, pm := range maps {
+				if !pm.Enabled {
+					continue
+				}
+				if err := fm.Start(remote.ProjectPortMap{RemotePort: pm.RemotePort, LocalPort: pm.LocalPort, Enabled: true}); err != nil {
+					log.Printf("desktop: port maps: auto-start remote:%d: %v", pm.RemotePort, err)
+				}
+			}
+		}
+	}
 	// Serve SPA (fallback to index.html for client-side routing)
 	mux.Handle("/", remoteSPAHandler(webFS))
 

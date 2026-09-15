@@ -98,9 +98,12 @@ export interface TTSEngine {
   reason?: string;
   browser_only: boolean;
   voice_id?: string;
+  voices?: string[];
   manifest_version?: string;
-  license_name?: string;
-  license_url?: string;
+	license_name?: string;
+	license_url?: string;
+	license_text?: string;
+	license_hash?: string;
 }
 
 export type TTSInstallStatus =
@@ -126,6 +129,7 @@ export interface TTSConfig {
   engine: TTSEngineId;
   voice: string;
   mode: TTSPlaybackMode;
+  model_voice?: Record<string, string>;
 }
 
 export interface TTSPlayback {
@@ -405,6 +409,10 @@ export interface GitStatus {
    *  editor uses this to distinguish "no unstaged changes" (repo, show no
    *  decorations) from "not a repo" (fall back to session diffs). */
   is_repo: boolean;
+  /** Ahead: local commits not yet pushed. Behind: remote commits not yet pulled. */
+  ahead: number;
+  behind: number;
+  has_upstream: boolean;
 }
 
 export interface GitDiffFile {
@@ -756,4 +764,15 @@ export interface BrowseResponse {
   current_path: string;
   parent_path: string;
   directories: DirectoryEntry[];
+}
+
+/** One user-added SSH port forward on top of the fixed api/browse tunnel,
+ *  from GET/POST /api/desktop/portmaps* (desktop remote-workspace only —
+ *  see internal/desktop/portmaps.go). live is the current session's forward
+ *  process state; enabled is the persisted intent. */
+export interface PortMapView {
+  remote_port: number;
+  local_port: number;
+  enabled: boolean;
+  live: boolean;
 }

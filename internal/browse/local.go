@@ -1,15 +1,20 @@
 package browse
 
 // handleLocal serves loopback/RFC1918 upstreams as a streaming reverse proxy.
-// It is reachable only for targets whose host literal is
-// private (parseTarget sets t.Local); an external page's rewritten links
-// always carry a non-private host and therefore route to Chrome via CDP. A
-// private host can only have been reached via a user-initiated address-bar
-// navigation (which minted the __grant); subresources ride the /b/ cookie.
-// We deliberately do NOT add a per-request "user-initiated" flag — reaching a
-// private host at all already required the user path, and the cookie is
-// confined to /b/. This transport uses allowPrivate=true and is the only
-// place private upstreams are dialed.
+// It is reachable for targets whose host literal is private (parseTarget
+// sets t.Local); an external page's rewritten links always carry a
+// non-private host and therefore route to Chrome via CDP. A private host can
+// only have been reached via a user-initiated address-bar navigation (which
+// minted the __grant); subresources ride the /b/ cookie. We deliberately do
+// NOT add a per-request "user-initiated" flag — reaching a private host at
+// all already required the user path, and the cookie is confined to /b/.
+// This transport uses allowPrivate=true and is the only place private
+// upstreams are dialed.
+//
+// In remote-workspace mode (Server.remoteMode) handleBrowse also routes
+// non-private (t.Local == false) targets here instead of to Chrome/CDP:
+// chooseLocalTransport picks the SSRF-safe externalTransport for those, never
+// the allowPrivate one above.
 //
 // Deviation from the spec's "only transformation: inject the capture script"
 // (found by live QA 2026-08-31): HTML responses are ALSO URL-rewritten via
@@ -53,10 +58,27 @@ func (s *Server) localInsecureTransport() *http.Transport {
 	return s.localInsecureTransportVal
 }
 
+// externalTransport is the SSRF-safe, TLS-strict transport used for genuine
+// public hosts that reach handleLocal only because of remote-workspace mode
+// (Server.remoteMode) — never the private-host-friendly transports below,
+// which would let an external page's subresource pivot into the remote
+// host's private network. Mirrors chrome mode's EgressProxy policy.
+func (s *Server) externalTransport() *http.Transport {
+	s.externalTransportOnce.Do(func() {
+		s.externalTransportVal = newSafeTransport(false)
+	})
+	return s.externalTransportVal
+}
+
 // chooseLocalTransport picks the right transport for t. Loopback hosts are
 // auto-allowed (self-signed dev certs just work); other private hosts require
 // an explicit bypass. Subresources inherit the document's bypass (same stateKey+host).
+// A non-private t only reaches here in remote-workspace mode (Server.remoteMode);
+// it always gets the SSRF-safe externalTransport, never the private-host paths.
 func (s *Server) chooseLocalTransport(t target) *http.Transport {
+	if !t.Local {
+		return s.externalTransport()
+	}
 	if t.Scheme != "https" {
 		return s.localTransport()
 	}
@@ -106,14 +128,16 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
 			// whose Location resolves to a non-private host, do not follow it
 			// inside the iframe (it would die on X-Frame-Options). Instead
 			// replace with 204 and emit a chrome nav event. The SPA will switch
-			// viewport and the chrome target will navigate there.
+			// viewport and the chrome target will navigate there. Not applicable
+			// in remote-workspace mode (Server.remoteMode) — there is no chrome
+			// to hand off to, so every redirect target stays in this pipeline.
 			if isDocumentRequest(r) && resp.StatusCode >= 300 && resp.StatusCode < 400 {
 				loc := resp.Header.Get("Location")
 				if loc != "" {
 					if parsed, err := url.Parse(loc); err == nil {
 						base := &url.URL{Scheme: t.Scheme, Host: t.Host, Path: t.Path}
 						resolved := base.ResolveReference(parsed)
-						if resolved.Host != "" && !hostIsLiteralPrivate(resolved.Host) {
+						if !s.remoteMode && resolved.Host != "" && !hostIsLiteralPrivate(resolved.Host) {
 							// Hand off to chrome.
 							s.emitNav(NavEvent{StateKey: t.StateKey, URL: resolved.String(), Status: 0, Mode: "chrome"})
 							// Drain and close original body.
@@ -131,11 +155,27 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
 							resp.ContentLength = 0
 							return nil
 						}
+						// Stay in this pipeline: rewrite Location into the /b/ route so
+						// the iframe's redirect follow re-enters the proxy (and its SSRF
+						// guard/header stripping) instead of navigating the raw upstream
+						// URL directly. mapURL's /b/... output is an absolute-path
+						// reference, which Location accepts (RFC 9110 §10.2.2).
+						resp.Header.Set("Location", mapURL(resolved.String(), t, ""))
 					}
 				}
 			}
 			// Never let the dev server install a service worker via header.
 			resp.Header.Del("Service-Worker-Allowed")
+			// Strip framing/CSP restrictions: the document now lives at the
+			// browse origin, cross-origin to every upstream, so
+			// X-Frame-Options/frame-ancestors would always refuse the iframe,
+			// and a kept CSP would block subresources rewritten onto /b/...
+			// paths. Local mode already controls network access server-side
+			// (SSRF-safe dialer for external hosts); dropping these client-side
+			// restrictions doesn't weaken that.
+			resp.Header.Del("X-Frame-Options")
+			resp.Header.Del("Content-Security-Policy")
+			resp.Header.Del("Content-Security-Policy-Report-Only")
 			ct := resp.Header.Get("Content-Type")
 			isHTML := strings.HasPrefix(ct, "text/html")
 			if !isHTML {

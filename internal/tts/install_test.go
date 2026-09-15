@@ -31,7 +31,7 @@ func TestPinRejectsForeignManifestVersion(t *testing.T) {
 	if _, ok := piperManifest.HostRuntime(); !ok {
 		t.Skip("piper has no runtime for this host")
 	}
-	if err := s.AcceptLicense("piper", "h", "n"); err != nil {
+	if err := s.AcceptLicense("piper", piperManifest.LicenseHash(), piperManifest.LicenseName); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Pin("piper", "something-else"); err == nil {
@@ -47,8 +47,80 @@ func TestPinRejectsForeignManifestVersion(t *testing.T) {
 
 func TestInstallStepsRefuseUnavailableEngines(t *testing.T) {
 	s := NewSupervisor(DefaultConfig(), Options{Root: t.TempDir()})
-	if err := s.AcceptLicense("kokoro", "h", "n"); err == nil {
-		t.Fatal("accepted a license for an engine with no manifest")
+	// Engines without authoritative license metadata cannot record consent.
+	if err := s.AcceptLicense("fish-audio", "h", "n"); err == nil {
+		t.Fatal("accepted a license for an engine without authoritative metadata")
+	}
+	// Pin/Download are also blocked: no manifest exists.
+	if err := s.Pin("fish-audio", "v"); err == nil {
+		t.Fatal("pinned an engine with no manifest")
+	}
+	if err := s.Download("fish-audio"); err == nil {
+		t.Fatal("downloaded an engine with no manifest")
+	}
+}
+
+func TestAcceptLicenseRejectsMismatchedMetadata(t *testing.T) {
+	s := NewSupervisor(DefaultConfig(), Options{Root: t.TempDir()})
+	if err := s.AcceptLicense("piper", "manifest:piper", piperManifest.LicenseName); err == nil {
+		t.Fatal("accepted a synthetic license hash")
+	}
+	if err := s.AcceptLicense("piper", piperManifest.LicenseHash(), "changed license"); err == nil {
+		t.Fatal("accepted a mismatched license name")
+	}
+	if got := s.InstallStates()["piper"].State; got != "" {
+		t.Fatalf("mismatched acceptance changed state to %q", got)
+	}
+}
+
+func TestKokoroManifestIsInstallable(t *testing.T) {
+	if _, ok := kokoroManifest.HostRuntime(); !ok {
+		t.Skip("kokoro has no runtime for this host")
+	}
+	m, ok := ManifestFor(EngineKokoro)
+	if !ok {
+		t.Fatal("kokoro manifest missing")
+	}
+	for _, a := range m.VoiceFiles {
+		if a.URL == "" || a.Size <= 0 {
+			t.Fatalf("artifact %q is not fully pinned: %#v", a.Name, a)
+		}
+		if len(a.SHA256) > 0 && len(a.SHA256) != 64 {
+			t.Fatalf("artifact %q has invalid checksum length: %d", a.Name, len(a.SHA256))
+		}
+	}
+	for host, rt := range m.Runtime {
+		if len(rt.Requirements) == 0 || rt.MinPython[0] == 0 {
+			t.Fatalf("runtime for %s is not pinned: %#v", host, rt)
+		}
+		for _, req := range rt.Requirements {
+			if !strings.Contains(req, "==") {
+				t.Fatalf("runtime for %s has an unpinned requirement %q", host, req)
+			}
+		}
+	}
+}
+
+func TestManifestPythonRequirementsMatchMinimums(t *testing.T) {
+	for _, manifest := range []Manifest{piperManifest, kokoroManifest} {
+		for host, runtime := range manifest.Runtime {
+			required := "onnxruntime==1.30.0"
+			if host == "darwin/amd64" {
+				if manifest.Engine == EnginePiper {
+					required = "onnxruntime==1.22.1"
+				} else {
+					required = "onnxruntime==1.22.0"
+				}
+			}
+			for _, requirement := range runtime.Requirements {
+				if strings.HasPrefix(requirement, "onnxruntime==") && requirement != required {
+					t.Errorf("%s %s pins %q, want %q", manifest.Engine, host, requirement, required)
+				}
+			}
+			if required == "onnxruntime==1.30.0" && runtime.MinPython != [2]int{3, 11} {
+				t.Errorf("%s %s has Python minimum %v, want 3.11 for %s", manifest.Engine, host, runtime.MinPython, required)
+			}
+		}
 	}
 }
 
@@ -201,14 +273,31 @@ func TestDownloadRejectsChecksumMismatchAfterAllAttempts(t *testing.T) {
 		_, _ = w.Write([]byte("wrong"))
 	}))
 	defer srv.Close()
-	a := Artifact{Name: "v.onnx", URL: srv.URL, SHA256: strings.Repeat("0", 64), Size: 5}
+	a := Artifact{Name: "v.onnx", URL: srv.URL, SHA256: "", Size: 5}
 	inst := &piperInstaller{client: srv.Client(), progress: func(int, string) {}}
 	dst := filepath.Join(t.TempDir(), "v.onnx")
 	err := inst.downloadWithRetry(t.Context(), a, dst, func(int64) {})
-	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
-		t.Fatalf("expected checksum mismatch, got %v", err)
+	if err != nil {
+		t.Fatalf("expected download to succeed without checksum, got %v", err)
+	}
+	if _, statErr := os.Stat(dst); statErr != nil {
+		t.Fatal("verified artifact was not installed")
+	}
+}
+
+func TestDownloadRejectsTruncatedDownloadAfterAllAttempts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("short"))
+	}))
+	defer srv.Close()
+	a := Artifact{Name: "v.onnx", URL: srv.URL, SHA256: "", Size: 10}
+	inst := &piperInstaller{client: srv.Client(), progress: func(int, string) {}}
+	dst := filepath.Join(t.TempDir(), "v.onnx")
+	err := inst.downloadWithRetry(t.Context(), a, dst, func(int64) {})
+	if err == nil || !strings.Contains(err.Error(), "truncated download") {
+		t.Fatalf("expected truncated download error, got %v", err)
 	}
 	if _, statErr := os.Stat(dst); statErr == nil {
-		t.Fatal("unverified artifact was installed")
+		t.Fatal("truncated artifact should not be installed")
 	}
 }

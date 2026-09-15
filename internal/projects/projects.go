@@ -39,6 +39,23 @@ type Project struct {
 	RemoteHost   string `json:"remote_host,omitempty"`
 	RemotePort   int    `json:"remote_port,omitempty"`
 	RemoteDistro string `json:"remote_distro,omitempty"`
+	// PortMaps is user-added extra SSH -L forwards (beyond the fixed
+	// api/browse tunnel `ocode remote <host> --web` always opens), managed
+	// by the `/port` command during a --web session. Meaningless for local
+	// (Host == "") and WSL (RemoteKind == "wsl") projects — WSL2 already
+	// shares localhost with Windows natively, so `/port` is a no-op there.
+	PortMaps []PortMap `json:"port_maps,omitempty"`
+}
+
+// PortMap is one user-added "remote:local" TCP forward on top of the fixed
+// api/browse tunnel, keyed by RemotePort (one entry per remote port).
+// Enabled tracks the persisted intent; the live SSH child process for it
+// exists only while a --web session is connected and Enabled is true (see
+// internal/remote's port-forward manager).
+type PortMap struct {
+	RemotePort int  `json:"remote_port"`
+	LocalPort  int  `json:"local_port"`
+	Enabled    bool `json:"enabled"`
 }
 
 // ProjectRef identifies a project entry for scoped mutations (rename,
@@ -254,6 +271,91 @@ func (s *Store) RemoveRemote(host, path string) error {
 	}
 	s.cache = append(s.cache[:idx], s.cache[idx+1:]...)
 	return s.save()
+}
+
+// findRemoteIdx locates ref's cache entry. ref.Host must be non-empty (this
+// helper backs the PortMap operations, which only apply to remote/WSL
+// projects).
+func (s *Store) findRemoteIdx(ref ProjectRef) (int, error) {
+	if ref.Host == "" {
+		return -1, fmt.Errorf("projects: port maps require a remote project (empty host)")
+	}
+	for i, p := range s.cache {
+		if p.Host == ref.Host && p.Path == ref.Path {
+			return i, nil
+		}
+	}
+	return -1, fmt.Errorf("remote project %s:%s not found", ref.Host, ref.Path)
+}
+
+// PortMaps returns ref's persisted extra port forwards.
+func (s *Store) PortMaps(ref ProjectRef) ([]PortMap, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, err := s.findRemoteIdx(ref)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PortMap, len(s.cache[idx].PortMaps))
+	copy(out, s.cache[idx].PortMaps)
+	return out, nil
+}
+
+// AddPortMap upserts a forward for remotePort (matched by RemotePort),
+// enabled by default, and persists it.
+func (s *Store) AddPortMap(ref ProjectRef, remotePort, localPort int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, err := s.findRemoteIdx(ref)
+	if err != nil {
+		return err
+	}
+	maps := s.cache[idx].PortMaps
+	for i := range maps {
+		if maps[i].RemotePort == remotePort {
+			maps[i].LocalPort = localPort
+			maps[i].Enabled = true
+			return s.save()
+		}
+	}
+	s.cache[idx].PortMaps = append(maps, PortMap{RemotePort: remotePort, LocalPort: localPort, Enabled: true})
+	return s.save()
+}
+
+// RemovePortMap deletes remotePort's forward entirely.
+func (s *Store) RemovePortMap(ref ProjectRef, remotePort int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, err := s.findRemoteIdx(ref)
+	if err != nil {
+		return err
+	}
+	maps := s.cache[idx].PortMaps
+	for i := range maps {
+		if maps[i].RemotePort == remotePort {
+			s.cache[idx].PortMaps = append(maps[:i], maps[i+1:]...)
+			return s.save()
+		}
+	}
+	return fmt.Errorf("port map for remote port %d not found", remotePort)
+}
+
+// SetPortMapEnabled flips remotePort's persisted Enabled flag.
+func (s *Store) SetPortMapEnabled(ref ProjectRef, remotePort int, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, err := s.findRemoteIdx(ref)
+	if err != nil {
+		return err
+	}
+	maps := s.cache[idx].PortMaps
+	for i := range maps {
+		if maps[i].RemotePort == remotePort {
+			maps[i].Enabled = enabled
+			return s.save()
+		}
+	}
+	return fmt.Errorf("port map for remote port %d not found", remotePort)
 }
 
 // Touch updates the LastUsedAt for a project, so it rises to the top of the list.

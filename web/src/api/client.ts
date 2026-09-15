@@ -47,6 +47,7 @@ import type {
 	TTSStatus,
 	TTSPlayback,
 	TTSInstallState,
+	PortMapView,
 } from "./types";
 
 export interface CompactConfig {
@@ -646,14 +647,16 @@ export const api = {
 	getTTSEngines: () => fetchJSON<{ engines: TTSEngine[] }>("/api/tts/engines"),
 	getTTSStatus: () => fetchJSON<TTSStatus>("/api/tts/status"),
 	getTTSState: () => fetchJSON<Record<string, TTSInstallState>>("/api/tts/state"),
-	ttsAcceptLicense: (engine: string, license_name: string) =>
-	  fetchJSON<{ state: string }>("/api/tts/license", { method: "POST", body: JSON.stringify({ engine, license_hash: "manifest:" + engine, license_name }) }),
+	ttsAcceptLicense: (engine: string, license_hash: string, license_name: string) =>
+	  fetchJSON<{ state: string }>("/api/tts/license", { method: "POST", body: JSON.stringify({ engine, license_hash, license_name }) }),
 	ttsPin: (engine: string, manifest_version: string) =>
 	  fetchJSON<{ state: string }>("/api/tts/pin", { method: "POST", body: JSON.stringify({ engine, manifest_version }) }),
 	ttsDownload: (engine: string) =>
 	  fetchJSON<{ state: string }>("/api/tts/download", { method: "POST", body: JSON.stringify({ engine }) }),
-	ttsEnable: (engine: string) =>
-	  fetchJSON<TTSStatus>("/api/tts/enable", { method: "POST", body: JSON.stringify({ engine }) }),
+	ttsEnable: (engine: string, model?: string) =>
+	  fetchJSON<TTSStatus>("/api/tts/enable", { method: "POST", body: JSON.stringify({ engine, model }) }),
+	ttsModelVoice: (engine: string, model: string, voice?: string) =>
+	  fetchJSON<{ engine: string; model: string; voice: string }>("/api/tts/model-voice", { method: "POST", body: JSON.stringify({ engine, model, voice }) }),
 	ttsAudioBlob: async (audioId: string): Promise<Blob> => {
 	  const res = await fetch(apiPath(`/api/tts/audio/${encodeURIComponent(audioId)}`), { headers: authHeaders() });
 	  if (!res.ok) throw new Error(`audio fetch failed (${res.status})`);
@@ -662,8 +665,8 @@ export const api = {
 	getTTSConfig: () => fetchJSON<TTSConfig>("/api/config/ocode/tts"),
 	setTTSConfig: (cfg: TTSConfig) =>
 	  fetchJSON<TTSStatus>("/api/config/ocode/tts", { method: "PUT", body: JSON.stringify(cfg) }),
-	ttsSpeak: (text: string) =>
-	  fetchJSON<TTSPlayback>("/api/tts/speak", { method: "POST", body: JSON.stringify({ text }) }),
+	ttsSpeak: (text: string, model?: string) =>
+	  fetchJSON<TTSPlayback>("/api/tts/speak", { method: "POST", body: JSON.stringify({ text, model }) }),
 	ttsStop: () => fetchJSON<TTSPlayback>("/api/tts/stop", { method: "POST" }),
 
 	getTUISettings: () => fetchJSON<TUISettings>("/api/config/ocode/tui"),
@@ -1604,7 +1607,34 @@ export const api = {
     fetchJSON<{ cancelled: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
       method: "POST",
     }),
+  // Desktop remote-workspace only (internal/desktop/portmaps.go) — these
+  // routes don't exist on a plain `ocode serve --remote` instance, so
+  // listPortMaps 404s there. See isPortMapsAvailable.
+  listPortMaps: () => fetchJSON<PortMapView[]>("/api/desktop/portmaps"),
+  addPortMap: (remotePort: number, localPort: number) =>
+    fetchJSON<PortMapView[]>("/api/desktop/portmaps", {
+      method: "POST",
+      body: JSON.stringify({ remote_port: remotePort, local_port: localPort }),
+    }),
+  removePortMap: (remotePort: number) =>
+    fetchJSON<PortMapView[]>(`/api/desktop/portmaps/${remotePort}`, { method: "DELETE" }),
+  setPortMapEnabled: (remotePort: number, enabled: boolean) =>
+    fetchJSON<PortMapView[]>(`/api/desktop/portmaps/${remotePort}/${enabled ? "enable" : "disable"}`, {
+      method: "POST",
+    }),
 };
+
+/** True when the Ports panel should be offered: the desktop-only
+ *  /api/desktop/portmaps routes exist here (a plain remote-server SPA,
+ *  reached directly via `ocode remote --web`, 404s instead). */
+export async function isPortMapsAvailable(): Promise<boolean> {
+  try {
+    await api.listPortMaps();
+    return true;
+  } catch (e) {
+    return !(e instanceof ApiError && e.status === 404);
+  }
+}
 
 export interface SecretScanResponse {
   path: string;
@@ -1639,11 +1669,13 @@ export type SSEEventHandler = (
 
 let _browseBase: string | null = null;
 let _browseHTRNotice = "";
+let _browseRemoteMode = false;
 
 /** Test-only: clear the cached browse base URL. */
 export function __resetBrowseBaseCache(): void {
 	_browseBase = null;
 	_browseHTRNotice = "";
+	_browseRemoteMode = false;
 }
 
 /** Fetches (once, then cached) the browse-origin base URL from the main
@@ -1653,14 +1685,22 @@ export async function getBrowseBase(): Promise<string> {
   if (_browseBase) return _browseBase;
   const res = await authedFetch("/api/browse/config", { method: "GET" });
   if (!res.ok) throw new Error(`browse config: ${res.status}`);
-	const body = (await res.json()) as { base_url: string; htr_notice?: string };
+	const body = (await res.json()) as { base_url: string; htr_notice?: string; remote_mode?: boolean };
 	_browseBase = body.base_url;
 	_browseHTRNotice = body.htr_notice ?? "";
+	_browseRemoteMode = body.remote_mode ?? false;
 	return _browseBase;
 }
 
 export function getBrowseHTRNotice(): string {
 	return _browseHTRNotice;
+}
+
+/** True when the browse origin backs a remote-workspace server (`ocode serve
+ *  --remote`): every host, not just private ones, routes through the
+ *  reverse-proxy pipeline, so the panel should never select chrome/CDP mode. */
+export function getBrowseRemoteMode(): boolean {
+	return _browseRemoteMode;
 }
 
 /** Mints a one-time grant for a stateKey; the first iframe navigation carries

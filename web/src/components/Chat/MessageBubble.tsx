@@ -178,7 +178,7 @@ function MessageBubble({ message, highlight = "", toolName = "", sessionId, mess
     return (
       <>
         {message.reasoning_content ? (
-          <ThinkingBlock text={message.reasoning_content} highlight={highlight} />
+          <ThinkingBlock text={message.reasoning_content} highlight={highlight} onSpeak={() => requestSpeech(message.reasoning_content || "")} />
         ) : null}
         {message.tool_calls?.map((tc, i) => (
           <ToolBlock

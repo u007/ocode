@@ -144,7 +144,8 @@ func (a *authStore) revoke(stateKey string) {
 // first navigation. Returns (stateKey, redirectURL, ok). When redirectURL is
 // non-empty the caller must 302 there after setting the returned cookie.
 // A grant whose target is a local upstream marks the new session local
-// (localDoc=true) — the sole way local mode is entered.
+// (localDoc=true) — the sole way private-host mode is entered. Remote-workspace
+// mode changes the transport used for public hosts, not this security state.
 func (a *authStore) authenticate(w http.ResponseWriter, r *http.Request) (string, string, bool) {
 	if g := r.URL.Query().Get("__grant"); g != "" {
 		local := false

@@ -51,6 +51,9 @@ const workspace: GitWorkspace = {
     changed_files: ["src/unstaged.ts", "src/untracked.txt"],
     has_changes: true,
     is_repo: true,
+    ahead: 0,
+    behind: 0,
+    has_upstream: false,
   },
   staged: [
     {
@@ -189,6 +192,9 @@ describe("GitPanel", () => {
         changed_files: ["src/both.ts"],
         has_changes: true,
         is_repo: true,
+        ahead: 0,
+        behind: 0,
+        has_upstream: false,
       },
       staged: [
         {

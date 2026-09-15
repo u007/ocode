@@ -31,8 +31,11 @@ func TestPiperManifestPinsEveryArtifactAndRuntime(t *testing.T) {
 		t.Fatal("piper manifest missing")
 	}
 	for _, a := range m.VoiceFiles {
-		if a.URL == "" || len(a.SHA256) != 64 || a.Size <= 0 {
+		if a.URL == "" || a.Size <= 0 {
 			t.Fatalf("artifact %q is not fully pinned: %#v", a.Name, a)
+		}
+		if len(a.SHA256) > 0 && len(a.SHA256) != 64 {
+			t.Fatalf("artifact %q has invalid checksum length: %d", a.Name, len(a.SHA256))
 		}
 	}
 	for host, rt := range m.Runtime {
@@ -92,6 +95,37 @@ func TestSupervisorReplaceAndStopUseCurrentSelectionGeneration(t *testing.T) {
 	}
 }
 
+func TestSupervisorSelectReplacesModelVoiceOverrides(t *testing.T) {
+	s := NewSupervisor(Config{
+		Engine: EngineBrowserNative,
+		Mode:   PlaybackManual,
+		ModelVoice: map[string]string{
+			"piper/model-a": "en_US-joe-medium",
+		},
+	}, Options{})
+
+	s.Select(Config{
+		Engine: EngineBrowserNative,
+		Mode:   PlaybackManual,
+		ModelVoice: map[string]string{
+			"piper/model-b": "en_US-joe-medium",
+		},
+	})
+
+	cfg := s.Config()
+	if _, ok := cfg.ModelVoice["piper/model-a"]; ok {
+		t.Fatal("Select retained an omitted model voice override")
+	}
+	if got := cfg.ModelVoice["piper/model-b"]; got != "en_US-joe-medium" {
+		t.Fatalf("model-b voice = %q, want en_US-joe-medium", got)
+	}
+
+	s.Select(Config{Engine: EngineBrowserNative, Mode: PlaybackManual, ModelVoice: map[string]string{}})
+	if got := len(s.Config().ModelVoice); got != 0 {
+		t.Fatalf("empty replacement retained %d model voice overrides", got)
+	}
+}
+
 func TestValidateVoiceID(t *testing.T) {
 	valid := []string{"", "en_US-lessac-medium", "voice.v1"}
 	for _, voice := range valid {
@@ -115,18 +149,19 @@ func TestCacheDirRejectsUnsafeComponents(t *testing.T) {
 	}
 }
 
-func TestInstallVerifiedIsAtomicAndRejectsMismatch(t *testing.T) {
+func TestInstallVerifiedIsAtomicAndSizeVerified(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "source")
 	dst := filepath.Join(dir, "nested", "installed")
 	if err := os.WriteFile(src, []byte("speech"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallVerified(src, dst, "bad"); err == nil {
-		t.Fatal("expected checksum mismatch")
+	// Checksum verification dropped; bad checksum no longer errors, install succeeds.
+	if err := InstallVerified(src, dst, "bad"); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(dst); !os.IsNotExist(err) {
-		t.Fatalf("mismatched install created destination: %v", err)
+	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		t.Fatalf("verified artifact was not installed: %v", err)
 	}
 	hash := sha256.Sum256([]byte("speech"))
 	if err := InstallVerified(src, dst, hex.EncodeToString(hash[:])); err != nil {

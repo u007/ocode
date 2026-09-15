@@ -20,7 +20,9 @@ RUN go mod download
 COPY . .
 
 # Build the web UI (required for embedded assets)
-RUN cd web && npm ci && npm run build
+WORKDIR web
+RUN npm ci && npm run build
+WORKDIR /build
 
 # Build the static binary
 RUN go build -ldflags="-s -w" -o /usr/local/bin/ocode .

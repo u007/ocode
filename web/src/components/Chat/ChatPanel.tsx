@@ -741,7 +741,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
                     ) : (
                       <>
                         {entry.assistant.reasoning_content ? (
-                          <ThinkingBlock text={entry.assistant.reasoning_content} highlight={highlight} />
+                          <ThinkingBlock text={entry.assistant.reasoning_content} highlight={highlight} onSpeak={() => requestSpeech(entry.assistant.reasoning_content || "")} />
                         ) : null}
                         {entry.calls.map(({ tc, resultContent, pendingQuestion }) => (
                           <ToolBlock
@@ -779,7 +779,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
           <div>
             {live.map((part, i) => {
               if (part.kind === "thinking")
-                return <ThinkingBlock key={`live-${i}`} text={part.text} />;
+                return <ThinkingBlock key={`live-${i}`} text={part.text} onSpeak={() => requestSpeech(part.text || "")} />;
               if (part.kind === "text")
                 return <AssistantText key={`live-${i}`} content={part.text} />;
               if (part.kind === "status")

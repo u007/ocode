@@ -3,9 +3,11 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/u007/ocode/internal/config"
@@ -41,7 +43,7 @@ func (s *Server) handleSetTTSConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := config.SaveOcodeTTSConfig(config.TTSConfig{Engine: string(cfg.Engine), Voice: cfg.Voice, Mode: string(cfg.Mode)}); err != nil {
+	if err := config.SaveOcodeTTSConfig(config.TTSConfig{Engine: string(cfg.Engine), Voice: cfg.Voice, Mode: string(cfg.Mode), ModelVoice: cfg.ModelVoice}); err != nil {
 		writeError(w, http.StatusInternalServerError, "save TTS config: "+err.Error())
 		return
 	}
@@ -54,7 +56,8 @@ func (s *Server) handleTTSSelect(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTTSSpeak(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Text string `json:"text"`
+		Text  string `json:"text"`
+		Model string `json:"model,omitempty"`
 	}
 	if err := decodeTTSJSON(w, r, &req, 1<<20); err != nil {
 		status := http.StatusBadRequest
@@ -72,6 +75,13 @@ func (s *Server) handleTTSSpeak(w http.ResponseWriter, r *http.Request) {
 	if s.tts.Status().Config.Engine == tts.EngineBrowserNative {
 		writeError(w, http.StatusConflict, "Browser Native speech runs in the browser")
 		return
+	}
+	if req.Model != "" {
+		if err := tts.ValidateModelID(req.Model); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.tts.SetModel(req.Model)
 	}
 	playback, err := s.tts.Replace(req.Text)
 	if err != nil {
@@ -108,7 +118,19 @@ func (s *Server) validateTTSConfig(cfg tts.Config) error {
 	if cfg.Mode != tts.PlaybackManual && cfg.Mode != tts.PlaybackAtBottom {
 		return errors.New("invalid TTS playback mode")
 	}
-	return tts.ValidateVoiceID(cfg.Voice)
+	if err := tts.ValidateVoiceID(cfg.Voice); err != nil {
+		return err
+	}
+	for key, voice := range cfg.ModelVoice {
+		engineName, model, ok := strings.Cut(key, "/")
+		if !ok || engineName == "" {
+			return errors.New("model_voice keys must be engine/model")
+		}
+		if err := tts.ValidateModelVoice(tts.EngineID(engineName), model, voice); err != nil {
+			return fmt.Errorf("model_voice %q: %w", key, err)
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleTTSAcceptLicense(w http.ResponseWriter, r *http.Request) {
@@ -177,10 +199,14 @@ func (s *Server) handleTTSInstall(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTTSEnable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Engine string `json:"engine"`
+		Model  string `json:"model,omitempty"`
 	}
 	if err := decodeTTSJSON(w, r, &req, 1024); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request")
 		return
+	}
+	if req.Model != "" {
+		s.tts.SetModel(req.Model)
 	}
 	status, err := s.tts.Enable(req.Engine)
 	if err != nil {
@@ -188,11 +214,44 @@ func (s *Server) handleTTSEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := status.Config
-	if err := config.SaveOcodeTTSConfig(config.TTSConfig{Engine: string(cfg.Engine), Voice: cfg.Voice, Mode: string(cfg.Mode)}); err != nil {
+	if err := config.SaveOcodeTTSConfig(config.TTSConfig{Engine: string(cfg.Engine), Voice: cfg.Voice, Mode: string(cfg.Mode), ModelVoice: cfg.ModelVoice}); err != nil {
 		writeError(w, http.StatusInternalServerError, "save TTS config: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleTTSModelVoice(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Engine string `json:"engine"`
+		Model  string `json:"model"`
+		Voice  string `json:"voice,omitempty"`
+	}
+	if err := decodeTTSJSON(w, r, &req, 1024); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	cfg := s.tts.Config()
+	if err := tts.ValidateModelVoice(tts.EngineID(req.Engine), req.Model, req.Voice); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if cfg.ModelVoice == nil {
+		cfg.ModelVoice = make(map[string]string)
+	}
+	key := req.Engine + "/" + req.Model
+	if req.Voice == "" {
+		delete(cfg.ModelVoice, key)
+	} else {
+		cfg.ModelVoice[key] = req.Voice
+	}
+	if err := config.SaveOcodeTTSConfig(config.TTSConfig{Engine: string(cfg.Engine), Voice: cfg.Voice, Mode: string(cfg.Mode), ModelVoice: cfg.ModelVoice}); err != nil {
+		writeError(w, http.StatusInternalServerError, "save TTS config: "+err.Error())
+		return
+	}
+	s.tts.SetModelVoice(req.Engine, req.Model, req.Voice)
+	s.tts.SetModel(req.Model)
+	writeJSON(w, http.StatusOK, map[string]string{"engine": req.Engine, "model": req.Model, "voice": req.Voice})
 }
 
 func (s *Server) handleTTSInstallStates(w http.ResponseWriter, r *http.Request) {

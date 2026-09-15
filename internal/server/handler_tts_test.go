@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -33,6 +34,20 @@ func TestValidateTTSConfigRejectsUnsafeVoice(t *testing.T) {
 	}
 }
 
+func TestValidateTTSConfigRejectsInvalidModelVoice(t *testing.T) {
+	s := newTTSTestServer()
+	cases := []tts.Config{
+		{Engine: tts.EngineBrowserNative, Mode: tts.PlaybackManual, ModelVoice: map[string]string{"unknown/model": "voice"}},
+		{Engine: tts.EngineBrowserNative, Mode: tts.PlaybackManual, ModelVoice: map[string]string{"piper/": "en_US-joe-medium"}},
+		{Engine: tts.EngineBrowserNative, Mode: tts.PlaybackManual, ModelVoice: map[string]string{"piper/model": "not-a-kokoro-voice"}},
+	}
+	for _, cfg := range cases {
+		if err := s.validateTTSConfig(cfg); err == nil {
+			t.Errorf("validateTTSConfig accepted invalid model_voice %#v", cfg.ModelVoice)
+		}
+	}
+}
+
 func TestDecodeTTSJSONRejectsTrailingValues(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/tts/select", strings.NewReader(`{"engine":"browser-native"} {}`))
 	w := httptest.NewRecorder()
@@ -48,5 +63,42 @@ func TestDecodeTTSJSONHonorsBodyLimit(t *testing.T) {
 	var cfg tts.Config
 	if err := decodeTTSJSON(w, r, &cfg, 1024); err == nil {
 		t.Fatal("decodeTTSJSON accepted an oversized body")
+	}
+}
+
+func TestHandleTTSAcceptLicenseValidatesMetadata(t *testing.T) {
+	manifest, ok := tts.ManifestFor(tts.EnginePiper)
+	if !ok {
+		t.Fatal("piper manifest missing")
+	}
+
+	testCases := []struct {
+		name        string
+		licenseHash string
+		licenseName string
+		wantStatus  int
+	}{
+		{name: "valid", licenseHash: manifest.LicenseHash(), licenseName: manifest.LicenseName, wantStatus: 200},
+		{name: "synthetic hash", licenseHash: "manifest:piper", licenseName: manifest.LicenseName, wantStatus: 409},
+		{name: "stale name", licenseHash: manifest.LicenseHash(), licenseName: "old license", wantStatus: 409},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTTSTestServer()
+			body, err := json.Marshal(map[string]string{
+				"engine":       string(tts.EnginePiper),
+				"license_hash": tc.licenseHash,
+				"license_name": tc.licenseName,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := httptest.NewRequest("POST", "/api/tts/license", bytes.NewReader(body))
+			w := httptest.NewRecorder()
+			s.handleTTSAcceptLicense(w, r)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", w.Code, tc.wantStatus, w.Body.String())
+			}
+		})
 	}
 }

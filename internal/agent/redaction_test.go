@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/redact"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // recordingScanner is a test Scanner that masks a single known novel value
@@ -112,6 +115,38 @@ func TestScanToolResult(t *testing.T) {
 			t.Fatalf("expected tokenized fallback on scanner error, got %q", out)
 		}
 	})
+}
+
+// TestHandleApprovedToolCallRedacts guards against a regression where the
+// post-human-approval resume path (TUI's executeApprovedTool, server's
+// executeApprovedWithTempPath -> HandleResolvePermission) called
+// HandleApprovedToolCall directly and returned its raw result, bypassing
+// scanToolResult entirely. That path is reached exactly when a
+// sandbox.sensitive Ask fires (e.g. `cat` on a .env file outside the
+// workspace) — the highest-risk case for a masking gap, since it is the one
+// already flagged sensitive enough to require a human decision.
+func TestHandleApprovedToolCallRedacts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses bash -c")
+	}
+	a := &Agent{tools: map[string]tool.Tool{"bash": tool.BashTool{}}}
+	a.SetRedactionEnabled(true)
+	a.SetRedactionRegistry(redact.NewRegistry("a1b2c3"))
+
+	const rawSecret = "sk-ant-12345678901234567890"
+	cmd := `printf 'API_KEY="` + rawSecret + `"\n'`
+	args, _ := json.Marshal(map[string]interface{}{"command": cmd})
+
+	out, err := a.HandleApprovedToolCall("bash", json.RawMessage(args), "call-approved-1")
+	if err != nil {
+		t.Fatalf("HandleApprovedToolCall returned error: %v", err)
+	}
+	if strings.Contains(out, rawSecret) {
+		t.Fatalf("secret leaked through the approved-tool-call path (unmasked): %q", out)
+	}
+	if !redact.TokenPattern.MatchString(out) {
+		t.Fatalf("expected a redaction token in output, got %q", out)
+	}
 }
 
 func TestSessionRedactorDisabled(t *testing.T) {

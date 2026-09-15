@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../../api/client";
 import type { TTSConfig, TTSEngine, TTSPlayback, TTSStatus } from "../../api/types";
+import { useChatSelector } from "../../stores/chatStore";
 import { chunkSpeechText, sanitizeSpeechText } from "./speechUtils";
 import { loadSpeechToolbarVisible, saveSpeechToolbarVisible } from "./speechToolbarPersistence";
 
@@ -37,6 +38,7 @@ function browserSpeechAvailable() {
 }
 
 export function SpeechProvider({ children }: { children: ReactNode }) {
+	const chatModel = useChatSelector((state) => state.model);
   const [engines, setEngines] = useState<TTSEngine[]>([]);
   const [status, setStatus] = useState<TTSStatus | null>(null);
   const [config, setConfig] = useState<TTSConfig>(defaultConfig);
@@ -200,7 +202,7 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
     const requestGeneration = ++localRequestGeneration.current;
     const current = () => requestGeneration === localRequestGeneration.current;
     try {
-      let playback = await enqueueLocalMutation(() => api.ttsSpeak(normalized));
+		  let playback = await enqueueLocalMutation(() => api.ttsSpeak(normalized, chatModel ?? undefined));
       if (!current()) return;
       setStatus((previous) => previous ? { ...previous, playback } : previous);
       setIsSpeaking(true);

@@ -110,7 +110,7 @@ func (h *Handler) applySessionContext(snap *TUIStatus, id string) {
 			}
 		}
 	}
-	current := totalChars / 4
+	current := totalChars / 4 // approximate token estimate from transcript chars (used only when no live TUI bridge value is present)
 	model := ""
 	maxTokens := 0
 	if rc := h.RCBridge(); rc != nil && id == rc.SessionID {

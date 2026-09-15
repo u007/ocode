@@ -4357,8 +4357,20 @@ func extractFilesFromCommand(command string) []string {
 	return files
 }
 
+// HandleApprovedToolCall runs a tool call that already cleared a human
+// permission Ask (TUI's executeApprovedTool, server's
+// executeApprovedWithTempPath) and applies the same secret-redaction gate the
+// normal Step-loop dispatch sites apply after handleToolCallWithImages. This
+// path is exactly the sensitive-file-read case a sandbox.sensitive Ask exists
+// for, so skipping scanToolResult here would leave the highest-risk result
+// unmasked in both the transcript sent to the model and the on-disk session
+// log. See agent.go's other three scanToolResult call sites for the pattern.
 func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage, toolCallID string) (string, error) {
-	return a.executeToolCall(name, args, nil, toolCallID)
+	result, err := a.executeToolCall(name, args, nil, toolCallID)
+	if err != nil {
+		return result, err
+	}
+	return a.scanToolResult(name, string(args), result), nil
 }
 
 func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {

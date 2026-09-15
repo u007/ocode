@@ -167,6 +167,8 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const lspCount = snap?.lsp_servers?.length ?? 0;
   const extraPathsCount = snap?.extra_allowed_paths?.length ?? 0;
   const subagent = snap?.subagent_model || "";
+  const mainModel = snap?.main_model || "";
+  const reasoningLevel = snap?.thinking_budget ?? null;
 
   // Elapsed timers — mirror the TUI's stream timing.
   const sessionElapsedMs = elapsedMsSince(snap?.session_created_at, nowMs);
@@ -212,6 +214,11 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
           {subagent && (
             <span className="text-foreground" title="Active subagent model">
               · subagent: {subagent}
+            </span>
+          )}
+          {mainModel && (
+            <span className="text-foreground" title="Active model">
+              · model: {mainModel}{reasoningLevel !== null ? ` (reasoning=${reasoningLevel})` : ""}
             </span>
           )}
           {runningParts.length > 0 && (

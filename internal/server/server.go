@@ -340,6 +340,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/tts/download", s.authMiddleware(s.handleTTSDownload))
 	s.mux.HandleFunc("POST /api/tts/install", s.authMiddleware(s.handleTTSInstall))
 	s.mux.HandleFunc("POST /api/tts/enable", s.authMiddleware(s.handleTTSEnable))
+	s.mux.HandleFunc("POST /api/tts/model-voice", s.authMiddleware(s.handleTTSModelVoice))
 	s.mux.HandleFunc("GET /api/config/ocode/permissions-mode", s.authMiddleware(s.handleGetPermissionModeConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/permissions-mode", s.authMiddleware(s.handleSetPermissionModeConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/tui", s.authMiddleware(s.handleGetTUIConfigSection))
@@ -809,6 +810,7 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 		}
 		srv.SetHTRNotice(htrNotice)
 	}
+	bOpts.RemoteMode = srv.remoteMode
 	// Persistent Chrome profile so cookies/logins survive restarts. One
 	// profile per data dir (Chrome is one process per ocode server, shared
 	// across projects), like a normal browser profile.
@@ -868,9 +870,10 @@ func (s *Server) browsePort() int {
 }
 
 func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"base_url":   sameSiteBrowseBase(s.browseBase, r.Host),
-		"htr_notice": s.htrNotice,
+	writeJSON(w, http.StatusOK, map[string]any{
+		"base_url":    sameSiteBrowseBase(s.browseBase, r.Host),
+		"htr_notice":  s.htrNotice,
+		"remote_mode": s.remoteMode,
 	})
 }
 
@@ -1324,7 +1327,12 @@ func (s *Server) SetWorkDir(dir string) {
 		s.handler.SetWorkDir(dir)
 	}
 	if cfg, err := config.LoadOcodeConfigCopy(); err == nil && cfg != nil {
-		s.tts.Select(tts.Config{Engine: tts.EngineID(cfg.TTS.Engine), Voice: cfg.TTS.Voice, Mode: tts.PlaybackMode(cfg.TTS.Mode)})
+		s.tts.Select(tts.Config{
+			Engine:     tts.EngineID(cfg.TTS.Engine),
+			Voice:      cfg.TTS.Voice,
+			Mode:       tts.PlaybackMode(cfg.TTS.Mode),
+			ModelVoice: cfg.TTS.ModelVoice,
+		})
 	}
 }
 

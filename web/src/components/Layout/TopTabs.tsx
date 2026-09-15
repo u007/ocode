@@ -3,6 +3,7 @@ import { FolderGit2, GitBranch, Paperclip, CalendarClock, MessageSquare, MoreHor
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import SyncStatusWidget from "./SyncStatusWidget";
+import PortMapsWidget from "./PortMapsWidget";
 import { useProjectState } from "../../stores/projectStore";
 import { loadProjectTerminals } from "../Terminal/terminalPersistence";
 import { basename } from "@/lib/utils";
@@ -67,10 +68,16 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
   // "N staged · M unstaged" header so the tab badge always matches.
   const [gitStaged, setGitStaged] = useState(0);
   const [gitUnstaged, setGitUnstaged] = useState(0);
+  const [gitAhead, setGitAhead] = useState(0);
+  const [gitBehind, setGitBehind] = useState(0);
+  const [gitHasUpstream, setGitHasUpstream] = useState(false);
   useEffect(() => {
     if (!activeProjectPath) {
       setGitStaged(0);
       setGitUnstaged(0);
+      setGitAhead(0);
+      setGitBehind(0);
+      setGitHasUpstream(false);
       return;
     }
     let cancelled = false;
@@ -80,10 +87,16 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
         if (cancelled) return;
         setGitStaged(status.staged_files?.length ?? 0);
         setGitUnstaged(status.changed_files?.length ?? 0);
+        setGitAhead(status.ahead ?? 0);
+        setGitBehind(status.behind ?? 0);
+        setGitHasUpstream(status.has_upstream ?? false);
       } catch {
         if (!cancelled) {
           setGitStaged(0);
           setGitUnstaged(0);
+          setGitAhead(0);
+          setGitBehind(0);
+          setGitHasUpstream(false);
         }
       }
     };
@@ -195,6 +208,16 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
                   {gitCount}
                 </span>
               )}
+              {gitHasUpstream && (gitAhead > 0 || gitBehind > 0) && (
+                <span
+                  title={`${gitAhead > 0 ? `${gitAhead} to push` : ""}${gitAhead > 0 && gitBehind > 0 ? " · " : ""}${gitBehind > 0 ? `${gitBehind} to pull` : ""}`}
+                  className="inline-flex items-center gap-0.5 text-xs font-semibold leading-none text-amber-500"
+                  aria-label={`Git sync: ${gitAhead > 0 ? `↑${gitAhead}` : ""}${gitBehind > 0 ? `↓${gitBehind}` : ""}`}
+                >
+                  {gitAhead > 0 && <span>↑{gitAhead}</span>}
+                  {gitBehind > 0 && <span>↓{gitBehind}</span>}
+                </span>
+              )}
             </TabsTrigger>
           );
         })}
@@ -243,6 +266,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
       )}
 
       <div className="ml-auto flex items-center shrink-0">
+        <PortMapsWidget />
         <SyncStatusWidget />
       </div>
     </header>

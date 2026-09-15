@@ -8,6 +8,9 @@ const gitStatus = (over: Partial<GitStatus> = {}): GitStatus => ({
   changed_files: [],
   has_changes: false,
   is_repo: true,
+  ahead: 0,
+  behind: 0,
+  has_upstream: false,
   ...over,
 });
 

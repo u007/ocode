@@ -771,3 +771,30 @@ func TestGitHunkStageWithTrailingBlankContextLine(t *testing.T) {
 		t.Errorf("staged patch should contain the edit, got: %s", ws.Staged[0].Patch)
 	}
 }
+func TestGitStatusAheadBehind(t *testing.T) {
+dir := t.TempDir()
+os.WriteFile(filepath.Join(dir, "a"), []byte("x"), 0644)
+gitRunInDir(dir, "init")
+gitRunInDir(dir, "config", "user.email", "t@t")
+gitRunInDir(dir, "config", "user.name", "T")
+gitRunInDir(dir, "add", ".")
+gitRunInDir(dir, "commit", "-m", "init")
+remoteDir := filepath.Join(dir, "remote.git")
+os.MkdirAll(remoteDir, 0755)
+gitRunInDir(remoteDir, "init", "--bare")
+gitRunInDir(dir, "remote", "add", "origin", remoteDir)
+gitRunInDir(dir, "push", "-u", "origin", "HEAD:main")
+os.WriteFile(filepath.Join(dir, "b"), []byte("y"), 0644)
+gitRunInDir(dir, "add", ".")
+gitRunInDir(dir, "commit", "-m", "local")
+h := NewHandler()
+h.SetWorkDir(dir)
+w := httptest.NewRecorder()
+r := httptest.NewRequest("GET", "/api/git/status", nil)
+h.HandleGitStatus(w, r)
+var s GitStatus
+json.NewDecoder(w.Body).Decode(&s)
+if !s.HasUpstream { t.Errorf("expected has_upstream=true, got %v", s.HasUpstream) }
+if s.Ahead != 1 { t.Errorf("expected ahead=1, got %d", s.Ahead) }
+if s.Behind != 0 { t.Errorf("expected behind=0, got %d", s.Behind) }
+}

@@ -57,6 +57,20 @@ func Run(args []string) error {
 		Out:    os.Stdout,
 	}
 	if web {
+		// SSH only: WSL's ConnectWeb path returns before ever reaching the
+		// wait loop the hook drives (Windows already shares WSL2's
+		// localhost natively, so extra forwards are a no-op there). Ensure
+		// the project entry exists BEFORE connecting — Load()/AddPortMap
+		// key off it, and it wouldn't exist yet on a brand-new project
+		// (the AddRemote call below only runs after Connect returns).
+		if store != nil && target.Kind == remote.KindSSH {
+			if aerr := store.AddRemote(hostKey, path); aerr == nil {
+				connectOpts.PortMapHook = &storePortMapHook{
+					store: store,
+					ref:   projects.ProjectRef{Path: path, Host: hostKey},
+				}
+			}
+		}
 		err = remote.ConnectWeb(connectOpts)
 	} else {
 		err = remote.Connect(connectOpts)

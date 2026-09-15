@@ -46,6 +46,11 @@ type GitStatus struct {
 	// unstaged-change decorations must NOT fall back to session diffs in a
 	// clean repo the way it does outside a repo.
 	IsRepo bool `json:"is_repo"`
+	// Divergence from upstream: ahead = local commits not yet pushed,
+	// behind = remote commits not yet pulled. -1 means no upstream branch.
+	Ahead  int `json:"ahead"`
+	Behind int `json:"behind"`
+	HasUpstream bool `json:"has_upstream"`
 }
 
 // HandleGitStatus returns the working-tree status. By default it reports the
@@ -170,6 +175,42 @@ func gitStatusForDir(dir string) GitStatus {
 		status.ChangedFiles = append(status.ChangedFiles, f)
 	}
 	status.HasChanges = len(status.StagedFiles) > 0 || len(status.ChangedFiles) > 0
+
+	// Divergence from upstream using --branch (works for detached HEAD too).
+	branchLine := run("status", "--porcelain=v2", "--branch")
+	status.HasUpstream = false
+	status.Ahead = 0
+	status.Behind = 0
+	for _, line := range strings.Split(branchLine, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "# branch.ab ") {
+			continue
+		}
+		// Format: # branch.ab +3 -2
+		parts := strings.Split(line, " ")
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p == "+0" || p == "-0" || p == "+" || p == "-" || p == "#" || p == "branch.ab" {
+				continue
+			}
+			if strings.HasPrefix(p, "+") {
+				status.Ahead, _ = strconv.Atoi(p[1:])
+				status.HasUpstream = true
+			} else if strings.HasPrefix(p, "-") {
+				status.Behind, _ = strconv.Atoi(p[1:])
+				status.HasUpstream = true
+			}
+		}
+		break
+	}
+	// Detect upstream even when divergence is 0.
+	if branchLine == "" || !strings.Contains(branchLine, "# branch.ab") {
+		upstream := run("rev-parse", "--abbrev-ref", "@{upstream}")
+		if upstream != "" && upstream != "HEAD" && !strings.Contains(upstream, "fatal:") && !strings.Contains(upstream, "unknown") {
+			status.HasUpstream = true
+		}
+	}
+
 	// Same dir handling as the run closure above (empty dir = server workdir).
 	repoCmd := exec.Command("git", "rev-parse", "--git-dir")
 	if dir != "" {

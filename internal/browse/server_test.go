@@ -55,6 +55,34 @@ func TestAuthenticatedNavigationProxiesExternal(t *testing.T) {
 	}
 }
 
+func TestRemoteModePublicPageCannotReachPrivateHost(t *testing.T) {
+	s := New("apitoken", nil, Options{RemoteMode: true})
+	grant := s.MintGrant("tab:remote", "")
+	initial := httptest.NewRequest("GET", "/b/tab:remote/https/example.com/?__grant="+grant, nil)
+	initialW := httptest.NewRecorder()
+	s.Handler().ServeHTTP(initialW, initial)
+	if initialW.Code != http.StatusFound {
+		t.Fatalf("initial navigation: got %d want 302", initialW.Code)
+	}
+	var cookie string
+	for _, c := range initialW.Result().Cookies() {
+		if c.Name == browseCookie {
+			cookie = c.Value
+		}
+	}
+	if cookie == "" {
+		t.Fatal("remote public navigation did not set a session cookie")
+	}
+
+	private := httptest.NewRequest("GET", "/b/tab:remote/http/127.0.0.1:9/", nil)
+	private.AddCookie(&http.Cookie{Name: browseCookie, Value: cookie})
+	privateW := httptest.NewRecorder()
+	s.Handler().ServeHTTP(privateW, private)
+	if privateW.Code != http.StatusForbidden {
+		t.Fatalf("private subrequest: got %d want 403; body=%q", privateW.Code, privateW.Body.String())
+	}
+}
+
 func TestAuthenticatedNavigationProxiesExternalLocalStillProxies(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/foo" {

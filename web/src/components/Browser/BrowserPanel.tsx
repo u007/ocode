@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getBrowseBase, getBrowseHTRNotice, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS } from "../../api/client";
+import { getBrowseBase, getBrowseHTRNotice, getBrowseRemoteMode, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS } from "../../api/client";
 import { useBrowserStore, useBrowserActions, isPrivateHost, type StateKey } from "../../lib/browserStore";
 import { AddressBar } from "./AddressBar";
 import { DevConsole } from "./DevConsole";
@@ -55,9 +55,12 @@ export function BrowserPanel({ stateKey, mode, active = true }: { stateKey: Stat
   // the override and the panel would stay stuck on the Chrome canvas. For
   // public hosts the server nav event's mode is authoritative once one has
   // arrived; before that (mode null) the host predicate decides (the same
-  // rule the Go router uses).
+  // rule the Go router uses). In remote-workspace mode there is no CDP/chrome
+  // at all — every host routes through the reverse proxy server-side (see
+  // internal/browse handleBrowse), so the panel always renders "local".
   const effectiveMode: "local" | "chrome" = (() => {
     if (!s) return "local";
+    if (getBrowseRemoteMode()) return "local";
     if (s.userMode) return s.userMode;
     let privateHost = false;
     try {

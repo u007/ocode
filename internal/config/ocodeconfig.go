@@ -349,10 +349,14 @@ func validHTRNativeHostName(name string) bool {
 // TTSConfig stores the shared web/desktop speech selection. Browser Native is
 // the default and is intentionally implemented in the browser; local engines
 // remain visible in the selector even when their manifest is unavailable.
+// ModelVoice maps model identifiers to voice overrides for that model.
+// When a model has a voice override, it takes precedence over the engine's
+// default voice from the manifest.
 type TTSConfig struct {
-	Engine string `json:"engine"`
-	Voice  string `json:"voice,omitempty"`
-	Mode   string `json:"mode"`
+	Engine    string            `json:"engine"`
+	Voice     string            `json:"voice,omitempty"`
+	Mode      string            `json:"mode"`
+	ModelVoice map[string]string `json:"model_voice,omitempty"`
 }
 
 // DefaultScreencastQuality is the default CDP screencast JPEG quality.
@@ -1196,6 +1200,12 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		}
 		if file.TTS.Mode != "" {
 			cfg.TTS.Mode = file.TTS.Mode
+		}
+		if len(file.TTS.ModelVoice) > 0 {
+			cfg.TTS.ModelVoice = make(map[string]string, len(file.TTS.ModelVoice))
+			for k, v := range file.TTS.ModelVoice {
+				cfg.TTS.ModelVoice[k] = v
+			}
 		}
 		delete(raw, "tts")
 	}

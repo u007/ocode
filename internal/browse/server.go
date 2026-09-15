@@ -68,6 +68,13 @@ type Options struct {
 	ProfileDir string
 	// NoSandbox passes --no-sandbox to Chrome (browser.no_sandbox config).
 	NoSandbox bool
+	// RemoteMode is true when this server backs a `ocode serve --remote`
+	// workspace: there is no guarantee Chrome is even installed on this host,
+	// and the whole point of a remote workspace is that browsing should
+	// egress from here rather than the desktop. External (non-private) hosts
+	// are routed through the same reverse-proxy/rewrite pipeline as private
+	// dev servers instead of handed off to CDP/chrome mode.
+	RemoteMode bool
 }
 
 // Optional interface: DOM.getNodeForLocation (used by context-menu lookup).
@@ -214,6 +221,10 @@ type Server struct {
 	localTransportVal          *http.Transport
 	localInsecureTransportOnce sync.Once
 	localInsecureTransportVal  *http.Transport
+	// externalTransport caches the SSRF-safe transport for genuine public
+	// hosts reaching handleLocal via remote-workspace mode. See chooseLocalTransport.
+	externalTransportOnce sync.Once
+	externalTransportVal  *http.Transport
 
 	// bypass tracks per-stateKey hosts the user has explicitly allowed
 	// after seeing a TLS “not trusted” interstitial (RFC1918 LAN hosts).
@@ -249,6 +260,10 @@ type Server struct {
 	cpuLast   map[int32]float64
 	cpuAt     time.Time
 	procCache map[int32]*process.Process
+
+	// remoteMode mirrors Options.RemoteMode: external hosts route through
+	// the reverse-proxy pipeline instead of CDP/chrome mode. See handleBrowse.
+	remoteMode bool
 }
 
 func New(apiToken string, logger *log.Logger, opts ...Options) *Server {
@@ -262,6 +277,7 @@ func New(apiToken string, logger *log.Logger, opts ...Options) *Server {
 	s.mux.HandleFunc("GET /b/{stateKey}/__cdp", s.handleCDP)
 	s.mux.HandleFunc("POST /b/{stateKey}/__bypass", s.handleBypass)
 	if len(opts) > 0 {
+		s.remoteMode = opts[0].RemoteMode
 		s.initManager(opts[0])
 	}
 	return s
@@ -543,6 +559,11 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(browseCookie); err == nil {
 		cookieVal = c.Value
 	}
+	// effectiveLocal additionally routes external hosts through the local-mode
+	// reverse proxy in remote-workspace mode (Server.remoteMode) — see
+	// Options.RemoteMode. t.Local itself (the literal-private-host check)
+	// never changes.
+	effectiveLocal := t.Local || s.remoteMode
 	// Server-authoritative local-mode gate (spec § Local mode). External pages
 	// must never navigate (or fetch) the panel into local mode: local upstreams
 	// are only reachable while this session is marked local, and a session is
@@ -576,7 +597,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		// an external <img> on a local page is still local traffic.
 		s.auth.setLocalDoc(cookieVal, false)
 	}
-	if t.Local {
+	if effectiveLocal {
 		s.handleLocal(w, r, t)
 		return
 	}

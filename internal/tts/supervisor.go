@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -46,6 +47,10 @@ type Supervisor struct {
 	installer *Installer
 	opts      Options
 	client    *http.Client
+	model     string
+
+	// modelVoice maps model ID → voice override for that model.
+	modelVoice map[string]string
 
 	// installJobs guards one background install per engine.
 	installJobs sync.Map // engine -> struct{}
@@ -61,8 +66,18 @@ func NewSupervisor(cfg Config, opts Options) *Supervisor {
 	if cfg.Mode == "" {
 		cfg.Mode = PlaybackManual
 	}
-	s := &Supervisor{config: cfg, state: "ready", installer: NewInstaller(opts.Root), opts: opts,
-		client: &http.Client{Timeout: 30 * time.Minute}}
+	s := &Supervisor{
+		config:     cfg,
+		state:      "ready",
+		installer:  NewInstaller(opts.Root),
+		opts:       opts,
+		client:     &http.Client{Timeout: 30 * time.Minute},
+		modelVoice: maps.Clone(cfg.ModelVoice),
+	}
+	if s.modelVoice == nil {
+		s.modelVoice = make(map[string]string)
+	}
+	s.config.ModelVoice = maps.Clone(s.modelVoice)
 	s.reconcileInstalled()
 	s.refreshLocked()
 	return s
@@ -104,7 +119,9 @@ func (s *Supervisor) reconcileInstalled() {
 func (s *Supervisor) Config() Config {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.config
+	cfg := s.config
+	cfg.ModelVoice = maps.Clone(s.modelVoice)
+	return cfg
 }
 
 // Engine returns the effective engine entry: catalog availability overlaid
@@ -139,7 +156,12 @@ func (s *Supervisor) Select(cfg Config) Status {
 	if cfg.Mode == "" {
 		cfg.Mode = s.config.Mode
 	}
+	s.modelVoice = maps.Clone(cfg.ModelVoice)
+	if s.modelVoice == nil {
+		s.modelVoice = make(map[string]string)
+	}
 	s.config = cfg
+	s.config.ModelVoice = maps.Clone(s.modelVoice)
 	selection := s.selection.Add(1)
 	s.err = ""
 	s.refreshLocked()
@@ -206,11 +228,19 @@ func (s *Supervisor) replaceWithLocked(m Manifest, text string) (Playback, error
 	s.synthMu.Lock()
 	s.synthCancel = cancel
 	s.synthMu.Unlock()
-	go s.runSynth(ctx, cancel, m, playback)
+	voice := m.Voice
+	if s.model != "" {
+		if v, ok := s.modelVoice[string(m.Engine)+"/"+s.model]; ok && v != "" {
+			voice = v
+		}
+	} else if s.config.Voice != "" {
+		voice = s.config.Voice
+	}
+	go s.runSynth(ctx, cancel, m, playback, voice)
 	return playback, nil
 }
 
-func (s *Supervisor) runSynth(ctx context.Context, cancel context.CancelFunc, m Manifest, playback Playback) {
+func (s *Supervisor) runSynth(ctx context.Context, cancel context.CancelFunc, m Manifest, playback Playback, voice string) {
 	defer cancel()
 	audioDir := filepath.Join(s.opts.Root, "models", "tts", "audio")
 	if err := os.MkdirAll(audioDir, 0o755); err != nil {
@@ -226,7 +256,7 @@ func (s *Supervisor) runSynth(ctx context.Context, cancel context.CancelFunc, m 
 		}
 	}
 	out := filepath.Join(audioDir, playback.AudioID+".wav")
-	if err := piperSynth(ctx, s.opts.ProcSup, s.opts.Root, m, playback.AudioID, playback.Text, out); err != nil {
+	if err := synthText(ctx, s.opts.ProcSup, s.opts.Root, m, playback.AudioID, playback.Text, out, voice); err != nil {
 		if errors.Is(err, context.Canceled) {
 			_ = os.Remove(out)
 			return // stopped or replaced; the newer state already published.
@@ -236,6 +266,14 @@ func (s *Supervisor) runSynth(ctx context.Context, cancel context.CancelFunc, m 
 		return
 	}
 	s.playback.Transition(playback.Generation, func(p *Playback) { p.Status = PlaybackStatusReady })
+}
+
+// synthText dispatches synthesis to the engine-specific function.
+func synthText(ctx context.Context, sup *tool.ProcessSupervisor, root string, m Manifest, id string, text, outPath string, voice string) error {
+	if m.Engine == EngineKokoro {
+		return kokoroSynth(ctx, sup, root, m, id, text, outPath, voice)
+	}
+	return piperSynth(ctx, sup, root, m, id, text, outPath)
 }
 
 func (s *Supervisor) failSynth(generation uint64, err error) {
@@ -303,7 +341,9 @@ func (s *Supervisor) statusLocked() Status {
 	if !engine.BrowserOnly {
 		hardware = "cpu"
 	}
-	return Status{Config: s.config, Engine: engine, Host: Host(), State: s.state, Hardware: hardware, Error: s.err, Playback: s.playback.Status(), SelectionGeneration: s.selection.Load()}
+	cfg := s.config
+	cfg.ModelVoice = maps.Clone(s.modelVoice)
+	return Status{Config: cfg, Engine: engine, Host: Host(), State: s.state, Hardware: hardware, Error: s.err, Playback: s.playback.Status(), SelectionGeneration: s.selection.Load()}
 }
 
 // installStateError reports a rejected install-pipeline step so callers can
@@ -329,11 +369,29 @@ func (s *Supervisor) installStep(engine, step string, allowed ...InstallState) (
 	return prev, installStateError(engine, step, prev, allowed...)
 }
 
-// AcceptLicense records license acceptance. Requires not-accepted/failed state.
+// AcceptLicense records license acceptance for a known engine with an
+// authoritative manifest. Unlike other install steps, license acceptance does
+// not require artifacts to be available; it is explicit consent recording only
+// and never implies installation. The client must echo the exact license
+// metadata presented by Catalog so a changed disclosure requires fresh consent.
 func (s *Supervisor) AcceptLicense(engine string, licenseHash string, licenseName string) error {
-	prev, err := s.installStep(engine, "accept license for", "", InstallNotAccepted, InstallFailed)
-	if err != nil {
-		return err
+	id := EngineID(engine)
+	if _, ok := EngineForHost(id); !ok {
+		return fmt.Errorf("tts: unknown engine %q", engine)
+	}
+	manifest, ok := ManifestFor(id)
+	if !ok || manifest.LicenseText == "" {
+		return fmt.Errorf("tts: no authoritative license metadata for engine %q", engine)
+	}
+	if licenseName != manifest.LicenseName {
+		return fmt.Errorf("tts: license name mismatch for engine %q", engine)
+	}
+	if licenseHash == "" || licenseHash != manifest.LicenseHash() {
+		return fmt.Errorf("tts: license hash mismatch for engine %q", engine)
+	}
+	prev := s.installer.State(engine)
+	if prev.State != InstallNotAccepted && prev.State != InstallFailed && prev.State != "" {
+		return installStateError(engine, "accept license for", prev, InstallNotAccepted, InstallFailed)
 	}
 	s.installer.SetState(engine, EngineInstall{EngineID: engine, LicenseHash: licenseHash, LicenseName: licenseName, State: InstallAccepted, Pinned: prev.Pinned, ManifestVer: prev.ManifestVer, Progress: prev.Progress})
 	return nil
@@ -421,6 +479,8 @@ func (s *Supervisor) Install(engine string) error {
 }
 
 // Enable selects the engine only if installed; updates to enabled state.
+// If a voice override is set for the current model, it takes precedence
+// over the manifest's default voice.
 func (s *Supervisor) Enable(engine string) (Status, error) {
 	inst := s.installer.State(engine)
 	if inst.State != InstallInstalled && inst.State != InstallEnabled {
@@ -429,13 +489,55 @@ func (s *Supervisor) Enable(engine string) (Status, error) {
 	if inst.State == InstallInstalled {
 		s.installer.Update(engine, func(x *EngineInstall) { x.State = InstallEnabled })
 	}
-	// Preserve the user's saved mode; the voice is the manifest's.
+	// Preserve the user's saved mode; the voice is the manifest's
+	// unless a per-model override exists.
 	cfg := s.Config()
 	cfg.Engine = EngineID(engine)
 	if m, ok := ManifestFor(EngineID(engine)); ok {
 		cfg.Voice = m.Voice
 	}
+	if voice, ok := s.ModelVoice(string(cfg.Engine), s.model); ok {
+		cfg.Voice = voice
+	}
 	return s.Select(cfg), nil
+}
+
+// SetModel sets the current model identifier. Used to resolve
+// per-model voice overrides when Enable is called.
+func (s *Supervisor) SetModel(model string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.model = model
+}
+
+// ModelVoice returns the voice override for the given engine and model,
+// and whether one exists.
+func (s *Supervisor) ModelVoice(engine string, model string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.modelVoice == nil {
+		return "", false
+	}
+	key := engine + "/" + model
+	v, ok := s.modelVoice[key]
+	return v, ok
+}
+
+// SetModelVoice sets or clears a voice override for a model on an engine.
+// Pass an empty voice to clear the override.
+func (s *Supervisor) SetModelVoice(engine string, model string, voice string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.modelVoice == nil {
+		s.modelVoice = make(map[string]string)
+	}
+	key := engine + "/" + model
+	if voice == "" {
+		delete(s.modelVoice, key)
+	} else {
+		s.modelVoice[key] = voice
+	}
+	s.config.ModelVoice = maps.Clone(s.modelVoice)
 }
 
 // InstallStates returns the per-engine install records keyed by engine id.

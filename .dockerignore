@@ -1,6 +1,7 @@
 .git/
 .gitignore
 .gitattributes
+.medusa/
 .worktrees/
 .sgindex/
 .claude/
@@ -10,6 +11,11 @@ release/
 bin/
 *.test
 *.out
+*_test.go
+docs/
+*.md
+!deepseek-v4-flash.OCODE.md
+!muse-spark-1.2.OCODE.md
 .env
 .env.local
 .DS_Store
@@ -19,6 +25,8 @@ ocode-linux-*
 ocode-windows-*
 web/node_modules/
 web/dist/assets/
+web/src/**/*.test.*
+web/src/**/*.spec.*
 internal/config/.opencode/snapshots/
 internal/tui/.opencode/
 .tmp_*

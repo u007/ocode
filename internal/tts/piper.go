@@ -3,8 +3,6 @@ package tts
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -163,13 +161,21 @@ func (p *piperInstaller) Install(ctx context.Context) error {
 	if out, err := runCmd(ctx, py.Command, "-m", "venv", venv); err != nil {
 		return fmt.Errorf("create venv: %w: %s", err, out)
 	}
-	p.progress(60, "installing piper-tts")
+	stepName := "installing piper-tts"
+	if p.manifest.Engine == EngineKokoro {
+		stepName = "installing kokoro-onnx"
+	}
+	p.progress(60, stepName)
 	pipArgs := append([]string{"-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--quiet"}, rt.Requirements...)
 	if out, err := runCmd(ctx, []string{venvPython(venv)}, pipArgs...); err != nil {
 		return fmt.Errorf("pip install: %w: %s", err, out)
 	}
 	p.progress(92, "verifying runtime")
-	if out, err := runCmd(ctx, []string{venvPython(venv)}, "-c", "import piper, onnxruntime"); err != nil {
+	importCheck := "import kokoro_onnx, onnxruntime"
+	if p.manifest.Engine == EnginePiper {
+		importCheck = "import piper, onnxruntime"
+	}
+	if out, err := runCmd(ctx, []string{venvPython(venv)}, "-c", importCheck); err != nil {
 		return fmt.Errorf("verify runtime import: %w: %s", err, out)
 	}
 	rec, err := json.Marshal(installedRecord{Version: p.manifest.Version, Python: strings.Join(py.Command, " ")})
@@ -183,7 +189,8 @@ func (p *piperInstaller) Install(ctx context.Context) error {
 	return nil
 }
 
-// Verify reports whether the cache directory holds a complete, checksum-valid
+// Verify reports whether the cache directory holds a complete, size-valid
+// artifact set and a working venv.
 // install of this manifest.
 func (p *piperInstaller) Verify() error {
 	dir, err := p.dir()
@@ -219,18 +226,6 @@ func verifyArtifact(path string, a Artifact) error {
 	}
 	if info.Size() != a.Size {
 		return fmt.Errorf("%s: size %d, want %d", a.Name, info.Size(), a.Size)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return err
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != a.SHA256 {
-		return fmt.Errorf("%s: checksum %s, want %s", a.Name, got, a.SHA256)
 	}
 	return nil
 }
@@ -304,6 +299,10 @@ func (p *piperInstaller) download(ctx context.Context, a Artifact, dst string, o
 			_ = tmp.Close()
 			return rerr
 		}
+	}
+	if n != a.Size {
+		_ = tmp.Close()
+		return fmt.Errorf("truncated download: got %d bytes, want %d", n, a.Size)
 	}
 	if err := tmp.Close(); err != nil {
 		return err

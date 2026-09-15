@@ -12,15 +12,21 @@ embeds the same React application.
   pins the `piper-tts==1.8.0` Python runtime (GPL-3.0-or-later,
   OHF-Voice/piper1-gpl) plus `onnxruntime` per host, and the CC0-dataset
   `en_US-joe-medium` voice from rhasspy/piper-voices with SHA-256 + size for
-  every file. The host needs Python >= 3.11 on PATH (or in the usual
-  Homebrew / python.org / pyenv locations). Other hosts show an explicit
-  unavailable reason.
-- **Kokoro, Fish Audio, and Breeze** are shown in Settings with an explicit
-  unavailable status until a pinned runtime/model manifest, checksum, output
-  protocol, platform matrix, and license review are complete. The UI does not
-  silently switch to Browser Native when a local engine is selected or fails.
+  every file. Hosts using onnxruntime 1.30.0 need Python >= 3.11; Intel macOS
+  uses the 1.22.1 universal2 runtime and accepts Python >= 3.10. Other hosts
+  show an explicit unavailable reason.
+- **Kokoro** is installable on the same supported host matrix. Its manifest
+  pins `kokoro-onnx==0.6.1`, a host-compatible onnxruntime release, the
+  `kokoro-v1.0.onnx` model, and `voices-v1.0.bin`, with Apache-2.0/MIT license
+  disclosures and SHA-256 checksums for the model artifacts. Hosts using
+  onnxruntime 1.30.0 need Python >= 3.11; Intel macOS uses onnxruntime 1.22.0
+  and accepts Python >= 3.10.
+- **Fish Audio and Breeze** remain unavailable until their runtime, artifact,
+  output protocol, platform matrix, and license review are complete. The UI
+  does not silently switch to Browser Native when a local engine is selected or
+  fails.
 
-## Installing Piper
+## Installing a local engine
 
 Settings > Speech playback walks the per-engine state machine
 (`not-accepted → license-accepted → pinned → downloading → installed →
@@ -48,7 +54,7 @@ Local synthesis: `POST /api/tts/speak` returns `playback.status =
 until `ready` (or `error`), then fetches `GET /api/tts/audio/{audio_id}`
 (WAV, 22.05 kHz mono) and plays it through an `<audio>` element. Each run is
 `python -m piper` spawned via the shared process supervisor
-(`ProcessKindTTS`) with a 10-minute timeout; stop/replace/engine-switch
+  (`ProcessKindTTS`) with a 10-minute timeout; stop/replace/engine-switch
 cancel it. Only the active playback's audio id is served.
 
 ## Controls
