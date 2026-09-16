@@ -181,7 +181,7 @@ export default function QuestionDialog({
       <div className="space-y-3">
         <p className="text-sm text-foreground">{q.question}</p>
         <div className="space-y-1">
-          {optionsPerQuestion[qi].map((opt) => {
+          {optionsPerQuestion[qi].map((opt, index) => {
             const checked = s.selected.has(opt.label);
             const Icon = multiple
               ? checked
@@ -196,6 +196,7 @@ export default function QuestionDialog({
                   type="button"
                   onClick={() => toggle(qi, opt)}
                   disabled={loading}
+                  autoFocus={qi === 0 && index === 0}
                   className={`flex w-full items-start gap-2 rounded-md border p-2 text-left transition-colors ${
                     checked
                       ? "border-blue-500 bg-blue-500/10"
@@ -276,6 +277,7 @@ export default function QuestionDialog({
             type="button"
             onClick={() => void handleSubmit()}
             disabled={loading || !allAnswered}
+            data-dialog-default-action
           >
             <Send className="w-4 h-4 mr-2" />
             Submit

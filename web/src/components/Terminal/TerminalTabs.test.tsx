@@ -20,6 +20,8 @@ vi.mock("@xterm/xterm", () => ({
     write = vi.fn();
     focus = vi.fn();
     onData = vi.fn(() => ({ dispose: vi.fn() }));
+    onSelectionChange = vi.fn(() => ({ dispose: vi.fn() }));
+    getSelection = vi.fn(() => "");
     onBell = vi.fn(() => ({ dispose: vi.fn() }));
     onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
     parser = {

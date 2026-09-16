@@ -1116,6 +1116,20 @@ func (m *model) currentStreamEpoch(epoch uint64) bool {
 	return epoch == 0 || epoch == m.agentEpoch
 }
 
+// logStaleStreamDrop records a stream event discarded because its epoch no
+// longer matches the live agent. The drop was previously silent, which made
+// an epoch mismatch (agent rebuilt mid-turn) indistinguishable from a hung
+// stream — the exact "LLM keeps running, TUI shows nothing" report. Logged
+// to the debug panel sparsely (first drop, then every 50th) so a long stale
+// stream cannot flood the 500-entry debug ring buffer.
+func (m *model) logStaleStreamDrop(kind string, epoch uint64, detail string) {
+	m.streamStaleDrops++
+	if m.streamStaleDrops == 1 || m.streamStaleDrops%50 == 0 {
+		agent.DebugAppendf("WARN", "[stream-drop] stale epoch %d (live %d): dropped %s (%s) - total %d",
+			epoch, m.agentEpoch, kind, detail, m.streamStaleDrops)
+	}
+}
+
 // queueReplacementWork records work that must not run against the retiring
 // agent. The notice is intentionally coalesced so holding Enter or submitting
 // several items does not fill the transcript with identical status messages.
@@ -1492,6 +1506,9 @@ type model struct {
 	streamTokenEstimate      int       // live character count during streaming for token estimation
 	streamThinkingChars      int       // live thinking/reasoning character count
 	streamOutputChars        int       // live output (non-thinking) character count
+	streamLastEventAt        time.Time // last streamMsgEvent/deltaMsg arrival; drives the stream-stall watchdog (dotTickMsg)
+	streamStallLogged        bool      // the 30s no-event WARN fires at most once per stream
+	streamStaleDrops         uint64    // stream events silently dropped for a stale epoch; surfaced by logStaleStreamDrop
 	tokenBlinkUntil          time.Time // when the token-count blink effect expires (2s after last token)
 	streamWasInterrupted     bool
 	transcriptLines          []string
@@ -4416,6 +4433,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.activeTab == tabAgents && m.agent != nil && m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0 {
 				m.refreshAgentsViewport()
 			}
+			// Stream-stall watchdog: while a stream is in flight, an LLM-side
+			// block (a tool or provider call hanging, or the transcript drain
+			// chain stalling) surfaces as "the spinner keeps spinning but
+			// nothing renders". Log once per stream so the log tab carries
+			// the evidence after the fact.
+			if m.streaming && !m.streamStallLogged && !m.streamLastEventAt.IsZero() &&
+				time.Since(m.streamLastEventAt) > 30*time.Second {
+				m.streamStallLogged = true
+				agent.DebugAppendf("WARN", "[stream-stall] no stream events for %v (last event %s ago); LLM may be blocked or events dropped — check [perf] entries and epoch warnings",
+					time.Since(m.streamLastEventAt).Round(time.Second), m.streamLastEventAt.Format("15:04:05"))
+			}
 			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
 		}
 	case autoRefreshTickMsg:
@@ -4425,8 +4453,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.streaming || m.lastActivity.LLMRunning || m.compacting || m.cmdRunning() || len(m.lastActivity.ActiveTools) > 0 {
 			return m, tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshTickMsg{} })
 		}
-		var cmds []tea.Cmd
 		// Always refresh the branch info for the sidebar (lightweight)
+		var cmds []tea.Cmd
 		cmds = append(cmds, m.git.cmdBranchRefresh())
 		if m.activeTab == tabGit {
 			cmds = append(cmds, m.git.cmdAutoRefresh())
@@ -4535,6 +4563,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastActivity = agent.ActivitySnapshot{LLMRunning: true}
 		m.streamStartedAt = time.Now()
 		m.streamEndedAt = time.Time{}
+		m.streamLastEventAt = m.streamStartedAt
+		m.streamStallLogged = false
 		// Push the activity state to the web status bar (mirrors the TUI's
 		// "⟳ LLM" indicator) — the activity tracker's own snapshot arrives a
 		// beat later, so reflect the transition promptly.
@@ -4816,6 +4846,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForRCResolve(m.rcResolveCh)
 	case streamMsgEvent:
 		if !m.currentStreamEpoch(msg.epoch) {
+			m.logStaleStreamDrop("streamMsgEvent", msg.epoch, msg.msg.Role)
 			return m, m.continueStreamEvent(msg.epoch, msg.ch, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
 		}
 		if msg.msg.Role == "tool" {
@@ -4917,6 +4948,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.rerenderTranscriptAndMaybeScroll()
 		}
+		m.streamLastEventAt = time.Now()
 		// Live-persist each completed message as it lands in the transcript
 		// (covers assistant/tool/injected-user branches above) — the turn-end
 		// saveSession stays authoritative.
@@ -5397,7 +5429,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitTitleEvent(m.titleCh)
 	case deltaMsg:
+		// Any live event (tool chunk, discovery, note, reasoning/text token)
+		// proves the stream is moving — refresh the stall watchdog timestamp
+		// before the per-kind branches.
+		m.streamLastEventAt = time.Now()
 		if !m.currentStreamEpoch(msg.epoch) {
+			m.logStaleStreamDrop("deltaMsg", msg.epoch, msg.delta.kind)
 			return m, m.continueStreamEvent(msg.epoch, msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
 		}
 		if msg.delta.kind == "tool" {
@@ -14347,7 +14384,17 @@ func (m *model) persistLiveSnapshot() {
 	if len(agentMsgs) == 0 {
 		return
 	}
-	if err := session.SaveAsync(m.sessionID, "", agentMsgs, nil); err != nil {
+	// This runs synchronously on the TUI goroutine once per streamed message
+	// (streamMsgEvent handler). The enqueue includes a synchronous
+	// readHistoryGen sqlite read; a slow/contended session DB stalls the whole
+	// Update loop (transcript freezes while the LLM keeps streaming), so log
+	// any enqueue slower than a frame's budget for diagnosis.
+	start := time.Now()
+	err := session.SaveAsync(m.sessionID, "", agentMsgs, nil)
+	if d := time.Since(start); d > 50*time.Millisecond {
+		agent.DebugAppendf("WARN", "[perf] persistLiveSnapshot enqueue=%v msgs=%d", d.Round(time.Millisecond), len(agentMsgs))
+	}
+	if err != nil {
 		agent.DebugAppendf("SESSION", "live persist FAILED for session %s: %v", m.sessionID, err)
 	}
 }

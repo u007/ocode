@@ -87,7 +87,7 @@ var advisorRecursionGuardFallback atomic.Bool
 
 // advisorAllowedTools lists the tool names the advisor sub-agent may use.
 var advisorAllowedTools = []string{
-	"read", "glob", "grep", "list", "lsp",
+	"read", "glob", "grep", "rgrep", "list", "lsp",
 	"bash", "bash_output", "kill_shell",
 	"webfetch", "websearch",
 	"repo_clone", "repo_overview",
@@ -259,6 +259,12 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 		if client == nil {
 			return "", fmt.Errorf("could not create client for advisor model %q: check provider credentials and config", modelStr)
 		}
+	}
+	// Share the conversation identity so opencode* providers keep request
+	// affinity / prompt caching across the advisor side-call (both the plain
+	// single-turn fallback below and the exploration sub-agent share it).
+	if t.mainAgent != nil {
+		client = t.mainAgent.bindOpenCodeSessionID(client)
 	}
 
 	// Create a sub-agent with exploration tools so the advisor can investigate

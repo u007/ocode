@@ -102,8 +102,10 @@ Called once per session from `agent.go:NewAgent()`. Creates one shared `lsp.Mana
 | | **Opt-in** | | | | |
 | 34 | `AstTool` | `ast.go` | `ast` | ✅ | allow |
 | 35 | `AstGrepTool` | `ast_grep.go` | `ast_grep` | ✅ | allow |
+| | **Conditional** | | | | |
+| 36 | `RgrepTool` | `rgrep.go` | `rgrep` | ✅ | allow |
 | | **Scheduled** | | | | |
-| 36 | `CronTool` | `cron.go` | `cron` | ❌ | allow |
+| 37 | `CronTool` | `cron.go` | `cron` | ❌ | allow |
 
 > Permission defaults from `permissions.go:NewPermissionManager()`. Override via `ocodeconfig.json:permissions.tools` or agent-specific permission maps.
 
@@ -140,7 +142,7 @@ agent.go:Step()
 ```
 
 Permission defaults are defined in `permissions.go:NewPermissionManager()`:
-- **Always allow** (no prompt): read, glob, grep, list, lsp, skill, question, todoread, todowrite, todo_update, advisor, task, task_status, agent_status, repo_overview, plan_enter, plan_exit, wait, bash_output, kill_shell
+- **Always allow** (no prompt): read, glob, grep, rgrep, list, lsp, skill, question, todoread, todowrite, todo_update, advisor, task, task_status, agent_status, repo_overview, plan_enter, plan_exit, wait, bash_output, kill_shell
 - **Default allow**: write, edit, multiedit, multi_file_edit, replace_lines, apply_patch, format, undo_file_change, skill_alias, lsp_diagnostics, ast
 - **Default ask**: delete, bash, webfetch, websearch, repo_clone, github_pr, github_issue, github_workflow, mcp_*
 
@@ -158,6 +160,7 @@ Permission defaults are defined in `permissions.go:NewPermissionManager()`:
 | `custom.go` | `CustomTool` — wraps user-defined tools from config (name, description, shell command) |
 | `ast.go` | `AstTool` — LSP-backed semantic code query (always registered when LSP server available) |
 | `ast_grep.go` | `AstGrepTool` — structural search/rewrite via ast-grep CLI (opt-in via `plugins.ast`) |
+| `rgrep.go` | `RgrepTool` — ripgrep-backed content search (registered when `rg` resolves on PATH; honors .gitignore/.ignore everywhere, hidden files searched, .git/node_modules hard-excluded) |
 | `bash_backup.go` | `UndoTool` — file change undo via snapshot store |
 | `cron.go` | `CronTool` — scheduled job management (requires scheduler service) |
 | `diagnostics.go` | `LSPDiagnosticsTool` — LSP diagnostics reader |

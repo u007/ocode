@@ -32,8 +32,10 @@ func TestLinuxBackendSelectsLandlockOrBwrap(t *testing.T) {
 		if got.Path != fakeExe {
 			t.Fatalf("Path = %q, want re-exec %q", got.Path, fakeExe)
 		}
-		if len(got.Args) < 3 || got.Args[1] != confinerSubcommand || got.Args[2] != "echo hi" {
-			t.Fatalf("Args = %v, want [exe sandbox-confine echo hi]", got.Args)
+		// The confiner carries the original shell argv tail verbatim:
+		// [exe, sandbox-confine, <shell>, [-l], -c, <command>].
+		if len(got.Args) < 4 || got.Args[1] != confinerSubcommand || got.Args[len(got.Args)-2] != "-c" || got.Args[len(got.Args)-1] != "echo hi" {
+			t.Fatalf("Args = %v, want [exe sandbox-confine <shell> -c echo hi]", got.Args)
 		}
 		hasRootsEnv := false
 		for _, kv := range got.Env {
@@ -43,6 +45,32 @@ func TestLinuxBackendSelectsLandlockOrBwrap(t *testing.T) {
 		}
 		if !hasRootsEnv {
 			t.Fatal("re-exec missing OCODE_SANDBOX_ROOTS env carry")
+		}
+	})
+
+	// The desktop login-shell invocation (SetLoginShell: <shell> -l -c) must
+	// survive the Landlock re-exec with its argv tail intact — the confiner
+	// extracts shell + flags + command positionally, so a 4-element argv that
+	// used to be read as Args[2] would have handed "-c" to bash.
+	t.Run("landlock-login-shell", func(t *testing.T) {
+		w := newLinuxWrapper(linuxBackendProbes{
+			landlockUsable: func() bool { return true },
+			bwrapUsable:    func() bool { return true },
+			executable:     func() (string, error) { return fakeExe, nil },
+		})
+		base := bashCmd("/bin/zsh", "-l", "-c", "echo hi")
+		got, err := w.Wrap(base, RootSet{WritableRoots: []string{"/tmp"}, NetworkEgress: true})
+		if err != nil {
+			t.Fatalf("wrap error: %v", err)
+		}
+		want := []string{fakeExe, confinerSubcommand, "/bin/zsh", "-l", "-c", "echo hi"}
+		if len(got.Args) != len(want) {
+			t.Fatalf("Args = %v, want %v", got.Args, want)
+		}
+		for i := range want {
+			if got.Args[i] != want[i] {
+				t.Fatalf("Args = %v, want %v (mismatch at %d)", got.Args, want, i)
+			}
 		}
 	})
 

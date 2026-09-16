@@ -124,6 +124,7 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
         {/* Install row */}
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
           <Input
+            autoFocus
             value={source}
             onChange={(e) => setSource(e.target.value)}
             placeholder="name, git URL, or owner/repo@ref"

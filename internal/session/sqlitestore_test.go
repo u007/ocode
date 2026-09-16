@@ -1,6 +1,7 @@
 package session
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -372,5 +373,103 @@ func TestAppendPreservesMetadataWhenNil(t *testing.T) {
 	}
 	if _, ok := got.Metadata["claude_original_session_id"]; ok {
 		t.Fatalf("expected old metadata discarded when new supplied, got %+v", got.Metadata)
+	}
+}
+
+// TestReadHistoryGenLegacyFileNoSchemaUpgrade covers the TUI-goroutine enqueue
+// path (saveAsyncToDir → readHistoryGen): a session file created before the
+// history_gen column (or with an empty/corrupt DB) must read as generation 0
+// without performing any DDL — readHistoryGen runs synchronously on the
+// Bubble Tea Update loop once per streamed message, so CREATE/ALTER/PRAGMA
+// work there stalls rendering (see the 2026-09-15 "LLM keeps running, TUI
+// shows no new messages" Linux report).
+func TestReadHistoryGenLegacyFileNoSchemaUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	id := "ses_legacy"
+
+	// Simulate a pre-column file: meta without history_gen.
+	path := sqliteSessionPath(dir, id)
+	db, err := openDBRaw(path)
+	if err != nil {
+		t.Fatalf("openDBRaw: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE meta (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', title_generated INTEGER NOT NULL DEFAULT 0, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}')`); err != nil {
+		t.Fatalf("create legacy meta: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO meta (id, created_at, updated_at) VALUES (?, ?, ?)`, id, time.Now(), time.Now()); err != nil {
+		t.Fatalf("insert legacy meta row: %v", err)
+	}
+	db.Close()
+
+	gen, err := readHistoryGen(dir, id)
+	if err != nil {
+		t.Fatalf("readHistoryGen on legacy file: %v", err)
+	}
+	if gen != 0 {
+		t.Fatalf("readHistoryGen = %d, want 0", gen)
+	}
+
+	// No schema upgrade must have happened: the column stays absent so the
+	// read path never takes DDL locks on the TUI goroutine.
+	db, err = openDBRaw(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db.Close()
+	var hasCol bool
+	rows, err := db.Query(`PRAGMA table_info(meta)`)
+	if err != nil {
+		t.Fatalf("pragma: %v", err)
+	}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			t.Fatalf("scan pragma: %v", err)
+		}
+		if name == "history_gen" {
+			hasCol = true
+		}
+	}
+	rows.Close()
+	if hasCol {
+		t.Fatal("readHistoryGen must not add history_gen on the read path")
+	}
+
+	// The write path must still upgrade the file and record a usable gen.
+	msgs := []agent.Message{{Role: "user", Content: "hi"}}
+	if _, err := appendSqliteSession(dir, id, "", msgs, nil, true, 0, false); err != nil {
+		t.Fatalf("appendSqliteSession (upgrades schema): %v", err)
+	}
+	gen, err = readHistoryGen(dir, id)
+	if err != nil {
+		t.Fatalf("readHistoryGen after upgrade: %v", err)
+	}
+	if gen != 0 {
+		t.Fatalf("readHistoryGen after upgrade = %d, want 0 (no shrink recorded)", gen)
+	}
+}
+
+// TestReadHistoryGenEmptyDBDefaultsZero covers the corrupt/empty-file case:
+// readHistoryGen must not fail the enqueue, just report "no recorded shrinks".
+func TestReadHistoryGenEmptyDBDefaultsZero(t *testing.T) {
+	dir := t.TempDir()
+	id := "ses_empty"
+	path := sqliteSessionPath(dir, id)
+	db, err := openDBRaw(path)
+	if err != nil {
+		t.Fatalf("openDBRaw: %v", err)
+	}
+	db.Close() // creates a zero-byte sqlite file
+
+	gen, err := readHistoryGen(dir, id)
+	if err != nil {
+		t.Fatalf("readHistoryGen on empty DB: %v", err)
+	}
+	if gen != 0 {
+		t.Fatalf("readHistoryGen = %d, want 0", gen)
 	}
 }

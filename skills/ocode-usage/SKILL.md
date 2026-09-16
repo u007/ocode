@@ -73,7 +73,7 @@ Configuration is split across two files:
 
 ### Provider API Keys
 
-Supported providers: **OpenAI**, **Anthropic**, **Google (Gemini)**, **Z.AI**, **Alibaba (Qwen)**, **GitHub Copilot**, **DeepSeek (opencode-go)**, **Minimax**, **Grok**, **Cloudflare Gateway**
+Supported providers: **OpenAI**, **Anthropic**, **Google (Gemini)**, **Z.AI**, **Alibaba (Qwen)**, **GitHub Copilot**, **DeepSeek (opencode-go)**, **Minimax**, **Grok**, **Novita AI**, **Ollama Cloud**, **Cloudflare Gateway**
 
 Configure via `apiKeys` in config or provider-specific env vars:
 - `OPENAI_API_KEY`
@@ -83,6 +83,8 @@ Configure via `apiKeys` in config or provider-specific env vars:
 - `DASHSCOPE_API_KEY` (Alibaba)
 - `GITHUB_COPILOT_TOKEN`
 - `OPENCODE_API_KEY` (opencode-go / DeepSeek)
+- `NOVITA_API_KEY` (Novita AI)
+- `OLLAMA_API_KEY` (Ollama Cloud)
 
 **Global override:** Set `OPENCODE_AUTH_TOKEN` to use a single token for all providers, bypassing per-provider configuration. Useful for CI/CD or proxy setups.
 

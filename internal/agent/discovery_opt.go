@@ -146,7 +146,7 @@ func (a *Agent) collectDiscoveryOptSignal(ckpt *advisorCheckpointState, newMsgs 
 					}
 				case "discover_more":
 					sig.discoverMore++
-				case "grep", "read", "glob", "list":
+				case "grep", "rgrep", "read", "glob", "list":
 					sig.grepReadCalls++
 				default:
 					// MCP tools: if a tool call name matches an attached MCP doc, count it as used.
@@ -184,7 +184,7 @@ func (a *Agent) collectDiscoveryOptSignal(ckpt *advisorCheckpointState, newMsgs 
 				switch toolNameByID[m.ToolID] {
 				case "discover_more":
 					sig.discoverMore++
-				case "grep", "read", "glob", "list":
+				case "grep", "rgrep", "read", "glob", "list":
 					sig.grepReadCalls++
 				default:
 					if strings.Contains(m.Content, "discover_more") {
@@ -201,7 +201,7 @@ func (a *Agent) collectDiscoveryOptSignal(ckpt *advisorCheckpointState, newMsgs 
 				if tc.Function.Name == "discover_more" {
 					sig.discoverMore++
 				}
-				if tc.Function.Name == "grep" || tc.Function.Name == "read" || tc.Function.Name == "glob" {
+				if tc.Function.Name == "grep" || tc.Function.Name == "rgrep" || tc.Function.Name == "read" || tc.Function.Name == "glob" {
 					sig.grepReadCalls++
 				}
 			}

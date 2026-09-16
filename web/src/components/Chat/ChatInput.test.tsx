@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import ChatInput from "./ChatInput";
+import { pushQueued, getQueue, clearQueue, dispatchQueueChanged } from "../../lib/tabQueue";
 
 // Controllable stand-in for the real useChat hook so we can assert exactly how
 // many times a message is submitted (the double-send bug under test).
@@ -150,6 +151,36 @@ describe("ChatInput submission", () => {
     });
     await tick();
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  // --- Queue-count sync when an injected message's pickup echo lands ---
+
+  // A message typed while streaming stays in tabQueue flagged `dispatched`
+  // until the server's user_message echo confirms the agent picked it up
+  // (sessionEvents drops the entry and fires QUEUE_CHANGED_EVENT). The "N
+  // queued" line must re-sync at that moment, not keep counting an entry the
+  // agent has already consumed.
+  it("re-syncs the queued line when the queue-changed event fires for its tab", async () => {
+    render(<ChatInput sessionTabId="s1" />);
+    pushQueued("s1", { kind: "message", text: "live", dispatched: true });
+    pushQueued("s1", { kind: "message", text: "next" });
+    expect(getQueue("s1")).toHaveLength(2);
+    await act(async () => {
+      dispatchQueueChanged("s1");
+    });
+    expect(getQueue("s1")).toHaveLength(2);
+    expect(screen.getByText(/2 queued/)).toBeTruthy();
+    clearQueue("s1");
+  });
+
+  it("ignores queue-changed events for other tabs", async () => {
+    render(<ChatInput sessionTabId="s1" />);
+    pushQueued("s1", { kind: "message", text: "live", dispatched: true });
+    await act(async () => {
+      dispatchQueueChanged("s-other");
+    });
+    expect(getQueue("s1")).toHaveLength(1);
+    clearQueue("s1");
   });
 
   // --- Context file pill removal (sticky exclusion, event-based reinjection) ---

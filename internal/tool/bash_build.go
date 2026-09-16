@@ -5,15 +5,52 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"sync"
 
 	"github.com/u007/ocode/internal/shell/sandbox"
 )
 
+// loginShellOverride pins the shell the bash tool runs commands through, as a
+// login shell. Empty means the default non-login `bash -c`.
+var (
+	loginShellMu       sync.RWMutex
+	loginShellOverride string
+)
+
+// SetLoginShell pins the shell the bash tool executes commands through:
+// `exec.Command(shell, "-l", "-c", command)` instead of plain `bash -c`.
+// The desktop app calls this once at boot: a Finder/Dock-launched .app
+// inherits launchd's minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) and no
+// $SHELL, so a non-login bash cannot find user toolchains initialized in
+// profile files (homebrew, nvm, go — "go: command not found"). A login shell
+// sources /etc/zprofile and ~/.zprofile (zsh) or /etc/profile and
+// ~/.bash_profile (bash), restoring the user's PATH. An empty shell restores
+// the default `bash -c` behavior — TUI and server modes launched from a
+// shell never need it. Safe to call concurrently.
+// See docs/superpowers/specs/2026-09-10-desktop-login-shell-env.md.
+func SetLoginShell(shell string) {
+	loginShellMu.Lock()
+	loginShellOverride = shell
+	loginShellMu.Unlock()
+}
+
+// loginShell returns the configured login-shell override, or "" when unset.
+func loginShell() string {
+	loginShellMu.RLock()
+	defer loginShellMu.RUnlock()
+	return loginShellOverride
+}
+
 // bashInvocation returns the platform shell argv for a bash-tool command:
-// `bash -c <command>` on Unix, `cmd /C <command>` on Windows.
+// `<configured login shell> -l -c <command>` when SetLoginShell has pinned a
+// shell (desktop), `bash -c <command>` on Unix otherwise, and
+// `cmd /C <command>` on Windows.
 func bashInvocation(command string) (string, []string) {
 	if runtime.GOOS == "windows" {
 		return "cmd", []string{"/C", command}
+	}
+	if shell := loginShell(); shell != "" {
+		return shell, []string{"-l", "-c", command}
 	}
 	return "bash", []string{"-c", command}
 }

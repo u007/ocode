@@ -1328,39 +1328,6 @@ func TestCompactSummaryClientFallbackUsesNoThinkingGenericClient(t *testing.T) {
 	}
 }
 
-func TestCompactSummaryClientNilConfigFallback(t *testing.T) {
-
-	// When a.config is nil, compactSummaryClient cannot create a synthetic
-	// client via NewClient. If a.client is a *GenericClient, a no-thinking
-	// copy should be returned.
-	mainClient := &GenericClient{
-		Provider:       "anthropic",
-		Model:          "claude-sonnet-4-6",
-		APIKey:         "test-key",
-		ThinkingBudget: 8000,
-	}
-
-	a := &Agent{
-		client: mainClient,
-		config: nil, // no config
-	}
-
-	client := a.compactSummaryClient()
-	gc, ok := client.(*GenericClient)
-	if !ok {
-		t.Fatalf("expected *GenericClient, got %T", client)
-	}
-	if gc.ThinkingBudget != 0 {
-		t.Errorf("nil-config fallback ThinkingBudget = %d, want 0", gc.ThinkingBudget)
-	}
-	if gc == mainClient {
-		t.Error("fallback must return a distinct client, not the original main client")
-	}
-	if mainClient.ThinkingBudget != 8000 {
-		t.Errorf("main client ThinkingBudget mutated to %d, want 8000", mainClient.ThinkingBudget)
-	}
-}
-
 func TestNoThinkingClientPreservesFields(t *testing.T) {
 	// Verify that noThinkingClient copies all safe fields (credentials,
 	// transport, redaction hook, session tag, sampling params) and only
@@ -1441,6 +1408,104 @@ func TestNoThinkingClientPreservesFields(t *testing.T) {
 	if gc.RetryNotifier != nil {
 		t.Error("RetryNotifier should be nil on new client")
 	}
+}
+
+func TestBindOpenCodeSessionIDSideClients(t *testing.T) {
+	// Every side-client constructor must carry the conversation identity:
+	// bindOpenCodeSessionID is nil-safe, idempotent, and must not allocate
+	// a fresh client when the model name is unresolvable. A side client
+	// that skips binding fans out a new opencodeFallback id per request,
+	// breaking opencode* request affinity on the provider side.
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	newAgent := func() *Agent {
+		return &Agent{
+			client: &GenericClient{Provider: "openai", Model: "gpt-4o-mini"},
+			config: &config.Config{Ocode: config.OcodeConfig{
+				SmallModel:        "openai/gpt-4o-mini",
+				SmallModelEnabled: true,
+			}},
+		}
+	}
+
+	t.Run("bind is nil-safe and idempotent", func(t *testing.T) {
+		a := newAgent()
+		var nilClient LLMClient
+		if got := a.bindOpenCodeSessionID(nilClient); got != nil {
+			t.Fatalf("bind(nil) = %v, want nil", got)
+		}
+		a.SetOpenCodeSessionID("sess-bind")
+		got := a.bindOpenCodeSessionID(&GenericClient{Provider: "openai", Model: "gpt-4o-mini"})
+		gc, ok := got.(*GenericClient)
+		if !ok {
+			t.Fatalf("expected *GenericClient, got %T", got)
+		}
+		if gc.opencodeSessionID() != "sess-bind" {
+			t.Errorf("bound session = %q, want sess-bind", gc.opencodeSessionID())
+		}
+		if again := a.bindOpenCodeSessionID(gc); again.(*GenericClient).opencodeSessionID() != "sess-bind" {
+			t.Error("rebind changed the session id")
+		}
+		// Non-generic clients pass through untouched.
+		m := &MockClient{}
+		if a.bindOpenCodeSessionID(m) != LLMClient(m) {
+			t.Error("mock client must pass through bind unchanged")
+		}
+	})
+
+	t.Run("recap client carries session", func(t *testing.T) {
+		a := newAgent()
+		a.SetOpenCodeSessionID("sess-recap")
+		gc, ok := a.recapClient().(*GenericClient)
+		if !ok {
+			t.Fatalf("expected *GenericClient, got %T", a.recapClient())
+		}
+		if gc.opencodeSessionID() != "sess-recap" {
+			t.Errorf("recap session = %q, want sess-recap", gc.opencodeSessionID())
+		}
+	})
+
+	t.Run("auto-continue judge client carries session", func(t *testing.T) {
+		a := newAgent()
+		a.config.Ocode.AutoContinueModel = "openai/gpt-4o-mini"
+		a.SetOpenCodeSessionID("sess-judge")
+		got := a.autoContinueJudgeClient()
+		gc, ok := got.(*GenericClient)
+		if !ok {
+			t.Fatalf("expected *GenericClient, got %T", got)
+		}
+		if gc.opencodeSessionID() != "sess-judge" {
+			t.Errorf("judge session = %q, want sess-judge", gc.opencodeSessionID())
+		}
+		// Unset model disables the judge (nil, not the main client).
+		a2 := newAgent()
+		a2.SetOpenCodeSessionID("sess-judge")
+		if a2.autoContinueJudgeClient() != nil {
+			t.Error("judge client must be nil when AutoContinueModel is unset")
+		}
+	})
+
+	t.Run("no-thinking and compact clients carry session", func(t *testing.T) {
+		a := newAgent()
+		a.client = &GenericClient{Provider: "anthropic", Model: "claude-sonnet-4-6", APIKey: "test-key", ThinkingBudget: 8000}
+		a.SetOpenCodeSessionID("sess-compact")
+		if got := a.noThinkingClient().(*GenericClient); got.opencodeSessionID() != "sess-compact" {
+			t.Errorf("no-thinking session = %q, want sess-compact", got.opencodeSessionID())
+		}
+		if got := a.compactSummaryClient().(*GenericClient); got.opencodeSessionID() != "sess-compact" {
+			t.Errorf("compact session = %q, want sess-compact", got.opencodeSessionID())
+		}
+		// Nil config still binds through the same path.
+		a.config = nil
+		if got := a.compactSummaryClient(); got == nil {
+			t.Fatal("nil-config compact client must not be nil")
+		} else if gc, ok := got.(*GenericClient); !ok {
+			t.Fatalf("expected *GenericClient, got %T", got)
+		} else if gc.opencodeSessionID() != "sess-compact" {
+			t.Errorf("nil-config compact session = %q, want sess-compact", gc.opencodeSessionID())
+		}
+	})
 }
 
 func TestRunCompactPrunesLargeToolResultsInSummaryPrompt(t *testing.T) {

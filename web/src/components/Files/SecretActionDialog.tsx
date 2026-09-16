@@ -190,7 +190,7 @@ export default function SecretActionDialog({ open, onOpenChange, path, name, isD
                 Cancel
               </Button>
               {fileCount !== 0 && (
-                <Button size="sm" onClick={() => setStep("passphrase")}>
+                <Button size="sm" onClick={() => setStep("passphrase")} autoFocus>
                   Continue
                 </Button>
               )}
@@ -261,7 +261,7 @@ export default function SecretActionDialog({ open, onOpenChange, path, name, isD
               {verb === "Encrypt" ? "Encrypted" : "Decrypted"} successfully.
             </p>
             <DialogFooter>
-              <Button size="sm" onClick={() => onOpenChange(false)}>
+              <Button size="sm" onClick={() => onOpenChange(false)} autoFocus>
                 Close
               </Button>
             </DialogFooter>
@@ -272,7 +272,7 @@ export default function SecretActionDialog({ open, onOpenChange, path, name, isD
           <>
             <p className="text-sm text-destructive">{error}</p>
             <DialogFooter>
-              <Button size="sm" onClick={() => onOpenChange(false)}>
+              <Button size="sm" onClick={() => onOpenChange(false)} autoFocus>
                 Close
               </Button>
             </DialogFooter>

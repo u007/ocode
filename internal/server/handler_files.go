@@ -28,6 +28,11 @@ type FileNode struct {
 }
 
 func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
+	// Remote project (?host=): run the walk on the remote host.
+	if hostParam(r) != "" {
+		h.remoteFileTree(w, r)
+		return
+	}
 	root := r.URL.Query().Get("path")
 	if root == "" {
 		// Anchor to the server's project root, not the process CWD: a
@@ -654,6 +659,19 @@ func searchFiles(ctx context.Context, params fileSearchParams, maxTotal int, emi
 // Stream variant `limit` is a total-result cap instead (see HandleFileSearchStream).
 // Invalid regex returns 400. The walk collects ALL matches then slices the page — see stream for incremental SSE.
 func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
+	// Remote project (?host=): grep on the remote host. Parse errors are
+	// the client's fault (400); remoteRun transport failures are the
+	// server's (502) — same split the git endpoints use.
+	if hostParam(r) != "" {
+		if err := h.remoteFileSearch(w, r); err != nil {
+			if isRemoteTransportError(err) {
+				writeError(w, http.StatusBadGateway, "remote search failed: "+err.Error())
+			} else {
+				writeError(w, http.StatusBadRequest, err.Error())
+			}
+		}
+		return
+	}
 	p, err := h.parseSearchParams(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -839,6 +857,11 @@ func containsDotDot(p string) bool {
 }
 
 func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
+	// Remote project (?host=): read the file on the remote host.
+	if hostParam(r) != "" {
+		h.remoteFileContent(w, r)
+		return
+	}
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		writeError(w, http.StatusBadRequest, "path is required")
@@ -927,6 +950,12 @@ func (h *Handler) HandleFileRaw(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	// Remote project (?host=): read the bytes on the remote host.
+	if hostParam(r) != "" {
+		h.remoteFileRaw(w, r)
 		return
 	}
 
@@ -1023,6 +1052,11 @@ func hashContent(s string) string {
 }
 
 func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) {
+	// Remote project (?host=): write the file on the remote host.
+	if hostParam(r) != "" {
+		h.remoteSaveFileContent(w, r)
+		return
+	}
 	var req saveFileContentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")

@@ -2226,7 +2226,7 @@ func (a *Agent) recapClient() LLMClient {
 	recap := strings.TrimSpace(a.config.Ocode.RecapModel)
 	if recap != "" {
 		if client := NewClient(a.config, recap); client != nil {
-			return client
+			return a.bindOpenCodeSessionID(client)
 		}
 	}
 	// Fall back to small model.
@@ -2235,7 +2235,7 @@ func (a *Agent) recapClient() LLMClient {
 		return a.client
 	}
 	if client := NewClient(a.config, small); client != nil {
-		return client
+		return a.bindOpenCodeSessionID(client)
 	}
 	return a.client
 }
@@ -2254,7 +2254,10 @@ func (a *Agent) autoContinueJudgeClient() LLMClient {
 	if model == "" {
 		return nil
 	}
-	return NewClient(a.config, model)
+	if client := NewClient(a.config, model); client != nil {
+		return a.bindOpenCodeSessionID(client)
+	}
+	return nil
 }
 
 // AutoContinueJudgeAsync asks the configured auto-continue judge model
@@ -3293,6 +3296,8 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_fail tool=%s model=%s error=client_creation_failed", toolName, modelLabel))
 		return false, "could not create LLM client", false
 	}
+	// Inherit the main conversation identity (opencode* request affinity).
+	client = a.bindOpenCodeSessionID(client)
 	pinDeterministicSampling(client)
 
 	// Gather context limits from config.
@@ -4403,7 +4408,7 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 		return "", fmt.Errorf("tool %s not found", name)
 	}
 
-	if name == "glob" || name == "grep" || name == "list" {
+	if name == "glob" || name == "grep" || name == "rgrep" || name == "list" {
 		var params map[string]interface{}
 		if err := json.Unmarshal(args, &params); err == nil && a.config != nil && len(a.config.Watcher.Ignore) > 0 {
 			params["ignore"] = a.config.Watcher.Ignore

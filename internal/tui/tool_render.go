@@ -92,6 +92,8 @@ func formatToolCallHint(tc agent.ToolCall, command ...string) string {
 		return fmt.Sprintf("∅  delete %s", first("path", "file_path"))
 	case "grep":
 		return fmt.Sprintf("⌾ grep %q", first("pattern"))
+	case "rgrep":
+		return fmt.Sprintf("⌾ rgrep %q", first("pattern"))
 	case "glob":
 		return fmt.Sprintf("⌾ glob %s", first("pattern"))
 	case "list":

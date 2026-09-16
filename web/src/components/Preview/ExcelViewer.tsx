@@ -15,7 +15,7 @@ const MAX_COLS = 100;
  * the top, the active sheet as a plain HTML table with selectable text
  * for Copy / Ask-LLM. Never routed through the Monaco editor.
  */
-export default function ExcelViewer({ path, projectRoot }: { path: string; projectRoot?: string }) {
+export default function ExcelViewer({ path, projectRoot, projectHost }: { path: string; projectRoot?: string; projectHost?: string }) {
   const [sheets, setSheets] = useState<string[]>([]);
   const [active, setActive] = useState(0);
   const [rows, setRows] = useState<string[][]>([]);
@@ -34,7 +34,7 @@ export default function ExcelViewer({ path, projectRoot }: { path: string; proje
     setRows([]);
     setActive(0);
     api
-      .fetchFileRaw(path, projectRoot)
+      .fetchFileRaw(path, projectRoot, projectHost)
       .then((buf) => {
         if (cancelled) return;
         // sheetRows caps parsing itself (not just rendering) so a 100k-row
@@ -59,7 +59,7 @@ export default function ExcelViewer({ path, projectRoot }: { path: string; proje
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, projectRoot]);
+  }, [path, projectRoot, projectHost]);
 
   const loadSheet = (wb: XLSX.WorkBook, idx: number) => {
     const name = wb.SheetNames[idx];
@@ -137,7 +137,7 @@ export default function ExcelViewer({ path, projectRoot }: { path: string; proje
           </table>
         )}
       </div>
-      {sel && <SelectionToolbar sel={sel} path={path} label={`sheet ${sheets[active] ?? ""}`} projectRoot={projectRoot} onDone={clear} />}
+      {sel && <SelectionToolbar sel={sel} path={path} label={`sheet ${sheets[active] ?? ""}`} projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}
     </div>
   );
 }

@@ -100,7 +100,7 @@ func TestProxy_InjectsRemoteToken(t *testing.T) {
 		t.Fatalf("NewRemoteProxy: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/api/sessions", nil)
+	req := httptest.NewRequest("GET", "/api/sessions?token=local-desktop-token", nil)
 	rec := httptest.NewRecorder()
 	proxy.ServeHTTP(rec, req)
 

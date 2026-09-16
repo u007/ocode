@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,6 +23,45 @@ import (
 // include) will actually open before it stops — see the comment in
 // GrepTool.ExecuteCtx for why unscoped defaults to the whole project root.
 const maxUnscopedFiles = 5000
+
+// maxGrepFileBytes caps how much of any single file a grep scans. Source
+// files are far below it; the cap exists so one pathologically large file
+// (multi-GB log, minified bundle, core dump) cannot balloon the walk's peak
+// memory when content IS scanned (the old os.ReadFile loaded every file
+// whole). Content past the cap is skipped, not silently counted as matched.
+var maxGrepFileBytes = int64(16 << 20) // 16 MiB per file, var so tests can shrink it
+
+// readGrepPrefix reads up to maxGrepFileBytes of a file and reports whether
+// content continues past it. size (the walk's FileInfo.Size) sizes the one
+// allocation exactly — small files never pay for the cap-sized buffer the
+// naive version allocated per file. truncated is exact for regular files:
+// size > cap means content exists past the cap. A size probe (one ReadAt
+// past the cap) covers files whose size changed between Stat and read.
+func readGrepPrefix(path string, size int64) (content []byte, truncated bool, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	n := min(max(size, 0), maxGrepFileBytes)
+	buf := make([]byte, n)
+	nr, rerr := io.ReadFull(f, buf)
+	if rerr != nil && rerr != io.EOF && rerr != io.ErrUnexpectedEOF {
+		return nil, false, rerr
+	}
+	content = buf[:nr]
+	truncated = size > maxGrepFileBytes
+	if nr == len(buf) && !truncated {
+		// Size could have grown since Stat; probe one byte past the cap.
+		var probe [1]byte
+		pn, perr := f.ReadAt(probe[:], maxGrepFileBytes)
+		truncated = pn > 0
+		if perr != nil && perr != io.EOF {
+			return content, truncated, perr
+		}
+	}
+	return content, truncated, nil
+}
 
 // maybeFreeOSMemory returns freed-but-retained heap pages to the OS after a
 // large tree walk. Glob/grep over a big tree can spike the heap by gigabytes
@@ -341,6 +381,18 @@ func globToRegex(pattern string) string {
 	return re.String()
 }
 
+// grepParams is the shared parameter shape for the grep tools. The plain-Go
+// walker (GrepTool) and the ripgrep route (RgrepTool) accept the same params
+// and share format/semantics; the json tags match each tool's own schema.
+type grepParams struct {
+	Pattern    string   `json:"pattern"`
+	Path       string   `json:"path"`
+	Include    string   `json:"include"`
+	OutputMode string   `json:"output_mode"`
+	Multiline  bool     `json:"multiline"`
+	Ignore     []string `json:"ignore"`
+}
+
 type GrepTool struct{}
 
 func (t GrepTool) Name() string { return "grep" }
@@ -388,14 +440,7 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 
 func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	defer maybeFreeOSMemory()
-	var params struct {
-		Pattern    string   `json:"pattern"`
-		Path       string   `json:"path"`
-		Include    string   `json:"include"`
-		OutputMode string   `json:"output_mode"`
-		Multiline  bool     `json:"multiline"`
-		Ignore     []string `json:"ignore"`
-	}
+	var params grepParams
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
 	}
@@ -432,7 +477,7 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 	// Reused across every file in this walk instead of allocating a fresh
 	// 1MB scanner buffer per file — on an unscoped, repo-wide grep that was
 	// the dominant allocation source (thousands of 1MB buffers for one call).
-	scanBuf := make([]byte, 0, 1024*1024)
+	scanBuf := make([]byte, 0, min(int(maxGrepFileBytes), 1024*1024))
 
 	// Guard against an unscoped grep (no path, no include) turning into a
 	// full-repo read: without either filter, resolveSearchRoot anchors on
@@ -482,7 +527,7 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		}
 		filesRead++
 
-		content, readErr := os.ReadFile(p)
+		content, capped, readErr := readGrepPrefix(p, info.Size())
 		if readErr != nil {
 			return nil
 		}
@@ -496,13 +541,16 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 						fr.lines = append(fr.lines, string(match))
 					}
 				}
+				if capped {
+					fr.lines = append(fr.lines, fmt.Sprintf("[file larger than the %d-byte scan cap — past-cap content not searched]", maxGrepFileBytes))
+				}
 				fileResults = append(fileResults, fr)
 			}
 		} else {
 			var fr fileResult
 			fr.path = display
 			scanner := bufio.NewScanner(bytes.NewReader(content))
-			scanner.Buffer(scanBuf, 1024*1024)
+			scanner.Buffer(scanBuf, int(maxGrepFileBytes))
 			lineNum := 1
 			for scanner.Scan() {
 				line := scanner.Text()
@@ -513,6 +561,9 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 					}
 				}
 				lineNum++
+			}
+			if fr.count > 0 && capped {
+				fr.lines = append(fr.lines, fmt.Sprintf("%d:[file larger than the %d-byte scan cap — past-cap content not searched]", lineNum, maxGrepFileBytes))
 			}
 			if fr.count > 0 {
 				fileResults = append(fileResults, fr)

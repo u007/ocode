@@ -113,6 +113,10 @@ interface FileMenuActions {
 interface FileTreeProps {
   onOpenFile: (path: string, projectRoot?: string, line?: number, query?: string) => void;
   projectPath?: string;
+  /** Registered remote target (SSH/WSL) when this is a remote project;
+   *  every tree/content/fs/git request carries it so the server routes the
+   *  work to the remote host (same ?host= contract as the terminal). */
+  projectHost?: string;
   /** Paths currently included in the chat/LLM context (opened editor tabs with includeInContext). Shown as a subtle indicator, separate from the bulk-selection checkbox. */
   includedPaths?: string[];
 }
@@ -288,6 +292,9 @@ interface TreeNodeProps {
   lastClickedPath: string | null;
   onPlainClick: (node: FileNode, e: React.MouseEvent) => void;
   projectRoot?: string;
+  /** Registered remote target for this tree; routed into child-expansion
+   *  requests so nested directories resolve on the remote host. */
+  projectHost?: string;
   forceExpanded?: boolean;
   menu: FileMenuActions;
   includedPaths?: Set<string>;
@@ -303,6 +310,7 @@ function TreeNode({
   lastClickedPath,
   onPlainClick,
   projectRoot,
+  projectHost,
   forceExpanded,
   menu,
   includedPaths,
@@ -349,7 +357,7 @@ function TreeNode({
       try {
         const res = await fetch(
           apiPath(
-            `/api/files/tree?path=${encodeURIComponent(treePathForRequest(projectRoot, node.path))}&depth=1&show_hidden=${showHiddenFiles ? "1" : "0"}`,
+            `/api/files/tree?path=${encodeURIComponent(treePathForRequest(projectRoot, node.path))}&depth=1&show_hidden=${showHiddenFiles ? "1" : "0"}${projectHost ? `&host=${encodeURIComponent(projectHost)}` : ""}`,
           ),
           { headers: authHeaders(), signal: controller.signal },
         );
@@ -369,7 +377,7 @@ function TreeNode({
     })();
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded, node.is_dir, node.path, children, showHiddenFiles]);
+  }, [expanded, node.is_dir, node.path, children, showHiddenFiles, projectRoot, projectHost]);
 
   const toggle = () => {
     if (forceExpanded) return;
@@ -542,6 +550,7 @@ function TreeNode({
               lastClickedPath={lastClickedPath}
               onPlainClick={onPlainClick}
               projectRoot={projectRoot}
+              projectHost={projectHost}
               forceExpanded={forceExpanded}
               menu={menu}
               includedPaths={includedPaths}
@@ -617,7 +626,12 @@ function ConfirmDeleteDialog({
           {rest > 0 && <li className="text-[11px] text-muted-foreground/70">…and {rest} more</li>}
         </ul>
         <div className="flex justify-end gap-2 mt-3">
-          <Button variant="ghost" onClick={onCancel} disabled={deleting}>
+          <Button
+            variant="ghost"
+            onClick={onCancel}
+            disabled={deleting}
+            data-dialog-default-action
+          >
             Cancel
           </Button>
           <Button
@@ -688,7 +702,7 @@ function PromptDialog({ state, onCancel }: { state: PromptState | null; onCancel
 }
 
 
-export default function FileTree({ onOpenFile, projectPath, includedPaths }: FileTreeProps) {
+export default function FileTree({ onOpenFile, projectPath, projectHost, includedPaths }: FileTreeProps) {
   const includedSet = new Set(includedPaths ?? []);
   const [tree, setTree] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
@@ -803,8 +817,12 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
     setActiveRoot(projectPath);
   }, [projectPath]);
 
+  // Dependencies include projectHost: the tree mounts before a project is
+  // active (host undefined); without it the memoized closure keeps sending
+  // tree requests WITHOUT &host= once a remote project activates, so the
+  // server answers with its LOCAL directory instead of the remote tree.
   const fetchRootChildren = useCallback(async (root: string, signal: AbortSignal) => {
-    const query = `path=${encodeURIComponent(root)}&depth=1&show_hidden=${showHiddenFiles ? "1" : "0"}`;
+    const query = `path=${encodeURIComponent(root)}&depth=1&show_hidden=${showHiddenFiles ? "1" : "0"}${projectHost ? `&host=${encodeURIComponent(projectHost)}` : ""}`;
     const res = await fetch(apiPath(`/api/files/tree?${query}`), {
       headers: authHeaders(),
       signal,
@@ -815,7 +833,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
       console.warn("File tree truncated at the root; not all entries were loaded");
     }
     return data;
-  }, [showHiddenFiles]);
+  }, [showHiddenFiles, projectHost]);
 
   const loadRoot = useCallback(
     (root: string) => {
@@ -859,7 +877,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
         if ((err as Error).name !== "AbortError") console.error("File tree refresh error:", err);
       }
     })();
-  }, [activeRoot, projectPath, fetchRootChildren]);
+  }, [activeRoot, projectPath, projectHost, fetchRootChildren]);
 
   useEffect(() => {
     const root = activeRoot ?? projectPath;
@@ -870,12 +888,12 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
       return;
     }
     return loadRoot(root);
-  }, [activeRoot, projectPath, loadRoot]);
+  }, [activeRoot, projectPath, projectHost, loadRoot]);
 
   useEffect(() => {
     setFullTree(null);
     setFullTreeTruncated(false);
-  }, [activeRoot, showHiddenFiles]);
+  }, [activeRoot, projectHost, showHiddenFiles]);
 
   // Reset column state when hidden-file visibility changes so columns
   // are rebuilt with the new filter rather than caching old results.
@@ -898,7 +916,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
     setFullTreeLoading(true);
     (async () => {
       try {
-        const query = `path=${encodeURIComponent(root)}&depth=0&show_hidden=${showHiddenFiles ? "1" : "0"}`;
+        const query = `path=${encodeURIComponent(root)}&depth=0&show_hidden=${showHiddenFiles ? "1" : "0"}${projectHost ? `&host=${encodeURIComponent(projectHost)}` : ""}`;
         const res = await fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders(), signal: controller.signal });
         if (!res.ok) throw new Error("Failed to load full file tree for filtering");
         const data: FileTreeResponse = await res.json();
@@ -916,7 +934,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
       }
     })();
     return () => controller.abort();
-  }, [keyword, activeRoot, projectPath, fullTree, showHiddenFiles]);
+  }, [keyword, activeRoot, projectPath, projectHost, fullTree, showHiddenFiles]);
 
   // ---- Miller-columns state sync ----
   useEffect(() => {
@@ -953,7 +971,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
       const root = activeRoot ?? projectPath ?? "";
       const reqPath = treePathForRequest(root || undefined, dirPath);
       try {
-        const query = `path=${encodeURIComponent(reqPath)}&depth=1&show_hidden=${showHiddenFiles ? "1" : "0"}`;
+        const query = `path=${encodeURIComponent(reqPath)}&depth=1&show_hidden=${showHiddenFiles ? "1" : "0"}${projectHost ? `&host=${encodeURIComponent(projectHost)}` : ""}`;
         const res = await fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders() });
         if (!res.ok) throw new Error("Failed to load directory");
         if (columnFetchSeq.current !== seq) return null;
@@ -964,7 +982,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
         throw err;
       }
     },
-    [activeRoot, projectPath, showHiddenFiles],
+    [activeRoot, projectPath, projectHost, showHiddenFiles],
   );
 
   const handleColumnSelect = useCallback(
@@ -1066,6 +1084,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
     setContentCapped(false);
     followTailRef.current = true;
     const params = new URLSearchParams({ path: root, query: q });
+    if (projectHost) params.set("host", projectHost);
     if (contentExts.trim()) params.set("exts", contentExts.trim());
     if (contentIgnore.trim()) params.set("ignore", contentIgnore.trim());
     if (contentRegex) params.set("regex", "1");
@@ -1115,7 +1134,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
         }
       }
     })();
-  }, [activeRoot, projectPath, contentQuery, contentExts, contentIgnore, contentRegex, contentCaseSensitive, contentWholeWord, contentIncludeIgnored, scrollSearchToBottom]);
+  }, [activeRoot, projectPath, projectHost, contentQuery, contentExts, contentIgnore, contentRegex, contentCaseSensitive, contentWholeWord, contentIncludeIgnored, scrollSearchToBottom]);
 
   useEffect(() => {
     if (searchMode !== "content") {
@@ -1256,7 +1275,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
     const paths = pendingDelete;
     if (!paths || paths.length === 0) return;
     const ok = await runFs(async () => {
-      await api.fsDelete(paths, activeRoot);
+      await api.fsDelete(paths, activeRoot, projectHost);
       window.dispatchEvent(
         new CustomEvent("ocode:fs-delete", { detail: { paths, projectRoot: activeRoot } }),
       );
@@ -1320,11 +1339,11 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
       const paths = [...clipboard.paths];
       runFs(async () => {
         if (cut) {
-          await api.fsMove(paths, destDir, activeRoot);
+          await api.fsMove(paths, destDir, activeRoot, projectHost);
           setClipboard(null);
           window.dispatchEvent(new CustomEvent("ocode:fs-delete", { detail: { paths, projectRoot: activeRoot } }));
         } else {
-          await api.fsCopy(paths, destDir, activeRoot);
+          await api.fsCopy(paths, destDir, activeRoot, projectHost);
         }
       });
     },
@@ -1342,7 +1361,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
           setPrompt(null);
           if (!value) return;
           runFs(async () => {
-            const res = (await api.fsRename(path, value, activeRoot)) as { path?: string };
+            const res = (await api.fsRename(path, value, activeRoot, projectHost)) as { path?: string };
             const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
             const newPath = res?.path ?? (dir ? `${dir}/${value}` : value);
             window.dispatchEvent(new CustomEvent("ocode:fs-rename", { detail: { oldPath: path, newPath, projectRoot: activeRoot } }));
@@ -1358,7 +1377,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
         onConfirm: (value) => {
           setPrompt(null);
           if (!value) return;
-          runFs(() => api.fsNewFile(`${dir}/${value}`, activeRoot));
+          runFs(() => api.fsNewFile(`${dir}/${value}`, activeRoot, projectHost));
         },
       });
     },
@@ -1370,15 +1389,15 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
         onConfirm: (value) => {
           setPrompt(null);
           if (!value) return;
-          runFs(() => api.fsNewFolder(`${dir}/${value}`, activeRoot));
+          runFs(() => api.fsNewFolder(`${dir}/${value}`, activeRoot, projectHost));
         },
       });
     },
-    duplicate: (path) => runFs(() => api.fsDuplicate(path, activeRoot)),
+    duplicate: (path) => runFs(() => api.fsDuplicate(path, activeRoot, projectHost)),
     secret: (path, name, isDir, mode) => setSecretAction({ path, name, isDir, mode }),
-    gitStage: (paths) => runGit((p) => api.gitStage(p, activeRoot), paths),
-    gitUnstage: (paths) => runGit((p) => api.gitUnstage(p, activeRoot), paths),
-    gitDiscard: (paths) => runGit((p) => api.gitDiscard(p, activeRoot), paths),
+    gitStage: (paths) => runGit((p) => api.gitStage(p, activeRoot, projectHost), paths),
+    gitUnstage: (paths) => runGit((p) => api.gitUnstage(p, activeRoot, projectHost), paths),
+    gitDiscard: (paths) => runGit((p) => api.gitDiscard(p, activeRoot, projectHost), paths),
     gitStash: (paths) =>
       setPrompt({
         title: "Stash changes",
@@ -1386,7 +1405,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
         defaultValue: "",
         onConfirm: (value) => {
           setPrompt(null);
-          runGit((p) => api.gitStash(value, p, activeRoot), paths);
+          runGit((p) => api.gitStash(value, p, activeRoot, projectHost), paths);
         },
       }),
     gitCommit: (paths) =>
@@ -1400,7 +1419,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
             showNotice("Commit message required");
             return;
           }
-          runGit((p) => api.gitCommit(value, p, activeRoot), paths);
+          runGit((p) => api.gitCommit(value, p, activeRoot, projectHost), paths);
         },
       }),
   };
@@ -1684,6 +1703,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
                   lastClickedPath={lastClickedPath}
                   onPlainClick={onPlainClick}
                   projectRoot={activeRoot}
+                  projectHost={projectHost}
                   forceExpanded
                   menu={menu}
                   includedPaths={includedSet}
@@ -1786,7 +1806,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
                                             <File className="w-3.5 h-3.5 mr-2" /> Open
                                           </ContextMenuItem>
                                           {!isDir && previewKindForPath(node.path) && (
-                                            <ContextMenuItem onSelect={() => dispatchOpenPreview(node.path, 1, activeRoot)}>
+                                            <ContextMenuItem onSelect={() => dispatchOpenPreview(node.path, 1, activeRoot, projectHost)}>
                                               <Eye className="w-3.5 h-3.5 mr-2" /> Preview in sidebar
                                             </ContextMenuItem>
                                           )}
@@ -1871,6 +1891,7 @@ export default function FileTree({ onOpenFile, projectPath, includedPaths }: Fil
                 lastClickedPath={lastClickedPath}
                 onPlainClick={onPlainClick}
                 projectRoot={activeRoot}
+                projectHost={projectHost}
                 menu={menu}
                 includedPaths={includedSet}
                 generation={refreshKey}

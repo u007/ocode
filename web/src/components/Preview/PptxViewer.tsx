@@ -44,11 +44,13 @@ function resolveTarget(baseDir: string, target: string): string {
 export default function PptxViewer({
   path,
   projectRoot,
+  projectHost,
   slide,
   onSlideChange,
 }: {
   path: string;
   projectRoot?: string;
+  projectHost?: string;
   slide: number;
   onSlideChange: (slide: number) => void;
 }) {
@@ -70,7 +72,7 @@ export default function PptxViewer({
     urlsRef.clear();
 
     (async () => {
-      const buf = await api.fetchFileRaw(path, projectRoot);
+      const buf = await api.fetchFileRaw(path, projectRoot, projectHost);
       const zip = await JSZip.loadAsync(buf);
 
       const presXml = await zip.file("ppt/presentation.xml")?.async("string");
@@ -157,7 +159,7 @@ export default function PptxViewer({
     return () => {
       cancelled = true;
     };
-  }, [path, projectRoot, urlsRef]);
+  }, [path, projectRoot, projectHost, urlsRef]);
 
   useEffect(() => {
     setRevealed(0);
@@ -257,7 +259,7 @@ export default function PptxViewer({
         </div>
       </div>
       <style>{`.pptx-block{transition:opacity .35s ease,transform .35s ease;}.pptx-hidden{opacity:0;transform:translateY(8px);}`}</style>
-      {sel && <SelectionToolbar sel={sel} path={path} label={`slide ${safe}`} projectRoot={projectRoot} onDone={clear} />}
+      {sel && <SelectionToolbar sel={sel} path={path} label={`slide ${safe}`} projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}
       {presenting && (
         <div
           className="fixed inset-0 z-50 flex flex-col bg-black/95 p-6"

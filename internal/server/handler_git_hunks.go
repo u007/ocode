@@ -34,6 +34,10 @@ type gitHunkRequest struct {
 // file): stage adds the file, discard removes it. The response is the full
 // refreshed workspace so the UI re-renders from one authoritative snapshot.
 func (h *Handler) HandleGitHunk(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		h.remoteGitHunk(w, r, host)
+		return
+	}
 	var req gitHunkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")

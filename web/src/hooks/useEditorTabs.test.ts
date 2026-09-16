@@ -57,7 +57,7 @@ describe("useEditorTabs", () => {
     await act(async () => {
       await result.current.saveEditorTab(result.current.editorTabs[0].id);
     });
-    expect(api.saveFileContent).toHaveBeenCalledWith("src/a.ts", "hello", "/projects/active", expect.any(String), undefined);
+    expect(api.saveFileContent).toHaveBeenCalledWith("src/a.ts", "hello", "/projects/active", expect.any(String), undefined, undefined);
   });
 
   it("closing the active tab falls back to null, not a string sentinel", async () => {

@@ -30,6 +30,12 @@ type FileSearchStreamDone struct {
 // context cancelled, or a frame write failing once the connection closed)
 // aborts the scan quietly — no trailing done is emitted.
 func (h *Handler) HandleFileSearchStream(w http.ResponseWriter, r *http.Request) {
+	// Remote project (?host=): serve the same SSE frames from a single
+	// remote grep (results arrive in one batch, then done).
+	if hostParam(r) != "" {
+		h.remoteFileSearchStream(w, r)
+		return
+	}
 	p, err := h.parseSearchParams(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

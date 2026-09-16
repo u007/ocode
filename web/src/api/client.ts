@@ -343,8 +343,12 @@ export { normalizeBrowseURL };
 
 // projQuery appends ?project=<root> for endpoints that select a registered
 // project root via the query string (git + fs mutation endpoints).
-function projQuery(project?: string): string {
-  return project ? `?project=${encodeURIComponent(project)}` : "";
+function projQuery(project?: string, host?: string): string {
+  const params = new URLSearchParams();
+  if (project) params.set("project", project);
+  if (host) params.set("host", host);
+  const q = params.toString();
+  return q ? `?${q}` : "";
 }
 
 /** Non-2xx response from fetchJSON. Carries the HTTP status so callers can
@@ -359,7 +363,7 @@ export class ApiError extends Error {
   }
 }
 
-async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
+export async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
@@ -369,7 +373,28 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new ApiError(err.message || err.error || res.statusText, res.status);
   }
-  return res.json();
+  // Guard the success path: a 2xx response with an empty or non-JSON body
+  // (server bug, proxy misconfig, HTML SPA fallback for an unknown /api
+  // route) makes bare res.json() throw WebKit's cryptic
+  // "SyntaxError: The string did not match the expected pattern" in the
+  // desktop WKWebView (Chrome says "Unexpected token ... in JSON").
+  // Parse defensively so callers get a readable ApiError naming the route.
+  // NOTE: an empty body resolves undefined (cast to T). Every current
+  // empty-2xx endpoint routes through fetchEmpty/authedFetch instead, so no
+  // caller depends on this — but a future fetchJSON caller doing
+  // `const s = await api.x(); s.field` on an empty body would get a
+  // runtime TypeError with no compiler warning. Prefer fetchEmpty for
+  // empty-body endpoints; treat a fetchJSON undefined as a server bug.
+  const text = await res.text();
+  if (text.trim() === "") return undefined as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new ApiError(
+      `Non-JSON response from ${path} (status ${res.status}, content-type ${res.headers.get("content-type") ?? "none"})`,
+      res.status,
+    );
+  }
 }
 
 async function fetchEmpty(path: string, init?: RequestInit): Promise<void> {
@@ -758,37 +783,46 @@ export const api = {
       body: JSON.stringify({ fake_agent }),
     }),
 
-  getGitDiff: (path?: string, project?: string, staged?: boolean) => {
+  getGitDiff: (path?: string, project?: string, staged?: boolean, host?: string) => {
     const params = new URLSearchParams();
     if (path) params.set("path", path);
     if (project) params.set("project", project);
+    if (host) params.set("host", host);
     if (staged) params.set("staged", "true");
     const query = params.toString();
     return fetchJSON<GitDiffFile[]>(`/api/git/diff${query ? `?${query}` : ""}`);
   },
 
-  /** Working-tree status of the repo at `project` (or the server workdir). */
-  getGitStatus: (project?: string) =>
-    fetchJSON<GitStatus>(`/api/git/status${projQuery(project)}`),
+  /** Working-tree status of the repo at `project` (or the server workdir).
+   *  host selects a registered remote project (SSH/WSL) — the git pipeline
+   *  then runs on that host (see the terminal endpoint's ?host= contract). */
+  getGitStatus: (project?: string, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/status${projQuery(project, host)}`),
 
   /** One-shot SourceTree-style snapshot: status + staged + unstaged diffs. */
-  getGitWorkspace: (project?: string) =>
-    fetchJSON<GitWorkspace>(`/api/git/workspace${projQuery(project)}`),
+  getGitWorkspace: (project?: string, host?: string) =>
+    fetchJSON<GitWorkspace>(`/api/git/workspace${projQuery(project, host)}`),
 
   /** Recent commits, newest first. */
-  gitLog: (project?: string, limit = 50) =>
-    fetchJSON<GitCommit[]>(`/api/git/log${projQuery(project)}${project ? "&" : "?"}limit=${limit}`),
+  gitLog: (project?: string, limit = 50, host?: string) => {
+    const params = new URLSearchParams();
+    if (project) params.set("project", project);
+    if (host) params.set("host", host);
+    params.set("limit", String(limit));
+    return fetchJSON<GitCommit[]>(`/api/git/log?${params.toString()}`);
+  },
 
   /** Diff of a single commit (for the commit detail pane). */
-  gitShow: (commit: string, project?: string) => {
+  gitShow: (commit: string, project?: string, host?: string) => {
     const params = new URLSearchParams({ commit });
     if (project) params.set("project", project);
+    if (host) params.set("host", host);
     return fetchJSON<GitDiffFile[]>(`/api/git/show?${params.toString()}`);
   },
 
   /** Stage / unstage / discard a single hunk; returns the refreshed workspace. */
-  gitHunk: (req: GitHunkRequest, project?: string) =>
-    fetchJSON<GitWorkspace>(`/api/git/hunk${projQuery(project)}`, {
+  gitHunk: (req: GitHunkRequest, project?: string, host?: string) =>
+    fetchJSON<GitWorkspace>(`/api/git/hunk${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify(req),
     }),
@@ -796,85 +830,85 @@ export const api = {
   // ── Git file actions (driven by the web file-tree context menu) ──
   // The target project is passed as ?project= (the same convention the GET
   // git endpoints use); paths/message travel in the JSON body.
-  gitStage: (paths: string[], project?: string) =>
-    fetchJSON<GitStatus>(`/api/git/stage${projQuery(project)}`, {
+  gitStage: (paths: string[], project?: string, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/stage${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ paths }),
     }),
-  gitUnstage: (paths: string[], project?: string) =>
-    fetchJSON<GitStatus>(`/api/git/unstage${projQuery(project)}`, {
+  gitUnstage: (paths: string[], project?: string, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/unstage${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ paths }),
     }),
-  gitDiscard: (paths: string[], project?: string) =>
-    fetchJSON<GitStatus>(`/api/git/discard${projQuery(project)}`, {
+  gitDiscard: (paths: string[], project?: string, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/discard${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ paths }),
     }),
-  gitStash: (message: string, paths: string[], project?: string) =>
-    fetchJSON<GitStatus>(`/api/git/stash${projQuery(project)}`, {
+  gitStash: (message: string, paths: string[], project?: string, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/stash${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ paths, message }),
     }),
-  gitCommit: (message: string, paths: string[], project?: string) =>
-    fetchJSON<GitStatus>(`/api/git/commit${projQuery(project)}`, {
+  gitCommit: (message: string, paths: string[], project?: string, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/commit${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ paths, message }),
     }),
 
   // ── Git network actions ──
-  gitFetch: (project?: string) =>
-    fetchJSON<GitStatus>(`/api/git/fetch${projQuery(project)}`, {
+  gitFetch: (project?: string, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/fetch${projQuery(project, host)}`, {
       method: "POST",
     }),
-  gitPull: (project?: string) =>
-    fetchJSON<GitStatus>(`/api/git/pull${projQuery(project)}`, {
+  gitPull: (project?: string, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/pull${projQuery(project, host)}`, {
       method: "POST",
     }),
-  gitPush: (project?: string, force = false) =>
-    fetchJSON<GitStatus>(`/api/git/push${projQuery(project)}`, {
+  gitPush: (project?: string, force = false, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/push${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ force }),
     }),
-  gitResetRemote: (project?: string) =>
-    fetchJSON<GitStatus>(`/api/git/reset-remote${projQuery(project)}`, {
+  gitResetRemote: (project?: string, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/reset-remote${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ force: true }),
     }),
 
   // ── File-system actions (web file-tree context menu) ──
-  fsCopy: (paths: string[], destDir: string, project?: string) =>
-    fetchJSON<{ success: boolean }>(`/api/fs/copy${projQuery(project)}`, {
+  fsCopy: (paths: string[], destDir: string, project?: string, host?: string) =>
+    fetchJSON<{ success: boolean }>(`/api/fs/copy${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ paths, dest_dir: destDir }),
     }),
-  fsMove: (paths: string[], destDir: string, project?: string) =>
-    fetchJSON<{ success: boolean }>(`/api/fs/move${projQuery(project)}`, {
+  fsMove: (paths: string[], destDir: string, project?: string, host?: string) =>
+    fetchJSON<{ success: boolean }>(`/api/fs/move${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ paths, dest_dir: destDir }),
     }),
-  fsDelete: (paths: string[], project?: string) =>
-    fetchJSON<{ success: boolean }>(`/api/fs/delete${projQuery(project)}`, {
+  fsDelete: (paths: string[], project?: string, host?: string) =>
+    fetchJSON<{ success: boolean }>(`/api/fs/delete${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ paths }),
     }),
-  fsRename: (path: string, newName: string, project?: string) =>
-    fetchJSON<{ success: boolean; path: string }>(`/api/fs/rename${projQuery(project)}`, {
+  fsRename: (path: string, newName: string, project?: string, host?: string) =>
+    fetchJSON<{ success: boolean; path: string }>(`/api/fs/rename${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ path, new_name: newName }),
     }),
-  fsNewFile: (path: string, project?: string) =>
-    fetchJSON<{ success: boolean; path: string }>(`/api/fs/new-file${projQuery(project)}`, {
+  fsNewFile: (path: string, project?: string, host?: string) =>
+    fetchJSON<{ success: boolean; path: string }>(`/api/fs/new-file${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
-  fsNewFolder: (path: string, project?: string) =>
-    fetchJSON<{ success: boolean; path: string }>(`/api/fs/new-folder${projQuery(project)}`, {
+  fsNewFolder: (path: string, project?: string, host?: string) =>
+    fetchJSON<{ success: boolean; path: string }>(`/api/fs/new-folder${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
-  fsDuplicate: (path: string, project?: string) =>
-    fetchJSON<{ success: boolean; path: string }>(`/api/fs/duplicate${projQuery(project)}`, {
+  fsDuplicate: (path: string, project?: string, host?: string) =>
+    fetchJSON<{ success: boolean; path: string }>(`/api/fs/duplicate${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
@@ -1280,17 +1314,23 @@ export const api = {
     ),
 
   // ── File content save (PUT) ──
-  saveFileContent: (path: string, content: string, projectRoot?: string, expectedHash?: string, force?: boolean) =>
-    fetchJSON<{ path: string; saved: boolean }>("/api/files/content", {
+  // host selects a registered remote project: it travels in the ?host=
+  // query string (the server dispatches on hostParam(r) only — a host
+  // field in the JSON body is ignored and the save would take the LOCAL
+  // branch against a remote project_root).
+  saveFileContent: (path: string, content: string, projectRoot?: string, expectedHash?: string, force?: boolean, host?: string) =>
+    fetchJSON<{ path: string; saved: boolean }>(`/api/files/content${host ? `?host=${encodeURIComponent(host)}` : ""}`, {
       method: "PUT",
       body: JSON.stringify({ path, content, project_root: projectRoot, expected_hash: expectedHash, force }),
     }),
 
   // ── File content load (GET) for the sidebar PreviewHost text/markdown
-  // viewer (same endpoint the editor tabs use).
-  getFileContent: async (path: string, projectRoot?: string): Promise<{ content: string; is_binary: boolean }> => {
+  // viewer (same endpoint the editor tabs use). host selects a registered
+  // remote project — the read runs on that host.
+  getFileContent: async (path: string, projectRoot?: string, host?: string): Promise<{ content: string; is_binary: boolean }> => {
     const query = new URLSearchParams({ path });
     if (projectRoot) query.set("project_root", projectRoot);
+    if (host) query.set("host", host);
     const res = await fetch(apiPath(`/api/files/content?${query.toString()}`), { headers: authHeaders() });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -1310,9 +1350,10 @@ export const api = {
 
   // ── Sidebar preview: fetch raw bytes for pdf/docx/pptx/image/mmd via
   // GET /api/files/raw (auth headers required — plain <img>/<iframe> tags
-  // can't attach them, so callers use fetch + blob URLs).
-  fetchFileRaw: async (path: string, projectRoot?: string): Promise<ArrayBuffer> => {
-    const q = `path=${encodeURIComponent(path)}${projectRoot ? `&project_root=${encodeURIComponent(projectRoot)}` : ""}`;
+  // can't attach them, so callers use fetch + blob URLs). host selects a
+  // registered remote project — the read runs on that host.
+  fetchFileRaw: async (path: string, projectRoot?: string, host?: string): Promise<ArrayBuffer> => {
+    const q = `path=${encodeURIComponent(path)}${projectRoot ? `&project_root=${encodeURIComponent(projectRoot)}` : ""}${host ? `&host=${encodeURIComponent(host)}` : ""}`;
     const res = await fetch(apiPath(`/api/files/raw?${q}`), { headers: authHeaders() });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -1626,11 +1667,14 @@ export const api = {
 
 /** True when the Ports panel should be offered: the desktop-only
  *  /api/desktop/portmaps routes exist here (a plain remote-server SPA,
- *  reached directly via `ocode remote --web`, 404s instead). */
+ *  reached directly via `ocode remote --web`, 404s instead). Treat a
+ *  non-array response as "unavailable": a 200 whose body is not a portmaps
+ *  JSON array means the route is actually missing (SPA fallback or proxy)
+ *  and every panel action would fail anyway. */
 export async function isPortMapsAvailable(): Promise<boolean> {
   try {
-    await api.listPortMaps();
-    return true;
+    const maps = await api.listPortMaps();
+    return Array.isArray(maps);
   } catch (e) {
     return !(e instanceof ApiError && e.status === 404);
   }

@@ -681,7 +681,7 @@ func gitConfigWriteArgs(args []string) bool {
 // path-returning cases of extractPathFromArgs.
 var pathScopedTools = map[string]bool{
 	"read": true, "write": true, "edit": true, "delete": true,
-	"multiedit": true, "multi_file_edit": true, "replace_lines": true, "glob": true, "grep": true,
+	"multiedit": true, "multi_file_edit": true, "replace_lines": true, "glob": true, "grep": true, "rgrep": true,
 	"list": true, "lsp": true, "apply_patch": true, "format": true, "repo_overview": true,
 }
 
@@ -1296,7 +1296,11 @@ func NewPermissionManager() *PermissionManager {
 	for k, v := range bashAutoAllowDefaultModes {
 		pm.bashPrefixModes[k] = v
 	}
-	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "lsp_diagnostics", "skill", "load_skill", "question", "todoread", "todowrite", "todo_update", "advisor", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell", "list_processes", "ocr", "cron"} {
+	// Read-only tools ride allow by default. rgrep is pre-registered here
+	// even though tool registration is conditional on rg availability
+	// (see LoadBuiltins): harmless when rg is missing, and keeps the
+	// rule table total (mirrors the ast/ast_grep opt-ins).
+	for _, name := range []string{"read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "skill", "load_skill", "question", "todoread", "todowrite", "todo_update", "advisor", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell", "list_processes", "ocr", "cron"} {
 		pm.rules[name] = PermissionAllow
 	}
 	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format", "imagegen"} {
@@ -2984,7 +2988,7 @@ func extractPathFromArgs(toolName string, args json.RawMessage) string {
 		return ""
 	}
 	switch toolName {
-	case "read", "write", "delete", "edit", "multiedit", "multi_file_edit", "replace_lines", "format", "lsp", "apply_patch", "grep", "repo_overview":
+	case "read", "write", "delete", "edit", "multiedit", "multi_file_edit", "replace_lines", "format", "lsp", "apply_patch", "grep", "rgrep", "repo_overview":
 		if params.Path != "" {
 			return params.Path
 		}
@@ -4128,7 +4132,7 @@ func validPermissionLevel(level PermissionLevel) bool {
 
 func isReadOnlyTool(name string) bool {
 	switch name {
-	case "read", "glob", "grep", "list", "lsp", "lsp_diagnostics", "webfetch", "websearch", "skill", "load_skill", "question", "todoread", "todowrite":
+	case "read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "webfetch", "websearch", "skill", "load_skill", "question", "todoread", "todowrite":
 		return true
 	default:
 		return false

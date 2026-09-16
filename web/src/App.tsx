@@ -390,13 +390,16 @@ function HomeApp() {
   // (for already-mounted editors) with bounded retry.
   const openFileAndShow = useCallback(
     async (path: string, projectRoot?: string, line?: number, query?: string) => {
+      // Resolve the host for this project root from the latest project list;
+      // a remote root must carry its ?host= so content loads hit the remote.
+      const host = projectState.projects.find((p) => p.path === projectRoot)?.host;
       if (query && query.trim()) {
         setPendingHighlight(path, query.trim(), line, projectRoot);
       } else if (line && line > 0) {
         // Line-only highlight (from chat file links) still needs dispatch
         setPendingHighlight(path, "", line, projectRoot);
       }
-      await handleOpenFile(path, projectRoot);
+      await handleOpenFile(path, projectRoot, host);
       setActiveView("files");
       if ((query && query.trim()) || (line && line > 0)) {
         const detail = { path, query: query?.trim() ?? "", line, projectRoot };
@@ -419,7 +422,7 @@ function HomeApp() {
         setTimeout(retry, 100);
       }
     },
-    [handleOpenFile],
+    [handleOpenFile, projectState.projects],
   );
 
   // File links in chat (markdown + plain text) dispatch this event.
@@ -965,7 +968,7 @@ function HomeApp() {
                   style={{ width: fileTreePane.collapsed ? 0 : fileTreePane.width }}
                 >
                   <div className="absolute inset-0" style={{ width: fileTreePane.width }}>
-                    <FileTree onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} includedPaths={contextFileEntries.filter((e) => (e.projectRoot ?? "") === (projectState.activeProject?.path ?? "")).map((e) => e.path)} />
+                    <FileTree onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} projectHost={projectState.activeProject?.host} includedPaths={contextFileEntries.filter((e) => (e.projectRoot ?? "") === (projectState.activeProject?.path ?? "")).map((e) => e.path)} />
                   </div>
                 </div>
                 {!fileTreePane.collapsed && (
@@ -1010,6 +1013,7 @@ function HomeApp() {
                         <FileEditor
                           path={et.path}
                           projectRoot={et.projectRoot}
+                          projectHost={et.projectHost}
                           persistKey={et.id}
                           content={et.content}
                           isBinary={et.isBinary}
@@ -1030,7 +1034,7 @@ function HomeApp() {
               </TabsContent>
 
               <TabsContent value="git" forceMount className="flex-1 overflow-hidden m-0">
-                <GitPanel onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} active={activeView === "git"} />
+                <GitPanel onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} projectHost={projectState.activeProject?.host} active={activeView === "git"} />
               </TabsContent>
               <TabsContent value="cron" forceMount className="flex-1 overflow-hidden m-0">
                 <CronPanel active={activeView === "cron"} />
@@ -1138,7 +1142,7 @@ function HomeApp() {
                       if (!visitedTabsRef.current.has(key) && !isActive) return null;
                       return (
                         <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
-                          <PreviewTabPage />
+                          <PreviewTabPage projectRoot={tab.projectPath} projectHost={projectState.projects.find((p) => p.path === tab.projectPath)?.host} />
                         </div>
                       );
                     })}
@@ -1253,6 +1257,7 @@ function HomeApp() {
                         key={sideStateKey}
                         stateKey={sideStateKey}
                         projectRoot={projectState.activeProject?.path}
+                        projectHost={projectState.activeProject?.host}
                         request={previewRequest}
                         nonce={previewNonce}
                       />

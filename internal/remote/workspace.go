@@ -30,6 +30,33 @@ type RemoteWorkspace struct {
 	tunnelCmd   *exec.Cmd
 	tunnelID    string
 	localAPIURL string
+
+	// startFreshServer poll-loop bounds. Zero values fall back to the
+	// defaults below (40 × 250ms = 10s); tests shrink them via
+	// setStartFreshServerPollForTest.
+	startFreshServerAttempts int
+	startFreshServerInterval time.Duration
+}
+
+// setStartFreshServerPollForTest overrides the startFreshServer poll loop
+// bounds for tests (zero/absent values keep production defaults). Package
+// vars, not consts, so tests can shrink the loop without a 10s wait.
+func (rw *RemoteWorkspace) setStartFreshServerPollForTest(attempts, intervalMillis int) {
+	rw.startFreshServerAttempts = attempts
+	rw.startFreshServerInterval = time.Duration(intervalMillis) * time.Millisecond
+}
+
+// pollBounds resolves the effective poll-loop bounds, substituting defaults
+// for zero values (a zero struct literal must not spin 0 times or sleep 0s).
+func (rw *RemoteWorkspace) pollBounds() (int, time.Duration) {
+	attempts, interval := rw.startFreshServerAttempts, rw.startFreshServerInterval
+	if attempts <= 0 {
+		attempts = defaultStartFreshServerAttempts
+	}
+	if interval <= 0 {
+		interval = defaultStartFreshServerInterval
+	}
+	return attempts, interval
 }
 
 // NewRemoteWorkspace creates a remote workspace session. Connect must be
@@ -218,8 +245,23 @@ func (rw *RemoteWorkspace) discoverServer() (ServeState, bool) {
 // (spec Fix 1). V1 writes state to the legacy path for compatibility;
 // per-workspace paths (spec Fix 2) will be added in a future iteration.
 func (rw *RemoteWorkspace) startFreshServer() (ServeState, error) {
+	statePath := shellQuotePath(rw.workspaceStatePath())
+	// Delete the existing state file synchronously before launching
+	// (mirror of the CLI path's launchServerCmd fix, commit b418fb15):
+	// startFreshServer only runs because the discovered state was
+	// unusable (dead pid, version mismatch, unhealthy), and that stale
+	// serve.json is often still on disk and still parses. Without the
+	// delete, the poll loop below can re-read it on its first iteration
+	// and return the OLD server as the "fresh" one — silently
+	// reconnecting to a version-mismatched server that predates newer
+	// remote features (e.g. browse remote_mode), leaving the browser
+	// panel "still not proxying" after a desktop upgrade. `rm -f` runs
+	// synchronously (`;`, not part of the backgrounded `&&` chain) so it
+	// has completed by the time this Exec call returns, making that
+	// stale read structurally impossible.
 	launchCmd := fmt.Sprintf(
-		"cd %s && nohup %s serve --remote --host 127.0.0.1 --port 0 </dev/null >%s 2>&1 & disown; echo launched",
+		"rm -f %s; cd %s && nohup %s serve --remote --host 127.0.0.1 --port 0 </dev/null >%s 2>&1 & disown; echo launched",
+		statePath,
 		shellQuotePath(rw.RemotePath),
 		shellQuotePath(RemoteBinaryPath(version.Version)),
 		shellQuotePath("~/.ocode/remote/serve.log"),
@@ -229,12 +271,23 @@ func (rw *RemoteWorkspace) startFreshServer() (ServeState, error) {
 		return ServeState{}, fmt.Errorf("launch remote server: %w: %s", err, res.Stderr)
 	}
 
-	for i := 0; i < 40; i++ {
+	// Poll-loop bounds resolve through pollBounds (zero struct fields fall
+	// back to the defaults below) so tests can shrink them instead of
+	// taking the full 10s per run — same pattern as serve.go's
+	// serveStatePollInterval/Attempts.
+	attempts, interval := rw.pollBounds()
+	for i := 0; i < attempts; i++ {
 		if state, ok := rw.discoverServer(); ok {
 			return state, nil
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(interval)
 	}
 
 	return ServeState{}, fmt.Errorf("remote server did not write its state file within 10s — check ~/.ocode/remote/serve.log on the remote")
 }
+
+// Defaults for the startFreshServer poll loop: 40 × 250ms = 10s.
+var (
+	defaultStartFreshServerAttempts = 40
+	defaultStartFreshServerInterval = 250 * time.Millisecond
+)

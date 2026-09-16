@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -477,22 +478,31 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 		return readByteWindow(params.Path, safe, *params.OffsetBytes, params.MaxBytes)
 	}
 
-	content, err := os.ReadFile(safe)
+	f, err := os.Open(safe)
 	if err != nil {
 		return "", fmt.Errorf("failed to read file %s: %w", params.Path, err)
 	}
+	defer f.Close()
 
-	// Images are not text: splitting binary into "lines" ships garbage. Return
-	// a concise description instead. When the active model has vision, the agent
-	// layer additionally attaches the pixels as a vision block (see
+	// Sniff the first readSniffHead bytes for image content. Images are not
+	// text: splitting binary into "lines" ships garbage. Return a concise
+	// description instead. When the active model has vision, the agent layer
+	// additionally attaches the pixels as a vision block (see
 	// handleToolCallWithImages) — this stub is what non-vision models and
 	// text-only tool paths (orphan recovery, permission checks) see.
-	if mime := sniffImageMIME(content); mime != "" {
-		return imageStub(params.Path, content, mime), nil
+	head := make([]byte, readSniffHead)
+	n, rerr := io.ReadFull(f, head)
+	if rerr != nil && rerr != io.EOF && rerr != io.ErrUnexpectedEOF {
+		return "", fmt.Errorf("failed to read file %s: %w", params.Path, rerr)
 	}
-
-	lines := strings.Split(string(content), "\n")
-	total := len(lines)
+	head = head[:n]
+	if mime := sniffImageMIME(head); mime != "" {
+		info, serr := f.Stat()
+		if serr != nil {
+			return "", fmt.Errorf("failed to stat file %s: %w", params.Path, serr)
+		}
+		return imageStubSized(params.Path, head, mime, info.Size()), nil
+	}
 
 	start := params.StartLine
 	if start <= 0 {
@@ -501,53 +511,66 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 	if start <= 0 {
 		start = 1
 	}
-	if start > total {
-		return fmt.Sprintf("(file has %d lines, start_line=%d is out of range)", total, start), nil
+	res, err := scanLineWindow(f, head, start, endLineFor(start, params.EndLine, params.Limit))
+	if err != nil {
+		return "", fmt.Errorf("failed to read file %s: %w", params.Path, err)
 	}
+	// Out of range is only decidable on an uncapped scan: when the cap
+	// stopped the scan, res.total is a lower bound and the requested start
+	// may exist beyond it.
+	if !res.truncated && start > res.total {
+		return fmt.Sprintf("(file has %d lines, start_line=%d is out of range)", res.total, start), nil
+	}
+	if res.truncated && res.end < start {
+		return fmt.Sprintf("(line scan stopped at the %d-byte cap before start_line=%d; use offset_bytes to page instead)", maxReadScanBytes, start), nil
+	}
+	if res.budgetStopped {
+		return res.out, nil
+	}
+	// Continuation hint whenever unserved lines follow the window: a short
+	// file that ended inside the requested range (end > total) is the only
+	// case with none. A capped scan always has more content past res.end.
+	if res.end < res.total || (res.truncated && res.end >= res.total) {
+		sb := strings.Builder{}
+		sb.WriteString(res.out)
+		sb.WriteString(fmt.Sprintf("…(use start_line=%d, end_line=%d to continue)\n", res.end+1, res.end+defaultReadLines))
+		return sb.String(), nil
+	}
+	return res.out, nil
+}
 
-	end := params.EndLine
-	if end <= 0 && params.Limit > 0 {
-		end = start + params.Limit - 1
+// endLineFor resolves the requested [start, end] window exactly as the old
+// inline resolution did: end_line > 0 wins, then limit alias, then
+// defaultReadLines, clamped to maxReadLines.
+func endLineFor(start, endParam, limitParam int) int {
+	end := endParam
+	if end <= 0 && limitParam > 0 {
+		end = start + limitParam - 1
 	}
 	if end <= 0 {
 		end = start + defaultReadLines - 1
 	}
-	// Clamp range to maxReadLines.
 	if end-start+1 > maxReadLines {
 		end = start + maxReadLines - 1
 	}
-	if end > total {
-		end = total
-	}
+	return end
+}
 
-	// Byte offset of line `start` so clamp hints can name an absolute offset.
-	lineStart := 0
-	for i := 1; i < start; i++ {
-		lineStart += len(lines[i-1]) + 1
+// imageStubSized is imageStub with an explicit byte size (the streaming path
+// only holds the sniff head, not the whole file).
+func imageStubSized(path string, head []byte, mime string, size int64) string {
+	dims := ""
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(head)); err == nil {
+		dims = fmt.Sprintf("%dx%d ", cfg.Width, cfg.Height)
 	}
+	return fmt.Sprintf(
+		"[image file: %s — %s%s, %s — not shown as text. A vision-capable model receives the image automatically when reading it; otherwise use the ocr tool to extract any text it contains.]",
+		path, dims, mime, humanBytes64(size),
+	)
+}
 
-	var sb strings.Builder
-	last := start - 1
-	for i := start; i <= end; i++ {
-		line := lines[i-1]
-		if sb.Len() >= maxReadOutputChars {
-			sb.WriteString(fmt.Sprintf("…(stopped at line %d: output budget of %d chars reached; continue with start_line=%d)\n", last, maxReadOutputChars, i))
-			return sb.String(), nil
-		}
-		if utf8.RuneCountInString(line) > maxReadLineChars {
-			cut := runeByteIndex(line, maxReadLineChars)
-			sb.WriteString(fmt.Sprintf("%d\t%s…[line %d is %d chars, showing %d; read offset_bytes=%d for the rest]\n",
-				i, line[:cut], i, utf8.RuneCountInString(line), maxReadLineChars, lineStart+cut))
-		} else {
-			sb.WriteString(fmt.Sprintf("%d\t%s\n", i, line))
-		}
-		lineStart += len(line) + 1
-		last = i
-	}
-	if end < total {
-		sb.WriteString(fmt.Sprintf("…(use start_line=%d, end_line=%d to continue)\n", end+1, end+defaultReadLines))
-	}
-	return sb.String(), nil
+func humanBytes64(n int64) string {
+	return humanBytes(int(n))
 }
 
 // runeByteIndex returns the byte index of the n-th rune in s (len(s) if s has
@@ -561,6 +584,193 @@ func runeByteIndex(s string, n int) int {
 		count++
 	}
 	return len(s)
+}
+
+// maxReadScanBytes caps how far into a file line mode will scan. start_line
+// can name a deep offset, so the cap is generous — but a request beyond it
+// still returns the same out-of-range/clamp-hint output a full read would,
+// never a failure. Text files the tools are meant for are far below it; the
+// cap exists so one call on a multi-GB path cannot allocate the whole file
+// (the old os.ReadFile + strings.Split doubled it in memory before
+// truncation — see TODO.md's desktop-memory investigation). Var, not const,
+// so tests can shrink it.
+var maxReadScanBytes = int64(64 << 20) // 64 MiB
+
+// readSniffHead bounds the content-sniffing prefix. http.DetectContentType
+// examines only the first 512 bytes, and image.DecodeConfig needs just the
+// header block — well under 64KB for the supported raster formats — so the
+// stub path never loads a whole image just to reject it as text.
+const readSniffHead = 64 << 10
+
+// maxReadLineRetain caps the bytes retained per line: the first
+// maxReadLineChars runes always fit (a rune is ≤4 bytes), which is all the
+// clamp rendering needs. Lines longer than this keep only their prefix; the
+// clamp hint's byte offset stays exact because the full line length is
+// tracked separately.
+const maxReadLineRetain = maxReadLineChars*4 + 64
+
+// lineScanResult is what the bounded streaming read produces for Execute's
+// line mode.
+type lineScanResult struct {
+	out           string // rendered lines (same format as the old loop)
+	end           int    // last line rendered (start-1 when none)
+	total         int    // lines observed in the scanned prefix (Split-equivalent)
+	truncated     bool   // scan stopped at maxReadScanBytes before EOF
+	budgetStopped bool   // stopped at maxReadOutputChars (old loop returned here)
+}
+
+// countNonContinuation counts bytes that are not UTF-8 continuation bytes.
+// Equal to utf8.RuneCount for valid UTF-8; for invalid sequences it counts
+// multi-byte-rune starts as one instead of one-per-invalid-byte. Only used
+// for lines too large to retain, whose real count is far above the clamp
+// threshold either way.
+func countNonContinuation(b []byte) int {
+	n := 0
+	for _, c := range b {
+		if c&0xC0 != 0x80 {
+			n++
+		}
+	}
+	return n
+}
+
+// scanLineWindow streams the file once and renders lines [start, end] with
+// the exact output the previous os.ReadFile + strings.Split path produced:
+// same numbered lines, same long-line clamp hints with byte offsets, same
+// output budget message, same trailing continuation hint. Memory is O(1) in
+// file size — at most the 64KB sniff head, one 64KB read buffer, and one
+// retained line prefix — instead of the whole file doubled by the old
+// ReadFile+Split.
+func scanLineWindow(f *os.File, head []byte, start, end int) (lineScanResult, error) {
+	// head is the sniff prefix ALREADY consumed from f by the caller: it is
+	// replayed into the reader and the seek skips past it, so the stream never
+	// sees those bytes twice and file offsets stay absolute.
+	if _, err := f.Seek(int64(len(head)), io.SeekStart); err != nil {
+		return lineScanResult{}, err
+	}
+	rest := maxReadScanBytes - int64(len(head))
+	if rest < 0 {
+		rest = 0
+	}
+	r := bufio.NewReaderSize(io.MultiReader(bytes.NewReader(head), io.LimitReader(f, rest)), 64<<10)
+
+	res := lineScanResult{end: start - 1}
+	var sb strings.Builder
+	var line []byte // retained prefix of the current line
+	lineFull := 0   // full byte length of the current line, excluding the \n
+	lineCapped := false
+	nonCont := 0   // non-continuation bytes once the line overflows the retain cap
+	lineStart := 0 // byte offset of the current line's first byte
+	lineNum := 0
+	scannedToEOF := false
+
+	for {
+		// Assemble one newline-separated segment. strings.Split semantics:
+		// the trailing empty segment after a final newline counts as a line,
+		// \r stays in the line, and the last segment without a newline is one
+		// too.
+		line = line[:0]
+		lineFull = 0
+		lineCapped = false
+		nonCont = 0
+		hadNL := false
+		eof := false
+		for {
+			chunk, rerr := r.ReadSlice('\n')
+			switch {
+			case rerr == nil:
+				// chunk includes the trailing newline.
+			case rerr == bufio.ErrBufferFull:
+				// Segment longer than the buffer; keep accumulating.
+			case rerr == io.EOF:
+				eof = true
+			default:
+				return res, rerr
+			}
+			piece := chunk
+			if rerr == nil {
+				piece = chunk[:len(chunk)-1]
+				hadNL = true
+			}
+			lineFull += len(piece)
+			// Retain at most maxReadLineRetain bytes (enough for the first
+			// maxReadLineChars runes) but count every rune exactly. On the
+			// transition slice the retained prefix (line + piece[:room]) and
+			// the dropped tail (piece[room:]) together are the whole piece,
+			// so counting line + piece once covers everything exactly.
+			if !lineCapped {
+				room := maxReadLineRetain - len(line)
+				if room >= len(piece) {
+					line = append(line, piece...)
+				} else {
+					nonCont += countNonContinuation(line) + countNonContinuation(piece)
+					if room > 0 {
+						line = append(line, piece[:room]...)
+					}
+					lineCapped = true
+				}
+			} else {
+				nonCont += countNonContinuation(piece)
+			}
+			if rerr == bufio.ErrBufferFull {
+				continue
+			}
+			break
+		}
+		lineNum++
+
+		if lineNum >= start && lineNum <= end {
+			// Budget check before rendering, exactly as the old loop did: the
+			// budget message names the last rendered line and the next one.
+			if sb.Len() >= maxReadOutputChars {
+				sb.WriteString(fmt.Sprintf("…(stopped at line %d: output budget of %d chars reached; continue with start_line=%d)\n", res.end, maxReadOutputChars, lineNum))
+				res.budgetStopped = true
+				res.total = lineNum
+				res.out = sb.String()
+				return res, nil
+			}
+			runes := 0
+			if lineCapped {
+				runes = nonCont
+			} else {
+				runes = utf8.RuneCount(line)
+			}
+			if runes > maxReadLineChars {
+				cut := runeByteIndex(string(line), maxReadLineChars)
+				sb.WriteString(fmt.Sprintf("%d\t%s…[line %d is %d chars, showing %d; read offset_bytes=%d for the rest]\n",
+					lineNum, line[:cut], lineNum, runes, maxReadLineChars, lineStart+cut))
+			} else {
+				sb.WriteString(fmt.Sprintf("%d\t%s\n", lineNum, line))
+			}
+			res.end = lineNum
+		}
+		lineStart += lineFull + 1
+		if !hadNL {
+			scannedToEOF = eof
+			break
+		}
+		if eof {
+			// strings.Split("a\n", "\n") == ["a", ""]: the empty segment
+			// after a final newline is a real line.
+			lineNum++
+			scannedToEOF = eof
+			break
+		}
+	}
+	res.total = lineNum
+
+	// Truncation probe: the LimitReader EOF'd at the cap, so one more byte
+	// past it tells a capped scan from a file that just happens to end there.
+	if !scannedToEOF {
+		var probe [1]byte
+		n, perr := f.ReadAt(probe[:], maxReadScanBytes)
+		res.truncated = n > 0
+		if perr != nil && perr != io.EOF {
+			return res, perr
+		}
+	}
+	res.out = sb.String()
+	return res, nil
 }
 
 // readByteWindow returns a raw [offset, offset+size) slice of the file with a
@@ -644,19 +854,6 @@ func sniffImageMIME(raw []byte) string {
 		return ct
 	}
 	return ""
-}
-
-// imageStub renders a one-line textual description of an image file for callers
-// that cannot display pixels (non-vision models, text-only tool paths).
-func imageStub(path string, raw []byte, mime string) string {
-	dims := ""
-	if cfg, _, err := image.DecodeConfig(bytes.NewReader(raw)); err == nil {
-		dims = fmt.Sprintf("%dx%d ", cfg.Width, cfg.Height)
-	}
-	return fmt.Sprintf(
-		"[image file: %s — %s%s, %s — not shown as text. A vision-capable model receives the image automatically when reading it; otherwise use the ocr tool to extract any text it contains.]",
-		path, dims, mime, humanBytes(len(raw)),
-	)
 }
 
 func humanBytes(n int) string {

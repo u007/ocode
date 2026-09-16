@@ -3,9 +3,9 @@ import FilePicker from "../Files/FilePicker";
 import PreviewSurface from "./PreviewSurface";
 import { previewKindForPath } from "../../lib/previewKind";
 
-export default function PreviewTabPage() {
+export default function PreviewTabPage({ projectRoot, projectHost }: { projectRoot?: string; projectHost?: string }) {
   const [filePickerOpen, setFilePickerOpen] = useState(false);
-  const [selected, setSelected] = useState<{ path: string; kind: string; projectRoot?: string } | null>(null);
+  const [selected, setSelected] = useState<{ path: string; kind: string; projectRoot?: string; projectHost?: string } | null>(null);
 
   return (
     <div className="flex h-full w-full min-h-0">
@@ -22,9 +22,11 @@ export default function PreviewTabPage() {
           open={filePickerOpen}
           onClose={() => setFilePickerOpen(false)}
           onOpenFile={(path, root) => {
-            setSelected({ path, kind: previewKindForPath(path) || "text", projectRoot: root });
+            setSelected({ path, kind: previewKindForPath(path) || "text", projectRoot: root ?? projectRoot, projectHost });
             setFilePickerOpen(false);
           }}
+          projectPath={projectRoot}
+          projectHost={projectHost}
         />
       </aside>
       <main className="flex-1 min-w-0 min-h-0 bg-background">
@@ -37,6 +39,7 @@ export default function PreviewTabPage() {
             path={selected.path}
             kind={selected.kind as any}
             projectRoot={selected.projectRoot}
+            projectHost={selected.projectHost}
           />
         )}
       </main>

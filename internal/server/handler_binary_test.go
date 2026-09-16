@@ -35,7 +35,7 @@ func TestHandleFileContentBinaryDetection(t *testing.T) {
 				t.Fatalf("expected 200, got %d", w.Code)
 			}
 			var resp struct {
-				Content   string `json:"content"`
+				Content  string `json:"content"`
 				IsBinary bool   `json:"is_binary"`
 			}
 			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {

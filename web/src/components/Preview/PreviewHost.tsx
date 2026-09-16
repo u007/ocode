@@ -12,6 +12,7 @@ interface Doc {
   path: string;
   kind: Exclude<ReturnType<typeof previewKindForPath>, null>;
   projectRoot?: string;
+  projectHost?: string;
 }
 
 /**
@@ -32,11 +33,15 @@ interface Doc {
 export default function PreviewHost({
   stateKey,
   projectRoot,
+  projectHost,
   request,
   nonce,
 }: {
   stateKey: StateKey;
   projectRoot?: string;
+  /** Fallback host for requests that don't carry their own (derived from
+   *  the active project at the App boundary). */
+  projectHost?: string;
   request: PreviewOpenRequest | null;
   nonce: number;
 }) {
@@ -51,6 +56,11 @@ export default function PreviewHost({
   // an explicit OS-open fallback instead of a broken preview. The fallback
   // keeps the request's own project root so OS-open resolves (and is
   // containment-checked) against the right project in multi-project windows.
+  // NOTE: "Open in app" always runs on the SERVER host (HandleOpenFile has
+  // no remote branch — there is no remote desktop to open a window on).
+  // For a remote doc the button is therefore hidden: showing it would open
+  // an unrelated server-local file (or 400) while implying the remote file
+  // opened.
   const [unsupported, setUnsupported] = useState<{ path: string; projectRoot?: string } | null>(null);
   useEffect(() => {
     if (!request || nonce === lastNonceRef.current) return;
@@ -64,23 +74,30 @@ export default function PreviewHost({
     }
     setUnsupported(null);
     const anchor = request.projectRoot ?? projectRoot;
-    setDoc({ path: request.path, kind: resolved.kind, projectRoot: anchor });
+    const anchorHost = request.projectHost ?? projectHost;
+    setDoc({ path: request.path, kind: resolved.kind, projectRoot: anchor, projectHost: anchorHost });
     setPage(Math.max(1, request.page));
     setSurface("preview");
-  }, [request, nonce, projectRoot]);
+  }, [request, nonce, projectRoot, projectHost]);
 
   // Follow project switches for the open doc's anchor.
   useEffect(() => {
     setDoc((d) => (d && !d.projectRoot && projectRoot ? { ...d, projectRoot } : d));
   }, [projectRoot]);
+  useEffect(() => {
+    setDoc((d) => (d && !d.projectHost && projectHost ? { ...d, projectHost } : d));
+  }, [projectHost]);
 
   const openWithOS = async (target?: string) => {
     const targetPath = target ?? doc?.path;
     // Legacy fallback keeps its own project root (multi-project windows);
     // docs use their anchor, else the pane default.
+    // Remote docs never reach this (the button is hidden when a host is
+    // set — see the toolbar below), so no host routing is needed here.
     const fallbackRoot = unsupported && targetPath && unsupported.path === targetPath ? unsupported.projectRoot : undefined;
     const targetRoot = fallbackRoot ?? doc?.projectRoot ?? projectRoot;
-    if (!targetPath) return;
+    const targetHost = doc?.projectHost ?? projectHost;
+    if (!targetPath || targetHost) return;
     setOsOpenState("Opening…");
     try {
       await api.openFileWithOS(targetPath, targetRoot);
@@ -92,7 +109,7 @@ export default function PreviewHost({
     }
   };
 
-  const openLinked = (p: string) => dispatchOpenPreview(p, 1, doc?.projectRoot ?? projectRoot);
+  const openLinked = (p: string) => dispatchOpenPreview(p, 1, doc?.projectRoot ?? projectRoot, doc?.projectHost ?? projectHost);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -160,6 +177,7 @@ export default function PreviewHost({
             path={doc.path}
             kind={doc.kind}
             projectRoot={doc.projectRoot}
+            projectHost={doc.projectHost ?? projectHost}
             page={page}
             onPageChange={setPage}
             slide={page}

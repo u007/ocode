@@ -96,7 +96,11 @@ export default function ChangesPanel({ session, active = true }: Props) {
             </DialogTitle>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPendingUndo(null)}>
+            <Button
+              variant="outline"
+              onClick={() => setPendingUndo(null)}
+              data-dialog-default-action
+            >
               Cancel
             </Button>
             <Button variant="destructive" onClick={confirmUndo}>

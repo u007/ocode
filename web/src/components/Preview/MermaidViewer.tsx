@@ -16,11 +16,13 @@ export default function MermaidViewer({
   path,
   code,
   projectRoot,
+  projectHost,
   onOpenFile,
 }: {
   path: string;
   code: string;
   projectRoot?: string;
+  projectHost?: string;
   onOpenFile: (path: string) => void;
 }) {
   const [svg, setSvg] = useState<string>("");
@@ -84,6 +86,7 @@ export default function MermaidViewer({
       label: `node ${activeNode.id}`,
       excerpt: activeNode.label || activeNode.id,
       projectRoot,
+      projectHost,
     });
     setActiveNode(null);
   };

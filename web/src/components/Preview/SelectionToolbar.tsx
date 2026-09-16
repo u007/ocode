@@ -59,12 +59,14 @@ export function SelectionToolbar({
   path,
   label,
   projectRoot,
+  projectHost,
   onDone,
 }: {
   sel: TextSelection;
   path: string;
   label: string;
   projectRoot?: string;
+  projectHost?: string;
   onDone: () => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -80,7 +82,7 @@ export function SelectionToolbar({
   };
 
   const ask = () => {
-    dispatchPreviewContext({ path, label, excerpt: sel.text, projectRoot });
+    dispatchPreviewContext({ path, label, excerpt: sel.text, projectRoot, projectHost });
     onDone();
   };
 

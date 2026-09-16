@@ -507,7 +507,13 @@ func (t *ImageGenTool) generateGemini(ctx context.Context, baseURL, apiKey, mode
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, over, rerr := readCappedBody(resp.Body, maxAPIResponseBytes)
+	if rerr != nil {
+		return nil, "", fmt.Errorf("read gemini response: %w", rerr)
+	}
+	if over {
+		return nil, "", fmt.Errorf("gemini response exceeds the %d-byte response cap", maxAPIResponseBytes)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("gemini API error (%d): %s", resp.StatusCode, truncateErr(respBody))
 	}
@@ -601,7 +607,13 @@ func (t *ImageGenTool) generateOpenAI(ctx context.Context, baseURL, apiKey, mode
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, over, rerr := readCappedBody(resp.Body, maxAPIResponseBytes)
+	if rerr != nil {
+		return nil, "", fmt.Errorf("read image API response: %w", rerr)
+	}
+	if over {
+		return nil, "", fmt.Errorf("image API response exceeds the %d-byte response cap", maxAPIResponseBytes)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("image API error (%d): %s", resp.StatusCode, truncateErr(respBody))
 	}
@@ -773,7 +785,7 @@ func readImageFile(ctx context.Context, path string) ([]byte, string, error) {
 }
 
 func fetchBytes(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+	resp, err := http.Get(url) //nolint:gosec // provider-supplied image URL
 	if err != nil {
 		return nil, err
 	}
@@ -781,7 +793,38 @@ func fetchBytes(url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download failed (%d)", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	// The result must fit the embed limit anyway; anything larger is a
+	// runaway download, not a usable image.
+	body, over, err := readCappedBody(resp.Body, maxImageBytes)
+	if err != nil {
+		return nil, err
+	}
+	if over {
+		return nil, fmt.Errorf("image exceeds the %d-byte embed limit during download", maxImageBytes)
+	}
+	return body, nil
+}
+
+// maxAPIResponseBytes bounds how much of any provider response body is read.
+// A JSON image response is bounded by maxImages × base64(size); 256 MiB is
+// far above any legitimate payload (20 MB image limit × n images) while
+// stopping a runaway/compromised endpoint from streaming gigabytes into
+// memory. fetchBytes (image downloads) uses the tighter maxImageBytes since
+// its result is the image itself.
+const maxAPIResponseBytes = 256 << 20
+
+// readCappedBody drains r up to limit bytes and reports whether more
+// content followed. The +1 probe distinguishes exactly-limit responses
+// (legitimate) from runaway ones.
+func readCappedBody(r io.Reader, limit int64) (body []byte, over bool, err error) {
+	body, err = io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return body, false, err
+	}
+	if int64(len(body)) > limit {
+		return body[:limit], true, nil
+	}
+	return body, false, nil
 }
 
 func truncateErr(body []byte) string {

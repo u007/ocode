@@ -76,7 +76,10 @@ const timeFormatRFC3339 = "2006-01-02T15:04:05.999999999Z07:00"
 // same "legitimate empty state" contract runsSnapshot uses.
 func (h *Handler) changesSnapshot(sessionID string) []fileChangeDTO {
 	ag := h.activeAgentForRuns(sessionID)
-	if ag == nil || ag.Changes() == nil {
+	if ag == nil {
+		return []fileChangeDTO{}
+	}
+	if ag.Changes() == nil {
 		return []fileChangeDTO{}
 	}
 	list := ag.Changes().List()

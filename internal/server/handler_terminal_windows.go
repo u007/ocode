@@ -41,7 +41,7 @@ type terminalSession struct {
 }
 
 func (s *terminalSession) hasExited() bool { return true }
-func (s *terminalSession) kill() {}
+func (s *terminalSession) kill()           {}
 
 // shutdownGracefully is a no-op on Windows: no pty processes exist (see
 // terminal_kill_windows.go), so there is nothing to signal or drain. Present

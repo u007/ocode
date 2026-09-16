@@ -145,6 +145,7 @@ var Providers = []Provider{
 	{ID: "grok", Label: "Grok (xAI)", EnvVar: "XAI_API_KEY"},
 	{ID: "groq", Label: "Groq", EnvVar: "GROQ_API_KEY"},
 	{ID: "novita-ai", Label: "Novita AI", EnvVar: "NOVITA_API_KEY"},
+	{ID: "ollama-cloud", Label: "Ollama Cloud", EnvVar: "OLLAMA_API_KEY"},
 	{ID: "requesty", Label: "Requesty", EnvVar: "REQUESTY_API_KEY"},
 	{ID: "deepinfra", Label: "DeepInfra", EnvVar: "DEEPINFRA_API_KEY"},
 	{ID: "runinfra", Label: "RunInfra", EnvVar: "RUNINFRA_GATEWAY_KEY"},

@@ -108,7 +108,7 @@ describe("FileTree preserves expanded state across a delete-triggered refresh", 
     fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
     fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
 
-    await waitFor(() => expect(mocks.fsDelete).toHaveBeenCalledWith(["gone"], "/proj"));
+    await waitFor(() => expect(mocks.fsDelete).toHaveBeenCalledWith(["gone"], "/proj", undefined));
 
     // "kept" must still be expanded, showing its child, instead of the whole
     // tree collapsing back to depth 1 (the reported bug).

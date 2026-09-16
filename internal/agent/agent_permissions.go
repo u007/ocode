@@ -21,7 +21,7 @@ func applyAgentPermissionsWithDiags(pm *PermissionManager, permissions map[strin
 		"read":      {"read"},
 		"edit":      {"write", "edit", "multi_edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format"},
 		"glob":      {"glob"},
-		"grep":      {"grep"},
+		"grep":      {"grep", "rgrep"},
 		"bash":      {"bash"},
 		"task":      {"task", "agent"},
 		"webfetch":  {"webfetch"},

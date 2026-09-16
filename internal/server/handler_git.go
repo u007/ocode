@@ -48,15 +48,27 @@ type GitStatus struct {
 	IsRepo bool `json:"is_repo"`
 	// Divergence from upstream: ahead = local commits not yet pushed,
 	// behind = remote commits not yet pulled. -1 means no upstream branch.
-	Ahead  int `json:"ahead"`
-	Behind int `json:"behind"`
+	Ahead       int  `json:"ahead"`
+	Behind      int  `json:"behind"`
 	HasUpstream bool `json:"has_upstream"`
 }
 
 // HandleGitStatus returns the working-tree status. By default it reports the
 // server's workdir; ?project=<path> selects a registered project root instead
 // (unknown paths are rejected so the endpoint can't probe arbitrary dirs).
+// ?host=<target> + ?project=<path> selects a registered REMOTE project — the
+// same (host, path) pair the terminal endpoint accepts — and the git
+// pipeline runs on that host through its transport.
 func (h *Handler) HandleGitStatus(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, err := h.remoteWorkFor(host, r.URL.Query().Get("project"))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		return
+	}
 	dir, ok := h.gitProjectDir(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
@@ -226,6 +238,20 @@ func gitStatusForDir(dir string) GitStatus {
 func (h *Handler) HandleGitDiff(w http.ResponseWriter, r *http.Request) {
 	pathFilter := r.URL.Query().Get("path")
 	staged := r.URL.Query().Get("staged") == "true" || r.URL.Query().Get("staged") == "1"
+	if host := hostParam(r); host != "" {
+		rw, err := h.remoteWorkFor(host, r.URL.Query().Get("project"))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		files, derr := remoteGitDiff(r.Context(), rw, staged, pathFilter)
+		if derr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": derr.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, files)
+		return
+	}
 	dir, ok := h.gitProjectDir(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
@@ -253,6 +279,15 @@ type GitWorkspace struct {
 
 // HandleGitWorkspace returns status + staged + unstaged diffs in one request.
 func (h *Handler) HandleGitWorkspace(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, err := h.remoteWorkFor(host, r.URL.Query().Get("project"))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, remoteGitWorkspace(r.Context(), rw))
+		return
+	}
 	dir, ok := h.gitProjectDir(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
@@ -351,6 +386,27 @@ type GitCommit struct {
 // HandleGitLog returns recent commit history, newest first. Supports
 // ?limit= (clamped to 1..200, default 50) and ?project=.
 func (h *Handler) HandleGitLog(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, lerr := h.remoteWorkFor(host, r.URL.Query().Get("project"))
+		if lerr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": lerr.Error()})
+			return
+		}
+		limit := 50
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				limit = n
+			}
+		}
+		limit = clampGitLogLimit(limit)
+		commits, gerr := remoteGitLog(r.Context(), rw, limit)
+		if gerr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": gerr.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, commits)
+		return
+	}
 	dir, ok := h.gitProjectDir(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
@@ -398,6 +454,24 @@ func (h *Handler) HandleGitLog(w http.ResponseWriter, r *http.Request) {
 // through the same unified-diff pipeline as the working-tree diff.
 func (h *Handler) HandleGitShow(w http.ResponseWriter, r *http.Request) {
 	rev := strings.TrimSpace(r.URL.Query().Get("commit"))
+	if host := hostParam(r); host != "" {
+		rw, rerr := h.remoteWorkFor(host, r.URL.Query().Get("project"))
+		if rerr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": rerr.Error()})
+			return
+		}
+		if rev == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "commit is required"})
+			return
+		}
+		files, serr := remoteGitShow(r.Context(), rw, rev)
+		if serr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": serr.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, files)
+		return
+	}
 	dir, ok := h.gitProjectDir(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})

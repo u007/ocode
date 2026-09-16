@@ -22,12 +22,12 @@ func TestHashContentUnicodeSpan(t *testing.T) {
 	// Exact JS vectors from web/src/components/Files/editorTabsPersistence.ts
 	// hashContent via Node: ""->45h, "hello"->4bj995, "a"->3t3a, "😀"->4lyxu, "a😀b"->zlbdid, "abc"->3772q3
 	cases := map[string]string{
-		"":     "45h",
+		"":      "45h",
 		"hello": "4bj995",
-		"a":    "3t3a",
-		"😀":   "4lyxu",
-		"a😀b": "zlbdid",
-		"abc":  "3772q3",
+		"a":     "3t3a",
+		"😀":     "4lyxu",
+		"a😀b":   "zlbdid",
+		"abc":   "3772q3",
 	}
 	for input, want := range cases {
 		if got := hashContent(input); got != want {
@@ -272,5 +272,38 @@ func TestSaveFileContentConcurrentGoroutines(t *testing.T) {
 	// Exactly one should succeed (200), the other 409, serialized by saveLockFor.
 	if !((c1 == http.StatusOK && c2 == http.StatusConflict) || (c1 == http.StatusConflict && c2 == http.StatusOK)) {
 		t.Fatalf("expected one 200 and one 409, got %d and %d", c1, c2)
+	}
+}
+
+// Regression: PUT /api/files/content routes on ?host= only — the frontend
+// sends host in the query string (never the JSON body). A remote save with
+// ?host= must take the remote branch even when the body carries no host.
+func TestSaveFileContentRemoteRoutedByQueryHost(t *testing.T) {
+	installFakeSSH(t)
+	remoteDir := t.TempDir()
+	remoteFile := filepath.Join(remoteDir, "note.txt")
+	if err := os.WriteFile(remoteFile, []byte("remote hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	h := newTestHandlerWithRemote(t, "ci.local", remoteDir)
+	body, _ := json.Marshal(map[string]interface{}{
+		"path":          "note.txt",
+		"content":       "remote hello world",
+		"project_root":  remoteDir,
+		"expected_hash": hashContent("remote hello"),
+	})
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/files/content?host=ci.local", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	h.HandleSaveFileContent(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	data, err := os.ReadFile(remoteFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "remote hello world" {
+		t.Fatalf("remote file not written, got %q", string(data))
 	}
 }

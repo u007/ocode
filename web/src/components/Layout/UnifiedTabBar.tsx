@@ -747,7 +747,9 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
               Close <span className="font-medium text-foreground">{pendingClose.title || pendingClose.id}</span>? This cannot be undone.
             </p>
             <DialogFooter className="gap-2">
-              <Button variant="ghost" onClick={cancelPendingClose}>Cancel</Button>
+              <Button variant="ghost" onClick={cancelPendingClose} data-dialog-default-action>
+                Cancel
+              </Button>
               <Button variant="destructive" onClick={confirmPendingClose}>Close tab</Button>
             </DialogFooter>
           </DialogContent>

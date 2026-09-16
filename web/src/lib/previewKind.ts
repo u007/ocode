@@ -83,6 +83,10 @@ export interface PreviewOpenRequest {
   kind: PreviewKind;
   page: number;
   projectRoot?: string;
+  /** Registered remote target for the file's project. The sidebar lookup
+   *  fills this in from the active project; the dialog/file-tree caller
+   *  passes it directly. */
+  projectHost?: string;
 }
 
 /**
@@ -107,16 +111,16 @@ export function parsePreviewOpen(contents: string[]): PreviewOpenRequest | null 
 }
 
 /** Authed URL for GET /api/files/raw binary bytes (pdf/docx/pptx/image/mmd). */
-export function previewRawUrl(path: string, projectRoot?: string): string {
-  const q = `path=${encodeURIComponent(path)}${projectRoot ? `&project_root=${encodeURIComponent(projectRoot)}` : ""}`;
+export function previewRawUrl(path: string, projectRoot?: string, projectHost?: string): string {
+  const q = `path=${encodeURIComponent(path)}${projectRoot ? `&project_root=${encodeURIComponent(projectRoot)}` : ""}${projectHost ? `&host=${encodeURIComponent(projectHost)}` : ""}`;
   return apiPath(`/api/files/raw?${q}`);
 }
 
 /** Ask the sidebar PreviewHost to show a file (file tree, AI tool hook). */
-export function dispatchOpenPreview(path: string, page = 1, projectRoot?: string): void {
+export function dispatchOpenPreview(path: string, page = 1, projectRoot?: string, projectHost?: string): void {
   window.dispatchEvent(
     new CustomEvent<PreviewOpenRequest>(OPEN_PREVIEW_EVENT, {
-      detail: { path, kind: previewKindForPath(path) ?? "text", page, projectRoot },
+      detail: { path, kind: previewKindForPath(path) ?? "text", page, projectRoot, projectHost },
     }),
   );
 }
@@ -127,6 +131,10 @@ export interface PreviewSelection {
   label: string;
   excerpt: string;
   projectRoot?: string;
+  /** Registered remote target of the file's project. Carried through the
+   *  Ask-LLM context chip so the composer can scope the reference to the
+   *  right project (same ?host= routing the file fetch used). */
+  projectHost?: string;
 }
 
 /** Push a preview highlight into the chat composer (Ask LLM). */

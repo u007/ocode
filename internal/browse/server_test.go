@@ -55,6 +55,29 @@ func TestAuthenticatedNavigationProxiesExternal(t *testing.T) {
 	}
 }
 
+// TestRemoteModeProxiesPublicHost verifies the remote-workspace contract:
+// with Options.RemoteMode set, a public host that would normally hand off to
+// chrome/CDP is proxied through the reverse-proxy pipeline instead (the whole
+// point of a remote workspace is remote-host egress; there may be no Chrome
+// installed at all).
+func TestRemoteModeProxiesPublicHost(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("remote ok"))
+	}))
+	defer upstream.Close()
+
+	s := New("apitoken", nil, Options{RemoteMode: true})
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	w := navAndServe(t, s, "tab:remote", "/b/tab:remote/http/"+host+"/")
+	if w.Code != http.StatusOK {
+		t.Fatalf("remote-mode public nav: got %d want 200, body %q", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); !strings.Contains(body, "remote ok") {
+		t.Fatalf("unexpected body %q, want the proxied upstream response", body)
+	}
+}
+
 func TestRemoteModePublicPageCannotReachPrivateHost(t *testing.T) {
 	s := New("apitoken", nil, Options{RemoteMode: true})
 	grant := s.MintGrant("tab:remote", "")

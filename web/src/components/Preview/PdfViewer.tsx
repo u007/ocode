@@ -19,11 +19,13 @@ if (typeof window !== "undefined" && pdfjsLib.GlobalWorkerOptions.workerSrc !== 
 export default function PdfViewer({
   path,
   projectRoot,
+  projectHost,
   page,
   onPageChange,
 }: {
   path: string;
   projectRoot?: string;
+  projectHost?: string;
   page: number;
   onPageChange: (page: number) => void;
 }) {
@@ -41,7 +43,7 @@ export default function PdfViewer({
     setError(null);
     setTotal(0);
     api
-      .fetchFileRaw(path, projectRoot)
+      .fetchFileRaw(path, projectRoot, projectHost)
       .then((buf) => pdfjsLib.getDocument({ data: buf }).promise)
       .then((doc) => {
         if (cancelled) {
@@ -64,7 +66,7 @@ export default function PdfViewer({
       docRef.current = null;
       if (d) void d.cleanup();
     };
-  }, [path, projectRoot]);
+  }, [path, projectRoot, projectHost]);
 
   useEffect(() => {
     const doc = docRef.current;
@@ -130,7 +132,7 @@ export default function PdfViewer({
         </div>
       </div>
       <style>{`.pdf-text-layer span{color:transparent;}.pdf-text-layer span::selection{background:rgba(59,130,246,.35);}`}</style>
-      {sel && <SelectionToolbar sel={sel} path={path} label={`p.${safe}`} projectRoot={projectRoot} onDone={clear} />}
+      {sel && <SelectionToolbar sel={sel} path={path} label={`p.${safe}`} projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}
     </div>
   );
 }

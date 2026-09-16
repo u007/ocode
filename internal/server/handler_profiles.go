@@ -23,9 +23,9 @@ func (h *Handler) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 			display = *delta.DisplayName
 		}
 		out = append(out, map[string]interface{}{
-			"name":           name,
-			"displayName":    display,
-			"overrideCount":  count,
+			"name":            name,
+			"displayName":     display,
+			"overrideCount":   count,
 			"credentialCount": credCount,
 		})
 	}

@@ -93,6 +93,18 @@ func openDB(path string) (*sql.DB, error) {
 	return sql.Open("sqlite", dsn)
 }
 
+// openDBRaw opens a sqlite file with the same WAL / busy_timeout pragmas
+// as openDB but creates no schema: callers that only read (or probe) an
+// existing file use this so a cold or contended file cannot trigger
+// CREATE/ALTER work — or its lock wait — on the calling goroutine.
+func openDBRaw(path string) (*sql.DB, error) {
+	escaped := strings.ReplaceAll(path, "%", "%25")
+	escaped = strings.ReplaceAll(escaped, "?", "%3F")
+	escaped = strings.ReplaceAll(escaped, "#", "%23")
+	dsn := fmt.Sprintf("file:%s?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", escaped)
+	return sql.Open("sqlite", dsn)
+}
+
 // openSessionDB opens (creating if needed) a per-session .sqlite file with
 // its schema: a single-row meta table and an ordered messages table.
 func openSessionDB(path string) (*sql.DB, error) {
@@ -167,27 +179,42 @@ func ensureHistoryGenColumn(db *sql.DB) error {
 
 // readHistoryGen returns the session file's current history generation: 0
 // for a missing file (a new session starts at generation 0, matching the
-// column default) or an error when the file cannot be read. It opens via
-// openSessionDB so pre-column files gain history_gen (defaulting 0, the
-// correct value for a file with no recorded shrinks) before reading.
+// column default), a file whose schema predates the column, or an
+// unreadable/corrupt file (defaulting 0 is the correct "no recorded
+// shrinks" value; the write path's own appendSqliteSessionOnce re-opens
+// with the full schema and surfaces real errors).
+//
+// This is deliberately a DDL-free single SELECT via openDBRaw: it runs on
+// the TUI goroutine once per streamed message (saveAsyncToDir →
+// readHistoryGen), where openSessionDB's CREATE TABLE / PRAGMA table_info /
+// potential ALTER TABLE and a cross-process BUSY wait (busy_timeout 5000ms)
+// would stall the whole Update loop — the "LLM keeps running, TUI renders
+// nothing" symptom observed on Linux (2026-09-15).
 func readHistoryGen(dir, id string) (int64, error) {
 	path := sqliteSessionPath(dir, id)
 	if !fileExists(path) {
 		return 0, nil
 	}
-	db, err := openSessionDB(path)
+	db, err := openDBRaw(path)
 	if err != nil {
 		return 0, err
 	}
 	defer db.Close()
 	var gen int64
-	if err := db.QueryRow(`SELECT history_gen FROM meta WHERE id = ?`, id).Scan(&gen); err != nil {
-		if err == sql.ErrNoRows {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("session: read history_gen %s: %w", id, err)
+	err = db.QueryRow(`SELECT history_gen FROM meta WHERE id = ?`, id).Scan(&gen)
+	if err == nil {
+		return gen, nil
 	}
-	return gen, nil
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	msg := err.Error()
+	// Missing schema (pre-column file, empty/corrupt DB) means "no recorded
+	// shrinks" — the column default. The next write upgrades the schema.
+	if strings.Contains(msg, "no such table") || strings.Contains(msg, "no such column") {
+		return 0, nil
+	}
+	return 0, fmt.Errorf("session: read history_gen %s: %w", id, err)
 }
 
 // openIndexDB opens (creating if needed) the shared per-project

@@ -88,4 +88,22 @@ describe("PortMapsWidget", () => {
 
     expect(await screen.findByText("port already in use")).toBeInTheDocument();
   });
+
+  it("shows a readable error when the list call returns a non-JSON 200 (regression)", async () => {
+    // Before the fetchJSON guard, a 200 HTML body from the SPA fallback
+    // surfaced as WebKit's cryptic "SyntaxError: The string did not match
+    // the expected pattern." fetchJSON now throws a readable ApiError.
+    mockIsPortMapsAvailable.mockResolvedValue(true);
+    mockListPortMaps.mockRejectedValue(
+      new FakeApiError(
+        "Non-JSON response from /api/desktop/portmaps (status 200, content-type text/html)",
+        200,
+      ),
+    );
+    render(<PortMapsWidget />);
+    fireEvent.click(await screen.findByTitle("Port forwards"));
+    expect(
+      await screen.findByText(/Non-JSON response from \/api\/desktop\/portmaps/),
+    ).toBeInTheDocument();
+  });
 });

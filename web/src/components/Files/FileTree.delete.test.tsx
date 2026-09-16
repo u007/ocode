@@ -134,7 +134,7 @@ describe("FileTree delete flow (replaces window.confirm, unsupported in Wails we
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     await confirmDeleteDialog();
 
-    await waitFor(() => expect(mocks.fsDelete).toHaveBeenCalledWith(["src/a.ts"], "/proj"));
+    await waitFor(() => expect(mocks.fsDelete).toHaveBeenCalledWith(["src/a.ts"], "/proj", undefined));
     expect(onDelete).toHaveBeenCalledWith(
       expect.objectContaining({ detail: { paths: ["src/a.ts"], projectRoot: "/proj" } }),
     );
@@ -161,7 +161,7 @@ describe("FileTree delete flow (replaces window.confirm, unsupported in Wails we
 
     await confirmDeleteDialog();
     await waitFor(() =>
-      expect(mocks.fsDelete).toHaveBeenCalledWith(["src/a.ts", "src/b.ts"], "/proj"),
+      expect(mocks.fsDelete).toHaveBeenCalledWith(["src/a.ts", "src/b.ts"], "/proj", undefined),
     );
   });
 
@@ -176,7 +176,7 @@ describe("FileTree delete flow (replaces window.confirm, unsupported in Wails we
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     await confirmDeleteDialog();
 
-    await waitFor(() => expect(mocks.fsDelete).toHaveBeenCalledWith(["src/c.ts"], "/proj"));
+    await waitFor(() => expect(mocks.fsDelete).toHaveBeenCalledWith(["src/c.ts"], "/proj", undefined));
   });
 
   it("API failure keeps the dialog open and shows the error notice", async () => {

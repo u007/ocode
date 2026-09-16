@@ -14,7 +14,7 @@ function languageFor(path: string): string {
   return map[ext] ?? "plaintext";
 }
 
-export default function TextViewer({ path, projectRoot }: { path: string; projectRoot?: string }) {
+export default function TextViewer({ path, projectRoot, projectHost }: { path: string; projectRoot?: string; projectHost?: string }) {
   const [content, setContent] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [dirty, setDirty] = useState(false);
@@ -32,7 +32,7 @@ export default function TextViewer({ path, projectRoot }: { path: string; projec
     setIsBinary(false);
     setForceEdit(false);
     api
-      .getFileContent(path, projectRoot)
+      .getFileContent(path, projectRoot, projectHost)
       .then((c) => {
         if (cancelled) return;
         setContent(c.content);
@@ -45,13 +45,13 @@ export default function TextViewer({ path, projectRoot }: { path: string; projec
     return () => {
       cancelled = true;
     };
-  }, [path, projectRoot]);
+  }, [path, projectRoot, projectHost]);
 
   const save = async () => {
     setSaving(true);
     setError(null);
     try {
-      await api.saveFileContent(path, draft, projectRoot);
+      await api.saveFileContent(path, draft, projectRoot, undefined, undefined, projectHost);
       setContent(draft);
       setDirty(false);
       setSavedTick(true);
@@ -112,6 +112,7 @@ export default function TextViewer({ path, projectRoot }: { path: string; projec
         <FileEditor
           path={path}
           projectRoot={projectRoot}
+          projectHost={projectHost}
           content={content}
           language={languageFor(path)}
           onChange={(v) => {

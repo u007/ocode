@@ -19,10 +19,12 @@ function extractMermaid(md: string): string | null {
 export default function MarkdownViewer({
   path,
   projectRoot,
+  projectHost,
   onOpenFile,
 }: {
   path: string;
   projectRoot?: string;
+  projectHost?: string;
   onOpenFile: (path: string) => void;
 }) {
   const [md, setMd] = useState<string | null>(null);
@@ -38,7 +40,7 @@ export default function MarkdownViewer({
     setIsBinary(false);
     setForceEdit(false);
     api
-      .getFileContent(path, projectRoot)
+      .getFileContent(path, projectRoot, projectHost)
       .then((c) => {
         if (!cancelled) {
           setIsBinary(c.is_binary);
@@ -51,7 +53,7 @@ export default function MarkdownViewer({
     return () => {
       cancelled = true;
     };
-  }, [path, projectRoot]);
+  }, [path, projectRoot, projectHost]);
 
   const diagram = useMemo(() => (md ? extractMermaid(md) : null), [md]);
 
@@ -68,7 +70,7 @@ export default function MarkdownViewer({
   if (forceEdit) {
     return (
       <div className="min-h-0 flex-1 overflow-hidden">
-        <FileEditor path={path} projectRoot={projectRoot} content={md || ""} language="plaintext" />
+        <FileEditor path={path} projectRoot={projectRoot} projectHost={projectHost} content={md || ""} language="plaintext" />
       </div>
     );
   }
@@ -77,13 +79,13 @@ export default function MarkdownViewer({
     <div className="flex h-full min-h-0 flex-col">
       {diagram && (
         <div className="min-h-[220px] shrink-0 border-b border-border">
-          <MermaidViewer path={path} code={diagram} projectRoot={projectRoot} onOpenFile={onOpenFile} />
+          <MermaidViewer path={path} code={diagram} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={onOpenFile} />
         </div>
       )}
       <div ref={ref} className="prose prose-sm prose-invert min-h-0 flex-1 overflow-auto p-3 select-text">
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
       </div>
-      {sel && <SelectionToolbar sel={sel} path={path} label="doc" projectRoot={projectRoot} onDone={clear} />}
+      {sel && <SelectionToolbar sel={sel} path={path} label="doc" projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}
     </div>
   );
 }

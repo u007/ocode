@@ -65,6 +65,9 @@ const STATUS_BADGES: Record<string, { label: string; color: string }> = {
 interface Props {
   onOpenFile?: (path: string, projectRoot?: string) => void;
   projectPath?: string;
+  /** Registered remote target (SSH/WSL) when this is a remote project;
+   *  empty for local projects. Routed through to every git API call. */
+  projectHost?: string;
   /** True while the Git view is frontmost. The panel is force-mounted so its
    *  DOM survives view switches; without this gate it polls and refetches the
    *  whole workspace every 10s forever, even while the user is chatting. */
@@ -114,7 +117,7 @@ function timeAgo(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
-export default function GitPanel({ onOpenFile, projectPath, active = true }: Props) {
+export default function GitPanel({ onOpenFile, projectPath, projectHost, active = true }: Props) {
   const [workspace, setWorkspace] = useState<GitWorkspace | null>(null);
   const [commits, setCommits] = useState<GitCommit[]>([]);
   const [commitDiff, setCommitDiff] = useState<GitDiffFile[] | null>(null);
@@ -135,8 +138,8 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
     setError(null);
     try {
       const [ws, log] = await Promise.all([
-        api.getGitWorkspace(projectPath),
-        api.gitLog(projectPath),
+        api.getGitWorkspace(projectPath, projectHost),
+        api.gitLog(projectPath, 50, projectHost),
       ]);
       setWorkspace(ws);
       setCommits(log);
@@ -161,7 +164,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
     } finally {
       setRefreshing(false);
     }
-  }, [projectPath]);
+  }, [projectPath, projectHost]);
 
   useEffect(() => {
     load();
@@ -189,7 +192,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
     return eventBus.on("git_status", (env) => {
       if (!projectPath || env.project === projectPath) load();
     });
-  }, [load, projectPath]);
+  }, [load, projectPath, projectHost]);
 
   const runMutation = useCallback(
     async (fn: () => Promise<unknown>) => {
@@ -208,38 +211,39 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
   );
 
   const stageFile = (path: string) =>
-    runMutation(() => api.gitStage([path], projectPath));
+    runMutation(() => api.gitStage([path], projectPath, projectHost));
   const unstageFile = (path: string) =>
-    runMutation(() => api.gitUnstage([path], projectPath));
+    runMutation(() => api.gitUnstage([path], projectPath, projectHost));
   const discardFile = (path: string, untracked: boolean) =>
     untracked
       ? runMutation(() =>
           api.gitHunk(
             { path, hunk_index: 0, action: "discard", staged: false },
             projectPath,
+            projectHost,
           ),
         )
-      : runMutation(() => api.gitDiscard([path], projectPath));
+      : runMutation(() => api.gitDiscard([path], projectPath, projectHost));
   const stageAll = (paths: string[]) =>
-    runMutation(() => api.gitStage(paths, projectPath));
+    runMutation(() => api.gitStage(paths, projectPath, projectHost));
   const unstageAll = (paths: string[]) =>
-    runMutation(() => api.gitUnstage(paths, projectPath));
+    runMutation(() => api.gitUnstage(paths, projectPath, projectHost));
 
   // Network actions
-  const doFetch = () => runMutation(() => api.gitFetch(projectPath));
-  const doPull = () => runMutation(() => api.gitPull(projectPath));
-  const doPush = () => runMutation(() => api.gitPush(projectPath, false));
+  const doFetch = () => runMutation(() => api.gitFetch(projectPath, projectHost));
+  const doPull = () => runMutation(() => api.gitPull(projectPath, projectHost));
+  const doPush = () => runMutation(() => api.gitPush(projectPath, false, projectHost));
 
   // Force-push confirmation flow
   const [pendingForcePush, setPendingForcePush] = useState(false);
   const [pendingResetRemote, setPendingResetRemote] = useState(false);
   const doForcePush = () => {
     setPendingForcePush(false);
-    runMutation(() => api.gitPush(projectPath, true));
+    runMutation(() => api.gitPush(projectPath, true, projectHost));
   };
   const doResetRemote = () => {
     setPendingResetRemote(false);
-    runMutation(() => api.gitResetRemote(projectPath));
+    runMutation(() => api.gitResetRemote(projectPath, projectHost));
   };
 
   // Right-click menu per file row. Actions mirror the row's hover buttons
@@ -291,6 +295,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
         const ws = await api.gitHunk(
           { path: file.path, hunk_index: hunkIndex, action, staged },
           projectPath,
+          projectHost,
         );
         setWorkspace(ws);
         setSelection((sel) =>
@@ -308,7 +313,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
         setBusy(false);
       }
     },
-    [projectPath],
+    [projectPath, projectHost],
   );
 
   const commit = () => {
@@ -317,7 +322,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
       return;
     }
     runMutation(async () => {
-      await api.gitCommit(commitMessage, [], projectPath);
+      await api.gitCommit(commitMessage, [], projectPath, projectHost);
       setCommitMessage("");
       setSelection(null);
       setCommitDiff(null);
@@ -332,7 +337,7 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
   const selectCommit = async (c: GitCommit) => {
     setSelection({ kind: "commit", hash: c.hash });
     try {
-      const files = await api.gitShow(c.hash, projectPath);
+      const files = await api.gitShow(c.hash, projectPath, projectHost);
       setCommitDiff(files);
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to load commit diff");
@@ -704,7 +709,11 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
             them. Are you sure you want to continue?
           </p>
           <DialogFooter className="mt-4">
-            <Button variant="outline" onClick={() => setPendingForcePush(false)}>
+            <Button
+              variant="outline"
+              onClick={() => setPendingForcePush(false)}
+              data-dialog-default-action
+            >
               Cancel
             </Button>
             <Button variant="destructive" onClick={doForcePush}>
@@ -726,7 +735,11 @@ export default function GitPanel({ onOpenFile, projectPath, active = true }: Pro
             commits and tracked working-tree changes not on the remote will be permanently discarded.
           </p>
           <DialogFooter className="mt-4">
-            <Button variant="outline" onClick={() => setPendingResetRemote(false)}>
+            <Button
+              variant="outline"
+              onClick={() => setPendingResetRemote(false)}
+              data-dialog-default-action
+            >
               Cancel
             </Button>
             <Button variant="destructive" onClick={doResetRemote}>

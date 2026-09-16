@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { chatReducer, getSessionSlice, getTurnState, initialState } from "./chatStore";
+import { MAX_SLICE_MESSAGES, chatReducer, getSessionSlice, getTurnState, initialState } from "./chatStore";
+import type { Message } from "../api/types";
 import type { ChatState } from "./chatStore";
 
 function initial(): ChatState {
@@ -758,5 +759,109 @@ describe("chatStore reload rehydration from transcript snapshot", () => {
     });
     expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q1");
     expect(getSessionSlice(state, "a").pendingQuestion?.questions[0].question).toBe("q?");
+  });
+});
+
+describe("chatStore in-memory message cap", () => {
+  function mkMsg(role: "user" | "assistant", content: string): Message {
+    return { role, content } as Message;
+  }
+  function fill(n: number, sessionId = "cap"): ChatState {
+    let state = initial();
+    for (let i = 0; i < n; i++) {
+      state = chatReducer(state, {
+        type: "ADD_MESSAGE",
+        sessionId,
+        message: mkMsg("user", `m${i}`),
+      });
+    }
+    return state;
+  }
+
+  it("does not trim below the cap and leaves content intact", () => {
+    const state = fill(MAX_SLICE_MESSAGES - 1);
+    const s = getSessionSlice(state, "cap");
+    expect(s.messages.length).toBe(MAX_SLICE_MESSAGES - 1);
+    expect(s.messages[0].content).toBe("m0");
+    expect(s.hasMore).toBe(false);
+  });
+
+  it("trims from the head once over the cap, keeping the newest window", () => {
+    const n = MAX_SLICE_MESSAGES + 10;
+    const state = fill(n);
+    const s = getSessionSlice(state, "cap");
+    expect(s.messages.length).toBe(MAX_SLICE_MESSAGES);
+    expect(s.messages[0].content).toBe(`m${n - MAX_SLICE_MESSAGES}`);
+    expect(s.messages[s.messages.length - 1].content).toBe(`m${n - 1}`);
+  });
+
+  it("sets hasMore when trimmed so the head stays paged-in via scroll-up", () => {
+    const state = fill(MAX_SLICE_MESSAGES + 1);
+    expect(getSessionSlice(state, "cap").hasMore).toBe(true);
+  });
+
+  it("SET_MESSAGES caps an authoritative full transcript to the newest window", () => {
+    const big: Message[] = [];
+    for (let i = 0; i < MAX_SLICE_MESSAGES + 5; i++) big.push(mkMsg("user", `s${i}`));
+    let state = initial();
+    state = chatReducer(state, { type: "SET_MESSAGES", sessionId: "cap", messages: big });
+    const s = getSessionSlice(state, "cap");
+    expect(s.messages.length).toBe(MAX_SLICE_MESSAGES);
+    expect(s.messages[0].content).toBe(`s${5}`);
+    expect(s.hasMore).toBe(true);
+    expect(s.totalMessages).toBe(MAX_SLICE_MESSAGES + 5);
+  });
+
+  it("APPEND_DELTA appends to the trailing assistant message and trims the head at the cap", () => {
+    let state = fill(MAX_SLICE_MESSAGES - 1);
+    state = chatReducer(state, {
+      type: "APPEND_DELTA",
+      sessionId: "cap",
+      delta: "hello",
+    });
+    let s = getSessionSlice(state, "cap");
+    expect(s.messages.length).toBe(MAX_SLICE_MESSAGES);
+    expect(s.messages[s.messages.length - 1]).toEqual({
+      role: "assistant",
+      content: "hello",
+    });
+    // Push over the cap with more deltas on the same assistant message.
+    state = chatReducer(state, { type: "APPEND_DELTA", sessionId: "cap", delta: " world" });
+    s = getSessionSlice(state, "cap");
+    expect(s.messages.length).toBe(MAX_SLICE_MESSAGES);
+    // The trimmed window's last message is still the growing assistant msg.
+    expect(s.messages[s.messages.length - 1].content).toBe("hello world");
+  });
+
+  it("MERGE_SNAPSHOT caps the snapshot and preserves total for pagination", () => {
+    const big: Message[] = [];
+    for (let i = 0; i < MAX_SLICE_MESSAGES + 3; i++) big.push(mkMsg("user", `g${i}`));
+    let state = initial();
+    state = chatReducer(state, {
+      type: "MERGE_SNAPSHOT",
+      sessionId: "cap",
+      messages: big,
+      total: MAX_SLICE_MESSAGES + 3,
+    });
+    const s = getSessionSlice(state, "cap");
+    expect(s.messages.length).toBe(MAX_SLICE_MESSAGES);
+    expect(s.messages[0].content).toBe(`g${3}`);
+    expect(s.totalMessages).toBe(MAX_SLICE_MESSAGES + 3);
+    expect(s.hasMore).toBe(true);
+  });
+
+  it("PREPEND stays exempt so scroll-up paging keeps the loaded window contiguous", () => {
+    const state = fill(MAX_SLICE_MESSAGES, "pre");
+    const older = [mkMsg("user", "old1"), mkMsg("assistant", "old2")];
+    const next = chatReducer(state, {
+      type: "PREPEND_MESSAGES",
+      sessionId: "pre",
+      messages: older,
+      total: MAX_SLICE_MESSAGES + 2,
+    });
+    const s = getSessionSlice(next, "pre");
+    // PREPEND is exempt from the cap; hasMore reflects server paging state.
+    expect(s.messages.length).toBe(MAX_SLICE_MESSAGES + 2);
+    expect(s.hasMore).toBe(false);
   });
 });

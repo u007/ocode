@@ -291,6 +291,7 @@ export default function PermissionDialog({
               </Button>
               <Button
                 type="button"
+                autoFocus
                 onClick={() => void handleResponse(confirming)}
                 disabled={loading}
               >
@@ -335,6 +336,7 @@ export default function PermissionDialog({
                 type="button"
                 onClick={() => void handleResponse("allow")}
                 disabled={loading}
+                data-dialog-default-action
               >
                 <Check className="w-4 h-4 mr-2" />
                 Allow once

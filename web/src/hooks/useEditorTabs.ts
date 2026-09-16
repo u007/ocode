@@ -13,6 +13,10 @@ export interface EditorTab {
   id: string;
   path: string;
   projectRoot?: string;
+  /** Registered remote target (SSH/WSL) for this tab's project; routes the
+   *  content fetch/save and git decorations to the remote host. Empty for
+   *  local projects. */
+  projectHost?: string;
   content: string;
   originalContent: string;
   /** Server-computed binary detection (bytes.IndexByte(data, 0) >= 0), from
@@ -41,7 +45,7 @@ export interface UseEditorTabsResult {
   editorTabs: EditorTab[];
   activeEditorTabId: string | null;
   setActiveEditorTabId: (id: string | null) => void;
-  handleOpenFile: (path: string, projectRoot?: string) => Promise<void>;
+  handleOpenFile: (path: string, projectRoot?: string, host?: string) => Promise<void>;
   reloadTabFromDisk: (id: string) => Promise<void>;
   dismissExternalChange: (id: string) => void;
   handleEditorChange: (id: string, content: string) => void;
@@ -76,9 +80,10 @@ export function useEditorTabs(): UseEditorTabsResult {
     activeEditorTabIdRef.current = activeEditorTabId;
   }, [activeEditorTabId]);
 
-  const fetchFileContent = useCallback(async (path: string, projectRoot?: string): Promise<{ content: string; isBinary: boolean }> => {
+  const fetchFileContent = useCallback(async (path: string, projectRoot?: string, host?: string): Promise<{ content: string; isBinary: boolean }> => {
     const query = new URLSearchParams({ path });
     if (projectRoot) query.set("project_root", projectRoot);
+    if (host) query.set("host", host);
     const res = await fetch(apiPath(`/api/files/content?${query.toString()}`), {
       headers: authHeaders(),
     });
@@ -87,7 +92,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     return { content: data.content as string, isBinary: !!data.is_binary };
   }, []);
 
-  const handleOpenFile = useCallback(async (path: string, projectRoot?: string) => {
+  const handleOpenFile = useCallback(async (path: string, projectRoot?: string, host?: string) => {
     const id = projectRoot ? `editor-${projectRoot}::${path}` : `editor-${path}`;
     if (openFileIdsRef.current.has(id)) {
       setActiveEditorTabId(id);
@@ -102,7 +107,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     const draft = loadEditorDraft(id);
     let tab: EditorTab;
     try {
-      const disk = await fetchFileContent(path, projectRoot);
+      const disk = await fetchFileContent(path, projectRoot, host);
       if (draft && draft.content !== disk.content) {
         // Unsaved edits survive the reload. If the on-disk content no longer
         // matches what the draft was edited against, the file moved under the
@@ -114,6 +119,7 @@ export function useEditorTabs(): UseEditorTabsResult {
           id,
           path,
           projectRoot,
+          projectHost: host,
           content: draft.content,
           originalContent: disk.content,
           isBinary: disk.isBinary,
@@ -129,6 +135,7 @@ export function useEditorTabs(): UseEditorTabsResult {
           id,
           path,
           projectRoot,
+          projectHost: host,
           content: disk.content,
           originalContent: disk.content,
           isBinary: disk.isBinary,
@@ -333,7 +340,7 @@ export function useEditorTabs(): UseEditorTabsResult {
       if (!tab) return;
       try {
         const expectedHash = tab.baseHash;
-        await api.saveFileContent(tab.path, tab.content, tab.projectRoot, expectedHash, opts?.force);
+        await api.saveFileContent(tab.path, tab.content, tab.projectRoot, expectedHash, opts?.force, tab.projectHost);
         setSaveError(null);
         clearEditorDraft(id);
         setEditorTabs((prev) =>
@@ -393,7 +400,7 @@ export function useEditorTabs(): UseEditorTabsResult {
       const tab = editorTabsRef.current.find((t) => t.id === id);
       if (!tab) return;
       try {
-        const disk = await fetchFileContent(tab.path, tab.projectRoot);
+        const disk = await fetchFileContent(tab.path, tab.projectRoot, tab.projectHost);
         clearEditorDraft(id);
         setEditorTabs((prev) =>
           prev.map((t) =>
@@ -468,7 +475,7 @@ export function useEditorTabs(): UseEditorTabsResult {
 
     const checkOne = async (tab: EditorTab) => {
       try {
-        const disk = await fetchFileContent(tab.path, tab.projectRoot);
+        const disk = await fetchFileContent(tab.path, tab.projectRoot, tab.projectHost);
         if (cancelled) return;
         // Use baseHash for change detection so dirty tabs that haven't rebased
         // don't compare against a stale originalContent that was already
@@ -534,7 +541,7 @@ export function useEditorTabs(): UseEditorTabsResult {
       const tab = editorTabsRef.current.find((t) => t.id === activeEditorTabId);
       if (!tab) return;
       try {
-        const disk = await fetchFileContent(tab.path, tab.projectRoot);
+        const disk = await fetchFileContent(tab.path, tab.projectRoot, tab.projectHost);
         if (cancelled) return;
         const diskHash = hashContent(disk.content);
         if (diskHash === tab.baseHash) return;

@@ -5,10 +5,13 @@ import {
   shiftQueued,
   shiftUndispatched,
   removeQueuedItem,
+  removeDispatchedQueuedByText,
   popLastQueued,
   unshiftQueued,
   rekeyQueue,
   clearQueue,
+  QUEUE_CHANGED_EVENT,
+  dispatchQueueChanged,
 } from "./tabQueue";
 
 const msg = (text: string) => ({ kind: "message" as const, text });
@@ -136,5 +139,45 @@ describe("tabQueue", () => {
     expect(popLastQueued("t8")).toEqual({ kind: "message", text: "live", dispatched: true });
     expect(getQueue("t8")).toEqual([msg("first")]);
     clearQueue("t8");
+  });
+
+  it("removeDispatchedQueuedByText drops only the dispatched entry matching text", () => {
+    pushQueued("t9", { kind: "message", text: "live", dispatched: true });
+    pushQueued("t9", msg("pending"));
+    pushQueued("t9", { kind: "message", text: "live", dispatched: true });
+    // First match wins (FIFO), leaving the fresh message and the duplicate.
+    expect(removeDispatchedQueuedByText("t9", "live")).toBe(true);
+    expect(getQueue("t9")).toEqual([msg("pending"), { kind: "message", text: "live", dispatched: true }]);
+    // Undispatched entries are never matches — a queued-but-not-yet-injected
+    // message must keep draining normally.
+    expect(removeDispatchedQueuedByText("t9", "pending")).toBe(false);
+    expect(getQueue("t9")).toEqual([msg("pending"), { kind: "message", text: "live", dispatched: true }]);
+    // Second call removes the remaining duplicate.
+    expect(removeDispatchedQueuedByText("t9", "live")).toBe(true);
+    expect(getQueue("t9")).toEqual([msg("pending")]);
+    clearQueue("t9");
+  });
+
+  it("removeDispatchedQueuedByText ignores commands and unknown tabs/text", () => {
+    pushQueued("t10", cmd("/status"));
+    // A command's text can never collide: only dispatched message entries match.
+    expect(removeDispatchedQueuedByText("t10", "/status")).toBe(false);
+    expect(getQueue("t10")).toEqual([cmd("/status")]);
+    expect(removeDispatchedQueuedByText("missing", "x")).toBe(false);
+    expect(removeDispatchedQueuedByText(null, "x")).toBe(false);
+    clearQueue("t10");
+  });
+
+  it("dispatchQueueChanged fires a tab-scoped window event", () => {
+    const seen: unknown[] = [];
+    const handler = (e: Event) => seen.push((e as CustomEvent).detail);
+    window.addEventListener(QUEUE_CHANGED_EVENT, handler);
+    try {
+      dispatchQueueChanged("t11");
+      dispatchQueueChanged(null);
+      expect(seen).toEqual([{ tabId: "t11" }]);
+    } finally {
+      window.removeEventListener(QUEUE_CHANGED_EVENT, handler);
+    }
   });
 });

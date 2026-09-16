@@ -29,6 +29,9 @@ import {
 interface FileEditorProps {
   path: string;
   projectRoot?: string;
+  /** Registered remote target (SSH/WSL) for this tab's project; routes git
+   *  status/diff decoration fetches to the remote host. */
+  projectHost?: string;
   content: string;
   /** Server-computed binary detection for `content`. When omitted, falls back
    *  to a NUL-byte heuristic (callers that don't fetch via the files API). */
@@ -112,6 +115,7 @@ function isModifiedHunk(hunk: Hunk): boolean {
 function FileEditorImpl({
   path,
   projectRoot,
+  projectHost,
   content,
   isBinary: isBinaryProp,
   language,
@@ -580,10 +584,10 @@ function FileEditorImpl({
     const sessionDiffP: Promise<ChangeDiff | null> =
       api.getChangeDiff(session, path).catch(() => null);
     const gitStatusP: Promise<GitStatus | undefined> = projectRoot
-      ? api.getGitStatus(projectRoot).catch(() => undefined)
+      ? api.getGitStatus(projectRoot, projectHost).catch(() => undefined)
       : Promise.resolve(undefined);
     const gitDiffP: Promise<GitDiffFile[]> = projectRoot
-      ? api.getGitDiff(path, projectRoot, false).catch(() => [])
+      ? api.getGitDiff(path, projectRoot, false, projectHost).catch(() => [])
       : Promise.resolve([]);
 
     Promise.all([sessionDiffP, gitStatusP, gitDiffP]).then(
@@ -607,7 +611,7 @@ function FileEditorImpl({
     return () => {
       cancelled = true;
     };
-  }, [path, session, diffVersion, projectRoot, editorMountVersion]);
+  }, [path, session, diffVersion, projectRoot, projectHost, editorMountVersion]);
 
   // ── Search highlight decorations (content search) ──
   // Single mechanism: pending highlight store keyed by path+projectRoot.

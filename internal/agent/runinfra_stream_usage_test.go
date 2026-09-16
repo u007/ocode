@@ -40,6 +40,9 @@ func TestProviderNeedsStreamUsageOptIn(t *testing.T) {
 	if !providerNeedsStreamUsageOptIn("runinfra") {
 		t.Fatal("runinfra must be in the stream usage opt-in allowlist")
 	}
+	if !providerNeedsStreamUsageOptIn("ollama-cloud") {
+		t.Fatal("ollama-cloud must be in the stream usage opt-in allowlist (verified 2026-09-15: ollama.com hides the usage frame without stream_options.include_usage)")
+	}
 	for _, p := range []string{"openai", "deepseek", "groq", "openrouter", "novita-ai", "mistral", "local", "lmstudio", ""} {
 		if providerNeedsStreamUsageOptIn(p) {
 			t.Fatalf("provider %q must NOT be in the stream usage opt-in allowlist", p)
@@ -104,6 +107,59 @@ func TestRuninfraStreamUsageOptInAndCachedUsage(t *testing.T) {
 	}
 	if out.Usage.CacheWriteTokens == nil || *out.Usage.CacheWriteTokens != 2176 {
 		t.Fatalf("cache write tokens = %v, want 2176", out.Usage.CacheWriteTokens)
+	}
+	if !out.Usage.PromptIncludesCacheRead {
+		t.Fatal("OpenAI-style usage must set PromptIncludesCacheRead")
+	}
+}
+
+// TestOllamaCloudStreamUsageOptInAndCachedUsage pins the ollama-cloud
+// contract: the streamed request carries stream_options.include_usage and
+// the usage frame's cached tokens land in TokenUsage. Live-probe shape
+// (2026-09-15): the usage frame arrives on a final empty-choices chunk with
+// prompt_tokens_details.cached_tokens.
+func TestOllamaCloudStreamUsageOptInAndCachedUsage(t *testing.T) {
+	captured, url := newStreamCaptureServer(t)
+	gc := &GenericClient{Provider: "ollama-cloud", Model: "glm-5.3-flash", BaseURL: url}
+	msgs := []Message{
+		{Role: "system", Content: "You are a terse probe."},
+		{Role: "user", Content: "Reply with one word: ok"},
+	}
+	out, err := gc.Chat(msgs, nil)
+	if err != nil {
+		t.Fatalf("Chat failed: %v", err)
+	}
+	if strings.TrimSpace(out.Content) != "ok" {
+		t.Fatalf("unexpected content %q", out.Content)
+	}
+
+	body := captured()
+	if len(body) == 0 {
+		t.Fatal("no request body captured")
+	}
+	var payload struct {
+		StreamOptions *struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("request body not JSON: %v", err)
+	}
+	if payload.StreamOptions == nil || !payload.StreamOptions.IncludeUsage {
+		t.Fatalf("ollama-cloud request missing stream_options.include_usage: %s", body)
+	}
+
+	if out.Usage == nil {
+		t.Fatal("usage frame not parsed from stream")
+	}
+	if out.Usage.PromptTokens == nil || *out.Usage.PromptTokens != 7962 {
+		t.Fatalf("prompt tokens = %v, want 7962", out.Usage.PromptTokens)
+	}
+	if out.Usage.CompletionTokens == nil || *out.Usage.CompletionTokens != 182 {
+		t.Fatalf("completion tokens = %v, want 182", out.Usage.CompletionTokens)
+	}
+	if out.Usage.CacheReadTokens == nil || *out.Usage.CacheReadTokens != 4352 {
+		t.Fatalf("cache read tokens = %v, want 4352", out.Usage.CacheReadTokens)
 	}
 	if !out.Usage.PromptIncludesCacheRead {
 		t.Fatal("OpenAI-style usage must set PromptIncludesCacheRead")

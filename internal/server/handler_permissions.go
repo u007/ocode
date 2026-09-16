@@ -65,12 +65,12 @@ func (h *Handler) HandleGetPermissions(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(bashRules, func(i, j int) bool { return bashRules[i].Tool < bashRules[j].Tool })
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"mode":                string(liveMode),
-		"auto_allow":          pm.AutoPermissionEnabled(),
-		"sandbox_supported":   agent.SandboxSupported(),
-		"effective_behavior":  effectivePermissionBehavior(liveMode),
-		"rules":               rules,
-		"bash_rules":          bashRules,
+		"mode":               string(liveMode),
+		"auto_allow":         pm.AutoPermissionEnabled(),
+		"sandbox_supported":  agent.SandboxSupported(),
+		"effective_behavior": effectivePermissionBehavior(liveMode),
+		"rules":              rules,
+		"bash_rules":         bashRules,
 	})
 }
 

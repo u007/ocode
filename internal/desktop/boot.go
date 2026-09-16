@@ -6,6 +6,7 @@ package desktop
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
@@ -388,13 +389,28 @@ func startRemoteServer(webFS fs.FS, workspace *remote.RemoteWorkspace, localToke
 
 // remoteSPAHandler serves the embedded React SPA for remote
 // workspaces. Mirrors internal/server.spaHandler but lives here
-// to avoid a server→desktop dependency.
+// to avoid a server→desktop dependency. Like spaHandler, unknown
+// /api/* paths get a JSON 404 instead of the index.html fallback: a
+// 200 text/html response on an API route makes the SPA's fetchJSON
+// parse HTML, which in WebKit (the desktop WKWebView) throws the
+// cryptic "SyntaxError: The string did not match the expected pattern"
+// and defeats availability probes that branch on status
+// (e.g. isPortMapsAvailable). The /api/ prefix never reaches here in
+// normal operation (the mux routes /api/ to the RemoteProxy or the
+// local portmaps handler first), so this guard only catches a request
+// that somehow missed both — fail loudly and JSON-ly.
 func remoteSPAHandler(webFS fs.FS) http.Handler {
 	if webFS == nil {
 		return http.NotFoundHandler()
 	}
 	fileServer := http.FileServer(http.FS(webFS))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+			return
+		}
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		if path == "" {
 			path = "index.html"

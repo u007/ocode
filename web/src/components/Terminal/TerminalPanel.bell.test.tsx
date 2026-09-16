@@ -34,6 +34,8 @@ vi.mock("@xterm/xterm", () => {
     write = vi.fn();
     focus = vi.fn();
     onData = vi.fn(() => ({ dispose: vi.fn() }));
+    onSelectionChange = vi.fn(() => ({ dispose: vi.fn() }));
+    getSelection = vi.fn(() => "");
     onBell = vi.fn((cb: () => void) => {
       this._bell = cb;
       return { dispose: vi.fn() };

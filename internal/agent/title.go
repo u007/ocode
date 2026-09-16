@@ -140,7 +140,7 @@ func (a *Agent) titleClients() []LLMClient {
 			}
 			seen[m] = true
 			if c := NewClient(&titleCfg, m); c != nil {
-				clients = append(clients, c)
+				clients = append(clients, a.bindOpenCodeSessionID(c))
 			}
 		}
 	}

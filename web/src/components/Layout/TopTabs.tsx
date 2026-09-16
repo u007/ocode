@@ -27,6 +27,7 @@ const mainTabs = [
 export default function TopTabs({ activeTab, onTabSelect }: Props) {
   const { state: projectState } = useProjectState();
   const activeProjectPath = projectState.activeProject?.path ?? "";
+  const activeProjectHost = projectState.activeProject?.host ?? "";
   const sessionsCount = activeProjectPath ? (projectState.tabsByProject[activeProjectPath]?.length ?? 0) : 0;
   const [terminalCount, setTerminalCount] = useState(() => {
     try {
@@ -83,7 +84,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
     let cancelled = false;
     const fetchCounts = async () => {
       try {
-        const status = await api.getGitStatus(activeProjectPath);
+        const status = await api.getGitStatus(activeProjectPath, activeProjectHost || undefined);
         if (cancelled) return;
         setGitStaged(status.staged_files?.length ?? 0);
         setGitUnstaged(status.changed_files?.length ?? 0);
@@ -110,7 +111,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
       clearInterval(interval);
       off();
     };
-  }, [activeProjectPath]);
+  }, [activeProjectPath, activeProjectHost]);
   const gitTotal = gitStaged + gitUnstaged;
   const gitTitle = `${gitStaged} staged · ${gitUnstaged} unstaged`;
 
@@ -208,7 +209,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
                   {gitCount}
                 </span>
               )}
-              {gitHasUpstream && (gitAhead > 0 || gitBehind > 0) && (
+              {tab.id === "git" && gitHasUpstream && (gitAhead > 0 || gitBehind > 0) && (
                 <span
                   title={`${gitAhead > 0 ? `${gitAhead} to push` : ""}${gitAhead > 0 && gitBehind > 0 ? " · " : ""}${gitBehind > 0 ? `${gitBehind} to pull` : ""}`}
                   className="inline-flex items-center gap-0.5 text-xs font-semibold leading-none text-amber-500"

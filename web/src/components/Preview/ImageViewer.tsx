@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../../api/client";
 
 /** Image preview (png/jpg/gif/webp/svg) fetched as authed bytes → blob URL. */
-export default function ImageViewer({ path, projectRoot }: { path: string; projectRoot?: string }) {
+export default function ImageViewer({ path, projectRoot, projectHost }: { path: string; projectRoot?: string; projectHost?: string }) {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -12,7 +12,7 @@ export default function ImageViewer({ path, projectRoot }: { path: string; proje
     setError(null);
     let objectUrl = "";
     api
-      .fetchFileRaw(path, projectRoot)
+      .fetchFileRaw(path, projectRoot, projectHost)
       .then((buf) => {
         if (cancelled) return;
         objectUrl = URL.createObjectURL(new Blob([buf]));
@@ -25,7 +25,7 @@ export default function ImageViewer({ path, projectRoot }: { path: string; proje
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [path, projectRoot]);
+  }, [path, projectRoot, projectHost]);
 
   if (error) return <div className="p-4 text-xs text-red-400">Image failed: {error}</div>;
   if (!url) return <div className="p-4 text-xs text-muted-foreground">Loading image…</div>;

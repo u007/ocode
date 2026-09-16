@@ -2316,6 +2316,14 @@ func providerSupportsReasoningEffort(provider string) bool {
 // Extend only after verifying a provider accepts the field.
 var streamUsageOptInProviders = map[string]bool{
 	"runinfra": true,
+	// ollama.com cloud (ollama-cloud) follows standard OpenAI semantics: the
+	// streamed response hides the usage frame entirely without the opt-in
+	// (verified 2026-09-15 with a live probe — with stream_options the final
+	// empty-choices chunk carries prompt_tokens_details.cached_tokens; without
+	// it, zero usage frames). Without the opt-in the TUI sidebar/status token
+	// counters show n/a and usage records never persist for every
+	// ollama-cloud model.
+	"ollama-cloud": true,
 }
 
 // providerNeedsStreamUsageOptIn reports whether the provider's streamed
@@ -4250,6 +4258,7 @@ var providers = map[string]providerInfo{
 	"groq":           {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},
 	"mistral":        {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
 	"novita-ai":      {"NOVITA_API_KEY", "https://api.novita.ai/openai/v1"},
+	"ollama-cloud":   {"OLLAMA_API_KEY", "https://ollama.com/v1"},
 	"opencode":       {"OPENCODE_API_KEY", "https://opencode.ai/zen/v1"},
 	"opencode-go":    {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
 	"copilot":        {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},

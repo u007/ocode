@@ -55,9 +55,11 @@ func landlockABI() int {
 const landlockAttrSize = 8
 
 // applyConfineToSelf applies no_new_privs + the full Landlock ruleset for the
-// given writable roots to the CURRENT process, then execve's /bin/bash -c.
-// It never returns on success (exec replaces the process image).
-func applyConfineToSelf(writableRoots []string, command string, env []string) error {
+// given writable roots to the CURRENT process, then execve's
+// <shell> [-l] -c <command> (the original bash-tool invocation shape — plain
+// bash or the desktop login shell). It never returns on success (exec
+// replaces the process image).
+func applyConfineToSelf(writableRoots []string, shell string, shellArgs []string, command string, env []string) error {
 	abi := landlockABI()
 	if abi == 0 {
 		return errors.New("landlock unsupported")
@@ -94,7 +96,7 @@ func applyConfineToSelf(writableRoots []string, command string, env []string) er
 		return fmt.Errorf("landlock_restrict_self: %w", err)
 	}
 
-	return syscall.Exec("/bin/bash", []string{"bash", "-c", command}, env)
+	return syscall.Exec(shell, append([]string{shell}, append(shellArgs, command)...), env)
 }
 
 // setNoNewPrivs disables gaining privileges via exec (required before Landlock

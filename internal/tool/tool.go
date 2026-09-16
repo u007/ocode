@@ -166,6 +166,13 @@ func initBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any, computer
 	if cfg != nil && cfg.Ocode.Plugins.AST {
 		builtins = append(builtins, &AstGrepTool{})
 	}
+	// rgrep (ripgrep-backed content search) is registered whenever the rg
+	// binary is available at session start — git-ignored files excluded out
+	// of the box. grep remains the zero-dependency fallback when rg is
+	// missing.
+	if rgBinResolver() != "" {
+		builtins = append(builtins, &RgrepTool{})
+	}
 	// OCR tool — always registered so the model knows it exists. When OCR
 	// is disabled or no model is configured, the tool's Execute method
 	// returns a NoticedError telling the user to use /ocr enable and

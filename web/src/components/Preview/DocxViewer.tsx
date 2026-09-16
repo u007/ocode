@@ -9,7 +9,7 @@ import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
  * (multi-page docs) with the document's own layout; text stays selectable
  * for Copy / Ask-LLM.
  */
-export default function DocxViewer({ path, projectRoot }: { path: string; projectRoot?: string }) {
+export default function DocxViewer({ path, projectRoot, projectHost }: { path: string; projectRoot?: string; projectHost?: string }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -20,7 +20,7 @@ export default function DocxViewer({ path, projectRoot }: { path: string; projec
     setLoading(true);
     setError(null);
     api
-      .fetchFileRaw(path, projectRoot)
+      .fetchFileRaw(path, projectRoot, projectHost)
       .then((buf) => {
         if (cancelled || !bodyRef.current) return;
         bodyRef.current.innerHTML = "";
@@ -40,15 +40,14 @@ export default function DocxViewer({ path, projectRoot }: { path: string; projec
     return () => {
       cancelled = true;
     };
-  }, [path, projectRoot]);
-
+  }, [path, projectRoot, projectHost]);
   return (
     <div ref={ref} className="h-full min-h-0 overflow-auto bg-muted/20 p-2">
       {loading && <div className="p-4 text-xs text-muted-foreground">Loading Word document…</div>}
       {error && <div className="p-4 text-xs text-red-400">Word preview failed: {error}</div>}
       <div ref={bodyRef} className="docx-body select-text" />
       <style>{`.docx-body .docx-wrapper{background:transparent !important;padding:0 !important;}.docx-body section.docx{box-shadow:none !important;margin:0 auto 12px !important;}`}</style>
-      {sel && <SelectionToolbar sel={sel} path={path} label="doc" projectRoot={projectRoot} onDone={clear} />}
+      {sel && <SelectionToolbar sel={sel} path={path} label="doc" projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}
     </div>
   );
 }

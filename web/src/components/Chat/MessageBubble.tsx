@@ -259,7 +259,9 @@ function UserBubble({
             <Button variant="outline" onClick={() => setConfirmOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleConfirm}>Restore</Button>
+            <Button onClick={handleConfirm} data-dialog-default-action>
+              Restore
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

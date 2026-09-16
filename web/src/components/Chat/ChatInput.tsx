@@ -1,7 +1,7 @@
 import { useState, type KeyboardEvent, useRef, useEffect, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
-import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, type QueuedItem } from "../../lib/tabQueue";
+import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, QUEUE_CHANGED_EVENT, type QueueChangedDetail, type QueuedItem } from "../../lib/tabQueue";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
@@ -28,7 +28,7 @@ interface ChatInputProps {
   onSessionCreated?: (tempTabId: string, sessionId: string) => void;
   /** Sidebar preview highlight (file + page/slide/node label + excerpt) to
    *  display as a chip and attach to the outgoing message. */
-  previewContext?: { path: string; label: string; excerpt: string } | null;
+  previewContext?: { path: string; label: string; excerpt: string; projectRoot?: string; projectHost?: string } | null;
   /** Called when the user X's the preview chip off this message. */
   onClearPreviewContext?: () => void;
   /** Whether this chat input belongs to the currently active session tab. */
@@ -124,7 +124,21 @@ export default forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
     setInput(getDraft(sessionTabId));
     setQueueCount(getQueue(sessionTabId).length);
 
+    // A queue entry can be removed outside this component: sessionEvents drops
+    // a dispatched (injected-while-streaming) entry when the server's
+    // user_message echo confirms the agent picked it up. Re-sync the "N
+    // queued" line so it doesn't linger. Only this tab's events apply — hidden
+    // tabs sync on their own listener and on activation (the mount effect
+    // above).
+    const onQueueChanged = (e: Event) => {
+      const ce = e as CustomEvent<QueueChangedDetail>;
+      if (!ce.detail || ce.detail.tabId !== sessionTabId) return;
+      setQueueCount(getQueue(sessionTabId).length);
+    };
+    window.addEventListener(QUEUE_CHANGED_EVENT, onQueueChanged as EventListener);
+
     return () => {
+      window.removeEventListener(QUEUE_CHANGED_EVENT, onQueueChanged as EventListener);
       if (delayedTimerRef.current !== null) {
         clearTimeout(delayedTimerRef.current);
         delayedTimerRef.current = null;
@@ -486,8 +500,11 @@ export default forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
         // A turn is actively running. Mirror the TUI: inject into the live agent
         // loop at the next tool-call boundary (so it's answered within the same
         // turn) AND keep a client queue entry flagged `dispatched` so the message
-        // is still recallable via up-arrow before the turn ends. The drain
-        // backstop discards dispatched entries, so it is never sent a second time.
+        // is still recallable via up-arrow until the agent picks it up. The
+        // server's user_message echo for injected messages removes the entry
+        // (via removeDispatchedQueuedByText in sessionEvents), and the drain
+        // backstop discards anything left when the turn ends — either way it is
+        // never sent a second time.
         const item: QueuedItem = { kind: "message", text: finalMessage, dispatched: true };
         pushQueued(sessionTabId, item);
         setQueueCount(getQueue(sessionTabId).length);

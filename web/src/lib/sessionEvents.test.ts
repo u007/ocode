@@ -13,7 +13,7 @@ import type { BusEnvelope } from "./eventBus";
 import type { ChatAction, ChatState } from "../stores/chatStore";
 import { chatReducer, initialState } from "../stores/chatStore";
 import { clearDraft, getDraft, setDraft } from "./tabDrafts";
-import { clearQueue, getQueue, pushQueued } from "./tabQueue";
+import { clearQueue, getQueue, pushQueued, QUEUE_CHANGED_EVENT } from "./tabQueue";
 import { browserStore } from "./browserStore";
 
 const mockGetSessionState = vi.fn();
@@ -102,6 +102,40 @@ describe("routeBusEnvelope", () => {
     routeBusEnvelope(env("user_message", { data: { content: "x" } }), router);
     routeBusEnvelope(env("user_message", { data: { content: "x" } }), router);
     expect(getState().sessions["s1"].messages).toHaveLength(2);
+  });
+
+  // Mid-turn injection pickup: a message typed while streaming is injected
+  // into the live loop AND kept in tabQueue flagged `dispatched` (up-arrow
+  // recall + drain backstop). The server's user_message echo for an injected
+  // message confirms the agent spliced it in — the queue entry must be
+  // dropped at that moment (web mirror of the TUI's removeQueuedInputByText),
+  // or the "N queued" line lingers until the turn-end drain silently
+  // discards it. Only a DISPATCHED entry matching the content is dropped; the
+  // echo for a turn's own opening message finds no queue entry (no-op), and
+  // pending (undispatched) entries are never touched.
+  it("drops the dispatched queue entry when the injected message's pickup echo arrives", () => {
+    const { router } = makeRouter(["s1"]);
+    const seen: { tabId: string }[] = [];
+    const onQueueChanged = (e: Event) => seen.push((e as CustomEvent<{ tabId: string }>).detail);
+    window.addEventListener(QUEUE_CHANGED_EVENT, onQueueChanged);
+    try {
+      pushQueued("s1", { kind: "message", text: "injected", dispatched: true });
+      pushQueued("s1", { kind: "message", text: "still pending" });
+      routeBusEnvelope(env("user_message", { data: { content: "injected", user_seq: 7 } }), router);
+      // The dispatched entry is gone; the pending one survives for the drain.
+      expect(getQueue("s1")).toEqual([{ kind: "message", text: "still pending" }]);
+      expect(seen).toEqual([{ tabId: "s1" }]);
+    } finally {
+      window.removeEventListener(QUEUE_CHANGED_EVENT, onQueueChanged);
+    }
+    clearQueue("s1");
+  });
+
+  it("a turn-opening user_message echo is a no-op for the queue", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("user_message", { data: { content: "hi", user_seq: 1 } }), router);
+    expect(getQueue("s1")).toEqual([]);
+    expect(getState().sessions["s1"].messages).toHaveLength(1);
   });
 
   // Guards the fix for the desktop-app CPU spike: a reasoning stream can

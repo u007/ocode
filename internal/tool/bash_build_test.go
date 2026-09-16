@@ -219,5 +219,68 @@ func (s *stubSandboxWrapper) Available() bool {
 	return s.available
 }
 
+// TestBashInvocationLoginShellOverride pins the desktop login-shell wiring:
+// SetLoginShell swaps `bash -c` for `<shell> -l -c`, and the empty-string
+// reset restores the default shape.
+func TestBashInvocationLoginShellOverride(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix login-shell shape only")
+	}
+	t.Cleanup(func() { SetLoginShell("") })
+
+	SetLoginShell("/bin/zsh")
+	shell, args := bashInvocation("echo hi")
+	if shell != "/bin/zsh" || len(args) != 3 || args[0] != "-l" || args[1] != "-c" || args[2] != "echo hi" {
+		t.Fatalf("with override: shell=%q args=%v, want [/bin/zsh -l -c echo hi]", shell, args)
+	}
+
+	// The override must flow through the unified builder into cmd.Args, so
+	// both the foreground (exec.go) and background (process.go) paths inherit it.
+	cmd, err := buildBashCmd(nil, "echo hi", "", nil, sandbox.RootSet{}, false)
+	if err != nil {
+		t.Fatalf("build error: %v", err)
+	}
+	if cmd.Path != "/bin/zsh" || len(cmd.Args) != 4 || cmd.Args[1] != "-l" || cmd.Args[2] != "-c" || cmd.Args[3] != "echo hi" {
+		t.Fatalf("buildBashCmd Args = %v, want [/bin/zsh -l -c echo hi]", cmd.Args)
+	}
+
+	SetLoginShell("")
+	shell, args = bashInvocation("echo hi")
+	if shell != "bash" || len(args) != 2 || args[0] != "-c" || args[1] != "echo hi" {
+		t.Fatalf("after reset: shell=%q args=%v, want [bash -c echo hi]", shell, args)
+	}
+}
+
+// TestLoginShellRunsProfileCommands is the end-to-end behavioral check for the
+// desktop symptom: with the override set, an agent-emitted export survives the
+// login-shell invocation (profile files are sourced before the command runs).
+func TestLoginShellRunsProfileCommands(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix login-shell behavior only")
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/bash"
+	}
+	switch filepath.Base(shell) {
+	case "zsh", "bash", "sh":
+	default:
+		t.Skipf("SHELL %q is not zsh/bash/sh", shell)
+	}
+	t.Cleanup(func() { SetLoginShell("") })
+
+	SetLoginShell(shell)
+	bt := BashTool{}
+	res, err := bt.ExecuteStreamCtx(context.Background(), jsonRaw(`{"command":"export OCODE_LOGIN_SHELL_TEST=1; echo ok"}`), nil)
+	if err != nil {
+		t.Fatalf("login-shell execution failed: %v", err)
+	}
+	if !strings.Contains(res, "ok") {
+		t.Fatalf("output %q missing expected ok", res)
+	}
+}
+
 // jsonRaw builds tool arguments inline.
-func jsonRaw(s string) json.RawMessage { return json.RawMessage(s) }
+func jsonRaw(s string) json.RawMessage {
+	return json.RawMessage(s)
+}

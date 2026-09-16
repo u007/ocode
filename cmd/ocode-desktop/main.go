@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -31,6 +32,7 @@ import (
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/remote"
 	"github.com/u007/ocode/internal/skill"
+	"github.com/u007/ocode/internal/tool"
 	"github.com/u007/ocode/web"
 	// Register provider plugins in the desktop binary as well as the CLI. Without
 	// these side-effect imports, OAuth-backed OpenAI requests fall through to the
@@ -56,6 +58,46 @@ func showQuittingIndicator(win *application.WebviewWindow) {
 	// The overlay runs async (InvokeAsync inside ExecJS) so it paints even
 	// when the main thread is about to block in OnShutdown.
 	win.ExecJS(`(function(){if(window.__ocodeQuittingOverlay)return;var d=document.createElement('div');d.id='ocode-quitting';d.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:#0a0a0aff;color:#e8e8e8;font-family:system-ui,sans-serif;z-index:2147483646;display:flex;align-items:center;justify-content:center;flex-direction:column;font-size:20px;letter-spacing:0.5px;pointer-events:none;';d.innerHTML='<div style="font-size:28px;margin-bottom:12px;">ocode</div><div>Quitting — finishing active tasks</div><div style="margin-top:18px;font-size:13px;color:#999;">Please wait a moment</div>';document.body.appendChild(d);window.__ocodeQuittingOverlay=true;})();`)
+}
+
+// configureLoginShell points the agent bash tool at the user's login shell
+// (tool.SetLoginShell). A Finder/Dock-launched .app inherits launchd's minimal
+// PATH (/usr/bin:/bin:/usr/sbin:/sbin) and no $SHELL, so the default
+// non-login `bash -c` cannot find user toolchains initialized in profile
+// files — homebrew, nvm, go ("go: command not found"). Running agent commands
+// through `<login shell> -l -c` sources /etc/zprofile + ~/.zprofile (or the
+// bash equivalents) and restores the user's environment — the same treatment
+// the interactive terminal already gets via terminalShellCommand. TUI and
+// server modes launched from a real shell already have the full environment
+// and never call this.
+// See docs/superpowers/specs/2026-09-10-desktop-login-shell-env.md.
+func configureLoginShell() {
+	if runtime.GOOS == "windows" {
+		return // the bash tool runs `cmd /C`; no login-shell concept
+	}
+	candidates := []string{}
+	if shell := os.Getenv("SHELL"); shell != "" {
+		candidates = append(candidates, shell)
+	}
+	candidates = append(candidates, "/bin/zsh", "/bin/bash")
+	for _, shell := range candidates {
+		// Agent commands are POSIX/bash-syntax; a fish/tcsh/nu login shell
+		// would reject them (`export FOO=1` fails in fish), so only zsh/bash/sh
+		// are eligible. $SHELL pointing at something exotic falls through to
+		// the system zsh/bash below.
+		switch filepath.Base(shell) {
+		case "zsh", "bash", "sh":
+		default:
+			continue
+		}
+		if _, err := os.Stat(shell); err != nil {
+			continue
+		}
+		tool.SetLoginShell(shell)
+		log.Printf("ocode-desktop: agent bash tool runs via login shell %s -l -c", shell)
+		return
+	}
+	log.Printf("ocode-desktop: no zsh/bash/sh found; agent bash tool keeps default bash -c")
 }
 
 func main() {
@@ -86,6 +128,10 @@ func main() {
 		}
 	}
 	sessionID := sessionIDFromArgs(os.Args)
+
+	// Before any agent session can run a bash command: pin the login shell so
+	// Finder/Dock-launched processes still see the user's full PATH.
+	configureLoginShell()
 
 	// Only one desktop instance may run: it owns the in-process API server,
 	// the terminal ptys, and the per-window profile state, so a second copy

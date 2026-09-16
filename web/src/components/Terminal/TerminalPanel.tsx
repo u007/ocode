@@ -84,6 +84,26 @@ export function buildTerminalWsConnection(opts: {
 }
 
 /**
+ * Writes text to the system clipboard, falling back to the deprecated
+ * execCommand path when the async Clipboard API is unavailable or denied
+ * (older WebKit, permission refusal, non-secure context).
+ */
+export async function writeClipboardText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch { /* ignore */ }
+    ta.remove();
+  }
+}
+
+/**
  * A single interactive terminal: one xterm.js instance bridged to one
  * pty-backed shell over /api/terminal/ws. Each panel owns its own WebSocket;
  * the server keys the shell by `id`, so a socket drop (reload, remount) only
@@ -123,6 +143,14 @@ export default function TerminalPanel({
   const fitRef = useRef<FitAddon | null>(null);
   const serializeRef = useRef<SerializeAddon | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
+  // WebGL renderer addon for THIS panel. Every hidden terminal tab holds a
+  // live WebGL context otherwise — each context carries GPU-side buffers for
+  // its full scrollback, and browsers cap total live contexts (~16), so a
+  // handful of background tabs can exhaust the pool and silently kill
+  // rendering in unrelated canvases. Released while the tab is hidden
+  // (canvas fallback re-renders from the same buffer, so scrollback and
+  // output are unaffected), re-created on activation.
+  const webglRef = useRef<InstanceType<typeof WebglAddon> | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const dragCounterRef = useRef(0);
   // Drag-guard for links: suppress link activation if mouse moved between
@@ -233,19 +261,7 @@ export default function TerminalPanel({
     if (!term) return;
     const sel = term.getSelection();
     if (!sel) return;
-    try {
-      await navigator.clipboard.writeText(sel);
-    } catch {
-      // Fallback: use the async clipboard fallback via execCommand on a temp textarea
-      const ta = document.createElement("textarea");
-      ta.value = sel;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      try { document.execCommand("copy"); } catch { /* ignore */ }
-      ta.remove();
-    }
+    await writeClipboardText(sel);
     setCtxMenu(null);
   }, []);
 
@@ -280,6 +296,22 @@ export default function TerminalPanel({
       termRef.current?.focus();
     }
     setCtxMenu(null);
+  }, []);
+
+  // Copy-on-selection (TUI parity): the TUI copies a dragged transcript
+  // selection to the system clipboard on mouse release (model.go mouse-up
+  // handling calls clipboard.WriteAll). The desktop/web terminal only copied
+  // via right-click → Copy, which is why a selection made here never reached
+  // the system clipboard. copySelectionNow runs inside the container's
+  // mouseup handler so WebKit/WKWebView treats it as a user-gesture clipboard
+  // write; the debounced term.onSelectionChange fallback below covers
+  // selections whose release lands outside this container and
+  // keyboard/programmatic selections.
+  const copySelectionNow = useCallback(() => {
+    const sel = termRef.current?.getSelection() ?? "";
+    if (!sel) return false;
+    void writeClipboardText(sel);
+    return true;
   }, []);
 
   const handleSelectAll = useCallback(() => {
@@ -484,6 +516,66 @@ export default function TerminalPanel({
     });
   });
 
+  // ── Cmd/Ctrl+C copy & Cmd/Ctrl+V paste ────────────────────────────
+  // xterm 6 never handles copy/paste shortcuts in keydown. Copy relies on
+  // the DOM `copy` event firing over a *browser text selection* — but
+  // xterm's selection is canvas-rendered with no DOM Selection, so browsers
+  // are not obliged to fire it (WKWebView in the desktop shell doesn't).
+  // And xterm's keyboard layer converts Ctrl+V to a literal 0x16 byte sent
+  // to the pty on non-mac. So the clipboard shortcuts are intercepted
+  // explicitly:
+  //   - Cmd/Ctrl+C with a selection → copy (returning false from the key
+  //     handler also stops xterm from emitting \x03 for that keydown). No
+  //     selection → falls through so Ctrl+C still sends SIGINT.
+  //   - Cmd/Ctrl+V → blocked in keydown (no 0x16), pasted via the async
+  //     Clipboard API in pasteFromClipboard. The container `copy` listener
+  //     below is the extra fallback for native Edit-menu-driven copies.
+  const copyViaShortcut = useCallback(() => {
+    const sel = termRef.current?.getSelection() ?? "";
+    if (!sel) return false;
+    void writeClipboardText(sel);
+    return true;
+  }, []);
+
+  // Paste needs a Clipboard API read, which requires a user gesture and (in
+  // WebKit) can be denied; on denial the terminal is focused so the user's
+  // next native Cmd+V still works. term.paste() (not a raw socket write) so
+  // bracketed-paste mode is honored for multiline payloads; it flows through
+  // onData → the pty socket as usual.
+  const pasteFromClipboard = useCallback(async () => {
+    const term = termRef.current;
+    if (!term) return;
+    let text = "";
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      term.focus();
+      return;
+    }
+    if (text) term.paste(text);
+  }, []);
+
+  // Container-level `copy` listener — the desktop-shell fallback. In the
+  // Wails webview the native Edit-menu Copy role can consume Cmd+C before a
+  // keydown ever reaches the page; the webview then dispatches a DOM `copy`
+  // event instead. xterm listens for that on its own element, but only when
+  // it has an active selection; this parent-level listener covers the same
+  // event with the same data (skipping when xterm already handled it), so a
+  // selection is copied whichever path the OS event took.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onCopy = (e: ClipboardEvent) => {
+      if (e.defaultPrevented) return;
+      const sel = termRef.current?.getSelection() ?? "";
+      if (!sel) return;
+      e.preventDefault();
+      e.clipboardData?.setData("text/plain", sel);
+    };
+    el.addEventListener("copy", onCopy);
+    return () => el.removeEventListener("copy", onCopy);
+  }, []);
+
   // Keep host in this lifecycle's dependencies. HomeApp gates startup on a
   // successful project-metadata snapshot, while a deliberate host identity
   // change must still rebuild history and the socket with the new destination.
@@ -550,8 +642,12 @@ export default function TerminalPanel({
     // unavailable (e.g. headless, offscreen, or unsupported browser).
     try {
       const webgl = new WebglAddon();
-      webgl.onContextLoss(() => { webgl.dispose(); });
+      webgl.onContextLoss(() => {
+        webgl.dispose();
+        if (webglRef.current === webgl) webglRef.current = null;
+      });
       term.loadAddon(webgl);
+      webglRef.current = webgl;
     } catch { /* fall back to canvas renderer */ }
     termRef.current = term;
     registerTerminal(id, term);
@@ -570,10 +666,25 @@ export default function TerminalPanel({
       },
     } as const;
 
-    // Custom key handler: Shift+Enter disambiguation, Ctrl/Cmd+F for find,
+    // Custom key handler: Shift+Enter disambiguation, clipboard shortcuts
+    // (copyViaShortcut/pasteFromClipboard below), Ctrl/Cmd+F for find,
     // Esc to close find, F3/Ctrl+G to navigate matches.
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== "keydown") return true;
+      // Cmd/Ctrl+C: copy when there is a selection (blocking xterm so the
+      // keydown is never converted to \x03). With no selection fall through
+      // so Ctrl+C still sends SIGINT as usual.
+      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && ev.key.toLowerCase() === "c") {
+        if (copyViaShortcut()) return false;
+        return true;
+      }
+      // Cmd/Ctrl+V (and Ctrl+Shift+V): paste. Return false unconditionally so
+      // xterm's keydown never converts the key to a literal 0x16; the actual
+      // clipboard read runs in pasteFromClipboard (async Clipboard API).
+      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && ev.key.toLowerCase() === "v") {
+        void pasteFromClipboard();
+        return false;
+      }
       if (ev.key === "Enter" && ev.shiftKey) {
         const sock = socketRef.current;
         if (sock && sock.readyState === WebSocket.OPEN) sock.send("\x1b[13;2u");
@@ -614,6 +725,34 @@ export default function TerminalPanel({
       markAlerted(projectPath, id);
       playAlertSound();
     };
+    // ── Cmd/Ctrl+C copy & Cmd/Ctrl+V paste ────────────────────────────
+    // xterm 6 never handles copy/paste shortcuts in keydown. Copy relies on
+    // the DOM `copy` event firing over a *browser text selection* — but
+    // xterm's selection is canvas-rendered with no DOM Selection, so browsers
+    // are not obliged to fire it (WKWebView in the desktop shell doesn't).
+    // And xterm's keyboard layer converts Ctrl+V to a literal 0x16 byte sent
+    // to the pty on non-mac. So the clipboard shortcuts are intercepted
+    // explicitly:
+    //   - Cmd/Ctrl+C with a selection → copy (returning false from the key
+    //     handler also stops xterm from emitting \x03 for that keydown). No
+    //     selection → falls through so Ctrl+C still sends SIGINT.
+    //   - Cmd/Ctrl+V → blocked in keydown (no 0x16), pasted via the async
+    //     Clipboard API in pasteFromClipboard. The container `copy` listener
+    //     below is the extra fallback for native Edit-menu-driven copies.
+
+  // Copy-on-selection debounce: xterm fires onSelectionChange continuously
+    // during a drag, so each event restarts the timer and the copy fires once
+    // the selection has settled (i.e. at release). A cleared selection (plain
+    // click, typing, buffer switch) must never touch the clipboard.
+    let copyDebounceId: ReturnType<typeof setTimeout> | null = null;
+    const selectionDisp = term.onSelectionChange(() => {
+      if (copyDebounceId !== null) clearTimeout(copyDebounceId);
+      copyDebounceId = setTimeout(() => {
+        copyDebounceId = null;
+        copySelectionNow();
+      }, 150);
+    });
+
     const bellDisp = term.onBell(onAttention);
     // OSC 0/2 window title from the running program (claude code, the ocode
     // TUI, shells with a title-setting prompt) becomes the tab name unless
@@ -949,6 +1088,8 @@ export default function TerminalPanel({
       window.removeEventListener("pagehide", onPageHide);
       observer.disconnect();
       dataSub.dispose();
+      selectionDisp.dispose();
+      if (copyDebounceId !== null) clearTimeout(copyDebounceId);
       bellDisp.dispose();
       titleDisp.dispose();
       osc0TitleDisp.dispose();
@@ -979,6 +1120,10 @@ export default function TerminalPanel({
       // close kills it via DELETE /api/terminal/{id} in the terminal store.
       sock?.close();
       socketRef.current = null;
+      if (webglRef.current) {
+        try { webglRef.current.dispose(); } catch {}
+        webglRef.current = null;
+      }
       term.dispose();
       unregisterTerminal(id);
       termRef.current = null;
@@ -1016,6 +1161,40 @@ export default function TerminalPanel({
       fitAndResize.current();
       termRef.current?.focus();
     }
+  }, [active]);
+
+  // Release the WebGL renderer while the tab is hidden; restore it on
+  // activation. Rationale: each live WebGL context pins GPU-side buffers for
+  // its full scrollback, and browsers cap total live contexts (~16) — a
+  // handful of background terminals can exhaust the pool and silently kill
+  // rendering in unrelated canvases (the terminal titles keep updating
+  // server-side either way; only this panel's GPU renderer is affected).
+  // Disposal falls back to xterm's canvas/DOM renderer from the same buffer,
+  // so hidden tabs lose nothing visible, and titles keep flowing through the
+  // unchanged data handlers. Restoration re-runs the same try/loadAddon
+  // pattern the mount path uses; a context-loss or unsupported GPU keeps
+  // webglRef null and the canvas renderer stays.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    if (!active) {
+      const webgl = webglRef.current;
+      if (webgl) {
+        try { webgl.dispose(); } catch {}
+        webglRef.current = null;
+      }
+      return;
+    }
+    if (webglRef.current) return; // already active with a live renderer
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        webgl.dispose();
+        if (webglRef.current === webgl) webglRef.current = null;
+      });
+      term.loadAddon(webgl);
+      webglRef.current = webgl;
+    } catch { /* fall back to canvas renderer */ }
   }, [active]);
 
   // Allow the tab bar to focus this shell on single left-click, even when
@@ -1092,6 +1271,10 @@ export default function TerminalPanel({
       }}
       onMouseUp={() => {
         dragStartedRef.current = false;
+        // Copy-on-selection at release, inside the user-gesture handler (see
+        // copySelectionNow above for the TUI-parity rationale). No-op on a
+        // plain click without a selection, so the clipboard is never clobbered.
+        copySelectionNow();
       }}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}

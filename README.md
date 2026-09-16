@@ -23,7 +23,7 @@ JS-based coding agents routinely consume 500MB+ just to sit in a terminal. ocode
 Our custom **FastViewport** component renders 1000 message pairs in **0.73ms** — a 41× improvement over the standard bubbles viewport. While other agents stutter on long conversations, ocode stays buttery smooth.
 
 ### 🧠 Multi-provider, multi-model, zero lock-in
-OpenAI, Anthropic, Google Gemini, Zhipu Z.AI, Alibaba, GitHub Copilot, Novita AI, OpenRouter, OrcaRouter, AIHubMix — bring your own model or use the one best suited to the task. Switch mid-conversation with `/model`. Use a cheap model for compaction and a powerful one for code. No vendor lock-in, no gatekeeping.
+OpenAI, Anthropic, Google Gemini, Zhipu Z.AI, Alibaba, GitHub Copilot, Novita AI, Ollama Cloud, OpenRouter, OrcaRouter, AIHubMix — bring your own model or use the one best suited to the task. Switch mid-conversation with `/model`. Use a cheap model for compaction and a powerful one for code. No vendor lock-in, no gatekeeping.
 
 ### 🔒 Permissions you can trust
 First-class permission modes (`normal` / `yolo` / `locked`) with per-tool rules, bash-prefix granularity, scope confinement, and an optional **LLM auto-permission model** that makes smart allow/deny decisions so you stay in flow. The advisor module catches risky operations before they happen. No silent `rm -rf`.
@@ -72,7 +72,7 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 
 | Feature | Detail |
 |---------|--------|
-| **Multi-Provider LLM** | OpenAI, Anthropic (Claude thinking / extended thinking + prompt caching), Google Gemini, Z.AI (GLM), Alibaba (Qwen), GitHub Copilot, Novita AI, OpenRouter, OrcaRouter, AIHubMix, Zhipu, DeepSeek (opencode-go route), Minimax |
+| **Multi-Provider LLM** | OpenAI, Anthropic (Claude thinking / extended thinking + prompt caching), Google Gemini, Z.AI (GLM), Alibaba (Qwen), GitHub Copilot, Novita AI, Ollama Cloud, OpenRouter, OrcaRouter, AIHubMix, Zhipu, DeepSeek (opencode-go route), Minimax |
 | **Live Model Resolution** | OpenRouter and Novita AI models are resolved from each provider's live API at startup (30s TTL cache, graceful fallback to the static registry) so context sizes, pricing, and vision support are accurate for models absent from or renamed in models.dev (e.g. `openrouter/tencent/hy3:free`) |
 | **Model Display Names** | `agent.ModelDisplayName` surfaces models.dev `name`; TUI picker shows `id — Name`, web `/api/models` exposes `display_name` |
 | **Reasoning Effort** | Toggle thinking budget on Claude models via `Alt+T` (off/low/med/high/xhigh/max) or `/effort`; per-turn effort via `ocode run --effort` |
@@ -95,7 +95,8 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 | `undo_file_change` | Roll back any `write`/`edit`/`multiedit`/`multi_file_edit`/`replace_lines`/`delete` by `tool_call_id` (10-step window; refuses if a newer same-file write would conflict). Backed by `internal/snapshot`. |
 | `bash` | Shell execution with background support, circular output buffer (256KB), `Ctrl+B` foreground→background, **live streaming** of combined stdout/stderr into the transcript |
 | `bash_output`, `kill_shell`, `list_processes` | Inspect / kill / list background shells |
-| `grep`, `glob`, `list`, `repo_overview`, `repo_clone` | Search (ripgrep-backed), file glob, directory listing, repository analysis & cloning |
+| `grep`, `glob`, `list`, `repo_overview`, `repo_clone` | Search, file glob, directory listing, repository analysis & cloning |
+| `rgrep` | Ripgrep-backed search (registered when `rg` is on PATH): honors .gitignore/.ignore at every depth even outside git repos, searches hidden files, hard-excludes .git/node_modules |
 | `lsp`, `lsp_diagnostics`, `ast`, `ast_grep`, `format` | Go-to-definition / hover / symbol search / diagnostics; semantic `ast` (auto-enabled when any LSP server is on PATH); structural `ast_grep` (opt-in `plugins.ast`); formatter dispatch |
 | `agent` / `task` | Delegate work to sub-agents with permission isolation, DAG deps, and contract verification |
 | `websearch`, `webfetch` | Web search and page fetching via DuckDuckGo |

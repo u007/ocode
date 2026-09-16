@@ -319,6 +319,51 @@ export const initialState: ChatState = {
   tuiStatusReady: false,
 };
 
+/**
+ * MAX_SLICE_MESSAGES caps the in-memory `messages` window per open tab.
+ * Long-lived tabs grow unbounded today: every turn's full-transcript
+ * broadcast, every streamed delta append, and every paginated prepend land
+ * in the same array, so a session left open for days accumulates the entire
+ * transcript (megabytes of tool output per message) in the reducer state —
+ * the same desktop-memory pressure the Go side's bounded reads address.
+ *
+ * The window stays a contiguous TAIL of the server transcript, which is the
+ * invariant the rest of the app relies on:
+ *  - ChatPanel scroll-up fetches with `offset: currentCount` ("skip this
+ *    many from the end") — correct as long as `messages` is the transcript's
+ *    newest N.
+ *  - hasMore is derived from totalMessages, so trimming the head flips
+ *    hasMore naturally and the user can page the trimmed prefix back in.
+ *  - TRUNCATE_MESSAGES indices are relative to the loaded window; the cap
+ *    only ever drops from the head after a fresh append, never reorders.
+ *
+ * When the cap trims, totalMessages is unchanged (it tracks the server
+ * total), so pagination math stays exact. Exemptions: PREPEND_MESSAGES and
+ * TRUNCATE_MESSAGES are user-driven window operations that preserve
+ * contiguity themselves.
+ */
+export const MAX_SLICE_MESSAGES = 400;
+
+/**
+ * capMessages keeps the newest MAX_SLICE_MESSAGES of a messages window.
+ * Returns the input array unchanged when within the cap (no allocation).
+ * `total` is the authoritative server total (defaults to messages.length);
+ * hasMore must reflect "older messages exist server-side", so a trimmed
+ * window (or a window shorter than total) reports true.
+ */
+export function capMessages(
+  messages: Message[],
+  total = messages.length,
+): { messages: Message[]; hasMore: boolean } {
+  if (messages.length <= MAX_SLICE_MESSAGES) {
+    return { messages, hasMore: total > messages.length };
+  }
+  return {
+    messages: messages.slice(messages.length - MAX_SLICE_MESSAGES),
+    hasMore: true, // total >= messages.length > cap, so older always exist
+  };
+}
+
 function updateSession(
   state: ChatState,
   sessionId: string,
@@ -350,11 +395,13 @@ function findPendingToolIndex(live: LivePart[], callId?: string): number {
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
-    case "ADD_MESSAGE":
-      return updateSession(state, action.sessionId, (s) => ({
-        ...s,
-        messages: [...s.messages, action.message],
-      }));
+    case "ADD_MESSAGE": {
+      return updateSession(state, action.sessionId, (s) => {
+        const grown = [...s.messages, action.message];
+        const capped = capMessages(grown, s.totalMessages || grown.length);
+        return { ...s, messages: capped.messages, hasMore: capped.hasMore || s.hasMore };
+      });
+    }
     case "SET_MESSAGES":
       // Authoritative snapshot lands at a turn boundary — commit it and clear
       // the live buffer it supersedes. It also marks the slice initialized:
@@ -363,11 +410,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // waiting on a history fetch that is now redundant.
       return updateSession(state, action.sessionId, (s) => {
         const pending = extractPendingFromMessages(action.messages);
+        const capped = capMessages(action.messages);
         return {
           ...s,
-          messages: action.messages,
+          messages: capped.messages,
           live: [],
           initialized: true,
+          hasMore: capped.hasMore,
+          totalMessages: Math.max(s.totalMessages, action.messages.length),
           pendingPermission: pending.pendingPermission,
           permissionQueue: pending.permissionQueue,
           pendingQuestion: pending.pendingQuestion,
@@ -416,7 +466,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         } else {
           msgs.push({ role: "assistant", content: action.delta });
         }
-        return { ...s, messages: msgs };
+        const capped = capMessages(msgs, s.totalMessages || msgs.length);
+        return { ...s, messages: capped.messages, hasMore: capped.hasMore || s.hasMore };
       });
     case "LIVE_DELTA":
       return updateSession(state, action.sessionId, (s) => {
@@ -691,11 +742,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             pendingQuestion: s.pendingQuestion ?? pending.pendingQuestion,
           };
         }
+        const capped = capMessages(action.messages, action.total);
         return {
           ...s,
-          messages: action.messages,
+          messages: capped.messages,
           totalMessages: action.total,
-          hasMore: action.messages.length < action.total,
+          hasMore: capped.hasMore,
           live: s.turnActive ? s.live : [],
           initialized: true,
           pendingPermission: pending.pendingPermission,

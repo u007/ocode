@@ -118,6 +118,7 @@ export default function PortMapsWidget() {
                 value={remotePort}
                 onChange={(e) => setRemotePort(e.target.value)}
                 placeholder="3000"
+                autoFocus
               />
             </div>
             <div className="flex-1 space-y-1">

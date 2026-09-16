@@ -111,6 +111,14 @@ func (h *Handler) decodeFSRequest(r *http.Request) (fsActionRequest, bool, strin
 }
 
 func (h *Handler) HandleFSCopy(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		h.fsCopyRemote(w, r, host)
+		return
+	}
+	h.fsCopyLocal(w, r)
+}
+
+func (h *Handler) fsCopyLocal(w http.ResponseWriter, r *http.Request) {
 	req, decoded, dir, ok := h.decodeFSRequest(r)
 	if !ok {
 		if !decoded {
@@ -179,6 +187,14 @@ func (h *Handler) HandleFSCopy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleFSMove(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		h.fsMoveRemote(w, r, host)
+		return
+	}
+	h.fsMoveLocal(w, r)
+}
+
+func (h *Handler) fsMoveLocal(w http.ResponseWriter, r *http.Request) {
 	req, decoded, dir, ok := h.decodeFSRequest(r)
 	if !ok {
 		if !decoded {
@@ -246,6 +262,14 @@ func (h *Handler) HandleFSMove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleFSDelete(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		h.fsDeleteRemote(w, r, host)
+		return
+	}
+	h.fsDeleteLocal(w, r)
+}
+
+func (h *Handler) fsDeleteLocal(w http.ResponseWriter, r *http.Request) {
 	req, decoded, dir, ok := h.decodeFSRequest(r)
 	if !ok {
 		if !decoded {
@@ -291,6 +315,14 @@ func (h *Handler) HandleFSDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleFSRename(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		h.fsRenameRemote(w, r, host)
+		return
+	}
+	h.fsRenameLocal(w, r)
+}
+
+func (h *Handler) fsRenameLocal(w http.ResponseWriter, r *http.Request) {
 	req, decoded, dir, ok := h.decodeFSRequest(r)
 	if !ok {
 		if !decoded {
@@ -330,6 +362,14 @@ func (h *Handler) HandleFSRename(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleFSNewFile(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		h.fsNewFileRemote(w, r, host)
+		return
+	}
+	h.fsNewFileLocal(w, r)
+}
+
+func (h *Handler) fsNewFileLocal(w http.ResponseWriter, r *http.Request) {
 	req, decoded, dir, ok := h.decodeFSRequest(r)
 	if !ok {
 		if !decoded {
@@ -366,6 +406,14 @@ func (h *Handler) HandleFSNewFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleFSNewFolder(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		h.fsNewFolderRemote(w, r, host)
+		return
+	}
+	h.fsNewFolderLocal(w, r)
+}
+
+func (h *Handler) fsNewFolderLocal(w http.ResponseWriter, r *http.Request) {
 	req, decoded, dir, ok := h.decodeFSRequest(r)
 	if !ok {
 		if !decoded {
@@ -392,6 +440,14 @@ func (h *Handler) HandleFSNewFolder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleFSDuplicate(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		h.fsDuplicateRemote(w, r, host)
+		return
+	}
+	h.fsDuplicateLocal(w, r)
+}
+
+func (h *Handler) fsDuplicateLocal(w http.ResponseWriter, r *http.Request) {
 	req, decoded, dir, ok := h.decodeFSRequest(r)
 	if !ok {
 		if !decoded {

@@ -83,6 +83,46 @@ export function removeQueuedItem(tabId: string | null | undefined, item: QueuedI
   if (idx !== -1) list.splice(idx, 1);
 }
 
+/** Remove the first dispatched entry matching text. Called when the server's
+ *  `user_message` echo confirms the agent actually picked an injected message
+ *  up (web mirror of the TUI's removeQueuedInputByText). The entry existed
+ *  only for up-arrow recall while the message sat in the live loop; once the
+ *  agent has spliced it in, the queue must stop showing it (and the drain
+ *  backstop no longer has to discard it). Undispatched entries are never
+ *  matches — they have not been sent and must drain normally. Returns true
+ *  when an entry was removed. */
+export function removeDispatchedQueuedByText(
+  tabId: string | null | undefined,
+  text: string,
+): boolean {
+  if (!tabId) return false;
+  const list = queues.get(tabId);
+  if (!list) return false;
+  const idx = list.findIndex((item) => item.dispatched && item.kind === "message" && item.text === text);
+  if (idx === -1) return false;
+  list.splice(idx, 1);
+  return true;
+}
+
+/** Window event fired when a queue is mutated outside ChatInput (currently by
+ *  sessionEvents when an injected message's pickup echo arrives). ChatInput
+ *  listens and re-syncs its queueCount so the "N queued" line stays accurate
+ *  — same sibling-bridge pattern as inputRestore's RESTORE_EVENT. */
+export const QUEUE_CHANGED_EVENT = "ocode:queue-changed";
+
+export interface QueueChangedDetail {
+  tabId: string;
+}
+
+export function dispatchQueueChanged(tabId: string | null | undefined) {
+  if (!tabId) return;
+  window.dispatchEvent(
+    new CustomEvent<QueueChangedDetail>(QUEUE_CHANGED_EVENT, {
+      detail: { tabId },
+    }),
+  );
+}
+
 /** Pop the most recently queued item (LIFO) — used to recall it into the
  *  input box via the up-arrow restore. Mirrors the TUI's up-arrow queue
  *  restore, which restores the last queued item *regardless of kind* (command

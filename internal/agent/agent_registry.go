@@ -94,14 +94,14 @@ func (r *AgentRegistry) registerBuiltins() {
 		{
 			Name:        "debug",
 			Description: "Focused investigation with bash and read tools",
-			Tools:       []string{"read", "glob", "grep", "list", "lsp", "bash", "webfetch", "websearch", "skill", "load_skill"},
+			Tools:       []string{"read", "glob", "grep", "rgrep", "list", "lsp", "bash", "webfetch", "websearch", "skill", "load_skill"},
 			Mode:        AgentModePrimary,
 			Source:      "builtin",
 		},
 		{
 			Name:        "docs",
 			Description: "Documentation writing with file operations",
-			Tools:       []string{"read", "write", "edit", "glob", "grep", "list", "delete", "webfetch", "websearch", "skill", "load_skill"},
+			Tools:       []string{"read", "write", "edit", "glob", "grep", "rgrep", "list", "delete", "webfetch", "websearch", "skill", "load_skill"},
 			Mode:        AgentModePrimary,
 			Source:      "builtin",
 		},

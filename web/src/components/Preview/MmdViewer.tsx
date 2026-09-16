@@ -6,10 +6,12 @@ import MermaidViewer from "./MermaidViewer";
 export default function MmdViewer({
   path,
   projectRoot,
+  projectHost,
   onOpenFile,
 }: {
   path: string;
   projectRoot?: string;
+  projectHost?: string;
   onOpenFile: (path: string) => void;
 }) {
   const [code, setCode] = useState<string | null>(null);
@@ -20,7 +22,7 @@ export default function MmdViewer({
     setCode(null);
     setError(null);
     api
-      .fetchFileRaw(path, projectRoot)
+      .fetchFileRaw(path, projectRoot, projectHost)
       .then((buf) => {
         if (!cancelled) setCode(new TextDecoder().decode(buf));
       })
@@ -30,9 +32,9 @@ export default function MmdViewer({
     return () => {
       cancelled = true;
     };
-  }, [path, projectRoot]);
+  }, [path, projectRoot, projectHost]);
 
   if (error) return <div className="p-4 text-xs text-red-400">Diagram failed: {error}</div>;
   if (code === null) return <div className="p-4 text-xs text-muted-foreground">Loading diagram…</div>;
-  return <MermaidViewer path={path} code={code} projectRoot={projectRoot} onOpenFile={onOpenFile} />;
+  return <MermaidViewer path={path} code={code} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={onOpenFile} />;
 }

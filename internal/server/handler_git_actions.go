@@ -219,6 +219,22 @@ func nonInteractiveSSHCommand(command string) string {
 // HandleGitFetch updates all remote-tracking branches without changing the
 // current branch or working tree.
 func (h *Handler) HandleGitFetch(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, ok := h.remoteGitDirForMutation(w, r, host)
+		if !ok {
+			return
+		}
+		if err := remoteRunNetwork(r.Context(), rw, remoteGitCommand(rw.Path, "fetch", "--all", "--prune")); err != nil {
+			writeError(w, http.StatusInternalServerError, "git fetch failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		return
+	}
+	h.gitFetchLocal(w, r)
+}
+
+func (h *Handler) gitFetchLocal(w http.ResponseWriter, r *http.Request) {
 	dir, ok := h.gitDirForMutation(w, r)
 	if !ok {
 		return
@@ -232,6 +248,22 @@ func (h *Handler) HandleGitFetch(w http.ResponseWriter, r *http.Request) {
 
 // HandleGitPull merges the configured upstream into the current branch.
 func (h *Handler) HandleGitPull(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, ok := h.remoteGitDirForMutation(w, r, host)
+		if !ok {
+			return
+		}
+		if err := remoteRunNetwork(r.Context(), rw, remoteGitCommand(rw.Path, "pull")); err != nil {
+			writeError(w, http.StatusInternalServerError, "git pull failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		return
+	}
+	h.gitPullLocal(w, r)
+}
+
+func (h *Handler) gitPullLocal(w http.ResponseWriter, r *http.Request) {
 	dir, ok := h.gitDirForMutation(w, r)
 	if !ok {
 		return
@@ -247,6 +279,31 @@ func (h *Handler) HandleGitPull(w http.ResponseWriter, r *http.Request) {
 // --force-with-lease, which protects against overwriting remote commits that
 // were not present in the local remote-tracking ref.
 func (h *Handler) HandleGitPush(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, ok := h.remoteGitDirForMutation(w, r, host)
+		if !ok {
+			return
+		}
+		var req gitPushRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		args := []string{"push"}
+		if req.Force {
+			args = append(args, "--force-with-lease")
+		}
+		if err := remoteRunNetwork(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
+			writeError(w, http.StatusInternalServerError, "git push failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		return
+	}
+	h.gitPushLocal(w, r)
+}
+
+func (h *Handler) gitPushLocal(w http.ResponseWriter, r *http.Request) {
 	dir, ok := h.gitDirForMutation(w, r)
 	if !ok {
 		return
@@ -271,6 +328,31 @@ func (h *Handler) HandleGitPush(w http.ResponseWriter, r *http.Request) {
 // pull. It fetches remotes and hard-resets the current branch to its upstream;
 // it never runs as part of the ordinary pull action.
 func (h *Handler) HandleGitResetRemote(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, ok := h.remoteGitDirForMutation(w, r, host)
+		if !ok {
+			return
+		}
+		var req gitPushRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !req.Force {
+			writeError(w, http.StatusBadRequest, "reset to remote requires force confirmation")
+			return
+		}
+		if err := remoteRunNetwork(r.Context(), rw, remoteGitCommand(rw.Path, "fetch", "--all", "--prune")); err != nil {
+			writeError(w, http.StatusInternalServerError, "git fetch before reset failed: "+err.Error())
+			return
+		}
+		if err := remoteRunNetwork(r.Context(), rw, remoteGitCommand(rw.Path, "reset", "--hard", "@{upstream}")); err != nil {
+			writeError(w, http.StatusInternalServerError, "git reset to remote failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		return
+	}
+	h.gitResetRemoteLocal(w, r)
+}
+
+func (h *Handler) gitResetRemoteLocal(w http.ResponseWriter, r *http.Request) {
 	dir, ok := h.gitDirForMutation(w, r)
 	if !ok {
 		return
@@ -292,6 +374,27 @@ func (h *Handler) HandleGitResetRemote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleGitStage(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, specs, _, ok := h.remotePrepareGitAction(w, r, host)
+		if !ok {
+			return
+		}
+		if len(specs) == 0 {
+			writeError(w, http.StatusBadRequest, "no paths provided")
+			return
+		}
+		args := append([]string{"add", "--"}, specs...)
+		if _, err := remoteRun(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
+			writeError(w, http.StatusInternalServerError, "git add failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		return
+	}
+	h.gitStageLocal(w, r)
+}
+
+func (h *Handler) gitStageLocal(w http.ResponseWriter, r *http.Request) {
 	dir, specs, _, ok := h.prepareGitAction(w, r)
 	if !ok {
 		return
@@ -309,6 +412,27 @@ func (h *Handler) HandleGitStage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleGitUnstage(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, specs, _, ok := h.remotePrepareGitAction(w, r, host)
+		if !ok {
+			return
+		}
+		if len(specs) == 0 {
+			writeError(w, http.StatusBadRequest, "no paths provided")
+			return
+		}
+		args := append([]string{"reset", "--"}, specs...)
+		if _, err := remoteRun(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
+			writeError(w, http.StatusInternalServerError, "git reset failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		return
+	}
+	h.gitUnstageLocal(w, r)
+}
+
+func (h *Handler) gitUnstageLocal(w http.ResponseWriter, r *http.Request) {
 	dir, specs, _, ok := h.prepareGitAction(w, r)
 	if !ok {
 		return
@@ -330,6 +454,29 @@ func (h *Handler) HandleGitUnstage(w http.ResponseWriter, r *http.Request) {
 // ignored by git here; removing them is a file-system delete, exposed
 // separately as the Delete action.
 func (h *Handler) HandleGitDiscard(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, specs, _, ok := h.remotePrepareGitAction(w, r, host)
+		if !ok {
+			return
+		}
+		if len(specs) == 0 {
+			writeError(w, http.StatusBadRequest, "no paths provided")
+			return
+		}
+		args := append([]string{"checkout", "HEAD", "--"}, specs...)
+		if _, err := remoteRun(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
+			if !strings.Contains(err.Error(), "pathspec") {
+				writeError(w, http.StatusInternalServerError, "git checkout failed: "+err.Error())
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		return
+	}
+	h.gitDiscardLocal(w, r)
+}
+
+func (h *Handler) gitDiscardLocal(w http.ResponseWriter, r *http.Request) {
 	dir, specs, _, ok := h.prepareGitAction(w, r)
 	if !ok {
 		return
@@ -351,6 +498,30 @@ func (h *Handler) HandleGitDiscard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleGitStash(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, specs, message, ok := h.remotePrepareGitAction(w, r, host)
+		if !ok {
+			return
+		}
+		args := []string{"stash", "push"}
+		if message != "" {
+			args = append(args, "-m", message)
+		}
+		if len(specs) > 0 {
+			args = append(args, "--")
+			args = append(args, specs...)
+		}
+		if _, err := remoteRun(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
+			writeError(w, http.StatusInternalServerError, "git stash failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		return
+	}
+	h.gitStashLocal(w, r)
+}
+
+func (h *Handler) gitStashLocal(w http.ResponseWriter, r *http.Request) {
 	dir, specs, message, ok := h.prepareGitAction(w, r)
 	if !ok {
 		return
@@ -371,6 +542,31 @@ func (h *Handler) HandleGitStash(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleGitCommit(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, specs, message, ok := h.remotePrepareGitAction(w, r, host)
+		if !ok {
+			return
+		}
+		if message == "" {
+			writeError(w, http.StatusBadRequest, "commit message is required")
+			return
+		}
+		args := []string{"commit", "-m", message}
+		if len(specs) > 0 {
+			args = append(args, "--")
+			args = append(args, specs...)
+		}
+		if _, err := remoteRun(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
+			writeError(w, http.StatusInternalServerError, "git commit failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		return
+	}
+	h.gitCommitLocal(w, r)
+}
+
+func (h *Handler) gitCommitLocal(w http.ResponseWriter, r *http.Request) {
 	dir, specs, message, ok := h.prepareGitAction(w, r)
 	if !ok {
 		return

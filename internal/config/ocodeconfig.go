@@ -955,6 +955,7 @@ func defaultPermissionConfig() PermissionConfig {
 			"read":            "allow",
 			"glob":            "allow",
 			"grep":            "allow",
+			"rgrep":           "allow",
 			"list":            "allow",
 			"lsp":             "allow",
 			"ast":             "allow",

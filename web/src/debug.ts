@@ -15,6 +15,23 @@ interface RuntimeStats {
   uptime: string;
 }
 
+interface FrontendStatsSample {
+  received_at: string;
+  window_id: string;
+  terminal_count: number;
+  terminal_lines: number;
+  session_count: number;
+  message_count: number;
+  message_bytes: number;
+  dom_node_count: number;
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
+}
+
 interface LogEntry {
   kind: string;
   message: string;
@@ -110,6 +127,46 @@ const ocodeDebug = {
     return stats;
   },
 
+  /**
+   * Memory debugging: Go runtime heap + the renderer's application-level
+   * attribution samples (POSTed every 30s by FrontendMemoryReporter when the
+   * desktop shell is up). Samples arrive oldest-first from the server ring;
+   * printed newest-first to read like a tail. The two views answer the
+   * recurring desktop-memory question together: is the Go process growing,
+   * and which renderer subsystem (terminals vs chat state vs DOM) is
+   * growing alongside it?
+   */
+  async memory(): Promise<{ go: RuntimeStats; frontend: FrontendStatsSample[] }> {
+    const [go, frontend] = await Promise.all([
+      debugFetch<RuntimeStats>('/api/debug/runtime'),
+      debugFetch<FrontendStatsSample[]>('/api/debug/frontend-stats').catch(() => [] as FrontendStatsSample[]),
+    ]);
+    console.log('=== Go runtime ===');
+    console.table([
+      { metric: 'heap_alloc', value: fmtBytes(go.heap_alloc_bytes) },
+      { metric: 'heap_sys', value: fmtBytes(go.heap_sys_bytes) },
+      { metric: 'sys', value: fmtBytes(go.sys_bytes) },
+      { metric: 'goroutines', value: go.num_goroutine },
+      { metric: 'gc_cycles', value: go.num_gc },
+      { metric: 'uptime', value: go.uptime },
+    ]);
+    if (frontend.length === 0) {
+      console.log('=== Frontend renderer === (no samples — desktop shell only, reporter pushes every 30s)');
+    } else {
+      console.log('=== Frontend renderer (newest first) ===');
+      console.table(
+        [...frontend].reverse().map((s) => ({
+          received: s.received_at,
+          window: s.window_id,
+          terminals: `${s.terminal_count} (${fmtBytes(s.terminal_lines * 2)} est. lines)`,
+          chat: `${s.session_count} sess / ${s.message_count} msgs / ${fmtBytes(s.message_bytes)}`,
+          dom_nodes: s.dom_node_count,
+        })),
+      );
+    }
+    return { go, frontend };
+  },
+
   async status(): Promise<TUIStatus> {
     const status = await debugFetch<TUIStatus>('/api/tui-status');
     console.log(status);
@@ -139,6 +196,7 @@ ocodeDebug — ocode agent system inspector
   ocodeDebug.agentRuns(sid?)    Agent run tree (all sessions if no sid)
   ocodeDebug.projects()         Saved project paths
   ocodeDebug.runtime()          Go runtime stats (heap, goroutines)
+  ocodeDebug.memory()           Memory view: Go heap + renderer attribution samples
   ocodeDebug.status()           Global TUI status snapshot
   ocodeDebug.lspStatus()        Running language servers
   ocodeDebug.logs(limit?)       Debug log entries (default 50, most recent first)

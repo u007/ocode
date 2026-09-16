@@ -5,7 +5,13 @@ import { authedFetch } from "@/api/client"
 type Profile = { name: string; displayName: string; overrideCount: number; credentialCount: number }
 type Cred = { provider: string; label: string; masked: string; kind: string }
 
-const PROVIDERS = ["openai","anthropic","google","opencode","openrouter","zai","deepseek","alibaba","minimax","moonshot","copilot","orcarouter","chutes","deepinfra","nvidia","alibaba-coding","zai-coding","requesty","grok","groq","novita-ai","lmstudio","cloudflare-workers","cloudflare-gateway","codex","opencode-go"] as const
+// NOTE: this list must stay in sync with auth.Providers (internal/auth/providers.go),
+// which the server serializes via GET /api/profiles/{name}/auth. It is currently
+// hardcoded and already omits aihubmix and runinfra, both of which the server
+// accepts (PUT /api/profiles/{name}/auth/{provider} validates via auth.FindProvider).
+// Adding a provider to auth.Providers does NOT make it selectable here — update
+// both. Deriving the options from the API would remove this drift.
+const PROVIDERS = ["openai","anthropic","google","opencode","openrouter","zai","deepseek","alibaba","minimax","moonshot","copilot","orcarouter","chutes","deepinfra","nvidia","alibaba-coding","zai-coding","requesty","grok","groq","novita-ai","ollama-cloud","lmstudio","cloudflare-workers","cloudflare-gateway","codex","opencode-go"] as const
 
 export default function ProfilesManager() {
   const [profiles, setProfiles] = useState<Profile[]>([])

@@ -25,7 +25,7 @@ export default function ConfirmCloseDialog({ path, open, error, onSave, onDiscar
           <Button variant="destructive" onClick={onDiscard}>
             Discard
           </Button>
-          <Button onClick={onSave}>Save</Button>
+          <Button onClick={onSave} data-dialog-default-action>Save</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

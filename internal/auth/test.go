@@ -35,6 +35,11 @@ func TestCredential(ctx context.Context, id string) error {
 		return probeBearer(ctx, "https://generativelanguage.googleapis.com/v1beta/openai/models", k)
 	case "groq":
 		return probeBearer(ctx, "https://api.groq.com/openai/v1/models", ResolveKey(id))
+	case "ollama-cloud":
+		// /v1/models is public on ollama.com and returns 200 for any (or no)
+		// credential, so probing it cannot detect a bad key. /api/usage is
+		// auth-gated: 401 without a valid key, 200 with one.
+		return probeBearer(ctx, "https://ollama.com/api/usage", ResolveKey(id))
 	case "runinfra":
 		return probeBearer(ctx, "https://api.runinfra.ai/v1/models", ResolveKey(id))
 	case "copilot":

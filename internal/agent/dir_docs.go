@@ -17,7 +17,7 @@ var dirDocNames = []string{"CLAUDE.md", "AGENTS.md", "OCODE.md"}
 // the patch text.
 var dirTouchingTools = map[string]string{
 	"read": "path", "write": "path", "edit": "path",
-	"multiedit": "file_path", "glob": "path", "list": "path", "grep": "path",
+	"multiedit": "file_path", "glob": "path", "list": "path", "grep": "path", "rgrep": "path",
 	"replace_lines": "path", "format": "path", "lsp": "path", "ast": "path",
 }
 

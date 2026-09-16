@@ -66,6 +66,32 @@ func TestBrowseConfigEndpointReusesRequestLoopbackHost(t *testing.T) {
 	}
 }
 
+// A `--remote` server must advertise remote_mode so the SPA's browser panel
+// forces the reverse-proxy pipeline (local mode) for every host instead of
+// chrome/CDP mode — the remote workspace has no Chrome and browsing must
+// egress from the remote host.
+func TestBrowseConfigEndpointRemoteModeFlag(t *testing.T) {
+	s := New("127.0.0.1:0", "", "secret-token", nil)
+	s.SetRemoteMode(true)
+	s.EnableBrowse("http://127.0.0.1:54321", browse.New("", nil))
+	r := httptest.NewRequest("GET", "/api/browse/config", nil)
+	r.Header.Set("Authorization", "Bearer secret-token")
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d body %q", w.Code, w.Body.String())
+	}
+	var body struct {
+		RemoteMode bool `json:"remote_mode"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.RemoteMode {
+		t.Fatal("remote_mode = false, want true for a --remote server")
+	}
+}
+
 // TestBrowseGrantEndpointRoundTrip proves the main server mints grants on the
 // browse server it was wired with: the returned grant must redeem (302 +
 // session cookie) on that browse server's handler.

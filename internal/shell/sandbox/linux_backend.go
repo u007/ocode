@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,18 +93,24 @@ func (w linuxWrapper) reexecConfiner(cmd *exec.Cmd, writableRoots []string) (*ex
 	if err != nil {
 		return nil, err
 	}
-	// The original cmd is bash -c <command>; the confiner receives the
-	// command string verbatim as argv[2] and re-execs /bin/bash -c with it
-	// (argv survives sizes that would overflow a single env var).
-	command := ""
-	if len(cmd.Args) > 2 {
-		command = cmd.Args[2]
+	// The original cmd is `<shell> -c <command>` (plain bash) or
+	// `<shell> -l -c <command>` (desktop login shell — SetLoginShell); the
+	// confiner receives the shell and command verbatim as argv[2..] and
+	// re-execs the same shape with it (argv survives sizes that would
+	// overflow a single env var).
+	if len(cmd.Args) < 3 {
+		return nil, fmt.Errorf("sandbox: unexpected command argv %q", cmd.Args)
+	}
+	// shellTail is the full original argv [<shell> [-l] -c <command>].
+	shellTail := cmd.Args
+	if cmd.Args[len(cmd.Args)-2] != "-c" {
+		return nil, fmt.Errorf("sandbox: unsupported command argv %q (expected <shell> [-l] -c <command>)", cmd.Args)
 	}
 	rootsJSON, _ := json.Marshal(writableRoots)
 	env := sandboxEnv(cmd.Env, rootsJSON, cmd.Dir)
 	return &exec.Cmd{
 		Path:        exe,
-		Args:        append([]string{exe, confinerSubcommand, command}, cmd.Args[3:]...),
+		Args:        append([]string{exe, confinerSubcommand}, shellTail...),
 		Env:         env,
 		Dir:         cmd.Dir,
 		Stdin:       cmd.Stdin,

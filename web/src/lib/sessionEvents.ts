@@ -4,7 +4,7 @@ import type { ProjectAction } from "../stores/projectStore";
 import type { Message, SSEPermissionEvent, TUIStatus } from "../api/types";
 import type { BusEnvelope } from "./eventBus";
 import { rekeyDraft } from "./tabDrafts";
-import { rekeyQueue } from "./tabQueue";
+import { rekeyQueue, removeDispatchedQueuedByText, dispatchQueueChanged } from "./tabQueue";
 import { browserActions, type NavEvent, type TitleEvent, type NewTabEvent, type StateKey } from "./browserStore";
 
 /**
@@ -428,6 +428,21 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
           });
         }
         r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
+        // Mid-turn injection pickup: a message typed while the turn was
+        // streaming is injected into the live loop AND kept in the client
+        // tabQueue flagged `dispatched` (up-arrow recall + double-send
+        // backstop). The TUI removes its queuedItems entry at the moment the
+        // agent splices the message in (streamEvent's "user" branch,
+        // removeQueuedInputByText); the server mirrors that pickup as a
+        // user_message echo for injected messages, so drop the matching
+        // dispatched entry here — otherwise the "N queued" line lingers until
+        // the turn-end drain silently discards it. The echo for a turn's
+        // own opening message has no queue entry (its submit removes it), so
+        // the remove is a no-op there. Hidden/background tabs re-sync their
+        // own count on activation.
+        if (removeDispatchedQueuedByText(sessionId, content)) {
+          dispatchQueueChanged(sessionId);
+        }
         return;
       }
       case "thinking":

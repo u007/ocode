@@ -222,6 +222,8 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_fail lang=%s model=%s error=client_creation_failed", ie.Language, modelLabel))
 		return false, "could not create LLM client", "", false
 	}
+	// Inherit the main conversation identity (opencode* request affinity).
+	client = a.bindOpenCodeSessionID(client)
 	pinDeterministicSampling(client)
 
 	minConfidence := 0.85

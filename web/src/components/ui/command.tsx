@@ -23,9 +23,28 @@ Command.displayName = CommandPrimitive.displayName;
 interface CommandDialogProps extends DialogProps {}
 
 const CommandDialog = ({ children, ...props }: CommandDialogProps) => {
+  // Initial focus lands on the cmdk search input (via the shared dialog
+  // open-focus policy: it is the dialog's first text-entry field). This
+  // matters for popups that render a tabbable non-input element before the
+  // input (e.g. the file picker's hidden-files toggle) — Radix's default
+  // "focus first tabbable" pass would otherwise land on that button.
+  const contentRef = React.useRef<HTMLDivElement>(null);
   return (
     <Dialog {...props}>
-      <DialogContent className="overflow-hidden p-0 shadow-lg">
+      <DialogContent
+        ref={contentRef}
+        className="overflow-hidden p-0 shadow-lg"
+        onOpenAutoFocus={(e) => {
+          // Runs after mount, so the input exists in the portal.
+          const input = contentRef.current?.querySelector<HTMLElement>("[cmdk-input]");
+          if (input) {
+            input.focus({ preventScroll: true });
+            e.preventDefault();
+          }
+          // No input (shouldn't happen for cmdk surfaces): fall through to
+          // the shared DialogContent open-focus policy / Radix default.
+        }}
+      >
         <Command className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground [&_[cmdk-group]:not([hidden])_~[cmdk-group]]:pt-0 [&_[cmdk-group]]:px-2 [&_[cmdk-input-wrapper]_svg]:h-5 [&_[cmdk-input-wrapper]_svg]:w-5 [&_[cmdk-input]]:h-12 [&_[cmdk-item]]:px-2 [&_[cmdk-item]]:py-3 [&_[cmdk-item]_svg]:h-5 [&_[cmdk-item]_svg]:w-5">
           {children}
         </Command>

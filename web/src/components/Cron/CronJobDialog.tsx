@@ -161,6 +161,7 @@ export default function CronJobDialog({ open, job, onOpenChange, onSave }: Props
           <label className="grid gap-2 text-sm">
             <span className="text-muted-foreground">Name</span>
             <Input
+              autoFocus
               value={state.name}
               onChange={(e) => setState((prev) => ({ ...prev, name: e.target.value }))}
               placeholder="Optional label"

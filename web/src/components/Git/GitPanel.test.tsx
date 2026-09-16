@@ -97,6 +97,7 @@ describe("GitPanel", () => {
       expect(mocks.gitHunk).toHaveBeenCalledWith(
         { path: "src/unstaged.ts", hunk_index: 1, action: "stage", staged: false },
         "/proj",
+        undefined,
       ),
     );
   });
@@ -111,6 +112,7 @@ describe("GitPanel", () => {
       expect(mocks.gitHunk).toHaveBeenCalledWith(
         { path: "src/staged.ts", hunk_index: 0, action: "unstage", staged: true },
         "/proj",
+        undefined,
       ),
     );
   });
@@ -124,6 +126,7 @@ describe("GitPanel", () => {
       expect(mocks.gitHunk).toHaveBeenCalledWith(
         { path: "src/untracked.txt", hunk_index: 0, action: "discard", staged: false },
         "/proj",
+        undefined,
       ),
     );
   });
@@ -140,7 +143,7 @@ describe("GitPanel", () => {
     });
     expect(commitButton).toBeEnabled();
     fireEvent.click(commitButton);
-    await waitFor(() => expect(mocks.gitCommit).toHaveBeenCalledWith("save changes", [], "/proj"));
+    await waitFor(() => expect(mocks.gitCommit).toHaveBeenCalledWith("save changes", [], "/proj", undefined));
   });
 
   it("stages an unstaged file via the right-click context menu", async () => {
@@ -152,7 +155,7 @@ describe("GitPanel", () => {
     // the portal menu.
     fireEvent.click(within(menu).getByRole("button", { name: "Stage file" }));
     await waitFor(() =>
-      expect(mocks.gitStage).toHaveBeenCalledWith(["src/unstaged.ts"], "/proj"),
+      expect(mocks.gitStage).toHaveBeenCalledWith(["src/unstaged.ts"], "/proj", undefined),
     );
   });
 
@@ -163,7 +166,7 @@ describe("GitPanel", () => {
 
     fireEvent.click(within(menu).getByRole("button", { name: "Unstage file" }));
     await waitFor(() =>
-      expect(mocks.gitUnstage).toHaveBeenCalledWith(["src/staged.ts"], "/proj"),
+      expect(mocks.gitUnstage).toHaveBeenCalledWith(["src/staged.ts"], "/proj", undefined),
     );
   });
 
@@ -180,6 +183,7 @@ describe("GitPanel", () => {
       expect(mocks.gitHunk).toHaveBeenCalledWith(
         { path: "src/untracked.txt", hunk_index: 0, action: "discard", staged: false },
         "/proj",
+        undefined,
       ),
     );
   });

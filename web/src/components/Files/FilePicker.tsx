@@ -30,6 +30,10 @@ interface Props {
   onClose: () => void;
   onOpenFile: (path: string, projectRoot?: string) => void;
   projectPath?: string;
+  /** Registered remote target for the project; routes the tree fetch to
+   *  the remote host (?host=). Without it a remote project's picker lists
+   *  the server-local tree instead. */
+  projectHost?: string;
 }
 
 function flattenFiles(nodes: FileNode[]): string[] {
@@ -44,7 +48,7 @@ function flattenFiles(nodes: FileNode[]): string[] {
   return out;
 }
 
-export default function FilePicker({ open, onClose, onOpenFile, projectPath }: Props) {
+export default function FilePicker({ open, onClose, onOpenFile, projectPath, projectHost }: Props) {
   const [files, setFiles] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [showHiddenFiles, setShowHiddenFiles] = useState(() => loadShowHiddenFiles());
@@ -62,7 +66,7 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath }: P
     // nested deep in the project are searchable, not just the shallow ones.
     // An explicit path anchors the request to the active project instead of
     // the server's own workDir (fixed at launch, e.g. home dir on desktop).
-    const query = `path=${encodeURIComponent(projectPath)}&depth=0&show_hidden=${showHiddenFiles ? "1" : "0"}`;
+    const query = `path=${encodeURIComponent(projectPath)}&depth=0&show_hidden=${showHiddenFiles ? "1" : "0"}${projectHost ? `&host=${encodeURIComponent(projectHost)}` : ""}`;
     fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders(), signal: controller.signal })
       .then((res) => res.json())
       .then((data: FileTreeResponse) => {
@@ -76,7 +80,7 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath }: P
         if ((err as Error).name !== "AbortError") console.error("Failed to load file tree:", err);
       });
     return () => controller.abort();
-  }, [open, projectPath, showHiddenFiles]);
+  }, [open, projectPath, projectHost, showHiddenFiles]);
 
   useEffect(() => {
     if (!open) setQuery("");

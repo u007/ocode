@@ -87,7 +87,7 @@ func TestInitBuiltinToolsReturnsAllTools(t *testing.T) {
 
 	// Verify no unexpected tools either.
 	for _, g := range got {
-		if g == "ast" || g == "ast_grep" {
+		if g == "ast" || g == "ast_grep" || g == "rgrep" {
 			continue // handled by TestBuiltinToolsIncludesConditionalNames
 		}
 		found := false
@@ -114,12 +114,18 @@ func TestBuiltinToolsIncludesConditionalNames(t *testing.T) {
 
 	hasAST := false
 	hasAstGrep := false
+	hasRgrep := false
+	rgrepCount := 0
 	for _, g := range got {
 		if g == "ast" {
 			hasAST = true
 		}
 		if g == "ast_grep" {
 			hasAstGrep = true
+		}
+		if g == "rgrep" {
+			hasRgrep = true
+			rgrepCount++
 		}
 	}
 
@@ -141,8 +147,16 @@ func TestBuiltinToolsIncludesConditionalNames(t *testing.T) {
 		t.Error("ast_grep should not be present when config is nil (plugins.ast disabled)")
 	}
 
+	// rgrep is included when the rg binary resolves, and at most once. The
+	// test environment may or may not have ripgrep on PATH, so only the
+	// duplicate invariant is asserted here.
+	if rgrepCount > 1 {
+		t.Errorf("rgrep appears %d times (should be 0 or 1)", rgrepCount)
+	}
+
 	// ast is included when lsp.AnyServerInstalled() is true.
 	_ = hasAST // environment-dependent; just check it didn't duplicate
+	_ = hasRgrep
 }
 
 func TestToolResultCacheDirWindowsFallbackUsesLocalAppData(t *testing.T) {
