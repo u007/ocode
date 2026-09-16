@@ -145,13 +145,15 @@ export default function PreviewHost({
             Legacy Office formats (.doc/.ppt) can't preview in the browser — open with the OS app instead.
           </div>
           {osOpenState && <div className="text-[11px] text-muted-foreground">{osOpenState}</div>}
-          <button
-            type="button"
-            onClick={() => openWithOS(unsupported.path)}
-            className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground hover:opacity-90"
-          >
-            Open in app
-          </button>
+          {!(doc?.projectHost ?? projectHost) && (
+            <button
+              type="button"
+              onClick={() => openWithOS(unsupported.path)}
+              className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground hover:opacity-90"
+            >
+              Open in app
+            </button>
+          )}
         </div>
       ) : doc ? (
         <div className="flex min-h-0 flex-1 flex-col">
@@ -160,9 +162,11 @@ export default function PreviewHost({
               {doc.path}
             </span>
             {osOpenState && <span className="shrink-0 text-muted-foreground">{osOpenState}</span>}
-            <button type="button" onClick={() => openWithOS()} className="shrink-0 rounded px-1.5 py-0.5 hover:bg-muted" title="Open with the OS default app (native PowerPoint/Keynote/Word playback)">
-              Open in app
-            </button>
+            {!(doc.projectHost ?? projectHost) && (
+              <button type="button" onClick={() => openWithOS()} className="shrink-0 rounded px-1.5 py-0.5 hover:bg-muted" title="Open with the OS default app (native PowerPoint/Keynote/Word playback)">
+                Open in app
+              </button>
+            )}
             <button
               type="button"
               onClick={() => navigator.clipboard?.writeText(doc.path)}

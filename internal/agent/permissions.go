@@ -1480,6 +1480,22 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful force): tool=bash command=%q", command))
 			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_force")}
 		}
+		// Destructive git subcommand families (git stash, git checkout,
+		// git reset, git clean, git restore, git switch — see
+		// harmfulBashPrefixes) must not ride the sandbox auto-allow either.
+		// The OS write-wall confines file writes to classified roots, but
+		// these commands mutate the repo (history rewrite, branch switch,
+		// stash create/drop, untracked removal) entirely within the
+		// allowed workdir — the write-wall is blind to them. Any harmful
+		// git form already routes to Ask in normal mode via
+		// IsHarmfulBashCommand; here we extend that contract to sandbox.
+		// Read-only stash inspection forms ("git stash list"/"show") are
+		// explicitly excluded from IsHarmfulBashCommand and so pass
+		// through to the auto-allow below, mirroring normal-mode behavior.
+		if pm.mode == PermissionModeSandbox && IsHarmfulBashCommand(command) {
+			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful git): tool=bash command=%q", command))
+			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_git")}
+		}
 		if sd := pm.sensitiveSandboxDecision(command, args); sd != nil {
 			return *sd
 		}

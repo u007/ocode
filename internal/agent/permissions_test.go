@@ -2571,6 +2571,89 @@ func TestDecideSandboxGitPush(t *testing.T) {
 	}
 }
 
+// TestDecideSandboxHarmfulGitRequiresAsk verifies that destructive git
+// subcommands (git stash, git checkout, git reset, git clean, git restore,
+// git switch) do NOT ride the sandbox auto-allow — they must always ASK,
+// even though the OS write-wall cannot constrain them (they mutate the
+// repo within the allowed workdir). Read-only git operations (git status,
+// git diff, git stash list/show) still auto-allow in sandbox.
+func TestDecideSandboxHarmfulGitRequiresAsk(t *testing.T) {
+	orig := sandboxSupported
+	sandboxSupported = func() bool { return true }
+	t.Cleanup(func() { sandboxSupported = orig })
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	pm.SetMode(PermissionModeSandbox)
+
+	// Read-only git still auto-allows in sandbox (write-wall can't
+	// constrain reads, and these are non-destructive by nature).
+	readOnlyCases := []string{
+		"git status",
+		"git status --short --branch",
+		"git diff HEAD~1",
+		"git log --oneline -10",
+		"git stash list",
+		"git stash list --format=%gd",
+		"git stash show",
+		"git stash show -p",
+		"git stash show stash@{1}",
+	}
+	for _, cmd := range readOnlyCases {
+		dec := pm.Decide("bash", json.RawMessage(`{"command":"`+cmd+`"}`))
+		if dec.Level != PermissionAllow {
+			t.Fatalf("sandbox read-only %q = %s, want Allow", cmd, dec.Level)
+		}
+	}
+
+	// Destructive git forms must ASK — they cannot auto-allow in sandbox.
+	harmfulCases := []string{
+		"git stash",               // bare stash defaults to push (mutating)
+		"git stash pop",           // restores + drops
+		"git stash apply",         // restores
+		"git stash drop",          // discards an entry
+		"git stash clear",         // discards all entries
+		"git stash branch feat",   // moves entries to a branch
+		"git stash store -m x",    // creates a stash entry
+		"git stash save wip",      // legacy create
+		"git checkout -- .",       // can discard working-tree changes
+		"git checkout main",       // switches branches
+		"git reset --hard HEAD",   // rewrites HEAD/index/working-tree
+		"git reset HEAD~1",        // rewrites HEAD
+		"git clean -fdx",          // removes untracked files
+		"git restore file.txt",    // can discard working-tree changes
+		"git switch main",         // can discard working-tree changes
+		"git stash pop stash@{0}", // explicit unstash
+	}
+	for _, cmd := range harmfulCases {
+		dec := pm.Decide("bash", json.RawMessage(`{"command":"`+cmd+`"}`))
+		if dec.Level != PermissionAsk {
+			t.Fatalf("sandbox harmful %q = %s, want Ask", cmd, dec.Level)
+		}
+	}
+
+	// Contrast: sandbox auto-allow still applies to plain git push/pull
+	// (network egress is open; write-wall cannot constrain remote
+	// mutations but they aren't locally destructive). Force-flagged
+	// push/pull remain Ask via the pre-existing harmful_force gate.
+	for _, cmd := range []string{"git push", "git push origin main", "git pull"} {
+		dec := pm.Decide("bash", json.RawMessage(`{"command":"`+cmd+`"}`))
+		if dec.Level != PermissionAllow {
+			t.Fatalf("sandbox %q = %s, want Allow (sandbox auto-allow)", cmd, dec.Level)
+		}
+	}
+	for _, cmd := range []string{"git push --force", "git push -f origin main", "git pull --force", "git pull -f"} {
+		dec := pm.Decide("bash", json.RawMessage(`{"command":"`+cmd+`"}`))
+		if dec.Level != PermissionAsk {
+			t.Fatalf("sandbox force %q = %s, want Ask (harmful force)", cmd, dec.Level)
+		}
+	}
+}
+
 // TestDecideSandboxEnvWriteAsks: writing a .env file is Ask in sandbox.
 func TestDecideSandboxEnvWriteAsks(t *testing.T) {
 	pm := NewPermissionManager()

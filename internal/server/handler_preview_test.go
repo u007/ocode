@@ -79,6 +79,68 @@ func TestHandleFileRawRejects(t *testing.T) {
 	}
 }
 
+func TestHandleFileRawRemote(t *testing.T) {
+	// Remote branch (?host=): same allowlist/cap/found contract as local,
+	// served from the remote host through the fake-ssh shim.
+	installFakeSSH(t)
+	remoteDir := t.TempDir()
+	payload := []byte("%PDF-1.4 fake remote")
+	if err := os.WriteFile(filepath.Join(remoteDir, "report.pdf"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(remoteDir, "app.exe"), []byte("MZ"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := newTestHandlerWithRemote(t, "ci.local", remoteDir)
+
+	get := func(query string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		h.HandleFileRaw(rec, httptest.NewRequest("GET", query, nil))
+		return rec
+	}
+
+	t.Run("serves remote bytes with content type", func(t *testing.T) {
+		rec := get("/api/files/raw?host=ci.local&project_root=" + url.QueryEscape(remoteDir) + "&path=" + url.QueryEscape("report.pdf"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/pdf" {
+			t.Errorf("content-type = %q, want application/pdf", ct)
+		}
+		if rec.Body.String() != string(payload) {
+			t.Error("body bytes mismatch")
+		}
+	})
+
+	t.Run("rejects non-previewable ext remotely", func(t *testing.T) {
+		rec := get("/api/files/raw?host=ci.local&project_root=" + url.QueryEscape(remoteDir) + "&path=" + url.QueryEscape("app.exe"))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("rejects traversal remotely", func(t *testing.T) {
+		rec := get("/api/files/raw?host=ci.local&project_root=" + url.QueryEscape(remoteDir) + "&path=" + url.QueryEscape("../../etc/passwd"))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("maps missing remote file to 404", func(t *testing.T) {
+		rec := get("/api/files/raw?host=ci.local&project_root=" + url.QueryEscape(remoteDir) + "&path=" + url.QueryEscape("missing.pdf"))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404 (body=%s)", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("unregistered host is 400, not a local read", func(t *testing.T) {
+		rec := get("/api/files/raw?host=nobody.local&project_root=" + url.QueryEscape(remoteDir) + "&path=" + url.QueryEscape("report.pdf"))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+		}
+	})
+}
+
 func TestHandleOpenFileRejectsBadMode(t *testing.T) {
 	dir := t.TempDir()
 	h := NewHandler()
