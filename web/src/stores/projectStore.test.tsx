@@ -487,3 +487,101 @@ describe("projectStore server-side tab persistence", () => {
     expect(result.current.state.activeTabByProject["/proj-a"]).toBe("new-1");
   });
 });
+
+describe("project session-list cache (snappy project switching)", () => {
+  const mkSession = (id: string, title: string) => ({
+    id,
+    title,
+    created_at: "",
+    updated_at: "",
+  });
+
+  it("a cache hit paints the list immediately and revalidates without a spinner", async () => {
+    projectApi.listProjectSessions.mockResolvedValueOnce([mkSession("s1", "One")]);
+    const { result } = setup();
+    await act(async () => {});
+
+    // First visit: a real fetch (cache miss).
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+    });
+    expect(result.current.state.projectSessions.map((s) => s.id)).toEqual(["s1"]);
+
+    // Park the revalidation so we can prove the cached list is already visible
+    // before the network reply lands.
+    let resolveRevalidation!: (v: unknown) => void;
+    projectApi.listProjectSessions.mockImplementationOnce(
+      () => new Promise((res) => { resolveRevalidation = res as (v: unknown) => void; }),
+    );
+
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+    });
+
+    // Painted from cache: list present, no loading state, revalidation in flight.
+    expect(result.current.state.projectSessions.map((s) => s.id)).toEqual(["s1"]);
+    expect(result.current.state.sessionsLoading).toBe(false);
+    expect(projectApi.listProjectSessions).toHaveBeenCalledTimes(2);
+
+    // The background reply refreshes the list in place.
+    await act(async () => {
+      resolveRevalidation([mkSession("s1", "One"), mkSession("s2", "Two")]);
+    });
+    expect(result.current.state.projectSessions.map((s) => s.id)).toEqual(["s1", "s2"]);
+  });
+
+  it("prefetchProjectSessions warms the cache so the click has no fetch on its path", async () => {
+    projectApi.listProjectSessions.mockResolvedValueOnce([mkSession("w1", "Warm")]);
+    const { result } = setup();
+    await act(async () => {});
+
+    // Hover-warm.
+    await act(async () => {
+      result.current.prefetchProjectSessions(testProjectA);
+    });
+    await act(async () => {});
+    expect(projectApi.listProjectSessions).toHaveBeenCalledWith("/proj-a", undefined);
+    expect(result.current.state.sessionsByProject["/proj-a"].sessions.map((s) => s.id)).toEqual(["w1"]);
+
+    // Click: paints from the warm cache without entering the loading state.
+    let resolveRevalidation!: (v: unknown) => void;
+    projectApi.listProjectSessions.mockImplementationOnce(
+      () => new Promise((res) => { resolveRevalidation = res as (v: unknown) => void; }),
+    );
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+    });
+    expect(result.current.state.sessionsLoading).toBe(false);
+    expect(result.current.state.projectSessions.map((s) => s.id)).toEqual(["w1"]);
+    await act(async () => {
+      resolveRevalidation([]);
+    });
+  });
+
+  it("keeps each host:path pair's session list in its own cache entry", async () => {
+    projectApi.listProjectSessions.mockImplementation(async (_path: string, host?: string) => [
+      mkSession(host ? "remote-1" : "local-1", host ? "Remote" : "Local"),
+    ]);
+    const { result } = setup();
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+    });
+    await act(async () => {
+      await result.current.selectProject(testRemoteProject);
+    });
+
+    // Remote listings never come from this server's local session directory;
+    // the handler returns [] for a remote host, so the cache must be keyed by
+    // (host, path) rather than path alone.
+    expect(projectApi.listProjectSessions).toHaveBeenCalledWith("/proj-a", undefined);
+    expect(projectApi.listProjectSessions).toHaveBeenCalledWith("/remote", "dev@example.com");
+    // Keys are `host::path`, so the remote entry can never shadow the local
+    // `/proj-a` entry (or a same-named local path).
+    expect(
+      result.current.state.sessionsByProject["dev@example.com::/remote"].sessions.map((s) => s.id),
+    ).toEqual(["remote-1"]);
+    expect(result.current.state.sessionsByProject["/proj-a"].sessions.map((s) => s.id)).toEqual(["local-1"]);
+  });
+});

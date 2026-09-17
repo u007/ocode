@@ -334,7 +334,7 @@ func TestFreeLocalPort(t *testing.T) {
 
 func TestTunnelArgsForwardsBrowsePortOnSameNumber(t *testing.T) {
 	got := tunnelArgs(5001, 4096, 39321, "user@host")
-	want := []string{"-N", "-L", "5001:127.0.0.1:4096", "-L", "39321:127.0.0.1:39321", "user@host"}
+	want := append(append([]string{"-N"}, keepaliveArgs...), "-L", "5001:127.0.0.1:4096", "-L", "39321:127.0.0.1:39321", "user@host")
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("tunnelArgs = %q, want %q", got, want)
 	}
@@ -342,8 +342,20 @@ func TestTunnelArgsForwardsBrowsePortOnSameNumber(t *testing.T) {
 
 func TestTunnelArgsSkipsBrowseForwardWhenUnset(t *testing.T) {
 	got := tunnelArgs(5001, 4096, 0, "user@host")
-	want := []string{"-N", "-L", "5001:127.0.0.1:4096", "user@host"}
+	want := append(append([]string{"-N"}, keepaliveArgs...), "-L", "5001:127.0.0.1:4096", "user@host")
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("tunnelArgs = %q, want %q", got, want)
+	}
+}
+
+// TestTunnelArgsHasKeepalive pins the fix for a desktop remote tunnel that
+// hangs forever on a silently-dead transport: without ServerAlive* the ssh -N
+// process never exits, so the proxied terminal never disconnects.
+func TestTunnelArgsHasKeepalive(t *testing.T) {
+	joined := strings.Join(tunnelArgs(5001, 4096, 0, "user@host"), " ")
+	for _, opt := range []string{"ServerAliveInterval=15", "ServerAliveCountMax=3", "ConnectTimeout=15"} {
+		if !strings.Contains(joined, opt) {
+			t.Fatalf("tunnel ssh missing %s: %q", opt, joined)
+		}
 	}
 }

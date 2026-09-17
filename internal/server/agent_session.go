@@ -57,6 +57,29 @@ func (h *Handler) advisorFlag() bool {
 	return h.advisorEnabled
 }
 
+// projectHostFor returns the saved remote host for projectRoot when it is
+// registered as a remote (SSH/WSL) project on THIS server, else "" for a local
+// project. A non-empty result drives the environment prompt's "Project host"
+// line: per-project remote projects execute their chat agent on the local
+// server (only terminal/files/git are forwarded over SSH — see
+// docs/architecture/terminal-detach-reattach.md), so without the line the
+// <env> block mixed a remote project root with the local machine's
+// config/session/skill/runtime paths with no hint they are different machines.
+//
+// h.projects.List() takes the store's own mutex, so this must be called with no
+// handler lock held (buildAgentSession already honors that).
+func (h *Handler) projectHostFor(projectRoot string) string {
+	if h.projects == nil || projectRoot == "" {
+		return ""
+	}
+	for _, p := range h.projects.List() {
+		if p.Host != "" && p.Path == projectRoot {
+			return p.Host
+		}
+	}
+	return ""
+}
+
 // buildAgentSession constructs a fresh agent session, emitting observable
 // bootstrap stage events (session_bootstrap: model → tools → mcp → ready) and
 // advancing the registry entry's bootstrap stage. **It must be called with no
@@ -144,6 +167,11 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		projectRoot = h.workDir
 	}
 	ag.SetWorkDir(projectRoot)
+	// Tell the environment prompt when this project is a remote (SSH/WSL)
+	// project: the agent still runs locally, so without this the <env> block
+	// presented the remote root next to the local machine's paths. Empty for
+	// local projects, keeping their prompt byte-identical.
+	ag.SetProjectHost(h.projectHostFor(projectRoot))
 	// Child (sub-agent) sessions persist next to their parent, in the same
 	// project's storage dir. The task tool calls this on every streamed
 	// sub-agent message and once at completion, so it must be the live

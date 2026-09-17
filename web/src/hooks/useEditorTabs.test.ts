@@ -41,6 +41,30 @@ describe("useEditorTabs", () => {
     expect(result.current.editorTabs).toHaveLength(1);
   });
 
+  it("opens preview-only files without fetching their contents", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("docs/report.pdf", "/proj");
+    });
+    expect(result.current.activeEditorTabId).toBe("editor-/proj::docs/report.pdf");
+    const tab = result.current.editorTabs[0];
+    expect(tab.path).toBe("docs/report.pdf");
+    expect(tab.projectRoot).toBe("/proj");
+    expect(tab.content).toBe("");
+    expect(tab.isBinary).toBe(true);
+    // The viewer reads /api/files/raw itself — no /api/files/content round-trip.
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("opens legacy .doc without fetching contents (OS-open pane)", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("docs/old.doc");
+    });
+    expect(result.current.editorTabs).toHaveLength(1);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("preserves the project root for loading and saving a file", async () => {
     const { result } = renderHook(() => useEditorTabs());
     await act(async () => {

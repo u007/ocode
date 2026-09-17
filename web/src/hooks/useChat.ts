@@ -1,7 +1,13 @@
 import { useCallback } from "react";
-import { useChatSelector, useChatDispatch, getSessionSlice } from "../stores/chatStore";
+import {
+  useChatSelector,
+  useChatDispatch,
+  useChatStateRef,
+  getSessionSlice,
+} from "../stores/chatStore";
 import { useProjectState, findProjectPathForTab } from "../stores/projectStore";
 import { api, ApiError } from "../api/client";
+import { getTrustedTerminalProject } from "../lib/trustedProject";
 import type { PermissionDecision, QuestionAnswerPayload } from "../api/types";
 import type { PermissionDecideResult } from "../components/Chat/PermissionDialog";
 
@@ -16,10 +22,65 @@ interface UseChatOptions {
 export function useChat(sessionId: string | null, options?: UseChatOptions) {
   const dispatch = useChatDispatch();
   const { state: projectState } = useProjectState();
-  const slice = useChatSelector((s) => getSessionSlice(s, sessionId));
+  // Narrow, field-level subscriptions. Subscribing to the whole session slice
+  // (`getSessionSlice(s, sessionId)`) used to re-render every consumer — HomeApp
+  // and each mounted ChatInput — on every streamed token: `updateSession`
+  // replaces the slice object on each LIVE_DELTA, which flushes every 90ms
+  // (see LIVE_DELTA_FLUSH_MS in lib/sessionEvents.ts). Only the fields this
+  // hook actually RETURNS should drive re-renders, so each gets its own
+  // selector with the store's default Object.is comparison. Per-turn fields
+  // that callbacks need (e.g. `model` for a draft tab's first send) are read
+  // imperatively through stateRef at call time instead.
+  const stateRef = useChatStateRef();
+  const wasInterrupted = useChatSelector(
+    (s) => getSessionSlice(s, sessionId).wasInterrupted,
+  );
+  const isStreaming = useChatSelector((s) => {
+    const slice = getSessionSlice(s, sessionId);
+    return slice.isStreaming || slice.turnActive;
+  });
+  const pendingPermission = useChatSelector(
+    (s) => getSessionSlice(s, sessionId).pendingPermission,
+  );
+  const pendingQuestion = useChatSelector(
+    (s) => getSessionSlice(s, sessionId).pendingQuestion,
+  );
   const projectPath = sessionId
     ? findProjectPathForTab(projectState, sessionId) ?? projectState.activeProject?.path
     : projectState.activeProject?.path;
+  // The SSH/WSL host for that path (undefined for a local project). A `!`
+  // command must run on the machine that owns the project — sending it to a
+  // remote host is what keeps the shell resolved there instead of the local
+  // one producing `fork/exec /bin/zsh: no such file or directory`.
+  // Resolved with the same single-match trust rule as the terminal: a path
+  // registered for both a local and a remote project is ambiguous, and
+  // picking whichever entry sorts first would run the command on the wrong
+  // machine, so an ambiguous path sends no host (the server runs it locally).
+  const trusted = projectPath ? getTrustedTerminalProject(projectState.projects, projectPath) : { known: false as const };
+  const projectHost = trusted.known ? trusted.host : undefined;
+
+  // Recover the pending ask when a send is refused because the session is
+  // already paused on one (HTTP 409 ErrPermissionPending). The live
+  // `permission`/`question` event may have been missed while the tab was
+  // backgrounded, and the sentinel may be absent from the persisted
+  // transcript, so the server's live session state is the only place the ask
+  // can be recovered from. Hydrating it opens the PermissionDialog (or the
+  // question prompt) so the user can approve/reject instead of being stuck
+  // with "resolve it before sending a new message".
+  const hydratePendingAsks = useCallback(async () => {
+    if (!sessionId || sessionId.startsWith("new-")) return;
+    try {
+      const state = await api.getSessionState(sessionId);
+      for (const permission of state.pending_asks?.permissions ?? []) {
+        dispatch({ type: "PERMISSION_REQUEST", sessionId, permission });
+      }
+      for (const question of state.pending_asks?.questions ?? []) {
+        dispatch({ type: "QUESTION_REQUEST", sessionId, question });
+      }
+    } catch (err) {
+      console.warn("failed to recover pending permission ask", err);
+    }
+  }, [sessionId, dispatch]);
 
   // Submit is fire-and-forget: the message is forwarded to the TUI's agent and
   // ALL rendering (the user echo, live thinking/text tokens, tool activity, and
@@ -53,10 +114,12 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       // A draft tab's locally-picked model (sidebar Model picker) rides along
       // with the first message; the server persists it as the new session's
       // model. Undefined when the tab never changed the model (server falls
-      // back to the global config default).
+      // back to the global config default). Read imperatively at send time so
+      // the model does not have to be a reactive render dependency.
+      const model = getSessionSlice(stateRef.current, sessionId).model;
       const submitPromise = isRealSession
         ? api.sendMessage(sessionId, content)
-        : api.chat(content, undefined, slice.model, sessionId, projectPath).then((res) => {
+        : api.chat(content, undefined, model, sessionId, projectPath).then((res) => {
             options?.onNewSession?.(res.sessionId);
             return res;
           });
@@ -75,12 +138,18 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       return submitPromise
         .then(() => true)
         .catch((err) => {
+          // 409 = the session is paused on a permission/question ask the
+          // server refused to step past. Recover the dialog from live state
+          // so the user can resolve it (see hydratePendingAsks).
+          if (err instanceof ApiError && err.status === 409) {
+            void hydratePendingAsks();
+          }
           dispatch({ type: "SET_ERROR", sessionId, error: err?.message || "send failed" });
           dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
           return false;
         });
     },
-    [sessionId, dispatch, projectPath, options?.onNewSession, slice.model],
+    [sessionId, dispatch, projectPath, options?.onNewSession, stateRef, hydratePendingAsks],
   );
 
   // Stop: optimistically clears local streaming state and queues, then asks
@@ -161,13 +230,15 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     [dispatch, sessionId],
   );
 
-  // Execute a shell command directly (for ! prefix commands)
+  // Execute a shell command directly (for ! prefix commands). A remote
+  // project's command runs on its host through the host's own login shell;
+  // `host` is omitted for local projects so the server keeps its local path.
   const executeShell = useCallback(
     async (
       command: string,
     ): Promise<{ output: string; exitCode: number; error: string }> => {
       try {
-        return await api.shellCommand(command, projectPath);
+        return await api.shellCommand(command, projectPath, projectHost);
       } catch (err) {
         return {
           output: "",
@@ -177,7 +248,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
         };
       }
     },
-    [projectPath],
+    [projectPath, projectHost],
   );
 
   return {
@@ -185,14 +256,14 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     executeShell,
     stop,
     resume,
-    wasInterrupted: slice.wasInterrupted,
+    wasInterrupted,
     resolvePermission,
     submitQuestionAnswers,
     // isStreaming derives from the per-session turn state (Part 05): set
     // optimistically on 202 (SET_STREAMING), confirmed by turn_started
     // (turnActive), cleared by turn_done/turn_error or a rejected submit.
-    isStreaming: slice.isStreaming || slice.turnActive,
-    pendingPermission: slice.pendingPermission,
-    pendingQuestion: slice.pendingQuestion,
+    isStreaming,
+    pendingPermission,
+    pendingQuestion,
   };
 }

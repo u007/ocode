@@ -16,6 +16,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/contextbudget"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/monaco"
@@ -34,10 +35,19 @@ type Handler struct {
 	mu            sync.Mutex
 	computerUseMu sync.Mutex
 	computerSup   *tool.ProcessSupervisor
-	agents        map[string]*agentSession
-	cfg           *config.Config
-	rc            *RCBridge          // set when proxying to a TUI session
-	scheduler     *scheduler.Service // when set, the `cron` tool is wired into agent sessions
+	// procSup is the server's process supervisor (the same one computerSup
+	// aliases), used for server-owned long-lived children that are not
+	// computer-use — today the per-project `ssh -N -L` port forwards
+	// (handler_portmaps.go). nil for a bare NewHandler().
+	procSup *tool.ProcessSupervisor
+	// portMaps owns one remote.ForwardManager per remote project for the
+	// project-scoped /api/portmaps panel. nil for a bare NewHandler(); wired
+	// by server.New from procSup.
+	portMaps  *portMapRegistry
+	agents    map[string]*agentSession
+	cfg       *config.Config
+	rc        *RCBridge          // set when proxying to a TUI session
+	scheduler *scheduler.Service // when set, the `cron` tool is wired into agent sessions
 	// sessions is the single authority for session ID → project root + agent
 	// lifecycle. Every session-scoped handler resolves through it, so sessions
 	// from any registered project load and run (no more cross-project 404s).
@@ -102,6 +112,13 @@ type Handler struct {
 	// saved remote-project identity. This closes the check-then-reserve race
 	// where an old terminal could be published after an edit commits.
 	remoteProjectMu sync.Mutex
+	// remoteShellCache memoizes per-host shell probes (canonical
+	// remote.Target.String() → remote.RemoteShellInfo) so the Settings UI and
+	// terminal-config reads do not ssh on every request. Guarded by its own
+	// mutex: probes run outside h.mu (an ssh round-trip must never hold the
+	// handler lock).
+	remoteShellCacheMu sync.Mutex
+	remoteShellCache   map[string]remoteShellCacheEntry
 	// terminalProcsWake is a one-slot wake signal for the
 	// terminal-processes emitter so a newly opened terminal pushes its
 	// memory footprint immediately instead of waiting for the next ticker
@@ -196,6 +213,12 @@ type Handler struct {
 	// lspManagerFor.
 	lspMu   sync.Mutex
 	lspMgrs map[string]*lsp.Manager
+
+	// mediaTokens holds in-memory capability tokens for the local audio/video
+	// streaming path (see media_tokens.go). A <video>/<audio> element can't
+	// send the Authorization header, so the SPA exchanges its bearer for a
+	// single-file, short-lived token it can put in the URL.
+	mediaTokens *mediaTokenStore
 }
 
 // SetTerminalAccessPolicy configures the security boundary for the terminal
@@ -357,6 +380,7 @@ func NewHandler() *Handler {
 		bus:               NewEventBus(),
 		terminalProcs:     newTerminalRegistry(),
 		terminalSessions:  newTerminalSessionTable(),
+		mediaTokens:       newMediaTokenStore(),
 		terminalProcsWake: make(chan struct{}, 1),
 		secretJobs:        secretjob.NewManager(),
 		saveLocks:         make(map[string]*sync.Mutex),
@@ -1439,6 +1463,10 @@ func (h *Handler) HandleExportSession(w http.ResponseWriter, r *http.Request, id
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	if len(s.Messages) == 0 {
+		writeError(w, http.StatusUnprocessableEntity, "session is empty")
+		return
+	}
 
 	var b strings.Builder
 	for _, msg := range s.Messages {
@@ -1461,7 +1489,7 @@ func (h *Handler) HandleExportClaudeSession(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if len(s.Messages) == 0 {
-		writeError(w, http.StatusUnprocessableEntity, "no messages to export")
+		writeError(w, http.StatusUnprocessableEntity, "session is empty")
 		return
 	}
 
@@ -1594,13 +1622,70 @@ func (h *Handler) HandleSessionContext(w http.ResponseWriter, r *http.Request, i
 		maxTokens = int(agent.ModelWindow(model))
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	// Full token-budget breakdown: the same Report the TUI renders locally, so
+	// the web/desktop `/context` shows identical sections and numbers. Only
+	// available when a live agent exists and is not mid-turn (see
+	// contextReportSource); otherwise the four summary fields above are all we
+	// can honestly report.
+	resp := map[string]any{
 		"session_id":       id,
 		"message_count":    len(s.Messages),
 		"estimated_tokens": totalChars / 4,
 		"max_tokens":       maxTokens,
 		"model":            model,
-	})
+	}
+	if ag, msgs, ok := h.contextReportSource(id); ok {
+		h.mu.Lock()
+		cfg := h.cfg
+		h.mu.Unlock()
+		rep := contextbudget.Build(contextbudget.Input{
+			Agent:    ag,
+			Messages: msgs,
+			WorkDir:  entry.ProjectRoot,
+			Config:   cfg,
+		})
+		resp["report"] = rep
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// contextReportSource returns the live agent and a copy of its transcript for
+// the /context breakdown, or ok=false when none is available.
+//
+// The read is deliberately conservative. The agent's tool maps are unsynchronised
+// (discovery attaches tools mid-turn with no lock), so reading them from this
+// HTTP goroutine while a turn runs can race the turn goroutine — and Go crashes
+// outright on a concurrent map iteration + write. We therefore only read:
+//   - a server-owned session while its per-session turn lock is free (TryLock,
+//     so a running turn is never blocked — /context is user-initiated and can
+//     simply fall back to the summary), and
+//   - a bridged TUI session while the TUI is not mid-turn (the TUI owns its
+//     agent; rc.GetMessages returns a safe copy).
+func (h *Handler) contextReportSource(id string) (ag *agent.Agent, msgs []agent.Message, ok bool) {
+	h.mu.Lock()
+	rc := h.rc
+	h.mu.Unlock()
+
+	if rc != nil && rc.SessionID == id {
+		if h.sessions.IsTurnActive(id) {
+			return nil, nil, false
+		}
+		a := rc.Agent()
+		if a == nil {
+			return nil, nil, false
+		}
+		return a, rc.GetMessages(), true
+	}
+
+	as := h.lookupAgentSession(id)
+	if as == nil || as.agent == nil {
+		return nil, nil, false
+	}
+	if !as.mu.TryLock() {
+		return nil, nil, false
+	}
+	defer as.mu.Unlock()
+	return as.agent, append([]agent.Message(nil), as.messages...), true
 }
 
 // HandleShellCommand executes a shell command and returns the output.
@@ -1611,10 +1696,18 @@ func (h *Handler) HandleSessionContext(w http.ResponseWriter, r *http.Request, i
 // Setpgid, exit-code extraction, error-string policy). The handler is
 // responsible for the HTTP-level concerns: input validation, response
 // shape, and the workDir defaulting chain (request → server workDir → ".").
+//
+// A request may name a `host` (an ocode Remote project). The command then runs
+// on that host instead of locally, through the host's own login shell — the
+// same rule the interactive terminal follows in HandleTerminalWS. Running it
+// locally would execute against the wrong filesystem, and using this machine's
+// shell resolution to do it is what produced
+// `fork/exec /bin/zsh: no such file or directory` on a Linux remote.
 func (h *Handler) HandleShellCommand(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Command string `json:"command"`
 		WorkDir string `json:"workDir,omitempty"`
+		Host    string `json:"host,omitempty"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -1622,6 +1715,11 @@ func (h *Handler) HandleShellCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Command == "" {
 		writeError(w, http.StatusBadRequest, "command is required")
+		return
+	}
+
+	if req.Host != "" {
+		h.handleRemoteShellCommand(w, r, req.Host, req.WorkDir, req.Command)
 		return
 	}
 
@@ -1636,6 +1734,29 @@ func (h *Handler) HandleShellCommand(w http.ResponseWriter, r *http.Request) {
 
 	res := shellpkg.Run(req.Command, workDir)
 
+	errMsg := ""
+	if res.Err != nil {
+		errMsg = res.Err.Error()
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"output":   res.Output,
+		"exitCode": res.ExitCode,
+		"error":    errMsg,
+	})
+}
+
+// handleRemoteShellCommand runs a `!` shell command on a registered remote
+// project. The host/path pair must resolve through remoteWorkFor, which is the
+// same admission check every other remote endpoint applies, so the request can
+// never name an unregistered ssh target. The shell itself is resolved on the
+// remote (remote.LoginShellScript), never from local config.
+func (h *Handler) handleRemoteShellCommand(w http.ResponseWriter, r *http.Request, host, path, command string) {
+	rw, err := h.remoteWorkFor(host, path)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	res := remoteShellRun(r.Context(), rw, command, shellpkg.DefaultTimeout)
 	errMsg := ""
 	if res.Err != nil {
 		errMsg = res.Err.Error()

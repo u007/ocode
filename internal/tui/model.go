@@ -32,14 +32,13 @@ import (
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/contextbudget"
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/hooks"
 	"github.com/u007/ocode/internal/ide"
-	"github.com/u007/ocode/internal/knowledge"
 	"github.com/u007/ocode/internal/lsp"
-	"github.com/u007/ocode/internal/memory"
 	"github.com/u007/ocode/internal/network"
 	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/ocr"
@@ -262,64 +261,8 @@ func resolveInitialIDEMode(cfg *config.Config) string {
 	return config.IDEModeOff
 }
 
-// columnPad returns spaces to pad label to width w for alignment.
-func columnPad(label string, w int) string {
-	pad := w - len(label)
-	if pad < 1 {
-		pad = 1
-	}
-	return strings.Repeat(" ", pad)
-}
-
-// groupMCPToolDefs separates tool definitions into per-server MCP groups and builtin.
-func groupMCPToolDefs(
-	defs []map[string]interface{},
-	mcpToolSet map[string]struct{},
-	serverNames []string,
-) (grouped map[string][]map[string]interface{}, builtin []map[string]interface{}) {
-	grouped = make(map[string][]map[string]interface{})
-	for _, def := range defs {
-		name, _ := def["name"].(string)
-		if _, isMCP := mcpToolSet[name]; !isMCP {
-			builtin = append(builtin, def)
-			continue
-		}
-		matched := false
-		for _, srv := range serverNames {
-			if strings.HasPrefix(name, srv+"_") {
-				grouped[srv] = append(grouped[srv], def)
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			builtin = append(builtin, def)
-		}
-	}
-	return
-}
-
-func latestRequestUsage(messages []message) (input, output, total int64) {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].raw == nil || messages[i].raw.Usage == nil {
-			continue
-		}
-		u := messages[i].raw.Usage
-		if u.PromptTokens != nil {
-			input = *u.PromptTokens
-		}
-		if u.CompletionTokens != nil {
-			output = *u.CompletionTokens
-		}
-		if u.TotalTokens != nil {
-			total = *u.TotalTokens
-		} else {
-			total = input + output
-		}
-		return
-	}
-	return 0, 0, 0
-}
+// currentContextEstimate is defined below; the /context token-budget helpers
+// moved to internal/contextbudget so the web/desktop report shares them.
 
 func (m *model) currentContextEstimate() (int64, string) {
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
@@ -3516,7 +3459,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.files, cmd = m.files.Update(msg, m.width, m.height)
 		return m, cmd
-	case gitStatusMsg, gitRefreshMsg, gitBranchRefreshMsg, loadMoreLogMsg, diffReadyMsg:
+	case gitStatusMsg, gitStatusTimeoutMsg, gitRefreshMsg, gitBranchRefreshMsg, loadMoreLogMsg, diffReadyMsg:
 		var cmd tea.Cmd
 		m.git, cmd = m.git.Update(msg, m.width, m.height)
 		return m, cmd
@@ -11204,6 +11147,10 @@ func (m *model) handleRedoCmd(args []string) {
 }
 
 func (m *model) handleExportCmd(args []string) {
+	if len(m.messages) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No messages available to export."})
+		return
+	}
 	filename := fmt.Sprintf("ocode_export_%d.md", time.Now().Unix())
 	var b strings.Builder
 	for _, msg := range m.messages {
@@ -13605,394 +13552,36 @@ func (m *model) handleContextCmd(args []string) {
 		return
 	}
 
-	discoveryOn := m.config != nil && m.config.Ocode.Discovery.Enabled && m.agent != nil
-
-	var b strings.Builder
-	b.WriteString("Context Budget\n")
-	b.WriteString(strings.Repeat("═", 38) + "\n")
-
-	// ── Base Prompt ──────────────────────────────
-	b.WriteString("\nBase Prompt\n")
-	baseTotal := 0
-	for _, msg := range m.agent.BasePromptMessages() {
-		if !strings.Contains(msg.Content, "[ocode:environment]") {
-			continue
-		}
-		tok := estimateTok(msg.Content)
-		baseTotal += tok
-		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Environment", formatTok(tok))
-		break
-	}
-
-	modePrompt := m.agent.Mode().SystemPrompt()
-	modeTok := estimateTok(modePrompt)
-	baseTotal += modeTok
-	modeLabel := fmt.Sprintf("Mode (%s)", m.agent.Mode().String())
-	fmt.Fprintf(&b, "  %s%s~%s tok\n", modeLabel, columnPad(modeLabel, 28), formatTok(modeTok))
-
-	// ── Provider/Model Prompt ──────────────────────
-	var providerModel string
-	var providerPrompt string
-	if m.agent != nil && m.agent.Client() != nil {
-		provider := m.agent.Client().GetProvider()
-		model := m.agent.Client().GetModel()
-		providerModel = fmt.Sprintf("%s/%s", provider, model)
-		// Use the agent's own accessor instead of reaching around via the
-		// unexported modelFamilyPrompt helper: same value, but the agent
-		// owns the "is a client configured?" check, so this stays correct
-		// when the client is nil.
-		providerPrompt = m.agent.ModelFamilyPrompt()
-	}
-	if providerPrompt != "" {
-		ppTok := estimateTok(providerPrompt)
-		baseTotal += ppTok
-		ppLabel := fmt.Sprintf("Provider prompt (%s)", providerModel)
-		fmt.Fprintf(&b, "  %s%s~%s tok\n", ppLabel, columnPad(ppLabel, 28), formatTok(ppTok))
-		b.WriteString("\n")
-		for _, line := range strings.Split(providerPrompt, "\n") {
-			b.WriteString("  │ ")
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
-	}
-
-	ambientFiles := []string{"AGENTS.md", "CLAUDE.md", ".cursorrules"}
-	rulesDir := filepath.Join(".opencode", "rules")
-	if entries, err := os.ReadDir(rulesDir); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() && filepath.Ext(e.Name()) == ".md" {
-				ambientFiles = append(ambientFiles, filepath.Join(rulesDir, e.Name()))
-			}
-		}
-	}
-	anyAmbient := false
-	for _, f := range ambientFiles {
-		content, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		anyAmbient = true
-		tok := estimateTok(string(content))
-		baseTotal += tok
-		label := filepath.Base(f)
-		fmt.Fprintf(&b, "  %-28s ~%s tok\n", label, formatTok(tok))
-	}
-	if !anyAmbient {
-		b.WriteString("  (no ambient files found)\n")
-	}
-
-	refCatalog := agent.BuildReferenceCatalog(enabledPluginMap(m.config))
-	if refCatalog != "" {
-		refTok := estimateTok(refCatalog)
-		baseTotal += refTok
-		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Reference catalog", formatTok(refTok))
-		b.WriteString("\n")
-		for _, line := range strings.Split(refCatalog, "\n") {
-			if line == "" {
-				b.WriteString("\n")
-				continue
-			}
-			b.WriteString("  │ ")
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
-	}
-
-	// ── Model-Specific Context ──────────────────────
-	var mcModel string
-	if m.agent.Client() != nil {
-		mcModel = m.agent.Client().GetModel()
-	}
-	// Prefer the agent's cached, workdir-anchored result so the inspector can
-	// never disagree with (or diverge in root from) the [ocode:model_context]
-	// message actually injected via BasePromptMessages.
-	if kind, path := m.agent.ModelContextInfo(); kind != "" {
-		mcTok := estimateTok(m.agent.ModelContextContent())
-		baseTotal += mcTok
-		source := "embedded:" + path
-		if kind == "file" {
-			source = "disk:" + path
-		}
-		fmt.Fprintf(&b, "  Model ctx  %-20s ~%s tok (%s)\n", mcModel, formatTok(mcTok), source)
-	}
-
-	plugs := plugins.LoadPlugins(nil)
-	for _, p := range plugs {
-		if p.Instructions == "" {
-			continue
-		}
-		tok := estimateTok(p.Instructions)
-		baseTotal += tok
-		fmt.Fprintf(&b, "  Plugin: %-20s ~%s tok\n", p.Name, formatTok(tok))
-	}
-	fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Base subtotal", formatTok(baseTotal))
-
-	// ── Knowledge Bundle (OKF) ──────────────────────
-	b.WriteString("\nKnowledge Bundle\n")
-	if m.agent != nil && m.agent.DocPromptEnabled() {
-		wd := m.workDir
-		if wd == "" {
-			wd, _ = os.Getwd()
-		}
-		if bundle, ok := knowledge.DetectBundle(wd); ok {
-			indexPath := filepath.Join(bundle.Root, "index.md")
-			if content, err := os.ReadFile(indexPath); err == nil {
-				tok := estimateTok(string(content))
-				baseTotal += tok
-				fmt.Fprintf(&b, "  Active\n")
-				fmt.Fprintf(&b, "  Source: %s\n", indexPath)
-				fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Index (docs/index.md)", formatTok(tok))
-			} else {
-				fmt.Fprintf(&b, "  Active (bundle detected, index unreadable: %v)\n", err)
-			}
-		} else {
-			b.WriteString("  Inactive (no OKF bundle at docs/ — run /docs init)\n")
-		}
-	} else {
-		b.WriteString("  Disabled (/docs off — run /docs on to enable)\n")
-	}
-
-	// ── Memory ────────────────────────────────
-	b.WriteString("\nMemory\n")
-	if m.agent != nil && m.agent.MemoryEnabled() {
-		snap, err := memory.Status(m.workDir)
-		if err == nil {
-			for _, ms := range []struct {
-				title string
-				s     memory.Scope
-			}{
-				{"Project memory", snap.Project},
-				{"User memory", snap.User},
-				{"Global history", snap.Global},
-			} {
-				status := "present"
-				if !ms.s.Present {
-					status = "not found"
-				}
-				fmt.Fprintf(&b, "  %-16s %s\n", ms.title, status)
-				fmt.Fprintf(&b, "    %s\n", ms.s.Path)
-			}
-		} else {
-			fmt.Fprintf(&b, "  Error: %v\n", err)
-		}
-	} else {
-		b.WriteString("  Disabled (/mem off — run /mem on to enable)\n")
-	}
-
-	// ── Tools ────────────────────────────────────
-	toolsSubtitle := "\nTools (injected every request)"
-	if discoveryOn {
-		toolsSubtitle = "\nTools (built-in always injected, MCP gated by discovery)"
-	}
-	b.WriteString(toolsSubtitle + "\n")
-	toolsTotal := 0
-	allDefs := m.agent.GetToolDefinitions()
-	mcpSet := make(map[string]struct{})
-	for _, name := range m.agent.MCPToolNames() {
-		mcpSet[name] = struct{}{}
-	}
-	var serverNames []string
-	if m.config != nil {
-		serverNames = make([]string, 0, len(m.config.MCP))
-		for name := range m.config.MCP {
-			serverNames = append(serverNames, name)
-		}
-	}
-	sort.Strings(serverNames)
-
-	grouped, builtinDefs := groupMCPToolDefs(allDefs, mcpSet, serverNames)
-	builtinTok := 0
-	for _, def := range builtinDefs {
-		raw, _ := json.Marshal(def)
-		builtinTok += estimateTok(string(raw))
-	}
-	toolsTotal += builtinTok
-	builtinLabel := fmt.Sprintf("Built-in (%d tools)", len(builtinDefs))
-	fmt.Fprintf(&b, "  %s%s~%s tok\n", builtinLabel, columnPad(builtinLabel, 28), formatTok(builtinTok))
-
-	if len(serverNames) == 0 {
-		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "MCP: (none)", "0")
-	}
-	for _, srv := range serverNames {
-		defs, ok := grouped[srv]
-		if !ok {
-			continue
-		}
-		srvTok := 0
-		for _, def := range defs {
-			raw, _ := json.Marshal(def)
-			srvTok += estimateTok(string(raw))
-		}
-		toolsTotal += srvTok
-		label := fmt.Sprintf("MCP: %s  %d tools", srv, len(defs))
-		fmt.Fprintf(&b, "  %s%s~%s tok\n", label, columnPad(label, 28), formatTok(srvTok))
-		for _, def := range defs {
-			fullName, _ := def["name"].(string)
-			shortName := strings.TrimPrefix(fullName, srv+"_")
-			raw, _ := json.Marshal(def)
-			tok := estimateTok(string(raw))
-			fmt.Fprintf(&b, "    %-24s ~%s tok\n", shortName, formatTok(tok))
-		}
-	}
-	fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Subtotal", formatTok(toolsTotal))
-
-	injectedTotal := baseTotal + toolsTotal
-	// Model-aware set: the pre-injected catalog uses BuildCatalogForModel, which
-	// gates Kaizen (per-model tuned) skills, so the token estimate must too.
-	catalogModel := ""
-	if m.agent != nil {
-		if c := m.agent.Client(); c != nil {
-			catalogModel = c.GetModel()
-		}
-	}
-	skills := skill.LoadSkillsForModel(m.workDir, catalogModel)
-	catalogTok := 0
-	if discoveryOn {
-		b.WriteString("\nSkill catalog (not pre-injected — discovery active)\n")
-	} else {
-		b.WriteString("\nSkill catalog (pre-injected)\n")
-	}
-	if len(skills) == 0 {
-		b.WriteString("  (none found)\n")
-	} else {
-		for _, s := range skills {
-			line := "- " + s.Name
-			if s.Description != "" {
-				line += ": " + s.Description
-			}
-			if s.WhenToUse != "" {
-				line += " When to use: " + s.WhenToUse
-			}
-			lineTok := estimateTok(line)
-			catalogTok += lineTok
-			fmt.Fprintf(&b, "  %-28s ~%s tok\n", s.Name, formatTok(lineTok))
-		}
-		if !discoveryOn {
-			injectedTotal += catalogTok
-		}
-	}
-
-	// Kaizen digest: per-model tuned directives force-injected into the base
-	// prompt (KaizenDigestBlock), UNCONDITIONALLY — unlike the catalog, it is not
-	// gated by discovery. "" for a non-matching model. Count its tokens toward the
-	// per-request total, which otherwise under-reports injected cost for a tuned model.
-	if digest := skill.KaizenDigestBlock(m.workDir, catalogModel); digest != "" {
-		digestTok := estimateTok(digest)
-		injectedTotal += digestTok
-		b.WriteString("\nModel directives (kaizen digest, force-injected)\n")
-		for _, s := range skill.KaizenSkillsForModel(m.workDir, catalogModel) {
-			if s.Digest == "" {
-				continue
-			}
-			label := fmt.Sprintf("%s → %s", s.Name, s.TunedFor)
-			fmt.Fprintf(&b, "  %s%s~%s tok\n", label, columnPad(label, 28), formatTok(estimateTok(s.Digest)))
-		}
-	}
-	fmt.Fprintf(&b, "\n  %-28s ~%s tok\n", "Injected per request", formatTok(injectedTotal))
-
-	// ── Skills ───────────────────────────────────
-	b.WriteString("\nSkills (full contents available on demand, not pre-injected)\n")
-	skills = skill.LoadSkillsForRoot(m.workDir)
-	if len(skills) == 0 {
-		b.WriteString("  (none found)\n")
-	} else {
-		shown := skills
-		extra := 0
-		if len(skills) > 5 {
-			shown = skills[:5]
-			extra = len(skills) - 5
-		}
-		skillTotal := 0
-		for _, s := range skills {
-			skillTotal += estimateTok(s.Content)
-		}
-		for _, s := range shown {
-			tok := estimateTok(s.Content)
-			fmt.Fprintf(&b, "  %-28s ~%s tok\n", s.Name, formatTok(tok))
-		}
-		if extra > 0 {
-			moreLabel := fmt.Sprintf("... +%d more (%d total)", extra, len(skills))
-			fmt.Fprintf(&b, "  %s%s~%s tok available\n", moreLabel, columnPad(moreLabel, 24), formatTok(skillTotal))
-		}
-	}
-
-	// ── Session Messages ─────────────────────────
-	b.WriteString("\nSession Messages\n")
-	modelName := m.currentModelName()
-
+	// The breakdown is built by internal/contextbudget so the web/desktop
+	// `/context` (GET /api/sessions/{id}/context) renders the exact same
+	// sections and numbers. The TUI contributes the two values the stateless
+	// builder cannot derive: its provider-reported context estimate and its live
+	// session telemetry (which also counts side-channel LLM calls).
+	agentMsgs, _ := m.buildAgentMessagesSnapshot()
 	ctxTokens, ctxSource := m.currentContextEstimate()
-	if ctxTokens > 0 {
-		if window, ok := modelContextWindow(modelName); ok {
-			pct := formatPercent(ctxTokens, window)
-			fmt.Fprintf(&b, "  Context    %s / %s (%s)  %s\n", strconv.FormatInt(ctxTokens, 10), strconv.FormatInt(window, 10), pct, ctxSource)
-		} else {
-			fmt.Fprintf(&b, "  Context    %s tok  %s\n", strconv.FormatInt(ctxTokens, 10), ctxSource)
+
+	in := contextbudget.Input{
+		Agent:         m.agent,
+		Messages:      agentMsgs,
+		WorkDir:       m.workDir,
+		Config:        m.config,
+		Model:         m.currentModelName(),
+		ContextTokens: ctxTokens,
+		ContextSource: ctxSource,
+	}
+	if m.sessionTelemetry.hasData() {
+		t := contextbudget.Telemetry{
+			InputTokens:  m.sessionTelemetry.inputTokens,
+			OutputTokens: m.sessionTelemetry.outputTokens,
+			TotalTokens:  m.sessionTelemetry.totalTokens,
+			CachedTokens: m.sessionTelemetry.cachedTokens,
+			Spend:        m.sessionTelemetry.spend,
 		}
-	} else {
-		b.WriteString("  Context    n/a\n")
+		in.Telemetry = &t
 	}
 
-	lastIn, lastOut, lastTotal := latestRequestUsage(m.messages)
-	if lastTotal > 0 {
-		fmt.Fprintf(&b, "  Last req   In %s  Out %s  Total %s\n", strconv.FormatInt(lastIn, 10), strconv.FormatInt(lastOut, 10), strconv.FormatInt(lastTotal, 10))
-	}
-
-	telemetry := m.sessionTelemetry
-	if !telemetry.hasData() {
-		telemetry = aggregateSidebarTelemetry(m.messages)
-	}
-	if telemetry.hasData() {
-		cacheRate := formatPercent(telemetry.cachedTokens, telemetry.inputTokens+telemetry.cachedTokens)
-		fmt.Fprintf(&b, "  Usage      In %s  Cache %s (%s)  Out %s\n", strconv.FormatInt(telemetry.inputTokens, 10), strconv.FormatInt(telemetry.cachedTokens, 10), cacheRate, strconv.FormatInt(telemetry.outputTokens, 10))
-		if telemetry.spend != nil {
-			fmt.Fprintf(&b, "             $%.4f\n", *telemetry.spend)
-		}
-	} else {
-		b.WriteString("  Usage      n/a\n")
-	}
-
-	// Discovery section: full corpus index, attached skills, MCP tools, and project docs.
-	if discoveryOn {
-		st := m.agent.DiscoveryStatus()
-		mcpAttached, mcpTotal, gatedToks, indexToks := m.agent.DiscoveryGatedTokens()
-		b.WriteString("\nDiscovery — [ocode:discovery] injected block\n")
-		fmt.Fprintf(&b, "  %-28s %s %s\n", "Backend/model", st.Backend, st.Model)
-		if !st.Active && st.InitErr != "" {
-			fmt.Fprintf(&b, "  %-28s fail-open: %s\n", "Status", st.InitErr)
-		}
-		fmt.Fprintf(&b, "\n  Corpus (names-index, stable — injected every turn)\n")
-		fmt.Fprintf(&b, "  %-28s %d\n", "Skills in index", len(st.AllSkills))
-		fmt.Fprintf(&b, "  %-28s %d\n", "MCP tools in index", len(st.AllMCP))
-		fmt.Fprintf(&b, "  %-28s %d\n", "Project docs in index", len(st.AllMD))
-		if st.MDPending > 0 {
-			fmt.Fprintf(&b, "  %-28s %d\n", "Docs pending summarization", st.MDPending)
-		}
-		fmt.Fprintf(&b, "\n  Attached to volatile tail (per-turn, grows with sticky set)\n")
-		fmt.Fprintf(&b, "  %-28s %d/%d\n", "Skills attached", len(st.AttachedSkills), st.SkillTotal)
-		if len(st.AttachedSkills) > 0 {
-			for _, name := range st.AttachedSkills {
-				fmt.Fprintf(&b, "    - %s\n", name)
-			}
-		}
-		fmt.Fprintf(&b, "  %-28s %d/%d\n", "MCP tools attached", mcpAttached, mcpTotal)
-		fmt.Fprintf(&b, "  %-28s %d/%d\n", "Project docs attached", len(st.AttachedMD), len(st.AllMD))
-		if len(st.AttachedMD) > 0 {
-			for _, name := range st.AttachedMD {
-				fmt.Fprintf(&b, "    - %s\n", name)
-			}
-		}
-		const queryEmbedToks = 64 // rough per-turn query embedding cost
-		net := gatedToks - indexToks - queryEmbedToks
-		if net < 0 {
-			net = 0
-		}
-		fmt.Fprintf(&b, "\n  Efficiency\n")
-		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (gross)", formatTok(gatedToks))
-		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (net)", formatTok(net))
-		fmt.Fprintf(&b, "  %-28s %d\n", "MCP tools not attached", mcpTotal-mcpAttached)
-	}
-
-	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+	report := contextbudget.Build(in)
+	m.messages = append(m.messages, message{role: roleAssistant, text: report.RenderText()})
 }
 
 // relPath returns a project-relative path if possible, otherwise the original path.

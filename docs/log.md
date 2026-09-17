@@ -21,6 +21,37 @@
 
 
 
+
+
+## 2026-09-17
+
+* **Creation**: Linux Sandbox Lockout: Confiner Shell Path, /dev/null, and Binary Dispatch ([gotchas/linux-sandbox-lockout-confiner-shell-devnull-dispatch.md](/gotchas/linux-sandbox-lockout-confiner-shell-devnull-dispatch.md))
+* **Update**: Pending ask recovery from live session state (sentinel-less transcript) ([gotchas/pending-ask-recovery-live-session-state.md](/gotchas/pending-ask-recovery-live-session-state.md))
+* **Update**: Pending ask recovery from live session state (sentinel-less transcript) ([gotchas/pending-ask-recovery-live-session-state.md](/gotchas/pending-ask-recovery-live-session-state.md))
+* **Update**: Terminal Shells Survive Page Reload (Detach / Reattach) ([architecture/terminal-detach-reattach.md](/architecture/terminal-detach-reattach.md))
+* **Creation**: Pending ask recovery from live session state (sentinel-less transcript) ([docs/gotchas/pending-ask-recovery-live-session-state.md](/docs/gotchas/pending-ask-recovery-live-session-state.md))
+* **Creation**: Sandbox Permission Mode ([concepts/sandbox-permission-mode.md](/concepts/sandbox-permission-mode.md))
+* **Update**: Sandbox git push — SSH agent inheritance and fail-closed TTY prompts ([gotchas/sandbox-git-push-ssh-agent-tty.md](/gotchas/sandbox-git-push-ssh-agent-tty.md))
+* **Creation**: Port forwards Disable/Enable: URL composed past query + supervisor retained-terminal collision ([gotchas/port-forwards-url-composition-and-supervisor-restart.md](/gotchas/port-forwards-url-composition-and-supervisor-restart.md))
+## 2026-09-16
+
+* **Creation**: PDF preview fails on WebKit with `undefined is not a function (near '...e of t...')` ([gotchas/pdf-preview-webkit-async-iterator.md](/gotchas/pdf-preview-webkit-async-iterator.md))
+* **Update**: Speech playback ([tts-speech-playback.md](/tts-speech-playback.md))
+* **Update**: Speech playback ([tts-speech-playback.md](/tts-speech-playback.md))
+* **Update**: Speech playback ([tts-speech-playback.md](/tts-speech-playback.md))
+* **Creation**: Speech Rendered Text Extraction — DOM, Not Markdown Source ([gotchas/speech-rendered-text-extraction.md](/gotchas/speech-rendered-text-extraction.md))
+* **Update**: TTS Speech Playback Design Specification ([superpowers/specs/2026-09-09-tts-speech-playback-design.md](/superpowers/specs/2026-09-09-tts-speech-playback-design.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Creation**: Remote-project port forwards in the web/desktop UI ([superpowers/specs/2026-09-16-remote-project-port-forwards-design.md](/superpowers/specs/2026-09-16-remote-project-port-forwards-design.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Update**: Multi-Use Preview — Design Spec (Draft, 2026-09-10) ([superpowers/specs/2026-09-10-preview-multipurpose-design.md](/superpowers/specs/2026-09-10-preview-multipurpose-design.md))
+* **Deprecation**: Files Tab Auto-Previews Binary/Office Formats (Preview-Only Routing): Misplaced by a path error: doc tools take bundle-relative paths (root is docs/), so this write landed at docs/docs/gotchas/... instead of docs/gotchas/.... Superseded by the correct doc at gotchas/files-tab-preview-only-routing.md; safe to remove via /docs cleanup. ([docs/gotchas/files-tab-preview-only-routing.md](/docs/gotchas/files-tab-preview-only-routing.md))
+* **Creation**: Files Tab Auto-Previews Binary/Office Formats (Preview-Only Routing) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Creation**: Files Tab Auto-Previews Binary/Office Formats (Preview-Only Routing) ([docs/gotchas/files-tab-preview-only-routing.md](/docs/gotchas/files-tab-preview-only-routing.md))
+* **Creation**: Git action errors "come out then disappear by themselves" — TUI truncation, sticky status, and background-refresh error clearing ([gotchas/git-action-errors-disappear.md](/gotchas/git-action-errors-disappear.md))
 ## 2026-09-14
 
 * **Creation**: TUI Leaves Mouse Tracking On After Silent Exit — Diagnose via tui-crash.log ([gotchas/tui-mouse-garbage-after-idle-crash-log.md](/gotchas/tui-mouse-garbage-after-idle-crash-log.md))

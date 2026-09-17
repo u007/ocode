@@ -87,6 +87,41 @@ func TestPrepareMessages_DoesNotDuplicateFragments(t *testing.T) {
 	}
 }
 
+// TestEnvironmentPrompt_RemoteProjectHost locks the remote-project fix: when a
+// session's project is a registered remote (SSH/WSL) project, the <env> block
+// must say so, because the agent still runs locally and the block otherwise
+// presents a remote project root next to this machine's config/session/skill
+// paths with no hint they belong to different machines. Local projects must
+// stay byte-identical (the line is omitted).
+func TestEnvironmentPrompt_RemoteProjectHost(t *testing.T) {
+	dir := t.TempDir()
+
+	local := &Agent{workDir: dir}
+	localPrompt := local.environmentPrompt()
+	if strings.Contains(localPrompt, "Project host:") {
+		t.Fatalf("local project prompt must not mention a project host:\n%s", localPrompt)
+	}
+
+	remote := &Agent{workDir: dir}
+	remote.SetProjectHost("james@example.test")
+	remotePrompt := remote.environmentPrompt()
+	if !strings.Contains(remotePrompt, "Project host: james@example.test") {
+		t.Fatalf("remote project host missing from <env>:\n%s", remotePrompt)
+	}
+	if !strings.Contains(remotePrompt, "<env>") || !strings.Contains(remotePrompt, "</env>") {
+		t.Fatalf("env block markers missing:\n%s", remotePrompt)
+	}
+
+	// Setting the host after a prompt was already built must invalidate the
+	// cached block, or a project switch would keep serving the stale prompt.
+	cached := &Agent{workDir: dir}
+	_ = cached.environmentPrompt()
+	cached.SetProjectHost("wsl:Ubuntu")
+	if !strings.Contains(cached.environmentPrompt(), "Project host: wsl:Ubuntu") {
+		t.Fatal("SetProjectHost did not refresh the cached <env> block")
+	}
+}
+
 func TestBuildModePrompt_IncludesAdvisorContextPacketGuidance(t *testing.T) {
 	p := ModeBuild.SystemPrompt()
 	if !strings.Contains(p, "When calling the advisor tool, provide a compact context packet") {

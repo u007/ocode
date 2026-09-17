@@ -51,6 +51,15 @@ type ProcessRegistration struct {
 	AllowGracefulShutdown bool
 	RetainOnShutdown      bool
 	StartedAt             time.Time
+	// ReplaceTerminal lets a manager that deliberately owns a stable, reused
+	// ID restart its child: when a record with this ID already exists and is
+	// terminal (exited/killed/failed), the new start replaces it instead of
+	// failing with "already registered". A still-running record is never
+	// replaced — the caller must stop it first. Same rule the browser manager
+	// relies on to relaunch Chrome, but opt-in so generic IDs (the bash
+	// registry's proc-N) keep colliding — see
+	// process_test.go:TestProcessRegistry_NoPrefix_CollidesInSupervisor.
+	ReplaceTerminal bool
 
 	waitFn     func() error
 	gracefulFn func() error
@@ -202,10 +211,12 @@ func StartSupervised(sup *ProcessSupervisor, cmd *exec.Cmd, reg ProcessRegistrat
 		}
 		recSnap := existing.snapshot()
 		isTerminal := recSnap.Status != ProcRunning
-		// Only allow automatic replacement for the stable browser ID or other
-		// browser-kind records; generic proc-N collisions remain errors as
-		// documented in process_test.go:NoPrefix_CollidesInSupervisor.
-		canReplace := isTerminal && (reg.ID == "browse-chrome" || reg.Kind == ProcessKindBrowser || recSnap.Kind == ProcessKindBrowser || reg.Kind == ProcessKindHTR || recSnap.Kind == ProcessKindHTR)
+		// Only allow automatic replacement for the stable browser ID, other
+		// browser-kind records, or a caller that explicitly declared its ID
+		// restartable (ReplaceTerminal); generic proc-N collisions remain
+		// errors as documented in
+		// process_test.go:NoPrefix_CollidesInSupervisor.
+		canReplace := isTerminal && (reg.ReplaceTerminal || reg.ID == "browse-chrome" || reg.Kind == ProcessKindBrowser || recSnap.Kind == ProcessKindBrowser || reg.Kind == ProcessKindHTR || recSnap.Kind == ProcessKindHTR)
 		if !canReplace {
 			sup.mu.Unlock()
 			// Duplicate running (or non-browser terminal) — kill leaked child.

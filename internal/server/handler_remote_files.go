@@ -412,9 +412,10 @@ func (h *Handler) remoteFileContent(w http.ResponseWriter, r *http.Request) {
 }
 
 // remoteFileRaw is HandleFileRaw's GET over the transport: the same
-// extension allowlist and 32 MiB size cap as the local path, enforced
-// remotely (stat + byte count) before the base64 read so a huge binary
-// can't OOM the server. found=false maps to 404 like os.ReadFile.
+// extension allowlist and per-type size cap as the local path (previewRawCap:
+// 32 MiB documents/images, 128 MiB audio/video), enforced remotely (stat +
+// byte count) before the base64 read so a huge binary can't OOM the server.
+// found=false maps to 404 like os.ReadFile.
 func (h *Handler) remoteFileRaw(w http.ResponseWriter, r *http.Request) {
 	host := hostParam(r)
 	path := r.URL.Query().Get("path")
@@ -445,10 +446,10 @@ func (h *Handler) remoteFileRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, found, rerr := remoteReadFileCapped(r.Context(), rw, path, previewRawMaxBytes)
+	data, found, rerr := remoteReadFileCapped(r.Context(), rw, path, previewRawCap(ct))
 	if rerr != nil {
 		if errors.Is(rerr, errTooLarge) {
-			writeError(w, http.StatusBadRequest, "file exceeds the 32 MiB preview limit")
+			writeError(w, http.StatusBadRequest, "file exceeds the "+strconv.Itoa(int(previewRawCap(ct)>>20))+" MiB preview limit")
 		} else if isRemoteTransportError(rerr) {
 			writeError(w, http.StatusBadGateway, "remote read failed: "+rerr.Error())
 		} else {

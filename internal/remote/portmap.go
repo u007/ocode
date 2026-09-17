@@ -65,6 +65,13 @@ func (m *ForwardManager) Start(pm ProjectPortMap) error {
 		Name:    "ssh-portmap",
 		Command: cmd.String(),
 		Kind:    tool.ProcessKindRemote,
+		// Stop marks this ID's record terminal; without ReplaceTerminal a
+		// later Start for the same port (the panel's Disable → Enable, or a
+		// remove → re-add) would fail at registration with "already
+		// registered" — the supervisor keeps terminal records, and this ID is
+		// deliberately stable per port. The flag only replaces a terminal
+		// record, never a running forward.
+		ReplaceTerminal: true,
 	}); err != nil {
 		return fmt.Errorf("open forward for remote port %d: %w", pm.RemotePort, err)
 	}

@@ -10,6 +10,23 @@
  */
 const drafts = new Map<string, string>();
 
+/**
+ * Prefix for the client-only temp tab id a brand-new chat gets before its
+ * first message creates a real session on the server (see
+ * `openNewSessionTab` in stores/projectStore.tsx). Nothing persisted ever
+ * uses this prefix — a session id looks like `ses_2026-01-02-030405-abcd`.
+ */
+export const NEW_SESSION_TAB_PREFIX = "new-";
+
+/**
+ * True when `tabId` is a client-only temp tab id. Session-scoped API calls
+ * must never be sent one: the server resolves ids against on-disk sessions
+ * and 404s with "session not found".
+ */
+export function isTempSessionTabId(tabId: string | null | undefined): boolean {
+  return !!tabId && tabId.startsWith(NEW_SESSION_TAB_PREFIX);
+}
+
 export function getDraft(tabId: string | null | undefined): string {
   if (!tabId) return "";
   return drafts.get(tabId) ?? "";
@@ -44,5 +61,5 @@ export function rekeyDraft(oldId: string | null | undefined, newId: string | nul
  * AND it has no typed draft.
  */
 export function isNewSessionTabEmpty(tabId: string | null | undefined): boolean {
-  return !!tabId && tabId.startsWith("new-") && !getDraft(tabId).trim();
+  return isTempSessionTabId(tabId) && !getDraft(tabId).trim();
 }

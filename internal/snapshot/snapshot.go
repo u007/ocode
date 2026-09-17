@@ -57,6 +57,15 @@ type Store struct {
 	// collide when one store gains a snapshot while another loses one
 	// between two List() calls, permanently hiding the new file.
 	version uint64
+	// retired marks the store as permanently discarded by Store.Retire.
+	// Once set, RegisterWrite is a no-op so a straggler write from a
+	// retiring agent (an orphan-recovery goroutine that outlived
+	// Shutdown's bounded wait) cannot re-seed the process-global
+	// fileWrites registry under a dead agent id — which would permanently
+	// block other agents' undos on those paths. Distinct from Reset,
+	// which is also called on live, reused stores (SwitchSession
+	// rebinding, the process-global store).
+	retired bool
 }
 
 // NewStore creates a Store for one agent. agentID must be unique across all
@@ -360,9 +369,24 @@ func (s *Store) backupAtDir(path, toolCallID, baseDir string) error {
 // RegisterWrite records a successful file write in the global cross-agent
 // registry and back-fills the WriteSeq on the matching snapshot. Must be
 // called after every successful write that was preceded by Backup.
+//
+// A retired store (see Retire) is a no-op: the owning agent has been shut
+// down, and re-appending here would leave a phantom entry in the
+// process-global registry that no later UnregisterAgent would ever clear,
+// permanently blocking other agents' undos on that path.
+//
+// s.mu is held across the registry append so the retired check and the
+// append are atomic against Retire (which unregisters under the same lock).
+// Lock order is s.mu -> fileWriteMu, matching UndoByToolCallID's use of
+// crossAgentWriteAfterSeq; no path nests the reverse.
 func (s *Store) RegisterWrite(path, toolCallID string) {
 	seq := globalWriteSeq.Add(1)
 
+	s.mu.Lock()
+	if s.retired {
+		s.mu.Unlock()
+		return
+	}
 	fileWriteMu.Lock()
 	fileWrites[path] = append(fileWrites[path], fileWrite{
 		AgentID:    s.agentID,
@@ -373,15 +397,13 @@ func (s *Store) RegisterWrite(path, toolCallID string) {
 
 	// Back-fill the WriteSeq on the most recent snapshot for this path + toolCallID
 	// so UndoByToolCallID can compare against other agents' write seqs.
-	if toolCallID == "" {
-		return
-	}
-	s.mu.Lock()
-	for i := len(s.snapshots) - 1; i >= 0; i-- {
-		snap := &s.snapshots[i]
-		if snap.OriginalPath == path && snap.ToolCallID == toolCallID && snap.WriteSeq == 0 {
-			snap.WriteSeq = seq
-			break
+	if toolCallID != "" {
+		for i := len(s.snapshots) - 1; i >= 0; i-- {
+			snap := &s.snapshots[i]
+			if snap.OriginalPath == path && snap.ToolCallID == toolCallID && snap.WriteSeq == 0 {
+				snap.WriteSeq = seq
+				break
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -562,6 +584,44 @@ func (s *Store) Reset() {
 	if s.agentID != "global" {
 		UnregisterAgent(s.agentID)
 	}
+}
+
+// Retire permanently discards this store: it clears live state, unregisters
+// the agent from the global file-write registry, and marks the store so that
+// any later RegisterWrite is a no-op.
+//
+// This is the terminal teardown for an agent that is going away (Agent.Shutdown).
+// It differs from Reset in exactly one way that matters: Reset leaves the store
+// writable, because Reset is also called on live, reused stores — SwitchSession
+// rebinds a rebuilt agent's store to a new session, and the process-global store
+// is long-lived. Retiring those would silently stop all future change tracking.
+// A retired store therefore can never be revived; only call this when the agent
+// owning it is discarded.
+//
+// The reason the flag exists at all: Shutdown must bound its wait on abandoned
+// orphan-recovery goroutines (they can outlive their 30s ctx if the underlying
+// tool blocks). Without this, such a straggler's RegisterWrite could land after
+// the store was unregistered and re-seed the registry under a dead agent id, with
+// nothing left to ever unregister it — permanently blocking other agents' undos
+// on that path via the cross-agent conflict check.
+func (s *Store) Retire() {
+	s.mu.Lock()
+	s.retired = true
+	s.snapshots = nil
+	s.clearRedoLocked()
+	s.step = 0
+	s.version++
+	s.mu.Unlock()
+	if s.agentID != "global" {
+		UnregisterAgent(s.agentID)
+	}
+}
+
+// Retired reports whether Retire has permanently discarded this store.
+func (s *Store) Retired() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.retired
 }
 
 // Undo pops the most recent snapshot and restores the file. The current state

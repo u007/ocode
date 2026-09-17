@@ -6,6 +6,43 @@
 export interface PersistedEditorTab {
   path: string;
   projectRoot?: string;
+  /** Registered remote target (SSH/WSL) this tab was opened from. Must be
+   *  persisted: without it a restored remote tab is re-fetched against the
+   *  local server (correct path, wrong host) or collides with a local tab. */
+  projectHost?: string;
+}
+
+/** Host-qualified identity of the project an editor tab belongs to. Mirrors
+ *  `projectSessionKey` in `stores/projectStore.tsx` (`${host}::${path}`); the
+ *  two must stay in sync so a remote `(host, path)` and a local `path` with
+ *  the same string never share editor state. */
+export function editorTabProjectKey(tab: { projectRoot?: string; projectHost?: string }): string {
+  const host = tab.projectHost ?? "";
+  const root = tab.projectRoot ?? "";
+  return host ? `${host}::${root}` : root;
+}
+
+/** The subset of editor tabs that belong to the active project. With no active
+ *  project (boot, before the project list resolves) every tab is returned so
+ *  persisted tabs aren't briefly hidden. */
+export function visibleEditorTabs<T extends { projectRoot?: string; projectHost?: string }>(
+  tabs: T[],
+  activeProject: { path?: string; host?: string } | null | undefined,
+): T[] {
+  if (!activeProject?.path) return tabs;
+  const key = editorTabProjectKey({ projectRoot: activeProject.path, projectHost: activeProject.host });
+  return tabs.filter((t) => editorTabProjectKey(t) === key);
+}
+
+/** The active tab id constrained to a visible set: the requested id when it is
+ *  visible, else the most recently opened visible tab, else null. Prevents a
+ *  hidden tab from another project from being "active" for save/close/context. */
+export function resolveVisibleEditorTabId<T extends { id: string }>(
+  visible: T[],
+  activeId: string | null,
+): string | null {
+  if (activeId && visible.some((t) => t.id === activeId)) return activeId;
+  return visible.length > 0 ? visible[visible.length - 1].id : null;
 }
 
 interface PersistedEditorTabsFile {

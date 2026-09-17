@@ -31,6 +31,7 @@ import (
 	"github.com/u007/ocode/internal/desktop"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/remote"
+	"github.com/u007/ocode/internal/shell/sandbox"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tool"
 	"github.com/u007/ocode/web"
@@ -113,6 +114,17 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+
+	// Hidden subcommand: the Linux Landlock sandbox backend re-execs
+	// os.Executable() with "sandbox-confine" (internal/shell/sandbox). In this
+	// binary os.Executable() resolves to ocode-desktop itself, so without this
+	// dispatch the confined child would fall through to the Wails bootstrap and
+	// open a second full desktop window instead of applying the ruleset and
+	// exec'ing the agent's command — every sandboxed bash call would hang or
+	// fail. Mirrors the "sandbox-confine" case in the root cmd/ocode main().
+	if len(os.Args) > 1 && os.Args[1] == "sandbox-confine" {
+		os.Exit(sandbox.ConfineEntrypoint(os.Args))
 	}
 
 	// The desktop shell hosts the web UI, so resume a requested session by

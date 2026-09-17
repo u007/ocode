@@ -30,11 +30,12 @@ If a project already has a local memory file, prefer the project copy over the g
 
 ## /mem command
 
-Use `/mem` to inspect or toggle the active memory layer.
+Use `/mem` to inspect, toggle, or update the memory layer.
 
 - `/mem` or `/mem status` prints the current status plus file previews for user, project, and global scopes.
-- `/mem on` enables memory context injection.
-- `/mem off` disables memory context injection.
+- `/mem on` enables memory context injection (also accepts `true`, `yes`, `enable`).
+- `/mem off` disables memory context injection (also accepts `false`, `no`, `disable`).
+- `/mem update [user|project|global] [focus]` triggers a focused update of the named scope (defaults to project). The focus arg is an optional hint for what to capture. The update runs as a sub-agent turn using the configured small model.
 
 ## Precedence order
 
@@ -65,6 +66,8 @@ After meaningful work, compress what happened into the correct memory layer:
 - **User preferences**: repeated personal defaults, UI/workflow choices, phrasing preferences, or stable cross-project habits.
 - **Project memory**: repository-specific decisions, architecture notes, conventions, recurring commands, and project history.
 - **Global history**: reusable lessons, durable agent workflows, and cross-project discoveries.
+
+An automated **memory maintenance worker** also runs after each job completes (when memory is enabled). It uses the small model to decide whether the job produced durable knowledge worth recording, and writes to the appropriate scope. Each scope has a 32 KB hard cap — files exceeding it are automatically compressed. The worker fires asynchronously and serializes writes; it does not block the next turn.
 
 Keep each update short. Prefer bullets over paragraphs.
 

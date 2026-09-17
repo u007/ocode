@@ -193,6 +193,10 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 	if a.workDir != "" {
 		child.workDir = a.workDir
 	}
+	// Match the parent's project host too, so a remote project's side query
+	// renders the same "this project lives on <host>" note rather than
+	// presenting the local machine's paths as the project's.
+	child.projectHost = a.projectHost
 	if a.sessionID != "" {
 		child.SetSessionID(a.sessionID)
 	} else if sessionID := a.OpenCodeSessionID(); sessionID != "" {

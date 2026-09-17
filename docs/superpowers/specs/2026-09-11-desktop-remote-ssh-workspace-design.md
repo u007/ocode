@@ -1,7 +1,7 @@
 # Desktop Remote SSH Workspace — Design Spec
 
 Date: 2026-09-11
-Status: Draft
+Status: Draft (see "Remote shell resolution" below, added 2026-09-16)
 
 ## Problem
 
@@ -16,6 +16,56 @@ to individual tools (BashTool, file tools, etc.). Instead, the remote
 `ocode serve` instance owns everything: agent, LSP, git, files, cron.
 The desktop app is a thin UI/control plane that connects to the remote
 server through an SSH tunnel.
+
+## Remote shell resolution (2026-09-16)
+
+Every shell-resolution path in ocode is **machine-local** by construction:
+`config.DefaultTerminalShell` reads the local `$SHELL` and the local
+`/etc/shells`, `terminal_shell` is persisted in the local global config, and
+the credential-sync payload used to copy that config file to the remote
+verbatim. None of those describe the target host.
+
+That produced a concrete failure: a `!` shell command in a web chat bound to a
+remote project returned `Shell command failed (exit code 1): fork/exec
+/bin/zsh: no such file or directory` — the local Mac's zsh, exec'd on a Linux
+remote.
+
+Rule: **a shell that will run on the remote is resolved on the remote.**
+
+- `remote.DetectShell(transport)` probes the target (POSIX `[ -x ]` over the
+  remote's own `$SHELL`, then `/bin/bash`, `/bin/zsh`, `/bin/sh` and their
+  `usr/bin` variants, then executable `/etc/shells` lines) and returns
+  `RemoteShellInfo{Default, Available}`. Probe failure degrades to `/bin/sh`.
+- `remote.LoginShellScript` / `remote.CdedLoginShellScript` run a *command*
+  through the first usable POSIX-family remote shell; a non-POSIX remote login
+  shell (fish, tcsh, nu) is skipped as the shell that runs the command because
+  ocode's command strings use POSIX/bash syntax. The selection scripts
+  themselves (and the probe, and the interactive launcher) are wrapped in
+  `sh -c '…'`, because ssh hands the command string to the remote *login*
+  shell for parsing — the skip alone does not stop tcsh from parsing (and
+  looping forever on) the POSIX loop.
+- `remote.ShellCommand` (interactive terminal) runs a `[ -x ]` loop with an
+  `exec /bin/sh -l` last resort, so a remote `$SHELL` that is set but not
+  executable can no longer prevent a terminal from opening.
+- `POST /api/shell` takes an optional `host`; with it, the command runs on the
+  target through the target's own shell. Admission is the same
+  registered-remote-project check every other remote endpoint uses
+  (`remoteWorkFor`), so the endpoint cannot be aimed at an arbitrary SSH
+  target.
+- `GET /api/config/terminal?host=&project=` reports the target's shells
+  (`remote: true`); probes are memoized per canonical target. There is no
+  per-host shell override — the target selects its own.
+- `terminal_shell` is stripped from the sync payload
+  (`remote.stripMachineLocalConfig`): it names a local path and must not cross
+  machines.
+- Locally, `shell.Resolve` validates every Unix candidate (exists, not a
+  directory, executable) before it reaches `exec`, so a stale `$SHELL` or a
+  stale `terminal_shell` falls through to an available shell instead of failing.
+
+This follows the spec's own principle — the remote server is the execution
+authority — applied to shell selection. The interactive terminal already had
+the right shape (it pty-starts `ssh`/`wsl.exe` rather than a local shell); the
+`!` prefix and the terminal-config endpoints did not.
 
 ## Pre-implementation fixes to shared infrastructure
 

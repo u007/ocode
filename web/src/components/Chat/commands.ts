@@ -1,5 +1,6 @@
 import type {
   ComputerUseConfig,
+  ContextBudgetReport,
   Message,
   OcrConfig,
   OcrModelsResponse,
@@ -9,6 +10,7 @@ import type {
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../../api/client";
+import { isTempSessionTabId } from "../../lib/tabDrafts";
 
 import {
   Plus,
@@ -285,6 +287,8 @@ export interface CommandContext {
       estimated_tokens: number;
       max_tokens?: number;
       model?: string;
+      /** Full breakdown shared with the TUI's local /context. */
+      report?: import("../../api/types").ContextBudgetReport;
     }>;
     /** LSP server status + aggregated diagnostic counts (/lsp). */
     getLSPStatuses: () => Promise<{ lsp_servers: import("../../api/types").LSPStatus[] }>;
@@ -817,12 +821,9 @@ async function handleComputer(
 }
 
 async function handleExport(ctx: CommandContext): Promise<CommandResult> {
-  const sessionId = ctx.getSessionId?.();
+  const sessionId = activeSessionId(ctx);
   if (!sessionId) {
-    return {
-      handled: true,
-      messages: [{ role: "assistant", content: "No active session to export." }],
-    };
+    return emptySessionExport();
   }
 
   try {
@@ -842,12 +843,9 @@ async function handleExport(ctx: CommandContext): Promise<CommandResult> {
 }
 
 async function handleExportClaude(ctx: CommandContext): Promise<CommandResult> {
-  const sessionId = ctx.getSessionId?.();
+  const sessionId = activeSessionId(ctx);
   if (!sessionId) {
-    return {
-      handled: true,
-      messages: [{ role: "assistant", content: "No active session to export." }],
-    };
+    return emptySessionExport();
   }
 
   try {
@@ -876,7 +874,7 @@ async function handleTitle(args: string, ctx: CommandContext): Promise<CommandRe
     };
   }
 
-  const sessionId = ctx.getSessionId?.();
+  const sessionId = activeSessionId(ctx);
   if (!sessionId) {
     return {
       handled: true,
@@ -898,7 +896,7 @@ async function handleTitle(args: string, ctx: CommandContext): Promise<CommandRe
 
 async function handleUndo(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const res = await api.undoFileChange(ctx.getSessionId?.() ?? undefined);
+    const res = await api.undoFileChange(activeSessionId(ctx));
     return {
       handled: true,
       messages: [{ role: "assistant", content: `Undid last change to \`${res.path}\`.` }],
@@ -910,7 +908,7 @@ async function handleUndo(ctx: CommandContext): Promise<CommandResult> {
 
 async function handleRedo(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const res = await api.redoFileChange(ctx.getSessionId?.() ?? undefined);
+    const res = await api.redoFileChange(activeSessionId(ctx));
     return {
       handled: true,
       messages: [{ role: "assistant", content: `Redid change to \`${res.path}\`.` }],
@@ -1053,7 +1051,7 @@ async function handleAgent(args: string, ctx: CommandContext): Promise<CommandRe
       };
     }
 
-    const sessionId = ctx.getSessionId?.() ?? undefined;
+    const sessionId = activeSessionId(ctx);
     const res = await api.setAgent(name, sessionId);
     return {
       handled: true,
@@ -1354,7 +1352,7 @@ async function handleMask(args: string, ctx: CommandContext): Promise<CommandRes
 }
 
 async function handleCompact(ctx: CommandContext): Promise<CommandResult> {
-  const sessionId = ctx.getSessionId?.();
+  const sessionId = activeSessionId(ctx);
   if (!sessionId) {
     return {
       handled: true,
@@ -1389,7 +1387,7 @@ async function handleCompact(ctx: CommandContext): Promise<CommandResult> {
 }
 
 async function handleRecap(ctx: CommandContext): Promise<CommandResult> {
-  const sessionId = ctx.getSessionId?.();
+  const sessionId = activeSessionId(ctx);
   if (!sessionId) {
     return {
       handled: true,
@@ -1418,7 +1416,7 @@ async function handleRecap(ctx: CommandContext): Promise<CommandResult> {
 }
 
 async function handleShare(ctx: CommandContext): Promise<CommandResult> {
-  const sessionId = ctx.getSessionId?.();
+  const sessionId = activeSessionId(ctx);
   if (!sessionId) {
     return {
       handled: true,
@@ -1458,7 +1456,7 @@ async function handleBtw(args: string, ctx: CommandContext): Promise<CommandResu
     };
   }
 
-  const sessionId = ctx.getSessionId?.();
+  const sessionId = activeSessionId(ctx);
   if (!sessionId) {
     return {
       handled: true,
@@ -1981,7 +1979,7 @@ async function handleDocs(args: string, ctx: CommandContext): Promise<CommandRes
   }
   if (sub === "update") {
     if (!ctx.api.docsUpdate) return unsupported("/docs update");
-    const sessionId = ctx.getSessionId?.();
+    const sessionId = activeSessionId(ctx);
     if (!sessionId) return ok("No active session — open a chat first so the maintenance pass has an agent to run on.");
     try {
       return ok((await ctx.api.docsUpdate(sessionId, parts.slice(1).join(" "))).result);
@@ -2141,33 +2139,130 @@ function fail(name: string, err: unknown): CommandResult {
   };
 }
 
+/**
+ * The session id a session-scoped command should act on, or `undefined` when
+ * no persisted session exists yet.
+ *
+ * A brand-new chat tab lives entirely on the client under a temp id
+ * (`new-<timestamp>`) until its first message creates a real session on the
+ * server. Sending that temp id to a session endpoint 404s with
+ * "session not found", which surfaced as a "context command failed" error
+ * (and the same for /compact, /recap, /share, /title, /export, /btw).
+ * Treat a temp tab exactly like no session so those commands answer
+ * helpfully instead of round-tripping to a guaranteed 404.
+ */
+function activeSessionId(ctx: CommandContext): string | undefined {
+  const id = ctx.getSessionId?.();
+  if (!id || isTempSessionTabId(id)) return undefined;
+  return id;
+}
+
+/** True when `err` is the server's session-not-found 404 (duck-typed so this
+ *  module keeps its single `api` import and stays mock-friendly). */
+function isSessionNotFound(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { status?: unknown }).status === 404
+  );
+}
+
+/** /export and /export-claude both need input to have something to export; a
+ *  brand-new `new-*` tab has no messages yet, so report an empty session
+ *  rather than "no active session". A real session with zero messages is
+ *  rejected by the server with the same 422 message. */
+function emptySessionExport(): CommandResult {
+  return {
+    handled: true,
+    messages: [{
+      role: "assistant",
+      content: "**Export failed:** the session is empty — nothing to export yet.",
+    }],
+  };
+}
+
 // ─── /context — token budget ──────────────────────────────────────────────
 
-async function handleContext(ctx: CommandContext): Promise<CommandResult> {
-  const sessionId = ctx.getSessionId?.();
-  if (!sessionId) {
-    return {
-      handled: true,
-      messages: [{ role: "assistant", content: "No active session." }],
-    };
+/**
+ * Render the shared context-budget Report (internal/contextbudget) as markdown.
+ * The same Report drives the TUI's local `/context`, so both surfaces show the
+ * same sections and the same numbers. Verbatim dumps (provider prompt,
+ * reference catalog) render in fenced code blocks.
+ */
+function renderContextReport(report: ContextBudgetReport): string {
+  const lines: string[] = ["## Context Budget"];
+  if (report.model) lines.push(`- **Model:** ${report.model}`);
+  for (const section of report.sections) {
+    lines.push("", `### ${section.title}`);
+    if (section.note) lines.push(section.note);
+    for (const row of section.rows) {
+      if (row.subhead) {
+        lines.push("", `**${row.label}**`);
+        continue;
+      }
+      lines.push(row.value ? `- ${row.label} — \`${row.value}\`` : `- ${row.label}`);
+      if (row.lines?.length) {
+        if (row.raw) {
+          lines.push("", "```", ...row.lines, "```");
+        } else {
+          for (const line of row.lines) lines.push(`  - ${line}`);
+        }
+      }
+    }
   }
-  try {
-    const c = await ctx.api.getSessionContext(sessionId);
-    const pct = c.max_tokens ? Math.round((c.estimated_tokens / c.max_tokens) * 100) : null;
+  for (const note of report.notes ?? []) lines.push("", `> _${note}_`);
+  return lines.join("\n");
+}
+
+/** The four-field summary returned when no live agent was available (the
+ *  session isn't attached to a running server-side agent, or a turn is in
+ *  flight). Matches the pre-parity web output. */
+function renderContextSummary(c: {
+  model?: string;
+  message_count: number;
+  estimated_tokens: number;
+  max_tokens?: number;
+}): string {
+  const pct = c.max_tokens ? Math.round((c.estimated_tokens / c.max_tokens) * 100) : null;
+  return [
+    "## Context Budget",
+    `- **Model:** ${c.model || "unknown"}`,
+    `- **Messages:** ${c.message_count}`,
+    `- **Estimated tokens:** ~${c.estimated_tokens.toLocaleString()}`,
+    `- **Max context:** ${c.max_tokens ? c.max_tokens.toLocaleString() : "unknown"}${pct !== null ? ` (${pct}% used)` : ""}`,
+  ].join("\n");
+}
+
+async function handleContext(ctx: CommandContext): Promise<CommandResult> {
+  const sessionId = activeSessionId(ctx);
+  if (!sessionId) {
     return {
       handled: true,
       messages: [{
         role: "assistant",
-        content: [
-          "## Context Budget",
-          `- **Model:** ${c.model || "unknown"}`,
-          `- **Messages:** ${c.message_count}`,
-          `- **Estimated tokens:** ~${c.estimated_tokens.toLocaleString()}`,
-          `- **Max context:** ${c.max_tokens ? c.max_tokens.toLocaleString() : "unknown"}${pct !== null ? ` (${pct}% used)` : ""}`,
-        ].join("\n"),
+        content: "No active session yet — send a message first, then `/context` will show the token budget.",
       }],
     };
+  }
+  try {
+    const c = await ctx.api.getSessionContext(sessionId);
+    const content = c.report?.sections?.length
+      ? renderContextReport(c.report)
+      : renderContextSummary(c);
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content }],
+    };
   } catch (err) {
+    if (isSessionNotFound(err)) {
+      return {
+        handled: true,
+        messages: [{
+          role: "assistant",
+          content: "This session isn't on the server — it may have been deleted, or it belongs to a project that isn't open. Open the project and try again.",
+        }],
+      };
+    }
     return {
       handled: true,
       messages: [{

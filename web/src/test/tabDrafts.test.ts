@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { getDraft, setDraft, clearDraft, isNewSessionTabEmpty } from "../lib/tabDrafts";
+import { getDraft, setDraft, clearDraft, isNewSessionTabEmpty, isTempSessionTabId } from "../lib/tabDrafts";
 
 // tabDrafts is a module-level store, so tests share state — reset between tests.
 describe("tabDrafts", () => {
@@ -56,5 +56,15 @@ describe("tabDrafts", () => {
   it("isNewSessionTabEmpty: null/undefined", () => {
     expect(isNewSessionTabEmpty(null)).toBe(false);
     expect(isNewSessionTabEmpty(undefined)).toBe(false);
+  });
+
+  it("isTempSessionTabId: only new- ids are temp", () => {
+    expect(isTempSessionTabId("new-123")).toBe(true);
+    expect(isTempSessionTabId("new-1758000000000")).toBe(true);
+    expect(isTempSessionTabId("ses_2026-01-02-030405-abcd")).toBe(false);
+    expect(isTempSessionTabId("session-abc")).toBe(false);
+    expect(isTempSessionTabId("")).toBe(false);
+    expect(isTempSessionTabId(null)).toBe(false);
+    expect(isTempSessionTabId(undefined)).toBe(false);
   });
 });

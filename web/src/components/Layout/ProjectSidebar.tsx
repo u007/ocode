@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useProjectState } from "../../stores/projectStore";
 import { useChatSelector, type ChatState } from "../../stores/chatStore";
 import { useTerminalState } from "../../stores/terminalStore";
+import { prefetchSession } from "../../lib/sessionPrefetch";
 import type { Project, ProjectGroup } from "../../api/types";
 import {
   DndContext,
@@ -364,6 +365,16 @@ function SortableProjectRow({
   const indicators = useProjectIndicators(project.path);
   const status = indicators.status;
   const rename = useInlineRename(project.name, onRename);
+  // Warm both of the project's loads while the pointer is still on the row:
+  // the session list (so `selectProject` finds a cache hit and the switch never
+  // blocks on a round-trip) and the project's active transcript (so the chat
+  // tab paints from data already in flight).
+  const { state: sidebarState, prefetchProjectSessions } = useProjectState();
+  const prefetchProjectActiveTab = useCallback(() => {
+    prefetchProjectSessions(project);
+    const tabId = sidebarState.activeTabByProject[project.path];
+    if (tabId) prefetchSession(tabId);
+  }, [prefetchProjectSessions, sidebarState.activeTabByProject, project]);
 
   const contextItems: ContextMenuItem[] = useMemo(() => {
     const items: ContextMenuItem[] = [
@@ -438,6 +449,8 @@ function SortableProjectRow({
             }`
           )}
           onClick={onSelect}
+          onMouseEnter={prefetchProjectActiveTab}
+          onFocus={prefetchProjectActiveTab}
           role="button"
           tabIndex={0}
         >
@@ -875,6 +888,14 @@ function CollapsedProjectButton({
   groups: ProjectGroup[];
 }) {
   const indicators = useProjectIndicators(project.path);
+  // Same hover-warming as the expanded row: start the session-list and active
+  // transcript fetches before the click lands.
+  const { state: railState, prefetchProjectSessions } = useProjectState();
+  const prefetchProjectActiveTab = useCallback(() => {
+    prefetchProjectSessions(project);
+    const tabId = railState.activeTabByProject[project.path];
+    if (tabId) prefetchSession(tabId);
+  }, [prefetchProjectSessions, railState.activeTabByProject, project]);
   const showCount = indicators.sessionCount > 0;
   // Prioritize overlays: pending > terminal alert > streaming > stalled.
   // Any attention state (chat stopped / waiting for input / terminal bell)
@@ -961,6 +982,8 @@ function CollapsedProjectButton({
             isActive ? "bg-primary/15 text-primary" : "text-muted-foreground"
           }`}
           onClick={onSelect}
+          onMouseEnter={prefetchProjectActiveTab}
+          onFocus={prefetchProjectActiveTab}
         >
           {project.host ? <Server className="w-4 h-4 text-sky-600" /> : <FolderGit2 className="w-4 h-4" />}
           {showCount && (

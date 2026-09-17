@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // TestHandleSessionStateEndpoint covers Part 03 Task 5's reconcile endpoint:
@@ -182,5 +184,71 @@ func TestPublishTurnStatusSnapshotBroadcastsContext(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("no status event broadcast")
+	}
+}
+
+// TestHandleSessionStateSurfacesLivePendingAsk covers the recovery path for a
+// session paused on a permission ask whose sentinel is NOT in the persisted
+// transcript: the live agent's trailing tool round is the authoritative
+// source, so GET /api/sessions/:id/state must carry pending_asks for the
+// browser to hydrate the dialog from (and resolve the ask instead of being
+// permanently blocked by ErrPermissionPending).
+func TestHandleSessionStateSurfacesLivePendingAsk(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+
+	payload, err := json.Marshal(agent.PermissionRequest{
+		ToolName: "bash",
+		Command:  "rm -rf /tmp/x",
+		Rule:     "bash.rm",
+		Scope:    agent.PermissionScopeBashPrefix,
+		Prefix:   "rm",
+	})
+	if err != nil {
+		t.Fatalf("marshal permission request: %v", err)
+	}
+	h.agents[id] = &agentSession{
+		messages: []agent.Message{
+			{Role: "assistant", Content: "working"},
+			{Role: "tool", ToolID: "call-1", Content: tool.SentinelPermissionAsk + string(payload)},
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	h.HandleSessionState(rec, httptest.NewRequest("GET", "/api/sessions/"+id+"/state", nil), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("state status %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var resp sessionStateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode state response: %v", err)
+	}
+	if resp.PendingAsks == nil || len(resp.PendingAsks.Permissions) != 1 {
+		t.Fatalf("pending_asks = %+v, want one permission ask", resp.PendingAsks)
+	}
+	ask := resp.PendingAsks.Permissions[0]
+	if ask.RequestID != "call-1" {
+		t.Errorf("request_id = %q, want call-1", ask.RequestID)
+	}
+	if ask.Tool != "bash" || ask.Command != "rm -rf /tmp/x" {
+		t.Errorf("ask = %+v, want bash rm -rf /tmp/x", ask)
+	}
+	if ask.Scope != "bash_prefix" || ask.Prefix != "rm" {
+		t.Errorf("scope/prefix = %q/%q, want bash_prefix/rm", ask.Scope, ask.Prefix)
+	}
+
+	// Resolving the ask (sentinel replaced in place) clears pending_asks.
+	h.agents[id].messages[1].Content = "ran"
+	rec = httptest.NewRecorder()
+	h.HandleSessionState(rec, httptest.NewRequest("GET", "/api/sessions/"+id+"/state", nil), id)
+	resp = sessionStateResponse{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode resolved state response: %v", err)
+	}
+	if resp.PendingAsks != nil {
+		t.Fatalf("pending_asks = %+v, want nil after resolution", resp.PendingAsks)
 	}
 }

@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -69,12 +70,60 @@ func BuildSyncPayload() (SyncPayload, error) {
 			if f, ok, err := readSyncFile(SyncDirConfig, filepath.Join(cfgDir, name)); err != nil {
 				return SyncPayload{}, err
 			} else if ok {
+				f.Content = stripMachineLocalConfig(f.Name, f.Content)
 				p.Files = append(p.Files, f)
 			}
 		}
 	}
 
 	return p, nil
+}
+
+// machineLocalConfigKeys maps a synced config file to the keys that must NOT
+// cross machines because they describe the local host rather than the user.
+//
+// This is the second half of the remote-shell fix: `terminal_shell` is an
+// absolute path to a shell binary on the *local* machine. Pushing it verbatim
+// gives the remote a config value it cannot satisfy, and any remote process
+// that honors the override (the interactive terminal, `!` commands) then fails
+// with `fork/exec /bin/zsh: no such file or directory`. The remote resolves its
+// own shell instead (remote.ShellProbeCommand / remote.LoginShellScript), so the key
+// is dropped rather than translated.
+var machineLocalConfigKeys = map[string][]string{
+	"ocodeconfig.json": {"terminal_shell"},
+}
+
+// stripMachineLocalConfig removes machineLocalConfigKeys[name] from a synced
+// config file. It preserves the rest of the document byte-for-byte for the
+// common case of nothing to strip, and preserves all other keys when it does
+// rewrite. A parse failure returns the original content unchanged: a config
+// that does not round-trip through JSON is still a valid credential payload
+// component (other code reads it leniently), so failing the sync over it would
+// be a regression.
+func stripMachineLocalConfig(name string, content []byte) []byte {
+	keys := machineLocalConfigKeys[name]
+	if len(keys) == 0 || len(bytes.TrimSpace(content)) == 0 {
+		return content
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(content, &doc); err != nil {
+		return content
+	}
+	stripped := false
+	for _, k := range keys {
+		if _, ok := doc[k]; ok {
+			delete(doc, k)
+			stripped = true
+		}
+	}
+	if !stripped {
+		return content
+	}
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return content
+	}
+	return append(out, '\n')
 }
 
 func ocodeAuthProfilesPath() (string, error) {

@@ -16,6 +16,10 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/gen2brain/beeep"
+
+	"github.com/u007/ocode/internal/crashguard"
 )
 
 type gitSection int
@@ -60,6 +64,14 @@ type gitCommit struct {
 
 type gitStatusMsg struct {
 	text string
+}
+
+// gitStatusTimeoutMsg is fired after gitStatusTimeout elapses to clear a
+// successful status message. Errors are sticky and never auto-clear, so the
+// seq identifies which action the timer belongs to — a stale timer must not
+// clear a newer message.
+type gitStatusTimeoutMsg struct {
+	seq int
 }
 
 type gitRefreshMsg struct {
@@ -123,7 +135,11 @@ type gitModel struct {
 	committing     bool
 	commitInput    textarea.Model
 	statusMsg      string
-	pendingAction  gitPendingAction
+	// statusSeq identifies the current status message so a stale auto-clear
+	// timer cannot wipe a newer message. Whether the message is an error is
+	// derived from its text by gitStatusIsError, so it can never go stale.
+	statusSeq     int
+	pendingAction gitPendingAction
 	// branch create input
 	branchInputMode bool
 	branchInputText string
@@ -221,7 +237,7 @@ func newGitModel(workDir string) (gitModel, tea.Cmd) {
 	ci.SetHeight(5)
 	m.commitInput = ci
 	// Initialize ListBox instances for each section
-	m.changesList = NewListBox(0, 0)   // size set in Resize
+	m.changesList = NewListBox(0, 0) // size set in Resize
 	m.logList = NewListBox(0, 0)
 	m.stashList = NewListBox(0, 0)
 	m.branchesList = NewListBox(0, 0)
@@ -446,7 +462,14 @@ func gitRunInDir(dir string, args ...string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			err = fmt.Errorf("%w: %s", err, msg)
+		}
+	}
 	return strings.TrimRight(string(out), "\r\n"), err
 }
 
@@ -455,7 +478,14 @@ func (m *gitModel) gitRunTimeout(timeout time.Duration, args ...string) (string,
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = m.workDir
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			err = fmt.Errorf("%w: %s", err, msg)
+		}
+	}
 	return strings.TrimRight(string(out), "\r\n"), err
 }
 
@@ -558,8 +588,13 @@ func (m *gitModel) cmdLoadMoreLog() tea.Cmd {
 	return func() tea.Msg {
 		cmd := exec.Command("git", "log", "--format=%h\t%s\t%an\t%cr", fmt.Sprintf("--skip=%d", skip), "-50")
 		cmd.Dir = workDir
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
 		out, err := cmd.Output()
 		if err != nil {
+			if msg := strings.TrimSpace(stderr.String()); msg != "" {
+				err = fmt.Errorf("%w: %s", err, msg)
+			}
 			return loadMoreLogMsg{err: err}
 		}
 		trimmed := strings.TrimSpace(string(out))
@@ -589,15 +624,105 @@ func (m *gitModel) cmdNetworkOp(statusDone, statusFail string, args ...string) t
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = workDir
-		if out, err := cmd.Output(); err != nil {
-			msg := err.Error()
-			if len(out) > 0 {
-				msg = strings.TrimSpace(string(out)) + ": " + msg
+		// CombinedOutput captures both stdout and stderr; git reports
+		// network/auth failures on stderr, so Output() alone would surface
+		// only "exit status 128" and lose the actionable message.
+		if out, err := cmd.CombinedOutput(); err != nil {
+			msg := firstLine(strings.TrimSpace(string(out)))
+			if msg == "" {
+				msg = err.Error()
 			}
 			return gitStatusMsg{text: statusFail + ": " + msg}
 		}
 		return gitStatusMsg{text: statusDone}
 	}
+}
+
+// notifyGitAction shows a desktop notification for a git operation result.
+// It is best-effort: a failure (e.g. Linux without a notification daemon) is
+// logged at debug level and otherwise ignored. It runs on its own goroutine —
+// beeep.Notify can block on the OS notification service and must never stall
+// the TUI update loop.
+//
+// The icon argument is the empty string, not nil: beeep validates the icon
+// type before any backend runs and rejects nil with "unsupported argument".
+//
+// It is a package-level var so tests can stub it: the real implementation
+// shells out to osascript/notify-send, which would spawn stray subprocesses
+// and is unnecessary in the test environment.
+var notifyGitAction = func(title, message string) {
+	if message == "" {
+		return
+	}
+	crashguard.Go(func() {
+		if err := beeep.Notify(title, message, ""); err != nil {
+			log.Printf("[git] desktop notification failed: title=%q err=%v", title, err)
+		}
+	})
+}
+
+// gitStatusIsError reports whether a git status message describes a failure.
+// Classification is derived from the text (never a stored flag) so it cannot
+// go stale when other code assigns statusMsg directly.
+//
+// It is structural, not a substring scan: the git model builds every failure
+// as "<action> failed: <git stderr>" (gitErrDone / cmdNetworkOp), or as a
+// "cannot …" / "… required" validation message. Only the label before the
+// first ':' is inspected, so a success that interpolates a path or branch
+// containing "error" ("staged src/errors.go", "switched to fix/error-page")
+// is never misclassified.
+func gitStatusIsError(text string) bool {
+	label, _, _ := strings.Cut(text, ":")
+	label = strings.ToLower(strings.TrimSpace(label))
+	switch {
+	case strings.HasSuffix(label, "failed"),
+		strings.HasPrefix(label, "cannot "),
+		strings.HasSuffix(label, "required"):
+		return true
+	}
+	return false
+}
+
+// gitStatusTimeout returns a command that fires gitStatusTimeoutMsg
+// after 5 seconds, clearing a *success* status message.
+func (m *gitModel) gitStatusTimeout() tea.Cmd {
+	seq := m.statusSeq
+	return func() tea.Msg {
+		<-time.After(5 * time.Second)
+		return gitStatusTimeoutMsg{seq: seq}
+	}
+}
+
+// setGitStatus records a git action's terminal state.
+//
+// Errors are sticky: they stay on the status bar until the user's next git
+// action, so a failed `git push` can never scroll away before it is read.
+// Successes auto-clear after 5 seconds — the on-screen "toast".
+//
+// statusSeq guards the timer: a stale timeout from an earlier action must
+// not clear a newer message.
+func (m *gitModel) setGitStatus(text string) tea.Cmd {
+	m.statusSeq++
+	m.statusMsg = text
+	m.logGit(firstLine(text))
+	if gitStatusIsError(text) {
+		// Sticky — no auto-clear. Failures are important enough to also
+		// surface as an OS notification for anyone who tabbed away.
+		notifyGitAction("git action failed", firstLine(text))
+		return nil
+	}
+	return m.gitStatusTimeout()
+}
+
+// gitErrDone records a failed git action (sticky) and returns the refresh cmd.
+func (m *gitModel) gitErrDone(text string) tea.Cmd {
+	return tea.Batch(m.setGitStatus(text), m.cmdRefresh())
+}
+
+// gitOKDone records a successful git action (auto-clears after 5s) and
+// refreshes the panel so the change is reflected immediately.
+func (m *gitModel) gitOKDone(text string) tea.Cmd {
+	return tea.Batch(m.setGitStatus(text), m.cmdRefresh())
 }
 
 func (m *gitModel) parseStatus(out string) {
@@ -747,12 +872,19 @@ func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
 		}
 		return m, nil
 	case gitStatusMsg:
-		// Choke point for network ops (push/pull/fetch) and any other
-		// statusMsg-returning operation. Log the terminal outcome so the
-		// log tab has a record of every git action.
-		m.statusMsg = msg.text
-		m.logGit(firstLine(msg.text))
-		return m, m.cmdRefresh()
+		// Choke point for network ops (push/pull/fetch). Errors stay on the
+		// status bar until the next action; successes auto-clear after 5s.
+		// The panel is refreshed so the ahead/behind indicator is current.
+		return m, tea.Batch(m.setGitStatus(msg.text), m.cmdRefresh())
+	case gitStatusTimeoutMsg:
+		// Only clear when the timer belongs to the message on screen; a
+		// success that has since been replaced by an error must not be
+		// able to wipe that error. Errors never auto-clear.
+		if msg.seq != m.statusSeq || gitStatusIsError(m.statusMsg) {
+			return m, nil
+		}
+		m.statusMsg = ""
+		return m, nil
 	case gitBranchRefreshMsg:
 		// Lightweight branch-only update for sidebar (doesn't touch other state)
 		if msg.currentBranch != "" {
@@ -828,23 +960,20 @@ func (m gitModel) updateCommitInput(msg tea.Msg) (gitModel, tea.Cmd) {
 			text := strings.TrimSpace(m.commitInput.Value())
 			if text != "" {
 				if _, err := m.gitRun("commit", "-m", text); err != nil {
-					m.statusMsg = "commit failed: " + err.Error()
-					m.logGit("commit failed: " + firstLine(err.Error()))
-				} else {
-					m.statusMsg = "committed"
-					subject := text
-					if i := strings.IndexByte(subject, '\n'); i >= 0 {
-						subject = subject[:i]
-					}
-					if len(subject) > 60 {
-						subject = subject[:59] + "…"
-					}
-					m.logGit("commit: " + subject)
-					m.committing = false
-					m.commitInput.Reset()
-					m.Resize(m.width, m.height)
-					return m, m.cmdRefresh()
+					return m, m.gitErrDone("commit failed: " + err.Error())
 				}
+				subject := text
+				if i := strings.IndexByte(subject, '\n'); i >= 0 {
+					subject = subject[:i]
+				}
+				if len(subject) > 60 {
+					subject = subject[:59] + "…"
+				}
+				m.logGit("commit: " + subject)
+				m.committing = false
+				m.commitInput.Reset()
+				m.Resize(m.width, m.height)
+				return m, m.gitOKDone("committed")
 			}
 			return m, nil
 		case "ctrl+g":
@@ -897,18 +1026,15 @@ func (m gitModel) updateBranchInput(msg tea.Msg) (gitModel, tea.Cmd) {
 			return m, nil
 		case "enter":
 			name := strings.TrimSpace(m.branchInputText)
-			if name != "" {
-				if _, err := m.gitRun("checkout", "-b", name); err != nil {
-					m.statusMsg = "create branch failed: " + err.Error()
-					m.logGit("create branch failed: " + firstLine(err.Error()))
-				} else {
-					m.statusMsg = "created and switched to " + name
-					m.logGit("create branch: " + name)
-				}
-			}
 			m.branchInputMode = false
 			m.branchInputText = ""
-			return m, m.cmdRefresh()
+			if name == "" {
+				return m, m.cmdRefresh()
+			}
+			if _, err := m.gitRun("checkout", "-b", name); err != nil {
+				return m, m.gitErrDone("create branch failed: " + err.Error())
+			}
+			return m, m.gitOKDone("created and switched to " + name)
 		case "backspace":
 			runes := []rune(m.branchInputText)
 			if len(runes) > 0 {
@@ -940,19 +1066,14 @@ func (m gitModel) updateStashInput(msg tea.Msg) (gitModel, tea.Cmd) {
 				args = append(args, "-m", note)
 			}
 			if _, err := m.gitRun(args...); err != nil {
-				m.statusMsg = "stash failed: " + err.Error()
-				m.logGit("stash failed: " + firstLine(err.Error()))
-			} else {
-				m.statusMsg = "stashed"
-				if note != "" {
-					m.logGit("stash push: " + note)
-				} else {
-					m.logGit("stash push")
-				}
+				return m, m.gitErrDone("stash failed: " + err.Error())
+			}
+			if note != "" {
+				m.logGit("stash push: " + note)
 			}
 			m.stashInputMode = false
 			m.stashInputText = ""
-			return m, m.cmdRefresh()
+			return m, m.gitOKDone("stashed")
 		case "backspace":
 			runes := []rune(m.stashInputText)
 			if len(runes) > 0 {
@@ -1271,14 +1392,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				if len(staged) > 0 {
 					args := append([]string{"add", "--"}, staged...)
 					if _, err := m.gitRun(args...); err != nil {
-						m.statusMsg = "stage failed: " + err.Error()
-						m.logGit("stage failed: " + firstLine(err.Error()))
-					} else {
-						m.statusMsg = fmt.Sprintf("staged %d files", len(staged))
-						m.logGit(fmt.Sprintf("staged %d files", len(staged)))
-						m.selectedFiles = nil
-						return m, m.cmdRefresh()
+						return m, m.gitErrDone("stage failed: " + err.Error())
 					}
+					m.selectedFiles = nil
+					return m, m.gitOKDone(fmt.Sprintf("staged %d files", len(staged)))
 				}
 			} else if m.filesCursor >= 0 && m.filesCursor >= len(m.stagedFiles) {
 				idx := m.filesCursor - len(m.stagedFiles)
@@ -1286,13 +1403,9 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				if idx < len(unstaged) {
 					f := unstaged[idx]
 					if _, err := m.gitRun("add", "--", f.path); err != nil {
-						m.statusMsg = "stage failed: " + err.Error()
-						m.logGit("stage failed: " + firstLine(err.Error()))
-					} else {
-						m.statusMsg = "staged " + f.path
-						m.logGit("stage: " + f.path)
-						return m, m.cmdRefresh()
+						return m, m.gitErrDone("stage failed: " + err.Error())
 					}
+					return m, m.gitOKDone("staged " + f.path)
 				}
 			}
 		}
@@ -1308,25 +1421,17 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				if len(unstaged) > 0 {
 					args := append([]string{"restore", "--staged", "--"}, unstaged...)
 					if _, err := m.gitRun(args...); err != nil {
-						m.statusMsg = "unstage failed: " + err.Error()
-						m.logGit("unstage failed: " + firstLine(err.Error()))
-					} else {
-						m.statusMsg = fmt.Sprintf("unstaged %d files", len(unstaged))
-						m.logGit(fmt.Sprintf("unstaged %d files", len(unstaged)))
-						m.selectedFiles = nil
-						return m, m.cmdRefresh()
+						return m, m.gitErrDone("unstage failed: " + err.Error())
 					}
+					m.selectedFiles = nil
+					return m, m.gitOKDone(fmt.Sprintf("unstaged %d files", len(unstaged)))
 				}
 			} else if m.filesCursor >= 0 && m.filesCursor < len(m.stagedFiles) {
 				f := m.stagedFiles[m.filesCursor]
 				if _, err := m.gitRun("restore", "--staged", "--", f.path); err != nil {
-					m.statusMsg = "unstage failed: " + err.Error()
-					m.logGit("unstage failed: " + firstLine(err.Error()))
-				} else {
-					m.statusMsg = "unstaged " + f.path
-					m.logGit("unstage: " + f.path)
-					return m, m.cmdRefresh()
+					return m, m.gitErrDone("unstage failed: " + err.Error())
 				}
+				return m, m.gitOKDone("unstaged " + f.path)
 			}
 		}
 	case "ctrl+d":
@@ -1343,13 +1448,9 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 							return m, nil
 						}
 						if _, err := m.gitRun("restore", "--", f.path); err != nil {
-							m.statusMsg = "discard failed: " + err.Error()
-							m.logGit("discard failed: " + firstLine(err.Error()))
-						} else {
-							m.statusMsg = "discarded " + f.path
-							m.logGit("discard: " + f.path)
-							return m, m.cmdRefresh()
+							return m, m.gitErrDone("discard failed: " + err.Error())
 						}
+						return m, m.gitOKDone("discarded " + f.path)
 					} else {
 						m.pendingAction = gitPendingDiscard
 						m.statusMsg = "press ctrl+d again to discard"
@@ -1363,13 +1464,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				m.pendingAction = gitPendingNone
 				ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
 				if _, err := m.gitRun("stash", "drop", ref); err != nil {
-					m.statusMsg = "drop failed: " + err.Error()
-					m.logGit("stash drop failed: " + firstLine(err.Error()))
-				} else {
-					m.statusMsg = "stash dropped"
-					m.logGit("stash drop: " + ref)
-					return m, m.cmdRefresh()
+					return m, m.gitErrDone("drop failed: " + err.Error())
 				}
+				m.logGit("stash drop: " + ref)
+				return m, m.gitOKDone("stash dropped")
 			} else {
 				m.pendingAction = gitPendingDropStash
 				m.statusMsg = "press ctrl+d again to drop stash"
@@ -1386,13 +1484,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		if m.section == gitSectionStash && m.stashCursor < len(m.stashes) {
 			ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
 			if _, err := m.gitRun("stash", "apply", ref); err != nil {
-				m.statusMsg = "stash apply failed: " + err.Error()
-				m.logGit("stash apply failed: " + firstLine(err.Error()))
-			} else {
-				m.statusMsg = "stash applied"
-				m.logGit("stash apply: " + ref)
-				return m, m.cmdRefresh()
+				return m, m.gitErrDone("stash apply failed: " + err.Error())
 			}
+			m.logGit("stash apply: " + ref)
+			return m, m.gitOKDone("stash applied")
 		}
 	case "ctrl+l":
 		if m.section == gitSectionChanges {
@@ -1441,13 +1536,9 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 			if m.pendingAction == gitPendingDeleteBranch {
 				m.pendingAction = gitPendingNone
 				if _, err := m.gitRun("branch", "-d", branch); err != nil {
-					m.statusMsg = "delete failed: " + err.Error()
-					m.logGit("delete branch failed: " + firstLine(err.Error()))
-				} else {
-					m.statusMsg = "deleted " + branch
-					m.logGit("delete branch: " + branch)
+					return m, m.gitErrDone("delete failed: " + err.Error())
 				}
-				return m, m.cmdRefresh()
+				return m, m.gitOKDone("deleted " + branch)
 			}
 			m.pendingAction = gitPendingDeleteBranch
 			m.statusMsg = "press ctrl+x again to delete " + branch
@@ -1477,13 +1568,9 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 			if m.pendingAction == gitPendingMergeBranch {
 				m.pendingAction = gitPendingNone
 				if _, err := m.gitRun("merge", branch); err != nil {
-					m.statusMsg = "merge failed: " + err.Error()
-					m.logGit("merge failed: " + firstLine(err.Error()))
-				} else {
-					m.statusMsg = "merged " + branch
-					m.logGit("merge: " + branch)
-					return m, m.cmdRefresh()
+					return m, m.gitErrDone("merge failed: " + err.Error())
 				}
+				return m, m.gitOKDone("merged " + branch)
 			} else {
 				m.pendingAction = gitPendingMergeBranch
 				m.statusMsg = "press ctrl+m again to merge " + branch + " into " + m.currentBranch
@@ -1506,25 +1593,18 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 					_, err = m.gitRun("checkout", branch)
 				}
 				if err != nil {
-					m.statusMsg = "checkout failed: " + err.Error()
-					m.logGit("checkout failed: " + firstLine(err.Error()))
-				} else {
-					m.statusMsg = "switched to " + branch
-					m.logGit("checkout: " + branch)
-					return m, m.cmdRefresh()
+					return m, m.gitErrDone("checkout failed: " + err.Error())
 				}
+				return m, m.gitOKDone("switched to " + branch)
 			}
 		case gitSectionStash:
 			if m.stashCursor < len(m.stashes) {
 				ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
 				if _, err := m.gitRun("stash", "pop", ref); err != nil {
-					m.statusMsg = "pop failed: " + err.Error()
-					m.logGit("stash pop failed: " + firstLine(err.Error()))
-				} else {
-					m.statusMsg = "stash popped"
-					m.logGit("stash pop: " + ref)
-					return m, m.cmdRefresh()
+					return m, m.gitErrDone("pop failed: " + err.Error())
 				}
+				m.logGit("stash pop: " + ref)
+				return m, m.gitOKDone("stash popped")
 			}
 		}
 	}
@@ -1628,15 +1708,11 @@ func (m gitModel) applyHunk(reverse bool) (gitModel, tea.Cmd) {
 	patch := m.diffHeader + hunk.body
 	tmp, err := os.CreateTemp("", "ocode-hunk-*.patch")
 	if err != nil {
-		m.statusMsg = "hunk apply: " + err.Error()
-		m.logGit("hunk apply failed: " + firstLine(err.Error()))
-		return m, nil
+		return m, m.gitErrDone("hunk apply failed: " + err.Error())
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.WriteString(patch); err != nil {
-		m.statusMsg = "hunk apply: " + err.Error()
-		m.logGit("hunk apply failed: " + firstLine(err.Error()))
-		return m, nil
+		return m, m.gitErrDone("hunk apply failed: " + err.Error())
 	}
 	tmp.Close()
 	args := []string{"apply", "--cached", tmp.Name()}
@@ -1644,17 +1720,13 @@ func (m gitModel) applyHunk(reverse bool) (gitModel, tea.Cmd) {
 		args = []string{"apply", "--cached", "--reverse", tmp.Name()}
 	}
 	if _, err := m.gitRun(args...); err != nil {
-		m.statusMsg = "hunk apply failed: " + err.Error()
-		m.logGit("hunk apply failed: " + firstLine(err.Error()))
-		return m, nil
+		return m, m.gitErrDone("hunk apply failed: " + err.Error())
 	}
 	action := "staged hunk"
 	if reverse {
 		action = "unstaged hunk"
 	}
-	m.statusMsg = action
-	m.logGit(action)
-	return m, m.cmdRefresh()
+	return m, m.gitOKDone(action)
 }
 
 func (m *gitModel) currentFileList() []gitFile {
@@ -1678,13 +1750,9 @@ func (m gitModel) ignorePath(path string) (gitModel, tea.Cmd) {
 		return m, nil
 	}
 	if err := appendUniqueLine(filepath.Join(m.workDir, ".gitignore"), path+"\n"); err != nil {
-		m.statusMsg = "ignore failed: " + err.Error()
-		m.logGit("ignore failed: " + firstLine(err.Error()))
-		return m, nil
+		return m, m.gitErrDone("ignore failed: " + err.Error())
 	}
-	m.statusMsg = "ignored " + path
-	m.logGit("ignore: " + path)
-	return m, m.cmdRefresh()
+	return m, m.gitOKDone("ignored " + path)
 }
 
 func appendUniqueLine(path, line string) error {
@@ -2169,18 +2237,27 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 	}
 	hints := styles.Hint.Render(m.renderHints())
 	var statusBar string
-	if m.filterActive || m.filterQuery != "" {
+	switch {
+	case m.filterActive || m.filterQuery != "":
 		cursor := ""
 		if m.filterActive {
 			cursor = "█"
 		}
 		filterStr := styles.Selected.Render("ctrl+f "+m.filterQuery+cursor) + "  " + styles.Hint.Render("esc clear")
 		statusBar = filterStr + "   " + hints
-	} else {
-		statusBar = hints
-		if m.statusMsg != "" {
-			statusBar = hints + "   " + errorStyle.Render(m.statusMsg)
+	case m.statusMsg != "":
+		// A status message takes priority over the key hints. The hint line
+		// is ~250 columns wide, so appending the message after it (the old
+		// behaviour) let the terminal truncate the message away entirely —
+		// a failed `git push` appeared to "disappear by itself". Render the
+		// message first and truncate it to the available width instead.
+		style := styles.Hint
+		if gitStatusIsError(m.statusMsg) {
+			style = errorStyle
 		}
+		statusBar = style.Render(ansi.Truncate(m.statusMsg, w, "…"))
+	default:
+		statusBar = hints
 	}
 	statusBar = lipgloss.NewStyle().Width(w).MaxHeight(1).Render(statusBar)
 	parts = append(parts, statusBar)
@@ -2253,12 +2330,12 @@ func (m *gitModel) renderFileList(width int) []string {
 			lb.SetSize(width, innerH)
 		}
 	}
-	
+
 	// Set up data and render based on section
 	switch m.section {
 	case gitSectionChanges:
 		files := m.currentFileList()
-		
+
 		// Set filter bar if active
 		if m.filterQuery != "" || m.filterActive {
 			cursor := ""
@@ -2269,7 +2346,7 @@ func (m *gitModel) renderFileList(width int) []string {
 		} else {
 			lb.SetFilterRow("")
 		}
-		
+
 		if m.filterQuery != "" {
 			// Filtered: flat list, no headers
 			lb.SetHeaderRows(nil)
@@ -2290,14 +2367,14 @@ func (m *gitModel) renderFileList(width int) []string {
 				headers = append(headers, hintStyle.Render("○ unstaged/untracked"))
 			}
 			lb.SetHeaderRows(headers)
-			
+
 			checkmark := func(i int) string {
 				if m.selectedFiles[i] {
 					return "◆ "
 				}
 				return "  "
 			}
-			
+
 			lb.SetData(len(files), func(idx, w int, selected bool) string {
 				line := checkmark(idx) + files[idx].status + " " + files[idx].path
 				if selected && m.panel == gitPanelFiles {
@@ -2353,7 +2430,7 @@ func (m *gitModel) renderFileList(width int) []string {
 		})
 		lb.SetSelectedForRender(m.branchCursor)
 	}
-	
+
 	// Render and split into lines
 	rendered := lb.Render()
 	return strings.Split(rendered, "\n")

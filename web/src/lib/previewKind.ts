@@ -16,6 +16,8 @@ export type PreviewKind =
   | "pptx"
   | "excel"
   | "image"
+  | "audio"
+  | "video"
   | "mermaid"
   | "markdown"
   | "text";
@@ -33,6 +35,22 @@ const kindByExt: Record<string, PreviewKind> = {
   ".gif": "image",
   ".webp": "image",
   ".svg": "image",
+  // Audio/video: browser-playable containers only (mirrors
+  // HandleFileRaw.previewRawTypes / preview_open's previewOpenKinds; .mkv
+  // and .avi stay out — no reliable renderer).
+  ".mp3": "audio",
+  ".m4a": "audio",
+  ".aac": "audio",
+  ".wav": "audio",
+  ".ogg": "audio",
+  ".oga": "audio",
+  ".opus": "audio",
+  ".flac": "audio",
+  ".mp4": "video",
+  ".m4v": "video",
+  ".webm": "video",
+  ".ogv": "video",
+  ".mov": "video",
   ".mmd": "mermaid",
   ".md": "markdown",
   ".markdown": "markdown",
@@ -57,9 +75,32 @@ export function previewKindForPath(path: string): PreviewKind | null {
   return kindByExt[path.slice(dot).toLowerCase()] ?? null;
 }
 
+/**
+ * Kinds the Files tab renders as a read-only preview surface instead of Monaco.
+ * These are binary containers with no editable text representation, so opening
+ * them in the editor only ever produced a "Binary File — Edit anyway" dead end.
+ * `markdown`, `text`, and `mermaid` stay editable and are deliberately excluded.
+ */
+const PREVIEW_ONLY_KINDS: ReadonlySet<PreviewKind> = new Set(["pdf", "docx", "pptx", "excel", "image", "audio", "video"]);
+
+/**
+ * PreviewSurface kind for a path the Files-tab editor must NOT open in Monaco,
+ * or null when the path is text-like (or not previewable). Callers use this to
+ * auto-default PDFs, Office documents, and media to a preview.
+ */
+export function previewOnlyKindForPath(path: string): PreviewKind | null {
+  const kind = previewKindForPath(path);
+  return kind !== null && PREVIEW_ONLY_KINDS.has(kind) ? kind : null;
+}
+
 // Legacy Office formats with no reliable browser renderer (no server-side
 // conversion in v1): .docx/.pptx preview; these do not.
 const LEGACY_OFFICE_RE = /\.(doc|ppt)$/i;
+
+/** Legacy Office (.doc/.ppt) — no in-browser renderer; show the OS-open fallback. */
+export function isLegacyOfficePath(path: string): boolean {
+  return LEGACY_OFFICE_RE.test(path);
+}
 
 /**
  * Resolves an open request to a renderable kind or an explicit unsupported

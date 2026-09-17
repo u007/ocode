@@ -18,14 +18,33 @@ export interface Tab {
   titleManual?: boolean;
 }
 
+/** One project's cached session list, plus when it landed. */
+export interface ProjectSessionCache {
+  sessions: SessionInfo[];
+  fetchedAt: number;
+}
+
+/** Cache key for a project's session list. `host`-qualified so a remote
+ *  `(host, path)` and a local `path` with the same string never collide. */
+export function projectSessionKey(path: string, host?: string): string {
+  return host ? `${host}::${path}` : path;
+}
+
 export interface ProjectState {
   projects: Project[];
   loading: boolean;
   /** The project list is trusted only after at least one request succeeds. */
   projectsStatus: ProjectMetadataStatus;
   activeProject: Project | null;
+  /** The active project's session list (derived from `sessionsByProject`). Kept
+   *  as its own field so `SessionDialog` and friends read the current project's
+   *  list without a lookup. */
   projectSessions: SessionInfo[];
   sessionsLoading: boolean;
+  /** Per-project session-list cache keyed by `projectSessionKey(path, host)`.
+   *  Lets a project switch paint from the last-known list immediately and
+   *  revalidate in the background, instead of blocking on a round-trip. */
+  sessionsByProject: Record<string, ProjectSessionCache>;
   /** Open tabs per project path (canonical). Never contains `new-*` temp tabs
    *  after persistence; those live in memory only. */
   tabsByProject: Record<string, Tab[]>;
@@ -44,6 +63,7 @@ export type ProjectAction =
   | { type: "SET_LOADING"; loading: boolean }
   | { type: "SET_ACTIVE_PROJECT"; project: Project | null }
   | { type: "SET_PROJECT_SESSIONS"; sessions: SessionInfo[] }
+  | { type: "SET_PROJECT_SESSIONS_CACHE"; key: string; sessions: SessionInfo[]; fetchedAt: number }
   | { type: "SET_SESSIONS_LOADING"; loading: boolean }
   | { type: "ADD_TAB"; tab: Tab }
   | { type: "REMOVE_TAB"; id: string }
@@ -55,6 +75,13 @@ export type ProjectAction =
   | { type: "SET_SESSION_PICKER"; open: boolean }
   | { type: "SET_GROUPS"; groups: ProjectGroup[] }
   | { type: "REKEY_TABS"; oldPath: string; newPath: string };
+
+/** How long a cached project session list is considered fresh. Within this
+ *  window a switch reuses the cache without revalidating; past it the cached
+ *  list is still painted immediately (no spinner) but revalidated in the
+ *  background. Bounds staleness without putting a fetch on the click path. */
+const SESSION_LIST_TTL_MS = 15_000;
+
 const initialState: ProjectState = {
   projects: [],
   loading: false,
@@ -62,6 +89,7 @@ const initialState: ProjectState = {
   activeProject: null,
   projectSessions: [],
   sessionsLoading: false,
+  sessionsByProject: {},
   tabsByProject: {},
   activeTabByProject: {},
   sessionPickerOpen: false,
@@ -111,10 +139,42 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
       };
     case "SET_LOADING":
       return { ...state, loading: action.loading };
-    case "SET_ACTIVE_PROJECT":
-      return { ...state, activeProject: action.project };
+    case "SET_ACTIVE_PROJECT": {
+      // Hydrate the active project's session list from the cache so a switch
+      // paints the last-known list immediately. A miss clears it; the caller
+      // then shows the spinner while the fetch runs.
+      const key = action.project
+        ? projectSessionKey(action.project.path, action.project.host)
+        : "";
+      const cached = key ? state.sessionsByProject[key] : undefined;
+      return {
+        ...state,
+        activeProject: action.project,
+        projectSessions: cached?.sessions ?? [],
+      };
+    }
     case "SET_PROJECT_SESSIONS":
       return { ...state, projectSessions: action.sessions, sessionsLoading: false };
+    case "SET_PROJECT_SESSIONS_CACHE": {
+      const sessionsByProject = {
+        ...state.sessionsByProject,
+        [action.key]: { sessions: action.sessions, fetchedAt: action.fetchedAt },
+      };
+      const activeKey = state.activeProject
+        ? projectSessionKey(state.activeProject.path, state.activeProject.host)
+        : "";
+      // Only the active project's entry drives the rendered list; a background
+      // revalidation for another project must not clobber it.
+      if (action.key === activeKey) {
+        return {
+          ...state,
+          sessionsByProject,
+          projectSessions: action.sessions,
+          sessionsLoading: false,
+        };
+      }
+      return { ...state, sessionsByProject };
+    }
     case "SET_SESSIONS_LOADING":
       return { ...state, sessionsLoading: action.loading };
     case "ADD_TAB": {
@@ -391,6 +451,9 @@ interface ProjectContextType {
   refreshProjects: () => Promise<void>;
   refreshGroups: () => Promise<void>;
   selectProject: (project: Project) => Promise<void>;
+  /** Warm a project's cached session list (hover preload). `force` revalidates
+   *  even when the entry is still fresh. */
+  prefetchProjectSessions: (project: Project, opts?: { force?: boolean }) => void;
   openSessionTab: (sessionId: string, sessionTitle: string) => void;
   closeSessionTab: (sessionId: string) => void;
   addProject: (path: string) => Promise<void>;
@@ -427,6 +490,14 @@ interface ProjectContextType {
 
 const ProjectContext = createContext<ProjectContextType | null>(null);
 
+/** Dispatch-only sibling of `ProjectContext`. `dispatch` is a `useCallback`
+ *  over the store and never changes identity, so a component that only
+ *  dispatches project actions can subscribe here and stop re-rendering whenever
+ *  project state changes. That is what makes the per-tab chat surfaces safely
+ *  `memo`-able: they re-render for their own chat slice, not for every tab or
+ *  project switch. */
+export const ProjectDispatchContext = createContext<React.Dispatch<ProjectAction> | null>(null);
+
 export function ProjectProvider({ children }: { children: ReactNode }) {
   // Backed by a @tanstack/store Store instance rather than useReducer — same
   // action-dispatch shape (projectReducer + ProjectAction) so the large body
@@ -441,6 +512,10 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     [store],
   );
   const projectsRequestRef = useRef(0);
+  /** In-flight session-list fetches, keyed by `projectSessionKey`. Dedupes a
+   *  hover prefetch against the fetch `selectProject` would otherwise start for
+   *  the same project. */
+  const sessionsInflightRef = useRef<Map<string, Promise<void>>>(new Map());
 
   // Server sync state shared by the persist, restore, and bus effects below.
   // `dirty` = a debounced write is scheduled, `writing` = a PUT is in flight,
@@ -575,20 +650,67 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     refreshGroups();
   }, [refreshProjects, refreshGroups]);
 
+  /** Fetch a project's session list into the cache. Deduped per project, so a
+   *  hover prefetch already in flight is joined rather than duplicated.
+   *  `background` keeps a failure from clearing a loading state it never set. */
+  const refreshProjectSessions = useCallback(
+    async (project: Project, opts?: { background?: boolean }): Promise<void> => {
+      const key = projectSessionKey(project.path, project.host);
+      const inflight = sessionsInflightRef.current.get(key);
+      if (inflight) return inflight;
+      const run = (async () => {
+        try {
+          const sessions = await api.listProjectSessions(project.path, project.host);
+          dispatch({
+            type: "SET_PROJECT_SESSIONS_CACHE",
+            key,
+            sessions,
+            fetchedAt: Date.now(),
+          });
+        } catch (err) {
+          console.error("Failed to load project sessions:", err);
+          if (!opts?.background) dispatch({ type: "SET_SESSIONS_LOADING", loading: false });
+        } finally {
+          sessionsInflightRef.current.delete(key);
+        }
+      })();
+      sessionsInflightRef.current.set(key, run);
+      return run;
+    },
+    [dispatch],
+  );
+
+  /** Hover-warm a project's session list so the click finds it already cached.
+   *  No-op while the entry is still fresh (bounds hover traffic); `force` is
+   *  for callers that know the list may have changed (e.g. the picker opening). */
+  const prefetchProjectSessions = useCallback(
+    (project: Project, opts?: { force?: boolean }) => {
+      const key = projectSessionKey(project.path, project.host);
+      if (!opts?.force) {
+        const cached = store.state.sessionsByProject[key];
+        if (cached && Date.now() - cached.fetchedAt < SESSION_LIST_TTL_MS) return;
+      }
+      void refreshProjectSessions(project, { background: true });
+    },
+    [refreshProjectSessions, store],
+  );
+
   const selectProject = useCallback(async (project: Project) => {
     dispatch({ type: "SET_ACTIVE_PROJECT", project });
-    dispatch({ type: "SET_SESSIONS_LOADING", loading: true });
-    try {
-      const sessions = await api.listProjectSessions(project.path, project.host);
-      dispatch({ type: "SET_PROJECT_SESSIONS", sessions });
-    } catch (err) {
-      console.error("Failed to load project sessions:", err);
-      dispatch({ type: "SET_SESSIONS_LOADING", loading: false });
+    // A cache hit (warm or stale) paints the last-known list immediately and
+    // revalidates silently, so the switch never blocks on a round-trip. Only a
+    // true miss shows the loading state.
+    const cached = store.state.sessionsByProject[projectSessionKey(project.path, project.host)];
+    if (cached) {
+      void refreshProjectSessions(project, { background: true });
+      return;
     }
+    dispatch({ type: "SET_SESSIONS_LOADING", loading: true });
+    await refreshProjectSessions(project);
     // No auto-ensured "New session" tab: the frontend must not force a tab
     // into existence. A New tab is created only on explicit user action
     // ("+" button, Cmd/Ctrl+N, /new) via openNewSessionTab.
-  }, []);
+  }, [dispatch, refreshProjectSessions, store]);
 
   const openSessionTab = useCallback((sessionId: string, sessionTitle: string) => {
     const path = state.activeProject?.path || "";
@@ -863,36 +985,39 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   }, [state.loading, state.activeProject, refreshProjects, selectProject]);
 
   return (
-    <ProjectContext.Provider
-      value={{
-        state,
-        tabs: activeTabs(state),
-        activeTabId: activeTabId(state),
-        dispatch,
-        refreshProjects,
-        refreshGroups,
-        selectProject,
-        openSessionTab,
-        closeSessionTab,
-        addProject,
-        addRemoteProject,
-        updateRemoteProject,
-        removeProject,
-        renameProject,
-        reorderProjects,
-        setProjectGroup,
-        createGroup,
-        deleteGroup,
-        renameGroup,
-        reorderGroups,
-        setGroupCollapsed,
-        toggleSessionPicker,
-        openNewSessionTab,
-        openDeepLinkSession,
-      }}
-    >
-      {children}
-    </ProjectContext.Provider>
+    <ProjectDispatchContext.Provider value={dispatch}>
+      <ProjectContext.Provider
+        value={{
+          state,
+          tabs: activeTabs(state),
+          activeTabId: activeTabId(state),
+          dispatch,
+          refreshProjects,
+          refreshGroups,
+          selectProject,
+          prefetchProjectSessions,
+          openSessionTab,
+          closeSessionTab,
+          addProject,
+          addRemoteProject,
+          updateRemoteProject,
+          removeProject,
+          renameProject,
+          reorderProjects,
+          setProjectGroup,
+          createGroup,
+          deleteGroup,
+          renameGroup,
+          reorderGroups,
+          setGroupCollapsed,
+          toggleSessionPicker,
+          openNewSessionTab,
+          openDeepLinkSession,
+        }}
+      >
+        {children}
+      </ProjectContext.Provider>
+    </ProjectDispatchContext.Provider>
   );
 }
 
@@ -900,4 +1025,13 @@ export function useProjectState() {
   const ctx = useContext(ProjectContext);
   if (!ctx) throw new Error("useProjectState must be used within ProjectProvider");
   return ctx;
+}
+
+/** Subscribe to the stable project dispatch only. Prefer this over
+ *  `useProjectState()` in components that just fire project actions — it never
+ *  re-renders the caller when project state changes. */
+export function useProjectDispatch(): React.Dispatch<ProjectAction> {
+  const dispatch = useContext(ProjectDispatchContext);
+  if (!dispatch) throw new Error("useProjectDispatch must be used within ProjectProvider");
+  return dispatch;
 }

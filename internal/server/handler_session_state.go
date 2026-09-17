@@ -34,7 +34,88 @@ func (h *Handler) HandleSessionState(w http.ResponseWriter, r *http.Request, id 
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, state)
+	resp := sessionStateResponse{SessionState: state}
+	// Attach the live pending ask (if any) from the resident agent's trailing
+	// tool round. The frontend already derives pending asks from a fetched
+	// transcript's sentinels, but that only works when the paused tool result
+	// actually reached disk: a session whose in-memory ask outlived a failed /
+	// conflicting save (or whose pause post-dated the last write) has no
+	// sentinel to recover from, leaving the browser with no dialog while every
+	// send is rejected by ErrPermissionPending. Reading the live transcript is
+	// the only authoritative source in that case.
+	//
+	// livePendingAsks takes h.mu only to read the session pointer, releases
+	// it, then takes as.mu — preserving the as.mu → h.mu lock order (see
+	// agent_session.go).
+	resp.PendingAsks = h.livePendingAsks(id)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// sessionStateResponse is SessionState plus the live pending-ask payload.
+// SessionState is embedded so every existing field serializes exactly as
+// before; pending_asks is omitempty so an idle session's body is unchanged.
+type sessionStateResponse struct {
+	SessionState
+	PendingAsks *PendingAsks `json:"pending_asks,omitempty"`
+}
+
+// PendingAsks is the unresolved permission/question prompt(s) a live agent
+// session is currently paused on. Each entry mirrors the corresponding SSE
+// frame (PermissionEvent / QuestionEvent) so the browser can dispatch it
+// through the same PERMISSION_REQUEST / QUESTION_REQUEST reducer path a live
+// event would take.
+type PendingAsks struct {
+	Permissions []PermissionEvent `json:"permissions,omitempty"`
+	Questions   []QuestionEvent   `json:"questions,omitempty"`
+}
+
+// livePendingAsks returns the unresolved asks held in the session's resident
+// agent transcript, or nil when the session has no live agent, a turn is in
+// flight, or it is not paused on one. A resolved ask has its sentinel replaced
+// in place, so this returns nil again once the user answers.
+//
+// The read is a non-blocking TryLock on purpose: runTurn holds as.mu for the
+// whole turn (minutes), and this runs inside the reconcile HTTP handler the
+// browser and watchdog poll — a blocking lock would pin an HTTP connection
+// behind the turn (the "stuck session" class, see AGENTS). While a turn holds
+// the lock it cannot yet be paused on an ask (the pause and the unlock happen
+// together when the step returns), so reporting nothing is correct; any ask it
+// does raise arrives over SSE.
+func (h *Handler) livePendingAsks(id string) *PendingAsks {
+	as := h.lookupAgentSession(id)
+	if as == nil {
+		return nil
+	}
+	if !as.mu.TryLock() {
+		return nil
+	}
+	defer as.mu.Unlock()
+	return pendingAsksFromMessages(as.messages)
+}
+
+// pendingAsksFromMessages extracts unresolved asks from the trailing tool
+// round of msgs. A single round may pause on more than one ask (parallel
+// dispatch runs several calls before the pause check), so the whole trailing
+// run is scanned — see trailingToolRunStart.
+func pendingAsksFromMessages(msgs []agent.Message) *PendingAsks {
+	var out PendingAsks
+	for i := trailingToolRunStart(msgs); i < len(msgs); i++ {
+		m := msgs[i]
+		if m.Role != "tool" {
+			continue
+		}
+		if req, ok := parsePermissionAsk(m.Content); ok {
+			out.Permissions = append(out.Permissions, newPermissionEvent(m.ToolID, req))
+			continue
+		}
+		if prompts, ok := parseQuestionAsk(m.Content); ok {
+			out.Questions = append(out.Questions, QuestionEvent{RequestID: m.ToolID, Questions: prompts})
+		}
+	}
+	if len(out.Permissions) == 0 && len(out.Questions) == 0 {
+		return nil
+	}
+	return &out
 }
 
 // HandleSessionStatus returns the per-session status snapshot: a superset of

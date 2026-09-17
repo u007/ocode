@@ -1277,7 +1277,7 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
     const ok = await runFs(async () => {
       await api.fsDelete(paths, activeRoot, projectHost);
       window.dispatchEvent(
-        new CustomEvent("ocode:fs-delete", { detail: { paths, projectRoot: activeRoot } }),
+        new CustomEvent("ocode:fs-delete", { detail: { paths, projectRoot: activeRoot, ...(projectHost ? { host: projectHost } : {}) } }),
       );
     });
     // Close and prune the selection only on success; on failure keep the dialog
@@ -1291,7 +1291,7 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
         return next;
       });
     }
-  }, [pendingDelete, activeRoot, runFs]);
+  }, [pendingDelete, activeRoot, projectHost, runFs]);
 
   const menu: FileMenuActions = {
     isGitRepo,
@@ -1341,7 +1341,7 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
         if (cut) {
           await api.fsMove(paths, destDir, activeRoot, projectHost);
           setClipboard(null);
-          window.dispatchEvent(new CustomEvent("ocode:fs-delete", { detail: { paths, projectRoot: activeRoot } }));
+          window.dispatchEvent(new CustomEvent("ocode:fs-delete", { detail: { paths, projectRoot: activeRoot, ...(projectHost ? { host: projectHost } : {}) } }));
         } else {
           await api.fsCopy(paths, destDir, activeRoot, projectHost);
         }
@@ -1364,7 +1364,7 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
             const res = (await api.fsRename(path, value, activeRoot, projectHost)) as { path?: string };
             const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
             const newPath = res?.path ?? (dir ? `${dir}/${value}` : value);
-            window.dispatchEvent(new CustomEvent("ocode:fs-rename", { detail: { oldPath: path, newPath, projectRoot: activeRoot } }));
+            window.dispatchEvent(new CustomEvent("ocode:fs-rename", { detail: { oldPath: path, newPath, projectRoot: activeRoot, ...(projectHost ? { host: projectHost } : {}) } }));
           });
         },
       });

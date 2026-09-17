@@ -46,6 +46,15 @@ const terminalPingInterval = 30 * time.Second
 // stalled peer cannot block the ping loop indefinitely.
 const terminalPingWriteTimeout = 10 * time.Second
 
+// terminalCreateWaitTimeout bounds how long a socket waits for a concurrent
+// socket that already holds the create reservation for the same terminal id.
+// A pty.Start is a fork/exec and returns in milliseconds, so anything near
+// this bound means the reservation owner is stuck (or the reservation leaked),
+// not that the spawn is slow; the waiter then answers a retryable 503 instead
+// of hanging the WebSocket handshake indefinitely. A var so tests can shorten
+// it without a multi-second sleep.
+var terminalCreateWaitTimeout = 15 * time.Second
+
 // terminalAttachMsg is the text control frame sent to the browser first on
 // every (re)connect. Every other server -> client frame is binary pty output,
 // so the client can key on frame type alone. resumed=true tells the client a
@@ -63,10 +72,13 @@ var anonTerminalSeq atomic.Int64
 // session detaches and arms a TTL timer; a new socket for the same id
 // reattaches and cancels it. A ping goroutine in serveTerminalSocket
 // sends periodic WebSocket pings (terminalPingInterval) for keepalive
-// and dead-connection detection; a failed ping detaches the shell.
-// Client auto-reconnect (TerminalPanel.tsx) reconnects with exponential
-// backoff on unexpected closes (network failures, server crashes),
-// but not on clean 1000 closures or user-initiated closes.
+// and dead-connection detection of the browser socket; a failed ping
+// detaches the shell. Client auto-reconnect (TerminalPanel.tsx) reconnects
+// with exponential backoff on unexpected closes (network failures, server
+// crashes), but not on user-initiated closes. Because the server closes
+// the TCP connection without a close frame, the browser sees 1006 and
+// reconnects after a shell exit too; the clean-1000 path only fires if a
+// graceful close frame is ever added.
 type terminalSession struct {
 	id        string
 	project   string

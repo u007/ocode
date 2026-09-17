@@ -28,6 +28,18 @@ func spaHandler(webFS fs.FS) http.Handler {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
+		// Cache policy. The embed.FS backing this handler reports a zero
+		// ModTime for every file, so Go emits no Last-Modified and no ETag —
+		// the browser has no validator and would re-download the whole bundle
+		// on every page load (slow in the desktop webview, brutal over
+		// Tailscale). Vite emits content-hashed filenames under assets/, so
+		// those are safe to cache forever; everything else (index.html, the
+		// SPA fallback) must revalidate so a new build is picked up at once.
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		if path == "" {
 			path = "index.html"

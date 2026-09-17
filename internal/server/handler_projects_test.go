@@ -205,3 +205,41 @@ func TestHandleUpdateRemoteProjectRejectsInvalidWSLPort(t *testing.T) {
 		t.Fatal("original project was changed")
 	}
 }
+
+// TestProjectHostFor locks the environment-prompt remote-project wiring:
+// projectHostFor must resolve a registered remote (SSH/WSL) project's host so
+// buildAgentSession can stamp it on the agent, and return "" for local
+// projects, unknown roots, and the empty root. Without this the <env> block
+// described a remote project root using the local machine's config/session/
+// skill paths with no indication they belong to different machines.
+func TestProjectHostFor(t *testing.T) {
+	h := testProjectHandler(t)
+	if err := h.projects.Add("/home/user/local"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.projects.AddRemote("devbox", "/home/user/app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.projects.AddRemote("wsl:Ubuntu", `C:\Users\james\win`); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		root string
+		want string
+	}{
+		{"local project", "/home/user/local", ""},
+		{"remote ssh", "/home/user/app", "devbox"},
+		{"remote wsl", `C:\Users\james\win`, "wsl:Ubuntu"},
+		{"unknown root", "/nope", ""},
+		{"empty root", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := h.projectHostFor(tc.root); got != tc.want {
+				t.Fatalf("projectHostFor(%q) = %q, want %q", tc.root, got, tc.want)
+			}
+		})
+	}
+}

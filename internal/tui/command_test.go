@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/contextbudget"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/skill"
@@ -1049,6 +1050,36 @@ func TestContextCommandNilAgentGuard(t *testing.T) {
 	}
 }
 
+// The TUI renders the shared contextbudget Report, so its /context output and
+// the web/desktop GET /api/sessions/:id/context report carry the same sections.
+func TestContextCommandRendersSharedReport(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Model = "gpt-4o"
+	m := model{
+		width:   80,
+		workDir: t.TempDir(),
+		config:  cfg,
+		agent:   agent.NewAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, cfg, nil),
+	}
+
+	m.handleContextCmd(nil)
+
+	if len(m.messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(m.messages))
+	}
+	text := m.messages[0].text
+	for _, want := range []string{
+		"Context Budget",
+		"Base Prompt",
+		"Provider prompt (openai/gpt-4o)",
+		"Session Messages",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("context output missing %q\n---\n%s", want, text)
+		}
+	}
+}
+
 func TestContextMCPGrouping(t *testing.T) {
 	serverNames := []string{"claude_ai_Gmail", "context7"}
 	toolNames := map[string]struct{}{
@@ -1064,7 +1095,7 @@ func TestContextMCPGrouping(t *testing.T) {
 		{"name": "bash", "description": "run bash"},
 	}
 
-	grouped, builtin := groupMCPToolDefs(defs, toolNames, serverNames)
+	grouped, builtin := contextbudget.GroupMCPToolDefs(defs, toolNames, serverNames)
 
 	if len(grouped["claude_ai_Gmail"]) != 2 {
 		t.Errorf("expected 2 tools for claude_ai_Gmail, got %d", len(grouped["claude_ai_Gmail"]))

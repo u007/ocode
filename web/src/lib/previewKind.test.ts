@@ -4,8 +4,10 @@ import {
   PREVIEW_CONTEXT_EVENT,
   dispatchOpenPreview,
   dispatchPreviewContext,
+  isLegacyOfficePath,
   parsePreviewOpen,
   previewKindForPath,
+  previewOnlyKindForPath,
   resolvePreviewDoc,
 } from "./previewKind";
 
@@ -21,11 +23,50 @@ describe("previewKindForPath", () => {
     expect(previewKindForPath("budget.xlsx")).toBe("excel");
     expect(previewKindForPath("legacy.xls")).toBe("excel");
     expect(previewKindForPath("data.csv")).toBe("excel");
+    expect(previewKindForPath("song.mp3")).toBe("audio");
+    expect(previewKindForPath("clip.mp4")).toBe("video");
+    expect(previewKindForPath("screen.webm")).toBe("video");
   });
 
   it("returns null for unknown or missing extensions", () => {
     expect(previewKindForPath("movie.mkv")).toBeNull();
     expect(previewKindForPath("Makefile")).toBeNull();
+  });
+});
+
+describe("previewOnlyKindForPath", () => {
+  it("routes binary preview formats away from Monaco", () => {
+    expect(previewOnlyKindForPath("report.pdf")).toBe("pdf");
+    expect(previewOnlyKindForPath("spec.docx")).toBe("docx");
+    expect(previewOnlyKindForPath("deck.pptx")).toBe("pptx");
+    expect(previewOnlyKindForPath("budget.xlsx")).toBe("excel");
+    expect(previewOnlyKindForPath("data.csv")).toBe("excel");
+    expect(previewOnlyKindForPath("photo.PNG")).toBe("image");
+    expect(previewOnlyKindForPath("icon.svg")).toBe("image");
+    expect(previewOnlyKindForPath("song.mp3")).toBe("audio");
+    expect(previewOnlyKindForPath("voice.m4a")).toBe("audio");
+    expect(previewOnlyKindForPath("clip.mp4")).toBe("video");
+    expect(previewOnlyKindForPath("screen.webm")).toBe("video");
+  });
+
+  it("keeps editable and unrenderable paths in the editor", () => {
+    expect(previewOnlyKindForPath("main.go")).toBeNull();
+    expect(previewOnlyKindForPath("notes.md")).toBeNull();
+    expect(previewOnlyKindForPath("flow.mmd")).toBeNull();
+    expect(previewOnlyKindForPath("legacy.doc")).toBeNull();
+    expect(previewOnlyKindForPath("movie.mkv")).toBeNull();
+    expect(previewOnlyKindForPath("movie.avi")).toBeNull();
+    expect(previewOnlyKindForPath("Makefile")).toBeNull();
+  });
+});
+
+describe("isLegacyOfficePath", () => {
+  it("detects .doc/.ppt only", () => {
+    expect(isLegacyOfficePath("old.doc")).toBe(true);
+    expect(isLegacyOfficePath("OLD.PPT")).toBe(true);
+    expect(isLegacyOfficePath("spec.docx")).toBe(false);
+    expect(isLegacyOfficePath("deck.pptx")).toBe(false);
+    expect(isLegacyOfficePath("report.pdf")).toBe(false);
   });
 });
 

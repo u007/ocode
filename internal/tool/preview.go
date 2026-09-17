@@ -16,7 +16,7 @@ const PreviewOpenSentinel = "PREVIEW_OPEN:"
 // previewOpenKinds is the allowlist of sidebar-previewable extensions.
 // Text/code fall back to the existing Monaco editor tab; binaries render
 // via pdf.js (pdf), docx-preview (docx), jszip slide parser (pptx),
-// mermaid.js (mmd/md with diagrams), or images.
+// mermaid.js (mmd/md with diagrams), images, or native audio/video elements.
 var previewOpenKinds = map[string]string{
 	".pdf":  "pdf",
 	".docx": "docx",
@@ -44,12 +44,27 @@ var previewOpenKinds = map[string]string{
 	".yml":  "text",
 	".html": "text",
 	".css":  "text",
+	// Audio/video: browser-playable containers only (mirrors
+	// HandleFileRaw.previewRawTypes; .mkv/.avi stay out).
+	".mp3":  "audio",
+	".m4a":  "audio",
+	".aac":  "audio",
+	".wav":  "audio",
+	".ogg":  "audio",
+	".oga":  "audio",
+	".opus": "audio",
+	".flac": "audio",
+	".mp4":  "video",
+	".m4v":  "video",
+	".webm": "video",
+	".ogv":  "video",
+	".mov":  "video",
 }
 
 // PreviewOpenTool lets the LLM activate the sidebar preview on a file:
 // "show this deck in the sidebar", "open the report for a look".
-// Office documents (Word, Excel, PowerPoint) and PDFs are preview-only
-// with selectable text; only text/code opens editable. It validates the
+// Office documents (Word, Excel, PowerPoint), PDFs, images, and audio/video
+// are preview-only; only text/code opens editable. It validates the
 // path only (workspace-relative + allowlist); the actual bytes flow
 // through GET /api/files/raw or /api/files/content so confinement stays
 // in the server handlers, not the tool.
@@ -58,7 +73,7 @@ type PreviewOpenTool struct{}
 func (t *PreviewOpenTool) Name() string { return "preview_open" }
 
 func (t *PreviewOpenTool) Description() string {
-	return "Open a file in the sidebar preview (browser tab stays available). Use when the user asks to preview or present a file: PDFs (multi-page), Word docs (preview + select), Excel sheets (preview + select), PowerPoint decks (slides + present mode), mermaid diagrams (clickable nodes), images, or text/code (editable). Returns a PREVIEW_OPEN directive the web UI auto-opens."
+	return "Open a file in the sidebar preview (browser tab stays available). Use when the user asks to preview or present a file: PDFs (multi-page), Word docs (preview + select), Excel sheets (preview + select), PowerPoint decks (slides + present mode), mermaid diagrams (clickable nodes), images, audio, or video (native player), or text/code (editable). Returns a PREVIEW_OPEN directive the web UI auto-opens."
 }
 
 func (t *PreviewOpenTool) Definition() map[string]interface{} {

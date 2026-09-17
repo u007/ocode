@@ -1,3 +1,21 @@
+---
+type: Decision
+title: Multi-Use Preview — Design Spec (Draft, 2026-09-10)
+description: Historical Draft (2026-09-10) design for sidebar PreviewHost + a full session Preview sub-tab. Predates and does NOT cover the 2026-09-16 Files-tab auto-preview routing; diverges from shipped code on `.md` default (rendered MarkdownViewer, not Monaco+toggle) and on the PreviewSurface signature. See docs/gotchas/files-tab-preview-only-routing.md for shipped behavior.
+resource: docs/superpowers/specs/2026-09-10-preview-multipurpose-design.md
+tags:
+  - preview
+  - design
+  - draft
+  - spec
+  - sidebar
+  - files-tab
+  - monaco
+  - pdf
+  - docx
+  - pptx
+timestamp: 2026-09-16T09:12:26Z
+---
 # Multi-Use Preview — Design Spec
 
 > Date: 2026-09-10  

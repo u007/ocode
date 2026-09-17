@@ -84,9 +84,10 @@ func asExitError(err error, target **exec.ExitError) bool {
 // AGENTS.md "capture subprocess output").
 func (s *SSHTransport) Exec(command string) (ExecResult, error) {
 	cmd := exec.Command("ssh", append(s.Target.SSHArgs(), command)...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := &LimitedBuffer{Max: MaxExecOutput}
+	stderr := &LimitedBuffer{Max: MaxExecOutput}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	runErr := s.run(cmd, "exec")
 	res := ExecResult{Stdout: stdout.String(), Stderr: stderr.String()}
@@ -108,9 +109,10 @@ func (s *SSHTransport) Exec(command string) (ExecResult, error) {
 func (s *SSHTransport) ExecStdin(command string, stdin io.Reader) (ExecResult, error) {
 	cmd := exec.Command("ssh", append(s.Target.SSHArgs(), command)...)
 	cmd.Stdin = stdin
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := &LimitedBuffer{Max: MaxExecOutput}
+	stderr := &LimitedBuffer{Max: MaxExecOutput}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	runErr := s.run(cmd, "exec-stdin")
 	res := ExecResult{Stdout: stdout.String(), Stderr: stderr.String()}

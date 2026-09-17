@@ -105,6 +105,9 @@ const stateFake = vi.hoisted(() => ({
   activeProject: null as Project | null,
   loading: false,
   tabsByProject: {} as Record<string, { id: string }[]>,
+  // Read by the row's hover-prefetch handler; the real ProjectState always
+  // carries this map (see its initialState), so the fixture must too.
+  activeTabByProject: {} as Record<string, string | null>,
 }));
 
 const chatSessionsFake = vi.hoisted(() => ({} as Record<string, Partial<SessionSlice>>));
@@ -125,6 +128,7 @@ const actionsFake = vi.hoisted(() => ({
   renameGroup: vi.fn(),
   reorderGroups: vi.fn(),
   setGroupCollapsed: vi.fn(),
+  prefetchProjectSessions: vi.fn(),
 }));
 
 vi.mock("../../stores/projectStore", () => ({

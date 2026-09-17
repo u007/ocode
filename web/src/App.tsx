@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import pkg from "../package.json";
 import { Routes, Route } from "react-router-dom";
 import { PanelLeft, PanelLeftClose, PanelRight, PanelRightClose, Plus, X } from "lucide-react";
@@ -27,7 +27,7 @@ import CommandPalette from "./components/common/CommandPalette";
 import GitPanel from "./components/Git/GitPanel";
 import ChangesPanel from "./components/Changes/ChangesPanel";
 import FileTree from "./components/Files/FileTree";
-import FileEditor from "./components/Files/FileEditor";
+import FileTabContent from "./components/Files/FileTabContent";
 import LogPanel from "./components/Logs/LogPanel";
 import TerminalTabs, { type TerminalTabsHandle } from "./components/Terminal/TerminalTabs";
 import AssetsPanel from "./components/Assets/AssetsPanel";
@@ -52,6 +52,10 @@ import { useKeyboard } from "./hooks/useKeyboard";
 import { useTheme } from "./hooks/useTheme";
 import { useResizableSidebar } from "./hooks/useResizableSidebar";
 import { useEditorTabs } from "./hooks/useEditorTabs";
+import {
+  resolveVisibleEditorTabId,
+  visibleEditorTabs as visibleEditorTabsForProject,
+} from "./components/Files/editorTabsPersistence";
 import { useChat } from "./hooks/useChat";
 import { dispatchCommand } from "./components/Chat/commands";
 import SessionPage from "./pages/SessionPage";
@@ -69,9 +73,14 @@ import { useTurnWatchdogAll } from "./hooks/useTurnWatchdog";
 import FrontendMemoryReporter from "./lib/debug/frontendMemoryReporter";
 import { __setRevoker } from "./lib/browserStore";
 import { revokeBrowseSession } from "./api/client";
-import type { Project } from "./api/types";
+import { getTrustedTerminalProject } from "./lib/trustedProject";
 import { SpeechProvider } from "./components/Speech/SpeechProvider";
 import SpeechToolbar from "./components/Speech/SpeechToolbar";
+
+/** Shared frozen empty array. Used as the default for props that would
+ *  otherwise be a fresh `[]` on every render, which would defeat `memo` on the
+ *  component receiving it. */
+const EMPTY_STRING_ARRAY: string[] = [];
 
 // Browse panel close → revoke the server-side browse session. Wired here
 // (module scope, once) rather than inside browserStore.ts to avoid a
@@ -85,18 +94,12 @@ type ModelDialogTab = "main" | "small" | "advisor" | "permission" | "recap" | "o
  * An absent path is deliberately not treated as local: persisted tabs can
  * outlive a project, and connecting them without trusted metadata could turn
  * a previously remote shell into a local one.
+ *
+ * Kept re-exported here for existing importers (App.browser.test.tsx); the
+ * implementation lives in lib/trustedProject so the Port forwards panel can use
+ * the same rule without an App ↔ Layout import cycle.
  */
-export function getTrustedTerminalProject(
-  projects: readonly Pick<Project, "path" | "host" | "remote_port">[],
-  projectPath: string,
-): { known: true; host?: string; remotePort?: number } | { known: false } {
-  const matches = projects.filter((candidate) => candidate.path === projectPath);
-  // The terminal store is keyed by path, so a path shared by multiple hosts
-  // cannot be routed safely from a path-only persisted tab. Reject ambiguity
-  // rather than arbitrarily selecting a remote or local project.
-  if (matches.length !== 1) return { known: false };
-  return { known: true, host: matches[0].host || undefined, remotePort: matches[0].remote_port || undefined };
-}
+export { getTrustedTerminalProject };
 
 function StatusMetricsHydrator() {
   const dispatch = useChatDispatch();
@@ -250,7 +253,16 @@ function HomeApp() {
   });
   // Restore per-project view state on project switch. Falls back to defaults
   // for new/unknown projects.
-  useEffect(() => {
+  //
+  // useLayoutEffect, NOT useEffect: the active project changes on a normal
+  // render, so a passive effect would let the browser PAINT the new project
+  // with the outgoing project's tab (e.g. Files) before swapping to the saved
+  // one (e.g. Sessions) — a visible one-frame flash on every project switch
+  // whose saved view differs. A layout effect applies the restore in the same
+  // commit, before paint, so the first frame is already correct. It runs on
+  // mount too, which is what makes a deep-linked session open on the right tab
+  // without a flash.
+  useLayoutEffect(() => {
     const path = projectState.activeProject?.path;
     if (!path) return;
     const saved = loadViewStateForProject(path);
@@ -299,12 +311,29 @@ function HomeApp() {
     dismissExternalChange,
   } = useEditorTabs();
 
+  // Editor tabs are global state (so switching projects preserves each
+  // project's open files), but the Files tab must only ever show the ACTIVE
+  // project's tabs. Otherwise a file left open in a remote SSH project stays
+  // on screen after switching to a local project (and vice versa) — the
+  // "files tab shows remote files while a local project is focused" bug.
+  const visibleEditorTabs = useMemo(
+    () => visibleEditorTabsForProject(editorTabs, projectState.activeProject),
+    [editorTabs, projectState.activeProject],
+  );
+  // The globally-active tab id may point at a tab that belongs to another
+  // project (hidden). Everything user-facing (tab bar, panes, Cmd+S/Cmd+W,
+  // chat attachment) must use an id that is actually visible here.
+  const visibleActiveEditorTabId = useMemo(
+    () => resolveVisibleEditorTabId(visibleEditorTabs, activeEditorTabId),
+    [visibleEditorTabs, activeEditorTabId],
+  );
+
   // Editor tabs opted into the LLM loop, preserving their project root so we
   // can filter per session-tab and avoid leaking files across projects. Omit
   // `includeInContext` (pre-feature) defaults to true.
   const contextFileEntries = useMemo(
-    () => editorTabs.filter((t) => t.includeInContext !== false).map((t) => ({ path: t.path, projectRoot: t.projectRoot })),
-    [editorTabs],
+    () => visibleEditorTabs.filter((t) => t.includeInContext !== false).map((t) => ({ path: t.path, projectRoot: t.projectRoot })),
+    [visibleEditorTabs],
   );
 
   // Effective active editor context respects the include toggle. Unchecking
@@ -313,12 +342,15 @@ function HomeApp() {
   // ChatInput's `activeEditorContext` even though the tab is excluded.
   const effectiveActiveEditorContext = useMemo(() => {
     if (!activeEditorContext) return null;
-    const tab = editorTabs.find(
+    const tab = visibleEditorTabs.find(
       (t) => t.path === activeEditorContext.path && (t.projectRoot ?? "") === (activeEditorContext.projectRoot ?? ""),
     );
     if (tab && tab.includeInContext === false) return null;
+    // A context left over from a tab that is now hidden (project switched) must
+    // not be attached to the newly-focused project's chat.
+    if (!tab) return null;
     return activeEditorContext;
-  }, [activeEditorContext, editorTabs]);
+  }, [activeEditorContext, visibleEditorTabs]);
 
   // ── Sidebar PreviewHost: AI/file-tree activation + highlight context ──
   // The `preview_open` agent tool and `ocode:open-preview` events (file tree
@@ -369,12 +401,12 @@ function HomeApp() {
 
   useEffect(() => {
     const onDelete = (e: Event) => {
-      const d = (e as CustomEvent).detail as { paths: string[]; projectRoot?: string };
-      if (d?.paths?.length) closeTabsForPaths(d.paths, d.projectRoot);
+      const d = (e as CustomEvent).detail as { paths: string[]; projectRoot?: string; host?: string };
+      if (d?.paths?.length) closeTabsForPaths(d.paths, d.projectRoot, d.host);
     };
     const onRename = (e: Event) => {
-      const d = (e as CustomEvent).detail as { oldPath: string; newPath: string; projectRoot?: string };
-      if (d?.oldPath && d?.newPath) renameTabPath(d.oldPath, d.newPath, d.projectRoot);
+      const d = (e as CustomEvent).detail as { oldPath: string; newPath: string; projectRoot?: string; host?: string };
+      if (d?.oldPath && d?.newPath) renameTabPath(d.oldPath, d.newPath, d.projectRoot, d.host);
     };
     window.addEventListener("ocode:fs-delete", onDelete as EventListener);
     window.addEventListener("ocode:fs-rename", onRename as EventListener);
@@ -390,9 +422,14 @@ function HomeApp() {
   // (for already-mounted editors) with bounded retry.
   const openFileAndShow = useCallback(
     async (path: string, projectRoot?: string, line?: number, query?: string) => {
-      // Resolve the host for this project root from the latest project list;
-      // a remote root must carry its ?host= so content loads hit the remote.
-      const host = projectState.projects.find((p) => p.path === projectRoot)?.host;
+      // Resolve the host for this project root. When the root is the ACTIVE
+      // project's, the active project is authoritative — a path-only lookup
+      // would be ambiguous if a remote SSH project and a local project share an
+      // absolute path, and could route a local open through the remote host.
+      const activeProject = projectState.activeProject;
+      const host = activeProject && activeProject.path === projectRoot
+        ? activeProject.host
+        : projectState.projects.find((p) => p.path === projectRoot)?.host;
       if (query && query.trim()) {
         setPendingHighlight(path, query.trim(), line, projectRoot);
       } else if (line && line > 0) {
@@ -422,7 +459,7 @@ function HomeApp() {
         setTimeout(retry, 100);
       }
     },
-    [handleOpenFile, projectState.projects],
+    [handleOpenFile, projectState.projects, projectState.activeProject],
   );
 
   // File links in chat (markdown + plain text) dispatch this event.
@@ -581,8 +618,8 @@ function HomeApp() {
     onCommandPalette: () => setCmdOpen(true),
     onFilePicker: () => setFilePickerOpen(true),
     onSave: () => {
-      if (activeEditorTabId) {
-        saveEditorTab(activeEditorTabId);
+      if (visibleActiveEditorTabId) {
+        saveEditorTab(visibleActiveEditorTabId);
       }
     },
     onCloseSession: () => {
@@ -596,8 +633,8 @@ function HomeApp() {
         return;
       }
       if (activeView === "files") {
-        if (activeEditorTabId) {
-          requestCloseTab(activeEditorTabId);
+        if (visibleActiveEditorTabId) {
+          requestCloseTab(visibleActiveEditorTabId);
         }
         return;
       }
@@ -795,7 +832,76 @@ function HomeApp() {
     rekeySession(tempTabId, sessionId);
   };
 
-  const allChatTabs = Object.values(projectState.tabsByProject).flat();
+  // --- Stable callbacks for the memoized per-tab children -------------------
+  // A trampoline keeps the prop identity constant across renders while always
+  // invoking the latest closure. Without it, every tab switch would hand
+  // ChatInput a freshly-created callback and defeat its `memo`, re-rendering
+  // every mounted (hidden) composer just because a sibling tab became active.
+  const handleCommandRef = useRef(handleCommand);
+  handleCommandRef.current = handleCommand;
+  const stableHandleCommand = useCallback(
+    (cmd: string, targetSessionId?: string | null) =>
+      handleCommandRef.current(cmd, targetSessionId),
+    [],
+  );
+  const handleSessionCreatedRef = useRef(handleSessionCreated);
+  handleSessionCreatedRef.current = handleSessionCreated;
+  const stableHandleSessionCreated = useCallback(
+    (tempTabId: string, sessionId: string) =>
+      handleSessionCreatedRef.current(tempTabId, sessionId),
+    [],
+  );
+  const handleClearPreviewContext = useCallback(() => setPreviewContext(null), []);
+
+  // Editor files opted into the loop, bucketed by project root so each tab's
+  // ChatInput receives a stable array reference across renders. Filtering
+  // inline in the tab map produced a fresh array per render per tab, which
+  // would defeat the memo on every one of them.
+  const contextFilePathsByProject = useMemo(() => {
+    const byProject: Record<string, string[]> = {};
+    for (const e of contextFileEntries) {
+      const key = e.projectRoot ?? "";
+      if (byProject[key]) byProject[key].push(e.path);
+      else byProject[key] = [e.path];
+    }
+    return byProject;
+  }, [contextFileEntries]);
+
+  // Every project that owns a terminal, so the project-scoped TerminalTabs
+  // instances stay mounted across both session-tab and project switches (their
+  // ptys/WebSockets must never be torn down by a switch). Hoisted out of the
+  // render-time IIFE below so this set is rebuilt only when the project/tab set
+  // actually changes, not on every render.
+  const terminalProjectPaths = useMemo(() => {
+    const paths = [
+      ...((projectState.projects ?? []) as { path: string }[]).map((p) => p.path),
+      ...Object.keys(projectState.tabsByProject ?? {}),
+      ...(projectState.activeProject ? [projectState.activeProject.path] : []),
+    ].filter(Boolean) as string[];
+    return Array.from(new Set(paths));
+  }, [projectState.projects, projectState.tabsByProject, projectState.activeProject]);
+
+  // Stable prop array for EditorTabBar (which is a plain child of App, so a
+  // fresh array each render is a needless prop change). Scoped to the active
+  // project so another project's tab never appears in the Files tab.
+  const editorTabBarItems = useMemo(
+    () =>
+      visibleEditorTabs.map((t) => ({
+        id: t.id,
+        path: t.path,
+        isDirty: t.isDirty,
+        includeInContext: t.includeInContext,
+      })),
+    [visibleEditorTabs],
+  );
+
+  // Computed once per tab-set change instead of six times per render (one per
+  // sub-tab block below) — each `Object.values(...).flat()` over every open tab
+  // in every project was a real per-render cost on large tab counts.
+  const allChatTabs = useMemo(
+    () => Object.values(projectState.tabsByProject).flat(),
+    [projectState.tabsByProject],
+  );
   const activeSessionTab = tabs.find((t) => t.id === activeTabId);
   // Lazy display:none: keep visited tabs mounted (hidden) so scroll/virtualizer
   // state survives switches (instant CSS toggle), but avoid mounting all 40
@@ -902,16 +1008,6 @@ function HomeApp() {
                   so TopTabs (which uses TabsList/TabsTrigger) keeps its Radix context, but outside the non-terminal
                   content region so switching away never unmounts the WebSocket/pty. Visibility is toggled via CSS only. */}
               {(() => {
-                const projectPaths = Array.from(
-                  new Set(
-                    [
-                      ...((projectState.projects ?? []) as { path: string }[]).map((p) => p.path),
-                      ...Object.keys(projectState.tabsByProject ?? {}),
-                      ...(projectState.activeProject ? [projectState.activeProject.path] : []),
-                    ].filter(Boolean) as string[],
-                  ),
-                );
-                const activeProjectPath = projectState.activeProject?.path ?? "";
                 const terminalFocused = activeView === "sessions" && focusedKind === "terminal";
                 return (
                   <div className={terminalFocused ? "flex flex-1 overflow-hidden m-0 flex-col" : "hidden"}>
@@ -923,7 +1019,7 @@ function HomeApp() {
                           </div>
                         )
                       ) : (
-                        projectPaths.map((pp) => {
+                        terminalProjectPaths.map((pp) => {
                           const metadata = getTrustedTerminalProject(projectState.projects, pp);
                           return (
                             <div
@@ -988,29 +1084,24 @@ function HomeApp() {
                 </button>
                 <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
                   <EditorTabBar
-                    editorTabs={editorTabs.map((t) => ({
-                      id: t.id,
-                      path: t.path,
-                      isDirty: t.isDirty,
-                      includeInContext: t.includeInContext,
-                    }))}
-                    activeEditorTabId={activeEditorTabId}
+                    editorTabs={editorTabBarItems}
+                    activeEditorTabId={visibleActiveEditorTabId}
                     onSelectTab={setActiveEditorTabId}
                     onCloseTab={requestCloseTab}
                     onToggleInclude={toggleIncludeInContext}
                   />
                   <div className="relative flex-1 overflow-hidden">
-                    {editorTabs.length === 0 && (
+                    {visibleEditorTabs.length === 0 && (
                       <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
                         No file open
                       </div>
                     )}
-                    {editorTabs.map((et) => (
+                    {visibleEditorTabs.map((et) => (
                       <div
                         key={et.id}
-                        className={et.id === activeEditorTabId ? "absolute inset-0" : "absolute inset-0 hidden"}
+                        className={et.id === visibleActiveEditorTabId ? "absolute inset-0" : "absolute inset-0 hidden"}
                       >
-                        <FileEditor
+                        <FileTabContent
                           path={et.path}
                           projectRoot={et.projectRoot}
                           projectHost={et.projectHost}
@@ -1081,17 +1172,18 @@ function HomeApp() {
                               if (handle) chatInputRefs.current.set(tab.id, handle);
                               else chatInputRefs.current.delete(tab.id);
                             }}
-                            onSlashCommand={handleCommand}
+                            projectPath={tab.projectPath}
+                            onSlashCommand={stableHandleCommand}
                             activeEditorContext={
                               effectiveActiveEditorContext && (effectiveActiveEditorContext.projectRoot ?? "") === (tab.projectPath ?? "") ? effectiveActiveEditorContext : null
                             }
-                            contextFilePaths={contextFileEntries.filter((e) => (e.projectRoot ?? "") === (tab.projectPath ?? "")).map((e) => e.path)}
+                            contextFilePaths={contextFilePathsByProject[tab.projectPath ?? ""] ?? EMPTY_STRING_ARRAY}
                             previewContext={
                               previewContext && (previewContext.projectRoot ?? "") === (tab.projectPath ?? "") ? previewContext : null
                             }
-                            onClearPreviewContext={() => setPreviewContext(null)}
+                            onClearPreviewContext={handleClearPreviewContext}
                             sessionTabId={tab.id}
-                            onSessionCreated={handleSessionCreated}
+                            onSessionCreated={stableHandleSessionCreated}
                           />
                         </div>
                       );

@@ -1,3 +1,15 @@
+---
+type: Decision
+title: Terminal Shells Survive Page Reload (Detach / Reattach)
+description: Record bounded-wait, abandon reservation safety net, and client restore timeout
+tags:
+  - terminal
+  - websocket
+  - architecture
+  - desktop
+  - robustness
+timestamp: 2026-09-16T17:33:00Z
+---
 # Terminal Shells Survive Page Reload (Detach / Reattach)
 
 **Status:** Implemented 2026-08-31. Supersedes the earlier "one websocket ==

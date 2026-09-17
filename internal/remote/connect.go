@@ -173,6 +173,15 @@ func newTransportForTarget(t Target, sup *tool.ProcessSupervisor) (Transport, er
 	}
 }
 
+// TransportForTarget builds the kind-appropriate Transport for t (nil
+// supervisor), validating that the target's transport is usable on this OS.
+// It is the exported form of newTransportForTarget for callers outside this
+// package — notably internal/server's remote shell probe, which must reach a
+// WSL distro via wsl.exe rather than assuming ssh.
+func TransportForTarget(t Target) (Transport, error) {
+	return newTransportForTarget(t, nil)
+}
+
 // ConnectWeb runs the shared prepare stages, then discovers-or-launches a
 // detached remote server, tunnels it to a local port (skipped for WSL —
 // Windows forwards WSL2 localhost natively), and opens the browser with a

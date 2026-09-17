@@ -101,11 +101,23 @@ func (w linuxWrapper) reexecConfiner(cmd *exec.Cmd, writableRoots []string) (*ex
 	if len(cmd.Args) < 3 {
 		return nil, fmt.Errorf("sandbox: unexpected command argv %q", cmd.Args)
 	}
-	// shellTail is the full original argv [<shell> [-l] -c <command>].
-	shellTail := cmd.Args
 	if cmd.Args[len(cmd.Args)-2] != "-c" {
 		return nil, fmt.Errorf("sandbox: unsupported command argv %q (expected <shell> [-l] -c <command>)", cmd.Args)
 	}
+	// shellTail is the full original argv [<shell> [-l] -c <command>], but
+	// argv[0] is replaced with the RESOLVED executable path: the Landlock
+	// confiner execve's the shell directly (no PATH lookup), so the default
+	// `bash -c` invocation's bare "bash" would otherwise resolve against the
+	// session CWD and fail with ENOENT — locking every sandboxed command out.
+	// cmd.Path is the absolute path exec.Command already resolved via PATH.
+	shellPath := cmd.Path
+	if shellPath == "" {
+		shellPath = cmd.Args[0]
+	}
+	if resolved := resolveConfineShell(shellPath); resolved != "" {
+		shellPath = resolved
+	}
+	shellTail := append([]string{shellPath}, cmd.Args[1:]...)
 	rootsJSON, _ := json.Marshal(writableRoots)
 	env := sandboxEnv(cmd.Env, rootsJSON, cmd.Dir)
 	return &exec.Cmd{
@@ -160,6 +172,25 @@ func stripSandboxEnv(env []string) []string {
 		out = append(out, kv)
 	}
 	return out
+}
+
+// resolveConfineShell returns the executable shell path a Linux confiner must
+// execve. An absolute path is returned unchanged; a bare name (the default
+// `bash` from bashInvocation) is resolved through PATH — execve does no PATH
+// lookup of its own, so forwarding "bash" verbatim would resolve it against
+// the session CWD and fail. Returns "" when a bare name cannot be resolved.
+func resolveConfineShell(shell string) string {
+	if shell == "" {
+		return ""
+	}
+	if filepath.IsAbs(shell) {
+		return shell
+	}
+	resolved, err := exec.LookPath(shell)
+	if err != nil {
+		return ""
+	}
+	return resolved
 }
 
 // canonicalExistingWritables resolves each writable root symlinks and keeps

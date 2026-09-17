@@ -7,12 +7,16 @@ import { ApiError } from "../api/client";
 import { useChat } from "./useChat";
 
 const mockResolvePermission = vi.fn();
+const mockSendMessage = vi.fn();
+const mockGetSessionState = vi.fn();
 vi.mock("../api/client", async () => {
   const actual = await vi.importActual<typeof import("../api/client")>("../api/client");
   return {
     ApiError: actual.ApiError,
     api: {
       resolvePermission: (...a: unknown[]) => mockResolvePermission(...a),
+      sendMessage: (...a: unknown[]) => mockSendMessage(...a),
+      getSessionState: (...a: unknown[]) => mockGetSessionState(...a),
       listProjects: vi.fn().mockResolvedValue([]),
       getCurrentProject: vi.fn().mockResolvedValue(null),
       listProjectSessions: vi.fn().mockResolvedValue([]),
@@ -84,6 +88,41 @@ describe("useChat.resolvePermission", () => {
       expect(await result.current.chat.resolvePermission("call-1", "deny")).toEqual({ ok: true });
     });
     expect(mockResolvePermission).toHaveBeenCalledWith("call-1", "sess-1", "deny");
+    expect(result.current.chat.pendingPermission).toBeNull();
+  });
+});
+
+describe("useChat.sendMessage pending-ask recovery", () => {
+  // The live `permission` frame can be missed (backgrounded tab) and the
+  // sentinel may never reach disk, leaving the user stuck on
+  // ErrPermissionPending with no dialog. A refused send must recover the ask
+  // from the server's live session state and open the dialog.
+  it("hydrates the permission dialog when a send is refused as pending (409)", async () => {
+    mockSendMessage.mockRejectedValueOnce(
+      new ApiError("a permission decision is pending for this session; resolve it before sending a new message", 409),
+    );
+    mockGetSessionState.mockResolvedValueOnce({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 1,
+      pending_asks: { permissions: [ask] },
+    });
+    const { result } = setup();
+    await act(async () => {
+      await result.current.chat.sendMessage("continue");
+    });
+    expect(mockGetSessionState).toHaveBeenCalledWith("sess-1");
+    expect(result.current.chat.pendingPermission?.request_id).toBe("call-1");
+  });
+
+  it("leaves the dialog untouched when the refusal is not a pending ask", async () => {
+    mockGetSessionState.mockClear();
+    mockSendMessage.mockRejectedValueOnce(new ApiError("agent error: upstream", 500));
+    const { result } = setup();
+    await act(async () => {
+      await result.current.chat.sendMessage("continue");
+    });
+    expect(mockGetSessionState).not.toHaveBeenCalled();
     expect(result.current.chat.pendingPermission).toBeNull();
   });
 });

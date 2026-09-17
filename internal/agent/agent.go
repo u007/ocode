@@ -287,6 +287,13 @@ type Agent struct {
 	// This is used by the /cd command to update the working directory shown
 	// to the LLM without changing the process working directory.
 	workDir string
+	// projectHost, when set, is the saved remote host ([user@]host or
+	// wsl:<distro>) of the project this agent is bound to. Non-empty means the
+	// project lives on another machine while this agent runs locally (the
+	// desktop/web server's per-project remote mode), so the environment prompt
+	// says so instead of presenting the local machine's config/session/runtime
+	// paths as if they were the project's.
+	projectHost string
 	// sessionID tags this agent's debug-log entries so the desktop/web Log
 	// tab can scope itself to the active session (see SetSessionID and
 	// emitDebug). Empty in the TUI, where DebugAppend is process-global by
@@ -2627,6 +2634,23 @@ func (a *Agent) SetMode(m Mode) {
 // WorkDir returns the project root the agent is bound to ("" = process cwd).
 func (a *Agent) WorkDir() string { return a.workDir }
 
+// SetProjectHost records the remote host of the project this agent is bound to
+// (empty for a local project). The environment prompt uses it to state that the
+// project lives on another machine, so the local machine's config/session/
+// runtime paths in the same <env> block are not read as the project's paths.
+// Invalidate the cached environment prompt, or a project switch would keep
+// serving the previous host's block.
+func (a *Agent) SetProjectHost(host string) {
+	if a.projectHost == host {
+		return
+	}
+	a.projectHost = host
+	a.clearEnvironmentPromptCache()
+}
+
+// ProjectHost returns the remote host recorded by SetProjectHost ("" = local).
+func (a *Agent) ProjectHost() string { return a.projectHost }
+
 // SetWorkDir sets the working directory override for the environment prompt.
 // When set, this directory is used instead of os.Getwd() in the <env> block.
 func (a *Agent) SetWorkDir(dir string) {
@@ -3219,6 +3243,19 @@ func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *P
 		modelLabel := a.autoPermissionModelDisplayName()
 		a.OnPermissionCheck(name, modelLabel, true)
 		defer a.OnPermissionCheck(name, modelLabel, false)
+	}
+	// TypeSafe (Jev) is a decision-only model: no chat loop, no read_file,
+	// no JSON effect report. It takes the whole request — interpreter
+	// source included — as structured state and answers one allow/deny
+	// choice, so it replaces BOTH chat paths below.
+	if modelName := a.autoPermissionModelName(); isTypesafeModel(modelName) {
+		client, ok := newClientFn(a.config, modelName).(*TypesafeClient)
+		if !ok {
+			a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_typesafe_fail tool=%s model=%s error=client_creation_failed", name, modelName))
+			return false, "could not create TypeSafe client (missing TYPESAFE_API_KEY?)", "", false
+		}
+		allowed, reason, consulted = a.askPermissionModelTypesafe(client, name, args, req)
+		return allowed, reason, "", consulted
 	}
 	if name == "bash" {
 		var p struct {
@@ -5109,15 +5146,39 @@ func (a *Agent) Shutdown() {
 	// Shut down memory maintenance worker as well. Both workers are started by
 	// NewAgent; leaving this channel open leaks one goroutine per agent.
 	a.memoryMaintShutdown()
-	// Wait for any abandoned orphan-recovery goroutine (see
-	// recoverOneOrphanedToolCall) to finish before resetting shared state
-	// below, so it can't race the reset.
-	a.orphanRecoveryWG.Wait()
-	// Drop this agent's entries from the global cross-agent write registry so
+	// Wait (bounded) for any abandoned orphan-recovery goroutine (see
+	// recoverOneOrphanedToolCall) to finish before retiring the store below,
+	// so it can't race that teardown. The bound matters: the goroutine is
+	// tracked because handleToolCallWithContext's 30s ctx only bounds the
+	// caller's select — if the underlying tool blocks (e.g. `git push` on a
+	// credential prompt) the goroutine outlives its ctx and this wait would
+	// otherwise hang Shutdown indefinitely. A straggler that outlives the
+	// bound is harmless: Retire makes the store reject later writes, so it
+	// cannot re-seed the global write registry with a phantom entry.
+	a.waitForOrphanRecovery(orphanRecoveryShutdownWait)
+	// Retire (not Reset) this agent's snapshot store: it is being discarded,
+	// so drop its entries from the global cross-agent write registry so
 	// surviving agents' UndoByToolCallID doesn't see stale same-agent writes
-	// blocking them. Safe to call multiple times (Reset is idempotent).
+	// blocking them, and poison it against the straggler above. Safe to call
+	// multiple times.
 	if a.snapshotStore != nil {
-		a.snapshotStore.Reset()
+		a.snapshotStore.Retire()
+	}
+}
+
+// waitForOrphanRecovery blocks until orphan-recovery goroutines finish or
+// timeout elapses, whichever comes first. Mirrors waitForPendingSaves: the
+// WaitGroup wait runs on its own goroutine so the bounded select can win.
+func (a *Agent) waitForOrphanRecovery(timeout time.Duration) {
+	done := make(chan struct{})
+	crashguard.Go(func() {
+		a.orphanRecoveryWG.Wait()
+		close(done)
+	})
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		a.emitDebug("ORPHAN", fmt.Sprintf("orphan recovery did not finish within %s; retiring store anyway", timeout))
 	}
 }
 
@@ -5451,6 +5512,16 @@ func (a *Agent) AddMCPErrors(errs []string) {
 // callers (runTurn, streamStep) hold the session mutex/goroutine across the
 // whole Step() call, the entire session becomes permanently stuck.
 const orphanRecoveryTimeout = 30 * time.Second
+
+// orphanRecoveryShutdownWait bounds how long Agent.Shutdown blocks on an
+// abandoned orphan-recovery goroutine before retiring the snapshot store
+// anyway. It is deliberately much shorter than orphanRecoveryTimeout: that
+// constant bounds the *caller's* select, not the goroutine itself, so a tool
+// blocked on its own I/O (a credential prompt, a stuck network call) outlives
+// it. Shutdown sits on the model-switch / session-eviction path, so it must
+// not be held hostage by such a straggler; Store.Retire makes the late write
+// inert instead.
+const orphanRecoveryShutdownWait = 2 * time.Second
 
 func (a *Agent) recoverOrphanedToolCalls(messages []Message, stopCh <-chan struct{}) []Message {
 	// Find the LAST assistant message with orphaned tool calls.

@@ -411,6 +411,16 @@ func remoteSPAHandler(webFS fs.FS) http.Handler {
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
 			return
 		}
+		// Cache policy — mirrors internal/server.spaHandler. embed.FS reports a
+		// zero ModTime, so without an explicit directive the webview has no
+		// validator and re-downloads every hashed asset on each load. Vite's
+		// content-hashed assets under assets/ are immutable; index.html and the
+		// SPA fallback must revalidate.
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		if path == "" {
 			path = "index.html"

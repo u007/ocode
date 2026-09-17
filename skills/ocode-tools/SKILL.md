@@ -25,12 +25,14 @@ type Tool interface {
 | Extension | Method | Purpose |
 |-----------|--------|---------|
 | `ContextualTool` | `ExecuteCtx(ctx, args)` | Tools needing snapshot store access or tool call ID |
-| `StreamingTool` | `ExecuteStream(ctx, args, emit)` | Long-running tools that emit incremental output (e.g. bash) |
+| `StreamingTool` | `ExecuteStream(args, emit)` | Long-running tools that emit incremental output (e.g. bash) |
+| `ContextualStreamingTool` | `ExecuteStreamCtx(ctx, args, emit)` | Combines context + streaming (currently only `BashTool`) |
 | `ImageResultTool` | `ExecuteImage(args)` | Tools returning raw image bytes for vision embedding |
+| `ImageProducingTool` | `ProducesImage(args)` | Extends `ImageResultTool`; agent checks this to decide if a call produces an image |
 
-The agent loop checks for these extensions at dispatch time and calls the appropriate method.
+The agent loop checks for these extensions at dispatch time and calls the appropriate method. `ContextualStreamingTool` is checked first (highest priority), then `StreamingTool`, then `ContextualTool`, then plain `Execute`.
 
-**Parallelism matters:** The agent loop sorts tool calls into parallel-capable (`Parallel() == true`) and sequential (`false`). Parallel tools (read, glob, grep, lsp, ast, skill, lsp_diagnostics, GitHub tools) run in goroutines. Sequential tools (bash, write, edit, delete, webfetch, apply_patch) block the loop — each runs to completion before the next starts.
+**Parallel tools** (read, glob, grep, rgrep, list, lsp, ast, skill, lsp_diagnostics, GitHub tools, repo_overview, todo_read, preview_open) run in goroutines. **Sequential tools** (bash, write, edit, delete, apply_patch, webfetch, websearch, etc.) block the loop — each runs to completion before the next starts.
 
 **`NoticedError`** — tools that encounter a recoverable problem (e.g. LSP server not installed) wrap their error with a user-facing notice:
 ```go
@@ -39,7 +41,7 @@ type NoticedError struct {
     Notice string  // Shown in transcript, NOT sent to LLM
 }
 ```
-The TUI strips the `NOTICE:` prefix and renders the remainder as a transient message.
+The agent extracts `NoticedError.Notice` into `Message.Notice`; the TUI renders it as a transient non-LLM message in the transcript.
 
 ## 2. Tool registration (`tool.go:100:InitBuiltinTools`)
 
@@ -62,7 +64,7 @@ Called once per session from `agent.go:NewAgent()`. Creates one shared `lsp.Mana
 | 5 | `EditTool` | `file.go` | `edit` | ❌ | allow |
 | 6 | `MultiEditTool` | `file.go` | `multiedit` | ❌ | allow |
 | 7 | `MultiFileEditTool` | `file.go` | `multi_file_edit` | ❌ | allow |
-| 8 | `UndoTool` | `bash_backup.go` | `undo_file_change` | ❌ | allow |
+| 8 | `UndoTool` | `undo.go` | `undo_file_change` | ❌ | allow |
 | | **Search** | | | | |
 | 9 | `GlobTool` | `search.go` | `glob` | ✅ | allow |
 | 10 | `GrepTool` | `search.go` | `grep` | ✅ | allow |
@@ -76,7 +78,7 @@ Called once per session from `agent.go:NewAgent()`. Creates one shared `lsp.Mana
 | 16 | `TodoUpdateTool` | `todo_store.go` | `todo_update` | ❌ | allow |
 | | **Skills & prompts** | | | | |
 | 17 | `SkillTool` | `misc.go` | `skill` | ✅ | allow |
-| 18 | `SkillAliasTool` | `misc.go` | `skill_alias` | ✅ | allow |
+| 18 | `SkillAliasTool` | `misc.go` | `load_skill` | ✅ | allow |
 | | **Interaction** | | | | |
 | 19 | `QuestionTool` | `misc.go` | `question` | ❌ | allow |
 | | **Web** | | | | |
@@ -99,13 +101,15 @@ Called once per session from `agent.go:NewAgent()`. Creates one shared `lsp.Mana
 | | **Media** | | | | |
 | 32 | `OcrTool` | `ocr.go` | `ocr` | ❌ | allow |
 | 33 | `ImageGenTool` | `imagegen.go` | `imagegen` | ❌ | allow |
+| 34 | `PreviewOpenTool` | `preview.go` | `preview_open` | ✅ | ask |
 | | **Opt-in** | | | | |
-| 34 | `AstTool` | `ast.go` | `ast` | ✅ | allow |
-| 35 | `AstGrepTool` | `ast_grep.go` | `ast_grep` | ✅ | allow |
+| 35 | `AstTool` | `ast.go` | `ast` | ✅ | allow |
+| 36 | `AstGrepTool` | `ast_grep.go` | `ast_grep` | ✅ | allow |
 | | **Conditional** | | | | |
-| 36 | `RgrepTool` | `rgrep.go` | `rgrep` | ✅ | allow |
+| 37 | `RgrepTool` | `rgrep.go` | `rgrep` | ✅ | allow |
+| 38 | `ComputerTool` | `computer.go` | `computer` | ❌ | ask |
 | | **Scheduled** | | | | |
-| 37 | `CronTool` | `cron.go` | `cron` | ❌ | allow |
+| 39 | `CronTool` | `cron.go` | `cron` | ❌ | allow |
 
 > Permission defaults from `permissions.go:NewPermissionManager()`. Override via `ocodeconfig.json:permissions.tools` or agent-specific permission maps.
 
@@ -113,7 +117,9 @@ Called once per session from `agent.go:NewAgent()`. Creates one shared `lsp.Mana
 - `task` (sub-agent spawner from `subagent.go`)
 - `advisor` (strategic advisor from `advisor_tool.go`)
 - `wait` (block/sleep from `wait_tool.go`)
-- `bash_output` / `kill_shell` (process management from `process_tools.go` — registered when `ProcessRegistry` is present)
+- `bash_output` / `kill_shell` / `list_processes` (process management from `process_tools.go` — registered when `ProcessRegistry` is present)
+- `agent_status` / `task_status` (run status tools)
+- `knowledge_lookup` / `task_cancel` (knowledge + task lifecycle)
 - MCP tools (registered from MCP server connections)
 
 ## 3. LSP manager lifecycle
@@ -129,8 +135,8 @@ All three tools receive `Mgr: lspMgr` at registration. The manager owns the lang
 
 ```
 agent.go:Step()
-  → finds tool by name in a.tools[]
-  → gateToolCall(mode, name, args)      — mode-gating (mode_gate.go)
+  → finds tool by name in a.tools[name] (map, not slice)
+  → gateToolCall(mode, name, args)      — mode-gating (mode.go)
   → a.permissions.Decide(name, args)    — permission check (permissions.go)
   → hooks.RunPreHook(name, args)        — user-configured pre-tool shell hooks
   → a.pipeline.RunToolBefore(name, args) — in-process transform
@@ -142,9 +148,11 @@ agent.go:Step()
 ```
 
 Permission defaults are defined in `permissions.go:NewPermissionManager()`:
-- **Always allow** (no prompt): read, glob, grep, rgrep, list, lsp, skill, question, todoread, todowrite, todo_update, advisor, task, task_status, agent_status, repo_overview, plan_enter, plan_exit, wait, bash_output, kill_shell
-- **Default allow**: write, edit, multiedit, multi_file_edit, replace_lines, apply_patch, format, undo_file_change, skill_alias, lsp_diagnostics, ast
-- **Default ask**: delete, bash, webfetch, websearch, repo_clone, github_pr, github_issue, github_workflow, mcp_*
+- **Always allow** (no prompt): read, glob, grep, rgrep, list, lsp, lsp_diagnostics, skill, load_skill, question, todoread, todowrite, todo_update, advisor, task, task_status, agent_status, repo_overview, plan_enter, plan_exit, wait, bash_output, kill_shell, list_processes, ocr, cron
+- **Default allow**: write, edit, multiedit, multi_file_edit, replace_lines, apply_patch, format, imagegen
+- **Default ask**: delete, bash, webfetch, websearch, repo_clone, mcp_*, computer
+
+Tools not in any list default to `PermissionAsk` (e.g. `github_pr`, `github_issue`, `github_workflow`).
 
 ## 5. Extra utilities
 
@@ -156,27 +164,31 @@ Permission defaults are defined in `permissions.go:NewPermissionManager()`:
 | `diff.go` | `DiffStrings()` helper used by edit/multiedit tools |
 | `process.go` | `ProcessRegistry` — tracks background shell processes, output buffering, state management |
 | `process_supervisor.go` | `ProcessSupervisor` — supervises process groups, timeout enforcement, cleanup |
-| `process_tools.go` | `BashOutputTool` + `KillShellTool` — expose process registry to the LLM |
+| `process_tools.go` | `BashOutputTool` + `KillShellTool` + `ListProcessesTool` — expose process registry to the LLM |
 | `custom.go` | `CustomTool` — wraps user-defined tools from config (name, description, shell command) |
-| `ast.go` | `AstTool` — LSP-backed semantic code query (always registered when LSP server available) |
+| `ast.go` | `AstTool` — LSP-backed semantic code query (registered when LSP server available on PATH) |
 | `ast_grep.go` | `AstGrepTool` — structural search/rewrite via ast-grep CLI (opt-in via `plugins.ast`) |
-| `rgrep.go` | `RgrepTool` — ripgrep-backed content search (registered when `rg` resolves on PATH; honors .gitignore/.ignore everywhere, hidden files searched, .git/node_modules hard-excluded) |
-| `bash_backup.go` | `UndoTool` — file change undo via snapshot store |
+| `rgrep.go` | `RgrepTool` — ripgrep-backed content search (registered when `rg` resolves on PATH) |
+| `bash_backup.go` | Bash undo command whitelist used by `UndoTool` |
+| `undo.go` | `UndoTool` — file change undo via snapshot store |
 | `cron.go` | `CronTool` — scheduled job management (requires scheduler service) |
 | `diagnostics.go` | `LSPDiagnosticsTool` — LSP diagnostics reader |
 | `imagegen.go` | `ImageGenTool` — image generation via Gemini/OpenAI/etc. |
-| `misc.go` | `SkillTool`, `SkillAliasTool`, `QuestionTool` |
+| `misc.go` | `SkillTool`, `SkillAliasTool` (`load_skill`), `QuestionTool` |
 | `ocr.go` | `OcrTool` — optical character recognition |
 | `patch.go` | `PatchTool` — apply unified diff patches |
 | `plan.go` | `PlanEnterTool`, `PlanExitTool` — planning phase management |
+| `preview.go` | `PreviewOpenTool` — sidebar preview activation |
 | `repo.go` | `RepoCloneTool`, `RepoOverviewTool` — external repo research |
+| `computer.go` | `ComputerTool` — host desktop control (opt-in via `computer_use.enabled`) |
+| `computer_driver.go` | `ComputerDriver` interface — platform abstraction for desktop control |
 | `todo_store.go` | `TodoWriteTool`, `TodoReadTool`, `TodoUpdateTool` — persistent todo plan |
 
 ## 6. Adding a new tool (checklist)
 
 1. **Choose the right file** — file operations go in `file.go`, search in `search.go`, web in `web.go`, process in `process_tools.go`, etc. If none fit, create a new file.
-2. **Implement `Tool` interface** — all 5 methods: `Name()`, `Description()`, `Definition()`, `Execute(json.RawMessage)`, `Parallel()`. Optionally implement `ContextualTool`, `StreamingTool`, or `ImageResultTool` extensions.
-3. **Register in `InitBuiltinTools()`** — add to the `builtins` slice in `tool.go:106`.
+2. **Implement `Tool` interface** — all 5 methods: `Name()`, `Description()`, `Definition()`, `Execute(json.RawMessage)`, `Parallel()`. Optionally implement `ContextualTool`, `StreamingTool`, `ContextualStreamingTool`, `ImageResultTool`, or `ImageProducingTool` extensions.
+3. **Register in `InitBuiltinTools()`** — add to the `builtins` slice in `tool.go:126`.
 4. **Set permission default** — add to the default rules table in `permissions.go:NewPermissionManager()`.
 5. **Add to the skill catalog** if it's a tool the LLM should discover via the skill tool.
 6. **Update this skill's table** above.

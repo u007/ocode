@@ -617,15 +617,36 @@ export async function reconcileOpenSessions(
         // that missed the ask event — derive the pending-ask status from the
         // transcript, not just the current (possibly empty) client slice.
         const transcriptPending = extractPendingFromMessages(detail.messages);
+        // Live ask(s) the server's resident agent is paused on. The sentinel
+        // may be absent from the persisted transcript (a paused pause whose
+        // save failed/conflicted, or a pause that post-dated the last write),
+        // so `transcriptPending` alone can miss the ask entirely. The server's
+        // live transcript is the authoritative source then.
+        const livePending = state.pending_asks;
+        const hasLivePending =
+          (livePending?.permissions?.length ?? 0) > 0 ||
+          (livePending?.questions?.length ?? 0) > 0;
         const hasPendingAsk = !!(
           slice.pendingPermission ||
           slice.pendingQuestion ||
           transcriptPending.pendingPermission ||
-          transcriptPending.pendingQuestion
+          transcriptPending.pendingQuestion ||
+          hasLivePending
         );
         const wasActive = slice.turnActive;
         applyReconcileState(dispatch, sessionId, state, hasPendingAsk, wasActive);
         dispatch({ type: "MERGE_SNAPSHOT", sessionId, messages: detail.messages, total: detail.total });
+        // Hydrate the dialog from the live ask(s) AFTER the merge: the
+        // non-mid-turn MERGE_SNAPSHOT branch overwrites pendingPermission /
+        // pendingQuestion from the (possibly sentinel-less) transcript, so a
+        // dispatch before it would be clobbered. The reducer dedupes by
+        // request_id, so an ask already set by the merge is unaffected.
+        for (const permission of livePending?.permissions ?? []) {
+          dispatch({ type: "PERMISSION_REQUEST", sessionId, permission });
+        }
+        for (const question of livePending?.questions ?? []) {
+          dispatch({ type: "QUESTION_REQUEST", sessionId, question });
+        }
         const watermark = lastAppliedSeq.get(sessionId) ?? 0;
         for (const frame of state.live_frames ?? []) {
           if (frame.seq <= watermark) continue;

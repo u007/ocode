@@ -205,9 +205,43 @@ func TestPreviewRawCoversOfficeSet(t *testing.T) {
 			t.Errorf("previewRawTypes[%q] = %q, want %q", ext, got, wantCT)
 		}
 	}
-	for _, legacy := range []string{".doc", ".ppt", ".exe", ".mkv"} {
+	// Audio/video are browser-playable containers only.
+	media := map[string]string{
+		".mp3":  "audio/mpeg",
+		".m4a":  "audio/mp4",
+		".wav":  "audio/wav",
+		".ogg":  "audio/ogg",
+		".flac": "audio/flac",
+		".mp4":  "video/mp4",
+		".webm": "video/webm",
+		".mov":  "video/quicktime",
+	}
+	for ext, wantCT := range media {
+		if got := previewRawTypes[ext]; got != wantCT {
+			t.Errorf("previewRawTypes[%q] = %q, want %q", ext, got, wantCT)
+		}
+	}
+	for _, legacy := range []string{".doc", ".ppt", ".exe", ".mkv", ".avi"} {
 		if _, ok := previewRawTypes[legacy]; ok {
 			t.Errorf("previewRawTypes must not serve %q", legacy)
 		}
+	}
+}
+
+// TestPreviewRawCapSplitsMedia guards the two budget tiers: audio/video get
+// the larger media cap, everything else the document cap.
+func TestPreviewRawCapSplitsMedia(t *testing.T) {
+	for _, ct := range []string{"audio/mpeg", "audio/mp4", "video/mp4", "video/webm"} {
+		if got := previewRawCap(ct); got != previewRawMediaMaxBytes {
+			t.Errorf("previewRawCap(%q) = %d, want media cap %d", ct, got, previewRawMediaMaxBytes)
+		}
+	}
+	for _, ct := range []string{"application/pdf", "image/png", "text/csv; charset=utf-8"} {
+		if got := previewRawCap(ct); got != previewRawMaxBytes {
+			t.Errorf("previewRawCap(%q) = %d, want doc cap %d", ct, got, previewRawMaxBytes)
+		}
+	}
+	if previewRawMediaMaxBytes <= previewRawMaxBytes {
+		t.Errorf("media cap (%d) must exceed the document cap (%d)", previewRawMediaMaxBytes, previewRawMaxBytes)
 	}
 }

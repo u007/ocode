@@ -48,6 +48,8 @@ import type {
 	TTSPlayback,
 	TTSInstallState,
 	PortMapView,
+	PortMapTarget,
+	ContextBudgetReport,
 } from "./types";
 
 export interface CompactConfig {
@@ -975,8 +977,14 @@ export const api = {
     }),
   // Interactive pty terminal configuration for the server's single workdir.
   // The terminal itself is always enabled; these are availability/scrollback.
-  getTerminalConfig: () =>
-    fetchJSON<{
+  // Pass a remote project's host+path to describe THAT host's shells instead
+  // of this machine's (the server probes the remote and reports `remote: true`).
+  getTerminalConfig: (host?: string, project?: string) => {
+    const params = new URLSearchParams();
+    if (host) params.set("host", host);
+    if (host && project) params.set("project", project);
+    const query = params.toString();
+    return fetchJSON<{
       available?: boolean;
       scrollback_lines: number;
       font_family: string;
@@ -985,7 +993,10 @@ export const api = {
       default_shell: string;
       available_shells: string[];
       work_dir: string;
-    }>("/api/config/terminal"),
+      /** Present and true when the response describes a remote host. */
+      remote?: boolean;
+    }>(`/api/config/terminal${query ? `?${query}` : ""}`);
+  },
   setTerminalScrollbackLines: (scrollback_lines: number) =>
     fetchJSON<{ scrollback_lines: number }>("/api/config/terminal", {
       method: "PUT",
@@ -1036,6 +1047,9 @@ export const api = {
       estimated_tokens: number;
       max_tokens?: number;
       model?: string;
+      /** Full token-budget breakdown shared with the TUI's local /context.
+       *  Present only when a live agent existed and was not mid-turn. */
+      report?: ContextBudgetReport;
     }>(`/api/sessions/${id}/context`),
   // Reconcile endpoint (Parts 03–05): authoritative turn state + the bus seq
   // watermark. Reconcile = state fetch + transcript refetch, never event
@@ -1051,6 +1065,18 @@ export const api = {
       // by reconcileOpenSessions so a mid-turn reload doesn't lose the
       // in-progress reply. Absent/empty once the turn ends.
       live_frames?: { event: string; data: unknown; seq: number }[];
+      // Unresolved asks the session's resident agent is paused on, read from
+      // its live transcript. The authoritative recovery source when the
+      // paused tool result never reached disk (so the fetched transcript
+      // carries no sentinel to derive the pending dialog from). Absent when
+      // the session is idle or has no live agent.
+      pending_asks?: {
+        permissions?: import("../api/types").SSEPermissionEvent[];
+        questions?: {
+          request_id: string;
+          questions: import("../api/types").QuestionPrompt[];
+        }[];
+      };
     }>(`/api/sessions/${id}/state`),
   // Per-session status snapshot (Part 03): superset of /api/tui-status with
   // session_id populated and context_* included, so each tab renders its own
@@ -1146,10 +1172,14 @@ export const api = {
       }),
     })
   },
-  shellCommand: (command: string, workDir?: string) =>
+  // Run a shell command via POST /api/shell (the `!` prefix). `host` targets a
+  // registered ocode Remote project: the server runs the command on that host
+  // through the host's own login shell instead of locally. Omitted (or empty)
+  // keeps the historical local execution.
+  shellCommand: (command: string, workDir?: string, host?: string) =>
     fetchJSON<{ output: string; exitCode: number; error: string }>("/api/shell", {
       method: "POST",
-      body: JSON.stringify({ command, workDir }),
+      body: JSON.stringify({ command, workDir, host }),
     }),
   listProjects: () => fetchJSON<Project[]>("/api/projects"),
   /** The saved project root matching the server's working directory (auto-added
@@ -1348,7 +1378,7 @@ export const api = {
       body: JSON.stringify({ path, mode: "os", project_root: projectRoot }),
     }),
 
-  // ── Sidebar preview: fetch raw bytes for pdf/docx/pptx/image/mmd via
+  // ── Sidebar preview: fetch raw bytes for pdf/docx/pptx/image/audio/video/mmd via
   // GET /api/files/raw (auth headers required — plain <img>/<iframe> tags
   // can't attach them, so callers use fetch + blob URLs). host selects a
   // registered remote project — the read runs on that host.
@@ -1361,6 +1391,18 @@ export const api = {
     }
     return res.arrayBuffer();
   },
+
+  // ── Sidebar preview (audio/video): exchange the bearer for a short-lived,
+  // single-file capability the browser's media element can carry in the URL.
+  // <video>/<audio> cannot set an Authorization header, and the master
+  // ?token= form is forbidden in remote mode; the capability is scoped to this
+  // one path. POST is authed normally, so the capability never leaves the
+  // browser except as the media URL.
+  getMediaToken: (path: string, projectRoot?: string) =>
+    fetchJSON<{ token: string }>("/api/files/media-token", {
+      method: "POST",
+      body: JSON.stringify({ path, project_root: projectRoot }),
+    }),
 
   // ── Session title / export ──
   setSessionTitle: (id: string, title: string) =>
@@ -1648,34 +1690,63 @@ export const api = {
     fetchJSON<{ cancelled: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
       method: "POST",
     }),
-  // Desktop remote-workspace only (internal/desktop/portmaps.go) — these
-  // routes don't exist on a plain `ocode serve --remote` instance, so
-  // listPortMaps 404s there. See isPortMapsAvailable.
-  listPortMaps: () => fetchJSON<PortMapView[]>("/api/desktop/portmaps"),
-  addPortMap: (remotePort: number, localPort: number) =>
-    fetchJSON<PortMapView[]>("/api/desktop/portmaps", {
+  // Port forwards. With a target, these hit the project-scoped family served by
+  // internal/server (`/api/portmaps?host=&project=`) so the panel follows the
+  // active remote SSH project. Without one they hit the desktop
+  // remote-workspace's single-tunnel family (internal/desktop/portmaps.go) —
+  // reached only in desktop remote-workspace mode, where /api/* is proxied to
+  // the remote and only the local desktop mux can answer.
+  listPortMaps: (target?: PortMapTarget) =>
+    fetchJSON<PortMapView[]>(portMapsPath(target)),
+  addPortMap: (remotePort: number, localPort: number, target?: PortMapTarget) =>
+    fetchJSON<PortMapView[]>(portMapsPath(target), {
       method: "POST",
       body: JSON.stringify({ remote_port: remotePort, local_port: localPort }),
     }),
-  removePortMap: (remotePort: number) =>
-    fetchJSON<PortMapView[]>(`/api/desktop/portmaps/${remotePort}`, { method: "DELETE" }),
-  setPortMapEnabled: (remotePort: number, enabled: boolean) =>
-    fetchJSON<PortMapView[]>(`/api/desktop/portmaps/${remotePort}/${enabled ? "enable" : "disable"}`, {
+  removePortMap: (remotePort: number, target?: PortMapTarget) =>
+    fetchJSON<PortMapView[]>(portMapsPath(target, `/${remotePort}`), { method: "DELETE" }),
+  setPortMapEnabled: (remotePort: number, enabled: boolean, target?: PortMapTarget) =>
+    fetchJSON<PortMapView[]>(portMapsPath(target, `/${remotePort}/${enabled ? "enable" : "disable"}`), {
       method: "POST",
     }),
 };
 
-/** True when the Ports panel should be offered: the desktop-only
- *  /api/desktop/portmaps routes exist here (a plain remote-server SPA,
- *  reached directly via `ocode remote --web`, 404s instead). Treat a
- *  non-array response as "unavailable": a 200 whose body is not a portmaps
- *  JSON array means the route is actually missing (SPA fallback or proxy)
- *  and every panel action would fail anyway. */
-export async function isPortMapsAvailable(): Promise<boolean> {
+/** Port-forwards route for a target: the project-scoped family when a remote
+ *  project is given, else the desktop single-workspace family.
+ *
+ *  `suffix` is the path segment that follows the route (`/{port}`,
+ *  `/{port}/enable`). It MUST be inserted before the target query string —
+ *  appending it to the returned URL instead lands the port inside the query
+ *  (`/api/portmaps?host=…&project=~/www/app/3510/disable`), which the server
+ *  reads as project path `~/www/app/3510/disable` and rejects with
+ *  "host/project_path is not a remote project registered with this server"
+ *  (and the POST lands on the add route, not the enable route). The desktop
+ *  family has no query, so its suffix appends directly. */
+function portMapsPath(target?: PortMapTarget, suffix = ""): string {
+  if (!target) return `/api/desktop/portmaps${suffix}`;
+  const params = new URLSearchParams();
+  params.set("host", target.host);
+  params.set("project", target.path);
+  return `/api/portmaps${suffix}?${params.toString()}`;
+}
+
+/** True when the Port forwards panel should be offered for target (or, with no
+ *  target, for the desktop remote-workspace's single tunnel).
+ *
+ *  Unavailable means the route does not exist here — a plain server without the
+ *  project-scoped family, or a local/desktop session with no remote workspace.
+ *  Treat a non-array response as "unavailable" too: a 200 whose body is not a
+ *  portmaps JSON array means the route is actually missing (SPA fallback or
+ *  proxy) and every panel action would fail anyway. 400 is unavailable as well —
+ *  the server answered but does not accept this project (unregistered host, or
+ *  a WSL target, which never needs forwards). Any other error is assumed
+ *  transient and keeps the panel offered, matching the historical behavior. */
+export async function isPortMapsAvailable(target?: PortMapTarget): Promise<boolean> {
   try {
-    const maps = await api.listPortMaps();
+    const maps = await api.listPortMaps(target);
     return Array.isArray(maps);
   } catch (e) {
+    if (e instanceof ApiError && (e.status === 404 || e.status === 400)) return false;
     return !(e instanceof ApiError && e.status === 404);
   }
 }

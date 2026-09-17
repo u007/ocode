@@ -80,6 +80,25 @@ describe("RunNode", () => {
     expect(screen.getByText("child says hi")).toBeInTheDocument();
   });
 
+  it("propagates onOpenDetail to nested child runs", () => {
+    const child: AgentRun = {
+      ...baseRun,
+      id: "run-2",
+      name: "sub-agent",
+      messages: [{ role: "assistant", content: "child says hi" }],
+    };
+    const withChild: AgentRun = { ...baseRun, children: [child] };
+    const onOpenDetail = vi.fn();
+    render(<RunNode run={withChild} depth={0} onOpenDetail={onOpenDetail} />);
+
+    fireEvent.click(screen.getByText("sub-agent"));
+
+    expect(onOpenDetail).toHaveBeenCalledWith("run-2");
+    // The name click is the drill-in, not the expand toggle, so the child's
+    // transcript stays open rather than collapsing.
+    expect(screen.getByText("child says hi")).toBeInTheDocument();
+  });
+
   it("badges a run whose output contract was checked and not satisfied", () => {
     const contractFailed: AgentRun = {
       ...baseRun,

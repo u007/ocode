@@ -499,6 +499,30 @@ describe("reconcileOpenSessions", () => {
     expect(actions.some((a) => a.type === "MERGE_SNAPSHOT" && a.sessionId === "s1")).toBe(true);
   });
 
+  it("hydrates the permission dialog from live pending_asks when the transcript has no sentinel", async () => {
+    // A paused ask whose sentinel never reached disk: the fetched transcript
+    // cannot derive it, so state.pending_asks is the only recovery source.
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 3,
+      pending_asks: {
+        permissions: [{ request_id: "call-1", tool: "bash", command: "rm -rf build" }],
+      },
+    });
+    mockGetSession.mockResolvedValue({
+      messages: [{ role: "assistant", content: "working" }],
+      total: 1,
+    });
+    const { router, getState } = makeRouter(["s1"]);
+    await reconcileOpenSessions(new Set(["s1"]), router);
+
+    const slice = getState().sessions["s1"];
+    expect(slice.pendingPermission?.request_id).toBe("call-1");
+    // The turn is paused, not finished: it must still read as running.
+    expect(slice.turnActive).toBe(true);
+  });
+
   it("continues when one session's reconcile fails", async () => {
     mockGetSessionState.mockRejectedValueOnce(new Error("404")).mockResolvedValueOnce({
       bootstrap_stage: "",

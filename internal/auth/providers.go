@@ -138,6 +138,7 @@ var Providers = []Provider{
 	{ID: "zai-coding", Label: "Z.AI Coding", EnvVar: "ZAI_CODING_API_KEY"},
 	{ID: "moonshot", Label: "Moonshot", EnvVar: "MOONSHOT_API_KEY"},
 	{ID: "minimax", Label: "MiniMax", EnvVar: "MINIMAX_API_KEY"},
+	{ID: "typesafe", Label: "TypeSafe AI (Jev, permission judge)", EnvVar: "TYPESAFE_API_KEY"},
 	{ID: "alibaba", Label: "Alibaba (DashScope)", EnvVar: "DASHSCOPE_API_KEY"},
 	{ID: "alibaba-coding", Label: "Alibaba Coding", EnvVar: "DASHSCOPE_CODING_API_KEY"},
 	{ID: "chutes", Label: "Chutes", EnvVar: "CHUTES_API_KEY"},

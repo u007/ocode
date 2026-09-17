@@ -1,4 +1,4 @@
-import { render, waitFor } from "@testing-library/react";
+import { act, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import TerminalPanel from "./TerminalPanel";
 
@@ -264,5 +264,37 @@ describe("TerminalPanel history restore handoff", () => {
     const saved = window.localStorage.getItem("ocode.term.buf.t1");
     expect(saved).not.toBeNull();
     unmount();
+  });
+});
+
+// The live socket is only opened after the REST history restore settles, so a
+// restore fetch that never settles would leave the terminal permanently blank.
+// The restore timeout must attach the socket anyway (without a cursor) and say
+// so, instead of hanging with no output.
+describe("TerminalPanel history restore timeout", () => {
+  it("attaches the live socket when the restore fetch never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+
+      const { unmount } = render(
+        <TerminalPanel id="t1" active projectPath="/project" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
+      );
+
+      // Restore is still pending: the socket must not be open yet.
+      expect(h.sockets).toHaveLength(0);
+
+      await act(async () => {
+        vi.advanceTimersByTime(15000);
+        await Promise.resolve();
+      });
+
+      expect(h.sockets).toHaveLength(1);
+      const writes = h.terminals[0].write.mock.calls.map(([text]) => String(text)).join("");
+      expect(writes).toContain("restore timed out");
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

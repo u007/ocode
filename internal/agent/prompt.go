@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/u007/ocode/internal/knowledge"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/skill"
 )
@@ -43,13 +42,13 @@ If the change affects documented behavior or public interfaces, you must update 
 2. **Update project documentation** — README, API docs, architecture docs, migration notes if your changes affect public APIs, config, setup steps, or data flow.
 3. **State explicitly if no doc updates are needed** and explain why.
 
-## Use the Knowledge Bundle via knowledge_lookup (not direct reads)
+## Use the Knowledge Bundle via the Context Agent (not direct reads)
 
-When the knowledge bundle is active, the [ocode:knowledge] index above lists curated project docs (docs/). For any **why / what-did-we-decide / playbook / gotcha** question about THIS project, call the **knowledge_lookup** tool FIRST — it dispatches the context sub-agent, which semantically searches the bundle, verifies claims against the codebase, and cites doc paths.
+When the knowledge bundle is active, OKF documentation (docs/) is ONLY accessible through the **context** sub-agent. The main agent must NOT read docs/ files directly. For any **why / what-did-we-decide / playbook / gotcha** question about THIS project, route the question to the context agent -- via knowledge_lookup (for pure knowledge questions) or task with agent=context (for mixed or code-level work). The context agent searches existing database documents via doc_search/doc_get and manages the bundle via doc_write/doc_deprecate.
 
-**Do NOT read docs/ files directly with the read tool** to answer knowledge questions. The docs/ directory is owned by the knowledge system: retrieval is intentionally routed through knowledge_lookup so answers stay curated, verified, and citation-tracked. Only fall back to read on docs/ if knowledge_lookup explicitly reports the bundle has no relevant information.
+**Do NOT read docs/ files directly with the read tool** to answer knowledge questions. The docs/ directory is owned by the knowledge system: retrieval is intentionally routed through the context agent so answers stay curated, verified, and citation-tracked. Only fall back to read on docs/ if the context agent explicitly reports the bundle has no relevant information.
 
-**Context subsumes explore when the bundle is active:** the context sub-agent also handles codebase exploration (where/how/what) and has the full explore toolkit (grep/glob/read/list/lsp/bash/webfetch/websearch) plus doc tools. When the bundle is active, dispatch task with agent=context for code-level or mixed (why+where) questions — explore is hidden from the schema. Priority: doc_search first (get_top: 3), then doc_get as needed, then code tools; for mixed questions you MAY call doc_search and code tools (grep/glob/lsp/read) in parallel in the same batch — if docs answer, ignore the parallel code results.`
+**Context subsumes explore when the bundle is active:** the context sub-agent also handles codebase exploration (where/how/what) and has the full explore toolkit plus doc tools. When the bundle is active, dispatch task with agent=context for code-level or mixed (why+where) questions — explore is hidden from the schema. Pure exploration (no doc involvement) may use grep/glob/read/lsp directly. Priority: doc_search first (get_top: 3), then doc_get as needed, then code tools; for mixed questions you MAY call doc_search and code tools (grep/glob/lsp/read) in parallel in the same batch — if docs answer, ignore the parallel code results.`
 
 // PrepareMessages prepends the stable base prompt fragments for this agent.
 // It is safe to call more than once; marked fragments are not duplicated.
@@ -173,17 +172,6 @@ func (a *Agent) BasePromptMessages() []Message {
 	}
 	if a.DocPromptEnabled() {
 		msgs = append(msgs, Message{Role: "system", Content: promptDocPromptMarker + "\n" + docPromptContent})
-		// Inject the [ocode:knowledge] index when the knowledge bundle is active.
-		wd := a.workDir
-		if wd == "" {
-			wd, _ = os.Getwd()
-		}
-		if bundle, ok := knowledge.DetectBundle(wd); ok {
-			indexPath := filepath.Join(bundle.Root, "index.md")
-			if content, err := os.ReadFile(indexPath); err == nil {
-				msgs = append(msgs, Message{Role: "system", Content: "[ocode:knowledge]\n" + string(content)})
-			}
-		}
 	}
 	// Notes protocol fragment. Gate strictly on bus presence:
 	// a child not in a group has no bus, and the prompt must
@@ -234,8 +222,8 @@ func (a *Agent) notesProtocolPrompt(id string) string {
 		"A lead that turns out to be wrong is normal; correct it in your own report and resolve it on the bus."
 }
 
-func envHash(cwd, root string) string {
-	return strings.Join([]string{cwd, root, os.Getenv("NVM_DIR"), os.Getenv("PYENV_ROOT"), os.Getenv("PATH")}, "|")
+func envHash(cwd, root, projectHost string) string {
+	return strings.Join([]string{cwd, root, projectHost, os.Getenv("NVM_DIR"), os.Getenv("PYENV_ROOT"), os.Getenv("PATH")}, "|")
 }
 
 func (a *Agent) environmentPrompt() string {
@@ -246,7 +234,7 @@ func (a *Agent) environmentPrompt() string {
 		cwd = a.workDir
 	}
 	root := findWorkspaceRoot(cwd)
-	if a.envPromptDate == today && a.envPromptStr != "" && a.envPromptCwd == cwd && a.envPromptRoot == root && a.envPromptEnvHash == envHash(cwd, root) {
+	if a.envPromptDate == today && a.envPromptStr != "" && a.envPromptCwd == cwd && a.envPromptRoot == root && a.envPromptEnvHash == envHash(cwd, root, a.projectHost) {
 		return a.envPromptStr
 	}
 	provider, model := "", ""
@@ -286,6 +274,17 @@ func (a *Agent) environmentPrompt() string {
 	if isGitRepo(root) {
 		lines = append(lines, "  Git worktree directory: .worktrees/ (gitignored, project root)")
 	}
+	// A per-project remote (SSH/WSL) project runs its chat agent on the local
+	// machine, so the <env> block would otherwise present a remote project root
+	// next to the local machine's config/session/skill/runtime paths with no
+	// indication they belong to different machines. Say it explicitly.
+	// Empty for local projects → byte-identical prompt (cache-stable).
+	if a.projectHost != "" {
+		lines = append(lines, fmt.Sprintf(
+			"  Project host: %s (remote project — the project files live on that host; the config/session/runtime paths below belong to the machine running this agent)",
+			a.projectHost,
+		))
+	}
 	lines = append(lines,
 		fmt.Sprintf("  Platform: %s", runtime.GOOS),
 		fmt.Sprintf("  Today's date: %s", today),
@@ -316,7 +315,7 @@ func (a *Agent) environmentPrompt() string {
 	a.envPromptStr = result
 	a.envPromptCwd = cwd
 	a.envPromptRoot = root
-	a.envPromptEnvHash = envHash(cwd, root)
+	a.envPromptEnvHash = envHash(cwd, root, a.projectHost)
 	return result
 }
 

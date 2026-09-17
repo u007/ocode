@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Network, Plus, Trash2 } from "lucide-react";
 import { api, isPortMapsAvailable, ApiError } from "../../api/client";
-import type { PortMapView } from "../../api/types";
+import type { PortMapTarget, PortMapView } from "../../api/types";
+import { useProjectState } from "../../stores/projectStore";
+import { remoteForwardTarget } from "../../lib/trustedProject";
 import {
   Dialog,
   DialogContent,
@@ -12,12 +14,31 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
-/** Top-nav "Ports" button + dialog for user-added SSH port forwards on a
- *  connected remote workspace (desktop app only — see internal/desktop/
- *  portmaps.go). Renders nothing when not connected to a remote workspace,
- *  or when viewing a plain remote-server SPA directly (`ocode remote --web`
- *  has no local process to back these routes; see isPortMapsAvailable). */
+/** Top-nav "Ports" button + dialog for user-added SSH port forwards.
+ *
+ *  Two backings, both keyed to the active project:
+ *  - A remote SSH project is active → the project-scoped family served by
+ *    internal/server (`/api/portmaps?host=&project=`), one `ssh -N -L` child per
+ *    forward under the server's process supervisor. This is what makes the
+ *    panel follow the project (kakiit, aimsai2, …) instead of the whole app.
+ *  - No remote project → the desktop remote-workspace's single-tunnel family
+ *    (`/api/desktop/portmaps`, internal/desktop/portmaps.go), reached only in
+ *    desktop remote-workspace mode.
+ *
+ *  Renders nothing when neither route exists (a plain local session, or a
+ *  remote-server SPA with no local process to back the desktop family — see
+ *  isPortMapsAvailable), and nothing for a WSL project (WSL2 shares the Windows
+ *  loopback, so the server refuses forwards for it). */
 export default function PortMapsWidget() {
+  const { state: projectState } = useProjectState();
+  const activePath = projectState.activeProject?.path ?? "";
+  const target = useMemo(
+    () => remoteForwardTarget(projectState.projects, activePath),
+    [projectState.projects, activePath],
+  );
+  // Stable dep key so switching project re-probes without object identity churn.
+  const targetKey = target ? `${target.host}\u0000${target.path}` : "";
+
   const [available, setAvailable] = useState(false);
   const [open, setOpen] = useState(false);
   const [maps, setMaps] = useState<PortMapView[]>([]);
@@ -26,20 +47,38 @@ export default function PortMapsWidget() {
   const [localPort, setLocalPort] = useState("");
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    isPortMapsAvailable().then(setAvailable);
-  }, []);
+  // The live target for handlers that fire after a project switch (the dialog is
+  // closed on switch, but an in-flight request can still resolve).
+  const targetRef = useRef<PortMapTarget | undefined>(undefined);
+  targetRef.current = target ?? undefined;
 
-  const refresh = () => {
+  // Re-probe (and drop stale rows) whenever the active project changes: a
+  // forward belongs to exactly one remote project, so a leftover list or an open
+  // dialog from the previous project must never be acted on.
+  useEffect(() => {
+    let cancelled = false;
+    setAvailable(false);
+    setMaps([]);
+    setError("");
+    setOpen(false);
+    isPortMapsAvailable(targetRef.current).then((ok) => {
+      if (!cancelled) setAvailable(ok);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [targetKey]);
+
+  const refresh = useCallback(() => {
     api
-      .listPortMaps()
+      .listPortMaps(targetRef.current)
       .then(setMaps)
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  };
+  }, []);
 
   useEffect(() => {
     if (open) refresh();
-  }, [open]);
+  }, [open, targetKey, refresh]);
 
   if (!available) return null;
 
@@ -54,7 +93,7 @@ export default function PortMapsWidget() {
     setBusy(true);
     setError("");
     try {
-      const updated = await api.addPortMap(rp, lp);
+      const updated = await api.addPortMap(rp, lp, targetRef.current);
       setMaps(updated);
       setRemotePort("");
       setLocalPort("");
@@ -69,7 +108,7 @@ export default function PortMapsWidget() {
     setBusy(true);
     setError("");
     try {
-      setMaps(await api.removePortMap(port));
+      setMaps(await api.removePortMap(port, targetRef.current));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -81,7 +120,7 @@ export default function PortMapsWidget() {
     setBusy(true);
     setError("");
     try {
-      setMaps(await api.setPortMapEnabled(port, enabled));
+      setMaps(await api.setPortMapEnabled(port, enabled, targetRef.current));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -104,7 +143,9 @@ export default function PortMapsWidget() {
           <DialogHeader>
             <DialogTitle className="text-foreground">Port Forwards</DialogTitle>
             <DialogDescription>
-              Extra SSH forwards to this remote workspace, on top of the API/browse tunnel.
+              {target?.host
+                ? `Extra SSH forwards from this machine to ${target.host}, on top of the built-in tunnels.`
+                : "Extra SSH forwards to this remote workspace, on top of the API/browse tunnel."}
             </DialogDescription>
           </DialogHeader>
 

@@ -43,6 +43,14 @@ func buildBwrapArgv(writableRoots []string, bashArgs []string) []string {
 // filesystem (ABI-v1-safe core, no TRUNCATE/REFER/IOCTL).
 const landlockReadExec = 0x1 | 0x4 | 0x8 // EXECUTE | READ_FILE | READ_DIR
 
+// landlockNullDevice is the singleton discard target outside every writable
+// root that tools open O_WRONLY/O_RDWR (`2>/dev/null`, git, ssh, pagers).
+// Landlock denies an open that no rule grants, so it gets an explicit write
+// grant — the Linux counterpart of the Seatbelt profile's /dev/null path rule
+// (see profile.go). /dev/tty is DELIBERATELY NOT granted, for the same
+// terminal-control reason documented there.
+const landlockNullDevice = "/dev/null"
+
 // landlockMutation is the full write/mutation right set, gated per ABI below.
 const (
 	landlockWriteFile  = 0x2

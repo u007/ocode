@@ -1,16 +1,17 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChatDispatch } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
 import { cancelLiveDeltas, closeSessionBackend } from "../../lib/sessionEvents";
+import { prefetchSession } from "../../lib/sessionPrefetch";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { MessageSquare, Plus, X, Loader2, Check } from "lucide-react";
 
 export default function SessionDialog() {
-  const { state: projectState, tabs, activeTabId, openSessionTab, closeSessionTab, toggleSessionPicker, openNewSessionTab } = useProjectState();
+  const { state: projectState, tabs, activeTabId, openSessionTab, closeSessionTab, toggleSessionPicker, openNewSessionTab, prefetchProjectSessions } = useProjectState();
   const chatDispatch = useChatDispatch();
   const { projectSessions, sessionsLoading, sessionPickerOpen, activeProject } = projectState;
 
@@ -34,6 +35,15 @@ export default function SessionDialog() {
       (s) => s.title?.toLowerCase().includes(q) || s.id.toLowerCase().includes(q)
     );
   }, [projectSessions, searchQuery]);
+
+  // The per-project session list is cached and revalidated in the background
+  // on switch, so it can be slightly stale. Opening the picker is the one
+  // moment that staleness is user-visible — force a revalidation here. The
+  // cached list still renders immediately; the fresh one replaces it in place.
+  useEffect(() => {
+    if (!sessionPickerOpen || !activeProject) return;
+    prefetchProjectSessions(activeProject, { force: true });
+  }, [sessionPickerOpen, activeProject, prefetchProjectSessions]);
 
   // Open a session tab and switch to it. Message loading is handled centrally
   // by SessionTabSync (it watches activeTabId).
@@ -133,6 +143,10 @@ export default function SessionDialog() {
                     key={session.id}
                     onClick={() => handleSessionClick(session.id, session.title)}
                     disabled={loading}
+                    // Warm the transcript before the click lands so the tab
+                    // opens without a cold fetch + loading spinner.
+                    onMouseEnter={() => prefetchSession(session.id)}
+                    onFocus={() => prefetchSession(session.id)}
                     onMouseDown={(e) => {
                       if (e.button === 1 && open) {
                         e.preventDefault(); // suppress middle-click autoscroll

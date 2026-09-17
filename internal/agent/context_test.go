@@ -408,6 +408,58 @@ func TestLoadContext_KaizenDigestInjected(t *testing.T) {
 	}
 }
 
+// TestLoadContextAnchorsAlwaysOnFilesAtRootNotCwd locks the desktop/web/remote
+// fix: the always-on context files (AGENTS.md, CLAUDE.md, OCODE.md,
+// .cursorrules) and .opencode/rules/*.md must resolve from the session's
+// project root, NOT the server process cwd. The desktop server boots with a cwd
+// that is not the session's project, and a per-project remote/WSL project's
+// root is not even on this machine — so a cwd-relative read injected another
+// project's (or the local machine's) rules into the session's cached prompt.
+func TestLoadContextAnchorsAlwaysOnFilesAtRootNotCwd(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("ROOT_AGENTS_BODY\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rulesDir := filepath.Join(root, ".opencode", "rules")
+	if err := os.MkdirAll(rulesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rulesDir, "root-rule.md"), []byte("ROOT_RULE_BODY\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A different project sits at the process cwd; its AGENTS.md must NOT leak.
+	cwdDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwdDir, "AGENTS.md"), []byte("CWD_AGENTS_BODY\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwdDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	got := LoadContext(map[string]bool{}, false, true, "", root)
+	if !strings.Contains(got, "ROOT_AGENTS_BODY") {
+		t.Fatalf("root AGENTS.md not injected:\n%s", got)
+	}
+	if !strings.Contains(got, "ROOT_RULE_BODY") {
+		t.Fatalf("root .opencode/rules/*.md not injected:\n%s", got)
+	}
+	if strings.Contains(got, "CWD_AGENTS_BODY") {
+		t.Fatalf("cwd project's AGENTS.md leaked into a root-anchored context:\n%s", got)
+	}
+
+	// root == "" must keep the legacy cwd-relative behavior callers relied on.
+	legacy := LoadContext(map[string]bool{}, false, true, "", "")
+	if !strings.Contains(legacy, "CWD_AGENTS_BODY") {
+		t.Fatalf("root==\"\" must fall back to the process cwd:\n%s", legacy)
+	}
+}
+
 // TestLoadModelContextWithSourceAt_AnchoredAtRootNotCwd proves the root-anchored
 // loader resolves {model}.OCODE.md from the supplied root even when the process
 // cwd is somewhere else entirely (the desktop shell boots with cwd "/"). The

@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent, useRef, useEffect, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
+import { memo, useState, type KeyboardEvent, useRef, useEffect, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
 import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, QUEUE_CHANGED_EVENT, type QueueChangedDetail, type QueuedItem } from "../../lib/tabQueue";
@@ -7,7 +7,6 @@ import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
 import { Paperclip, X } from "lucide-react";
 import { apiPath, authHeaders } from "@/api/client";
-import { useProjectState } from "../../stores/projectStore";
 import EditorContextChip from "./EditorContextChip";
 import { RESTORE_EVENT } from "../../lib/inputRestore";
 import { CHAT_INPUT_DEBOUNCE_MS, joinChatInputBatch } from "../../lib/chatInputBatch";
@@ -33,6 +32,12 @@ interface ChatInputProps {
   onClearPreviewContext?: () => void;
   /** Whether this chat input belongs to the currently active session tab. */
   isActive?: boolean;
+  /** Project root that owns this composer's session. Uploads land in
+   *  `<projectPath>/.ocode/uploads` so the relative `@.ocode/uploads/...` refs
+   *  resolve against the session's project. Passed as a prop (rather than read
+   *  from the project context) so this component can be memoized — a context
+   *  read would re-render every mounted composer on every tab/project switch. */
+  projectPath?: string;
 }
 
 export interface ChatInputHandle {
@@ -45,7 +50,7 @@ export interface SlashCommandResult {
   accepted?: boolean;
 }
 
-export default forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
+const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
   onSlashCommand,
   activeEditorContext,
   contextFilePaths,
@@ -54,6 +59,7 @@ export default forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
   previewContext,
   onClearPreviewContext,
   isActive,
+  projectPath,
 }: ChatInputProps,
   ref: ForwardedRef<ChatInputHandle>
 ) {
@@ -337,7 +343,6 @@ export default forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
   // Shared upload logic for both file input and drag-and-drop. Uploads are
   // project-scoped: they land in <project>/.ocode/uploads so the relative
   // @.ocode/uploads/<name> refs below resolve against the session's project.
-  const projectPath = useProjectState().state.activeProject?.path;
   const uploadFiles = async (files: File[]) => {
     if (files.length === 0) return;
     const fd = new FormData();
@@ -789,4 +794,11 @@ export default forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
       </div>
     </div>
   );
-})
+});
+
+/** One composer is mounted per open tab (all kept alive, hidden via CSS). Its
+ *  props are now stable across renders (App passes hoisted callbacks and
+ *  memoized arrays), so `memo` keeps every hidden composer from re-rendering
+ *  when a sibling tab or project becomes active. Draft/queue state is local and
+ *  unaffected. */
+export default memo(ChatInput);

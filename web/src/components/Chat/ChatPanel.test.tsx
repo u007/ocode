@@ -15,11 +15,13 @@ import { render, screen, fireEvent, act, within, cleanup } from "@testing-librar
 import { useLayoutEffect, useEffect } from "react";
 import ChatPanel from "./ChatPanel";
 import { ChatProvider, useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/chatStore";
+import { dropPrefetchedSession, prefetchSession } from "../../lib/sessionPrefetch";
 import type { Message } from "../../api/types";
 
 // --- Mock the API so the initial load + prepend pagination are controllable.
 const hoisted = vi.hoisted(() => ({
   resolve: { current: (() => {}) as (v: unknown) => void },
+  projectDispatch: vi.fn(),
 }));
 vi.mock("../../api/client", () => ({
   api: {
@@ -32,15 +34,17 @@ vi.mock("../../api/client", () => ({
   },
 }));
 
-// --- Mock the project store (ChatPanel only dispatches UPDATE_TAB_TITLE).
+// --- Mock the project store (ChatPanel only dispatches UPDATE_TAB_TITLE via
+// the stable dispatch-only context).
 vi.mock("../../stores/projectStore", () => ({
-  useProjectState: () => ({
-    state: { activeProject: { path: "/tmp/proj" } },
-    dispatch: vi.fn(),
-  }),
+  useProjectDispatch: () => hoisted.projectDispatch,
 }));
 
 import { api } from "../../api/client";
+
+/** Session id used by the hover-prefetch test (kept unique so the module-level
+ *  prefetch cache cannot collide with another test's session). */
+const PREFETCHED_SESSION_ID = "sess-prefetched";
 
 // --- Layout shims so @tanstack/react-virtual can compute a window in jsdom.
 // Instances are registered while observed so tests can drive size changes
@@ -163,6 +167,9 @@ afterEach(() => {
   // Prevent a pending getSession promise from one test leaking into the next.
   hoisted.resolve.current = (() => {}) as (v: unknown) => void;
   roInstances.length = 0;
+  // Same for the module-level prefetch cache (a warm entry surviving into an
+  // unrelated test would let it skip its own fetch).
+  dropPrefetchedSession(PREFETCHED_SESSION_ID);
 });
 
 // --- Helpers ---------------------------------------------------------------
@@ -381,6 +388,12 @@ describe("ChatPanel", () => {
       </ChatProvider>,
     );
     await tick();
+    // Same as `renderSeeded`: settle the pending fetch so the panel is
+    // initialized before the ADD_MESSAGE auto-scroll is asserted.
+    act(() => {
+      hoisted.resolve.current({ messages: [], total: 0, title: "" });
+    });
+    await tick();
     const scrollEl2 = scrollElOf(container2);
     let scrollTopValue = 0;
     Object.defineProperty(scrollEl2, "scrollHeight", { configurable: true, get: () => 1234 });
@@ -410,6 +423,17 @@ describe("ChatPanel", () => {
           <ChatPanel sessionId={sessionId} />
         </ChatProvider>,
       );
+      await tick();
+      // Let the panel's initial transcript fetch settle so it reaches its
+      // `initialized` state through the real fetch path. This used to happen by
+      // accident: the project-store mock handed back a fresh `dispatch` on every
+      // render, which re-ran the load effect until it observed the seeded
+      // slice. The real store — and the stable `useProjectDispatch` the panel
+      // now uses — makes that dependency stable, so the effect runs once and the
+      // pending fetch must be resolved for the panel to finish initializing.
+      act(() => {
+        hoisted.resolve.current({ messages: [], total: 0, title: "" });
+      });
       await tick();
       // Drain the mount-time rAFs (initial-load pin, observer follow-up)
       // BEFORE the fake scroll overrides are installed, so their writes to
@@ -515,6 +539,47 @@ describe("ChatPanel", () => {
     expect(screen.getByRole("button", { name: /scroll to bottom/i })).toBeInTheDocument();
   });
 
+  it("offers a scroll-to-top arrow once the reader scrolls down, and jumps back to the top", async () => {
+    const { container } = render(
+      <ChatProvider>
+        <LiveSeed
+          sessionId="sess-jump-top"
+          messages={[mk("user", "a"), mk("assistant", "b")]}
+          hasMore
+        />
+        <ChatPanel sessionId="sess-jump-top" />
+      </ChatProvider>,
+    );
+    await tick();
+    // Settle the pending initial fetch so the panel is initialized.
+    act(() => {
+      hoisted.resolve.current({ messages: [], total: 0, title: "" });
+    });
+    await tick();
+    await advanceFrame();
+
+    const el = scrollElOf(container);
+    const f = fakeScroll(el, 0, 5000); // 5000px of transcript in a 600px viewport
+    const scrollTo = vi.fn();
+    Object.defineProperty(el, "scrollTo", { configurable: true, value: scrollTo });
+    fireEvent.scroll(el);
+    await advanceFrame();
+
+    // Parked at the top: only the down arrow is offered.
+    expect(screen.queryByRole("button", { name: /scroll to top/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /scroll to bottom/i })).toBeInTheDocument();
+
+    // Reader scrolls into the middle: both edges are reachable.
+    f.set(2400);
+    fireEvent.scroll(el);
+    await advanceFrame();
+    const topButton = screen.getByRole("button", { name: /scroll to top/i });
+    expect(screen.getByRole("button", { name: /scroll to bottom/i })).toBeInTheDocument();
+
+    fireEvent.click(topButton);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "smooth" });
+  });
+
   it("adds live parts and removes them on LIVE_RESET", async () => {
     let captured: ((a: unknown) => void) | null = null;
     render(
@@ -576,6 +641,13 @@ describe("ChatPanel", () => {
         <ChatPanel sessionId="sess-page" />
       </ChatProvider>,
     );
+    await tick();
+    // Settle the initial tail fetch first (same reason as `renderSeeded`): the
+    // panel must be initialized before the scroll-up prepend path is exercised,
+    // and the pending resolver must be owned by the prepend call below.
+    act(() => {
+      hoisted.resolve.current({ messages: [], total: 0, title: "" });
+    });
     await tick();
 
     const scrollEl = scrollElOf(container);
@@ -827,5 +899,30 @@ describe("ChatPanel", () => {
     const ring = document.querySelector(".ring-2");
     expect(ring).toBeTruthy();
     expect(ring?.textContent).toContain("UNIQUE_SEARCH_TOKEN_abc123");
+  });
+
+  it("consumes a hover-prefetched transcript instead of issuing a second request", async () => {
+    // A pill/row hover warms the fetch before the tab is opened.
+    (api.getSession as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      messages: [mk("user", "prefetched hello")],
+      total: 1,
+      title: "Warm",
+    });
+    prefetchSession(PREFETCHED_SESSION_ID);
+    expect(api.getSession).toHaveBeenCalledTimes(1);
+
+    render(
+      <ChatProvider>
+        <ChatPanel sessionId={PREFETCHED_SESSION_ID} />
+      </ChatProvider>,
+    );
+    await flushRAF();
+
+    expect(await screen.findByText("prefetched hello")).toBeInTheDocument();
+    // Still exactly one request: mount reused the warm promise rather than
+    // starting a cold fetch (the mock's default impl never resolves, so a
+    // second call would hang and fail the assertion above).
+    expect(api.getSession).toHaveBeenCalledTimes(1);
+    expect(api.getSession).toHaveBeenCalledWith(PREFETCHED_SESSION_ID, { limit: 100 });
   });
 });

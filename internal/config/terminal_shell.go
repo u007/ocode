@@ -4,7 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"strings"
+
+	"github.com/u007/ocode/internal/shell"
 )
 
 // windowsCandidateShells is checked in preference order: PowerShell 7+ (pwsh)
@@ -30,27 +31,38 @@ func AvailableShells() []string {
 		return shells
 	}
 
-	data, err := os.ReadFile("/etc/shells")
-	if err != nil {
-		return nil
-	}
-	var shells []string
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+	return shell.SystemShells()
+}
+
+// ResolveTerminalShell returns a shell the terminal can actually start,
+// preferring preferred (the configured terminal_shell override) and falling
+// back to $SHELL and then the standard system locations. Every Unix candidate
+// is validated as an executable file before it is returned.
+//
+// The validation is the point: terminal_shell is persisted in the *local*
+// global config and travels with a synced config payload, so a value that names
+// a shell the current host does not have (a Mac's /bin/zsh on a Linux remote)
+// previously reached exec and surfaced as
+// `fork/exec /bin/zsh: no such file or directory`. Windows keeps its own
+// candidate list because $SHELL/POSIX paths do not apply there.
+func ResolveTerminalShell(preferred string) string {
+	if runtime.GOOS == "windows" {
+		if preferred != "" {
+			if _, err := exec.LookPath(preferred); err == nil {
+				return preferred
+			}
 		}
-		if info, err := os.Stat(line); err == nil && !info.IsDir() {
-			shells = append(shells, line)
-		}
+		return DefaultTerminalShell()
 	}
-	return shells
+	return shell.Resolve(preferred)
 }
 
 // DefaultTerminalShell picks the shell the interactive terminal starts when
 // no explicit TerminalShell override is configured: $SHELL (Unix) /
 // %COMSPEC% (Windows) if set, else the first entry AvailableShells finds,
-// else a hardcoded last resort.
+// else a hardcoded last resort. On Unix the result is validated so an
+// unusable $SHELL falls through to an available shell instead of failing at
+// exec time.
 func DefaultTerminalShell() string {
 	if runtime.GOOS == "windows" {
 		if shell := os.Getenv("COMSPEC"); shell != "" {
@@ -61,11 +73,5 @@ func DefaultTerminalShell() string {
 		}
 		return "cmd.exe"
 	}
-	if shell := os.Getenv("SHELL"); shell != "" {
-		return shell
-	}
-	if shells := AvailableShells(); len(shells) > 0 {
-		return shells[0]
-	}
-	return "/bin/sh"
+	return shell.Resolve("")
 }

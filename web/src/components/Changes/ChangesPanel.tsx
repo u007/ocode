@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { api } from "@/api/client";
 import type { FileChange } from "@/api/types";
 import ChangesFileList from "./ChangesFileList";
@@ -18,7 +18,7 @@ interface Props {
 
 type PendingUndo = { path: string; kind: "file" | "block" } | null;
 
-export default function ChangesPanel({ session, active = true }: Props) {
+function ChangesPanel({ session, active = true }: Props) {
   const [files, setFiles] = useState<FileChange[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -112,3 +112,7 @@ export default function ChangesPanel({ session, active = true }: Props) {
     </div>
   );
 }
+
+/** Props are primitives (`session`, `active`), so a parent re-render — e.g.
+ *  another tab becoming active — never re-renders a hidden ChangesPanel. */
+export default memo(ChangesPanel);

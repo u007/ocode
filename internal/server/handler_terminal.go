@@ -113,12 +113,18 @@ type terminalResizeMsg struct {
 // tab close goes through DELETE /api/terminal/{id} (HandleTerminalKill).
 //
 // The server sends WebSocket ping frames every terminalPingInterval (30s)
-// to keep the connection alive through NATs/proxies and detect dead
-// connections (common with remote SSH/WSL tunnels). A failed ping detaches
-// the shell immediately. The web client (TerminalPanel.tsx) auto-reconnects
+// to keep the browser socket alive through NATs/proxies and to detect a
+// dead browser connection. A failed ping detaches the shell immediately.
+// A ping cannot see through to the SSH/WSL tunnel: for remote projects the
+// interactive ssh carries ServerAlive options (remote.ShellCommand) so a
+// silently-dropped tunnel makes ssh exit within ~45s, the pty reaches EOF,
+// and the session ends. The web client (TerminalPanel.tsx) auto-reconnects
 // with exponential backoff on unexpected closes — network failures, server
-// crashes, and dead-connection detection — but not on clean 1000 closures
-// (natural shell exit) or user-initiated closes (tab close).
+// crashes, and dead-connection detection. The server closes the underlying
+// TCP connection without a close frame (gorilla Conn.Close), so the browser
+// observes code 1006 and takes the reconnect path; the clean-1000 branch is
+// reserved for a future graceful close. Only a user-initiated tab close
+// suppresses reconnection.
 //
 // Framing: client -> server frames are raw keystrokes unless they start with
 // `{"type":"resize"`, in which case they are parsed as a resize control
@@ -235,11 +241,12 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 			workDir = home
 		}
 
-		shell := shellOverride
-		if shell == "" {
-			shell = config.DefaultTerminalShell()
-		}
-		cmd = terminalShellCommand(shell)
+		// ResolveTerminalShell validates the configured override before it
+		// reaches exec: terminal_shell is persisted machine-local config, so a
+		// value naming a shell this host does not have must fall back to an
+		// available one instead of failing the pty with
+		// `fork/exec <shell>: no such file or directory`.
+		cmd = terminalShellCommand(config.ResolveTerminalShell(shellOverride))
 		cmd.Dir = workDir
 	}
 
@@ -301,7 +308,17 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		}
 		if existing == nil {
 			// Another socket is spawning right now; wait for it to publish.
-			<-done
+			// Bounded: a reservation whose owner never reaches completeCreate
+			// (abandoned by its deferred safety net, or leaked outside the
+			// handler) must surface a retryable error rather than hanging this
+			// WebSocket handshake — and the browser with it — forever.
+			select {
+			case <-done:
+			case <-time.After(terminalCreateWaitTimeout):
+				log.Printf("terminal %s: timed out waiting for concurrent spawn to publish", terminalID)
+				writeError(w, http.StatusServiceUnavailable, "terminal is still starting; retry")
+				return
+			}
 			existing = h.terminalSessions.lookup(terminalID)
 			if existing == nil {
 				// The winner's pty.Start failed; the client will retry.
@@ -349,11 +366,22 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// This caller won the reservation: spawn exactly one shell for the id.
+	// The deferred abandon guarantees the reservation is released even if the
+	// spawn panics between reserve and completeCreate, so a leaked reservation
+	// can never permanently hang every later socket for this id — waiters are
+	// woken and get a retryable failure instead of blocking on done forever.
+	completedCreate := false
+	defer func() {
+		if !completedCreate {
+			h.terminalSessions.abandon(terminalID)
+		}
+	}()
 	sess, err := h.startTerminalShell(terminalID, project, cmd)
 	// Publish the session (or the failure) before doing anything else so
 	// waiters unblock promptly; on failure they re-lookup, find nothing, and
 	// return an error the client will retry.
 	accepted := h.terminalSessions.completeCreate(terminalID, sess)
+	completedCreate = true
 	if err != nil {
 		log.Printf("terminal: failed to start pty shell %q for %q: %v", cmd.Path, project, err)
 		writeError(w, http.StatusInternalServerError, "failed to start terminal")

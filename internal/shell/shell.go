@@ -14,9 +14,104 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
+
+// unixShellFallbacks is the resolution order used when neither the caller's
+// preferred override nor $SHELL names a usable shell. bash comes first (the
+// documented default for agent and `!` commands), then zsh (the macOS user
+// default this codebase historically assumed), then sh (the POSIX baseline
+// that exists on essentially every Unix).
+var unixShellFallbacks = []string{
+	"/bin/bash", "/usr/bin/bash",
+	"/bin/zsh", "/usr/bin/zsh",
+	"/bin/sh", "/usr/bin/sh",
+}
+
+// IsExecutable reports whether path names an existing, non-directory file with
+// at least one execute bit. It is the guard every shell-resolution path applies
+// before returning a candidate: without it, a shell value that is stale,
+// misspelled, or copied from another machine reaches exec and fails with the
+// opaque `fork/exec /bin/zsh: no such file or directory`.
+func IsExecutable(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return info.Mode()&0o111 != 0
+}
+
+// SystemShells returns the login shells registered in /etc/shells that actually
+// exist and are executable, in file order. It is best-effort: a missing or
+// unreadable file yields an empty slice rather than an error, so callers
+// degrade to their own fallbacks.
+func SystemShells() []string {
+	data, err := os.ReadFile("/etc/shells")
+	if err != nil {
+		return nil
+	}
+	var shells []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if IsExecutable(line) {
+			shells = append(shells, line)
+		}
+	}
+	return shells
+}
+
+// usableShell reports whether name can be handed to exec: an absolute path must
+// point at an executable file, and a bare name must resolve through PATH.
+func usableShell(name string) bool {
+	if name == "" {
+		return false
+	}
+	if filepath.IsAbs(name) {
+		return IsExecutable(name)
+	}
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+// Resolve returns a usable Unix shell path, preferring preferred, then $SHELL,
+// then the common system locations, then the first executable entry in
+// /etc/shells, and finally the bare name "sh".
+//
+// Every absolute candidate must exist and be executable before it is returned,
+// so a value that is stale or came from another machine can never reach exec —
+// the failure mode this function exists to prevent is
+// `fork/exec /bin/zsh: no such file or directory` on a host whose configured
+// shell value names a binary the host does not have. The bare "sh" last resort
+// is resolved through PATH at exec time, which strictly beats a guaranteed
+// ENOENT.
+//
+// Callers on Windows have their own shells and never reach this function (see
+// Build, config.DefaultTerminalShell, and tool.bashInvocation).
+func Resolve(preferred string) string {
+	for _, candidate := range []string{preferred, os.Getenv("SHELL")} {
+		if usableShell(candidate) {
+			return candidate
+		}
+	}
+	for _, candidate := range unixShellFallbacks {
+		if usableShell(candidate) {
+			return candidate
+		}
+	}
+	if shells := SystemShells(); len(shells) > 0 {
+		return shells[0]
+	}
+	return "sh"
+}
 
 // DefaultTimeout is the upper bound for a single shell invocation. Callers
 // can override it with RunWithTimeout.
@@ -47,11 +142,11 @@ func Build(ctx context.Context, command string, dir string) *exec.Cmd {
 	if runtime.GOOS == "windows" {
 		c = exec.CommandContext(ctx, "cmd", "/C", command)
 	} else {
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "bash"
-		}
-		c = exec.CommandContext(ctx, shell, "-l", "-c", command)
+		// Resolve (never a raw $SHELL): a shell value that is stale or was
+		// inherited from another machine must not reach exec, or the command
+		// fails with an opaque `fork/exec <shell>: no such file or directory`
+		// instead of running under an available shell.
+		c = exec.CommandContext(ctx, Resolve(""), "-l", "-c", command)
 	}
 	if dir != "" {
 		c.Dir = dir

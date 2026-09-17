@@ -4248,6 +4248,7 @@ var providers = map[string]providerInfo{
 	"alibaba-coding": {"DASHSCOPE_API_KEY", "https://coding-intl.dashscope.aliyuncs.com/v1"},
 	"moonshot":       {"MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"},
 	"minimax":        {"MINIMAX_API_KEY", "https://api.minimax.chat/v1"},
+	"typesafe":       {"TYPESAFE_API_KEY", "https://api.typesafe.ai/v1"},
 	"requesty":       {"REQUESTY_API_KEY", "https://router.requesty.ai/v1"},
 	"deepinfra":      {"DEEPINFRA_API_KEY", "https://api.deepinfra.com/v1/openai"},
 	"runinfra":       {"RUNINFRA_GATEWAY_KEY", "https://api.runinfra.ai/v1"},
@@ -4601,6 +4602,14 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 	thinkingBudget := 0
 	if cfg != nil {
 		thinkingBudget = cfg.ThinkingBudget
+	}
+
+	// TypeSafe (System One / Jev) is not a chat-completions API: it answers
+	// typed questions only. Build its bespoke client so the permission judge
+	// can call Decide; Chat on it fails with ErrTypesafeDecisionOnly.
+	if provider == "typesafe" {
+		emitDebug("AGENT", fmt.Sprintf("NewClient: OK — provider=%q model=%q apiKey=%s (decision-only client)", provider, model, maskKey(apiKey)))
+		return newTypesafeClient(apiKey, model, baseURL)
 	}
 
 	emitDebug("AGENT", fmt.Sprintf("NewClient: OK — provider=%q model=%q apiKey=%s useOAuth=%v ws=%v", provider, model, maskKey(apiKey), useOAuth, cfg != nil && cfg.UseWebSocket))

@@ -21,7 +21,14 @@ func confineEntrypoint(args []string) int {
 	// args[2:] is the original shell argv tail: <shell> [-l] -c <command>.
 	// The last element is the command; exec the original shell shape so the
 	// desktop login-shell invocation (zsh -l -c) survives confinement.
-	shell := args[2]
+	// A bare shell name ("bash") must be resolved through PATH here: execve
+	// does no PATH lookup, so a relative "bash" would resolve against the
+	// session CWD and fail — the whole sandbox would be unusable.
+	shell := resolveConfineShell(args[2])
+	if shell == "" {
+		fmt.Fprintf(os.Stderr, "sandbox-confine: cannot resolve shell %q\n", args[2])
+		return 1
+	}
 	command := args[len(args)-1]
 	shellArgs := args[3 : len(args)-1] // e.g. [] or ["-l"]
 

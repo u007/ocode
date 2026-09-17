@@ -1,17 +1,30 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useChatSelector, useChatDispatch, getSessionSlice, parseQuestionFromMessage, type QuestionRequest } from "../../stores/chatStore";
-import { useProjectState } from "../../stores/projectStore";
+import { useProjectDispatch } from "../../stores/projectStore";
 import { api } from "../../api/client";
 import MessageBubble, { AssistantText } from "./MessageBubble";
 import { StatusBlock, ThinkingBlock, ToolBlock } from "./TurnParts";
 import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
 import ModelPromptRow from "./ModelPromptRow";
 import { RESTORE_EVENT } from "../../lib/inputRestore";
+import { SESSION_PREFETCH_LIMIT, takePrefetchedSession } from "../../lib/sessionPrefetch";
 import { requestSpeech } from "../Speech/SpeechProvider";
-import { Volume2 } from "lucide-react";
+import { lastRenderedSpeechText, renderedSpeechTexts } from "../Speech/speechUtils";
+import { ArrowDown, ArrowUp, Volume2 } from "lucide-react";
 
 const PAGE_SIZE = 50;
+
+/** Scroll a container to an offset. Falls back to the `scrollTop` property
+ *  when `Element.prototype.scrollTo` is unavailable (jsdom), so the scroll
+ *  affordances degrade instead of throwing under test. */
+function scrollElementTo(el: HTMLElement, top: number, behavior: ScrollBehavior) {
+  if (typeof el.scrollTo === "function") {
+    el.scrollTo({ top, behavior });
+  } else {
+    el.scrollTop = top;
+  }
+}
 
 interface ChatPanelProps {
   /** The tab this instance renders — a real session id or a temporary
@@ -20,14 +33,18 @@ interface ChatPanelProps {
   sessionId: string;
 }
 
-export default function ChatPanel({ sessionId }: ChatPanelProps) {
+function ChatPanel({ sessionId }: ChatPanelProps) {
   // Scoped to this tab's own session: getSessionSlice returns the exact same
   // object reference across dispatches that don't touch this session (see
   // updateSession's immutable per-key update), so other tabs' streamed
   // tokens don't re-render this ChatPanel instance.
   const slice = useChatSelector((s) => getSessionSlice(s, sessionId));
   const dispatch = useChatDispatch();
-  const { dispatch: projectDispatch } = useProjectState();
+  // Stable dispatch-only subscription: this must NOT read the project state, or
+  // every tab/project switch would re-render every mounted (hidden) ChatPanel.
+  // Combined with `memo` below, a hidden tab only re-renders for its own chat
+  // slice — never because a sibling tab became active.
+  const projectDispatch = useProjectDispatch();
   const { messages, live, hasMore, loadingMore } = slice;
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -42,6 +59,11 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
   // user is already at the bottom (and resume reliably after they return).
   const atBottomRef = useRef(true);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  // Mirror of showJumpToBottom for the other edge: shown whenever there is more
+  // than a viewport-threshold of transcript above the current position. Set by
+  // handleScroll (the scroll listener) and by the pin-to-bottom effects, which
+  // move the offset without a user-initiated scroll.
+  const [showJumpToTop, setShowJumpToTop] = useState(false);
   const [selectedText, setSelectedText] = useState("");
   const lastCompletedAssistantRef = useRef<string | null>(null);
   const wasTurnActiveRef = useRef(false);
@@ -52,7 +74,14 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
     if (!initialized || !wasTurnActive || slice.isStreaming || slice.turnActive) return;
     const assistant = [...messages].reverse().find((message) => message.role === "assistant" && message.content.trim());
     if (!assistant) return;
-    const text = assistant.content.trim();
+    // Speak what is RENDERED, not the markdown source (heading hashes, `**`,
+    // backticks and link targets must not be read aloud). The transcript is
+    // virtualized, so the completed message's DOM node is only guaranteed while
+    // the view is pinned to the bottom — which is exactly when "at-bottom" mode
+    // speaks. Fall back to the source if the node is somehow not mounted.
+    const rendered = lastRenderedSpeechText(listContainerRef.current);
+    const text = (rendered || assistant.content).trim();
+    if (!text) return;
     const key = `${messages.length}:${text}`;
     if (lastCompletedAssistantRef.current === key) return;
     lastCompletedAssistantRef.current = key;
@@ -359,10 +388,11 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
       ? matchEntryPositions[matchCursor]
       : -1;
 
-  // Initial load: fetch this session's last 50 messages once (skipped for a
-  // `new-*` tab, which has no session yet, and for a session whose slice is
-  // already initialized — e.g. this ChatPanel remounted, or a live SSE event
-  // populated the slice before this fetch resolved).
+  // Initial load: fetch the tail of this session's transcript once
+  // (SESSION_PREFETCH_LIMIT messages). Skipped for a `new-*` tab, which has no
+  // session yet, and for a session whose slice is already initialized — e.g.
+  // this ChatPanel remounted, or a live SSE event populated the slice before
+  // this fetch resolved.
   useEffect(() => {
     const generation = ++loadGenerationRef.current;
     let cancelled = false;
@@ -381,8 +411,11 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
     }
     setInitialized(false);
 
-    api
-      .getSession(sessionId, { limit: PAGE_SIZE * 2 })
+    // A hover prefetch (lib/sessionPrefetch) may already have this request in
+    // flight or resolved — use it so the tab paints straight from warm data
+    // instead of starting a cold round-trip. Falls back to a fresh fetch when
+    // nothing is warm or the warm entry is stale.
+    (takePrefetchedSession(sessionId) ?? api.getSession(sessionId, { limit: SESSION_PREFETCH_LIMIT }))
       .then((detail) => {
         if (cancelled || generation !== loadGenerationRef.current) return;
         // Mirrors MERGE_SNAPSHOT guard in chatStore.tsx — only committed
@@ -415,6 +448,9 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
             el.scrollTop = el.scrollHeight;
             atBottomRef.current = true;
             setShowJumpToBottom(false);
+            // Pinned to the bottom of a long transcript: the top affordance is
+            // available even though no user scroll has fired yet.
+            setShowJumpToTop(el.scrollHeight - el.clientHeight > 200);
           }
         });
       })
@@ -468,6 +504,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
       if (height > 0 && (prevHeight === 0 || prevHeight === -1) && atBottomRef.current && initialized) {
         el.scrollTop = el.scrollHeight;
         setShowJumpToBottom(false);
+        setShowJumpToTop(el.scrollHeight - el.clientHeight > 200);
         cancelAnimationFrame(raf);
         raf = requestAnimationFrame(() => {
           if (atBottomRef.current) {
@@ -548,11 +585,24 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
   const scrollToBottom = useCallback((smooth = false) => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+    scrollElementTo(el, el.scrollHeight, smooth ? "smooth" : "auto");
     requestAnimationFrame(() => {
       atBottomRef.current = true;
       setShowJumpToBottom(false);
     });
+  }, []);
+
+  // Jump back to the start of the transcript (the "scroll to top" affordance).
+  // The scroll listener takes over from here: handleScroll flips
+  // showJumpToTop off (we are at the top) and showJumpToBottom on, and drops
+  // the at-bottom pin so streaming no longer yanks the view back down.
+  const scrollToTop = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    scrollElementTo(el, 0, "smooth");
+    atBottomRef.current = false;
+    setShowJumpToTop(false);
+    setShowJumpToBottom(true);
   }, []);
 
   // Scroll-up handler: load older messages when near top, and track whether we
@@ -572,6 +622,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
       const atBottom = distanceFromBottom < 200;
       atBottomRef.current = atBottom;
       setShowJumpToBottom(!atBottom);
+      setShowJumpToTop(el.scrollTop > 200);
     });
 
     setReachedTop(el.scrollTop < 5);
@@ -648,7 +699,7 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
           type="button"
           className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
           title="Speak visible chat text"
-          onClick={() => requestSpeech(Array.from(scrollRef.current?.querySelectorAll(".prose") ?? []).map((node) => node.textContent ?? "").join("\n").slice(0, 100_000))}
+          onClick={() => requestSpeech(renderedSpeechTexts(scrollRef.current))}
         >
           <Volume2 className="h-3.5 w-3.5" /> Speak visible
         </button>
@@ -811,17 +862,38 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
           chrome; renders nothing for untuned models. */}
       <ModelPromptRow prompt={slice.tuiStatus?.model_prompt} model={slice.tuiStatus?.main_model} />
 
-      {showJumpToBottom && (
-        <button
-          type="button"
-          onClick={() => scrollToBottom(true)}
-          className="absolute bottom-4 right-4 z-10 flex h-9 w-9 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg transition-colors hover:bg-accent"
-          title="Scroll to bottom"
-          aria-label="Scroll to bottom"
-        >
-          ↓
-        </button>
+      {(showJumpToTop || showJumpToBottom) && (
+        <div className="absolute bottom-4 right-4 z-10 flex flex-col gap-2">
+          {showJumpToTop && (
+            <button
+              type="button"
+              onClick={scrollToTop}
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg transition-colors hover:bg-accent"
+              title="Scroll to top"
+              aria-label="Scroll to top"
+            >
+              <ArrowUp className="h-4 w-4" />
+            </button>
+          )}
+          {showJumpToBottom && (
+            <button
+              type="button"
+              onClick={() => scrollToBottom(true)}
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg transition-colors hover:bg-accent"
+              title="Scroll to bottom"
+              aria-label="Scroll to bottom"
+            >
+              <ArrowDown className="h-4 w-4" />
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
 }
+
+/** `sessionId` is the only prop and never changes across an instance's
+ *  lifetime (App mounts one ChatPanel per open tab), so memo is fully
+ *  effective: a parent re-render — e.g. another tab becoming active — is a
+ *  no-op here. Background tabs keep streaming via the chat store, untouched. */
+export default memo(ChatPanel);

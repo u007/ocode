@@ -18,6 +18,14 @@ name). Do not duplicate content between the two — update here only.
   `internal/tui/selection.go`)
 - LLM providers: OpenAI, Anthropic, Google, Z.AI, Alibaba, plus the
   `opencode-go` (DeepSeek) and Minimax routes
+- `typesafe` (TypeSafe AI System One, model `jev-latest`) is **decision-only**:
+  `POST /v1/systemone` answers typed choice/score/noul questions and never
+  generates text. `NewClient` builds a `TypesafeClient` whose `Chat` fails
+  with `ErrTypesafeDecisionOnly`; its only consumer is the auto-permission
+  judge (`consultPermissionModel` → `askPermissionModelTypesafe`), which sends
+  the request as structured state and thresholds the choice `confidence`
+  against `permissions.auto.min_confidence`. Never route it through the chat,
+  compaction, small-model, or interpreter-effects paths.
 - Every request to an `opencode*` provider must carry `X-Opencode-Session`, an
   opaque ID stable for one conversation (Zen/Go pin the conversation to one
   upstream for prompt caching; some Go models 400 without it). All transports
@@ -102,6 +110,11 @@ What still asks (permission layer, not the OS):
 - ocode config dir (writes only) → Ask
 - `~/.ssh`, `.env` (read or write) → Ask
 - danger-`rm` heuristics → Ask
+- destructive git forms (`git stash`/`checkout`/`reset`/`clean`/`restore`/
+  `switch`, plus force-flagged `git push`/`pull`) → Ask — the OS write-wall is
+  blind to a repo mutation that stays inside the allowed workdir (history
+  rewrite, branch switch, stash create/drop, untracked removal). Read-only
+  forms (`git stash list`/`show`) are unaffected and still auto-allow.
 - writes to permission-defining files (`.ocode/settings.json`,
   `.claude/settings.json`, ocode config gating files) and loopback requests to
   `/api/permissions*` → Ask (self-escalation guard, all modes)
@@ -119,14 +132,26 @@ Platform matrix:
 - Windows: no backend — selecting sandbox behaves like `normal` (prompts),
   no confinement
 
-Toggling is per-session and never persisted: restarts return to `normal`.
+Sandbox **persists** like any other mode: `persistPermissions` calls
+`SavePermissionModeSwitch`, which writes `permissions.mode` verbatim — the
+former sandbox→normal clamp is gone, so a restart comes back in sandbox. Cron
+jobs are unaffected: each resolves its own per-job mode independently
+(`resolveCronPermissionMode`, blank → `normal`), so a persisted sandbox default
+never leaks into scheduled runs.
 Fail-closed on macOS/Linux: if the mode is sandbox but no backend is available,
 the command errors before starting (no silent unsandboxed execution).
 
 ## Context Loading
 
-- `AGENTS.md`, `CLAUDE.md`, `OCODE.md`, and `.cursorrules` are loaded at
-  session start by `internal/agent/context.go::LoadContext`.
+- `AGENTS.md`, `CLAUDE.md`, `OCODE.md`, and `.cursorrules` (plus every
+  `.opencode/rules/*.md`) are loaded at session start by
+  `internal/agent/context.go::LoadContext`.
+- **The always-on context files resolve from the session's project root**
+  (`root`), not the server process cwd. A server hosts many projects and the
+  desktop `.app` boots with cwd `/`, so a cwd-relative read injected the wrong
+  project's rules into a session's cached system prompt. `root == ""` keeps
+  the legacy cwd-relative behavior for callers that never threaded a root
+  through.
 - If a context file is tracked by git AND has unstaged modifications, the
   committed `HEAD` version is used instead of the working-tree copy. This
   keeps the base prompt stable across edits; commit the changes to make
@@ -137,9 +162,10 @@ the command errors before starting (no silent unsandboxed execution).
 ## Knowledge System (OKF Bundle)
 The project supports an optional **OKF v0.1 knowledge bundle** at `docs/` — a
 curated set of markdown files with YAML frontmatter (type, title, description,
-tags, timestamp, status). When active, the agent receives a
-`[ocode:knowledge]` index in its system prompt and gains the
-`knowledge_lookup` tool for semantic retrieval.
+tags, timestamp, status). When active, the agent gains the `knowledge_lookup`
+tool (and the `context` sub-agent) for retrieval; nothing from the bundle —
+not even `docs/index.md` — is injected into the system prompt (see "OKF docs
+access scope" below).
 
 **Activation** (two gates, both required):
 1. `DocPromptEnabled` flag — toggled via `/docs on` (persisted in config).
@@ -160,6 +186,17 @@ for why/decision/playbook questions; when the bundle is active use `context` (wh
 subagent may write to the bundle — the main agent's tool set never includes
 `doc_write`/`doc_deprecate`. Deletion happens only via `/docs cleanup`
 (per-file confirmation required).
+
+**OKF docs access scope:** OKF documentation (the `docs/` bundle, including
+`index.md`) is NOT loaded into the main agent's system context. The main
+agent only accesses OKF docs through the `context` sub-agent (via
+`knowledge_lookup` or `task` with `agent=context`). The `context` sub-agent
+discovers and reads docs dynamically through `doc_search`/`doc_get` and
+manages the bundle through `doc_write`/`doc_deprecate`. When the bundle is
+active, ALL non-exploration work (why/decision/playbook questions, doc
+updates, mixed why+where questions) must route through the `context`
+sub-agent; pure code exploration (no doc involvement) may use the explore
+toolkit directly.
 
 ### Tools
 
@@ -669,6 +706,27 @@ Rules for anything in `internal/server`:
   top of one still-raw sentinel feeds the model a malformed tool result, which
   it typically "fixes" by retrying the call and raising a brand new ask (looks
   like the same permission dialog popping back up after being answered).
+- **A pending ask must be recoverable from live session state, not only from
+  the persisted transcript.** The paused tool result is normally saved as a
+  `PERMISSION_ASK:`/question sentinel, but that save can fail or conflict, or
+  the pause can post-date the last write — and a live SSE `permission` frame
+  sent while the tab was untracked is gone. The session then answers every send
+  with `ErrPermissionPending` (HTTP 409) while the browser has no dialog to
+  resolve it. `GET /api/sessions/{id}/state` therefore carries an optional
+  `pending_asks` object read from the live agent transcript (`livePendingAsks`
+  in `handler_session_state.go`); the web reconcile hydrates the dialog from it
+  and a 409 send re-hydrates via `hydratePendingAsks`. Any new surface that
+  consumes asks should keep this fallback. See
+  `docs/gotchas/pending-ask-recovery-live-session-state.md`.
+- **Reading a live session's `as.messages` from an HTTP handler uses a
+  non-blocking `as.mu.TryLock()`, never `Lock()`.** `runTurn` holds `as.mu` for
+  the whole turn (minutes), and endpoints like `GET /api/sessions/{id}/state`
+  are polled by the browser and the turn watchdog — a blocking read parks those
+  requests behind the turn and re-creates the "stuck session" symptom from the
+  server side. When the try-lock fails, skip the live read and fall back to
+  persisted state; a turn holding the lock cannot yet be paused on an ask (the
+  pause and the unlock happen together when the step returns). Follow
+  `livePendingAsks`.
 - **Do not pin an HTTP connection for the length of a turn.** A browser allows
   only six concurrent connections per origin over HTTP/1.1 (the server is plain
   HTTP, so there is no h2 multiplexing), and the SPA already spends some on the
@@ -846,8 +904,8 @@ Rules for any change that touches tools or the base prompt:
   project `*.md` except the always-on briefing set (`AGENTS.md`, `CLAUDE.md`,
   `OCODE.md`, `.cursorrules`, `.opencode/rules/*.md`, which `LoadContext` injects
   in full) **and files inside an active OKF knowledge bundle's `docs/` directory**
-  (owned by the knowledge system — `docs/index.md` is injected as the
-  `[ocode:knowledge]` TOC and `knowledge_lookup` retrieves any concept doc on
+  (owned by the knowledge system — nothing from it is injected into the prompt;
+  `knowledge_lookup` / the `context` sub-agent retrieve any concept doc on
   demand) is a `Kind:"md"` Doc whose `Text` is an LLM summary (small model when
   configured, else the main client), cached at `.ocode/md-summaries.json` keyed
   by file content (mtime+size gate, then sha256). The first activation runs a
@@ -871,11 +929,18 @@ illustrative shape is:
   Working directory: /path/to/project
   Workspace root folder: /path/to/project
   Is directory a git repo: yes
-  Git branch: main
   Platform: darwin
   Today's date: <resolved at session start>
 </env>
 ```
 
-The git branch is resolved via `git rev-parse --abbrev-ref HEAD` when the
-workspace is a git repo.
+A session bound to a **remote (SSH/WSL) project** gets one extra line —
+`Project host: <[user@]host|wsl:distro> (remote project — …)` — right after
+the git-repo lines. Per-project remote projects execute their chat agent on
+the local server (only terminal/files/git are forwarded over SSH; see
+`docs/architecture/terminal-detach-reattach.md`), so without that line the
+block presented a remote project root next to the local machine's config,
+session, skill, and runtime paths with no hint they belong to different
+machines. Local projects emit no such line, so their prompt is byte-identical.
+
+There is no `Git branch` line: the git branch is not resolved or injected.

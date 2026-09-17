@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import FilePicker from "../Files/FilePicker";
 import PreviewSurface from "./PreviewSurface";
 import { previewKindForPath } from "../../lib/previewKind";
 
-export default function PreviewTabPage({ projectRoot, projectHost }: { projectRoot?: string; projectHost?: string }) {
+function PreviewTabPage({ projectRoot, projectHost }: { projectRoot?: string; projectHost?: string }) {
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [selected, setSelected] = useState<{ path: string; kind: string; projectRoot?: string; projectHost?: string } | null>(null);
 
@@ -46,3 +46,7 @@ export default function PreviewTabPage({ projectRoot, projectHost }: { projectRo
     </div>
   );
 }
+
+/** Props are primitives (`projectRoot`, `projectHost`), so a parent re-render —
+ *  e.g. another tab or project becoming active — is a no-op here. */
+export default memo(PreviewTabPage);

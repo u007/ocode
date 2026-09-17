@@ -446,6 +446,10 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	if t.mainAgent.workDir != "" {
 		subAgent.workDir = t.mainAgent.workDir
 	}
+	// A child dispatched from a remote (SSH/WSL) project gets the same host, so
+	// its own <env> block carries the "project lives on <host>" note instead of
+	// advertising the local machine's config/session paths as the project's.
+	subAgent.projectHost = t.mainAgent.projectHost
 
 	// Wire the sub-agent's advisor gate to the parent's atomic flag so
 	// mid-run toggles propagate immediately (reactive, not a snapshot).

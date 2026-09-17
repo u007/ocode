@@ -228,10 +228,14 @@ func TestBashInvocationLoginShellOverride(t *testing.T) {
 	}
 	t.Cleanup(func() { SetLoginShell("") })
 
-	SetLoginShell("/bin/zsh")
+	// Pin a shell this host actually has: the override is validated before
+	// exec, so a hard-coded /bin/zsh would silently resolve to something else
+	// on a Linux host without it and the assertions below would lie.
+	want := existingShell(t)
+	SetLoginShell(want)
 	shell, args := bashInvocation("echo hi")
-	if shell != "/bin/zsh" || len(args) != 3 || args[0] != "-l" || args[1] != "-c" || args[2] != "echo hi" {
-		t.Fatalf("with override: shell=%q args=%v, want [/bin/zsh -l -c echo hi]", shell, args)
+	if shell != want || len(args) != 3 || args[0] != "-l" || args[1] != "-c" || args[2] != "echo hi" {
+		t.Fatalf("with override: shell=%q args=%v, want [%s -l -c echo hi]", shell, args, want)
 	}
 
 	// The override must flow through the unified builder into cmd.Args, so
@@ -240,8 +244,8 @@ func TestBashInvocationLoginShellOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build error: %v", err)
 	}
-	if cmd.Path != "/bin/zsh" || len(cmd.Args) != 4 || cmd.Args[1] != "-l" || cmd.Args[2] != "-c" || cmd.Args[3] != "echo hi" {
-		t.Fatalf("buildBashCmd Args = %v, want [/bin/zsh -l -c echo hi]", cmd.Args)
+	if cmd.Path != want || len(cmd.Args) != 4 || cmd.Args[1] != "-l" || cmd.Args[2] != "-c" || cmd.Args[3] != "echo hi" {
+		t.Fatalf("buildBashCmd Args = %v, want [%s -l -c echo hi]", cmd.Args, want)
 	}
 
 	SetLoginShell("")
@@ -283,4 +287,52 @@ func TestLoginShellRunsProfileCommands(t *testing.T) {
 // jsonRaw builds tool arguments inline.
 func jsonRaw(s string) json.RawMessage {
 	return json.RawMessage(s)
+}
+
+// existingShell returns the first of the standard Unix shells present on this
+// host, so login-shell tests never depend on a particular distro's layout.
+func existingShell(t *testing.T) string {
+	t.Helper()
+	for _, candidate := range []string{"/bin/bash", "/bin/zsh", "/bin/sh"} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate
+		}
+	}
+	t.Skip("no standard shell found on this host")
+	return ""
+}
+
+// TestBashInvocationLoginShellOverrideMissingShell pins the validation in
+// bashInvocation: a pinned login shell that does not exist on this host (a
+// stale desktop config, a path copied from another machine) must resolve to a
+// shell that does, instead of every agent command failing with
+// `fork/exec <shell>: no such file or directory`.
+func TestBashInvocationLoginShellOverrideMissingShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix login-shell shape only")
+	}
+	t.Cleanup(func() { SetLoginShell("") })
+
+	missing := filepath.Join(t.TempDir(), "no-such-shell")
+	SetLoginShell(missing)
+	shell, args := bashInvocation("echo hi")
+	if shell == missing {
+		t.Fatalf("nonexistent override %q was handed to exec", missing)
+	}
+	if info, err := os.Stat(shell); err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+		t.Fatalf("resolved shell %q is not an executable file (err=%v)", shell, err)
+	}
+	if len(args) != 3 || args[0] != "-l" || args[1] != "-c" || args[2] != "echo hi" {
+		t.Fatalf("args = %v, want [-l -c echo hi]", args)
+	}
+
+	// A non-executable file is just as unusable as a missing one.
+	plain := filepath.Join(t.TempDir(), "not-executable")
+	if err := os.WriteFile(plain, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	SetLoginShell(plain)
+	if shell, _ := bashInvocation("echo hi"); shell == plain {
+		t.Fatalf("non-executable override %q was handed to exec", plain)
+	}
 }

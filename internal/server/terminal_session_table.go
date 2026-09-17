@@ -139,6 +139,24 @@ func (t *terminalSessionTable) completeCreate(id string, sess *terminalSession) 
 	return accepted
 }
 
+// abandon releases a reservation whose owner never reached completeCreate
+// (for example a panic between reserve and publish). It wakes every waiter on
+// the id with a nil lookup so they get a retryable spawn failure instead of
+// blocking on the done channel forever. completeCreate is the normal release
+// path; abandon is the safety net that makes a leaked reservation impossible.
+//
+// It is a no-op when the owner already completed (the reservation is gone), so
+// a deferred abandon racing a successful publish cannot close done twice.
+func (t *terminalSessionTable) abandon(id string) {
+	t.mu.Lock()
+	done, ok := t.creating[id]
+	delete(t.creating, id)
+	t.mu.Unlock()
+	if ok {
+		close(done.done)
+	}
+}
+
 // put publishes an anonymous session. It reports false (and stores nothing)
 // when the table is sealed for shutdown, so a pty.Start that raced the seal
 // is torn down by the caller instead of escaping termination.

@@ -1,20 +1,30 @@
 ---
 type: Decision
 title: TTS Speech Playback Design Specification
-description: User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing.
+description: User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source).
 tags:
   - TTS
   - speech
   - design
   - local-model
   - supervisor
-timestamp: 2026-09-09T04:41:33Z
-resource: docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md
+  - DOM-extraction
+timestamp: 2026-09-16T12:32:11Z
+resource: ""
 ---
 # TTS Speech Playback Design Specification
 
+**Type:** Decision  
+**Description:** User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing.  
+**Resource:** docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md  
+**Tags:** TTS, speech, design, local-model, supervisor  
+
+---
+
+# TTS Speech Playback Design Specification
+
 **Status**: Active
-**Last Updated**: 2026-09-09
+**Last Updated**: 2026-09-16
 
 ## Overview
 
@@ -90,6 +100,27 @@ This specification defines the TTS (Text-to-Speech) speech playback system for t
 - Speak any message, selected text, or visible viewport text top-to-bottom without UI chrome
 - Reject empty text
 - Bound/chunk large text to reasonable sizes
+
+#### 10.1 Rendered-Text Extraction (DOM) — web SPA
+
+Speech text must always be extracted from the **rendered DOM**, never from the raw markdown source. Speaking markdown source produces audible artefacts ("hash Title", "asterisk asterisk bold", backtick-delimited code, raw link URLs) that degrade the user experience.
+
+**Why DOM, not a markdown-source stripper:** the rendered DOM is the single source of truth for what the user sees — ReactMarkdown + remark-gfm + rehypeFileLinks transform the source before paint. A source-level stripper cannot stay in sync with the renderer's output and will silently drift as the pipeline evolves.
+
+Three helpers in `web/src/components/Speech/speechUtils.ts` cover the extraction surfaces:
+
+| Helper | Purpose | Used by |
+|--------|---------|---------|
+| `renderedSpeechText(root)` | Walk a single rendered DOM subtree; collapse whitespace; skip `[data-speech-exclude]`, `aria-hidden="true"`, script/style/svg; insert line breaks at block-level tags so adjacent paragraphs don't merge. | Per-message Speak button |
+| `renderedSpeechTexts(root)` | Collect all `[data-speech-content]` blocks in DOM order into a single string. | "Speak visible" viewport button |
+| `lastRenderedSpeechText(root)` | Return the last `[data-speech-content]` block (fallback to markdown source if virtualised node isn't mounted). | Auto-speak at-bottom |
+
+**Component contract:**
+
+- `data-speech-content` — marks the element whose text content should be spoken. Set on the markdown subtree (e.g. `AssistantText`'s rendered block) so the extractor knows where to walk.
+- `data-speech-exclude` — marks elements inside a speech-content subtree that must NOT be spoken (e.g. the Speak button itself, which had its own label read aloud before this rule was enforced). The extractor skips these and all their descendants.
+
+**Scope note:** `ThinkingBlock` reasoning and terminal selections are plain text (not markdown) and are passed through unchanged — no DOM extraction needed.
 
 ### 11. Terminal TTS
 - xterm selection right-click → Play selection
@@ -202,33 +233,11 @@ This specification defines the TTS (Text-to-Speech) speech playback system for t
 - Late-event ignoring verification
 
 ### Frontend Tests
-- Settings / progress / error handling
-- VoiceSelector: Browser Native remains selectable; local engine failure retains selection with Retry
-- Chat selection / visible text / chunking
-- Terminal context / play / ANSI stripping
-- Toolbar replacement / modes / browser bypass
-- Playback control ownership: frontend controls drive playback, backend reports state
-
-### Integration Tests
-- Same-model-process scenarios
-- Different-model-process scenarios
-- Cross-process download lock contention with ownership identity/token
-- Engine switch mid-playback
-- Selection generation prevention of stale setup activation
-- Playback state expiration on disconnect
-
-## Summary
-
-This specification provides a complete, active design for TTS speech playback in ocode. It establishes a flat voice choice model, clear upgrade paths from Browser Native to local engines, global download coordination via advisory locks with ownership-safe semantics, and robust error handling with no silent fallbacks. The design is intentionally scoped to desktop/web with no TUI or cloud TTS components in this phase.
-
-Key revisions incorporated from the 2026-09-09 review:
-- Browser Native remains selectable at all times; local engine failure retains selection with error+Retry; switching to Browser Native is a deliberate user action
-- Global download lock with ownership identity/token, checksum-based artifact validity, cache namespace <global-data>/models/tts/<engine>/<voice-or-model-id>/<manifest-version>/<GOOS>-<GOARCH>/
-- Selection generations prevent stale setup from activating; stale setup may finish install but must not activate/change selection/affect playback
-- Local playback scope: one active local playback generation per server process, shared across its tabs/sessions; separate processes are not shared
-- On disconnect, cancel/expire active generation; do not resume automatically
-- Partial/corrupt artifacts deleted before lock release; never marked installed; next Retry starts cleanly
-- Retry: three bounded download attempts with backoff, then manual Retry creates new generation; no unbounded retry, no Browser Native fallback
-- Engine-specific pinned verified manifests, engine-specific startup/health/inference adapters, packaging/license/platform validation; common supervisor interface only
-- Playback control ownership: frontend Audio/SpeechController operations where possible; backend generates/serves seekable audio and reports progress/state; POST /tts/seek not required as backend operation
-- All other approved requirements preserved exactly
+- `speechUtils.test.ts` — extractor unit tests for `renderedSpeechText`, `renderedSpeechTexts`, `lastRenderedSpeechText` (whitespace collapse, exclusion attributes, block-level line breaks)
+- `MessageBubble.speak.test.tsx` — the Speak button speaks rendered text, not `**`/`#`/backticks/URLs
+- Voice selector state transitions
+- Toolbar playback control
+- Error surfacing without fallback
+- Browser Native vs local engine state isolation
+- Selection generation lifecycle
+- Edge cases: empty text, boundary conditions, rapid switching

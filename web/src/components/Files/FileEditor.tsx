@@ -26,7 +26,7 @@ import {
   setEditorModelInfo,
 } from "../../lib/editorLinks";
 
-interface FileEditorProps {
+export interface FileEditorProps {
   path: string;
   projectRoot?: string;
   /** Registered remote target (SSH/WSL) for this tab's project; routes git
@@ -112,6 +112,64 @@ function isModifiedHunk(hunk: Hunk): boolean {
   return hunk.lines.some((l: DiffLine) => l.type === "del") && hunk.lines.some((l: DiffLine) => l.type === "add");
 }
 
+// Extra vertical padding around a deleted-block view zone: 2px top + 2px
+// bottom (matching .monaco-deleted-block padding) + 2px slack so a wrap-point
+// mismatch can only ever leave a little background, never paint the deleted
+// text over the line below.
+const DELETED_BLOCK_EXTRA_PX = 6;
+
+// Cached 2D context for measuring wrapped deleted-line text. null (canvas
+// unavailable, e.g. jsdom) after the first failed attempt.
+let deletedBlockMeasureCtx: CanvasRenderingContext2D | null | undefined;
+
+/**
+ * Measure the pixel height a deleted-block view zone needs once rendered,
+ * accounting for word-wrap (each deleted line may span multiple visual rows).
+ * Returns null when measurement is unavailable (no canvas context) — callers
+ * fall back to the line-count estimate.
+ */
+function measureDeletedBlockHeight(
+  textLines: string[],
+  fontInfo: { fontWeight: string; fontSize: number; fontFamily: string; lineHeight: number },
+  contentWidthPx: number,
+): number | null {
+  if (deletedBlockMeasureCtx === undefined) {
+    deletedBlockMeasureCtx = document.createElement("canvas").getContext("2d");
+  }
+  if (!deletedBlockMeasureCtx) return null;
+  // Zone chrome: 8px padding each side + 3px left border + copy button (12px)
+  // + 6px flex gap. Biased 2px narrower so a borderline wrap rounds UP to an
+  // extra row (a slightly-too-tall zone is harmless; a too-short one paints
+  // deleted text over the line below).
+  const availWidth = Math.max(contentWidthPx - 8 - 8 - 3 - 12 - 6 - 2, 60);
+  deletedBlockMeasureCtx.font = `${fontInfo.fontWeight} ${fontInfo.fontSize}px ${fontInfo.fontFamily}`;
+  let rows = 0;
+  for (const t of textLines) {
+    const w = deletedBlockMeasureCtx.measureText(t).width;
+    rows += Math.max(1, Math.ceil(w / availWidth));
+  }
+  return rows * fontInfo.lineHeight + DELETED_BLOCK_EXTRA_PX;
+}
+
+/**
+ * Height (px) for a deleted-block view zone, accounting for wrapping. The
+ * zone's span always wraps (pre-wrap + break-all) regardless of the editor's
+ * wordWrap setting, so the height must always be measured — the line-count
+ * estimate is only the fallback when canvas measurement is unavailable.
+ */
+function computeDeletedZoneHeight(
+  ed: editor.IStandaloneCodeEditor,
+  monaco: typeof import("monaco-editor"),
+  textLines: string[],
+): number {
+  const fontInfo = ed.getOption(monaco.editor.EditorOption.fontInfo);
+  const fallback = textLines.length * fontInfo.lineHeight + DELETED_BLOCK_EXTRA_PX;
+  return (
+    measureDeletedBlockHeight(textLines, fontInfo, ed.getLayoutInfo().contentWidth) ??
+    fallback
+  );
+}
+
 function FileEditorImpl({
   path,
   projectRoot,
@@ -156,11 +214,34 @@ function FileEditorImpl({
 
   // Refs for diff decoration cleanup
   const decorationIdsRef = useRef<string[]>([]);
-  const viewZoneIdsRef = useRef<string[]>([]);
+  // Deleted-block view zones: id + the live IViewZone delegate (mutable
+  // heightInPx) so wrap-aware relayout can resize an existing zone in place.
+  const viewZonesRef = useRef<{ id: string; delegate: editor.IViewZone }[]>([]);
   const searchDecorationIdsRef = useRef<string[]>([]);
+  const diffLayoutDisposablesRef = useRef<{ dispose: () => void }[]>([]);
   const selectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const scrollDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const [activeHighlight, setActiveHighlight] = useState<{ query: string; path: string } | null>(null);
+
+  // Resize deleted-block view zones when the editor geometry or typography
+  // changes (window resize, font-size setting, word-wrap toggle). Monaco only
+  // re-reads a zone's height when layoutZone() is called, so mutations to the
+  // delegate need this explicit pass; unchanged heights are skipped to avoid
+  // pointless re-renders.
+  const relayoutDeletedZones = useCallback(() => {
+    const ed = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!ed || !monaco || viewZonesRef.current.length === 0) return;
+    ed.changeViewZones((accessor) => {
+      for (const z of viewZonesRef.current) {
+        const textLines = (z.delegate as unknown as { __deletedTextLines?: string[] }).__deletedTextLines ?? [];
+        const heightPx = computeDeletedZoneHeight(ed, monaco, textLines);
+        if (Math.abs(heightPx - (z.delegate.heightInPx ?? 0)) < 1) continue;
+        z.delegate.heightInPx = heightPx;
+        accessor.layoutZone(z.id);
+      }
+    });
+  }, []);
 
   // ── Stable callback refs ──
   // The parent recreates onChange / onSelectionChange on every render (App.tsx
@@ -442,13 +523,16 @@ function FileEditorImpl({
       ed.deltaDecorations(decorationIdsRef.current, []);
       decorationIdsRef.current = [];
     }
-    // View zones must be removed one at a time
-    for (const zoneId of viewZoneIdsRef.current) {
+    // View zones must be removed one at a time; their layout subscriptions
+    // go with them.
+    for (const { id: zoneId } of viewZonesRef.current) {
       ed.changeViewZones((accessor) => {
         accessor.removeZone(zoneId);
       });
     }
-    viewZoneIdsRef.current = [];
+    viewZonesRef.current = [];
+    for (const d of diffLayoutDisposablesRef.current) d.dispose();
+    diffLayoutDisposablesRef.current = [];
 
     const applyPatch = (patch: string) => {
       if (cancelled) return;
@@ -515,21 +599,31 @@ function FileEditorImpl({
       decorationIdsRef.current = ed.deltaDecorations([], decorations);
 
       // Apply view zones
+      const fontInfo = ed.getOption(monaco.editor.EditorOption.fontInfo);
+      const layoutDisposables: { dispose: () => void }[] = [];
       ed.changeViewZones((accessor) => {
         for (const zd of zoneDefs) {
+          const textLines = zd.lines.map((l) => l.text);
           const domNode = document.createElement("div");
           domNode.className = "monaco-deleted-block";
           domNode.style.cssText = [
             "background: rgba(127, 17, 17, 0.15);",
             "border-left: 3px solid rgba(239, 68, 68, 0.6);",
             "padding: 2px 8px;",
-            "font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', Menlo, monospace;",
-            "font-size: 12px;",
+            // Match the editor's own typography so the zone's wrap points and
+            // line heights agree with the code around it. A hardcoded 12px
+            // drifts from the user's font size and desyncs the measured zone
+            // height from the real render.
+            `font-family: ${fontInfo.fontFamily};`,
+            `font-size: ${fontInfo.fontSize}px;`,
+            `font-weight: ${fontInfo.fontWeight};`,
+            `line-height: ${fontInfo.lineHeight}px;`,
             "color: rgba(239, 68, 68, 0.7);",
             "display: flex;",
             "align-items: flex-start;",
             "gap: 6px;",
             "user-select: text;",
+            "overflow: hidden;",
           ].join(" ");
 
           // Copy button
@@ -561,20 +655,43 @@ function FileEditorImpl({
           };
 
           const textSpan = document.createElement("span");
-          textSpan.style.cssText = "white-space: pre-wrap;";
+          textSpan.style.cssText = "white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; flex: 1; min-width: 0;";
           textSpan.textContent = zd.lines.map((l) => l.text).join("\n");
 
           domNode.appendChild(copyBtn);
           domNode.appendChild(textSpan);
 
-          const id = accessor.addZone({
+          // Word-wrap-aware zone height: a fixed heightInLines undercounts
+          // whenever a deleted line wraps, and the overflowing red text then
+          // paints over the lines below the block (user-reported bug). The
+          // delegate object is kept so relayoutDeletedZones() can resize the
+          // zone when the editor is resized or its typography changes.
+          const zone: editor.IViewZone = {
             afterLineNumber: Math.max(zd.afterLine, 1),
-            heightInLines: zd.lines.length,
+            heightInPx: computeDeletedZoneHeight(ed, monaco, textLines),
             domNode,
-          });
-          viewZoneIdsRef.current.push(id);
+          };
+          (zone as unknown as { __deletedTextLines?: string[] }).__deletedTextLines = textLines;
+          const id = accessor.addZone(zone);
+          viewZonesRef.current.push({ id, delegate: zone });
         }
       });
+
+      // Keep zone heights in sync while they are alive: onDidLayoutChange
+      // covers window resizes / panel resizes; onDidChangeConfiguration
+      // covers font-size and word-wrap setting changes.
+      layoutDisposables.push(
+        ed.onDidLayoutChange(() => relayoutDeletedZones()),
+        ed.onDidChangeConfiguration((e) => {
+          if (
+            e.hasChanged(monaco.editor.EditorOption.fontInfo) ||
+            e.hasChanged(monaco.editor.EditorOption.wordWrap)
+          ) {
+            relayoutDeletedZones();
+          }
+        }),
+      );
+      diffLayoutDisposablesRef.current = layoutDisposables;
     };
 
     // All sources are fetched in parallel: the agent-session change diff, the

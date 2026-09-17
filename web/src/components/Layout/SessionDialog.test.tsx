@@ -35,6 +35,7 @@ vi.mock("../../stores/projectStore", () => ({
     openSessionTab: vi.fn(),
     toggleSessionPicker: mocks.toggleSessionPicker,
     openNewSessionTab: vi.fn(),
+    prefetchProjectSessions: vi.fn(),
   }),
 }));
 

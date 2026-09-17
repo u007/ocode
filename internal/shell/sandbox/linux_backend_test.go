@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"errors"
+	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
@@ -171,5 +172,44 @@ func TestLinuxExecutableErrorFailsClosed(t *testing.T) {
 	})
 	if _, err := w.Wrap(bashCmd("/bin/bash", "-c", "true"), RootSet{WritableRoots: []string{"/tmp"}, NetworkEgress: true}); err == nil {
 		t.Fatal("executable resolution failure must error")
+	}
+}
+
+// TestLinuxLandlockReexecResolvesBareShellPath is the regression for the Linux
+// "total lockout": the production bash invocation is `exec.Command("bash",
+// "-c", cmd)`, whose Args[0] is the bare name while Path is the PATH-resolved
+// absolute path. The Landlock confiner execve's the shell directly (no PATH
+// lookup), so forwarding Args[0] verbatim made every sandboxed command fail
+// with `sandbox-confine: no such file or directory`. Wrap must hand the
+// confiner an absolute shell path.
+func TestLinuxLandlockReexecResolvesBareShellPath(t *testing.T) {
+	w := newLinuxWrapper(linuxBackendProbes{
+		landlockUsable: func() bool { return true },
+		executable:     func() (string, error) { return "/fake/ocode", nil },
+	})
+	// Model exactly what exec.Command("bash", "-c", ...) produces on Linux:
+	// resolved absolute Path, bare Args[0].
+	base := &exec.Cmd{Path: "/usr/bin/bash", Args: []string{"bash", "-c", "echo hi"}}
+	got, err := w.Wrap(base, RootSet{WritableRoots: []string{"/tmp"}, NetworkEgress: true})
+	if err != nil {
+		t.Fatalf("wrap error: %v", err)
+	}
+	if len(got.Args) < 5 || got.Args[1] != confinerSubcommand {
+		t.Fatalf("Args = %v, want [exe sandbox-confine <shell> -c echo hi]", got.Args)
+	}
+	if shell := got.Args[2]; shell != "/usr/bin/bash" {
+		t.Fatalf("confiner shell = %q, want absolute /usr/bin/bash (bare name would ENOENT)", shell)
+	}
+}
+
+// TestLinuxConfineEntrypointResolvesBareShellPath locks the confiner's own
+// defense-in-depth PATH resolution: even if a caller hands it a bare shell
+// name, the confiner must not execve a CWD-relative "bash".
+func TestLinuxConfineEntrypointResolvesBareShellPath(t *testing.T) {
+	if got := resolveConfineShell("bash"); got == "" || got == "bash" {
+		t.Fatalf("resolveConfineShell(%q) = %q, want a PATH-resolved path", "bash", got)
+	}
+	if got := resolveConfineShell("/usr/bin/bash"); got != "/usr/bin/bash" {
+		t.Fatalf("resolveConfineShell absolute = %q, want unchanged", got)
 	}
 }

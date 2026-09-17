@@ -1,3 +1,17 @@
+---
+type: Guide
+title: Speech playback
+description: Speech playback — user-facing doc covering engine availability, installation, playback controls, and DOM-based rendered-text extraction
+tags:
+  - speech
+  - tts
+  - playback
+  - web
+  - desktop
+  - user-facing
+  - DOM-extraction
+timestamp: 2026-09-16T13:04:47Z
+---
 # Speech playback
 
 Speech playback is shared by the web UI and the desktop app because desktop
@@ -57,13 +71,43 @@ until `ready` (or `error`), then fetches `GET /api/tts/audio/{audio_id}`
   (`ProcessKindTTS`) with a 10-minute timeout; stop/replace/engine-switch
 cancel it. Only the active playback's audio id is served.
 
+## Rendered-text extraction (DOM, not markdown source)
+
+Speech reads the message's **rendered** text — what is on screen, extracted
+from the DOM — never the raw markdown source string. The extraction helpers
+in `web/src/components/Speech/speechUtils.ts` implement this:
+
+| Helper | Purpose |
+|---|---|
+| `renderedSpeechText(root)` | Walk a rendered DOM subtree; collapse whitespace; skip `[data-speech-exclude]`, `aria-hidden`, script/style/svg; insert line breaks at block-level tags. Used by per-message Speak button. |
+| `renderedSpeechTexts(root)` | Collect all `[data-speech-content]` blocks in DOM order into a single string. Used by "Speak visible" viewport button. |
+| `lastRenderedSpeechText(root)` | Return the last `[data-speech-content]` block. Used by auto-speak at-bottom. |
+
+Because the extractor walks the rendered DOM rather than reading markdown
+source, heading hashes, `**` emphasis markers, backticks and link URLs are
+not read aloud. Adjacent paragraphs, list items and table cells are
+separated by block-level breaks rather than run together. The Skip rules:
+
+- `[data-speech-exclude]` children are omitted (e.g. the Speak button
+  itself).
+- `aria-hidden` elements, `<script>`, `<style>`, and `<svg>` are skipped.
+
+Component contract: every markdown-rendered message block must set
+`data-speech-content` on its subtree. `ThinkingBlock` reasoning and terminal
+selections are plain text and pass through unchanged — no DOM extraction
+needed.
+
+For the full rationale (formatting markers, block-level structure, why
+markdown source fails) see `gotchas/speech-rendered-text-extraction.md` and
+`superpowers/specs/2026-09-09-tts-speech-playback-design.md` §10.1.
+
 ## Controls
 
 Assistant messages expose **Speak**. Chat supports speaking the current text
 selection or visible message content. The terminal context menu preserves Copy
 and adds **Play selection** and **Speak visible**; terminal control bytes are
-removed before speech. New speech replaces current speech and clears queued
-chunks.
+removed before speech. New speech replaces current speech and clears
+queued chunks.
 
 Server-side stop, selection, and synthesis mutations are serialized by the
 frontend and supervisor. A late stop cannot cancel a newer speech request, and

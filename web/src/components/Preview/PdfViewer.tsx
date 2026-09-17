@@ -2,7 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { api } from "../../api/client";
+import { ensureReadableStreamAsyncIterator } from "../../lib/readableStreamAsyncIterator";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
+
+// WebKit has no ReadableStream async iteration, which pdf.js's getTextContent()
+// needs (`for await … of streamTextContent()`). Install it before the first
+// document loads; no-op on Chrome/Firefox. See the shim for the full story.
+ensureReadableStreamAsyncIterator();
 
 // pdf.js runs page raster + text extraction in a worker; the bundled worker
 // URL keeps preview offline-capable (no CDN, same as monaco-setup).
@@ -77,12 +83,25 @@ export default function PdfViewer({
       try {
         const pg = await doc.getPage(safe);
         if (cancelled) return;
+        // Render the raster at the device pixel ratio (cap 3 to bound memory)
+        // so retina/hi-DPI screens get a crisp page. Without this the canvas
+        // backing store is 1× CSS pixels and the display upscales it by
+        // devicePixelRatio — the "blurry PDF" bug on Mac/WKWebView. The backing
+        // store is dpr× the CSS size; the text layer keeps the 1:1 viewport so
+        // glyph positions stay aligned with the rendered page.
+        const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1), 3);
         const viewport = pg.getViewport({ scale: 1.5 });
         const canvas = canvasRef.current;
         if (canvas) {
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          await pg.render({ canvas, viewport }).promise;
+          canvas.width = Math.floor(viewport.width * dpr);
+          canvas.height = Math.floor(viewport.height * dpr);
+          canvas.style.width = `${viewport.width}px`;
+          canvas.style.height = `${viewport.height}px`;
+          await pg.render({
+            canvas,
+            viewport,
+            transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
+          }).promise;
         }
         if (cancelled) return;
         const tc = await pg.getTextContent();

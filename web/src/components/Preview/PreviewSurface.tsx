@@ -1,12 +1,34 @@
-import PdfViewer from "./PdfViewer";
-import DocxViewer from "./DocxViewer";
-import PptxViewer from "./PptxViewer";
-import ExcelViewer from "./ExcelViewer";
-import MmdViewer from "./MmdViewer";
-import MarkdownViewer from "./MarkdownViewer";
-import TextViewer from "./TextViewer";
+import { lazy, Suspense } from "react";
 import ImageViewer from "./ImageViewer";
+import MediaViewer from "./MediaViewer";
 import type { PreviewKind } from "../../lib/previewKind";
+
+// Heavy viewers are code-split. pdf.js, xlsx, docx-preview and mermaid (and,
+// transitively through TextViewer/MarkdownViewer → FileEditor, all of Monaco)
+// used to sit in the initial bundle purely because this file imported them
+// statically — that is what made the entry chunk ~6.7 MB and its parse/compile
+// cost part of every cold start. Splitting them behind `lazy` moves them into
+// hashed chunks that load on first use and are then immutable-cached.
+//
+// ImageViewer/MediaViewer stay static: they pull nothing heavy, and the common
+// image path should never pay a Suspense round-trip.
+const PdfViewer = lazy(() => import("./PdfViewer"));
+const DocxViewer = lazy(() => import("./DocxViewer"));
+const PptxViewer = lazy(() => import("./PptxViewer"));
+const ExcelViewer = lazy(() => import("./ExcelViewer"));
+const MmdViewer = lazy(() => import("./MmdViewer"));
+const MarkdownViewer = lazy(() => import("./MarkdownViewer"));
+const TextViewer = lazy(() => import("./TextViewer"));
+
+/** Minimal placeholder while a heavy viewer's chunk downloads. Intentionally
+ *  chrome-free so it does not flash a layout the viewer then replaces. */
+function ViewerLoading() {
+  return (
+    <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+      Loading viewer…
+    </div>
+  );
+}
 
 export interface PreviewSurfaceProps {
   path: string;
@@ -43,14 +65,18 @@ export default function PreviewSurface({
   const handleOpenFile = onOpenFile ?? (() => {});
   return (
     <div className="min-h-0 flex-1">
-      {kind === "pdf" && <PdfViewer path={path} projectRoot={projectRoot} projectHost={projectHost} page={page ?? 1} onPageChange={handlePageChange} />}
-      {kind === "docx" && <DocxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
-      {kind === "pptx" && <PptxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} slide={slide ?? 1} onSlideChange={handleSlideChange} />}
-      {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
-      {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} />}
-      {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} />}
-      {kind === "text" && <TextViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
-      {kind === "image" && <ImageViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
+      <Suspense fallback={<ViewerLoading />}>
+        {kind === "pdf" && <PdfViewer path={path} projectRoot={projectRoot} projectHost={projectHost} page={page ?? 1} onPageChange={handlePageChange} />}
+        {kind === "docx" && <DocxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
+        {kind === "pptx" && <PptxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} slide={slide ?? 1} onSlideChange={handleSlideChange} />}
+        {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
+        {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} />}
+        {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} />}
+        {kind === "text" && <TextViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
+        {kind === "image" && <ImageViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
+        {kind === "audio" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="audio" />}
+        {kind === "video" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="video" />}
+      </Suspense>
     </div>
   );
 }

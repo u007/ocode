@@ -151,6 +151,8 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 		tsShare:       &tailscaleShare{},
 	}
 	h.computerSup = s.procSup
+	h.procSup = s.procSup
+	h.portMaps = newPortMapRegistry(s.procSup)
 	s.tts = tts.NewSupervisor(tts.DefaultConfig(), tts.Options{Root: ttsCacheRoot(), ProcSup: s.procSup})
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
@@ -246,7 +248,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/files/search", s.authMiddleware(s.handleFileSearch))
 	s.mux.HandleFunc("GET /api/files/search/stream", s.authMiddleware(s.handleFileSearchStream))
 	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
-	s.mux.HandleFunc("GET /api/files/raw", s.authMiddleware(s.handleFileRaw))
+	s.mux.HandleFunc("GET /api/files/raw", s.mediaAuthMiddleware(s.handleFileRaw))
+	s.mux.HandleFunc("POST /api/files/media-token", s.authMiddleware(s.handleMediaToken))
 	s.mux.HandleFunc("PUT /api/files/content", s.authMiddleware(s.handleSaveFileContent))
 	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
 	s.mux.HandleFunc("POST /api/fs/copy", s.authMiddleware(s.handler.HandleFSCopy))
@@ -463,6 +466,16 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/projects/groups/reorder", s.authMiddleware(s.handleReorderGroups))
 	s.mux.HandleFunc("POST /api/projects/groups/collapse", s.authMiddleware(s.handleSetGroupCollapsed))
 
+	// Port forwards for remote SSH projects (the Port forwards panel). One
+	// ssh -N -L child per forward, supervised by the server's process
+	// supervisor; the panel is scoped to the active project via ?host=&project=.
+	// WSL targets are rejected — WSL2 already shares the Windows loopback.
+	s.mux.HandleFunc("GET /api/portmaps", s.authMiddleware(s.handler.HandleListPortMaps))
+	s.mux.HandleFunc("POST /api/portmaps", s.authMiddleware(s.handler.HandleAddPortMap))
+	s.mux.HandleFunc("DELETE /api/portmaps/{port}", s.authMiddleware(s.handler.HandleRemovePortMap))
+	s.mux.HandleFunc("POST /api/portmaps/{port}/enable", s.authMiddleware(s.handler.HandleEnablePortMap))
+	s.mux.HandleFunc("POST /api/portmaps/{port}/disable", s.authMiddleware(s.handler.HandleDisablePortMap))
+
 	// Profiles — desktop per-window sparse overlays
 	s.mux.HandleFunc("GET /api/profiles", s.authMiddleware(s.handler.handleListProfiles))
 	s.mux.HandleFunc("POST /api/profiles", s.authMiddleware(s.handler.handleCreateProfile))
@@ -599,6 +612,56 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		s.rl.reset(ip)
 		next(w, r)
+	}
+}
+
+// mediaAuthMiddleware guards GET /api/files/raw. It behaves like
+// authMiddleware (same credential paths, same rate-limit accounting) but also
+// accepts a valid single-file media capability in `?media_token=` — the path a
+// <video>/<audio> element must use, since it cannot send an Authorization
+// header. See media_tokens.go for why a query-string capability is acceptable
+// here where the master `?token=` form is forbidden in --remote mode.
+//
+// Rejection policy: a media-token attempt carrying NO Authorization header is
+// not recorded as a credential failure. Otherwise an expired token (or a
+// restart, which empties the in-memory store) would let the element's range
+// retries trip the 5-failure IP lockout and block the whole SPA API for that
+// IP — a self-inflicted DoS. A request that also presents a credential still
+// goes through the normal path, so password guessing stays rate-limited; and
+// the token is 256 bits, so it is not guessable.
+func (s *Server) mediaAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// No auth configured (default local desktop/TUI): unchanged bypass.
+		if !s.remoteMode && s.username == "" && s.password == "" {
+			next(w, r)
+			return
+		}
+		ip := realIP(r)
+		// Same lockout precedence as authMiddleware: a blocked IP is answered
+		// 429 before any credential (or capability) is considered, so a
+		// successful guess can't sidestep the limiter.
+		if s.rl.isBlocked(ip) {
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
+		if s.checkAuth(r) {
+			s.rl.reset(ip)
+			next(w, r)
+			return
+		}
+		q := r.URL.Query()
+		tok := q.Get("media_token")
+		if tok != "" && len(tok) <= mediaTokenMaxLen && previewExtIsMedia(filepath.Ext(q.Get("path"))) {
+			if s.handler.mediaTokens.validate(tok, q.Get("path"), q.Get("project_root"), hostParam(r)) {
+				next(w, r)
+				return
+			}
+			if r.Header.Get("Authorization") == "" {
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+		}
+		s.authMiddleware(next)(w, r)
 	}
 }
 
@@ -1231,6 +1294,10 @@ func (s *Server) handleFileContent(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFileRaw(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleFileRaw(w, r)
+}
+
+func (s *Server) handleMediaToken(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleMediaToken(w, r)
 }
 
 func (s *Server) handleSaveFileContent(w http.ResponseWriter, r *http.Request) {

@@ -26,11 +26,11 @@ import (
 // file content is attached to the volatile tail only when the query matches.
 //
 // Files owned by an active OKF knowledge bundle (the docs/ directory) are
-// EXCLUDED: docs/index.md — a curated TOC of every concept doc — is injected
-// into the system prompt when /docs is on, and knowledge_lookup retrieves any
-// concept doc on demand. Re-discovering them would produce a redundant
-// "path — summary" TOC (duplicate mention of the same docs) and waste
-// small-model summarization calls on files the knowledge system already owns.
+// EXCLUDED: the bundle is reached only through knowledge_lookup / the context
+// sub-agent (nothing from it, index.md included, is injected into the system
+// prompt). Re-discovering them would put a "path — summary" TOC of docs the
+// main agent must not read directly into the prompt and waste small-model
+// summarization calls on files the knowledge system already owns.
 // Non-bundle *.md (README, CHANGELOG, project docs) remain discoverable.
 // Summaries are expensive (one small-model call each), so generation runs in a
 // background goroutine and is cached on disk keyed by file content. discoveryDocs()
@@ -443,10 +443,11 @@ func walkMarkdownFiles(root string, ignorePaths ...string) []mdRef {
 	ignorePaths = append(config.DefaultDiscoveryIgnorePaths(), ignorePaths...)
 	matcher := loadGitignore(root)
 	// When an OKF knowledge bundle is active, its docs/ directory is owned by
-	// the knowledge system: docs/index.md (a curated TOC) is injected into the
-	// system prompt and knowledge_lookup retrieves any concept doc on demand.
-	// Skip those files in markdown discovery to avoid a redundant "path —
-	// summary" TOC and duplicate small-model summarization.
+	// the knowledge system: knowledge_lookup / the context sub-agent retrieve
+	// any concept doc on demand and nothing from it is injected into the
+	// system prompt. Skip those files in markdown discovery so the main agent
+	// is not handed a TOC of docs it must not read directly, and to avoid
+	// duplicate small-model summarization.
 	var bundleRoot string
 	if b, ok := knowledge.DetectBundle(root); ok {
 		bundleRoot = b.Root

@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -149,6 +151,151 @@ func remoteRunRaw(ctx context.Context, rw remoteWork, command string) (string, e
 // is bounded by remoteExecTimeout anyway.
 func runWithContext(ctx context.Context, cmd *exec.Cmd) error {
 	return runBounded(ctx, cmd, remoteExecTimeout)
+}
+
+// remoteShellResult is the outcome of running one shell command on a remote
+// target, shaped like internal/shell.Result so the /api/shell handler can
+// answer local and remote requests identically.
+type remoteShellResult struct {
+	Output   string
+	ExitCode int
+	Err      error
+}
+
+// remoteShellRun executes command on rw through the remote host's OWN login
+// shell (remote.LoginShellScript), with rw.Path as the working directory.
+//
+// The remote shell is resolved remotely, per the "remote server is the
+// execution authority" rule in docs/superpowers/specs/2026-09-11-desktop-remote-ssh-workspace-design.md:
+// the local process's $SHELL and the local /etc/shells describe this machine,
+// not the target, so the command runs under a shell the target actually has. A
+// non-zero remote exit is reported via ExitCode, never Err, mirroring
+// internal/shell.Run; Err is reserved for transport failures (ssh could not
+// start, the connection died, the command exceeded the bound).
+//
+// timeout is the caller's budget: the `!` prefix passes shell.DefaultTimeout so
+// a remote command gets the same allowance as a local one (the shorter
+// remoteExecTimeout is a git/files bound, too tight for interactive commands).
+func remoteShellRun(ctx context.Context, rw remoteWork, command string, timeout time.Duration) remoteShellResult {
+	cmd, err := remote.ExecCommand(rw.Target, remote.CdedLoginShellScript(rw.Path, command))
+	if err != nil {
+		return remoteShellResult{ExitCode: 1, Err: err}
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := runBounded(ctx, cmd, timeout); err != nil {
+		out := joinedShellOutput(stdout.String(), stderr.String())
+		// A remote command that ran and exited non-zero is reported via
+		// ExitCode with its output, never Err — the same contract
+		// internal/shell.Run documents. Everything else (the ssh process
+		// failed to start, the connection died, the bound fired) is a genuine
+		// error with no usable output of its own.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return remoteShellResult{Output: out, ExitCode: exitErr.ExitCode()}
+		}
+		return remoteShellResult{Output: out, ExitCode: 1, Err: err}
+	}
+	return remoteShellResult{Output: joinedShellOutput(stdout.String(), stderr.String())}
+}
+
+// joinedShellOutput mirrors internal/shell's combined-stream behavior: callers
+// render one output string, so stdout and stderr are concatenated (stdout
+// first, since a shell typically emits its useful payload there).
+func joinedShellOutput(stdout, stderr string) string {
+	if stderr == "" {
+		return stdout
+	}
+	if stdout == "" {
+		return stderr
+	}
+	return stdout + stderr
+}
+
+// remoteShellCacheEntry is one memoized remote shell probe. A probe is an ssh
+// round-trip, so it is cached per host for the process lifetime: a host's
+// installed shells change far less often than the Settings UI polls this.
+// There is no TTL by design — a deliberately changed remote shell is a
+// reconnect, and a stale answer is still validated remote-side at exec time
+// (the launch/login loops test -x themselves), so caching can never cause a
+// failed command, only a slightly stale picker.
+type remoteShellCacheEntry struct {
+	info remote.RemoteShellInfo
+}
+
+// remoteShellProbeTimeout bounds one shell probe. The probe is a handful of
+// `[ -x ]` tests plus an /etc/shells read, so anything near this is a dead or
+// hung ssh, not a slow remote.
+const remoteShellProbeTimeout = 15 * time.Second
+
+// remoteShellProbeFn runs remote.ShellProbeCommand on t and returns its
+// stdout. A package var so tests can substitute canned probe output instead
+// of shelling out to a real ssh. The default is kind-aware (remote.ExecCommand
+// routes a WSL target through wsl.exe) and bounded: a hung ssh must not pin
+// the HTTP request goroutine, and the output buffers are capped so a runaway
+// remote cannot grow the process without limit.
+var remoteShellProbeFn = func(ctx context.Context, t remote.Target) (string, error) {
+	cmd, err := remote.ExecCommand(t, remote.ShellProbeCommand())
+	if err != nil {
+		return "", err
+	}
+	stdout := &remote.LimitedBuffer{Max: remote.MaxExecOutput}
+	cmd.Stdout = stdout
+	cmd.Stderr = &remote.LimitedBuffer{Max: remote.MaxExecOutput}
+	if err := runBounded(ctx, cmd, remoteShellProbeTimeout); err != nil {
+		return "", err
+	}
+	return stdout.String(), nil
+}
+
+// remoteShellCacheKey identifies a probe target. Target.String() drops the SSH
+// port, and two registered targets on one host that differ only by port are
+// different machines (or containers) with different shells, so the port is
+// part of the key.
+func remoteShellCacheKey(t remote.Target) string {
+	if t.Port > 0 {
+		return t.String() + ":" + strconv.Itoa(t.Port)
+	}
+	return t.String()
+}
+
+// remoteShellInfo probes (or returns the cached probe for) the shells a remote
+// target can actually run. The probe runs outside h.mu because it blocks on
+// ssh; the cache has its own mutex for that reason.
+//
+// A probe failure (including the bound firing) is not an error: the result
+// degrades to /bin/sh, is cached like any other answer, and callers render it
+// as "the remote reported no shells".
+func (h *Handler) remoteShellInfo(ctx context.Context, rw remoteWork) remote.RemoteShellInfo {
+	key := remoteShellCacheKey(rw.Target)
+
+	h.remoteShellCacheMu.Lock()
+	if h.remoteShellCache != nil {
+		if entry, ok := h.remoteShellCache[key]; ok {
+			h.remoteShellCacheMu.Unlock()
+			return entry.info
+		}
+	}
+	h.remoteShellCacheMu.Unlock()
+
+	// Probe without holding the lock: two concurrent first-requests for the
+	// same host may both ssh, which is harmless (idempotent, read-only) and
+	// strictly better than serializing every other host behind one slow probe.
+	info := remote.RemoteShellInfo{Default: "/bin/sh"}
+	if out, err := remoteShellProbeFn(ctx, rw.Target); err != nil {
+		log.Printf("[remote] shell probe failed for %s; using /bin/sh: %v", key, err)
+	} else {
+		info = remote.ParseShellProbe(out)
+	}
+
+	h.remoteShellCacheMu.Lock()
+	if h.remoteShellCache == nil {
+		h.remoteShellCache = map[string]remoteShellCacheEntry{}
+	}
+	h.remoteShellCache[key] = remoteShellCacheEntry{info: info}
+	h.remoteShellCacheMu.Unlock()
+	return info
 }
 
 // runBounded runs cmd with a bounded lifetime: a hung network filesystem or

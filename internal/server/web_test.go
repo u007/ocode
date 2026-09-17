@@ -13,9 +13,48 @@ import (
 // static asset, enough to exercise both the file hit and the SPA fallback.
 func testSPAWebFS() fs.FS {
 	fsys := fstest.MapFS{
-		"index.html": &fstest.MapFile{Data: []byte("<!DOCTYPE html><html><body>spa</body></html>")},
+		"index.html":          &fstest.MapFile{Data: []byte("<!DOCTYPE html><html><body>spa</body></html>")},
+		"assets/index-abc.js": &fstest.MapFile{Data: []byte("console.log('spa')")},
+		"favicon.ico":         &fstest.MapFile{Data: []byte("icon")},
 	}
 	return fsys
+}
+
+// The embedded bundle must carry explicit Cache-Control: embed.FS files report
+// a zero ModTime, so Go emits no Last-Modified/ETag and the browser has no
+// validator — without a directive it re-downloads every hashed asset on each
+// load. Hashed assets are immutable; index.html and the SPA fallback must
+// revalidate so a new build is served immediately.
+func TestSPAHandlerCacheHeaders(t *testing.T) {
+	h := spaHandler(testSPAWebFS())
+
+	cases := []struct {
+		name       string
+		path       string
+		wantSubstr string
+		wantAbsent string
+	}{
+		{"hashed asset", "/assets/index-abc.js", "immutable", "no-cache"},
+		{"index", "/", "no-cache", "immutable"},
+		{"spa fallback", "/session/abc", "no-cache", "immutable"},
+		{"non-hashed root file", "/favicon.ico", "no-cache", "immutable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", tc.path, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s = %d, want 200", tc.path, rec.Code)
+			}
+			cc := rec.Header().Get("Cache-Control")
+			if !strings.Contains(cc, tc.wantSubstr) {
+				t.Fatalf("GET %s Cache-Control = %q, want it to contain %q", tc.path, cc, tc.wantSubstr)
+			}
+			if strings.Contains(cc, tc.wantAbsent) {
+				t.Fatalf("GET %s Cache-Control = %q, must not contain %q", tc.path, cc, tc.wantAbsent)
+			}
+		})
+	}
 }
 
 // Unknown /api/* paths must get a JSON 404, never the index.html SPA

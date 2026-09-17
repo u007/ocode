@@ -10,12 +10,12 @@ A short, dense map of the ocode TUI so you don't re-discover it from scratch.
 
 ## 1. Single entry point
 
-- `tui.Run(opts RunOptions)` in `internal/tui/tui.go:25` — redirects `log` to a debug panel, then calls `tea.NewProgram(newModel(opts))`.
+- `tui.Run(opts RunOptions)` in `internal/tui/tui.go:37` — redirects `log` to a debug panel, installs the crash log + terminal-reset hook, then calls `tea.NewProgram(newModel(opts))`.
 - `newModel(opts ...RunOptions) model` in `internal/tui/model.go` — assembles the `model` struct: input, viewport, tabs, sidebar, files/git sub-models, agent, theme.
 - `View() tea.View` in `internal/tui/model.go` — builds `tea.NewView(m.renderContent())`, sets `AltScreen = true`, conditionally sets `MouseMode = MouseModeAllMotion` when `m.mouseEnabled()` returns true (required for hover-underline on the sidebar; gated by config `tui.mouse`).
 - `Update(msg tea.Msg) (tea.Model, tea.Cmd)` in `internal/tui/model.go` — value receiver. Big `switch msg := msg.(type)` for window size, key, mouse, agent, debug, etc.
 
-> **Line anchors drift fast** — `model.go` is ~20.8k lines and grows constantly. Trust the symbol name, not the line number.
+> **Line anchors drift fast** — `model.go` is ~23.4k lines and grows constantly. Trust the symbol name, not the line number.
 
 ## 2. Screen layout (chat tab, top → bottom)
 
@@ -96,6 +96,7 @@ Any `fmt.Print*` / `fmt.Fprint*(os.Stdout|os.Stderr,…)` / `println` / raw `os.
 - Use `agent.emitDebug` / `agent.DebugAppendf` inside the `agent` package, or `log.Printf` elsewhere — `tui.Run()` calls `log.SetOutput(debugLogWriter{})` so `log` lands in the debug panel.
 - For subprocesses, capture output (`cmd.Stdout = &buf`); never inherit the terminal with `cmd.Stdout = os.Stdout`.
 - Clamp one-line status/activity rows with `.Width(w).MaxHeight(1)` so long content can't wrap and push the bottom chrome past the terminal height.
+- **Crash path:** `installCrashLog()` (`crash_log.go`) + `installCrashTerminalReset()` (`crash_reset.go`) are what stop a panic from leaving the terminal stuck in alt-screen with mouse tracking on (the `[<35;20;10M` garbage). `installCrashTerminalReset` registers `crashguard.SetOnPanic`; a bare `go func()` panic in `internal/tui` is unrecovered and kills the process before that hook runs — spawn through `crashguard.Go`.
 
 ## 7. Test scaffolding
 
@@ -120,14 +121,14 @@ In `internal/tui`:
 
 **Add a new mouse-handled region:** follow the §5 selection recipe. Add a `selectionState` field, a `…ForClick(mouse)` and `…ContentTopY()` helper, and wire the press/motion/release paths in `handleMouseAction` / `handleMouseMotion` (and the `scrollbarDrag*` switch).
 
-**Add a new modal/popup:** use the component layer (`internal/tui/component_overlay.go`, `component_dialog.go`, `component_listbox.go`, `component_button.go`) as building blocks. Wire an adapter (e.g. `other_modals_adapter.go`, `perm_dialog_adapter.go`) and register with the `modalStack` (`modal_stack.go`). The `picker.go` and `slash_popup.go` follow this pattern.
+**Add a new modal/popup:** use the component layer (`internal/tui/component_overlay.go`, `component_dialog.go`, `component_listbox.go`, `component_button.go`) as building blocks. Wire an adapter (e.g. `other_modals_adapter.go`, `picker_adapter.go`) and register with the `modalStack` (`modal_stack.go`). The `picker.go` and `slash_popup.go` follow this pattern.
 
 **Change a theme color:** edit the `ThemeColors` struct in `theme.go` and the relevant `builtinThemes` entry. `ApplyThemeColors` is the only consumer; everything flows from it.
 
 ## 9. Files to know
 
 ### Core layout & chrome
-- `internal/tui/model.go` (~20.8k lines) — model struct, Update, View, renderContent, layout, mouse, scrollbar, all the chrome math. Tab routing in `renderTabContent`; the agents tab (`tabAgents`) renders via `m.renderAgentsTab()`.
+- `internal/tui/model.go` (~23.4k lines) — model struct, Update, View, renderContent, layout, mouse, scrollbar, all the chrome math. Tab routing in `renderTabContent`; the agents tab (`tabAgents`) renders via `m.renderAgentsTab()`.
 - `internal/tui/theme.go` — themes + style singletons.
 - `internal/tui/tabs.go` — tab constants (6: chat, agents, files, changes, git, log) + `renderTabBar`.
 - `internal/tui/selection.go` — shared `selectionState`, `applySelectionHighlight`, `extractSelectionText`, `normaliseSelection`.
@@ -160,7 +161,6 @@ In `internal/tui`:
 - `internal/tui/connect.go`, `picker.go`, `question_prompt.go`, `slash_popup.go` — modal dialogs / popups.
 - `internal/tui/permission_modal.go` — permission request modal.
 - `internal/tui/other_modals_adapter.go` — adapter for permission/question modals.
-- `internal/tui/perm_dialog_adapter.go` — permission dialog adapter.
 - `internal/tui/picker_adapter.go` — picker adapter.
 - `internal/tui/slash_popup_adapter.go` — slash popup adapter.
 
@@ -184,6 +184,16 @@ In `internal/tui`:
 
 ### Scheduling
 - `internal/tui/command_cron.go` — `/cron` command for scheduled job management.
+
+### Crash handling & terminal safety
+- `internal/tui/crash_log.go` — `installCrashLog()` installs the crash/panic log writer (plus `ttyStateLine()`), and is what the debug log writer delegates to.
+- `internal/tui/crash_reset.go` — `installCrashTerminalReset()`, the `crashguard.SetOnPanic` hook that leaves the alt-screen and disables mouse tracking.
+- `internal/tui/tty_foreground_unix.go` / `tty_foreground_windows.go` — `reclaimTTYForeground()` / `ttyForegroundPgrp()`: reclaim the TTY foreground process group after a child process or terminal handoff (platform-split).
+
+### Text width & input
+- `internal/tui/textwidth.go` — `visualWidth()` / `nextVisualCluster()`: display width in terminal cells **counting grapheme clusters, not runes**. Use these for any column math; a raw `len()`/rune count under-/over-counts combining marks and wide glyphs.
+- `internal/tui/delayed_chat_input.go` — `queueDelayedChatInput()` / `takeDelayedChatInput()` / `invalidateDelayedChatInput()`: input typed while a stream is in flight, drained when the turn ends.
+- `internal/tui/secret_editor.go`, `internal/tui/secret_cli_exec.go` — `/secret` support: the secret-aware editor opener (decrypt → edit → re-encrypt) and the secret CLI exec command (`runSecretCmd`, `resolveSecretCmdArgs`).
 
 ## 10. Quick grep recipes
 

@@ -373,3 +373,41 @@ func TestTerminalWSSpawnsSSHShellForRemoteProject(t *testing.T) {
 		t.Fatalf("session project = %q, want %q", sess.project, host+":~/app")
 	}
 }
+
+// A socket that arrives while another socket holds the create reservation must
+// not hang the websocket handshake forever if that reservation is never
+// published (the deferred abandon safety net covers in-handler leaks, but a
+// reservation can also be observed after an owner died with the process still
+// serving). The waiter is bounded and answers a retryable 503.
+func TestTerminalWSWaiterTimesOutOnLeakedReservation(t *testing.T) {
+	orig := terminalCreateWaitTimeout
+	terminalCreateWaitTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { terminalCreateWaitTimeout = orig })
+
+	h := NewHandler()
+	h.workDir = t.TempDir()
+	h.SetTerminalAccessPolicy(false, true)
+
+	const id = "term-leaked-reservation"
+	// Simulate an owner that reserved and vanished without publishing.
+	if _, created, _ := h.terminalSessions.reserveForProject(id, h.workDir); !created {
+		t.Fatal("failed to seed a leaked reservation")
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/terminal/ws?terminal_id="+id+"&project_path="+url.QueryEscape(h.workDir), nil)
+	done := make(chan struct{})
+	go func() {
+		h.HandleTerminalWS(w, r)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("HandleTerminalWS hung on a leaked reservation instead of timing out")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}

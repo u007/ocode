@@ -145,13 +145,28 @@ func LoadContext(enabled map[string]bool, memoryEnabled bool, discoveryOn bool, 
 	var context string
 	files := []string{"AGENTS.md", "CLAUDE.md", "OCODE.md", ".cursorrules"}
 
+	// Anchor the always-on context files at the session's project root, not the
+	// process cwd. The desktop/web server boots with cwd "/" (or whatever
+	// project it was launched in) while each session is bound to its own
+	// project root — a remote/WSL project's root is not even on this machine —
+	// so a cwd-relative read injected ANOTHER project's AGENTS.md/CLAUDE.md
+	// into the session's cached system prompt. Same anchor rationale as
+	// loadModelContextWithSource below; root == "" preserves the cwd behavior
+	// callers relied on before roots were threaded through.
 	for _, f := range files {
-		if content, ok := readContextFile(f); ok {
+		path := f
+		if root != "" {
+			path = filepath.Join(root, f)
+		}
+		if content, ok := readContextFileAt(root, path); ok {
 			context += "\n--- " + f + " ---\n" + content + "\n"
 		}
 	}
 
 	rulesDir := filepath.Join(".opencode", "rules")
+	if root != "" {
+		rulesDir = filepath.Join(root, ".opencode", "rules")
+	}
 	if entries, err := os.ReadDir(rulesDir); err == nil {
 		for _, entry := range entries {
 			if !entry.IsDir() && filepath.Ext(entry.Name()) == ".md" {

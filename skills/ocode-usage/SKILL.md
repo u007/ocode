@@ -73,7 +73,7 @@ Configuration is split across two files:
 
 ### Provider API Keys
 
-Supported providers: **OpenAI**, **Anthropic**, **Google (Gemini)**, **Z.AI**, **Alibaba (Qwen)**, **GitHub Copilot**, **DeepSeek (opencode-go)**, **Minimax**, **Grok**, **Novita AI**, **Ollama Cloud**, **Cloudflare Gateway**
+Supported providers: **OpenAI**, **Anthropic**, **Google (Gemini)**, **Z.AI**, **Alibaba (Qwen)**, **GitHub Copilot**, **DeepSeek (opencode-go)**, **Minimax**, **Grok**, **Novita AI**, **Ollama Cloud**, **Cloudflare Gateway**, **TypeSafe AI** (`TYPESAFE_API_KEY`; Jev is decision-only — select `typesafe/jev-latest` with `/permissions model`, not as the chat model)
 
 Configure via `apiKeys` in config or provider-specific env vars:
 - `OPENAI_API_KEY`
@@ -105,25 +105,28 @@ ocode                    # Start fresh session
 ocode -continue          # Resume last session
 ocode -session <id>      # Resume specific session
 ocode -yolo              # Auto-approve all (last resort — prefer the auto-permission layer)
-ocode --permission-mode off  # Disable permissions entirely
+                         # Also: --yolo, --dangerously-skip-permissions
+ocode --permission-mode off  # Disable auto-permission layer (fall back to normal prompting)
 ocode -effort high       # Set reasoning effort level (off|low|med|high|xhigh|max; persists like /effort)
 ```
 
 **TUI Navigation:**
-- `Tab` / `Shift+Tab` — Switch tabs (chat, agents, files, changes, git, log)
+- `Alt+[` / `Alt+]` — Switch tabs (chat, agents, files, changes, git, log)
+- `Tab` — Cycle agent modes (build, plan, review, debug, docs)
 - `Shift+Tab` (while agent running) — Toggle agent strip focus (cycle through running agents)
-- `Ctrl+P` — Search and open files (command palette)
-- `Ctrl+X` — Leader key (then `h` help, `u` undo, `r` redo, `n` new, `l` list, `c` compact, `t` thinking level)
-- `Ctrl+D` — Cycle thinking effort level (off → low → med → high)
+- `Ctrl+P` — File search
+- `Ctrl+X` — Leader key (then `s` sidebar, `u` undo, `r` redo, `n` new, `l` list, `c` compact, `y` copy session ID, `t` thinking level, `q` quit)
+- `Ctrl+D` — Cycle thinking effort level (off → low → med → high → xhigh → max)
 - `Ctrl+B` — Move running bash command to background
 - `Ctrl+G` — Open process list
 - `Ctrl+O` — Toggle YOLO permissions mode
 - `Ctrl+Y` — Retry last LLM timeout or I/O error
+- `Ctrl+A` — Toggle keyboard focus on agent strip
 - `Ctrl+C` — Clear input / Cancel / Double-tap to quit
-- `Esc` — Close popup / Exit shell mode / Cancel detail view
+- `Esc` — Close popup / Exit shell mode / Cancel detail view / Cancel running agent
 - `Up/Down` — Navigate input history
 - `Shift+Enter` — New line in input
-- `Tab` — Autocomplete slash commands
+- `Tab` — Autocomplete slash commands (when input starts with `/`)
 - Mouse — Click tabs, scroll, select text (click-drag to copy, plain click to activate)
 - `!command` — Prefix input with `!` to run a shell command (double-esc to exit shell mode)
 - `@path` — Reference a file (attach image, or pass path to model)
@@ -183,7 +186,7 @@ ocode serve -port 8080
 | `GET /api/terminal/ws` | Interactive pty terminal WebSocket |
 | `GET /api/sessions` | List sessions (supports `?limit=&offset=` pagination) |
 | `GET /api/sessions/:id` | Session detail with live model/context info |
-| `GET /api/sessions/:id/state` | Session state (messages, model, context) |
+| `GET /api/sessions/:id/state` | Reconcile state (`bootstrap_stage`, `turn_active`, `last_seq`, buffered `live_frames`) plus optional `pending_asks` — the live permission/question prompt(s) the session is paused on, used to recover the approve/reject dialog when the sentinel is not in the persisted transcript |
 | `GET /api/sessions/:id/status` | Session status (TUI status snapshot) |
 | `POST /api/sessions/:id/message` | Send message to session |
 | `POST /api/sessions/:id/compact` | Compact session context |
@@ -278,6 +281,11 @@ ocode version          # Show version (alias)
 | `mcp` | Manage MCP servers |
 | `models` | List available models |
 | `skills` | Manage skills |
+| `secret` | Encrypt/decrypt project files or dirs |
+| `goal` | Run multi-agent orchestration pipeline |
+| `remote` | Connect to ocode on a remote SSH host |
+| `debug` | Print project-scoping info (slug, data dirs) |
+| `version` | Show version information |
 
 ### Help for Any Command
 
@@ -347,6 +355,7 @@ ocode models --provider anthropic
 | GitHub Copilot | gpt-4o, claude-3-5-sonnet (via Copilot) |
 | DeepSeek (opencode-go) | deepseek-v4-flash, deepseek-v4 |
 | Minimax | minimax-m3 |
+| TypeSafe AI | jev-latest (permission judge only) |
 | Grok | grok-3, grok-3-mini (via grok.com subscription) |
 | Cloudflare Gateway | Various models via Cloudflare Workers AI |
 
@@ -384,14 +393,11 @@ ocode skills uninstall ocode-tui
 | `ocode-permissions` | Permission modes, policies, and configuration |
 | `ocode-agent-architecture` | Agent loop, context loading, provider abstraction |
 | `ocode-mem` | Persistent memory workflow for user/project/global context |
+| `ocode-usage` | This usage guide |
 | `team-onboarding` | Team onboarding documentation generator |
 | `review-changes` | AI code review using parallel agents with shared context |
 | `custom-model-prompt` | Model-specific prompt configuration |
-| `find-docs` | Search for documentation files in the codebase |
-| `find-skills` | Discover and install skills by description |
 | `skill-creator` | Guide for creating and updating skills |
-| `agent-browser` | Browser automation CLI for AI agents |
-| `flutter` | Flutter/Dart development with Riverpod, Freezed |
 | `compress` | Workspace compression for reducing context size |
 
 ### Creating Custom Skills
@@ -411,11 +417,11 @@ ocode skills uninstall ocode-tui
 ocode
 
 # In TUI: use /commands
-/explain    # Explain selected code
-/refactor   # Refactor selection
-/test       # Generate tests
-/review     # Code review
+/review     # AI code review
+/standup    # Recent commits + pending changes
 /git        # Git operations
+/context    # Show context window token budget
+/lsp        # LSP diagnostics
 ```
 
 ### Code Review Pipeline
@@ -462,7 +468,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 
 | Command | Aliases | When to Use | Notes |
 |---------|---------|-------------|-------|
-| `/model` | `/m` | Switch LLM providers/models | Fuzzy search; shows recent/favorite models first |
+| `/model` | `/models` | Switch LLM providers/models | Fuzzy search; shows recent/favorite models first |
 | `/advisor` | | Set the advisor model for strategic guidance | Used by the `advisor()` tool during code reviews |
 | `/small-model` | | Show or switch the small model for lightweight tasks | Small model gets an intent-analysis prompt fragment |
 | `/compact` | `[focus]` | Manually trigger context compaction | Uses configured summary model (separate from chat model) |
@@ -471,7 +477,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/cron` | | Manage scheduled jobs | `list`, `describe <id>`, `remove <id>`, `add <kind> <args> <message>`; jobs fire in the long-lived serve/web/desktop host, not the TUI |
 | `/agents` | | Show active/queued subagents, or set max concurrent subagents | `status`, `limit <n>` (0 = unlimited) |
 | `/clear` | `/new` | Start a fresh conversation in the current session | Keeps session on disk; only clears in-memory messages |
-| `/session` | `/s`, `/resume` | List, pick, or resume sessions | Supports pagination with limit/offset |
+| `/session` | `/sessions`, `/resume` | List, pick, or resume sessions | Supports pagination with limit/offset |
 | `/export` | | Export session as JSON | Full transcript for backup or migration |
 | `/export-claude` | | Export in Claude Code compatible JSONL format | For importing into Claude Code |
 | `/share` | | Generate a shareable session link | Requires `ocode serve` running |
@@ -483,6 +489,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/theme` | `/themes` | Switch themes instantly | Built-in themes: Tokyo Night, Storm, Catppuccin |
 | `/permissions` | | View/set tool and bash permissions | Supports per-tool rules, bash prefix rules, auto-permission model |
 | `/yolo` | | Toggle YOLO permissions mode on/off (**last resort**) | Auto-approves permission-gated tools (respects hard blocks) |
+| `/sandbox` | | Toggle sandbox mode (OS-confined writes) | Write-confined; touching secrets/config still asks |
 | `/git` | | Git operations from command line | Stage, unstage, discard, commit, push, pull, branch |
 | `/github` | | PR, issue, and workflow commands | GitHub API integration |
 | `/plugin` | | Plugin management (install, sync, list, etc.) | Git-based plugin system with registry |
@@ -497,6 +504,33 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/mem` | | Memory context injection | Inspect or toggle user/project/global memory layers |
 | `/btw` | `/by-the-way` | Add a quick aside to the conversation | Injects a note without breaking flow |
 | `/init` | | Analyze project and generate AGENTS.md | Project initialization |
+| `/effort` | | Show or set reasoning effort level | off, low, med, high, xhigh, max |
+| `/thinking` | | Toggle visibility of agent thoughts | |
+| `/details` | | Toggle tool execution details | |
+| `/sound` | | Toggle terminal bell on task completion | |
+| `/connect` | | Show/Set provider API keys | |
+| `/secret` | | Encrypt/decrypt project files | |
+| `/login` | | Log in and enable encrypted config sync | |
+| `/logout` | `/sync-logout` | Log out and stop config sync | |
+| `/changes` | | Analyze repo changes: diffs, LSP errors, specs | |
+| `/title` | | Set session title | |
+| `/sidebar` | | Toggle sidebar | |
+| `/ban` | | Manage banned bash command prefixes | |
+| `/max-step` | `/max-steps` | Show or set max tool-call steps before auto-summary | |
+| `/paths` | | Show all relevant filesystem paths | |
+| `/add-dir` | `/add-dirs` | Add a directory to extra allowed paths | |
+| `/discover` | | Enable/disable retrieval-based skill/MCP discovery | |
+| `/localmodel` | | Manage locally-run model instances (e.g. Bonsai 8B) | |
+| `/docs` | `/doc-mode` | Manage documentation-first development and OKF knowledge bundle | |
+| `/goal` | | Run multi-agent orchestration pipeline on a coding goal | |
+| `/autocontinue` | | Auto-resume turns cut off by /max-step | |
+| `/ocr` | | Show OCR status, toggle OCR, or set the OCR model | |
+| `/computer` | | Show computer-use status or enable/disable desktop control | |
+| `/image` | | Show imagegen status, toggle image generation, or set model | |
+| `/fake-agent` | | Show or switch the harness identity (default ocode) | |
+| `/tools` | `/tool` | Detect/install CLI utilities (fd, rg, fzf, eza, bat, grep) | |
+| `/agent` | | Switch agent (build, plan, review, debug, docs) | |
+| `/search` | `/find` | Find a message by keyword (opens in-chat find bar) | |
 | `/help` | `/?` | Show all available commands | Auto-generated from registered command specs |
 
 **Web command parity:** the web/desktop UI supports the same slash-command surface as the TUI — `/standup`, `/changes`, `/review`, `/context`, `/lsp`, `/agents`, `/skills`, `/mcp`, `/cron`, `/small-model`, `/advisor`, `/github` all work in the web chat input. The repo-analysis ones (`/standup`, `/changes`, `/review`) build their prompts through the shared `internal/commandctx` package, so TUI and web get byte-identical context.
@@ -512,9 +546,11 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | Mode | Behavior |
 |------|----------|
 | `normal` (default) | Follow tool rules — some auto-allow, some prompt |
-| `auto` (**recommended**) | LLM-based auto-approval layer — auto-allows routine/low-risk ops, prompts for risky ones, respects hard blocks |
 | `yolo` (last resort) | Auto-approve all permission-gated tools (dangerous) |
 | `locked` | Read-only — all write/edit/bash/network tools denied |
+| `sandbox` | Write-confined — bash runs without prompts, but the OS blocks writes outside the workspace/allowed dirs; touching secrets (`auth.json`, `~/.ssh`, `.env`) or config still asks. Network stays open |
+
+The **auto-permission layer** (LLM-based auto-approval) can be combined with `normal` or `sandbox` modes. Use `--permission-mode auto` to enable it, or toggle via `/permissions` in the TUI.
 
 ### Auto-Permission Layer (Recommended)
 
@@ -555,14 +591,14 @@ Every tool/prefix rule resolves to one of:
 
 Default tool rules:
 ```
-Always allow:  read, glob, grep, list, lsp, lsp_diagnostics, skill, load_skill,
-              question, todoread, todowrite, todo_update, advisor, task,
-              task_status, agent_status, repo_overview, plan_enter,
+Always allow:  read, glob, grep, rgrep, list, lsp, lsp_diagnostics, skill,
+              load_skill, question, todoread, todowrite, todo_update, advisor,
+              task, task_status, agent_status, repo_overview, plan_enter,
               plan_exit, wait, bash_output, kill_shell, list_processes,
               ocr, cron
 
 Default allow: write, edit, multiedit, multi_file_edit, replace_lines,
-              apply_patch, format
+              apply_patch, format, imagegen
 
 Default ask:  delete, bash, webfetch, websearch, repo_clone, mcp_*, computer
 ```
@@ -626,7 +662,7 @@ The `task` tool dispatches a sub-agent. Key features:
 
 ## 13. Sessions
 
-Sessions are stored in `~/.local/share/opencode/sessions/`
+Sessions are stored in `~/.local/share/opencode/project/{slug}/sessions/` (project-scoped by repo root path hash)
 
 ```bash
 # Resume last
@@ -645,16 +681,30 @@ ocode -fork
 
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Next/previous tab |
-| `Ctrl+P` | Command palette |
-| `Ctrl+X` then `h` | Toggle help |
-| `Ctrl+X` then `t` | Cycle theme |
-| `Ctrl+X` then `m` | Toggle mouse |
-| `Esc` | Close popup / cancel |
+| `Alt+[` / `Alt+]` | Next/previous tab |
+| `Tab` | Cycle agent modes (build, plan, review, etc.) |
+| `Shift+Tab` | Toggle agent strip focus |
+| `Ctrl+P` | File search |
+| `Ctrl+X` then `s` | Toggle sidebar |
+| `Ctrl+X` then `u` | Undo |
+| `Ctrl+X` then `r` | Redo |
+| `Ctrl+X` then `n` | New session |
+| `Ctrl+X` then `l` | List/resume sessions |
+| `Ctrl+X` then `c` | Compact |
+| `Ctrl+X` then `y` | Copy session ID |
+| `Ctrl+X` then `t` | Cycle thinking level |
+| `Ctrl+X` then `q` | Quit |
+| `Ctrl+D` | Cycle thinking effort level |
+| `Ctrl+B` | Move running bash to background |
+| `Ctrl+G` | Open process list |
+| `Ctrl+O` | Toggle YOLO mode |
+| `Ctrl+Y` | Retry last LLM error |
+| `Ctrl+A` | Toggle keyboard focus on agent strip |
+| `Esc` | Close popup / Cancel running agent |
 | `Enter` | Send message |
 | `Shift+Enter` | New line in input |
 | `↑` / `↓` | History / scroll |
-| `Ctrl+C` | Interrupt agent |
+| `Ctrl+C` | Clear input / Cancel / Double-tap to quit |
 
 **Desktop (Wails) differences:** `Cmd/Ctrl+W` is deliberately unbound in the native menu so the key reaches the webview, where it closes the active **session tab** (not the app). `Cmd/Ctrl+Q` shows a native "Quit ocode?" confirmation before exiting.
 
@@ -680,7 +730,7 @@ ocode -fork
 # Enable debug logging
 DEBUG=1 ocode
 
-# View logs in TUI: Tab → Log
+# View logs in TUI: switch to Log tab (Alt+[/])
 # Or check ~/.local/share/opencode/logs/
 ```
 
@@ -690,14 +740,18 @@ DEBUG=1 ocode
 
 ```
 ~/.config/opencode/
-├── config.json          # Main config
-├── skills/              # Installed skills
+├── opencode.json       # Upstream-compatible settings
+├── ocodeconfig.json    # ocode-only state (permissions, editor, model history)
+├── skills/             # Installed skills
 │   └── skill-name/
 │       └── SKILL.md
 ~/.local/share/opencode/
-├── sessions/            # Session data
-├── logs/                # Debug logs
-└── mcp/                 # MCP server configs
+├── project/{slug}/     # Per-project state
+│   └── sessions/       # Session data
+├── usage/              # LLM token usage records
+├── logs/               # Debug logs
+├── mcp/                # MCP server configs
+└── auth.json           # Provider API keys
 ```
 
 ---

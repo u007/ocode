@@ -766,13 +766,50 @@ export interface BrowseResponse {
   directories: DirectoryEntry[];
 }
 
-/** One user-added SSH port forward on top of the fixed api/browse tunnel,
- *  from GET/POST /api/desktop/portmaps* (desktop remote-workspace only —
- *  see internal/desktop/portmaps.go). live is the current session's forward
+/** One user-added SSH port forward, from GET/POST /api/portmaps* (a remote SSH
+ *  project — see internal/server/handler_portmaps.go) or
+ *  /api/desktop/portmaps* (the desktop remote-workspace's single tunnel — see
+ *  internal/desktop/portmaps.go). live is the current session's forward
  *  process state; enabled is the persisted intent. */
 export interface PortMapView {
   remote_port: number;
   local_port: number;
   enabled: boolean;
   live: boolean;
+}
+
+/** The remote SSH project a port-forwards call is scoped to. Omit it to talk to
+ *  the desktop remote-workspace's single-tunnel /api/desktop/portmaps family. */
+export interface PortMapTarget {
+  /** Canonical "[user@]host" (optionally ":port") the server stores on the
+   *  project entry — the same string every other ?host= endpoint takes. */
+  host: string;
+  /** The remote project path, matched verbatim (remote separators). */
+  path: string;
+}
+
+/** One row of the /context token-budget report (internal/contextbudget). Value
+ *  is the pre-formatted right-hand side; lines are indented detail — a verbatim
+ *  multi-line dump when raw is set. */
+export interface ContextBudgetRow {
+  label: string;
+  value?: string;
+  lines?: string[];
+  raw?: boolean;
+  subhead?: boolean;
+}
+
+export interface ContextBudgetSection {
+  title: string;
+  note?: string;
+  rows: ContextBudgetRow[];
+}
+
+/** The full context-window breakdown, identical to the TUI's local `/context`.
+ *  Returned by GET /api/sessions/:id/context as `report` when a live agent was
+ *  available and not mid-turn. */
+export interface ContextBudgetReport {
+  model: string;
+  sections: ContextBudgetSection[];
+  notes?: string[];
 }

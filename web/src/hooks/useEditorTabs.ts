@@ -8,6 +8,7 @@ import {
   saveEditorDraft,
   saveEditorTabs,
 } from "../components/Files/editorTabsPersistence";
+import { isLegacyOfficePath, previewOnlyKindForPath } from "../lib/previewKind";
 
 export interface EditorTab {
   id: string;
@@ -51,8 +52,8 @@ export interface UseEditorTabsResult {
   handleEditorChange: (id: string, content: string) => void;
   handleSelectionChange: (sel: { startLine: number; endLine: number } | null) => void;
   toggleIncludeInContext: (id: string) => void;
-  closeTabsForPaths: (paths: string[], projectRoot?: string) => void;
-  renameTabPath: (oldPath: string, newPath: string, projectRoot?: string) => void;
+  closeTabsForPaths: (paths: string[], projectRoot?: string, host?: string) => void;
+  renameTabPath: (oldPath: string, newPath: string, projectRoot?: string, host?: string) => void;
   activeEditorContext: ActiveEditorContext | null;
   requestCloseTab: (id: string) => void;
   saveEditorTab: (id: string, opts?: { force?: boolean }) => Promise<void>;
@@ -62,6 +63,29 @@ export interface UseEditorTabsResult {
   confirmDiscardAndClose: () => void;
   cancelClose: () => void;
   saveError: string | null;
+}
+
+/**
+ * Preview-only files (PDF/Office/media and legacy .doc/.ppt) are rendered by a
+ * viewer, never Monaco. They carry no editable buffer and their bytes are read
+ * by the viewer through /api/files/raw, so the external-change watchers must
+ * not fetch /api/files/content for them (that would re-download the whole
+ * binary just to compare a hash nothing uses).
+ */
+function isPreviewOnlyPath(path: string): boolean {
+  return previewOnlyKindForPath(path) !== null || isLegacyOfficePath(path);
+}
+
+/**
+ * Stable id for an editor tab. Host-qualified (`host::projectRoot::path`) so
+ * the same projectRoot+path on two projects — a remote SSH project and a local
+ * one — are two distinct tabs instead of one tab that silently switches
+ * content/host. The local-project form is byte-identical to the historical
+ * `editor-<projectRoot>::<path>` so existing persisted ids keep resolving.
+ */
+function editorTabId(path: string, projectRoot?: string, host?: string): string {
+  const scope = [host || "", projectRoot || ""].filter(Boolean).join("::");
+  return scope ? `editor-${scope}::${path}` : `editor-${path}`;
 }
 
 export function useEditorTabs(): UseEditorTabsResult {
@@ -93,7 +117,7 @@ export function useEditorTabs(): UseEditorTabsResult {
   }, []);
 
   const handleOpenFile = useCallback(async (path: string, projectRoot?: string, host?: string) => {
-    const id = projectRoot ? `editor-${projectRoot}::${path}` : `editor-${path}`;
+    const id = editorTabId(path, projectRoot, host);
     if (openFileIdsRef.current.has(id)) {
       setActiveEditorTabId(id);
       return;
@@ -104,6 +128,38 @@ export function useEditorTabs(): UseEditorTabsResult {
     // append two tabs with the same id — two stacked Monaco editors fighting
     // over focus, selection sync, and caret position.
     openFileIdsRef.current.add(id);
+
+    // Preview-only formats (PDF/Office/media) and legacy .doc/.ppt render a
+    // viewer (or the OS-open pane) for the Files tab, never Monaco. Skip the
+    // /api/files/content fetch: the viewers read their own bytes via
+    // /api/files/raw, and a large binary would otherwise be transferred — and
+    // JSON-decoded into a JS string — a second time for nothing.
+    if (isPreviewOnlyPath(path)) {
+      setEditorTabs((prev) =>
+        prev.some((t) => t.id === id)
+          ? prev
+          : [
+              ...prev,
+              {
+                id,
+                path,
+                projectRoot,
+                projectHost: host,
+                content: "",
+                originalContent: "",
+                isBinary: true,
+                isDirty: false,
+                diffVersion: 0,
+                externalChange: false,
+                includeInContext: true,
+                baseHash: "",
+              },
+            ],
+      );
+      setActiveEditorTabId(id);
+      return;
+    }
+
     const draft = loadEditorDraft(id);
     let tab: EditorTab;
     try {
@@ -195,7 +251,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     (async () => {
       // Sequential so the restored tab order matches what was persisted.
       for (const t of saved.tabs) {
-        await handleOpenFile(t.path, t.projectRoot);
+        await handleOpenFile(t.path, t.projectRoot, t.projectHost);
       }
       setActiveEditorTabId((prev) => {
         if (saved.activeId && openFileIdsRef.current.has(saved.activeId)) return saved.activeId;
@@ -211,7 +267,7 @@ export function useEditorTabs(): UseEditorTabsResult {
   useEffect(() => {
     if (!restoreDone.current) return;
     saveEditorTabs(
-      editorTabs.map((t) => ({ path: t.path, projectRoot: t.projectRoot })),
+      editorTabs.map((t) => ({ path: t.path, projectRoot: t.projectRoot, projectHost: t.projectHost })),
       activeEditorTabId,
       editorTabs.map((t) => t.id),
     );
@@ -399,6 +455,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     async (id: string) => {
       const tab = editorTabsRef.current.find((t) => t.id === id);
       if (!tab) return;
+      if (isPreviewOnlyPath(tab.path)) return;
       try {
         const disk = await fetchFileContent(tab.path, tab.projectRoot, tab.projectHost);
         clearEditorDraft(id);
@@ -420,12 +477,15 @@ export function useEditorTabs(): UseEditorTabsResult {
     setEditorTabs((prev) => prev.map((t) => (t.id === id ? { ...t, externalChange: false } : t)));
   }, []);
 
-  const closeTabsForPaths = useCallback((paths: string[], projectRoot?: string) => {
+  const closeTabsForPaths = useCallback((paths: string[], projectRoot?: string, host?: string) => {
     const norm = (p: string) => p.replace(/\/+$/, "");
     const targets = paths.map(norm);
     setEditorTabs((prev) => {
       const keep = prev.filter((t) => {
         if ((t.projectRoot ?? "") !== (projectRoot ?? "")) return true;
+        // Host-qualified: deleting a file in a local project must not close a
+        // remote project tab that happens to share the same absolute path.
+        if ((t.projectHost ?? "") !== (host ?? "")) return true;
         const tp = norm(t.path);
         for (const del of targets) {
           if (tp === del || tp.startsWith(del + "/")) return false;
@@ -446,17 +506,18 @@ export function useEditorTabs(): UseEditorTabsResult {
     });
   }, []);
 
-  const renameTabPath = useCallback((oldPath: string, newPath: string, projectRoot?: string) => {
+  const renameTabPath = useCallback((oldPath: string, newPath: string, projectRoot?: string, host?: string) => {
     const normOld = oldPath.replace(/\/+$/, "");
     const normNew = newPath.replace(/\/+$/, "");
     setEditorTabs((prev) =>
       prev.map((t) => {
         if ((t.projectRoot ?? "") !== (projectRoot ?? "")) return t;
-        if (t.path === normOld) return { ...t, path: normNew, id: `editor-${projectRoot ? `${projectRoot}::${normNew}` : normNew}` };
+        if ((t.projectHost ?? "") !== (host ?? "")) return t;
+        if (t.path === normOld) return { ...t, path: normNew, id: editorTabId(normNew, projectRoot, host) };
         if (t.path.startsWith(normOld + "/")) {
           const suffix = t.path.slice(normOld.length);
           const np = normNew + suffix;
-          return { ...t, path: np, id: `editor-${projectRoot ? `${projectRoot}::${np}` : np}` };
+          return { ...t, path: np, id: editorTabId(np, projectRoot, host) };
         }
         return t;
       }),
@@ -474,6 +535,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     let cancelled = false;
 
     const checkOne = async (tab: EditorTab) => {
+      if (isPreviewOnlyPath(tab.path)) return;
       try {
         const disk = await fetchFileContent(tab.path, tab.projectRoot, tab.projectHost);
         if (cancelled) return;
@@ -540,6 +602,7 @@ export function useEditorTabs(): UseEditorTabsResult {
       if (document.hidden) return;
       const tab = editorTabsRef.current.find((t) => t.id === activeEditorTabId);
       if (!tab) return;
+      if (isPreviewOnlyPath(tab.path)) return;
       try {
         const disk = await fetchFileContent(tab.path, tab.projectRoot, tab.projectHost);
         if (cancelled) return;

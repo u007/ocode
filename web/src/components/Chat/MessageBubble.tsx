@@ -1,4 +1,4 @@
-import { memo, useState } from "react";
+import { memo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message } from "../../api/types";
@@ -8,6 +8,7 @@ import {
   linkifyPlainText,
 } from "../../lib/fileLinks";
 import { ThinkingBlock, ToolBlock } from "./TurnParts";
+import { renderedSpeechText } from "../Speech/speechUtils";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
 import { dispatchRestore } from "../../lib/inputRestore";
@@ -41,11 +42,20 @@ interface Props {
 
 // AssistantText renders markdown assistant output. Shared by committed messages
 // and the live text stream so rendering stays consistent.
-export function AssistantText({ content, onSpeak }: { content: string; onSpeak?: () => void }) {
+//
+// `onSpeak` receives the RENDERED text of this block (extracted from the DOM in
+// `speechRef`), never the raw markdown `content`: speaking the source would read
+// heading hashes, `**` markers, backticks and link targets aloud.
+export function AssistantText({ content, onSpeak }: { content: string; onSpeak?: (text: string) => void }) {
+  const speechRef = useRef<HTMLDivElement>(null);
   return (
     <div className="flex justify-start mb-3">
       <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-muted text-foreground">
-        <div className="relative prose prose-invert prose-sm max-w-none text-sm">
+        <div
+          ref={speechRef}
+          data-speech-content=""
+          className="relative prose prose-invert prose-sm max-w-none text-sm"
+        >
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeFileLinks]}
@@ -146,12 +156,26 @@ export function AssistantText({ content, onSpeak }: { content: string; onSpeak?:
           >
             {content}
           </ReactMarkdown>
-          {onSpeak && (
-            <button type="button" aria-label="Speak message" title="Speak message" onClick={onSpeak} className="mt-2 inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-muted-foreground hover:bg-background hover:text-foreground">
-              <Volume2 className="h-3.5 w-3.5" /> Speak
-            </button>
-          )}
         </div>
+        {onSpeak && (
+          // Rendered by a sibling of the `.prose` block, not inside it: the
+          // extractor reads `[data-speech-content]`, so a control inside that
+          // subtree would have its own label ("Speak") read aloud. The button
+          // also opts out explicitly for any container-wide extraction.
+          <button
+            type="button"
+            aria-label="Speak message"
+            title="Speak message"
+            data-speech-exclude=""
+            onClick={() => {
+              const text = renderedSpeechText(speechRef.current);
+              if (text) onSpeak(text);
+            }}
+            className="mt-2 inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-muted-foreground hover:bg-background hover:text-foreground"
+          >
+            <Volume2 className="h-3.5 w-3.5" /> Speak
+          </button>
+        )}
       </div>
     </div>
   );
@@ -189,7 +213,7 @@ function MessageBubble({ message, highlight = "", toolName = "", sessionId, mess
             highlight={highlight}
           />
         ))}
-        {message.content ? <AssistantText content={message.content} onSpeak={() => requestSpeech(message.content)} /> : null}
+        {message.content ? <AssistantText content={message.content} onSpeak={requestSpeech} /> : null}
       </>
     );
   }
@@ -200,7 +224,7 @@ function MessageBubble({ message, highlight = "", toolName = "", sessionId, mess
     );
   }
 
-  return <AssistantText content={message.content} onSpeak={() => requestSpeech(message.content)} />;
+  return <AssistantText content={message.content} onSpeak={requestSpeech} />;
 }
 
 function UserBubble({

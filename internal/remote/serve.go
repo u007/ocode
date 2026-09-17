@@ -174,9 +174,14 @@ func EnsureRemoteServer(t Transport, ver string) (state ServeState, reused bool,
 	return fresh, false, staleVersionPID, nil
 }
 
-// tunnelArgs builds the ssh argument list for StartTunnel.
+// tunnelArgs builds the ssh argument list for StartTunnel. It carries the same
+// keepalive options as the interactive shell (sshKeepaliveArgs): a tunnel with
+// no ServerAlive* never notices a silently-dropped transport, so the desktop
+// proxy and the port forwards it carries hang forever instead of failing and
+// being rebuilt.
 func tunnelArgs(localPort, remotePort, browsePort int, target string) []string {
-	args := []string{"-N", "-L", fmt.Sprintf("%d:127.0.0.1:%d", localPort, remotePort)}
+	args := append([]string{"-N"}, sshKeepaliveArgs()...)
+	args = append(args, "-L", fmt.Sprintf("%d:127.0.0.1:%d", localPort, remotePort))
 	if browsePort > 0 {
 		args = append(args, "-L", fmt.Sprintf("%d:127.0.0.1:%d", browsePort, browsePort))
 	}

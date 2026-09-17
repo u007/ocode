@@ -23,15 +23,16 @@ The TUI `/permissions` command and `/yolo` toggle are in `internal/tui/model.go`
 
 ## 2. Permission modes
 
-Three session-level modes, stored in `ocodeconfig.json` → `permissions.mode`:
+Four session-level modes, stored in `ocodeconfig.json` → `permissions.mode`:
 
 | Mode | Behaviour |
 |---|---|
 | `normal` (default) | Follow tool and bash-prefix rules. Read/edit tools allowed; delete, bash, webfetch, websearch, task ask by default. |
 | `yolo` | Allow all permission-gated tools without prompting. Still respects hard safety blocks and agent-mode restrictions. |
 | `locked` | Read/search tools only. All write/edit/bash/network tools denied. |
+| `sandbox` | Bash runs without prompts, but the OS confines **writes** to the classified allowed roots (workspace/extra paths, opencode data dir, language caches, `~/.claude`, temp dirs). Write-integrity only — reads, exec, and network egress stay open. Secrets (`auth.json`, `~/.ssh`, `.env`) and ocode-config writes still **ask** (routed to the auto-judge when `auto` is on). Fail-closed: with no OS backend (Windows) it degrades to normal prompting. |
 
-Toggle via `Ctrl+O` (TUI), `/yolo [on|off|status]`, or `--yolo` CLI flag. Persists to `ocodeconfig.json`.
+Toggle via `Ctrl+O` / `/yolo [on|off|status]` (yolo), `/sandbox [on|off|status]` (sandbox), the TUI permission-mode cycle, or the web mode selector. All four persist to `ocodeconfig.json` — `SavePermissionModeSwitch()` writes the mode verbatim, sandbox included (there is no longer a sandbox→normal clamp on the persist path).
 
 ## 3. Permission levels
 
@@ -45,18 +46,19 @@ Every tool/prefix rule resolves to one of:
 
 ## 4. Default tool rules
 
-Hardcoded in `NewPermissionManager()` (`permissions.go:762`):
+Hardcoded in `NewPermissionManager()` (`permissions.go:1281`):
 
 ```
-Always allow (no prompt):  read, glob, grep, list, lsp, skill, question,
-                           todoread, todowrite, advisor, task, task_status,
-                           agent_status, repo_overview, plan_enter, plan_exit,
-                           wait, bash_output, kill_shell
+Always allow (no prompt):  read, glob, grep, rgrep, list, lsp, lsp_diagnostics,
+                           skill, load_skill, question, todoread, todowrite,
+                           todo_update, advisor, task, task_status, agent_status,
+                           repo_overview, plan_enter, plan_exit, wait,
+                           bash_output, kill_shell, list_processes, ocr, cron
 
 Default allow:             write, edit, multiedit, multi_file_edit,
-                           replace_lines, apply_patch, format
+                           replace_lines, apply_patch, format, imagegen
 
-Default ask:               delete, bash, webfetch, websearch, repo_clone, mcp_*
+Default ask:               delete, bash, webfetch, websearch, repo_clone, mcp_*, computer
 ```
 
 Override per-tool in `ocodeconfig.json` → `permissions.tools`:
@@ -73,7 +75,7 @@ Bash commands go through a multi-layer evaluation pipeline in `Decide()`:
 
 ### 5a. Hard blocks (always deny)
 
-`IsHarmfulBashCommand()` (`permissions.go:721`) — these can never be auto-allowed or persisted as "always allow":
+`IsHarmfulBashCommand()` (`permissions.go:1175`) — these can never be auto-allowed or persisted as "always allow":
 
 **Git destructive prefixes** (any args):
 - `git revert`, `git stash`, `git reset`, `git clean`, `git checkout`, `git restore`, `git switch`
@@ -91,6 +93,8 @@ Bash commands go through a multi-layer evaluation pipeline in `Decide()`:
 - `wget` with `--post-file`, `--post-data`, `--body-data`, `--body-file`, `-i`
 - `httpie`/`http`/`https` with `file@` pattern, env var headers, or `--auth`/`-a` + env var
 - `nc`/`ncat` with host+port (no `-z` scan flag) or stdin redirect `< file`
+
+**Sandbox extension (HEAD `760b2037`):** in sandbox mode `Decide()` also returns `ask` for the force-flagged git push/pull forms (`isHarmfulForceCommand()`) and for any `IsHarmfulBashCommand()` match. The OS write-wall confines *file* writes but is blind to a repo mutation that stays inside the workdir (history rewrite, branch switch, stash create/drop, untracked removal), so those do not ride the sandbox auto-allow. Read-only `git stash list`/`show` are excluded from the harmful set and still auto-allow. Normal mode is unchanged; YOLO remains the promptless escape hatch.
 
 ### 5b. YOLO mode shortcut
 
@@ -141,7 +145,7 @@ Any absolute path outside the working directory → `ask` (unless the tool has a
 
 ### 6b. Sensitive paths
 
-`isSensitivePath()` (`permissions.go:1018`) flags these for `ask`:
+`isSensitivePath()` (`permissions.go:2677`) flags these for `ask`:
 - Exact filenames: `.env`, `.netrc`, `.npmrc`, `.pypirc`
 - `.env.*` variants
 - SSH keys: `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`
@@ -215,15 +219,17 @@ Implementation: `internal/config/auto_permission_prompt.go` (versioned body, sta
 
 ## 8. Permission evaluation entry point
 
-`PermissionManager.Decide(toolName, args)` (`permissions.go:866`):
+`PermissionManager.Decide(toolName, args)` (`permissions.go:1399`):
 
 ```
 1. If locked mode → read-only tools allow, everything else deny
 2. If bash tool:
    a. Hard-blocked? → deny
    b. YOLO mode? → allow
-   c. Parse compound command → evaluate each sub-command
-   d. Return first deny, or first ask, or allow
+   c. Sandbox mode → harmful force/git forms + sensitive paths ask; else allow
+      (only when the OS backend is present; otherwise falls through to ask)
+   d. Parse compound command → evaluate each sub-command
+   e. Return first deny, or first ask, or allow
 3. If YOLO mode → allow
 4. If path-scoped tool:
    a. Check path-glob patterns
@@ -253,6 +259,7 @@ Project config overrides global. The `opencode.json` `permission` field is a sep
 | `/yolo on` | Enable YOLO mode |
 | `/yolo off` | Disable YOLO mode |
 | `Ctrl+O` | Toggle YOLO mode |
+| `/sandbox [on\|off\|status]` | Enter/leave sandbox mode (bare `/sandbox` toggles) |
 | `/plugin enable\|disable <name>` | Toggle opt-in tools |
 
 ## 11. Agent-level permissions
@@ -286,16 +293,16 @@ Unknown groups produce a diagnostic warning. Non-shorthand (object-valued) permi
 
 | Function | File:Line | Purpose |
 |---|---|---|
-| `NewPermissionManager()` | `permissions.go:762` | Creates PM with defaults |
-| `Decide()` | `permissions.go:866` | Main entry point for permission checks |
-| `Check()` | `permissions.go:791` | Tool-level rule lookup |
+| `NewPermissionManager()` | `permissions.go:1281` | Creates PM with defaults |
+| `Decide()` | `permissions.go:1399` | Main entry point for permission checks |
+| `Check()` | `permissions.go:1322` | Tool-level rule lookup |
 | `CheckPathPatterns()` | (via patterns) | Path-glob pattern matching |
-| `IsHarmfulBashCommand()` | `permissions.go:721` | Hard-block detection |
-| `IsHarmfulRequest()` | `permissions.go:755` | Wraps bash check for PermissionRequest |
-| `isExfiltrationRiskCommand()` | `permissions.go:689` | curl/wget/httpie/nc exfil detection |
-| `isSensitivePath()` | `permissions.go:1018` | Sensitive file/dir detection |
-| `isWithinWorkDir()` | `permissions.go:996` | Workdir containment check |
-| `matchSubcommandAllow()` | `permissions.go:1095` | Safe subcommand matching |
+| `IsHarmfulBashCommand()` | `permissions.go:1175` | Hard-block detection |
+| `IsHarmfulRequest()` | `permissions.go:1235` | Wraps bash check for PermissionRequest |
+| `isExfiltrationRiskCommand()` | `permissions.go:1128` | curl/wget/httpie/nc exfil detection |
+| `isSensitivePath()` | `permissions.go:2677` | Sensitive file/dir detection |
+| `isWithinWorkDir()` | `permissions.go:1783` | Workdir containment check |
+| `matchSubcommandAllow()` | `permissions.go:3095` | Safe subcommand matching |
 | `buildPermissionManagerFromAgent()` | `agent_permissions.go:3` | Agent-definition PM builder |
-| `LoadFromOcode()` | `permissions.go:826` | Load rules from config |
-| `LoadFromConfig()` | `permissions.go:805` | Load rules from opencode.json format |
+| `LoadFromOcode()` | `permissions.go:1357` | Load rules from config |
+| `LoadFromConfig()` | `permissions.go:1336` | Load rules from opencode.json format |

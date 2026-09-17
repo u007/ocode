@@ -72,7 +72,7 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 
 | Feature | Detail |
 |---------|--------|
-| **Multi-Provider LLM** | OpenAI, Anthropic (Claude thinking / extended thinking + prompt caching), Google Gemini, Z.AI (GLM), Alibaba (Qwen), GitHub Copilot, Novita AI, Ollama Cloud, OpenRouter, OrcaRouter, AIHubMix, Zhipu, DeepSeek (opencode-go route), Minimax |
+| **Multi-Provider LLM** | OpenAI, Anthropic (Claude thinking / extended thinking + prompt caching), Google Gemini, Z.AI (GLM), Alibaba (Qwen), GitHub Copilot, Novita AI, Ollama Cloud, OpenRouter, OrcaRouter, AIHubMix, Zhipu, DeepSeek (opencode-go route), Minimax, TypeSafe AI (Jev — decision-only, permission judge) |
 | **Live Model Resolution** | OpenRouter and Novita AI models are resolved from each provider's live API at startup (30s TTL cache, graceful fallback to the static registry) so context sizes, pricing, and vision support are accurate for models absent from or renamed in models.dev (e.g. `openrouter/tencent/hy3:free`) |
 | **Model Display Names** | `agent.ModelDisplayName` surfaces models.dev `name`; TUI picker shows `id — Name`, web `/api/models` exposes `display_name` |
 | **Reasoning Effort** | Toggle thinking budget on Claude models via `Alt+T` (off/low/med/high/xhigh/max) or `/effort`; per-turn effort via `ocode run --effort` |
@@ -264,7 +264,7 @@ A React + shadcn/ui + Tailwind SPA that mirrors the TUI experience, served by th
 
 ### 📚 Knowledge Bundle (`/docs` — OKF v0.1)
 
-An optional **OKF (Open Knowledge Format)** knowledge bundle at `docs/` that the agent curates automatically. When active, the agent's system prompt includes a `[ocode:knowledge]` index and a `knowledge_lookup` tool for semantic retrieval.
+An optional **OKF (Open Knowledge Format)** knowledge bundle at `docs/` that the agent curates automatically. When active, the agent gains a `knowledge_lookup` tool (backed by the `context` sub-agent) for semantic retrieval; the bundle is never injected into the system prompt.
 
 | Command | Purpose |
 |---------|---------|

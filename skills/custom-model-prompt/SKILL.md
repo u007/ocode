@@ -10,7 +10,7 @@ Inject a custom system prompt for a specific model via a file named `{MODEL}.OCO
 
 ## 1. Find the right stem
 
-The filename stem (everything before `.OCODE.md`) must match the value the active client's `GetModel()` returns, lowercased. The agent has no other source for this — you have to look it up in the codebase. Try, in order:
+The filename stem (everything before `.OCODE.md`) is matched against the active model id, lowercased **after normalization**. `loadModelContextWithSource` (`internal/agent/context.go`) strips the provider prefix (`opencode/`, `opencode-go/`), a `:variant` suffix (e.g. `:free`), and a trailing `-free` tier suffix — so one file serves several id forms. `muse-spark-1.2.OCODE.md` matches `muse-spark-1.2`, `opencode/muse-spark-1.2`, and `opencode-go/muse-spark-1.2:free`. The agent has no other source for the id — look it up in the codebase. Try, in order:
 
 1. The model list / provider registry — e.g. `internal/agent/small_model.go`, `internal/agent/client.go` provider tables, `internal/config/ocodeconfig.go` defaults, or the advisor default in `internal/agent/advisor_tool.go`. In this repo the canonical model id is the bare slug (e.g. `deepseek-v4-flash`, `claude-sonnet-4-6`), **not** the `provider/model` form.
 2. Concrete greps if (1) is unclear:
@@ -31,6 +31,8 @@ Location (first match wins):
 | 3 (lowest) | Global config                       | `~/.config/opencode/deepseek-v4-flash.OCODE.md`    |
 
 Use the **highest-priority location that makes sense for the request** — usually project root for repo-wide rules, `.opencode/` for personal overrides, global for cross-project behavior. Filename match is case-insensitive; prefer lowercase.
+
+Search order is anchored at the session **project root**, never the process cwd (`loadModelContextWithSource` — the desktop shell boots with cwd `/` while the real project is the anchored workDir; the TUI chdirs so both agree): `root`, then `root/.opencode/`, then the global config dir. If nothing matches on disk, the loader falls back to an `{model}.OCODE.md` **embedded in the binary** (`loadBundledModelContext`, wired from `main()` via `SetBundledModelContextFS`); `ModelContextResult.Kind` is `"file"` or `"embedded"` so the UI can show which source is live.
 
 ### Content rules
 
@@ -77,7 +79,7 @@ A test exists for the loader at `internal/agent/context_test.go::TestLoadModelCo
 go test ./internal/agent/ -run TestLoadModelContext -v
 ```
 
-Expected: all 14 subtests pass (8 exact-match + 6 wildcard). If the test doesn't exist in this repo (fork / older checkout, or a checkout that pre-dates wildcard support), fall back to:
+Expected: all `TestLoadModelContext_*` tests pass (20 at time of writing — 16 loader + 4 `TestLoadModelContextWithSourceAt_*` root-anchored). If the tests don't exist in this repo (fork / older checkout, or one that pre-dates wildcard support), fall back to:
 
 ```bash
 # Quick glob: do you have a file the loader would actually pick up?
@@ -123,7 +125,7 @@ A green test (or an `EXACT` / `WILD` line) is the only acceptable signal that th
 
 ## Activation — the git-stable-version rule
 
-`.OCODE.md` files follow the same rule as `AGENTS.md` / `CLAUDE.md` (see `internal/agent/context.go::readContextFile`): **if the file is tracked by git and has unstaged changes, the loader silently uses the HEAD (committed) version and logs `[CONTEXT] using HEAD version of <file> due to unstaged changes` to stderr.** Untracked files are read from the working tree.
+`.OCODE.md` files follow the same rule as `AGENTS.md` / `CLAUDE.md` (see `internal/agent/context.go::readContextFile`): **if the file is tracked by git and has unstaged changes, the loader silently uses the HEAD (committed) version and emits `[CONTEXT] using HEAD version of <file> due to unstaged changes` via `agent.emitDebug` (the TUI debug panel; stderr only when headless).** Untracked files are read from the working tree.
 
 Concretely:
 

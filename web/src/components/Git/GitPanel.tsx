@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   RefreshCw,
   GitBranch,
@@ -125,6 +125,10 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
   const [commitMessage, setCommitMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Transient success notice ("pushed", "committed", …). Auto-clears after 5s,
+  // mirroring the TUI's status-bar toast.
+  const [notice, setNotice] = useState<string | null>(null);
+  const noticeTimer = useRef<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [sections, setSections] = useState<PanelSections>(loadPanelSections);
   const [fileFilter, setFileFilter] = useState("");
@@ -133,9 +137,33 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
     position: { x: number; y: number };
   } | null>(null);
 
-  const load = useCallback(async () => {
+  // showNotice displays a transient success message for 5 seconds. Any prior
+  // timer is cleared so rapid actions don't leave a stale message on screen.
+  const showNotice = useCallback((message: string) => {
+    if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
+    setNotice(message);
+    noticeTimer.current = window.setTimeout(() => {
+      setNotice(null);
+      noticeTimer.current = null;
+    }, 5000);
+  }, []);
+
+  // Clear any pending notice timer on unmount so it can't fire against an
+  // unmounted component.
+  useEffect(() => {
+    return () => {
+      if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
+    };
+  }, []);
+
+  // load refetches the workspace. `background` is true for the periodic poll
+  // and eventBus-driven refreshes: those must NOT clear an error or notice
+  // left by an explicit user action, otherwise a failed push would vanish
+  // within 10 seconds ("git push error disappears by itself").
+  const load = useCallback(async (opts?: { background?: boolean }) => {
+    const background = opts?.background ?? false;
+    if (!background) setError(null);
     setRefreshing(true);
-    setError(null);
     try {
       const [ws, log] = await Promise.all([
         api.getGitWorkspace(projectPath, projectHost),
@@ -158,9 +186,13 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
         };
       });
     } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Failed to load git workspace",
-      );
+      // A background refresh failing is not the user's action — don't let a
+      // transient poll error overwrite the outcome of what they just did.
+      if (!background) {
+        setError(
+          e instanceof Error ? e.message : "Failed to load git workspace",
+        );
+      }
     } finally {
       setRefreshing(false);
     }
@@ -169,7 +201,7 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
   useEffect(() => {
     load();
     if (!active) return;
-    const interval = setInterval(load, REFRESH_INTERVAL);
+    const interval = setInterval(() => load({ background: true }), REFRESH_INTERVAL);
     return () => clearInterval(interval);
   }, [load, active]);
 
@@ -188,18 +220,20 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
 
   // The server pushes git_status bus events whenever the repo changes (also
   // after the TUI or the file-tree context menu mutate it) — stay fresh.
+  // These are background refreshes so they never clear a user-visible error.
   useEffect(() => {
     return eventBus.on("git_status", (env) => {
-      if (!projectPath || env.project === projectPath) load();
+      if (!projectPath || env.project === projectPath) load({ background: true });
     });
   }, [load, projectPath, projectHost]);
 
   const runMutation = useCallback(
-    async (fn: () => Promise<unknown>) => {
+    async (fn: () => Promise<unknown>, successMessage?: string) => {
       setBusy(true);
       setError(null);
       try {
         await fn();
+        if (successMessage) showNotice(successMessage);
         await load();
       } catch (e) {
         setError(e instanceof Error ? e.message : "git action failed");
@@ -207,43 +241,49 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
         setBusy(false);
       }
     },
-    [load],
+    [load, showNotice],
   );
 
   const stageFile = (path: string) =>
-    runMutation(() => api.gitStage([path], projectPath, projectHost));
+    runMutation(() => api.gitStage([path], projectPath, projectHost), "staged " + path);
   const unstageFile = (path: string) =>
-    runMutation(() => api.gitUnstage([path], projectPath, projectHost));
+    runMutation(() => api.gitUnstage([path], projectPath, projectHost), "unstaged " + path);
   const discardFile = (path: string, untracked: boolean) =>
     untracked
-      ? runMutation(() =>
-          api.gitHunk(
-            { path, hunk_index: 0, action: "discard", staged: false },
-            projectPath,
-            projectHost,
-          ),
+      ? runMutation(
+          () =>
+            api.gitHunk(
+              { path, hunk_index: 0, action: "discard", staged: false },
+              projectPath,
+              projectHost,
+            ),
+          "deleted " + path,
         )
-      : runMutation(() => api.gitDiscard([path], projectPath, projectHost));
+      : runMutation(() => api.gitDiscard([path], projectPath, projectHost), "discarded " + path);
   const stageAll = (paths: string[]) =>
-    runMutation(() => api.gitStage(paths, projectPath, projectHost));
+    runMutation(() => api.gitStage(paths, projectPath, projectHost), `staged ${paths.length} file(s)`);
   const unstageAll = (paths: string[]) =>
-    runMutation(() => api.gitUnstage(paths, projectPath, projectHost));
+    runMutation(() => api.gitUnstage(paths, projectPath, projectHost), `unstaged ${paths.length} file(s)`);
 
-  // Network actions
-  const doFetch = () => runMutation(() => api.gitFetch(projectPath, projectHost));
-  const doPull = () => runMutation(() => api.gitPull(projectPath, projectHost));
-  const doPush = () => runMutation(() => api.gitPush(projectPath, false, projectHost));
+  // Network actions. Each surfaces a 5-second success notice on completion,
+  // mirroring the TUI's status-bar toast.
+  const doFetch = () =>
+    runMutation(() => api.gitFetch(projectPath, projectHost), "fetched");
+  const doPull = () =>
+    runMutation(() => api.gitPull(projectPath, projectHost), "pulled");
+  const doPush = () =>
+    runMutation(() => api.gitPush(projectPath, false, projectHost), "pushed");
 
   // Force-push confirmation flow
   const [pendingForcePush, setPendingForcePush] = useState(false);
   const [pendingResetRemote, setPendingResetRemote] = useState(false);
   const doForcePush = () => {
     setPendingForcePush(false);
-    runMutation(() => api.gitPush(projectPath, true, projectHost));
+    runMutation(() => api.gitPush(projectPath, true, projectHost), "force pushed");
   };
   const doResetRemote = () => {
     setPendingResetRemote(false);
-    runMutation(() => api.gitResetRemote(projectPath, projectHost));
+    runMutation(() => api.gitResetRemote(projectPath, projectHost), "reset to remote");
   };
 
   // Right-click menu per file row. Actions mirror the row's hover buttons
@@ -307,13 +347,14 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
               }
             : sel,
         );
+        showNotice(action === "discard" ? "discarded hunk" : action + "d hunk");
       } catch (e) {
         setError(e instanceof Error ? e.message : "hunk action failed");
       } finally {
         setBusy(false);
       }
     },
-    [projectPath, projectHost],
+    [projectPath, projectHost, showNotice],
   );
 
   const commit = () => {
@@ -326,7 +367,7 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
       setCommitMessage("");
       setSelection(null);
       setCommitDiff(null);
-    });
+    }, "committed");
   };
 
   const selectFile = (file: GitDiffFile, staged: boolean) => {
@@ -464,7 +505,7 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
             <Trash2 className="w-3.5 h-3.5" />
           </button>
           <button
-            onClick={load}
+            onClick={() => load()}
             disabled={refreshing}
             title="Refresh"
             className="p-1 rounded hover:bg-muted/60 text-muted-foreground hover:text-foreground disabled:opacity-50"
@@ -477,6 +518,16 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
       {error && (
         <div className="px-3 py-1.5 text-xs bg-red-500/10 text-red-400 border-b border-border">
           {error}
+        </div>
+      )}
+
+      {notice && !error && (
+        <div
+          role="status"
+          data-testid="git-notice"
+          className="px-3 py-1.5 text-xs bg-green-500/10 text-green-400 border-b border-border"
+        >
+          {notice}
         </div>
       )}
 
@@ -924,9 +975,9 @@ function FileDiff({
         </pre>
       ) : (
         hunks.map((hunk, i) => (
-          <div key={i} className="mb-3">
+          <div key={i} className="mb-3 border border-border rounded-md overflow-hidden">
             {/* hunk header + actions */}
-            <div className="flex items-center gap-2 mb-0.5">
+            <div className="flex items-center gap-2 px-2 py-1.5 bg-muted/30 border-b border-border">
               <span className="text-blue-400 font-mono text-xs shrink-0">
                 {hunk[0]}
               </span>
@@ -964,7 +1015,7 @@ function FileDiff({
               )}
             </div>
             {/* hunk body */}
-            <div className="font-mono text-xs whitespace-pre-wrap">
+            <div className="font-mono text-xs whitespace-pre-wrap px-2 py-1.5">
               {hunk.slice(1).map((line, j) => (
                 <div key={j} className={lineColor(line)}>
                   {line || " "}
@@ -1011,13 +1062,15 @@ function CommitDiff({ files }: { files: GitDiffFile[] }) {
             ) : (
               hunks.map((hunk, i) => (
                 <div key={i} className="pl-7">
-                  <div className="text-blue-400 font-mono text-xs">{hunk[0]}</div>
-                  <div className="font-mono text-xs whitespace-pre-wrap">
-                    {hunk.slice(1).map((line, j) => (
-                      <div key={j} className={lineColor(line)}>
-                        {line || " "}
-                      </div>
-                    ))}
+                  <div className="border border-border rounded-md overflow-hidden">
+                    <div className="text-blue-400 font-mono text-xs px-2 py-1.5 bg-muted/30 border-b border-border">{hunk[0]}</div>
+                    <div className="font-mono text-xs whitespace-pre-wrap px-2 py-1.5">
+                      {hunk.slice(1).map((line, j) => (
+                        <div key={j} className={lineColor(line)}>
+                          {line || " "}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 </div>
               ))

@@ -36,7 +36,7 @@ First, run the discovery commands to gather facts about this ocode codebase.
 
 ### 1.3 Build system
 
-!`grep -E '^(build|test|run|lint|fmt|check):' Makefile 2>/dev/null || echo "No Makefile targets found"`
+!`grep -E '^(build|build-all|test|install|dev|production|web-build|desktop|desktop-app|bundle-desktop-assets|models-snapshot|release|clean|skill-audit):' Makefile 2>/dev/null || echo "No Makefile targets found"`
 !`ls -la *.go go.mod 2>/dev/null`
 
 ### 1.4 Configuration
@@ -59,8 +59,8 @@ Document each internal package with its role:
 
 ### 2.3 LLM Providers
 
-!`grep -n 'Provider\s*=' internal/agent/client.go | head -20`
-!`grep -n 'provider\|Provider' internal/auth/*.go | head -20`
+!`sed -n '/^var providers = map\[string\]providerInfo{/,/^}/p' internal/agent/client.go`
+!`ls internal/auth/*.go`
 !`cat internal/agent/small_model.go`
 
 ### 2.4 Agent system
@@ -117,7 +117,7 @@ After gathering the data above, synthesize it into structured onboarding documen
 - **Quick Start**: Build and run instructions
 - **Architecture Overview**: Package map and data flow (main → TUI → agent → LLM providers → tools)
 - **Configuration**: Config file location, structure, environment variables
-- **LLM Providers**: Supported providers (OpenAI, Anthropic, Google, Z.AI, Alibaba, DeepSeek via opencode-go)
+- **LLM Providers**: Supported providers are the registry `var providers = map[string]providerInfo{…}` in `internal/agent/client.go` — OpenAI, Anthropic, Google, Z.AI (`zai`/`z.ai`/`zai-coding`), Alibaba (`alibaba`/`alibaba-coding`), Moonshot, MiniMax, DeepSeek, xAI/Grok, Groq, Mistral, OpenRouter, Requesty, DeepInfra, Novita, Ollama Cloud, GitHub Copilot, LM Studio + `local`, Cloudflare Workers/Gateway, plus the `opencode` / `opencode-go` (Zen/Go) routes. Document each provider's API-key env var from that map, and note the two mandatory session headers: `opencode*` requests need `X-Opencode-Session`, and `openrouter` needs `x-session-id` + the `HTTP-Referer`/`X-Title` attribution headers
 - **Agent System**: The agent registry, modes (build/plan/review/debug/docs), sub-agents
 - **Tools**: Available tools (read, write, edit, bash, glob, grep, lsp, websearch, webfetch, skill, agent, etc.)
 - **TUI Architecture**: Layout, mouse/selection, themes, keyboard shortcuts

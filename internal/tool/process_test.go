@@ -722,3 +722,72 @@ func TestProcessRegistry_ForegroundWithPrefix_FinalizeMarksSupervisorRecord(t *t
 		t.Fatalf("supervisor record stuck in Running after finalize (status=%s) — supKey mismatch?", rec.Status)
 	}
 }
+
+// TestStartSupervised_ReplaceTerminalAllowsRestartOfStableID covers a manager
+// that owns a deliberately stable ID and restarts its child over its lifetime —
+// the port-forward manager's Disable → Enable cycle. The supervisor keeps
+// terminal records, so without ReplaceTerminal the second start for the same ID
+// fails "already registered" (which surfaced to the UI as
+// "enabled, but failed to open now: … already registered"). With the flag the
+// terminal record is replaced; a still-RUNNING record is never replaced.
+func TestStartSupervised_ReplaceTerminalAllowsRestartOfStableID(t *testing.T) {
+	const id = "remote-portmap-3000"
+	sup := NewProcessSupervisor(ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	defer func() { _ = sup.Shutdown(context.Background()) }()
+
+	// start runs a trivial child under the stable ID, waits for it, and marks
+	// the record terminal — i.e. exactly the state ForwardManager.Stop leaves.
+	start := func(replace bool) error {
+		cmd := exec.Command("true")
+		if _, err := StartSupervised(sup, cmd, ProcessRegistration{
+			ID:              id,
+			Name:            "ssh-portmap",
+			Kind:            ProcessKindRemote,
+			ReplaceTerminal: replace,
+		}); err != nil {
+			return err
+		}
+		_ = cmd.Wait()
+		sup.MarkExited(id, 0)
+		return nil
+	}
+
+	if err := start(false); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+
+	// Default (no flag): the terminal record blocks the reused ID.
+	if err := start(false); err == nil || !strings.Contains(err.Error(), "already registered") {
+		t.Fatalf("restart without ReplaceTerminal = %v, want an 'already registered' error", err)
+	}
+
+	// Opt-in: the terminal record is replaced, so the restart succeeds twice in
+	// a row (a repeated toggle must keep working).
+	if err := start(true); err != nil {
+		t.Fatalf("restart with ReplaceTerminal: %v", err)
+	}
+	if err := start(true); err != nil {
+		t.Fatalf("second restart with ReplaceTerminal: %v", err)
+	}
+
+	// A still-running record must never be replaced, even when opted in.
+	running := exec.Command("sleep", "30")
+	if _, err := StartSupervised(sup, running, ProcessRegistration{
+		ID:              id,
+		Kind:            ProcessKindRemote,
+		ReplaceTerminal: true,
+	}); err != nil {
+		t.Fatalf("start long-running child: %v", err)
+	}
+	dup := exec.Command("true")
+	if _, err := StartSupervised(sup, dup, ProcessRegistration{
+		ID:              id,
+		Kind:            ProcessKindRemote,
+		ReplaceTerminal: true,
+	}); err == nil {
+		t.Fatal("second start while the record is still running succeeded; running records must never be replaced")
+	}
+	_ = running.Process.Kill()
+	_, _ = running.Process.Wait()
+	sup.MarkExited(id, 0)
+}

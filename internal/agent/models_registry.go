@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1062,6 +1063,12 @@ func allProviderModelsFromRegistry(refresh bool) []string {
 	if !containsString(ids, "orcarouter/auto") {
 		ids = append(ids, "orcarouter/auto")
 	}
+	// TypeSafe AI is not in models.dev; its catalog is the static list below.
+	for _, m := range typesafeModels {
+		if id := "typesafe/" + m; !containsString(ids, id) {
+			ids = append(ids, id)
+		}
+	}
 	// AIHubMix live models — supplement the snapshot so models the models.dev
 	// catalog omits (e.g. "ox-alpha") appear in the picker. Guarded by refresh (or
 	// a still-fresh cache) to avoid blocking the main loop on a network fetch.
@@ -1112,7 +1119,15 @@ func allProviderModelsFromRegistry(refresh bool) []string {
 // flag behaves as in allProviderModelsFromRegistry: when false it only reads an
 // already-fresh live cache (safe for the TUI main loop); when true it may refresh
 // live sources over the network.
+// typesafeModels is the TypeSafe AI (System One) catalog. It is not served by
+// models.dev, and TypeSafe exposes no public list endpoint, so the picker gets
+// this static list. Jev is decision-only — see TypesafeClient.
+var typesafeModels = []string{"jev-latest"}
+
 func providerModelsFromRegistry(provider string, refresh bool) []string {
+	if provider == "typesafe" {
+		return slices.Clone(typesafeModels)
+	}
 	if provider == "lmstudio" {
 		return fetchLMStudioModels()
 	}

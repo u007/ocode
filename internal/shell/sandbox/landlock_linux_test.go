@@ -80,6 +80,21 @@ func TestLinuxAllowsExec(t *testing.T) {
 	}
 }
 
+// TestLinuxAllowsDevNullWrite: /dev/null sits outside every writable root,
+// but tools open it for write as a pure discard target (`cmd 2>/dev/null`) and
+// Landlock denies an open no rule grants. Regression for the Linux lockout
+// where bash reported "/dev/null: Permission denied" and every command using
+// it failed.
+func TestLinuxAllowsDevNullWrite(t *testing.T) {
+	out, err := linuxManyBackends(t, []string{t.TempDir()}, "echo discard > /dev/null && echo devnull-ok")
+	if err != nil {
+		t.Fatalf("write to /dev/null failed under sandbox: %v", err)
+	}
+	if !strings.Contains(out, "devnull-ok") {
+		t.Fatalf("output %q lacks devnull-ok", out)
+	}
+}
+
 // TestLinuxConfineEntrypointStripsProtocolEnv locks the env-scrubbing boundary
 // at the confiner level: the OCODE_SANDBOX_* vars must not leak into the
 // confined command's environment.

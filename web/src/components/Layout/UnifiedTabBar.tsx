@@ -28,39 +28,12 @@ import type { FocusedKind } from "../../lib/viewPersistence";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
 import { cancelLiveDeltas, closeSessionBackend } from "../../lib/sessionEvents";
+import { prefetchSession } from "../../lib/sessionPrefetch";
 import { api } from "../../api/client";
 import { loadTabOrder, saveTabOrder, reconcileTabOrder, type UnifiedTabKey } from "./tabOrderPersistence";
 import { focusTerminalById } from "../Terminal/terminalFocus";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
-
-// While a tab's session has an in-flight turn, show what it's doing as a
-// badge alongside its title (never replacing the title). Reverts once idle.
-function activeProcessLabel(slice: SessionSlice): string | null {
-  if (!slice.turnActive) return null;
-  for (let i = slice.live.length - 1; i >= 0; i--) {
-    const part = slice.live[i];
-    if (part.kind === "tool") return shortCommandLabel(part.command, part.tool);
-  }
-  return "Running…";
-}
-
-function shortCommandLabel(command: string | undefined, tool: string): string {
-  if (!command) return tool;
-  let candidate: string = tool;
-  try {
-    const parsed = JSON.parse(command) as Record<string, unknown>;
-    if (typeof parsed.command === "string") candidate = parsed.command;
-    else if (typeof parsed.description === "string") candidate = parsed.description;
-    else {
-      const firstString = Object.values(parsed).find((v): v is string => typeof v === "string");
-      if (firstString) candidate = firstString;
-    }
-  } catch {
-    // Not valid JSON — fall back to the tool name.
-  }
-  return candidate.length > 40 ? `${candidate.slice(0, 40)}…` : candidate;
-}
 
 function truncateTitle(s: string, maxLen: number): string {
   s = s.replace(/\n/g, " ").trim();
@@ -88,7 +61,6 @@ interface ChatDerived {
   id: string;
   initialized: boolean;
   hasPending: boolean;
-  processLabel: string | null;
   displayTitle: string;
 }
 
@@ -97,7 +69,7 @@ function chatDerivedEqual(a: ChatDerived[], b: ChatDerived[]): boolean {
   for (let i = 0; i < a.length; i++) {
     const x = a[i];
     const y = b[i];
-    if (x.id !== y.id || x.initialized !== y.initialized || x.hasPending !== y.hasPending || x.processLabel !== y.processLabel || x.displayTitle !== y.displayTitle) {
+    if (x.id !== y.id || x.initialized !== y.initialized || x.hasPending !== y.hasPending || x.displayTitle !== y.displayTitle) {
       return false;
     }
   }
@@ -114,7 +86,6 @@ interface TabPillProps {
   /** Terminal-only: a backgrounded terminal emitted a bell/notification. Drives
    *  the "unread activity" badge above the pill. */
   hasAlert?: boolean;
-  processLabel?: string | null;
   isEditing: boolean;
   editValue: string;
   onEditValueChange: (v: string) => void;
@@ -124,6 +95,10 @@ interface TabPillProps {
   onCancelRename: () => void;
   onClose: (e: React.MouseEvent) => void;
   onAuxClose?: (e: React.MouseEvent) => void;
+  /** Fired when the pill is hovered or focused — a cheap "the user is about to
+   *  open this tab" signal used to warm its data. Chat tabs use it to prefetch
+   *  the transcript; other kinds pass nothing. */
+  onHover?: () => void;
 }
 
 function TabPill({
@@ -134,7 +109,6 @@ function TabPill({
   isLoading,
   hasPending,
   hasAlert,
-  processLabel,
   isEditing,
   editValue,
   onEditValueChange,
@@ -144,6 +118,7 @@ function TabPill({
   onCancelRename,
   onClose,
   onAuxClose,
+  onHover,
 }: TabPillProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: sortId });
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
@@ -160,6 +135,8 @@ function TabPill({
       aria-selected={isActive}
       aria-label={`${displayTitle}${hasAlert ? " (has unread activity)" : ""}`}
       onClick={onClick}
+      onMouseEnter={onHover}
+      onFocus={onHover}
       onContextMenu={(e) => {
         // Preserve native context menu / right-click behavior: don't select
         // or focus the terminal on right-click. onClick only fires for button
@@ -239,15 +216,6 @@ function TabPill({
           }}
         >
           {displayTitle}
-        </span>
-      )}
-      {processLabel && (
-        <span
-          data-testid="tab-process"
-          className="max-w-24 shrink-0 truncate text-[10px] leading-none px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30"
-          title={processLabel}
-        >
-          {processLabel}
         </span>
       )}
       <span
@@ -349,7 +317,6 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           id: tab.id,
           initialized: slice.initialized,
           hasPending: activeChatId !== tab.id && (slice.pendingPermission !== null || slice.pendingQuestion !== null),
-          processLabel: activeProcessLabel(slice),
           displayTitle: deriveChatTabTitle(tab, slice),
         };
       }),
@@ -605,11 +572,11 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           isActive={focusedKind === "chat" && activeChatId === id}
           isLoading={isLoadingChatTab(id, derived?.initialized ?? false)}
           hasPending={derived?.hasPending ?? false}
-          processLabel={derived?.processLabel ?? null}
           isEditing={editing?.kind === "chat" && editing.id === id}
           editValue={editValue}
           onEditValueChange={setEditValue}
           onClick={(e) => handleChatClick(e, id, displayTitle)}
+          onHover={() => prefetchSession(id)}
           onStartRename={() => startRename("chat", id, displayTitle || "")}
           onCommitRename={commitRename}
           onCancelRename={() => setEditing(null)}

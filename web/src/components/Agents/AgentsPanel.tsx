@@ -1,6 +1,8 @@
+import { memo, useEffect, useRef } from "react";
 import { ArrowLeft, Bot } from "lucide-react";
 import { useAgentRuns } from "../../hooks/useAgentRuns";
-import RunNode, { childSummary, elapsed, statusStyles } from "./RunNode";
+import RunNode, { elapsed, statusStyles } from "./RunNode";
+import ScrollNavButtons from "../common/ScrollNavButtons";
 import type { AgentRun } from "../../api/types";
 
 interface AgentsPanelProps {
@@ -18,38 +20,20 @@ function findRun(runs: AgentRun[], id: string): AgentRun | undefined {
   return undefined;
 }
 
-function AgentListRow({ run, onOpen }: { run: AgentRun; onOpen: () => void }) {
-  const s = statusStyles(run.status);
-  const summary = childSummary(run.children);
-  const dur = elapsed(run.startedAt, run.endedAt);
-
-  return (
-    <button
-      onClick={onOpen}
-      className="group relative flex w-full items-center gap-2 overflow-hidden rounded-md py-2 pl-3 pr-2 text-left text-sm transition-colors hover:bg-muted/70"
-    >
-      <span className={`absolute left-0 top-1 bottom-1 w-0.5 rounded-full ${s.bar}`} />
-      <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
-      <span className="shrink-0 truncate font-medium text-foreground">{run.name}</span>
-      {run.model && (
-        <span className="shrink-0 truncate font-mono text-[11px] text-muted-foreground">{run.model}</span>
-      )}
-      <span className={`shrink-0 text-[11px] ${s.text}`}>{run.status}</span>
-      <span className="ml-auto flex shrink-0 items-center gap-2">
-        {summary && (
-          <span className="rounded-full bg-muted px-2 py-0.5 font-mono text-[10px] text-muted-foreground ring-1 ring-inset ring-ring/60">
-            {summary}
-          </span>
-        )}
-        {dur && <span className="font-mono text-[10px] tabular-nums text-foreground">{dur}</span>}
-      </span>
-    </button>
-  );
-}
-
-export default function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: AgentsPanelProps) {
+function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: AgentsPanelProps) {
   const { runs, loaded } = useAgentRuns(sessionId);
   const selected = selectedRunId ? findRun(runs, selectedRunId) : undefined;
+  const listScrollRef = useRef<HTMLDivElement>(null);
+  const detailScrollRef = useRef<HTMLDivElement>(null);
+
+  // Opening a different run must start at its top — without this the new run
+  // inherits the previous run's scroll offset (the container is not remounted).
+  useEffect(() => {
+    const el = detailScrollRef.current;
+    if (!el) return;
+    if (typeof el.scrollTo === "function") el.scrollTo({ top: 0 });
+    else el.scrollTop = 0;
+  }, [selectedRunId]);
 
   if (selected) {
     const s = statusStyles(selected.status);
@@ -72,8 +56,18 @@ export default function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: A
           <span className={`text-[11px] ${s.text}`}>{selected.status}</span>
           {dur && <span className="font-mono text-[10px] tabular-nums text-foreground">{dur}</span>}
         </div>
-        <div className="flex-1 min-h-0 overflow-hidden p-3">
-          <RunNode run={selected} depth={0} />
+        {/* The run detail scrolls as one surface: RunNode's own bounded
+            sub-lists (thinking / messages / result) keep their inner caps, but
+            the tree as a whole can now be taller than the panel without being
+            clipped — and the nav buttons give it explicit top/bottom edges. */}
+        <div className="relative min-h-0 flex-1">
+          <div
+            ref={detailScrollRef}
+            className="h-full overflow-y-auto overscroll-contain p-3"
+          >
+            <RunNode run={selected} depth={0} />
+          </div>
+          <ScrollNavButtons scrollRef={detailScrollRef} watch={selectedRunId} />
         </div>
       </div>
     );
@@ -121,12 +115,30 @@ export default function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: A
   }
 
   return (
-    <div className="h-full overflow-y-auto p-3">
-      <div className="space-y-1">
-        {runs.map((run) => (
-          <AgentListRow key={run.id} run={run} onOpen={() => onSelectRun(run.id)} />
-        ))}
+    <div className="relative h-full">
+      <div ref={listScrollRef} className="h-full overflow-y-auto overscroll-contain p-3">
+        <div className="space-y-1">
+          {/* Each run (and its nested sub-agents) is independently expandable,
+              so any number can be open at once instead of the single-run
+              drill-in swap. Rows start collapsed so a freshly spawned crew
+              doesn't balloon the list; the focused full-screen view is still
+              one click away on the run name. */}
+          {runs.map((run) => (
+            <RunNode
+              key={run.id}
+              run={run}
+              depth={0}
+              defaultOpen={false}
+              onOpenDetail={onSelectRun}
+            />
+          ))}
+        </div>
       </div>
+      <ScrollNavButtons scrollRef={listScrollRef} watch={runs} />
     </div>
   );
 }
+
+/** `sessionId` is stable per instance and `onSelectRun` is a stable setState, so
+ *  a parent re-render — e.g. another tab becoming active — is a no-op here. */
+export default memo(AgentsPanel);

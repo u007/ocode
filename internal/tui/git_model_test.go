@@ -321,6 +321,167 @@ func TestGitViewStatusBarStaysOneLine(t *testing.T) {
 	}
 }
 
+// --- Git action status/toast regression tests -----------------------------
+//
+// A failed `git push` used to be invisible: the status bar rendered
+// `hints + statusMsg` and then truncated to the terminal width, and the hint
+// line is ~250 columns wide, so the error was cut off entirely. These tests
+// pin the fix: the message is rendered first, truncated to width, and errors
+// are sticky while successes auto-clear after gitStatusTimeout.
+
+// stubGitNotify replaces the OS notifier so tests never spawn
+// osascript/notify-send subprocesses, and records the calls for assertions.
+func stubGitNotify(t *testing.T) *[]string {
+	t.Helper()
+	orig := notifyGitAction
+	var calls []string
+	notifyGitAction = func(title, message string) {
+		calls = append(calls, title+": "+message)
+	}
+	t.Cleanup(func() { notifyGitAction = orig })
+	return &calls
+}
+
+func TestGitStatusMessageVisibleDespiteLongHints(t *testing.T) {
+	m := gitModel{
+		section:     gitSectionChanges,
+		panel:       gitPanelFiles,
+		statusMsg:   "push failed: remote rejected (fetch first)",
+		stagedFiles: []gitFile{{status: "M", path: "a.go"}},
+	}
+	view := m.View(80, 20, ApplyThemeColors("tokyonight"), false, false)
+	if !strings.Contains(view, "push failed") {
+		t.Fatalf("status message not visible at 80 cols (regression: clipped off):\n%s", view)
+	}
+}
+
+func TestGitStatusMessageTruncatedToWidth(t *testing.T) {
+	m := gitModel{
+		section:     gitSectionChanges,
+		panel:       gitPanelFiles,
+		statusMsg:   strings.Repeat("x", 500),
+		stagedFiles: []gitFile{{status: "M", path: "a.go"}},
+	}
+	view := m.View(80, 20, ApplyThemeColors("tokyonight"), false, false)
+	for _, line := range strings.Split(view, "\n") {
+		if w := lipgloss.Width(line); w > 80 {
+			t.Fatalf("render exceeded width 80 (%d)", w)
+		}
+	}
+}
+
+func TestGitStatusClassifiesErrors(t *testing.T) {
+	errs := []string{
+		"push failed: remote rejected",
+		"commit failed: nothing to commit",
+		"fetch failed: exit status 128: fatal: could not read Username",
+		"stash apply failed: error",
+		"cannot discard untracked file",
+		"commit message is required",
+	}
+	for _, s := range errs {
+		if !gitStatusIsError(s) {
+			t.Errorf("expected error classification for %q", s)
+		}
+	}
+	oks := []string{
+		"pushed", "fetched", "committed", "staged a.go", "switched to main", "stash dropped",
+		// Interpolated paths/branches must not trip the classifier: only the
+		// label before the first ':' is inspected, never the payload.
+		"staged src/errors.go", "switched to feature/error-recovery", "ignored logs/error.log",
+		"deleted failed-experiment", "created and switched to fix/failed-login",
+	}
+	for _, s := range oks {
+		if gitStatusIsError(s) {
+			t.Errorf("expected success classification for %q", s)
+		}
+	}
+}
+
+func TestGitErrorMessageIsSticky(t *testing.T) {
+	stubGitNotify(t)
+	m := gitModel{workDir: t.TempDir()}
+	m.setGitStatus("push failed: rejected")
+	if !gitStatusIsError(m.statusMsg) {
+		t.Fatalf("expected error status, got %q", m.statusMsg)
+	}
+	// An error must not schedule an auto-clear: applying the timeout message
+	// (were one scheduled) with the current seq would be a no-op anyway, but
+	// the key guarantee is that setGitStatus returns no timer for errors.
+	seq := m.statusSeq
+	m2, _ := m.Update(gitStatusTimeoutMsg{seq: seq}, 80, 20)
+	if m2.statusMsg != "push failed: rejected" {
+		t.Fatalf("error was cleared by timeout: %q", m2.statusMsg)
+	}
+}
+
+func TestGitSuccessAutoClearsAfterTimeout(t *testing.T) {
+	stubGitNotify(t)
+	m := gitModel{workDir: t.TempDir()}
+	m.setGitStatus("pushed")
+	if m.statusMsg != "pushed" {
+		t.Fatalf("expected success status, got %q", m.statusMsg)
+	}
+	// A success must schedule an auto-clear (the 5-second toast) and must
+	// return the timer command so the message can disappear on schedule.
+	if cmd := m.setGitStatus("fetched"); cmd == nil {
+		t.Fatal("expected a timeout command for a success message")
+	}
+	m.statusMsg = "pushed"
+	// A matching timeout clears a success.
+	m2, _ := m.Update(gitStatusTimeoutMsg{seq: m.statusSeq}, 80, 20)
+	if m2.statusMsg != "" {
+		t.Fatalf("expected success to clear, got %q", m2.statusMsg)
+	}
+}
+
+func TestGitOSNotificationOnlyForErrors(t *testing.T) {
+	// The on-screen status message is the toast for every action; the OS
+	// notification is reserved for failures so a success does not spam the
+	// desktop notification centre.
+	calls := stubGitNotify(t)
+	m := gitModel{workDir: t.TempDir()}
+	m.setGitStatus("pushed")
+	if len(*calls) != 0 {
+		t.Fatalf("success must not raise an OS notification, got %v", *calls)
+	}
+	m.setGitStatus("push failed: rejected")
+	if len(*calls) != 1 {
+		t.Fatalf("expected one OS notification for the failure, got %v", *calls)
+	}
+	if !strings.Contains((*calls)[0], "push failed") {
+		t.Fatalf("expected failure notification, got %v", *calls)
+	}
+}
+
+func TestGitStaleStatusTimeoutDoesNotClearNewMessage(t *testing.T) {
+	stubGitNotify(t)
+	m := gitModel{workDir: t.TempDir()}
+	m.setGitStatus("pushed")
+	stale := m.statusSeq
+	// A newer error arrives before the success timer fires.
+	m.setGitStatus("push failed: rejected")
+	// The stale timer must not wipe the newer error.
+	m2, _ := m.Update(gitStatusTimeoutMsg{seq: stale}, 80, 20)
+	if m2.statusMsg != "push failed: rejected" {
+		t.Fatalf("stale timeout cleared newer message: %q", m2.statusMsg)
+	}
+}
+
+func TestGitRunInDirSurfacesStderr(t *testing.T) {
+	dir := t.TempDir()
+	// `git log` in a non-repo fails and git writes the reason to stderr.
+	// Before the fix only "exit status 128" was returned; now the actionable
+	// stderr text must be included.
+	_, err := gitRunInDir(dir, "log")
+	if err == nil {
+		t.Fatal("expected error from git log outside a repository")
+	}
+	if !strings.Contains(err.Error(), "not a git repository") {
+		t.Fatalf("stderr not surfaced in error: %v", err)
+	}
+}
+
 func TestGitPreviewShowsTruncationNotice(t *testing.T) {
 	dir := initGitRepoForPathSeparatorTest(t)
 	writeFileForGitTest(t, dir, "big.txt", strings.Repeat("abcdefghijklmnopqrstuvwxyz\n", 3000))
@@ -422,5 +583,20 @@ func TestParseStatusZ(t *testing.T) {
 	}
 	if len(m.untrackedFiles) != 1 || m.untrackedFiles[0].path != "new file.go" {
 		t.Fatalf("unexpected untracked: %+v", m.untrackedFiles)
+	}
+}
+
+// TestRootModelRoutesGitStatusTimeout pins that the root Update forwards
+// gitStatusTimeoutMsg to the git model. The timer command returned by
+// setGitStatus is dispatched through the root router, so a missing case there
+// silently drops the message and success statuses never auto-clear — the
+// gitModel.Update-level tests above cannot catch that.
+func TestRootModelRoutesGitStatusTimeout(t *testing.T) {
+	stubGitNotify(t)
+	m := model{width: 100, height: 30, git: gitModel{workDir: t.TempDir()}}
+	m.git.setGitStatus("pushed")
+	updated, _ := m.Update(gitStatusTimeoutMsg{seq: m.git.statusSeq})
+	if got := updated.(model).git.statusMsg; got != "" {
+		t.Fatalf("root Update did not route gitStatusTimeoutMsg: statusMsg=%q", got)
 	}
 }

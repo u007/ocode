@@ -4,6 +4,7 @@ import type { StateKey } from "../../lib/browserStore";
 import { previewKindForPath, resolvePreviewDoc, type PreviewOpenRequest } from "../../lib/previewKind";
 import { api } from "../../api/client";
 import PreviewSurface from "./PreviewSurface";
+import LegacyOfficePane from "./LegacyOfficePane";
 import { dispatchOpenPreview } from "../../lib/previewKind";
 
 type Surface = "browser" | "preview";
@@ -139,21 +140,12 @@ export default function PreviewHost({
           <BrowserPanel key={stateKey} stateKey={stateKey} mode="side" />
         </div>
       ) : unsupported ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
-          <div className="max-w-[240px] truncate font-mono text-xs text-foreground" title={unsupported.path}>{unsupported.path}</div>
-          <div className="max-w-[240px] text-[11px] leading-relaxed text-muted-foreground">
-            Legacy Office formats (.doc/.ppt) can't preview in the browser — open with the OS app instead.
-          </div>
-          {osOpenState && <div className="text-[11px] text-muted-foreground">{osOpenState}</div>}
-          {!(doc?.projectHost ?? projectHost) && (
-            <button
-              type="button"
-              onClick={() => openWithOS(unsupported.path)}
-              className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground hover:opacity-90"
-            >
-              Open in app
-            </button>
-          )}
+        <div className="flex min-h-0 flex-1 flex-col">
+          <LegacyOfficePane
+            path={unsupported.path}
+            projectRoot={unsupported.projectRoot}
+            projectHost={doc?.projectHost ?? projectHost}
+          />
         </div>
       ) : doc ? (
         <div className="flex min-h-0 flex-1 flex-col">

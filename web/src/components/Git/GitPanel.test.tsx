@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitWorkspace } from "@/api/types";
 
@@ -9,14 +9,32 @@ const mocks = vi.hoisted(() => ({
   gitStage: vi.fn(),
   gitUnstage: vi.fn(),
   gitCommit: vi.fn(),
+  gitPush: vi.fn(),
+  gitFetch: vi.fn(),
+  gitPull: vi.fn(),
+  /** git_status bus handlers registered by GitPanel. */
+  gitStatusHandlers: [] as Array<(env: unknown) => void>,
 }));
 
 vi.mock("@/api/client", () => ({ api: mocks }));
 vi.mock("@/lib/eventBus", () => ({
-  eventBus: { on: vi.fn(() => () => {}) },
+  eventBus: {
+    on: vi.fn((event: string, handler: (env: unknown) => void) => {
+      if (event === "git_status") mocks.gitStatusHandlers.push(handler);
+      return () => {};
+    }),
+  },
 }));
 
 import GitPanel from "./GitPanel";
+
+/** Simulates the server pushing a git_status event (background refresh). */
+async function emitGitStatus(project = "/proj") {
+  await act(async () => {
+    for (const h of mocks.gitStatusHandlers) h({ project });
+    await Promise.resolve();
+  });
+}
 
 const GIT_PANEL_SECTIONS_KEY = "ocode.ui.git-panel.v1";
 
@@ -81,6 +99,10 @@ describe("GitPanel", () => {
     mocks.gitStage.mockResolvedValue(workspace.status);
     mocks.gitUnstage.mockResolvedValue(workspace.status);
     mocks.gitCommit.mockResolvedValue(workspace.status);
+    mocks.gitPush.mockResolvedValue(workspace.status);
+    mocks.gitFetch.mockResolvedValue(workspace.status);
+    mocks.gitPull.mockResolvedValue(workspace.status);
+    mocks.gitStatusHandlers.length = 0;
     window.localStorage.clear();
   });
 
@@ -256,5 +278,55 @@ describe("GitPanel", () => {
     render(<GitPanel projectPath="/proj" />);
     await screen.findByText("src/unstaged.ts");
     expect(screen.queryByText("src/staged.ts")).toBeNull();
+  });
+
+  // --- git action error/notice regression tests ---------------------------
+  //
+  // A failed push used to be wiped by the next background poll: load() began
+  // with setError(null) and ran on a 10s interval plus every git_status bus
+  // event, so the error "disappeared by itself" within seconds. These tests
+  // pin the fix (background refreshes never clear a user-visible error) and
+  // the new 5-second success notice.
+
+  it("keeps a failed push error visible across background refreshes", async () => {
+    mocks.gitPush.mockRejectedValueOnce(new Error("remote rejected (fetch first)"));
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+
+    fireEvent.click(screen.getByLabelText("Push to remote"));
+    expect(await screen.findByText("remote rejected (fetch first)")).toBeTruthy();
+
+    // The server pushes a git_status event (the real background-refresh path
+    // used by the 10s poll and other clients mutating the repo). It must NOT
+    // clear the error — this is the "disappears by itself" regression.
+    await emitGitStatus();
+    expect(screen.getByText("remote rejected (fetch first)")).toBeTruthy();
+  });
+
+  it("shows a transient success notice after a push and clears it after 5s", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<GitPanel projectPath="/proj" />);
+      // Let the initial load resolve.
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      const pushBtn = screen.getByLabelText("Push to remote");
+      await act(async () => {
+        fireEvent.click(pushBtn);
+        await Promise.resolve();
+      });
+
+      expect(screen.getByTestId("git-notice").textContent).toBe("pushed");
+
+      // After 5 seconds the notice is gone.
+      await act(async () => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(screen.queryByTestId("git-notice")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

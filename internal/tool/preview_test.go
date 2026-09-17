@@ -17,7 +17,7 @@ func previewArgs(t *testing.T, path string, page int) json.RawMessage {
 
 func TestPreviewOpenToolAcceptsPreviewable(t *testing.T) {
 	tool := &PreviewOpenTool{}
-	for _, p := range []string{"docs/deck.pptx", "spec.docx", "report.pdf", "flow.mmd", "notes.md", "main.go", "budget.xlsx", "legacy.xls", "data.csv"} {
+	for _, p := range []string{"docs/deck.pptx", "spec.docx", "report.pdf", "flow.mmd", "notes.md", "main.go", "budget.xlsx", "legacy.xls", "data.csv", "song.mp3", "clip.mp4"} {
 		got, err := tool.Execute(previewArgs(t, p, 0))
 		if err != nil {
 			t.Errorf("path %q: unexpected error %v", p, err)
@@ -55,6 +55,7 @@ func TestPreviewOpenToolRejects(t *testing.T) {
 		{"traversal", "../secret.txt", 0},
 		{"dotdot", "a/../../etc/passwd", 0},
 		{"unknown ext", "movie.mkv", 0},
+		{"unknown video ext", "movie.avi", 0},
 		{"binary", "app.exe", 0},
 		{"legacy doc (OS-open fallback, never previewed)", "old.doc", 0},
 		{"legacy ppt (OS-open fallback, never previewed)", "old.ppt", 0},
@@ -86,6 +87,23 @@ func TestPreviewOpenCoversOfficeSet(t *testing.T) {
 		".xlsx": "excel", ".xls": "excel", ".csv": "excel",
 	}
 	for ext, want := range office {
+		got, ok := previewOpenKinds[ext]
+		if !ok {
+			t.Errorf("previewOpenKinds missing %q", ext)
+			continue
+		}
+		if got != want {
+			t.Errorf("previewOpenKinds[%q] = %q, want %q", ext, got, want)
+		}
+	}
+	// Audio/video: browser-playable containers only. .mkv/.avi are rejected
+	// by TestPreviewOpenToolRejects ("unknown ext").
+	media := map[string]string{
+		".mp3": "audio", ".m4a": "audio", ".wav": "audio",
+		".ogg": "audio", ".flac": "audio",
+		".mp4": "video", ".webm": "video", ".mov": "video",
+	}
+	for ext, want := range media {
 		got, ok := previewOpenKinds[ext]
 		if !ok {
 			t.Errorf("previewOpenKinds missing %q", ext)

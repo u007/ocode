@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/u007/ocode/internal/shell"
 	"github.com/u007/ocode/internal/shell/sandbox"
 )
 
@@ -49,8 +50,12 @@ func bashInvocation(command string) (string, []string) {
 	if runtime.GOOS == "windows" {
 		return "cmd", []string{"/C", command}
 	}
-	if shell := loginShell(); shell != "" {
-		return shell, []string{"-l", "-c", command}
+	if override := loginShell(); override != "" {
+		// Validate before exec: a pinned shell that is missing or not
+		// executable (a stale desktop config, a path from another machine)
+		// must fall through to an available shell rather than failing every
+		// agent command with `fork/exec <shell>: no such file or directory`.
+		return shell.Resolve(override), []string{"-l", "-c", command}
 	}
 	return "bash", []string{"-c", command}
 }

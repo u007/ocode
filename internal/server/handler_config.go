@@ -17,6 +17,7 @@ import (
 	"github.com/u007/ocode/internal/network"
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/redact"
+	"github.com/u007/ocode/internal/remote"
 )
 
 func (h *Handler) HandleGetModel(w http.ResponseWriter, r *http.Request) {
@@ -974,6 +975,34 @@ func (h *Handler) HandleGetTerminalConfig(w http.ResponseWriter, r *http.Request
 	if !available {
 		workDir = ""
 	}
+
+	// A `host` names an ocode Remote project. Its shells are the remote's, not
+	// this machine's: reporting the local /etc/shells (or the local
+	// terminal_shell override) would offer the Settings UI a shell the remote
+	// cannot run. The probe is cached per host (remoteShellInfo).
+	if host := hostParam(r); host != "" {
+		rw, err := h.remoteWorkFor(host, r.URL.Query().Get("project"))
+		if err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		info := h.remoteShellInfo(r.Context(), rw)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"available":        available,
+			"scrollback_lines": scrollback,
+			"font_family":      fontFamily,
+			"font_size":        fontSize,
+			// There is no per-host override: the remote picks its own shell,
+			// so the picker reads "use the remote default" (empty shell).
+			"shell":            "",
+			"default_shell":    info.Default,
+			"available_shells": remote.SortShells(info.Available),
+			"work_dir":         "",
+			"remote":           true,
+		})
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"available":        available,
 		"scrollback_lines": scrollback,

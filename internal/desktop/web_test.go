@@ -46,6 +46,44 @@ func TestRemoteSPAHandlerAPINotFoundIsJSON(t *testing.T) {
 	}
 }
 
+// remoteSPAHandler must set the same cache policy as internal/server.spaHandler:
+// embed.FS has a zero ModTime, so with no directive the webview re-downloads
+// every hashed asset on each load. Hashed assets are immutable; index.html and
+// the SPA fallback revalidate.
+func TestRemoteSPAHandlerCacheHeaders(t *testing.T) {
+	h := remoteSPAHandler(fstest.MapFS{
+		"index.html":          &fstest.MapFile{Data: []byte("<!DOCTYPE html><html><body>spa</body></html>")},
+		"assets/index-abc.js": &fstest.MapFile{Data: []byte("console.log('spa')")},
+	})
+
+	cases := []struct {
+		name       string
+		path       string
+		wantSubstr string
+		wantAbsent string
+	}{
+		{"hashed asset", "/assets/index-abc.js", "immutable", "no-cache"},
+		{"index", "/", "no-cache", "immutable"},
+		{"spa fallback", "/session/abc", "no-cache", "immutable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", tc.path, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s = %d, want 200", tc.path, rec.Code)
+			}
+			cc := rec.Header().Get("Cache-Control")
+			if !strings.Contains(cc, tc.wantSubstr) {
+				t.Fatalf("GET %s Cache-Control = %q, want it to contain %q", tc.path, cc, tc.wantSubstr)
+			}
+			if strings.Contains(cc, tc.wantAbsent) {
+				t.Fatalf("GET %s Cache-Control = %q, must not contain %q", tc.path, cc, tc.wantAbsent)
+			}
+		})
+	}
+}
+
 // Compile-time sanity: the embedded-SPA filesystem type remoteSPAHandler
 // expects satisfies fs.ReadFileFS (the Open call it relies on).
 var _ fs.ReadFileFS = fstest.MapFS{}

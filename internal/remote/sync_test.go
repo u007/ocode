@@ -193,3 +193,49 @@ func overrideSyncDirsForTest(t *testing.T, dataDir, cfgDir string) func() {
 	}
 	return func() { resolveSyncDirFn = orig }
 }
+
+// terminal_shell is an absolute path to a shell binary on the *local* machine;
+// pushing it to a remote gives that host a config value it cannot satisfy and
+// produced `fork/exec /bin/zsh: no such file or directory` on a Linux remote.
+func TestStripMachineLocalConfigRemovesTerminalShell(t *testing.T) {
+	in := []byte(`{"models":{"a":1},"terminal_shell":"/bin/zsh","terminal_font_size":13}`)
+	out := stripMachineLocalConfig("ocodeconfig.json", in)
+
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+	}
+	if _, ok := doc["terminal_shell"]; ok {
+		t.Fatalf("terminal_shell survived the strip:\n%s", out)
+	}
+	// Everything else must be preserved.
+	for _, key := range []string{"models", "terminal_font_size"} {
+		if _, ok := doc[key]; !ok {
+			t.Fatalf("key %q was dropped:\n%s", key, out)
+		}
+	}
+}
+
+// A config with nothing to strip must be returned byte-for-byte, so an
+// unrelated sync does not rewrite (and reorder) the user's file.
+func TestStripMachineLocalConfigNoopKeepsBytes(t *testing.T) {
+	in := []byte(`{"models":{"a":1}}`)
+	if got := stripMachineLocalConfig("ocodeconfig.json", in); string(got) != string(in) {
+		t.Fatalf("content changed: %q -> %q", in, got)
+	}
+	// opencode.json has no machine-local keys at all.
+	if got := stripMachineLocalConfig("opencode.json", in); string(got) != string(in) {
+		t.Fatalf("opencode.json rewritten: %q -> %q", in, got)
+	}
+}
+
+// An unparseable config must not fail the sync — other readers tolerate it.
+func TestStripMachineLocalConfigSurvivesBadJSON(t *testing.T) {
+	in := []byte(`{not json`)
+	if got := stripMachineLocalConfig("ocodeconfig.json", in); string(got) != string(in) {
+		t.Fatalf("bad JSON rewritten: %q -> %q", in, got)
+	}
+	if got := stripMachineLocalConfig("ocodeconfig.json", nil); string(got) != "" {
+		t.Fatalf("empty content rewritten: %q", got)
+	}
+}

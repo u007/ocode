@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { apiPath, authHeaders } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
@@ -38,7 +38,7 @@ const KIND_COLORS: Record<string, string> = {
 
 const KIND_FILTERS = ["ALL", "LLM", "TOOL", "AGENT", "ERROR", "SESSION", "GIT", "PROFILE"];
 
-export default function LogPanel({ active, sessionId }: { active: boolean; sessionId: string }) {
+function LogPanel({ active, sessionId }: { active: boolean; sessionId: string }) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [streaming, setStreaming] = useState(true);
   const [filter, setFilter] = useState("ALL");
@@ -319,3 +319,7 @@ export default function LogPanel({ active, sessionId }: { active: boolean; sessi
     </div>
   );
 }
+
+/** Props are primitives (`active`, `sessionId`), so a parent re-render — e.g.
+ *  another tab becoming active — never re-renders a hidden LogPanel. */
+export default memo(LogPanel);

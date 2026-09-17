@@ -104,6 +104,32 @@ export async function writeClipboardText(text: string): Promise<void> {
 }
 
 /**
+ * DECRST for every mouse-tracking mode xterm.js can be left in by a TUI
+ * (`vim`, `tmux`, `htop`) that enabled it via DECSET and then died before
+ * sending the matching disable — which is exactly what happens when a remote
+ * SSH tunnel times out or crashes. Mouse modes are xterm parser state, not pty
+ * state, so they survive the socket closing. Left on, xterm keeps encoding
+ * every mouse move into escape sequences; after a reconnect those are written
+ * into the fresh shell, which has no mouse handler and echoes them as literal
+ * garbage ("mouse gibberish"). Written via term.write(), so it disables the
+ * modes without clearing scrollback the way term.reset() would.
+ * ?1004 is focus reporting (not mouse), so it is deliberately excluded.
+ */
+const TERMINAL_MOUSE_RESET =
+  "\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l";
+
+/**
+ * How long the terminal waits for the REST history restore before giving up and
+ * attaching the live socket anyway. `fetch` has no timeout of its own, and the
+ * WebSocket is only opened after the restore settles — so a stalled restore
+ * (a wedged server, a dropped connection held open by a proxy) would otherwise
+ * leave the terminal blank with no output and no error, indistinguishable from
+ * a dead shell. Each history page re-arms the timer, so a large-but-progressing
+ * restore is never cut off; only a genuinely stalled one is.
+ */
+const TERMINAL_HISTORY_RESTORE_TIMEOUT_MS = 15000;
+
+/**
  * A single interactive terminal: one xterm.js instance bridged to one
  * pty-backed shell over /api/terminal/ws. Each panel owns its own WebSocket;
  * the server keys the shell by `id`, so a socket drop (reload, remount) only
@@ -171,6 +197,12 @@ export default function TerminalPanel({
   // False during the initial scrollback replay; flipped true once the live pty
   // socket opens so a BEL baked into restored history can't false-alert.
   const readyRef = useRef(false);
+  // False until the server's attach control frame arrives on the current
+  // socket. term.onData must not be forwarded before that: mouse reports left
+  // over from a dead session (or keystrokes queued during the handshake) would
+  // otherwise be written into the pty before we know whether this is a fresh
+  // shell (whose stale mouse modes we must clear) or a resumed one.
+  const attachedRef = useRef(false);
   // Reconnection state (refs, not state, to avoid re-renders).
   const reconnectingRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
@@ -840,10 +872,22 @@ export default function TerminalPanel({
       });
       const nextSocket = new WebSocket(url, protocols);
       nextSocket.binaryType = "arraybuffer";
+      // True when this socket carries a REST history cursor: the client just
+      // replayed scrollback from disk, and any mode-setting sequence inside
+      // that replay is a recording of the past. In particular a TUI that
+      // enabled mouse tracking before the desktop app quit (remote workspaces
+      // keep the shell alive on the remote server) left a DECSET in the log
+      // that the replay re-applies; the TUI itself is gone, so the mode must be
+      // cleared even though the reattach is `resumed:true`.
+      const isHistoryAttach = historyOffset !== undefined;
       sock = nextSocket;
       socketRef.current = nextSocket;
       reconnectingRef.current = false;
-      reconnectAttemptRef.current = 0;
+      // Reset only the handshake gate here — NOT reconnectAttemptRef. This
+      // function also runs from the reconnect timer, so clearing the attempt
+      // counter on every call would pin the backoff at its 1s floor and hammer
+      // an unreachable remote. onopen resets it once a socket actually opens.
+      attachedRef.current = false;
 
       nextSocket.onopen = () => {
         readyRef.current = true;
@@ -902,10 +946,30 @@ export default function TerminalPanel({
             console.error("terminal: unparseable control frame", ev.data, err);
             return;
           }
-          // A cursor attach replays only bytes after the REST snapshot, so the
-          // restored xterm buffer must stay intact. The old no-cursor attach
-          // path still clears localStorage fallback before capped replay.
-          if (msg.type === "attach" && msg.resumed && !serverHistoryRestored) term.reset();
+          if (msg.type === "attach") {
+            // The handshake is done: from here term.onData may drive the pty.
+            attachedRef.current = true;
+            if (!msg.resumed || isHistoryAttach) {
+              // Stale mouse modes survive two ways:
+              //   - a fresh shell (previous session gone: remote SSH timeout/
+              //     crash), where the TUI died without sending DECRST;
+              //   - a history-cursor reattach (desktop app restart with a
+              //     remote workspace), where the replayed scrollback re-applied
+              //     a dead TUI's DECSET.
+              // Either way xterm would keep encoding mouse moves into escape
+              // sequences the bare shell echoes as garbage. A plain resumed
+              // attach (transient blip, in-memory replay, app still alive) is
+              // left untouched so an app that still owns the mouse keeps it.
+              term.write(TERMINAL_MOUSE_RESET);
+            }
+            if (msg.resumed && !serverHistoryRestored) {
+              // A cursor attach replays only bytes after the REST snapshot, so
+              // the restored xterm buffer must stay intact. The old no-cursor
+              // attach path still clears localStorage fallback before capped
+              // replay.
+              term.reset();
+            }
+          }
           return;
         }
         const decoded = terminalDecoder.decode(new Uint8Array(ev.data as ArrayBuffer), { stream: true });
@@ -1014,6 +1078,29 @@ export default function TerminalPanel({
       term.options.scrollback = Math.max(scrollbackLines, requiredScrollback);
     };
 
+    // The live socket is only opened after the REST restore settles, so a
+    // restore that never settles would leave the terminal blank forever. Bound
+    // it; each page re-arms the timer (see armRestoreTimeout below).
+    let restoreSettled = false;
+    let restoreTimer: number | null = null;
+    const armRestoreTimeout = () => {
+      if (restoreTimer !== null) clearTimeout(restoreTimer);
+      restoreTimer = window.setTimeout(() => {
+        restoreTimer = null;
+        if (restoreSettled || restoreCancelled) return;
+        restoreSettled = true;
+        // Cancel the stalled fetch and attach without a history cursor — the
+        // same fallback the restore-failure path uses.
+        restoreController.abort();
+        if (serverHistoryPartial) term.reset();
+        term.write(
+          "\r\n\x1b[33m[terminal history restore timed out; live terminal attached without restore]\x1b[0m\r\n",
+        );
+        connectSocket();
+      }, TERMINAL_HISTORY_RESTORE_TIMEOUT_MS);
+    };
+    armRestoreTimeout();
+
     void restoreTerminalHistory({
       id,
       projectPath,
@@ -1023,6 +1110,8 @@ export default function TerminalPanel({
       signal: restoreController.signal,
       onText: (text) => {
         if (restoreCancelled || restoreController.signal.aborted) return;
+        // Progress: the restore is alive, so give it another full window.
+        armRestoreTimeout();
         serverHistoryPartial = true;
         prepareHistoryPage(text);
         // xterm parses writes asynchronously. Wait for the page callback
@@ -1036,6 +1125,11 @@ export default function TerminalPanel({
         });
       },
     }).then((result) => {
+      restoreSettled = true;
+      if (restoreTimer !== null) {
+        clearTimeout(restoreTimer);
+        restoreTimer = null;
+      }
       if (restoreCancelled) return;
       if (result.kind === "missing") {
         // Only announce the fallback when there is actually a cached
@@ -1050,6 +1144,11 @@ export default function TerminalPanel({
       serverHistoryRestored = true;
       connectSocket(result.snapshotEnd);
     }).catch((err: unknown) => {
+      restoreSettled = true;
+      if (restoreTimer !== null) {
+        clearTimeout(restoreTimer);
+        restoreTimer = null;
+      }
       if (restoreCancelled || restoreController.signal.aborted) return;
       // Do not leave a partial server replay on screen before attaching
       // without a cursor. A resumed shell will send its capped replay, while
@@ -1066,7 +1165,9 @@ export default function TerminalPanel({
     // with {"type":"resize" as a control message and anything else as raw
     // keystrokes.
     const dataSub = term.onData((data) => {
-      if (sock?.readyState === WebSocket.OPEN) sock.send(data);
+      // Wait for the attach handshake: mouse reports xterm still holds from a
+      // dead session must not reach the new pty before the fresh-shell reset.
+      if (attachedRef.current && sock?.readyState === WebSocket.OPEN) sock.send(data);
     });
 
     const observer = new ResizeObserver(() => fitAndResize.current());
@@ -1075,6 +1176,10 @@ export default function TerminalPanel({
     return () => {
       restoreCancelled = true;
       restoreController.abort();
+      if (restoreTimer !== null) {
+        clearTimeout(restoreTimer);
+        restoreTimer = null;
+      }
       doSave();
       clearInterval(saveInterval);
       if (saveIdleId !== null) {

@@ -917,13 +917,47 @@ func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 }
 
 // previewRawMaxBytes caps GET /api/files/raw responses so a malicious or
-// accidental request for a huge binary (video, disk image) can't OOM the
-// server or the preview tab. 32 MiB covers real docx/pptx/pdf decks.
+// accidental request for a huge binary (disk image, archive) can't OOM the
+// server or the preview tab. 32 MiB covers real docx/pptx/pdf decks and
+// images.
 const previewRawMaxBytes = 32 << 20
 
+// previewRawMediaMaxBytes is the (larger) cap for BUFFERED audio/video reads
+// — i.e. the remote path, which must read the whole file over the SSH
+// transport (base64) before writing it. Media legitimately runs large, so
+// 128 MiB covers most clips while bounding server and browser memory. The
+// LOCAL media path streams via http.ServeContent and applies no cap at all
+// (nothing is ever held in memory), so this constant is dead for local files.
+const previewRawMediaMaxBytes = 128 << 20
+
+// isMediaContentType reports whether a raw content type is audio/video — the
+// kinds served by the streaming (range-capable) path and the only kinds a
+// media capability token may authorize.
+func isMediaContentType(contentType string) bool {
+	return strings.HasPrefix(contentType, "audio/") || strings.HasPrefix(contentType, "video/")
+}
+
+// previewExtIsMedia reports whether an extension maps to an audio/video type.
+func previewExtIsMedia(ext string) bool {
+	ct, ok := previewRawTypes[strings.ToLower(ext)]
+	return ok && isMediaContentType(ct)
+}
+
+// previewRawCap returns the byte cap for a previewable content type: the
+// larger media budget for audio/video, the document budget otherwise. It
+// governs the BUFFERED paths only — the local media path streams via
+// http.ServeContent and applies no cap (nothing is held in memory).
+func previewRawCap(contentType string) int64 {
+	if isMediaContentType(contentType) {
+		return previewRawMediaMaxBytes
+	}
+	return previewRawMaxBytes
+}
+
 // previewRawTypes allowlists previewable binary extensions. The browser
-// renderers (pdf.js, docx-preview, jszip slide parser) only need these;
-// anything else falls back to the text content endpoint or OS-open.
+// renderers (pdf.js, docx-preview, jszip slide parser, media elements) only
+// need these; anything else falls back to the text content endpoint or
+// OS-open.
 var previewRawTypes = map[string]string{
 	".pdf":  "application/pdf",
 	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -939,6 +973,23 @@ var previewRawTypes = map[string]string{
 	".svg":  "image/svg+xml",
 	".mmd":  "text/plain; charset=utf-8",
 	".md":   "text/markdown; charset=utf-8",
+	// Audio — browser-playable containers only.
+	".mp3":  "audio/mpeg",
+	".m4a":  "audio/mp4",
+	".aac":  "audio/aac",
+	".wav":  "audio/wav",
+	".ogg":  "audio/ogg",
+	".oga":  "audio/ogg",
+	".opus": "audio/ogg",
+	".flac": "audio/flac",
+	// Video — browser-playable containers only. .mkv/.avi stay out: no
+	// reliable browser renderer (a broken player is worse than the OS-open
+	// fallback).
+	".mp4":  "video/mp4",
+	".m4v":  "video/mp4",
+	".webm": "video/webm",
+	".ogv":  "video/ogg",
+	".mov":  "video/quicktime",
 }
 
 // HandleFileRaw serves previewable file bytes for PreviewHost (pdf.js,
@@ -993,8 +1044,20 @@ func (h *Handler) HandleFileRaw(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
-	if info.Size() > previewRawMaxBytes {
-		writeError(w, http.StatusBadRequest, "file exceeds the 32 MiB preview limit")
+
+	// Audio/video stream from disk with range support so a <video>/<audio>
+	// element can seek without downloading (or the server buffering) the whole
+	// file. ServeContent handles Range/If-Range/HEAD, so the buffered size cap
+	// below is neither needed nor applied for media. Documents/images stay on
+	// the buffered path: pdf.js/docx-preview/etc. need the whole byte range up
+	// front and are bounded by the 32 MiB cap.
+	if isMediaContentType(ct) {
+		h.serveMediaFile(w, r, path, ct, info)
+		return
+	}
+
+	if capBytes := previewRawCap(ct); info.Size() > capBytes {
+		writeError(w, http.StatusBadRequest, "file exceeds the "+strconv.Itoa(int(capBytes>>20))+" MiB preview limit")
 		return
 	}
 
@@ -1008,6 +1071,76 @@ func (h *Handler) HandleFileRaw(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+// serveMediaFile streams one local audio/video file with HTTP range support
+// (http.ServeContent) instead of buffering it. The Content-Type from the
+// allowlist is set first — ServeContent respects an already-set header — and
+// no-store keeps a tokenized URL's response out of shared caches.
+func (h *Handler) serveMediaFile(w http.ResponseWriter, r *http.Request, path, contentType string, info os.FileInfo) {
+	f, err := os.Open(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)
+}
+
+type mediaTokenRequest struct {
+	Path        string `json:"path"`
+	ProjectRoot string `json:"project_root,omitempty"`
+	Host        string `json:"host,omitempty"`
+}
+
+// HandleMediaToken issues a short-lived, single-file capability for the local
+// audio/video streaming path. The SPA calls it with normal bearer auth, then
+// hands the token to a <video>/<audio> element, which cannot set an
+// Authorization header (and for which the master ?token= form is forbidden in
+// --remote mode). See mediaTokenStore for the blast-radius argument.
+//
+// Remote (host=) media keeps the buffered blob path — there is no range
+// transport over SSH — so a capability for it would never be used.
+func (h *Handler) HandleMediaToken(w http.ResponseWriter, r *http.Request) {
+	var req mediaTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	path := strings.TrimSpace(req.Path)
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	if strings.TrimSpace(req.Host) != "" {
+		writeError(w, http.StatusBadRequest, "media streaming is local-only")
+		return
+	}
+	if !previewExtIsMedia(filepath.Ext(path)) {
+		writeError(w, http.StatusBadRequest, "file type is not streamable media")
+		return
+	}
+	// Same anchoring/traversal preconditions as HandleFileRaw. The raw handler
+	// re-validates at use time (the token is only a capability, never a
+	// substitute for those checks).
+	if req.ProjectRoot != "" {
+		if _, ok := h.fileContentRootFor(req.ProjectRoot); !ok {
+			writeError(w, http.StatusBadRequest, "project_root is not an allowed project root")
+			return
+		}
+	}
+	if containsDotDot(path) {
+		writeError(w, http.StatusBadRequest, "path is outside the project root")
+		return
+	}
+	tok := h.mediaTokens.issue(path, req.ProjectRoot, "")
+	if tok == "" {
+		writeError(w, http.StatusInternalServerError, "failed to issue media token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": tok})
 }
 
 type saveFileContentRequest struct {

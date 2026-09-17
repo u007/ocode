@@ -202,7 +202,13 @@ export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true }
             </div>
           )}
           {run.children.map((child) => (
-            <RunNode key={child.id} run={child} depth={depth + 1} defaultOpen={defaultOpen} />
+            <RunNode
+              key={child.id}
+              run={child}
+              depth={depth + 1}
+              defaultOpen={defaultOpen}
+              onOpenDetail={onOpenDetail}
+            />
           ))}
         </div>
       )}
