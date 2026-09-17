@@ -37,6 +37,7 @@ function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
     return {
       tool: toolName,
       command: command || undefined,
+      args: argsRaw,
       rule: (req["rule"] as string) || undefined,
       summary: (req["summary"] as string) || undefined,
       deny_reason: (req["deny_reason"] as string) || undefined,
@@ -97,6 +98,8 @@ export function extractPendingFromMessages(messages: Message[]): {
 export interface PermissionRequest {
   tool: string;
   command?: string;
+  /** Preserved for both live events and recovered transcript asks. */
+  args?: unknown;
   rule?: string;
   summary?: string;
   deny_reason?: string;

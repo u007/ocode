@@ -103,9 +103,9 @@ func TestSyncDispatchRetriesOnceOnUnmetContract(t *testing.T) {
 	if len(runs) != 1 {
 		t.Fatalf("runs = %d, want 1", len(runs))
 	}
-	checked, satisfied, deficiency := runs[0].ContractVerdict()
-	if !checked || !satisfied || deficiency != "" {
-		t.Errorf("verdict = checked=%v satisfied=%v deficiency=%q, want checked=true satisfied=true", checked, satisfied, deficiency)
+	v := runs[0].ContractVerdict()
+	if !v.Checked || !v.Satisfied || v.CheckFailed || v.Deficiency != "" {
+		t.Errorf("verdict = %+v, want checked=true satisfied=true checkFailed=false", v)
 	}
 }
 
@@ -137,11 +137,14 @@ func TestSyncDispatchFailedContractPrefixesAndRecordsVerdict(t *testing.T) {
 	}
 
 	runs := a.Runs().Snapshot()
-	checked, satisfied, deficiency := runs[0].ContractVerdict()
-	if !checked || satisfied {
-		t.Errorf("verdict = checked=%v satisfied=%v, want checked=true satisfied=false", checked, satisfied)
+	v := runs[0].ContractVerdict()
+	if !v.Checked || v.Satisfied {
+		t.Errorf("verdict = %+v, want checked=true satisfied=false", v)
 	}
-	if deficiency == "" {
+	if v.CheckFailed {
+		t.Errorf("a judged NOT_SATISFIED verdict must not be recorded as a check failure: %+v", v)
+	}
+	if v.Deficiency == "" {
 		t.Error("deficiency should be recorded on the run")
 	}
 }
@@ -162,15 +165,14 @@ func TestSyncDispatchNoContractIsUnchanged(t *testing.T) {
 	}
 	// No contract → run has no verdict recorded.
 	runs := a.Runs().Snapshot()
-	checked, _, _ := runs[0].ContractVerdict()
-	if checked {
+	if runs[0].ContractVerdict().Checked {
 		t.Error("run should have no contract verdict when no contract applies")
 	}
 }
 
 func TestTaskStatusSurfacesContractVerdict(t *testing.T) {
 	run := &AgentRun{ID: "run-1", Name: "general", Status: RunDone, Result: "the child result"}
-	run.SetContractVerdict(false, "missing file list")
+	run.SetContractVerdict(ContractOutcome{Deficiency: "missing file list"})
 
 	out := formatTaskRunStatus("run-1", run, 0)
 	if !strings.Contains(out, "Contract NOT satisfied") {
@@ -223,12 +225,15 @@ func TestBackgroundDispatchNotDoneUntilVerdictExists(t *testing.T) {
 		}
 		run := runs[0]
 		if run.statusValue() == RunDone {
-			checked, satisfied, _ := run.ContractVerdict()
-			if !checked {
+			v := run.ContractVerdict()
+			if !v.Checked {
 				t.Fatalf("background run reached done without a contract verdict")
 			}
-			if !satisfied {
+			if !v.Satisfied {
 				t.Fatalf("background run verdict = not satisfied, want satisfied after retry")
+			}
+			if v.CheckFailed {
+				t.Fatalf("satisfied verdict must not carry checkFailed=true: %+v", v)
 			}
 			if !strings.Contains(run.Result, "bg result two") {
 				t.Fatalf("background run result = %q, want the retried output", run.Result)
@@ -238,4 +243,90 @@ func TestBackgroundDispatchNotDoneUntilVerdictExists(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("background run never reached done with a verdict")
+}
+
+// TestContractCheckFailureIsUnverifiedNotFailed locks in the distinction that
+// motivated the checkFailed flag: when the verifier itself fails (timeout, LLM
+// error, unparseable response) the child must NOT be reported as failing the
+// contract. The result carries an "NOT verified" prefix, the run records
+// CheckFailed, and there is no wasted retry against a broken verifier.
+func TestContractCheckFailureIsUnverifiedNotFailed(t *testing.T) {
+	client := &contractScriptClient{
+		childResponses:   []string{"a fine result that simply was not judged"},
+		verdictResponses: []string{"I could not decide, sorry"}, // no VERDICT line → malformed
+	}
+	a, taskTool := newContractTaskTool(client)
+
+	result, err := taskTool.Execute(json.RawMessage(`{"prompt": "do the thing", "agent": "general", "expected_output": "the required shape"}`))
+	if err != nil {
+		t.Fatalf("Execute err: %v", err)
+	}
+
+	if !strings.Contains(result, "Output contract NOT verified") {
+		t.Errorf("check failure should say NOT verified, got: %q", result)
+	}
+	if strings.Contains(result, "Output contract not met") {
+		t.Errorf("check failure must not be reported as a contract failure, got: %q", result)
+	}
+	if !strings.Contains(result, "a fine result") {
+		t.Errorf("child result must still be present, got: %q", result)
+	}
+	// A broken verifier is not retried: the child ran exactly once.
+	if client.childCalls != 1 {
+		t.Errorf("child Step calls = %d, want 1 (no retry on check failure)", client.childCalls)
+	}
+
+	runs := a.Runs().Snapshot()
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(runs))
+	}
+	v := runs[0].ContractVerdict()
+	if !v.Checked || v.Satisfied || !v.CheckFailed {
+		t.Errorf("verdict = %+v, want checked=true satisfied=false checkFailed=true", v)
+	}
+	if v.TimedOut {
+		t.Errorf("a malformed response is a check failure but not a timeout: %+v", v)
+	}
+	if !strings.Contains(v.Deficiency, "verification failed") {
+		t.Errorf("deficiency = %q, want the verification-failure reason", v.Deficiency)
+	}
+}
+
+// TestTaskStatusSurfacesUnverifiedContract pins that task_status reports a
+// check failure as "NOT verified" (not "NOT satisfied").
+func TestTaskStatusSurfacesUnverifiedContract(t *testing.T) {
+	run := &AgentRun{ID: "run-1", Name: "general", Status: RunDone, Result: "the child result"}
+	run.SetContractVerdict(ContractOutcome{CheckFailed: true, Deficiency: "verification failed: timed out"})
+
+	out := formatTaskRunStatus("run-1", run, 0)
+	if !strings.Contains(out, "Contract NOT verified") {
+		t.Errorf("task_status output should say NOT verified, got: %q", out)
+	}
+	if strings.Contains(out, "Contract NOT satisfied") {
+		t.Errorf("task_status output must not call a check failure NOT satisfied, got: %q", out)
+	}
+}
+
+func TestTruncateVerifierResult(t *testing.T) {
+	short := "a short result"
+	if got := truncateVerifierResult(short); got != short {
+		t.Errorf("short result should pass through unchanged, got %q", got)
+	}
+
+	long := strings.Repeat("x", taskContractResultBudget+500)
+	got := truncateVerifierResult(long)
+	if !strings.Contains(got, "[... verification input truncated") {
+		t.Errorf("oversized result should carry the truncation marker")
+	}
+	if !strings.HasPrefix(got, strings.Repeat("x", 100)) {
+		t.Errorf("truncated result should keep the head")
+	}
+	if !strings.HasSuffix(got, strings.Repeat("x", 100)) {
+		t.Errorf("truncated result should keep the tail")
+	}
+	// Head + tail, with the middle replaced by the marker.
+	wantLen := taskContractResultBudget + len([]rune(verifierTruncationMarker))
+	if gotLen := len([]rune(got)); gotLen != wantLen {
+		t.Errorf("truncated rune length = %d, want %d", gotLen, wantLen)
+	}
 }

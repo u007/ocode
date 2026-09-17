@@ -30,7 +30,7 @@ const (
 var modelKeys = []string{
 	"id", "name", "family", "attachment", "reasoning", "tool_call",
 	"temperature", "knowledge", "release_date", "last_updated",
-	"open_weights", "modalities", "limit", "cost",
+	"open_weights", "modalities", "limit", "cost", "provider",
 }
 
 func main() {

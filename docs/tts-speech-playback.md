@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: Speech playback
-description: Speech playback — user-facing doc covering engine availability, installation, playback controls, and DOM-based rendered-text extraction
+description: Speech playback — engine availability, installation, playback controls, and DOM-based rendered-text extraction. Updated to document tool-group and live-stream Speak button coverage (2026-09-17) and sibling/data-speech-exclude architecture.
 tags:
   - speech
   - tts
@@ -10,8 +10,16 @@ tags:
   - desktop
   - user-facing
   - DOM-extraction
-timestamp: 2026-09-16T13:04:47Z
+timestamp: 2026-09-17T05:37:54Z
 ---
+---
+type: Guide
+description: Speech playback — user-facing doc covering engine availability, installation, playback controls, and DOM-based rendered-text extraction
+tags: [speech, tts, playback, web, desktop, user-facing, DOM-extraction]
+status: active
+okf_version: "0.1"
+---
+
 # Speech playback
 
 Speech playback is shared by the web UI and the desktop app because desktop
@@ -26,15 +34,38 @@ embeds the same React application.
   pins the `piper-tts==1.8.0` Python runtime (GPL-3.0-or-later,
   OHF-Voice/piper1-gpl) plus `onnxruntime` per host, and the CC0-dataset
   `en_US-joe-medium` voice from rhasspy/piper-voices with SHA-256 + size for
-  every file. Hosts using onnxruntime 1.30.0 need Python >= 3.11; Intel macOS
-  uses the 1.22.1 universal2 runtime and accepts Python >= 3.10. Other hosts
-  show an explicit unavailable reason.
+  every file.
+
+  **Supported Python range:** Each host declares a `MinPython` and `MaxPython`
+  (inclusive `<major>.<minor>`) on the `PythonRuntime` struct. The ceiling
+  comes from the most restrictive `Requires-Python` constraint among the
+  pinned pip requirements for that host — usually onnxruntime. Concrete ranges:
+
+  | Host | Piper range | Binding constraint |
+  |------|-------------|---------------------|
+  | darwin/arm64, linux/amd64, linux/arm64, windows/amd64 | 3.11–3.14 | onnxruntime 1.30.0 ships cp311–cp314 wheels; piper-tts is cp39-abi3 (wider) |
+  | darwin/amd64 | 3.10–3.13 | onnxruntime 1.22.1 universal2 ships cp310–cp313 wheels only |
+
 - **Kokoro** is installable on the same supported host matrix. Its manifest
   pins `kokoro-onnx==0.6.1`, a host-compatible onnxruntime release, the
-  `kokoro-v1.0.onnx` model, and `voices-v1.0.bin`, with Apache-2.0/MIT license
-  disclosures and SHA-256 checksums for the model artifacts. Hosts using
-  onnxruntime 1.30.0 need Python >= 3.11; Intel macOS uses onnxruntime 1.22.0
-  and accepts Python >= 3.10.
+  `kokoro-v1.0.onnx` model, and `voices-v1.0.bin`, with Apache-2.0/MIT
+  license disclosures and SHA-256 checksums for the model artifacts.
+
+  **Supported Python range:**
+
+  | Host | Kokoro range | Binding constraint |
+  |------|--------------|---------------------|
+  | darwin/arm64, linux/amd64, linux/arm64, windows/amd64 | 3.11–3.13 | kokoro-onnx 0.6.1 declares `Requires-Python <3.14,>=3.10`; onnxruntime 1.30.0 requires >=3.11 |
+  | darwin/amd64 | 3.10–3.13 | onnxruntime 1.22.0 ships cp310–cp313 wheels only |
+
+  On a host where the highest available interpreter exceeds the ceiling (e.g.
+  macOS arm64 with python@3.14 on PATH), the installer selects a versioned
+  interpreter below the ceiling (e.g. `/opt/homebrew/bin/python3.13`) rather
+  than the bare `python3` which may resolve to an unsupported version. If no
+  suitable interpreter is found, the install fails with a message naming the
+  selected interpreter and the supported range, plus advice such as
+  `brew install python@<newest supported minor>`.
+
 - **Fish Audio and Breeze** remain unavailable until their runtime, artifact,
   output protocol, platform matrix, and license review are complete. The UI
   does not silently switch to Browser Native when a local engine is selected or
@@ -63,13 +94,19 @@ State persists in `<data>/models/tts/install-state.json`. At startup the
 cache is re-verified: a complete cache is recognized as installed and a
 missing/corrupt cache demotes an installed/enabled record to `failed`.
 
-Local synthesis: `POST /api/tts/speak` returns `playback.status =
-"synthesizing"` with an `audio_id`; the client polls `GET /api/tts/status`
-until `ready` (or `error`), then fetches `GET /api/tts/audio/{audio_id}`
-(WAV, 22.05 kHz mono) and plays it through an `<audio>` element. Each run is
-`python -m piper` spawned via the shared process supervisor
-  (`ProcessKindTTS`) with a 10-minute timeout; stop/replace/engine-switch
-cancel it. Only the active playback's audio id is served.
+**Interpreters and install failures:** The installer probes candidate
+interpreters newest-supported-minor first, including versioned names
+(`python3.13`, `python3.12`, …, pyenv shims, framework installs), falling
+back to bare `python3`/`python`. Versioned names matter because a user who
+follows the install-error advice (`brew install python@3.13`) gets a binary
+that is not reachable as bare `python3`. When pip fails with "requires a
+different python version" or "No matching distribution found", the error
+message appends an actionable hint naming the interpreter version, the
+supported range, and a suggested install command. Other pip failures
+(network, disk, wheel build) pass through unchanged.
+
+See `gotchas/tts-pinned-python-upper-bound-needed.md` for the general
+lesson about upper Python bounds on pinned requirement sets.
 
 ## Rendered-text extraction (DOM, not markdown source)
 
@@ -108,6 +145,30 @@ selection or visible message content. The terminal context menu preserves Copy
 and adds **Play selection** and **Speak visible**; terminal control bytes are
 removed before speech. New speech replaces current speech and clears
 queued chunks.
+
+### Speak button placement (updated 2026-09-17)
+
+The per-message Speak button (`onSpeak={requestSpeech}`) is passed on every
+render path that shows assistant text:
+
+- **Standalone assistant text** — the normal assistant message bubble.
+- **Tool-group assistant text** — the assistant text inside a `tool-group`
+  render entry (every assistant turn that issued tool calls). Previously
+  omitted `onSpeak`, so tool-using turns showed Speak on "Thinking" but not
+  on the answer. Fixed 2026-09-17.
+- **Live streaming text** — the `kind: "text"` part while the assistant is
+  streaming. Previously omitted `onSpeak`. Fixed 2026-09-17.
+
+**Invariant:** speech is DOM-derived, never a `Message` field. Neither
+`internal/agent/client.go` `Message` nor `web/src/api/types.ts` `Message`
+has a speak/speech field. The button is rendered as a **sibling** of the
+`[data-speech-content]` `.prose` subtree — not a child — and carries
+`data-speech-exclude`. This ensures the button's own label is not read
+aloud by the speech extractor (which skips `[data-speech-exclude]`
+children).
+
+**Relevant code:** `web/src/components/Chat/ChatPanel.tsx` ~line 866
+(grouped assistant content) and ~line 889 (live `kind: "text"` part).
 
 Server-side stop, selection, and synthesis mutations are serialized by the
 frontend and supervisor. A late stop cannot cancel a newer speech request, and

@@ -27,7 +27,7 @@ import (
 // This text is intentionally separate from permissions.auto.prompt in
 // ocodeconfig.json: that field is the user's own free-form override and
 // must never be silently overwritten by a bundled update.
-const BundledAutoPermissionPromptVersion = "1.9.3"
+const BundledAutoPermissionPromptVersion = "1.9.4"
 
 // BundledAutoPermissionPromptBody is the shipped default addendum. Bump
 // BundledAutoPermissionPromptVersion whenever this changes.
@@ -77,6 +77,17 @@ If the action is permissible (build, test, lint, format, codegen, local file pro
 Always ALLOW reading and manipulation of any OS temporary directory, including /tmp, /var/tmp, $TMPDIR, $TMP, and the platform-specific os.TempDir() (and any path beneath them). This covers listing, creating, reading, writing, modifying, moving, copying, and deleting files/directories under temp. This exception applies only to temporary directories; it does not grant unrestricted access to the rest of the filesystem or to the network.
 
 Always ALLOW reading the global git-ignore files — the core.excludesFile default ($XDG_CONFIG_HOME/git/ignore, else ~/.config/git/ignore) and the legacy ~/.gitignore_global and ~/.gitignore. Git reads these on every invocation, including read-only commands, so denying them would break ordinary git use. This covers reading these exact files only — it never grants their parent dirs (~/.config, $HOME) or an arbitrary core.excludesFile path outside the fixed candidates.
+
+Shell control-flow constructs (for, select, while, until, if/elif, case) are
+syntax, not executables. Never treat the keyword itself, a loop variable, the
+"in" separator, an iteration list, a case subject, or a case pattern label as
+the command under review, and never deny merely because the first word is a
+control-flow keyword. What matters is the list of commands the construct runs.
+ALLOW when every command it runs would be ALLOWED on its own; DENY (or require
+human approval) only when one of those commands would be, by the rules above —
+e.g. a loop body that deletes outside the allowed roots, force-pushes, or
+exfiltrates data. A plain loop over literal values that only echoes, prints, or
+runs read-only commands (for i in 1 2 3; do echo $i; done) is always permissible.
 `
 
 // AutoPermissionPromptStatus mirrors internal/skill's skill status states,

@@ -105,9 +105,9 @@ export function cancelLiveDeltas(sessionId: string): void {
  *  session ids is safe. Draft tabs (`new-*`) have no server session yet and
  *  are skipped. The session transcript persists server-side and can be
  *  reopened; its agent rebuilds on the next turn. */
-export function closeSessionBackend(sessionId: string): void {
+export function closeSessionBackend(sessionId: string, host?: string): void {
   if (!sessionId || sessionId.startsWith("new-")) return;
-  api.closeSession(sessionId).catch((err) => {
+  api.closeSession(sessionId, host).catch((err) => {
     console.warn("close session backend failed", err);
   });
 }
@@ -348,11 +348,11 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
     return routeSessionScoped(r, env, eventSessionId, (sessionId) => {
       flushLiveDeltas(sessionId, r.dispatch);
       r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
-      r.dispatch({
-        type: "SET_ERROR",
-        sessionId,
-        error: (data as { error?: string }).error || "turn failed",
-      });
+      const error = (data as { error?: string }).error || "turn failed";
+      r.dispatch({ type: "SET_ERROR", sessionId, error });
+      // A send refused because the session is paused on a permission ask must
+      // open the dialog, not just show the error (see PENDING_ASK_ERROR).
+      if (error.includes(PENDING_ASK_ERROR)) scheduleHydratePendingAsks(sessionId, r);
     });
   }
   if (event === "session_bootstrap") {
@@ -539,11 +539,16 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         });
         return;
       }
-      case "error":
-        r.dispatch({ type: "SET_ERROR", sessionId, error: (data as { error: string }).error });
+      case "error": {
+        const error = (data as { error: string }).error;
+        r.dispatch({ type: "SET_ERROR", sessionId, error });
         r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
         r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
+        // See the turn_error handler: the async send path reports a refused
+        // (pending-ask) send here, and the dialog must open.
+        if (error?.includes(PENDING_ASK_ERROR)) scheduleHydratePendingAsks(sessionId, r);
         return;
+      }
       default:
         return; // unrecognized event type — no routing, no warn
     }
@@ -641,12 +646,7 @@ export async function reconcileOpenSessions(
         // pendingQuestion from the (possibly sentinel-less) transcript, so a
         // dispatch before it would be clobbered. The reducer dedupes by
         // request_id, so an ask already set by the merge is unaffected.
-        for (const permission of livePending?.permissions ?? []) {
-          dispatch({ type: "PERMISSION_REQUEST", sessionId, permission });
-        }
-        for (const question of livePending?.questions ?? []) {
-          dispatch({ type: "QUESTION_REQUEST", sessionId, question });
-        }
+        dispatchPendingAsks(sessionId, livePending, dispatch);
         const watermark = lastAppliedSeq.get(sessionId) ?? 0;
         for (const frame of state.live_frames ?? []) {
           if (frame.seq <= watermark) continue;
@@ -660,6 +660,71 @@ export async function reconcileOpenSessions(
 }
 
 export const RECONCILE_PAGE_SIZE = 100;
+
+// The server's ErrPermissionPending message (internal/server/run_states.go).
+// The web client always sends async:true, so a refused send resolves 202 and
+// the submit catch's `status === 409` recovery never runs; the turn_error /
+// error frame is the only trigger then. Matching the message keeps this
+// working for both frames (the legacy "error" frame carries only the string)
+// without a server payload change.
+const PENDING_ASK_ERROR = "permission decision is pending";
+
+/** Sessions whose pending-ask hydration is already in flight — a burst of
+ *  error frames (or an error replayed inside a reconcile) must not fan out
+ *  into parallel /state fetches. */
+const hydratingPendingAsks = new Set<string>();
+
+type PendingAsks = Awaited<ReturnType<typeof api.getSessionState>>["pending_asks"];
+
+/** Dispatch the ask dialogs for a `pending_asks` payload through the same
+ *  reducer path a live permission/question frame takes. Shared by reconcile
+ *  (which already holds the state) and hydratePendingAsks (which fetches it).
+ *  The reducer dedupes by request_id, so re-dispatching an ask already on
+ *  screen is a no-op. */
+function dispatchPendingAsks(
+  sessionId: string,
+  pending: PendingAsks,
+  dispatch: (action: ChatAction) => void,
+): void {
+  for (const permission of pending?.permissions ?? []) {
+    dispatch({ type: "PERMISSION_REQUEST", sessionId, permission });
+  }
+  for (const question of pending?.questions ?? []) {
+    dispatch({ type: "QUESTION_REQUEST", sessionId, question });
+  }
+}
+
+/**
+ * Open the permission/question dialog(s) for one session from the server's
+ * live `pending_asks`. The live `permission`/`question` frame can be missed
+ * (backgrounded tab, dropped SSE) and the sentinel may be absent from the
+ * persisted transcript, so the server's resident-agent transcript is the only
+ * recovery source. Reconcile does this on reconnect/load; the turn_error/error
+ * handlers call it when a send is refused with ErrPermissionPending — the
+ * async 202 path never returns the HTTP 409 the submit catch checks, so
+ * without this the user sees the error and no dialog.
+ */
+export async function hydratePendingAsks(
+  sessionId: string,
+  router: SessionEventRouter,
+): Promise<void> {
+  if (!sessionId || sessionId.startsWith("new-")) return;
+  try {
+    const state = await api.getSessionState(sessionId);
+    dispatchPendingAsks(sessionId, state.pending_asks, router.dispatch);
+  } catch (err) {
+    console.warn(`eventBus: hydrate pending asks failed for ${sessionId}`, err);
+  }
+}
+
+/** Fire-and-forget, per-session-deduped hydration for a live error frame. */
+function scheduleHydratePendingAsks(sessionId: string, router: SessionEventRouter): void {
+  if (hydratingPendingAsks.has(sessionId)) return;
+  hydratingPendingAsks.add(sessionId);
+  void hydratePendingAsks(sessionId, router).finally(() => {
+    hydratingPendingAsks.delete(sessionId);
+  });
+}
 
 /**
  * applyReconcileState — pure application of a GET /api/sessions/:id/state

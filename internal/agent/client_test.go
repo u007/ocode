@@ -1822,6 +1822,103 @@ func TestChatOpenAIResponsesSendsOpencodeSessionHeader(t *testing.T) {
 	}
 }
 
+// usesAnthropicMessagesAPI decides the per-model transport for the
+// opencode/opencode-go routes. union-alpha (models.dev npm @ai-sdk/anthropic)
+// must go to /v1/messages — /v1/chat/completions answers HTTP 500 for it.
+func TestUsesAnthropicMessagesAPIOpencodePerModel(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider string
+		model    string
+		want     bool
+	}{
+		{"union-alpha goes to messages", "opencode-go", "union-alpha", true},
+		{"union-alpha on zen goes to messages", "opencode", "union-alpha", true},
+		{"minimax-m2.7 goes to messages", "opencode-go", "minimax-m2.7", true},
+		{"minimax-m3 goes to messages", "opencode-go", "minimax-m3", true},
+		{"deepseek stays on chat/completions", "opencode-go", "deepseek-v4-flash", false},
+		{"gpt-5.6 stays on responses", "opencode-go", "gpt-5.6-luna", false},
+		{"muse-spark stays on responses", "opencode-go", "muse-spark-1.3-contributor", false},
+		// The zen provider keeps the historical minimax-only rule: claude
+		// models there are not switched by the opencode-go npm hint.
+		{"zen claude unchanged", "opencode", "claude-sonnet-4-6", false},
+		{"anthropic provider always messages", "anthropic", "claude-sonnet-4-5", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &GenericClient{Provider: tc.provider, Model: tc.model}
+			if got := c.usesAnthropicMessagesAPI(); got != tc.want {
+				t.Fatalf("usesAnthropicMessagesAPI(%s/%s) = %v, want %v", tc.provider, tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
+// The models.dev npm hint drives routing for opencode-go models that are not in
+// the static fallback list — qwen3.8-flash is declared @ai-sdk/anthropic, and
+// the hint alone must send it to /v1/messages.
+func TestUsesAnthropicMessagesAPIHonoursRegistryNpmHint(t *testing.T) {
+	withSandboxedModelsCache(t)
+	registry.mu.Lock()
+	prevData := registry.data
+	prevFetchedAt := registry.fetchedAt
+	registry.data = map[string]providerEntry{
+		"opencode-go": {
+			ID: "opencode-go",
+			Models: map[string]modelEntry{
+				"qwen3.8-flash": {ID: "qwen3.8-flash", Provider: modelProviderMeta{Npm: modelsDevNpmAnthropic}},
+				"deepseek-v4-flash": {ID: "deepseek-v4-flash",
+					Provider: modelProviderMeta{Npm: "@ai-sdk/openai"}},
+			},
+		},
+	}
+	registry.fetchedAt = time.Now()
+	registry.mu.Unlock()
+	t.Cleanup(func() {
+		registry.mu.Lock()
+		registry.data = prevData
+		registry.fetchedAt = prevFetchedAt
+		registry.mu.Unlock()
+	})
+
+	if c := (&GenericClient{Provider: "opencode-go", Model: "qwen3.8-flash"}); !c.usesAnthropicMessagesAPI() {
+		t.Fatal("qwen3.8-flash (npm @ai-sdk/anthropic) should use /v1/messages")
+	}
+	if c := (&GenericClient{Provider: "opencode-go", Model: "deepseek-v4-flash"}); c.usesAnthropicMessagesAPI() {
+		t.Fatal("deepseek-v4-flash (npm @ai-sdk/openai) must not use /v1/messages")
+	}
+}
+
+// Regression: the full request path for opencode-go/union-alpha must land on
+// /v1/messages. The old per-model rule only matched "minimax-", so union-alpha
+// was POSTed to /v1/chat/completions, which answers HTTP 500.
+func TestChatRoutesUnionAlphaToAnthropicMessages(t *testing.T) {
+	var gotPath string
+	stubLLMHTTP(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotPath = req.URL.Path
+		body := "data: {\"type\":\"message_start\",\"message\":{\"model\":\"union-alpha\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+			"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\n" +
+			"data: {\"type\":\"message_stop\"}\n\n"
+		return statusResponse(http.StatusOK, body), nil
+	}))
+
+	c := &GenericClient{
+		Provider: "opencode-go",
+		Model:    "union-alpha",
+		BaseURL:  "https://opencode.ai/zen/go/v1",
+		APIKey:   "test-key",
+	}
+	if _, err := c.ChatWithContext(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("ChatWithContext(opencode-go/union-alpha): %v", err)
+	}
+	if gotPath != "/zen/go/v1/messages" {
+		t.Fatalf("union-alpha request path = %q, want /zen/go/v1/messages (chat/completions returns HTTP 500)", gotPath)
+	}
+}
+
 func TestChatAnthropicSendsOpencodeSessionHeader(t *testing.T) {
 	var got string
 	stubLLMHTTP(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {

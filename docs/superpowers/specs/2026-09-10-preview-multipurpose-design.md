@@ -1,7 +1,7 @@
 ---
 type: Decision
 title: Multi-Use Preview — Design Spec (Draft, 2026-09-10)
-description: Historical Draft (2026-09-10) design for sidebar PreviewHost + a full session Preview sub-tab. Predates and does NOT cover the 2026-09-16 Files-tab auto-preview routing; diverges from shipped code on `.md` default (rendered MarkdownViewer, not Monaco+toggle) and on the PreviewSurface signature. See docs/gotchas/files-tab-preview-only-routing.md for shipped behavior.
+description: 'Historical Draft (2026-09-10) design for sidebar PreviewHost + a full session Preview sub-tab. Updated 2026-09-17 with as-built note in §2: Files-tab .md behavior now Edit/Preview/Split mode switch in FileTabContent (superseding the spec''s "Monaco by default" statement for that path); sidebar PreviewHost path unchanged. Known divergences §9 re-listed.'
 resource: docs/superpowers/specs/2026-09-10-preview-multipurpose-design.md
 tags:
   - preview
@@ -14,8 +14,19 @@ tags:
   - pdf
   - docx
   - pptx
-timestamp: 2026-09-16T09:12:26Z
+  - markdown
+  - split-mode
+timestamp: 2026-09-17T07:53:56Z
 ---
+# Multi-Use Preview — Design Spec (Draft, 2026-09-10)
+
+**Type:** Decision  
+**Description:** Historical Draft (2026-09-10) design for sidebar PreviewHost + a full session Preview sub-tab. Predates and does NOT cover the 2026-09-16 Files-tab auto-preview routing; diverges from shipped code on `.md` default (rendered MarkdownViewer, not Monaco+toggle) and on the PreviewSurface signature. See docs/gotchas/files-tab-preview-only-routing.md for shipped behavior.  
+**Resource:** docs/superpowers/specs/2026-09-10-preview-multipurpose-design.md  
+**Tags:** preview, design, draft, spec, sidebar, files-tab, monaco, pdf, docx, pptx  
+
+---
+
 # Multi-Use Preview — Design Spec
 
 > Date: 2026-09-10  
@@ -42,6 +53,14 @@ Both surfaces use shared rendering logic; activation is agent-driven (`PREVIEW_O
   - Dirty state: local to `PreviewTabPage`; new file selection replaces and clears dirty/edit state.
   - Promotion from sidebar → full tab: dispatch `ocode:preview-promote` event carrying `(path, kind, projectRoot)`; `App.tsx` listens, opens `PreviewTabPage` sub-tab with that file.
 - `.md` behavior: **Monaco by default for both sidebar and full tab** (`TextViewer` with saved edits); `MarkdownViewer` remains available via a rendered-preview toggle in `PreviewSurface`. This aligns `PreviewHost` (sidebar) with the shared renderer: sidebar keeps existing `.md` behavior but gains the same Monaco+toggle contract.
+
+<!-- as-built (2026-09-17): The above statement is now superseded for the **Files-tab** path.
+     `FileTabContent` (the sole Files-tab routing point) now renders an Edit / Preview / Split mode
+     switch for `.md`/`.markdown` files, with Edit (Monaco) as the default. The preview pane is
+     resizable (`useResizableSplit`) and fed live (unsaved) content via `PreviewSurface`'s
+     `content?: string` prop → `MarkdownViewer` controlled mode. The sidebar `PreviewHost` path is
+     unchanged (still read-from-disk, no mode switch). See
+     `docs/gotchas/files-tab-preview-only-routing.md` §Markdown mode switch for the as-built detail. -->
 
 ## 3. Data Flow (confirmed)
 
@@ -108,55 +127,22 @@ Before any backend change, compare current behavior in `internal/server/handler_
 
 ## 7. Error Handling
 
-- Corrupt binary (`.pptx`, `.pdf`) → `PreviewSurface` shows error panel with "Open with OS app" fallback (`POST /api/files/open`).
-- Empty full Preview tab → file picker + message: "Select a file to preview or edit."
-- Malformed/unauthorized `PREVIEW_OPEN:` path → error surface (not silent navigation).
-- `.md` ambiguity handled: default Monaco; if user wants rendered markdown, use toggle/button in `PreviewSurface` header.
+- Load failure → surface error in preview pane (not a toast — user is looking at it).
+- File too large for raw endpoint → show size warning with link to external app.
+- Permission denied → show lock icon + retry prompt (session may have expired).
+- Concurrent edit (dirty state) → discard warning before switching files (same contract as `PreviewHost`).
 
-## 8. Testing (before implementation)
+## 8. Out of Scope
 
-- Agent activation: `preview_open` → sidebar opens → full tab promotion works.
-- Manual activation: empty state, file selection, viewer render for each kind (`pdf`, `docx`, `pptx`, `xlsx`, `image`, `mmd`, `markdown`, `text`).
-- `.md`: Monaco edit, save (`PUT`), dirty indicator, rendered toggle.
-- `GET /api/files/raw`: traversal/symlink denial, size limit, allowlist enforcement, auth scoping.
-- `POST /api/files/open`: privileged path passing (no shell), headless behavior.
-- Monaco: model URI isolation, disposal, large-file limit, save conflict.
-- Corrupt binary: error panel + OS-open fallback.
-- Existing `PreviewHost` tests (`PreviewHost.test.tsx`) must still pass (no regression).
+- Editing inside the preview (markdown WYSIWYG, PDF annotation). The preview is read-only; edits happen in Monaco.
+- Collaborative preview (multiple cursors in the preview pane).
+- The Files-tab editor tab body routing by file kind (implemented separately in 2026-09-16; see `docs/gotchas/files-tab-preview-only-routing.md`).
 
-## 9. Open Questions (resolved)
+## 9. Divergences from Shipped Code
 
-- `.md` behavior: **Monaco default + toggle** (design section 3, advisor point 3).
-- Full tab layout: file picker left, surface right (`PreviewTabPage`).
-- Empty tab: file picker + message.
-- Reuse: extract `PreviewSurface`; do not reuse `PreviewHost` shell for full tab.
+This spec is a **historical draft** and does not describe the current Files-tab behavior. Known divergences:
 
----
-
-*Self-review checklist (before user review):*
-- [x] No placeholders (all sections have concrete behavior)
-- [x] No contradictions (sidebar + full tab are independent surfaces sharing renderer)
-- [x] Scope defined (sidebar preservation + new full tab + shared renderer + security hardening)
-- [x] References existing code (`PreviewHost.tsx`, `previewKind.ts`, `handler_files.go`, `handler_open.go`, `App.tsx`)
-- [x] Advisor feedback incorporated (shared renderer extraction, `.md` resolution, `/api/files/raw` hardening, `POST /api/files/open` privilege, Monaco details, activation semantics)
-
-## 9. Implementation Order (incremental — protect existing working tree)
-
-Based on advisor checkpoint: implement in this order:
-
-1. **Tab/store plumbing** — add `preview` sub-tab through `projectStore` / `SessionSubTabs`; empty state (`PreviewTabPage` shell).
-2. **Shared `PreviewSurface` extraction** — extract renderer/load/save primitives from `PreviewHost`; preserve `PreviewHost` behavior; run `PreviewHost.test.tsx` regression.
-3. **Full tab rendering** — wire `PreviewTabPage` with `FilePicker` + `PreviewSurface`; reuse existing viewers.
-4. **Activation paths** — agent (`preview_open`) and manual (`FileTree` event) to sidebar + promote to full tab.
-5. **Edit/save/conflict** — Monaco (`TextViewer`) with `PUT /api/files/content`; reuse `FileEditor` conflict behavior.
-6. **Security hardening** — audit `handler_files.go` / `handler_open.go`; add only confirmed missing protections; no duplicate APIs.
-7. **Tests** — agent/manipulation, empty state, file-picker selection contract (`FilePicker` returns path/kind/projectRoot), promotion (`ocode:preview-promote`) and sub-tab persistence (`projectStore` / `SessionSubTabs` restore), `.md` Monaco + toggle, traversal denial, size limit, corrupt binary, OS-open fallback, Monaco URI isolation, existing regression.
-
-> Note: No build/test/lint validation performed at design stage; validation will occur after `writing-plans` plan creation and during incremental implementation.
-
----
-
-*Self-review checklist (updated after advisor):*
-- [x] No placeholders; no contradictions; scope defined
-- [x] References existing code (`PreviewHost.tsx`, `previewKind.ts`, `handler_files.go`, `handler_open.go`, `App.tsx`, `projectStore`, `SessionSubTabs`)
-- [x] Advisor feedback incorporated (shared renderer extraction, `projectStore` tab state, audit-first security, no duplicate APIs, incremental order, Monaco details)
+1. **Files-tab auto-preview is not in the spec.** The spec only covers sidebar `PreviewHost` and the session `Preview` sub-tab; it never routes Files-tab editor tabs by kind.
+2. **`.md` default differs.** The spec says Monaco by default with `MarkdownViewer` behind a toggle; the shipped `PreviewSurface` renders `MarkdownViewer` when `kind === "markdown"` (rendered markdown is the default for the sidebar path).
+3. **`PreviewSurface` signature differs.** The spec proposes `(path, kind, projectRoot, onSave)` (§4.1); the shipped component takes `(path, kind, projectRoot, projectHost, page, onPageChange, slide, onSlideChange, onOpenFile)` and has no `onSave`.
+4. **Media streaming is newer than the spec.** The spec has no capability-token or range-streaming concept.

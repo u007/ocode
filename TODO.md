@@ -1,5 +1,15 @@
 # TODO
 
+## Remote projects (agent on host) — follow-ups (2026-09-17)
+
+- Move terminal, Files-tab, git, and `!`-command traffic to the remote
+  server's native endpoints; they still use per-request ssh/wsl.exe while
+  chat/agent/session traffic is proxied to the host.
+- Aggregate remote sessions in the global views (the session list and
+  agent-run views are per host).
+- Re-home open tabs when a remote project's host is edited (a tab's host is
+  derived from its project binding at call time).
+
 ## Web tabs
 
 - Terminal tabs (`web/src/components/Terminal/terminalPersistence.ts`) are
@@ -10,8 +20,6 @@
 
 ## Computer use
 
-- Add a web Settings toggle for the opt-in computer-use tool; `/computer
-  enable|disable` and the config API currently cover TUI/web chat only.
 - Add multi-display selection and region zoom to computer screenshots.
 - Run the opt-in live driver checks on Windows and Linux/X11 or Wayland
   (`OCODE_COMPUTER_LIVE=1`). macOS is verified (2026-09-14): screenshot,

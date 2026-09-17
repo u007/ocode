@@ -66,7 +66,15 @@ func TestE2EWebPermissionFlow(t *testing.T) {
 				b, _ := json.Marshal(ev.Data)
 				_ = json.Unmarshal(b, &pe)
 				permReqID = pe.RequestID
-				t.Logf("got permission frame: request_id=%s", permReqID)
+				// The wire frame must carry the complete execution params
+				// alongside the parsed command (web dialog needs both).
+				if string(pe.Args) != `{"command":"rm -rf build"}` {
+					t.Fatalf("permission frame args = %s, want the full tool arguments JSON", pe.Args)
+				}
+				if pe.Command != "rm -rf build" {
+					t.Fatalf("permission frame command = %q, want rm -rf build", pe.Command)
+				}
+				t.Logf("got permission frame: request_id=%s args=%s", permReqID, pe.Args)
 			}
 		case <-deadline:
 			t.Fatalf("timed out waiting for permission frame")

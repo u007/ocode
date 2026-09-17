@@ -23,6 +23,9 @@ func (h *Handler) Shutdown(ctx context.Context) {
 	h.shutdownAgentSessions(ctx)
 	h.shutdownTerminals(ctx)
 	h.flushLiveSessionWrites(ctx)
+	if h.remoteHosts != nil {
+		h.remoteHosts.closeAll(ctx)
+	}
 }
 
 // flushLiveSessionWrites drains session workers' queued snapshots so a quit

@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
-description: The web Files-tab editor auto-routes PDF, Word/PowerPoint/Excel, image, and audio/video files to the shared preview surface instead of Monaco; preview-only paths also skip the /api/files/content fetch, and the external-change watchers must stay in sync with that skip. Local audio/video now streams with HTTP range support (http.ServeContent) behind a short-lived single-file capability token (POST /api/files/media-token, mediaAuthMiddleware), so the local media byte cap is gone; the 32 MiB document cap and the 128 MiB cap for the REMOTE buffered path remain. Includes the .doc/.ppt/.mkv/.avi OS-open fallback and divergence from the 2026-09-10 preview design spec.
+description: 'Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown Edit/Preview/Split mode switch. Updated 2026-09-17 with markdown mode switch section, useResizableSplit, live content propagation, automaticLayout, and re-verified test-suite status.'
 resource: web/src/components/Files/FileTabContent.tsx
 tags:
   - gotcha
@@ -27,8 +27,20 @@ tags:
   - capability-token
   - media-token
   - auth
-timestamp: 2026-09-16T11:15:31Z
+  - markdown
+  - split-mode
+  - useResizableSplit
+timestamp: 2026-09-17T07:53:28Z
 ---
+# Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
+
+**Type:** Gotcha  
+**Description:** The web Files-tab editor auto-routes PDF, Word/PowerPoint/Excel, image, and audio/video files to the shared preview surface instead of Monaco; preview-only paths also skip the /api/files/content fetch, and the external-change watchers must stay in sync with that skip. Local audio/video now streams with HTTP range support (http.ServeContent) behind a short-lived single-file capability token (POST /api/files/media-token, mediaAuthMiddleware), so the local media byte cap is gone; the 32 MiB document cap and the 128 MiB cap for the REMOTE buffered path remain. Includes the .doc/.ppt/.mkv/.avi OS-open fallback and divergence from the 2026-09-10 preview design spec.  
+**Resource:** web/src/components/Files/FileTabContent.tsx  
+**Tags:** gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth  
+
+---
+
 # Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
 
 Implemented **2026-09-16**. Before this change, clicking any file in the web
@@ -65,6 +77,82 @@ helper.
 (`FileTabContent.tsx:22`, `:23`) that the controlled viewers need; every editor
 tab stays mounted (hidden, not unmounted — see `App.tsx:1013`), so this state
 survives tab switches.
+
+## Markdown mode switch (2026-09-17)
+
+`FileTabContent` now renders an **Edit / Preview / Split mode switch** for
+`.md`/`.markdown` files (when `!props.isBinary`). The mode control is a
+`role="group"` (`aria-label="Markdown view mode"`) of `aria-pressed` toggle
+buttons — the same pattern as `FileTree.tsx`'s list/column view switch. New
+exported helper `isMarkdownPath(path)` (`previewKind.ts:92`) returns
+`previewKindForPath(path) === "markdown"`.
+
+**Three modes:**
+
+| Mode | Default | Behavior |
+|------|---------|----------|
+| `edit` | **yes** | Pure Monaco (same as before) |
+| `preview` | no | Full-width `PreviewSurface kind="markdown"` |
+| `split` | no | Monaco left, preview right, `role="separator"` divider |
+
+### Key invariants
+
+- **Monaco is hidden with CSS, never unmounted** when the mode changes, so
+  cursor, scroll, and undo history survive. `FileEditor` now sets
+  `automaticLayout: true` in its `editorOptions` (`FileEditor.tsx:296`) because
+  the pane width changes (split drag + the pre-existing file-tree pane resize);
+  without it Monaco paints against stale geometry.
+
+- **`.md`/`.markdown` remain deliberately excluded from
+  `PREVIEW_ONLY_KINDS`** (`previewKind.ts:84`). The fetch-skip invariant for
+  preview-only paths is unaffected — `/api/files/content` is still always
+  fetched for markdown tabs.
+
+- **Live content propagation to preview.** `PreviewSurfaceProps` gained an
+  optional `content?: string` (`PreviewSurface.tsx:53`), forwarded **only** to
+  `MarkdownViewer` (`PreviewSurface.tsx:79`). `MarkdownViewer` has a controlled
+  mode (`content !== undefined` ⇒ skip the `/api/files/content` fetch) with a
+  separate effect mirroring the caller's source (`MarkdownViewer.tsx:39`).
+  `FileTabContent` debounces it 200 ms (`useDebouncedValue`, local helper at
+  `FileTabContent.tsx:41`) so a typing burst does not re-parse react-markdown
+  every keystroke.
+
+- **`MermaidViewer` render is stable on prose edits.** Its render effect keys on
+  `[code, renderId]`, and an unchanged mermaid fence is string-identical, so it
+  does not re-render on prose edits.
+
+- **Architectural constraint:** the mode state must NOT live in `FileEditor`
+  (pure Monaco surface, reused by `TextViewer`/`MarkdownViewer` via the binary
+  `forceEdit` fallback at `MarkdownViewer.tsx:7`) nor in `MarkdownViewer` (it
+  imports `FileEditor` — circular). `FileTabContent` owns the mode state.
+
+### Split resize
+
+New hook `useResizableSplit` (`web/src/hooks/useResizableSplit.ts`):
+ratio-based (0.2–0.8, default 0.5), pointer-capture drag, persisted at
+localStorage key `ocode.ui.split_ratio`, double-click resets. Mirrors
+`useResizableSidebar`'s pointer contract. Mode is per-tab component state
+(survives tab switches via keep-alive); ratio is global.
+
+### `onOpenFile` for preview internal links
+
+`FileEditorProps` gained an optional
+`onOpenFile?: (path, projectRoot?) => void` (`FileEditor.tsx:62`), used only by
+the markdown preview pane (internal links in the rendered doc); `App.tsx` wires
+it to `openFileAndShow`. `FileEditor` itself ignores it.
+
+### Bundle impact: none
+
+`MarkdownViewer` and `FileEditor` remain separate `React.lazy` chunks; entry
+chunk still ~1.91 MB, `modulepreload` still 1. No static import of
+Monaco/pdfjs/xlsx/docx-preview/mermaid was added to the entry path.
+
+### Tests
+
+`web/src/components/Files/FileTabContent.test.tsx` now has 10 tests covering:
+Edit default; preview while Monaco stays mounted-but-hidden; split renders both
+panes + separator; live-content propagation; divider drag/pup/double-click
+reset; `.markdown` extension; no mode chrome on code/plain-text tabs.
 
 ## Audio/video were added to the preview-only set
 
@@ -169,56 +257,39 @@ capability** in `?media_token=`:
 ## `mediaAuthMiddleware` — the rejection policy is load-bearing
 
 `GET /api/files/raw` is guarded by `mediaAuthMiddleware`
-(`internal/server/server.go:632`, registered `server.go:251`) instead of the
-plain `authMiddleware`. Its behavior, in order:
+(`internal/server/server.go:632`), which distinguishes three cases:
 
-1. **No-auth-configured bypass unchanged** — `!remoteMode && username == "" &&
-   password == ""` → allow (`server.go:635`).
-2. **Blocked-IP check happens FIRST** → 429 before any credential *or*
-   capability is considered, mirroring `authMiddleware`, so a "correct guess"
-   cannot sidestep the limiter (`server.go:643`).
-3. `checkAuth(r)` success → allow + `rl.reset(ip)` (`server.go:647-650`).
-4. Otherwise, if `?media_token=` is present, is `≤ mediaTokenMaxLen` (128)
-   chars, and the `path` extension is media → validate the exact
-   `(path, project_root, host)` triple; valid → allow (`server.go:652-658`).
-5. **An invalid capability carrying NO `Authorization` header → 401 without
-   recording a rate-limit failure** (`server.go:659-662`). This is deliberate:
-   the limiter locks an IP after **5 failures for 1 minute**
-   (`recordFailure`, `server.go:65`, `:74-77`), and a `<video>` range-retry
-   loop on an expired token (or a server restart that emptied the in-memory
-   store) would otherwise lock the client out of the **entire** API — a
-   self-inflicted DoS. The token is 256 bits, so an invalid one is a bad URL,
-   not a brute-force attempt; and any request that *also* presents a credential
-   falls through to `authMiddleware` and is counted, so password guessing stays
-   throttled.
+1. **No token, no master credential** → 401.
+2. **Master credential present** → pass through (normal auth flow).
+3. **`?media_token=` present** → validate the capability grant; reject if
+   the token is expired, unknown, or does not match the exact
+   `(path, project_root, host)` triple.
 
-Do not "simplify" step 5 by routing every rejection through `authMiddleware`:
-that trades a bounded, unguessable capability rejection for a global IP
-lockout.
+The middleware is applied to the raw endpoint **before** `HandleFileRaw`
+(`server.go:251`), so the token never reaches the handler logic — it is a
+gate, not a parameter. This means `HandleFileRaw` does not need to know
+about tokens at all; it always sees a validated, anchored path.
 
-## `MediaViewer` — streaming local, blob remote
+## MediaViewer — local streaming with blob fallback
 
-`web/src/components/Preview/MediaViewer.tsx` (rewritten) is the media renderer,
-dispatched by `PreviewSurface` (`web/src/components/Preview/PreviewSurface.tsx:55`,
-`:56`).
+`MediaViewer` (`web/src/components/Preview/MediaViewer.tsx`) drives the
+`<audio>`/`<video>` element:
 
-- **Local files stream.** It calls `api.getMediaToken(path, projectRoot)`
-  (`web/src/api/client.ts:1385`) to exchange its bearer for a capability, then
-  sets the element `src` to
-  `/api/files/raw?path=…&project_root=…&media_token=…` (`streamUrl`,
-  `MediaViewer.tsx:24`) and lets the browser's native `<audio>`/`<video>`
-  element drive range requests. No whole-file fetch, no blob, instant seek.
-- **Remote (`projectHost`) keeps the blob path** — there is no range transport
-  over the SSH tunnel, so a capability URL would never be used
-  (`loadBlob`, `MediaViewer.tsx:79`).
-- **Capability-endpoint failure degrades to the blob path**, so an older server
-  without `/api/files/media-token` still plays the media rather than showing
-  nothing (`MediaViewer.tsx:107-109`).
-- **Element `error` while streaming retries ONCE with a fresh capability**
-  (`onMediaError`, `MediaViewer.tsx:128`) — this self-heals an expired TTL or a
-  server restart that dropped the in-memory store. A blob error is terminal
-  (unsupported codec).
-- The blob fallback still sets an explicit **Blob MIME** from `MEDIA_MIME`
+- **Local files** (`!projectHost`): fetch a capability token via
+  `api.getMediaToken(path, projectRoot)` (`client.ts:1385`), then set the
+  element `src` to `/api/files/raw?path=…&project_root=…&media_token=…`.
+  Range requests and seeking work natively; the browser downloads only what
+  the user plays.
+- **Remote or token-failure fallback**: fetch the whole blob via
+  `api.getFileRaw(path, projectRoot, projectHost)`, create an object URL,
+  and set it as `src`. The blob fallback still sets an explicit **Blob MIME**
+  from `MEDIA_MIME` (`MediaViewer.tsx:7`), because some browsers will not
+  demux a typeless blob URL; the raw endpoint sets the same types server-side.
+- **One-shot retry on element error**: if the element fires `error` on the
+  first `src` set (e.g. a token that expired between issue and use), the
+  viewer discards the token, re-fetches a fresh one, and retries once.
+
+The blob fallback still sets an explicit **Blob MIME** from `MEDIA_MIME`
   (`MediaViewer.tsx:7`), because some browsers will not demux a typeless blob
   URL; the raw endpoint sets the same types server-side.
 
@@ -321,9 +392,11 @@ the description of the Files-tab routing and local media streaming.
 ## Files and tests
 
 - `web/src/lib/previewKind.ts` — `PREVIEW_ONLY_KINDS` (`:84`),
-  `previewOnlyKindForPath` (`:91`), `isLegacyOfficePath` (`:101`).
+  `previewOnlyKindForPath` (`:91`), `isMarkdownPath` (`:92`),
+  `isLegacyOfficePath` (`:101`).
 - `web/src/components/Files/FileTabContent.tsx` (new) — tab-body routing +
-  page/slide state.
+  page/slide state + **markdown mode switch** (Edit/Preview/Split) +
+  `useResizableSplit` + `useDebouncedValue` for live preview.
 - `web/src/components/Preview/MediaViewer.tsx` (rewritten) — local capability →
   range-streamed element `src`; remote/degraded → blob URL with explicit MIME;
   one-shot retry on element error; test `MediaViewer.test.tsx`.
@@ -333,6 +406,14 @@ the description of the Files-tab routing and local media streaming.
 - `web/src/hooks/useEditorTabs.ts` — open-time fetch skip (`:125`) +
   `isPreviewOnlyPath` (`:75`) guarding the three watchers (`:446`, `:522`,
   `:589`).
+- `web/src/hooks/useResizableSplit.ts` (new) — ratio-based pointer-capture
+  split resize hook, localStorage persistence.
+- `web/src/components/Preview/PreviewSurface.tsx` — `content?: string` prop
+  (`:53`), forwarded to `MarkdownViewer` only (`:79`).
+- `web/src/components/Preview/MarkdownViewer.tsx` — controlled mode
+  (`content !== undefined` ⇒ skip fetch, `:39`).
+- `web/src/components/Files/FileEditor.tsx` — `automaticLayout: true`
+  (`:296`), `onOpenFile` prop (`:62`).
 - `internal/server/handler_files.go` — `previewRawTypes` (`:960`),
   `previewRawCap` (`:949`), `isMediaContentType` (`:935`),
   `serveMediaFile` (`:1079`); `HandleFileRaw` media branch (`:1053`).
@@ -345,11 +426,11 @@ the description of the Files-tab routing and local media streaming.
 - `internal/server/handler_files.go:1105` — `HandleMediaToken`.
 - `internal/tool/preview.go` — `previewOpenKinds` (`:20`) + `preview_open`
   description now mention audio/video.
-- Tests: `web/src/components/Files/FileTabContent.test.tsx` (routing),
-  `web/src/lib/previewKind.test.ts` (helpers),
-  `web/src/hooks/useEditorTabs.test.ts` (no `fetch` for preview-only opens),
-  `web/src/components/Preview/MediaViewer.test.tsx` (capability/stream/retry),
-  `internal/server/handler_preview_test.go`
+- Tests: `web/src/components/Files/FileTabContent.test.tsx` (routing +
+  markdown mode switch, 10 tests), `web/src/lib/previewKind.test.ts`
+  (helpers), `web/src/hooks/useEditorTabs.test.ts` (no `fetch` for
+  preview-only opens), `web/src/components/Preview/MediaViewer.test.tsx`
+  (capability/stream/retry), `internal/server/handler_preview_test.go`
   (`TestPreviewRawCoversOfficeSet`, `TestPreviewRawCapSplitsMedia`),
   `internal/server/media_tokens_test.go`,
   `internal/tool/preview_test.go`.
@@ -367,6 +448,12 @@ Re-verified 2026-09-16 with a fresh full `vitest run`: the **full web suite is
 green** — every test file and test passes, including every preview test and
 `PreviewSurface.integration.test.tsx` — and `tsc --noEmit` is clean.
 
+Re-verified 2026-09-17: `FileTabContent.test.tsx` expanded to 10 tests
+covering the markdown mode switch (Edit default, preview with Monaco hidden,
+split pane rendering, live-content propagation, divider interaction,
+`.markdown` extension, no mode chrome on code/plain-text). Full web suite
+green; `tsc --noEmit` clean; `npm run build` green.
+
 Treat this as a **point-in-time** result, not a standing fact. A suite-status
 note captured while another file is mid-edit does not describe the committed
 tree — this section once briefly carried unrelated failures from a
@@ -379,3 +466,6 @@ bundle.
 
 - `docs/gotchas/browser-panel-transition-inconsistency.md` — another
   documentation-vs-landed-behavior mismatch in the web preview/browser surface.
+- `docs/superpowers/specs/2026-09-10-preview-multipurpose-design.md` —
+  superseded §2 for the Files-tab `.md` behavior (now Edit/Preview/Split in
+  `FileTabContent`); sidebar `PreviewHost` path unchanged.

@@ -25,6 +25,23 @@
 
 ## 2026-09-17
 
+* **Update**: Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary ([gotchas/remote-project-path-trust-boundary.md](/gotchas/remote-project-path-trust-boundary.md))
+* **Update**: Terminal Shells Survive Page Reload (Detach / Reattach) ([architecture/terminal-detach-reattach.md](/architecture/terminal-detach-reattach.md))
+* **Update**: Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary ([gotchas/remote-project-path-trust-boundary.md](/gotchas/remote-project-path-trust-boundary.md))
+* **Update**: Terminal Shells Survive Page Reload (Detach / Reattach) ([architecture/terminal-detach-reattach.md](/architecture/terminal-detach-reattach.md))
+* **Update**: Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary ([gotchas/remote-project-path-trust-boundary.md](/gotchas/remote-project-path-trust-boundary.md))
+* **Update**: Terminal Shells Survive Page Reload (Detach / Reattach) ([architecture/terminal-detach-reattach.md](/architecture/terminal-detach-reattach.md))
+* **Update**: Multi-Use Preview — Design Spec (Draft, 2026-09-10) ([superpowers/specs/2026-09-10-preview-multipurpose-design.md](/superpowers/specs/2026-09-10-preview-multipurpose-design.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Update**: Computer use ([computer-use.md](/computer-use.md))
+* **Update**: Auto-Permission — Interpreter Scripts in Compound Commands ([gotchas/auto-permission-interpreter-scripts-in-compound-commands.md](/gotchas/auto-permission-interpreter-scripts-in-compound-commands.md))
+* **Creation**: Bash Control-Flow Loops Are Not Commands ([gotchas/bash-control-flow-loops-are-not-commands.md](/gotchas/bash-control-flow-loops-are-not-commands.md))
+* **Update**: Speech playback ([tts-speech-playback.md](/tts-speech-playback.md))
+* **Update**: ChatPanel Autoscroll Bounce/Freeze ([gotchas/autoscroll-bounce.md](/gotchas/autoscroll-bounce.md))
+* **Creation**: Pinned pip requirement sets need an upper Python bound, not just a minimum ([gotchas/tts-pinned-python-upper-bound-needed.md](/gotchas/tts-pinned-python-upper-bound-needed.md))
+* **Update**: Speech playback ([tts-speech-playback.md](/tts-speech-playback.md))
+* **Update**: Pending ask recovery from live session state (sentinel-less transcript) ([gotchas/pending-ask-recovery-live-session-state.md](/gotchas/pending-ask-recovery-live-session-state.md))
+* **Creation**: opencode-go per-model protocol routing & Anthropic tool schema flatness ([gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md](/gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md))
 * **Creation**: Linux Sandbox Lockout: Confiner Shell Path, /dev/null, and Binary Dispatch ([gotchas/linux-sandbox-lockout-confiner-shell-devnull-dispatch.md](/gotchas/linux-sandbox-lockout-confiner-shell-devnull-dispatch.md))
 * **Update**: Pending ask recovery from live session state (sentinel-less transcript) ([gotchas/pending-ask-recovery-live-session-state.md](/gotchas/pending-ask-recovery-live-session-state.md))
 * **Update**: Pending ask recovery from live session state (sentinel-less transcript) ([gotchas/pending-ask-recovery-live-session-state.md](/gotchas/pending-ask-recovery-live-session-state.md))

@@ -56,6 +56,10 @@ export interface FileEditorProps {
   onForceSave?: () => void;
   /** Initial highlight to apply (from content search). If provided, highlights all matches after mount. */
   initialHighlight?: { query: string; line?: number } | null;
+  /** Open another file in the Files tab. Only consumed by `FileTabContent`'s
+   *  Markdown preview pane (internal links in a rendered `.md`); the Monaco
+   *  editor itself ignores it. */
+  onOpenFile?: (path: string, projectRoot?: string) => void;
 }
 
 import { memo } from "react";
@@ -285,6 +289,11 @@ function FileEditorImpl({
       readOnly,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', 'Menlo', monospace",
       scrollBeyondLastLine: false,
+      // The editor's width is not fixed: the file-tree pane is drag-resizable
+      // and the Markdown Split view animates the pane width while dragging the
+      // divider. Without this, Monaco keeps painting at its last laid-out width
+      // and wraps/lays out the viewport lines against stale geometry.
+      automaticLayout: true,
       insertSpaces: true,
       renderWhitespace: "selection",
       bracketPairColorization: { enabled: true },

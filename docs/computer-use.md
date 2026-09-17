@@ -2,13 +2,14 @@
 type: Guide
 title: Computer use
 description: User-facing guide to enabling and using the opt-in computer desktop-control tool, including actions, coordinate mapping, permissions, platform setup, limitations, and privacy.
-resource: internal/tool/computer.go; internal/computer/; internal/config/computeruse_config.go; internal/agent/permissions.go; internal/tui/model.go; internal/server/handler_config.go
+resource: internal/tool/computer.go; internal/computer/; internal/config/computeruse_config.go; internal/agent/permissions.go; internal/tui/model.go; internal/server/handler_config.go; web/src/components/Settings/ComputerUseForm.tsx; web/src/components/Settings/SettingsPanel.tsx
 tags:
   - computer-use
   - desktop
   - permissions
   - platforms
-timestamp: 2026-09-13T07:21:43Z
+  - settings
+timestamp: 2026-09-17T07:29:56Z
 ---
 # Computer use
 
@@ -20,7 +21,9 @@ Computer use is exposed in TUI and web/server sessions. ACP and headless `ocode 
 
 ## Enable computer use
 
-In the TUI or web chat, use:
+There are three surfaces for toggling computer use:
+
+### 1. Chat slash commands (TUI or web chat)
 
 ```text
 /computer status
@@ -28,7 +31,13 @@ In the TUI or web chat, use:
 /computer disable
 ```
 
-Enabling or disabling is persisted, but takes effect in **new sessions**. Start a new session after changing the setting.
+### 2. Settings panel (web/desktop)
+
+Open **Settings → Computer Use**. The panel contains a checkbox ("Enable the desktop-control `computer` tool") and a **Save** button. On load it fetches the current state via `GET /api/config/computer-use`; on save it calls `PUT /api/config/computer-use` with `{"enabled": bool}`.
+
+The panel renders a status block showing the platform backend (e.g. `macOS: screencapture + CGEvent`, `Windows: PowerShell SendInput`, `Linux: xdotool/scrot (X11)` or `Linux: ydotool/grim (Wayland, wlroots-only)`) and — on macOS — the Screen Recording / Accessibility permission reminder. These are the same status lines produced by the shared Go helper `internal/computer/status.go::StatusLines` and printed by `/computer status`. The panel does **not** probe the desktop, verify installed binaries, or start a driver; it is informational only.
+
+### 3. Raw config key
 
 The same setting can be stored in `ocodeconfig.json`:
 
@@ -39,6 +48,8 @@ The same setting can be stored in `ocodeconfig.json`:
   }
 }
 ```
+
+All three surfaces persist immediately but the change takes effect in **new sessions**. Start a new session after changing the setting.
 
 `/computer status` reports whether the setting is enabled and names the platform backend. This is platform backend information, not a readiness or health check: status does not probe the desktop, verify installed Linux binaries, or start a driver. On macOS it also prints the required permission reminder.
 

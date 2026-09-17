@@ -85,31 +85,55 @@ type AgentRun struct {
 	LastError  string    // last error message if retrying
 	RetryingAt time.Time // when the last retry started
 
-	// Output-contract verdict. ContractChecked is true when the dispatch
-	// carried an expected_output contract and verification ran. When
-	// checked, ContractSatisfied is the final verdict and
-	// ContractDeficiency is what the verifier said was missing (or the
-	// failure reason when the check itself failed). These are written
-	// exactly once, before finishOK/finishErr, on the dispatch goroutine.
-	ContractChecked    bool
-	ContractSatisfied  bool
-	ContractDeficiency string
+	// contract is the output-contract verdict, written exactly once on the
+	// dispatch goroutine before finishOK/finishErr. Zero value = no contract.
+	contract ContractOutcome
 }
 
-// SetContractVerdict records the output-contract verdict for this run.
-func (r *AgentRun) SetContractVerdict(satisfied bool, deficiency string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.ContractChecked = true
-	r.ContractSatisfied = satisfied
-	r.ContractDeficiency = deficiency
+// ContractOutcome is the recorded output-contract verdict for a run.
+//
+// Checked is true when the dispatch carried an expected_output contract and
+// verification ran; false means the unchanged, zero-cost path (no contract).
+//
+// Satisfied is the final verdict, meaningful only when Checked && !CheckFailed:
+// the child's final result met the contract.
+//
+// CheckFailed is true when the verification machinery itself failed — the
+// verifier LLM errored, timed out, returned an empty response, or returned an
+// unparseable verdict. It is deliberately NOT the same as "the contract was not
+// met": no judgement was ever produced. Satisfied is false in that state, so
+// consumers MUST branch on CheckFailed before treating !Satisfied as a contract
+// failure (otherwise a slow verifier reads as a failing child).
+//
+// TimedOut is a proper subset of CheckFailed: the check was abandoned because a
+// caller-configured deadline elapsed (Agent.RequestTimeout). There is no default
+// deadline. It exists so surfaces can report a timeout as a timeout rather than
+// a generic verification failure.
+//
+// Deficiency is what the verifier said was missing (CheckFailed false), or the
+// failure reason (CheckFailed true).
+type ContractOutcome struct {
+	Checked     bool
+	Satisfied   bool
+	CheckFailed bool
+	TimedOut    bool
+	Deficiency  string
 }
 
-// ContractVerdict returns the run's contract verdict fields.
-func (r *AgentRun) ContractVerdict() (checked, satisfied bool, deficiency string) {
+// SetContractVerdict records the output-contract verdict for this run. It always
+// marks the run as checked; pass only the verdict fields on outcome.
+func (r *AgentRun) SetContractVerdict(outcome ContractOutcome) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.ContractChecked, r.ContractSatisfied, r.ContractDeficiency
+	outcome.Checked = true
+	r.contract = outcome
+}
+
+// ContractVerdict returns the run's contract verdict.
+func (r *AgentRun) ContractVerdict() ContractOutcome {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.contract
 }
 
 // AddUsage accumulates input/output token counts reported by the provider.

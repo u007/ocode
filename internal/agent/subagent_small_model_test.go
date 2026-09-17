@@ -12,7 +12,7 @@ func TestSmallModelEligible(t *testing.T) {
 		want bool
 	}{
 		{"explore", true},
-		{"general", true},
+		{"general", false},
 		{"compaction", true},
 		{"build", false},
 		{"plan", false},

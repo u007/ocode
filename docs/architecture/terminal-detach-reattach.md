@@ -1,14 +1,14 @@
 ---
 type: Decision
 title: Terminal Shells Survive Page Reload (Detach / Reattach)
-description: Record bounded-wait, abandon reservation safety net, and client restore timeout
+description: 'Decision: bounded-wait abandon reservation safety net, client restore timeout, and reattach lifecycle'
 tags:
   - terminal
   - websocket
   - architecture
   - desktop
   - robustness
-timestamp: 2026-09-16T17:33:00Z
+timestamp: 2026-09-17T11:02:15Z
 ---
 # Terminal Shells Survive Page Reload (Detach / Reattach)
 
@@ -55,9 +55,12 @@ Server (`internal/server/terminal_session.go`, `terminal_session_table.go`,
   `remote.ShellCommand` (`ssh -t host 'cd path && exec $SHELL -l'` or
   `wsl.exe -d distro --cd path`) instead of a local shell. The session's
   project key is `host:path`, so a same-path local project can never
-  reattach to it. Only the terminal is remote here; chat/files for that
-  project still run on the local server (full remote web mode is
-  `ocode remote --web`).
+  reattach to it. Chat/agent/session traffic for a remote project is
+  reverse-proxied to that host's `ocode serve --remote` via
+  `/api/remote/{host}/api/{rest...}` (`handler_remote_proxy.go`); the
+  remote bearer token is injected server-side and never reaches the browser.
+  Terminal, files tab, git tab, `!` shell commands, and port forwards remain
+  per-request ssh/wsl.exe — only chat traffic moves to the host.
 - Anonymous sockets (no `terminal_id`) keep the old behaviour: shell dies
   with the socket.
 - **Explicit close** is now a separate call: `DELETE /api/terminal/{id}`

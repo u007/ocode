@@ -47,6 +47,10 @@ export interface PreviewSurfaceProps {
   slide?: number;
   onSlideChange?: (s: number) => void;
   onOpenFile?: (p: string) => void;
+  /** Live editor source for a markdown preview: the Files tab's Split view
+   *  passes the current editor content so the rendered pane tracks unsaved
+   *  edits. Only `markdown` consumes it; every other kind reads from disk. */
+  content?: string;
 }
 
 export default function PreviewSurface({
@@ -59,6 +63,7 @@ export default function PreviewSurface({
   slide,
   onSlideChange,
   onOpenFile,
+  content,
 }: PreviewSurfaceProps) {
   const handlePageChange = onPageChange ?? (() => {});
   const handleSlideChange = onSlideChange ?? (() => {});
@@ -71,7 +76,7 @@ export default function PreviewSurface({
         {kind === "pptx" && <PptxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} slide={slide ?? 1} onSlideChange={handleSlideChange} />}
         {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
         {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} />}
-        {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} />}
+        {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} content={content} />}
         {kind === "text" && <TextViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
         {kind === "image" && <ImageViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
         {kind === "audio" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="audio" />}

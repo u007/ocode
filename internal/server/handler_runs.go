@@ -40,8 +40,10 @@ type agentRunDTO struct {
 	// Contract is the output-contract verdict, present only when the
 	// dispatch carried an expected_output contract (checked). satisfied is
 	// false when the result did not meet the contract after the single
-	// retry, or when verification itself failed. It is a shape check, not
-	// "verified correct".
+	// retry. checkFailed distinguishes the two reasons satisfied can be
+	// false: true means the verification machinery itself failed (timeout /
+	// LLM error / unparseable verdict) and the result was never judged — it
+	// is NOT a contract failure. It is a shape check, not "verified correct".
 	Contract *agentRunContractDTO `json:"contract,omitempty"`
 	Messages []runMessageDTO      `json:"messages"`
 	Children []agentRunDTO        `json:"children"`
@@ -49,9 +51,11 @@ type agentRunDTO struct {
 
 // agentRunContractDTO mirrors the AgentRun contract-verdict fields.
 type agentRunContractDTO struct {
-	Checked    bool   `json:"checked"`
-	Satisfied  bool   `json:"satisfied"`
-	Deficiency string `json:"deficiency,omitempty"`
+	Checked     bool   `json:"checked"`
+	Satisfied   bool   `json:"satisfied"`
+	CheckFailed bool   `json:"checkFailed,omitempty"`
+	TimedOut    bool   `json:"timedOut,omitempty"`
+	Deficiency  string `json:"deficiency,omitempty"`
 }
 
 // buildRunDTO converts a run (and its nested sub-agent runs) into a serialisable
@@ -72,8 +76,14 @@ func buildRunDTO(r *agent.AgentRun) agentRunDTO {
 		Messages:     []runMessageDTO{},
 		Children:     []agentRunDTO{},
 	}
-	if checked, satisfied, deficiency := r.ContractVerdict(); checked {
-		dto.Contract = &agentRunContractDTO{Checked: true, Satisfied: satisfied, Deficiency: deficiency}
+	if v := r.ContractVerdict(); v.Checked {
+		dto.Contract = &agentRunContractDTO{
+			Checked:     true,
+			Satisfied:   v.Satisfied,
+			CheckFailed: v.CheckFailed,
+			TimedOut:    v.TimedOut,
+			Deficiency:  v.Deficiency,
+		}
 	}
 	if !r.EndedAt.IsZero() {
 		ended := r.EndedAt

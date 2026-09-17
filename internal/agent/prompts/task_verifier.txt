@@ -18,6 +18,12 @@ asks for a list of affected files and the result describes work but does not
 enumerate the files, that is NOT satisfied. If the result looks truncated
 (mid-sentence, missing sections, "will continue..."), that is NOT satisfied.
 
+Exception: a very long result may contain the explicit marker
+"[... verification input truncated; middle of the result omitted ...]".
+That marker means the tooling elided the middle to keep the check fast — it is
+NOT a truncated or unfinished result. Judge only the content that is present
+(head and tail); do not fail the contract merely because of that marker.
+
 Reply with EXACTLY two lines, nothing else:
 
 VERDICT: SATISFIED

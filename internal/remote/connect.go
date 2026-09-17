@@ -432,9 +432,9 @@ func superviseTunnel(sup *tool.ProcessSupervisor, tunnelCmd *exec.Cmd, fm *Forwa
 }
 
 // runSyncStage builds and pushes the credential/config payload, honoring
-// the per-host skip-if-unchanged cache. It never returns an error that
-// should abort the connect — failures are rendered as a warned stage and
-// swallowed, matching "connect continues" in the spec's error handling.
+// the per-host skip-if-unchanged cache. The caller decides what to do with
+// errors: the CLI call site warns-and-continues, while
+// RemoteWorkspace.Connect treats it as fatal per the no-fallback rule.
 func runSyncStage(progress *Progress, transport Transport, hostKey, ver string) error {
 	progress.Start("sync", "syncing credentials")
 

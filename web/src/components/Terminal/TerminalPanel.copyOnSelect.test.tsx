@@ -172,6 +172,7 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
     // mac: metaKey+C
     const mac = fireKey({ key: "c", metaKey: true });
     expect(mac.allowed).toBe(false); // xterm must not process the keydown
+    expect(mac.defaultPrevented).toBe(true); // nor run native copy a second time
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("selected command output"));
 
     // linux/windows: ctrlKey+C with selection → copy too
@@ -192,6 +193,7 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
 
     const r = fireKey({ key: "c", ctrlKey: true });
     expect(r.allowed).toBe(true); // xterm converts to \x03 as usual
+    expect(r.defaultPrevented).toBe(false);
     expect(writeText).not.toHaveBeenCalled();
   });
 
@@ -276,6 +278,25 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
 
     expect(ev.defaultPrevented).toBe(true);
     expect(dt.getData("text/plain")).toBe("menu copy text");
+  });
+
+  it("leaves copying from unrelated text fields alone", () => {
+    render(<Panel />);
+    h.terminals[0].selectionText = "stale terminal selection";
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    try {
+      input.focus();
+      const setData = vi.fn();
+      const event = new Event("copy", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", { value: { setData } });
+      fireEvent(input, event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(setData).not.toHaveBeenCalled();
+      expect(writeText).not.toHaveBeenCalled();
+    } finally {
+      input.remove();
+    }
   });
 });
 
@@ -383,6 +404,50 @@ describe("terminal copy-on-selection", () => {
 });
 
 describe("writeClipboardText fallback", () => {
+  it("preserves the field focused while an async write was pending", async () => {
+    const original = document.createElement("input");
+    const next = document.createElement("input");
+    document.body.append(original, next);
+    original.focus();
+    let reject!: (error: Error) => void;
+    writeText.mockImplementationOnce(() => new Promise<void>((_resolve, fail) => { reject = fail; }));
+    Object.defineProperty(document, "execCommand", { configurable: true, value: vi.fn(() => true) });
+    try {
+      const pending = writeClipboardText("output");
+      next.focus();
+      reject(new Error("denied"));
+      await pending;
+      expect(document.activeElement).toBe(next);
+    } finally {
+      original.remove();
+      next.remove();
+      delete (document as unknown as Record<string, unknown>).execCommand;
+    }
+  });
+
+  it("restores terminal input focus after a denied clipboard write", async () => {
+    const terminalInput = document.createElement("textarea");
+    document.body.appendChild(terminalInput);
+    terminalInput.focus();
+    writeText.mockRejectedValueOnce(new Error("denied"));
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: vi.fn(() => {
+        // Model the focus change caused by selecting the fallback textarea.
+        const fallback = document.body.lastElementChild as HTMLTextAreaElement;
+        fallback.focus();
+        return true;
+      }),
+    });
+    try {
+      await writeClipboardText("selected output");
+      expect(document.activeElement).toBe(terminalInput);
+    } finally {
+      terminalInput.remove();
+      delete (document as unknown as Record<string, unknown>).execCommand;
+    }
+  });
+
   it("uses navigator.clipboard.writeText when available", async () => {
     await writeClipboardText("abc");
     expect(writeText).toHaveBeenCalledWith("abc");

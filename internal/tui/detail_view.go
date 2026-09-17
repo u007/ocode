@@ -166,14 +166,20 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 	if run.Status == agent.RunCancelled && strings.TrimSpace(run.Err) != "" {
 		appendLine(errorStyle.Render("Cancelled: " + strings.TrimSpace(run.Err)))
 	}
-	// Output-contract verdict: a finished run whose contract was not met (or
-	// whose verification failed) gets an explicit line. Shape check, not
+	// Output-contract verdict: a finished run whose contract was not met gets an
+	// explicit line. A verification failure (timeout / LLM error / malformed
+	// verdict) is rendered separately as "not verified" — the result was never
+	// judged, so it must not read as a contract failure. Shape check, not
 	// "verified correct".
-	if checked, satisfied, deficiency := run.ContractVerdict(); checked && !satisfied {
-		if strings.TrimSpace(deficiency) != "" {
-			appendLine(errorStyle.Render("Output contract not met: " + strings.TrimSpace(deficiency)))
+	if v := run.ContractVerdict(); v.Checked && !v.Satisfied {
+		label, style := "Output contract not met", errorStyle
+		if v.CheckFailed {
+			label, style = "Output contract not verified", hintStyle
+		}
+		if strings.TrimSpace(v.Deficiency) != "" {
+			appendLine(style.Render(label + ": " + strings.TrimSpace(v.Deficiency)))
 		} else {
-			appendLine(errorStyle.Render("Output contract not met"))
+			appendLine(style.Render(label))
 		}
 	}
 
@@ -470,10 +476,15 @@ func renderAgentRunStripCard(ri *agent.AgentRun, width int, frame string, select
 		head += fmt.Sprintf(" · ↓%s ↑%s", formatTokenCount(in), formatTokenCount(out))
 	}
 	// Output-contract badge: a run that finished but did not meet its
-	// expected_output contract gets an explicit marker. This is a shape
-	// check, not "verified correct" — the text says so.
-	if checked, satisfied, _ := ri.ContractVerdict(); checked && !satisfied {
-		head += " " + errorStyle.Render("contract ✗")
+	// expected_output contract gets "contract ✗"; a run whose verification
+	// itself failed gets a muted "contract ?" (never judged — not a contract
+	// failure). This is a shape check, not "verified correct" — the text says so.
+	if v := ri.ContractVerdict(); v.Checked && !v.Satisfied {
+		if v.CheckFailed {
+			head += " " + hintStyle.Render("contract ?")
+		} else {
+			head += " " + errorStyle.Render("contract ✗")
+		}
 	}
 	if selected {
 		b.WriteString(selectedStyle.Render(truncateToWidth(head, width)) + "\n")

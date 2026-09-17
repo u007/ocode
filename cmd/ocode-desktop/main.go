@@ -145,6 +145,13 @@ func main() {
 	// Finder/Dock-launched processes still see the user's full PATH.
 	configureLoginShell()
 
+	// macOS routes a held key to the accent chooser instead of repeating it.
+	// The shell embeds a real terminal (xterm) plus Monaco and chat inputs, all
+	// of which need key repeat, so opt this application out before the WKWebView
+	// exists and its text input context handles the first key event. No-op off
+	// macOS (see native_darwin.m for why the web layer cannot do this).
+	disablePressAndHold()
+
 	// Only one desktop instance may run: it owns the in-process API server,
 	// the terminal ptys, and the per-window profile state, so a second copy
 	// would silently fork all of that. application.New acquires the instance

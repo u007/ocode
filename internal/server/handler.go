@@ -43,11 +43,14 @@ type Handler struct {
 	// portMaps owns one remote.ForwardManager per remote project for the
 	// project-scoped /api/portmaps panel. nil for a bare NewHandler(); wired
 	// by server.New from procSup.
-	portMaps  *portMapRegistry
-	agents    map[string]*agentSession
-	cfg       *config.Config
-	rc        *RCBridge          // set when proxying to a TUI session
-	scheduler *scheduler.Service // when set, the `cron` tool is wired into agent sessions
+	portMaps *portMapRegistry
+	// remoteHosts owns one remote.RemoteWorkspace per remote host, created
+	// lazily on first use. nil for a bare NewHandler(); wired by server.New.
+	remoteHosts *remoteHostRegistry
+	agents      map[string]*agentSession
+	cfg         *config.Config
+	rc          *RCBridge          // set when proxying to a TUI session
+	scheduler   *scheduler.Service // when set, the `cron` tool is wired into agent sessions
 	// sessions is the single authority for session ID → project root + agent
 	// lifecycle. Every session-scoped handler resolves through it, so sessions
 	// from any registered project load and run (no more cross-project 404s).
@@ -716,6 +719,22 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	if projectRoot == "" {
 		projectRoot = h.workDir
 	}
+	// Expand ~ in project paths so ~/x resolves to the server's own home.
+	// Only a local project is expanded: a path registered as a remote project
+	// on this server is stored verbatim and is expanded by the host that owns
+	// $HOME (remote chat traffic is proxied there and never reaches this
+	// handler). Expanding it here would rebind the turn to the wrong machine's
+	// directory of the same name.
+	if h.projectHostFor(projectRoot) == "" {
+		expanded, err := projects.ExpandHome(projectRoot)
+		if err != nil {
+			log.Printf("chat: expand project path %q: %v", projectRoot, err)
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("expand project path: %v", err))
+			return
+		}
+		projectRoot = expanded
+	}
+
 	// A session must be bound to a real project root. An empty root would make
 	// the agent fall back to the server process's cwd (for the desktop app,
 	// typically $HOME), and markdown discovery would then sweep the whole home
@@ -735,7 +754,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		// project A but save into project B. An empty project_path keeps
 		// the bound root (or the default root for unknown sessions).
 		if req.ProjectPath != "" {
-			snap, verr := h.sessions.BindNewOrVerify(sid, req.ProjectPath, windowID)
+			snap, verr := h.sessions.BindNewOrVerify(sid, projectRoot, windowID)
 			if verr != nil {
 				writeError(w, http.StatusConflict, verr.Error())
 				return

@@ -25,6 +25,7 @@ import TerminalFindBar from "./TerminalFindBar";
 import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
 import { apiPath, apiWsPath, authHeaders, authToken, isRemoteSession } from "@/api/client";
 import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
+import { createTerminalSnapshot } from "./terminalSnapshot";
 import { registerTerminal, unregisterTerminal } from "@/lib/debug/terminalRegistry";
 import { playAlertSound } from "./terminalAlertSound";
 import { useTerminalState } from "../../stores/terminalStore";
@@ -92,14 +93,28 @@ export async function writeClipboardText(text: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text);
   } catch {
+    // Capture after the asynchronous rejection: the user may have moved focus
+    // since the copy started. Restore that element, not a stale terminal ref.
+    const focused = document.activeElement;
     const ta = document.createElement("textarea");
     ta.value = text;
     ta.style.position = "fixed";
     ta.style.opacity = "0";
     document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand("copy"); } catch { /* ignore */ }
-    ta.remove();
+    try {
+      ta.focus({ preventScroll: true });
+      ta.select();
+      if (!document.execCommand("copy")) {
+        console.warn("Terminal clipboard copy was rejected");
+      }
+    } catch (err) {
+      console.warn("Terminal clipboard copy failed:", err);
+    } finally {
+      ta.remove();
+      if (focused instanceof HTMLElement && focused.isConnected) {
+        focused.focus({ preventScroll: true });
+      }
+    }
   }
 }
 
@@ -168,6 +183,7 @@ export default function TerminalPanel({
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const serializeRef = useRef<SerializeAddon | null>(null);
+  const snapshotRef = useRef<ReturnType<typeof createTerminalSnapshot> | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
   // WebGL renderer addon for THIS panel. Every hidden terminal tab holds a
   // live WebGL context otherwise — each context carries GPU-side buffers for
@@ -353,21 +369,18 @@ export default function TerminalPanel({
 
   const handleClear = useCallback(() => {
     termRef.current?.clear();
-    // Persist the cleared state so the empty buffer survives reload — reuse
-    // the existing serialize path immediately instead of waiting for the idle save.
-    if (serializeRef.current && termRef.current) {
-      saveTerminalBuffer(id, serializeRef.current.serialize({ scrollback: scrollbackLines }), termRef.current.cols, termRef.current.rows);
-    }
+    // clear/reset are synchronous and do not emit onWriteParsed.
+    snapshotRef.current?.markDirty();
+    snapshotRef.current?.flush();
     setCtxMenu(null);
-  }, [id, scrollbackLines]);
+  }, []);
 
   const handleReset = useCallback(() => {
     termRef.current?.reset();
-    if (serializeRef.current && termRef.current) {
-      saveTerminalBuffer(id, serializeRef.current.serialize({ scrollback: scrollbackLines }), termRef.current.cols, termRef.current.rows);
-    }
+    snapshotRef.current?.markDirty();
+    snapshotRef.current?.flush();
     setCtxMenu(null);
-  }, [id, scrollbackLines]);
+  }, []);
 
   const handleScrollTop = useCallback(() => {
     termRef.current?.scrollToTop();
@@ -598,11 +611,11 @@ export default function TerminalPanel({
     const el = containerRef.current;
     if (!el) return;
     const onCopy = (e: ClipboardEvent) => {
-      if (e.defaultPrevented) return;
+      if (e.defaultPrevented || !e.clipboardData) return;
       const sel = termRef.current?.getSelection() ?? "";
       if (!sel) return;
       e.preventDefault();
-      e.clipboardData?.setData("text/plain", sel);
+      e.clipboardData.setData("text/plain", sel);
     };
     el.addEventListener("copy", onCopy);
     return () => el.removeEventListener("copy", onCopy);
@@ -707,7 +720,12 @@ export default function TerminalPanel({
       // keydown is never converted to \x03). With no selection fall through
       // so Ctrl+C still sends SIGINT as usual.
       if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && ev.key.toLowerCase() === "c") {
-        if (copyViaShortcut()) return false;
+        if (copyViaShortcut()) {
+          // Returning false only stops xterm; cancel the browser copy as well
+          // so it cannot overwrite our canvas selection with an empty one.
+          ev.preventDefault();
+          return false;
+        }
         return true;
       }
       // Cmd/Ctrl+V (and Ctrl+Shift+V): paste. Return false unconditionally so
@@ -817,35 +835,25 @@ export default function TerminalPanel({
       return true;
     });
 
-    // Defer serialization to avoid blocking the main thread. serialize() can
-    // be CPU-heavy for large scrollback buffers, so we use requestIdleCallback
-    // (with setTimeout fallback) for periodic saves. On pagehide/visibilitychange
-    // we save immediately — the browser will complete the task before
-    // unloading. The idle handle is stored so cleanup can correctly cancel it.
-    let saveIdleId: number | null = null;
-    const scheduleSave = () => {
-      if (saveIdleId !== null) return; // already scheduled
-      if (typeof requestIdleCallback === "function") {
-        saveIdleId = requestIdleCallback(
-          () => {
-            saveIdleId = null;
-            doSave();
-          },
-          { timeout: 5000 },
-        ) as unknown as number;
-      } else {
-        saveIdleId = setTimeout(() => {
-          saveIdleId = null;
-          doSave();
-        }, 0) as unknown as number;
-      }
+    // onWriteParsed runs even for hidden keep-alive terminals, unlike render
+    // events. Never acknowledge queued bytes before xterm has parsed them.
+    const snapshot = createTerminalSnapshot(() => {
+      saveTerminalBuffer(id, serialize.serialize({ scrollback: term.options.scrollback }), term.cols, term.rows);
+    });
+    snapshotRef.current = snapshot;
+    const parsedDisp = term.onWriteParsed?.(snapshot.markDirty);
+    const resizeDisp = term.onResize?.(snapshot.markDirty);
+    const onSnapshotPointerDown = (event: PointerEvent) => {
+      if (event.button === 0) snapshot.beginSelection();
     };
-    const doSave = () => {
-      const s = serializeRef.current;
-      if (!s) return;
-      saveTerminalBuffer(id, s.serialize({ scrollback: scrollbackLines }), term.cols, term.rows);
-    };
-    const saveInterval = setInterval(scheduleSave, 30000);
+    el.addEventListener("wheel", snapshot.input, { passive: true });
+    el.addEventListener("keydown", snapshot.input, true);
+    el.addEventListener("pointerdown", onSnapshotPointerDown, true);
+    window.addEventListener("pointerup", snapshot.endSelection, true);
+    window.addEventListener("pointercancel", snapshot.endSelection, true);
+    window.addEventListener("blur", snapshot.endSelection);
+    const doSave = snapshot.flush;
+    const saveInterval = setInterval(snapshot.schedule, 30000);
     const onPageHide = () => doSave();
     document.addEventListener("visibilitychange", onPageHide);
     window.addEventListener("pagehide", onPageHide);
@@ -968,6 +976,7 @@ export default function TerminalPanel({
               // attach path still clears localStorage fallback before capped
               // replay.
               term.reset();
+              snapshot.markDirty();
             }
           }
           return;
@@ -1092,7 +1101,10 @@ export default function TerminalPanel({
         // Cancel the stalled fetch and attach without a history cursor — the
         // same fallback the restore-failure path uses.
         restoreController.abort();
-        if (serverHistoryPartial) term.reset();
+        if (serverHistoryPartial) {
+          term.reset();
+          snapshot.markDirty();
+        }
         term.write(
           "\r\n\x1b[33m[terminal history restore timed out; live terminal attached without restore]\x1b[0m\r\n",
         );
@@ -1154,7 +1166,10 @@ export default function TerminalPanel({
       // without a cursor. A resumed shell will send its capped replay, while
       // a fresh shell starts from a clean buffer; either way this avoids
       // overlapping partial output and live replay.
-      if (serverHistoryPartial) term.reset();
+      if (serverHistoryPartial) {
+        term.reset();
+        snapshot.markDirty();
+      }
       const message = err instanceof TerminalHistoryError ? err.message : "terminal history restore failed";
       console.error("terminal: history restore failed", err);
       term.write(`\r\n\x1b[31m[${message}; live terminal attached without restore]\x1b[0m\r\n`);
@@ -1182,13 +1197,16 @@ export default function TerminalPanel({
       }
       doSave();
       clearInterval(saveInterval);
-      if (saveIdleId !== null) {
-        if (typeof cancelIdleCallback === "function") {
-          cancelIdleCallback(saveIdleId as unknown as number);
-        } else {
-          clearTimeout(saveIdleId as unknown as number);
-        }
-      }
+      snapshot.dispose();
+      snapshotRef.current = null;
+      parsedDisp?.dispose();
+      resizeDisp?.dispose();
+      el.removeEventListener("wheel", snapshot.input);
+      el.removeEventListener("keydown", snapshot.input, true);
+      el.removeEventListener("pointerdown", onSnapshotPointerDown, true);
+      window.removeEventListener("pointerup", snapshot.endSelection, true);
+      window.removeEventListener("pointercancel", snapshot.endSelection, true);
+      window.removeEventListener("blur", snapshot.endSelection);
       document.removeEventListener("visibilitychange", onPageHide);
       window.removeEventListener("pagehide", onPageHide);
       observer.disconnect();
@@ -1246,6 +1264,7 @@ export default function TerminalPanel({
     const term = termRef.current;
     if (!term) return;
     term.options.scrollback = scrollbackLines;
+    snapshotRef.current?.markDirty();
   }, [scrollbackLines]);
 
   // Apply font changes to the live terminal in place instead of tearing down

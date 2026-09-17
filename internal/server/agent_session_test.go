@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -262,5 +264,78 @@ func TestRegisterAgentSessionDedupes(t *testing.T) {
 	}
 	if got := h.lookupAgentSession("sess-dup"); got != first {
 		t.Fatal("lookup should return the winner")
+	}
+}
+
+// TestChatProjectPathTildeExpansion verifies that HandleChat expands ~ in
+// project_path before binding the session, so ~/x becomes $HOME/x.
+func TestChatProjectPathTildeExpansion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// Create the target directory so session binding can stat it.
+	if err := os.MkdirAll(filepath.Join(home, "myapp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler()
+	newTestSession(h, "test-tilde-session", instantClient{})
+
+	rec := chatRequest(t, h, map[string]any{
+		"content":      "hello",
+		"sessionId":    "test-tilde-session",
+		"model":        "fake-model",
+		"project_path": "~/myapp",
+	})
+	// The request should be dispatched (200 or 202).
+	if rec.Code != http.StatusOK && rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s, want 200 or 202", rec.Code, rec.Body.String())
+	}
+
+	// The session must be bound to the expanded path, not literal ~.
+	snap, ok := h.sessions.SnapshotEntry("test-tilde-session")
+	if !ok {
+		t.Fatal("session not found in session manager")
+	}
+	want := filepath.Join(home, "myapp")
+	if snap.ProjectRoot != want {
+		t.Errorf("session ProjectRoot = %q, want %q", snap.ProjectRoot, want)
+	}
+}
+
+// TestChatRemoteProjectPathNotExpandedLocally verifies that HandleChat does
+// not expand a path registered as a remote project on this server. The host
+// owning $HOME expands it; the local server must keep the path verbatim, or a
+// local directory of the same name would silently capture the remote project.
+func TestChatRemoteProjectPathNotExpandedLocally(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// A local directory that the expanded form would resolve to. It must NOT
+	// end up as the session's project root.
+	if err := os.MkdirAll(filepath.Join(home, "webapp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler()
+	if err := h.projects.AddRemote("user@example.test", "~/webapp", 0); err != nil {
+		t.Fatalf("AddRemote: %v", err)
+	}
+	newTestSession(h, "test-remote-tilde-session", instantClient{})
+
+	rec := chatRequest(t, h, map[string]any{
+		"content":      "hello",
+		"sessionId":    "test-remote-tilde-session",
+		"model":        "fake-model",
+		"project_path": "~/webapp",
+	})
+	if rec.Code != http.StatusOK && rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s, want 200 or 202", rec.Code, rec.Body.String())
+	}
+
+	snap, ok := h.sessions.SnapshotEntry("test-remote-tilde-session")
+	if !ok {
+		t.Fatal("session not found in session manager")
+	}
+	if snap.ProjectRoot != "~/webapp" {
+		t.Errorf("session ProjectRoot = %q, want the verbatim remote path %q", snap.ProjectRoot, "~/webapp")
 	}
 }

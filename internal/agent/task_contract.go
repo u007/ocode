@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/u007/ocode/internal/crashguard"
 )
@@ -16,11 +15,16 @@ import (
 //	CheckFailed: the verification machinery itself failed (LLM error, timeout,
 //	             malformed response). Satisfied is meaningless in this state —
 //	             the caller must surface the failure, never proceed on it.
+//	TimedOut:    CheckFailed because a caller-configured deadline elapsed
+//	             (Agent.RequestTimeout). It is a proper subset of CheckFailed:
+//	             no judgement was produced, but the reason is specifically a
+//	             timeout and must be reported as one.
 //	Satisfied:   the result met the contract (only meaningful when !CheckFailed).
 //	Deficiency:  what the verifier said is missing, or the failure reason when
 //	             CheckFailed. Empty when Satisfied.
 type contractVerdict struct {
 	CheckFailed bool
+	TimedOut    bool
 	Satisfied   bool
 	Deficiency  string
 }
@@ -40,7 +44,37 @@ func stripLabelPrefix(line, label string) string {
 	return strings.TrimSpace(line)
 }
 
-const taskContractVerifyTimeout = 30 * time.Second
+// taskContractResultBudget bounds how much of the child's final result is fed
+// to the verifier, in runes. The full result can be tens of thousands of runes
+// (a whole review report); the verifier only needs enough to judge shape, and
+// an unbounded prompt makes the single verification call needlessly slow. When
+// the result exceeds the budget the head and
+// tail are kept (reports front-load scope and back-load conclusions) with an
+// explicit, machine-recognizable marker in between. The marker is spelled out
+// in task_verifier.txt so the verifier does not misread the elision itself as a
+// truncated result.
+const taskContractResultBudget = 12000
+
+// verifierTruncationMarker is inserted between the kept head and tail of an
+// oversized result. Kept in sync with the instruction in task_verifier.txt.
+const verifierTruncationMarker = "\n\n[... verification input truncated; middle of the result omitted ...]\n\n"
+
+// truncateVerifierResult bounds the result handed to the verifier. It is a
+// no-op for results within budget.
+func truncateVerifierResult(result string) string {
+	runes := []rune(result)
+	if len(runes) <= taskContractResultBudget {
+		return result
+	}
+	// Keep a larger head than tail: contracts overwhelmingly ask about the
+	// shape of the front matter (report sections, file lists, findings), and
+	// the tail is only kept so a closing summary is still visible.
+	headLen := taskContractResultBudget * 3 / 4
+	tailLen := taskContractResultBudget - headLen
+	head := string(runes[:headLen])
+	tail := string(runes[len(runes)-tailLen:])
+	return head + verifierTruncationMarker + tail
+}
 
 // verifierClient returns the LLM client used for contract verification: the
 // configured small model when enabled and resolvable, else the session client.
@@ -66,6 +100,25 @@ func (t TaskTool) verifierClient() LLMClient {
 	return a.client
 }
 
+// verifierContext returns the context for one verification call. Verification
+// is bounded exactly like every other LLM call in the process — by the client's
+// own pre-stream timeout (llmRequestTimeout) and the per-read stream idle
+// watchdog — and NOT by a hardcoded total-call deadline.
+//
+// There is deliberately no default wall-clock cap. A former 30s constant
+// abandoned verifier calls that were merely slow (the dominant cause of
+// spurious "contract ✗" badges), and because LLMClient.Chat takes no context it
+// could not even cancel the underlying request — it just abandoned a live
+// goroutine and recorded a false check failure. A total-call deadline is applied
+// only when the caller explicitly configured one (Agent.RequestTimeout, e.g.
+// headless `ocode run`).
+func verifierContext(a *Agent) (context.Context, context.CancelFunc) {
+	if a != nil && a.RequestTimeout > 0 {
+		return context.WithTimeout(context.Background(), a.RequestTimeout)
+	}
+	return context.Background(), func() {}
+}
+
 // verifyContract runs one verification call: the contract plus the child's
 // final result, verdict out. A malformed or missing response is a CheckFailed
 // verdict (logged, never treated as satisfied). The prompt lives in
@@ -77,10 +130,10 @@ func (t TaskTool) verifyContract(contract, result string) contractVerdict {
 	}
 	prompt := strings.NewReplacer(
 		"{contract}", contract,
-		"{result}", result,
+		"{result}", truncateVerifierResult(result),
 	).Replace(taskVerifierPromptText)
 
-	ctx, cancel := context.WithTimeout(context.Background(), taskContractVerifyTimeout)
+	ctx, cancel := verifierContext(t.mainAgent)
 	defer cancel()
 
 	respCh := make(chan struct {
@@ -98,8 +151,16 @@ func (t TaskTool) verifyContract(contract, result string) contractVerdict {
 	var text string
 	select {
 	case <-ctx.Done():
-		t.mainAgent.emitDebug("CONTRACT", fmt.Sprintf("verification timed out: %v", ctx.Err()))
-		return contractVerdict{CheckFailed: true, Deficiency: "contract verification timed out"}
+		// Only reachable when Agent.RequestTimeout was explicitly set; there is
+		// no default deadline, so this is not the normal path. Report it as a
+		// timeout specifically (TimedOut) so callers can say "timed out" rather
+		// than a generic verification failure.
+		deficiency := "verification cancelled"
+		if t.mainAgent != nil && t.mainAgent.RequestTimeout > 0 {
+			deficiency = fmt.Sprintf("timed out after %s (Agent.RequestTimeout)", t.mainAgent.RequestTimeout)
+		}
+		t.mainAgent.emitDebug("CONTRACT", fmt.Sprintf("verification aborted: %v", ctx.Err()))
+		return contractVerdict{CheckFailed: true, TimedOut: true, Deficiency: deficiency}
 	case out := <-respCh:
 		if out.err != nil {
 			t.mainAgent.emitDebug("CONTRACT", fmt.Sprintf("verification call failed: %v", out.err))
@@ -168,6 +229,16 @@ func contractWarningPrefix(contract, deficiency string) string {
 	return fmt.Sprintf("⚠ Output contract not met: %q\nDeficiency: %s\n\nThe sub-agent's full result follows (contract failed; treat as unverified):", contract, deficiency)
 }
 
+// contractUnverifiedPrefix builds the prefix for a result whose contract could
+// NOT be checked because the verification machinery itself failed (timeout, LLM
+// error, empty or malformed verdict). It is deliberately distinct from
+// contractWarningPrefix: the child did not fail the contract, the check never
+// produced a judgement. Wording matters — the parent model reads this text and
+// must not downgrade a possibly-fine result.
+func contractUnverifiedPrefix(contract, reason string) string {
+	return fmt.Sprintf("⚠ Output contract NOT verified: %q\nVerification could not run: %s\n\nThis is a verification failure, not a contract failure — the sub-agent's result was never judged. Its full result follows (treat as unverified):", contract, reason)
+}
+
 // verifyAndRetryContract runs the verify-and-retry-once sequence for a
 // dispatch that carries a contract (t.contract != ""). It must be called while
 // the child subAgent is still live — inside runSyncDispatch / the
@@ -188,16 +259,22 @@ func (t TaskTool) verifyAndRetryContract(specName string, subAgent *Agent, messa
 	if v.CheckFailed {
 		// The machinery failed (LLM error / timeout / malformed verdict).
 		// Retrying against a broken verifier is pointless; surface the
-		// failure loudly and keep the partial result visible.
+		// failure loudly and keep the partial result visible. This is NOT a
+		// contract failure — record CheckFailed so every surface can say so.
+		// A caller-configured timeout is reported as a timeout, not wrapped in
+		// the generic "verification failed" wording.
 		deficiency := "verification failed: " + v.Deficiency
-		if run != nil {
-			run.SetContractVerdict(false, deficiency)
+		if v.TimedOut {
+			deficiency = v.Deficiency
 		}
-		return contractWarningPrefix(t.contract, deficiency) + "\n\n" + result, resp, v
+		if run != nil {
+			run.SetContractVerdict(ContractOutcome{CheckFailed: true, TimedOut: v.TimedOut, Deficiency: deficiency})
+		}
+		return contractUnverifiedPrefix(t.contract, deficiency) + "\n\n" + result, resp, v
 	}
 	if v.Satisfied {
 		if run != nil {
-			run.SetContractVerdict(true, "")
+			run.SetContractVerdict(ContractOutcome{Satisfied: true})
 		}
 		return result, resp, v
 	}
@@ -210,9 +287,9 @@ func (t TaskTool) verifyAndRetryContract(specName string, subAgent *Agent, messa
 	if err2 != nil {
 		deficiency := fmt.Sprintf("retry failed: %v (original gap: %s)", err2, v.Deficiency)
 		if run != nil {
-			run.SetContractVerdict(false, deficiency)
+			run.SetContractVerdict(ContractOutcome{CheckFailed: true, Deficiency: deficiency})
 		}
-		return contractWarningPrefix(t.contract, deficiency) + "\n\n" + result, resp, contractVerdict{CheckFailed: true, Deficiency: deficiency}
+		return contractUnverifiedPrefix(t.contract, deficiency) + "\n\n" + result, resp, contractVerdict{CheckFailed: true, Deficiency: deficiency}
 	}
 	result = result2
 	resp = resp2
@@ -222,11 +299,20 @@ func (t TaskTool) verifyAndRetryContract(specName string, subAgent *Agent, messa
 	deficiency := v2.Deficiency
 	if v2.CheckFailed {
 		// Re-verification broke after a successful retry. The child did not
-		// demonstrably meet the contract — fail loud, treat as not met.
+		// demonstrably meet the contract, but the check also did not complete;
+		// record it as a check failure so surfaces say "unverified", not "failed".
+		// A timeout is kept as a timeout rather than a generic re-verify failure.
 		deficiency = "re-verification failed after retry: " + v2.Deficiency
+		if v2.TimedOut {
+			deficiency = v2.Deficiency
+		}
+		if run != nil {
+			run.SetContractVerdict(ContractOutcome{CheckFailed: true, TimedOut: v2.TimedOut, Deficiency: deficiency})
+		}
+		return contractUnverifiedPrefix(t.contract, deficiency) + "\n\n" + result, resp, contractVerdict{CheckFailed: true, TimedOut: v2.TimedOut, Deficiency: deficiency}
 	}
 	if run != nil {
-		run.SetContractVerdict(satisfied, deficiency)
+		run.SetContractVerdict(ContractOutcome{Satisfied: satisfied, Deficiency: deficiency})
 	}
 	if satisfied {
 		return result, resp, v2

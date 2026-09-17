@@ -76,26 +76,30 @@ func (t *PreviewOpenTool) Description() string {
 	return "Open a file in the sidebar preview (browser tab stays available). Use when the user asks to preview or present a file: PDFs (multi-page), Word docs (preview + select), Excel sheets (preview + select), PowerPoint decks (slides + present mode), mermaid diagrams (clickable nodes), images, audio, or video (native player), or text/code (editable). Returns a PREVIEW_OPEN directive the web UI auto-opens."
 }
 
+// Definition returns the canonical FLAT tool descriptor
+// ({name, description, parameters}) that every other built-in uses. The
+// OpenAI transport wraps it into the nested {type:function, function:{...}}
+// shape (openAITools); the Anthropic transport reads name/parameters directly
+// and has no nested-form normalization, so returning the nested object here
+// produced malformed Anthropic tool entries (empty name, nil input_schema) and
+// a 400 from every Anthropic-protocol route.
 func (t *PreviewOpenTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
-		"type": "function",
-		"function": map[string]interface{}{
-			"name":        t.Name(),
-			"description": t.Description(),
-			"parameters": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"path": map[string]interface{}{
-						"type":        "string",
-						"description": "Workspace-relative file path to preview (e.g. docs/deck.pptx). Must stay inside the project root.",
-					},
-					"page": map[string]interface{}{
-						"type":        "integer",
-						"description": "Optional 1-based initial page/slide to show (PDF, PPTX). Defaults to 1.",
-					},
+		"name":        t.Name(),
+		"description": t.Description(),
+		"parameters": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "Workspace-relative file path to preview (e.g. docs/deck.pptx). Must stay inside the project root.",
 				},
-				"required": []string{"path"},
+				"page": map[string]interface{}{
+					"type":        "integer",
+					"description": "Optional 1-based initial page/slide to show (PDF, PPTX). Defaults to 1.",
+				},
 			},
+			"required": []string{"path"},
 		},
 	}
 }

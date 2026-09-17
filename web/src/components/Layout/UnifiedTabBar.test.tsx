@@ -19,7 +19,7 @@ vi.mock("../../api/client", () => ({
 }));
 
 let projectFake: {
-  state: { activeProject: { path: string; name: string } | null };
+  state: { activeProject: { path: string; name: string } | null; projects: unknown[] };
   tabs: { id: string; projectPath: string; title: string; activeSubTab: "chat" }[];
   activeTabId: string | null;
 };
@@ -40,6 +40,15 @@ vi.mock("../../stores/projectStore", () => ({
     toggleSessionPicker,
     dispatch: projectDispatch,
   }),
+  findProjectPathForTab: (_state: { tabsByProject?: Record<string, { id: string }[]> }, tabId: string) => {
+    // The real findProjectPathForTab searches tabsByProject, but the test
+    // mock uses a flat tabs array with projectPath.  Build a lookup from
+    // the fake tabs so the function works in tests.
+    for (const tab of projectFake.tabs) {
+      if (tab.id === tabId) return tab.projectPath;
+    }
+    return null;
+  },
 }));
 
 function renderBar(focusedKind: FocusedKind = "chat") {
@@ -69,7 +78,7 @@ beforeEach(() => {
   (api.closeSession as unknown as ReturnType<typeof vi.fn>).mockClear?.();
   (api.setSessionTitle as unknown as ReturnType<typeof vi.fn>).mockClear?.();
   projectFake = {
-    state: { activeProject: { path: "/proj", name: "proj" } },
+    state: { activeProject: { path: "/proj", name: "proj" }, projects: [] },
     tabs: [{ id: "s1", projectPath: "/proj", title: "Chat One", activeSubTab: "chat" }],
     activeTabId: "s1",
   };
@@ -225,7 +234,7 @@ describe("UnifiedTabBar", () => {
     // The closed session's backend must be released (cancel + agent teardown),
     // not just hidden — otherwise the server keeps running the turn nobody is
     // viewing. Mock api.closeSession asserts the fire-and-forget call.
-    expect(api.closeSession).toHaveBeenCalledWith("s1");
+    expect(api.closeSession).toHaveBeenCalledWith("s1", undefined);
   });
 
   it("X on a chat tab confirmation Cancel preserves the tab", async () => {
@@ -244,7 +253,7 @@ describe("UnifiedTabBar", () => {
     const pill = screen.getByRole("tab", { name: "Chat One" });
     fireEvent(pill, new MouseEvent("auxclick", { button: 1, bubbles: true }));
     expect(closeSessionTab).toHaveBeenCalledWith("s1");
-    expect(api.closeSession).toHaveBeenCalledWith("s1");
+    expect(api.closeSession).toHaveBeenCalledWith("s1", undefined);
     // No dialog should appear
     expect(screen.queryByText(/Close chat tab\?/)).not.toBeInTheDocument();
   });
@@ -505,5 +514,20 @@ describe("terminal alert badge auto-clear timer", () => {
     expect(activePill.className).toMatch(/overflow-hidden/);
     expect(activePill.querySelector('[data-testid="tab-process"]')).toBeNull();
     expect(within(activePill).getByText("Chat One")).toBeInTheDocument();
+  });
+  it("passes the host to closeSession for a remote project tab", async () => {
+    const remoteProject = { path: "/srv/app", name: "app", host: "devbox" };
+    projectFake = {
+      state: { activeProject: { path: "/srv/app", name: "app" }, projects: [remoteProject] },
+      tabs: [{ id: "s-remote", projectPath: "/srv/app", title: "Remote Chat", activeSubTab: "chat" }],
+      activeTabId: "s-remote",
+    };
+    renderBar();
+    // Close via the X button → confirm dialog
+    fireEvent.click(screen.getByLabelText("Close Remote Chat"));
+    expect(screen.getByText(/Close chat tab\?/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+    // The host should have been passed to closeSession
+    expect(api.closeSession).toHaveBeenCalledWith("s-remote", "devbox");
   });
 });

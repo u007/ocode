@@ -19,6 +19,35 @@ function renderDialog(overrides: Partial<Parameters<typeof PermissionDialog>[0]>
 }
 
 describe("PermissionDialog", () => {
+  it("shows all execution parameters alongside the command without truncation", () => {
+    const args = {
+      command: "echo ready",
+      timeout: 600,
+      run_in_background: false,
+      nested: { values: [null, true, "<script>not markup</script>"] },
+      content: "long-value-".repeat(2000) + "END-OF-PARAMETERS",
+    };
+    renderDialog({ command: args.command, args });
+    expect(screen.getByText(args.command)).toBeTruthy();
+    const block = screen.getByRole("region", { name: "Tool execution parameters" }).querySelector("pre")!;
+    expect(block.textContent).toBe(JSON.stringify(args, null, 2));
+    expect(block.querySelector("script")).toBeNull();
+    expect(block.className).toContain("overflow-y-auto");
+    expect(block.className).toContain("whitespace-pre-wrap");
+    expect(block.className).toContain("[overflow-wrap:anywhere]");
+  });
+
+  it("keeps legacy command-only requests working", () => {
+    renderDialog();
+    expect(screen.queryByRole("region", { name: "Tool execution parameters" })).toBeNull();
+    expect(screen.getByText("rm -rf build")).toBeTruthy();
+  });
+
+  it("shows explicitly empty parameter objects", () => {
+    renderDialog({ args: {} });
+    expect(screen.getByRole("region", { name: "Tool execution parameters" }).querySelector("pre")?.textContent).toBe("{}");
+  });
+
   it("sends allow and deny decisions", async () => {
     // One dialog per decision: a resolved (ok=true) dialog expects to be
     // unmounted by the parent, so its buttons stay disabled afterwards.

@@ -578,6 +578,23 @@ describe("chatStore permission dialog lifecycle", () => {
 });
 
 describe("chatStore reload rehydration from transcript snapshot", () => {
+  it("preserves complete parameters in live events, queued asks, and transcript recovery", () => {
+    const args = { command: "echo ready", timeout: 600, run_in_background: false, nested: { values: [1, null, true] } };
+    const permission = { tool: "bash", command: args.command, args, request_id: "call-params" };
+    let state = chatReducer(initial(), { type: "PERMISSION_REQUEST", sessionId: "a", permission });
+    expect(getSessionSlice(state, "a").pendingPermission?.args).toEqual(args);
+    state = chatReducer(state, { type: "PERMISSION_REQUEST", sessionId: "a", permission: { ...permission, request_id: "call-next" } });
+    const slice = getSessionSlice(state, "a");
+    expect([slice.pendingPermission, ...slice.permissionQueue].map((ask) => ask?.args)).toEqual([args, args]);
+    const recovered = chatReducer(initial(), {
+      type: "SET_MESSAGES", sessionId: "a", messages: [{
+        role: "tool", tool_call_id: "call-params",
+        content: "PERMISSION_ASK:" + JSON.stringify({ tool_name: "bash", command: args.command, args }),
+      }],
+    });
+    expect(getSessionSlice(recovered, "a").pendingPermission?.args).toEqual(args);
+  });
+
   const makeAskMsg = (id: string, toolName = "bash", command = "rm -rf /tmp/x") => ({
     role: "tool" as const,
     content:

@@ -303,6 +303,8 @@ export interface SSEToolErrorEvent {
 export interface SSEPermissionEvent {
   tool: string;
   command?: string;
+  /** Complete execution parameters, separate from the command summary. */
+  args?: unknown;
   rule?: string;
   summary?: string;
   deny_reason?: string;
@@ -507,10 +509,21 @@ export interface AgentRun {
   inputTokens: number;
   outputTokens: number;
   // Contract is the output-contract verdict, present only when the dispatch
-  // carried an expected_output contract. satisfied=false means the result
-  // did not meet the contract after the single retry (or verification
-  // failed) — a shape check, not "verified correct".
-  contract?: { checked: boolean; satisfied: boolean; deficiency?: string };
+  // carried an expected_output contract. satisfied=false means the result did
+  // not meet the contract after the single retry. checkFailed distinguishes
+  // the two reasons satisfied can be false: true means verification itself
+  // failed (timeout / error / unparseable verdict) and the result was never
+  // judged — NOT a contract failure. A shape check, not "verified correct".
+  contract?: {
+    checked: boolean;
+    satisfied: boolean;
+    checkFailed?: boolean;
+    // timedOut is a subset of checkFailed: the check was abandoned because a
+    // caller-configured deadline elapsed. Report it as a timeout, not a generic
+    // verification failure.
+    timedOut?: boolean;
+    deficiency?: string;
+  };
   messages: AgentRunMessage[];
   children: AgentRun[];
 }

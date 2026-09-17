@@ -21,19 +21,30 @@ export default function MarkdownViewer({
   projectRoot,
   projectHost,
   onOpenFile,
+  content,
 }: {
   path: string;
   projectRoot?: string;
   projectHost?: string;
   onOpenFile: (path: string) => void;
+  /** Live editor source. When provided, the viewer renders this instead of
+   *  fetching from disk — the Files tab's split view feeds it the current
+   *  (possibly unsaved) editor content so the preview tracks typing without a
+   *  save round-trip. Omit it for the normal read-from-disk behaviour. */
+  content?: string;
 }) {
-  const [md, setMd] = useState<string | null>(null);
+  // `content !== undefined` selects controlled mode. It is stable per mounted
+  // viewer instance (the Files tab mounts a separate viewer per mode), so the
+  // two effects below never fight over the same instance.
+  const controlled = content !== undefined;
+  const [md, setMd] = useState<string | null>(controlled ? (content ?? "") : null);
   const [error, setError] = useState<string | null>(null);
   const [isBinary, setIsBinary] = useState(false);
   const [forceEdit, setForceEdit] = useState(false);
   const { ref, sel, clear } = usePreviewSelection<HTMLDivElement>(() => "doc");
 
   useEffect(() => {
+    if (controlled) return;
     let cancelled = false;
     setMd(null);
     setError(null);
@@ -53,7 +64,15 @@ export default function MarkdownViewer({
     return () => {
       cancelled = true;
     };
-  }, [path, projectRoot, projectHost]);
+  }, [path, projectRoot, projectHost, controlled]);
+
+  // Controlled mode: mirror the caller's live source on every edit.
+  useEffect(() => {
+    if (!controlled) return;
+    setMd(content ?? "");
+    setError(null);
+    setIsBinary(false);
+  }, [controlled, content]);
 
   const diagram = useMemo(() => (md ? extractMermaid(md) : null), [md]);
 

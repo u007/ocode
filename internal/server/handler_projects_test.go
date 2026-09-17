@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -241,5 +243,50 @@ func TestProjectHostFor(t *testing.T) {
 				t.Fatalf("projectHostFor(%q) = %q, want %q", tc.root, got, tc.want)
 			}
 		})
+	}
+}
+
+// HandleAddProject expands ~ in the LOCAL branch so the project is stored
+// with the resolved absolute path.
+func TestHandleAddProjectExpandHome(t *testing.T) {
+	h := testProjectHandler(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// Create the target directory so any future existence check would pass.
+	if err := os.MkdirAll(filepath.Join(home, "webapp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := postJSON(t, h, h.HandleAddProject, `{"path":"~/webapp"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rr.Code, rr.Body.String())
+	}
+
+	// The stored path must be expanded, not literal ~.
+	want := filepath.Join(home, "webapp")
+	got := projectByRef(t, h, "", want)
+	if got.Path != want {
+		t.Errorf("stored path = %q, want %q", got.Path, want)
+	}
+	if got.Name != "webapp" {
+		t.Errorf("stored name = %q, want webapp", got.Name)
+	}
+}
+
+// HandleAddProject does NOT expand ~ when a host is present (R3).
+func TestHandleAddProjectRemoteTildeNotExpanded(t *testing.T) {
+	h := testProjectHandler(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	rr := postJSON(t, h, h.HandleAddProject, `{"host":"devbox","path":"~/webapp"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rr.Code, rr.Body.String())
+	}
+
+	// Remote path must be stored VERBATIM — no expansion.
+	got := projectByRef(t, h, "devbox", "~/webapp")
+	if got.Path != "~/webapp" {
+		t.Errorf("stored path = %q, want ~/webapp", got.Path)
 	}
 }

@@ -71,7 +71,7 @@ class ResizeObserverMock {
     if (i >= 0) roInstances.splice(i, 1);
   }
   /** Fire the callback with a fake content-box of the given height. */
-  fire(height: number) {
+  fire(height = 96) {
     const rect = makeRect(400, height);
     this.cb([
       {
@@ -249,6 +249,13 @@ function scrollElOf(container: HTMLElement): HTMLElement {
  *  container (older instances unregister themselves on disconnect). */
 function scrollObserverFor(container: HTMLElement): ResizeObserverMock {
   const el = scrollElOf(container);
+  const obs = roInstances.filter((o) => o.el === el);
+  return obs[obs.length - 1];
+}
+
+/** The ResizeObserver watching an arbitrary element (e.g. the virtualized list
+ *  container, whose size-correction growth drives the turn-end tail follow). */
+function observerForEl(el: HTMLElement): ResizeObserverMock {
   const obs = roInstances.filter((o) => o.el === el);
   return obs[obs.length - 1];
 }
@@ -500,6 +507,86 @@ describe("ChatPanel", () => {
       await advanceFrame();
       expect(f.get()).toBe(0);
     });
+
+    it("keeps following the tail when the virtualized list grows after a turn ends", async () => {
+      // Regression: the turn-end `messages` broadcast moves the streamed tail out
+      // of the live block into the virtualized list, where each fresh entry first
+      // carries only estimateSize (96px). The virtualizer's estimate→measure
+      // corrections then grow the list AFTER the one-shot [messages, live] pin
+      // ran, leaving the viewport above the bottom ("chat scrolls back up when the
+      // loop finishes"). The content observer must re-pin on that growth while the
+      // reader is pinned.
+      const { container } = await renderSeeded("sess-content-grow");
+      const el = scrollElOf(container);
+      const obs = scrollObserverFor(container);
+      const f = fakeScroll(el, 5000); // pinned at the bottom
+      // Keep the pin: the box observer still reports a visible box.
+      act(() => obs.fire(600));
+      const list = el.querySelector('div[style*="height"]') as HTMLElement;
+      // A size correction grows the list container without a box change on the
+      // scroll element itself.
+      act(() => observerForEl(list).fire());
+      await advanceFrame();
+      expect(f.get()).toBe(5000);
+    });
+
+    it("does NOT re-pin on list growth after the reader scrolled up", async () => {
+      const { container } = await renderSeeded("sess-content-grow-up");
+      const el = scrollElOf(container);
+      const f = fakeScroll(el, 0);
+      // Unpin via a real scroll event (bottom far away).
+      fireEvent.scroll(el);
+      await advanceFrame();
+      const list = el.querySelector('div[style*="height"]') as HTMLElement;
+      act(() => observerForEl(list).fire());
+      await advanceFrame();
+      expect(f.get()).toBe(0);
+    });
+  });
+
+  describe("per-message Speak", () => {
+    it("offers Speak on the assistant text of a tool-group turn", async () => {
+      const msgs: Message[] = [
+        mk("user", "do it"),
+        {
+          role: "assistant",
+          content: "All done here.",
+          tool_calls: [{ id: "call-speak", function: { name: "read", arguments: '{"path":"a.go"}' } }],
+        },
+        { role: "tool", content: "file body", tool_call_id: "call-speak" },
+      ];
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId="sess-speak-group" messages={msgs} hasMore />
+          <ChatPanel sessionId="sess-speak-group" />
+        </ChatProvider>,
+      );
+      await tick();
+      // Exactly one per-message Speak button — the grouped assistant text. The
+      // reasoning/thinking block is absent for this message, so a stray button
+      // would mean the wrong surface grew one.
+      const buttons = screen.getAllByRole("button", { name: /speak message/i });
+      expect(buttons).toHaveLength(1);
+      // The button is a SIBLING of the speech subtree (by design — a control
+      // inside `[data-speech-content]` would have its own label read aloud), so
+      // assert its wrapper carries the extractable content and the button opts
+      // out of container-wide extraction.
+      const wrapper = buttons[0].parentElement as HTMLElement;
+      expect(wrapper.querySelector('[data-speech-content]')?.textContent).toContain("All done here.");
+      expect(buttons[0].hasAttribute("data-speech-exclude")).toBe(true);
+    });
+
+    it("offers Speak on the live streamed text while streaming", async () => {
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId="sess-speak-live" messages={[mk("user", "hi")]} live={["partial answer"]} />
+          <ChatPanel sessionId="sess-speak-live" />
+        </ChatProvider>,
+      );
+      await tick();
+      expect(screen.getByText(/partial answer/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /speak message/i })).toBeInTheDocument();
+    });
   });
 
   it("jumps to a match that is NOT yet rendered (unmeasured item)", async () => {
@@ -574,7 +661,11 @@ describe("ChatPanel", () => {
     fireEvent.scroll(el);
     await advanceFrame();
     const topButton = screen.getByRole("button", { name: /scroll to top/i });
-    expect(screen.getByRole("button", { name: /scroll to bottom/i })).toBeInTheDocument();
+    // The top affordance is anchored to the transcript's TOP edge (below the
+    // header), not stacked above the bottom button.
+    expect(topButton.className).toContain("top-full");
+    const bottomButton = screen.getByRole("button", { name: /scroll to bottom/i });
+    expect(bottomButton.parentElement?.className).toContain("bottom-4");
 
     fireEvent.click(topButton);
     expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "smooth" });

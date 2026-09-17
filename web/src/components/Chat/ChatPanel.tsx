@@ -521,6 +521,46 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
     };
   }, [initialized]);
 
+  // Follow the virtualizer's estimate→measure corrections at the end of a turn.
+  // The [messages, live] effect above is one-shot per store update, but the
+  // turn-end `messages` broadcast swaps the streamed tail from the live block
+  // (already laid out at its real height, and pinned) into the virtualized list,
+  // where each freshly committed entry first carries only `estimateSize` (96px).
+  // The virtualizer then corrects every one of those items to its measured
+  // height over the following frames, growing the list container AFTER the pin
+  // ran — and the scroll-ELEMENT observer above deliberately ignores non-zero→
+  // non-zero box changes, so nothing follows the growth and the viewport is left
+  // above the bottom (the "chat scrolls back up when the loop finishes" report).
+  // Observe the virtualized CONTENT instead: while the panel is pinned, re-pin
+  // after every size correction. The user-scrolled-up case is guarded by
+  // `atBottomRef`, exactly like the [messages, live] effect — a reader who broke
+  // the pin is never yanked back.
+  const hasList = renderEntries.length > 0;
+  useEffect(() => {
+    const el = scrollRef.current;
+    const list = listContainerRef.current;
+    if (!el || !list) return;
+    let raf = 0;
+    const pin = () => {
+      if (!atBottomRef.current) return;
+      // The write lands after layout but before paint, so the correction never
+      // shows as a visible frame at the old (short) offset. The follow-up frame
+      // rides out the virtualizer's re-windowing, mirroring the hidden→visible
+      // re-pin above.
+      el.scrollTop = el.scrollHeight;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        if (atBottomRef.current) el.scrollTop = el.scrollHeight;
+      });
+    };
+    const ro = new ResizeObserver(pin);
+    ro.observe(list);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  }, [hasList]);
+
   // Toggle the find bar with Ctrl/Cmd+F. Local to this tab: each ChatPanel
   // instance is only visible while its tab is active (App.tsx CSS-hides the
   // rest), so this window listener would fire for every open tab — guard on
@@ -685,7 +725,7 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
           />
         </div>
       )}
-      <div className="flex shrink-0 items-center justify-end gap-2 border-b border-border px-3 py-1">
+      <div className="relative flex shrink-0 items-center justify-end gap-2 border-b border-border px-3 py-1">
         <button
           type="button"
           className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
@@ -703,6 +743,20 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
         >
           <Volume2 className="h-3.5 w-3.5" /> Speak visible
         </button>
+        {/* Anchored to the header's bottom edge (top-full) so the "scroll to
+            top" affordance floats at the TOP-right of the transcript rather
+            than stacked above the scroll-to-bottom button at the bottom. */}
+        {showJumpToTop && (
+          <button
+            type="button"
+            onClick={scrollToTop}
+            className="absolute right-4 top-full z-10 mt-2 flex h-9 w-9 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg transition-colors hover:bg-accent"
+            title="Scroll to top"
+            aria-label="Scroll to top"
+          >
+            <ArrowUp className="h-4 w-4" />
+          </button>
+        )}
       </div>
       <div
         ref={scrollRef}
@@ -809,7 +863,7 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
                           />
                         ))}
                         {entry.assistant.content ? (
-                          <AssistantText content={entry.assistant.content} />
+                          <AssistantText content={entry.assistant.content} onSpeak={requestSpeech} />
                         ) : null}
                       </>
                     )}
@@ -832,7 +886,7 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
               if (part.kind === "thinking")
                 return <ThinkingBlock key={`live-${i}`} text={part.text} onSpeak={() => requestSpeech(part.text || "")} />;
               if (part.kind === "text")
-                return <AssistantText key={`live-${i}`} content={part.text} />;
+                return <AssistantText key={`live-${i}`} content={part.text} onSpeak={requestSpeech} />;
               if (part.kind === "status")
                 return <StatusBlock key={`live-${i}`} text={part.text} />;
               return (
@@ -862,30 +916,17 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
           chrome; renders nothing for untuned models. */}
       <ModelPromptRow prompt={slice.tuiStatus?.model_prompt} model={slice.tuiStatus?.main_model} />
 
-      {(showJumpToTop || showJumpToBottom) && (
-        <div className="absolute bottom-4 right-4 z-10 flex flex-col gap-2">
-          {showJumpToTop && (
-            <button
-              type="button"
-              onClick={scrollToTop}
-              className="flex h-9 w-9 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg transition-colors hover:bg-accent"
-              title="Scroll to top"
-              aria-label="Scroll to top"
-            >
-              <ArrowUp className="h-4 w-4" />
-            </button>
-          )}
-          {showJumpToBottom && (
-            <button
-              type="button"
-              onClick={() => scrollToBottom(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg transition-colors hover:bg-accent"
-              title="Scroll to bottom"
-              aria-label="Scroll to bottom"
-            >
-              <ArrowDown className="h-4 w-4" />
-            </button>
-          )}
+      {showJumpToBottom && (
+        <div className="absolute bottom-4 right-4 z-10">
+          <button
+            type="button"
+            onClick={() => scrollToBottom(true)}
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg transition-colors hover:bg-accent"
+            title="Scroll to bottom"
+            aria-label="Scroll to bottom"
+          >
+            <ArrowDown className="h-4 w-4" />
+          </button>
         </div>
       )}
     </div>

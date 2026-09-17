@@ -323,6 +323,16 @@ export function apiPath(path: string): string {
   return withBase;
 }
 
+/** Returns the URL prefix for proxying API calls to a remote host's
+ *  `ocode serve --remote` instance. Empty for local (no host); otherwise
+ *  `/api/remote/<encoded-host>` so the local server reverse-proxies the
+ *  request to the correct remote. The host string is URI-component-encoded
+ *  (e.g. `user@host` → `user%40host`, `wsl:Ubuntu` → `wsl%3AUbuntu`). */
+export function remoteApiBase(host?: string): string {
+  if (!host) return "";
+  return `/api/remote/${encodeURIComponent(host)}`;
+}
+
 /** Returns a WebSocket URL for the given API path, respecting the configured
  *  backend origin. Handles both same-origin (uses window.location.host) and
  *  absolute backendBase (derives host/protocol from the backend URL). */
@@ -365,11 +375,13 @@ export class ApiError extends Error {
   }
 }
 
-export async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
+export async function fetchJSON<T>(path: string, init?: RequestInit, host?: string, projectPath?: string): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
-  const res = await fetch(apiPath(path), { ...init, headers });
+  if (host && projectPath) headers.set("X-Ocode-Project", projectPath);
+  const prefixed = host ? `${remoteApiBase(host)}${path}` : path;
+  const res = await fetch(apiPath(prefixed), { ...init, headers });
   if (!res.ok) {
     reportAuthFailure(res.status);
     const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -488,31 +500,33 @@ export const api = {
       `/api/sessions${qs ? `?${qs}` : ""}`,
     );
   },
-  getSession: (id: string, opts?: { limit?: number; offset?: number }) => {
+  getSession: (id: string, opts?: { limit?: number; offset?: number }, host?: string) => {
     const params = new URLSearchParams();
     if (opts?.limit) params.set("limit", String(opts.limit));
     if (opts?.offset) params.set("offset", String(opts.offset));
     const qs = params.toString();
     return fetchJSON<SessionDetail>(
       `/api/sessions/${id}${qs ? `?${qs}` : ""}`,
+      undefined, host,
     );
   },
-  truncateSession: (id: string, keepUntil: number) =>
+  truncateSession: (id: string, keepUntil: number, host?: string) =>
     fetchJSON<SessionDetail>(`/api/sessions/${id}/truncate`, {
       method: "POST",
       body: JSON.stringify({ keepUntil }),
-    }),
-  listModels: (opts?: { provider?: string; refresh?: boolean }) => {
+    }, host),
+  listModels: (opts?: { provider?: string; refresh?: boolean }, host?: string) => {
     const params = new URLSearchParams();
     if (opts?.provider) params.set("provider", opts.provider);
     if (opts?.refresh) params.set("refresh", "true");
     const qs = params.toString();
-    return fetchJSON<ModelInfo[]>(`/api/models${qs ? `?${qs}` : ""}`);
+    return fetchJSON<ModelInfo[]>(`/api/models${qs ? `?${qs}` : ""}`, undefined, host);
   },
   listAgents: () => fetchJSON<AgentInfo[]>("/api/config/agents"),
-  listAgentRuns: (session?: string) =>
+  listAgentRuns: (session?: string, host?: string) =>
     fetchJSON<AgentRun[]>(
       `/api/agents/runs${session ? `?session=${encodeURIComponent(session)}` : ""}`,
+      undefined, host,
     ),
   getConfigModel: () =>
     fetchJSON<{ model: string; context_max_tokens?: number }>("/api/config/model"),
@@ -525,17 +539,19 @@ export const api = {
   // for one session only — persisted in its transcript metadata and reflected
   // in that session's status snapshot — without touching the global config
   // model or any other session.
-  setSessionModel: (sessionId: string, model: string) =>
+  setSessionModel: (sessionId: string, model: string, host?: string) =>
     fetchJSON<{ model: string; session_id: string }>(
       `/api/sessions/${sessionId}/model`,
       { method: "PUT", body: JSON.stringify({ model }) },
+      host,
     ),
   // Clears a session's per-session model override so it falls back to the
   // global config model.
-  clearSessionModel: (sessionId: string) =>
+  clearSessionModel: (sessionId: string, host?: string) =>
     fetchJSON<{ model: string; session_id: string }>(
       `/api/sessions/${sessionId}/model`,
       { method: "DELETE" },
+      host,
     ),
   // Add/remove a "provider/model" from the favorites list shared with the
   // TUI model picker (ctrl+f). Idempotent; responds with the full favorites
@@ -1040,7 +1056,7 @@ export const api = {
     fetchJSON<{ lsp_servers: LSPStatus[] }>("/api/lsp/statuses"),
   getModifiedFiles: () =>
     fetchJSON<{ modified_files: FileStatus[] }>("/api/files/modified"),
-  getSessionContext: (id: string) =>
+  getSessionContext: (id: string, host?: string) =>
     fetchJSON<{
       session_id: string;
       message_count: number;
@@ -1050,12 +1066,12 @@ export const api = {
       /** Full token-budget breakdown shared with the TUI's local /context.
        *  Present only when a live agent existed and was not mid-turn. */
       report?: ContextBudgetReport;
-    }>(`/api/sessions/${id}/context`),
+    }>(`/api/sessions/${id}/context`, undefined, host),
   // Reconcile endpoint (Parts 03–05): authoritative turn state + the bus seq
   // watermark. Reconcile = state fetch + transcript refetch, never event
   // replay. The watchdog and the reconnect path use this to clear a stuck
   // streaming spinner.
-  getSessionState: (id: string) =>
+  getSessionState: (id: string, host?: string) =>
     fetchJSON<{
       bootstrap_stage: string;
       turn_active: boolean;
@@ -1077,12 +1093,12 @@ export const api = {
           questions: import("../api/types").QuestionPrompt[];
         }[];
       };
-    }>(`/api/sessions/${id}/state`),
+    }>(`/api/sessions/${id}/state`, undefined, host),
   // Per-session status snapshot (Part 03): superset of /api/tui-status with
   // session_id populated and context_* included, so each tab renders its own
   // status without a TUI bridge.
-  getSessionStatus: (id: string) =>
-    fetchJSON<TUIStatus>(`/api/sessions/${id}/status`),
+  getSessionStatus: (id: string, host?: string) =>
+    fetchJSON<TUIStatus>(`/api/sessions/${id}/status`, undefined, host),
   getSmallModelWithEnabled: () =>
     fetchJSON<{ model: string; enabled: boolean; priority: string }>(
       "/api/config/small-model",
@@ -1128,7 +1144,7 @@ export const api = {
   // requests — a second session would just sit there doing nothing. The turn's
   // output arrives over the session mirror (see SessionTabSync), which is where
   // the UI renders it from anyway.
-  sendMessage: (sessionId: string, content: string) => {
+  sendMessage: (sessionId: string, content: string, host?: string) => {
     let windowId = ""
     try {
       windowId = new URLSearchParams(window.location.search).get("windowId")?.trim() || ""
@@ -1144,9 +1160,9 @@ export const api = {
       method: "POST",
       headers: windowId ? { "X-Window-Id": windowId } : undefined,
       body: JSON.stringify({ content, windowId, async: true }),
-    })
+    }, host)
   },
-  chat: (content: string, sessionId?: string, model?: string, requestId?: string, projectPath?: string) => {
+  chat: (content: string, sessionId?: string, model?: string, requestId?: string, projectPath?: string, host?: string) => {
     let windowId = ""
     try {
       windowId = new URLSearchParams(window.location.search).get("windowId")?.trim() || ""
@@ -1170,7 +1186,7 @@ export const api = {
         windowId,
         async: true,
       }),
-    })
+    }, host, projectPath)
   },
   // Run a shell command via POST /api/shell (the `!` prefix). `host` targets a
   // registered ocode Remote project: the server runs the command on that host
@@ -1223,7 +1239,9 @@ export const api = {
       { method: "DELETE" },
     ),
   listProjectSessions: (path: string, host?: string) =>
-    fetchJSON<SessionInfo[]>("/api/projects/sessions?path=" + encodeURIComponent(path) + (host ? "&host=" + encodeURIComponent(host) : "")),
+    fetchJSON<SessionInfo[]>(
+      `${remoteApiBase(host)}/api/projects/sessions?path=${encodeURIComponent(path)}`,
+    ),
   renameProject: (path: string, name: string, host?: string) =>
     fetchJSON<{ status: string }>("/api/projects/rename", {
       method: "POST",
@@ -1292,24 +1310,28 @@ export const api = {
       "/api/browse" + (path ? "?path=" + encodeURIComponent(path) : ""),
     ),
   // Session operations
-  compactSession: (id: string) =>
+  compactSession: (id: string, host?: string) =>
     fetchJSON<{ original_len: number; compacted_len: number }>(
       `/api/sessions/${encodeURIComponent(id)}/compact`, { method: "POST" },
+      host,
     ),
-  recapSession: (id: string) =>
+  recapSession: (id: string, host?: string) =>
     fetchJSON<{ recap: string }>(
       `/api/sessions/${encodeURIComponent(id)}/recap`,
+      undefined, host,
     ),
-  shareSession: (id: string) =>
+  shareSession: (id: string, host?: string) =>
     fetchJSON<{ markdown: string }>(
       `/api/sessions/${encodeURIComponent(id)}/share`,
+      undefined, host,
     ),
-  btwSession: (id: string, content: string) =>
+  btwSession: (id: string, content: string, host?: string) =>
     fetchJSON<{ status: string }>(
       `/api/sessions/${encodeURIComponent(id)}/btw`, {
         method: "POST",
         body: JSON.stringify({ content }),
       },
+      host,
     ),
 
   // Mask (secret redaction) config
@@ -1405,21 +1427,24 @@ export const api = {
     }),
 
   // ── Session title / export ──
-  setSessionTitle: (id: string, title: string) =>
+  setSessionTitle: (id: string, title: string, host?: string) =>
     fetchJSON<{ title: string }>(
       `/api/sessions/${encodeURIComponent(id)}/title`,
       { method: "PUT", body: JSON.stringify({ title }) },
+      host,
     ),
-  generateSessionTitle: (id: string) =>
+  generateSessionTitle: (id: string, host?: string) =>
     fetchJSON<{ title: string }>(
       `/api/sessions/${encodeURIComponent(id)}/title/generate`,
       { method: "POST" },
+      host,
     ),
   // The server returns raw markdown (text/markdown), not JSON, so this uses a
   // raw fetch and reads the body as text.
-  exportSessionMarkdown: async (id: string): Promise<string> => {
+  exportSessionMarkdown: async (id: string, host?: string): Promise<string> => {
+    const prefix = remoteApiBase(host);
     const res = await fetch(
-      apiPath(`/api/sessions/${encodeURIComponent(id)}/export`),
+      apiPath(`${prefix}/api/sessions/${encodeURIComponent(id)}/export`),
       { headers: authHeaders() },
     );
     if (!res.ok) {
@@ -1428,9 +1453,9 @@ export const api = {
     }
     return res.text();
   },
-  exportClaudeSession: (id: string) =>
+  exportClaudeSession: (id: string, host?: string) =>
     fetchJSON<{ path: string }>(
-      `/api/sessions/${encodeURIComponent(id)}/export-claude`,
+      `${remoteApiBase(host)}/api/sessions/${encodeURIComponent(id)}/export-claude`,
     ),
 
   // ── Usage ──
@@ -1595,6 +1620,7 @@ export const api = {
     requestId: string,
     sessionId: string | null,
     answers: import("./types").QuestionAnswerPayload[],
+    host?: string,
   ) =>
     fetchJSON<ChatResponse>("/api/questions", {
       method: "POST",
@@ -1603,7 +1629,7 @@ export const api = {
         session_id: sessionId ?? undefined,
         answers,
       }),
-    }),
+    }, host),
 
   // ── Agent permission prompts ──
   // Resolve a pending PERMISSION_ASK raised by the agent (headless serve mode).
@@ -1615,6 +1641,7 @@ export const api = {
     requestId: string,
     sessionId: string | null,
     decision: PermissionDecision,
+    host?: string,
   ) =>
     fetchJSON<ChatResponse>("/api/permissions/resolve", {
       method: "POST",
@@ -1623,7 +1650,7 @@ export const api = {
         session_id: sessionId ?? undefined,
         decision,
       }),
-    }),
+    }, host),
   // ── Changes tab (session file changes) ──
   listChanges: (session?: string) =>
     fetchJSON<FileChange[]>(
@@ -1679,17 +1706,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ job_id: jobId }),
     }),
-  cancelSession: (sessionId: string) =>
+  cancelSession: (sessionId: string, host?: string) =>
     fetchJSON<{ cancelled: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
       method: "POST",
-    }),
+    }, host),
   /** Terminate the backend for a closed session (web/desktop tab close):
    *  cancels in-flight work AND releases the resident agent. Fire-and-forget
    *  safe on idle sessions (server no-ops). */
-  closeSession: (sessionId: string) =>
+  closeSession: (sessionId: string, host?: string) =>
     fetchJSON<{ cancelled: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
       method: "POST",
-    }),
+    }, host),
   // Port forwards. With a target, these hit the project-scoped family served by
   // internal/server (`/api/portmaps?host=&project=`) so the panel follows the
   // active remote SSH project. Without one they hit the desktop

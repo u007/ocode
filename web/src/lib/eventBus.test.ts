@@ -47,6 +47,7 @@ interface FetchCall {
   headers: Headers;
   resolve: (res: Response) => void;
   reject: (err: unknown) => void;
+  aborted: boolean;
 }
 
 function envelopeFrame(event: string, seq: number, extra: Partial<BusEnvelope> = {}): string {
@@ -62,8 +63,12 @@ describe("eventBus", () => {
     const fetchMock = vi.fn((url: string, init?: RequestInit) => {
       return new Promise<Response>((resolve, reject) => {
         const headers = new Headers(init?.headers);
-        calls.push({ url, headers, resolve, reject });
-        init?.signal?.addEventListener("abort", () => reject(abortError()));
+        const call: FetchCall = { url, headers, resolve, reject, aborted: false };
+        calls.push(call);
+        init?.signal?.addEventListener("abort", () => {
+          call.aborted = true;
+          reject(abortError());
+        });
       });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -279,5 +284,135 @@ describe("eventBus", () => {
     expect(calls.length).toBe(2);
     await openWithStream(1);
     expect(reconnect).toHaveBeenCalledTimes(1);
+  });
+
+  // ── per-host streams: remote project sessions ───────────────────────────
+  // The SPA routes a remote session through /api/remote/{host}/api/*; the
+  // event bus is host-level, so it keeps one stream per host with an open tab
+  // (plus the local "" stream). All connections feed the same subscriber path.
+  it("setHosts opens one extra stream per remote host", async () => {
+    eventBus.on("text", () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.length).toBe(1);
+    expect(calls[0].url).toContain("/api/events");
+
+    eventBus.setHosts(["a"]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.length).toBe(2);
+    expect(calls[1].url).toContain("/api/remote/a/api/events");
+  });
+
+  it("holds one stream per host (local + each remote)", async () => {
+    eventBus.on("text", () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    eventBus.setHosts(["a", "b"]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.length).toBe(3);
+    expect(calls[0].url).toContain("/api/events");
+    expect(calls[1].url).toContain("/api/remote/a/api/events");
+    expect(calls[2].url).toContain("/api/remote/b/api/events");
+  });
+
+  it("setHosts([]) closes the remote streams and keeps the local one", async () => {
+    const onText = vi.fn();
+    eventBus.on("text", onText);
+    await vi.advanceTimersByTimeAsync(0);
+    eventBus.setHosts(["a"]);
+    await vi.advanceTimersByTimeAsync(0);
+    const local = await openWithStream(0);
+    await openWithStream(1);
+
+    eventBus.setHosts([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.length).toBe(2); // the removed host does not reconnect
+    expect(calls[1].aborted).toBe(true);
+    expect(calls[0].aborted).toBe(false);
+
+    // The local stream is untouched and still dispatches frames.
+    onText.mockClear();
+    local.push(envelopeFrame("text", 1, { session_id: "local-1" }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onText).toHaveBeenCalledTimes(1);
+    expect(onText.mock.calls[0][0]).toMatchObject({ session_id: "local-1" });
+
+    await vi.advanceTimersByTimeAsync(RECONNECT_MAX_MS);
+    expect(calls.length).toBe(2); // the aborted remote never retried
+  });
+
+  it("routes a frame from a remote host to the same subscriber path", async () => {
+    const onText = vi.fn();
+    eventBus.on("text", onText);
+    await vi.advanceTimersByTimeAsync(0);
+    eventBus.setHosts(["a"]);
+    await vi.advanceTimersByTimeAsync(0);
+    const local = await openWithStream(0);
+    const remote = await openWithStream(1);
+
+    local.push(envelopeFrame("text", 1, { session_id: "local" }));
+    remote.push(envelopeFrame("text", 1, { session_id: "s1", data: { delta: "from-a" } }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onText).toHaveBeenCalledTimes(2);
+    expect(onText.mock.calls[1][0]).toMatchObject({
+      event: "text",
+      session_id: "s1",
+      data: { delta: "from-a" },
+    });
+  });
+
+  it("keeps reconnect back-off independent per host (removing a host leaves local alone)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    eventBus.on("text", () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    eventBus.setHosts(["a"]);
+    await vi.advanceTimersByTimeAsync(0);
+    const local = await openWithStream(0);
+    await openWithStream(1);
+
+    // Local drops → reconnect scheduled at 1x and local back-off doubles to 2x.
+    local.fail(new Error("drop"));
+    // Removing host `a` aborts only its stream; local's pending back-off stays.
+    eventBus.setHosts([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls[1].aborted).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(RECONNECT_BASE_MS);
+    expect(calls.length).toBe(3); // local reconnects at 1x
+    calls[2].resolve(new Response(null, { status: 401 })); // ...and fails again
+    await vi.advanceTimersByTimeAsync(0);
+
+    // 2x, not reset to 1x by the host removal.
+    await vi.advanceTimersByTimeAsync(RECONNECT_BASE_MS * 2 - 1);
+    expect(calls.length).toBe(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls.length).toBe(4);
+    errSpy.mockRestore();
+  });
+
+  it("setHosts with an unchanged host set does not restart streams", async () => {
+    eventBus.on("text", () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    eventBus.setHosts(["a", "b"]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.length).toBe(3);
+    eventBus.setHosts(["b", "a"]); // same set, different order — no restart
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.length).toBe(3);
+  });
+
+  it("stop() closes every connection (local and remote hosts)", async () => {
+    eventBus.on("text", () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    eventBus.setHosts(["a", "b"]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.length).toBe(3);
+    await openWithStream(0);
+    await openWithStream(1);
+    await openWithStream(2);
+
+    eventBus.stop();
+    await vi.advanceTimersByTimeAsync(RECONNECT_MAX_MS);
+    expect(calls.length).toBe(3); // no reconnect from any connection
+    expect(calls.every((c) => c.aborted)).toBe(true);
   });
 });

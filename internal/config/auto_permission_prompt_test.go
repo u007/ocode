@@ -302,6 +302,30 @@ func TestBundledAutoPermissionPrompt_GitConfigBoundary(t *testing.T) {
 	}
 }
 
+// TestBundledAutoPermissionPrompt_ControlFlow pins the judge-facing rule for
+// shell control-flow constructs (for/select/while/until/if/case). The keyword
+// and its header words (loop variable, "in", iteration list, case subject,
+// pattern label) are syntax, not commands; the judge must decide on the
+// commands the construct runs. Before this rule, an ordinary numeric loop was
+// described to the judge as `Execute 'for' (unknown command)` with no
+// governing rule, and a cautious judge would deny or ask.
+func TestBundledAutoPermissionPrompt_ControlFlow(t *testing.T) {
+	for _, want := range []string{
+		"Shell control-flow constructs",
+		"syntax, not executables",
+		"never deny merely because the first word is a",
+		"control-flow keyword",
+		"case pattern label",
+		"ALLOW when every command it runs would be ALLOWED on its own",
+		"exfiltrates data",
+		"for i in 1 2 3; do echo $i; done",
+	} {
+		if !strings.Contains(BundledAutoPermissionPromptBody, want) {
+			t.Fatalf("bundled auto-permission prompt missing %q", want)
+		}
+	}
+}
+
 func TestAutoPermissionPromptAdvisory(t *testing.T) {
 	// Missing/UpToDate: no note — the first serves the always-current embedded
 	// body, the second the identical installed body.

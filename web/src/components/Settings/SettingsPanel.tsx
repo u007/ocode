@@ -8,6 +8,7 @@ import SecurityForm from "./SecurityForm";
 import TerminalForm from "./TerminalForm";
 import LogsForm from "./LogsForm";
 import OcrForm from "./OcrForm";
+import ComputerUseForm from "./ComputerUseForm";
 import DiscoveryForm from "./DiscoveryForm";
 import TUIForm from "./TUIForm";
 import EditorModeForm from "./EditorModeForm";
@@ -40,6 +41,7 @@ export type SettingsGroupId =
   | "terminal"
   | "logs"
   | "ocr"
+  | "computer-use"
   | "discovery"
   | "tui"
   | "editor"
@@ -73,6 +75,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "terminal", label: "Terminal" },
   { id: "logs", label: "Logs" },
   { id: "ocr", label: "OCR" },
+  { id: "computer-use", label: "Computer Use" },
   { id: "discovery", label: "Discovery" },
   { id: "tui", label: "TUI" },
   { id: "editor", label: "Editor Mode" },
@@ -123,6 +126,8 @@ function renderGroup(id: SettingsGroupId) {
       return <LogsForm />;
     case "ocr":
       return <OcrForm />;
+    case "computer-use":
+      return <ComputerUseForm />;
     case "discovery":
       return <DiscoveryForm />;
     case "tui":

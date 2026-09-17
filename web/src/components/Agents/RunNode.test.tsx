@@ -110,6 +110,40 @@ describe("RunNode", () => {
     expect(badge).toHaveAttribute("title", expect.stringContaining("missing file list"));
   });
 
+  it("badges a failed verification as 'not verified', not as a contract failure", () => {
+    const contractUnverified: AgentRun = {
+      ...baseRun,
+      contract: {
+        checked: true,
+        satisfied: false,
+        checkFailed: true,
+        deficiency: "verification failed: timed out",
+      },
+    };
+    render(<RunNode run={contractUnverified} depth={0} />);
+    const badge = screen.getByText("contract ?");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveAttribute("title", expect.stringContaining("not verified"));
+    expect(screen.queryByText("contract ✗")).not.toBeInTheDocument();
+  });
+
+  it("labels a timed-out verification as a timeout, not a generic failure", () => {
+    const contractTimeout: AgentRun = {
+      ...baseRun,
+      contract: {
+        checked: true,
+        satisfied: false,
+        checkFailed: true,
+        timedOut: true,
+        deficiency: "timed out after 5m0s (Agent.RequestTimeout)",
+      },
+    };
+    render(<RunNode run={contractTimeout} depth={0} />);
+    const badge = screen.getByText("contract ?");
+    expect(badge).toHaveAttribute("title", expect.stringContaining("timed out"));
+    expect(screen.queryByText("contract ✗")).not.toBeInTheDocument();
+  });
+
   it("shows no contract badge when the contract was satisfied", () => {
     const contractOK: AgentRun = {
       ...baseRun,

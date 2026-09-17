@@ -34,6 +34,14 @@ const (
 	modelsCacheFile     = "models.json"
 	envModelsPath       = "OPENCODE_MODELS_PATH"
 	orcaRouterModelsURL = "https://api.orcarouter.ai/v1/models"
+
+	// modelsDevNpmAnthropic is the models.dev `provider.npm` value declaring
+	// the Anthropic Messages protocol. Upstream OpenCode selects the transport
+	// from this field per model (packages/core/src/session/runner/model.ts:
+	// `api.package === "@ai-sdk/anthropic"` -> AnthropicMessages.route); ocode
+	// consults it for the opencode/opencode-go routes, whose per-model protocol
+	// is not uniform.
+	modelsDevNpmAnthropic = "@ai-sdk/anthropic"
 )
 
 // registryLockWait bounds how long a registry load waits on the cross-process
@@ -66,21 +74,31 @@ type modelModalities struct {
 	Output []string `json:"output"`
 }
 
+// modelProviderMeta is the models.dev per-model `provider` object. Its `npm`
+// field names the SDK package that serves the model (e.g.
+// "@ai-sdk/anthropic", "@ai-sdk/openai") and is the canonical protocol
+// declaration upstream OpenCode routes on. Kept deliberately minimal — ocode
+// only needs the protocol hint, not the rest of the object.
+type modelProviderMeta struct {
+	Npm string `json:"npm,omitempty"`
+}
+
 type modelEntry struct {
-	ID          string          `json:"id"`
-	Name        string          `json:"name"`
-	Family      string          `json:"family"`
-	Attachment  bool            `json:"attachment"`
-	Reasoning   bool            `json:"reasoning"`
-	ToolCall    bool            `json:"tool_call"`
-	Temperature bool            `json:"temperature"`
-	Knowledge   string          `json:"knowledge"`
-	ReleaseDate string          `json:"release_date"`
-	LastUpdated string          `json:"last_updated"`
-	OpenWeights bool            `json:"open_weights"`
-	Modalities  modelModalities `json:"modalities"`
-	Limit       modelLimit      `json:"limit"`
-	Cost        modelCost       `json:"cost"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Family      string            `json:"family"`
+	Attachment  bool              `json:"attachment"`
+	Reasoning   bool              `json:"reasoning"`
+	ToolCall    bool              `json:"tool_call"`
+	Temperature bool              `json:"temperature"`
+	Knowledge   string            `json:"knowledge"`
+	ReleaseDate string            `json:"release_date"`
+	LastUpdated string            `json:"last_updated"`
+	OpenWeights bool              `json:"open_weights"`
+	Modalities  modelModalities   `json:"modalities"`
+	Limit       modelLimit        `json:"limit"`
+	Cost        modelCost         `json:"cost"`
+	Provider    modelProviderMeta `json:"provider,omitempty"`
 }
 
 func init() {
@@ -707,6 +725,31 @@ func registrySnapshotIfReady() map[string]providerEntry {
 		return nil
 	}
 	return registry.data
+}
+
+// ModelAPIPackageFromRegistry returns the models.dev `provider.npm` SDK package
+// declared for a model — the canonical protocol hint upstream OpenCode routes
+// on (e.g. "@ai-sdk/anthropic" means the Anthropic Messages API). The bool is
+// false when the registry is not loaded/fresh, the provider/model is unknown,
+// or models.dev carries no declaration for it.
+//
+// Non-blocking: it reads the in-memory snapshot and never triggers a
+// models.dev fetch, so it is safe to call from the per-request routing path
+// (see modelSupportsThinkingFromRegistry for the same pattern).
+func ModelAPIPackageFromRegistry(provider, model string) (string, bool) {
+	data := registrySnapshotIfReady()
+	if data == nil {
+		return "", false
+	}
+	entry, ok := data[provider]
+	if !ok {
+		return "", false
+	}
+	m, ok := entry.Models[model]
+	if !ok || m.Provider.Npm == "" {
+		return "", false
+	}
+	return m.Provider.Npm, true
 }
 
 // RegistryReady reports whether the models.dev registry has been loaded and is

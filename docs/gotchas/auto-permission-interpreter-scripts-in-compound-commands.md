@@ -1,15 +1,23 @@
 ---
 type: Gotcha
 title: 'Auto-Permission — Interpreter Scripts in Compound Commands'
-description: 'Auto-permission custom-script detection must cover interpreter and runner forms (python x.py, node x.js, bun run x.ts, uv run x.py, npx tsx x.ts); the structured interpreter path only sees the FIRST command, so compound commands otherwise reach the generic LLM path with no script content and no truncation guard.'
+description: 'Auto-permission custom-script detection must cover interpreter and runner forms; the structured interpreter path only sees the FIRST command, so compound commands otherwise reach the generic LLM path with no script content and no truncation guard.'
 tags:
   - security
   - permissions
   - auto-permission
   - interpreter
   - gotcha
-timestamp: 2026-08-31T05:00:00Z
+timestamp: 2026-09-17T06:16:59Z
 ---
+# Auto-Permission — Interpreter Scripts in Compound Commands
+
+**Type:** Gotcha  
+**Description:** Auto-permission custom-script detection must cover interpreter and runner forms (python x.py, node x.js, bun run x.ts, uv run x.py, npx tsx x.ts); the structured interpreter path only sees the FIRST command, so compound commands otherwise reach the generic LLM path with no script content and no truncation guard.  
+**Tags:** security, permissions, auto-permission, interpreter, gotcha  
+
+---
+
 ## The Problem
 
 Bash auto-permission has two LLM paths:
@@ -43,3 +51,7 @@ Because both `buildPermissionContext` and `verifyAutoGrant` consume `detectExecu
 - Never assume the structured interpreter path covers a form; it only sees the first command. Any new "execute a local file" syntax must be added to `detectExecutedCustomScripts` too.
 - Keep `interpreterScriptEntrypoint` and `classifyInterpreterExecution` in agreement — tests in `custom_script_test.go` (`TestDetectExecutedCustomScripts`, `TestVerifyAutoGrantDeniesTruncatedInterpreterScript`) pin the shared rules.
 - `cd` is not tracked: relative paths resolve against the agent's cwd, not the post-`cd` directory (pre-existing behaviour, applies to shell wrappers too).
+
+## Related
+
+- [Bash Control-Flow Loops Are Not Commands](bash-control-flow-loops-are-not-commands.md) — control-flow keywords (`for`/`while`/`case`/`select`) leaking as command prefixes in `parseShellCommandLine`, causing benign loops to be refused by the LLM judge.

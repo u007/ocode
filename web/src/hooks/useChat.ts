@@ -7,7 +7,7 @@ import {
 } from "../stores/chatStore";
 import { useProjectState, findProjectPathForTab } from "../stores/projectStore";
 import { api, ApiError } from "../api/client";
-import { getTrustedTerminalProject } from "../lib/trustedProject";
+import { resolveSessionHost } from "./useSessionHost";
 import type { PermissionDecision, QuestionAnswerPayload } from "../api/types";
 import type { PermissionDecideResult } from "../components/Chat/PermissionDialog";
 
@@ -45,9 +45,6 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   const pendingQuestion = useChatSelector(
     (s) => getSessionSlice(s, sessionId).pendingQuestion,
   );
-  const projectPath = sessionId
-    ? findProjectPathForTab(projectState, sessionId) ?? projectState.activeProject?.path
-    : projectState.activeProject?.path;
   // The SSH/WSL host for that path (undefined for a local project). A `!`
   // command must run on the machine that owns the project — sending it to a
   // remote host is what keeps the shell resolved there instead of the local
@@ -56,8 +53,11 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   // registered for both a local and a remote project is ambiguous, and
   // picking whichever entry sorts first would run the command on the wrong
   // machine, so an ambiguous path sends no host (the server runs it locally).
-  const trusted = projectPath ? getTrustedTerminalProject(projectState.projects, projectPath) : { known: false as const };
-  const projectHost = trusted.known ? trusted.host : undefined;
+  // useChat falls back to the active project for brand-new draft tabs.
+  const projectHost = resolveSessionHost(projectState, sessionId ?? undefined, { fallbackToActive: true });
+  const projectPath = sessionId
+    ? findProjectPathForTab(projectState, sessionId) ?? projectState.activeProject?.path
+    : projectState.activeProject?.path;
 
   // Recover the pending ask when a send is refused because the session is
   // already paused on one (HTTP 409 ErrPermissionPending). The live
@@ -70,7 +70,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   const hydratePendingAsks = useCallback(async () => {
     if (!sessionId || sessionId.startsWith("new-")) return;
     try {
-      const state = await api.getSessionState(sessionId);
+      const state = await api.getSessionState(sessionId, projectHost);
       for (const permission of state.pending_asks?.permissions ?? []) {
         dispatch({ type: "PERMISSION_REQUEST", sessionId, permission });
       }
@@ -80,7 +80,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     } catch (err) {
       console.warn("failed to recover pending permission ask", err);
     }
-  }, [sessionId, dispatch]);
+  }, [sessionId, dispatch, projectHost]);
 
   // Submit is fire-and-forget: the message is forwarded to the TUI's agent and
   // ALL rendering (the user echo, live thinking/text tokens, tool activity, and
@@ -118,8 +118,8 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       // the model does not have to be a reactive render dependency.
       const model = getSessionSlice(stateRef.current, sessionId).model;
       const submitPromise = isRealSession
-        ? api.sendMessage(sessionId, content)
-        : api.chat(content, undefined, model, sessionId, projectPath).then((res) => {
+        ? api.sendMessage(sessionId, content, projectHost)
+        : api.chat(content, undefined, model, sessionId, projectPath, projectHost).then((res) => {
             options?.onNewSession?.(res.sessionId);
             return res;
           });
@@ -149,7 +149,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
           return false;
         });
     },
-    [sessionId, dispatch, projectPath, options?.onNewSession, stateRef, hydratePendingAsks],
+    [sessionId, dispatch, projectPath, projectHost, options?.onNewSession, stateRef, hydratePendingAsks],
   );
 
   // Stop: optimistically clears local streaming state and queues, then asks
@@ -164,11 +164,11 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     // Don't block UI on the cancel RPC; fire and forget. If the session is
     // a temp `new-*` id with no server session yet, skip the call.
     if (!sessionId.startsWith("new-")) {
-      api.cancelSession(sessionId).catch((err) => {
+      api.cancelSession(sessionId, projectHost).catch((err) => {
         console.warn("cancel session failed", err);
       });
     }
-  }, [dispatch, sessionId]);
+  }, [dispatch, sessionId, projectHost]);
 
   const resume = useCallback(() => {
     if (!sessionId) return;
@@ -190,7 +190,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     async (requestId: string, decision: PermissionDecision): Promise<PermissionDecideResult> => {
       if (!sessionId) return { ok: false, error: "no active session" };
       try {
-        await api.resolvePermission(requestId, sessionId, decision);
+        await api.resolvePermission(requestId, sessionId, decision, projectHost);
         dispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId });
         return { ok: true };
       } catch (err) {
@@ -204,7 +204,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
         return { ok: false, error: message };
       }
     },
-    [dispatch, sessionId],
+    [dispatch, sessionId, projectHost],
   );
 
   // Submit answers to a pending agent question prompt. Mirrors the TUI's
@@ -214,7 +214,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     async (requestId: string, answers: QuestionAnswerPayload[]) => {
       if (!sessionId) return false;
       try {
-        await api.answerQuestion(requestId, sessionId, answers);
+        await api.answerQuestion(requestId, sessionId, answers, projectHost);
         dispatch({ type: "QUESTION_RESOLVED", sessionId });
         return true;
       } catch (err) {
@@ -227,7 +227,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
         return false;
       }
     },
-    [dispatch, sessionId],
+    [dispatch, sessionId, projectHost],
   );
 
   // Execute a shell command directly (for ! prefix commands). A remote

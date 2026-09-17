@@ -70,6 +70,9 @@ func TestNewRCPermissionEventPropagatesDecisionMetadata(t *testing.T) {
 	}
 
 	ev := newRCPermissionEvent("call-1", req)
+	if string(ev.Args) != string(req.Args) {
+		t.Fatalf("RC permission event lost execution args: %s", ev.Args)
+	}
 	if ev.RequestID != "call-1" || ev.Tool != req.ToolName {
 		t.Fatalf("event identity mismatch: %+v", ev)
 	}

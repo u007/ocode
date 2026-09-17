@@ -84,6 +84,16 @@ export function previewKindForPath(path: string): PreviewKind | null {
 const PREVIEW_ONLY_KINDS: ReadonlySet<PreviewKind> = new Set(["pdf", "docx", "pptx", "excel", "image", "audio", "video"]);
 
 /**
+ * True for a Markdown document (`.md` / `.markdown`). Markdown is NOT
+ * preview-only — it stays editable in Monaco — but the Files tab gives it an
+ * Edit/Preview/Split mode switch (default: Edit) because a rendered preview is
+ * useful alongside the source. See `FileTabContent`.
+ */
+export function isMarkdownPath(path: string): boolean {
+  return previewKindForPath(path) === "markdown";
+}
+
+/**
  * PreviewSurface kind for a path the Files-tab editor must NOT open in Monaco,
  * or null when the path is text-like (or not previewable). Callers use this to
  * auto-default PDFs, Office documents, and media to a preview.

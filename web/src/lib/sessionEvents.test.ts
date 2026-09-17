@@ -465,7 +465,7 @@ describe("closeSessionBackend", () => {
 
   it("calls the backend close endpoint for a real session id", () => {
     closeSessionBackend("sess-123");
-    expect(mockCloseSession).toHaveBeenCalledWith("sess-123");
+    expect(mockCloseSession).toHaveBeenCalledWith("sess-123", undefined);
   });
 
   it("skips new-* draft tabs that have no server session yet", () => {
@@ -476,7 +476,7 @@ describe("closeSessionBackend", () => {
   it("skips empty ids and swallows backend failures (fire-and-forget)", () => {
     mockCloseSession.mockRejectedValue(new Error("boom"));
     closeSessionBackend("sess-123");
-    expect(mockCloseSession).toHaveBeenCalledWith("sess-123");
+    expect(mockCloseSession).toHaveBeenCalledWith("sess-123", undefined);
   });
 });
 
@@ -786,5 +786,59 @@ describe("browse_newtab routing", () => {
     expect(browserStore.state.byKey).toEqual({});
     expect(onNewTab).not.toHaveBeenCalled();
     error.mockRestore();
+  });
+});
+
+describe("pending-ask recovery from the live error frame", () => {
+  beforeEach(() => {
+    mockGetSessionState.mockReset();
+    mockGetSession.mockReset();
+  });
+
+  // The web client always sends async:true, so a send refused because the
+  // session is paused on a permission ask resolves 202; runTurn's refusal
+  // arrives later as turn_error. Without this hydration the user sees only the
+  // error text and no dialog on a session whose ask event was missed.
+  const PENDING_MSG =
+    "a permission decision is pending for this session; resolve it before sending a new message";
+
+  it("hydrates the permission dialog when turn_error reports a pending ask", async () => {
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 1,
+      pending_asks: {
+        permissions: [{ request_id: "call-1", tool: "bash", command: "rm -rf build" }],
+      },
+    });
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("turn_error", { data: { error: PENDING_MSG } }), router);
+
+    await vi.waitFor(() => {
+      expect(getState().sessions["s1"].pendingPermission?.request_id).toBe("call-1");
+    });
+    expect(mockGetSessionState).toHaveBeenCalledWith("s1");
+  });
+
+  it("hydrates from the legacy error frame too", async () => {
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 1,
+      pending_asks: { questions: [{ request_id: "q-1", questions: [] }] },
+    });
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("error", { data: { error: PENDING_MSG } }), router);
+
+    await vi.waitFor(() => {
+      expect(getState().sessions["s1"].pendingQuestion?.request_id).toBe("q-1");
+    });
+  });
+
+  it("does not fetch session state for an unrelated turn_error", async () => {
+    const { router } = makeRouter(["s1"]);
+    routeBusEnvelope(env("turn_error", { data: { error: "agent error: upstream" } }), router);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockGetSessionState).not.toHaveBeenCalled();
   });
 });

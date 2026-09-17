@@ -39,29 +39,79 @@ type pythonSpec struct {
 
 var pythonVersionRE = regexp.MustCompile(`Python (\d+)\.(\d+)`)
 
-// findPython returns the first interpreter on this host that satisfies
-// rt.MinPython. Candidates are probed in order; the first that runs and
-// reports a new enough version wins. Every candidate is version-checked, so a
-// too-old python3 on PATH never silently wins over a newer install.
-func findPython(ctx context.Context, rt PythonRuntime) (pythonSpec, error) {
-	var candidates [][]string
+// pythonScanWindow bounds how far above MinPython an unbounded runtime probes
+// for versioned interpreter names (all shipped runtimes set MaxPython; this
+// only keeps a future manifest without a ceiling from degenerating).
+const pythonScanWindow = 8
+
+// pythonMinorRange returns the minor versions to probe for a runtime, newest
+// first, so the newest supported interpreter wins.
+func pythonMinorRange(rt PythonRuntime) []int {
+	hi := rt.MinPython[1] + pythonScanWindow
+	if rt.MaxPython != [2]int{} {
+		hi = rt.MaxPython[1]
+	}
+	var minors []int
+	for m := hi; m >= rt.MinPython[1]; m-- {
+		minors = append(minors, m)
+	}
+	return minors
+}
+
+// pythonCandidates lists the interpreter argv prefixes to probe on this host,
+// in preference order: newest supported minor first, then the unversioned
+// names. Versioned names are deliberately probed because a too-new python3 is
+// usually what PATH resolves and a user following the install error's advice
+// (`brew install python@3.13`) ends up with a versioned binary that is NOT
+// reachable as `python3`. Every candidate is version-checked by selectPython,
+// so a too-old or too-new python3 never silently wins.
+func pythonCandidates(rt PythonRuntime) [][]string {
+	minors := pythonMinorRange(rt)
 	if runtime.GOOS == "windows" {
-		candidates = [][]string{{"py", "-3"}, {"python"}, {"python3"}}
-	} else {
-		candidates = [][]string{{"python3"}, {"python"}}
-		for _, dir := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"} {
-			candidates = append(candidates, []string{filepath.Join(dir, "python3")})
+		// The py launcher resolves the newest install for a bare `-3`, so pin
+		// the range's minors explicitly and newest-first.
+		var candidates [][]string
+		for _, m := range minors {
+			candidates = append(candidates, []string{"py", "-3." + strconv.Itoa(m)})
 		}
-		if home, err := os.UserHomeDir(); err == nil {
-			candidates = append(candidates, []string{filepath.Join(home, ".pyenv", "shims", "python3")})
+		return append(candidates, []string{"py", "-3"}, []string{"python"}, []string{"python3"})
+	}
+	var candidates [][]string
+	for _, m := range minors {
+		candidates = append(candidates, []string{"python3." + strconv.Itoa(m)})
+	}
+	candidates = append(candidates, []string{"python3"}, []string{"python"})
+	for _, dir := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"} {
+		for _, m := range minors {
+			candidates = append(candidates, []string{filepath.Join(dir, "python3."+strconv.Itoa(m))})
 		}
-		if runtime.GOOS == "darwin" {
-			matches, _ := filepath.Glob("/Library/Frameworks/Python.framework/Versions/3.*/bin/python3")
-			for _, m := range matches {
-				candidates = append(candidates, []string{m})
+		candidates = append(candidates, []string{filepath.Join(dir, "python3")})
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, m := range minors {
+			candidates = append(candidates, []string{filepath.Join(home, ".pyenv", "shims", "python3."+strconv.Itoa(m))})
+		}
+		candidates = append(candidates, []string{filepath.Join(home, ".pyenv", "shims", "python3")})
+	}
+	if runtime.GOOS == "darwin" {
+		for _, m := range minors {
+			matches, _ := filepath.Glob(fmt.Sprintf("/Library/Frameworks/Python.framework/Versions/3.%d/bin/python3", m))
+			for _, match := range matches {
+				candidates = append(candidates, []string{match})
 			}
 		}
 	}
+	return candidates
+}
+
+// selectPython probes candidates in order and returns the first interpreter
+// whose version falls inside rt's inclusive MinPython/MaxPython range. The
+// upper bound matters as much as the lower one: pip resolves the pinned
+// requirement set against the venv's own interpreter, so a python3 newer than
+// the pinned packages publish wheels for fails the whole install instead of
+// degrading. Candidates outside the range are recorded in the error so a user
+// whose only python3 is, say, 3.14 sees why it was rejected.
+func selectPython(ctx context.Context, rt PythonRuntime, candidates [][]string) (pythonSpec, error) {
 	var tried []string
 	for _, argv := range candidates {
 		bin, err := exec.LookPath(argv[0])
@@ -81,12 +131,20 @@ func findPython(ctx context.Context, rt PythonRuntime) (pythonSpec, error) {
 		}
 		major, _ := strconv.Atoi(string(m[1]))
 		minor, _ := strconv.Atoi(string(m[2]))
-		if major > rt.MinPython[0] || (major == rt.MinPython[0] && minor >= rt.MinPython[1]) {
-			return pythonSpec{Command: append([]string{bin}, argv[1:]...), Version: [2]int{major, minor}}, nil
+		version := [2]int{major, minor}
+		if !rt.accepts(version) {
+			tried = append(tried, fmt.Sprintf("%s (%d.%d)", strings.Join(argv, " "), major, minor))
+			continue
 		}
-		tried = append(tried, fmt.Sprintf("%s (%d.%d)", strings.Join(argv, " "), major, minor))
+		return pythonSpec{Command: append([]string{bin}, argv[1:]...), Version: version}, nil
 	}
-	return pythonSpec{}, fmt.Errorf("no Python >= %d.%d found (tried: %s)", rt.MinPython[0], rt.MinPython[1], strings.Join(tried, ", "))
+	return pythonSpec{}, fmt.Errorf("no Python %s found (tried: %s)", rt.pythonRange(), strings.Join(tried, ", "))
+}
+
+// findPython returns the newest interpreter on this host inside the runtime's
+// supported range.
+func findPython(ctx context.Context, rt PythonRuntime) (pythonSpec, error) {
+	return selectPython(ctx, rt, pythonCandidates(rt))
 }
 
 func venvPython(venv string) string {
@@ -168,7 +226,7 @@ func (p *piperInstaller) Install(ctx context.Context) error {
 	p.progress(60, stepName)
 	pipArgs := append([]string{"-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--quiet"}, rt.Requirements...)
 	if out, err := runCmd(ctx, []string{venvPython(venv)}, pipArgs...); err != nil {
-		return fmt.Errorf("pip install: %w: %s", err, out)
+		return fmt.Errorf("pip install: %w: %s", err, pipResolutionHint(out, py, rt))
 	}
 	p.progress(92, "verifying runtime")
 	importCheck := "import kokoro_onnx, onnxruntime"
@@ -314,6 +372,33 @@ func runCmd(ctx context.Context, argv []string, args ...string) (string, error) 
 	cmd := exec.CommandContext(ctx, argv[0], append(append([]string{}, argv[1:]...), args...)...)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// pipResolutionHint explains an interpreter-mismatch resolver failure in terms
+// the user can act on. pip reports a too-new interpreter only as a wall of
+// "Ignored the following versions that require a different python version" /
+// "No matching distribution found" lines, which reads like a missing package
+// rather than a host that has no interpreter in the pinned range. Only the
+// interpreter-mismatch case is annotated; any other pip failure (network, disk,
+// wheel build) is returned untouched so the real cause stays legible.
+func pipResolutionHint(pipOut string, py pythonSpec, rt PythonRuntime) string {
+	detail := pipOut
+	if !strings.Contains(pipOut, "requires a different python version") &&
+		!strings.Contains(pipOut, "No matching distribution found") {
+		return detail
+	}
+	selected := fmt.Sprintf("%d.%d", py.Version[0], py.Version[1])
+	return detail + fmt.Sprintf("\n\nthis host's selected interpreter is Python %s, but the pinned packages support Python %s; install a Python in that range (e.g. `brew install python@%d`) and retry",
+		selected, rt.pythonRange(), chooseSuggestedMinor(rt))
+}
+
+// chooseSuggestedMinor picks the newest minor version in rt's range for the
+// actionable "install this" hint, falling back to the minimum when unbounded.
+func chooseSuggestedMinor(rt PythonRuntime) int {
+	if rt.MaxPython != [2]int{} {
+		return rt.MaxPython[1]
+	}
+	return rt.MinPython[1]
 }
 
 // piperSynth runs one synthesis under the shared process supervisor. It

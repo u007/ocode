@@ -28,6 +28,7 @@ import type { FocusedKind } from "../../lib/viewPersistence";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
 import { cancelLiveDeltas, closeSessionBackend } from "../../lib/sessionEvents";
+import { resolveSessionHost } from "../../hooks/useSessionHost";
 import { prefetchSession } from "../../lib/sessionPrefetch";
 import { api } from "../../api/client";
 import { loadTabOrder, saveTabOrder, reconcileTabOrder, type UnifiedTabKey } from "./tabOrderPersistence";
@@ -63,7 +64,6 @@ interface ChatDerived {
   hasPending: boolean;
   displayTitle: string;
 }
-
 function chatDerivedEqual(a: ChatDerived[], b: ChatDerived[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
@@ -428,12 +428,12 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   const [pendingClose, setPendingClose] = useState<PendingTabClose>(null);
 
   const doCloseChat = useCallback((id: string) => {
-    closeSessionBackend(id);
+    closeSessionBackend(id, resolveSessionHost(projectState, id));
     cancelLiveDeltas(id);
     chatDispatch({ type: "RESET", sessionId: id });
     closeSessionTab(id);
     clearQueue(id);
-  }, [closeSessionTab, chatDispatch]);
+  }, [closeSessionTab, chatDispatch, projectState]);
 
   const doCloseBrowser = useCallback((id: string) => {
     closeBrowserTab(id);
@@ -528,7 +528,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     if (target.kind === "chat") {
       projectDispatch({ type: "UPDATE_TAB_TITLE", id: target.id, title, manual: true });
       if (!target.id.startsWith("new-")) {
-        api.setSessionTitle(target.id, title).catch((err) => {
+        api.setSessionTitle(target.id, title, resolveSessionHost(projectState, target.id)).catch((err) => {
           console.error("failed to save renamed tab title", err);
         });
       }
@@ -537,7 +537,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     } else {
       renameTerminal(activeProjectPath, target.id, title);
     }
-  }, [editing, editValue, projectDispatch, renameTerminal, renameBrowserTab, activeProjectPath]);
+  }, [editing, editValue, projectDispatch, projectState, renameTerminal, renameBrowserTab, activeProjectPath]);
 
   const handleNewChat = useCallback(() => {
     onFocusKindChange("chat");

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/u007/ocode/internal/changes"
 	"github.com/u007/ocode/internal/computer"
@@ -3302,6 +3303,44 @@ func autoPermissionAddendum() (string, error) {
 	return addendum, nil
 }
 
+// permissionArgBudget is the maximum size of the tool arguments rendered into
+// the auto-permission judge prompt. It bounds the prompt while leaving room for
+// a realistic multi-line shell script (a few KB) — the previous 500-byte cap
+// cut long commands off before the judge could see the tail that decides
+// safety. Arguments over budget are shown truncated AND cannot be auto-granted
+// (verifyAutoGrant), so a partial view never becomes a silent approval.
+const permissionArgBudget = 8192
+
+// permissionArgsPayload renders the tool arguments shown to the judge under the
+// "Arguments:" heading, and reports whether they exceeded permissionArgBudget.
+//
+// Bash is rendered as the command itself — real newlines, no JSON escaping.
+// The escaped form inflates the size (each newline costs two bytes as `\n`,
+// each quote two as `\"`) and hides the line structure a reviewer reads, so a
+// loop could be cut off well before the budget in command terms. Every other
+// tool renders its raw JSON arguments.
+//
+// Truncation is on a rune boundary so a multi-byte character is never split.
+func permissionArgsPayload(toolName string, args json.RawMessage) (payload string, truncated bool) {
+	payload = string(args)
+	if toolName == "bash" {
+		var p struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(args, &p); err == nil && p.Command != "" {
+			payload = p.Command
+		}
+	}
+	if len(payload) <= permissionArgBudget {
+		return payload, false
+	}
+	cut := permissionArgBudget
+	for cut > 0 && !utf8.RuneStart(payload[cut]) {
+		cut--
+	}
+	return payload[:cut] + "\n...(truncated)", true
+}
+
 // askPermissionModel consults the LLM permission judge for a single request.
 // The LLM is given a read_file tool so it can explore the codebase before
 // deciding. The tool call loop is capped at maxToolCalls to prevent abuse.
@@ -3356,11 +3395,10 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 	// Build initial context snapshot.
 	context := a.buildPermissionContext(toolName, args, maxCtxBytes, maxSources, maxLinesPerSource)
 
-	// Build the prompt.
-	toolArgs := string(args)
-	if len(toolArgs) > 500 {
-		toolArgs = toolArgs[:500] + "...(truncated)"
-	}
+	// Build the prompt. Bash is rendered as the command itself (real newlines,
+	// no JSON escaping): the escaped form inflates the size and hides the
+	// line structure a reviewer reads. Every other tool renders its raw JSON.
+	toolArgs, argsTruncated := permissionArgsPayload(toolName, args)
 
 	rule := "tool." + toolName
 	scope := "tool"
@@ -3397,6 +3435,11 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 		}
 	}
 
+	truncationNote := ""
+	if argsTruncated {
+		truncationNote = "\n\nNOTE: the arguments above are TRUNCATED — only a prefix of the request is shown, so the full effect is unknown. You must not approve a request you cannot fully see; answer DENY."
+	}
+
 	prompt := fmt.Sprintf(`You are a permission gatekeeper for an AI coding assistant.
 A tool call is requesting permission. Decide whether to ALLOW or DENY it.
 
@@ -3404,7 +3447,7 @@ Tool: %s
 Arguments: %s
 Rule: %s
 Scope: %s
-%s%s
+%s%s%s
 Project context:
 %s
 Relative paths in the arguments — including "cd" targets — resolve against the
@@ -3431,7 +3474,7 @@ Keep your reply short. Examples of correctly formatted final lines:
 ALLOW: writes a test file inside the project directory
 ALLOW: read-only listing of project files
 DENY: deletes files outside the working directory
-These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, rule, scope, allowedRoots, bannedPrefixes, context)
+These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, rule, scope, allowedRoots, bannedPrefixes, truncationNote, context)
 
 	// Insert the user's own local addendum (auto-permission-prompt.local.md)
 	// right after the bundled prompt, before this final prepend step runs.
@@ -3549,6 +3592,14 @@ func (a *Agent) verifyAutoGrant(toolName string, args json.RawMessage, req *Perm
 	pm := a.permissions
 	if pm == nil {
 		return true, ""
+	}
+	// A partial view must never become a silent approval: when the arguments
+	// the judge saw were cut at the budget, Go cannot know what the tail
+	// contained. Mirrors the interpreter path, which refuses a grant when the
+	// analysed source was truncated (verifyInterpreterEffects). Applies to
+	// every tool, not just bash — a truncated `write` body is just as opaque.
+	if _, truncated := permissionArgsPayload(toolName, args); truncated {
+		return false, fmt.Sprintf("arguments exceed the %d-byte auto-permission budget — a partial view cannot be auto-granted", permissionArgBudget)
 	}
 	if toolName == "bash" {
 		cmd := ""
@@ -4321,6 +4372,15 @@ func explainBashCommand(command string) string {
 		return "(empty command)"
 	}
 	prefix := fields[0]
+
+	// Shell control-flow keywords are syntax, not executables. Naming them as
+	// an "unknown command" nudged the auto-permission judge toward refusal on
+	// an ordinary loop; describe the construct and point the judge at the
+	// constituent commands instead.
+	if desc, ok := controlFlowExplanation(prefix); ok {
+		return desc
+	}
+
 	explanations := map[string]string{
 		"ls":     "List directory contents",
 		"cat":    "Display file contents",
@@ -4378,6 +4438,35 @@ func explainBashCommand(command string) string {
 		return explanation
 	}
 	return fmt.Sprintf("Execute '%s' (unknown command)", prefix)
+}
+
+// controlFlowExplanation describes a shell control-flow construct whose first
+// word is a reserved keyword, so the auto-permission judge reads it as the
+// loop/conditional it is rather than as an unknown executable named "for".
+// It reports ok=false for anything that is not a control-flow keyword, leaving
+// the ordinary command table to answer.
+func controlFlowExplanation(prefix string) (string, bool) {
+	describe := func(kind string) (string, bool) {
+		return fmt.Sprintf("Shell %s — the commands it runs appear later in the "+
+			"command and are evaluated individually; judge those, not the keyword", kind), true
+	}
+	switch prefix {
+	case "for", "select":
+		kind := "for loop"
+		if prefix == "select" {
+			kind = "select menu loop"
+		}
+		return describe(kind)
+	case "while", "until":
+		return describe(prefix + " loop")
+	case "if", "elif":
+		return describe("conditional (if/elif)")
+	case "case":
+		return describe("case statement")
+	case "do", "then", "else", "fi", "done", "esac", "function", "time", "!":
+		return describe("control-flow keyword")
+	}
+	return "", false
 }
 
 func extractFilesFromCommand(command string) []string {

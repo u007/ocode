@@ -1230,15 +1230,10 @@ func (t AgentStatusTool) Execute(args json.RawMessage) (string, error) {
 	// Output-contract verdict, surfaced for any run that carried one. A
 	// finished-but-contract-failed run is "done" with a caveat — the parent
 	// must not read done as correct.
-	if checked, satisfied, deficiency := run.ContractVerdict(); checked {
-		if satisfied {
-			b.WriteString("\nContract: satisfied")
-		} else {
-			b.WriteString("\nContract: NOT satisfied")
-			if strings.TrimSpace(deficiency) != "" {
-				b.WriteString(" — " + strings.TrimSpace(deficiency))
-			}
-		}
+	if v := run.ContractVerdict(); v.Checked {
+		// A CheckFailed verdict renders "NOT verified" (the verifier never
+		// produced a judgement), never "NOT satisfied".
+		b.WriteString("\nContract: " + contractVerdictLabel(v))
 	}
 	return b.String(), nil
 }
@@ -1313,8 +1308,8 @@ func formatTaskRunStatus(taskID string, run *AgentRun, waited time.Duration) str
 		return formatTaskStatus(taskID, "running", text)
 	case RunDone:
 		text := run.Result
-		if checked, satisfied, deficiency := run.ContractVerdict(); checked && !satisfied {
-			text = "Contract NOT satisfied" + contractDeficiencySuffix(deficiency) + "\n\n" + text
+		if v := run.ContractVerdict(); v.Checked && !v.Satisfied {
+			text = "Contract " + contractVerdictLabel(v) + "\n\n" + text
 		}
 		return formatTaskStatus(taskID, "completed", fmt.Sprintf("Completed in %s.\n\n%s", elapsed, text))
 	case RunFailed:
@@ -1329,6 +1324,25 @@ func contractDeficiencySuffix(deficiency string) string {
 		return ""
 	}
 	return " — " + strings.TrimSpace(deficiency)
+}
+
+// contractVerdictLabel renders a contract outcome for status text. CheckFailed
+// (the verifier never produced a judgement) is reported as "NOT verified", not
+// "NOT satisfied" — a slow or broken verifier must not read as a failed child.
+// A caller-configured timeout (TimedOut) is reported as "timed out"; the
+// deficiency already carries the "after <d>" detail and is shown in the fuller
+// surfaces, so it is not duplicated here.
+func contractVerdictLabel(v ContractOutcome) string {
+	switch {
+	case v.Satisfied:
+		return "satisfied"
+	case v.TimedOut:
+		return "timed out"
+	case v.CheckFailed:
+		return "NOT verified" + contractDeficiencySuffix(v.Deficiency)
+	default:
+		return "NOT satisfied" + contractDeficiencySuffix(v.Deficiency)
+	}
 }
 
 func formatTaskStatus(taskID, state, text string) string {

@@ -29,6 +29,8 @@ interface Props {
   open: boolean;
   tool: string;
   command?: string;
+  /** Complete JSON execution parameters; absent on legacy requests. */
+  args?: unknown;
   rule?: string;
   summary?: string;
   denyReason?: string;
@@ -77,6 +79,7 @@ export default function PermissionDialog({
   open,
   tool,
   command,
+  args,
   rule,
   summary,
   denyReason,
@@ -88,6 +91,10 @@ export default function PermissionDialog({
   onDecide,
 }: Props) {
   const [loading, setLoading] = useState(false);
+  const parameters = useMemo(
+    () => args === undefined ? undefined : JSON.stringify(args, null, 2),
+    [args],
+  );
   // Which always-allow choice is pending confirmation ("a"/"t" step in the
   // TUI); empty when the main button row is shown.
   const [confirming, setConfirming] = useState<"always_rule" | "always_tool" | null>(null);
@@ -260,6 +267,14 @@ export default function PermissionDialog({
                   )}
                 </div>
               </div>
+              {parameters !== undefined && (
+                <section aria-label="Tool execution parameters" className="min-w-0 max-w-full">
+                  <div className="mb-2 text-sm font-medium text-foreground">Tool execution parameters</div>
+                  <pre tabIndex={0} className="max-h-64 max-w-full overflow-y-auto rounded-lg border border-border bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-words text-foreground [overflow-wrap:anywhere]">
+                    {parameters}
+                  </pre>
+                </section>
+              )}
             </>
           )}
 

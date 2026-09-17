@@ -14391,6 +14391,7 @@ func newRCPermissionEvent(requestID string, req agent.PermissionRequest) server.
 		RequestID:        requestID,
 		Tool:             req.ToolName,
 		Command:          command,
+		Args:             req.Args,
 		Rule:             req.Rule,
 		Summary:          req.Summary,
 		DenyReason:       req.DenyReason,

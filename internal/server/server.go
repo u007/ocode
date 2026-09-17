@@ -153,6 +153,7 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 	h.computerSup = s.procSup
 	h.procSup = s.procSup
 	h.portMaps = newPortMapRegistry(s.procSup)
+	h.remoteHosts = newRemoteHostRegistry(s.procSup)
 	s.tts = tts.NewSupervisor(tts.DefaultConfig(), tts.Options{Root: ttsCacheRoot(), ProcSup: s.procSup})
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
@@ -294,6 +295,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/truncate", s.authMiddleware(s.handler.HandleTruncateSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/cancel", s.authMiddleware(s.handleCancelSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/close", s.authMiddleware(s.handleCloseSession))
+	// Remote project proxy: /api/remote/{host}/api/{rest...} matches all
+	// methods and proxies to the remote server. ServeMux matches this more
+	// specific pattern ahead of the generic /api/ handlers by specificity,
+	// not registration order.
+	s.mux.HandleFunc("/api/remote/{host}/api/{rest...}", s.authMiddleware(s.handler.HandleRemoteProxy))
 
 	// Files
 	s.mux.HandleFunc("POST /api/files/undo", s.authMiddleware(s.handleUndo))

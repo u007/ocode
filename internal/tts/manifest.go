@@ -76,9 +76,23 @@ type Artifact struct {
 // PythonRuntime pins the pip requirements installed into a per-manifest venv.
 // Requirements are exact "name==version" specs; pip resolves the matching
 // wheel for the host and verifies it against the index digest.
+//
+// MinPython/MaxPython are the inclusive interpreter range for which every
+// pinned requirement publishes a compatible wheel. The upper bound is
+// load-bearing: pip resolves the requirement set against the venv's own
+// interpreter, so a too-new python3 fails the install with a raw resolver dump
+// ("Ignored the following versions that require a different python version")
+// instead of installing. E.g. kokoro-onnx declares Requires-Python
+// <3.14,>=3.10 on every platform while onnxruntime 1.30.0 needs >=3.11, so the
+// kokoro range is 3.11-3.13 even though a newer python3 is usually first on
+// PATH. MaxPython zero means unbounded, but every shipped runtime sets it.
+// The range is enforced when selecting an interpreter for a new install; it is
+// deliberately NOT re-checked by Verify, because an existing venv keeps working
+// regardless (the cache path is not keyed by interpreter version).
 type PythonRuntime struct {
 	Requirements []string
 	MinPython    [2]int
+	MaxPython    [2]int
 }
 
 // Manifest is the verified install recipe for one local engine + voice.
@@ -109,6 +123,31 @@ func (m Manifest) LicenseHash() string {
 func (m Manifest) HostRuntime() (PythonRuntime, bool) {
 	rt, ok := m.Runtime[Host()]
 	return rt, ok
+}
+
+// accepts reports whether an interpreter version lies inside the runtime's
+// inclusive MinPython/MaxPython range. A zero MaxPython is unbounded.
+func (rt PythonRuntime) accepts(version [2]int) bool {
+	if version[0] < rt.MinPython[0] ||
+		(version[0] == rt.MinPython[0] && version[1] < rt.MinPython[1]) {
+		return false
+	}
+	if rt.MaxPython != [2]int{} &&
+		(version[0] > rt.MaxPython[0] ||
+			(version[0] == rt.MaxPython[0] && version[1] > rt.MaxPython[1])) {
+		return false
+	}
+	return true
+}
+
+// pythonRange renders the supported interpreter range for user-facing errors
+// ("3.11-3.13", or ">=3.11" when no ceiling is pinned).
+func (rt PythonRuntime) pythonRange() string {
+	lower := fmt.Sprintf("%d.%d", rt.MinPython[0], rt.MinPython[1])
+	if rt.MaxPython == [2]int{} {
+		return ">=" + lower
+	}
+	return lower + "-" + fmt.Sprintf("%d.%d", rt.MaxPython[0], rt.MaxPython[1])
 }
 
 const (
@@ -176,11 +215,14 @@ var piperManifest = Manifest{
 		},
 	},
 	Runtime: map[string]PythonRuntime{
-		"darwin/arm64":  {Requirements: piperRequirements("1.30.0"), MinPython: [2]int{3, 11}},
-		"darwin/amd64":  {Requirements: piperRequirements("1.22.1"), MinPython: [2]int{3, 10}},
-		"linux/amd64":   {Requirements: piperRequirements("1.30.0"), MinPython: [2]int{3, 11}},
-		"linux/arm64":   {Requirements: piperRequirements("1.30.0"), MinPython: [2]int{3, 11}},
-		"windows/amd64": {Requirements: piperRequirements("1.30.0"), MinPython: [2]int{3, 11}},
+		// onnxruntime 1.30.0 ships cp311-cp314 wheels for these hosts, and
+		// piper-tts is cp39-abi3, so 3.14 is the newest verified interpreter.
+		"darwin/arm64": {Requirements: piperRequirements("1.30.0"), MinPython: [2]int{3, 11}, MaxPython: [2]int{3, 14}},
+		// onnxruntime 1.22.1 has cp310-cp313 wheels only.
+		"darwin/amd64":  {Requirements: piperRequirements("1.22.1"), MinPython: [2]int{3, 10}, MaxPython: [2]int{3, 13}},
+		"linux/amd64":   {Requirements: piperRequirements("1.30.0"), MinPython: [2]int{3, 11}, MaxPython: [2]int{3, 14}},
+		"linux/arm64":   {Requirements: piperRequirements("1.30.0"), MinPython: [2]int{3, 11}, MaxPython: [2]int{3, 14}},
+		"windows/amd64": {Requirements: piperRequirements("1.30.0"), MinPython: [2]int{3, 11}, MaxPython: [2]int{3, 14}},
 	},
 }
 
@@ -216,11 +258,15 @@ var kokoroManifest = Manifest{
 		},
 	},
 	Runtime: map[string]PythonRuntime{
-		"darwin/arm64":  {Requirements: kokoroRequirements("1.30.0"), MinPython: [2]int{3, 11}},
-		"darwin/amd64":  {Requirements: kokoroRequirements("1.22.0"), MinPython: [2]int{3, 10}},
-		"linux/amd64":   {Requirements: kokoroRequirements("1.30.0"), MinPython: [2]int{3, 11}},
-		"linux/arm64":   {Requirements: kokoroRequirements("1.30.0"), MinPython: [2]int{3, 11}},
-		"windows/amd64": {Requirements: kokoroRequirements("1.30.0"), MinPython: [2]int{3, 11}},
+		// kokoro-onnx 0.6.1 declares Requires-Python <3.14 on every platform,
+		// so 3.13 is the ceiling regardless of the onnxruntime wheels available
+		// (1.30.0 has cp314 wheels; kokoro-onnx is the binding constraint).
+		"darwin/arm64": {Requirements: kokoroRequirements("1.30.0"), MinPython: [2]int{3, 11}, MaxPython: [2]int{3, 13}},
+		// onnxruntime 1.22.0 has cp310-cp313 wheels only.
+		"darwin/amd64":  {Requirements: kokoroRequirements("1.22.0"), MinPython: [2]int{3, 10}, MaxPython: [2]int{3, 13}},
+		"linux/amd64":   {Requirements: kokoroRequirements("1.30.0"), MinPython: [2]int{3, 11}, MaxPython: [2]int{3, 13}},
+		"linux/arm64":   {Requirements: kokoroRequirements("1.30.0"), MinPython: [2]int{3, 11}, MaxPython: [2]int{3, 13}},
+		"windows/amd64": {Requirements: kokoroRequirements("1.30.0"), MinPython: [2]int{3, 11}, MaxPython: [2]int{3, 13}},
 	},
 }
 

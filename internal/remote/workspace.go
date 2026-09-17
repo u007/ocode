@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -71,11 +73,15 @@ func NewRemoteWorkspace(target Target, remotePath, workspaceID string, sup *tool
 	if id == "" {
 		id = generateWorkspaceID()
 	}
+	tr, err := newTransportForTarget(target, sup)
+	if err != nil {
+		return nil, fmt.Errorf("build transport for %s: %w", target.String(), err)
+	}
 	return &RemoteWorkspace{
 		WorkspaceID: id,
 		Target:      target,
 		RemotePath:  remotePath,
-		Transport:   NewSSHTransport(target, sup),
+		Transport:   tr,
 		Sup:         sup,
 	}, nil
 }
@@ -89,10 +95,21 @@ func generateWorkspaceID() string {
 }
 
 // Connect establishes the remote workspace: provisions the binary,
-// starts or reuses the remote server, and establishes the SSH tunnel.
+// syncs credentials, starts or reuses the remote server, and establishes
+// the SSH tunnel (skipped for WSL — Windows forwards WSL2 localhost
+// natively).
 func (rw *RemoteWorkspace) Connect() error {
 	if err := rw.ensureBinary(); err != nil {
 		return fmt.Errorf("provision remote binary: %w", err)
+	}
+
+	// Sync credentials/config to the remote before server discovery so
+	// a freshly provisioned server has provider keys. Fatal for Connect:
+	// a sync failure blocks the turn with a logged error.
+	progress := NewProgress(io.Discard, "sync")
+	if err := runSyncStage(progress, rw.Transport, rw.Target.String(), version.Version); err != nil {
+		log.Printf("sync credentials to %s: %v", rw.Target.String(), err)
+		return fmt.Errorf("sync credentials to %s: %w", rw.Target.String(), err)
 	}
 
 	state, err := rw.discoverOrStartServer()
@@ -100,6 +117,14 @@ func (rw *RemoteWorkspace) Connect() error {
 		return fmt.Errorf("remote server: %w", err)
 	}
 	rw.State = state
+
+	// WSL targets share loopback with Windows — no SSH tunnel needed.
+	// The browser can reach the WSL server's port directly.
+	if rw.Target.Kind == KindWSL {
+		rw.APIPort = rw.State.Port
+		rw.localAPIURL = fmt.Sprintf("http://127.0.0.1:%d", rw.State.Port)
+		return nil
+	}
 
 	apiPort, err := FreeLocalPort()
 	if err != nil {
@@ -131,7 +156,8 @@ func (rw *RemoteWorkspace) Connect() error {
 }
 
 // Disconnect tears down the SSH tunnel. The remote server stays running
-// for resume on next connect. Uses ProcessSupervisor lifecycle APIs
+// for resume on next connect. Safe for WSL targets (no tunnel registered):
+// the nil guard below is a no-op. Uses ProcessSupervisor lifecycle APIs
 // (MarkExited) rather than raw Process.Kill for proper bookkeeping.
 func (rw *RemoteWorkspace) Disconnect() error {
 	if rw.tunnelCmd != nil && rw.tunnelCmd.Process != nil {
@@ -160,6 +186,11 @@ func (rw *RemoteWorkspace) Reconnect() error {
 // APIURL returns the local URL for the remote API via the SSH tunnel.
 func (rw *RemoteWorkspace) APIURL() string {
 	return rw.localAPIURL
+}
+
+// Token returns the authentication token from the remote server state.
+func (rw *RemoteWorkspace) Token() string {
+	return rw.State.Token
 }
 
 // SetAPIURL sets the local tunnel URL. Used in tests to simulate

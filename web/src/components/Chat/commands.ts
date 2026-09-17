@@ -261,7 +261,7 @@ export interface CommandContext {
   /** Caller-provided helpers the handler can use. */
   api: {
     listSessions: () => Promise<{ id: string; title: string }[]>;
-    getSession: (id: string) => Promise<{ messages?: Message[]; title?: string }>;
+    getSession: (id: string, opts?: { limit?: number; offset?: number }, host?: string) => Promise<{ messages?: Message[]; title?: string }>;
     getOcrConfig: () => Promise<OcrConfig>;
     setOcrConfig: (cfg: OcrConfig) => Promise<OcrConfig>;
     getComputerUseConfig: () => Promise<ComputerUseConfig>;
@@ -270,10 +270,10 @@ export interface CommandContext {
     getOcrEnabled: () => Promise<{ enabled: boolean; model: string }>;
     setOcrEnabled: (enabled: boolean) => Promise<unknown>;
     setOcrModel: (model: string) => Promise<unknown>;
-    compactSession: (id: string) => Promise<{ original_len: number; compacted_len: number }>;
-    recapSession: (id: string) => Promise<{ recap: string }>;
-    shareSession: (id: string) => Promise<{ markdown: string }>;
-    btwSession: (id: string, content: string) => Promise<{ status: string }>;
+    compactSession: (id: string, host?: string) => Promise<{ original_len: number; compacted_len: number }>;
+    recapSession: (id: string, host?: string) => Promise<{ recap: string }>;
+    shareSession: (id: string, host?: string) => Promise<{ markdown: string }>;
+    btwSession: (id: string, content: string, host?: string) => Promise<{ status: string }>;
     getMaskConfig: () => Promise<{ enabled: boolean; mode: string; model: string }>;
     setMaskEnabled: (enabled: boolean) => Promise<{ enabled: boolean }>;
     setMaskMode: (mode: string) => Promise<{ mode: string }>;
@@ -346,6 +346,8 @@ export interface CommandContext {
   getMessages?: () => Message[];
   /** Current session ID (used by /export). */
   getSessionId?: () => string | null;
+  /** SSH/WSL host for the current session's project (undefined for local). */
+  host?: string;
 }
 
 /** Dispatch a slash command to the appropriate handler. */
@@ -560,7 +562,7 @@ async function handleSession(
   // /session load <id>
   if (sub === "load" && parts[1]) {
     try {
-      const session = await ctx.api.getSession(parts[1]);
+      const session = await ctx.api.getSession(parts[1], undefined, ctx.host);
       const message: Message = {
         role: "assistant",
         content: `Loaded session **${session.title || parts[1]}**.`,
@@ -827,7 +829,7 @@ async function handleExport(ctx: CommandContext): Promise<CommandResult> {
   }
 
   try {
-    const markdown = await api.exportSessionMarkdown(sessionId);
+    const markdown = await api.exportSessionMarkdown(sessionId, ctx.host);
     return {
       handled: true,
       messages: [{ role: "assistant", content: "Exported session as Markdown." }],
@@ -849,7 +851,7 @@ async function handleExportClaude(ctx: CommandContext): Promise<CommandResult> {
   }
 
   try {
-    const { path } = await api.exportClaudeSession(sessionId);
+    const { path } = await api.exportClaudeSession(sessionId, ctx.host);
     return {
       handled: true,
       messages: [{
@@ -883,7 +885,7 @@ async function handleTitle(args: string, ctx: CommandContext): Promise<CommandRe
   }
 
   try {
-    await api.setSessionTitle(sessionId, title);
+    await api.setSessionTitle(sessionId, title, ctx.host);
     return {
       handled: true,
       messages: [{ role: "assistant", content: `Session title set to **${title}**.` }],
@@ -1364,7 +1366,7 @@ async function handleCompact(ctx: CommandContext): Promise<CommandResult> {
     try {
       window.dispatchEvent(new CustomEvent("ocode:compact-start", { detail: { sessionId } }));
     } catch {}
-    const result = await ctx.api.compactSession(sessionId);
+    const result = await ctx.api.compactSession(sessionId, ctx.host);
     try {
       window.dispatchEvent(new CustomEvent("ocode:compact", { detail: { sessionId, originalLen: result.original_len, compactedLen: result.compacted_len } }));
     } catch {}
@@ -1396,7 +1398,7 @@ async function handleRecap(ctx: CommandContext): Promise<CommandResult> {
   }
 
   try {
-    const result = await ctx.api.recapSession(sessionId);
+    const result = await ctx.api.recapSession(sessionId, ctx.host);
     return {
       handled: true,
       messages: [{
@@ -1425,7 +1427,7 @@ async function handleShare(ctx: CommandContext): Promise<CommandResult> {
   }
 
   try {
-    const result = await ctx.api.shareSession(sessionId);
+    const result = await ctx.api.shareSession(sessionId, ctx.host);
     return {
       handled: true,
       messages: [{
@@ -1465,7 +1467,7 @@ async function handleBtw(args: string, ctx: CommandContext): Promise<CommandResu
   }
 
   try {
-    await ctx.api.btwSession(sessionId, args);
+    await ctx.api.btwSession(sessionId, args, ctx.host);
     return {
       handled: true,
       messages: [{

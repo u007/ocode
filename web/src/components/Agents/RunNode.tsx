@@ -157,16 +157,34 @@ export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true }
         )}
         <span className={`shrink-0 text-[11px] ${s.text}`}>{run.status}</span>
         {run.contract && run.contract.checked && !run.contract.satisfied && (
-          <span
-            title={
-              run.contract.deficiency
-                ? `Output contract not met: ${run.contract.deficiency}`
-                : "Output contract not met"
-            }
-            className="shrink-0 rounded bg-red-500/15 px-1.5 py-0.5 font-mono text-[10px] text-red-300 ring-1 ring-inset ring-red-800/50"
-          >
-            contract ✗
-          </span>
+          run.contract.checkFailed ? (
+            // Verification itself failed (timeout / LLM error / unparseable
+            // verdict): the result was never judged, so this is a muted
+            // "not verified", NOT a red contract failure.
+            <span
+              title={
+                run.contract.timedOut
+                  ? `Output contract verification timed out${run.contract.deficiency ? `: ${run.contract.deficiency}` : ""}`
+                  : run.contract.deficiency
+                    ? `Output contract not verified: ${run.contract.deficiency}`
+                    : "Output contract not verified"
+              }
+              className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] text-amber-300 ring-1 ring-inset ring-amber-800/50"
+            >
+              contract ?
+            </span>
+          ) : (
+            <span
+              title={
+                run.contract.deficiency
+                  ? `Output contract not met: ${run.contract.deficiency}`
+                  : "Output contract not met"
+              }
+              className="shrink-0 rounded bg-red-500/15 px-1.5 py-0.5 font-mono text-[10px] text-red-300 ring-1 ring-inset ring-red-800/50"
+            >
+              contract ✗
+            </span>
+          )
         )}
 
         <span className="ml-auto flex shrink-0 items-center gap-2">

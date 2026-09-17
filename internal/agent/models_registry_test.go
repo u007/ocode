@@ -920,3 +920,68 @@ func TestModelDisplayName(t *testing.T) {
 		t.Fatalf("ModelDisplayName(unknown) = %q, want empty", got)
 	}
 }
+
+// ModelAPIPackageFromRegistry surfaces models.dev's per-model protocol hint
+// (`provider.npm`) that the opencode/opencode-go transport routing consults.
+func TestModelAPIPackageFromRegistry(t *testing.T) {
+	withSandboxedModelsCache(t)
+
+	registry.mu.Lock()
+	prevData := registry.data
+	prevFetchedAt := registry.fetchedAt
+	registry.data = map[string]providerEntry{
+		"opencode-go": {
+			ID: "opencode-go",
+			Models: map[string]modelEntry{
+				"union-alpha":       {ID: "union-alpha", Provider: modelProviderMeta{Npm: modelsDevNpmAnthropic}},
+				"deepseek-v4-flash": {ID: "deepseek-v4-flash"},
+			},
+		},
+	}
+	registry.fetchedAt = time.Now()
+	registry.mu.Unlock()
+	t.Cleanup(func() {
+		registry.mu.Lock()
+		registry.data = prevData
+		registry.fetchedAt = prevFetchedAt
+		registry.mu.Unlock()
+	})
+
+	if pkg, ok := ModelAPIPackageFromRegistry("opencode-go", "union-alpha"); !ok || pkg != modelsDevNpmAnthropic {
+		t.Fatalf("union-alpha npm = (%q,%v), want (%q,true)", pkg, ok, modelsDevNpmAnthropic)
+	}
+	if pkg, ok := ModelAPIPackageFromRegistry("opencode-go", "deepseek-v4-flash"); ok || pkg != "" {
+		t.Fatalf("deepseek npm = (%q,%v), want (\"\",false)", pkg, ok)
+	}
+	if pkg, ok := ModelAPIPackageFromRegistry("opencode-go", "unknown-model"); ok || pkg != "" {
+		t.Fatalf("unknown npm = (%q,%v), want (\"\",false)", pkg, ok)
+	}
+	if pkg, ok := ModelAPIPackageFromRegistry("no-such-provider", "union-alpha"); ok || pkg != "" {
+		t.Fatalf("unknown provider npm = (%q,%v), want (\"\",false)", pkg, ok)
+	}
+}
+
+// The models.dev payload nests the protocol hint under `provider.npm`; the
+// registry must capture it rather than dropping it (it used to drop it, which
+// left union-alpha on the chat/completions route and produced HTTP 500).
+func TestModelEntryCapturesProviderNpm(t *testing.T) {
+	payload := []byte(`{
+	  "opencode-go": {
+	    "id": "opencode-go",
+	    "models": {
+	      "union-alpha": {"id": "union-alpha", "provider": {"npm": "@ai-sdk/anthropic"}},
+	      "deepseek-v4-flash": {"id": "deepseek-v4-flash"}
+	    }
+	  }
+	}`)
+	var parsed map[string]providerEntry
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		t.Fatalf("unmarshal models.dev payload: %v", err)
+	}
+	if got := parsed["opencode-go"].Models["union-alpha"].Provider.Npm; got != modelsDevNpmAnthropic {
+		t.Fatalf("union-alpha provider.npm = %q, want %q", got, modelsDevNpmAnthropic)
+	}
+	if got := parsed["opencode-go"].Models["deepseek-v4-flash"].Provider.Npm; got != "" {
+		t.Fatalf("deepseek provider.npm = %q, want empty", got)
+	}
+}

@@ -103,6 +103,28 @@ func TestInitBuiltinToolsReturnsAllTools(t *testing.T) {
 	}
 }
 
+// Every built-in must return the canonical FLAT descriptor
+// ({name, description, parameters}). The OpenAI transport reshapes it into the
+// nested {type:function, function:{...}} form; the Anthropic transport reads
+// name/parameters directly with no nested-form normalization. preview_open used
+// to return the nested form, so it reached Anthropic as an empty name with a
+// nil input_schema and every Anthropic-protocol request was rejected 400.
+func TestBuiltinToolDefinitionsAreFlat(t *testing.T) {
+	for _, tl := range InitBuiltinTools(nil, nil, nil) {
+		d := tl.Definition()
+		if _, nested := d["function"]; nested {
+			t.Errorf("%s: Definition must be flat; found nested \"function\" object", tl.Name())
+		}
+		name, _ := d["name"].(string)
+		if name != tl.Name() {
+			t.Errorf("%s: Definition name = %q, want %q", tl.Name(), name, tl.Name())
+		}
+		if _, ok := d["parameters"].(map[string]interface{}); !ok {
+			t.Errorf("%s: Definition parameters must be a JSON object, got %T", tl.Name(), d["parameters"])
+		}
+	}
+}
+
 func TestBuiltinToolsIncludesConditionalNames(t *testing.T) {
 	lspMgr := lsp.NewManager(".")
 	tools := InitBuiltinTools(lspMgr, nil, nil)

@@ -58,6 +58,20 @@ func TestParsePermissionAsk(t *testing.T) {
 }
 
 func TestNewPermissionEvent(t *testing.T) {
+	reqWithArgs := samplePermissionRequest()
+	reqWithArgs.Args = json.RawMessage(`{"command":"rm -rf build","timeout":600,"run_in_background":false,"nested":{"values":[null,true,1]}}`)
+	fullEvent := newPermissionEvent("call-full", reqWithArgs)
+	wire, err := json.Marshal(fullEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded PermissionEvent
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded.Args) != string(reqWithArgs.Args) || decoded.Command != reqWithArgs.Command {
+		t.Fatalf("full args or command lost in permission event: %s", wire)
+	}
 	ev := newPermissionEvent("call-1", samplePermissionRequest())
 	if ev.RequestID != "call-1" || ev.Tool != "bash" || ev.Command != "rm -rf build" {
 		t.Fatalf("unexpected event: %+v", ev)

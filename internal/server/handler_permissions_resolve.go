@@ -39,12 +39,14 @@ func validPermDecision(s string) bool {
 // availability rules (parity with the TUI dialog). RequestID is the paused
 // tool-call ID, which the browser echoes back to /api/permissions/resolve.
 type PermissionEvent struct {
-	RequestID  string `json:"request_id"`
-	Tool       string `json:"tool"`
-	Command    string `json:"command,omitempty"`
-	Rule       string `json:"rule,omitempty"`
-	Summary    string `json:"summary,omitempty"`
-	DenyReason string `json:"deny_reason,omitempty"`
+	RequestID string `json:"request_id"`
+	Tool      string `json:"tool"`
+	Command   string `json:"command,omitempty"`
+	// Args preserves the complete execution parameters independently of Command.
+	Args       json.RawMessage `json:"args,omitempty"`
+	Rule       string          `json:"rule,omitempty"`
+	Summary    string          `json:"summary,omitempty"`
+	DenyReason string          `json:"deny_reason,omitempty"`
 	// ModelUnavailable mirrors PermissionRequest.ModelUnavailable: the judge
 	// never ran, so the browser must not render this as a denial.
 	ModelUnavailable string `json:"model_unavailable,omitempty"`
@@ -76,6 +78,7 @@ func newPermissionEvent(requestID string, req agent.PermissionRequest) Permissio
 		RequestID:        requestID,
 		Tool:             req.ToolName,
 		Command:          command,
+		Args:             req.Args,
 		Rule:             req.Rule,
 		Summary:          req.Summary,
 		DenyReason:       req.DenyReason,

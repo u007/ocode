@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Pending ask recovery from live session state (sentinel-less transcript)
-description: 'Gotcha: pending permission/question dialog not appearing when SSE frame missed and transcript has no sentinel — livePendingAsks recovery'
+description: 'Added async turn_error bus event as a fourth recovery trigger for pending-ask hydration, updated sentinel names, updated timestamp.'
 tags:
   - gotcha
   - web
@@ -12,8 +12,21 @@ tags:
   - reconcile
   - TryLock
   - pending-ask
-timestamp: 2026-09-17T01:56:14Z
+  - async
+  - turn_error
+timestamp: 2026-09-17T04:40:49Z
 ---
+---
+type: Gotcha
+title: "Pending ask recovery from live session state (sentinel-less transcript)"
+description: "Gotcha: pending permission/question dialog not appearing when SSE frame missed and transcript has no sentinel — livePendingAsks recovery"
+tags: [gotcha, web, desktop, permission, dialog, sse, reconcile, TryLock, pending-ask]
+timestamp: 2026-09-17T00:00:00Z
+status: active
+---
+
+# Pending ask recovery from live session state (sentinel-less transcript)
+
 ## Problem
 
 When a session is paused on a permission or question ask, the browser can fail to
@@ -39,7 +52,7 @@ transcript (sqlite messages table). This happens when:
 Pre-recovery, the only source of truth was `as.messages` (the live agent's
 in-memory transcript), but the web client never read it for asks.
 
-## Recovery path (three layers)
+## Recovery path (four layers)
 
 ### 1. Server: `GET /api/sessions/:id/state` returns live pending asks
 
@@ -79,6 +92,31 @@ block calls `hydratePendingAsks()` which fetches session state via
 `api.getSessionState` and dispatches `PERMISSION_REQUEST` / `QUESTION_REQUEST`
 for each pending ask, opening the dialog.
 
+### 4. Client: async `turn_error` frame triggers live-state hydration
+
+`web/src/api/client.ts` — the web client **always** sends `async:true` on
+`sendMessage`. A send on a session paused on a permission ask therefore returns
+**202**, not the HTTP 409 the `useChat` submit catch checks. `runTurn`'s
+`ErrPermissionPending` refusal is published later by `publishTurnError`
+(`internal/server/agent_session.go`) as a `turn_error` bus event (and a legacy
+`error` frame headless).
+
+The client reacts to that frame: `scheduleHydratePendingAsks` in
+`web/src/lib/sessionEvents.ts` (per-session in-flight dedupe) → exported
+`hydratePendingAsks(sessionId, router)` → `api.getSessionState` →
+`dispatchPendingAsks` → dispatches `PERMISSION_REQUEST` / `QUESTION_REQUEST`.
+It matches the error text against `PENDING_ASK_ERROR = "permission decision is
+pending"` (mirrors `ErrPermissionPending` in `internal/server/run_states.go`),
+because the legacy `error` frame carries only the string.
+
+`reconcileOpenSessions` now reuses the same `dispatchPendingAsks` helper.
+
+**Do NOT "fix" the async path by returning 409 pre-dispatch:**
+`TestAsyncTurnRefusedWhilePermissionPending` in
+`internal/server/zz_repro_perm_test.go` asserts the async contract (202 + the
+refused message stays queued for retry). The only missing piece was the client
+trigger.
+
 ## Rule
 
 **When reading `agentSession.messages` from an HTTP handler, use `TryLock` not
@@ -96,3 +134,7 @@ the (possibly stale) transcript.
   with TryLock semantics.
 - Client: the 409 path is exercised when a send is refused while a permission
   dialog is live but unseen.
+- Client: the async `turn_error` path is covered by
+  `TestAsyncTurnRefusedWhilePermissionPending` in
+  `internal/server/zz_repro_perm_test.go` (server-side contract), and the
+  `scheduleHydratePendingAsks` dispatch path in `sessionEvents.ts` (client-side).

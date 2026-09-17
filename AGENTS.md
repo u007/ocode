@@ -383,8 +383,17 @@ returned, and retried **once** in place if it does not match. The mechanism:
   `internal/agent/prompts/task_verifier.txt` with the other subagent prompts.
   The verifier checks **shape, not truth** — a result that claims completion
   satisfies a contract it never fulfilled. Do not present the badge as
-  "verified correct". A malformed/unparseable verdict is logged and treated as
-  not-satisfied, never as satisfied.
+  "verified correct". The result handed to the verifier is bounded
+  (`truncateVerifierResult`, head+tail with a marker the prompt understands) so
+  an oversized report does not needlessly slow the one call. **Do not add a
+  hardcoded total-call deadline** — the verifier is bounded like every other LLM
+  call (client pre-stream timeout + stream idle watchdog); `verifierContext`
+  applies a deadline only when `Agent.RequestTimeout` is explicitly set, and when
+  that deadline fires it is reported as a **timeout** (`TimedOut`, a subset of
+  `CheckFailed`): the deficiency says `timed out after <d>`, status text says
+  `Contract: timed out`, and the web tooltip says so. A malformed/unparseable
+  verdict, LLM error, or timeout is a **check failure** (`CheckFailed`), never a
+  silent "satisfied".
 - **Retry must live inside `runSyncDispatch`, not via `resume_task_id`.**
   The retry steps the same still-live child (`executeSubAgentWithTranscript`)
   with the deficiency appended to its full transcript, then re-verifies. It
@@ -398,9 +407,19 @@ returned, and retried **once** in place if it does not match. The mechanism:
 - **Reporting:** satisfied → result returned unchanged (no decoration). Not
   satisfied after retry → result **prefixed** with an explicit warning naming
   the contract and the deficiency; the full child result stays present. The
-  verdict (checked / satisfied / deficiency) is recorded on the `AgentRun` via
+  verdict is recorded on the `AgentRun` as a `ContractOutcome`
+  (`Checked` / `Satisfied` / `CheckFailed` / `Deficiency`) via
   `SetContractVerdict` and surfaced in `agent_status` / `task_status`, the TUI
   agent strip + detail view, and the web Agents tab (DTO field `contract`).
+- **`CheckFailed` is not "not satisfied".** When the verifier itself fails
+  (timeout / LLM error / empty or unparseable response) the child's result was
+  never judged; `Satisfied` is false only because no judgement exists. Every
+  consumer must branch on `CheckFailed` **before** treating `!Satisfied` as a
+  contract failure: the tool result is prefixed `Output contract NOT verified`
+  (not `not met`), status text says `Contract NOT verified`, and the TUI/web
+  badge is the muted `contract ?` (not the red `contract ✗`). Otherwise a slow
+  or broken verifier reads as a failing child — this was the dominant cause of
+  spurious `contract ✗` badges (verifier timeouts).
 - **No built-in agent declares a default contract** — contracts are opt-in per
   call (or via a user-authored agent's frontmatter). This keeps built-ins
   (e.g. `knowledge_lookup` via the `context` agent) free of verification
@@ -711,12 +730,19 @@ Rules for anything in `internal/server`:
   `PERMISSION_ASK:`/question sentinel, but that save can fail or conflict, or
   the pause can post-date the last write — and a live SSE `permission` frame
   sent while the tab was untracked is gone. The session then answers every send
-  with `ErrPermissionPending` (HTTP 409) while the browser has no dialog to
-  resolve it. `GET /api/sessions/{id}/state` therefore carries an optional
-  `pending_asks` object read from the live agent transcript (`livePendingAsks`
-  in `handler_session_state.go`); the web reconcile hydrates the dialog from it
-  and a 409 send re-hydrates via `hydratePendingAsks`. Any new surface that
-  consumes asks should keep this fallback. See
+  with `ErrPermissionPending` while the browser has no dialog to resolve it.
+  `GET /api/sessions/{id}/state` therefore carries an optional `pending_asks`
+  object read from the live agent transcript (`livePendingAsks` in
+  `handler_session_state.go`). Three client triggers hydrate the dialog from
+  it: web reconcile (`reconcileOpenSessions`), a 409 send (`useChat`'s
+  `hydratePendingAsks`), and — needed because the web client always sends
+  `async:true`, so a refused send resolves 202 and the refusal arrives later as
+  a `turn_error`/`error` frame instead of a 409 — that frame's handler
+  (`scheduleHydratePendingAsks` in `sessionEvents.ts`). Do not "fix" the async
+  path by returning 409 pre-dispatch: the async contract deliberately
+  persist-then-202s and leaves the refused message queued for retry
+  (`TestAsyncTurnRefusedWhilePermissionPending`). Any new surface that consumes
+  asks should keep this fallback. See
   `docs/gotchas/pending-ask-recovery-live-session-state.md`.
 - **Reading a live session's `as.messages` from an HTTP handler uses a
   non-blocking `as.mu.TryLock()`, never `Lock()`.** `runTurn` holds `as.mu` for
@@ -773,6 +799,43 @@ the working directory of a session's work. The rules:
 - The TUI itself is unaffected by any of this: it drives `internal/agent`
   directly with `m.workDir` and only touches `internal/server` for RC bridge
   types.
+
+### Remote projects: chat runs on the host, terminal/files stay per-request
+
+A sidebar remote (SSH/WSL) project's **chat/agent/session traffic** is
+reverse-proxied to an `ocode serve --remote` process **on that host**, reached
+through `/api/remote/{host}/api/{rest...}`
+(`internal/server/handler_remote_proxy.go`, route registered in
+`server.registerRoutes`). `Handler.remoteHosts`
+(`internal/server/remote_hosts.go`) owns one lazily-connected
+`remote.RemoteWorkspace` per host, shared by every remote project on that host
+and closed at shutdown; the proxy builder is
+`remote.NewAPIProxy`/`remote.InjectAuth` (`internal/remote/proxy.go`), which
+`internal/desktop/proxy.go` also uses. Terminal, the Files tab, git, `!`
+commands, and port forwards keep their existing per-request ssh/wsl.exe paths
+— they are not proxied.
+
+Rules:
+
+- **Only saved project hosts may be proxied.** `{host}` must be the `Host` of
+  at least one saved project (the same trust boundary `remoteWorkFor`
+  enforces); a non-matching host is rejected before any connect, and the route
+  never consults the local `allowedProjectRoots` path allowlist.
+- **The remote token never reaches the browser.** The proxy strips the local
+  `token` query param and `Authorization` header and injects `Bearer
+  <ServeState.Token>` server-side.
+- **`~` is expanded only by the server owning that `$HOME`**
+  (`projects.ExpandHome`, called from `Store.Add`, `HandleAddProject`, and
+  `HandleChat`). A remote project's saved path stays verbatim locally and is
+  expanded by its host; a local `~/…` project is expanded locally.
+- **A remote failure blocks the turn** (502 `{error, stage:
+  "remote-connect"}`); never fall back to running a remote project's agent
+  locally.
+- **The SPA resolves the host per session, not per active project**
+  (`resolveSessionHost` in `web/src/hooks/useSessionHost.ts`, from the tab's
+  project binding). New session-scoped calls must pass that host — plus an
+  `X-Ocode-Project` header when they carry a path — or they hit the wrong
+  machine. Local calls pass no host and keep byte-identical URLs.
 
 ## Data Storage
 All persistent state lives under a single cross-platform global directory
@@ -936,11 +999,14 @@ illustrative shape is:
 
 A session bound to a **remote (SSH/WSL) project** gets one extra line —
 `Project host: <[user@]host|wsl:distro> (remote project — …)` — right after
-the git-repo lines. Per-project remote projects execute their chat agent on
-the local server (only terminal/files/git are forwarded over SSH; see
-`docs/architecture/terminal-detach-reattach.md`), so without that line the
-block presented a remote project root next to the local machine's config,
-session, skill, and runtime paths with no hint they belong to different
-machines. Local projects emit no such line, so their prompt is byte-identical.
+the git-repo lines (`Agent.SetProjectHost`, from `Handler.projectHostFor`).
+That line was added because a locally-built agent for a remote project saw a
+remote project root beside the local machine's config/session/skill/runtime
+paths. Remote chat/agent traffic is now reverse-proxied to the host's
+`ocode serve --remote` (see "Remote projects: chat runs on the host" above),
+so the answering agent runs on the host; the line still marks the residual
+case of a locally-built agent bound to a remote project (e.g. a direct
+`/api/chat` call that does not go through the host prefix). Local projects
+emit no such line, so their prompt is byte-identical.
 
 There is no `Git branch` line: the git branch is not resolved or injected.

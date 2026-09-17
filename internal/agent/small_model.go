@@ -40,10 +40,12 @@ func ResolveSmallModel(cfg *config.Config) string {
 
 // smallModelEligibleNames is the set of agent names that may use the small
 // model. Primary coding agents (build, plan) are excluded to avoid downgrading
-// the main coding loop.
+// the main coding loop, and the general-purpose sub-agent is excluded so it
+// inherits the main model (its work is open-ended and benefits from the
+// stronger model). Explore/context remain eligible as purpose-scoped,
+// retrieval-heavy helpers.
 var smallModelEligibleNames = map[string]bool{
 	"explore":    true,
-	"general":    true,
 	"context":    true,
 	"compaction": true,
 	// orchestrator-planner intentionally excluded: requires reliable JSON output

@@ -670,14 +670,39 @@ func (c *GenericClient) usesAnthropicMessagesAPI() bool {
 	if c.Provider == "anthropic" {
 		return true
 	}
-	// opencode-go routes per-model: minimax uses /v1/messages (Anthropic API);
-	// everything else (deepseek, glm, kimi, mimo, qwen) uses
-	// /v1/chat/completions (OpenAI).
+	// opencode/opencode-go route per-model. models.dev declares each model's
+	// protocol via `provider.npm`, and upstream OpenCode picks the transport
+	// from it per model (packages/core/src/session/runner/model.ts). An
+	// Anthropic-protocol model only answers at /v1/messages; sending it to
+	// /v1/chat/completions fails — union-alpha returns HTTP 500 there.
+	if c.Provider == "opencode-go" {
+		if pkg, ok := ModelAPIPackageFromRegistry("opencode-go", c.Model); ok && pkg == modelsDevNpmAnthropic {
+			return true
+		}
+	}
 	if c.Provider == "opencode" || c.Provider == "opencode-go" {
-		return strings.HasPrefix(c.Model, "minimax-")
+		// Registry unavailable/stale (or an id models.dev hasn't annotated yet):
+		// fall back to the known Anthropic-protocol ids. minimax-* is the
+		// historical prefix rule; opencodeAnthropicMessagesModel covers the
+		// newer exact-id cases.
+		return strings.HasPrefix(c.Model, "minimax-") || opencodeAnthropicMessagesModel(c.Model)
 	}
 	baseURL := strings.ToLower(strings.TrimRight(c.BaseURL, "/"))
 	return strings.HasSuffix(baseURL, "/anthropic") || strings.Contains(baseURL, "/anthropic/")
+}
+
+// opencodeAnthropicMessagesModel reports whether an opencode/opencode-go model
+// id is served exclusively by the Anthropic Messages API when the models.dev
+// `provider.npm` hint is unavailable (fresh install, stale/unreachable
+// registry, or an id models.dev has not annotated yet). Keep in sync with
+// models.dev; every entry must also work on /v1/messages, since routing a
+// chat/completions-only id here would break it.
+func opencodeAnthropicMessagesModel(model string) bool {
+	switch model {
+	case "union-alpha":
+		return true
+	}
+	return false
 }
 
 func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {

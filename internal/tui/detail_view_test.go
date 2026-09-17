@@ -552,3 +552,29 @@ func TestAgentStripClickableAfterStripGrows(t *testing.T) {
 			paintedY, m.agentStripTopY(), m.viewport.Height())
 	}
 }
+
+// TestAgentStripContractBadgeDistinguishesUnverified locks in the two distinct
+// contract badges: a judged contract failure is "contract ✗", while a
+// verification-machinery failure is the muted "contract ?" — the run was never
+// judged, so it must not read as a failed child.
+func TestAgentStripContractBadgeDistinguishesUnverified(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil, nil)
+	run := a.Runs().New("worker")
+
+	// Judged not satisfied → red ✗.
+	run.SetContractVerdict(agent.ContractOutcome{Deficiency: "missing file list"})
+	got, _ := renderAgentRunStripCard(run, 120, "", false, 0)
+	if !strings.Contains(stripANSI(got), "contract ✗") {
+		t.Fatalf("expected contract ✗ badge, got: %q", stripANSI(got))
+	}
+
+	// Verification itself failed → muted "?" and never ✗.
+	run.SetContractVerdict(agent.ContractOutcome{CheckFailed: true, Deficiency: "verification failed: timed out"})
+	got, _ = renderAgentRunStripCard(run, 120, "", false, 0)
+	if !strings.Contains(stripANSI(got), "contract ?") {
+		t.Fatalf("expected contract ? badge for a check failure, got: %q", stripANSI(got))
+	}
+	if strings.Contains(stripANSI(got), "contract ✗") {
+		t.Fatalf("check failure must not render contract ✗, got: %q", stripANSI(got))
+	}
+}

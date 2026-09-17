@@ -4,7 +4,40 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
+
+// TestVerifierContextNoDefaultDeadline locks in that verification is NOT bounded
+// by a hardcoded total-call deadline (a former 30s constant abandoned slow but
+// healthy verifier calls and recorded a false check failure). It is bounded like
+// any other LLM call — client pre-stream timeout + stream idle watchdog — and
+// only gains a total deadline when the caller explicitly set RequestTimeout.
+func TestVerifierContextNoDefaultDeadline(t *testing.T) {
+	ctx, cancel := verifierContext(&Agent{})
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("verifier must not impose a default total-call deadline")
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("default verifier context should be live, got %v", err)
+	}
+
+	ctx2, cancel2 := verifierContext(&Agent{RequestTimeout: 90 * time.Second})
+	defer cancel2()
+	d, ok := ctx2.Deadline()
+	if !ok {
+		t.Fatal("explicit Agent.RequestTimeout should bound the verifier")
+	}
+	if remaining := time.Until(d); remaining <= 0 || remaining > 90*time.Second {
+		t.Fatalf("deadline = %v away, want ~90s", remaining)
+	}
+
+	ctx3, cancel3 := verifierContext(nil)
+	defer cancel3()
+	if _, ok := ctx3.Deadline(); ok {
+		t.Fatal("nil agent should not produce a deadline")
+	}
+}
 
 // verdictClient is a fake LLM client whose response is used as the verifier's
 // output. Set callErr to simulate an LLM failure.
@@ -107,5 +140,59 @@ func TestContractRetryMsg(t *testing.T) {
 	}
 	if !strings.Contains(msg, "only three files listed") {
 		t.Errorf("retry msg should carry the deficiency, got %q", msg)
+	}
+}
+
+// blockingVerdictClient sleeps in Chat for delay. LLMClient.Chat takes no
+// context, so this is exactly the production shape: a caller-configured
+// deadline must be detected by verifyContract's own select, not by cancelling
+// the underlying call.
+type blockingVerdictClient struct{ delay time.Duration }
+
+func (b *blockingVerdictClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
+	time.Sleep(b.delay)
+	return &Message{Role: "assistant", Content: "VERDICT: SATISFIED"}, nil
+}
+func (b *blockingVerdictClient) GetProvider() string { return "mock" }
+func (b *blockingVerdictClient) GetModel() string    { return "mock-model" }
+
+// TestVerifyContractReportsTimeoutWhenRequestTimeoutSet verifies that a
+// caller-configured deadline (Agent.RequestTimeout) is returned as a TIMEOUT —
+// CheckFailed + TimedOut with a timeout deficiency — not as a generic check
+// failure, and promptly (the wrapper does not wait for the slow call).
+func TestVerifyContractReportsTimeoutWhenRequestTimeoutSet(t *testing.T) {
+	taskTool := TaskTool{
+		mainAgent: &Agent{
+			client:         &blockingVerdictClient{delay: 5 * time.Second},
+			RequestTimeout: 40 * time.Millisecond,
+		},
+	}
+	start := time.Now()
+	v := taskTool.verifyContract("the full file list", "result text")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("deadline not honoured: verifyContract took %s", elapsed)
+	}
+	if !v.CheckFailed || !v.TimedOut {
+		t.Fatalf("verdict = %+v, want CheckFailed && TimedOut", v)
+	}
+	if v.Satisfied {
+		t.Fatal("a timed-out verdict must never be satisfied")
+	}
+	if !strings.Contains(v.Deficiency, "timed out") {
+		t.Fatalf("deficiency = %q, want a timeout statement", v.Deficiency)
+	}
+}
+
+// TestContractVerdictLabelTimeout pins that status text reports a timeout as
+// "timed out", not the generic "NOT verified".
+func TestContractVerdictLabelTimeout(t *testing.T) {
+	got := contractVerdictLabel(ContractOutcome{CheckFailed: true, TimedOut: true, Deficiency: "timed out after 5m0s (Agent.RequestTimeout)"})
+	if got != "timed out" {
+		t.Fatalf("label = %q, want %q", got, "timed out")
+	}
+	// A non-timeout check failure still says NOT verified, with the reason.
+	got = contractVerdictLabel(ContractOutcome{CheckFailed: true, Deficiency: "verification failed: boom"})
+	if !strings.HasPrefix(got, "NOT verified") || !strings.Contains(got, "boom") {
+		t.Fatalf("label = %q, want NOT verified with reason", got)
 	}
 }

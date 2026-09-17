@@ -74,6 +74,7 @@ import FrontendMemoryReporter from "./lib/debug/frontendMemoryReporter";
 import { __setRevoker } from "./lib/browserStore";
 import { revokeBrowseSession } from "./api/client";
 import { getTrustedTerminalProject } from "./lib/trustedProject";
+import { resolveSessionHost } from "./hooks/useSessionHost";
 import { SpeechProvider } from "./components/Speech/SpeechProvider";
 import SpeechToolbar from "./components/Speech/SpeechToolbar";
 
@@ -690,10 +691,12 @@ function HomeApp() {
       if (sessionId.startsWith("new-")) {
         const projectPath = findProjectPathForTab(projectState, sessionId) ?? projectState.activeProject?.path;
         if (!projectPath) throw new Error("Select a project before starting a chat.");
-        const result = await api.chat(content, undefined, undefined, sessionId, projectPath);
+        const host = resolveSessionHost(projectState, sessionId, { fallbackToActive: true });
+        const result = await api.chat(content, undefined, undefined, sessionId, projectPath, host);
         rekeySession(sessionId, result.sessionId);
       } else {
-        await api.sendMessage(sessionId, content);
+        const host = resolveSessionHost(projectState, sessionId);
+        await api.sendMessage(sessionId, content, host);
       }
       return true;
     } catch (err) {
@@ -708,6 +711,7 @@ function HomeApp() {
     const targetProjectPath = targetSessionId
       ? findProjectPathForTab(projectState, targetSessionId) ?? projectState.activeProject?.path
       : projectState.activeProject?.path;
+    const targetHost = resolveSessionHost(projectState, targetSessionId ?? undefined, { fallbackToActive: true });
     // Built-in quick actions that don't need the dispatch pipeline
     if (baseCmd === "/clear" || baseCmd === "/new") {
       openNewSessionTab(isNewSessionTabEmpty(targetSessionId), targetProjectPath);
@@ -726,7 +730,7 @@ function HomeApp() {
       args: cmd.slice(baseCmd.length).trim(),
       api: {
         listSessions: () => api.listSessions().then((r) => r.sessions),
-        getSession: (id) => api.getSession(id),
+        getSession: (id, opts?, host?) => api.getSession(id, opts, host),
         getOcrConfig: () => api.getOcrConfig(),
         setOcrConfig: (cfg) => api.setOcrConfig(cfg),
         getComputerUseConfig: () => api.getComputerUseConfig(),
@@ -735,10 +739,10 @@ function HomeApp() {
         getOcrEnabled: () => api.getOcrEnabled(),
         setOcrEnabled: (enabled) => api.setOcrEnabled(enabled),
         setOcrModel: (model) => api.setOcrModel(model),
-        compactSession: (id) => api.compactSession(id),
-        recapSession: (id) => api.recapSession(id),
-        shareSession: (id) => api.shareSession(id),
-        btwSession: (id, content) => api.btwSession(id, content),
+        compactSession: (id, host?) => api.compactSession(id, host),
+        recapSession: (id, host?) => api.recapSession(id, host),
+        shareSession: (id, host?) => api.shareSession(id, host),
+        btwSession: (id, content, host?) => api.btwSession(id, content, host),
         getMaskConfig: () => api.getMaskConfig(),
         setMaskEnabled: (enabled) => api.setMaskEnabled(enabled),
         setMaskMode: (mode) => api.setMaskMode(mode),
@@ -788,6 +792,7 @@ function HomeApp() {
       },
       getMessages: () => getSessionSlice(chatStateRef.current, targetSessionId).messages,
       getSessionId: () => targetSessionId,
+      host: targetHost,
     });
 
     if (!result.handled) return { handled: false, accepted: true };
@@ -1109,6 +1114,7 @@ function HomeApp() {
                           content={et.content}
                           isBinary={et.isBinary}
                           onChange={(value) => handleEditorChange(et.id, value)}
+                          onOpenFile={openFileAndShow}
                           readOnly={false}
                           session={activeTabId ?? undefined}
                           diffVersion={et.diffVersion}
@@ -1422,6 +1428,7 @@ function HomeApp() {
           open={true}
           tool={pendingPermission.tool}
           command={pendingPermission.command}
+          args={pendingPermission.args}
           rule={pendingPermission.rule}
           summary={pendingPermission.summary}
           denyReason={pendingPermission.deny_reason}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -201,13 +202,35 @@ func (s *Store) List() []Project {
 	return out
 }
 
+// ExpandHome rewrites a leading "~" or "~/" using os.UserHomeDir and returns
+// the resulting absolute path. A "~user" form (e.g. "~bob/x") is returned
+// unchanged. Any other path (absolute, relative, empty) passes through
+// unchanged. Returns an error only when os.UserHomeDir fails.
+func ExpandHome(path string) (string, error) {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("expand ~: %w", err)
+		}
+		if path == "~" {
+			return home, nil
+		}
+		return filepath.Join(home, path[2:]), nil
+	}
+	return path, nil
+}
+
 // Add inserts a project root, or updates its LastUsedAt if already present.
 // New projects are appended with Order=0 (will sort to end until reordered).
 func (s *Store) Add(path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cleaned := filepath.Clean(path)
+	expanded, err := ExpandHome(path)
+	if err != nil {
+		return fmt.Errorf("add project: %w", err)
+	}
+	cleaned := filepath.Clean(expanded)
 	now := time.Now()
 
 	// Update existing entry.

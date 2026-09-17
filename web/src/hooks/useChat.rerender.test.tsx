@@ -177,6 +177,6 @@ describe("useChat render cost", () => {
     });
 
     const chatMock = api.chat as unknown as ReturnType<typeof vi.fn>;
-    expect(chatMock).toHaveBeenCalledWith("hi", undefined, "claude-x", "new-123", "/tmp/proj");
+    expect(chatMock).toHaveBeenCalledWith("hi", undefined, "claude-x", "new-123", "/tmp/proj", undefined);
   });
 });

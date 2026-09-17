@@ -87,7 +87,7 @@ describe("useChat.resolvePermission", () => {
     await act(async () => {
       expect(await result.current.chat.resolvePermission("call-1", "deny")).toEqual({ ok: true });
     });
-    expect(mockResolvePermission).toHaveBeenCalledWith("call-1", "sess-1", "deny");
+    expect(mockResolvePermission).toHaveBeenCalledWith("call-1", "sess-1", "deny", undefined);
     expect(result.current.chat.pendingPermission).toBeNull();
   });
 });
@@ -111,7 +111,7 @@ describe("useChat.sendMessage pending-ask recovery", () => {
     await act(async () => {
       await result.current.chat.sendMessage("continue");
     });
-    expect(mockGetSessionState).toHaveBeenCalledWith("sess-1");
+    expect(mockGetSessionState).toHaveBeenCalledWith("sess-1", undefined);
     expect(result.current.chat.pendingPermission?.request_id).toBe("call-1");
   });
 

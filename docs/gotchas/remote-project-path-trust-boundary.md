@@ -1,15 +1,15 @@
 ---
 type: Gotcha
 title: Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary
-description: 'Critical security gotcha: saved remote project paths currently can enter the local filesystem allowlist and be reused by local file and terminal handlers; keep remote identities host-aware and out of local root validation.'
-resource: internal/server/handler.go; internal/server/handler_files.go; internal/server/handler_open.go; internal/server/handler_secret.go; internal/server/handler_terminal.go; internal/server/handler_projects.go
+description: 'Gotcha: saved remote project paths can enter the local filesystem allowlist — keep host-aware and out of local root validation'
+resource: ""
 tags:
   - security
   - remote-projects
   - filesystem
   - trust-boundary
   - server
-timestamp: 2026-09-14T02:13:05Z
+timestamp: 2026-09-17T11:02:16Z
 ---
 # Remote project paths must not enter the local filesystem trust boundary
 
@@ -37,6 +37,7 @@ The shared `allowedProjectRoots` result is consumed by local filesystem and term
 - `internal/server/handler_open.go`: local file opening through `fileContentRootFor`.
 - `internal/server/handler_secret.go`: directory-wide secret operations through `fileTreeRootFor`.
 - `internal/server/handler_terminal.go`: local `HandleTerminalWS` admission, `resolveTerminalProject`, and project-scoped terminal-process filtering. The no-host branches must never accept a remote record's path as a local root.
+- `internal/server/handler_remote_proxy.go`: the `/api/remote/{host}/api/{rest...}` reverse proxy route that proxies chat/agent/session traffic to a remote host's `ocode serve --remote`.
 
 Remote project records are created and managed by `internal/server/handler_projects.go`; their identity is `(host, path)`, not `path` alone.
 
@@ -48,6 +49,7 @@ Remote project records are created and managed by `internal/server/handler_proje
 - Remote terminal/file operations must require the remote identity and validate the exact registered `(host, path)` pair (and port where applicable) before starting an SSH/WSL operation. They must not fall back to local path validation.
 - Local and remote projects with the same path must remain distinct identities.
 - Any new project-scoped endpoint must choose its local or remote mode explicitly and must not reuse a path-only allowlist for both modes.
+- The remote proxy route `/api/remote/{host}/api/*` (`handler_remote_proxy.go`) admits only a host that is the `Host` of at least one saved project — the same trust boundary as `remoteWorkFor`. It never consults the local path allowlist (`allowedProjectRoots`). The remote bearer token is injected server-side by the cached reverse proxy (`remote.InjectAuth`) and never reaches the browser, so the SPA cannot use the token to reach the remote directly.
 
 ## Regression coverage
 

@@ -1243,6 +1243,12 @@ func IsHarmfulRequest(req PermissionRequest) bool {
 // make no sense as an "always allow prefix" rule. Shared by every surface
 // that offers an always-allow choice (TUI dialog, web/desktop dialog, remote
 // resolvers) so the availability rules cannot drift.
+//
+// This set is intentionally NOT identical to the parser's bodyIntroKeywords:
+// it is a superset (it also covers for/select/case, which the parser handles
+// structurally via stForHeader/stCaseHeader). A keyword must be in this set
+// whenever an always-allow prefix for it would be meaningless, regardless of
+// how the parser splits it.
 var ShellControlKeywords = map[string]bool{
 	"if": true, "else": true, "elif": true, "fi": true,
 	"then": true, "while": true, "do": true, "done": true,
@@ -4602,6 +4608,7 @@ const (
 	tokOp                        // &&, ||, ;, &, |
 	tokRedir                     // >, >>, <, 2>, &>, etc.
 	tokSubst                     // $(...) or `...`
+	tokArith                     // $((...)) arithmetic expansion
 	tokLeftParen                 // (
 	tokRightParen                // )
 )
@@ -4646,6 +4653,13 @@ func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
 	// the deny short-circuit is skipped. Block terminators (fi/done/esac)
 	// and leading "!" negation are dropped the same way so they never
 	// surface as bogus command prefixes that trigger permission asks.
+	//
+	// `for`/`select`/`case` are deliberately NOT members here: dropping just
+	// the keyword would leave the loop variable or case subject as the
+	// fragment prefix. They are handled by the structured state machine below
+	// (stForHeader/stCaseHeader/stCasePattern), which drops the whole header
+	// and still evaluates the body. Adding them here would reintroduce the
+	// bogus-prefix ask.
 	bodyIntroKeywords := map[string]bool{
 		"do": true, "then": true, "else": true, "elif": true,
 		"if": true, "while": true, "until": true,
@@ -4653,28 +4667,153 @@ func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
 		"!": true,
 	}
 
-	for _, tok := range tokens {
-		if tok.typ == tokOp {
-			emitCommand()
-		} else if tok.typ == tokLeftParen || tok.typ == tokRightParen {
-			emitCommand()
-		} else if tok.typ == tokWord && len(currentTokens) == 0 && bodyIntroKeywords[tok.value] {
-			// Bare keyword at the start of a fragment: drop it and let the
-			// following words form their own command fragment.
-			continue
-		} else if tok.typ == tokSubst {
-			subCmds, err := parseShellCommandLine(tok.value)
-			if err == nil {
-				commands = append(commands, subCmds...)
+	// `for`/`select` headers and `case` arms are shell syntax, not commands.
+	// Their header words — the loop variable, `in`, the literal list, the case
+	// subject, and the pattern labels — are not executables. Left in the token
+	// stream they surfaced as bogus fragments (`for`, `case`, a list word, a
+	// numeric arithmetic operand) whose prefixes forced a needless permission
+	// ask and a misleading "unknown command" verdict from the auto-permission
+	// judge. Only the loop/arm BODY is a real command list, and it is still
+	// parsed and evaluated below.
+	//
+	// `if`/`while`/`until` need no header handling: dropping the keyword leaves
+	// the condition (`[`, `test`, `true`) as the fragment, which the capability
+	// allowlist already covers.
+	const (
+		stNormal = iota
+		stForHeader
+		stCaseHeader
+		stCasePattern
+	)
+	state := stNormal
+	caseDepth := 0
+
+	for i := 0; i < len(tokens); i++ {
+		tok := tokens[i]
+
+		if tok.typ == tokSubst {
+			// A command substitution executes wherever it appears — including
+			// inside a for/select header or a case subject/pattern — so it is
+			// recursed into regardless of the current state.
+			if sub, err := parseShellCommandLine(tok.value); err == nil {
+				commands = append(commands, sub...)
 			}
-			currentTokens = append(currentTokens, tok)
-		} else {
-			currentTokens = append(currentTokens, tok)
+			if state == stNormal {
+				currentTokens = append(currentTokens, tok)
+			}
+			continue
 		}
+		if tok.typ == tokArith {
+			// Arithmetic expansion is not a command. Recurse only into nested
+			// command substitutions inside the expression; the arith operands
+			// themselves must never become a fragment (the old behavior leaked
+			// "i+1" as a command prefix from `i=$((i+1))`).
+			appendSubstCommands(tok.value, &commands)
+			continue
+		}
+
+		switch state {
+		case stForHeader:
+			// Drop the loop variable, `in`, and the literal list. The header
+			// ends at `do`, or at an operator for a header-less form
+			// (`for f; do ...`) or a malformed one.
+			if tok.typ == tokOp || (tok.typ == tokWord && tok.value == "do") {
+				state = stNormal
+			}
+			continue
+		case stCaseHeader:
+			// Drop `case` subject words until `in`.
+			if tok.typ == tokWord && tok.value == "in" {
+				state = stCasePattern
+			}
+			continue
+		case stCasePattern:
+			// Pattern labels (words, `|`, optional surrounding parens) end at
+			// the ')' that opens the arm body. `esac` closes a case that has no
+			// trailing arm terminator.
+			if tok.typ == tokRightParen {
+				state = stNormal
+				continue
+			}
+			if tok.typ == tokWord && tok.value == "esac" {
+				state = stNormal
+				if caseDepth > 0 {
+					caseDepth--
+				}
+			}
+			continue
+		}
+
+		// state == stNormal
+		if tok.typ == tokOp || tok.typ == tokLeftParen || tok.typ == tokRightParen {
+			emitCommand()
+			if tok.typ == tokOp && tok.value == ";" && caseDepth > 0 &&
+				i+1 < len(tokens) && tokens[i+1].typ == tokOp &&
+				(tokens[i+1].value == ";" || tokens[i+1].value == "&") {
+				// ";"+"&" covers the `;;`, `;&` and `;;&` arm terminators;
+				// the next arm's pattern labels follow.
+				i++
+				state = stCasePattern
+			}
+			continue
+		}
+		if tok.typ == tokWord && len(currentTokens) == 0 {
+			if bodyIntroKeywords[tok.value] {
+				// Bare keyword at the start of a fragment: drop it and let the
+				// following words form their own command fragment.
+				if tok.value == "esac" && caseDepth > 0 {
+					// A single-arm case may close with `;` instead of `;;`
+					// (`case x in a) echo a; esac` is valid shell), so the
+					// terminator never re-entered pattern state. Count the
+					// closing keyword here too.
+					caseDepth--
+				}
+				continue
+			}
+			switch tok.value {
+			case "for", "select":
+				state = stForHeader
+				continue
+			case "case":
+				caseDepth++
+				state = stCaseHeader
+				continue
+			}
+		}
+		currentTokens = append(currentTokens, tok)
 	}
 	emitCommand()
 
+	// An unterminated control-flow header or pattern means the construct never
+	// closed, so words were dropped and the fragment list no longer reflects
+	// the command. Fail the parse (the caller then asks) rather than returning
+	// a short list that could auto-allow an unparsed command.
+	if state != stNormal || caseDepth != 0 {
+		return nil, fmt.Errorf("unterminated shell control-flow construct")
+	}
+
 	return commands, nil
+}
+
+// appendSubstCommands recurses into every command substitution nested inside an
+// arithmetic expression (`$(( $(cmd) + 1 ))`) so an executed inner command is
+// still evaluated, while the arithmetic operands and operators themselves are
+// never parsed as commands.
+func appendSubstCommands(expr string, commands *[]parsedShellCommand) {
+	tokens, err := tokenizeShell(expr)
+	if err != nil {
+		return
+	}
+	for _, tok := range tokens {
+		switch tok.typ {
+		case tokSubst:
+			if sub, err := parseShellCommandLine(tok.value); err == nil {
+				*commands = append(*commands, sub...)
+			}
+		case tokArith:
+			appendSubstCommands(tok.value, commands)
+		}
+	}
 }
 
 // absorbFdDup extends a just-emitted redirect operator (e.g. ">", "2>") to
@@ -4757,6 +4896,16 @@ func tokenizeShell(input string) ([]shellToken, error) {
 		}
 
 		if inDouble {
+			if r == '$' && i+2 < n && runes[i+1] == '(' && runes[i+2] == '(' {
+				emitWord()
+				expr, endIdx, err := parseArithmetic(runes, i)
+				if err != nil {
+					return nil, err
+				}
+				tokens = append(tokens, shellToken{typ: tokArith, value: expr})
+				i = endIdx
+				continue
+			}
 			if r == '$' && i+1 < n && runes[i+1] == '(' {
 				emitWord()
 				sub, endIdx, err := parseParenthesis(runes, i+1)
@@ -4799,7 +4948,15 @@ func tokenizeShell(input string) ([]shellToken, error) {
 			tokens = append(tokens, shellToken{typ: tokSubst, value: sub})
 			i = endIdx
 		case '$':
-			if i+1 < n && runes[i+1] == '(' {
+			if i+2 < n && runes[i+1] == '(' && runes[i+2] == '(' {
+				emitWord()
+				expr, endIdx, err := parseArithmetic(runes, i)
+				if err != nil {
+					return nil, err
+				}
+				tokens = append(tokens, shellToken{typ: tokArith, value: expr})
+				i = endIdx
+			} else if i+1 < n && runes[i+1] == '(' {
 				emitWord()
 				sub, endIdx, err := parseParenthesis(runes, i+1)
 				if err != nil {
@@ -4906,6 +5063,70 @@ func tokenizeShell(input string) ([]shellToken, error) {
 	}
 	emitWord()
 	return tokens, nil
+}
+
+// parseArithmetic consumes a `$(( ... ))` arithmetic expansion beginning at
+// `start` (which points at the '$'), returning the inner expression and the
+// index of the final ')'. Depth counting starts at 2 for the doubled opening
+// paren and, unlike parseParenthesis, treats every '(' as nesting depth —
+// including the '(' of a nested command substitution — so the closing "))"
+// pair is matched correctly and the expression body is returned verbatim.
+func parseArithmetic(runes []rune, start int) (string, int, error) {
+	depth := 2
+	inSingle := false
+	inDouble := false
+	escaped := false
+	var content strings.Builder
+
+	n := len(runes)
+	for i := start + 3; i < n; i++ {
+		r := runes[i]
+		if escaped {
+			content.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' && !inSingle {
+			content.WriteRune(r)
+			escaped = true
+			continue
+		}
+		if inSingle {
+			if r == '\'' {
+				inSingle = false
+			}
+			content.WriteRune(r)
+			continue
+		}
+		if inDouble {
+			if r == '"' {
+				inDouble = false
+			}
+			content.WriteRune(r)
+			continue
+		}
+
+		switch r {
+		case '\'':
+			inSingle = true
+			content.WriteRune(r)
+		case '"':
+			inDouble = true
+			content.WriteRune(r)
+		case '(':
+			depth++
+			content.WriteRune(r)
+		case ')':
+			depth--
+			if depth == 0 {
+				return content.String(), i, nil
+			}
+			content.WriteRune(r)
+		default:
+			content.WriteRune(r)
+		}
+	}
+	return "", 0, fmt.Errorf("unbalanced arithmetic expansion")
 }
 
 func parseParenthesis(runes []rune, start int) (string, int, error) {
