@@ -215,6 +215,11 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       if (!sessionId) return false;
       try {
         await api.answerQuestion(requestId, sessionId, answers, projectHost);
+        // Echo the answers locally before dismissing the dialog so the chat
+        // shows the questions + the selections that were sent to the LLM
+        // immediately, without waiting for the continuation turn's snapshot
+        // (see QUESTION_ANSWERED in chatStore).
+        dispatch({ type: "QUESTION_ANSWERED", sessionId, requestId, answers });
         dispatch({ type: "QUESTION_RESOLVED", sessionId });
         return true;
       } catch (err) {

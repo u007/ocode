@@ -47,6 +47,12 @@ type TUIStatus struct {
 	// model, then the main model, when off or unset.
 	ContextAgentModel   string `json:"context_agent_model,omitempty"`
 	ContextAgentModelOn bool   `json:"context_agent_model_enabled"`
+	// Auto-continue: runtime on/off gate + optional judge model. Mirrors the
+	// TUI's autocont sidebar row ("autocont: ●on/○off <model>") so the web
+	// sidebar can render and toggle the same control. AutoContinueOn has no
+	// omitempty: false is the meaningful default.
+	AutoContinueModel string `json:"auto_continue_model,omitempty"`
+	AutoContinueOn    bool   `json:"auto_continue_enabled"`
 	// OCR tool model + runtime on/off.
 	OcrBackend string `json:"ocr_backend,omitempty"`
 	OcrModel   string `json:"ocr_model,omitempty"`

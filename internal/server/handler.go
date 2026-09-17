@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/contextbudget"
 	"github.com/u007/ocode/internal/debuglog"
@@ -35,6 +37,10 @@ type Handler struct {
 	mu            sync.Mutex
 	computerUseMu sync.Mutex
 	computerSup   *tool.ProcessSupervisor
+	// requestComputerPermissions triggers the OS permission prompts for
+	// computer use. Overridable in tests so the suite never fires a real
+	// consent dialog; nil falls back to computer.RequestPermissions.
+	requestComputerPermissions func(context.Context) computer.PermissionReport
 	// procSup is the server's process supervisor (the same one computerSup
 	// aliases), used for server-owned long-lived children that are not
 	// computer-use — today the per-project `ssh -N -L` port forwards

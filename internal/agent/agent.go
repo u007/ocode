@@ -250,6 +250,11 @@ type AutoContinueJudgeResult struct {
 	Gen    uint64
 	Resume bool
 	Err    error
+	// Detail names the judge and why it decided as it did (model id, step-limit
+	// signal, confidence, or the failure). It is user-facing display text: a
+	// caller with a transcript renders it so a declined or failed triage is
+	// VISIBLE instead of the turn silently appearing done.
+	Detail string
 }
 
 type Agent struct {
@@ -2262,21 +2267,38 @@ func (a *Agent) autoContinueJudgeClient() LLMClient {
 	if model == "" {
 		return nil
 	}
-	if client := NewClient(a.config, model); client != nil {
+	if client := newClientFn(a.config, model); client != nil {
 		return a.bindOpenCodeSessionID(client)
 	}
 	return nil
 }
 
+// autoContinueJudgeClientTyped resolves the judge client and reports whether
+// it is the TypeSafe decision-only route. A typesafe AutoContinueModel builds
+// a TypesafeClient (triage via Decide), any other model builds a chat client
+// (prose YES/NO via Chat).
+func (a *Agent) autoContinueJudgeClientTyped() (LLMClient, bool) {
+	client := a.autoContinueJudgeClient()
+	if client == nil {
+		return nil, false
+	}
+	_, isTS := client.(*TypesafeClient)
+	return client, isTS
+}
+
 // AutoContinueJudgeAsync asks the configured auto-continue judge model
 // whether the most recent assistant reply looks like a genuinely interrupted,
 // unfinished response that should be auto-resumed, rather than a naturally
-// completed one. Returns false (no call made) if no judge model is
+// completed one. A typesafe/<model> judge is consulted through the TypeSafe
+// decision API (Decide) with structured state — the chat judge path would
+// fail closed because TypesafeClient.Chat always returns
+// ErrTypesafeDecisionOnly. Returns false (no call made) if no judge model is
 // configured or a judge call is already in flight. The verdict arrives via
 // OnAutoContinueJudge; on any error the caller receives Resume=false (fail
-// closed — never auto-resume on an ambiguous/failed judge call).
+// closed — never auto-resume on an ambiguous/failed judge call) with Detail
+// describing the failure.
 func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64) bool {
-	client := a.autoContinueJudgeClient()
+	client, isTypesafe := a.autoContinueJudgeClientTyped()
 	if client == nil {
 		return false
 	}
@@ -2287,9 +2309,17 @@ func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64) bool {
 	copy(snapshot, messages)
 	crashguard.Go(func() {
 		defer a.autoContinueJudgeMu.Unlock()
-		resume, err := a.runAutoContinueJudge(client, snapshot)
+		var resume bool
+		var err error
+		var detail string
+		if isTypesafe {
+			resume, detail, err = a.runAutoContinueJudgeTypesafe(client.(*TypesafeClient), snapshot)
+		} else {
+			resume, err = a.runAutoContinueJudge(client, snapshot)
+			detail = "chat judge " + client.GetProvider() + "/" + client.GetModel()
+		}
 		if a.OnAutoContinueJudge != nil {
-			a.OnAutoContinueJudge(AutoContinueJudgeResult{Gen: gen, Resume: resume, Err: err})
+			a.OnAutoContinueJudge(AutoContinueJudgeResult{Gen: gen, Resume: resume, Err: err, Detail: detail})
 		}
 	})
 	return true
@@ -4957,6 +4987,22 @@ func (a *Agent) GetMaxSteps() int {
 // finishing because the model stopped calling tools on its own.
 func (a *Agent) StepLimitHit() bool {
 	return a.stepLimitHit.Load()
+}
+
+// StepLimitHitDetail is the user-facing one-liner for the most recent
+// Step()'s outcome: the hard /max-step cutoff when stepLimitHit is set, the
+// turn's error when it failed, or "" when the reply finished naturally within
+// budget. Callers render it so a turn that was cut off — or a triage that
+// declined to resume — is visible instead of the transcript going silent.
+// Read AFTER Step returns; like stepLimitHit it describes the last call only.
+func (a *Agent) StepLimitHitDetail(err error) string {
+	if a.stepLimitHit.Load() {
+		return "cut off by the /max-step cap — reply summarized, work may remain"
+	}
+	if err != nil {
+		return "turn failed: " + err.Error()
+	}
+	return ""
 }
 
 // applySpecModel swaps the active LLM client when the spec declares a Model

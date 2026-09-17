@@ -8,6 +8,8 @@ export default function ComputerUseForm() {
   const [statusLines, setStatusLines] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [requesting, setRequesting] = useState(false);
+  const [permissionLines, setPermissionLines] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -39,6 +41,20 @@ export default function ComputerUseForm() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const requestPermissions = async () => {
+    setRequesting(true);
+    setError(null);
+    setPermissionLines([]);
+    try {
+      const report = await api.requestComputerUsePermissions();
+      setPermissionLines(report.lines ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRequesting(false);
     }
   };
 
@@ -76,10 +92,37 @@ export default function ComputerUseForm() {
           ))}
         </div>
       )}
-      <Button size="sm" onClick={save} disabled={saving} className="h-8 text-xs">
-        {saving && <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />}
-        Save
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button size="sm" onClick={save} disabled={saving} className="h-8 text-xs">
+          {saving && <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />}
+          Save
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={requestPermissions}
+          disabled={requesting}
+          className="h-8 text-xs"
+        >
+          {requesting && <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />}
+          Request permissions
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Triggers the operating-system permission dialogs the computer tool needs
+        (on macOS: Accessibility, Screen Recording, and Automation). On Windows
+        and Linux this only reports that no explicit grant is required.
+      </p>
+      {permissionLines.length > 0 && (
+        <div
+          data-testid="computer-use-permission-result"
+          className="space-y-1 rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground"
+        >
+          {permissionLines.map((line, i) => (
+            <div key={i}>{line}</div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

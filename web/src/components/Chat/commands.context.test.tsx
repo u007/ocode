@@ -31,7 +31,8 @@ type SessionContext = {
  */
 function context(opts: {
   sessionId?: string | null;
-  getSessionContext?: (id: string) => Promise<SessionContext>;
+  host?: string;
+  getSessionContext?: (id: string, host?: string) => Promise<SessionContext>;
 } = {}) {
   const hasSessionId = "sessionId" in opts;
   const getSessionContext =
@@ -46,6 +47,7 @@ function context(opts: {
       commandName: "context",
       args: "",
       api: { getSessionContext },
+      ...(opts.host ? { host: opts.host } : {}),
       ...(hasSessionId ? { getSessionId: () => opts.sessionId ?? null } : {}),
     } as never,
     getSessionContext,
@@ -82,11 +84,22 @@ describe("/context command", () => {
     });
     const result = await dispatchCommand("/context", ctx);
     const content = result.messages?.[0]?.content ?? "";
-    expect(getSessionContext).toHaveBeenCalledWith("ses_2026-01-02-030405-abcd");
+    expect(getSessionContext).toHaveBeenCalledWith("ses_2026-01-02-030405-abcd", undefined);
     expect(content).toContain("## Context Budget");
     expect(content).toContain("opencode-go/deepseek-v4.1-flash");
     expect(content).toContain("~12,345");
     expect(content).toContain("(6% used)");
+  });
+
+  it("passes the session's host so a remote project's budget comes from that host", async () => {
+    const getSessionContext = vi.fn(async (id: string) => ({
+      session_id: id,
+      message_count: 1,
+      estimated_tokens: 10,
+    }));
+    const { ctx } = context({ sessionId: "ses_remote", host: "devbox", getSessionContext });
+    await dispatchCommand("/context", ctx);
+    expect(getSessionContext).toHaveBeenCalledWith("ses_remote", "devbox");
   });
 
   it("renders the shared breakdown report when the server returns one", async () => {
@@ -220,5 +233,30 @@ describe("session-scoped commands treat a new-* tab as no session", () => {
     if (spy) {
       expect(api[spy as keyof typeof api]).not.toHaveBeenCalled();
     }
+  });
+});
+
+/**
+ * /agents regression suite: the subagent registry is per server, so a remote
+ * session's view must read the host's registry. A host-less read returned the
+ * local server's empty list and printed "No active or queued subagents."
+ */
+describe("/agents command", () => {
+  it("reads the run tree from the session's host", async () => {
+    const getAgentRuns = vi.fn(async () => [
+      { id: "run-1", agent: "explore", status: "running" },
+    ]);
+    const ctx = {
+      commandName: "agents",
+      args: "",
+      api: { getAgentRuns } as never,
+      host: "devbox",
+      getSessionId: () => "ses_remote",
+    } as never;
+
+    const result = await dispatchCommand("/agents", ctx);
+    expect(result.handled).toBe(true);
+    expect(getAgentRuns).toHaveBeenCalledWith("devbox");
+    expect(result.messages?.[0]?.content).toContain("explore");
   });
 });

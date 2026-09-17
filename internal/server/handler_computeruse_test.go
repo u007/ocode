@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -140,5 +141,55 @@ func TestComputerUseConfigConcurrentPutsKeepMemoryAndDiskInSync(t *testing.T) {
 	}
 	if disk.ComputerUse.Enabled != inMemory {
 		t.Fatalf("memory enabled=%v, disk enabled=%v", inMemory, disk.ComputerUse.Enabled)
+	}
+}
+
+func TestHandleRequestComputerUsePermissions(t *testing.T) {
+	h := testConfigHandler(t)
+	h.requestComputerPermissions = func(context.Context) computer.PermissionReport {
+		return computer.PermissionReport{
+			Platform: "test-os",
+			Granted:  false,
+			Lines:    []string{"Accessibility: not granted.", "Opened System Settings → Privacy & Security."},
+		}
+	}
+
+	w := httptest.NewRecorder()
+	h.HandleRequestComputerUsePermissions(w, httptest.NewRequest(http.MethodPost, "/api/config/computer-use/permissions", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	var report computer.PermissionReport
+	if err := json.Unmarshal(w.Body.Bytes(), &report); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if report.Platform != "test-os" || report.Granted {
+		t.Fatalf("report = %+v, want platform test-os and granted false", report)
+	}
+	if len(report.Lines) != 2 {
+		t.Fatalf("lines = %v, want 2", report.Lines)
+	}
+}
+
+// TestHandleRequestComputerUsePermissionsDoesNotPersistConfig pins the
+// invariant that requesting permissions never changes the enabled flag.
+func TestHandleRequestComputerUsePermissionsDoesNotPersistConfig(t *testing.T) {
+	h := testConfigHandler(t)
+	h.requestComputerPermissions = func(context.Context) computer.PermissionReport {
+		return computer.PermissionReport{Platform: "test-os", Granted: true}
+	}
+
+	w := httptest.NewRecorder()
+	h.HandleRequestComputerUsePermissions(w, httptest.NewRequest(http.MethodPost, "/api/config/computer-use/permissions", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	h.mu.Lock()
+	enabled := h.cfg.Ocode.ComputerUse.Enabled
+	h.mu.Unlock()
+	if enabled {
+		t.Fatal("requesting permissions enabled computer use")
 	}
 }

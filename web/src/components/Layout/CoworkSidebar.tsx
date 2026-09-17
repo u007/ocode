@@ -22,7 +22,7 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   activeAgent: string;
-  onModelClick?: (tab: "main" | "small" | "advisor" | "permission" | "explorer" | "context") => void;
+  onModelClick?: (tab: "main" | "small" | "advisor" | "permission" | "explorer" | "context" | "autocontinue") => void;
   // When true the sidebar becomes a fixed overlay (right side) with a backdrop
   // instead of pushing the chat column. Used for the mobile layout (≤767px).
   isMobile?: boolean;
@@ -50,6 +50,10 @@ interface ConfigState {
   explorerModelEnabled?: boolean;
   contextModel?: string;
   contextModelEnabled?: boolean;
+  // Auto-continue: process-level defaults backing the sidebar row before a
+  // session's TUIStatus snapshot exists (tuiStatus wins once present).
+  autoContinueModel?: string;
+  autoContinueEnabled?: boolean;
 }
 
 // Expanded/collapsed state of the sidebar sections. Persisted to localStorage
@@ -103,6 +107,7 @@ export default function CoworkSidebar({
   const [smallLoading, setSmallLoading] = useState(false);
   const [explorerLoading, setExplorerLoading] = useState(false);
   const [contextLoading, setContextLoading] = useState(false);
+  const [autoContinueLoading, setAutoContinueLoading] = useState(false);
   // Permission-mode cycling (normal → yolo → locked → sandbox). Hoisted with
   // the other hooks: hooks must run unconditionally before any early return
   // (collapsing the sidebar returns null on desktop) or React throws
@@ -235,8 +240,9 @@ export default function CoworkSidebar({
       api.getSmallModelWithEnabled().catch(() => null),
       api.getExplorerModel().catch(() => null),
       api.getContextModel().catch(() => null),
+      api.getAutoContinue().catch(() => null),
     ])
-      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, advisorRes, advisorEnabledRes, smallRes, explorerRes, contextRes]) => {
+      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, advisorRes, advisorEnabledRes, smallRes, explorerRes, contextRes, autoContinueRes]) => {
         setConfig({
           model: modelRes?.model || "",
           thinkingBudget: thinkingRes?.budget,
@@ -254,6 +260,8 @@ export default function CoworkSidebar({
           explorerModelEnabled: explorerRes?.enabled,
           contextModel: contextRes?.model || "",
           contextModelEnabled: contextRes?.enabled,
+          autoContinueModel: autoContinueRes?.model || "",
+          autoContinueEnabled: autoContinueRes?.enabled,
         });
       })
       .catch(console.error);
@@ -437,6 +445,29 @@ export default function CoworkSidebar({
       console.error("toggle context model error", e);
     } finally {
       setContextLoading(false);
+    }
+  };
+
+  // Auto-continue on/off: PUT /api/config/ocode/autocontinue {enabled}, the
+  // same persisted global gate the TUI's sidebar row and /autocontinue write.
+  // The handler also broadcasts a fresh status snapshot, so a refetch keeps
+  // every open sidebar in sync.
+  const toggleAutoContinue = async () => {
+    const current = tuiStatus?.auto_continue_enabled ?? config.autoContinueEnabled ?? false;
+    const next = !current;
+    setAutoContinueLoading(true);
+    try {
+      await api.setAutoContinue({ enabled: next });
+      if (sessionId) {
+        const status = await api.getSessionStatus(sessionId);
+        dispatch({ type: "SET_TUI_STATUS", sessionId, status });
+      } else {
+        setConfig((prev) => ({ ...prev, autoContinueEnabled: next }));
+      }
+    } catch (e) {
+      console.error("toggle auto-continue error", e);
+    } finally {
+      setAutoContinueLoading(false);
     }
   };
 
@@ -664,6 +695,37 @@ export default function CoworkSidebar({
               checked={Boolean(tuiStatus?.context_agent_model_enabled ?? config.contextModelEnabled)}
               disabled={contextLoading}
               onChange={toggleContext}
+              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+            />
+          </label>
+
+          {/* Auto-continue — model picker + on/off toggle (mirrors TUI's
+              autocont: ●on/○off <model> row). Off or no judge model means a
+              turn is only resumed on a hard /max-step cutoff. */}
+          <button
+            type="button"
+            onClick={() => onModelClick?.("autocontinue")}
+            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-muted disabled:cursor-default disabled:hover:bg-transparent"
+            disabled={!onModelClick}
+            title="Pick the auto-continue judge model (clear = StepLimitHit-only resumes)"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">Auto-continue</span>
+              <span className={`font-mono text-[11px] ${(tuiStatus?.auto_continue_enabled ?? config.autoContinueEnabled) ? "text-emerald-400" : "text-muted-foreground"}`}>
+                {(tuiStatus?.auto_continue_enabled ?? config.autoContinueEnabled) ? "●on" : "○off"}
+              </span>
+            </div>
+            <div className="text-foreground font-mono truncate">
+              {tuiStatus?.auto_continue_model || config.autoContinueModel || "(step-limit only)"}
+            </div>
+          </button>
+          <label className="flex items-center justify-between cursor-pointer rounded px-1 py-1 hover:bg-muted">
+            <span className="text-xs text-muted-foreground">Auto-continue enabled</span>
+            <input
+              type="checkbox"
+              checked={Boolean(tuiStatus?.auto_continue_enabled ?? config.autoContinueEnabled)}
+              disabled={autoContinueLoading}
+              onChange={toggleAutoContinue}
               className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
             />
           </label>

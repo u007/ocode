@@ -59,7 +59,7 @@ vi.mock("./api/client", () => {
 });
 
 vi.mock("./lib/eventBus", () => ({
-  eventBus: { on: () => () => {}, onReconnect: () => () => {}, emit: () => {}, start: () => {}, stop: () => {}, setProjects: () => {} },
+  eventBus: { on: () => () => {}, onReconnect: () => () => {}, emit: () => {}, start: () => {}, stop: () => {}, setProjects: () => {}, setHosts: () => {} },
 }));
 
 const REMOTE_TAB = {

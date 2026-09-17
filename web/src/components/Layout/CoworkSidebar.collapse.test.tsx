@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { render, cleanup } from "@testing-library/react";
+import { fireEvent, render, cleanup, screen, waitFor } from "@testing-library/react";
 import CoworkSidebar from "./CoworkSidebar";
 import { ChatProvider } from "../../stores/chatStore";
 
@@ -24,8 +24,12 @@ vi.mock("../../api/client", () => ({
     getSmallModelWithEnabled: vi.fn(() => Promise.resolve({ model: "", enabled: false })),
     getExplorerModel: vi.fn(() => Promise.resolve({ model: "", enabled: false })),
     getContextModel: vi.fn(() => Promise.resolve({ model: "", enabled: false })),
+    getAutoContinue: vi.fn(() => Promise.resolve({ enabled: false, model: "" })),
+    setAutoContinue: vi.fn(() => Promise.resolve({ enabled: false, model: "" })),
+    getSessionStatus: vi.fn(() => Promise.resolve({ auto_continue_enabled: true })),
   },
   apiPath: (p: string) => p,
+  remoteApiBase: (host?: string) => (host ? `/api/remote/${encodeURIComponent(host)}` : ""),
   authHeaders: () => ({}),
 }));
 
@@ -98,5 +102,31 @@ describe("CoworkSidebar collapse (React error #300 regression)", () => {
     expect(scroller).toBeDefined();
     expect(scroller!.className).toMatch(/flex-1/);
     expect(scroller!.className).toMatch(/min-h-0/);
+  });
+});
+
+// The sidebar mirrors the TUI's pinned model rows (advisor/small/explorer/
+// context/autocont); the auto-continue row is the web's only toggle surface
+// for this feature besides the /autocontinue command.
+describe("CoworkSidebar auto-continue row", () => {
+  it("renders the autocont row (off + step-limit placeholder) and toggles the gate via setAutoContinue", async () => {
+    const { api } = await import("../../api/client");
+    const onModelClick = vi.fn();
+    const { container } = renderSidebar({ onModelClick });
+
+    // The row exists with the TUI-matching placeholder before any snapshot.
+    expect(container.textContent).toContain("Auto-continue");
+    expect(container.textContent).toContain("(step-limit only)");
+    expect(container.textContent).toContain("○off");
+
+    // Toggling fires the persisted global gate write (enabled only — the
+    // judge model must not be touched by the checkbox).
+    const checkbox = screen.getByRole("checkbox", { name: "Auto-continue enabled" });
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(api.setAutoContinue).toHaveBeenCalledWith({ enabled: true }));
+
+    // The model-name button opens the judge picker for the autocontinue purpose.
+    fireEvent.click(screen.getByText("(step-limit only)"));
+    expect(onModelClick).toHaveBeenCalledWith("autocontinue");
   });
 });

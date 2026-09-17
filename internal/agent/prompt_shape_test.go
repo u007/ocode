@@ -108,6 +108,11 @@ func TestEnvironmentPrompt_RemoteProjectHost(t *testing.T) {
 	if !strings.Contains(remotePrompt, "Project host: james@example.test") {
 		t.Fatalf("remote project host missing from <env>:\n%s", remotePrompt)
 	}
+	// The chat agent now runs on the host itself, so the line must say the
+	// paths below belong to that host — not to the machine the user is on.
+	if !strings.Contains(remotePrompt, "this agent runs on that host") {
+		t.Fatalf("remote project host line must state the agent runs on the host:\n%s", remotePrompt)
+	}
 	if !strings.Contains(remotePrompt, "<env>") || !strings.Contains(remotePrompt, "</env>") {
 		t.Fatalf("env block markers missing:\n%s", remotePrompt)
 	}

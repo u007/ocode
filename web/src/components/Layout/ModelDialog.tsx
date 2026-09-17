@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { api } from "../../api/client";
 import { useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import type { ModelInfo } from "../../api/types";
@@ -13,7 +13,7 @@ import {
 
 /** The single model-selection purpose this dialog is opened for. Each settings
  *  field opens the dialog for exactly one purpose — there are no tabs. */
-export type ModelDialogTab = "main" | "small" | "advisor" | "recap" | "ocr" | "mask" | "commit" | "summary" | "permission" | "explorer" | "context";
+export type ModelDialogTab = "main" | "small" | "advisor" | "recap" | "ocr" | "mask" | "commit" | "summary" | "permission" | "explorer" | "context" | "autocontinue";
 
 const PURPOSE_TITLES: Record<ModelDialogTab, string> = {
   main: "Select Model",
@@ -27,6 +27,7 @@ const PURPOSE_TITLES: Record<ModelDialogTab, string> = {
   permission: "Select Permission Model",
   explorer: "Select Explorer Model",
   context: "Select Context Model",
+  autocontinue: "Select Auto-Continue Judge Model",
 };
 
 interface Props {
@@ -44,9 +45,14 @@ interface Props {
    *  session (persisted as a per-session override) instead of the global
    *  config model, so each chat tab keeps its own model. */
   sessionId?: string;
+  /** SSH/WSL host of the session's project. When set, the model list and every
+   *  session-scoped call go to that host's server (`/api/remote/<host>/…`) —
+   *  a remote session's model registry and context live there, not locally.
+   *  Resolved by the caller via `useSessionHost(sessionId)`. */
+  host?: string;
 }
 
-export default function ModelDialog({ open, onClose, purpose = "main", onPick, currentValues, sessionId }: Props) {
+export default function ModelDialog({ open, onClose, purpose = "main", onPick, currentValues, sessionId, host }: Props) {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [search, setSearch] = useState("");
   // The advisor's Claude Code toggle is owned by AdvisorForm; the dialog must
@@ -60,6 +66,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   const [permissionModelState, setPermissionModelState] = useState("");
   const [explorerModelState, setExplorerModelState] = useState("");
   const [contextModelState, setContextModelState] = useState("");
+  const [autoContinueModelState, setAutoContinueModelState] = useState("");
   const activeModel = useChatSelector((s) => s.model);
   const smallModel = useChatSelector((s) => s.smallModel);
   const advisorModel = useChatSelector((s) => s.advisorModel);
@@ -74,17 +81,22 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   });
   const dispatch = useChatDispatch();
 
+  // Pass `host` only when present so a local call stays byte-identical — an
+  // explicit trailing `undefined` would change every local request's arity.
+  const hostArgs = useMemo<[] | [string]>(() => (host ? [host] : []), [host]);
+
   useEffect(() => {
     if (open) {
       setSearch("");
-      // Load the standard registry models, augmented for the permission and
-      // Security & Redaction (mask) purposes with the user's enabled local/LM
-      // Studio models — mirroring the TUI's permission-model and redaction-model
-      // pickers, which list enabled LocalModels. The permission judge is
-      // typically a local model, so it must be selectable here.
+      // Load the standard registry models, augmented for the permission,
+      // Security & Redaction (mask), and auto-continue judge purposes with
+      // the user's enabled local/LM Studio models — mirroring the TUI's
+      // permission-model, redaction-model and autocontinue-model pickers,
+      // which list enabled LocalModels. The permission judge and auto-continue
+      // judge are typically local models, so they must be selectable here.
       const loadModels = async () => {
-        const base = await api.listModels({ refresh: true });
-        if (purpose === "mask" || purpose === "permission") {
+        const base = await api.listModels({ refresh: true }, ...hostArgs);
+        if (purpose === "mask" || purpose === "permission" || purpose === "autocontinue") {
           try {
             const local = await api.getLocalModelsConfig();
             const extra: ModelInfo[] = Object.entries(local)
@@ -127,8 +139,13 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           setContextModelState(res.model ?? "");
         }).catch(console.error);
       }
+      if (purpose === "autocontinue" && !currentValues?.autocontinue) {
+        api.getAutoContinue().then((res) => {
+          setAutoContinueModelState(res.model ?? "");
+        }).catch(console.error);
+      }
     }
-  }, [open, dispatch, purpose, currentValues?.explorer, currentValues?.context]);
+  }, [open, dispatch, purpose, currentValues?.explorer, currentValues?.context, currentValues?.autocontinue, hostArgs]);
 
   const filteredModels = models.filter(
     (m) =>
@@ -160,7 +177,10 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     purpose === "permission" ||
     purpose === "mask" ||
     purpose === "explorer" ||
-    purpose === "context";
+    purpose === "context" ||
+    // TUI's autocontinue-model picker reuses openModelPicker (recents +
+    // favorites sections render; the ctrl+f star does not act on it).
+    purpose === "autocontinue";
   const supportsFavoriteToggle = purpose === "main" || purpose === "permission";
   const sections = supportsSections ? partitionModelSections(filteredModels) : null;
   // Flat provider grouping for purposes without favorites sections. Must NOT
@@ -186,6 +206,8 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         return currentValues?.explorer ?? explorerModelState;
       case "context":
         return currentValues?.context ?? contextModelState;
+      case "autocontinue":
+        return currentValues?.autocontinue ?? autoContinueModelState;
       default:
         // "main": when a session is scoped, highlight that session's own
         // effective model (from its per-session status snapshot) rather than
@@ -225,12 +247,12 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           // No optimistic local write: SET_TUI_STATUS replaces the whole
           // snapshot, and the authoritative push from pushSessionStatusSnapshot
           // lands on the same tab within one frame.
-          api.setSessionModel(sessionId, modelId).catch((err) => {
+          api.setSessionModel(sessionId, modelId, ...hostArgs).catch((err) => {
             console.error("set session model failed", err);
             // On failure, refetch this session's status so the sidebar shows
             // the model actually in effect rather than a stale value.
             api
-              .getSessionStatus(sessionId)
+              .getSessionStatus(sessionId, ...hostArgs)
               .then((st) => dispatch({ type: "SET_TUI_STATUS", sessionId, status: st }))
               .catch(console.error);
           });
@@ -260,6 +282,16 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           api.setContextModel(modelId).catch(console.error);
         }
         break;
+      case "autocontinue":
+        onPick?.(purpose, modelId, selectedModel);
+        if (!onPick) {
+          // No form owns this pick (sidebar direct trigger): persist the judge
+          // model directly. Leave the on/off gate untouched — mirroring the
+          // TUI's `/autocontinue model <name>`, which never toggles the gate.
+          setAutoContinueModelState(modelId);
+          api.setAutoContinue({ model: modelId }).catch(console.error);
+        }
+        break;
       default:
         // Form-owned purpose (recap/ocr/mask/commit/summary): hand the pick to
         // the owning form, which persists it via its own Save.
@@ -282,7 +314,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
       prev.map((x) => (x.name === m.name ? { ...x, favorite: next } : x)),
     );
     try {
-      const res = await api.setModelFavorite(m.name, next);
+      const res = await api.setModelFavorite(m.name, next, ...hostArgs);
       const favSet = new Set(res.favorites);
       setModels((prev) => prev.map((x) => ({ ...x, favorite: favSet.has(x.name) })));
     } catch (err) {
@@ -312,10 +344,10 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         if (sessionId && sessionId.startsWith("new-")) {
           dispatch({ type: "SET_SESSION_MODEL", sessionId, model: undefined });
         } else if (sessionId) {
-          api.clearSessionModel(sessionId).catch((err) => {
+          api.clearSessionModel(sessionId, ...hostArgs).catch((err) => {
             console.error("clear session model failed", err);
             api
-              .getSessionStatus(sessionId)
+              .getSessionStatus(sessionId, ...hostArgs)
               .then((st) => dispatch({ type: "SET_TUI_STATUS", sessionId, status: st }))
               .catch(console.error);
           });
@@ -342,6 +374,15 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         if (!onPick) {
           setContextModelState("");
           api.setContextModel("auto").catch(console.error);
+        }
+        break;
+      case "autocontinue":
+        onPick?.(purpose, "");
+        if (!onPick) {
+          // Clear = judge model cleared, gate untouched (TUI parity: "auto"/
+          // "none" clears the model, meaning StepLimitHit-only resumes).
+          setAutoContinueModelState("");
+          api.setAutoContinue({ clear: true }).catch(console.error);
         }
         break;
       default:

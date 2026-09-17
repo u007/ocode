@@ -281,7 +281,7 @@ func (a *Agent) environmentPrompt() string {
 	// Empty for local projects → byte-identical prompt (cache-stable).
 	if a.projectHost != "" {
 		lines = append(lines, fmt.Sprintf(
-			"  Project host: %s (remote project — the project files live on that host; the config/session/runtime paths below belong to the machine running this agent)",
+			"  Project host: %s (remote project — this agent runs on that host, so the project files, shell, home, and the config/session/runtime paths below all live on it)",
 			a.projectHost,
 		))
 	}

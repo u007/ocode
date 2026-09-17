@@ -1,6 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { useEffect } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import ModelDialog from "./ModelDialog";
+import { ProjectProvider, useProjectDispatch } from "../../stores/projectStore";
+import { useSessionHost } from "../../hooks/useSessionHost";
 import type { ModelInfo } from "../../api/types";
 
 // Fixtures in the exact order GET /api/models returns them: Recently Used
@@ -35,12 +38,28 @@ const hoisted = vi.hoisted(() => {
     setSessionModel: vi.fn(async () => ({ model: "", session_id: "" })),
     clearSessionModel: vi.fn(async () => ({ model: "", session_id: "" })),
     getSessionStatus: vi.fn(async () => ({ main_model: "" })),
+    // Auto-continue judge picker (purpose="autocontinue").
+    getAutoContinue: vi.fn(async () => ({ enabled: false, model: "" })),
+    setAutoContinue: vi.fn(async (_fields: { enabled?: boolean; model?: string; clear?: boolean }) => ({
+      enabled: false,
+      model: "",
+    })),
+    // ProjectProvider fires these on mount.
+    listProjects: vi.fn(async (): Promise<unknown[]> => []),
+    getCurrentProject: vi.fn(async () => null),
+    listProjectSessions: vi.fn(async () => []),
+    listGroups: vi.fn(async () => []),
+    getTabs: vi.fn(async () => ({ projects: {} })),
+    setTabs: vi.fn(async () => ({ status: "ok" })),
   };
   const dispatchSpy = vi.fn();
   return { models, api, dispatchSpy };
 });
 
 vi.mock("../../api/client", () => ({ api: hoisted.api }));
+vi.mock("../../lib/eventBus", () => ({
+  eventBus: { on: () => () => {}, onReconnect: () => () => {}, start: () => {}, stop: () => {} },
+}));
 vi.mock("../../stores/chatStore", () => ({
   useChatSelector: (sel: (s: { model: string; smallModel: string; advisorModel: string }) => unknown) =>
     sel({ model: "", smallModel: "", advisorModel: "" }),
@@ -166,8 +185,8 @@ describe("ModelDialog favorites/recents sections", () => {
     expect(screen.queryByLabelText(/Favorite|Unfavorite/)).toBeNull();
   });
 
-  it("renders the priority sections without star toggles for small/recap/mask (TUI reuses openModelPicker, ctrl+f does not act)", async () => {
-    for (const purpose of ["small", "recap", "mask"] as const) {
+  it("renders the priority sections without star toggles for small/recap/mask/autocontinue (TUI reuses openModelPicker, ctrl+f does not act)", async () => {
+    for (const purpose of ["small", "recap", "mask", "autocontinue"] as const) {
       const { unmount } = render(
         <ModelDialog open onClose={vi.fn()} purpose={purpose} />,
       );
@@ -239,5 +258,128 @@ describe("ModelDialog favorites/recents sections", () => {
       await waitFor(() => expect(hoisted.api.setConfigModel).toHaveBeenCalledWith("openai/gpt-c"));
       expect(hoisted.api.setSessionModel).not.toHaveBeenCalled();
     });
+  });
+});
+
+// A remote project's session header must resolve the session's host with
+// `useSessionHost` and hand it to the model dialog, so the model list and the
+// per-session pick come from that host's server rather than the local one.
+const remoteProject = {
+  path: "/remote",
+  name: "remote",
+  host: "devbox",
+  added_at: "",
+  last_used_at: "",
+  order: 1,
+  group: "",
+};
+
+/** Mirrors App's header wiring: resolve the active session's host, pass it in. */
+function HeaderModelDialog({ sessionId }: { sessionId: string }) {
+  const host = useSessionHost(sessionId);
+  return <ModelDialog open onClose={vi.fn()} sessionId={sessionId} host={host} />;
+}
+
+/** Register the remote project and bind the session to a tab under it. */
+function SeedRemoteTab({ children }: { children: React.ReactNode }) {
+  const dispatch = useProjectDispatch();
+  useEffect(() => {
+    dispatch({ type: "SET_PROJECTS", projects: [remoteProject] });
+    dispatch({ type: "SET_ACTIVE_PROJECT", project: remoteProject });
+    dispatch({
+      type: "ADD_TAB",
+      tab: { id: "sess-remote", projectPath: "/remote", title: "Remote", activeSubTab: "chat" },
+    });
+  }, [dispatch]);
+  return <>{children}</>;
+}
+
+describe("ModelDialog remote session host", () => {
+  beforeEach(() => {
+    hoisted.api.listModels.mockClear();
+    hoisted.api.setSessionModel.mockClear();
+    hoisted.api.listProjects.mockResolvedValue([remoteProject]);
+  });
+
+  it("loads a remote session's model list from that host and scopes the pick there", async () => {
+    render(
+      <ProjectProvider>
+        <SeedRemoteTab>
+          <HeaderModelDialog sessionId="sess-remote" />
+        </SeedRemoteTab>
+      </ProjectProvider>,
+    );
+
+    await waitFor(() =>
+      expect(hoisted.api.listModels).toHaveBeenCalledWith({ refresh: true }, "devbox"),
+    );
+
+    fireEvent.click(await screen.findByText("gpt-c"));
+    await waitFor(() =>
+      expect(hoisted.api.setSessionModel).toHaveBeenCalledWith("sess-remote", "openai/gpt-c", "devbox"),
+    );
+  });
+
+  it("toggles a favorite on the session's host, not the local machine", async () => {
+    render(
+      <ProjectProvider>
+        <SeedRemoteTab>
+          <HeaderModelDialog sessionId="sess-remote" />
+        </SeedRemoteTab>
+      </ProjectProvider>,
+    );
+
+    await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalledWith({ refresh: true }, "devbox"));
+
+    // The displayed star state comes from the host's list, so the write must
+    // land on the host's model.json too — a local write would corrupt it.
+    fireEvent.click(await screen.findByLabelText("Favorite openai/gpt-c"));
+    await waitFor(() =>
+      expect(hoisted.api.setModelFavorite).toHaveBeenCalledWith("openai/gpt-c", true, "devbox"),
+    );
+  });
+});
+
+// ── Auto-continue judge-model purpose (web counterpart of the TUI's
+// kind="autocontinue-model" picker) ─────────────────────────────────────────
+describe("ModelDialog autocontinue purpose", () => {
+  it("shows the auto-continue title and merges enabled local models into the list", async () => {
+    hoisted.api.getLocalModelsConfig.mockResolvedValueOnce({
+      "bonsai-8b": { enabled: true },
+      "disabled-8b": { enabled: false },
+    });
+    render(<ModelDialog open onClose={vi.fn()} purpose="autocontinue" />);
+
+    await waitFor(() => expect(screen.getByText("Select Auto-Continue Judge Model")).toBeInTheDocument());
+    // Enabled local models join the registry entries; disabled ones don't.
+    await waitFor(() => expect(screen.getByText("bonsai-8b")).toBeInTheDocument());
+    expect(screen.queryByText("disabled-8b")).toBeNull();
+    // The current judge model is fetched so the active row can highlight.
+    await waitFor(() => expect(hoisted.api.getAutoContinue).toHaveBeenCalled());
+  });
+
+  it("a pick with no owning form persists via setAutoContinue({model}) without touching the gate", async () => {
+    render(<ModelDialog open onClose={vi.fn()} purpose="autocontinue" />);
+    await waitFor(() => expect(screen.getByText("gpt-c")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("gpt-c"));
+
+    await waitFor(() =>
+      expect(hoisted.api.setAutoContinue).toHaveBeenCalledWith({ model: "openai/gpt-c" }),
+    );
+    // The enabled/model write shape matters: no `enabled` key, so the gate is untouched.
+    const arg = hoisted.api.setAutoContinue.mock.calls[0][0];
+    expect(Object.keys(arg)).toEqual(["model"]);
+  });
+
+  it("clear calls setAutoContinue({clear:true}) — judge model cleared, gate untouched", async () => {
+    render(<ModelDialog open onClose={vi.fn()} purpose="autocontinue" />);
+    await waitFor(() => expect(screen.getByText("gpt-c")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Clear (not set)"));
+
+    await waitFor(() =>
+      expect(hoisted.api.setAutoContinue).toHaveBeenCalledWith({ clear: true }),
+    );
   });
 });

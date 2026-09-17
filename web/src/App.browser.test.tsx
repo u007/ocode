@@ -70,6 +70,7 @@ vi.mock("./lib/eventBus", () => ({
     start: () => {},
     stop: () => {},
     setProjects: () => {},
+    setHosts: () => {},
   },
 }));
 

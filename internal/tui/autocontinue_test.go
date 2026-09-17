@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 )
 
@@ -127,3 +129,42 @@ func TestResolveMaskModelArg(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentAutoContinueDeclineDetail covers the streamDone decline-notice
+// helper: a step-limited turn that will not auto-continue must produce a
+// user-facing one-liner (off toggle or exhausted cap), and a natural
+// completion must produce nothing.
+func TestAgentAutoContinueDeclineDetail(t *testing.T) {
+	m := &model{
+		autoContinueEnabled: true,
+		autoContinueCount:   0,
+		agent:               &agent.Agent{},
+	}
+	if got := m.agentAutoContinueDeclineDetail(nil, false); got != "" {
+		t.Errorf("natural completion detail = %q, want empty", got)
+	}
+	if got := m.agentAutoContinueDeclineDetail(nil, true); got != "" {
+		// Enabled and under the cap: the chain fires, so the decline helper
+		// must stay silent (the fire path renders its own hint).
+		t.Errorf("enabled+under-cap step-limit detail = %q, want empty (chain fires)", got)
+	}
+	m.autoContinueEnabled = false
+	got := m.agentAutoContinueDeclineDetail(nil, true)
+	if !strings.Contains(got, "auto-continue is off") {
+		t.Errorf("disabled detail should say auto-continue is off: %q", got)
+	}
+	m.autoContinueEnabled = true
+	m.autoContinueCount = autoContinueMaxChain
+	got = m.agentAutoContinueDeclineDetail(nil, true)
+	if !strings.Contains(got, "cap") {
+		t.Errorf("capped-out detail should name the chain cap: %q", got)
+	}
+	// Errors are surfaced by the error path, never by this helper.
+	if got := m.agentAutoContinueDeclineDetail(errTestStream{}, true); got != "" {
+		t.Errorf("errored turn detail = %q, want empty", got)
+	}
+}
+
+type errTestStream struct{}
+
+func (errTestStream) Error() string { return "boom" }

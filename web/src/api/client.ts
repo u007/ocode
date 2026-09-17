@@ -556,13 +556,14 @@ export const api = {
   // Add/remove a "provider/model" from the favorites list shared with the
   // TUI model picker (ctrl+f). Idempotent; responds with the full favorites
   // list so the dialog can resync star states without a model refetch.
-  setModelFavorite: (model: string, favorited: boolean) =>
+  setModelFavorite: (model: string, favorited: boolean, host?: string) =>
     fetchJSON<{ model: string; favorite: boolean; favorites: string[] }>(
       "/api/models/favorite",
       {
         method: favorited ? "PUT" : "DELETE",
         body: JSON.stringify({ model }),
       },
+      host,
     ),
   // Extended-thinking (reasoning effort) budget for the main model. budget 0 =
   // off; levels list the canonical off/low/med/high/xhigh/max options shared
@@ -1122,6 +1123,14 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
+  // Triggers the operating-system permission prompts the computer tool needs
+  // (macOS: Accessibility + Screen Recording + Automation). Informational and
+  // no-op on Windows/Linux, which require no explicit grant.
+  requestComputerUsePermissions: () =>
+    fetchJSON<import("../api/types").ComputerUsePermissionReport>(
+      "/api/config/computer-use/permissions",
+      { method: "POST" },
+    ),
 
   // ── OCR (legacy API, deprecated) ──
   getOcrEnabled: () =>

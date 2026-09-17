@@ -254,6 +254,23 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
     expect(sent.join("")).not.toContain("\x16");
   });
 
+  it("Shift+Enter sends CSI-u once and cancels the keydown so the follow-up keypress cannot send \\r", async () => {
+    render(<Panel />);
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+
+    const down = fireKey({ key: "Enter", shiftKey: true });
+    expect(down.allowed).toBe(false);
+    // xterm only cancels the keydown itself when the custom handler lets it
+    // run; when we return false we must preventDefault ourselves, otherwise
+    // the browser fires keypress(Enter) and xterm converts it to "\r".
+    expect(down.defaultPrevented).toBe(true);
+
+    const sent = (h.sockets[0]!.send as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(sent).toEqual(["\x1b[13;2u"]);
+  });
+
   it("container copy event writes the xterm selection to clipboardData (desktop Edit-menu fallback)", async () => {
     const { container } = render(<Panel />);
     const term = h.terminals[0];

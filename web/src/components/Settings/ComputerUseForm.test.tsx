@@ -12,11 +12,13 @@ vi.mock("../../api/client", () => ({
   api: {
     getComputerUseConfig: vi.fn(),
     setComputerUseConfig: vi.fn(),
+    requestComputerUsePermissions: vi.fn(),
   },
 }));
 
 const mockGet = vi.mocked(api.getComputerUseConfig);
 const mockSet = vi.mocked(api.setComputerUseConfig);
+const mockRequest = vi.mocked(api.requestComputerUsePermissions);
 
 const statusLines = [
   "Computer use: disabled",
@@ -27,6 +29,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockGet.mockResolvedValue({ enabled: false, status_lines: statusLines } as never);
   mockSet.mockResolvedValue({ enabled: true, status_lines: statusLines } as never);
+  mockRequest.mockResolvedValue({
+    platform: "darwin",
+    granted: false,
+    lines: ["Accessibility: not granted yet.", "Opened System Settings → Privacy & Security."],
+  } as never);
 });
 
 afterEach(() => {
@@ -53,6 +60,28 @@ describe("ComputerUseForm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(mockSet).toHaveBeenCalledWith(true));
+  });
+
+  it("requests OS permissions and renders the report lines", async () => {
+    render(<ComputerUseForm />);
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: /Request permissions/ }));
+
+    await waitFor(() => expect(mockRequest).toHaveBeenCalledTimes(1));
+    const result = await screen.findByTestId("computer-use-permission-result");
+    expect(result.textContent).toContain("Opened System Settings");
+    expect(result.textContent).toContain("Accessibility: not granted yet.");
+  });
+
+  it("surfaces a permission-request failure", async () => {
+    mockRequest.mockRejectedValue(new Error("permission route exploded"));
+    render(<ComputerUseForm />);
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: /Request permissions/ }));
+
+    expect(await screen.findByText(/permission route exploded/)).toBeDefined();
   });
 
   it("surfaces a load failure instead of silently showing defaults", async () => {

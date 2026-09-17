@@ -25,6 +25,8 @@
 
 ## 2026-09-17
 
+* **Update**: Question-answer transcript echo: client must mirror server payload byte-for-byte ([gotchas/question-answer-transcript-echo.md](/gotchas/question-answer-transcript-echo.md))
+* **Update**: Computer use ([computer-use.md](/computer-use.md))
 * **Update**: Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary ([gotchas/remote-project-path-trust-boundary.md](/gotchas/remote-project-path-trust-boundary.md))
 * **Update**: Terminal Shells Survive Page Reload (Detach / Reattach) ([architecture/terminal-detach-reattach.md](/architecture/terminal-detach-reattach.md))
 * **Update**: Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary ([gotchas/remote-project-path-trust-boundary.md](/gotchas/remote-project-path-trust-boundary.md))

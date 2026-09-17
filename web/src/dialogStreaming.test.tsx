@@ -44,7 +44,9 @@ beforeAll(() => {
 });
 
 vi.mock("./api/client", () => {
-  const project = { path: "/proj", name: "proj" };
+  // A remote project: the active session's host must reach ModelDialog so its
+  // model list and picks go to `/api/remote/devbox/…`, not the local server.
+  const project = { path: "/proj", name: "proj", host: "devbox" };
   const impl: Record<string, () => Promise<unknown>> = {
     listProjects: async () => [project],
     getCurrentProject: async () => ({ project }),
@@ -108,6 +110,7 @@ vi.mock("./lib/eventBus", () => ({
     start: () => {},
     stop: () => {},
     setProjects: () => {},
+    setHosts: () => {},
   },
 }));
 
@@ -137,6 +140,9 @@ vi.mock("./components/common/ErrorBoundary", () => ({
 }));
 
 import App from "./App";
+// The mocked client (see vi.mock above); used to assert the dialog's
+// host-scoped calls carry the active session's project host.
+import { api } from "./api/client";
 import { __resetLastAppliedSeqForTests } from "./lib/sessionEvents";
 // The mocked eventBus (see vi.mock above): emit() drives the real router.
 // Cast: the real EventBus type has no public emit — the mock adds it.
@@ -183,6 +189,14 @@ describe("dialogs stay open while chat is streaming", () => {
     fireEvent.click(modelRow!);
     await screen.findByRole("dialog");
     expect(screen.getByText("Select Model")).toBeInTheDocument();
+
+    // The real dialog received the active session's project host from App
+    // (`host={activeSessionHost}`): its host-scoped model list request carries
+    // `devbox`. Dropping that prop while `sessionId` remains would call
+    // listModels without a host and fail here.
+    await waitFor(() =>
+      expect(api.listModels).toHaveBeenCalledWith({ refresh: true }, "devbox"),
+    );
 
     // Streaming burst through the real router. Start with session_started so
     // the temp tab rekeys to the real session id (request_id correlation).

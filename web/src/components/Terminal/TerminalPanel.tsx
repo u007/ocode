@@ -738,6 +738,10 @@ export default function TerminalPanel({
       if (ev.key === "Enter" && ev.shiftKey) {
         const sock = socketRef.current;
         if (sock && sock.readyState === WebSocket.OPEN) sock.send("\x1b[13;2u");
+        // Returning false skips xterm's own cancel(), so the browser still
+        // fires keypress(Enter) and xterm's _keyPress turns it into "\r" —
+        // the pty then saw Shift+Enter immediately followed by Enter.
+        ev.preventDefault();
         return false;
       }
       if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === "f") {

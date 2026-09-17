@@ -394,6 +394,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocr", s.authMiddleware(s.handleSetOcrConfig))
 	s.mux.HandleFunc("GET /api/config/computer-use", s.authMiddleware(s.handleGetComputerUseConfig))
 	s.mux.HandleFunc("PUT /api/config/computer-use", s.authMiddleware(s.handleSetComputerUseConfig))
+	s.mux.HandleFunc("POST /api/config/computer-use/permissions", s.authMiddleware(s.handleRequestComputerUsePermissions))
 	s.mux.HandleFunc("GET /api/ocr/models", s.authMiddleware(s.handleGetOcrModels))
 	// Mask (secret redaction) config
 	s.mux.HandleFunc("GET /api/config/mask", s.authMiddleware(s.handleGetMaskConfig))
@@ -2130,6 +2131,9 @@ func (s *Server) handleGetComputerUseConfig(w http.ResponseWriter, r *http.Reque
 }
 func (s *Server) handleSetComputerUseConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetComputerUseConfig(w, r)
+}
+func (s *Server) handleRequestComputerUsePermissions(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleRequestComputerUsePermissions(w, r)
 }
 func (s *Server) handleGetOcrModels(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetOcrModels(w, r)

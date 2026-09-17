@@ -199,6 +199,11 @@ func (h *Handler) HandleSetAutoContinue(w http.ResponseWriter, r *http.Request) 
 		h.cfg.Ocode.AutoContinueModel = req.Model
 	}
 
+	// Broadcast a fresh status snapshot so a connected web sidebar's
+	// auto-continue row (model + on/off) reflects the change immediately —
+	// same reasoning as HandleSetSmallModel's pushStatusSnapshot.
+	h.pushStatusSnapshot()
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": h.cfg.Ocode.AutoContinueEnabled,
 		"model":   h.cfg.Ocode.AutoContinueModel,

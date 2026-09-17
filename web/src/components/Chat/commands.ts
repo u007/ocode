@@ -244,8 +244,11 @@ export interface CommandResult {
   };
   /** User-role message to send through the normal chat send path. */
   prompt?: string;
-  /** Open the model picker dialog (web equivalent of the TUI's no-arg /model). */
+  /** Open the model picker dialog (web equivalent of the TUI's no-arg /model).
+   *  `modelPickerPurpose` selects which settings field the dialog edits —
+   *  e.g. `/autocontinue model` opens the auto-continue judge picker. */
   openModelPicker?: boolean;
+  modelPickerPurpose?: import("../../components/Layout/ModelDialog").ModelDialogTab;
   /** Updated session title for tab label updates. */
   title?: string;
 }
@@ -281,7 +284,7 @@ export interface CommandContext {
     /** Fetch an assembled LLM prompt for a repo-analysis command (/standup, /changes, /review). */
     getCommandContext: (name: string, args?: string) => Promise<{ prompt: string }>;
     /** Token budget for the current session (/context). */
-    getSessionContext: (id: string) => Promise<{
+    getSessionContext: (id: string, host?: string) => Promise<{
       session_id: string;
       message_count: number;
       estimated_tokens: number;
@@ -300,8 +303,10 @@ export interface CommandContext {
     getGithubPR: (owner: string, repo: string, number: number) => Promise<{ pr: Record<string, unknown>; diff?: string }>;
     /** GitHub issue list (/github issue list). */
     getGithubIssues: (owner: string, repo: string, state?: string) => Promise<Record<string, unknown>[]>;
-    /** Subagent runs (/agents). */
-    getAgentRuns?: () => Promise<{ id: string; agent?: string; title?: string; status?: string; state?: string }[]>;
+    /** Subagent runs (/agents). `host` routes the read to a remote session's
+     *  server (`/api/remote/<host>/…`); the local registry is empty for a
+     *  remote session, so omitting it reports "no subagents" for active runs. */
+    getAgentRuns?: (host?: string) => Promise<{ id: string; agent?: string; title?: string; status?: string; state?: string }[]>;
     /** Scheduled jobs (/cron). */
     getCronJobs?: () => Promise<{ id: string | number; name?: string; next_run?: string }[]>;
     /** Small-model config (/small-model). */
@@ -314,7 +319,7 @@ export interface CommandContext {
     setLimitsConfig?: (fields: { max_steps: number; image_max_dim: number; max_concurrent_agents: number; undo_max_age_delta: number }) => Promise<unknown>;
     getThinkingBudget?: () => Promise<{ budget: number; level: string; levels: { level: string; budget: number }[] }>;
     setThinkingBudget?: (level: string) => Promise<unknown>;
-    listModels?: () => Promise<{ name: string; model: string; provider: string; active: boolean }[]>;
+    listModels?: (host?: string) => Promise<{ name: string; model: string; provider: string; active: boolean }[]>;
     getConfigModel?: () => Promise<{ model: string }>;
     setConfigModel?: (model: string) => Promise<unknown>;
     getFeaturesConfig?: () => Promise<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>;
@@ -1607,7 +1612,7 @@ async function handleModels(args: string, ctx: CommandContext): Promise<CommandR
   if (!ctx.api.setConfigModel) return unsupported("/models");
   try {
     if (ctx.api.listModels) {
-      const models = await ctx.api.listModels();
+      const models = await ctx.api.listModels(ctx.host);
       const match = models.find(
         (m) => m.model.toLowerCase() === name.toLowerCase() || m.name.toLowerCase() === name.toLowerCase(),
       );
@@ -1676,7 +1681,9 @@ async function handleAutoContinue(args: string, ctx: CommandContext): Promise<Co
     if (sub === "model") {
       const target = parts.slice(1).join(" ").trim();
       if (!target) {
-        return ok("Usage: `/autocontinue model <name>` (or `model auto` to clear). The interactive picker is TUI-only.");
+        // No-arg opens the interactive judge-model picker, mirroring the TUI's
+        // `/autocontinue model` (handled by App's openModelDialog).
+        return { handled: true, openModelPicker: true, modelPickerPurpose: "autocontinue" };
       }
       if (["auto", "none", "off"].includes(target.toLowerCase())) {
         const r = await ctx.api.setAutoContinue({ clear: true });
@@ -2247,7 +2254,7 @@ async function handleContext(ctx: CommandContext): Promise<CommandResult> {
     };
   }
   try {
-    const c = await ctx.api.getSessionContext(sessionId);
+    const c = await ctx.api.getSessionContext(sessionId, ctx.host);
     const content = c.report?.sections?.length
       ? renderContextReport(c.report)
       : renderContextSummary(c);
@@ -2314,7 +2321,7 @@ async function handleLsp(ctx: CommandContext): Promise<CommandResult> {
 
 async function handleAgents(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const runs = await ctx.api.getAgentRuns?.();
+    const runs = await ctx.api.getAgentRuns?.(ctx.host);
     if (!runs || !runs.length) {
       return {
         handled: true,

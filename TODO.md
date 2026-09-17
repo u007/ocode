@@ -9,6 +9,15 @@
   agent-run views are per host).
 - Re-home open tabs when a remote project's host is edited (a tab's host is
   derived from its project binding at call time).
+- `CoworkSidebar.tsx` still calls `generateSessionTitle`/`getSessionStatus`
+  without a host, and its six global-config toggle handlers write the LOCAL
+  server before `getSessionStatus` throws. A remote session's title/status and
+  those toggles must follow the session's host.
+- Decide which server owns "global" config for a remote session — favorites,
+  the advisor/small/explorer/permission model toggles, and the host-less global
+  model reads in `ModelDialog.tsx` (getConfigModel/getSmallModel/getAdvisor).
+  Those settings are process-global per server, while the model registry and
+  the session live per host; the plan never rules on the split.
 
 ## Web tabs
 

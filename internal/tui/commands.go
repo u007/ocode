@@ -171,7 +171,7 @@ func init() {
 			handler: runLocalModelCmd},
 		{name: "/docs", aliases: []string{"/doc-mode"}, usage: "/docs [on|off|status|init|update|cleanup]", help: "Manage documentation-first development and OKF knowledge bundle: on/off toggle, status show counts, init create bundle, update force maintenance, cleanup remove deprecated docs", handler: runDocsCmd},
 		{name: "/goal", usage: "/goal <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runGoalCmd},
-		{name: "/autocontinue", usage: "/autocontinue [on|off|status|model [name]]", help: "Auto-resume any turn cut off by /max-step (or judged interrupted by an optional judge model), general-purpose across TUI and /rc web turns", handler: runAutoContinueCmd},
+		{name: "/autocontinue", usage: "/autocontinue [on|off|status|model [name]]", help: "Auto-resume any turn cut off by /max-step (or judged interrupted by an optional judge model — chat YES/NO or typesafe decision-only), across TUI and web turns", handler: runAutoContinueCmd},
 		{name: "/ocr", usage: "/ocr [status|enable|disable|model [name]]", help: "Show OCR status, toggle OCR, or set the OCR model (from LM Studio)", handler: runOcrCmd},
 		{name: "/computer", usage: "/computer [status|enable|disable]", help: "Show computer-use status or enable/disable desktop control for new sessions", handler: runComputerCmd},
 		{name: "/image", usage: "/image [status|enable|disable|model [provider/model]]", help: "Show imagegen status, toggle image generation, or set the image model/provider", handler: runImageCmd},
@@ -1780,10 +1780,14 @@ func autoContinueStatusText(m *model) string {
 	if m.config != nil && m.config.Ocode.AutoContinueModel != "" {
 		judgeModel = m.config.Ocode.AutoContinueModel
 	}
-	return fmt.Sprintf("Auto-continue: %s (chain so far this session: %d/%d)\nJudge model: %s\n\n"+
-		"When enabled, any turn cut off by the /max-step cap — not just /goal — is automatically resumed with a \"continue\" prompt, general-purpose across whatever command or task is running (including /rc web turns). "+
+	judgeKind := ""
+	if strings.HasPrefix(judgeModel, "typesafe/") {
+		judgeKind = "\nJudge kind: typesafe (decision-only triage — the transcript tail travels as structured state and Jev answers a typed continue/end choice; no chat call is made)"
+	}
+	return fmt.Sprintf("Auto-continue: %s (chain so far this session: %d/%d)\nJudge model: %s%s\n\n"+
+		"When enabled, any turn cut off by the /max-step cap — not just /goal — is automatically resumed with a \"continue\" prompt, general-purpose across whatever command or task is running (including /rc web and headless server turns). "+
 		"If a judge model is set (see /autocontinue model), it's also asked to check replies that did NOT hit /max-step but might still look interrupted. Capped at %d consecutive auto-fires and reset whenever you send a new message, so a stuck local model can't loop forever.",
-		state, m.autoContinueCount, autoContinueMaxChain, judgeModel, autoContinueMaxChain)
+		state, m.autoContinueCount, autoContinueMaxChain, judgeModel, judgeKind, autoContinueMaxChain)
 }
 
 func runDiscoverCmd(m *model, args []string) tea.Cmd {

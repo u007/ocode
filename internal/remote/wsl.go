@@ -21,13 +21,16 @@ type WSLTransport struct {
 	Distro     string
 	Supervisor *tool.ProcessSupervisor
 
-	seq atomic.Int64
+	// instance namespaces this transport's supervised process IDs within the
+	// (possibly shared) supervisor. Assigned once in NewWSLTransport.
+	instance uint64
+	seq      atomic.Int64
 }
 
 var _ Transport = (*WSLTransport)(nil)
 
 func NewWSLTransport(distro string, sup *tool.ProcessSupervisor) *WSLTransport {
-	return &WSLTransport{Distro: distro, Supervisor: sup}
+	return &WSLTransport{Distro: distro, Supervisor: sup, instance: transportInstanceCounter.Add(1)}
 }
 
 func (w *WSLTransport) Describe() string {
@@ -37,8 +40,12 @@ func (w *WSLTransport) Describe() string {
 	return "wsl " + w.Distro
 }
 
+// nextID returns a supervisor-unique ID of the form
+// remote-wsl-<prefix>-<instance>-<seq>. The instance token is the same
+// package-level counter SSHTransport draws from, so the two transports can
+// also never collide with each other on a shared supervisor.
 func (w *WSLTransport) nextID(prefix string) string {
-	return fmt.Sprintf("remote-wsl-%s-%d", prefix, w.seq.Add(1))
+	return fmt.Sprintf("remote-wsl-%s-%d-%d", prefix, w.instance, w.seq.Add(1))
 }
 
 // run mirrors SSHTransport.run exactly (same supervisor bookkeeping

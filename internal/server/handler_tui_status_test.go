@@ -207,6 +207,89 @@ func TestHandleSetSmallModelRejectsEmptyBody(t *testing.T) {
 	}
 }
 
+// The status snapshot must carry the auto-continue gate + judge model so the
+// web sidebar can mirror the TUI's autocont row (model + ●on/○off toggle).
+func TestBuildStatusSnapshotCarriesAutoContinue(t *testing.T) {
+	h := testHandlerWithConfig(t)
+	h.mu.Lock()
+	h.cfg.Ocode.AutoContinueEnabled = true
+	h.cfg.Ocode.AutoContinueModel = "local/bonsai-8b"
+	h.mu.Unlock()
+
+	snap := h.buildStatusSnapshot()
+	if !snap.AutoContinueOn {
+		t.Errorf("AutoContinueOn = false, want true")
+	}
+	if snap.AutoContinueModel != "local/bonsai-8b" {
+		t.Errorf("AutoContinueModel = %q, want local/bonsai-8b", snap.AutoContinueModel)
+	}
+}
+
+// A web-initiated auto-continue write must broadcast a fresh status snapshot
+// so every connected sidebar's auto-continue row updates immediately (same
+// contract as HandleSetSmallModel).
+func TestHandleSetAutoContinueBroadcastsStatusSnapshot(t *testing.T) {
+	h := testHandlerWithConfig(t)
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+
+	body := strings.NewReader(`{"enabled":true}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/config/ocode/autocontinue", body)
+	rec := httptest.NewRecorder()
+	h.HandleSetAutoContinue(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case ev := <-sub:
+		if ev.Event != "status" {
+			t.Fatalf("event = %q, want \"status\"", ev.Event)
+		}
+		data, err := json.Marshal(ev.Data)
+		if err != nil {
+			t.Fatalf("marshal event data: %v", err)
+		}
+		var snap TUIStatus
+		if err := json.Unmarshal(data, &snap); err != nil {
+			t.Fatalf("unmarshal event data: %v", err)
+		}
+		if !snap.AutoContinueOn {
+			t.Errorf("broadcast AutoContinueOn = false, want true")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no status event broadcast within 2s")
+	}
+}
+
+// Clearing the judge model via {clear:true} must leave the enabled gate alone
+// (StepLimitHit-only resumes, mirroring the TUI's `/autocontinue model auto`).
+func TestHandleSetAutoContinueClearKeepsGate(t *testing.T) {
+	h := testHandlerWithConfig(t)
+	h.mu.Lock()
+	h.cfg.Ocode.AutoContinueEnabled = true
+	h.cfg.Ocode.AutoContinueModel = "local/bonsai-8b"
+	h.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPut, "/api/config/ocode/autocontinue", strings.NewReader(`{"clear":true}`))
+	rec := httptest.NewRecorder()
+	h.HandleSetAutoContinue(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	h.mu.Lock()
+	enabled := h.cfg.Ocode.AutoContinueEnabled
+	model := h.cfg.Ocode.AutoContinueModel
+	h.mu.Unlock()
+	if !enabled {
+		t.Errorf("AutoContinueEnabled = false after clear, want true (gate must survive a model clear)")
+	}
+	if model != "" {
+		t.Errorf("AutoContinueModel = %q after clear, want empty", model)
+	}
+}
+
 // The headless snapshot must always carry the thinking budget (0 = off is a
 // meaningful value, not an absent field).
 func TestBuildStatusSnapshotCarriesThinkingBudget(t *testing.T) {

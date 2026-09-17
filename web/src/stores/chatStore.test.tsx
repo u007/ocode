@@ -687,6 +687,60 @@ describe("chatStore reload rehydration from transcript snapshot", () => {
     expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q1");
   });
 
+  it("QUESTION_ANSWERED rewrites the pending question result with the answers", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "", tool_calls: [{ id: "q1", type: "function", function: { name: "question", arguments: "{}" } }] },
+        makeQuestionMsg("q1"),
+      ],
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q1");
+
+    const answers = [
+      { header: "Deploy target", question: "Where?", answers: [{ label: "Staging" }] },
+    ];
+    state = chatReducer(state, {
+      type: "QUESTION_ANSWERED",
+      sessionId: "a",
+      requestId: "q1",
+      answers,
+    });
+
+    const slice = getSessionSlice(state, "a");
+    // The dialog is dismissed and the Q&A (what the model receives as the tool
+    // result) replaces the sentinel in place.
+    expect(slice.pendingQuestion).toBeNull();
+    const tool = slice.messages.find(
+      (m) => m.role === "tool" && m.tool_call_id === "q1",
+    );
+    expect(tool?.content).toBe(JSON.stringify(answers));
+  });
+
+  it("QUESTION_ANSWERED is a no-op when the sentinel is not in the loaded page", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "done" },
+      ],
+    });
+    state = chatReducer(state, {
+      type: "QUESTION_ANSWERED",
+      sessionId: "a",
+      requestId: "q1",
+      answers: [{ question: "Where?", answers: [{ label: "Staging" }] }],
+    });
+    const slice = getSessionSlice(state, "a");
+    expect(slice.pendingQuestion).toBeNull();
+    expect(slice.messages).toHaveLength(2);
+  });
+
   it("ignores malformed sentinel and non-trailing asks", () => {
     let state = initial();
     // ask not at trailing run (followed by assistant) + malformed second ask

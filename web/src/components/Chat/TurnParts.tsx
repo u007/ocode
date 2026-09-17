@@ -1,5 +1,6 @@
 import { memo, useState } from "react";
-import { Volume2 } from "lucide-react";
+import { CheckCircle2, Volume2 } from "lucide-react";
+import type { QuestionAnswerPayload } from "@/api/types";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
 
@@ -99,6 +100,75 @@ export function StatusBlock({ text }: { text: string }) {
   );
 }
 
+// Parses an answered `question` tool result. The server replaces the pending
+// QUESTION_PROMPT sentinel in place with exactly the JSON array the browser
+// posted (handler_questions.go questionAnswerPayload — the same payload the
+// model receives as the tool result). Recognizing it lets the transcript show
+// the questions and the selected answers instead of a raw JSON blob. Returns
+// null for the unanswered sentinel and for anything that is not an answer
+// payload, so callers fall back to the generic rendering.
+export function parseQuestionAnswers(
+  output?: string,
+): QuestionAnswerPayload[] | null {
+  if (!output) return null;
+  const trimmed = output.trim();
+  if (!trimmed.startsWith("[")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") return null;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.question !== "string" || !Array.isArray(e.answers)) return null;
+  }
+  return parsed as QuestionAnswerPayload[];
+}
+
+// QuestionAnswerBlock renders the answered `question` result as the questions
+// the model asked plus the answer(s) the user selected — i.e. what was sent to
+// the LLM. Shown in place of the generic tool block once a question is answered.
+export function QuestionAnswerBlock({
+  answers,
+}: {
+  answers: QuestionAnswerPayload[];
+}) {
+  return (
+    <div className="mb-3 flex justify-start">
+      <div className="w-full max-w-[95%] rounded-lg border border-emerald-700/40 bg-emerald-950/20 px-3 py-2 md:max-w-[80%]">
+        <div className="flex items-center gap-1.5 text-xs font-medium text-emerald-300/90">
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          Answered question prompt
+        </div>
+        <div className="mt-2 space-y-2">
+          {answers.map((entry, i) => (
+            <div key={i} className="text-xs">
+              {entry.header ? (
+                <div className="font-medium text-foreground">{entry.header}</div>
+              ) : null}
+              <div className="text-muted-foreground">{entry.question}</div>
+              <ul className="mt-0.5 space-y-0.5">
+                {entry.answers.length === 0 ? (
+                  <li className="text-muted-foreground">→ (no selection)</li>
+                ) : (
+                  entry.answers.map((a, j) => (
+                    <li key={j} className="text-emerald-300/90">
+                      → {a.custom && a.text ? `${a.label}: “${a.text}”` : a.label}
+                    </li>
+                  ))
+                )}
+              </ul>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ToolBlock renders a single tool call and (optionally) its result. The details
 // are expanded by default so tool output is visible immediately.
 //
@@ -125,8 +195,15 @@ export const ToolBlock = memo(function ToolBlock({
    *  (the dialog can be lost to a reload/reconcile while the ask is pending). */
   onOpenQuestion?: () => void;
 }) {
+  // Never render the raw QUESTION_PROMPT sentinel. The grouped transcript path
+  // already filters the sentinel tool message, but the live stream can carry it
+  // as the tool output until the authoritative snapshot lands.
+  const suppressSentinel =
+    tool === "question" && (output ?? "").startsWith("QUESTION_PROMPT:");
   const displayOutput =
-    output !== undefined ? stripTruncationFooter(output) : output;
+    output !== undefined && !suppressSentinel
+      ? stripTruncationFooter(output)
+      : undefined;
   const lineCount = displayOutput ? displayOutput.split("\n").length : 0;
   const [open, setOpen] = useState(lineCount <= 50);
   const [expanded, setExpanded] = useState(false);
@@ -142,6 +219,13 @@ export const ToolBlock = memo(function ToolBlock({
   // stream, or by the "DIFF:" first line on replayed history (no tool name).
   const isDiffOutput =
     TOOL_OUTPUT_LANG[tool] === "diff" || (displayOutput ?? "").startsWith("DIFF:");
+  // Answered `question` call: render the questions + the selected answers (what
+  // was sent to the LLM) instead of the raw result JSON. Placed after every
+  // hook so the early return cannot change the hook order across renders.
+  if (tool === "question") {
+    const answers = parseQuestionAnswers(output);
+    if (answers) return <QuestionAnswerBlock answers={answers} />;
+  }
   return (
     <div className="mb-3 flex justify-start">
       <div className="max-w-[95%] md:max-w-[80%] w-full rounded-lg border border-amber-700/40 bg-amber-950/20 px-3 py-2">

@@ -712,6 +712,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     // ("+" button, Cmd/Ctrl+N, /new) via openNewSessionTab.
   }, [dispatch, refreshProjectSessions, store]);
 
+  /** Open (or focus) a session tab under the CURRENT active project. That
+   *  binding is what `resolveSessionHost` later reads to route every
+   *  session-scoped call, so a caller resuming a session from a non-active
+   *  project's list must thread that project through — a tab bound to the
+   *  local active project silently routes the resumed remote session locally. */
   const openSessionTab = useCallback((sessionId: string, sessionTitle: string) => {
     const path = state.activeProject?.path || "";
     const tab: Tab = {

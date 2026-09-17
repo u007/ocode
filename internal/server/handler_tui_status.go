@@ -40,6 +40,8 @@ func (h *Handler) buildStatusSnapshot() TUIStatus {
 		snap.ExplorerModelOn = h.cfg.Ocode.ExplorerModelEnabled
 		snap.ContextAgentModel = h.cfg.Ocode.ContextModel
 		snap.ContextAgentModelOn = h.cfg.Ocode.ContextModelEnabled
+		snap.AutoContinueModel = h.cfg.Ocode.AutoContinueModel
+		snap.AutoContinueOn = h.cfg.Ocode.AutoContinueEnabled
 		snap.AdvisorModel = h.cfg.Ocode.Advisor.Model
 		if h.cfg.Ocode.Permissions.Auto != nil {
 			snap.PermissionModel = h.cfg.Ocode.Permissions.Auto.Model
@@ -107,6 +109,8 @@ func (h *Handler) pushStatusSnapshot() {
 		cur.ExplorerModelOn = snap.ExplorerModelOn
 		cur.ContextAgentModel = snap.ContextAgentModel
 		cur.ContextAgentModelOn = snap.ContextAgentModelOn
+		cur.AutoContinueModel = snap.AutoContinueModel
+		cur.AutoContinueOn = snap.AutoContinueOn
 		cur.AdvisorModel = snap.AdvisorModel
 		cur.PermissionModel = snap.PermissionModel
 		cur.PermissionAutoAllow = snap.PermissionAutoAllow

@@ -1,12 +1,11 @@
-// App-level coverage for the remote-session auth-failure guard (whole-branch
-// review fix Important 7): `isRemoteSession() && !authToken()` alone only
-// catches "no token at all". This covers the extended guard —
-// `isRemoteSession() && (!authToken() || remoteAuthFailed)` — where
-// remoteAuthFailed flips via the reportAuthFailure → setAuthFailureHandler
-// wiring in client.ts when a remote-mode API call 401s with a still-cached
-// (now stale) token. All heavy children are stubbed, mirroring
-// App.browser.test.tsx's mocking pattern.
-import { render, screen, act } from "@testing-library/react";
+// App-level coverage for per-host event streams: the bus keeps one `/api/events`
+// stream per remote host that has at least one OPEN session tab (the local ""
+// stream always runs). The host set is derived from the open tabs, not from the
+// active project — a remote project with a background tab still needs its
+// stream. All heavy children are stubbed, mirroring App.browser.test.tsx's
+// mocking pattern; the real projects store and eventBus wiring stay live, with
+// only `setHosts` captured.
+import { render, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
@@ -24,39 +23,38 @@ beforeAll(() => {
   })) as unknown as typeof window.matchMedia;
 });
 
-const authState = vi.hoisted(() => ({
-  isRemote: false,
-  token: null as string | null,
-  handler: null as (() => void) | null,
+const appApi = vi.hoisted(() => ({
+  listProjects: vi.fn(),
+  getCurrentProject: vi.fn(),
+  listProjectSessions: vi.fn(),
+  listGroups: vi.fn(),
+  getSpending: vi.fn(),
+  getTabs: vi.fn(),
 }));
 
 vi.mock("./api/client", () => {
-  const project = { path: "/proj", name: "proj" };
-  const impl: Record<string, () => Promise<unknown>> = {
-    listProjects: async () => [project],
-    getCurrentProject: async () => ({ project }),
-    listProjectSessions: async () => [],
-    listGroups: async () => [],
-    getSpending: async () => ({ spending_usd: 0 }),
+  const impl: Record<string, unknown> = {
+    listProjects: appApi.listProjects,
+    getCurrentProject: appApi.getCurrentProject,
+    listProjectSessions: appApi.listProjectSessions,
+    listGroups: appApi.listGroups,
+    getSpending: appApi.getSpending,
+    getTabs: appApi.getTabs,
   };
   const api = new Proxy({} as Record<string, unknown>, {
     get: (target, prop: string) => {
-      if (!(prop in target)) {
-        target[prop] = vi.fn(impl[prop] ?? (async () => ({})));
-      }
+      if (!(prop in target)) target[prop] = impl[prop] ?? vi.fn(async () => ({}));
       return target[prop];
     },
   });
   return {
     api,
     authHeaders: () => ({}),
-    authToken: () => authState.token,
-    isRemoteSession: () => authState.isRemote,
-    setAuthFailureHandler: (fn: (() => void) | null) => {
-      authState.handler = fn;
-    },
+    authToken: () => null,
+    isRemoteSession: () => false,
     apiPath: (p: string) => p,
     apiWsPath: (p: string) => `ws://localhost${p}`,
+    remoteApiBase: (host?: string) => (host ? `/api/remote/${encodeURIComponent(host)}` : ""),
     authedFetch: vi.fn(async () => new Response("{}")),
     getBrowseBase: vi.fn(async () => "http://browse.test"),
     mintBrowseGrant: vi.fn(async () => "G1"),
@@ -66,15 +64,20 @@ vi.mock("./api/client", () => {
   };
 });
 
-const eventBusStop = vi.hoisted(() => vi.fn());
-vi.mock("./lib/eventBus", () => ({
-  eventBus: { on: () => () => {}, onReconnect: () => () => {}, emit: () => {}, start: () => {}, stop: eventBusStop, setProjects: () => {}, setHosts: () => {} },
+const bus = vi.hoisted(() => ({
+  on: vi.fn(() => () => {}),
+  onReconnect: vi.fn(() => () => {}),
+  off: vi.fn(),
+  offReconnect: vi.fn(),
+  setProjects: vi.fn(),
+  setHosts: vi.fn(),
+  start: vi.fn(),
+  stop: vi.fn(),
 }));
+vi.mock("./lib/eventBus", () => ({ eventBus: bus }));
 
-vi.mock("./components/Browser/BrowserPanel", () => ({
-  BrowserPanel: () => <div data-testid="browser-panel" />,
-}));
-vi.mock("./components/Chat/ChatPanel", () => ({ default: () => <div data-testid="chat-panel" /> }));
+vi.mock("./components/Browser/BrowserPanel", () => ({ BrowserPanel: () => null }));
+vi.mock("./components/Chat/ChatPanel", () => ({ default: () => null }));
 vi.mock("./components/Chat/AgentPreview", () => ({ default: () => null }));
 vi.mock("./components/Agents/AgentsPanel", () => ({ default: () => null }));
 vi.mock("./components/Chat/ChatInput", () => ({ default: () => null }));
@@ -99,9 +102,9 @@ vi.mock("./components/Layout/ProjectSidebar", () => ({ default: () => null }));
 vi.mock("./components/Layout/SessionSubTabs", () => ({ default: () => null }));
 vi.mock("./components/Layout/SessionTabSync", () => ({ default: () => null }));
 vi.mock("./components/Layout/CoworkSidebar", () => ({ default: () => null }));
+vi.mock("./components/Layout/TopTabs", () => ({ default: () => null }));
 vi.mock("./components/Files/FilePicker", () => ({ default: () => null }));
 vi.mock("./components/Files/ConfirmCloseDialog", () => ({ default: () => null }));
-vi.mock("./components/Layout/TopTabs", () => ({ default: () => null }));
 vi.mock("./pages/SessionPage", () => ({ default: () => null }));
 vi.mock("./lib/debug/frontendMemoryReporter", () => ({ default: () => null }));
 vi.mock("./components/common/ErrorBoundary", () => ({
@@ -109,6 +112,9 @@ vi.mock("./components/common/ErrorBoundary", () => ({
 }));
 
 import App from "./App";
+
+const REMOTE_PROJECT = { path: "/remote", name: "remote", host: "me@ssh" };
+const LOCAL_PROJECT = { path: "/local", name: "local" };
 
 function renderApp() {
   return render(
@@ -120,48 +126,40 @@ function renderApp() {
 
 beforeEach(() => {
   window.localStorage.clear();
-  authState.isRemote = false;
-  authState.token = null;
-  authState.handler = null;
-  eventBusStop.mockClear();
+  bus.setProjects.mockClear();
+  bus.setHosts.mockClear();
+  appApi.listProjects.mockReset().mockResolvedValue([REMOTE_PROJECT, LOCAL_PROJECT]);
+  // The active project is LOCAL — the remote host must still get a stream
+  // because it has a background tab open.
+  appApi.getCurrentProject.mockReset().mockResolvedValue({ project: LOCAL_PROJECT });
+  appApi.listProjectSessions.mockReset().mockResolvedValue([]);
+  appApi.listGroups.mockReset().mockResolvedValue([]);
+  appApi.getSpending.mockReset().mockResolvedValue({ spending_usd: 0 });
+  appApi.getTabs.mockReset().mockResolvedValue({ projects: {} });
 });
 
-describe("App remote auth-failure guard", () => {
-  it("shows RemoteReconnect when isRemoteSession is true and no token was ever present", () => {
-    authState.isRemote = true;
-    authState.token = null;
-    renderApp();
-    expect(screen.getByText(/reconnect/i)).toBeInTheDocument();
-  });
-
-  it("renders the normal app for a remote session with a valid token", async () => {
-    authState.isRemote = true;
-    authState.token = "valid-token";
-    renderApp();
-    expect(await screen.findByRole("button", { name: /new chat session/i })).toBeInTheDocument();
-    expect(screen.queryByText(/reconnect/i)).not.toBeInTheDocument();
-  });
-
-  it("switches to RemoteReconnect and stops the event bus when the auth-failure handler fires", async () => {
-    authState.isRemote = true;
-    authState.token = "valid-token";
-    renderApp();
-    await screen.findByRole("button", { name: /new chat session/i });
-    expect(authState.handler).toBeInstanceOf(Function);
-
-    act(() => {
-      authState.handler?.();
+describe("App per-host event streams", () => {
+  it("declares the host of a background remote-project tab even when the active project is local", async () => {
+    appApi.getTabs.mockResolvedValue({
+      projects: { "/remote": { tabs: [{ id: "s1", title: "s1", sub_tab: "chat" }], active: "s1" } },
     });
 
-    expect(await screen.findByText(/reconnect/i)).toBeInTheDocument();
-    expect(eventBusStop).toHaveBeenCalled();
+    renderApp();
+
+    // Restore settled once the tab is visible to the projects store.
+    await waitFor(() => expect(bus.setProjects).toHaveBeenCalledWith(["/remote"]));
+    await waitFor(() => expect(bus.setHosts).toHaveBeenCalledWith(["me@ssh"]));
   });
 
-  it("does not register an auth-failure handler for a non-remote session", async () => {
-    authState.isRemote = false;
-    authState.token = null;
+  it("declares no remote host when every open tab belongs to a local project", async () => {
+    appApi.getTabs.mockResolvedValue({
+      projects: { "/local": { tabs: [{ id: "s2", title: "s2", sub_tab: "chat" }], active: "s2" } },
+    });
+
     renderApp();
-    await screen.findByRole("button", { name: /new chat session/i });
-    expect(authState.handler).toBeNull();
+
+    await waitFor(() => expect(bus.setProjects).toHaveBeenCalledWith(["/local"]));
+    expect(bus.setHosts).toHaveBeenLastCalledWith([]);
+    expect(bus.setHosts.mock.calls.flat().flat()).not.toContain("me@ssh");
   });
 });

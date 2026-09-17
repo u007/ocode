@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { ProjectProvider, useProjectState } from "./projectStore";
+import { resolveSessionHost } from "../hooks/useSessionHost";
 
 const projectApi = vi.hoisted(() => ({
   listProjects: vi.fn(),
@@ -583,5 +584,28 @@ describe("project session-list cache (snappy project switching)", () => {
       result.current.state.sessionsByProject["dev@example.com::/remote"].sessions.map((s) => s.id),
     ).toEqual(["remote-1"]);
     expect(result.current.state.sessionsByProject["/proj-a"].sessions.map((s) => s.id)).toEqual(["local-1"]);
+  });
+
+  it("binds a resumed remote session's tab under its own project so the host resolves", async () => {
+    projectApi.listProjectSessions.mockResolvedValueOnce([mkSession("remote-s1", "Remote one")]);
+    const { result } = setup();
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.dispatch({ type: "SET_PROJECTS", projects: [testRemoteProject] });
+      await result.current.selectProject(testRemoteProject);
+    });
+
+    // Resuming the session from the list (SessionDialog's open action).
+    await act(async () => {
+      result.current.openSessionTab("remote-s1", "Remote one");
+    });
+    await act(async () => {});
+
+    // The tab is owned by the remote project, so findProjectPathForTab +
+    // getTrustedTerminalProject resolve "dev@example.com" — a tab bound to the
+    // local path would silently route the resumed session to the local server.
+    expect(result.current.state.tabsByProject["/remote"].map((t) => t.id)).toContain("remote-s1");
+    expect(resolveSessionHost(result.current.state, "remote-s1")).toBe("dev@example.com");
   });
 });

@@ -712,6 +712,19 @@ func (h *Handler) HandleSetComputerUseConfig(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+// HandleRequestComputerUsePermissions triggers the operating-system permission
+// prompts the computer tool needs on the current platform and returns a
+// human-readable report. It is best-effort and never changes persisted config:
+// on platforms with no explicit grant (Windows/Linux) it returns an
+// informational report. The report is advisory, not a hard readiness gate.
+func (h *Handler) HandleRequestComputerUsePermissions(w http.ResponseWriter, r *http.Request) {
+	fn := h.requestComputerPermissions
+	if fn == nil {
+		fn = computer.RequestPermissions
+	}
+	writeJSON(w, http.StatusOK, fn(r.Context()))
+}
+
 // HandleSetOcrConfig updates the full OCR configuration.
 func (h *Handler) HandleSetOcrConfig(w http.ResponseWriter, r *http.Request) {
 	var req ocr.OcrConfig

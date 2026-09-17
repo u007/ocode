@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, type ReactNode } from "react";
 import { Store, useSelector } from "@tanstack/react-store";
-import type { Message, LivePart, TUIStatus, QuestionPrompt } from "../api/types";
+import type { Message, LivePart, TUIStatus, QuestionPrompt, QuestionAnswerPayload } from "../api/types";
 
 // ── Rehydrate pending asks from persisted transcript ──────────────
 // The server persists a permission/question pause as a sentinel in the
@@ -289,6 +289,12 @@ export type ChatAction =
   | { type: "PERMISSION_RESOLVED"; sessionId: string; requestId?: string }
   | { type: "QUESTION_REQUEST"; sessionId: string; question: QuestionRequest }
   | { type: "QUESTION_RESOLVED"; sessionId: string }
+  | {
+      type: "QUESTION_ANSWERED";
+      sessionId: string;
+      requestId: string;
+      answers: QuestionAnswerPayload[];
+    }
   | { type: "PREPEND_MESSAGES"; sessionId: string; messages: Message[]; total: number }
   | { type: "SET_LOADING_MORE"; sessionId: string; loading: boolean }
   | { type: "MERGE_SNAPSHOT"; sessionId: string; messages: Message[]; total: number }
@@ -594,6 +600,33 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }));
     case "QUESTION_RESOLVED":
       return updateSession(state, action.sessionId, (s) => ({ ...s, pendingQuestion: null }));
+    case "QUESTION_ANSWERED":
+      // Optimistic echo of the answers the browser just POSTed. The server
+      // rewrites the pending `question` tool result in place with exactly this
+      // JSON (handler_questions.go applyQuestionAnswer), so mirroring it here
+      // makes the Q&A visible the instant the dialog is submitted instead of
+      // only when the continuation turn's `messages` snapshot lands. The
+      // snapshot later replaces the message with equivalent content, so this
+      // stays idempotent; when the sentinel is not in the loaded page (deep
+      // history / hydrated ask) the turn-end snapshot is the only source and
+      // the local rewrite is a no-op.
+      return updateSession(state, action.sessionId, (s) => {
+        const answers = JSON.stringify(action.answers);
+        let replaced = false;
+        const messages = s.messages.map((m) => {
+          if (
+            replaced ||
+            m.role !== "tool" ||
+            m.tool_call_id !== action.requestId ||
+            !m.content.includes(SENTINEL_QUESTION_PROMPT)
+          ) {
+            return m;
+          }
+          replaced = true;
+          return { ...m, content: answers };
+        });
+        return { ...s, messages, pendingQuestion: null };
+      });
     case "RESET": {
       const sessions = { ...state.sessions };
       delete sessions[action.sessionId];

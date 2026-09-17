@@ -25,21 +25,36 @@ type SSHTransport struct {
 	// construct one for the lifetime of a `remote` command when possible.
 	Supervisor *tool.ProcessSupervisor
 
-	seq atomic.Int64
+	// instance namespaces this transport's supervised process IDs within the
+	// (possibly shared) supervisor. Assigned once in NewSSHTransport.
+	instance uint64
+	seq      atomic.Int64
 }
+
+// transportInstanceCounter hands every transport a process-unique instance
+// token. The server shares ONE supervisor across every remote host for the
+// process lifetime (internal/server/remote_hosts.go), and the supervisor
+// retains terminal records forever, so a per-transport sequence that restarts
+// at 1 would make any second transport collide on remote-exec-1 — a reconnect
+// after a failed connect, or two hosts connecting in parallel. The token is
+// folded into nextID; mirrors the sub-N-/btw-N- namespacing used for
+// registries sharing an agent's supervisor (internal/agent).
+var transportInstanceCounter atomic.Uint64
 
 var _ Transport = (*SSHTransport)(nil)
 
 func NewSSHTransport(t Target, sup *tool.ProcessSupervisor) *SSHTransport {
-	return &SSHTransport{Target: t, Supervisor: sup}
+	return &SSHTransport{Target: t, Supervisor: sup, instance: transportInstanceCounter.Add(1)}
 }
 
 func (s *SSHTransport) Describe() string {
 	return "ssh " + s.Target.String()
 }
 
+// nextID returns a supervisor-unique ID of the form
+// remote-<prefix>-<instance>-<seq>.
 func (s *SSHTransport) nextID(prefix string) string {
-	return fmt.Sprintf("remote-%s-%d", prefix, s.seq.Add(1))
+	return fmt.Sprintf("remote-%s-%d-%d", prefix, s.instance, s.seq.Add(1))
 }
 
 // run starts cmd under the supervisor (when set) and waits for it,

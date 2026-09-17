@@ -291,6 +291,12 @@ export interface ComputerUseConfig {
   status_lines: string[];
 }
 
+export interface ComputerUsePermissionReport {
+  platform: string;
+  granted: boolean;
+  lines: string[];
+}
+
 export interface OcrModelsResponse {
   backends: { name: string; models: string[]; error?: string }[];
 }
@@ -561,6 +567,10 @@ export interface TUIStatus {
    *  small model, then the main model. */
   context_agent_model?: string;
   context_agent_model_enabled?: boolean;
+  /** Auto-continue: runtime on/off gate + optional judge model (mirrors the
+   *  TUI's autocont sidebar row). No judge model = StepLimitHit-only resumes. */
+  auto_continue_model?: string;
+  auto_continue_enabled?: boolean;
   ide_mode?: string;
   ide_status?: string;
   ocr_backend?: string;

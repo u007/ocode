@@ -2,15 +2,16 @@
 type: Guide
 title: Computer use
 description: User-facing guide to enabling and using the opt-in computer desktop-control tool, including actions, coordinate mapping, permissions, platform setup, limitations, and privacy.
-resource: internal/tool/computer.go; internal/computer/; internal/config/computeruse_config.go; internal/agent/permissions.go; internal/tui/model.go; internal/server/handler_config.go; web/src/components/Settings/ComputerUseForm.tsx; web/src/components/Settings/SettingsPanel.tsx
+resource: internal/tool/computer.go; internal/computer/; internal/config/computeruse_config.go; internal/agent/permissions.go; internal/tui/model.go; internal/server/handler_config.go; web/src/components/Settings/ComputerUseForm.tsx; web/src/components/Settings/SettingsPanel.tsx; internal/computer/permissions.go; internal/computer/permissions_darwin.go; internal/computer/permissions_other.go; web/src/api/client.ts; web/src/api/types.ts
 tags:
   - computer-use
   - desktop
   - permissions
   - platforms
   - settings
-timestamp: 2026-09-17T07:29:56Z
+timestamp: 2026-09-17T12:13:30Z
 ---
+
 # Computer use
 
 Computer use adds an opt-in `computer` tool that lets the agent see and operate the desktop running ocode. It is disabled by default. When disabled, the tool is not advertised to the model.
@@ -52,6 +53,23 @@ The same setting can be stored in `ocodeconfig.json`:
 All three surfaces persist immediately but the change takes effect in **new sessions**. Start a new session after changing the setting.
 
 `/computer status` reports whether the setting is enabled and names the platform backend. This is platform backend information, not a readiness or health check: status does not probe the desktop, verify installed Linux binaries, or start a driver. On macOS it also prints the required permission reminder.
+
+### Request OS permissions
+
+The **Request permissions** button in the Settings panel triggers a one-time, best-effort request for the OS-level grants the computer tool needs. It calls `POST /api/config/computer-use/permissions` (`internal/server/handler_config.go::HandleRequestComputerUsePermissions`), which delegates to `computer.RequestPermissions` (`internal/computer/permissions.go`).
+
+**What it does per platform:**
+
+- **macOS** — opens the System Settings pane for the missing grant(s) and triggers each consent prompt:
+  - *Accessibility:* runs a JXA `AXIsProcessTrustedWithOptions` script that shows the macOS accessibility consent dialog.
+  - *Screen Recording:* runs a `screencapture` probe. macOS has no scriptable way to poll this grant — a denied grant produces a wallpaper-only image without an error — so the probe can only confirm the consent dialog was requested.
+  - *Automation → System Events:* runs a harmless `osascript` query that triggers the one-time System Events automation prompt. macOS asks for this the first time a script controls System Events (which is how the computer tool types text).
+  - When more than one grant is missing the Privacy & Security root pane opens; when only one is missing the specific deep link opens. The report lines describe each grant.
+- **Windows** — informational only. No explicit permission grant is required; input is posted through the PowerShell SendInput helper and screenshots use built-in capture APIs.
+- **Linux** — informational only. No explicit permission grant is required. The report notes the desktop input backend dependency: xdotool + scrot (X11) or ydotool + grim (Wayland, wlroots-only).
+- **Other platforms** — reports the platform as unsupported.
+
+The request is advisory and best-effort: it never returns an error, never changes the persisted `enabled` flag, and never starts a driver. On macOS, relaunch ocode-desktop or your terminal after changing any of the permissions.
 
 ## Actions
 

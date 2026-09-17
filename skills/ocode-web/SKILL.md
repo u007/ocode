@@ -90,7 +90,7 @@ web/
         │   ├── SessionDialog.tsx   # Filterable session picker dialog
         │   ├── ProjectSidebar.tsx  # Multi-project sidebar (left edge)
         │   ├── CoworkSidebar.tsx   # Right sidebar: model, agent, context, files, LSP
-        │   ├── ModelDialog.tsx     # Model selector with tabs (main/small/advisor)
+        │   ├── ModelDialog.tsx     # Model selector, one purpose per open (main/small/advisor/recap/ocr/mask/commit/summary/permission/explorer/context/autocontinue)
         │   ├── DirectoryBrowser.tsx# Folder picker for adding projects
         │   ├── EditorTabBar.tsx    # File editor tab bar
         │   ├── ShareDialog.tsx     # Session share dialog
@@ -217,7 +217,7 @@ web/
             │
             └── Dialogs:
                 ├── <SessionDialog>     (filterable session picker)
-                ├── <ModelDialog>       (model selector, 3 tabs)
+                ├── <ModelDialog>       (model selector, one purpose per open — see ModelDialogTab)
                 ├── <PermissionDialog>  (permission approval)
                 ├── <QuestionDialog>    (question prompt)
                 ├── <ShareDialog>       (session share)
@@ -231,7 +231,7 @@ Four stores — no Redux, no Zustand.
 
 ### chatStore.tsx
 - **State**: `ChatState` — `messages[]`, `sessionId`, `model/smallModel/advisorModel`, `ocr*`, `isStreaming`, `live[]` buffer, `pendingPermission`, pagination cursor, `tuiStatus` snapshot, `spending`, `sessionContext`
-- **Actions**: 24+ action types including `ADD_MESSAGE`, `SET_MESSAGES`, `LIVE_DELTA`, `LIVE_TOOL_START/RESULT`, `MERGE_SNAPSHOT` (from turn-done), `PREPEND_MESSAGES` (scroll-up lazy load), `SET_TUI_STATUS`, `PERMISSION_REQUEST/RESOLVED`, `RESET`
+- **Actions**: 24+ action types including `ADD_MESSAGE`, `SET_MESSAGES`, `LIVE_DELTA`, `LIVE_TOOL_START/RESULT`, `MERGE_SNAPSHOT` (from turn-done), `PREPEND_MESSAGES` (scroll-up lazy load), `SET_TUI_STATUS`, `PERMISSION_REQUEST/RESOLVED`, `QUESTION_REQUEST/RESOLVED/ANSWERED`, `RESET`
 - **Pattern**: Separate `ChatStateContext` and `ChatDispatchContext` — read with `useChatState()`, dispatch with `useChatDispatch()`
 - **RESET nuance**: preserves `advisorEnabled` and `tuiStatus` across `/new` so they don't blink out
 
@@ -289,6 +289,7 @@ A single long-lived fetch-based SSE stream on `GET /api/events` carries every ev
 - `spending` — token usage
 - `permission` — permission approval needed (paired with `permission_resolved`)
 - `question` — agent question prompt (paired with `question_resolved`)
+- **Answered questions render as a Q&A card.** On a successful `POST /api/questions`, `useChat.submitQuestionAnswers` dispatches `QUESTION_ANSWERED`, which rewrites the local `QUESTION_PROMPT:` sentinel tool result in place with the same answer JSON the server sends the model — so the chat shows the questions + the selected answers the instant the dialog is submitted, without waiting for the continuation turn's `messages` snapshot. `TurnParts.parseQuestionAnswers` / `QuestionAnswerBlock` render that payload for any `question` tool call whose result is the answer array (grouped, loose, and live paths all go through `ToolBlock`). The raw `QUESTION_PROMPT:` sentinel is never rendered, including from the live stream.
 - `permission_check` — auto-permission judge activity
 - `log` — server log lines
 

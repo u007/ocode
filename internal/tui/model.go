@@ -194,6 +194,30 @@ func (m *model) maybeDispatchAutoContinueJudge(forRC bool) bool {
 	return true
 }
 
+// agentAutoContinueDeclineDetail explains, in one user-facing line, why the
+// just-finished turn did NOT auto-continue: a step-limit cutoff blocked by a
+// disabled toggle, an exhausted chain cap, or a turn error. Empty when there
+// is nothing noteworthy (natural completion with auto-continue available).
+// Rendered as a transient transcript hint so a cut-off turn is visibly
+// "cut off / needs more" instead of silently reading as done.
+func (m *model) agentAutoContinueDeclineDetail(streamErr error, stepLimitHit bool) string {
+	if streamErr != nil {
+		return ""
+	}
+	if !stepLimitHit {
+		// Natural completion or a judge verdict pending — nothing to report
+		// yet (the judge path renders its own outcome line).
+		return ""
+	}
+	if !m.autoContinueEnabled {
+		return "turn hit the /max-step cap (auto-continue is off) — reply summarized, work may remain"
+	}
+	if m.autoContinueCount >= autoContinueMaxChain {
+		return fmt.Sprintf("turn hit the /max-step cap again — auto-continue chain cap (%d) reached; send a message to resume manually", autoContinueMaxChain)
+	}
+	return ""
+}
+
 // queueItemKind classifies entries in the unified queuedItems queue so
 // drain/render/recall can dispatch each item by type while preserving
 // insertion order across all previously-separate queues.
@@ -5113,6 +5137,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if shouldAutoContinue(m.autoContinueEnabled, stepLimitHit, m.autoContinueCount) {
 					return m, m.fireAutoContinue(true)
 				}
+				// The chain declined to fire: say WHY in the transcript instead
+				// of going silent (a capped-out chain or a disabled toggle left
+				// a step-limited turn looking exactly like a finished one).
+				if detail := m.agentAutoContinueDeclineDetail(msg.err, stepLimitHit); detail != "" {
+					m.messages = append(m.messages, message{
+						role:      roleAssistant,
+						text:      hintStyle.Render("~ " + detail),
+						transient: true,
+					})
+					m.rerenderTranscriptAndMaybeScroll()
+				}
 				if msg.err == nil && !stepLimitHit {
 					m.maybeDispatchAutoContinueJudge(false)
 				}
@@ -5294,6 +5329,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingRCAutoContinue = true
 			}
 			return m, tea.Batch(m.fireAutoContinue(false), waitAutoContinueJudgeEvent(m.autoContinueJudgeCh))
+		}
+		// No resume fired: make the triage outcome VISIBLE instead of letting
+		// the turn silently look done (the "no display output like its done or
+		// needs more" report). Superseded verdicts returned earlier; this is
+		// reached only while the session is idle at the exact turn the judge
+		// ran for.
+		if !m.streaming && msg.detail != "" {
+			m.messages = append(m.messages, message{
+				role:      roleAssistant,
+				text:      hintStyle.Render("~ " + msg.detail),
+				transient: true,
+			})
+			m.rerenderTranscriptAndMaybeScroll()
 		}
 		if forRC {
 			// The chain's /rc listener was deliberately left un-armed while
@@ -15442,6 +15490,11 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 		snap.ExplorerModelOn = m.config.Ocode.ExplorerModelEnabled
 		snap.ContextAgentModel = m.config.Ocode.ContextModel
 		snap.ContextAgentModelOn = m.config.Ocode.ContextModelEnabled
+		// Auto-continue mirrors the TUI's live runtime gate (m.autoContinue
+		// Enabled may have been flipped by the sidebar toggle without a config
+		// save yet) plus the configured judge model.
+		snap.AutoContinueModel = m.config.Ocode.AutoContinueModel
+		snap.AutoContinueOn = m.autoContinueEnabled
 		snap.OcrBackend = m.config.Ocode.Ocr.Backend
 		if snap.OcrBackend == "" {
 			snap.OcrBackend = "openai-compat"
@@ -17804,7 +17857,7 @@ func (m *model) wireCompactCallbacks() {
 	autoContinueJudgeDoneCh := m.autoContinueJudgeCh
 	m.agent.OnAutoContinueJudge = func(result agent.AutoContinueJudgeResult) {
 		select {
-		case autoContinueJudgeDoneCh <- autoContinueJudgeFinishedMsg{gen: result.Gen, resume: result.Resume, err: result.Err}:
+		case autoContinueJudgeDoneCh <- autoContinueJudgeFinishedMsg{gen: result.Gen, resume: result.Resume, err: result.Err, detail: result.Detail}:
 		default:
 		}
 	}
@@ -17990,6 +18043,11 @@ type autoContinueJudgeFinishedMsg struct {
 	gen    uint64
 	resume bool
 	err    error
+	// detail is the judge's user-facing outcome line (model, verdict, why) —
+	// rendered in the transcript when the verdict does NOT fire a resume, so
+	// a declined/failed triage is visible instead of the turn silently
+	// looking done.
+	detail string
 }
 
 func waitBtwEvent(doneCh chan btwResultMsg) tea.Cmd {

@@ -74,7 +74,7 @@ import FrontendMemoryReporter from "./lib/debug/frontendMemoryReporter";
 import { __setRevoker } from "./lib/browserStore";
 import { revokeBrowseSession } from "./api/client";
 import { getTrustedTerminalProject } from "./lib/trustedProject";
-import { resolveSessionHost } from "./hooks/useSessionHost";
+import { resolveSessionHost, useSessionHost } from "./hooks/useSessionHost";
 import { SpeechProvider } from "./components/Speech/SpeechProvider";
 import SpeechToolbar from "./components/Speech/SpeechToolbar";
 
@@ -88,7 +88,9 @@ const EMPTY_STRING_ARRAY: string[] = [];
 // client→store→client import cycle.
 __setRevoker(revokeBrowseSession);
 
-type ModelDialogTab = "main" | "small" | "advisor" | "permission" | "recap" | "ocr" | "mask" | "commit" | "summary" | "explorer" | "context";
+// Canonical union lives on ModelDialog (PURPOSE_TITLES keys) — re-aliased here
+// so App and ModelDialog can never drift apart when a new purpose is added.
+type ModelDialogTab = import("./components/Layout/ModelDialog").ModelDialogTab;
 
 /**
  * Resolve terminal routing only from the latest successful project snapshot.
@@ -157,6 +159,10 @@ function HomeApp() {
     document.title = sessionTitle ? "ocode - " + sessionTitle : ("ocode - " + (pkg.version || ""));
   }, [activeTabId, projectState.activeProject, tabs, projectState.tabsByProject]);
   const { resolvePermission, pendingPermission, pendingQuestion, submitQuestionAnswers } = useChat(activeTabId);
+  // Host of the active session's project. The model dialog and the command
+  // context route their session-scoped calls there so a remote session's model
+  // list and context come from that host's server, never the local one.
+  const activeSessionHost = useSessionHost(activeTabId ?? undefined);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [coworkOpen, setCoworkOpen] = useState(true);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -187,6 +193,21 @@ function HomeApp() {
     const paths = [...new Set(Object.values(projectState.tabsByProject).flat().map((t) => t.projectPath))];
     eventBus.setProjects(paths);
   }, [projectState.tabsByProject]);
+
+  // Declare the remote hosts with at least one open tab so the bus keeps a
+  // per-host `/api/events` stream alongside the local one. Derived from every
+  // open tab (not the active project): a host leaves the set only when its
+  // LAST tab closes, so background tabs in a remote project keep receiving
+  // their events. `resolveSessionHost` reads only `tabsByProject` and
+  // `projects`, so both are the complete dependency set for this derivation.
+  useEffect(() => {
+    const hosts = new Set<string>();
+    for (const tab of Object.values(projectState.tabsByProject).flat()) {
+      const host = resolveSessionHost(projectState, tab.id);
+      if (host) hosts.add(host);
+    }
+    eventBus.setHosts([...hosts]);
+  }, [projectState.tabsByProject, projectState.projects]);
   const [cmdOpen, setCmdOpen] = useState(false);
   const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<
@@ -667,18 +688,24 @@ function HomeApp() {
       newId: sessionId,
       newTitle: "New session",
     });
+    // The REKEY/UPDATE_TAB_ID dispatches above are batched, so this render's
+    // projectState still owns the tab under its OLD id. Resolve the host from
+    // the temp tab (the rekeyed session inherits its project) so a remote
+    // session's authoritative title is fetched from its own server, not the
+    // local one (which would 404 and leave the tab titled "New session").
+    const host = resolveSessionHost(projectState, tempTabId, { fallbackToActive: true });
     // Replace the placeholder with the authoritative session title once the
     // server has persisted it (auto title from first message). This covers
     // the race where the api.chat() 202 response wins before the
     // session_started SSE event's own fetch. Wrap in Promise.resolve for
     // test mocks that may return synchronously.
-    void Promise.resolve(api.getSession(sessionId)).then((detail: any) => {
+    void Promise.resolve(api.getSession(sessionId, undefined, host)).then((detail: any) => {
       const t = detail?.title?.trim() || "";
       if (t && t !== "New session") {
         projectDispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: t });
       }
     }).catch(() => {});
-  }, [dispatch, projectDispatch]);
+  }, [dispatch, projectDispatch, projectState]);
 
   // Commands may be drained by a hidden ChatInput belonging to a background
   // tab. Keep the originating session explicit rather than routing a command
@@ -748,13 +775,13 @@ function HomeApp() {
         setMaskMode: (mode) => api.setMaskMode(mode),
         setMaskModel: (model) => api.setMaskModel(model),
         getCommandContext: (name, args) => api.getCommandContext(name, args),
-        getSessionContext: (id) => api.getSessionContext(id),
+        getSessionContext: (id, host) => api.getSessionContext(id, host),
         getLSPStatuses: () => api.getLSPStatuses(),
         listSkills: () => api.listSkills(),
         getMCP: () => api.getMCP(),
         getGithubPR: (owner, repo, number) => api.getGithubPR(owner, repo, number),
         getGithubIssues: (owner, repo, state) => api.getGithubIssues(owner, repo, state),
-        getAgentRuns: () => api.listAgentRuns(),
+        getAgentRuns: (host) => api.listAgentRuns(undefined, host),
         getCronJobs: () => api.listCronJobs().then((r) => r.jobs),
         getSmallModelWithEnabled: () => api.getSmallModelWithEnabled(),
         getAdvisor: () => api.getAdvisor(),
@@ -762,7 +789,7 @@ function HomeApp() {
         setLimitsConfig: (fields) => api.setLimitsConfig(fields),
         getThinkingBudget: () => api.getThinkingBudget(),
         setThinkingBudget: (budget) => api.setThinkingBudget(budget),
-        listModels: () => api.listModels(),
+        listModels: (host) => api.listModels(undefined, host),
         getConfigModel: () => api.getConfigModel(),
         setConfigModel: (model) => api.setConfigModel(model),
         getFeaturesConfig: () => api.getFeaturesConfig(),
@@ -798,7 +825,7 @@ function HomeApp() {
     if (!result.handled) return { handled: false, accepted: true };
 
     if (result.openModelPicker) {
-      openModelDialog("main");
+      openModelDialog(result.modelPickerPurpose ?? "main");
       return { handled: true, accepted: true };
     }
 
@@ -1420,6 +1447,7 @@ function HomeApp() {
         onClose={() => setModelDialogOpen(false)}
         purpose={modelDialogTab}
         sessionId={activeTabId ?? undefined}
+        host={activeSessionHost}
       />
 
       {/* Permission Dialog */}

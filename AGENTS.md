@@ -21,11 +21,14 @@ name). Do not duplicate content between the two — update here only.
 - `typesafe` (TypeSafe AI System One, model `jev-latest`) is **decision-only**:
   `POST /v1/systemone` answers typed choice/score/noul questions and never
   generates text. `NewClient` builds a `TypesafeClient` whose `Chat` fails
-  with `ErrTypesafeDecisionOnly`; its only consumer is the auto-permission
-  judge (`consultPermissionModel` → `askPermissionModelTypesafe`), which sends
-  the request as structured state and thresholds the choice `confidence`
-  against `permissions.auto.min_confidence`. Never route it through the chat,
-  compaction, small-model, or interpreter-effects paths.
+  with `ErrTypesafeDecisionOnly`; its only consumers are the auto-permission
+  judge (`consultPermissionModel` → `askPermissionModelTypesafe`) and the
+  auto-continue triage judge (`Ocode.AutoContinueModel = "typesafe/<model>"` →
+  `runAutoContinueJudgeTypesafe` in `internal/agent/autocontinue_typesafe.go`,
+  a Decide() call answering a typed continue/end choice over the transcript
+  tail). Both send the request as structured state and threshold the choice
+  `confidence` against `permissions.auto.min_confidence`. Never route it
+  through the chat, compaction, small-model, or interpreter-effects paths.
 - Every request to an `opencode*` provider must carry `X-Opencode-Session`, an
   opaque ID stable for one conversation (Zen/Go pin the conversation to one
   upstream for prompt caching; some Go models 400 without it). All transports
