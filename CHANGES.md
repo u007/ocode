@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-18 — Remote projects: persistent terminals on the host; reuse-on-mismatch + Restart
+
+- A remote (SSH/WSL) sidebar project's **terminal now runs on the host** inside `ocode serve --remote`, instead of ssh'ing from this machine on every request. A pty is a child of the host's server, so a laptop sleep or a desktop restart reattaches to the same shell; the host keeps a detached shell for 24 h (30 min locally). The terminal websocket and HTTP calls are reverse-proxied through `/api/remote/{host}/api/terminal/*` with the remote token kept server-side — the proxy rewrites the bearer subprotocol on the request and restores the browser's offered `Sec-WebSocket-Protocol` on the 101 so the token never reaches the browser. Files, git, `!` commands, and port forwards stay per-request ssh/wsl.exe.
+
+- **Remote server version policy.** A live, healthy but older `ocode serve` on the host is now **reused and flagged**, not silently replaced (a dead/unhealthy one is still replaced). The sidebar project row gains a status line — `vX.Y.Z · N chats (M running) · K terminals`, or `not connected` with a **Connect** action; an outdated server shows an amber dot and a **Restart** action (plus a "Restart remote server" context-menu item). Backing endpoints on the local server: `GET /api/remote/{host}/status` (reports what the registry knows, never connects), `POST /api/remote/{host}/connect`, and `POST /api/remote/{host}/restart` (kill pid → drop registry entry → fresh server at the local version → re-register saved projects). Restart is explicit and unguarded; the event bus and terminal websockets reconnect with their normal backoff.
+
+- **Reattach inventory.** `GET /api/terminal?project_path=…` lists live, named terminal sessions (id, title, pid, started_at, attached), and the sidebar's expandable row attaches any of them by id — covering cleared localStorage or a new machine. Terminal persistence keys are host-qualified (`<host>::<path>`), so a local and a remote project at the same path no longer share terminal tabs.
+
+- **Sleep/wake.** The event bus and terminal panel share a wake signal (window `online` / `visibilitychange` to visible, deduplicated within 1 s) that resets the backoff and reconnects immediately, instead of waiting up to 30 s for the next retry.
+
 ## 2026-09-18 — Desktop: System Permissions settings section (macOS TCC + cross-platform)
 
 - Request: a settings section that detects which OS permission areas ocode is requesting, lets each be toggled on/off permanently, prompts the OS when switched on, and re-requests the enabled ones on startup — because rebuilding the desktop app resets macOS TCC grants.

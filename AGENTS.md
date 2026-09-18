@@ -810,20 +810,32 @@ the working directory of a session's work. The rules:
   directly with `m.workDir` and only touches `internal/server` for RC bridge
   types.
 
-### Remote projects: chat runs on the host, terminal/files stay per-request
+### Remote projects: chat and terminals run on the host; files/git/forwards stay per-request
 
-A sidebar remote (SSH/WSL) project's **chat/agent/session traffic** is
-reverse-proxied to an `ocode serve --remote` process **on that host**, reached
-through `/api/remote/{host}/api/{rest...}`
-(`internal/server/handler_remote_proxy.go`, route registered in
-`server.registerRoutes`). `Handler.remoteHosts`
+A sidebar remote (SSH/WSL) project's **chat/agent/session traffic and its
+terminal websocket + terminal HTTP calls** are reverse-proxied to an
+`ocode serve --remote` process **on that host**, reached through
+`/api/remote/{host}/api/{rest...}` (`internal/server/handler_remote_proxy.go`,
+route registered in `server.registerRoutes`). `Handler.remoteHosts`
 (`internal/server/remote_hosts.go`) owns one lazily-connected
 `remote.RemoteWorkspace` per host, shared by every remote project on that host
 and closed at shutdown; the proxy builder is
 `remote.NewAPIProxy`/`remote.InjectAuth` (`internal/remote/proxy.go`), which
-`internal/desktop/proxy.go` also uses. Terminal, the Files tab, git, `!`
-commands, and port forwards keep their existing per-request ssh/wsl.exe paths
-— they are not proxied.
+`internal/desktop/proxy.go` also uses. Terminal pty's are therefore children of
+the **host's** server, not the local one: a remote project's shell survives a
+laptop sleep or a desktop restart (24 h detach TTL in `--remote` mode; 30 min
+local). The Files tab, git, `!` commands, and port forwards keep their existing
+per-request ssh/wsl.exe paths — they are not proxied.
+
+Terminal routing for a project with a `host`:
+
+```
+/api/remote/{host}/api/terminal/ws?project_path=…
+/api/remote/{host}/api/terminal/{id}/history   (GET)
+/api/remote/{host}/api/terminal/{id}           (DELETE)
+/api/remote/{host}/api/terminal/processes
+/api/remote/{host}/api/terminal                (GET — live named sessions, for reattach)
+```
 
 Rules:
 
@@ -834,6 +846,14 @@ Rules:
 - **The remote token never reaches the browser.** The proxy strips the local
   `token` query param and `Authorization` header and injects `Bearer
   <ServeState.Token>` server-side.
+- **The proxy must restore the browser's websocket subprotocol on a 101.** In
+  `--remote` mode the host expects `ocode.bearer.<remoteToken>` as the offered
+  `Sec-WebSocket-Protocol` and echoes it on the 101. Forwarding that header
+  unchanged both breaks the handshake (the browser offered a different value)
+  and leaks the remote token. `remote.InjectAuth` records the browser's offer
+  on the request context and `ModifyResponse` restores exactly that value on a
+  101 (deleting the header when the browser offered nothing). Any new
+  Upgrade-capable proxy path must preserve this.
 - **`~` is expanded only by the server owning that `$HOME`**
   (`projects.ExpandHome`, called from `Store.Add`, `HandleAddProject`, and
   `HandleChat`). A remote project's saved path stays verbatim locally and is
@@ -846,6 +866,48 @@ Rules:
   project binding). New session-scoped calls must pass that host — plus an
   `X-Ocode-Project` header when they carry a path — or they hit the wrong
   machine. Local calls pass no host and keep byte-identical URLs.
+- **Version mismatch is reused, never auto-restarted.** `EnsureRemoteServer`
+  reuses an alive, healthy but version-mismatched server and flags
+  `ServeState.Outdated` (a dead/unhealthy one is still replaced). The sidebar
+  shows an amber outdated marker and an explicit **Restart**; `POST
+  /api/remote/{host}/restart` kills the pid, drops the registry entry, brings
+  up a fresh server at the local version, and re-registers the host's saved
+  projects. It is unguarded: running turns and terminals are not drained, so
+  the SPA reconnects with its normal backoff and a dead shell shows the
+  existing "shell exited" state. `GET /api/remote/{host}/status` reports what
+  the registry knows without connecting; `POST /api/remote/{host}/connect` is
+  the explicit connect.
+- **Terminal reattach keys are host-qualified.** `terminalPersistence.ts`'s
+  `projectTerminalsKey(path, host)` is `<host>::<path>` for remote projects and
+  the bare path for local ones, so a local and a remote project at the same
+  path cannot share terminal tabs. `GET /api/terminal?project_path=…` backs the
+  sidebar's reattach list when localStorage is empty.
+
+
+## Web/Desktop Context gauge: provider-reported only
+The web/desktop Context gauge (`TUIStatus.context_current_tokens`) and the
+`/context` summary (`current_tokens`) MUST carry the backend's
+provider-reported context occupancy — never a character-count estimate over
+the session transcript.
+
+- **Source of truth:** `Agent.LastInputTokens()`, an atomic set from
+  `resp.Usage` inside `Step` (so it covers every provider, not just the
+  streaming-usage ones). The bridged TUI session keeps using its own live
+  `ContextCurrentTokens`.
+- **One resolution, two entry points:** `Handler.applySessionContext` (status
+  snapshots) and `Handler.HandleSessionContext` (the `/context` endpoint) both
+  resolve current tokens the same way, and the report's
+  `contextbudget.Input.ContextTokens` override is fed the same value so the
+  report's Context row and the summary cannot disagree.
+- **0 means "no provider usage recorded yet"** (e.g. a session restored before
+  its first turn) and is omitted on the wire (`omitempty`), rendering as
+  unknown. Do NOT reintroduce a `len(content)/4` fallback: it fabricated a
+  number that diverged from the real provider count and made the desktop gauge
+  disagree with the TUI.
+- **API shape:** `GET /api/sessions/:id/context` returns `current_tokens`
+  (renamed from `estimated_tokens`), alongside `max_tokens` / `model` / the
+  optional `report`.
+
 
 ## Data Storage
 All persistent state lives under a single cross-platform global directory

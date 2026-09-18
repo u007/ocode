@@ -29,6 +29,7 @@ okf_version: 0.1
 # concepts
 
 - [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) - TypeSafe relevance judge that vets discovery candidates per-turn, only when connected
+- [Remote Persistent Sessions and Terminals](concepts/remote-persistent-sessions-terminals.md) - Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, sidebar UI, and wake reconnect.
 - [Sandbox Permission Mode](concepts/sandbox-permission-mode.md) - Concept doc for sandbox permission mode: four modes, persistence (Decision 2 superseded), destructive git Ask routing, sensitive-path carve-outs, security model, and platform support
 - [Server-Side Auto-Continue Loop](concepts/server-auto-continue.md) - Server-side auto-continue loop pattern: bounded chain with step-limit cutoff, judge dispatch, and visible end-of-turn status.
 

@@ -460,6 +460,8 @@ ocode serve -host 0.0.0.0 -port 4096
 ocode run -attach http://server:4096 -prompt "Continue work"
 ```
 
+Sidebar remote (SSH/WSL) projects behave differently from `-attach`: their **chat and terminal run on the host** inside `ocode serve --remote`, so a terminal pty survives laptop sleep and desktop restarts (the host keeps a detached shell for 24 h). The project row in the sidebar shows the host's version plus chat and terminal counts; it offers **Connect** when the host is offline and an amber **Restart** when the host runs an older ocode (restart is explicit and kills that host's running shells and turns). Expand the row to open a running chat or reattach a live terminal by id.
+
 ---
 
 ## 9. Slash Commands (TUI & Web UI & Run Mode)
