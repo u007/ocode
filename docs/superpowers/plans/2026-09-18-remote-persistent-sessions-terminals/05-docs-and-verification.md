@@ -19,8 +19,8 @@ Docs are the source of truth in this repo. The terminal section of `AGENTS.md` (
 - Modify: `skills/ocode-usage/SKILL.md` (a short paragraph on remote terminal persistence and the sidebar Restart / Connect actions, where remote projects are described)
 - Modify: `web/src/lib/trustedProject.ts` only if the manual run shows the trusted-project gate blocking the proxied terminal path; otherwise untouched
 
-- [ ] **Step 1: Write the docs** listed above. Every statement must match the implemented behaviour; read the handlers and components before writing.
-- [ ] **Step 2: Run** `go test ./internal/remote/... ./internal/server/...` and `cd web && pnpm test`. Expected: all PASS. Then `cd web && pnpm build` and the Go build for the desktop binary as `Makefile` describes. Expected: no errors.
+- [x] **Step 1: Write the docs** listed above. Every statement must match the implemented behaviour; read the handlers and components before writing.
+- [x] **Step 2: Run** `go test ./internal/remote/... ./internal/server/...` and `cd web && pnpm test`. Expected: all PASS. Then `cd web && pnpm build` and the Go build for the desktop binary as `Makefile` describes. Expected: no errors.
 - [ ] **Step 3: Manual verification (SSH)**, recording the outcome of each in the commit message body:
   1. Add or select a remote SSH project. Open a terminal, run `top`.
   2. Sleep the laptop for at least three minutes, wake it. Within a few seconds the terminal reconnects and `top` is still running.
@@ -29,4 +29,4 @@ Docs are the source of truth in this repo. The terminal section of `AGENTS.md` (
   5. Clear the browser's localStorage for the app. The sidebar row for the project, expanded, lists the terminal; clicking it reattaches.
   6. On the host, note the pid from the status line. Bump `internal/version/version.go` locally, rebuild, relaunch. The row shows the amber outdated marker. Click Restart. The row shows the new version and a new pid; the old terminal reports exited; a chat opened before the restart resumes.
 - [ ] **Step 4: Manual verification (WSL)**, on a Windows machine with a `wsl:<distro>` project: repeat items 1, 3, and 6. Sleep/wake is item 2 there as well.
-- [ ] **Step 5: Commit** `docs: remote persistent sessions and terminals` with the verification notes in the body.
+- [x] **Step 5: Commit** `docs: remote persistent sessions and terminals` with the verification notes in the body.

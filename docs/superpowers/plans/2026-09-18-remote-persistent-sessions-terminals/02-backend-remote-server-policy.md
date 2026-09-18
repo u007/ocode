@@ -25,14 +25,14 @@ Constraints: only saved-project hosts; remote commands go through the host `Tran
 - `RemoteWorkspace.discoverOrStartServer` delegates to `EnsureRemoteServer` so the two decision copies collapse into one.
 - Progress line in `connect.go`: `reusing existing server (v<remote>, local v<local>, outdated)` when outdated, else the current wording.
 
-- [ ] **Step 1: Write failing tests** with `newFakeTransport` from `fake_transport_test.go` (it maps command strings to canned results; look at `TestEnsureRemoteServer*` for how discovery, pid, and health probes are scripted):
+- [x] **Step 1: Write failing tests** with `newFakeTransport` from `fake_transport_test.go` (it maps command strings to canned results; look at `TestEnsureRemoteServer*` for how discovery, pid, and health probes are scripted):
   - `TestEnsureRemoteServer_ReusesMismatchedAliveServer`: state file with version `1.0.0`, pid alive, health OK, local version `2.0.0` → reused true, `Outdated` true, no launch command executed.
   - `TestEnsureRemoteServer_ReplacesDeadMismatchedServer`: pid dead → fresh, `Outdated` false.
   - `TestEnsureRemoteServer_MatchingVersionNotOutdated`.
   - In `workspace_test.go`: `discoverOrStartServer` returns `Outdated` true for the mismatched-alive case.
-- [ ] **Step 2: Run** `go test ./internal/remote/ -run 'EnsureRemoteServer|discoverOrStart' -v`. Expected: FAIL (compile error on the three-value signature is acceptable as the failure).
-- [ ] **Step 3: Implement** the field, the health split, the new decision, the delegation, and the `connect.go` call site. Update any other test that pattern-matched the four-value signature.
-- [ ] **Step 4: Run** `go test ./internal/remote/...`. Expected: PASS.
+- [x] **Step 2: Run** `go test ./internal/remote/ -run 'EnsureRemoteServer|discoverOrStart' -v`. Expected: FAIL (compile error on the three-value signature is acceptable as the failure).
+- [x] **Step 3: Implement** the field, the health split, the new decision, the delegation, and the `connect.go` call site. Update any other test that pattern-matched the four-value signature.
+- [x] **Step 4: Run** `go test ./internal/remote/...`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(remote): reuse version-mismatched remote server and flag it outdated`.
 
 ---
@@ -53,12 +53,12 @@ Constraints: only saved-project hosts; remote commands go through the host `Tran
 - `remoteHostRegistry.connect(host, path string, port int) (remoteHostStatus, error)`: `workspaceForPort` then `status`.
 - `remote.KillServer(t, pid)`: `kill <pid>`, poll `kill -0` up to a bounded number of attempts with a short interval, then `kill -9` once, then one final `kill -0`; error if still alive. Also removes the state file so a later discovery cannot reuse the dead pid.
 
-- [ ] **Step 1: Write failing tests**:
+- [x] **Step 1: Write failing tests**:
   - `serve_test.go`: `TestKillServer_TermThenKill` scripts `kill -0` alive twice then dead; asserts the command sequence and state-file removal. `TestKillServer_StillAlive` returns an error.
   - `remote_hosts_test.go`, using the existing fake workspace and connect stubs from `TestWorkspaceFor_SingleConnect`: `TestStatus_NeverConnected` → `Connected` false; `TestStatus_ConnectedReportsVersionAndOutdated`; `TestRestart_KillsDropsReconnectsAndReregisters` asserts kill was invoked with the old pid, a second connect happened, and the previously registered paths were re-registered; `TestRestart_KillFailureLeavesEntryDropped`.
-- [ ] **Step 2: Run** `go test ./internal/remote/ -run KillServer -v && go test ./internal/server/ -run 'Status_|Restart_' -v`. Expected: FAIL.
-- [ ] **Step 3: Implement** the interface widening, the status struct and methods, `KillServer`, and `restart`/`connect` on the registry.
-- [ ] **Step 4: Run** both packages' tests. Expected: PASS.
+- [x] **Step 2: Run** `go test ./internal/remote/ -run KillServer -v && go test ./internal/server/ -run 'Status_|Restart_' -v`. Expected: FAIL.
+- [x] **Step 3: Implement** the interface widening, the status struct and methods, `KillServer`, and `restart`/`connect` on the registry.
+- [x] **Step 4: Run** both packages' tests. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(server): remote host registry status, connect, restart`.
 
 ---
@@ -76,8 +76,8 @@ Constraints: only saved-project hosts; remote commands go through the host `Tran
 - `POST connect` → 200 with status after connecting; 502 `{error, stage: "remote-connect"}` on failure.
 - `POST restart` → 200 with status after restart; 502 `{error, stage: <stage from the registry error>}` on failure. Logged with host and stage.
 
-- [ ] **Step 1: Write failing tests** with the `Handler` fixture used in `handler_remote_proxy_test.go` (it injects a fake registry): unknown host → 403 on all three; status on a never-connected saved host → `connected:false`; connect → registry connect called with the saved path and port, 200 body; restart → 200 body from the registry; restart error → 502 with the registry's stage; verify the exact routes resolve (a `httptest` request against the real mux for `GET /api/remote/h/status` must not fall into the proxy).
-- [ ] **Step 2: Run** `go test ./internal/server/ -run RemoteLifecycle -v`. Expected: FAIL.
-- [ ] **Step 3: Implement** the handler file and routes.
-- [ ] **Step 4: Run** `go test ./internal/server/...`. Expected: PASS.
+- [x] **Step 1: Write failing tests** with the `Handler` fixture used in `handler_remote_proxy_test.go` (it injects a fake registry): unknown host → 403 on all three; status on a never-connected saved host → `connected:false`; connect → registry connect called with the saved path and port, 200 body; restart → 200 body from the registry; restart error → 502 with the registry's stage; verify the exact routes resolve (a `httptest` request against the real mux for `GET /api/remote/h/status` must not fall into the proxy).
+- [x] **Step 2: Run** `go test ./internal/server/ -run RemoteLifecycle -v`. Expected: FAIL.
+- [x] **Step 3: Implement** the handler file and routes.
+- [x] **Step 4: Run** `go test ./internal/server/...`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(server): remote host status/connect/restart endpoints`.

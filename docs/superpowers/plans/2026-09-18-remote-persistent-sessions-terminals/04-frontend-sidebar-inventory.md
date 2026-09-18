@@ -33,10 +33,10 @@ Constraints: use existing UI primitives (`Button`, context menu, dialog componen
 - `useRemoteHostStatus(host: string | undefined, enabled: boolean)` returns `{ status, loading, error, refresh, connect, restart, busy: "idle" | "connecting" | "restarting" }`. Fetches on mount when enabled, every 30 s while enabled, and on every `eventBus.onReconnect`. `connect` and `restart` set `busy`, call the API, and store the returned status; on error they store the error message and refresh.
 - `useRemoteTerminals(host, projectPath, enabled)` returns `{ terminals, loading, error, refresh }`. Fetches when enabled becomes true and on `eventBus.onReconnect`.
 
-- [ ] **Step 1: Write failing tests**: client functions hit the exact URLs with the right method and header and throw with `stage` in the message on 502; the status hook fetches on mount, refetches on a simulated `onReconnect`, and `restart` transitions `busy` through `restarting` back to `idle` with the new status; the terminals hook does not fetch while disabled and fetches once enabled. Use the `authedFetch` mocking pattern already present in `web/src/hooks/useSessionStatus.test.tsx`.
-- [ ] **Step 2: Run** the three test files. Expected: FAIL.
-- [ ] **Step 3: Implement** types, client functions, and hooks.
-- [ ] **Step 4: Run** `cd web && pnpm test -- remote`. Expected: PASS.
+- [x] **Step 1: Write failing tests**: client functions hit the exact URLs with the right method and header and throw with `stage` in the message on 502; the status hook fetches on mount, refetches on a simulated `onReconnect`, and `restart` transitions `busy` through `restarting` back to `idle` with the new status; the terminals hook does not fetch while disabled and fetches once enabled. Use the `authedFetch` mocking pattern already present in `web/src/hooks/useSessionStatus.test.tsx`.
+- [x] **Step 2: Run** the three test files. Expected: FAIL.
+- [x] **Step 3: Implement** types, client functions, and hooks.
+- [x] **Step 4: Run** `cd web && pnpm test -- remote`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(web): remote host status/terminal hooks and client`.
 
 ---
@@ -56,10 +56,10 @@ Constraints: use existing UI primitives (`Button`, context menu, dialog componen
 - Context menu item "Restart remote server" calls the same `restart` as the inline button.
 - `attachTerminal` reuses the tab shape `openTerminal` builds and persists it through the same save path so a reload restores it.
 
-- [ ] **Step 1: Write failing tests**: renders `not connected` + Connect when status is disconnected; renders `v1.2.3 · 2 chats (1 running) · 3 terminals` for a connected status with mocked hooks; amber marker and Restart appear only when `outdated`; clicking Restart calls the hook's `restart`; expanding lists chats and terminals and clicking a terminal calls `attachTerminal` with the id; `attachTerminal` in the store adds a tab with the given id once and ignores a second call; `ProjectSidebar` shows the status component only for host projects and its context menu contains the restart item only for hosts.
-- [ ] **Step 2: Run** the test files. Expected: FAIL.
-- [ ] **Step 3: Implement** the component, the store action, and the sidebar wiring using existing `ui` primitives.
-- [ ] **Step 4: Run** `cd web && pnpm test -- Layout terminalStore`. Expected: PASS, including existing `ProjectSidebar.test.tsx` cases.
+- [x] **Step 1: Write failing tests**: renders `not connected` + Connect when status is disconnected; renders `v1.2.3 · 2 chats (1 running) · 3 terminals` for a connected status with mocked hooks; amber marker and Restart appear only when `outdated`; clicking Restart calls the hook's `restart`; expanding lists chats and terminals and clicking a terminal calls `attachTerminal` with the id; `attachTerminal` in the store adds a tab with the given id once and ignores a second call; `ProjectSidebar` shows the status component only for host projects and its context menu contains the restart item only for hosts.
+- [x] **Step 2: Run** the test files. Expected: FAIL.
+- [x] **Step 3: Implement** the component, the store action, and the sidebar wiring using existing `ui` primitives.
+- [x] **Step 4: Run** `cd web && pnpm test -- Layout terminalStore`. Expected: PASS, including existing `ProjectSidebar.test.tsx` cases.
 - [ ] **Step 5: Commit** `feat(web): sidebar shows remote server version, chats, terminals; connect and restart`.
 
 ---
@@ -74,8 +74,8 @@ Constraints: use existing UI primitives (`Button`, context menu, dialog componen
 
 **Why.** Backoff can reach 30 s. After sleep the user expects the chat stream and terminals to be back within a second of the network returning.
 
-- [ ] **Step 1: Write failing tests**: `onWake` fires once for an `online` event and once for a visibility change, and not twice within a second; the bus, after a simulated drop with backoff at its max, reconnects immediately on wake; the terminal panel, with a closed socket and a pending timer, opens a new socket on wake and resets its attempt counter.
-- [ ] **Step 2: Run** the test files. Expected: FAIL.
-- [ ] **Step 3: Implement** the helper and the two subscriptions, unsubscribing on teardown.
-- [ ] **Step 4: Run** `cd web && pnpm test -- eventBus wake Terminal`. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(web): reconnect event bus and terminals immediately on wake`.
+- [x] **Step 1: Write failing tests**: `onWake` fires once for an `online` event and once for a visibility change, and not twice within a second; the bus, after a simulated drop with backoff at its max, reconnects immediately on wake; the terminal panel, with a closed socket and a pending timer, opens a new socket on wake and resets its attempt counter.
+- [x] **Step 2: Run** the test files. Expected: FAIL.
+- [x] **Step 3: Implement** the helper and the two subscriptions, unsubscribing on teardown.
+- [x] **Step 4: Run** `cd web && pnpm test -- eventBus wake Terminal`. Expected: PASS.
+- [x] **Step 5: Commit** `feat(web): reconnect event bus and terminals immediately on wake`.

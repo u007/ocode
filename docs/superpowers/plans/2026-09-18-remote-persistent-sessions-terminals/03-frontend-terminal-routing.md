@@ -25,13 +25,13 @@ Constraints: local projects keep byte-identical URLs and keys; no `host=` or `po
 - Terminal kill: `DELETE ${remoteApiBase(host)}/api/terminal/{id}` with the same header when `host` is set.
 - Local calls (no host) produce exactly today's URLs and headers.
 
-- [ ] **Step 1: Write failing tests**:
+- [x] **Step 1: Write failing tests**:
   - `TerminalPanel.wsAuth.test.ts`: with `host: "user@box"` the URL starts with `/api/remote/user%40box/api/terminal/ws` and its query has no `host` and no `port`; with no host the URL is unchanged from the existing assertions.
   - `terminalHistory.test.ts`: with a host the fetch URL is prefixed and the `X-Ocode-Project` header is present; without a host neither.
   - `TerminalTabs.test.tsx`: closing a tab on a host project calls DELETE on the prefixed URL with the header (extend the existing DELETE assertion around line 198).
-- [ ] **Step 2: Run** the three test files. Expected: FAIL.
-- [ ] **Step 3: Implement** the URL and header changes, threading `host` from `TerminalTabs` props into the panel, the history call, and the store.
-- [ ] **Step 4: Run** `cd web && pnpm test -- Terminal`. Expected: PASS, including the other `TerminalPanel.*.test.tsx` files.
+- [x] **Step 2: Run** the three test files. Expected: FAIL.
+- [x] **Step 3: Implement** the URL and header changes, threading `host` from `TerminalTabs` props into the panel, the history call, and the store.
+- [x] **Step 4: Run** `cd web && pnpm test -- Terminal`. Expected: PASS, including the other `TerminalPanel.*.test.tsx` files.
 - [ ] **Step 5: Commit** `feat(web): remote project terminals run on the host via the remote proxy`.
 
 ---
@@ -50,8 +50,8 @@ Constraints: local projects keep byte-identical URLs and keys; no `host=` or `po
 - `projectTerminalsKey(path: string, host?: string): string` returns `host::path` when host is set, else `path` (identical to `projectSessionKey`; reuse it by import rather than duplicating).
 - Existing bare-path entries in localStorage keep loading for local projects. No migration of remote entries: a remote project's old bare-path entry is simply not found, and the sidebar list from Part 4 offers reattach.
 
-- [ ] **Step 1: Write failing tests**: save under `(path, host)` then load with the same pair returns it and load with `(path)` alone returns null; a pre-existing bare-path entry loads for `(path)`; `TerminalTabs` for a host project persists under the qualified key.
-- [ ] **Step 2: Run** the two test files. Expected: FAIL.
-- [ ] **Step 3: Implement** the key helper and thread it through the store and tabs.
-- [ ] **Step 4: Run** `cd web && pnpm test -- Terminal`. Expected: PASS.
+- [x] **Step 1: Write failing tests**: save under `(path, host)` then load with the same pair returns it and load with `(path)` alone returns null; a pre-existing bare-path entry loads for `(path)`; `TerminalTabs` for a host project persists under the qualified key.
+- [x] **Step 2: Run** the two test files. Expected: FAIL.
+- [x] **Step 3: Implement** the key helper and thread it through the store and tabs.
+- [x] **Step 4: Run** `cd web && pnpm test -- Terminal`. Expected: PASS.
 - [ ] **Step 5: Commit** `fix(web): key terminal tabs by host and path for remote projects`.
