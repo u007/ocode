@@ -106,23 +106,41 @@ func NewSession(eng *Engine) *Session {
 	return &Session{eng: eng, attached: map[string]bool{}}
 }
 
-// Discover ranks query against the corpus, selects rank-relative, and adds any
-// new selections to the sticky set. Returns the docs newly added this call.
-func (s *Session) Discover(ctx context.Context, query string) ([]Doc, error) {
+// Select ranks query against the corpus and applies the rank-relative policy,
+// returning the selected docs that are not already attached, in rank order. It
+// is non-mutating: call Seed with the ids to attach them. Use Select when a
+// caller needs to inspect/veto the candidates before they join the sticky set
+// (the TypeSafe judge path); Discover is the plain attach-everything wrapper.
+func (s *Session) Select(ctx context.Context, query string) ([]Doc, error) {
 	ranked, err := s.eng.Rank(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 	selected := SelectRankRelative(ranked)
-	var added []Doc
-	s.mu.Lock()
+	var candidates []Doc
+	s.mu.RLock()
 	for _, sc := range selected {
 		if !s.attached[sc.Doc.ID] {
-			s.attached[sc.Doc.ID] = true
-			added = append(added, sc.Doc)
+			candidates = append(candidates, sc.Doc)
 		}
 	}
-	s.mu.Unlock()
+	s.mu.RUnlock()
+	return candidates, nil
+}
+
+// Discover ranks query against the corpus, selects rank-relative, and adds any
+// new selections to the sticky set. Returns the docs newly added this call.
+// It is exactly Select followed by Seed of the returned ids.
+func (s *Session) Discover(ctx context.Context, query string) ([]Doc, error) {
+	added, err := s.Select(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(added))
+	for _, d := range added {
+		ids = append(ids, d.ID)
+	}
+	s.Seed(ids)
 	return added, nil
 }
 

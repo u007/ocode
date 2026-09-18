@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"reflect"
 	"testing"
 )
 
@@ -84,6 +85,101 @@ func TestWarmBecomesReady(t *testing.T) {
 	}
 	if !eng.Ready() {
 		t.Fatal("idempotent Warm must keep ready")
+	}
+}
+
+// TestSelectDoesNotAttach: Select is non-mutating — it returns rank-relative
+// candidates without touching the sticky attached set. Seed is what attaches.
+func TestSelectDoesNotAttach(t *testing.T) {
+	eng := NewEngine(FakeEmbedder{Dimension: 128}, t.TempDir())
+	if err := eng.Warm(context.Background(), docsFixture()); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSession(eng)
+	got, err := s.Select(context.Background(), "summarize notion meeting notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("Select should return candidates for a matching query")
+	}
+	for _, d := range got {
+		if s.IsAttached(d.ID) {
+			t.Fatalf("Select must not attach %s", d.ID)
+		}
+	}
+	if attached := s.Attached(); len(attached) != 0 {
+		t.Fatalf("Select must leave the sticky set empty, got %v", attached)
+	}
+}
+
+// TestSelectSkipsAlreadyAttached: seeded ids must not be returned again by
+// Select, so the caller never re-judges or re-seeds an attached doc.
+func TestSelectSkipsAlreadyAttached(t *testing.T) {
+	eng := NewEngine(FakeEmbedder{Dimension: 128}, t.TempDir())
+	// Both docs contain the full query, so both pass rank-relative selection.
+	docs := []Doc{
+		{ID: "skill:a", Kind: "skill", Name: "a", Text: "search notion meeting notes"},
+		{ID: "skill:b", Kind: "skill", Name: "b", Text: "search notion meeting notes"},
+	}
+	if err := eng.Warm(context.Background(), docs); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSession(eng)
+	q := "search notion meeting notes"
+	first, err := s.Select(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) < 2 {
+		t.Fatalf("fixture should select both docs, got %v", ids(first))
+	}
+	s.Seed([]string{first[0].ID})
+
+	second, err := s.Select(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != len(first)-1 {
+		t.Fatalf("Select should return all but the attached doc: first=%v second=%v", ids(first), ids(second))
+	}
+	for _, d := range second {
+		if d.ID == first[0].ID {
+			t.Fatalf("already-attached %s must be skipped", d.ID)
+		}
+	}
+}
+
+// TestDiscoverEqualsSelectPlusSeed: Discover is exactly Select followed by
+// Seed — same ids returned, and the sticky set reflects them afterward.
+func TestDiscoverEqualsSelectPlusSeed(t *testing.T) {
+	eng := NewEngine(FakeEmbedder{Dimension: 128}, t.TempDir())
+	if err := eng.Warm(context.Background(), docsFixture()); err != nil {
+		t.Fatal(err)
+	}
+	q := "manipulate pdf documents"
+
+	selected, err := NewSession(eng).Select(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovered, err := NewSession(eng).Discover(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ids(selected), ids(discovered)) {
+		t.Fatalf("Discover != Select+Seed: select=%v discover=%v", ids(selected), ids(discovered))
+	}
+
+	s := NewSession(eng)
+	added, err := s.Discover(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range added {
+		if !s.IsAttached(d.ID) {
+			t.Fatalf("Discover must leave %s attached", d.ID)
+		}
 	}
 }
 
