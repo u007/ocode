@@ -71,6 +71,11 @@ func revealCommand(goos, absPath string, isDir bool) (string, []string) {
 			"--session",
 			"--dest=org.freedesktop.FileManager1",
 			"--type=method_call",
+			// --print-reply makes dbus-send WAIT for the reply, so a missing
+			// FileManager1 service (no file manager, or a bare session bus)
+			// surfaces as a non-zero exit the caller can fall back from.
+			// Without it dbus-send is fire-and-forget and always exits 0.
+			"--print-reply",
 			"/org/freedesktop/FileManager1",
 			"org.freedesktop.FileManager1.ShowItems",
 			"array:string:" + uri,

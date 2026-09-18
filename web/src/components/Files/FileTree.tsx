@@ -1346,6 +1346,18 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
     rangeSelect,
     setSelection: (paths) => setSelectedPaths(new Set(paths)),
     open: (p) => onOpenFile(p, activeRoot),
+    // Reveal runs on the LOCAL server host (no remote branch), so it is only
+    // offered for a local project — see canReveal below.
+    reveal: async (p) => {
+      try {
+        await api.revealInFileManager(p, activeRoot);
+        showNotice(`Opened in ${fileManagerLabel(serverPlatform)}`);
+      } catch (err) {
+        showNotice(`Error: ${(err as Error).message}`);
+      }
+    },
+    fileManager: fileManagerLabel(serverPlatform),
+    canReveal: !projectHost,
     copyPath: async (p) => {
       try {
         if (navigator.clipboard?.writeText) {
@@ -1858,6 +1870,11 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
                                           <ContextMenuItem onSelect={() => menu.copyPath(requestPath)}>
                                             <Link2 className="w-3.5 h-3.5 mr-2" /> Copy path
                                           </ContextMenuItem>
+                                          {menu.canReveal && (
+                                            <ContextMenuItem onSelect={() => menu.reveal(requestPath)}>
+                                              <FolderSearch className="w-3.5 h-3.5 mr-2" /> {revealMenuLabel(isDir, menu.fileManager)}
+                                            </ContextMenuItem>
+                                          )}
                                           <ContextMenuSeparator />
                                           <ContextMenuItem onSelect={() => menu.copy(effectivePaths)}>
                                             <Copy className="w-3.5 h-3.5 mr-2" /> Copy

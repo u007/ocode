@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-09-19 — Files tab: right-click a file/folder to open it in Finder / Explorer / the Linux file manager
+
+- Requested: "files tab explorer need the os native open in explorer or open in finder the directory via right click, or right click to show the file location on finder or explorer or thunar or ubuntu or what ever linux or wayland preset file explorer". The TUI already had this (`ctrl+o` reveal in `internal/tui/files_model.go`), but the web Files tab context menu had no such action, and the server `POST /api/files/open` only accepted `mode: "editor" | "os"` and rejected directories outright.
+
+- **`internal/server/reveal.go` (new).** `revealCommand(goos, absPath, isDir)` returns the per-platform file-manager argv (pure, no exec, so it is unit-testable): darwin `open <dir>` / `open -R <file>` (Finder selects the file), windows `explorer <dir>` / `explorer /select,<file>`, linux `xdg-open <dir>` / a `dbus-send` call to `org.freedesktop.FileManager1.ShowItems` with a percent-encoded `file://` URI (the cross-desktop "select this file" interface used by Nautilus/Thunar/Dolphin/Nemo, and the only reliable Wayland path). `revealPathInFileManager` probes dbus-send with a 2s bounded wait and falls back to opening the containing folder when FileManager1 is absent (headless/minimal hosts) — matching the TUI's fallback. `revealPathFn` is the package-level test seam (same pattern as `notifyGitAction`).
+
+- **`internal/server/handler_open.go`.** New `mode: "reveal"` in `POST /api/files/open`. It is the only mode that accepts a directory (folder → open the folder; file → select it in its containing folder); `editor`/`os` still 404 a directory. Containment is unchanged (`resolveWithinWorkdir` / `filepath.Rel` against the allowed project root), so reveal cannot escape the workdir. `openResolvedPath` gains an `isDir` arg.
+
+- **`internal/server/handler_config.go`.** `GET /api/config/ocode/paths` now also returns `platform` (runtime.GOOS), so the web labels the action to match the machine the reveal command actually runs on — the browser's own `navigator.platform` would be wrong behind a remote host.
+
+- **`web/src/api/client.ts`.** New `api.revealInFileManager(path, projectRoot)`; `getPathsConfig` type gains `platform?`.
+
+- **`web/src/components/Files/FileTree.tsx`.** Both context menus (tree rows via `dirItems`, and Miller-column rows) gain an "Open in Finder" (directory) / "Show in Finder" (file) item — the noun follows the server OS: Finder / Explorer / File Manager. It is hidden for a remote project (`canReveal: !projectHost`), because reveal runs on the local server host with no remote branch — offering it there would reveal an unrelated local path. Path is the anchored `requestPath` (same as Copy path), so the server resolves it against the active project root.
+
+- Tests: `internal/server/reveal_test.go` — per-platform argv matrix, the Linux FileManager1 URI encoding, `TestHandleOpenFileRevealAllowsDirectory` (dir + file route through the seam; verified failing against the pre-fix 404-on-directory code by temporary revert), and `TestHandleOpenFileRevealKeepsContainment` (traversal still 400; editor-on-dir still 404). `web/src/components/Files/FileTree.reveal.test.tsx` — darwin/Windows/Linux labels, dir vs file label, API call with the anchored path, and the remote-hide guard (4/5 verified failing when `canReveal` is forced false). Full `internal/server` suite (117s) and web suite (159 files / 1365 tests) pass; `tsgo --noEmit`, `vite build`, and `GOOS=linux`/`GOOS=windows` server builds are clean.
+
+- Files: `internal/server/reveal.go` (new), `internal/server/reveal_test.go` (new), `internal/server/handler_open.go`, `internal/server/handler_config.go`, `web/src/api/client.ts`, `web/src/components/Files/FileTree.tsx`, `web/src/components/Files/FileTree.reveal.test.tsx` (new), `skills/ocode-web/SKILL.md`, `CHANGES.md`.
+
 ## 2026-09-19 — Denied tool calls now name the blocking permission rule
 
 - Reported: a remote SSH project "seems the bash tool call always got blocked, even `git stash list`", showing only a generic `denied: tool "bash" is not permitted by permission rules`. Root cause: the host's `~/.claude/settings.json` carried `Bash(git stash *)`, and `claudePatternMatches` expands `*` to `.*`, so it matched the read-only `git stash list`/`show` forms too. That Claude deny is a `HardDeny` checked per sub-command before every other gate — including ocode's own read-only-stash carve-out — so one `git stash list` in an `&&` chain denied the whole line. The local machine's file had already been refined to granular mutating-only denies plus `allow` for `list`/`show`; only the remote diverged.

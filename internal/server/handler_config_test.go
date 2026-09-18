@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -291,6 +292,27 @@ func TestHandleSetPathsConfigPersists(t *testing.T) {
 	h.mu.Unlock()
 	if len(got.ExtraAllowedPaths) != 2 || got.UploadDir != "/data/uploads" {
 		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}
+
+// GET /api/config/ocode/paths must report the server's GOOS so the Files-tab
+// "reveal in file manager" action can label itself (Finder/Explorer/File
+// Manager) from the machine the command actually runs on, rather than the
+// browser's navigator.platform.
+func TestHandleGetPathsConfigIncludesPlatform(t *testing.T) {
+	h := testConfigHandler(t)
+
+	w := httptest.NewRecorder()
+	h.HandleGetPathsConfig(w, httptest.NewRequest("GET", "/api/config/ocode/paths", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, _ := body["platform"].(string); got != runtime.GOOS {
+		t.Errorf("platform = %q, want %q", got, runtime.GOOS)
 	}
 }
 
