@@ -72,17 +72,28 @@ touched by this change.
 ### Websocket auth through the proxy
 
 The remote server is in `--remote` mode: query-string tokens are forbidden
-and the websocket token must arrive as a `Sec-WebSocket-Protocol`
-subprotocol (`server.go` auth middleware). `remote.InjectAuth` currently only
-sets `Authorization: Bearer`. Extend it: when the request is an Upgrade,
-strip the browser's local-token subprotocol and add the remote token
-subprotocol in the form the remote auth middleware expects. The
-`httputil.ReverseProxy` already forwards 101 Upgrade responses and hijacks
-the connection, so no separate websocket proxy is needed.
+and the websocket token must arrive as the subprotocol
+`ocode.bearer.<token>` (`remoteWSToken` in `server.go`). The browser
+authenticates to the *local* server the way it does today: `?token=` when
+the local server is a normal desktop/serve process, or its own
+`ocode.bearer.<localToken>` subprotocol when the local server is itself in
+`--remote` mode (legacy `ocode remote --web`).
 
-The response's `Sec-WebSocket-Protocol` header must echo what the *browser*
-offered, not the remote token. The proxy's `ModifyResponse` rewrites it back
-to the browser's value.
+`remote.InjectAuth` currently only sets `Authorization: Bearer`. Extend it
+for Upgrade requests: strip `?token=` (already done), remove any
+`ocode.bearer.*` entry from the offered `Sec-WebSocket-Protocol` list, and
+append `ocode.bearer.<remoteToken>`. `httputil.ReverseProxy` forwards 101
+Upgrade responses and hijacks the connection, so no separate websocket proxy
+is needed.
+
+The remote server's 101 response carries
+`Sec-WebSocket-Protocol: ocode.bearer.<remoteToken>`
+(`terminalUpgradeRespHeader`). Forwarding it unchanged both breaks the
+handshake (the browser did not offer that protocol) and **leaks the remote
+token to the browser**, which the remote token model forbids. The proxy's
+`ModifyResponse` therefore restores the header to exactly what the browser
+offered, and deletes it when the browser offered nothing. The browser's
+offered value is stashed on the request context by the Director.
 
 ### Detach TTL
 
@@ -94,9 +105,13 @@ point of this feature. Local mode keeps 30 min.
 
 The SPA already persists terminal ids per project in localStorage
 (`terminalPersistence.ts`) and reattaches by id with history replay. That
-works unchanged because the id is now looked up on the remote server. When
-localStorage is gone (new machine, cleared storage), the sidebar list in
-Section 4 offers the same ids for reattach.
+works because the id is now looked up on the remote server. One fix is
+needed: the persistence key is the project path alone, so a local project
+and a remote project at the same path would share tabs and reattach ids.
+The key becomes `<host>|<path>` for remote projects; local projects keep the
+bare path so existing entries still load. When localStorage is gone (new
+machine, cleared storage), the sidebar list in Section 4 offers the same ids
+for reattach.
 
 ## Section 2: Remote server version policy and restart
 
@@ -120,8 +135,20 @@ GET /api/remote/{host}/status
 
 `connected=false` with no version when the host entry has never connected or
 was dropped. The handler does not connect; it reports what the registry
-knows. Same trust boundary as the proxy: `{host}` must belong to a saved
-project.
+knows. Connecting from a status poll would ssh to every remote project on
+sidebar mount, including hosts that are down or prompt for a passphrase.
+Instead the row offers an explicit **Connect** action:
+
+```
+POST /api/remote/{host}/connect
+→ same body as status
+```
+
+which runs `workspaceForPort` (discover or start the server, open the tunnel,
+register saved projects) and returns the resulting status. Opening a chat or
+terminal on the host connects implicitly as today.
+
+Same trust boundary as the proxy: `{host}` must belong to a saved project.
 
 ### Restart endpoint (local server, not proxied)
 
@@ -178,7 +205,8 @@ v1.2.3 · 2 chats (1 running) · 3 terminals
 
 - `outdated=true`: amber dot before the version and an inline **Restart**
   action, plus a "Restart remote server" item in the row's context menu.
-- `connected=false`: the line reads `not connected` and no counts.
+- `connected=false`: the line reads `not connected` with a **Connect**
+  action and no counts.
 - Restart in progress: line reads `restarting…`, action disabled.
 
 Clicking the status line expands the row:
@@ -215,20 +243,25 @@ Without this a wake can wait up to 30 s before the first attempt.
 
 Go:
 
-- `internal/remote`: `InjectAuth` on an Upgrade request strips the local
-  subprotocol token and adds the remote one; `ModifyResponse` echoes the
-  browser's subprotocol. `EnsureRemoteServer` reuses an alive mismatched
+- `internal/remote`: `InjectAuth` on an Upgrade request strips `?token=`
+  and any `ocode.bearer.*` subprotocol and appends the remote one;
+  `ModifyResponse` restores the browser's offered subprotocol and deletes
+  the header when none was offered, so the remote token never appears in a
+  response to the browser. `EnsureRemoteServer` reuses an alive mismatched
   server and sets `Outdated`; still replaces a dead one.
 - `internal/server`: status endpoint for unknown host is 403, for a
-  never-connected host reports `connected=false`; restart with the fake
-  transport kills the old pid, starts a new server, re-registers projects,
-  and returns the new state; terminal list endpoint returns only live named
-  sessions for the project, sorted; `--remote` mode uses the 24 h TTL.
+  never-connected host reports `connected=false`; connect endpoint brings a
+  never-connected host to `connected=true`; restart with the fake transport
+  kills the old pid, starts a new server, re-registers projects, and returns
+  the new state; terminal list endpoint returns only live named sessions for
+  the project, sorted; `--remote` mode uses the 24 h TTL.
 
 Vitest:
 
 - Terminal panel builds the proxied websocket URL for a host project with
   no `host=` param and the `X-Ocode-Project` header on HTTP calls.
+- Terminal persistence keys a remote project by `<host>|<path>` and a local
+  project by bare path, and a pre-existing bare-path entry still loads.
 - Sidebar row renders version, counts, outdated marker, and calls restart.
 - Status hook refetches on event bus reconnect.
 - Wake trigger resets backoff on `online`.
