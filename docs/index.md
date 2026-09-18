@@ -28,8 +28,13 @@ okf_version: 0.1
 
 # concepts
 
+- [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) - TypeSafe relevance judge that vets discovery candidates per-turn, only when connected
 - [Sandbox Permission Mode](concepts/sandbox-permission-mode.md) - Concept doc for sandbox permission mode: four modes, persistence (Decision 2 superseded), destructive git Ask routing, sensitive-path carve-outs, security model, and platform support
 - [Server-Side Auto-Continue Loop](concepts/server-auto-continue.md) - Server-side auto-continue loop pattern: bounded chain with step-limit cutoff, judge dispatch, and visible end-of-turn status.
+
+# docs
+
+- [System Permissions Settings Section (macOS TCC + cross-platform)](docs/superpowers/specs/2026-09-18-system-permissions-design.md) - Design spec for System Permissions settings section covering macOS TCC grants with cross-platform support, detection/request, API, startup reconcile, and web UI.
 
 # gotchas
 
@@ -190,6 +195,7 @@ okf_version: 0.1
 
 - [Delayed Chat Input Consolidation](superpowers/specs/2026-09-09-chat-input-consolidation-design.md)
 - [Multi-Use Preview — Design Spec (Draft, 2026-09-10)](superpowers/specs/2026-09-10-preview-multipurpose-design.md) - Historical Draft (2026-09-10) design for sidebar PreviewHost + a full session Preview sub-tab. Updated 2026-09-17 with as-built note in §2: Files-tab .md behavior now Edit/Preview/Split mode switch in FileTabContent (superseding the spec's "Monaco by default" statement for that path); sidebar PreviewHost path unchanged. Known divergences §9 re-listed.
+- [Remote Persistent Sessions and Terminals Design](superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md) - Approved design: remote (SSH/WSL) project terminals run inside the host ocode serve --remote and survive laptop sleep/restart; version-mismatched remote servers are reused, surfaced, and restartable; sidebar lists remote chats and terminals for reattach.
 - [Remote-project port forwards in the web/desktop UI](superpowers/specs/2026-09-16-remote-project-port-forwards-design.md) - Design for restoring the Port forwards button so it works for the active remote SSH project (project-scoped /api/portmaps routes, per-project ssh -L forwards)
 - [TTS Speech Playback Design Specification](superpowers/specs/2026-09-09-tts-speech-playback-design.md) - User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source).
 - [TUI Sidebar Title Expand/Collapse Design](superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md) - Design for sidebar title expand/collapse behavior, updated to match user decision: transient expansion, reset on session changes, no session JSON persistence.
@@ -384,6 +390,13 @@ okf_version: 0.1
 - [03-frontend-session-routing.md](superpowers/plans/2026-09-17-remote-project-agent-on-host/03-frontend-session-routing.md)
 - [04-docs-and-verification.md](superpowers/plans/2026-09-17-remote-project-agent-on-host/04-docs-and-verification.md)
 - [INDEX.md](superpowers/plans/2026-09-17-remote-project-agent-on-host/INDEX.md)
+- [2026-09-18-discovery-typesafe-judge.md](superpowers/plans/2026-09-18-discovery-typesafe-judge.md)
+- [01-backend-terminal-through-proxy.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/01-backend-terminal-through-proxy.md)
+- [02-backend-remote-server-policy.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/02-backend-remote-server-policy.md)
+- [03-frontend-terminal-routing.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/03-frontend-terminal-routing.md)
+- [04-frontend-sidebar-inventory.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md)
+- [05-docs-and-verification.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/05-docs-and-verification.md)
+- [INDEX.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/INDEX.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [01-architecture.md](superpowers/specs/2026-08-29-remote-ssh/01-architecture.md)
 - [02-phase1-connect.md](superpowers/specs/2026-08-29-remote-ssh/02-phase1-connect.md)
