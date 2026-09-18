@@ -49,6 +49,10 @@ type RCResolution struct {
 	// Answers answers a question prompt; one set per question, preserving
 	// multiple selections (see tool.QuestionAnswerSet).
 	Answers []tool.QuestionAnswerSet `json:"answers"`
+	// Dismiss cancels a pending question prompt without answering it (the web
+	// dialog's Cancel). The TUI clears its dialog and rewrites the sentinel so
+	// the ask no longer reads as pending; no agent Step runs.
+	Dismiss bool `json:"dismiss,omitempty"`
 }
 
 // RCResult is the final response from the TUI's agent after processing an RCRequest.

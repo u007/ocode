@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -38,6 +39,13 @@ type Snapshot struct {
 	AgentStep    int    // agent loop iteration at backup time
 	WriteSeq     uint64 // monotonic sequence number assigned by RegisterWrite after the write
 	BaseDir      string // snapshot store base dir at backup time (provenance for undo/redo)
+	// PostWriteHash is a sha256 hex digest of the content produced by the write
+	// (fingerprintAbsent when the write removed the file). UndoByToolCallID
+	// refuses to restore when the current on-disk content no longer matches it,
+	// which catches edits made outside ocode's tracked write tools. Empty means
+	// no fingerprint was recorded (legacy or journal-rehydrated snapshot); such
+	// snapshots skip the integrity check for backward compatibility.
+	PostWriteHash string
 }
 
 // Store is a per-agent snapshot store. Each agent creates one via NewStore.
@@ -380,6 +388,14 @@ func (s *Store) backupAtDir(path, toolCallID, baseDir string) error {
 // Lock order is s.mu -> fileWriteMu, matching UndoByToolCallID's use of
 // crossAgentWriteAfterSeq; no path nests the reverse.
 func (s *Store) RegisterWrite(path, toolCallID string) {
+	// Fingerprint the file as it exists now. RegisterWrite is defined as the
+	// post-write hook, so this is the state an undo must find before restoring.
+	// It is computed before taking s.mu because it is a filesystem read and the
+	// store lock should not be held across it.
+	var fingerprint string
+	if toolCallID != "" {
+		fingerprint = postWriteFingerprint(path)
+	}
 	seq := globalWriteSeq.Add(1)
 
 	s.mu.Lock()
@@ -405,8 +421,42 @@ func (s *Store) RegisterWrite(path, toolCallID string) {
 				break
 			}
 		}
+		// Record the post-write fingerprint on the most recent snapshot for this
+		// path + toolCallID. A later formatter rewrite registers too, so this
+		// overwrites the intermediate hash — intended: the last write in the
+		// group is the state the undo must verify against.
+		if fingerprint != "" {
+			for i := len(s.snapshots) - 1; i >= 0; i-- {
+				snap := &s.snapshots[i]
+				if snap.OriginalPath == path && snap.ToolCallID == toolCallID {
+					snap.PostWriteHash = fingerprint
+					break
+				}
+			}
+		}
 	}
 	s.mu.Unlock()
+}
+
+// fingerprintAbsent marks a recorded post-write state where the file did not
+// exist (the write deleted it). A sha256 hex digest is always 64 hex chars, so
+// it can never collide with this sentinel.
+const fingerprintAbsent = "absent"
+
+// postWriteFingerprint returns a stable fingerprint of path's current content:
+// a sha256 hex digest, fingerprintAbsent when the file does not exist, or ""
+// when the content could not be read. Callers treat "" as "unknown — skip the
+// integrity check" rather than blocking an undo.
+func postWriteFingerprint(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fingerprintAbsent
+		}
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // UndoByToolCallID restores all files changed by toolCallID to their pre-edit
@@ -467,6 +517,14 @@ func (s *Store) UndoByToolCallID(toolCallID string, maxAgeDelta int) ([]string, 
 		}
 	}
 
+	// Content-integrity check: refuse to undo when a file changed since the
+	// group's last tracked write — e.g. the user edited it in another editor or
+	// an untracked process rewrote it. Tracked writes are already covered by the
+	// conflict checks above; this closes the gap for everything else.
+	if err := s.verifyUndoContentLocked(indices); err != nil {
+		return nil, err
+	}
+
 	// Out-of-order removal invalidates the redo chain — clear it explicitly.
 	s.clearRedoLocked()
 
@@ -488,6 +546,59 @@ func (s *Store) UndoByToolCallID(toolCallID string, maxAgeDelta int) ([]string, 
 		s.version++
 	}
 	return restored, nil
+}
+
+// verifyUndoContentLocked refuses an undo when the current on-disk content of a
+// path no longer matches the fingerprint recorded when the group's last write to
+// that path completed. Snapshots without a fingerprint (legacy or rehydrated)
+// are skipped, preserving pre-existing behavior. Assumes s.mu is held.
+func (s *Store) verifyUndoContentLocked(indices []int) error {
+	type pathState struct {
+		latestHash string
+		newFile    bool // earliest snapshot for the path predates the file (undo = delete)
+	}
+	states := make(map[string]*pathState, len(indices))
+	order := make([]string, 0, len(indices))
+	// indices is in ascending snapshot order, so the first time a path is seen
+	// is its earliest snapshot and the last non-empty hash is its newest write.
+	for _, idx := range indices {
+		snap := s.snapshots[idx]
+		st, ok := states[snap.OriginalPath]
+		if !ok {
+			st = &pathState{newFile: snap.BackupPath == ""}
+			states[snap.OriginalPath] = st
+			order = append(order, snap.OriginalPath)
+		}
+		if snap.PostWriteHash != "" {
+			st.latestHash = snap.PostWriteHash
+		}
+	}
+
+	for _, path := range order {
+		st := states[path]
+		if st.latestHash == "" {
+			continue // legacy / journal-rehydrated snapshot: unchanged behavior
+		}
+		current := postWriteFingerprint(path)
+		if current == "" {
+			continue // current state unreadable; do not block the undo
+		}
+		switch {
+		case st.latestHash == fingerprintAbsent:
+			if current != fingerprintAbsent {
+				return fmt.Errorf("%w: %s was recreated after this change", ErrConflict, path)
+			}
+		case current == fingerprintAbsent:
+			if !st.newFile {
+				return fmt.Errorf("%w: %s was deleted after this change", ErrConflict, path)
+			}
+			// The write created this file and it is already absent, so the
+			// restore is a harmless no-op delete.
+		case current != st.latestHash:
+			return fmt.Errorf("%w: %s was modified after this change", ErrConflict, path)
+		}
+	}
+	return nil
 }
 
 func (s *Store) clearRedoLocked() {

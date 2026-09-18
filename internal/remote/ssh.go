@@ -94,11 +94,33 @@ func asExitError(err error, target **exec.ExitError) bool {
 	return ok
 }
 
+// scpFailFastArgs is commandArgs' scp counterpart: the same fail-fast option
+// block (scp accepts ssh's -o options) plus scp's own port flag (-P, where ssh
+// uses -p) when the target names a non-default port.
+func scpFailFastArgs(t Target) []string {
+	args := sshFailFastArgs()
+	if t.Port > 0 {
+		args = append(args, "-P", strconv.Itoa(t.Port))
+	}
+	return args
+}
+
+// commandArgs is the argument list for one short-lived, non-interactive ssh
+// command: the fail-fast option block (BatchMode + ConnectTimeout + keepalive)
+// followed by the target and the remote command. Centralised so Exec and
+// ExecStdin cannot drift; the option block is what keeps a cold connect from
+// hanging the request goroutine on an invisible password prompt or an
+// unreachable host (see sshFailFastArgs).
+func (s *SSHTransport) commandArgs(command string) []string {
+	args := append(sshFailFastArgs(), s.Target.SSHArgs()...)
+	return append(args, command)
+}
+
 // Exec runs a single non-interactive command over ssh, capturing stdout and
 // stderr separately (never inheriting the terminal — house rule, see
 // AGENTS.md "capture subprocess output").
 func (s *SSHTransport) Exec(command string) (ExecResult, error) {
-	cmd := exec.Command("ssh", append(s.Target.SSHArgs(), command)...)
+	cmd := exec.Command("ssh", s.commandArgs(command)...)
 	stdout := &LimitedBuffer{Max: MaxExecOutput}
 	stderr := &LimitedBuffer{Max: MaxExecOutput}
 	cmd.Stdout = stdout
@@ -122,7 +144,7 @@ func (s *SSHTransport) Exec(command string) (ExecResult, error) {
 // remote process's stdin — never interpolated into the command string, so
 // its content never appears in this (or the remote's) process argv.
 func (s *SSHTransport) ExecStdin(command string, stdin io.Reader) (ExecResult, error) {
-	cmd := exec.Command("ssh", append(s.Target.SSHArgs(), command)...)
+	cmd := exec.Command("ssh", s.commandArgs(command)...)
 	cmd.Stdin = stdin
 	stdout := &LimitedBuffer{Max: MaxExecOutput}
 	stderr := &LimitedBuffer{Max: MaxExecOutput}
@@ -175,11 +197,11 @@ func (s *SSHTransport) Copy(src io.Reader, size int64, destPath string) error {
 	}
 
 	dest := s.Target.String() + ":" + destPath
-	args := []string{}
-	if s.Target.Port > 0 {
-		args = append(args, "-P", strconv.Itoa(s.Target.Port))
-	}
-	args = append(args, tmpPath, dest)
+	// scp speaks the same option dialect as ssh for BatchMode/ConnectTimeout,
+	// so the upload cannot block on an invisible passphrase prompt either. The
+	// scp-specific port flag is -P (ssh uses -p), so the port is not reused
+	// from SSHArgs.
+	args := append(scpFailFastArgs(s.Target), tmpPath, dest)
 	cmd := exec.Command("scp", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

@@ -97,16 +97,6 @@ type Handler struct {
 	// agents this handler creates. Seeded from config, flipped from the web
 	// sidebar, never persisted back to config.
 	advisorEnabled bool
-	// livePermissionModeOverride is the process-global runtime permission mode
-	// set via PUT /api/permissions/mode (and, for parity, PUT
-	// /api/permissions/yolo). It is session-scoped and never persisted: new
-	// agent sessions inherit it at registration (applyLivePermissionOverride)
-	// so a freshly created tab does not silently revert to the config default.
-	// Atomic on purpose: status snapshots are built from call sites that may or
-	// may not hold h.mu (pushStatusSnapshot is invoked under h.mu by
-	// HandleSetAdvisor and unlocked by the permission handlers), so reads must
-	// not re-enter the lock. Nil means "no override — use config default".
-	livePermissionModeOverride atomic.Pointer[agent.PermissionMode]
 	// windowProfiles caches windowId -> activeProfile (empty = Default).
 	// Hydrated from window-state.json once at startup; mutated only via
 	// handleSetWindowActiveProfile which also persists to disk. Avoids file I/O
@@ -656,6 +646,30 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 			Data:      AdvisorCheckpointEvent{Kind: kind, Active: running},
 		})
 	}
+	// Discovery notices: the TUI renders these as transient "~ Discovered: …" /
+	// "~ Indexing: …" transcript lines (see appendDiscoveryNotice in
+	// internal/tui/model.go). The headless web had no equivalent surface, so
+	// mirror them onto the bus with the same payload shape as the token deltas
+	// (TextDelta). OnDiscovery fires when turn ranking attaches new
+	// skills/MCP/docs; OnMDIndexing fires while a project doc's summary is being
+	// generated. Both are cosmetic/transient — a dropped frame is harmless.
+	ag.OnDiscovery = func(names string) {
+		if names == "" {
+			return
+		}
+		h.broadcastEvent(SSEEvent{
+			SessionID: sessionID,
+			Event:     "discovery",
+			Data:      TextDelta{Delta: names},
+		})
+	}
+	ag.OnMDIndexing = func(rel string) {
+		h.broadcastEvent(SSEEvent{
+			SessionID: sessionID,
+			Event:     "md_indexing",
+			Data:      TextDelta{Delta: rel},
+		})
+	}
 	ag.OnMessage = func(m agent.Message) {
 		if m.Role == "user" {
 			// A message injected mid-turn from the session's live queue (see
@@ -827,14 +841,23 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		sid = session.NewSessionID()
 		createdSession = true
 		entry = h.sessions.RegisterWithWindow(sid, projectRoot, windowID)
-		// Persist an explicitly-requested model as this session's override at
-		// creation time (before any turn), so a "new chat with model X" pick
-		// survives resume/restart instead of silently falling back to the
-		// global config default. Later saves pass nil metadata and the sqlite
-		// append preserves this row. Sessions created without an explicit
-		// model get no override and keep following the global default.
+		// Persist an explicitly-requested model and/or permission mode as this
+		// session's overrides at creation time (before any turn), so a "new chat
+		// with model X / yolo" pick survives resume/restart instead of silently
+		// falling back to the global defaults. Later saves pass nil metadata and
+		// the sqlite append preserves this row. Sessions created without an
+		// explicit value get no override and keep following the config default.
+		meta := map[string]any{}
 		if req.Model != "" {
-			if err := h.saveSession(sid, "", nil, map[string]any{"model": req.Model}); err != nil {
+			meta["model"] = req.Model
+		}
+		if req.PermissionMode != "" {
+			if mode, ok := normalizePermissionMode(req.PermissionMode); ok {
+				meta[permissionModeMetadataKey] = string(mode)
+			}
+		}
+		if len(meta) > 0 {
+			if err := h.saveSession(sid, "", nil, meta); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
@@ -1749,6 +1772,101 @@ func (h *Handler) contextReportSource(id string) (ag *agent.Agent, msgs []agent.
 	}
 	defer as.mu.Unlock()
 	return as.agent, append([]agent.Message(nil), as.messages...), true
+}
+
+// discoveryStatusDTO carries discovery configuration plus, when a live agent is
+// reachable, the same runtime status the TUI's /discover status shows. The
+// config fields mirror discoveryConfigDTO so /discover status can render both
+// halves from one response; the runtime block is meaningful only when Live is
+// true.
+type discoveryStatusDTO struct {
+	// Config (identical wire keys to discoveryConfigDTO).
+	Enabled          bool     `json:"enabled"`
+	EmbeddingModel   string   `json:"embedding_model"`
+	EmbeddingBackend string   `json:"embedding_backend"`
+	LocalModelStatus string   `json:"local_model_status"`
+	LocalServerURL   string   `json:"local_server_url"`
+	PinnedSkills     []string `json:"pinned_skills"`
+	IgnorePaths      []string `json:"ignore_paths"`
+
+	// Runtime status (agent.DiscoveryStatus). Live is false when no live agent
+	// was reachable (idle/evicted session, or a turn is mid-flight and the
+	// unsafe read was skipped) — every field below is then zero-valued.
+	Live           bool     `json:"live"`
+	Active         bool     `json:"active"`
+	InitError      string   `json:"init_error,omitempty"`
+	Judge          string   `json:"judge,omitempty"`
+	JudgeVetoed    int      `json:"judge_vetoed"`
+	MCPTotal       int      `json:"mcp_total"`
+	SkillTotal     int      `json:"skill_total"`
+	AttachedSkills []string `json:"attached_skills"`
+	AttachedMCP    []string `json:"attached_mcp"`
+	AttachedMD     []string `json:"attached_md"`
+	AllSkills      []string `json:"all_skills"`
+	AllMCP         []string `json:"all_mcp"`
+	AllMD          []string `json:"all_md"`
+	MDPending      int      `json:"md_pending"`
+}
+
+// HandleSessionDiscovery reports the discovery settings for a session plus its
+// live runtime status (corpus sizes, attached skills/MCP/docs, judge vetoes)
+// when an agent is reachable. It is the web counterpart to the TUI's
+// `/discover status` (internal/tui/model.go:showDiscoverStatus) — the config
+// half alone cannot tell a user whether discovery is actually working.
+//
+// The runtime read goes through contextReportSource on purpose: DiscoveryStatus
+// touches the agent's unsynchronised tool maps, so reading it while a turn
+// mutates those maps can race (and Go crashes on a concurrent map iteration +
+// write). contextReportSource yields the agent only when that read is safe;
+// otherwise the response carries config only with live=false, exactly like the
+// /context breakdown degrading to its summary.
+func (h *Handler) HandleSessionDiscovery(w http.ResponseWriter, r *http.Request, id string) {
+	if _, err := h.sessions.Resolve(id); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	h.mu.Lock()
+	d := config.DiscoveryConfig{}
+	if h.cfg != nil {
+		d = h.cfg.Ocode.Discovery
+	}
+	h.mu.Unlock()
+
+	resp := discoveryStatusDTO{
+		Enabled: d.Enabled, EmbeddingModel: d.EmbeddingModel, EmbeddingBackend: d.EmbeddingBackend,
+		LocalModelStatus: d.LocalModelStatus, LocalServerURL: d.LocalServerURL,
+		PinnedSkills: d.PinnedSkills, IgnorePaths: d.IgnorePaths,
+	}
+
+	if ag, _, ok := h.contextReportSource(id); ok && ag != nil {
+		st := ag.DiscoveryStatus()
+		resp.Live = true
+		resp.Active = st.Active
+		resp.InitError = st.InitErr
+		resp.Judge = st.Judge
+		resp.JudgeVetoed = st.JudgeVetoed
+		resp.MCPTotal = st.MCPTotal
+		resp.SkillTotal = st.SkillTotal
+		resp.AttachedSkills = nonNilStrings(st.AttachedSkills)
+		resp.AttachedMCP = nonNilStrings(st.AttachedMCP)
+		resp.AttachedMD = nonNilStrings(st.AttachedMD)
+		resp.AllSkills = nonNilStrings(st.AllSkills)
+		resp.AllMCP = nonNilStrings(st.AllMCP)
+		resp.AllMD = nonNilStrings(st.AllMD)
+		resp.MDPending = st.MDPending
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// nonNilStrings returns s, or an empty slice when s is nil, so a JSON response
+// serializes an absent list as [] rather than null. The web client reads
+// `.length` on these arrays and would throw on null.
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // HandleShellCommand executes a shell command and returns the output.

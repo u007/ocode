@@ -167,6 +167,16 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		projectRoot = h.workDir
 	}
 	ag.SetWorkDir(projectRoot)
+	// Apply this session's own persisted permission-mode override, if any, so
+	// every build path (bootstrap, profile reconcile, plugin reload) restores
+	// the chat's mode. Per-session on purpose: one chat's yolo/sandbox toggle
+	// must never leak into another chat or project. Resolution touches the
+	// disk, so it happens here (no handler lock is held during construction).
+	if mode, ok := sessionPermissionModeForDir(projectRoot, sessionID); ok {
+		if pm := ag.Permissions(); pm != nil {
+			pm.SetMode(mode)
+		}
+	}
 	// Tell the environment prompt when this project is a remote (SSH/WSL)
 	// project: the agent still runs locally, so without this the <env> block
 	// presented the remote root next to the local machine's paths. Empty for
@@ -311,6 +321,18 @@ func (h *Handler) replaceAgentSession(id string, as *agentSession) {
 // already-resolved root when projectRoot is empty).
 func (h *Handler) registerAgentSession(id string, as *agentSession, projectRoot string) *agentSession {
 	entry := h.sessions.Register(id, projectRoot)
+	// Resolve this session's own persisted permission-mode override BEFORE
+	// taking h.mu: the lookup may touch the disk, and h.mu is a short-lived
+	// map lock, never a work lock. Per-session on purpose — a chat's
+	// yolo/sandbox toggle must never leak into another chat or project.
+	// Prefer the registry's resolved root: projectRoot may be "" ("keep the
+	// already-resolved root"), and an empty root would read the wrong storage
+	// dir for a multi-project session.
+	permRoot := projectRoot
+	if permRoot == "" {
+		permRoot = entry.ProjectRoot
+	}
+	permMode, hasPermMode := sessionPermissionModeForDir(permRoot, id)
 	h.mu.Lock()
 	if existing, ok := h.agents[id]; ok {
 		h.mu.Unlock()
@@ -320,15 +342,9 @@ func (h *Handler) registerAgentSession(id string, as *agentSession, projectRoot 
 		return existing
 	}
 	h.agents[id] = as
-	// A session-scoped permission-mode toggle (PUT /api/permissions/mode, yolo
-	// toggle) must carry into sessions registered afterwards — a brand-new tab
-	// or a resumed session should not silently revert to the config default
-	// while the runtime override is in force.
-	if as.agent != nil {
-		if p := h.livePermissionModeOverride.Load(); p != nil {
-			if pm := as.agent.Permissions(); pm != nil {
-				pm.SetMode(*p)
-			}
+	if as.agent != nil && hasPermMode {
+		if pm := as.agent.Permissions(); pm != nil {
+			pm.SetMode(permMode)
 		}
 	}
 	h.mu.Unlock()

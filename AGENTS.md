@@ -26,13 +26,23 @@ name). Do not duplicate content between the two — update here only.
   auto-continue triage judge (`Ocode.AutoContinueModel = "typesafe/<model>"` →
   `runAutoContinueJudgeTypesafe` in `internal/agent/autocontinue_typesafe.go`,
   a Decide() call answering a typed continue/end choice over the transcript
-  tail), and the discovery relevance judge (`judgeDiscoveryCandidates` in
+  tail), the discovery relevance judge (`judgeDiscoveryCandidates` in
   `internal/agent/discovery_typesafe.go`, one noul question per
-  embedder-selected skill/doc/MCP candidate). All send the request as
-  structured state and threshold the answer against
-  `permissions.auto.min_confidence` (choice `confidence`, noul
-  yes-probability). Never route it through the chat, compaction, small-model,
-  or interpreter-effects paths.
+  embedder-selected skill/doc/MCP candidate), and the doc_search relevance
+  judge (`judgeDocSearchResults` in `internal/agent/doc_search_typesafe.go`,
+  one noul question per returned knowledge doc; wired only for the context
+  subagent's doc tools). All send the request as structured state. Thresholds
+  scale with the consequence of getting the decision wrong: the high-stakes
+  auto-permission judge uses `permissions.auto.min_confidence` (default 0.85);
+  the two *relevance* judges (discovery + doc_search) share the lenient
+  `relevanceJudgeMinConfidenceDefault` (0.5) because a relevance veto only
+  hides a retrieval result and the product rule is "even slight relevancy
+  should be presented, only a different scope is skipped"; the auto-continue
+  triage uses its own lower floor `autoContinueMinConfidenceDefault` (0.6) —
+  auto-continue is bounded and reversible, and Jev's `confidence` is a
+  distribution-shape statistic that runs below `probabilities[choice]`, so the
+  permission floor rejected legitimate mid-task resumes. Never route TypeSafe
+  through the chat, compaction, small-model, or interpreter-effects paths.
 - Every request to an `opencode*` provider must carry `X-Opencode-Session`, an
   opaque ID stable for one conversation (Zen/Go pin the conversation to one
   upstream for prompt caching; some Go models 400 without it). All transports
@@ -68,7 +78,10 @@ git worktree add .worktrees/feature-branch feature-branch
     call touched to their pre-edit state. It is valid within your most recent
     agent steps (default 10, configurable via `ocode.undo_max_age_delta` in
     `ocodeconfig.json`; `0`/unset uses the default), so call it promptly after a
-    bad edit. (Every file
+    bad edit. It **refuses** (returns a conflict, leaving the file untouched) if
+    any affected file was changed outside ocode's tracked write tools since the
+    original call — e.g. the user edited it in an external editor — rather than
+    overwriting those changes. (Every file
     write is backed up automatically by the snapshot store, so no extra setup
     is needed.)
   - Only fall back to git (`git checkout`/`git restore`/`git revert`) when you
@@ -88,9 +101,12 @@ git worktree add .worktrees/feature-branch feature-branch
 ## Sandbox permission mode
 
 `sandbox` is the fourth permission mode (besides `normal`/`yolo`/`locked`),
-toggled from the TUI permission-mode click cycle, `/sandbox`, or the web mode
-selector. It is **write-integrity confinement only** — it does NOT protect
-secrets or prevent exfiltration.
+toggled from the TUI permission-mode click cycle, `/sandbox`, or the web
+sidebar permission pill / `/sandbox` command. On the web/desktop server the
+live mode is **per chat session** (persisted in the session's metadata;
+`PUT /api/permissions/mode` and `/yolo` require a `session_id`), so toggling
+one chat never changes another. It is **write-integrity confinement only** —
+it does NOT protect secrets or prevent exfiltration.
 
 What it confines:
 - Only the agent **shell tool** (`bash`) is wrapped. The interactive PTY
@@ -806,6 +822,20 @@ Rules for anything in `internal/server`:
   once the turn is dispatched; output reaches the browser over the SSE mirror,
   which is the UI's rendering source anyway. The synchronous path stays for
   non-browser callers (scheduler, Telegram, external API clients).
+- **One project must never block another: bound every subprocess and fan out
+  shared loops.** `h.mu` is process-wide, so anything held across slow work
+  freezes unrelated projects and sessions — including a background emitter
+  goroutine, which has no request context to cancel it. Local git was the
+  violation: `gitStatusForDir` (`handler_git.go`) ran `exec.Command("git", …)`
+  with no deadline (unlike the remote path's `remoteExecTimeout`), and the
+  git-status emitter (`emitters.go` `watchEmittersLoop`) computed every viewed
+  project **sequentially on one goroutine** — so one repo whose git wedged
+  stalled `git_status` for every other project. It now runs every probe under
+  `gitStatusTimeout` via `exec.CommandContext`, and fans due projects out
+  through `forEachGitStatusConcurrently`, yielding results as they arrive on
+  the loop goroutine (shared state like `lastGit` stays single-writer). Any new
+  per-project work driven from a shared loop must follow that shape: a
+  per-item deadline plus per-item fan-out, never a bare `exec.Command`.
 
 ## Web/Desktop Server: project dirs are per-session, not per-process
 
@@ -1018,16 +1048,31 @@ Rules for any change that touches tools or the base prompt:
   attaching.** `Session.Select` ranks and returns the not-yet-attached
   candidates *without* mutating the sticky set; `RunDiscovery` then judges them
   when TypeSafe is connected (one `noul` question per candidate in a single
-  `Decide` call) and seeds only those whose noul meets
-  `permissions.auto.min_confidence`. It never changes `renderDiscoveryContext`
-  — the names-index stays a function of the doc set; only which ids become
-  attached changes. Not connected, a judge transport/decode error, or a missing
-  candidate answer all fail open (seed everything): the judge may only veto,
-  never attach fewer docs because of a failure. The judge client is resolved
-  once per discovery state (`discoveryState.judge`, `sync.Once`) so the
-  factory's no-key refusal log fires once, not every turn. See
-  `internal/agent/discovery_typesafe.go` and
+  `Decide` call) and seeds only those whose noul meets the lenient shared
+  relevance floor (`relevanceJudgeMinConfidenceDefault` = 0.5; the rubric asks
+  for same-scope relevancy, not necessity — see
+  `internal/agent/relevance_typesafe.go`). It never changes
+  `renderDiscoveryContext` — the names-index stays a function of the doc set;
+  only which ids become attached changes. Not connected, a judge transport/
+  decode error, or a missing candidate answer all fail open (seed everything):
+  the judge may only veto, never attach fewer docs because of a failure. The
+  judge client is resolved once per discovery state (`discoveryState.judge`,
+  `sync.Once`) so the factory's no-key refusal log fires once, not every turn.
+  See `internal/agent/discovery_typesafe.go` and
   `docs/concepts/discovery-typesafe-judge.md`.
+- **doc_search results pass through the same TypeSafe relevance judge before
+  the context subagent sees them.** The context subagent's doc tools are built
+  via `newDocToolsWithJudge` with `Agent.docSearchJudge()` (nil when TypeSafe is
+  not connected), so `doc_search` asks Jev one `noul` question per returned
+  document ("is this doc in the same scope as the query?") and hides
+  different-scope docs; slight relevancy is kept. Filtering happens before
+  `get_top` body inlining. Fail-open: no judge, a judge error, or a missing
+  answer shows every result. `DocSearchJudge` is the injection seam
+  (`internal/agent/doc_tools.go`); the judge lives in
+  `internal/agent/doc_search_typesafe.go` and shares the mechanics (Decide,
+  side-usage, lenient floor, per-candidate fail-open, debug lines) with
+  discovery via `judgeRelevanceQuestions` in
+  `internal/agent/relevance_typesafe.go`.
 - **Role determines caching, not array position — because of the hoist.** The
   Anthropic builder (`chatAnthropic` → `collectAndRemoveSystemMessages` in
   `client.go`) pulls **every `system`-role message — including tail ones — into

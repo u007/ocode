@@ -13,6 +13,7 @@ function renderDialog(
       requestId: string,
       answers: QuestionAnswerPayload[],
     ) => Promise<boolean>;
+    onCancel: (requestId: string) => Promise<boolean>;
   }> = {},
 ) {
   const questions: QuestionPrompt[] = [
@@ -26,6 +27,7 @@ function renderDialog(
     },
   ];
   const onSubmit = vi.fn(async () => true);
+  const onCancel = vi.fn(async () => true);
   const requestId = "req-1";
   const view = render(
     <QuestionDialog
@@ -33,9 +35,15 @@ function renderDialog(
       requestId={requestId}
       questions={overrides.questions ?? questions}
       onSubmit={overrides.onSubmit ?? onSubmit}
+      onCancel={overrides.onCancel ?? onCancel}
     />,
   );
-  return { onSubmit, requestId, unmount: () => view.unmount() };
+  return {
+    onSubmit,
+    onCancel,
+    requestId,
+    unmount: () => view.unmount(),
+  };
 }
 
 describe("QuestionDialog", () => {
@@ -147,5 +155,30 @@ describe("QuestionDialog", () => {
     // Failure (e.g. network) keeps the dialog open and the button retryable.
     await waitFor(() => expect((submit as HTMLButtonElement).disabled).toBe(false));
     unmount();
+  });
+
+  // Regression: the prompt used to be non-dismissible — the only way out was
+  // answering every question. Cancel mirrors the TUI's Esc-to-cancel.
+  it("cancels without answering when the Cancel button is clicked", async () => {
+    const { onCancel, onSubmit, requestId } = renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    await waitFor(() => expect(onCancel).toHaveBeenCalledWith(requestId));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("cancels on Escape (Radix open-change) without a selection", async () => {
+    const { onCancel, requestId } = renderDialog();
+    fireEvent.keyDown(document.body, { key: "Escape", code: "Escape" });
+    await waitFor(() => expect(onCancel).toHaveBeenCalledWith(requestId));
+  });
+
+  it("keeps the dialog retryable when cancel fails", async () => {
+    const onCancel = vi.fn(async () => false);
+    const { requestId } = renderDialog({ onCancel });
+    const cancel = screen.getByRole("button", { name: /^cancel$/i });
+    fireEvent.click(cancel);
+    await waitFor(() => expect(onCancel).toHaveBeenCalledWith(requestId));
+    // Failure keeps the dialog mounted and the button usable for a retry.
+    await waitFor(() => expect((cancel as HTMLButtonElement).disabled).toBe(false));
   });
 });

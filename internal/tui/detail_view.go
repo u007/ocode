@@ -335,8 +335,10 @@ func renderDetailToolRequestBox(tc agent.ToolCall, width int, expanded bool) str
 		}
 	} else {
 		body = formatToolCallHint(tc)
-		if args := strings.TrimSpace(prettyToolArguments(tc.Function.Arguments)); args != "" && args != "{}" {
-			body += "\n\n" + args
+		if !toolArgsRedundant(toolName) {
+			if args := strings.TrimSpace(prettyToolArguments(tc.Function.Arguments)); args != "" && args != "{}" {
+				body += "\n\n" + args
+			}
 		}
 	}
 	visible, footer := collapsePreviewBlock(body, 8, expanded, false)

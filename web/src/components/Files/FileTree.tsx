@@ -36,6 +36,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  FolderSearch,
   GitCommit,
   Link2,
   List,
@@ -94,6 +95,14 @@ interface FileMenuActions {
   setSelection: (paths: string[]) => void;
   open: (p: string) => void;
   copyPath: (p: string) => void;
+  /** Reveal a path in the OS-native file manager (server host). */
+  reveal: (p: string) => void;
+  /** Human name of the server OS's file manager ("Finder"/"Explorer"/…),
+   *  used to label the reveal menu item. */
+  fileManager: string;
+  /** False when the tree targets a remote host: reveal runs on the local
+   *  server, so it must be hidden for remote projects. */
+  canReveal: boolean;
   copy: (paths: string[]) => void;
   cut: (paths: string[]) => void;
   paste: (destDir: string) => void;
@@ -152,6 +161,30 @@ export function treePathForRequest(projectRoot: string | undefined, nodePath: st
 function parentDir(p: string): string {
   const i = p.lastIndexOf("/");
   return i >= 0 ? p.slice(0, i) : p;
+}
+
+// Human name of the OS-native file manager for the "reveal" menu action. The
+// server reports its own GOOS via GET /api/config/ocode/paths (platform), so
+// the label matches the machine the reveal command actually runs on rather
+// than the browser's platform. Falls back to a neutral label when unknown.
+function fileManagerLabel(platform?: string): string {
+  switch (platform) {
+    case "darwin":
+      return "Finder";
+    case "windows":
+      return "Explorer";
+    case "linux":
+      return "File Manager";
+    default:
+      return "File Manager";
+  }
+}
+
+// Context-menu label for the reveal action: "Open in Finder" for a directory
+// (the folder opens) vs "Show in Finder" for a file (it is selected inside its
+// containing folder). Takes the OS-appropriate file-manager name.
+function revealMenuLabel(isDir: boolean, fileManager: string): string {
+  return `${isDir ? "Open" : "Show"} in ${fileManager}`;
 }
 
 // Parse the two git-status columns into coarse flags for menu visibility.
@@ -502,6 +535,11 @@ function TreeNode({
       <ContextMenuItem onSelect={() => menu.copyPath(requestPath)}>
         <Link2 className="w-3.5 h-3.5 mr-2" /> Copy path
       </ContextMenuItem>
+      {menu.canReveal && (
+        <ContextMenuItem onSelect={() => menu.reveal(requestPath)}>
+          <FolderSearch className="w-3.5 h-3.5 mr-2" /> {revealMenuLabel(isDir, menu.fileManager)}
+        </ContextMenuItem>
+      )}
       <ContextMenuSeparator />
       <ContextMenuItem onSelect={() => menu.remove(effectivePaths)} className="text-red-400 focus:text-red-300">
         <Trash2 className="w-3.5 h-3.5 mr-2" /> Delete
@@ -713,6 +751,10 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
   const [isGitRepo, setIsGitRepo] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [extraPaths, setExtraPaths] = useState<string[]>([]);
+  // Server OS (GOOS) for the "reveal in file manager" menu label; loaded from
+  // GET /api/config/ocode/paths alongside the extra roots. Undefined until the
+  // fetch resolves, which the label helper maps to a neutral "File Manager".
+  const [serverPlatform, setServerPlatform] = useState<string | undefined>(undefined);
   const [activeRoot, setActiveRoot] = useState<string | undefined>(projectPath);
   const [keyword, setKeyword] = useState("");
   const [searchMode, setSearchMode] = useState<"path" | "content">("path");
@@ -809,7 +851,10 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
   useEffect(() => {
     api
       .getPathsConfig()
-      .then((cfg) => setExtraPaths(cfg.extra_allowed_paths || []))
+      .then((cfg) => {
+        setExtraPaths(cfg.extra_allowed_paths || []);
+        setServerPlatform(cfg.platform);
+      })
       .catch((err) => console.error("Failed to load extra allowed paths:", err));
   }, []);
 

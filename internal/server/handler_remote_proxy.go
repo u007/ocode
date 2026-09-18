@@ -98,6 +98,13 @@ func (h *Handler) HandleRemoteProxy(w http.ResponseWriter, r *http.Request) {
 	if originalPath != "" {
 		if err := ensureRemoteProject(r.Context(), ws, h.remoteHosts, host, originalPath); err != nil {
 			log.Printf("remote proxy: register project %s on host %s failed: %v", originalPath, host, err)
+			// The cached workspace/proxy just proved unusable (e.g. the remote
+			// server died or the tunnel dropped). Drop the host so the next
+			// request reconnects instead of reusing the dead entry forever —
+			// the same self-heal the proxy ErrorHandler performs on a
+			// round-trip failure, extended to the pre-proxy registration call
+			// that runs first.
+			h.remoteHosts.drop(host)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
 			_ = json.NewEncoder(w).Encode(map[string]string{

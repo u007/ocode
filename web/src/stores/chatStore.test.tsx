@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_SLICE_MESSAGES, chatReducer, getSessionSlice, getTurnState, initialState } from "./chatStore";
+import { MAX_SLICE_MESSAGES, QUESTION_DISMISSED_RESULT, chatReducer, getSessionSlice, getTurnState, initialState } from "./chatStore";
 import type { Message } from "../api/types";
 import type { ChatState } from "./chatStore";
 
@@ -934,5 +934,90 @@ describe("chatStore in-memory message cap", () => {
     // PREPEND is exempt from the cap; hasMore reflects server paging state.
     expect(s.messages.length).toBe(MAX_SLICE_MESSAGES + 2);
     expect(s.hasMore).toBe(false);
+  });
+
+  const mkQ = (id: string) => ({
+    role: "tool" as const,
+    content:
+      "QUESTION_PROMPT:" +
+      JSON.stringify([{ header: "h", question: "q?", options: [{ label: "a" }] }]) +
+      "\n\nWAITING_FOR_USER_RESPONSE",
+    tool_call_id: id,
+  });
+
+  it("QUESTION_DISMISSED rewrites the pending question result and clears the dialog", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "", tool_calls: [{ id: "q1", type: "function", function: { name: "question", arguments: "{}" } }] },
+        mkQ("q1"),
+      ],
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q1");
+
+    state = chatReducer(state, {
+      type: "QUESTION_DISMISSED",
+      sessionId: "a",
+      requestId: "q1",
+    });
+
+    const slice = getSessionSlice(state, "a");
+    expect(slice.pendingQuestion).toBeNull();
+    const tool = slice.messages.find(
+      (m) => m.role === "tool" && m.tool_call_id === "q1",
+    );
+    // Rewritten with the dismissal notice so a later reconcile (which derives
+    // the pending ask from the sentinel) does not reopen the dialog.
+    expect(tool?.content).toBe(QUESTION_DISMISSED_RESULT);
+    expect(slice.messages).toHaveLength(3);
+  });
+
+  it("QUESTION_DISMISSED is a no-op rewrite when the sentinel is not loaded", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    state = chatReducer(state, {
+      type: "QUESTION_DISMISSED",
+      sessionId: "a",
+      requestId: "q1",
+    });
+    const slice = getSessionSlice(state, "a");
+    expect(slice.pendingQuestion).toBeNull();
+    expect(slice.messages).toHaveLength(1);
+  });
+
+  it("QUESTION_RESOLVED ignores a stale request_id (does not close a newer dialog)", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "", tool_calls: [{ id: "q2", type: "function", function: { name: "question", arguments: "{}" } }] },
+        mkQ("q2"),
+      ],
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q2");
+
+    state = chatReducer(state, {
+      type: "QUESTION_RESOLVED",
+      sessionId: "a",
+      requestId: "q1",
+    });
+    // Stale dismissal for a different round must not close the live dialog.
+    expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q2");
+
+    state = chatReducer(state, {
+      type: "QUESTION_RESOLVED",
+      sessionId: "a",
+      requestId: "q2",
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion).toBeNull();
   });
 });

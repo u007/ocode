@@ -144,6 +144,7 @@ func (h *Handler) finishSessionTitle(sessionID, title string) {
 		snap.CWD = entry.ProjectRoot
 	}
 	h.applySessionContext(&snap, sessionID)
+	h.applySessionPermissionFields(&snap, sessionID)
 	h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "status", Data: snap})
 }
 

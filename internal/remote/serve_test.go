@@ -334,6 +334,23 @@ func TestLaunchServerCmdDeletesStaleStateFileSynchronously(t *testing.T) {
 	}
 }
 
+// TestLaunchServerCmdDetachesServerInSubshell is the regression test for the
+// fresh-server connect hang. `mkdir X && nohup CMD &` backgrounds the WHOLE
+// `mkdir && nohup` list, so the forked subshell waits on the long-lived server
+// before exiting and keeps the ssh channel open: StartFreshServer's Exec blocks
+// until the server dies, which the connect backstop reports as a 502 after its
+// timeout. The nohup must run inside its own `( … & )` so the command's shell
+// returns immediately while the server survives.
+func TestLaunchServerCmdDetachesServerInSubshell(t *testing.T) {
+	cmd := launchServerCmd("0.8.85")
+	if !strings.Contains(cmd, "&& (nohup ") || !strings.Contains(cmd, "&); echo launched") {
+		t.Fatalf("launch command must detach the server in a `( nohup … & )` subshell: %q", cmd)
+	}
+	if strings.Contains(cmd, "& disown;") {
+		t.Errorf("launch command still uses the hanging `… & disown` shape: %q", cmd)
+	}
+}
+
 func TestStartFreshServerNeverReturnsStaleStateEvenIfObservableAfterLaunch(t *testing.T) {
 	stale := ServeState{PID: 42, Port: 4096, Token: "oldtok", Version: "0.8.85"}
 	staleData, _ := json.Marshal(stale)

@@ -520,6 +520,16 @@ func TestHandleRemoteProxy_RegistrationFailureThenRetry(t *testing.T) {
 		t.Errorf("expected stage remote-register, got %q", body1.Stage)
 	}
 
+	// A registration failure means the cached workspace/proxy just proved
+	// unusable. The entry must be dropped so the next request reconnects
+	// rather than reusing a dead tunnel forever (the stale-502 loop).
+	h.remoteHosts.mu.Lock()
+	_, exists := h.remoteHosts.byHost["user@realhost"]
+	h.remoteHosts.mu.Unlock()
+	if exists {
+		t.Fatal("expected the host entry to be dropped after a registration failure")
+	}
+
 	// Enable registration.
 	mu.Lock()
 	failRegister = false

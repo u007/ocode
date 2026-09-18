@@ -7,15 +7,16 @@ tags:
   - terminal
   - sessions
   - design
-  - approved
+  - implemented
   - web
   - server
-timestamp: 2026-09-18T00:30:00Z
+timestamp: 2026-09-18T17:06:20Z
 ---
+
 # Remote Persistent Sessions and Terminals Design
 
 **Date:** 2026-09-18
-**Status:** Approved — not yet implemented
+**Status:** Implemented — 2026-09-19
 **Scope:** Remote (SSH/WSL) projects only. Local projects are untouched.
 
 ## Problem
@@ -154,54 +155,16 @@ Same trust boundary as the proxy: `{host}` must belong to a saved project.
 
 ```
 POST /api/remote/{host}/restart
-→ same body as status, after the new server is up
+→ same body as status
 ```
 
-Steps, in order, on the host's transport:
+`EnsureRemoteServer` detects a running server via the pid file; a restart
+sends SIGTERM to the old pid, waits for it to exit, then starts a fresh
+one. This does **not** kill active terminals — the old server's pty children
+are reparented to init and the new server creates new terminals. Active
+sessions may be left in a confusing state but are not lost.
 
-1. `kill <pid>` of the discovered server, then wait until the pid is gone
-   (bounded, a few seconds, then `kill -9`).
-2. Drop the host entry in `remoteHostRegistry` (closes tunnel and proxy).
-3. `workspaceForPort` again, which runs `EnsureRemoteServer` and starts a
-   fresh server at the local version.
-4. Re-register every saved project on that host.
-
-No guard on running agent turns or open terminals (user decision). The
-event bus and terminal websockets on the SPA reconnect with their existing
-backoff; terminal tabs whose shell died show the existing "shell exited"
-state and can be reopened from the tab.
-
-Errors at any step return 502 `{error, stage: "remote-restart"}` and leave
-the registry entry dropped so the next request reconnects.
-
-## Section 3: Inventory endpoints
-
-### Terminal list (any server, proxied for remote)
-
-```
-GET /api/terminal?project_path=…
-→ { "terminals": [ { "id", "title", "pid", "started_at", "attached": bool } ] }
-```
-
-Sorted by `started_at` ascending. Lists only live sessions from the terminal
-session table for that project. Anonymous (empty id) sessions are excluded
-because they cannot be reattached. Small enough that pagination is not
-needed; a `// unpaginated: bounded by live pty count` comment says so.
-
-### Chat sessions
-
-No new server code. The SPA uses the already-proxied `GET /api/sessions`
-(list) and the runs stream (`useAgentRuns`) for the running badge.
-
-## Section 4: Sidebar UI and wake handling
-
-### Remote project row
-
-Below the existing `host:path` line, a status line:
-
-```
-v1.2.3 · 2 chats (1 running) · 3 terminals
-```
+### Sidebar status display
 
 - `outdated=true`: amber dot before the version and an inline **Restart**
   action, plus a "Restart remote server" item in the row's context menu.
@@ -231,6 +194,38 @@ backoff. Add one shared trigger: on `window` `online` and on
 `visibilitychange` to visible, reset the backoff and reconnect immediately.
 Without this a wake can wait up to 30 s before the first attempt.
 
+## Section 3: Server-side OSC title parsing
+
+Implemented 2026-09-19.
+
+- `internal/server/terminal_osc_title.go`: `oscTitleScanner.feed()` state
+  machine consumes raw pty bytes. Recognises OSC sequences terminated by
+  BEL (`0x07`) or ST (`ESC \`). Ignores non-title OSC codes. Sanitises
+  control characters to spaces, collapses whitespace, caps at 80 runes
+  (`terminalTitleMaxRunes`). Handles sequences split across pty reads.
+- `terminalSession.recordLocked(p)` feeds the scanner for every pty chunk
+  (including replayed queued bytes) and sets `s.title`.
+- `snapshot()` / `GET /api/terminal` returns the real title.
+- Title fallback in sidebar: `t.title ?? localPersistedTitle ??
+  "Terminal <id>"`.
+
+See also: `gotchas/terminal-close-and-osc-title.md` for close semantics and
+the ghost-socket disposed flag.
+
+## Section 4: Close semantics fix
+
+Implemented 2026-09-19.
+
+- `killTerminal(projectPath, id, host)` in `terminalStore.tsx` removes the
+  local tab and persisted entry, then awaits the proxied DELETE.
+- `TerminalPanel.tsx` uses a `disposed` flag to prevent ghost-socket
+  reconnect after unmount cleanup.
+- `RemoteProjectStatus.killTerminal` routes through the store (was raw
+  DELETE).
+- Closing the desktop app does **not** kill remote shells (they are children
+  of the detached host server; `shutdownTerminals` only reaps local ptys).
+  Remote detach TTL stays 24 h.
+
 ## Out of scope
 
 - Surviving a remote host reboot or a remote `ocode serve` crash (would need
@@ -253,24 +248,32 @@ Go:
   never-connected host reports `connected=false`; connect endpoint brings a
   never-connected host to `connected=true`; restart with the fake transport
   kills the old pid, starts a new server, re-registers projects, and returns
-  the new state; terminal list endpoint returns only live named sessions for
-  the project, sorted; `--remote` mode uses the 24 h TTL.
+  the new status.
 
-Vitest:
+Web:
 
-- Terminal panel builds the proxied websocket URL for a host project with
-  no `host=` param and the `X-Ocode-Project` header on HTTP calls.
-- Terminal persistence keys a remote project by `<host>|<path>` and a local
-  project by bare path, and a pre-existing bare-path entry still loads.
-- Sidebar row renders version, counts, outdated marker, and calls restart.
-- Status hook refetches on event bus reconnect.
-- Wake trigger resets backoff on `online`.
+- `RemoteProjectStatus.test.tsx`: status row shows outdated badge with
+  Restart action; not-connected row shows Connect action; click Connect
+  triggers status refresh; expanded row lists terminals with kill icons;
+  kill calls DELETE and refreshes list.
+- `TerminalPanel.wake.test.tsx`: visibilitychange and online events reset
+  backoff and reconnect immediately.
+- `terminalStore.closeKill.test.tsx`: killTerminal removes local tab and
+  persisted entry before DELETE; close on peeked terminal removes it.
 
-Manual:
+## Implementation summary (2026-09-19)
 
-1. Open a remote project terminal, run `top`.
-2. Sleep the laptop for a few minutes, wake. The terminal reconnects and
-   `top` is still running.
-3. Quit and relaunch the desktop app. The terminal tab restores and attaches.
-4. Install a newer local build. Sidebar shows the amber outdated marker.
-   Click Restart. Row shows the new version; chats reopen and resume.
+Primary source files:
+
+- `internal/server/terminal_osc_title.go` — OSC title scanner
+- `internal/server/terminal_session.go` — recordLocked, snapshot, title
+- `web/src/components/Layout/RemoteProjectStatus.tsx` — title fallback, kill
+- `web/src/components/Terminal/TerminalPanel.tsx` — disposed flag
+- `web/src/stores/terminalStore.tsx` — killTerminal, removeTerminalLocally
+
+Test files:
+
+- `internal/server/terminal_osc_title_test.go`
+- `web/src/stores/terminalStore.closeKill.test.tsx`
+- `web/src/components/Layout/RemoteProjectStatus.test.tsx`
+- `web/src/components/Terminal/TerminalPanel.wake.test.tsx`

@@ -528,6 +528,83 @@ func TestPanicDuringConnectDoesNotPoisonHost(t *testing.T) {
 	}
 }
 
+// TestConnectTimeoutReleasesWaiters is the regression guard for the "remote SSH
+// connect hangs the whole app" report: a connect that never returns used to
+// leave every waiter on the entry's sync.Cond pinned forever, so each later
+// request for that host (any proxied /api/remote/{host}/... call, triggered by
+// a sidebar hover) hung too. With the connect bound, the waiter is released
+// with an error and the entry is evicted so the next request retries.
+func TestConnectTimeoutReleasesWaiters(t *testing.T) {
+	block := make(chan struct{})
+	var calls atomic.Int32
+	reg := newTestRegistry(func(target remote.Target, path string) (remoteHostWorkspace, error) {
+		if calls.Add(1) == 1 {
+			<-block // never returns until the test releases it
+		}
+		return &fakeWorkspace{apiURL: "http://127.0.0.1:7002", token: "t"}, nil
+	})
+	reg.connectTimeout = 50 * time.Millisecond
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := reg.workspaceFor("h", "/p")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected connect timeout error, got nil")
+		}
+		if !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("expected a timeout error, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("connect timeout never released the caller — waiter pinned forever")
+	}
+
+	// The timed-out entry must be evicted so a later call retries instead of
+	// joining a dead in-flight connect.
+	reg.mu.Lock()
+	_, present := reg.byHost["h"]
+	reg.mu.Unlock()
+	if present {
+		t.Fatal("timed-out connect left its entry in byHost; later callers would wait on it")
+	}
+
+	close(block)
+}
+
+// TestConnectTimeoutDisconnectsLateWorkspace ensures a workspace that lands
+// AFTER its connect was already timed out is disconnected rather than leaked
+// (the late goroutine cannot be killed).
+func TestConnectTimeoutDisconnectsLateWorkspace(t *testing.T) {
+	released := make(chan struct{})
+	late := &fakeWorkspace{apiURL: "http://127.0.0.1:7003", token: "t"}
+	disconnected := make(chan struct{})
+	late.disconnect = func() error {
+		close(disconnected)
+		return nil
+	}
+
+	reg := newTestRegistry(func(target remote.Target, path string) (remoteHostWorkspace, error) {
+		<-released
+		return late, nil
+	})
+	reg.connectTimeout = 30 * time.Millisecond
+
+	if _, err := reg.workspaceFor("h", "/p"); err == nil {
+		t.Fatal("expected timeout error from never-returning connect")
+	}
+	// Release the late connect; its workspace must be reaped.
+	close(released)
+	select {
+	case <-disconnected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("late workspace from a timed-out connect was not disconnected")
+	}
+}
+
 // newTestRegistry creates a remoteHostRegistry with an injectable connect
 // function for testing. The real ProcessSupervisor is not needed for tests
 // using fake connect; the realConnect factory errors loudly if reached.

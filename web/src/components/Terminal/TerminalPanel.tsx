@@ -868,6 +868,13 @@ export default function TerminalPanel({
     const pendingChunks: string[] = [];
     let pendingBytes = 0;
     let restoreCancelled = false;
+    // Set by the unmount cleanup. The cleanup closes the socket, which fires
+    // onclose asynchronously — after the cleanup has already cleared the
+    // pending reconnect timer. Without this guard that late onclose schedules
+    // a fresh reconnect from an unmounted panel, and the ghost socket
+    // reattaches to (or, if the shell was just killed, respawns) the terminal
+    // under the closed tab's id.
+    let disposed = false;
     const restoreController = new AbortController();
     let serverHistoryRestored = false;
     let serverHistoryPartial = false;
@@ -1005,10 +1012,15 @@ export default function TerminalPanel({
         if (chunkRafId === 0) chunkRafId = requestAnimationFrame(flushChunks);
       };
       nextSocket.onerror = () => {
+        if (disposed) return;
         console.error("terminal: websocket error on", url);
         term.write("\r\n\x1b[31m[terminal connection error]\x1b[0m\r\n");
       };
       nextSocket.onclose = (ev) => {
+        // The panel unmounted (tab/project closed): never reconnect. The
+        // cleanup already saved the buffer and cleared its timer; a reconnect
+        // here would outlive the component and resurrect the shell.
+        if (disposed) return;
         const remainder = terminalDecoder.decode();
         // Flush every queued render chunk BEFORE the ended banner and the
         // final save: WebSocket frames are decoded into pendingChunks and
@@ -1192,6 +1204,7 @@ export default function TerminalPanel({
     // reconnect now if the socket is not open. Without this, a laptop that
     // slept mid-backoff can wait up to 30s before the first retry.
     const offWake = onWake(() => {
+      if (disposed) return;
       if (sock && (sock.readyState === WebSocket.OPEN || sock.readyState === WebSocket.CONNECTING)) return;
       if (reconnectTimerRef.current !== null) {
         clearTimeout(reconnectTimerRef.current);
@@ -1205,6 +1218,7 @@ export default function TerminalPanel({
     observer.observe(el);
 
     return () => {
+      disposed = true;
       restoreCancelled = true;
       restoreController.abort();
       if (restoreTimer !== null) {

@@ -7,6 +7,13 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 TARGETS=(linux-amd64 linux-arm64 darwin-amd64 darwin-arm64)
+
+# The canonical version the macOS About panel must display.
+EXPECTED_VERSION="$(sed -n 's/^const Version = "\(.*\)"$/\1/p' "$ROOT/internal/version/version.go")"
+[[ -n "$EXPECTED_VERSION" ]] || fail 'could not read canonical version from internal/version/version.go'
+plist_version() {
+  sed -n '/CFBundleShortVersionString/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$1"
+}
 REMOTE="$TMP/remote binaries/1.2.3"
 APP="$TMP/test app.app"
 mkdir -p "$REMOTE"
@@ -21,6 +28,11 @@ for target in "${TARGETS[@]}"; do
   [[ -x "$dest" ]] || fail "not executable: $target"
 done
 cmp "$TMP/desktop" "$APP/Contents/MacOS/ocode"
+
+# The About panel version comes from Info.plist; it must match the canonical
+# Go version when the 4th argument is omitted.
+[[ "$(plist_version "$APP/Contents/Info.plist")" == "$EXPECTED_VERSION" ]] \
+  || fail "Info.plist version '$(plist_version "$APP/Contents/Info.plist")' != '$EXPECTED_VERSION'"
 
 # Each missing target must fail before destroying the previous app.
 for target in "${TARGETS[@]}"; do
@@ -43,6 +55,8 @@ fi
 bash "$ROOT/scripts/bundle-macos.sh" "$TMP/desktop" "$APP"
 [[ ! -e "$APP/Contents/Resources/remote-binaries" ]] || fail 'legacy bundle retained remote binaries'
 [[ -f "$APP/Contents/Info.plist" ]] || fail 'missing plist'
+[[ "$(plist_version "$APP/Contents/Info.plist")" == "$EXPECTED_VERSION" ]] \
+  || fail 'legacy bundle plist version mismatch'
 
 # Exercise the real Makefile in an isolated fixture with stub prerequisites
 # and Go. The shared prerequisites must finish exactly once under make -j.
@@ -89,6 +103,9 @@ chmod +x "$TMP/build/tools/go"
     grep -qx "$target" builds
     [[ -x "bin/ocode.app/Contents/Resources/remote-binaries/1.2.3/ocode-$target" ]] || fail "not bundled: $target"
   done
+  # `make desktop-app` passes VERSION through to the plist (About panel).
+  [[ "$(plist_version bin/ocode.app/Contents/Info.plist)" == "1.2.3" ]] \
+    || fail "make bundle plist version '$(plist_version bin/ocode.app/Contents/Info.plist)' != '1.2.3'"
   for target in "${TARGETS[@]}"; do
     printf 'preserve\n' > bin/ocode.app/sentinel
     if FAIL_TARGET="$target" make -j8 -f Makefile -f stubs.mk VERSION=1.2.3 desktop-app > "$TMP/make.log" 2>&1; then

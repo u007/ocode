@@ -150,6 +150,12 @@ func FormatFile(ctx context.Context, path string, formatters map[string]config.F
 		if err := os.WriteFile(path, formatted, 0644); err != nil {
 			return fmt.Errorf("write formatted %s: %w", path, err)
 		}
+		// Register the formatter's rewrite as the post-write state for this tool
+		// call, so undo_file_change verifies (and reverts) the final formatted
+		// content rather than the intermediate unformatted write.
+		if tcID != "" {
+			snapshot.FromContext(ctx).RegisterWrite(path, tcID)
+		}
 	}
 
 	return nil

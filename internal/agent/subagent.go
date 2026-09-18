@@ -411,7 +411,10 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		if wd == "" {
 			wd, _ = os.Getwd()
 		}
-		if docTools, err := newDocTools(wd); err == nil {
+		// Wire the shared TypeSafe relevance judge into doc_search when TypeSafe
+		// is connected (docSearchJudge returns nil otherwise). Resolved per
+		// context dispatch, the same granularity as building these tools.
+		if docTools, err := newDocToolsWithJudge(wd, t.mainAgent.docSearchJudge()); err == nil {
 			for _, dt := range docTools {
 				tools = append(tools, dt)
 				injectedDocToolNames = append(injectedDocToolNames, dt.Name())

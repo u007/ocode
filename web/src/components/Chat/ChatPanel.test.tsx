@@ -544,6 +544,178 @@ describe("ChatPanel", () => {
     });
   });
 
+  describe("scroll lock (auto-scroll pauses after scroll-up)", () => {
+    /** Render a seeded panel and settle its initial history fetch so effects
+     *  and the scroll observers are live before a test fakes scroll geometry. */
+    async function renderLocked(sessionId: string, messages: Message[], live?: string[]) {
+      let captured: ((a: unknown) => void) | null = null;
+      const utils = render(
+        <ChatProvider>
+          <DispatchCapture onCapture={(d) => (captured = d)} />
+          <LiveSeed sessionId={sessionId} messages={messages} live={live} />
+          <ChatPanel sessionId={sessionId} />
+        </ChatProvider>,
+      );
+      await tick();
+      act(() => {
+        hoisted.resolve.current({ messages: [], total: 0, title: "" });
+      });
+      await tick();
+      await advanceFrame();
+      return { ...utils, dispatch: (a: unknown) => captured!(a) };
+    }
+
+    it("stays locked when a token lands in the same frame as the scroll-up", async () => {
+      const sessionId = "sess-lock-race";
+      const { container, dispatch } = await renderLocked(sessionId, [
+        mk("user", "hi"),
+        mk("assistant", "yo"),
+      ]);
+      const el = scrollElOf(container);
+      const f = fakeScroll(el, 5000); // pinned at the bottom
+
+      // Settle the pinned state, then the reader wheel-scrolls up: the offset
+      // decreases, which must unpin synchronously (our own pins only grow it).
+      fireEvent.scroll(el);
+      await advanceFrame();
+      f.set(0);
+      fireEvent.scroll(el);
+
+      // A streamed token lands BEFORE the deferred at-bottom recompute runs.
+      // The old rAF-deferred-only check let this re-pin and swallow the
+      // scroll-up; the synchronous unpin must hold the lock instead.
+      act(() => {
+        dispatch({ type: "LIVE_DELTA", sessionId, kind: "text", delta: " chunk" });
+      });
+      await advanceFrame();
+      expect(f.get()).toBe(0);
+    });
+
+    it("re-arms the tail follow when the transcript is reset (truncate)", async () => {
+      const sessionId = "sess-lock-reset";
+      const { container, dispatch } = await renderLocked(sessionId, [
+        mk("user", "u1"),
+        mk("assistant", "a1"),
+        mk("user", "u2"),
+        mk("assistant", "a2"),
+      ]);
+      const el = scrollElOf(container);
+      const f = fakeScroll(el, 0, 5000);
+      // Lock the reader away from the bottom.
+      fireEvent.scroll(el);
+      await advanceFrame();
+      expect(f.get()).toBe(0);
+
+      // Truncate (restore-to-input) shrinks the committed list: the old read
+      // position no longer refers to this content, so the lock resets.
+      act(() => {
+        dispatch({ type: "TRUNCATE_MESSAGES", sessionId, keepUntil: 1 });
+      });
+      await advanceFrame();
+      expect(f.get()).toBe(5000);
+    });
+
+    it("re-arms the tail follow once the content stops overflowing (no scrollbar)", async () => {
+      const sessionId = "sess-lock-noscroll";
+      const { container, dispatch } = await renderLocked(sessionId, [
+        mk("user", "hi"),
+        mk("assistant", "yo"),
+      ]);
+      const el = scrollElOf(container);
+      let sh = 5000;
+      let top = 0;
+      Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => sh });
+      Object.defineProperty(el, "clientHeight", { configurable: true, get: () => 600 });
+      Object.defineProperty(el, "scrollTop", {
+        configurable: true,
+        get: () => top,
+        set: (v: number) => {
+          top = v;
+        },
+      });
+
+      // Reader locks by scrolling up while the content overflows.
+      fireEvent.scroll(el);
+      await advanceFrame();
+      expect(top).toBe(0);
+
+      // Content shrinks to fit: no scrollbar, so there is nothing to be locked
+      // away from. A store update runs the auto-scroll effect, which re-arms.
+      sh = 600;
+      act(() => {
+        dispatch({ type: "LIVE_DELTA", sessionId, kind: "text", delta: "a" });
+      });
+      await flushRAF();
+
+      // Overflow returns: the re-armed follow must track the tail again.
+      sh = 5000;
+      act(() => {
+        dispatch({ type: "LIVE_DELTA", sessionId, kind: "text", delta: "b" });
+      });
+      await flushRAF();
+      expect(top).toBe(5000);
+    });
+
+    it("does not re-arm the lock from a stream event while the tab is hidden", async () => {
+      const sessionId = "sess-lock-hidden";
+      const { container, dispatch } = await renderLocked(sessionId, [
+        mk("user", "hi"),
+        mk("assistant", "yo"),
+      ]);
+      const el = scrollElOf(container);
+      const f = fakeScroll(el, 0, 5000);
+      // Lock the reader away from the bottom.
+      fireEvent.scroll(el);
+      await advanceFrame();
+      expect(f.get()).toBe(0);
+
+      // Simulate display:none — the panel has no layout box (0/0), which must
+      // NOT be mistaken for "content fits / no scrollbar".
+      Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => 0 });
+      Object.defineProperty(el, "clientHeight", { configurable: true, get: () => 0 });
+      act(() => {
+        dispatch({ type: "LIVE_DELTA", sessionId, kind: "text", delta: " hidden" });
+      });
+      await flushRAF();
+
+      // Back to a visible box: the lock must still hold (no yank to the tail).
+      Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => 5000 });
+      Object.defineProperty(el, "clientHeight", { configurable: true, get: () => 600 });
+      act(() => {
+        dispatch({ type: "LIVE_DELTA", sessionId, kind: "text", delta: " shown" });
+      });
+      await flushRAF();
+      expect(f.get()).toBe(0);
+    });
+
+    it("starts a new session pinned (no inherited lock)", async () => {
+      let captured: ((a: unknown) => void) | null = null;
+      const { container } = render(
+        <ChatProvider>
+          <DispatchCapture onCapture={(d) => (captured = d)} />
+          <ChatPanel sessionId="new-77" />
+        </ChatProvider>,
+      );
+      await tick();
+      const el = scrollElOf(container);
+      let top = 0;
+      Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => 5000 });
+      Object.defineProperty(el, "clientHeight", { configurable: true, get: () => 600 });
+      Object.defineProperty(el, "scrollTop", {
+        configurable: true,
+        get: () => top,
+        set: (v: number) => {
+          top = v;
+        },
+      });
+      act(() => {
+        captured!({ type: "LIVE_DELTA", sessionId: "new-77", kind: "text", delta: "hello" });
+      });
+      await flushRAF();
+      expect(top).toBe(5000);
+    });
+  });
+
   describe("per-message Speak", () => {
     it("offers Speak on the assistant text of a tool-group turn", async () => {
       const msgs: Message[] = [

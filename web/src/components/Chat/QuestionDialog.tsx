@@ -30,6 +30,8 @@ interface Props {
     requestId: string,
     answers: QuestionAnswerPayload[],
   ) => Promise<boolean>;
+  /** Cancel/dismiss the prompt without answering it (TUI Esc parity). */
+  onCancel: (requestId: string) => Promise<boolean>;
 }
 
 const OTHER_LABEL = "Something else";
@@ -82,6 +84,7 @@ export default function QuestionDialog({
   requestId,
   questions,
   onSubmit,
+  onCancel,
 }: Props) {
   const optionsPerQuestion = useMemo(
     () => questions.map(displayOptions),
@@ -174,6 +177,21 @@ export default function QuestionDialog({
     }
   };
 
+  // Dismiss without answering — mirrors the TUI's Esc-to-cancel. Kept on the
+  // dialog's own open-change handler so the X button, Escape, and an overlay
+  // click all funnel here. Suppressed while a submit/cancel is in flight so an
+  // in-flight answer is never double-resolved.
+  const handleCancel = async () => {
+    if (loading) return;
+    setLoading(true);
+    try {
+      const ok = await onCancel(requestId);
+      if (!ok) setLoading(false);
+    } catch {
+      setLoading(false);
+    }
+  };
+
   const renderQuestion = (q: QuestionPrompt, qi: number) => {
     const s = state[qi];
     const multiple = !!q.multiple;
@@ -236,9 +254,11 @@ export default function QuestionDialog({
   };
 
   return (
-    // Non-dismissible: closing without an answer would leave the agent paused,
-    // so the dialog stays until Submit resolves it server-side.
-    <Dialog open={open}>
+    // Dismissible: Escape and the close (X) button both cancel the prompt
+    // (TUI Esc parity) via onOpenChange, rewriting the sentinel so the agent is
+    // not left paused. Overlay clicks stay suppressed (onInteractOutside) so a
+    // stray click cannot discard a half-answered multi-question form.
+    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && void handleCancel()}>
       <DialogContent
         className="sm:max-w-lg bg-card border-border"
         onInteractOutside={(e) => e.preventDefault()}
@@ -272,7 +292,15 @@ export default function QuestionDialog({
           </Tabs>
         )}
 
-        <div className="flex justify-end pt-2">
+        <div className="flex justify-end gap-2 pt-2">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => void handleCancel()}
+            disabled={loading}
+          >
+            Cancel
+          </Button>
           <Button
             type="button"
             onClick={() => void handleSubmit()}

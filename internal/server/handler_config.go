@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"runtime"
 	"strings"
 
 	"github.com/u007/ocode/internal/agent"
@@ -1644,6 +1645,11 @@ func (h *Handler) HandleGetPathsConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"extra_allowed_paths": paths,
 		"upload_dir":          uploadDir,
+		// platform lets the web label the OS-native file-manager action
+		// ("Open in Finder" / "Open in Explorer" / "Open in File Manager")
+		// to match the machine the server actually runs on — for a remote
+		// host the browser's own navigator.platform would be wrong.
+		"platform": runtime.GOOS,
 	})
 }
 

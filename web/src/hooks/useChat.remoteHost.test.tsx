@@ -122,6 +122,7 @@ describe("useChat remote host routing", () => {
       "new-draft-1",
       "/srv/app",
       "devbox",
+      undefined,
     );
   });
 
@@ -151,6 +152,7 @@ describe("useChat remote host routing", () => {
       "new-draft-reg",
       "/srv/app",
       "devbox",
+      undefined,
     );
   });
 

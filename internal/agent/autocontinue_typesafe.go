@@ -14,6 +14,31 @@ const (
 	typesafeAutoContinueReasonKey  = "reason"
 )
 
+// autoContinueMinConfidenceDefault is the TypeSafe confidence floor for
+// auto-continue triage. It is deliberately LOWER than the shared permission
+// floor (autoJudgeMinConfidenceDefault = 0.85): auto-continue is low-stakes and
+// reversible (the chain is bounded at AutoContinueChainCap and one extra LLM
+// round is cheap), whereas an auto-granted tool call is not. TypeSafe's own
+// guidance is explicit that "a confidence threshold is not one number" and that
+// the threshold should scale with the consequences of getting it wrong.
+//
+// Reusing the permission floor here was a real defect: Jev's `confidence` is a
+// distribution-shape statistic that runs systematically below the selected
+// option's `probabilities[choice]`, so legitimate mid-task cutoff verdicts
+// (confidence 0.6-0.8 with p(choice) >= 0.85) were failed closed and the turn
+// silently ended. 0.6 sits just above TypeSafe's "genuinely unsure" boundary
+// (confidence < 0.5 => do not act) while still rejecting coin-flip verdicts.
+const autoContinueMinConfidenceDefault = 0.6
+
+// resolveAutoContinueMinConfidence returns the confidence floor for
+// auto-continue triage. Per the risk-scaling rule above it is intentionally
+// decoupled from permissions.auto.min_confidence — that key remains the
+// high-stakes permission/discovery floor, and overloading it here was what
+// suppressed low-confidence-but-correct resumes.
+func (a *Agent) resolveAutoContinueMinConfidence() float64 {
+	return autoContinueMinConfidenceDefault
+}
+
 // typesafeAutoContinueReasons is the closed set of triage outcome categories,
 // in the order they are described to the model. "finished" must stay first:
 // it is the expected answer for a reply that naturally completed.
@@ -101,7 +126,7 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client *TypesafeClient, messages []
 		return false, detail, nil
 	}
 
-	minConfidence := a.resolveAutoJudgeMinConfidence()
+	minConfidence := a.resolveAutoContinueMinConfidence()
 	reasonKey := ""
 	if r, ok := resp.Answers[typesafeAutoContinueReasonKey]; ok && r.Type == "choice" {
 		reasonKey = r.Choice

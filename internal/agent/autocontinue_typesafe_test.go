@@ -115,6 +115,46 @@ func TestAutoContinueTypesafeLowConfidenceFailsClosed(t *testing.T) {
 	}
 }
 
+// Auto-continue is low-stakes and reversible, so it must use its OWN lower
+// confidence floor — not the shared permission floor (0.85). Reusing the
+// permission floor failed closed on legitimate mid-task verdicts whose Jev
+// `confidence` sits in the 0.6-0.8 band even though the chosen option's
+// probability is high (a real report: "auto continue llm via jev does not
+// work"). This pins the risk-scaling split: a 0.66-confidence `continue`
+// resumes, while the permission floor would have rejected it.
+func TestAutoContinueTypesafeUsesRiskScaledFloorNotPermissionFloor(t *testing.T) {
+	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.66, "mid_task"))
+	// Even with a high configured permission floor, auto-continue must not
+	// inherit it.
+	a.config.Ocode.Permissions = config.PermissionConfig{
+		Auto: &config.AutoPermissionConfig{MinConfidence: 0.95},
+	}
+	if got := a.resolveAutoJudgeMinConfidence(); got != 0.95 {
+		t.Fatalf("permission floor = %v, want 0.95 (sanity)", got)
+	}
+	if got := a.resolveAutoContinueMinConfidence(); got != autoContinueMinConfidenceDefault {
+		t.Fatalf("auto-continue floor = %v, want %v", got, autoContinueMinConfidenceDefault)
+	}
+	resume, detail, err := a.AutoContinueJudgeSync([]Message{
+		{Role: "assistant", Content: "I've updated the schema. Next I'll regenerate the migrations and run the tests."},
+	}, nil)
+	if err != nil || !resume {
+		t.Fatalf("0.66-confidence continue should resume at the auto-continue floor, got resume=%v err=%v detail=%q", resume, err, detail)
+	}
+}
+
+// A coin-flip verdict ("continue" at 0.4, below TypeSafe's documented
+// "genuinely unsure / do not act" band of <0.5) still fails closed.
+func TestAutoContinueTypesafeBelowUnsureBandFailsClosed(t *testing.T) {
+	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.49, "mid_task"))
+	resume, _, err := a.AutoContinueJudgeSync([]Message{
+		{Role: "assistant", Content: "hmm"},
+	}, nil)
+	if err != nil || resume {
+		t.Fatalf("sub-0.5 confidence must fail closed, got resume=%v err=%v", resume, err)
+	}
+}
+
 func TestAutoContinueTypesafeUnknownChoiceIsNotResumed(t *testing.T) {
 	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("maybe", 0.9, "finished"))
 	resume, detail, err := a.AutoContinueJudgeSync(nil, nil)

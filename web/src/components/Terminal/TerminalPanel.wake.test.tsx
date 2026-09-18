@@ -168,4 +168,33 @@ describe("TerminalPanel wake reconnect", () => {
     const writes = h.terminals[0].write.mock.calls.map((c) => String(c[0])).join("\n");
     expect(writes).toContain("reconnecting in 1s");
   });
+
+  it("does not reconnect after the panel unmounts (closing a tab must not respawn its shell)", async () => {
+    const view = render(
+      <TerminalProvider>
+        <TerminalPanel active id="t1" projectPath="/proj" scrollbackLines={1000} fontFamily="mono" fontSize={12} />
+      </TerminalProvider>,
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(h.sockets.length).toBe(1);
+    const first = h.sockets[0];
+    act(() => {
+      first.onopen?.();
+    });
+
+    view.unmount();
+    // Closing the tab kills the shell server-side, so the server's close can
+    // arrive after the cleanup ran. A reconnect here would outlive the panel
+    // and spawn a fresh shell under the closed tab's id.
+    act(() => {
+      first.onclose?.({ wasClean: false, code: 1006, reason: "" });
+    });
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(h.sockets.length).toBe(1);
+  });
 });

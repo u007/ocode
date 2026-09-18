@@ -960,13 +960,25 @@ func isRateLimitError(err error) bool {
 }
 
 // isServerUnavailableError reports whether err is a typed provider status
-// error with a transient gateway/server availability code (502/503/504),
-// which are safe to retry with short backoff.
+// error with a transient server/gateway availability code that is safe to
+// retry with short backoff: 500 (Internal Server Error), 502, 503, 504.
+//
+// 500 is included deliberately (2026-09-18). Providers — opencode-go in
+// particular — return a generic 500 "Internal server error" for transient
+// upstream faults, and hard-failing the turn on the first one (`failed after
+// 1 attempt(s)`) is worse than retrying. Some deterministic 500s do exist
+// (e.g. the opencode-go per-model protocol-routing bug where an
+// Anthropic-protocol model was posted to /v1/chat/completions); retrying
+// those just spends the retry budget and surfaces the same error, which is
+// acceptable — routing correctness is enforced separately in
+// usesAnthropicMessagesAPI. The deltaEmitted gate in the retry loop still
+// prevents duplicate streamed content, and empty-response errors keep their
+// own retry semantics.
 func isServerUnavailableError(err error) bool {
 	var se *providerStatusError
 	if errors.As(err, &se) {
 		switch se.Code {
-		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			return true
 		}
 	}

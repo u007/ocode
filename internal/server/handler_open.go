@@ -20,7 +20,10 @@ type openFileRequest struct {
 	// Mode selects the opener: ""/"editor" uses the configured GUI editor
 	// with system-opener fallback (previous behavior); "os" forces the OS
 	// default application (used by PreviewHost "Open with OS app" for
-	// native-fidelity pptx/docx playback). Any other value is rejected.
+	// native-fidelity pptx/docx playback); "reveal" opens the OS file manager
+	// at the path (directory → open the folder; file → select it in its
+	// containing folder) — used by the Files tab "Open/Show in Finder/
+	// Explorer/File Manager" context-menu action. Any other value is rejected.
 	Mode string `json:"mode,omitempty"`
 	// ProjectRoot optionally anchors relative paths (same allowlist as
 	// HandleFileContent's project_root). Empty falls back to workDir.
@@ -42,9 +45,9 @@ func (h *Handler) HandleOpenFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch req.Mode {
-	case "", "editor", "os":
+	case "", "editor", "os", "reveal":
 	default:
-		writeError(w, http.StatusBadRequest, "mode must be \"editor\" or \"os\"")
+		writeError(w, http.StatusBadRequest, "mode must be \"editor\", \"os\", or \"reveal\"")
 		return
 	}
 
@@ -54,13 +57,17 @@ func (h *Handler) HandleOpenFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if info, statErr := os.Stat(abs); statErr != nil || info.IsDir() {
+	info, statErr := os.Stat(abs)
+	// "reveal" is the only mode that accepts a directory: the Files tab's
+	// "Open in Finder/Explorer/File Manager" acts on folders too. Every other
+	// mode opens a document, so a directory is still a 404 there.
+	if statErr != nil || (info.IsDir() && req.Mode != "reveal") {
 		log.Printf("[open] not a file: %q (err=%v)", abs, statErr)
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
 
-	if err := openResolvedPath(abs, req.Line, req.Mode); err != nil {
+	if err := openResolvedPath(abs, req.Line, req.Mode, info.IsDir()); err != nil {
 		log.Printf("[open] failed to open %q: %v", abs, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -91,12 +98,16 @@ func (h *Handler) resolveOpenPath(reqPath, projectRoot string) (string, error) {
 }
 
 // openResolvedPath honors mode: "os" forces the OS default application
-// (native-fidelity playback for pptx/docx); anything else uses the
-// configured editor with system-opener fallback.
-func openResolvedPath(absPath string, line int, mode string) error {
-	if mode == "os" {
+// (native-fidelity playback for pptx/docx); "reveal" opens the OS-native file
+// manager at the path (selecting a file, or opening a directory); anything
+// else uses the configured editor with system-opener fallback.
+func openResolvedPath(absPath string, line int, mode string, isDir bool) error {
+	switch mode {
+	case "os":
 		name, args := systemOpener(absPath)
 		return startDetached(name, args)
+	case "reveal":
+		return revealPathFn(absPath, isDir)
 	}
 	return openPathInEditor(absPath, line)
 }

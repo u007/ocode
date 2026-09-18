@@ -20,16 +20,30 @@ const (
 	docSearchMaxBodyChars = 4000
 )
 
-// newDocTools resolves the OKF bundle and returns doc tools wrapping a Store.
-// Returns error when no bundle is found at workDir.
+// DocSearchJudge vets the results of one doc_search call against the query that
+// produced them, returning the subset to show. A nil judge means "no filtering"
+// (the tool is not connected to a judge). The TypeSafe/Jev relevance judge is
+// the production implementation (see doc_search_typesafe.go).
+type DocSearchJudge func(query string, docs []*knowledge.Doc) ([]*knowledge.Doc, error)
+
+// newDocTools resolves the OKF bundle and returns doc tools wrapping a Store
+// with no search judge (every doc_search result is shown). Returns error when no
+// bundle is found at workDir.
 func newDocTools(workDir string) ([]DocTool, error) {
+	return newDocToolsWithJudge(workDir, nil)
+}
+
+// newDocToolsWithJudge is newDocTools with a relevance judge wired into the
+// doc_search tool. The context subagent uses this so its searches are vetted by
+// TypeSafe when connected; tests and the plain builder use a nil judge.
+func newDocToolsWithJudge(workDir string, judge DocSearchJudge) ([]DocTool, error) {
 	bundle, ok := knowledge.DetectBundle(workDir)
 	if !ok {
 		return nil, fmt.Errorf("no OKF knowledge bundle found at %s/docs — run /docs init first", workDir)
 	}
 	store := knowledge.NewStore(bundle)
 	return []DocTool{
-		&DocSearchTool{store: store},
+		&DocSearchTool{store: store, judge: judge},
 		&DocGetTool{store: store},
 		&DocWriteTool{store: store},
 		&DocDeprecateTool{store: store},
@@ -45,9 +59,12 @@ type DocTool interface {
 	Execute(args json.RawMessage) (string, error)
 }
 
-// DocSearchTool searches the knowledge bundle.
+// DocSearchTool searches the knowledge bundle. judge, when non-nil, vets the
+// page of results against the query and hides out-of-scope docs (see
+// DocSearchJudge); nil shows every result.
 type DocSearchTool struct {
 	store *knowledge.Store
+	judge DocSearchJudge
 }
 
 func (t *DocSearchTool) Name() string { return "doc_search" }
@@ -120,8 +137,31 @@ func (t *DocSearchTool) Execute(args json.RawMessage) (string, error) {
 		return "No matching documents found (0 total).", nil
 	}
 
+	// The relevance judge (TypeSafe/Jev, when connected) hides results of a
+	// different scope. It is fail-open: a judge error leaves every result in
+	// place, so the judge can never make doc_search return fewer results because
+	// of a failure. Filtering happens before get_top so the inlined bodies are
+	// the top *kept* docs.
+	filtered := 0
+	if t.judge != nil {
+		kept, jerr := t.judge(params.Query, results)
+		if jerr != nil {
+			slog.Warn("doc_search: relevance judge failed (fail-open, all results kept)", "query", params.Query, "error", jerr)
+		} else {
+			filtered = len(results) - len(kept)
+			results = kept
+		}
+	}
+	if len(results) == 0 {
+		return fmt.Sprintf("Found %d matching document(s), but none are in scope for this query (relevance judge omitted %d).", total, filtered), nil
+	}
+
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Found %d matching document(s) (page %d, %d total):\n\n", len(results), params.Page, total))
+	header := fmt.Sprintf("Found %d matching document(s) (page %d, %d total)", len(results), params.Page, total)
+	if filtered > 0 {
+		header += fmt.Sprintf(" — %d out-of-scope result(s) omitted by the relevance judge", filtered)
+	}
+	b.WriteString(header + ":\n\n")
 	for i, doc := range results {
 		status := ""
 		if doc.Status == "deprecated" {

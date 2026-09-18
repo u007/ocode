@@ -18,15 +18,14 @@ const DEFAULT_MODE_OPTIONS: { value: string; auto: boolean; label: string }[] = 
 ];
 
 export default function PermissionsForm() {
-  // Live permission mode string (normal|yolo|locked|sandbox). Loaded from GET
-  // /api/permissions and saved via the mode endpoint so a session-scoped
-  // sandbox toggle is preserved (never reverted by the "yolo" boolean path).
-  const [mode, setMode] = useState<string>("normal");
-  const [loadedMode, setLoadedMode] = useState<string>("normal");
+  // This form is process-wide settings. The live permission mode is now PER
+  // CHAT SESSION (toggled from the sidebar pill, /yolo, /sandbox), so it is
+  // deliberately not edited here: a session-less live-mode write would be the
+  // process-global footgun this design removes. Settings owns the persisted
+  // default a brand-new session starts in.
   const [sandboxSupported, setSandboxSupported] = useState(true);
-  // The persisted default a new TUI/web/RC session starts in — distinct from
-  // the live mode above. Loaded from/saved to GET|PUT
-  // /api/config/ocode/permissions-mode.
+  // The persisted default a new TUI/web/RC session starts in. Loaded from and
+  // saved to GET|PUT /api/config/ocode/permissions-mode.
   const [defaultMode, setDefaultMode] = useState<string>("normal");
   const [loadedDefaultMode, setLoadedDefaultMode] = useState<string>("normal");
   const [auto, setAuto] = useState<AutoPermissionConfig>(EMPTY_AUTO);
@@ -44,8 +43,6 @@ export default function PermissionsForm() {
         api.getAutoPermissionConfig(),
         api.getPermissionModeConfig(),
       ]);
-      setMode(perms.mode || "normal");
-      setLoadedMode(perms.mode || "normal");
       setSandboxSupported(perms.sandbox_supported ?? true);
       setDefaultMode(defaultModeCfg.mode || "normal");
       setLoadedDefaultMode(defaultModeCfg.mode || "normal");
@@ -65,11 +62,6 @@ export default function PermissionsForm() {
     setSaving(true);
     setError(null);
     try {
-      // Only flip the mode if the user changed it in this form; otherwise a
-      // session-scoped sandbox/yolo toggle stays untouched.
-      if (mode !== loadedMode) {
-        await api.setPermissionMode(mode);
-      }
       if (defaultMode !== loadedDefaultMode) {
         await api.setPermissionModeConfig(defaultMode);
       }
@@ -100,19 +92,13 @@ export default function PermissionsForm() {
       <h2 className="text-sm font-semibold text-foreground">Permissions</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
 
-      <label className="flex items-center gap-2 text-xs text-muted-foreground">
-        <input
-          type="checkbox"
-          checked={mode === "yolo"}
-          onChange={(e) => setMode(e.target.checked ? "yolo" : "normal")}
-        />
-        Yolo mode (auto-approve all tool calls, current session only)
-      </label>
-      {(mode === "sandbox" || mode === "locked") && (
-        <div className="text-xs text-muted-foreground">
-          Current live permission mode: <span className="font-mono text-foreground">{mode}</span> (preserved on save)
-        </div>
-      )}
+      <p className="text-xs text-muted-foreground">
+        The live permission mode (normal / yolo / locked / sandbox) is set per
+        chat session — use the Permission pill in the chat sidebar or
+        <span className="font-mono"> /yolo</span> and
+        <span className="font-mono"> /sandbox</span>. It never affects other
+        chats or projects.
+      </p>
 
       <div className="border-t border-border pt-4 space-y-2">
         <div className="text-xs font-semibold text-foreground">Default on startup</div>

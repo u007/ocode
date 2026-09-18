@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"os/exec"
 	"time"
 
@@ -195,28 +194,19 @@ func (rw *RemoteWorkspace) BrowseURL() string {
 }
 
 // ensureBinary checks if the remote binary exists; provisions it if not.
+//
+// It delegates to EnsureBinary so the upload AND activation/verification steps
+// stay together. A previous hand-rolled upload-only path left the freshly
+// uploaded binary as ~/.ocode/bin/<ver>/.ocode.partial; the credential sync
+// that Connect runs next then invoked the still-missing
+// ~/.ocode/bin/<ver>/ocode and failed with exit 127 ("No such file or
+// directory"), which surfaced on the web/desktop side as a 502
+// "remote connect failed" for every proxied request to the host. Callers
+// (Connect) wrap the returned error with the "provision remote binary" stage.
 func (rw *RemoteWorkspace) ensureBinary() error {
-	if BinaryExists(rw.Transport, version.Version) {
-		return nil
+	if _, err := EnsureBinary(rw.Transport, ""); err != nil {
+		return err
 	}
-
-	goos, goarch, err := DetectPlatform(rw.Transport)
-	if err != nil {
-		return fmt.Errorf("platform detect: %w", err)
-	}
-
-	build, err := PrepareLocalBuild(goos, goarch, "")
-	if err != nil {
-		return fmt.Errorf("prepare local build: %w", err)
-	}
-	if !build.Reused {
-		defer os.Remove(build.Path)
-	}
-
-	if err := UploadBinary(rw.Transport, version.Version, build.Path); err != nil {
-		return fmt.Errorf("upload binary: %w", err)
-	}
-
 	return nil
 }
 

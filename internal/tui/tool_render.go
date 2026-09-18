@@ -131,6 +131,24 @@ func formatToolCallHint(tc agent.ToolCall, command ...string) string {
 	return fmt.Sprintf("⚙ %s %s", name, a)
 }
 
+// toolArgsRedundant reports whether dumping a tool call's raw JSON arguments
+// adds nothing beyond the human-readable hint from formatToolCallHint:
+//
+//   - read/bash: every field is already in the summary (path + offset/limit,
+//     command).
+//   - write: the JSON is dominated by the file body, whose useful rendering is
+//     the FormatDiff tool result shown right below the request.
+//
+// The detail view skips the raw-argument block for these tools instead of
+// burying the one-line summary under page after page of escaped JSON.
+func toolArgsRedundant(name string) bool {
+	switch name {
+	case "read", "write", "bash":
+		return true
+	}
+	return false
+}
+
 func makeToolCall(name, argsJSON string) agent.ToolCall {
 	tc := agent.ToolCall{}
 	tc.Function.Name = name

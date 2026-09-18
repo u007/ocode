@@ -152,6 +152,8 @@ const SESSION_SCOPED_EVENTS = new Set([
   "permission_resolved",
   "permission_check",
   "advisor_checkpoint",
+  "discovery",
+  "md_indexing",
   "error",
   "session_bootstrap",
 ]);
@@ -457,6 +459,26 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
           r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
         }
         return;
+      case "discovery":
+        // Discovery attach notice ("Discovered: …"), mirrored from the TUI's
+        // transient transcript notice. Flush buffered deltas first so the
+        // notice lands after the sentence that preceded it, not mid-sentence.
+        flushLiveDeltas(sessionId, r.dispatch);
+        r.dispatch({
+          type: "LIVE_NOTICE",
+          sessionId,
+          text: `Discovered: ${(data as { delta: string }).delta}`,
+        });
+        return;
+      case "md_indexing":
+        // Project-doc summary generation ("Indexing: …"), same transient shape.
+        flushLiveDeltas(sessionId, r.dispatch);
+        r.dispatch({
+          type: "LIVE_NOTICE",
+          sessionId,
+          text: `Indexing: ${(data as { delta: string }).delta}`,
+        });
+        return;
       case "tool_start":
         // Flush first: LIVE_TOOL_START appends a part, and a buffered text
         // tail (the end of the sentence that introduced the call) must land
@@ -500,7 +522,11 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         return;
       }
       case "question_resolved":
-        r.dispatch({ type: "QUESTION_RESOLVED", sessionId });
+        r.dispatch({
+          type: "QUESTION_RESOLVED",
+          sessionId,
+          requestId: (data as { request_id?: string }).request_id,
+        });
         return;
       case "permission":
         r.dispatch({

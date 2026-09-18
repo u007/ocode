@@ -24,8 +24,31 @@
 
 
 
+
+## 2026-09-19
+
+* **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
+* **Update**: Remote Persistent Sessions and Terminals Design ([superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md](/superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md))
+* **Creation**: Terminal close semantics and OSC title source ([gotchas/terminal-close-and-osc-title.md](/gotchas/terminal-close-and-osc-title.md))
+* **Creation**: Doc Search Relevance Judge ([concepts/doc-search-relevance-judge.md](/concepts/doc-search-relevance-judge.md))
+* **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
 ## 2026-09-18
 
+* **Update**: ChatPanel & LogPanel Autoscroll Bounce / Freeze ([gotchas/autoscroll-bounce.md](/gotchas/autoscroll-bounce.md))
+* **Update**: ChatPanel Autoscroll Bounce / Freeze ([gotchas/autoscroll-bounce.md](/gotchas/autoscroll-bounce.md))
+* **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
+* **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
+* **Creation**: Discovery Web Surfaces ([concepts/discovery-web-surfaces.md](/concepts/discovery-web-surfaces.md))
+* **Creation**: ONNX Runtime POSIX telemetry writes `:memory:.ses` into process cwd ([gotchas/onnx-runtime-telemetry-memory-ses.md](/gotchas/onnx-runtime-telemetry-memory-ses.md))
+* **Deprecation**: Remote SSH terminal 502s from provisioning and path bugs: Superseded: doc tools take bundle-relative paths, so this write landed at docs/docs/gotchas/remote-terminal-502-provisioning.md instead of docs/gotchas/.... The correct doc is at gotchas/remote-terminal-502-provisioning.md (bundle-relative). ([docs/gotchas/remote-terminal-502-provisioning.md](/docs/gotchas/remote-terminal-502-provisioning.md))
+* **Creation**: Remote SSH terminal 502s from provisioning and path bugs ([gotchas/remote-terminal-502-provisioning.md](/gotchas/remote-terminal-502-provisioning.md))
+* **Creation**: Remote SSH terminal 502s from provisioning and path bugs ([docs/gotchas/remote-terminal-502-provisioning.md](/docs/gotchas/remote-terminal-502-provisioning.md))
+* **Creation**: Project/Endpoint Isolation — one project must never halt another ([gotchas/project-endpoint-isolation.md](/gotchas/project-endpoint-isolation.md))
+* **Update**: opencode-go per-model protocol routing & Anthropic tool schema flatness ([gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md](/gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md))
+* **Update**: opencode-go per-model protocol routing & Anthropic tool schema flatness ([gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md](/gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md))
+* **Update**: Server-Side Auto-Continue Loop ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
+* **Update**: Speech playback ([tts-speech-playback.md](/tts-speech-playback.md))
+* **Creation**: espeak-ng N_PATH_HOME buffer truncates long data paths → exit(1) ([gotchas/kokoro-espeak-ng-path-limit.md](/gotchas/kokoro-espeak-ng-path-limit.md))
 * **Update**: Sandbox Permission Mode ([concepts/sandbox-permission-mode.md](/concepts/sandbox-permission-mode.md))
 * **Creation**: Remote Persistent Sessions and Terminals ([concepts/remote-persistent-sessions-terminals.md](/concepts/remote-persistent-sessions-terminals.md))
 * **Deprecation**: System Permissions Settings Section (macOS TCC + cross-platform): Document was created at the wrong path (docs/docs/...). The correct canonical location is superpowers/specs/2026-09-18-system-permissions-design.md. Content has been moved; this copy is superseded. ([docs/superpowers/specs/2026-09-18-system-permissions-design.md](/docs/superpowers/specs/2026-09-18-system-permissions-design.md))

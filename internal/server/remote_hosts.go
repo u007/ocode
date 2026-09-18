@@ -92,6 +92,10 @@ type remoteHostRegistry struct {
 	// factory constructs the concrete workspace for realConnect. It is a field
 	// rather than a package var so tests substitute a fake without a global.
 	factory func(target remote.Target, path string, sup *tool.ProcessSupervisor) (remoteHostWorkspaceConnector, error)
+
+	// connectTimeout overrides the default backstop on one connect attempt
+	// (remoteConnectTimeout). Tests set a short value; production leaves it 0.
+	connectTimeout time.Duration
 }
 
 // remoteHostWorkspaceConnector is the factory result used by realConnect: a
@@ -223,7 +227,7 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 	// broadcast and every later caller for this host would block forever.
 	log.Printf("remote: connecting to host %s", host)
 	start := time.Now()
-	ws, err := connectGuarded(reg.connect, target, path, host)
+	ws, err := reg.connectBounded(target, path, host)
 	if err != nil {
 		// Publish the failure and evict the entry under reg.mu → e.mu, the
 		// established lock order. The delete is conditional on identity: a
@@ -398,6 +402,68 @@ func connectGuarded(connect func(remote.Target, string) (remoteHostWorkspace, er
 		}
 	}()
 	return connect(target, path)
+}
+
+// remoteConnectTimeout is the default backstop for one connect attempt. It is
+// deliberately generous because first use may cross-compile and upload the
+// ocode binary, sync credentials, discover-or-start the remote server, and open
+// the tunnel — all before the tunnel is up. The per-command ssh options
+// (internal/remote sshFailFastArgs) bound each individual exec's connection
+// setup, but ConnectTimeout does not bound a remote command's runtime; this
+// catches the residual cases (a stalled upload, or a remote command that
+// connects but never returns). Without it, a wedged connect leaves every waiter
+// on this host pinned on the entry's sync.Cond forever.
+//
+// A spurious timeout is self-healing: the next attempt finds the binary already
+// installed (BinaryExists) and reuses it, so it connects quickly.
+var remoteConnectTimeout = 10 * time.Minute
+
+// connectDeadline returns the effective connect bound: the registry's override
+// when set, else the package default.
+func (reg *remoteHostRegistry) connectDeadline() time.Duration {
+	if reg.connectTimeout > 0 {
+		return reg.connectTimeout
+	}
+	return remoteConnectTimeout
+}
+
+// connectBounded runs the connect with a deadline. On timeout the owning entry
+// is resolved as failed by workspaceForPort's normal failure path (all waiters
+// are broadcast and the entry evicted), so a hung connect can never pin
+// requests for this host indefinitely. The connect goroutine cannot be killed
+// (it owns an ssh process), so a late result is reaped in the background: a
+// workspace it managed to build is disconnected rather than leaked after its
+// entry has already been evicted.
+func (reg *remoteHostRegistry) connectBounded(target remote.Target, path, host string) (remoteHostWorkspace, error) {
+	type result struct {
+		ws  remoteHostWorkspace
+		err error
+	}
+	deadline := reg.connectDeadline()
+	done := make(chan result, 1)
+	go func() {
+		ws, err := connectGuarded(reg.connect, target, path, host)
+		done <- result{ws, err}
+	}()
+
+	timer := time.NewTimer(deadline)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.ws, r.err
+	case <-timer.C:
+		go func() {
+			if r := <-done; r.ws != nil {
+				if derr := r.ws.Disconnect(); derr != nil {
+					log.Printf("remote: disconnect late workspace for host %s after connect timeout: %v", host, derr)
+				}
+			}
+		}()
+		return nil, &remoteHostStageError{
+			Stage: "remote-connect",
+			Err:   fmt.Errorf("remote connect to %s timed out after %s", host, deadline),
+		}
+	}
 }
 
 // getOrCreateEntry returns the entry for host. If none exists, a new one is

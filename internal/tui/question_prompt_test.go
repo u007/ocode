@@ -7,6 +7,8 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/server"
+	"github.com/u007/ocode/internal/tool"
 	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
@@ -116,5 +118,47 @@ WAITING_FOR_USER_RESPONSE`
 	got = derefTestModel(t, updated)
 	if got.questionTab != 0 {
 		t.Fatalf("expected left arrow to move to first question tab, got %d", got.questionTab)
+	}
+}
+
+// A web/desktop Cancel on the question dialog arrives over the RC bridge as an
+// RCResolution with Dismiss set. Regression for "question ask on web cannot
+// cancel": the TUI must clear its dialog and rewrite the sentinel so the ask no
+// longer reads as pending, without running an agent Step.
+func TestRCQuestionDismissClearsDialogAndSentinel(t *testing.T) {
+	m := pendingTestModel(t)
+	m.rcResolveCh = make(chan server.RCResolution, 1)
+	m.questionToolCallID = "tc-1"
+	m.questionPrompts = []tool.QuestionPrompt{{Header: "Pick", Question: "Which?", Options: []tool.QuestionOption{{Label: "A"}}}}
+	m.showQuestionDialog = true
+	m.rcPendingQuestion = &rcPendingQuestion{requestID: "tc-1", questions: m.questionPrompts}
+	// Seed the transcript with the unanswered ask round the TUI rendered.
+	m.messages = append(m.messages,
+		message{role: roleAssistant, raw: &agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "tc-1"}}}},
+		message{role: roleAssistant, text: "waiting", raw: &agent.Message{
+			Role:    "tool",
+			ToolID:  "tc-1",
+			Content: tool.SentinelQuestionPrompt + "\n[]\n\n" + tool.SentinelWaitingForUser,
+		}},
+	)
+
+	upd, _ := m.Update(rcResolveMsg{Resolution: server.RCResolution{RequestID: "tc-1", Dismiss: true}})
+	got := derefTestModel(t, upd)
+
+	if got.showQuestionDialog {
+		t.Fatalf("dismissal did not clear the question dialog")
+	}
+	if got.rcPendingQuestion != nil {
+		t.Fatalf("dismissal did not clear rcPendingQuestion")
+	}
+	idx := got.findToolMessageIndexByToolID("tc-1")
+	if idx < 0 {
+		t.Fatalf("question tool message vanished")
+	}
+	if got.messages[idx].raw == nil || got.messages[idx].raw.Content != tool.QuestionDismissedResult {
+		t.Fatalf("sentinel not rewritten with the dismissal result: %+v", got.messages[idx].raw)
+	}
+	if strings.Contains(got.messages[idx].raw.Content, tool.SentinelWaitingForUser) {
+		t.Fatalf("message still reads as a pending question ask")
 	}
 }

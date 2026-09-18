@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useRemoteHostStatus } from "./useRemoteHostStatus";
+import { useRemoteHostStatus, __resetRemoteHostStatusForTests } from "./useRemoteHostStatus";
 
 const mockStatus = vi.fn();
 const mockConnect = vi.fn();
@@ -27,6 +27,7 @@ const base = { host: "h", connected: true, version: "1.0.0", local_version: "2.0
 
 describe("useRemoteHostStatus", () => {
   beforeEach(() => {
+    __resetRemoteHostStatusForTests();
     mockStatus.mockReset();
     mockConnect.mockReset();
     mockRestart.mockReset();

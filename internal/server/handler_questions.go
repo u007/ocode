@@ -98,6 +98,97 @@ func applyQuestionAnswer(msgs []agent.Message, requestID, answerJSON string) boo
 	return true
 }
 
+// HandleDismissQuestion cancels a pending `question` prompt without answering
+// it. Body: {request_id, session_id?}. This is the web/desktop equivalent of
+// the TUI's Esc-to-cancel on a question dialog: the sentinel tool result is
+// rewritten in place with tool.QuestionDismissedResult, so the transcript stops
+// reading as a pending ask (the dialog will not reopen on reload/reconcile,
+// tailIsQuestionAsk goes false, and pending_asks drops it) and the model still
+// sees that the question went unanswered on its next turn.
+//
+// Unlike HandleAnswerQuestion this does NOT re-Step the agent: there is no
+// answer to act on, so the session simply goes idle and the user's next message
+// starts an ordinary turn. Re-stepping would spend a model round-trip narrating
+// a non-answer and could raise a fresh ask the user must dismiss again.
+//
+// In /rc bridge mode the dismissal is forwarded to the TUI (which owns the
+// agent and its own dialog), mirroring HandleAnswerQuestion.
+func (h *Handler) HandleDismissQuestion(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RequestID string `json:"request_id"`
+		SessionID string `json:"session_id,omitempty"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.RequestID == "" {
+		writeError(w, http.StatusBadRequest, "request_id is required")
+		return
+	}
+
+	if rc := h.RCBridge(); rc != nil {
+		// The TUI owns the agent and its question dialog; forward the dismissal
+		// so it clears its own dialog and rewrites its transcript. No
+		// server-side broadcast here — the TUI broadcasts question_resolved
+		// itself once it applies the dismissal (same as the answer path).
+		if !rc.SendResolution(RCResolution{RequestID: req.RequestID, Dismiss: true}) {
+			writeError(w, http.StatusServiceUnavailable, "resolve channel full; try again")
+			return
+		}
+		writeJSON(w, http.StatusOK, ChatResponse{})
+		return
+	}
+
+	// Locate the session whose pending question matches request_id. Prefer the
+	// explicit session_id; otherwise scan (tool-call IDs are unique). The
+	// session comes back with its lock held, so the tail cannot be dismissed
+	// out from under us by a racing answer.
+	as, sessID := h.findPendingSession(req.SessionID, req.RequestID, func(m agent.Message) bool {
+		return m.Role == "tool" && isQuestionAsk(m.Content)
+	})
+	if as == nil {
+		writeError(w, http.StatusNotFound, "no pending question found for request_id")
+		return
+	}
+	defer as.mu.Unlock()
+
+	askIdx := -1
+	for i := trailingToolRunStart(as.messages); i < len(as.messages); i++ {
+		if as.messages[i].ToolID == req.RequestID && isQuestionAsk(as.messages[i].Content) {
+			askIdx = i
+			break
+		}
+	}
+	if askIdx < 0 {
+		writeError(w, http.StatusConflict, "question already answered, dismissed, or superseded")
+		return
+	}
+
+	working := append([]agent.Message(nil), as.messages...)
+	working[askIdx].Content = tool.QuestionDismissedResult
+
+	// Mirror the dismissal onto the stored row before memory diverges from
+	// disk (see rewriteAskResult). Unlike the answer path there is no
+	// continuation Step, so this single-row rewrite is the only persist
+	// needed — every other row is unchanged.
+	h.rewriteAskResult(sessID, working, askIdx)
+	as.messages = working
+
+	// Tell every watcher the dialog can be dismissed NOW. The request_id lets a
+	// client that shows more than one question round drop only this one.
+	h.broadcastEvent(SSEEvent{
+		SessionID: sessID,
+		Event:     "question_resolved",
+		Data:      map[string]string{"request_id": req.RequestID},
+	})
+	// Mirror the updated transcript so the chat replaces the pending sentinel
+	// with the dismissal result instead of leaving the raw prompt on screen.
+	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
+
+	writeJSON(w, http.StatusOK, ChatResponse{SessionID: sessID, Model: as.model})
+}
+
 // HandleAnswerQuestion resolves a pending `question` prompt raised by the agent
 // and continues the turn. Body: {request_id, session_id?, answers}. It mirrors
 // the TUI answer path (submitQuestionAnswers): inject the selected answers as

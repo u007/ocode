@@ -39,11 +39,11 @@ describe("syntax highlighting", () => {
     expect(container.querySelector('span[style*="color"]')).toBeNull();
   });
 
-  it("colors tool command json and bash output", async () => {
+  it("colors tool command json", async () => {
     const { container } = render(
       <ToolBlock
-        tool="bash"
-        command={'{"command":"ls -la"}'}
+        tool="grep"
+        command={'{"pattern":"ls -la"}'}
         output={"$ ls -la\ntotal 0"}
       />,
     );
@@ -75,7 +75,7 @@ describe("syntax highlighting", () => {
 
   it("falls back to plaintext with mark when the find bar is active", async () => {
     render(
-      <ToolBlock tool="bash" command={'{"command":"ls"}'} output="hello" highlight="ls" />,
+      <ToolBlock tool="grep" command={'{"pattern":"ls"}'} output="hello" highlight="ls" />,
     );
     await waitFor(() => {
       expect(document.querySelectorAll("mark").length).toBeGreaterThan(0);

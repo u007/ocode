@@ -16,8 +16,10 @@ import { useBrowserStore, browserActions, type StateKey } from "./lib/browserSto
 import { loadViewStateForProject, saveViewStateForProject, type FocusedKind } from "./lib/viewPersistence";
 import { api, isRemoteSession, authToken, setAuthFailureHandler } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
+import AttentionSoundBridge from "./components/common/AttentionSoundBridge";
 import RemoteReconnect from "./components/RemoteReconnect";
 import ChatPanel from "./components/Chat/ChatPanel";
+import RemoteVersionBanner from "./components/Chat/RemoteVersionBanner";
 import AgentPreview from "./components/Chat/AgentPreview";
 import AgentsPanel from "./components/Agents/AgentsPanel";
 import ChatInput, { type SlashCommandResult } from "./components/Chat/ChatInput";
@@ -158,7 +160,7 @@ function HomeApp() {
     const sessionTitle = activeTab?.title?.trim() || projectState.activeProject?.path?.split("/").pop() || "";
     document.title = sessionTitle ? "ocode - " + sessionTitle : ("ocode - " + (pkg.version || ""));
   }, [activeTabId, projectState.activeProject, tabs, projectState.tabsByProject]);
-  const { resolvePermission, pendingPermission, pendingQuestion, submitQuestionAnswers } = useChat(activeTabId);
+  const { resolvePermission, pendingPermission, pendingQuestion, submitQuestionAnswers, cancelQuestion } = useChat(activeTabId);
   // Host of the active session's project. The model dialog and the command
   // context route their session-scoped calls there so a remote session's model
   // list and context come from that host's server, never the local one.
@@ -217,6 +219,17 @@ function HomeApp() {
   // shown. Restored from per-project persistence on project switch.
   const [focusedKind, setFocusedKind] = useState<FocusedKind>("chat");
   const activeProjectPath = projectState.activeProject?.path ?? "";
+  // Every open session tab (any project) + whether the chat half of the
+  // Sessions view is actually on screen — feeds AttentionSoundBridge so a
+  // backgrounded chat can chime when it finishes / stalls / waits on a dialog.
+  const attentionTabs = useMemo(
+    () =>
+      Object.values(projectState.tabsByProject)
+        .flat()
+        .map((t) => ({ id: t.id, projectPath: t.projectPath })),
+    [projectState.tabsByProject],
+  );
+  const chatVisible = activeView === "sessions" && focusedKind === "chat";
   const { activeId: activeBrowserId, closeBrowserTab } = useBrowserTabs(activeProjectPath);
   const allBrowserTabs = useAllBrowserTabs();
   const [activatedBrowserKeys, setActivatedBrowserKeys] = useState<Set<string>>(() => new Set());
@@ -812,6 +825,7 @@ function HomeApp() {
         setImageGenConfig: (cfg) => api.setImageGenConfig(cfg),
         getDiscoveryConfig: () => api.getDiscoveryConfig(),
         setDiscoveryConfig: (cfg) => api.setDiscoveryConfig(cfg),
+        getDiscoveryStatus: (id, host) => api.getDiscoveryStatus(id, host),
         getLocalModelsConfig: () => api.getLocalModelsConfig(),
         setLocalModelsConfig: (models) => api.setLocalModelsConfig(models),
         syncLoginStart: () => api.syncLoginStart(),
@@ -819,6 +833,11 @@ function HomeApp() {
       },
       getMessages: () => getSessionSlice(chatStateRef.current, targetSessionId).messages,
       getSessionId: () => targetSessionId,
+      setDraftPermissionMode: (mode) => {
+        if (targetSessionId) {
+          dispatch({ type: "SET_SESSION_PERMISSION_MODE", sessionId: targetSessionId, mode });
+        }
+      },
       host: targetHost,
     });
 
@@ -953,6 +972,12 @@ function HomeApp() {
   return (
     <div className="flex flex-col h-screen bg-background">
       <SessionTabSync onNewTab={openBackgroundBrowserTab} />
+      <AttentionSoundBridge
+        tabs={attentionTabs}
+        activeTabId={activeTabId}
+        activeProjectPath={activeProjectPath}
+        chatVisible={chatVisible}
+      />
 
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
@@ -1195,6 +1220,9 @@ function HomeApp() {
                           key={key}
                           className={isActive ? "absolute inset-0 flex flex-col" : "absolute inset-0 hidden"}
                         >
+                          {/* Remote (SSH/WSL) server version mismatch for the
+                              active chat tab's project. One instance only. */}
+                          {isActive && <RemoteVersionBanner host={projectState.activeProject?.host} />}
                           <div className="relative flex-1 min-h-0 overflow-hidden">
                             <ChatPanel sessionId={tab.id} />
                           </div>
@@ -1476,6 +1504,7 @@ function HomeApp() {
           requestId={pendingQuestion.request_id}
           questions={pendingQuestion.questions}
           onSubmit={submitQuestionAnswers}
+          onCancel={cancelQuestion}
         />
       )}
 

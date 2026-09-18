@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RemoteHostStatusState } from "@/hooks/useRemoteHostStatus";
 import type { Project } from "@/api/types";
@@ -18,9 +18,15 @@ vi.mock("@/api/client", () => ({
 }));
 
 const mockAttach = vi.fn();
+const mockKill = vi.fn(() => Promise.resolve());
+const mockLocalTerminals = vi.fn(
+  (): { id: string; title: string; oscTitle?: string; renamed?: boolean }[] => [],
+);
 vi.mock("@/stores/terminalStore", () => ({
-  getProjectTerminals: () => ({ terminals: [], activeId: "", live: false }),
-  useTerminalState: () => ({ state: {}, attachTerminal: mockAttach }),
+  getProjectTerminals: () => ({ terminals: mockLocalTerminals(), activeId: "", live: false }),
+  terminalDisplayTitle: (t: { title: string; oscTitle?: string; renamed?: boolean }) =>
+    t.renamed ? t.title : t.oscTitle || t.title,
+  useTerminalState: () => ({ state: {}, attachTerminal: mockAttach, killTerminal: mockKill }),
 }));
 
 const sessions = [
@@ -68,6 +74,10 @@ describe("RemoteProjectStatus", () => {
   beforeEach(() => {
     mockTerminals.mockReset();
     mockAttach.mockReset();
+    mockKill.mockReset();
+    mockKill.mockReturnValue(Promise.resolve());
+    mockLocalTerminals.mockReset();
+    mockLocalTerminals.mockReturnValue([]);
     mockTerminals.mockReturnValue({
       terminals: [
         { id: "t1", title: "shell one", pid: 1, started_at: "", attached: false },
@@ -115,7 +125,7 @@ describe("RemoteProjectStatus", () => {
     expect(mockAttach).toHaveBeenCalledWith("/srv", "dev@box", "t1", "shell one");
   });
 
-  it("kills an inventory terminal through the proxy with the project header", () => {
+  it("kills an inventory terminal through the store and refreshes the inventory", async () => {
     const refresh = vi.fn();
     mockTerminals.mockReturnValue({
       terminals: [{ id: "t1", title: "shell one", pid: 1, started_at: "", attached: false }],
@@ -127,10 +137,25 @@ describe("RemoteProjectStatus", () => {
     fireEvent.click(screen.getByTestId("remote-project-status"));
     fireEvent.click(screen.getByLabelText("kill terminal t1"));
 
-    expect(authedFetchMock).toHaveBeenCalledWith(
-      `/api/remote/${encodeURIComponent("dev@box")}/api/terminal/t1`,
-      expect.objectContaining({ method: "DELETE" }),
-    );
+    // The store owns the DELETE (and removing any local tab, so the panel
+    // cannot reattach and respawn the shell); the row only triggers it.
+    expect(mockKill).toHaveBeenCalledWith("/srv", "t1", "dev@box");
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it("falls back to this window's persisted title when the host reports none", () => {
+    mockTerminals.mockReturnValue({
+      terminals: [{ id: "t9", title: "", pid: 9, started_at: "", attached: false }],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+    mockLocalTerminals.mockReturnValue([{ id: "t9", title: "Terminal 9", oscTitle: "vim foo" }]);
+    render(<RemoteProjectStatus project={project} statusState={state()} />);
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+
+    expect(screen.getByText("vim foo")).toBeTruthy();
+    expect(screen.queryByText(/Terminal t9/)).toBeNull();
   });
 
   it("shows the busy label and hides action buttons while restarting", () => {

@@ -79,13 +79,43 @@ function killTerminalShell(id: string, host?: string, projectPath?: string) {
     headers.set("X-Ocode-Project", projectPath);
     init.headers = headers;
   }
-  authedFetch(`${prefix}/api/terminal/${encodeURIComponent(id)}`, init)
+  return authedFetch(`${prefix}/api/terminal/${encodeURIComponent(id)}`, init)
     .then((res) => {
       if (!res.ok && res.status !== 404) {
         console.error(`terminal: failed to kill shell ${id}: HTTP ${res.status}`);
       }
     })
     .catch((err) => console.error(`terminal: failed to kill shell ${id}:`, err));
+}
+
+/** Removes a terminal from this window's live store, or — when the project was
+ *  never activated — from the persisted peek list. Returns false when the id
+ *  is absent either way, so a repeated close cannot fall through to a
+ *  neighbour. The persisted branch is what lets the tab strip close a terminal
+ *  that is only being *peeked* after a reload (see getProjectTerminals): the
+ *  reducer's CLOSE_TERMINAL no-ops without a live entry, which previously left
+ *  the tab on screen and its shell alive. */
+function removeTerminalLocally(
+  store: Store<TerminalStoreState>,
+  dispatch: (action: TerminalAction) => void,
+  projectPath: string,
+  id: string,
+  host?: string,
+): boolean {
+  const key = projectTerminalsKey(projectPath, host);
+  const cur = store.state.byProject[key];
+  if (cur?.live) {
+    if (!cur.terminals.some((t) => t.id === id)) return false;
+    dispatch({ type: "CLOSE_TERMINAL", projectPath, host, id });
+    return true;
+  }
+  const saved = loadProjectTerminals(projectPath, host);
+  if (!saved?.terminals.some((t) => t.id === id)) return false;
+  const terminals = saved.terminals.filter((t) => t.id !== id);
+  const activeId =
+    saved.activeId === id ? (terminals[terminals.length - 1]?.id ?? "") : saved.activeId;
+  saveProjectTerminals(projectPath, terminals, activeId, host);
+  return true;
 }
 
 function newTerminal(): TerminalInstance {
@@ -103,6 +133,25 @@ function bumpSeqPast(titles: string[]) {
   }
 }
 
+/** Restrict a project's alert map to the terminals that still exist, dropping
+ *  cleared (false) entries too. A cross-window storage sync can replace the
+ *  terminal list with a shrunken set (another window closed a terminal); an
+ *  alert keyed to a removed id has no tab to focus, so it can never be cleared
+ *  and keeps the project's attention bell lit forever. Returns undefined when
+ *  nothing survives so the entry stays shape-identical to a fresh seed. */
+function pruneAlerts(
+  alerts: Record<string, boolean> | undefined,
+  terminals: TerminalInstance[],
+): Record<string, boolean> | undefined {
+  if (!alerts) return undefined;
+  const ids = new Set(terminals.map((t) => t.id));
+  const next: Record<string, boolean> = {};
+  for (const [id, on] of Object.entries(alerts)) {
+    if (on && ids.has(id)) next[id] = true;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
 function terminalReducer(state: TerminalStoreState, action: TerminalAction): TerminalStoreState {
   const key = projectTerminalsKey(action.projectPath, action.host);
   switch (action.type) {
@@ -118,8 +167,9 @@ function terminalReducer(state: TerminalStoreState, action: TerminalAction): Ter
             path: action.projectPath,
             host: action.host,
             // Keep any in-flight alerts across the (re)seed so a background
-            // badge isn't wiped by an activate()/cross-window sync.
-            alerts: cur?.alerts,
+            // badge isn't wiped by an activate()/cross-window sync, but only
+            // for terminals that survived (see pruneAlerts).
+            alerts: pruneAlerts(cur?.alerts, action.terminals),
           },
         },
       };
@@ -224,6 +274,11 @@ interface TerminalContextType {
    *  when that terminal is not currently open in this window's live state, so a
    *  repeated close of an already-removed terminal does not fall through. */
   closeTerminal: (projectPath: string, id: string, host?: string) => boolean;
+  /** Kills a terminal on the host even when this window has no live tab for
+   *  it (the sidebar inventory's kill X). Removes any local tab/persisted
+   *  entry first — so the panel cannot reattach and respawn the shell after
+   *  the DELETE — then resolves once the DELETE has been sent. */
+  killTerminal: (projectPath: string, id: string, host?: string) => Promise<void>;
   /** Ensures the project is live, then sets its active id (a terminal id or
    *  PROCESSES_TAB_ID). */
   setActiveId: (projectPath: string, id: string, host?: string) => void;
@@ -289,19 +344,30 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     [store, dispatch],
   );
 
-  // Returns true only if a live terminal with that id actually existed and was
-  // removed. Reading `store.state` (not the captured `state`) keeps the check
-  // correct within a single tick — e.g. two synchronous closeActiveTerminal()
-  // calls: the first removes the terminal and returns true; the second sees it
-  // already gone in live state and returns false instead of removing a
-  // neighbour or double-firing.
+  // Returns true only if a terminal with that id actually existed (live or
+  // peeked) and was removed. Reading `store.state` (not the captured `state`)
+  // keeps the check correct within a single tick — e.g. two synchronous
+  // closeActiveTerminal() calls: the first removes the terminal and returns
+  // true; the second sees it already gone and returns false instead of
+  // removing a neighbour or double-firing.
   const closeTerminal = useCallback(
     (projectPath: string, id: string, host?: string): boolean => {
-      const cur = store.state.byProject[projectTerminalsKey(projectPath, host)];
-      if (!cur?.live || !cur.terminals.some((t) => t.id === id)) return false;
-      dispatch({ type: "CLOSE_TERMINAL", projectPath, host, id });
-      killTerminalShell(id, host, projectPath);
+      if (!removeTerminalLocally(store, dispatch, projectPath, id, host)) return false;
+      void killTerminalShell(id, host, projectPath);
       return true;
+    },
+    [store, dispatch],
+  );
+
+  // Kills a terminal that may not be open in this window at all — the sidebar
+  // inventory's kill X. Removes any local tab (live or peeked) first so the
+  // panel cannot reattach to the id and respawn the shell right after the
+  // DELETE, then awaits the DELETE so the caller can refresh the inventory
+  // once the host has actually dropped the session.
+  const killTerminal = useCallback(
+    async (projectPath: string, id: string, host?: string): Promise<void> => {
+      removeTerminalLocally(store, dispatch, projectPath, id, host);
+      await killTerminalShell(id, host, projectPath);
     },
     [store, dispatch],
   );
@@ -427,7 +493,7 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
   }, [store, dispatch]);
 
   return (
-    <TerminalContext.Provider value={{ state, activate, openTerminal, closeTerminal, setActiveId, renameTerminal, setOscTitle, markAlerted, clearAlert, attachTerminal }}>
+    <TerminalContext.Provider value={{ state, activate, openTerminal, closeTerminal, killTerminal, setActiveId, renameTerminal, setOscTitle, markAlerted, clearAlert, attachTerminal }}>
       {children}
     </TerminalContext.Provider>
   );

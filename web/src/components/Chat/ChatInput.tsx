@@ -87,7 +87,10 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // agent would otherwise answer msg2 first, then re-engage with the shell
   // output of msg1, producing confusing turn ordering.
   const [shellInFlight, setShellInFlight] = useState(false);
-  const [queueCount, setQueueCount] = useState(0);
+  // Full queue snapshot (not just a count) so the composer can render the
+  // actual queued message text, matching the TUI's renderQueueRow.
+  const [queuedItems, setQueuedItems] = useState<QueuedItem[]>([]);
+  const queueCount = queuedItems.length;
   const compaction = useCompactionState(sessionTabId);
   const compacting = compaction?.status === "active";
   const drainingRef = useRef(new Set<string | null | undefined>());
@@ -140,7 +143,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // whether the active tab is "completely empty").
   useEffect(() => {
     setInput(getDraft(sessionTabId));
-    setQueueCount(getQueue(sessionTabId).length);
+    setQueuedItems([...getQueue(sessionTabId)]);
 
     // A queue entry can be removed outside this component: sessionEvents drops
     // a dispatched (injected-while-streaming) entry when the server's
@@ -151,7 +154,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     const onQueueChanged = (e: Event) => {
       const ce = e as CustomEvent<QueueChangedDetail>;
       if (!ce.detail || ce.detail.tabId !== sessionTabId) return;
-      setQueueCount(getQueue(sessionTabId).length);
+      setQueuedItems([...getQueue(sessionTabId)]);
     };
     window.addEventListener(QUEUE_CHANGED_EVENT, onQueueChanged as EventListener);
 
@@ -297,7 +300,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     // A pending debounce must not send into a compaction begun elsewhere.
     if (getCompactionState(sessionTabId)?.status === "active") {
       pushQueued(sessionTabId, { kind: "message", text: combined });
-      setQueueCount(getQueue(sessionTabId).length);
+      setQueuedItems([...getQueue(sessionTabId)]);
       return true;
     }
     const accepted = await sendMessage(combined);
@@ -332,14 +335,14 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         if (!mountedRef.current || sessionRef.current !== sessionTabId ||
             workBlockedRef.current || getCompactionState(sessionTabId)?.status === "active") break;
         const item = shiftUndispatched(sessionTabId);
-        setQueueCount(getQueue(sessionTabId).length);
+        setQueuedItems([...getQueue(sessionTabId)]);
         if (!item) break;
         const outcome = item.kind === "command"
           ? await dispatchCommand(item.text)
           : { startedTurn: true, accepted: await sendMessage(item.text) };
         if (!outcome.accepted) {
           unshiftQueued(sessionTabId, item);
-          setQueueCount(getQueue(sessionTabId).length);
+          setQueuedItems([...getQueue(sessionTabId)]);
           break;
         }
         if (outcome.startedTurn) break;
@@ -476,13 +479,13 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           // Keep submission order: the command waits behind the consolidated
           // chat turn rather than overtaking it.
           pushQueued(sessionTabId, { kind: "command", text: trimmed });
-          setQueueCount(getQueue(sessionTabId).length);
+          setQueuedItems([...getQueue(sessionTabId)]);
           await flushDelayedMessages();
           return;
         }
         if (effectiveBusy || drainingRef.current.has(sessionTabId) || getCompactionState(sessionTabId)?.status === "active") {
           pushQueued(sessionTabId, { kind: "command", text: trimmed });
-          setQueueCount(getQueue(sessionTabId).length);
+          setQueuedItems([...getQueue(sessionTabId)]);
           return;
         }
         const pending = dispatchCommand(trimmed);
@@ -535,7 +538,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         // Local barriers: queue without injecting into a paused/compacting
         // session or overtaking the command currently owned by the drain.
         pushQueued(sessionTabId, { kind: "message", text: finalMessage });
-        setQueueCount(getQueue(sessionTabId).length);
+        setQueuedItems([...getQueue(sessionTabId)]);
         return;
       }
       if (isStreaming) {
@@ -549,7 +552,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         // never sent a second time.
         const item: QueuedItem = { kind: "message", text: finalMessage, dispatched: true };
         pushQueued(sessionTabId, item);
-        setQueueCount(getQueue(sessionTabId).length);
+        setQueuedItems([...getQueue(sessionTabId)]);
         const ok = await sendMessage(finalMessage);
         if (!ok) {
           // Submit was rejected (network/validation) — the message never reached
@@ -557,7 +560,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           // drain backstop silently skip it. The error is already surfaced in the
           // store for the user to retry.
           removeQueuedItem(sessionTabId, item);
-          setQueueCount(getQueue(sessionTabId).length);
+          setQueuedItems([...getQueue(sessionTabId)]);
         }
         return;
       }
@@ -565,7 +568,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         // Shell command in flight, no agent turn running yet — nothing to
         // inject into, so queue as before until it frees up.
         pushQueued(sessionTabId, { kind: "message", text: finalMessage });
-        setQueueCount(getQueue(sessionTabId).length);
+        setQueuedItems([...getQueue(sessionTabId)]);
         return;
       }
       scheduleDelayedMessage(finalMessage);
@@ -591,7 +594,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const restoreLastQueued = () => {
     const item = popLastQueued(sessionTabId);
     if (!item) return false;
-    setQueueCount(getQueue(sessionTabId).length);
+    setQueuedItems([...getQueue(sessionTabId)]);
     updateDraft(item.text);
     return true;
   };
@@ -735,7 +738,18 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       <CompactionStatus sessionId={sessionTabId} queued={getQueue(sessionTabId).some((item) => !item.dispatched && item.kind === "command" && isCompactCommand(item.text))} />
       {queueCount > 0 && (
         <div className="text-xs text-muted-foreground mb-1">
-          {queueCount} queued — press ↑ in an empty box to edit the last one
+          <div>{queueCount} queued — press ↑ in an empty box to edit the last one</div>
+          {/* Show each queued item's full text (no truncation) so the user can
+              see exactly what will be sent, mirroring the TUI's queue row. The
+              list scrolls once it gets tall, so it can't swallow the transcript. */}
+          <ul className="mt-1 max-h-40 space-y-0.5 overflow-y-auto pr-1">
+            {queuedItems.map((item, idx) => (
+              <li key={`${idx}:${item.text}`} className="flex gap-1.5">
+                <span className="shrink-0 text-muted-foreground/60">{idx + 1}.</span>
+                <span className="whitespace-pre-wrap break-words text-foreground/90">{item.text}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       {delayedCount > 0 && (

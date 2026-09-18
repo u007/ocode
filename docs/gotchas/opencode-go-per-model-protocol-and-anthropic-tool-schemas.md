@@ -1,15 +1,18 @@
 ---
 type: Gotcha
 title: opencode-go per-model protocol routing & Anthropic tool schema flatness
-description: 'Two ocode bugs fixed 2026-09-17: opencode-go per-model routing by provider.npm, and flat tool Definition() shape required by chatAnthropic'
-tags:
-  - gotcha
-  - opencode-go
-  - anthropic
-  - tool-schema
-  - models-registry
-timestamp: 2026-09-17T03:44:49Z
+description: 'Two ocode bugs fixed 2026-09-17: opencode-go per-model routing by provider.npm, flat tool Definition() shape for chatAnthropic; 2026-09-18: HTTP 500 retried as transient with routing caveat.'
+tags: []
+timestamp: 2026-09-18T12:22:29Z
 ---
+# opencode-go per-model protocol routing & Anthropic tool schema flatness
+
+**Type:** Gotcha  
+**Description:** Two ocode bugs fixed 2026-09-17: opencode-go per-model routing by provider.npm, and flat tool Definition() shape required by chatAnthropic  
+**Tags:** gotcha, opencode-go, anthropic, tool-schema, models-registry  
+
+---
+
 ## opencode-go is per-model routed, not per-provider
 
 The ocode transport for `opencode-go` routes each model to a different upstream protocol based on the model's `provider.npm` annotation in the models.dev registry. The canonical source of truth is models.dev's `provider.npm` field — upstream OpenCode itself routes on `api.package` in `packages/core/src/session/runner/model.ts`.
@@ -64,4 +67,18 @@ When adding a new built-in tool, always return `{name, description, parameters}`
 
 ---
 
-**Cite:** `internal/agent/client.go` (`usesAnthropicMessagesAPI`, `chatAnthropic`), `internal/agent/models_registry.go` (`modelEntry`, `ModelAPIPackageFromRegistry`), `internal/tool/preview.go`, `internal/tool/tool_test.go`, CHANGES.md entry "2026-09-17 — Union Alpha (opencode-go) works; Anthropic tool schemas fixed"
+## 2026-09-18 — HTTP 500 now retried (transient server error)
+
+`isServerUnavailableError` in `internal/agent/client.go` now treats HTTP 500 (`StatusInternalServerError`) the same as 502/503/504: retried with the standard budget (`llmMaxRetries` = 3 attempts, `(attempt+1) × llmRetryBaseDelay` backoff). Previously 500 failed fast after a single attempt.
+
+**Rationale.** Providers (opencode-go in particular) return a generic 500 "Internal server error" for transient upstream faults; hard-failing the turn on the first one is worse than retrying. Retrying a *deterministic* 500 (like the protocol-routing 500 described above) is harmless — it just spends the retry budget and surfaces the same error.
+
+**Caveat — routing 500 vs transient 500 are indistinguishable from the status code alone.** A 500 with the Anthropic envelope body (`{"type":"error","error":{"type":"invalid_request_error",...}}`) from a mis-routed opencode-go model is deterministic: the upstream knows the model ID but was posted to the wrong endpoint. Retrying it three times will not make it succeed — the routing fix in `usesAnthropicMessagesAPI` remains the load-bearing correction. A persistent 500 that does not resolve after retries therefore still points at a routing or protocol mismatch, not a transient fault.
+
+The delta-emitted gate is unchanged: a 500 after partial streamed deltas still does not retry (duplicate-transcript protection), except for empty-response errors.
+
+**Tests:** `TestChatRetriesTransientServerStatusCodes` (now includes 500), `TestChat500UsesUsualMaxRetries` (pins 4 attempts total on persistent 500), `TestProviderStatusErrorClassification` (500 ⇒ server-unavailable true), `TestStatusErrorBodyTextDoesNotCauseRetry` (switched to 400).
+
+---
+
+**Cite:** `internal/agent/client.go` (`usesAnthropicMessagesAPI`, `chatAnthropic`, `isServerUnavailableError`), `internal/agent/models_registry.go` (`modelEntry`, `ModelAPIPackageFromRegistry`), `internal/tool/preview.go`, `internal/tool/tool_test.go`, CHANGES.md entry "2026-09-17 — Union Alpha (opencode-go) works; Anthropic tool schemas fixed", `internal/agent/agent.go` (`ChatWithContext` retry loop, auto-permission judge loop)

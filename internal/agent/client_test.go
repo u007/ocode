@@ -1310,8 +1310,8 @@ func TestChatRetries503ThenSucceeds(t *testing.T) {
 	}
 }
 
-func TestChatRetriesGatewayStatusCodes(t *testing.T) {
-	for _, code := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+func TestChatRetriesTransientServerStatusCodes(t *testing.T) {
+	for _, code := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
 		t.Run(http.StatusText(code), func(t *testing.T) {
 			var calls int32
 			stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -1333,36 +1333,41 @@ func TestChatRetriesGatewayStatusCodes(t *testing.T) {
 	}
 }
 
-func TestChatFailsFastOn500(t *testing.T) {
+// TestChat500UsesUsualMaxRetries pins that a provider 500 is retried with the
+// same budget as other transient server errors (llmMaxRetries + 1 attempts)
+// rather than hard-failing the turn on the first response.
+func TestChat500UsesUsualMaxRetries(t *testing.T) {
 	var calls int32
 	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
 		atomic.AddInt32(&calls, 1)
-		return statusResponse(http.StatusInternalServerError, `{"error":{"message":"boom"}}`), nil
+		return statusResponse(http.StatusInternalServerError,
+			`{"type":"error","error":{"type":"error","message":"Internal server error"}}`), nil
 	}))
 
-	client := &GenericClient{Provider: "opencode", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	client := &GenericClient{Provider: "opencode-go", Model: "gpt-test", BaseURL: "https://example.test/v1"}
 	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
 	if err == nil {
 		t.Fatal("expected failure")
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("expected fail-fast after 1 attempt for non-gateway 5xx, got %d calls", got)
+	if got := atomic.LoadInt32(&calls); got != int32(llmMaxRetries+1) {
+		t.Fatalf("expected %d attempts (usual max retry), got %d", llmMaxRetries+1, got)
 	}
-	if !strings.Contains(err.Error(), "llm request failed after 1 attempt(s)") ||
-		!strings.Contains(err.Error(), "opencode error (500)") {
+	if !strings.Contains(err.Error(), fmt.Sprintf("llm request failed after %d attempt(s)", llmMaxRetries+1)) ||
+		!strings.Contains(err.Error(), "opencode-go error (500)") {
 		t.Fatalf("unexpected error format: %v", err)
 	}
 }
 
 func TestStatusErrorBodyTextDoesNotCauseRetry(t *testing.T) {
-	// Deliberate behavior change pinned here: typed provider status errors are
-	// classified purely by HTTP code. A 500 whose BODY text contains
+	// Deliberate behavior pinned here: typed provider status errors are
+	// classified purely by HTTP code. A 400 whose BODY text contains
 	// "timeout"/"eof" must NOT become retryable via the legacy substring
-	// checks (it silently was before the typed error existed).
+	// checks (it silently was before the typed error existed). 400 is used
+	// because 500 is now retryable by code (see TestChat500UsesUsualMaxRetries).
 	var calls int32
 	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
 		atomic.AddInt32(&calls, 1)
-		return statusResponse(http.StatusInternalServerError, `upstream timeout occurred while reading EOF`), nil
+		return statusResponse(http.StatusBadRequest, `upstream timeout occurred while reading EOF`), nil
 	}))
 
 	client := &GenericClient{Provider: "opencode", Model: "gpt-test", BaseURL: "https://example.test/v1"}
@@ -1374,8 +1379,8 @@ func TestStatusErrorBodyTextDoesNotCauseRetry(t *testing.T) {
 		t.Fatalf("body text must not influence status-error classification; expected 1 call, got %d", got)
 	}
 	var se *providerStatusError
-	if !errors.As(err, &se) || se.Code != http.StatusInternalServerError {
-		t.Fatalf("expected wrapped *providerStatusError with code 500, got %v", err)
+	if !errors.As(err, &se) || se.Code != http.StatusBadRequest {
+		t.Fatalf("expected wrapped *providerStatusError with code 400, got %v", err)
 	}
 }
 
@@ -1482,7 +1487,7 @@ func TestProviderStatusErrorClassification(t *testing.T) {
 		{http.StatusBadRequest, false, false},
 		{http.StatusUnauthorized, false, false},
 		{http.StatusTooManyRequests, false, true},
-		{http.StatusInternalServerError, false, false},
+		{http.StatusInternalServerError, true, false},
 		{http.StatusBadGateway, true, false},
 		{http.StatusServiceUnavailable, true, false},
 		{http.StatusGatewayTimeout, true, false},

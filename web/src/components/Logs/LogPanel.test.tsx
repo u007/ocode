@@ -230,4 +230,152 @@ describe("LogPanel scroll behavior", () => {
     emitLog("after enable");
     expect(scroller.scrollTop).toBe(1000);
   });
+
+  it("locks synchronously on scroll-up, before the deferred check runs", async () => {
+    // Hold rAF so the deferred at-bottom recompute cannot run yet — this is the
+    // real-browser ordering where a log envelope can land in the same frame as
+    // the scroll-up.
+    const pending: Array<() => void> = [];
+    vi.stubGlobal("requestAnimationFrame", (cb: () => void) => {
+      pending.push(cb);
+      return pending.length;
+    });
+    const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
+    await act(async () => {});
+    const scroller = getScroller(container);
+    makeScrollable(scroller, 1000, 100);
+
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />));
+    act(() => pending.splice(0).forEach((cb) => cb())); // flush the tab-open rAF
+    expect(scroller.scrollTop).toBe(1000);
+
+    // User scrolls up; the deferred check is still pending. Pre-fix, autoScroll
+    // stayed true until that rAF ran, so a log arriving first re-pinned them.
+    scroller.scrollTop = 400;
+    fireEvent.scroll(scroller);
+    expect(screen.getByTitle("Enable auto-scroll")).toBeInTheDocument();
+
+    act(() => pending.splice(0).forEach((cb) => cb()));
+    expect(screen.getByTitle("Enable auto-scroll")).toBeInTheDocument();
+  });
+
+  it("re-arms auto-scroll when the log list is reset (clear)", async () => {
+    const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
+    await act(async () => {});
+    const scroller = getScroller(container);
+    makeScrollable(scroller, 1000, 100);
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />));
+    emitLog("one");
+    emitLog("two");
+
+    // Lock the reader away from the bottom.
+    scroller.scrollTop = 400;
+    fireEvent.scroll(scroller);
+    expect(screen.getByTitle("Enable auto-scroll")).toBeInTheDocument();
+
+    // Clearing resets the list — the old position no longer means anything.
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    try {
+      fireEvent.click(screen.getByTitle("Clear logs"));
+      await act(async () => {});
+      expect(screen.getByTitle("Disable auto-scroll")).toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it("re-arms auto-scroll once the content stops overflowing", async () => {
+    const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
+    await act(async () => {});
+    const scroller = getScroller(container);
+    const { setScrollHeight } = makeScrollable(scroller, 1000, 100);
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />));
+    emitLog("one");
+
+    scroller.scrollTop = 400;
+    fireEvent.scroll(scroller);
+    expect(screen.getByTitle("Enable auto-scroll")).toBeInTheDocument();
+
+    // Content shrinks to fit the viewport: no scrollbar, so there is nothing to
+    // be locked away from and auto-scroll re-arms.
+    setScrollHeight(100);
+    emitLog("two");
+    expect(screen.getByTitle("Disable auto-scroll")).toBeInTheDocument();
+  });
+
+  it("starts a new session following the tail", async () => {
+    const { rerender, container } = render(<LogPanel active={false} sessionId="session-a" />);
+    await act(async () => {});
+    const scroller = getScroller(container);
+    makeScrollable(scroller, 1000, 100);
+    act(() => rerender(<LogPanel active={true} sessionId="session-a" />));
+    emitLog("one");
+
+    scroller.scrollTop = 400;
+    fireEvent.scroll(scroller);
+    expect(screen.getByTitle("Enable auto-scroll")).toBeInTheDocument();
+
+    // A different session must not inherit the previous read lock.
+    act(() => rerender(<LogPanel active={true} sessionId="session-b" />));
+    await act(async () => {});
+    expect(screen.getByTitle("Disable auto-scroll")).toBeInTheDocument();
+  });
+
+  it("keeps an explicit toolbar disable across a log-list reset (clear)", async () => {
+    const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
+    await act(async () => {});
+    const scroller = getScroller(container);
+    makeScrollable(scroller, 1000, 100);
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />));
+    emitLog("one");
+    emitLog("two");
+
+    // Explicit toolbar disable — distinct from the scroll-up auto-lock.
+    fireEvent.click(screen.getByTitle("Disable auto-scroll"));
+    expect(screen.getByTitle("Enable auto-scroll")).toBeInTheDocument();
+
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    try {
+      fireEvent.click(screen.getByTitle("Clear logs"));
+      await act(async () => {});
+      // An explicit choice outlives the reset it would otherwise be re-armed by.
+      expect(screen.getByTitle("Enable auto-scroll")).toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it("keeps an explicit toolbar disable across a no-scrollbar shrink", async () => {
+    const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
+    await act(async () => {});
+    const scroller = getScroller(container);
+    const { setScrollHeight } = makeScrollable(scroller, 1000, 100);
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />));
+    emitLog("one");
+
+    fireEvent.click(screen.getByTitle("Disable auto-scroll"));
+    expect(screen.getByTitle("Enable auto-scroll")).toBeInTheDocument();
+
+    // Content shrinks to fit — the no-scrollbar reset must not override the
+    // explicit disable.
+    setScrollHeight(100);
+    emitLog("two");
+    expect(screen.getByTitle("Enable auto-scroll")).toBeInTheDocument();
+  });
+
+  it("keeps an explicit toolbar disable across a session change", async () => {
+    const { rerender, container } = render(<LogPanel active={false} sessionId="session-a" />);
+    await act(async () => {});
+    const scroller = getScroller(container);
+    makeScrollable(scroller, 1000, 100);
+    act(() => rerender(<LogPanel active={true} sessionId="session-a" />));
+    emitLog("one");
+
+    fireEvent.click(screen.getByTitle("Disable auto-scroll"));
+    expect(screen.getByTitle("Enable auto-scroll")).toBeInTheDocument();
+
+    act(() => rerender(<LogPanel active={true} sessionId="session-b" />));
+    await act(async () => {});
+    expect(screen.getByTitle("Enable auto-scroll")).toBeInTheDocument();
+  });
 });

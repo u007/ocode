@@ -294,6 +294,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/sessions/{id}/title", s.authMiddleware(s.handleSetSessionTitle))
 	s.mux.HandleFunc("POST /api/sessions/{id}/title/generate", s.authMiddleware(s.handleGenerateSessionTitle))
 	s.mux.HandleFunc("GET /api/sessions/{id}/context", s.authMiddleware(s.handleSessionContext))
+	s.mux.HandleFunc("GET /api/sessions/{id}/discovery", s.authMiddleware(s.handleSessionDiscovery))
 	s.mux.HandleFunc("POST /api/sessions/{id}/truncate", s.authMiddleware(s.handler.HandleTruncateSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/cancel", s.authMiddleware(s.handleCancelSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/close", s.authMiddleware(s.handleCloseSession))
@@ -433,6 +434,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/permissions", s.authMiddleware(s.handleSetPermission))
 	s.mux.HandleFunc("POST /api/permissions/bash-rule", s.authMiddleware(s.handleSetBashRule))
 	s.mux.HandleFunc("POST /api/questions", s.authMiddleware(s.handleAnswerQuestion))
+	s.mux.HandleFunc("POST /api/questions/cancel", s.authMiddleware(s.handleDismissQuestion))
 	s.mux.HandleFunc("POST /api/permissions/resolve", s.authMiddleware(s.handleResolvePermission))
 	s.mux.HandleFunc("GET /api/permissions/yolo", s.authMiddleware(s.handleGetYolo))
 	s.mux.HandleFunc("PUT /api/permissions/yolo", s.authMiddleware(s.handleSetYolo))
@@ -1888,6 +1890,9 @@ func (s *Server) handleGenerateSessionTitle(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSessionContext(w, r, r.PathValue("id"))
 }
+func (s *Server) handleSessionDiscovery(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSessionDiscovery(w, r, r.PathValue("id"))
+}
 func (s *Server) handleCancelSession(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleCancelSession(w, r, r.PathValue("id"))
 }
@@ -2218,6 +2223,9 @@ func (s *Server) handleSetPermissionMode(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleAnswerQuestion(w, r)
 }
+func (s *Server) handleDismissQuestion(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleDismissQuestion(w, r)
+}
 func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleResolvePermission(w, r)
 }
@@ -2395,6 +2403,12 @@ type ChatRequest struct {
 	// WindowID binds the session to a desktop window for per-window profile
 	// isolation. First value wins; later non-empty values update the binding.
 	WindowID string `json:"windowId,omitempty"`
+	// PermissionMode optionally seeds a brand-new session's per-session live
+	// permission mode (normal|yolo|locked|sandbox). It exists so a draft
+	// ("new-*") tab's mode pick survives the first message creating the
+	// session: the web has no session id to PUT the override to yet. Ignored
+	// for an existing session (use PUT /api/permissions/mode with its id).
+	PermissionMode string `json:"permission_mode,omitempty"`
 	// Async, when set, makes the endpoint acknowledge with 202 as soon as the
 	// turn is dispatched instead of holding the HTTP connection open until the
 	// agent finishes. The web UI sets it: a browser allows only six concurrent

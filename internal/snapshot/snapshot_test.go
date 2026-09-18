@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -166,11 +167,13 @@ func TestStoreBackupAndUndoByToolCallID_RoundTrip(t *testing.T) {
 	if err := s.Backup("a.txt", "tc1"); err != nil {
 		t.Fatal(err)
 	}
-	s.RegisterWrite("a.txt", "tc1")
 
+	// Simulate the tool's write, then register it. RegisterWrite is the
+	// post-write hook and fingerprints the current on-disk content.
 	if err := os.WriteFile("a.txt", []byte("modified\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	s.RegisterWrite("a.txt", "tc1")
 
 	restored, err := s.UndoByToolCallID("tc1", 5)
 	if err != nil {
@@ -193,11 +196,10 @@ func TestStoreUndoByToolCallID_RestoresNewFileDelete(t *testing.T) {
 	if err := s.Backup("new.txt", "tc1"); err != nil {
 		t.Fatal(err)
 	}
-	s.RegisterWrite("new.txt", "tc1")
-
 	if err := os.WriteFile("new.txt", []byte("hello\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	s.RegisterWrite("new.txt", "tc1")
 
 	restored, err := s.UndoByToolCallID("tc1", 5)
 	if err != nil {
@@ -208,6 +210,140 @@ func TestStoreUndoByToolCallID_RestoresNewFileDelete(t *testing.T) {
 	}
 	if _, err := os.Stat("new.txt"); !os.IsNotExist(err) {
 		t.Fatalf("expected file deleted, stat err = %v", err)
+	}
+}
+
+func TestStoreUndoByToolCallID_RefusesWhenFileModifiedExternally(t *testing.T) {
+	s, _ := newTempStore(t)
+	if err := os.WriteFile("a.txt", []byte("original\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Backup("a.txt", "tc1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("a.txt", []byte("written\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterWrite("a.txt", "tc1")
+
+	// An editor or process outside ocode's tracked writes changes the file.
+	if err := os.WriteFile("a.txt", []byte("user edit\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.UndoByToolCallID("tc1", 5); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict, got %v", err)
+	}
+	got, readErr := os.ReadFile("a.txt")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "user edit\n" {
+		t.Fatalf("external edit was clobbered: %q", got)
+	}
+}
+
+func TestStoreUndoByToolCallID_RefusesAfterExternalDelete(t *testing.T) {
+	s, _ := newTempStore(t)
+	if err := os.WriteFile("a.txt", []byte("original\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Backup("a.txt", "tc1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("a.txt", []byte("written\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterWrite("a.txt", "tc1")
+
+	if err := os.Remove("a.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UndoByToolCallID("tc1", 5); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict for externally deleted file, got %v", err)
+	}
+}
+
+func TestStoreUndoByToolCallID_NewFileAlreadyDeletedIsNoOp(t *testing.T) {
+	s, _ := newTempStore(t)
+	if err := s.Backup("new.txt", "tc1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("new.txt", []byte("hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterWrite("new.txt", "tc1")
+
+	// The user cleaned up the file the agent created. Undo (delete) is already
+	// satisfied, so it must not be reported as a conflict.
+	if err := os.Remove("new.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UndoByToolCallID("tc1", 5); err != nil {
+		t.Fatalf("expected no-op undo, got %v", err)
+	}
+}
+
+func TestStoreUndoByToolCallID_TracksFormatterRewrite(t *testing.T) {
+	s, _ := newTempStore(t)
+	if err := os.WriteFile("a.txt", []byte("original\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Tool write.
+	if err := s.Backup("a.txt", "tc1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("a.txt", []byte("written\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterWrite("a.txt", "tc1")
+	// Formatter pass: backs up the intermediate content, rewrites, re-registers.
+	if err := s.Backup("a.txt", "tc1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("a.txt", []byte("formatted\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterWrite("a.txt", "tc1")
+
+	if _, err := s.UndoByToolCallID("tc1", 5); err != nil {
+		t.Fatalf("undo of a formatted write must succeed, got %v", err)
+	}
+	got, err := os.ReadFile("a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original\n" {
+		t.Fatalf("file = %q, want %q", got, "original\n")
+	}
+}
+
+func TestStoreUndoByToolCallID_ExternalChangeAfterFormattedWriteDetected(t *testing.T) {
+	s, _ := newTempStore(t)
+	if err := os.WriteFile("a.txt", []byte("original\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Backup("a.txt", "tc1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("a.txt", []byte("written\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterWrite("a.txt", "tc1")
+	if err := s.Backup("a.txt", "tc1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("a.txt", []byte("formatted\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterWrite("a.txt", "tc1")
+
+	// External edit after the formatter finished.
+	if err := os.WriteFile("a.txt", []byte("user edit\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UndoByToolCallID("tc1", 5); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict, got %v", err)
 	}
 }
 
@@ -266,12 +402,16 @@ func TestStoreUndoByToolCallID_ClearsCrossAgentRegistryOnSuccess(t *testing.T) {
 	if err := s.Backup("a.txt", "tc1"); err != nil {
 		t.Fatal(err)
 	}
-	s.RegisterWrite("a.txt", "tc1")
-
 	if err := os.WriteFile("a.txt", []byte("v1\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	s.RegisterWrite("a.txt", "tc1")
+
+	// Another agent writes the same file after our write.
 	if err := other.Backup("a.txt", "tc2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("a.txt", []byte("v2\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	other.RegisterWrite("a.txt", "tc2")

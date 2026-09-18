@@ -3,6 +3,8 @@ package remote
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -232,5 +234,62 @@ func TestWorkspaceDiscoverOrStartServerFlagsOutdated(t *testing.T) {
 		if strings.Contains(c, "nohup") && strings.Contains(c, "serve --remote") {
 			t.Fatalf("discoverOrStartServer launched a fresh server instead of reusing: %q", c)
 		}
+	}
+}
+
+// TestEnsureBinaryActivatesUploadedBinary is the regression test for the
+// upload-without-activation bug: ensureBinary uploaded the remote binary to
+// ~/.ocode/bin/<ver>/.ocode.partial and returned success, so the credential
+// sync Connect runs next invoked the never-installed final path and failed
+// with exit 127 ("No such file or directory"). On the web/desktop side that
+// surfaced as a 502 "remote connect failed" for every proxied request to the
+// host. ensureBinary must run the chmod+mv activation (and the --version
+// verification) after the upload, exactly like the CLI ConnectWeb path.
+func TestEnsureBinaryActivatesUploadedBinary(t *testing.T) {
+	fixture := filepath.Join(t.TempDir(), "ocode-linux-amd64")
+	if err := os.WriteFile(fixture, []byte("binary fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := prepareLocalBuildFn
+	prepareLocalBuildFn = func(goos, goarch, moduleDir string) (LocalBuild, error) {
+		return LocalBuild{Path: fixture, Reused: true}, nil
+	}
+	defer func() { prepareLocalBuildFn = prev }()
+
+	final := RemoteBinaryPath(version.Version)
+	partial := remotePartialPath(version.Version)
+	installCmd := fmt.Sprintf("chmod +x %s && mv %s %s",
+		shellQuotePath(partial), shellQuotePath(partial), shellQuotePath(final))
+	verifyCmd := shellQuotePath(final) + " --version"
+
+	ft := newFakeTransport()
+	// Binary is missing, remote is Linux/amd64, activation and verify succeed.
+	ft.execResults["test -x "+shellQuotePath(final)] = ExecResult{ExitCode: 1}
+	ft.execResults["uname -sm"] = ExecResult{Stdout: "Linux x86_64"}
+	ft.execResults[installCmd] = ExecResult{ExitCode: 0}
+	ft.execResults[verifyCmd] = ExecResult{Stdout: version.Version}
+
+	rw := &RemoteWorkspace{Transport: ft}
+	if err := rw.ensureBinary(); err != nil {
+		t.Fatalf("ensureBinary: %v", err)
+	}
+
+	if ft.copyDestPath != partial {
+		t.Errorf("upload dest = %q, want %q", ft.copyDestPath, partial)
+	}
+	ran := func(want string) bool {
+		for _, c := range ft.execCalls {
+			if c == want {
+				return true
+			}
+		}
+		return false
+	}
+	if !ran(installCmd) {
+		t.Errorf("activation command did not run; exec calls: %v", ft.execCalls)
+	}
+	if !ran(verifyCmd) {
+		t.Errorf("--version verification did not run; exec calls: %v", ft.execCalls)
 	}
 }

@@ -26,6 +26,8 @@ vi.mock("../../api/client", () => ({
     getContextModel: vi.fn(() => Promise.resolve({ model: "", enabled: false })),
     getAutoContinue: vi.fn(() => Promise.resolve({ enabled: false, model: "" })),
     setAutoContinue: vi.fn(() => Promise.resolve({ enabled: false, model: "" })),
+    getDiscoveryConfig: vi.fn(() => Promise.resolve(null)),
+    setDiscoveryConfig: vi.fn(() => Promise.resolve(null)),
     getSessionStatus: vi.fn(() => Promise.resolve({ auto_continue_enabled: true })),
   },
   apiPath: (p: string) => p,

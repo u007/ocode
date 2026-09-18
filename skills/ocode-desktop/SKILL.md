@@ -163,14 +163,24 @@ Creates `bin/ocode.app` with the standard macOS bundle layout:
 ```
 ocode.app/
 ├── Contents/
-│   ├── Info.plist          # Bundle name, identifier, icon, LSUIElement
+│   ├── Info.plist          # Bundle name, identifier, icon, version
 │   ├── MacOS/
-│   │   └── ocode-desktop   # The compiled binary
+│   │   └── ocode           # The compiled ocode-desktop binary
 │   └── Resources/
-│       └── icon.icns       # App icon
+│       ├── appicon.icns    # App icon (when build/appicon.icns exists)
+│       └── remote-binaries/<version>/   # Optional bundled remote CLIs
 ```
 
-`LSUIElement = true` means the app has no menu bar icon and no dock icon by default (it uses the system tray icon instead). The script copies the binary, generates a minimal `Info.plist`, and codesigns if a certificate is available.
+The script copies the binary, generates a minimal `Info.plist`, and (when a
+`remote-binaries/<version>` dir is passed) bundles the four cross-compiled
+remote CLIs. `CFBundleShortVersionString` is **injected at bundle time** — from
+the optional 4th argument, otherwise `internal/version/version.go` — so the
+macOS native About panel (`application.About` → `orderFrontStandardAboutPanel:`)
+always matches `ocode --version`. Never hardcode it.
+
+The app menu (`buildAppMenu`) adds the standard macOS `About ocode` role plus
+Settings/Quit; the About panel reads the plist, while Windows/Linux show a
+version-less name/description dialog.
 
 ## 9. Key Architectural Decisions & Gotchas
 

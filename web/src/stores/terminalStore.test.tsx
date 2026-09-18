@@ -16,6 +16,9 @@ function Harness({ projectPath }: { projectPath: string }) {
       <div data-testid="alerted">
         {terminals.map((t) => (t.alerted ? t.id : "")).filter(Boolean).join(",")}
       </div>
+      <div data-testid="raw-alert-count">
+        {Object.values(state.byProject[projectPath]?.alerts ?? {}).filter(Boolean).length}
+      </div>
       <button onClick={() => activate(projectPath)}>activate</button>
       <button onClick={() => openTerminal(projectPath)}>open</button>
       <button onClick={() => activeId && closeTerminal(projectPath, activeId)}>close-active</button>
@@ -144,6 +147,39 @@ describe("terminalStore", () => {
     expect(screen.getByTestId("alerted").textContent).toBe(id);
     act(() => screen.getByText("close-active").click());
     expect(screen.getByTestId("alerted").textContent).toBe("");
+  });
+
+  it("prunes alerts for terminals a cross-window sync removed", () => {
+    // Regression: SET_PROJECT_TERMINALS used to carry the whole `alerts` map
+    // over to the new terminal list, so an alert for a terminal closed in
+    // another window stayed truthy forever. The project sidebar counts every
+    // truthy entry, and no tab exists to focus, so its attention bell could
+    // never be cleared. Alerts must be scoped to the terminals that survive.
+    seedPersisted(
+      "/proj",
+      [
+        { id: "term-A", title: "A" },
+        { id: "term-B", title: "B" },
+      ],
+      "term-A",
+    );
+    render(
+      <TerminalProvider>
+        <Harness projectPath="/proj" />
+      </TerminalProvider>,
+    );
+    act(() => screen.getByText("activate").click());
+    act(() => screen.getByText("mark-term-A").click());
+    act(() => screen.getByText("mark-term-B").click());
+    expect(screen.getByTestId("raw-alert-count").textContent).toBe("2");
+    // Another window closes term-B; its storage write replaces the persisted
+    // list and fires this window's storage handler with the shrunken set.
+    seedPersisted("/proj", [{ id: "term-A", title: "A" }], "term-A");
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "ocode.ui.terminals.project.v1" }));
+    });
+    expect(screen.getByTestId("count").textContent).toBe("1");
+    expect(screen.getByTestId("raw-alert-count").textContent).toBe("1");
   });
 
   it("alert state is ephemeral and is never persisted to disk", async () => {

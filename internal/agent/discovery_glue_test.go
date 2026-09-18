@@ -715,6 +715,64 @@ func TestRunDiscoveryJudgeFailureAttachesAll(t *testing.T) {
 	}
 }
 
+// TestRunDiscoveryRankLogStatesJudgeStatus pins the observability contract: the
+// turn's single rank line must always state whether the TypeSafe judge filtered
+// it, so an operator can tell "Jev vetoed nothing" from "Jev was never
+// consulted" — the exact ambiguity that made a live discovery question
+// unanswerable from the debug log.
+func TestRunDiscoveryRankLogStatesJudgeStatus(t *testing.T) {
+	captureRankLines := func(t *testing.T) *[]string {
+		t.Helper()
+		lines := &[]string{}
+		prev := DebugAppend
+		DebugAppend = func(kind, msg string) {
+			if kind == "DISCOVERY" && strings.Contains(msg, "turn rank:") {
+				*lines = append(*lines, msg)
+			}
+		}
+		t.Cleanup(func() { DebugAppend = prev })
+		return lines
+	}
+
+	t.Run("connected and kept", func(t *testing.T) {
+		lines := captureRankLines(t)
+		a := newDiscoveryGlueAgent(t)
+		_, srv := newDiscoveryGlueJudgeServer(t, 0.99, nil, 0)
+		useJudgeFactory(t, srv)
+
+		a.RunDiscovery(discoveryGlueQuery)
+
+		if len(*lines) != 1 || !strings.Contains((*lines)[0], "judge=jev-latest kept ") {
+			t.Fatalf("rank line must name the connected judge and its kept count: %v", *lines)
+		}
+	})
+
+	t.Run("not connected", func(t *testing.T) {
+		lines := captureRankLines(t)
+		a := newDiscoveryGlueAgent(t)
+		useNonTypesafeFactory(t)
+
+		a.RunDiscovery(discoveryGlueQuery)
+
+		if len(*lines) != 1 || !strings.Contains((*lines)[0], "judge=none") {
+			t.Fatalf("rank line must say the judge was not connected: %v", *lines)
+		}
+	})
+
+	t.Run("judge error fails open", func(t *testing.T) {
+		lines := captureRankLines(t)
+		a := newDiscoveryGlueAgent(t)
+		_, srv := newDiscoveryGlueJudgeServer(t, 0.99, nil, http.StatusInternalServerError)
+		useJudgeFactory(t, srv)
+
+		a.RunDiscovery(discoveryGlueQuery)
+
+		if len(*lines) != 1 || !strings.Contains((*lines)[0], "judge=jev-latest error (fail-open)") {
+			t.Fatalf("rank line must mark a failed judge as fail-open: %v", *lines)
+		}
+	})
+}
+
 func TestRunDiscoveryVetoedDocReJudgedNextTurn(t *testing.T) {
 	a := newDiscoveryGlueAgent(t)
 	h, srv := newDiscoveryGlueJudgeServer(t, 0.99, map[string]bool{"mcp:Notion/update": true}, 0)

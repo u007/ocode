@@ -173,6 +173,23 @@ describe("ChatInput submission", () => {
     clearQueue("s1");
   });
 
+  it("renders the entire queued message text, not just a count", async () => {
+    render(<ChatInput sessionTabId="s1" />);
+    // Long single-line body: the old UI only rendered the count, and any
+    // truncation on the queued line would hide the tail of this text.
+    const long =
+      "please summarize the entire transcript including every tool call and " +
+      "the final assistant answer without omitting any detail whatsoever";
+    pushQueued("s1", { kind: "message", text: long });
+    await act(async () => {
+      dispatchQueueChanged("s1");
+    });
+    expect(screen.getByText(/1 queued/)).toBeTruthy();
+    // getByText fails unless the full string is present in one node's text.
+    expect(screen.getByText(long)).toBeTruthy();
+    clearQueue("s1");
+  });
+
   it("ignores queue-changed events for other tabs", async () => {
     render(<ChatInput sessionTabId="s1" />);
     pushQueued("s1", { kind: "message", text: "live", dispatched: true });

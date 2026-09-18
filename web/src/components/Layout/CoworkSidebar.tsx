@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { api, apiPath, authHeaders } from "../../api/client";
+import { api, apiPath, authHeaders, type DiscoveryConfig } from "../../api/client";
 import { useChatSelector, useChatDispatch, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { eventBus } from "../../lib/eventBus";
@@ -108,6 +108,11 @@ export default function CoworkSidebar({
   const [explorerLoading, setExplorerLoading] = useState(false);
   const [contextLoading, setContextLoading] = useState(false);
   const [autoContinueLoading, setAutoContinueLoading] = useState(false);
+  // Full discovery config (not just the enabled flag): the PUT replaces the
+  // whole block, so a sidebar toggle must round-trip embedding model/backend,
+  // pinned skills and ignore paths untouched. null until the fetch resolves.
+  const [discoveryCfg, setDiscoveryCfg] = useState<DiscoveryConfig | null>(null);
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
   // Permission-mode cycling (normal → yolo → locked → sandbox). Hoisted with
   // the other hooks: hooks must run unconditionally before any early return
   // (collapsing the sidebar returns null on desktop) or React throws
@@ -140,6 +145,11 @@ export default function CoworkSidebar({
   // work), so switching tabs shows each session's own model, not one global.
   const { tuiStatus, messages, model: sessionModel } = useChatSelector((s) =>
     getSessionSlice(s, sessionId),
+  );
+  // Draft ("new-*") tab's locally-picked permission mode. Hook lives here
+  // (before the early return below) to respect the rules of hooks.
+  const draftPermissionMode = useChatSelector(
+    (s) => getSessionSlice(s, sessionId).permissionMode,
   );
   const effectiveModel = tuiStatus?.main_model || sessionModel || "";
 
@@ -241,8 +251,12 @@ export default function CoworkSidebar({
       api.getExplorerModel().catch(() => null),
       api.getContextModel().catch(() => null),
       api.getAutoContinue().catch(() => null),
+      // Discovery is not part of the per-session TUI status snapshot, so the
+      // sidebar row seeds itself from the persisted config endpoint (same one
+      // the Settings → Discovery tab and /discover write).
+      api.getDiscoveryConfig().catch(() => null),
     ])
-      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, advisorRes, advisorEnabledRes, smallRes, explorerRes, contextRes, autoContinueRes]) => {
+      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, advisorRes, advisorEnabledRes, smallRes, explorerRes, contextRes, autoContinueRes, discoveryRes]) => {
         setConfig({
           model: modelRes?.model || "",
           thinkingBudget: thinkingRes?.budget,
@@ -263,6 +277,12 @@ export default function CoworkSidebar({
           autoContinueModel: autoContinueRes?.model || "",
           autoContinueEnabled: autoContinueRes?.enabled,
         });
+        // Guard against partially-mocked / malformed responses (the boolean
+        // check requires a real payload) so the row never renders a bogus
+        // ○off for a config the server never returned.
+        if (discoveryRes && typeof discoveryRes.enabled === "boolean") {
+          setDiscoveryCfg(discoveryRes);
+        }
       })
       .catch(console.error);
   }, []);
@@ -316,31 +336,47 @@ export default function CoworkSidebar({
     (s) => activeRoot === "" || s.root === activeRoot || (s.root === "" && activeRoot === ".")
   );
 
+  // Short discovery status shown next to ●on, mirroring the TUI sidebar row:
+  // local backend → server state, http backend → embedding model, else "ready".
+  const discoveryStatus = (() => {
+    if (!discoveryCfg) return "";
+    if (discoveryCfg.embedding_backend === "local") {
+      return discoveryCfg.local_model_status || "ready";
+    }
+    return discoveryCfg.embedding_model || "ready";
+  })();
+
   // On mobile the sidebar is always mounted (so it can slide); when closed it
   // sits off-screen. On desktop it is fully removed when closed so the chat
   // column reclaims the space (push layout).
   if (!isOpen && !isMobile) return null;
 
-  // Current live permission mode, defaulting to the config-style yolo hint.
-  const currentMode = tuiStatus?.permission_mode || (config.yolo ? "yolo" : "normal");
+  // Current permission mode for THIS tab. A real session's own status snapshot
+  // is authoritative; a draft ("new-*") tab has none yet, so fall back to its
+  // locally-picked mode, then the process default. Never read another tab's
+  // mode: that is what made yolo look global.
+  const isDraftTab = !!sessionId && sessionId.startsWith("new-");
+  const currentMode =
+    tuiStatus?.permission_mode ||
+    draftPermissionMode ||
+    (config.yolo ? "yolo" : "normal");
 
-  // Cycle permission mode: normal → yolo → locked → sandbox → normal, via the
-  // dedicated mode endpoint (session-scoped, never persisted).
+  // Cycle permission mode for this tab only: normal → yolo → locked → sandbox
+  // → normal. A real session PUTs the scoped override; a draft tab has no
+  // server session yet, so the pick is held locally and sent with the first
+  // message (api.chat's permission_mode), which persists it at creation.
   const cycleMode = async () => {
     const order = ["normal", "yolo", "locked", "sandbox"];
     const idx = order.indexOf(currentMode);
     const next = order[(idx + 1) % order.length];
     setModeLoading(true);
     try {
-      const res = await fetch(apiPath("/api/permissions/mode"), {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ mode: next }),
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => null);
-        console.error("set permission mode failed", j);
-      } else if (sessionId) {
+      if (!sessionId || isDraftTab) {
+        if (sessionId) {
+          dispatch({ type: "SET_SESSION_PERMISSION_MODE", sessionId, mode: next });
+        }
+      } else {
+        await api.setPermissionMode(next, sessionId);
         const status = await api.getSessionStatus(sessionId);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
       }
@@ -468,6 +504,24 @@ export default function CoworkSidebar({
       console.error("toggle auto-continue error", e);
     } finally {
       setAutoContinueLoading(false);
+    }
+  };
+
+  // Discovery on/off: PUT the WHOLE discovery config back with only `enabled`
+  // flipped, so the embedding model/backend, pinned skills and ignore paths
+  // survive. Mirrors the TUI sidebar's `discover:` row, which writes the same
+  // persisted flag (config.SaveDiscoveryEnabled).
+  const toggleDiscovery = async () => {
+    if (!discoveryCfg) return;
+    const next: DiscoveryConfig = { ...discoveryCfg, enabled: !discoveryCfg.enabled };
+    setDiscoveryLoading(true);
+    try {
+      const saved = await api.setDiscoveryConfig(next);
+      setDiscoveryCfg(saved && typeof saved.enabled === "boolean" ? saved : next);
+    } catch (e) {
+      console.error("toggle discovery error", e);
+    } finally {
+      setDiscoveryLoading(false);
     }
   };
 
@@ -729,6 +783,34 @@ export default function CoworkSidebar({
               className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
             />
           </label>
+
+          {/* Discovery — gates retrieval-based skill/MCP discovery. Mirrors the
+              TUI sidebar's `discover: ●on/○off <status>` row (click to flip).
+              Hidden until the config fetch resolves; the whole config is PUT
+              back so embedding/ignore settings survive the toggle. */}
+          {discoveryCfg && (
+            <label
+              className="flex items-center justify-between cursor-pointer rounded px-1 py-1 hover:bg-muted"
+              title="Enable/disable retrieval-based skill and doc discovery"
+            >
+              <span className="text-xs text-muted-foreground">Discovery</span>
+              <span className="flex items-center gap-2">
+                <span
+                  className={`font-mono text-[11px] ${discoveryCfg.enabled ? "text-emerald-400" : "text-muted-foreground"}`}
+                >
+                  {discoveryCfg.enabled ? `●on ${discoveryStatus}` : "○off"}
+                </span>
+                <input
+                  type="checkbox"
+                  aria-label="Discovery enabled"
+                  checked={discoveryCfg.enabled}
+                  disabled={discoveryLoading}
+                  onChange={toggleDiscovery}
+                  className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+                />
+              </span>
+            </label>
+          )}
 
           {/* Reasoning level selector */}
           <ReasoningLevelSelector

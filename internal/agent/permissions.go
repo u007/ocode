@@ -112,6 +112,14 @@ type PermissionDecision struct {
 	// prefixes). Unlike other Deny decisions, these are not soft hints —
 	// they cannot be overridden even when auto-permission is enabled.
 	HardDeny bool
+	// DenyReason is a short, user-facing explanation of which policy produced
+	// a static Deny (e.g. a Claude Code deny rule, a user bash ban, locked
+	// mode, or a hard block). It is surfaced verbatim in the tool error so a
+	// blocked call names the offending rule instead of a generic "permission
+	// rules" message the user cannot act on. Empty when Level != PermissionDeny
+	// or when no specific rule could be identified; consumers fall back to the
+	// generic message in that case.
+	DenyReason string
 }
 
 // PermissionResponse is returned by an interactive permission callback. Level
@@ -772,12 +780,30 @@ var exfiltrationCurlMetaFlags = map[string]bool{
 	"--socks4": true,
 }
 
-// exfiltrationWgetPostFlags are wget flags that send data to a remote server.
-var exfiltrationWgetPostFlags = map[string]bool{
+// exfiltrationWgetFileFlags are wget flags whose values are FILE PATHS that get
+// read from disk and uploaded to a remote server. They are always hard-blocked
+// (the file contents — and therefore any secret in it — cannot be inspected by
+// the auto-permission judge).
+var exfiltrationWgetFileFlags = map[string]bool{
 	"--post-file": true,
+	"--body-file": true,
+}
+
+// exfiltrationWgetDataEqualsPrefixes are the "=" forms of the file-upload flags
+// above (e.g. "--post-file=secrets.txt"), which carry the path in the same token.
+var exfiltrationWgetDataEqualsPrefixes = []string{
+	"--post-file=",
+	"--body-file=",
+}
+
+// exfiltrationWgetInlineDataFlags are wget flags whose values are INLINE data
+// (--post-data/--body-data). Inline data is judgeable — the auto-permission LLM
+// inspects it for credentials before allowing — so it is NOT hard-blocked by
+// itself, mirroring curl "-d". Env-var expansion and subshells remain
+// hard-blocked, and the file-upload flags above stay hard-blocked.
+var exfiltrationWgetInlineDataFlags = map[string]bool{
 	"--post-data": true,
 	"--body-data": true,
-	"--body-file": true,
 }
 
 // containsEnvVarRef returns true if s contains a shell environment variable
@@ -911,6 +937,10 @@ func isExfiltrationRiskCurl(fields []string) bool {
 }
 
 // isExfiltrationRiskWget checks if a wget command has data exfiltration risk.
+// File-upload flags (--post-file/--body-file), -i (URLs read from a file),
+// env-var expansion, and subshells stay hard-blocked; inline --post-data/
+// --body-data is judgeable (the auto-permission LLM inspects it for secrets),
+// mirroring curl -d.
 func isExfiltrationRiskWget(fields []string) bool {
 	if len(fields) < 2 {
 		return false
@@ -920,23 +950,37 @@ func isExfiltrationRiskWget(fields []string) bool {
 		return true
 	}
 
+	// Env-var expansion in the URL/query or an inline body is
+	// exfiltration-capable, so it stays hard-blocked regardless of the flag it
+	// appears under.
+	for _, f := range fields[1:] {
+		if containsEnvVarRef(f) {
+			return true
+		}
+	}
+
 	i := 1
 	for i < len(fields) {
 		arg := fields[i]
 
-		// --post-file=<file>, --post-data=<data>, etc. (equals form)
-		if strings.HasPrefix(arg, "--post-file=") ||
-			strings.HasPrefix(arg, "--post-data=") ||
-			strings.HasPrefix(arg, "--body-data=") ||
-			strings.HasPrefix(arg, "--body-file=") {
+		// --post-file/--body-file (space form): reads a local file and uploads
+		// its contents — the file's secrets are invisible to the judge.
+		if exfiltrationWgetFileFlags[arg] {
 			return true
 		}
-
-		// --post-file <file> (space-separated form)
-		if exfiltrationWgetPostFlags[arg] {
-			if i+1 < len(fields) {
+		// Same flags in "=" form (e.g. "--post-file=secrets.txt").
+		for _, prefix := range exfiltrationWgetDataEqualsPrefixes {
+			if strings.HasPrefix(arg, prefix) {
 				return true
 			}
+		}
+
+		// --post-data/--body-data carry INLINE data: not hard-blocked on its
+		// own (the judge inspects it for secrets), only the env-var/subshell
+		// checks above apply. Consume the flag's value so a following positional
+		// is not re-examined as the data value.
+		if exfiltrationWgetInlineDataFlags[arg] && i+1 < len(fields) {
+			i++
 		}
 
 		// -i <file>: reads URLs from file
@@ -1445,7 +1489,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			exists, err := targetExists(pm, path)
 			if !exists && errors.Is(err, os.ErrNotExist) {
 				pm.emitDebug("perm", fmt.Sprintf("Decide DENY (read: target does not exist): tool=%s path=%s", toolName, path))
-				return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+				return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: fmt.Sprintf("read target does not exist: %s", path)}
 			}
 		}
 	}
@@ -1455,23 +1499,27 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			return PermissionDecision{Level: PermissionAllow}
 		}
 		pm.emitDebug("perm", fmt.Sprintf("Decide DENY (locked, not read-only): tool=%s", toolName))
-		return PermissionDecision{Level: PermissionDeny}
+		return PermissionDecision{Level: PermissionDeny, DenyReason: "locked permission mode permits read/search tools only"}
 	}
 
 	if toolName == "bash" {
 		command := bashCommand(args)
 		if isHardBlockedCommand(command) {
 			pm.emitDebug("perm", fmt.Sprintf("Decide DENY (hard-blocked): tool=bash command=%q", command))
-			return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+			return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: "hard-blocked shell command"}
 		}
 		// Claude Code settings: a matching deny is a hard block even before
 		// the dangerous-rm ask (deny > ask). Check each subcommand so
 		// compound lines like "echo hi; rm -rf /" are still caught.
 		if parsed, err := parseShellCommandLine(command); err == nil {
 			for _, cmd := range parsed {
-				if sub := rebuildCommandLine(cmd.cmdWords); sub != "" && pm.claudeIsDenied(sub) {
+				sub := rebuildCommandLine(cmd.cmdWords)
+				if sub == "" {
+					continue
+				}
+				if pat, denied := pm.claudeDenyRule(sub); denied {
 					pm.emitDebug("perm", fmt.Sprintf("Decide DENY (claude deny): tool=bash command=%q", command))
-					return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+					return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: formatClaudeDenyReason(pat)}
 				}
 			}
 		}
@@ -1537,7 +1585,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 					// `cd X && …` was never even looked at).
 					if denied, ok := pm.matchBashPrefixRule(c.cmdWords, PermissionDeny); ok {
 						pm.emitDebug("perm", fmt.Sprintf("Decide DENY (sandbox banned prefix): prefix=%s command=%q", denied, sub))
-						return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+						return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: fmt.Sprintf("user-defined bash ban %q", denied)}
 					}
 					// Destructive git subcommand families (git stash,
 					// git checkout, git reset, git clean, git restore,
@@ -1611,6 +1659,9 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			if level == PermissionAsk {
 				return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "")}
 			}
+			if level == PermissionDeny {
+				return PermissionDecision{Level: level, DenyReason: "permissions.tools.bash = deny"}
+			}
 			return PermissionDecision{Level: level}
 		}
 
@@ -1655,6 +1706,9 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 					}}
 				}
 				pm.emitDebug("perm", fmt.Sprintf("Decide %s (path pattern): tool=%s path=%s", level, toolName, path))
+				if level == PermissionDeny {
+					return PermissionDecision{Level: level, DenyReason: fmt.Sprintf("path pattern rule denies %s", path)}
+				}
 				return PermissionDecision{Level: level}
 			}
 			// Relative paths and glob patterns (non-absolute) are implicitly within workDir.
@@ -1736,6 +1790,9 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			}
 			if level, exists := pm.webfetchDomains[domain]; exists {
 				pm.emitDebug("perm", fmt.Sprintf("Decide %s (webfetch domain cached): tool=%s domain=%s", level, toolName, domain))
+				if level == PermissionDeny {
+					return PermissionDecision{Level: level, DenyReason: fmt.Sprintf("webfetch domain %q is denied", domain)}
+				}
 				return PermissionDecision{Level: level}
 			}
 			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (webfetch domain): tool=%s domain=%s", toolName, domain))
@@ -1767,6 +1824,9 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool.computer", Command: computerAction(args),
 				}}
 			}
+			if level == PermissionDeny {
+				return PermissionDecision{Level: level, DenyReason: "permissions.tools.computer = deny"}
+			}
 			return PermissionDecision{Level: level}
 		}
 	}
@@ -1777,6 +1837,9 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName}}
 	}
 	pm.emitDebug("perm", fmt.Sprintf("Decide %s (tool rule): tool=%s", level, toolName))
+	if level == PermissionDeny {
+		return PermissionDecision{Level: level, DenyReason: fmt.Sprintf("permissions.tools.%s = deny", toolName)}
+	}
 	return PermissionDecision{Level: level}
 }
 
@@ -5687,7 +5750,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	command := rebuildCommandLine(cmd.cmdWords)
 	if isHardBlockedCommand(command) {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (hard-blocked): command=%q", command))
-		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+		return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: "hard-blocked shell command"}
 	}
 
 	prefix := cmd.cmdWords[0]
@@ -5714,16 +5777,16 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// shadow an explicit deny rule.
 	if deniedPrefix, ok := pm.matchBashPrefixRule(cmd.cmdWords, PermissionDeny); ok {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (banned prefix rule): prefix=%s", deniedPrefix))
-		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+		return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: fmt.Sprintf("user-defined bash ban %q", deniedPrefix)}
 	}
 
 	// Claude Code settings: deny takes precedence over everything (mirrors
 	// Claude's deny > ask > allow evaluation order). A matching deny in
 	// .claude/settings.json or .claude/settings.local.json is a hard block
 	// that no allow rule or auto-allow can bypass.
-	if pm.claudeIsDenied(command) {
+	if pat, denied := pm.claudeDenyRule(command); denied {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (claude deny): command=%q", command))
-		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+		return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: formatClaudeDenyReason(pat)}
 	}
 
 	// Harmful operations (git revert/stash/reset/clean/checkout/restore/switch,
@@ -5783,7 +5846,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// governs every subcommand and must win over any granular allow.
 	if level, exists := pm.bashPrefixes[prefix]; exists && level == PermissionDeny {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (broad prefix rule): prefix=%s", prefix))
-		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+		return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: fmt.Sprintf("user-defined bash ban %q", prefix)}
 	}
 	// Then the granular rulePrefix (e.g. "git push"), which carries always-allow.
 	if level, exists := pm.bashPrefixes[rulePrefix]; exists {
@@ -5799,6 +5862,9 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 				return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
 			}
 			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (prefix rule): prefix=%s", level, rulePrefix))
+			if level == PermissionDeny {
+				return PermissionDecision{Level: level, DenyReason: fmt.Sprintf("user-defined bash ban %q", rulePrefix)}
+			}
 			return PermissionDecision{Level: level}
 		}
 	}
@@ -5844,6 +5910,9 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
 	}
 	pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (tool rule): prefix=%s", level, prefix))
+	if level == PermissionDeny {
+		return PermissionDecision{Level: level, DenyReason: "permissions.tools.bash = deny"}
+	}
 	return PermissionDecision{Level: level}
 }
 

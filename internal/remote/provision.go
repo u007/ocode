@@ -211,6 +211,11 @@ func InstallBinary(t Transport, ver, localPath string) error {
 	return ActivateAndVerify(t, ver)
 }
 
+// prepareLocalBuildFn is the build-resolution seam used by EnsureBinary.
+// Production always points it at PrepareLocalBuild; tests override it so the
+// provisioning flow can be exercised without a bundled CLI or a cross-compile.
+var prepareLocalBuildFn = PrepareLocalBuild
+
 // EnsureBinary is the full stage-3 flow: check for an existing install,
 // otherwise reuse-or-cross-compile and install one. Returns whether a fresh
 // install happened (false when the remote already had it).
@@ -223,7 +228,7 @@ func EnsureBinary(t Transport, moduleDir string) (installed bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	build, err := PrepareLocalBuild(goos, goarch, moduleDir)
+	build, err := prepareLocalBuildFn(goos, goarch, moduleDir)
 	if err != nil {
 		return false, err
 	}

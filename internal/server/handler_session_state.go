@@ -160,6 +160,10 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 	}
 	h.applySessionContext(&snap, id)
 	h.applyTurnTiming(&snap, id)
+	// Permission mode is per session: without this the snapshot would report
+	// the process-wide config default and a chat's yolo/sandbox toggle would
+	// look global in the sidebar again.
+	h.applySessionPermissionFields(&snap, id)
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 
 	writeJSON(w, http.StatusOK, snap)
@@ -265,6 +269,8 @@ func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 		}
 	}
 	h.applyTurnTiming(&snap, sessionID)
+	// Per-session permission mode (see applySessionPermissionFields).
+	h.applySessionPermissionFields(&snap, sessionID)
 	// Reflect the session's effective (override-or-default) model so the
 	// sidebar's Context gauge and Model row stay in sync per session.
 	snap.MainModel = h.effectiveSessionModel(sessionID)
@@ -344,6 +350,7 @@ func (h *Handler) pushSessionStatusSnapshot(id string) {
 	}
 	h.applySessionContext(&snap, id)
 	h.applyTurnTiming(&snap, id)
+	h.applySessionPermissionFields(&snap, id)
 	if snap.SessionCreatedAt == "" {
 		if entry, err := h.sessions.Resolve(id); err == nil {
 			if s, err := session.LoadForDir(entry.ProjectRoot, id); err == nil && !s.CreatedAt.IsZero() {

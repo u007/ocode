@@ -32,7 +32,9 @@ Four session-level modes, stored in `ocodeconfig.json` → `permissions.mode`:
 | `locked` | Read/search tools only. All write/edit/bash/network tools denied. |
 | `sandbox` | Bash runs without prompts, but the OS confines **writes** to the classified allowed roots (workspace/extra paths, opencode data dir, language caches, `~/.claude`, temp dirs). Write-integrity only — reads, exec, and network egress stay open. Secrets (`auth.json`, `~/.ssh`, `.env`, keys/certs) and ocode-config writes still **ask** (routed to the auto-judge when `auto` is on). Repo-metadata dirs (`.git/`, `.github/workflows/`) ask on **write only** — listing/reading them (`ls .git/`, `cat .git/config`) auto-allows, matching normal mode. Fail-closed: with no OS backend (Windows) it degrades to normal prompting. |
 
-Toggle via `Ctrl+O` / `/yolo [on|off|status]` (yolo), `/sandbox [on|off|status]` (sandbox), the TUI permission-mode cycle, or the web mode selector. All four persist to `ocodeconfig.json` — `SavePermissionModeSwitch()` writes the mode verbatim, sandbox included (there is no longer a sandbox→normal clamp on the persist path).
+Toggle via `Ctrl+O` / `/yolo [on|off|status]` (yolo), `/sandbox [on|off|status]` (sandbox), the TUI permission-mode cycle, or the web sidebar permission pill / `/sandbox` command. The **persisted default** (the mode a brand-new session starts in) lives in `ocodeconfig.json` → `permissions.mode` — `SavePermissionModeSwitch()` writes it verbatim, sandbox included (there is no longer a sandbox→normal clamp on the persist path).
+
+On the web/desktop **server** the *live* mode is **per chat session**, not per process: `PUT /api/permissions/mode` and `PUT /api/permissions/yolo` require a `session_id` (body or `?session_id=`) and apply only to that session's agent; `GET /api/permissions` / `yolo` accept the same query param, and a session-less write is `400`. The override is stored in the session transcript's metadata key `permission_mode` (via `session.UpdateMetadataForDir`, mirroring the per-session `model` override) so it survives agent eviction, resume, and server restart. `buildAgentSession` / `registerAgentSession` reapply only that session's own value, and every per-session status snapshot stamps `permission_mode` via `applySessionPermissionFields` — so toggling one chat never changes another chat or project. A draft (`new-*`) tab holds its pick locally and sends it as `permission_mode` on the first `POST /api/chat` (which persists it at creation). The TUI is single-session and unaffected; the Settings→Permissions form owns only the persisted default.
 
 ## 3. Permission levels
 
@@ -90,7 +92,7 @@ Bash commands go through a multi-layer evaluation pipeline in `Decide()`:
 - `curl` with `--config`/`--proxy`/`--socks5`/`--socks4` + `@file` or env var
 - `curl` URL containing `$ENV_VAR`
 - Any curl/wget/httpie command with `$(...)` or `` `...` `` subshell expansion
-- `wget` with `--post-file`, `--post-data`, `--body-data`, `--body-file`, `-i`
+- `wget` with `--post-file`, `--body-file`, `-i` (file reads), or `--post-data`/`--body-data` containing `$ENV_VAR` — inline `--post-data`/`--body-data` is judgeable (mirrors curl `-d`)
 - `httpie`/`http`/`https` with `file@` pattern, env var headers, or `--auth`/`-a` + env var
 - `nc`/`ncat` with host+port (no `-z` scan flag) or stdin redirect `< file`
 
@@ -138,6 +140,14 @@ Configured in `permissions.bash.prefix_modes`:
 | `read_only` (default) | Auto-allow in-root calls; persist a project-scoped in-root rule |
 | `mutating` | Auto-allow in-root calls once; do NOT persist |
 | `never_auto` | Disable auto-allow for that prefix entirely |
+
+### 5h. Claude Code settings (`.claude/settings.json`)
+
+`LoadClaudePermissions` (`claude_settings.go`) merges global `~/.claude/settings.json` with project `.claude/settings.json` + `.claude/settings.local.json`; only `permissions.allow/deny/ask` entries for `Bash(...)` are honored. **Deny wins over ask over allow**, and a deny is a `HardDeny`: it is checked per sub-command at the top of `Decide` (before dangerous-rm/harmful, YOLO, and sandbox short-circuits), so no allow rule, auto-allow, or auto-permission judge can override it.
+
+Pattern semantics: `*` matches any character sequence (including empty), so `Bash(git stash *)` matches **every** `git stash …` form — including the read-only `git stash list`/`show` that ocode's own `/ban add git stash` and `IsHarmfulBashCommand` deliberately carve out. A bare `Bash` (no pattern) denies every bash command. To ban only the mutating stash family the way ocode's carve-out does, use granular patterns (`Bash(git stash)`, `Bash(git stash -*)`, `Bash(git stash pop*)`, …) plus `allow` for `Bash(git stash list*)` / `Bash(git stash show*)`.
+
+`PermissionDecision.DenyReason` is populated by `Decide` on every static-deny path (Claude deny pattern, user bash ban prefix, locked mode, tool/path/webfetch rules, hard blocks) and rendered into the tool-error text by `denyToolMessage` (`agent.go`), so a blocked call names the offending rule instead of a generic "permission rules" message. Remote SSH projects run the agent on the host, so **the host's** `.claude/settings.json` is the one that applies — a host carrying an over-broad `Bash(git stash *)` deny blocks read-only stash inspection even when the local machine's file allows it.
 
 ## 6. Path-based permissions
 
@@ -209,6 +219,19 @@ An optional LLM-based layer that auto-approves/denies permission prompts without
 - The auto layer cannot escalate the permission mode or widen past static guardrails.
 - `allow_destructive: false` instructs the model to conservatively deny operations it cannot confidently approve.
 
+### Judge backends (chat vs TypeSafe/Jev)
+
+Two distinct code paths implement the auto-permission judge, and they do **not** share a rulebook:
+
+| Judge model | Path | Rulebook |
+|---|---|---|
+| chat model (`deepseek:...`, any OpenAI-compatible) | `askPermissionModel` (`agent.go`) | `BundledAutoPermissionPromptBody` / installed `auto-permission-prompt.md` + `permissions.auto.prompt` + `auto-permission-prompt.local.md` |
+| `typesafe/<model>` (Jev) | `askPermissionModelTypesafe` (`permission_typesafe.go`) | `typesafeJudgeInstructions` (typed choice: allow/deny + `typesafeConcerns`) |
+
+`consultPermissionModel` routes on `isTypesafeModel(modelName)`. Jev is decision-only (no chat loop, no `read_file`): the request travels as structured `state` (tool, arguments, allowed roots, banned prefixes, interpreter source) and the verdict is a typed `choice` with a confidence floor (`permissions.auto.min_confidence`, default 0.85). Consequences:
+- Editing the bundled prompt body does **not** change Jev's behaviour — update `typesafeJudgeInstructions` (and the `concern` labels) instead, and vice versa.
+- The confidence floor means Jev must reach ≥ `min_confidence` on the `allow` choice to auto-grant; a request it merely leans-allowed on falls through to the human. Rules that remove hesitation (explicit "this is ordinary and allowed") raise that confidence.
+
 ### AutoGrant persistence
 
 When the auto-permission model approves a request, Go derives a typed `AutoGrant` entry before persisting. Grants are narrow and durable:
@@ -217,7 +240,7 @@ When the auto-permission model approves a request, Go derives a typed `AutoGrant
 
 ### Bundled prompt addendum (`/permissions auto prompt`)
 
-A versioned, installable system-prompt addendum is prepended to the LLM gatekeeper prompt before the user's `permissions.auto.prompt` override. The installed file lives at `~/.config/opencode/auto-permission-prompt.md` (with a `.bundled-hash` sidecar recording the installed version), and ships a default body of known-safe git commands that should always be allowed without further reasoning — read-only inspection forms of `git status`/`diff`/`log`/`show`/`blame`/`ls-files`/`branch` (listing/query only)/`remote -v`/`stash list`/`stash show`/`tag` (listing only)/`worktree list`/`rev-parse`/`describe`/`submodule status`/`config` reads, plus loopback-only curl/wget. mutating git forms (`branch -D`, `tag -d`, `config` writes — including the bare positional `git config <key> <value>` — `worktree remove`, `notes add`) are explicitly carved out as requiring human approval.
+A versioned, installable system-prompt addendum is prepended to the LLM gatekeeper prompt before the user's `permissions.auto.prompt` override. The installed file lives at `~/.config/opencode/auto-permission-prompt.md` (with a `.bundled-hash` sidecar recording the installed version), and ships a default body of known-safe git commands that should always be allowed without further reasoning — read-only inspection forms of `git status`/`diff`/`log`/`show`/`blame`/`ls-files`/`branch` (listing/query only)/`remote -v`/`stash list`/`stash show`/`tag` (listing only)/`worktree list`/`rev-parse`/`describe`/`submodule status`/`config` reads, plus loopback-only curl/wget and non-secret remote HTTP requests (no credential in URL/query/header/body; hard blocks still win). mutating git forms (`branch -D`, `tag -d`, `config` writes — including the bare positional `git config <key> <value>` — `worktree remove`, `notes add`) are explicitly carved out as requiring human approval.
 
 Manage it with `/permissions auto prompt <status|install|upgrade> [force]`:
 - `status` → `missing` / `up-to-date` / `outdated` / `custom-modified` / `newer`
@@ -237,12 +260,13 @@ Implementation: `internal/config/auto_permission_prompt.go` (versioned body, sta
 ```
 1. If locked mode → read-only tools allow, everything else deny
 2. If bash tool:
-   a. Hard-blocked? → deny
-   b. YOLO mode? → allow
-   c. Sandbox mode → harmful force/git forms + sensitive paths ask; else allow
+   a. Hard-blocked (pipe-to-shell, rm -rf /, sudo chains)? → deny
+   b. Claude Code settings deny matches any sub-command? → deny (hard)
+   c. YOLO mode? → allow
+   d. Sandbox mode → harmful force/git forms + sensitive paths ask; else allow
       (only when the OS backend is present; otherwise falls through to ask)
-   d. Parse compound command → evaluate each sub-command
-   e. Return first deny, or first ask, or allow
+   e. Parse compound command → evaluate each sub-command
+   f. Return first deny, or first ask, or allow
 3. If YOLO mode → allow
 4. If path-scoped tool:
    a. Check path-glob patterns
@@ -252,6 +276,8 @@ Implementation: `internal/config/auto_permission_prompt.go` (versioned body, sta
 5. If webfetch → check domain cache
 6. Check tool-level rule → return ask if unset
 ```
+
+Deny decisions carry `PermissionDecision.DenyReason` (the matched rule/gate), surfaced in the tool error by `denyToolMessage` (`agent.go`).
 
 ## 9. Configuration file location
 
@@ -319,3 +345,6 @@ Unknown groups produce a diagnostic warning. Non-shorthand (object-valued) permi
 | `buildPermissionManagerFromAgent()` | `agent_permissions.go:3` | Agent-definition PM builder |
 | `LoadFromOcode()` | `permissions.go:1357` | Load rules from config |
 | `LoadFromConfig()` | `permissions.go:1336` | Load rules from opencode.json format |
+| `claudeDenyRule()` | `claude_settings.go` | Matched Claude `.claude/settings.json` deny pattern for a command |
+| `formatClaudeDenyReason()` | `claude_settings.go` | Renders that pattern for `PermissionDecision.DenyReason` |
+| `denyToolMessage()` | `agent.go` | Renders a static Deny into the tool error, including `DenyReason` |

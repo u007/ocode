@@ -65,4 +65,26 @@ describe("/autocontinue command", () => {
     await dispatchCommand("/autocontinue model auto", clearCtx);
     expect(setClear).toHaveBeenCalledWith({ clear: true });
   });
+
+  // Setting a judge model does not arm auto-continue. The reply must say the
+  // gate is still off, or the user configures `typesafe/jev-latest`, sees
+  // "Judge model: …", and assumes it is running — the "via jev does not work"
+  // report (the gate was left disabled).
+  it("model <name> warns that the enable gate is still off", async () => {
+    const { ctx: c } = ctx({
+      setAutoContinue: vi.fn(async () => ({ enabled: false, model: "typesafe/jev-latest" })),
+    });
+    const result = await dispatchCommand("/autocontinue model typesafe/jev-latest", c);
+    expect(result.messages?.[0]?.content).toContain("typesafe/jev-latest");
+    expect(result.messages?.[0]?.content).toContain("DISABLED");
+  });
+
+  it("model <name> does not warn when the gate is already enabled", async () => {
+    const { ctx: c } = ctx({
+      setAutoContinue: vi.fn(async () => ({ enabled: true, model: "typesafe/jev-latest" })),
+    });
+    const result = await dispatchCommand("/autocontinue model typesafe/jev-latest", c);
+    expect(result.messages?.[0]?.content).toContain("typesafe/jev-latest");
+    expect(result.messages?.[0]?.content).not.toContain("DISABLED");
+  });
 });

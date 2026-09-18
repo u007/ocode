@@ -35,7 +35,12 @@ export type LivePart =
       stream?: string;
       output?: string;
     }
-  | { kind: "status"; text: string };
+  | { kind: "status"; text: string }
+  /** A transient, informational notice (e.g. "Discovered: …" / "Indexing: …"
+   *  mirrored from the TUI's discovery notices). Not LLM output and not
+   *  persisted — cleared with the rest of the live buffer at the turn
+   *  boundary. */
+  | { kind: "notice"; text: string };
 
 export interface ChatRequest {
   content: string;

@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // GitDiffFile represents a single file's diff in the working tree.
@@ -129,13 +131,31 @@ func (h *Handler) mutationProjectDir(r *http.Request) (string, bool) {
 	return dir, true
 }
 
+// gitBinary is the git executable the git-status helpers invoke. It is a var
+// (not a literal) so tests can substitute a stub — e.g. one that never returns
+// — to exercise the gitStatusTimeout bound without mutating PATH process-wide.
+var gitBinary = "git"
+
+// gitStatusTimeout bounds the total time gitStatusForDir spends running git
+// probes for ONE project. Local git is otherwise unbounded, unlike the remote
+// path (remoteExecTimeout): a repo whose git wedges — a stalled network mount,
+// an index.lock held by a dead process, a pathological tree — would otherwise
+// hang its own HTTP request and, worse, stall the shared git-status emitter
+// for every other viewed project. When the budget expires the remaining
+// probes fail fast and the project reports an empty, non-repo status; the next
+// poll retries.
+var gitStatusTimeout = 10 * time.Second
+
 // gitStatusForDir computes the working-tree status of the repo at dir. It is
 // shared by the legacy GET endpoint (with the server's workdir) and the
 // subscriber-aware server-push git watcher (per project root). A non-repo or
-// erroring dir yields an empty, no-changes status.
+// erroring dir yields an empty, no-changes status. All git probes share one
+// deadline (gitStatusTimeout) so a wedged repo can never pin the caller.
 func gitStatusForDir(dir string) GitStatus {
+	ctx, cancel := context.WithTimeout(context.Background(), gitStatusTimeout)
+	defer cancel()
 	run := func(args ...string) string {
-		cmd := exec.Command("git", args...)
+		cmd := exec.CommandContext(ctx, gitBinary, args...)
 		if dir != "" {
 			cmd.Dir = dir
 		}
@@ -224,7 +244,7 @@ func gitStatusForDir(dir string) GitStatus {
 	}
 
 	// Same dir handling as the run closure above (empty dir = server workdir).
-	repoCmd := exec.Command("git", "rev-parse", "--git-dir")
+	repoCmd := exec.CommandContext(ctx, gitBinary, "rev-parse", "--git-dir")
 	if dir != "" {
 		repoCmd.Dir = dir
 	}

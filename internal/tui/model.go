@@ -4806,6 +4806,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.rcPendingQuestion != nil && res.RequestID == m.rcPendingQuestion.requestID {
 			pend := m.rcPendingQuestion
 			m.rcPendingQuestion = nil
+			if res.Dismiss {
+				// Cancel without answering (web dialog Cancel): clear the
+				// dialog and rewrite the sentinel so the ask no longer reads
+				// as pending. No agent Step runs — the user's next message
+				// starts a fresh turn, mirroring Esc on the local dialog.
+				m.clearQuestionPrompt()
+				if idx := m.findToolMessageIndexByToolID(res.RequestID); idx >= 0 {
+					if m.messages[idx].raw != nil {
+						m.messages[idx].raw.Content = tool.QuestionDismissedResult
+					}
+					m.messages[idx].text = "✕ dismissed question prompt"
+				}
+				m.renderTranscript()
+				m.saveSession()
+				m.broadcastRC("question_resolved", map[string]string{"request_id": res.RequestID})
+				return m, waitForRCResolve(m.rcResolveCh)
+			}
 			cmd := m.submitRCQuestionAnswers(pend.requestID, pend.questions, res.Answers)
 			m.broadcastRC("question_resolved", map[string]string{"request_id": res.RequestID})
 			return m, tea.Batch(cmd, waitForRCResolve(m.rcResolveCh))
@@ -5457,11 +5474,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.delta.kind == "discovery" {
 			m.appendDiscoveryNotice("Discovered: " + msg.delta.text)
+			// Mirror to the /rc web UI: the notice is otherwise TUI-only. The
+			// headless server emits the same event with a TextDelta payload, so
+			// both transports carry {"delta": …}.
+			m.broadcastRC("discovery", map[string]string{"delta": msg.delta.text})
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, m.continueStreamEvent(msg.epoch, msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
 		}
 		if msg.delta.kind == "md-indexing" {
 			m.appendDiscoveryNotice("Indexing: " + msg.delta.text)
+			m.broadcastRC("md_indexing", map[string]string{"delta": msg.delta.text})
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, m.continueStreamEvent(msg.epoch, msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel, msg.pending)
 		}
@@ -11148,8 +11170,24 @@ func (m *model) handleAutoContinueModelSub(args []string) tea.Cmd {
 		return nil
 	}
 
-	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Auto-continue judge model updated to %s\nPersisted to config for next session.", args[0])})
+	// Setting the judge model does NOT enable the feature — the gate is a
+	// separate persisted flag (m.autoContinueEnabled). Say so explicitly when
+	// it is off, or the user configures a judge, sees it echoed back, and
+	// reasonably concludes auto-continue is on when nothing will ever fire.
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Auto-continue judge model updated to %s\n%s", args[0], autoContinueModelSetNote(m.autoContinueEnabled))})
 	return nil
+}
+
+// autoContinueModelSetNote is the second line of the `/autocontinue model <name>`
+// confirmation. Configuring a judge model does not arm the feature — the
+// enable gate is separate — so when the gate is off the note says so plainly.
+// Pulled out as a pure helper so the wording is unit-testable without building
+// a live LLM client for the model probe.
+func autoContinueModelSetNote(enabled bool) string {
+	if enabled {
+		return "Persisted to config for next session."
+	}
+	return "Auto-continue is still DISABLED — run /autocontinue on (or flip the sidebar toggle) to arm it."
 }
 
 func (m *model) handleRecapStatus() {

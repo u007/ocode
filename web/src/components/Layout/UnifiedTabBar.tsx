@@ -299,7 +299,10 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   const { available: terminalAvailable } = useTerminalConfig();
   const { state: terminalState, openTerminal, closeTerminal, setActiveId: setActiveTerminalId, renameTerminal, clearAlert } =
     useTerminalState();
-  const { terminals, activeId: activeTerminalId } = getProjectTerminals(terminalState, activeProjectPath, activeProjectHost);
+  const { terminals, activeId: activeTerminalId } = useMemo(
+    () => getProjectTerminals(terminalState, activeProjectPath, activeProjectHost),
+    [terminalState, activeProjectPath, activeProjectHost],
+  );
   const {
     tabs: browserTabs,
     activeId: activeBrowserId,
@@ -328,8 +331,13 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   const [editValue, setEditValue] = useState("");
 
   // When a backgrounded terminal is focused (clicked), keep its "unread
-  // activity" badge visible for 3s and then clear it. Re-runs if a fresh bell
-  // arrives mid-window (resets the timer) and cleans up on tab/project change.
+  // activity" badge visible for 3s and then clear it. The effect keys off the
+  // memoized `terminals` array: getProjectTerminals rebuilds it whenever
+  // alerts exist, so depending on a freshly-built array re-ran the effect on
+  // every unrelated render and restarted the 3s timer — a component that
+  // re-rendered more often than that never cleared the alert. Memoizing keeps
+  // the array stable across unrelated renders while a real bell (which mutates
+  // the terminal store) still produces a new array and restarts the window.
   useEffect(() => {
     if (focusedKind !== "terminal") return;
     if (!activeTerminalId || activeTerminalId === PROCESSES_TAB_ID) return;

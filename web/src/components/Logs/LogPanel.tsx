@@ -82,6 +82,22 @@ function LogPanel({ active, sessionId }: { active: boolean; sessionId: string })
   const hasOpenedRef = useRef(false);
   const savedScrollTopRef = useRef(0);
   const rafRef = useRef(0);
+  // Last observed scrollTop. A scroll event whose offset DECREASED can only
+  // come from the user (our own pins always increase it), so it is checked
+  // synchronously in handleScroll to lock auto-scroll immediately — before a
+  // log envelope landing in the same frame can re-pin and swallow the
+  // scroll-up (same fix as ChatPanel).
+  const lastScrollTopRef = useRef(0);
+  // Previous rendered log count, to tell a list RESET (clear / session change /
+  // shorter refetch) from an append. The retention cap keeps the length flat at
+  // the limit, so appends never shrink it.
+  const prevLogsCountRef = useRef<number | null>(null);
+  // True when the user explicitly disabled auto-scroll with the toolbar ▼
+  // toggle (as opposed to the auto-lock `handleScroll` applies when they scroll
+  // up). An explicit choice must survive the reset conditions (list reset /
+  // no scrollbar / session change); the scroll-up lock must not. Cleared only by
+  // an explicit re-enable (toolbar) or by scrolling back to the bottom.
+  const manualOffRef = useRef(false);
 
   // Scroll the viewport to the bottom. Instant by default — smooth scrolling
   // during streaming starts a competing animation (down/up bounce, eventual
@@ -90,6 +106,8 @@ function LogPanel({ active, sessionId }: { active: boolean; sessionId: string })
     const el = containerRef.current;
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+    lastScrollTopRef.current = el.scrollTop;
+    manualOffRef.current = false;
     autoScrollRef.current = true;
     setAutoScroll(true);
   }, []);
@@ -104,6 +122,15 @@ function LogPanel({ active, sessionId }: { active: boolean; sessionId: string })
     if (prevSessionRef.current !== sessionId) {
       prevSessionRef.current = sessionId;
       setLogs([]); // fresh session — don't flash the previous tab's logs
+      // A new session follows the tail again — unless the user explicitly
+      // turned auto-scroll off, which is a choice that outlives the session.
+      if (!manualOffRef.current) {
+        autoScrollRef.current = true;
+        setAutoScroll(true);
+      }
+      lastScrollTopRef.current = 0;
+      savedScrollTopRef.current = 0;
+      prevLogsCountRef.current = null;
     }
     let cancelled = false;
     fetch(apiPath(`/api/logs?session_id=${encodeURIComponent(sessionId)}`), { headers: authHeaders() })
@@ -152,11 +179,36 @@ function LogPanel({ active, sessionId }: { active: boolean; sessionId: string })
 
   // Follow the tail on new logs, but only while the user is pinned to the
   // bottom (autoScroll enabled). Instant, not smooth — see scrollToBottom.
+  // The lock RESETS (autoScroll re-arms) when carrying it would be meaningless:
+  // a shrunken log list (clear / session change / shorter refetch), or content
+  // that no longer overflows the viewport.
   useEffect(() => {
-    if (!autoScroll) return;
     const el = containerRef.current;
     if (!el) return;
+    const prev = prevLogsCountRef.current;
+    prevLogsCountRef.current = logs.length;
+    let follow = autoScroll;
+    // Resets only override the auto-lock — never an explicit toolbar disable.
+    if (!manualOffRef.current) {
+      if (prev !== null && logs.length < prev) {
+        // The list was reset/replaced under the reader — the old position no
+        // longer refers to this content.
+        follow = true;
+      }
+      // Guard on clientHeight so a hidden (display:none) tab, which reports 0/0,
+      // is not mistaken for "content fits" and does not silently re-arm the lock
+      // while backgrounded (background log buffering can deliver entries then).
+      if (el.clientHeight > 0 && el.scrollHeight - el.clientHeight <= 1) {
+        follow = true;
+      }
+    }
+    if (follow !== autoScroll) {
+      autoScrollRef.current = follow;
+      setAutoScroll(follow);
+    }
+    if (!follow) return;
     el.scrollTop = el.scrollHeight;
+    lastScrollTopRef.current = el.scrollTop;
   }, [logs, autoScroll]);
 
   // React to the log tab becoming visible. The first open jumps to the bottom
@@ -177,6 +229,7 @@ function LogPanel({ active, sessionId }: { active: boolean; sessionId: string })
       const view = containerRef.current;
       if (!view) return;
       view.scrollTop = jumpToBottom ? view.scrollHeight : savedScrollTopRef.current;
+      lastScrollTopRef.current = view.scrollTop;
     });
   }, [active]);
 
@@ -202,13 +255,28 @@ function LogPanel({ active, sessionId }: { active: boolean; sessionId: string })
     // Save the position while the element is still visible — display:none
     // resets scrollTop to 0, so this cannot wait for the tab to hide.
     savedScrollTopRef.current = el.scrollTop;
+    // Synchronous upward-move check: a DECREASE can only come from the user
+    // (our own pins always increase scrollTop). Unpin immediately so a log
+    // envelope that lands in the same frame can't re-pin and swallow the
+    // scroll-up; the deferred pass below still owns the near-bottom re-pin.
+    const top = el.scrollTop;
+    const prevTop = lastScrollTopRef.current;
+    lastScrollTopRef.current = top;
+    if (top < prevTop - 1) {
+      autoScrollRef.current = false;
+      setAutoScroll(false);
+    }
     // Defer the pinned-to-bottom check to the next frame. Content growth
     // during streaming fires scroll events where scrollHeight has grown but
     // scrollTop has not caught up yet, which makes the distance look large
     // and wrongly flips auto-scroll off (same fix as ChatPanel).
     cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(() => {
+      lastScrollTopRef.current = el.scrollTop;
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+      // Scrolling back to the bottom is an explicit-enough act to drop a manual
+      // disable, matching the old position-driven behavior.
+      if (atBottom) manualOffRef.current = false;
       autoScrollRef.current = atBottom;
       setAutoScroll(atBottom);
     });
@@ -261,6 +329,7 @@ function LogPanel({ active, sessionId }: { active: boolean; sessionId: string })
             size="sm"
             onClick={() => {
               if (autoScroll) {
+                manualOffRef.current = true;
                 autoScrollRef.current = false;
                 setAutoScroll(false);
               } else {

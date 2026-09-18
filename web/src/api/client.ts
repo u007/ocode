@@ -87,6 +87,27 @@ export interface DiscoveryConfig {
   ignore_paths: string[];
 }
 
+/** Discovery settings plus live runtime status (GET /api/sessions/:id/discovery).
+ *  The config half always arrives; the runtime half is meaningful only when
+ *  `live` is true (no agent reachable, or a turn is mid-flight and the unsafe
+ *  read was skipped). Mirrors the TUI's /discover status. */
+export interface DiscoveryStatus extends DiscoveryConfig {
+  live: boolean;
+  active: boolean;
+  init_error?: string;
+  judge?: string;
+  judge_vetoed: number;
+  mcp_total: number;
+  skill_total: number;
+  attached_skills: string[];
+  attached_mcp: string[];
+  attached_md: string[];
+  all_skills: string[];
+  all_mcp: string[];
+  all_md: string[];
+  md_pending: number;
+}
+
 export interface TUISettings {
   theme: string;
   mouse: boolean | null;
@@ -712,6 +733,9 @@ export const api = {
 	getDiscoveryConfig: () => fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery"),
 	setDiscoveryConfig: (cfg: DiscoveryConfig) =>
 	  fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery", { method: "PUT", body: JSON.stringify(cfg) }),
+	/** Config + live runtime status for one session (/discover status). */
+	getDiscoveryStatus: (id: string, host?: string) =>
+	  fetchJSON<DiscoveryStatus>(`/api/sessions/${id}/discovery`, undefined, host),
 
 	getTTSEngines: () => fetchJSON<{ engines: TTSEngine[] }>("/api/tts/engines"),
 	getTTSStatus: () => fetchJSON<TTSStatus>("/api/tts/status"),
@@ -755,7 +779,9 @@ export const api = {
     fetchJSON<ImageGenConfig>("/api/config/ocode/imagegen", { method: "PUT", body: JSON.stringify(cfg) }),
 
   getPathsConfig: () =>
-    fetchJSON<{ extra_allowed_paths: string[]; upload_dir: string }>("/api/config/ocode/paths"),
+    fetchJSON<{ extra_allowed_paths: string[]; upload_dir: string; platform?: string }>(
+      "/api/config/ocode/paths",
+    ),
   setPathsConfig: (extra_allowed_paths: string[], upload_dir: string) =>
     fetchJSON<{ extra_allowed_paths: string[]; upload_dir: string }>("/api/config/ocode/paths", {
       method: "PUT",
@@ -1254,7 +1280,7 @@ export const api = {
       body: JSON.stringify({ content, windowId, async: true }),
     }, host)
   },
-  chat: (content: string, sessionId?: string, model?: string, requestId?: string, projectPath?: string, host?: string) => {
+  chat: (content: string, sessionId?: string, model?: string, requestId?: string, projectPath?: string, host?: string, permissionMode?: string) => {
     let windowId = ""
     try {
       windowId = new URLSearchParams(window.location.search).get("windowId")?.trim() || ""
@@ -1276,6 +1302,10 @@ export const api = {
         request_id: requestId,
         project_path: projectPath,
         windowId,
+        // A draft ("new-*") tab has no server session id yet, so its permission
+        // mode rides along with the first message; the server persists it as
+        // the new session's override. Ignored for an existing session.
+        permission_mode: permissionMode,
         async: true,
       }),
     }, host, projectPath)
@@ -1492,6 +1522,18 @@ export const api = {
       body: JSON.stringify({ path, mode: "os", project_root: projectRoot }),
     }),
 
+  // ── Files tab: reveal a file/folder in the OS-native file manager (Finder
+  // on macOS, Explorer on Windows, the desktop file manager on Linux). The
+  // server runs the reveal command on its own host — there is no remote
+  // branch, so callers must not use this for a remote project (it would
+  // reveal an unrelated path on the local machine). A directory opens
+  // directly; a file is selected in its containing folder.
+  revealInFileManager: (path: string, projectRoot?: string) =>
+    fetchJSON<{ path: string; status: string }>("/api/files/open", {
+      method: "POST",
+      body: JSON.stringify({ path, mode: "reveal", project_root: projectRoot }),
+    }),
+
   // ── Sidebar preview: fetch raw bytes for pdf/docx/pptx/image/audio/video/mmd via
   // GET /api/files/raw (auth headers required — plain <img>/<iframe> tags
   // can't attach them, so callers use fetch + blob URLs). host selects a
@@ -1563,18 +1605,30 @@ export const api = {
     }),
 
   // ── Permissions ──
-  getPermissions: () => fetchJSON<PermissionsResponse>("/api/permissions"),
-  getYolo: () => fetchJSON<{ yolo: boolean }>("/api/permissions/yolo"),
-  setYolo: (enabled: boolean) =>
+  // Permission modes are PER CHAT SESSION. Every read/write takes an optional
+  // sessionId so a yolo/sandbox toggle on one tab never leaks into another
+  // chat or project. Omitting it (settings form) reports/inspects the
+  // persisted config default.
+  getPermissions: (sessionId?: string) =>
+    fetchJSON<PermissionsResponse>(
+      `/api/permissions${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`,
+    ),
+  getYolo: (sessionId?: string) =>
+    fetchJSON<{ yolo: boolean }>(
+      `/api/permissions/yolo${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`,
+    ),
+  setYolo: (enabled: boolean, sessionId?: string) =>
     fetchJSON<{ yolo: boolean }>("/api/permissions/yolo", {
       method: "PUT",
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify({ enabled, session_id: sessionId }),
     }),
-  /** Set the live permission mode: normal|yolo|locked|sandbox (session-scoped). */
-  setPermissionMode: (mode: string) =>
-    fetchJSON<{ mode: string }>("/api/permissions/mode", {
+  /** Set one chat session's live permission mode: normal|yolo|locked|sandbox.
+   *  The override is persisted in that session's metadata so it survives
+   *  resume and restart; it never affects any other session. */
+  setPermissionMode: (mode: string, sessionId?: string) =>
+    fetchJSON<{ mode: string; session_id?: string }>("/api/permissions/mode", {
       method: "PUT",
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify({ mode, session_id: sessionId }),
     }),
   /** The persisted default permission mode new TUI/web/RC sessions start in. */
   getPermissionModeConfig: () =>
@@ -1720,6 +1774,20 @@ export const api = {
         request_id: requestId,
         session_id: sessionId ?? undefined,
         answers,
+      }),
+    }, host),
+
+  // Cancel (dismiss) a pending `question` prompt without answering it — the
+  // web equivalent of the TUI's Esc on the question dialog. The server rewrites
+  // the sentinel tool result in place with a dismissal notice, persists it, and
+  // broadcasts `question_resolved`; no continuation turn runs, so the session
+  // goes idle and the next user message starts an ordinary turn.
+  cancelQuestion: (requestId: string, sessionId: string | null, host?: string) =>
+    fetchJSON<ChatResponse>("/api/questions/cancel", {
+      method: "POST",
+      body: JSON.stringify({
+        request_id: requestId,
+        session_id: sessionId ?? undefined,
       }),
     }, host),
 

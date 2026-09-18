@@ -1,6 +1,8 @@
 # Part 03 — UI toggles (TUI + web) + cron guard
 
 > **SUPERSEDED (2026-09-09):** the "sandbox must not be persisted as the durable default" constraint below (Decision 2, see `INDEX.md`) has been reversed by explicit owner request. Sandbox now persists as the durable default like any other mode, in both TUI and web. This part's history (implemented as written, then later changed) is kept for record; see `INDEX.md` Decision 2 for the current rule and rationale.
+>
+> **SUPERSEDED (2026-09-18):** the web `livePermissionModeOverride` described in Task 2 was process-global, which made one chat's yolo/sandbox leak into every other chat and project. The web live mode is now **per chat session** (persisted in session metadata, `session_id` required on the PUT/GET endpoints). See `docs/concepts/sandbox-permission-mode.md` § "Per-session live mode". The TUI remains single-session and unaffected.
 
 **Self-contained constraints recap:** `sandbox` is a permission mode toggled via the existing permission-mode surfaces — **not** `shift+tab` (that cycles agent focus/type via `cycleAgentMode`, `model.go:6034` — preserve it). ~~Sandbox must **not** be persisted as the durable default (clamp/skip in the persist path).~~ Interactive PTY and web `!shell` stay out of scope. No code snippets.
 

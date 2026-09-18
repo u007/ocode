@@ -227,6 +227,35 @@ func TestBundledAutoPermissionPrompt_CoversLanguageToolBins(t *testing.T) {
 	}
 }
 
+// TestBundledAutoPermissionPrompt_OutgoingNetwork pins the judge-facing rule
+// for non-loopback HTTP requests: a request whose URL, query string, headers,
+// and body carry no credential is ALLOWed, while a literal secret-bearing
+// request still requires human approval. Env-var/file expansion stays a
+// code-level hard block (never reaches the judge), so the prompt names it as
+// such. The code-side counterpart for the hard blocks is
+// TestPermissions_IsExfiltrationRisk{Curl,Wget,HTTPie}.
+func TestBundledAutoPermissionPrompt_OutgoingNetwork(t *testing.T) {
+	for _, want := range []string{
+		"Outgoing HTTP requests",
+		"to a remote host are ordinary",
+		"query string",
+		"request body",
+		"query parameters with no credential",
+		"inline request body with no secret",
+		"httpie inline data with no secret",
+		"Do NOT ALLOW when a credential or secret appears anywhere in the request",
+		"credential-bearing",
+		"Authorization/X-API-Key/Cookie header carrying a real value",
+		"password/token/",
+		"placeholder value",
+		"hard-blocked before you",
+	} {
+		if !strings.Contains(BundledAutoPermissionPromptBody, want) {
+			t.Fatalf("bundled auto-permission prompt missing %q", want)
+		}
+	}
+}
+
 // TestBundledAutoPermissionPrompt_GlobalGitIgnore pins the judge-facing rule
 // for the fixed global git-ignore files (core.excludesFile default +
 // legacy globals): reads are always allowed, parent dirs and arbitrary

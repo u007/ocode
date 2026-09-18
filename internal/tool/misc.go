@@ -14,6 +14,14 @@ const (
 	SentinelPermissionAsk  = "PERMISSION_ASK:"
 )
 
+// QuestionDismissedResult is the tool result written in place of an unanswered
+// `question` prompt when the user dismisses it (web/desktop Cancel, TUI Esc).
+// It deliberately carries no sentinel, so the transcript stops reading as a
+// pending ask (no dialog reopens on reload/reconcile) while the model still
+// learns that the question went unanswered when the next turn runs. The turn
+// is NOT resumed on dismissal — the user's next message starts a fresh turn.
+const QuestionDismissedResult = "The user dismissed the question prompt without answering."
+
 type SkillTool struct{}
 
 func (t SkillTool) Name() string        { return "skill" }

@@ -345,6 +345,8 @@ export interface CommandContext {
     setImageGenConfig?: (cfg: import("../../api/client").ImageGenConfig) => Promise<unknown>;
     getDiscoveryConfig?: () => Promise<import("../../api/client").DiscoveryConfig>;
     setDiscoveryConfig?: (cfg: import("../../api/client").DiscoveryConfig) => Promise<unknown>;
+    /** Config + live runtime discovery status for one session (/discover status). */
+    getDiscoveryStatus?: (id: string, host?: string) => Promise<import("../../api/client").DiscoveryStatus>;
     getLocalModelsConfig?: () => Promise<Record<string, { enabled: boolean; max_parallel: number }>>;
     setLocalModelsConfig?: (models: Record<string, { enabled: boolean; max_parallel: number }>) => Promise<unknown>;
     syncLoginStart?: () => Promise<{ deviceCode: string; userCode: string; verifyUrl: string; expiresIn: number }>;
@@ -354,6 +356,11 @@ export interface CommandContext {
   getMessages?: () => Message[];
   /** Current session ID (used by /export). */
   getSessionId?: () => string | null;
+    /** Set the active DRAFT ("new-*") tab's locally-held permission mode. A
+     *  draft has no server session yet, so /yolo and /sandbox can't PUT an
+     *  override; the pick rides with the first message instead. No-op for a
+     *  real session (the command writes the scoped override directly). */
+    setDraftPermissionMode?: (mode: string) => void;
   /** SSH/WSL host for the current session's project (undefined for local). */
   host?: string;
 }
@@ -410,12 +417,12 @@ export async function dispatchCommand(
 
     // ── Permissions ──
     case "/permissions":
-      return handlePermissions();
+      return handlePermissions(ctx);
     case "/yolo":
-      return handleYolo(args);
+      return handleYolo(args, ctx);
 
     case "/sandbox":
-      return handleSandbox(args);
+      return handleSandbox(args, ctx);
 
     // ── Agent selection ──
     case "/agent":
@@ -954,9 +961,9 @@ async function handleInit(): Promise<CommandResult> {
   }
 }
 
-async function handlePermissions(): Promise<CommandResult> {
+async function handlePermissions(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const p = await api.getPermissions();
+    const p = await api.getPermissions(activeSessionId(ctx));
     return {
       handled: true,
       messages: [{ role: "assistant", content: formatPermissions(p) }],
@@ -966,12 +973,13 @@ async function handlePermissions(): Promise<CommandResult> {
   }
 }
 
-async function handleYolo(args: string): Promise<CommandResult> {
+async function handleYolo(args: string, ctx: CommandContext): Promise<CommandResult> {
   const sub = args.trim().toLowerCase();
+  const sessionId = activeSessionId(ctx);
 
   try {
     if (sub === "" || sub === "status") {
-      const { yolo } = await api.getYolo();
+      const { yolo } = await api.getYolo(sessionId);
       return {
         handled: true,
         messages: [{
@@ -981,17 +989,31 @@ async function handleYolo(args: string): Promise<CommandResult> {
       };
     }
     if (sub === "on" || sub === "enable" || sub === "true") {
-      await api.setYolo(true);
+      if (!sessionId) {
+        ctx.setDraftPermissionMode?.("yolo");
+        return {
+          handled: true,
+          messages: [{ role: "assistant", content: "YOLO mode: **on** — applies to this new chat once you send a message." }],
+        };
+      }
+      await api.setYolo(true, sessionId);
       return {
         handled: true,
-        messages: [{ role: "assistant", content: "YOLO mode: **on** — tools are auto-approved." }],
+        messages: [{ role: "assistant", content: "YOLO mode: **on** — tools are auto-approved for this chat." }],
       };
     }
     if (sub === "off" || sub === "disable" || sub === "false") {
-      await api.setYolo(false);
+      if (!sessionId) {
+        ctx.setDraftPermissionMode?.("normal");
+        return {
+          handled: true,
+          messages: [{ role: "assistant", content: "YOLO mode: **off** for this new chat." }],
+        };
+      }
+      await api.setYolo(false, sessionId);
       return {
         handled: true,
-        messages: [{ role: "assistant", content: "YOLO mode: **off**." }],
+        messages: [{ role: "assistant", content: "YOLO mode: **off** for this chat." }],
       };
     }
     return {
@@ -1003,12 +1025,13 @@ async function handleYolo(args: string): Promise<CommandResult> {
   }
 }
 
-async function handleSandbox(args: string): Promise<CommandResult> {
+async function handleSandbox(args: string, ctx: CommandContext): Promise<CommandResult> {
   const sub = args.trim().toLowerCase();
+  const sessionId = activeSessionId(ctx);
 
   try {
     if (sub === "" || sub === "status") {
-      const perm = await api.getPermissions();
+      const perm = await api.getPermissions(sessionId);
       const behavior = perm.effective_behavior;
       return {
         handled: true,
@@ -1021,14 +1044,28 @@ async function handleSandbox(args: string): Promise<CommandResult> {
       };
     }
     if (sub === "on" || sub === "enable" || sub === "true") {
-      await api.setPermissionMode("sandbox");
+      if (!sessionId) {
+        ctx.setDraftPermissionMode?.("sandbox");
+        return {
+          handled: true,
+          messages: [{ role: "assistant", content: "Sandbox mode: **on** — applies to this new chat once you send a message." }],
+        };
+      }
+      await api.setPermissionMode("sandbox", sessionId);
       return {
         handled: true,
         messages: [{ role: "assistant", content: "Sandbox mode: **on** — filesystem writes are OS-confined to writable roots." }],
       };
     }
     if (sub === "off" || sub === "disable" || sub === "false") {
-      await api.setPermissionMode("normal");
+      if (!sessionId) {
+        ctx.setDraftPermissionMode?.("normal");
+        return {
+          handled: true,
+          messages: [{ role: "assistant", content: "Sandbox mode: **off** for this new chat." }],
+        };
+      }
+      await api.setPermissionMode("normal", sessionId);
       return {
         handled: true,
         messages: [{ role: "assistant", content: "Sandbox mode: **off** (back to normal)." }],
@@ -1692,7 +1729,10 @@ async function handleAutoContinue(args: string, ctx: CommandContext): Promise<Co
         return ok(`**Auto-continue judge model cleared** — falling back to StepLimitHit only. Enabled: ${r.enabled}.`);
       }
       const r = await ctx.api.setAutoContinue({ model: target });
-      return ok(`**Judge model:** \`${r.model}\`.`);
+      // Setting the judge model does not enable the feature; say so when the
+      // gate is off so the user doesn't configure a judge and assume it fires.
+      const gate = r.enabled ? "" : "\n**Auto-continue is still DISABLED** — run `/autocontinue on` to arm it.";
+      return ok(`**Judge model:** \`${r.model}\`.${gate}`);
     }
     return ok("Usage: `/autocontinue [on|off|status|model [name]]`.");
   } catch (err) {
@@ -1857,6 +1897,41 @@ async function handleLocalModel(args: string, ctx: CommandContext): Promise<Comm
 
 // ─── /discover [...] — codebase discovery ──────────────────────────────────
 
+/** Render the live runtime half of /discover status (corpus sizes and the
+ *  attached/name-only split) from GET /api/sessions/:id/discovery. Mirrors the
+ *  TUI's showDiscoverStatus: ● marks a name whose full summary is attached (its
+ *  description is in the volatile prompt tail), ○ a name that is injected by
+ *  name only. Returns a note instead when no live agent was reachable. */
+function renderDiscoveryRuntime(s: import("../../api/client").DiscoveryStatus): string {
+  const lines: string[] = ["", "### Runtime status"];
+  if (!s.live) {
+    lines.push("_No live agent for this session — send a message, then re-run `/discover status` to see the index and attached items._");
+    return lines.join("\n");
+  }
+  lines.push(`- **Active:** ${s.active ? "yes" : "no"}`);
+  if (!s.active && s.init_error) lines.push(`- **Fail-open:** \`${s.init_error}\``);
+  if (s.judge) {
+    lines.push(`- **Relevance judge:** \`${s.judge}\` (vetoed ${s.judge_vetoed} this session)`);
+  }
+  lines.push(`- **Skills in index:** ${s.all_skills.length}`);
+  lines.push(`- **MCP tools in index:** ${s.all_mcp.length} of ${s.mcp_total}`);
+  lines.push(`- **Project docs in index:** ${s.all_md.length}`);
+  if (s.md_pending > 0) lines.push(`- **Docs pending summarization:** ${s.md_pending}`);
+
+  const marked = (attached: string[], all: string[]) => {
+    const set = new Set(attached);
+    return all.map((n) => `${set.has(n) ? "●" : "○"} ${n}`).join(", ");
+  };
+  lines.push("", "**Attached to volatile tail (per-turn, grows with sticky set)**");
+  const skillList = marked(s.attached_skills, s.all_skills);
+  lines.push(`- **Skills:** ${s.attached_skills.length}/${s.all_skills.length}${skillList ? ` — ${skillList}` : ""}`);
+  const mcpList = s.attached_mcp.join(", ");
+  lines.push(`- **MCP tools:** ${s.attached_mcp.length}/${s.mcp_total}${mcpList ? ` — ${mcpList}` : ""}`);
+  const mdList = marked(s.attached_md, s.all_md);
+  lines.push(`- **Project docs:** ${s.attached_md.length}/${s.all_md.length}${mdList ? ` — ${mdList}` : ""}`);
+  return lines.join("\n");
+}
+
 async function handleDiscover(args: string, ctx: CommandContext): Promise<CommandResult> {
   if (!ctx.api.getDiscoveryConfig || !ctx.api.setDiscoveryConfig) return unsupported("/discover");
   try {
@@ -1865,13 +1940,24 @@ async function handleDiscover(args: string, ctx: CommandContext): Promise<Comman
     const sub = parts[0]?.toLowerCase();
 
     if (!sub || sub === "status") {
-      return ok([
+      const lines = [
         "## Codebase Discovery",
         `- **Enabled:** ${cfg.enabled}`,
         `- **Embedding model:** ${cfg.embedding_model || "(default)"}`,
         `- **Backend:** ${cfg.embedding_backend || "-"}`,
         `- **Ignore paths:** ${cfg.ignore_paths.length ? cfg.ignore_paths.map((p) => `\`${p}\``).join(", ") : "(none)"}`,
-      ].join("\n"));
+      ];
+      // Runtime status is best-effort: an older/remote server without the
+      // endpoint, or a session with no live agent, degrades to config only.
+      const sessionId = activeSessionId(ctx);
+      if (sessionId && ctx.api.getDiscoveryStatus) {
+        try {
+          lines.push(renderDiscoveryRuntime(await ctx.api.getDiscoveryStatus(sessionId, ctx.host)));
+        } catch {
+          lines.push("", "_Runtime status unavailable (the server did not return it)._");
+        }
+      }
+      return ok(lines.join("\n"));
     }
     if (sub === "enable" || sub === "disable") {
       await ctx.api.setDiscoveryConfig({ ...cfg, enabled: sub === "enable" });

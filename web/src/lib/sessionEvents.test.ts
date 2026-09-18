@@ -303,6 +303,29 @@ describe("routeBusEnvelope", () => {
     expect(getState().sessions["s1"].live).toEqual([]);
   });
 
+  it("discovery and md_indexing append transient notice live parts", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("discovery", { data: { delta: "Notion/search, github/pr" } }), router);
+    routeBusEnvelope(env("md_indexing", { data: { delta: "docs/README.md" } }), router);
+    expect(getState().sessions["s1"].live).toEqual([
+      { kind: "notice", text: "Discovered: Notion/search, github/pr" },
+      { kind: "notice", text: "Indexing: docs/README.md" },
+    ]);
+  });
+
+  it("flushes a buffered text tail before a discovery notice (no mid-sentence split)", () => {
+    vi.useFakeTimers();
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("text", { data: { delta: "working on it" } }), router);
+    routeBusEnvelope(env("discovery", { data: { delta: "Skill/x" } }), router);
+    // No timer advance: the notice's flush must have dispatched the tail.
+    expect(getState().sessions["s1"].live).toEqual([
+      { kind: "text", text: "working on it" },
+      { kind: "notice", text: "Discovered: Skill/x" },
+    ]);
+    vi.useRealTimers();
+  });
+
   it("turn lifecycle drives turn state (streaming flag)", () => {
     const { router, getState } = makeRouter(["s1"]);
     routeBusEnvelope(env("turn_started", { data: { session_id: "s1" } }), router);

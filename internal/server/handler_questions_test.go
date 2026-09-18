@@ -489,3 +489,273 @@ func TestHandleAnswerQuestionPersistsContinuationToDisk(t *testing.T) {
 		t.Fatalf("continuation not persisted: %q", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// HandleDismissQuestion (POST /api/questions/cancel): cancel a pending
+// `question` prompt without answering it. Regression for "question ask on web
+// cannot cancel" — the web dialog previously had no way out but answering.
+// ---------------------------------------------------------------------------
+
+func TestHandleDismissQuestionValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"bad json", `{`, http.StatusBadRequest},
+		{"missing request_id", `{}`, http.StatusBadRequest},
+		{"no pending question", `{"request_id":"call-1"}`, http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHandler()
+			req := httptest.NewRequest("POST", "/api/questions/cancel", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			h.HandleDismissQuestion(rec, req)
+			if rec.Code != tc.want {
+				t.Errorf("status = %d, want %d (body=%s)", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleDismissQuestionForwardsToBridgeWhenBridged(t *testing.T) {
+	resolveCh := make(chan RCResolution, 1)
+	h := NewHandler()
+	h.rc = &RCBridge{SessionID: "tui-sess", ResolveCh: resolveCh}
+
+	// Same no-broadcast invariant as the answer path: in bridge mode the TUI
+	// broadcasts question_resolved itself once it applies the dismissal.
+	evCh := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(evCh)
+
+	req := httptest.NewRequest("POST", "/api/questions/cancel", strings.NewReader(`{"request_id":"call-1"}`))
+	rec := httptest.NewRecorder()
+	h.HandleDismissQuestion(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	select {
+	case res := <-resolveCh:
+		if res.RequestID != "call-1" || !res.Dismiss {
+			t.Fatalf("expected a dismiss resolution for call-1, got %+v", res)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("no dismissal forwarded to the bridge")
+	}
+	select {
+	case ev := <-evCh:
+		if ev.Event == "question_resolved" {
+			t.Fatalf("server must not broadcast question_resolved in bridge mode (got SessionID=%q)", ev.SessionID)
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// dismissing the pending ask must clear the pending state, rewrite the sentinel
+// in place, persist it, and NOT run a continuation Step.
+func TestHandleDismissQuestionClearsPendingAndDoesNotStep(t *testing.T) {
+	h := NewHandler()
+	ag := agent.NewAgent(questionFakeClient{}, nil, nil, nil)
+	as := &agentSession{
+		agent: ag,
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "deploy"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: questionAskContent(t, sampleQuestion())},
+		},
+	}
+	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir())
+
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+
+	req := httptest.NewRequest("POST", "/api/questions/cancel", strings.NewReader(`{"request_id":"call-1"}`))
+	rec := httptest.NewRecorder()
+	h.HandleDismissQuestion(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	// The sentinel must be gone so no dialog reopens and tailIsQuestionAsk is
+	// false (the session is no longer paused).
+	if len(as.messages) != 3 {
+		t.Fatalf("dismissal must not append messages, got %d: %v", len(as.messages), messageContents(as.messages))
+	}
+	if isQuestionAsk(as.messages[2].Content) {
+		t.Fatalf("sentinel still pending after dismissal: %q", as.messages[2].Content)
+	}
+	if as.messages[2].Content != tool.QuestionDismissedResult {
+		t.Fatalf("dismissal result not written in place: %q", as.messages[2].Content)
+	}
+	if tailIsQuestionAsk(as.messages) || tailIsPermissionAsk(as.messages) {
+		t.Fatalf("session still reads as paused after dismissal")
+	}
+	// No continuation Step: the transcript has no new assistant message.
+	for _, m := range as.messages {
+		if m.Role == "assistant" && m.Content != "" {
+			t.Fatalf("dismissal must not run a continuation Step, found assistant: %q", m.Content)
+		}
+	}
+
+	sawResolved, sawMessages := false, false
+	for drained := false; !drained; {
+		select {
+		case ev := <-sub:
+			switch ev.Event {
+			case "question_resolved":
+				sawResolved = true
+				if got := ev.Data.(map[string]string)["request_id"]; got != "call-1" {
+					t.Fatalf("question_resolved request_id = %q, want call-1", got)
+				}
+			case "messages":
+				sawMessages = true
+			}
+		default:
+			drained = true
+		}
+	}
+	if !sawResolved {
+		t.Fatalf("expected a question_resolved mirror event")
+	}
+	if !sawMessages {
+		t.Fatalf("expected a messages mirror event so the transcript drops the prompt")
+	}
+}
+
+// The dismissal must be persisted so a reload/reconcile does not resurrect the
+// dialog from the on-disk sentinel.
+func TestHandleDismissQuestionPersistsToDisk(t *testing.T) {
+	h := NewHandler()
+	projectRoot := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, projectRoot)
+
+	ask := []agent.Message{
+		{Role: "user", Content: "deploy", UserSeq: 1},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+		{Role: "tool", ToolID: "call-1", Content: questionAskContent(t, sampleQuestion())},
+	}
+	if err := session.SaveForDir(projectRoot, id, "", ask, nil); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	as := &agentSession{
+		agent:    agent.NewAgent(questionFakeClient{}, nil, nil, nil),
+		model:    "fake-model",
+		messages: append([]agent.Message(nil), ask...),
+	}
+	h.agents[id] = as
+
+	body := `{"request_id":"call-1","session_id":"` + id + `"}`
+	req := httptest.NewRequest("POST", "/api/questions/cancel", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleDismissQuestion(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	loaded, err := session.LoadForDir(projectRoot, id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(loaded.Messages) != 3 {
+		t.Fatalf("stored transcript has %d messages, want 3: %v", len(loaded.Messages), messageContents(loaded.Messages))
+	}
+	if isQuestionAsk(loaded.Messages[2].Content) {
+		t.Fatalf("stored row still holds the sentinel: %q", loaded.Messages[2].Content)
+	}
+	if loaded.Messages[2].Content != tool.QuestionDismissedResult {
+		t.Fatalf("stored dismissal not persisted: %q", loaded.Messages[2].Content)
+	}
+}
+
+// Dismissing twice is a conflict, not a silent success — the ask is gone.
+func TestHandleDismissQuestionTwiceIsConflict(t *testing.T) {
+	h := NewHandler()
+	as := &agentSession{
+		agent: agent.NewAgent(questionFakeClient{}, nil, nil, nil),
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "deploy"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: questionAskContent(t, sampleQuestion())},
+		},
+	}
+	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir())
+
+	for i, want := range []int{http.StatusOK, http.StatusNotFound} {
+		req := httptest.NewRequest("POST", "/api/questions/cancel", strings.NewReader(`{"request_id":"call-1"}`))
+		rec := httptest.NewRecorder()
+		h.HandleDismissQuestion(rec, req)
+		if rec.Code != want {
+			t.Fatalf("call %d: status = %d, want %d (body=%s)", i+1, rec.Code, want, rec.Body.String())
+		}
+	}
+}
+
+// After a dismissal the session must be tailable again: a new user turn must
+// not be refused (ErrPermissionPending) and the transcript the model sees must
+// carry the dismissal result instead of the raw sentinel — otherwise the user
+// is freed from the dialog but the session stays wedged.
+func TestDismissQuestionAllowsNextTurnAndHidesSentinel(t *testing.T) {
+	h := NewHandler()
+	projectRoot := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, projectRoot)
+
+	ask := []agent.Message{
+		{Role: "user", Content: "deploy", UserSeq: 1},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+		{Role: "tool", ToolID: "call-1", Content: questionAskContent(t, sampleQuestion())},
+	}
+	if err := session.SaveForDir(projectRoot, id, "", ask, nil); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	// The follow-up client returns plain text on every call, so the next turn
+	// completes without raising another ask.
+	as := &agentSession{
+		agent:    agent.NewAgent(questionFakeClient{}, nil, nil, nil),
+		model:    "fake-model",
+		messages: append([]agent.Message(nil), ask...),
+	}
+	h.agents[id] = as
+
+	body := `{"request_id":"call-1","session_id":"` + id + `"}`
+	rec := httptest.NewRecorder()
+	h.HandleDismissQuestion(rec, httptest.NewRequest("POST", "/api/questions/cancel", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	// A fresh user message must be accepted (no ErrPermissionPending).
+	rec = httptest.NewRecorder()
+	h.HandleSendMessage(rec, httptest.NewRequest("POST", "/api/sessions/"+id+"/messages",
+		strings.NewReader(`{"content":"ok, forget it","async":false}`)), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("follow-up send status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	// The model must never be fed the raw sentinel: no persisted row still reads
+	// as a pending question ask.
+	loaded, err := session.LoadForDir(projectRoot, id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	for i, m := range loaded.Messages {
+		if isQuestionAsk(m.Content) {
+			t.Fatalf("row %d still a pending question ask: %q", i, m.Content)
+		}
+	}
+	foundDismissal := false
+	for _, m := range loaded.Messages {
+		if m.Content == tool.QuestionDismissedResult {
+			foundDismissal = true
+		}
+	}
+	if !foundDismissal {
+		t.Fatalf("dismissal result not present in persisted transcript: %v", messageContents(loaded.Messages))
+	}
+}

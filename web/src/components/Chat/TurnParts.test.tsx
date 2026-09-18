@@ -120,3 +120,92 @@ describe("ToolBlock question rendering", () => {
     expect(screen.queryByText(/QUESTION_PROMPT:/)).not.toBeInTheDocument();
   });
 });
+
+// read/write/bash arguments are summarized in the header (mirroring the TUI's
+// formatToolCallHint); their raw JSON parameters are never dumped into the
+// transcript. write is the worst offender because the JSON carries the whole
+// file body.
+describe("ToolBlock argument summary", () => {
+  it("summarizes read in the header and hides the raw JSON", () => {
+    const args = '{"path":"/src/app.ts","offset":10,"limit":20}';
+    render(<ToolBlock tool="read" command={args} />);
+    expect(screen.getByText(/read \/src\/app\.ts offset=10 limit=20/)).toBeInTheDocument();
+    expect(screen.queryByText(args)).not.toBeInTheDocument();
+    expect(screen.queryByText(/"offset"/)).not.toBeInTheDocument();
+  });
+
+  it("summarizes bash in the header and hides the raw JSON", () => {
+    const args = '{"command":"ls -la /tmp"}';
+    render(<ToolBlock tool="bash" command={args} />);
+    expect(screen.getByText(/\$ ls -la \/tmp/)).toBeInTheDocument();
+    expect(screen.queryByText(args)).not.toBeInTheDocument();
+    expect(screen.queryByText(/"command"/)).not.toBeInTheDocument();
+  });
+
+  it("summarizes write as the path and never renders the file body", () => {
+    const args = '{"path":"/src/new.ts","content":"SECRET_BODY"}';
+    render(<ToolBlock tool="write" command={args} />);
+    expect(screen.getByText(/write \/src\/new\.ts/)).toBeInTheDocument();
+    expect(screen.queryByText(args)).not.toBeInTheDocument();
+    expect(screen.queryByText(/SECRET_BODY/)).not.toBeInTheDocument();
+  });
+
+  it("still renders raw arguments for tools without a summary", () => {
+    const args = '{"pattern":"**/*.ts"}';
+    render(<ToolBlock tool="glob" command={args} />);
+    expect(screen.getByText(/\{.*"pattern".*\}/)).toBeInTheDocument();
+  });
+});
+
+// Bash tool-call blocks: command/result text is kept intact (no soft wrap) and
+// scrolled horizontally so column-aligned output stays readable. A command that
+// does not fit the header line is repeated in full in its own code block.
+describe("ToolBlock bash code block", () => {
+  it("repeats a bash command that doesn't fit one line in a non-wrapping scroll block", () => {
+    const cmd = "echo " + "x".repeat(120);
+    const { container } = render(
+      <ToolBlock tool="bash" command={JSON.stringify({ command: cmd })} />,
+    );
+    const block = container.querySelector("pre.overflow-x-auto.whitespace-pre");
+    expect(block).not.toBeNull();
+    expect(block!.textContent).toContain(`$ ${cmd}`);
+  });
+
+  it("repeats a multi-line bash command even when it is short", () => {
+    const cmd = "cd /tmp\nls";
+    const { container } = render(
+      <ToolBlock tool="bash" command={JSON.stringify({ command: cmd })} />,
+    );
+    const block = container.querySelector("pre.overflow-x-auto.whitespace-pre");
+    expect(block).not.toBeNull();
+    expect(block!.textContent).toContain("cd /tmp\nls");
+  });
+
+  it("keeps a short single-line bash command inline only", () => {
+    const { container } = render(
+      <ToolBlock tool="bash" command={'{"command":"ls -la /tmp"}'} />,
+    );
+    expect(container.querySelector("pre.overflow-x-auto.whitespace-pre")).toBeNull();
+  });
+
+  it("renders bash output without wrapping so wide lines scroll horizontally", () => {
+    const { container } = render(
+      <ToolBlock
+        tool="bash"
+        command={'{"command":"cat big.txt"}'}
+        output={"a".repeat(200) + "\nsecond"}
+      />,
+    );
+    expect(container.querySelector("span.whitespace-pre")).not.toBeNull();
+    expect(container.querySelector("span.whitespace-pre-wrap")).toBeNull();
+    expect(container.querySelector("div.overflow-x-auto")).not.toBeNull();
+  });
+
+  it("keeps soft wrapping for non-bash tool output", () => {
+    const { container } = render(
+      <ToolBlock tool="grep" command={'{"pattern":"x"}'} output={"a".repeat(200)} />,
+    );
+    expect(container.querySelector("span.whitespace-pre")).toBeNull();
+    expect(container.querySelector("span.whitespace-pre-wrap")).not.toBeNull();
+  });
+});

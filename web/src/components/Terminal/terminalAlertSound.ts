@@ -1,4 +1,10 @@
-// Client-side settings + playback for terminal bell/notification alerts.
+// Client-side settings + playback for background alert sounds.
+//
+// One shared sound covers every "something needs you" signal in the SPA:
+// terminal bells / OSC notifications (TerminalPanel) and background chat
+// attention — turn finished, stalled, or waiting on a permission/question
+// dialog (AttentionSoundBridge). Keeping a single setting means the device's
+// enable toggle and custom sound file apply to all of them.
 //
 // Sound settings are intentionally stored in the browser/webview (not the
 // server-side ocodeconfig) because they are device-specific and selecting a
@@ -85,7 +91,8 @@ function playDefaultBeep(): void {
   osc.stop(now + 0.22);
 }
 
-/** Play the alert sound if enabled. Safe to call on every detected bell. */
+/** Play the alert sound if enabled. Safe to call on every attention signal
+ *  (terminal bell, background chat finishing / stalling / asking). */
 export function playAlertSound(): void {
   const settings = loadSoundSettings();
   if (!settings.enabled) return;

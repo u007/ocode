@@ -273,3 +273,23 @@ func TestDiscoveryJudgeClientResolvedOncePerDiscoveryState(t *testing.T) {
 		t.Fatalf("new discovery state must re-resolve the judge, got %d factory calls", calls)
 	}
 }
+
+func TestDiscoveryJudgeKeepsSlightlyRelevantCandidate(t *testing.T) {
+	a, _ := newDiscoveryJudgeAgent(t, typesafeNoulReply(map[string]float64{
+		"skill:a": 0.60, // slightly relevant -> kept at the lenient 0.5 floor
+		"skill:b": 0.40, // genuinely unsure / different scope -> vetoed
+	}), 0)
+	client := a.discoveryJudgeClient()
+	if client == nil {
+		t.Fatal("judge client should resolve with a keyed typesafe factory")
+	}
+	keep, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates()[:2])
+	if err != nil {
+		t.Fatalf("judge error: %v", err)
+	}
+	got := docIDList(keep)
+	want := []string{"skill:a"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("keep = %v want %v (0.60 must survive the lenient relevance floor)", got, want)
+	}
+}

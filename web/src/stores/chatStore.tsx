@@ -13,6 +13,13 @@ export const SENTINEL_PERMISSION_ASK = "PERMISSION_ASK:";
 export const SENTINEL_QUESTION_PROMPT = "QUESTION_PROMPT:";
 export const SENTINEL_WAITING = "WAITING_FOR_USER_RESPONSE";
 
+// Must match tool.QuestionDismissedResult (internal/tool/misc.go): the tool
+// result the server writes in place of an unanswered question prompt when the
+// user dismisses it. Mirrored locally so the optimistic rewrite matches the
+// snapshot byte-for-byte and a reconcile does not reopen the dialog.
+export const QUESTION_DISMISSED_RESULT =
+  "The user dismissed the question prompt without answering.";
+
 function trailingToolRunStart(messages: Message[]): number {
   let i = messages.length;
   while (i > 0 && messages[i - 1].role === "tool") i--;
@@ -176,6 +183,12 @@ export interface SessionSlice {
   // local value is no longer consulted (tuiStatus.main_model wins for real
   // sessions). Undefined = no pick yet.
   model?: string;
+  // Permission mode picked for a draft ("new-*") tab before the session exists
+  // server-side (normal|yolo|locked|sandbox). Same lifecycle as `model`: the
+  // first message sends it and the server persists it as the new session's
+  // per-session override; for a real session tuiStatus.permission_mode wins.
+  // Undefined = never picked (follows the config default).
+  permissionMode?: string;
 }
 
 export const emptySessionSlice: SessionSlice = {
@@ -262,6 +275,9 @@ export type ChatAction =
   // Per-session main model pick for a draft ("new-*") tab — see
   // SessionSlice.model. Does NOT touch the global s.model.
   | { type: "SET_SESSION_MODEL"; sessionId: string; model: string | undefined }
+  // Per-session permission-mode pick for a draft ("new-*") tab — see
+  // SessionSlice.permissionMode. Does NOT touch any other tab.
+  | { type: "SET_SESSION_PERMISSION_MODE"; sessionId: string; mode: string | undefined }
   | { type: "SET_SMALL_MODEL"; model: string }
   | { type: "SET_SMALL_MODEL_ENABLED"; enabled: boolean }
   | { type: "SET_ADVISOR_MODEL"; model: string }
@@ -285,16 +301,21 @@ export type ChatAction =
   | { type: "LIVE_RESET"; sessionId: string }
   | { type: "LIVE_PERMISSION_CHECK"; sessionId: string; tool: string; model: string; active: boolean }
   | { type: "LIVE_ADVISOR_CHECKPOINT"; sessionId: string; kind: string; active: boolean }
+  /** A transient informational line appended to the live buffer (discovery
+   *  notices mirrored from the TUI). Append-only: unlike a permission/advisor
+   *  status part it is never removed on completion. */
+  | { type: "LIVE_NOTICE"; sessionId: string; text: string }
   | { type: "PERMISSION_REQUEST"; sessionId: string; permission: PermissionRequest }
   | { type: "PERMISSION_RESOLVED"; sessionId: string; requestId?: string }
   | { type: "QUESTION_REQUEST"; sessionId: string; question: QuestionRequest }
-  | { type: "QUESTION_RESOLVED"; sessionId: string }
+  | { type: "QUESTION_RESOLVED"; sessionId: string; requestId?: string }
   | {
       type: "QUESTION_ANSWERED";
       sessionId: string;
       requestId: string;
       answers: QuestionAnswerPayload[];
     }
+  | { type: "QUESTION_DISMISSED"; sessionId: string; requestId: string }
   | { type: "PREPEND_MESSAGES"; sessionId: string; messages: Message[]; total: number }
   | { type: "SET_LOADING_MORE"; sessionId: string; loading: boolean }
   | { type: "MERGE_SNAPSHOT"; sessionId: string; messages: Message[]; total: number }
@@ -445,6 +466,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, model: action.model };
     case "SET_SESSION_MODEL":
       return updateSession(state, action.sessionId, (s) => ({ ...s, model: action.model }));
+    case "SET_SESSION_PERMISSION_MODE":
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        permissionMode: action.mode,
+      }));
     case "SET_SMALL_MODEL":
       return { ...state, smallModel: action.model };
     case "SET_SMALL_MODEL_ENABLED":
@@ -558,6 +584,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         return { ...s, live };
       });
     }
+    case "LIVE_NOTICE":
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        live: [...s.live, { kind: "notice", text: action.text }],
+      }));
     case "PERMISSION_REQUEST":
       return updateSession(state, action.sessionId, (s) => {
         // A round that dispatched multiple tool calls needing approval can
@@ -599,7 +630,44 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         pendingQuestion: action.question,
       }));
     case "QUESTION_RESOLVED":
-      return updateSession(state, action.sessionId, (s) => ({ ...s, pendingQuestion: null }));
+      return updateSession(state, action.sessionId, (s) => {
+        // A resolve for a question that isn't the one on screen (a stale
+        // dismissal for an older/superseded round) must not close the newer
+        // dialog. Permission resolves already carry this guard; questions use
+        // a single pending slot, so a mismatched request_id is ignored.
+        if (
+          action.requestId &&
+          s.pendingQuestion &&
+          s.pendingQuestion.request_id !== action.requestId
+        ) {
+          return s;
+        }
+        return { ...s, pendingQuestion: null };
+      });
+    case "QUESTION_DISMISSED":
+      // Optimistic echo of a Cancel the browser just POSTed. Mirrors
+      // QUESTION_ANSWERED: rewrite the local sentinel tool result in place with
+      // the same dismissal notice the server persists, so the chat stops
+      // showing the prompt and a later reconcile (which re-derives the pending
+      // ask from the transcript sentinel) does not immediately reopen the
+      // dialog. Idempotent and a no-op when the sentinel is not in the loaded
+      // page — the server snapshot is then the only source.
+      return updateSession(state, action.sessionId, (s) => {
+        let replaced = false;
+        const messages = s.messages.map((m) => {
+          if (
+            replaced ||
+            m.role !== "tool" ||
+            m.tool_call_id !== action.requestId ||
+            !m.content.includes(SENTINEL_QUESTION_PROMPT)
+          ) {
+            return m;
+          }
+          replaced = true;
+          return { ...m, content: QUESTION_DISMISSED_RESULT };
+        });
+        return { ...s, messages, pendingQuestion: null };
+      });
     case "QUESTION_ANSWERED":
       // Optimistic echo of the answers the browser just POSTed. The server
       // rewrites the pending `question` tool result in place with the

@@ -53,6 +53,7 @@ import DirectoryBrowser from "./DirectoryBrowser";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { RemoteProjectStatus } from "./RemoteProjectStatus";
 import { useRemoteHostStatus } from "../../hooks/useRemoteHostStatus";
+import { projectTerminalsKey } from "../Terminal/terminalPersistence";
 import { computeProjectDrag, projectDragKey } from "../../lib/projectDrag";
 import { buttonVariants } from "../ui/button";
 import { cn } from "@/lib/utils";
@@ -129,7 +130,7 @@ export function buildProjectSidebarOrder(
  *  Covers: # sessions open, streaming count / stalled (chat streaming stopped),
  *  pending permission, and terminal beep (alerted). Optimized to only re-render
  *  when the aggregate counts actually change, not on every streamed token. */
-function useProjectIndicators(projectPath: string): ProjectIndicators {
+function useProjectIndicators(projectPath: string, host?: string): ProjectIndicators {
   const { state: projectState } = useProjectState();
   const tabs = projectState.tabsByProject[projectPath] ?? [];
   const sessionCount = tabs.length;
@@ -164,14 +165,19 @@ function useProjectIndicators(projectPath: string): ProjectIndicators {
   );
 
   // Terminal-derived aggregate: how many backgrounded terminals emitted a bell.
+  // Read through the same host-aware key the store writes (a remote project's
+  // entry is `host::path`, never the bare path) and count only terminals that
+  // still exist. Counting raw alert-map values let an alert stranded by a
+  // cross-window sync (its terminal closed elsewhere) keep the bell lit with no
+  // tab to focus; deriving from the terminal list makes that impossible.
   const { state: terminalState } = useTerminalState();
   const terminalAlertCount = useMemo(() => {
-    const entry = terminalState.byProject[projectPath];
+    const entry = terminalState.byProject[projectTerminalsKey(projectPath, host)];
     if (!entry?.alerts) return 0;
     let c = 0;
-    for (const v of Object.values(entry.alerts)) if (v) c++;
+    for (const t of entry.terminals) if (entry.alerts[t.id]) c++;
     return c;
-  }, [terminalState, projectPath]);
+  }, [terminalState, projectPath, host]);
 
   const anyStreaming = chatAgg.streamingCount > 0;
   const anyStalled = chatAgg.stalledCount > 0;
@@ -365,7 +371,7 @@ function SortableProjectRow({
   onRemoveFromGroup,
   groups,
 }: SortableProjectRowProps) {
-  const indicators = useProjectIndicators(project.path);
+  const indicators = useProjectIndicators(project.path, project.host);
   const status = indicators.status;
   const rename = useInlineRename(project.name, onRename);
   // Remote host status is owned here (not inside RemoteProjectStatus) so the
@@ -376,11 +382,19 @@ function SortableProjectRow({
   // blocks on a round-trip) and the project's active transcript (so the chat
   // tab paints from data already in flight).
   const { state: sidebarState, prefetchProjectSessions } = useProjectState();
+  // A remote project must NOT be warmed while its host is unconnected: the
+  // session-list fetch goes through /api/remote/{host}/... which cold-connects
+  // the host server-side (SSH reachability → provision → server start →
+  // tunnel). That is a multi-second-to-minutes operation, and doing it on a
+  // pointer crossing the row made the SPA look hung. Connection is an explicit
+  // action (the row's Connect button); hover warm-up resumes once connected.
+  const remoteReady = !project.host || !!hostStatus.status?.connected;
   const prefetchProjectActiveTab = useCallback(() => {
+    if (!remoteReady) return;
     prefetchProjectSessions(project);
     const tabId = sidebarState.activeTabByProject[project.path];
     if (tabId) prefetchSession(tabId);
-  }, [prefetchProjectSessions, sidebarState.activeTabByProject, project]);
+  }, [prefetchProjectSessions, sidebarState.activeTabByProject, project, remoteReady]);
 
   const contextItems: ContextMenuItem[] = useMemo(() => {
     const items: ContextMenuItem[] = [
@@ -897,15 +911,19 @@ function CollapsedProjectButton({
   onRemoveFromGroup: () => void;
   groups: ProjectGroup[];
 }) {
-  const indicators = useProjectIndicators(project.path);
-  // Same hover-warming as the expanded row: start the session-list and active
-  // transcript fetches before the click lands.
+  const indicators = useProjectIndicators(project.path, project.host);
+  // Same hover-warming as the expanded row, with the same cold-connect guard:
+  // an unconnected remote host must not be connected by a pointer crossing the
+  // rail icon (see SortableProjectRow for the full rationale).
   const { state: railState, prefetchProjectSessions } = useProjectState();
+  const hostStatus = useRemoteHostStatus(project.host, !!project.host);
+  const remoteReady = !project.host || !!hostStatus.status?.connected;
   const prefetchProjectActiveTab = useCallback(() => {
+    if (!remoteReady) return;
     prefetchProjectSessions(project);
     const tabId = railState.activeTabByProject[project.path];
     if (tabId) prefetchSession(tabId);
-  }, [prefetchProjectSessions, railState.activeTabByProject, project]);
+  }, [prefetchProjectSessions, railState.activeTabByProject, project, remoteReady]);
   const showCount = indicators.sessionCount > 0;
   // Prioritize overlays: pending > terminal alert > streaming > stalled.
   // Any attention state (chat stopped / waiting for input / terminal bell)

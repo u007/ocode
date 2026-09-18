@@ -3147,7 +3147,7 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 					a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_unavailable tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 				}
 			}
-			return fmt.Sprintf("denied: tool %q is not permitted by permission rules. This call is blocked by policy — do not retry the same call; choose a different approach or ask the user.", name), nil
+			return denyToolMessage(name, decision), nil
 		}
 		if decision.Level == PermissionAsk {
 			if autoEnabled {
@@ -3220,6 +3220,18 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 	// comment at the top of this function for the rationale.)
 
 	return a.executeToolCallWithContext(ctx, name, args, b, toolCallID)
+}
+
+// denyToolMessage renders the tool-result text for a static policy Deny.
+// decision.DenyReason, when set by Decide, names the rule or gate that blocked
+// the call (e.g. a Claude Code deny rule, a user bash ban, locked mode) so the
+// user can fix the policy instead of guessing why the call failed. Without a
+// reason the message stays generic.
+func denyToolMessage(name string, decision PermissionDecision) string {
+	if decision.DenyReason != "" {
+		return fmt.Sprintf("denied: tool %q is not permitted by permission rules (%s). This call is blocked by policy — do not retry the same call; choose a different approach or ask the user.", name, decision.DenyReason)
+	}
+	return fmt.Sprintf("denied: tool %q is not permitted by permission rules. This call is blocked by policy — do not retry the same call; choose a different approach or ask the user.", name)
 }
 
 func (a *Agent) autoPermissionModelName() string {

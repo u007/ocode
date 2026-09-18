@@ -35,8 +35,19 @@ Sandbox was originally per-session only: `persistPermissions()` (`internal/tui/m
 - `persistPermissions()` calls `config.SavePermissionModeSwitch(string(pm.Mode()))` (`model.go:14755`) — writes the mode verbatim, no clamp.
 - `SavePermissionModeSwitch` (`internal/config/ocodeconfig.go:3164`) sets `cfg.Permissions.Mode = mode` with no sandbox-specific logic.
 - TUI: `/sandbox` bare toggles, `/sandbox on|off|status`, permission-mode click cycle.
-- Web: mode selector in settings, `PUT /api/permissions/mode`.
+- Web: the chat sidebar's Permission pill and `/yolo` + `/sandbox` commands, scoped to the active chat session; the Settings→Permissions form owns only the persisted default.
 - Cron is unaffected: each job resolves its own per-job permission mode independently via `resolveCronPermissionMode` (`internal/server/scheduler_runner.go:172`); blank → `normal`.
+
+## Per-session live mode (web/server, 2026-09-18)
+
+The **live** mode is per chat session, not per process. `PUT /api/permissions/mode` and `PUT /api/permissions/yolo` require a `session_id` (body or `?session_id=`) and apply only to that session's live agent; `GET /api/permissions` and `GET /api/permissions/yolo` accept the same query param. A session-less write is a `400` (there is deliberately no process-global path).
+
+- Override storage: the session transcript's metadata key `permission_mode` (via `session.UpdateMetadataForDir`), mirroring the per-session `model` override, so it survives resume and server restart.
+- Applied at every agent build: `buildAgentSession` and `registerAgentSession` (`internal/server/agent_session.go`) read the session's own metadata; other sessions never inherit it.
+- Status: per-session snapshot builders stamp `permission_mode` / `permission_sandbox_supported` / `permission_effective_behavior` via `applySessionPermissionFields` (`internal/server/handler_permissions.go`); the process-wide `buildStatusSnapshot` reports only the persisted default.
+- Bridged TUI sessions resolve through the RC bridge agent and are persisted by the TUI, not the server.
+- New-session seeding: `POST /api/chat` accepts `permission_mode` so a draft (`new-*`) tab's pick is persisted when the first message creates the session.
+- The persisted default (`PUT /api/config/ocode/permissions-mode`) still governs sessions with no override and is edited in Settings.
 
 ## Destructive git routing
 

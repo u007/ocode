@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: Speech playback
-description: Speech playback — engine availability, installation, playback controls, and DOM-based rendered-text extraction. Updated to document tool-group and live-stream Speak button coverage (2026-09-17) and sibling/data-speech-exclude architecture.
+description: Speech playback — user-facing doc covering engine availability, installation, playback controls, and DOM-based rendered-text extraction. Updated with espeak-ng data-path length gotcha (2026-09-18).
 tags:
   - speech
   - tts
@@ -10,11 +10,11 @@ tags:
   - desktop
   - user-facing
   - DOM-extraction
-timestamp: 2026-09-17T05:37:54Z
+timestamp: 2026-09-18T11:27:27Z
 ---
 ---
 type: Guide
-description: Speech playback — user-facing doc covering engine availability, installation, playback controls, and DOM-based rendered-text extraction
+description: Speech playback — user-facing doc covering engine availability, installation, playback controls, and DOM-based rendered-text extraction. Updated with espeak-ng data-path length gotcha (2026-09-18).
 tags: [speech, tts, playback, web, desktop, user-facing, DOM-extraction]
 status: active
 okf_version: "0.1"
@@ -65,6 +65,20 @@ embeds the same React application.
   suitable interpreter is found, the install fails with a message naming the
   selected interpreter and the supported range, plus advice such as
   `brew install python@<newest supported minor>`.
+
+  **espeak-ng data-path length constraint:** Kokoro depends on
+  `espeakng-loader==0.2.4` (which embeds espeak-ng 1.52.0) and
+  `phonemizer==3.4.0`. espeak-ng stores the data directory in a fixed
+  `N_PATH_HOME` buffer (160 bytes POSIX, 230 bytes Windows —
+  `src/libespeak-ng/speech.h`). Paths that exceed this length are truncated
+  silently, causing espeak to fall back to a compile-time default baked into
+  the wheel (the CI builder's path, e.g. `/Users/runner/work/...`) and then
+  call `exit(1)`. Symlinks do NOT help because phonemizer's
+  `EspeakWrapper.data_path` applies `pathlib.Path.resolve()`, re-expanding
+  the link. The engine mitigates this: if the bundled espeak data path
+  exceeds the buffer limit, it copies the data to a short real directory
+  (`<cache>/.espeak-data`) and passes that path to the synth process. See
+  `gotchas/kokoro-espeak-ng-path-limit.md` for full details.
 
 - **Fish Audio and Breeze** remain unavailable until their runtime, artifact,
   output protocol, platform matrix, and license review are complete. The UI

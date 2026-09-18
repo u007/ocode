@@ -111,18 +111,22 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
         dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
         return Promise.resolve(false);
       }
-      // A draft tab's locally-picked model (sidebar Model picker) rides along
-      // with the first message; the server persists it as the new session's
-      // model. Undefined when the tab never changed the model (server falls
-      // back to the global config default). Read imperatively at send time so
-      // the model does not have to be a reactive render dependency.
-      const model = getSessionSlice(stateRef.current, sessionId).model;
+      // A draft tab's locally-picked model and/or permission mode (sidebar
+      // pickers) ride along with the first message; the server persists them
+      // as the new session's overrides. Undefined when the tab never changed
+      // them (server falls back to the global defaults). Read imperatively at
+      // send time so they do not have to be reactive render dependencies.
+      const draftSlice = getSessionSlice(stateRef.current, sessionId);
+      const model = draftSlice.model;
+      const permissionMode = draftSlice.permissionMode;
       const submitPromise = isRealSession
         ? api.sendMessage(sessionId, content, projectHost)
-        : api.chat(content, undefined, model, sessionId, projectPath, projectHost).then((res) => {
-            options?.onNewSession?.(res.sessionId);
-            return res;
-          });
+        : api
+            .chat(content, undefined, model, sessionId, projectPath, projectHost, permissionMode)
+            .then((res) => {
+              options?.onNewSession?.(res.sessionId);
+              return res;
+            });
 
       // The send endpoints resolve as soon as the server has *dispatched* the
       // turn (202), not when it finishes — they no longer hold a connection
@@ -235,6 +239,37 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     [dispatch, sessionId, projectHost],
   );
 
+  // Cancel a pending agent question prompt without answering it (the web
+  // equivalent of the TUI's Esc on the dialog). Mirrors submitQuestionAnswers:
+  // only a confirmed success dismisses the dialog. A 404/409 means the server
+  // no longer holds this ask (already answered/dismissed elsewhere, or the
+  // agent was released) — retrying can never succeed, so the dialog is
+  // dismissed locally instead of staying stuck open.
+  const cancelQuestion = useCallback(
+    async (requestId: string): Promise<boolean> => {
+      if (!sessionId) return false;
+      try {
+        await api.cancelQuestion(requestId, sessionId, projectHost);
+        dispatch({ type: "QUESTION_DISMISSED", sessionId, requestId });
+        return true;
+      } catch (err) {
+        console.error("Failed to cancel question:", err);
+        const stale = err instanceof ApiError && (err.status === 404 || err.status === 409);
+        if (stale) {
+          dispatch({ type: "QUESTION_RESOLVED", sessionId, requestId });
+          return true;
+        }
+        dispatch({
+          type: "SET_ERROR",
+          sessionId,
+          error: err instanceof Error ? err.message : "question cancel failed",
+        });
+        return false;
+      }
+    },
+    [dispatch, sessionId, projectHost],
+  );
+
   // Execute a shell command directly (for ! prefix commands). A remote
   // project's command runs on its host through the host's own login shell;
   // `host` is omitted for local projects so the server keeps its local path.
@@ -264,6 +299,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     wasInterrupted,
     resolvePermission,
     submitQuestionAnswers,
+    cancelQuestion,
     // isStreaming derives from the per-session turn state (Part 05): set
     // optimistically on 202 (SET_STREAMING), confirmed by turn_started
     // (turnActive), cleared by turn_done/turn_error or a rejected submit.

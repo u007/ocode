@@ -29,7 +29,6 @@ const mockSetPermissionMode = vi.mocked(api.setPermissionMode);
 const mockGetPermissionModeConfig = vi.mocked(api.getPermissionModeConfig);
 const mockSetPermissionModeConfig = vi.mocked(api.setPermissionModeConfig);
 const mockSetAuto = vi.mocked(api.setAutoPermissionConfig);
-const mockSetPermissionModel = vi.mocked(api.setPermissionModel);
 
 const EMPTY_AUTO = {
   enabled: false,
@@ -55,30 +54,23 @@ beforeEach(() => {
   mockGetPermissionModeConfig.mockResolvedValue({ mode: "normal" } as never);
 });
 
-describe("PermissionsForm sandbox preservation", () => {
-  it("does not revert sandbox to normal when saved without touching mode", async () => {
+describe("PermissionsForm is process-wide settings only", () => {
+  it("never writes a session-less live permission mode on save", async () => {
     render(<PermissionsForm />);
     await screen.findByText("Permissions");
 
-    const save = screen.getByRole("button", { name: /save/i });
-    fireEvent.click(save);
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => expect(mockSetAuto).toHaveBeenCalled());
-    // The mode was sandbox and the user did not change it → setPermissionMode
-    // must NOT be called, so the session-scoped sandbox toggle is preserved.
+    // The live mode is per chat session and is edited from the sidebar/commands,
+    // never from this process-wide form (a session-less write would leak).
     expect(mockSetPermissionMode).not.toHaveBeenCalled();
   });
 
-  it("calls setPermissionMode('yolo') when the user enables YOLO and saves", async () => {
+  it("does not offer a live YOLO checkbox anymore", async () => {
     render(<PermissionsForm />);
     await screen.findByText("Permissions");
-
-    const yolo = screen.getByLabelText(/Yolo mode/i);
-    fireEvent.click(yolo); // toggle to checked (yolo)
-    fireEvent.click(screen.getByRole("button", { name: /save/i }));
-
-    await waitFor(() => expect(mockSetPermissionMode).toHaveBeenCalledWith("yolo"));
-    expect(mockSetPermissionModel).not.toHaveBeenCalled(); // no model change
+    expect(screen.queryByLabelText(/Yolo mode/i)).toBeNull();
   });
 
   it("does not persist the default mode when the user did not change it", async () => {

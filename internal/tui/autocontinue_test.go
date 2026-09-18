@@ -81,6 +81,25 @@ func TestAutoContinueChainCap(t *testing.T) {
 	}
 }
 
+// The model-set confirmation must say the enable gate is still off — setting a
+// judge model does not arm auto-continue. Before this, `/autocontinue model
+// typesafe/jev-latest` printed "Auto-continue judge model updated … Persisted
+// to config", which reads as "it is on" and matches the report "auto continue
+// llm via jev does not work" (the gate was left disabled).
+func TestAutoContinueModelSetNoteSurfacesDisabledGate(t *testing.T) {
+	off := autoContinueModelSetNote(false)
+	if !strings.Contains(off, "DISABLED") {
+		t.Errorf("note when disabled should warn the gate is off: %q", off)
+	}
+	on := autoContinueModelSetNote(true)
+	if !strings.Contains(on, "Persisted") {
+		t.Errorf("note when enabled should confirm persistence: %q", on)
+	}
+	if strings.Contains(on, "DISABLED") {
+		t.Errorf("note when enabled must not claim it is disabled: %q", on)
+	}
+}
+
 func TestShouldAutoContinueGuards(t *testing.T) {
 	cases := []struct {
 		name         string

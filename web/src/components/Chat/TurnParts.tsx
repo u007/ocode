@@ -3,8 +3,16 @@ import { CheckCircle2, Volume2 } from "lucide-react";
 import type { QuestionAnswerPayload } from "@/api/types";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
+import { bashCommandFromArgs, formatToolArgsHint } from "./toolHint";
 
 const TOOL_OUTPUT_PREVIEW_LINES = 20;
+
+// Character budget approximating a single transcript line inside the tool
+// block (a max-w-[80%] bubble at font-mono text-[11px]). A bash command longer
+// than this — or one containing an explicit newline — does not fit on the
+// block header, where it is ellipsis-truncated, so the full command is
+// repeated in a non-wrapping, horizontally scrollable code block below it.
+const BASH_COMMAND_INLINE_BUDGET = 80;
 
 // Mirrors internal/tui/tool_render.go's stripTruncationFooter: the Go layer
 // appends this marker (see internal/agent/truncate.go TruncationMarkerPrefix)
@@ -95,6 +103,23 @@ export function StatusBlock({ text }: { text: string }) {
       <div className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-card/40 px-3 py-2 text-xs text-muted-foreground">
         <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-muted" />
         <span>{text}</span>
+      </div>
+    </div>
+  );
+}
+
+// NoticeBlock renders a transient, informational one-line notice (a discovery
+// "Discovered: …" / "Indexing: …" event mirrored from the TUI). Unlike
+// StatusBlock it carries no spinner — it does not represent work in flight, so
+// it must not read as "still busy". Transient like StatusBlock: the turn-end
+// snapshot clears the live buffer it lives in.
+export function NoticeBlock({ text }: { text: string }) {
+  if (!text) return null;
+  return (
+    <div className="mb-3 flex justify-start">
+      <div className="rounded-lg border border-border/40 bg-card/30 px-3 py-1.5 text-xs text-muted-foreground">
+        <span className="mr-1 opacity-70">~</span>
+        {text}
       </div>
     </div>
   );
@@ -221,6 +246,10 @@ export const ToolBlock = memo(function ToolBlock({
   // stream, or by the "DIFF:" first line on replayed history (no tool name).
   const isDiffOutput =
     TOOL_OUTPUT_LANG[tool] === "diff" || (displayOutput ?? "").startsWith("DIFF:");
+  // Concise summary for tools whose raw argument JSON is noise in the
+  // transcript (read/write/bash). When present, the header shows it instead of
+  // the bare tool name and the raw-args block below is suppressed.
+  const argsHint = formatToolArgsHint(tool, command);
   // Answered `question` call: render the questions + the selected answers (what
   // was sent to the LLM) instead of the raw result JSON. Placed after every
   // hook so the early return cannot change the hook order across renders.
@@ -228,6 +257,20 @@ export const ToolBlock = memo(function ToolBlock({
     const answers = parseQuestionAnswers(output);
     if (answers) return <QuestionAnswerBlock answers={answers} />;
   }
+  // Bash: the header ellipsis-truncates a command that does not fit on one
+  // line, so repeat the whole command in a code block below it. Short,
+  // single-line commands stay inline in the header only.
+  const bashCommand = tool === "bash" ? bashCommandFromArgs(command) : "";
+  const showCommandBlock =
+    bashCommand !== "" &&
+    (bashCommand.includes("\n") || bashCommand.length > BASH_COMMAND_INLINE_BUDGET);
+  // Bash output is command-line text (tables, logs, paths): keep source lines
+  // intact and scroll horizontally instead of soft-wrapping, which destroys
+  // column alignment. Every other tool keeps the existing wrap behavior.
+  const noWrapCode = tool === "bash";
+  const codeBoxClass = noWrapCode
+    ? "overflow-x-auto whitespace-pre"
+    : "whitespace-pre-wrap break-words";
   return (
     <div className="mb-3 flex justify-start">
       <div className="max-w-[95%] md:max-w-[80%] w-full rounded-lg border border-amber-700/40 bg-amber-950/20 px-3 py-2">
@@ -237,7 +280,7 @@ export const ToolBlock = memo(function ToolBlock({
           className="flex w-full items-center gap-1.5 text-xs font-medium text-amber-300/90 hover:text-amber-200"
         >
           <span>{open ? "▾" : "▸"}</span>
-          <span>🔧 {tool || "tool"}{lineCount > 0 ? ` · ${lineCount} lines` : ""}</span>
+          <span className="min-w-0 truncate" title={argsHint || undefined}>🔧 {argsHint || tool || "tool"}{lineCount > 0 ? ` · ${lineCount} lines` : ""}</span>
           {pending && !onOpenQuestion && <span className="ml-1 animate-pulse text-amber-400/70">running…</span>}
           {onOpenQuestion && <span className="ml-1 text-amber-400/70">awaiting your answer</span>}
         </button>
@@ -252,8 +295,15 @@ export const ToolBlock = memo(function ToolBlock({
         )}
         {open && (
           <div className="mt-2 space-y-2">
-            {command && (
-              <pre className="whitespace-pre-wrap break-words rounded bg-card/70 p-2 font-mono text-[11px] text-foreground">
+            {showCommandBlock && (
+              <pre className={`${codeBoxClass} rounded bg-card/70 p-2 font-mono text-[11px] text-foreground`}>
+                {highlight.trim()
+                  ? highlightMatches(`$ ${bashCommand}`, highlight)
+                  : `$ ${bashCommand}`}
+              </pre>
+            )}
+            {command && !argsHint && (
+              <pre className={`${codeBoxClass} rounded bg-card/70 p-2 font-mono text-[11px] text-foreground`}>
                 {highlight.trim() ? (
                   highlightMatches(command, highlight)
                 ) : (
@@ -263,14 +313,15 @@ export const ToolBlock = memo(function ToolBlock({
             )}
             {pending && stream && (
               <div className="rounded bg-card/70 p-2">
-                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">
+                <pre className={`${codeBoxClass} font-mono text-[11px] text-muted-foreground`}>
                   {stream.split("\n").slice(-TOOL_OUTPUT_PREVIEW_LINES).join("\n")}
                 </pre>
               </div>
             )}
             {output !== undefined && output !== "" && (
               <div className="rounded bg-card/70 p-2">
-                <div className="font-mono text-[11px] text-muted-foreground whitespace-pre">
+                <div className={`font-mono text-[11px] text-muted-foreground ${noWrapCode ? "overflow-x-auto" : "whitespace-pre"}`}>
+                  <div className={noWrapCode ? "w-max min-w-full" : undefined}>
                   {(visibleOutput ?? "").split("\n").map((line, i) => {
                     const colorClass = !isDiffOutput
                       ? "text-muted-foreground"
@@ -282,11 +333,13 @@ export const ToolBlock = memo(function ToolBlock({
                     return (
                       <div key={i} className={`flex ${colorClass}`}>
                         <span className="select-none text-neutral-600 w-10 text-right pr-2 shrink-0 text-[10px] leading-4">{isDiffOutput ? String(i + 1) : ""}</span>
-                        <span className="whitespace-pre-wrap break-words">{highlight.trim() ? highlightMatches(line, highlight) : line}</span>
+                        <span className={noWrapCode ? "whitespace-pre" : "whitespace-pre-wrap break-words"}>{highlight.trim() ? highlightMatches(line, highlight) : line}</span>
                       </div>
                     );
                   })
-                }</div>
+                }
+                  </div>
+                </div>
                 {collapsible && (
                   <button
                     type="button"

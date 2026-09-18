@@ -44,6 +44,12 @@ internal/config/.opencode/snapshots/
 
 # Scratch / debug artifacts produced by local agent sessions
 .tmp_*
+
+# ONNX Runtime >= 1.29 POSIX telemetry sidecar, written into the process cwd on
+# OrtEnv init (first onnxruntime import). The TTS synth children opt out via
+# ORT_DISABLE_TELEMETRY, but a manual python import from the repo root still
+# drops one; ignore it at any depth.
+:memory:.ses
 .d_*.diff
 build_*.sh
 _build_*.sh

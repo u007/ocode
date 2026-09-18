@@ -4,7 +4,7 @@ import { useChatSelector, useChatDispatch, getSessionSlice, parseQuestionFromMes
 import { useProjectDispatch } from "../../stores/projectStore";
 import { api } from "../../api/client";
 import MessageBubble, { AssistantText } from "./MessageBubble";
-import { StatusBlock, ThinkingBlock, ToolBlock } from "./TurnParts";
+import { StatusBlock, ThinkingBlock, ToolBlock, NoticeBlock } from "./TurnParts";
 import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
 import ModelPromptRow from "./ModelPromptRow";
 import { RESTORE_EVENT } from "../../lib/inputRestore";
@@ -57,7 +57,20 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
   // Whether the viewport is pinned to the bottom. Driven by handleScroll and
   // consulted by the auto-scroll effect so we only follow the tail when the
   // user is already at the bottom (and resume reliably after they return).
+  // This IS the scroll lock: false means the user scrolled up and auto-scroll
+  // must not follow until they scroll back down or the lock is reset.
   const atBottomRef = useRef(true);
+  // Last observed scrollTop. Used to detect an UPWARD move synchronously in
+  // handleScroll: a scroll event whose offset decreased can only come from the
+  // user (our own pins always increase it). Unpinning in the same tick as the
+  // event — instead of waiting for the deferred recompute — is what stops a
+  // streamed token that lands in the same frame from re-pinning and swallowing
+  // the user's scroll-up.
+  const lastScrollTopRef = useRef(0);
+  // Previous committed message-list size, so the auto-scroll effect can tell a
+  // transcript RESET (truncate/clear/replace, which shrinks the list) from an
+  // append or prepend (which only grow it).
+  const prevMessagesRef = useRef<{ count: number } | null>(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   // Mirror of showJumpToBottom for the other edge: shown whenever there is more
   // than a viewport-threshold of transcript above the current position. Set by
@@ -417,6 +430,7 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
           const el = scrollRef.current;
           if (el) {
             el.scrollTop = el.scrollHeight;
+            lastScrollTopRef.current = el.scrollTop;
             atBottomRef.current = true;
             setShowJumpToBottom(false);
             // Pinned to the bottom of a long transcript: the top affordance is
@@ -435,17 +449,57 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
     };
   }, [sessionId, dispatch, projectDispatch]);
 
+  // A new session (or any session-id change) starts with a clean tail lock:
+  // there is no prior reader scroll intent to preserve. ChatPanel is keyed by
+  // tab id in App.tsx, so this usually coincides with a remount; making it
+  // explicit keeps the invariant testable and guards a future non-keyed reuse.
+  useEffect(() => {
+    atBottomRef.current = true;
+    lastScrollTopRef.current = 0;
+    prevMessagesRef.current = null;
+    setShowJumpToBottom(false);
+    setShowJumpToTop(false);
+  }, [sessionId]);
+
   // Auto-scroll to bottom on new committed messages, but ONLY when the user
   // is already pinned to the bottom. We scroll instantly (not smooth) so a
   // burst of streaming tokens can't start a competing smooth animation — that
   // competition is what caused the down/up bounce and eventual lockout. The
   // explicit "jump to bottom" button uses smooth scrolling instead.
+  //
+  // The lock RESETS (auto-scroll re-arms) when carrying it would be meaningless:
+  //   - the transcript was replaced by a shorter one (truncate / clear / reset),
+  //     so the reader's old position no longer refers to this content;
+  //   - the content no longer overflows the viewport (no scrollbar), so there is
+  //     nothing to be scrolled away from and later growth should track the tail.
   useEffect(() => {
     if (!initialized) return;
     const el = scrollRef.current;
     if (!el) return;
+    // Appends and prepends only ever grow the committed list; a shrink means
+    // the transcript was reset/replaced under the reader.
+    const prev = prevMessagesRef.current;
+    prevMessagesRef.current = { count: messages.length };
+    if (prev && messages.length < prev.count) {
+      atBottomRef.current = true;
+    }
+    // Only meaningful while the panel has a layout box: a hidden (display:none)
+    // tab reports scrollHeight/clientHeight 0 and must NOT be mistaken for
+    // "no scrollbar" — that would silently re-arm a reader's lock every time a
+    // stream event lands while the tab is in the background.
+    const hasScrollbar = el.scrollHeight - el.clientHeight > 1;
+    if (el.clientHeight > 0 && !hasScrollbar) {
+      // No scrollbar: there is no position to be locked away from, so re-arm
+      // the follow and clear both affordances. Fall through to the pin below so
+      // a programmatic pin still happens (a no-op in a real browser where the
+      // content fits, but it keeps the pinned invariant true for tests/layout).
+      atBottomRef.current = true;
+      setShowJumpToBottom(false);
+      setShowJumpToTop(false);
+    }
     if (atBottomRef.current) {
       el.scrollTop = el.scrollHeight;
+      lastScrollTopRef.current = el.scrollTop;
     }
   }, [messages, live, initialized]);
 
@@ -472,14 +526,23 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
       // prevHeight === -1 covers a panel whose very first observation already
       // arrives while visible (e.g. the effect re-created when `initialized`
       // flipped); pinning then matches the initial-load-to-bottom behavior.
-      if (height > 0 && (prevHeight === 0 || prevHeight === -1) && atBottomRef.current && initialized) {
+      if (height > 0 && initialized && el.scrollHeight - el.clientHeight <= 1) {
+        // No scrollbar (e.g. the window grew to fit the transcript): the lock
+        // cannot apply, so re-arm the follow for when it overflows again.
+        atBottomRef.current = true;
+        lastScrollTopRef.current = el.scrollTop;
+        setShowJumpToBottom(false);
+        setShowJumpToTop(false);
+      } else if (height > 0 && (prevHeight === 0 || prevHeight === -1) && atBottomRef.current && initialized) {
         el.scrollTop = el.scrollHeight;
+        lastScrollTopRef.current = el.scrollTop;
         setShowJumpToBottom(false);
         setShowJumpToTop(el.scrollHeight - el.clientHeight > 200);
         cancelAnimationFrame(raf);
         raf = requestAnimationFrame(() => {
           if (atBottomRef.current) {
             el.scrollTop = el.scrollHeight;
+            lastScrollTopRef.current = el.scrollTop;
           }
         });
       }
@@ -519,9 +582,13 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
       // rides out the virtualizer's re-windowing, mirroring the hidden→visible
       // re-pin above.
       el.scrollTop = el.scrollHeight;
+      lastScrollTopRef.current = el.scrollTop;
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
-        if (atBottomRef.current) el.scrollTop = el.scrollHeight;
+        if (atBottomRef.current) {
+          el.scrollTop = el.scrollHeight;
+          lastScrollTopRef.current = el.scrollTop;
+        }
       });
     };
     const ro = new ResizeObserver(pin);
@@ -599,6 +666,7 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
     scrollElementTo(el, el.scrollHeight, smooth ? "smooth" : "auto");
     requestAnimationFrame(() => {
       atBottomRef.current = true;
+      lastScrollTopRef.current = el.scrollTop;
       setShowJumpToBottom(false);
     });
   }, []);
@@ -627,8 +695,27 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
     const el = scrollRef.current;
     if (!el) return;
 
+    // Synchronous upward-move check. A scroll event whose offset DECREASED can
+    // only come from the user (or an explicit jump up) — our own pins always
+    // increase it. Unpinning here, in the same tick as the event, is what stops
+    // a streamed token that lands before the deferred recompute below from
+    // re-pinning and swallowing the scroll-up (the "can't stay scrolled up
+    // while the LLM streams" report). The deferred pass still owns the
+    // near-bottom re-pin and the content-growth race it was written for.
+    const top = el.scrollTop;
+    const prevTop = lastScrollTopRef.current;
+    lastScrollTopRef.current = top;
+    if (top < prevTop - 1) {
+      atBottomRef.current = false;
+    }
+
     cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(() => {
+      // A pin may have moved the offset since the event; record it so the next
+      // event doesn't misread our own downward write as an upward move.
+      lastScrollTopRef.current = el.scrollTop;
+      // With no scrollbar the distance below is always negative, so the general
+      // path already re-arms the follow (and clears both affordances).
       const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
       const atBottom = distanceFromBottom < 200;
       atBottomRef.current = atBottom;
@@ -858,6 +945,8 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
                 return <AssistantText key={`live-${i}`} content={part.text} onSpeak={requestSpeech} />;
               if (part.kind === "status")
                 return <StatusBlock key={`live-${i}`} text={part.text} />;
+              if (part.kind === "notice")
+                return <NoticeBlock key={`live-${i}`} text={part.text} />;
               return (
                 <ToolBlock
                   key={`live-${i}`}

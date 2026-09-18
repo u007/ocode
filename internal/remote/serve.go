@@ -113,14 +113,19 @@ func launchServerCmd(ver string) string {
 	// structurally impossible: the poll can only ever see nothing (keep
 	// polling) or the genuinely new server's fresh state.
 	//
-	// Redirect all three standard fds explicitly and disown the child: a
-	// backgrounded process that still holds the ssh session's stdout/stderr
-	// pipe open makes the outer non-interactive `ssh host cmd` hang waiting
-	// for those fds to close, even after this shell returns. </dev/null
-	// plus explicit redirects plus `disown` fully detaches it so `ssh`
-	// returns as soon as this command's own shell exits.
+	// Redirect all three standard fds and detach the child in its own
+	// backgrounded subshell: a backgrounded process that still holds the ssh
+	// session's stdout/stderr pipe open makes the outer non-interactive
+	// `ssh host cmd` hang until that process exits, even after this shell
+	// returns. `&&` before a bare `nohup … &` is the trap: `mkdir && nohup … &`
+	// backgrounds the WHOLE `mkdir && nohup` list, so the forked subshell waits
+	// on the (long-lived) server before exiting and keeps the ssh channel open —
+	// StartFreshServer's Exec then blocks until the server dies, which the
+	// connect backstop reports as a 502 after its timeout. Wrapping the nohup in
+	// `( … & )` keeps the mkdir guard while letting the subshell return
+	// immediately, so `ssh` sees EOF as soon as this command's shell exits.
 	return fmt.Sprintf(
-		"rm -f %s; mkdir -p %s && nohup %s serve --remote --host 127.0.0.1 --port 0 </dev/null >%s 2>&1 & disown; echo launched",
+		"rm -f %s; mkdir -p %s && (nohup %s serve --remote --host 127.0.0.1 --port 0 </dev/null >%s 2>&1 &); echo launched",
 		statePath, shellQuotePath("~/.ocode/remote"), remoteOcode, logPath,
 	)
 }

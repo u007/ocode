@@ -27,7 +27,7 @@ import (
 // This text is intentionally separate from permissions.auto.prompt in
 // ocodeconfig.json: that field is the user's own free-form override and
 // must never be silently overwritten by a bundled update.
-const BundledAutoPermissionPromptVersion = "1.9.4"
+const BundledAutoPermissionPromptVersion = "1.9.5"
 
 // BundledAutoPermissionPromptBody is the shipped default addendum. Bump
 // BundledAutoPermissionPromptVersion whenever this changes.
@@ -55,6 +55,27 @@ const BundledAutoPermissionPromptBody = `Always ALLOW these git commands without
 - Commands using "git -c <key>=<value>" (including repeated "-c" and mixed with "-C <path>", "--no-pager", "--git-dir", "--work-tree") are NOT auto-allowed by the code allowlist — you must evaluate them. If the underlying subcommand is read-only (e.g. "git status", "git log", "git diff" with a safe key like "core.quotepath"), the wrapper does not make it mutating and it is safe to ALLOW. Do NOT ALLOW if the -c key is security-sensitive — "protocol.*.allow" (enables ext::), "core.sshCommand", "core.pager", "core.editor", "core.hooksPath", "filter.*", "url.*.insteadOf", "credential.*" (including URL-scoped forms like "credential.<url>.helper"), "pager.*" (a pager is an executed command), "gpg.program" (executed by verify-commit/verify-tag) — even when the underlying subcommand is read-only; those require human approval. Repeated "-c" is handled the same way.
 - All other git subcommands that are primarily read-only (e.g. "git ls-tree", "git ls-remote", "git reflog", "git shortlog", "git cat-file", "git check-ignore", "git grep", "git name-rev", "git for-each-ref", "git rev-list") are also safe to ALLOW when they do not carry destructive flags. Do not auto-allow mutating forms like "git branch -D", "git tag -d", "git remote remove", "git config --unset", "git worktree remove", or "git notes add".
 - "curl"/"wget"/"http"/"https" targeting localhost, 127.0.0.0/8, or ::1 (any port/path, including with auth headers or request bodies) — loopback-only traffic stays on-host and cannot exfiltrate data off-machine.
+
+Outgoing HTTP requests ("curl"/"wget"/"http"/"https") to a remote host are ordinary
+development activity when they carry no credential or secret. Judge the ENTIRE
+request — the URL, everything after "?" in the query string, every "-H"/"--header"
+value, and the request body — and ALLOW it when none of those contains a secret:
+no API key, bearer/basic token, password, session cookie, signed-URL signature,
+private-key material, or credential-shaped value. Merely contacting a remote host
+is not, by itself, a reason to require human approval.
+- ALLOW: "curl https://api.example.com/v1/status" and "curl -s https://api.github.com/repos/owner/repo" — plain GETs.
+- ALLOW: curl 'https://api.example.com/search?q=widget&page=2' — query parameters with no credential.
+- ALLOW: curl -X POST https://api.example.com/v1/items -H 'Content-Type: application/json' -d '{"name":"widget","count":3}' — inline request body with no secret.
+- ALLOW: "wget https://example.com/releases/app.tar.gz" and "wget -O out.json https://api.example.com/data" — downloads.
+- ALLOW: "http POST https://api.example.com/v1/items name=widget count:=3" — httpie inline data with no secret.
+Do NOT ALLOW when a credential or secret appears anywhere in the request: an
+Authorization/X-API-Key/Cookie header carrying a real value, a credential-bearing
+query parameter ("api_key", "token", "access_token", "sig", …), a password/token/
+secret field in the body, or a URL that embeds one. Those require human approval
+even though the transport is otherwise ordinary. A clearly placeholder value
+("test", "example", "<your-key>", "xxx") is not a secret. Values expanded from the
+environment or read from a file ("$TOKEN", "@file") are hard-blocked before you
+see them and must stay denied.
 
 Always ALLOW only these package-manager inspection commands:
 - "npm --version", "npm version" (without a package argument), "npm ls", "npm list", "npm outdated", and "npm audit" — read-only dependency inspection.

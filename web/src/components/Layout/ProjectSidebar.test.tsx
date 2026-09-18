@@ -113,7 +113,10 @@ const stateFake = vi.hoisted(() => ({
 const chatSessionsFake = vi.hoisted(() => ({} as Record<string, Partial<SessionSlice>>));
 
 const terminalStateFake = vi.hoisted(() => ({
-  byProject: {} as Record<string, { alerts?: Record<string, boolean> }>,
+  byProject: {} as Record<
+    string,
+    { terminals?: { id: string }[]; alerts?: Record<string, boolean> }
+  >,
 }));
 
 const actionsFake = vi.hoisted(() => ({
@@ -151,9 +154,20 @@ vi.mock("../../stores/terminalStore", () => ({
   getProjectTerminals: () => ({ terminals: [], activeId: "", live: false }),
 }));
 
+const remoteHostFake = vi.hoisted(() => ({
+  connected: false,
+}));
+
 vi.mock("../../hooks/useRemoteHostStatus", () => ({
   useRemoteHostStatus: () => ({
-    status: { host: "", connected: false, version: "", local_version: "", outdated: false, pid: 0 },
+    status: {
+      host: "dev@box",
+      connected: remoteHostFake.connected,
+      version: "",
+      local_version: "",
+      outdated: false,
+      pid: 0,
+    },
     loading: false,
     error: null,
     busy: "idle",
@@ -161,6 +175,11 @@ vi.mock("../../hooks/useRemoteHostStatus", () => ({
     connect: vi.fn(),
     restart: vi.fn(),
   }),
+}));
+
+const prefetchSessionFake = vi.hoisted(() => vi.fn());
+vi.mock("../../lib/sessionPrefetch", () => ({
+  prefetchSession: (...a: unknown[]) => prefetchSessionFake(...a),
 }));
 
 function railLabels(): (string | null)[] {
@@ -290,18 +309,41 @@ describe("ProjectSidebar project indicators", () => {
 
   it("renders terminal beep badge", () => {
     stateFake.tabsByProject = { "/proj": [{ id: "s1" }] };
-    terminalStateFake.byProject["/proj"] = { alerts: { t1: true } };
+    terminalStateFake.byProject["/proj"] = { terminals: [{ id: "t1" }], alerts: { t1: true } };
     render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
     expect(screen.getByTitle("1 terminal beep")).toBeDefined();
   });
 
   it("renders terminal beep even with no open chat sessions", () => {
     // Terminal-only project: no tabs, but has an alerted terminal
-    terminalStateFake.byProject["/proj"] = { alerts: { t1: true } };
+    terminalStateFake.byProject["/proj"] = { terminals: [{ id: "t1" }], alerts: { t1: true } };
     render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
     expect(screen.getByTitle("1 terminal beep")).toBeDefined();
     // Should NOT show session count (no sessions)
     expect(screen.queryByText("0")).toBeNull();
+  });
+
+  it("renders terminal beep badge for a remote project keyed by host::path", () => {
+    // The terminal store keys a remote project's entry by `host::path`; the
+    // sidebar must read that same key or a remote shell's bell never surfaces.
+    stateFake.projects = [remoteProject("/home/user/app", "devbox")];
+    terminalStateFake.byProject["devbox::/home/user/app"] = {
+      terminals: [{ id: "t1" }],
+      alerts: { t1: true },
+    };
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    expect(screen.getByTitle("1 terminal beep")).toBeDefined();
+  });
+
+  it("ignores an alert stranded for a terminal that no longer exists", () => {
+    // Defence in depth for the stuck-bell report: even if a stale entry slips
+    // into the alert map, the badge must only count terminals that still exist.
+    terminalStateFake.byProject["/proj"] = {
+      terminals: [{ id: "alive" }],
+      alerts: { gone: true },
+    };
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    expect(screen.queryByTitle("1 terminal beep")).toBeNull();
   });
 
   it("does not render badges when project has no activity", () => {
@@ -444,5 +486,53 @@ describe("ProjectSidebar remote right-click edit", () => {
     const nameNode = container.querySelector(".group.relative .truncate.font-medium");
     fireEvent.contextMenu(nameNode!);
     expect(screen.getByText("Restart remote server")).toBeDefined();
+  });
+});
+
+// ── Remote hover cold-connect guard ──────────────────────────────────────────
+// Hovering a remote project row must NOT warm its session list while the host
+// is unconnected: the fetch proxies to /api/remote/{host}/... which cold-connects
+// the host server-side (SSH provision + server start + tunnel) and made the SPA
+// appear hung. Warming resumes once the host reports connected.
+
+describe("ProjectSidebar remote hover cold-connect guard", () => {
+  beforeEach(() => {
+    remoteHostFake.connected = false;
+    prefetchSessionFake.mockClear();
+    actionsFake.prefetchProjectSessions.mockClear();
+    stateFake.projects = [remoteProject("/home/user/app", "devbox")];
+    stateFake.groups = [];
+    stateFake.activeProject = null;
+    stateFake.tabsByProject = { "/home/user/app": [{ id: "s1" }] };
+    stateFake.activeTabByProject = { "/home/user/app": "s1" };
+  });
+
+  it("does not prefetch a remote project's sessions on hover while disconnected", () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    const nameNode = document.querySelector(".group.relative .truncate.font-medium")!;
+    fireEvent.mouseEnter(nameNode);
+    expect(actionsFake.prefetchProjectSessions).not.toHaveBeenCalled();
+  });
+
+  it("prefetches a remote project's sessions on hover once the host is connected", () => {
+    remoteHostFake.connected = true;
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    const nameNode = document.querySelector(".group.relative .truncate.font-medium")!;
+    fireEvent.mouseEnter(nameNode);
+    expect(actionsFake.prefetchProjectSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "/home/user/app", host: "devbox" }),
+    );
+  });
+
+  it("still prefetches a local project on hover", () => {
+    stateFake.projects = [project("/local/app", "")];
+    stateFake.tabsByProject = { "/local/app": [{ id: "s1" }] };
+    stateFake.activeTabByProject = { "/local/app": "s1" };
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    const nameNode = document.querySelector(".group.relative .truncate.font-medium")!;
+    fireEvent.mouseEnter(nameNode);
+    expect(actionsFake.prefetchProjectSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "/local/app" }),
+    );
   });
 });

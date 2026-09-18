@@ -47,16 +47,20 @@ func (h *Handler) buildStatusSnapshot() TUIStatus {
 			snap.PermissionModel = h.cfg.Ocode.Permissions.Auto.Model
 			snap.PermissionAutoAllow = h.cfg.Ocode.Permissions.Auto.Enabled
 		}
-		// The LIVE permission mode is authoritative for the status SSE (a
-		// session-scoped yolo/sandbox toggle moves agents without touching the
-		// config). Fall back to the config default when no live agent exists.
-		live := h.livePermissionModeSnapshot()
-		if live == "" && h.cfg != nil {
-			live = agent.PermissionMode(h.cfg.Ocode.Permissions.Mode)
+		// Permission mode is PER SESSION now (see handler_permissions.go). This
+		// process-wide snapshot has no session to resolve, so it reports the
+		// persisted config default. Per-session snapshot builders overwrite
+		// this with the session's own mode; GET /api/tui-status (headless
+		// fallback) is the only consumer of the bare default.
+		defaultMode := agent.PermissionModeNormal
+		if h.cfg != nil {
+			if mode, ok := normalizePermissionMode(h.cfg.Ocode.Permissions.Mode); ok {
+				defaultMode = mode
+			}
 		}
-		snap.PermissionMode = string(live)
+		snap.PermissionMode = string(defaultMode)
 		snap.PermissionSandboxSupported = agent.SandboxSupported()
-		snap.PermissionEffectiveBehavior = effectivePermissionBehavior(live)
+		snap.PermissionEffectiveBehavior = effectivePermissionBehavior(defaultMode)
 		snap.ExtraAllowedPaths = h.cfg.Ocode.ExtraAllowedPaths
 		snap.OcrBackend = h.cfg.Ocode.Ocr.Backend
 		if snap.OcrBackend == "" {
@@ -114,9 +118,18 @@ func (h *Handler) pushStatusSnapshot() {
 		cur.AdvisorModel = snap.AdvisorModel
 		cur.PermissionModel = snap.PermissionModel
 		cur.PermissionAutoAllow = snap.PermissionAutoAllow
-		cur.PermissionMode = snap.PermissionMode
+		// Permission mode is per-session and owned by whichever surface holds
+		// the session; this process-wide push (model/advisor/etc.) must not
+		// stamp the config default onto the TUI's live mode. Leave
+		// cur.PermissionMode untouched, and keep the effective-behavior text
+		// in step with it; only a snapshot with no live mode yet takes the
+		// config default's behavior.
 		cur.PermissionSandboxSupported = snap.PermissionSandboxSupported
-		cur.PermissionEffectiveBehavior = snap.PermissionEffectiveBehavior
+		if liveMode, ok := normalizePermissionMode(cur.PermissionMode); ok {
+			cur.PermissionEffectiveBehavior = effectivePermissionBehavior(liveMode)
+		} else {
+			cur.PermissionEffectiveBehavior = snap.PermissionEffectiveBehavior
+		}
 		cur.UpdatedAt = snap.UpdatedAt
 		h.rc.StatusStore().Set(cur, h.rc)
 		return

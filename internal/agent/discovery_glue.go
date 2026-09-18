@@ -388,16 +388,25 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 	// The TypeSafe judge may veto candidates the embedder proposed. It runs only
 	// when TypeSafe is connected; any failure keeps every candidate (fail-open —
 	// the judge must never attach fewer docs than today's behavior).
+	//
+	// judgeNote is folded into the turn's single rank line so a reader can always
+	// tell whether Jev filtered this turn: "judge=none" means TypeSafe is not
+	// connected (nothing was filtered), "error (fail-open)" means the call failed,
+	// and "kept N/M" is the actual verdict. Without this, "Jev vetoed nothing" and
+	// "Jev was never consulted" looked identical in the log.
 	keep := candidates
+	judgeNote := "judge=none (typesafe not connected)"
 	if client := a.discoveryJudgeClient(); client != nil {
 		judged, jerr := a.judgeDiscoveryCandidates(client, tail, query, candidates)
 		if jerr != nil {
+			judgeNote = fmt.Sprintf("judge=%s error (fail-open)", client.Model)
 			a.emitDebug("DISCOVERY", fmt.Sprintf("typesafe judge failed (fail-open, all attached): %v", jerr))
 		} else {
 			keep = judged
 			if vetoed := len(candidates) - len(keep); vetoed > 0 {
 				a.disco.judgeVetoed.Add(int64(vetoed))
 			}
+			judgeNote = fmt.Sprintf("judge=%s kept %d/%d", client.Model, len(keep), len(candidates))
 		}
 	}
 	ids := make([]string, 0, len(keep))
@@ -412,8 +421,8 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 		}
 		a.OnDiscovery(strings.Join(names, ", "))
 	}
-	a.emitDebug("DISCOVERY", fmt.Sprintf("turn rank: %d newly attached, %d total (q=%.60q)",
-		len(keep), len(a.disco.session.Attached()), query))
+	a.emitDebug("DISCOVERY", fmt.Sprintf("turn rank: %d newly attached, %d total [%s] (q=%.60q)",
+		len(keep), len(a.disco.session.Attached()), judgeNote, query))
 }
 
 // startBackgroundWarm warms the corpus off the turn's critical path with a

@@ -175,7 +175,7 @@ export default function TerminalForm() {
             onChange={(e) => persistSound({ enabled: e.target.checked })}
             className="h-3.5 w-3.5 accent-blue-500"
           />
-          Play a sound when a backgrounded terminal rings a bell or triggers a notification
+          Play a sound when a backgrounded terminal rings a bell, or a backgrounded chat finishes, stalls, or waits for your approval
         </label>
         <div className="flex items-center gap-2">
           <Input

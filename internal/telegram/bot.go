@@ -952,7 +952,9 @@ func (b *Bot) setYolo(chatID int64, on bool) {
 	// Auth via the Authorization: Bearer header, not the URL query string.
 	u := fmt.Sprintf("http://%s/api/permissions/yolo", e.Addr)
 	method := http.MethodPut
-	body := strings.NewReader(fmt.Sprintf(`{"enabled":%t}`, on))
+	// Scope the toggle to the instance's own session: permission modes are
+	// per chat session, and a session-less PUT is rejected server-side.
+	body := strings.NewReader(fmt.Sprintf(`{"enabled":%t,"session_id":%q}`, on, e.SessionID))
 	req, err := http.NewRequest(method, u, body)
 	if err != nil {
 		_, _ = b.client.SendMessage(chatID, "❌ "+err.Error(), nil)

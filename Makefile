@@ -80,7 +80,7 @@ desktop-remote-binaries: web-build prepare-htr-assets
 
 ## desktop-app: build and bundle ocode.app with remote CLIs (macOS only)
 desktop-app: desktop desktop-remote-binaries
-	./scripts/bundle-macos.sh bin/ocode-desktop bin/ocode.app "$(DESKTOP_REMOTE_DIR)"
+	./scripts/bundle-macos.sh bin/ocode-desktop bin/ocode.app "$(DESKTOP_REMOTE_DIR)" "$(VERSION)"
 
 # prepare-htr-assets creates the archive consumed by internal/browse/cdp's
 # go:embed. It builds the sibling daemon for the selected target and copies the

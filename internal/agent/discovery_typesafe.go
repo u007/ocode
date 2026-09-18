@@ -8,10 +8,12 @@ import (
 )
 
 // discoveryJudgeModel is the TypeSafe System One model (Jev) consulted to
-// decide whether each embedder-selected discovery candidate is actually needed
-// for the current request. There is no separate config flag for the judge:
-// "connected" means the shared client factory yields a TypesafeClient with a
-// non-empty API key (see discoveryJudgeClient).
+// decide whether each embedder-selected discovery candidate is in scope for the
+// current request (the lenient relevance rule — see relevance_typesafe.go).
+// There is no separate config flag for the judge: "connected" means the shared
+// client factory yields a TypesafeClient with a non-empty API key (see
+// discoveryJudgeClient, which is also the shared connected check for the
+// doc_search relevance judge).
 const discoveryJudgeModel = "typesafe/jev-latest"
 
 // discoveryJudgeSummaryCap bounds one candidate's summary in the judge state so
@@ -26,11 +28,12 @@ const (
 	discoveryJudgeTailCap = 4000
 )
 
-// discoveryJudgeClient resolves the client for the TypeSafe discovery judge, or
-// nil when TypeSafe is not connected. It is the sole "provider connected" check:
-// the factory must yield a *TypesafeClient with a non-empty API key. A nil
-// config, a non-typesafe factory result, or a keyless client all mean "no
-// judge", and the caller keeps today's attach-everything behavior.
+// discoveryJudgeClient resolves the shared TypeSafe judge client, or nil when
+// TypeSafe is not connected. It is the sole "provider connected" check for both
+// the discovery relevance judge and the doc_search relevance judge: the factory
+// must yield a *TypesafeClient with a non-empty API key. A nil config, a
+// non-typesafe factory result, or a keyless client all mean "no judge", and the
+// caller keeps today's keep-everything behavior.
 //
 // The factory result is cached per discoveryState (see discoveryState.judge);
 // with no discovery state the lookup is uncached.
@@ -54,51 +57,42 @@ func (a *Agent) resolveDiscoveryJudgeClient() *TypesafeClient {
 }
 
 // judgeDiscoveryCandidates asks one noul (yes-probability) question per
-// candidate in a single Decide call and returns the subset whose answer meets
-// the shared auto-judge confidence floor. It is pure with respect to the sticky
-// session: the caller seeds exactly what is returned.
+// candidate in a single Decide call and returns the subset judged relevant. It
+// is pure with respect to the sticky session: the caller seeds exactly what is
+// returned.
 //
-// Fail-open contract: a transport/decode error returns (nil, err) and the
-// caller seeds every candidate. A candidate whose answer is missing or not
-// type "noul" is kept (fail-open per candidate) and logged — only a real
-// below-threshold noul vetoes.
+// The floor is the lenient shared relevance floor
+// (relevanceJudgeMinConfidenceDefault = 0.5), not the high-stakes permission
+// floor: this judge only decides whether a candidate is in scope, and the
+// product rule is "even slight relevancy should be presented; only a different
+// scope is skipped". Fail-open is handled by judgeRelevanceQuestions — a
+// transport/decode error returns (nil, err) and the caller seeds every
+// candidate; a missing or non-noul answer keeps that candidate.
 func (a *Agent) judgeDiscoveryCandidates(client *TypesafeClient, tail []Message, query string, candidates []discovery.Doc) ([]discovery.Doc, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
 	state := buildDiscoveryJudgeState(tail, query, candidates)
+	ids := make([]string, len(candidates))
 	questions := make(map[string]TypesafeQuestion, len(candidates))
 	for i, d := range candidates {
+		ids[i] = d.ID
 		questions[d.ID] = TypesafeQuestion{
 			Type:         "noul",
 			Instructions: discoveryJudgeInstructions(d, i),
 		}
 	}
 
-	resp, err := client.Decide(state, questions)
+	keepSet, err := a.judgeRelevanceQuestions(client, "DISCOVERY", "discovery_typesafe", ids, state, questions)
 	if err != nil {
 		return nil, err
 	}
-	a.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, "typesafe/"+client.Model)
-
-	min := a.resolveAutoJudgeMinConfidence()
-	model := "typesafe/" + client.Model
-	var keep []discovery.Doc
+	keep := make([]discovery.Doc, 0, len(candidates))
 	for _, d := range candidates {
-		ans, ok := resp.Answers[d.ID]
-		if !ok || ans.Type != "noul" {
-			a.emitDebug("DISCOVERY", fmt.Sprintf("discovery_typesafe id=%s verdict=keep (missing noul answer; fail-open)", d.ID))
+		if keepSet[d.ID] {
 			keep = append(keep, d)
-			continue
-		}
-		if ans.Noul >= min {
-			a.emitDebug("DISCOVERY", fmt.Sprintf("discovery_typesafe id=%s noul=%.3f verdict=keep", d.ID, ans.Noul))
-			keep = append(keep, d)
-		} else {
-			a.emitDebug("DISCOVERY", fmt.Sprintf("discovery_typesafe id=%s noul=%.3f verdict=veto", d.ID, ans.Noul))
 		}
 	}
-	a.emitDebug("DISCOVERY", fmt.Sprintf("discovery_typesafe kept=%d vetoed=%d min=%.2f model=%s", len(keep), len(candidates)-len(keep), min, model))
 	return keep, nil
 }
 
@@ -176,8 +170,8 @@ func discoveryJudgeInstructions(d discovery.Doc, idx int) string {
 	label := discoveryJudgeKindLabel(d.Kind)
 	desc := discoveryJudgeKindDescription(d.Kind)
 	return fmt.Sprintf(`You are an AI coding agent mid-conversation. The state holds the current request (request), a tail of the conversation (transcript_tail), and a numbered list of candidates (candidates) that an embedding search proposed from your skills, project docs, and tools.
-Decide whether loading candidate `+"`candidates[%d]`"+` — the %s "%s" — into your context is needed to complete the current request.
-Answer yes when the request cannot be handled well without this %s, or it directly covers the task.
-Answer no when it is only topically adjacent but not required, or the conversation already covers the task.
-The candidate is %s.`, idx, label, d.Name, label, desc)
+Decide whether candidate `+"`candidates[%d]`"+` — the %s "%s" — is in the same scope as the current request.
+Answer yes when it is even slightly relevant: it touches the same subject, component, decision, workflow, or concept as the request.
+Answer no only when it is of a different scope — an unrelated subject that merely happens to share a word — or the conversation already covers it.
+The candidate is %s.`, idx, label, d.Name, desc)
 }

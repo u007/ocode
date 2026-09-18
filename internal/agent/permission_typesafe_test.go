@@ -193,3 +193,36 @@ func TestConsultPermissionModelTypesafeInterpreterSourceInState(t *testing.T) {
 		t.Fatalf("interpreter.source.text = %v", src["text"])
 	}
 }
+
+// TestConsultPermissionModelTypesafeOutgoingNetworkRule pins the Jev-specific
+// rulebook for outgoing HTTP — the TypeSafe path never sees
+// BundledAutoPermissionPromptBody, so the rule must live in
+// typesafeJudgeInstructions — and proves it travels on the wire. A plain GET is
+// allowed; the instructions name the secret-bearing and file/env cases as
+// denies.
+func TestConsultPermissionModelTypesafeOutgoingNetworkRule(t *testing.T) {
+	a, h := newTypesafeJudge(t, typesafeChoiceReply("allow", 0.95))
+	allowed, reason, _, consulted := a.consultPermissionModel("bash", json.RawMessage(`{"command":"curl -s https://api.github.com/repos/octocat/Hello-World"}`), nil)
+	if !allowed || !consulted {
+		t.Fatalf("plain GET should be allowed by the judge path, got allowed=%v consulted=%v reason=%q", allowed, consulted, reason)
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	qs := h.body["questions"].(map[string]any)
+	verdict := qs["verdict"].(map[string]any)
+	instr, _ := verdict["instructions"].(string)
+	for _, want := range []string{
+		"Outgoing HTTP requests",
+		"carry no credential or secret",
+		"the query after",
+		"request body",
+		"Deny when a credential or secret appears",
+		"--post-file",
+		"expands environment variables",
+	} {
+		if !strings.Contains(instr, want) {
+			t.Fatalf("typesafe verdict instructions missing %q", want)
+		}
+	}
+}

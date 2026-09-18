@@ -411,6 +411,7 @@ func piperSynth(ctx context.Context, sup *tool.ProcessSupervisor, root string, m
 	model := filepath.Join(dir, m.Voice+".onnx")
 	cmd := exec.CommandContext(ctx, venvPython(filepath.Join(dir, "venv")),
 		"-m", "piper", "--model", model, "--config", model+".json", "--output_file", outPath)
+	applySynthProcessEnv(cmd, dir)
 	cmd.Stdin = strings.NewReader(text + "\n")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

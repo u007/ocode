@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -174,21 +175,34 @@ func (pm *PermissionManager) LoadClaudePermissions(workDir string) {
 	}
 }
 
-// claudeIsDenied reports whether command matches any Claude deny rule.
-func (pm *PermissionManager) claudeIsDenied(command string) bool {
+// claudeDenyRule returns the first Claude Bash deny pattern that matches
+// command. The pattern is returned (not just a bool) so a Deny decision can
+// name the exact rule the user configured — e.g. "Bash(git stash *)" — instead
+// of a generic "permission rules" message. A bare "Bash" deny (which blocks
+// every command) yields the synthetic pattern "*".
+func (pm *PermissionManager) claudeDenyRule(command string) (string, bool) {
 	if pm == nil {
-		return false
+		return "", false
 	}
 	if pm.claudeBareDeny != nil && pm.claudeBareDeny["bash"] {
-		return true
+		return "*", true
 	}
 	cmd := strings.TrimSpace(command)
 	for _, pat := range pm.claudeBashDeny {
 		if claudePatternMatches(cmd, pat) {
-			return true
+			return pat, true
 		}
 	}
-	return false
+	return "", false
+}
+
+// formatClaudeDenyReason renders a matched Claude Bash deny pattern for a
+// DenyReason. The "*" pattern is the synthetic form of a bare "Bash" deny.
+func formatClaudeDenyReason(pattern string) string {
+	if pattern == "" || pattern == "*" {
+		return "Claude Code deny rule Bash (all bash commands)"
+	}
+	return fmt.Sprintf("Claude Code deny rule %q in .claude/settings.json", "Bash("+pattern+")")
 }
 
 func (pm *PermissionManager) claudeIsAsk(command string) bool {

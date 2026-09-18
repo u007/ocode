@@ -89,11 +89,17 @@ type terminalSession struct {
 	onExit    func(*terminalSession)
 
 	// startedAt is when the shell was spawned; the list endpoint sorts by it.
-	// title is the last OSC window title the shell advertised, or "" (this
-	// server does not parse OSC titles; the field exists so the SPA can echo
-	// its own persisted title back in the inventory).
+	// title is the last OSC 0/2 window title the shell advertised (parsed from
+	// the pty stream), or "" when the program never set one. The inventory
+	// returns it so a remote terminal shows its real name instead of its id;
+	// the SPA still merges its own persisted title as a fallback for shells
+	// that were already idle when this server started.
 	startedAt time.Time
 	title     string
+	// oscTitle scans the pty stream for OSC 0/2 title sequences (see
+	// terminal_osc_title.go). Only the read loop feeds it, under s.mu via
+	// recordLocked.
+	oscTitle oscTitleScanner
 
 	mu          sync.Mutex
 	writeMu     sync.Mutex
@@ -260,6 +266,13 @@ func (s *terminalSession) recordLocked(p []byte) {
 	// purely for fast reattach repaint; it never loses history because the log
 	// has it all and the frontend pages older content back from disk.
 	s.history.write(p)
+	// Track the program's OSC 0/2 title so the inventory can name the
+	// terminal. Scanning here keeps it off the delivery hot path beyond a
+	// few byte comparisons and makes every byte that reaches history or the
+	// socket observable exactly once.
+	if title, ok := s.oscTitle.feed(p); ok {
+		s.title = title
+	}
 	s.replay = append(s.replay, p...)
 	if len(s.replay) > terminalReplayCap {
 		// Drop the oldest bytes, then skip to the next line start so the

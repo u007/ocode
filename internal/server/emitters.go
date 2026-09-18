@@ -113,6 +113,43 @@ func (h *Handler) startWatchEmitters() {
 	go h.watchEmittersLoop()
 }
 
+// gitStatusFn computes one project's git status for the emitter. It is a var
+// so tests can substitute a blocking implementation and prove that a slow
+// project never delays another project's git_status envelope.
+var gitStatusFn = gitStatusForDir
+
+// forEachGitStatusConcurrently computes a status for every project in
+// projects in its own goroutine, invoking yield(project, status) on the
+// CALLER's goroutine as each result arrives. It deliberately does not collect
+// all results first and return: a project whose git is slow — gitStatusForDir
+// is bounded by gitStatusTimeout, but that can still be seconds — must not
+// delay the publication of every other project's status. Running them in
+// parallel makes one tick cost max(per-project) instead of sum(per-project).
+//
+// yield is called from this goroutine, in arrival order, so callers can keep
+// unsynchronised state (the emitter's lastGit map) without a lock. The result
+// channel is buffered to len(projects), so a producer never blocks even if the
+// consumer returns early and no goroutine is stranded.
+func forEachGitStatusConcurrently(projects []string, yield func(project string, status GitStatus)) {
+	if len(projects) == 0 {
+		return
+	}
+	type gitResult struct {
+		project string
+		status  GitStatus
+	}
+	results := make(chan gitResult, len(projects))
+	for _, p := range projects {
+		go func(p string) {
+			results <- gitResult{project: p, status: gitStatusFn(p)}
+		}(p)
+	}
+	for range projects {
+		r := <-results
+		yield(r.project, r.status)
+	}
+}
+
 // watchEmittersLoop drives the subscriber-aware git-status and spending
 // emitters on one 1s master ticker. Git status is computed per viewed project:
 // an initial snapshot when the project becomes viewed, then on the 10s
@@ -138,17 +175,23 @@ func (h *Handler) watchEmittersLoop() {
 
 		viewed := h.bus.ViewedProjects()
 		seen := make(map[string]bool, len(viewed))
+		due := make([]string, 0, len(viewed))
 		for _, p := range viewed {
 			seen[p] = true
 			if _, known := lastGit[p]; !known || ticks%int(gitPollInterval.Seconds()) == 0 {
-				status := gitStatusForDir(p)
-				data, _ := json.Marshal(status)
-				if string(data) != lastGit[p] {
-					lastGit[p] = string(data)
-					h.bus.Publish("git_status", p, "", status)
-				}
+				due = append(due, p)
 			}
 		}
+		// Recompute the due projects in parallel: yield runs on this goroutine,
+		// so lastGit and the bus keep single-writer semantics, while one slow
+		// project can no longer delay every other project's git_status.
+		forEachGitStatusConcurrently(due, func(p string, status GitStatus) {
+			data, _ := json.Marshal(status)
+			if string(data) != lastGit[p] {
+				lastGit[p] = string(data)
+				h.bus.Publish("git_status", p, "", status)
+			}
+		})
 		// Drop state for projects no subscriber views anymore, so a returning
 		// client gets a fresh initial snapshot.
 		for p := range lastGit {

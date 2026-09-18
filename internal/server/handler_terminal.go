@@ -23,6 +23,7 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/remote"
 )
 
@@ -215,6 +216,16 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
+		// The shell runs on THIS host, so a leading ~ is this host's home and
+		// must be expanded before the registered-root check. A remote project
+		// reached through the reverse proxy carries its saved path verbatim
+		// (e.g. "~/www/app"), while the host's projects store holds the
+		// expanded form (projects.Add expands local paths); without this the
+		// root check never matches and the socket 403s. A host != "" request
+		// names another machine's path and is left verbatim for that host.
+		if expanded, expandErr := projects.ExpandHome(requestedPath); expandErr == nil {
+			requestedPath = expanded
+		}
 		if requestedPath != "" && requestedPath != workDir {
 			allowed := false
 			for _, root := range h.allowedProjectRoots() {
@@ -707,6 +718,15 @@ func (h *Handler) resolveTerminalHistoryProject(r *http.Request) (string, int, s
 			return "", http.StatusForbidden, "host/project_path is not a registered remote project"
 		}
 		return host + ":" + project, 0, ""
+	}
+	// Local to this server: expand a leading ~ against THIS host's home so
+	// the path matches the projects store's expanded roots. The terminal
+	// endpoints are reached through the reverse proxy for a remote project,
+	// whose saved path is stored verbatim as ~/...; without this the history
+	// and list handlers 403. The host != "" branch above is another machine's
+	// path and is deliberately left verbatim for that host to expand.
+	if expanded, expandErr := projects.ExpandHome(project); expandErr == nil {
+		project = expanded
 	}
 	if project == "" {
 		project = h.workDir

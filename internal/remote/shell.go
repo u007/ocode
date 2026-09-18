@@ -59,3 +59,28 @@ func sshKeepaliveArgs() []string {
 		"-o", "ConnectTimeout=15",
 	}
 }
+
+// sshFailFastArgs is the option block every SHORT-LIVED, non-interactive ssh
+// command must carry (SSHTransport.Exec/ExecStdin and the scp upload). It is
+// sshKeepaliveArgs plus BatchMode=yes.
+//
+// BatchMode is the critical option: without it ssh will try to read a
+// password/passphrase from /dev/tty. When ocode's server was started from a
+// terminal that tty exists, so ssh blocks on an invisible prompt — the captured
+// stdout/stderr pipes give ssh no way to ask and no way to fail, and the whole
+// remote connect (reachability → platform detect → provision → sync) hangs
+// forever. An unreachable host is similarly bounded by ConnectTimeout instead
+// of the OS-level TCP timeout.
+//
+// The interactive paths are deliberately excluded: ExecInteractive and
+// ShellCommand keep `-t` without BatchMode so the user can still answer a
+// passphrase prompt at a real terminal.
+//
+// Trade-off: a non-interactive connect to a host that offers ONLY password auth
+// now fails fast ("Permission denied (publickey,password)") instead of hanging
+// on an invisible prompt. This matches the policy already applied to every other
+// server-side remote command (ExecCommand in execcmd.go). Key/agent auth is the
+// supported path; password-auth terminals can still prompt via ExecInteractive.
+func sshFailFastArgs() []string {
+	return append([]string{"-o", "BatchMode=yes"}, sshKeepaliveArgs()...)
+}

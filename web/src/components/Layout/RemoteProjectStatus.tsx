@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { MessageSquare, Play, RotateCw, SquareTerminal, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { authedFetch, remoteApiBase } from "@/api/client";
 import type { AgentRun, Project } from "@/api/types";
 import type { RemoteHostStatusState } from "@/hooks/useRemoteHostStatus";
 import { useRemoteTerminals } from "@/hooks/useRemoteTerminals";
 import { eventBus } from "@/lib/eventBus";
 import { projectSessionKey, useProjectState } from "@/stores/projectStore";
-import { getProjectTerminals, useTerminalState } from "@/stores/terminalStore";
+import { getProjectTerminals, terminalDisplayTitle, useTerminalState } from "@/stores/terminalStore";
 
 function anyRunRunning(runs: AgentRun[]): boolean {
   return runs.some((run) => run.status === "running" || anyRunRunning(run.children ?? []));
@@ -51,7 +50,7 @@ export function RemoteProjectStatus({ project, statusState }: { project: Project
   const [expanded, setExpanded] = useState(false);
   const { status, loading, busy, error, connect, restart } = statusState;
   const { state: projectState, prefetchProjectSessions, openSessionTab } = useProjectState();
-  const { state: terminalState, attachTerminal } = useTerminalState();
+  const { state: terminalState, attachTerminal, killTerminal: killTerminalTab } = useTerminalState();
   const running = useRunningSessions();
 
   const connected = status?.connected ?? false;
@@ -62,14 +61,31 @@ export function RemoteProjectStatus({ project, statusState }: { project: Project
 
   const sessions = projectState.sessionsByProject?.[projectSessionKey(project.path, host)]?.sessions ?? [];
   const openSessionIds = new Set((projectState.tabsByProject?.[project.path] ?? []).map((t) => t.id));
-  const openTerminalIds = useMemo(
-    () => new Set(getProjectTerminals(terminalState, project.path, host).terminals.map((t) => t.id)),
+  const localTerminals = useMemo(
+    () => getProjectTerminals(terminalState, project.path, host).terminals,
     [terminalState, project.path, host],
   );
+  const openTerminalIds = useMemo(() => new Set(localTerminals.map((t) => t.id)), [localTerminals]);
+  // The host's inventory title is the shell's last OSC 0/2 title. A shell that
+  // was already idle when the remote server started never emitted one in this
+  // process, so fall back to this window's persisted title for the same id
+  // instead of dropping to the "Terminal <id>" placeholder.
+  const localTitleById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const t of localTerminals) {
+      const title = terminalDisplayTitle(t);
+      if (title) map.set(t.id, title);
+    }
+    return map;
+  }, [localTerminals]);
 
+  // Warm the session list when the inventory is expanded — but only once the
+  // host is connected. For an unconnected host the fetch goes through
+  // /api/remote/{host}/... and would cold-connect it (SSH provision + server
+  // start + tunnel), which must stay an explicit Connect action.
   useEffect(() => {
-    if (expanded) prefetchProjectSessions(project);
-  }, [expanded, prefetchProjectSessions, project]);
+    if (expanded && connected) prefetchProjectSessions(project);
+  }, [expanded, connected, prefetchProjectSessions, project]);
 
   const runningCount = sessions.filter((s) => running.has(s.id)).length;
 
@@ -82,11 +98,11 @@ export function RemoteProjectStatus({ project, statusState }: { project: Project
   const busyNow = busy !== "idle";
 
   const killTerminal = (id: string) => {
-    const headers = new Headers();
-    headers.set("X-Ocode-Project", project.path);
-    void authedFetch(`${remoteApiBase(host)}/api/terminal/${encodeURIComponent(id)}`, { method: "DELETE", headers })
-      .then(() => refresh())
-      .catch((err) => console.error(`failed to kill remote terminal ${id}:`, err));
+    // Route through the store: it removes this window's tab (live or peeked)
+    // so the panel cannot reconnect and respawn the shell right after the
+    // DELETE, then sends the proxied DELETE with the project header. Await it
+    // so the inventory refresh reflects the host's post-kill state.
+    void killTerminalTab(project.path, id, host).then(() => refresh());
   };
 
   const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
@@ -170,7 +186,9 @@ export function RemoteProjectStatus({ project, statusState }: { project: Project
             {terminals.length === 0 ? (
               <div className="text-xs text-muted-foreground">No terminals</div>
             ) : (
-              terminals.map((t) => (
+              terminals.map((t) => {
+                const title = t.title || localTitleById.get(t.id) || "";
+                return (
                 <div
                   key={t.id}
                   className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-xs hover:bg-accent"
@@ -183,10 +201,10 @@ export function RemoteProjectStatus({ project, statusState }: { project: Project
                     className="min-w-0 flex-1 truncate text-left"
                     onClick={(e) => {
                       stop(e);
-                      attachTerminal(project.path, host, t.id, t.title);
+                      attachTerminal(project.path, host, t.id, title);
                     }}
                   >
-                    {t.title || `Terminal ${t.id.slice(0, 6)}`}
+                    {title || `Terminal ${t.id.slice(0, 6)}`}
                   </button>
                   {openTerminalIds.has(t.id) && <span className="shrink-0 text-[10px] text-muted-foreground">open</span>}
                   <button
@@ -201,7 +219,8 @@ export function RemoteProjectStatus({ project, statusState }: { project: Project
                     <X className="w-3 h-3" />
                   </button>
                 </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>

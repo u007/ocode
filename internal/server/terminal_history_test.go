@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -185,5 +186,39 @@ func TestTerminalHistoryPathDoesNotUseTerminalIDAsPath(t *testing.T) {
 	}
 	if path == other {
 		t.Fatal("distinct terminal IDs collided in history path")
+	}
+}
+
+// TestTerminalHistoryExpandsTildeProjectPath is the regression test for the
+// reverse-proxy path: a remote project saved as "~/www/app" is forwarded to the
+// host verbatim, while the host's projects store holds the path expanded by
+// projects.Add. The terminal endpoints must expand a leading ~ against the
+// HOST's home before the registered-root check, otherwise history/list/socket
+// requests 403 with "project is not a project registered with this server".
+func TestTerminalHistoryExpandsTildeProjectPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	project := filepath.Join(home, "www", "app")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	id := "history-tilde-" + filepath.Base(project)
+	history := newTerminalHistory(project, id)
+	t.Cleanup(history.remove)
+	history.write([]byte("tilde history"))
+	history.close()
+
+	h := NewHandler()
+	h.workDir = project
+	h.SetTerminalAccessPolicy(false, true)
+	// The provided registry root is empty; the expanded ~ path must resolve
+	// against the registered workDir root.
+	r := httptest.NewRequest(http.MethodGet, "/api/terminal/"+id+"/history?project_path=~/www/app&offset=0&limit=64", nil)
+	r.SetPathValue("id", id)
+	w := httptest.NewRecorder()
+	h.HandleTerminalHistory(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("history with ~ project_path status = %d, body=%s", w.Code, w.Body.String())
 	}
 }
