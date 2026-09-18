@@ -297,6 +297,45 @@ export interface ComputerUsePermissionReport {
   lines: string[];
 }
 
+// ── System Permissions (OS permission manager) ──
+export type SystemPermissionStatus =
+  | "granted"
+  | "denied"
+  | "not_determined"
+  | "unknown"
+  | "not_required";
+
+export interface SystemPermissionEntry {
+  id: string;
+  label: string;
+  detail?: string;
+  kind: "category" | "path";
+  platform: string;
+  supported: boolean;
+  status: SystemPermissionStatus;
+  enabled: boolean;
+  requested: boolean;
+  path?: string;
+  source: "builtin" | "discovered" | "custom";
+}
+
+export interface SystemPermissionResult {
+  id: string;
+  status: SystemPermissionStatus;
+  message: string;
+  opened_settings: boolean;
+}
+
+export interface SystemPermissionsResponse {
+  platform: string;
+  supported: boolean;
+  entries: SystemPermissionEntry[];
+  /** Present on PUT when the entry was enabled and requested. */
+  result?: SystemPermissionResult;
+  /** Present on the reconcile/request-all endpoint. */
+  results?: SystemPermissionResult[];
+}
+
 export interface OcrModelsResponse {
   backends: { name: string; models: string[]; error?: string }[];
 }

@@ -304,9 +304,13 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
           {(ctxCur > 0 || ctxMax > 0) && (
             <span
               className="text-muted-foreground"
-              title={`Context: ${ctxCur} / ${ctxMax} tokens`}
+              title={
+                ctxCur > 0
+                  ? `Context: ${ctxCur} / ${ctxMax} tokens`
+                  : `Context: unknown / ${ctxMax} tokens (no provider reading yet)`
+              }
             >
-              ctx: {formatTok(ctxCur)}/{formatTok(ctxMax)}
+              ctx: {ctxCur > 0 ? formatTok(ctxCur) : "?"}/{formatTok(ctxMax)}
             </span>
           )}
           {spending > 0 && (

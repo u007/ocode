@@ -29,6 +29,7 @@ import (
 	shellpkg "github.com/u007/ocode/internal/shell"
 	"github.com/u007/ocode/internal/skill"
 	ocodesync "github.com/u007/ocode/internal/sync"
+	"github.com/u007/ocode/internal/sysperm"
 	"github.com/u007/ocode/internal/tabs"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -41,6 +42,17 @@ type Handler struct {
 	// computer use. Overridable in tests so the suite never fires a real
 	// consent dialog; nil falls back to computer.RequestPermissions.
 	requestComputerPermissions func(context.Context) computer.PermissionReport
+	// sysPermMu serializes read-modify-write of the system-permissions
+	// sub-tree (persisted + the in-memory h.cfg copy).
+	sysPermMu sync.Mutex
+	// requestSystemPermission triggers one OS permission request for the
+	// System Permissions settings section. Overridable in tests so the suite
+	// never fires a real consent dialog; nil falls back to sysperm.Request.
+	requestSystemPermission func(context.Context, sysperm.Entry) sysperm.RequestResult
+	// systemPermissionCatalog builds the catalog for the System Permissions
+	// section. Overridable in tests so no OS probe runs; nil falls back to
+	// sysperm.Catalog over the persisted config + allowed project roots.
+	systemPermissionCatalog func(context.Context) []sysperm.Entry
 	// procSup is the server's process supervisor (the same one computerSup
 	// aliases), used for server-owned long-lived children that are not
 	// computer-use — today the per-project `ssh -N -L` port forwards
@@ -1638,22 +1650,24 @@ func (h *Handler) HandleSessionContext(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	var totalChars int
-	for _, msg := range s.Messages {
-		totalChars += len(msg.Content) + len(msg.ReasoningContent)
-		for _, tc := range msg.ToolCalls {
-			totalChars += len(tc.Function.Arguments)
-		}
-	}
-
-	// Prefer the live TUI values when bridged — the model name + max context
-	// come from the running model, not from a snapshot saved to disk.
+	// Context occupancy is ALWAYS the backend's provider-reported value, never a
+	// chars/4 estimate over the persisted transcript: the bridged TUI's live
+	// value for its session, else the session's live agent LastInputTokens.
+	// Zero means "no provider usage recorded yet" and is reported as such
+	// rather than fabricated from message text.
 	model := ""
 	maxTokens := 0
-	if h.rc != nil {
-		if live := h.rc.TUIStatus(); live.ContextModel != "" {
+	var current int64
+	if rc := h.RCBridge(); rc != nil && rc.SessionID == id {
+		if live := rc.TUIStatus(); live.ContextModel != "" {
 			model = live.ContextModel
 			maxTokens = live.ContextMaxTokens
+			current = int64(live.ContextCurrentTokens)
+		}
+	}
+	if current == 0 {
+		if as := h.lookupAgentSession(id); as != nil && as.agent != nil {
+			current = as.agent.LastInputTokens()
 		}
 	}
 	if model == "" {
@@ -1666,26 +1680,34 @@ func (h *Handler) HandleSessionContext(w http.ResponseWriter, r *http.Request, i
 	// Full token-budget breakdown: the same Report the TUI renders locally, so
 	// the web/desktop `/context` shows identical sections and numbers. Only
 	// available when a live agent exists and is not mid-turn (see
-	// contextReportSource); otherwise the four summary fields above are all we
-	// can honestly report.
+	// contextReportSource); otherwise the summary fields above are all we can
+	// honestly report.
 	resp := map[string]any{
-		"session_id":       id,
-		"message_count":    len(s.Messages),
-		"estimated_tokens": totalChars / 4,
-		"max_tokens":       maxTokens,
-		"model":            model,
+		"session_id":     id,
+		"message_count":  len(s.Messages),
+		"current_tokens": current,
+		"max_tokens":     maxTokens,
+		"model":          model,
 	}
 	if ag, msgs, ok := h.contextReportSource(id); ok {
 		h.mu.Lock()
 		cfg := h.cfg
 		h.mu.Unlock()
-		rep := contextbudget.Build(contextbudget.Input{
+		in := contextbudget.Input{
 			Agent:    ag,
 			Messages: msgs,
 			WorkDir:  entry.ProjectRoot,
 			Config:   cfg,
-		})
-		resp["report"] = rep
+		}
+		// Override the report's derived context estimate with the same
+		// provider-reported value the summary carries, so the report's Context
+		// row and the summary agree instead of the report re-deriving an
+		// estimate from message text.
+		if current > 0 {
+			in.ContextTokens = current
+			in.ContextSource = "actual"
+		}
+		resp["report"] = contextbudget.Build(in)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -43,6 +43,7 @@ export function useRemoteTerminals(
         setError(null);
       })
       .catch((err) => {
+        console.error(`remote terminal list for ${host} ${projectPath} failed:`, err);
         if (cancelledRef.current) return;
         setError(errorMessage(err));
       })

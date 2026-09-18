@@ -148,7 +148,18 @@ func TestProcessRegistry_WithSupervisor_FailedToStartRetained(t *testing.T) {
 	reg.SetSupervisor(sup)
 
 	p := reg.StartBackground("exit 42")
-	time.Sleep(100 * time.Millisecond) // let it finish
+	// Poll for completion instead of a fixed 100ms sleep: under a loaded CI
+	// host the shell can take longer than that to start and exit.
+	finishDeadline := time.Now().Add(5 * time.Second)
+	for {
+		if st, _ := p.snapshotStatus(); st != ProcRunning {
+			break
+		}
+		if time.Now().After(finishDeadline) {
+			t.Fatal("`exit 42` did not finish within 5s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	_, st, code, err := reg.Dump(p.ID)
 	if err != nil {
@@ -532,19 +543,34 @@ func TestBashToolForegroundUnchanged(t *testing.T) {
 func TestBashOutputTool(t *testing.T) {
 	r := NewProcessRegistry()
 	p := r.StartBackground("echo poll-me")
-	for i := 0; i < 200; i++ {
+	// Poll for completion, then retry the read: under a loaded CI host the
+	// shell can take longer than the old fixed 2s budget to start, exit, and
+	// flush its output.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
 		if st, _ := p.snapshotStatus(); st != ProcRunning {
+			break
+		}
+		if time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	bo := BashOutputTool{Procs: r}
-	out, err := bo.Execute(json.RawMessage(`{"id":"` + p.ID + `"}`))
-	if err != nil {
-		t.Fatalf("Execute err: %v", err)
-	}
-	if !strings.Contains(out, "poll-me") {
-		t.Fatalf("bash_output missing process text: %q", out)
+	var out string
+	for {
+		chunk, err := bo.Execute(json.RawMessage(`{"id":"` + p.ID + `"}`))
+		if err != nil {
+			t.Fatalf("Execute err: %v", err)
+		}
+		out += chunk
+		if strings.Contains(out, "poll-me") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("bash_output missing process text within 5s: %q", out)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

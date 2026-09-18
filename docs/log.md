@@ -26,7 +26,10 @@
 
 ## 2026-09-18
 
+* **Update**: Sandbox Permission Mode ([concepts/sandbox-permission-mode.md](/concepts/sandbox-permission-mode.md))
 * **Creation**: Remote Persistent Sessions and Terminals ([concepts/remote-persistent-sessions-terminals.md](/concepts/remote-persistent-sessions-terminals.md))
+* **Deprecation**: System Permissions Settings Section (macOS TCC + cross-platform): Document was created at the wrong path (docs/docs/...). The correct canonical location is superpowers/specs/2026-09-18-system-permissions-design.md. Content has been moved; this copy is superseded. ([docs/superpowers/specs/2026-09-18-system-permissions-design.md](/docs/superpowers/specs/2026-09-18-system-permissions-design.md))
+* **Creation**: System Permissions Settings Section (macOS TCC + cross-platform) ([superpowers/specs/2026-09-18-system-permissions-design.md](/superpowers/specs/2026-09-18-system-permissions-design.md))
 * **Creation**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
 * **Update**: Web Compact Feedback Design ([superpowers/specs/2026-09-18-web-compact-feedback-design.md](/superpowers/specs/2026-09-18-web-compact-feedback-design.md))
 * **Creation**: Web Compact Feedback Design ([superpowers/specs/2026-09-18-web-compact-feedback-design.md](/superpowers/specs/2026-09-18-web-compact-feedback-design.md))

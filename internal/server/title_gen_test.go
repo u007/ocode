@@ -138,6 +138,20 @@ func TestFinishSessionTitleBroadcastsStatus(t *testing.T) {
 		{Role: "assistant", Content: "sure"},
 	})
 
+	// A live headless agent that has reported usage: the title broadcast lands
+	// right after the first turn, so the snapshot must carry the backend's
+	// provider-reported context occupancy (never a transcript estimate).
+	ag := agent.NewAgent(usageReportingClient{prompt: 555}, nil, nil, nil)
+	if _, err := ag.Step([]agent.Message{{Role: "user", Content: "hi"}}); err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	h.mu.Lock()
+	h.agents[sessID] = &agentSession{
+		agent:    ag,
+		messages: []agent.Message{{Role: "user", Content: "help me"}, {Role: "assistant", Content: "sure"}},
+	}
+	h.mu.Unlock()
+
 	// Subscribe to the headless bus.
 	sub := h.subscribeHeadless()
 	defer h.unsubscribeHeadless(sub)
@@ -163,9 +177,10 @@ func TestFinishSessionTitleBroadcastsStatus(t *testing.T) {
 		// The snapshot must carry the session's context fields — the title
 		// broadcast lands right after the first turn, and a context-less
 		// status event zeroes the web sidebar's Context gauge (fields are
-		// omitempty on the wire).
-		if snap.ContextCurrentTokens <= 0 {
-			t.Errorf("ContextCurrentTokens = %d, want > 0 from the seeded transcript", snap.ContextCurrentTokens)
+		// omitempty on the wire). ContextCurrentTokens is the live agent's
+		// provider-reported input tokens, not a transcript estimate.
+		if snap.ContextCurrentTokens != 555 {
+			t.Errorf("ContextCurrentTokens = %d, want 555 (provider-reported)", snap.ContextCurrentTokens)
 		}
 		if snap.ContextModel == "" || snap.ContextMaxTokens <= 0 {
 			t.Errorf("context = %q/%d, want model + window", snap.ContextModel, snap.ContextMaxTokens)

@@ -43,32 +43,26 @@ func TestDiscoverServerCorruptFileTreatedAsMissing(t *testing.T) {
 	}
 }
 
-func TestServerAliveRequiresPidAndHealth(t *testing.T) {
+func TestServerHealthyRequiresPidAndHealth(t *testing.T) {
 	state := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "0.8.85"}
 
 	ft := newFakeTransport()
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
-	if !ServerAlive(ft, state, "0.8.85") {
+	if !serverHealthy(ft, state) {
 		t.Fatal("expected alive: pid alive, health 200")
-	}
-
-	// Version is no longer part of liveness: a mismatched but healthy server
-	// is reused (EnsureRemoteServer flags Outdated), never treated as dead.
-	if !ServerAlive(ft, state, "0.9.0") {
-		t.Fatal("expected alive despite version mismatch: version no longer gates reuse")
 	}
 
 	ftDeadPid := newFakeTransport()
 	ftDeadPid.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 1}
-	if ServerAlive(ftDeadPid, state, "0.8.85") {
+	if serverHealthy(ftDeadPid, state) {
 		t.Fatal("expected not alive: pid check failed")
 	}
 
 	ftBadHealth := newFakeTransport()
 	ftBadHealth.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ftBadHealth.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "000"}
-	if ServerAlive(ftBadHealth, state, "0.8.85") {
+	if serverHealthy(ftBadHealth, state) {
 		t.Fatal("expected not alive: health probe did not return 200 (curl missing or server wedged)")
 	}
 }
@@ -289,7 +283,7 @@ func (p *pollAfterLaunchFake) Exec(command string) (ExecResult, error) {
 
 // raceProneFake models the realistic timing StartFreshServer must be safe
 // against: before launch, `cat` returns a stale (already on disk) state file
-// — exactly what EnsureRemoteServer sees when ServerAlive rejects a
+// — exactly what EnsureRemoteServer sees when serverHealthy rejects a
 // discovered server as dead/mismatched/unhealthy but the old process never
 // got around to deleting its own file. Once the launch command runs, `cat`
 // must never again see that stale content — the launch command's `rm -f`

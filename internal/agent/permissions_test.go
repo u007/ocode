@@ -3137,3 +3137,82 @@ func TestGitStashReadOnlyFormsReachAutoAllow(t *testing.T) {
 		t.Errorf("Decide(bash git -c protocol.allow=always stash list) = %s, want Ask — dangerous -c key stays harmful", dec.Level)
 	}
 }
+
+// IsHarmfulRequest must judge every constituent of a compound bash line, not
+// just the first word. Before this, "cd repo && git stash" reached the
+// auto-permission judge (IsHarmfulBashCommand only recognizes a line whose
+// first word is git), so Jev could auto-approve a destructive stash.
+func TestIsHarmfulRequestCompoundBash(t *testing.T) {
+	harmful := []string{
+		"cd /repo && git stash",
+		"cd /repo && git stash && go test ./... 2>&1 | tail -10",
+		"cd /repo; git stash pop",
+		"git stash list && git stash pop",
+		"true || git reset --hard",
+		"echo hi && git checkout -- .",
+	}
+	for _, cmd := range harmful {
+		req := PermissionRequest{ToolName: "bash", Command: cmd}
+		if !IsHarmfulRequest(req) {
+			t.Errorf("IsHarmfulRequest(%q) = false, want true", cmd)
+		}
+	}
+	benign := []string{
+		"cd /repo && git stash list",
+		"cd /repo && git stash show -p",
+		"cd /repo && go test ./... | tail -10",
+		"git status && git diff",
+	}
+	for _, cmd := range benign {
+		req := PermissionRequest{ToolName: "bash", Command: cmd}
+		if IsHarmfulRequest(req) {
+			t.Errorf("IsHarmfulRequest(%q) = true, want false", cmd)
+		}
+	}
+}
+
+// A "git stash" deny prefix rule (/ban add git stash) bans the mutating stash
+// family but must leave the read-only inspection forms (list/show) alone, in
+// both normal and sandbox mode, and per constituent of a compound line.
+func TestBannedGitStashPrefixSkipsReadOnlyForms(t *testing.T) {
+	orig := sandboxSupported
+	sandboxSupported = func() bool { return true }
+	t.Cleanup(func() { sandboxSupported = orig })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	for _, mode := range []PermissionMode{PermissionModeNormal, PermissionModeSandbox} {
+		pm := NewPermissionManager()
+		work := t.TempDir()
+		pm.SetWorkDir(work)
+		pm.SetMode(mode)
+		pm.SetBashPrefixRule("git stash", PermissionDeny)
+
+		for _, cmd := range []string{
+			"git stash list",
+			"git stash list --format=%gd",
+			"git stash show -p stash@{0}",
+			"cd " + work + " && git stash list",
+		} {
+			dec := pm.Decide("bash", json.RawMessage(fmt.Sprintf(`{"command":%q}`, cmd)))
+			if dec.Level != PermissionAllow {
+				t.Errorf("[%s] %q = %s, want Allow", mode, cmd, dec.Level)
+			}
+		}
+		for _, cmd := range []string{
+			"git stash",
+			"git stash -u",
+			"git stash push -m x",
+			"git stash pop",
+			"git stash drop",
+			"cd /repo && git stash",
+			"git stash list && git stash pop",
+		} {
+			dec := pm.Decide("bash", json.RawMessage(fmt.Sprintf(`{"command":%q}`, cmd)))
+			if dec.Level != PermissionDeny || !dec.HardDeny {
+				t.Errorf("[%s] %q = %s hard=%v, want hard Deny", mode, cmd, dec.Level, dec.HardDeny)
+			}
+		}
+	}
+}

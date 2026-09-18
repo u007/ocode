@@ -241,3 +241,35 @@ func TestDiscoveryJudgeClientNilWhenNotConnected(t *testing.T) {
 		t.Fatalf("nil client must not be the judge: %+v", got)
 	}
 }
+
+func TestDiscoveryJudgeClientResolvedOncePerDiscoveryState(t *testing.T) {
+	prev := newClientFn
+	t.Cleanup(func() { newClientFn = prev })
+
+	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a.disco = &discoveryState{enabled: true}
+
+	calls := 0
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		calls++
+		return newTypesafeClient("", "jev-latest", "http://127.0.0.1:1")
+	}
+	for i := 0; i < 3; i++ {
+		if got := a.discoveryJudgeClient(); got != nil {
+			t.Fatalf("keyless typesafe client must not be the judge: %+v", got)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("factory must run once per discovery state (its no-key refusal is logged every call), got %d", calls)
+	}
+
+	// ResetDiscovery drops the state, so the next lookup re-resolves.
+	a.ResetDiscovery()
+	a.disco = &discoveryState{enabled: true}
+	if a.discoveryJudgeClient() != nil {
+		t.Fatal("still keyless after reset")
+	}
+	if calls != 2 {
+		t.Fatalf("new discovery state must re-resolve the judge, got %d factory calls", calls)
+	}
+}

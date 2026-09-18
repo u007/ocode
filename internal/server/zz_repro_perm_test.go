@@ -37,6 +37,10 @@ func TestReproPermissionResolveHeadless(t *testing.T) {
 	ag := agent.NewAgent(&fakeClientAskBash{}, nil, nil, nil)
 	as := &agentSession{agent: ag, model: "fake-model", messages: nil}
 	h.agents["sess-1"] = as
+	// Suppress the background title-generation goroutine: it writes session
+	// files after the test body returns and races t.TempDir's RemoveAll cleanup.
+	// This test asserts the permission gate, not title generation.
+	h.tryClaimTitleGen("sess-1")
 
 	body := `{"content":"list files","sessionId":"sess-1"}`
 	req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(body))
@@ -76,6 +80,10 @@ func TestSecondSyncChatRefusedWhilePermissionPending(t *testing.T) {
 	ag := agent.NewAgent(&fakeClientAskBash{}, nil, nil, nil)
 	as := &agentSession{agent: ag, model: "fake-model", messages: nil}
 	h.agents["sess-pending"] = as
+	// Suppress the background title-generation goroutine: it writes session
+	// files after the test body returns and races t.TempDir's RemoveAll cleanup.
+	// This test asserts the permission gate, not title generation.
+	h.tryClaimTitleGen("sess-pending")
 
 	body := `{"content":"list files","sessionId":"sess-pending"}`
 	req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(body))
@@ -114,6 +122,10 @@ func TestAsyncTurnRefusedWhilePermissionPending(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // isolate session storage from other tests/runs sharing "sess-1"
 	h := NewHandler()
 	as := newTestSession(h, "sess-async-pending", &fakeClientAskBash{})
+	// Suppress the background title-generation goroutine: it writes session
+	// files after the test body returns and races t.TempDir's RemoveAll cleanup.
+	// This test asserts the permission gate, not title generation.
+	h.tryClaimTitleGen("sess-async-pending")
 
 	rec := chatRequest(t, h, map[string]any{"content": "list files", "sessionId": "sess-async-pending", "async": true, "model": "fake-model"})
 	if rec.Code != http.StatusAccepted {

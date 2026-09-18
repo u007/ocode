@@ -66,7 +66,7 @@ func healthProbeCmd(port int) string {
 	// Best-effort: curl ships on the overwhelming majority of target
 	// systems ocode already requires (git, go toolchain era Linux/macOS).
 	// A missing curl makes this probe report "000" (curl's own placeholder
-	// for "no response"), which ServerAlive correctly treats as not-alive —
+	// for "no response"), which serverHealthy correctly treats as not-alive —
 	// degrading to a fresh server start rather than failing the connect.
 	//
 	// No Authorization header: /api/health is deliberately unauthenticated
@@ -95,14 +95,6 @@ func serverHealthy(t Transport, state ServeState) bool {
 		return false
 	}
 	return strings.TrimSpace(res.Stdout) == "200"
-}
-
-// ServerAlive reports whether a discovered server is alive and healthy. The
-// localVersion argument is retained for compatibility; version no longer
-// affects the decision (see serverHealthy).
-func ServerAlive(t Transport, state ServeState, localVersion string) bool {
-	_ = localVersion
-	return serverHealthy(t, state)
 }
 
 func launchServerCmd(ver string) string {

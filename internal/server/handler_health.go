@@ -7,7 +7,7 @@ import (
 )
 
 // handleHealth answers GET /api/health. It exists so a --remote server's
-// reuse check (internal/remote's ServerAlive, run as a short-lived exec
+// reuse check (internal/remote's serverHealthy, run as a short-lived exec
 // probe on the remote host itself, before any tunnel or token has been
 // established) can tell "process alive and this ocode's HTTP stack is
 // actually serving" from "process alive but wedged/still booting", without

@@ -460,6 +460,39 @@ func TestLoadContextAnchorsAlwaysOnFilesAtRootNotCwd(t *testing.T) {
 	}
 }
 
+// TestLoadContextClaudeTakesPriorityOverAgents verifies that when
+// both CLAUDE.md and AGENTS.md exist, only CLAUDE.md is loaded
+// (CLAUDE.md takes priority). When only AGENTS.md exists, it is
+// loaded as a fallback.
+func TestLoadContextClaudeTakesPriorityOverAgents(t *testing.T) {
+	root := t.TempDir()
+
+	// Both files present — CLAUDE.md wins, AGENTS.md is skipped.
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("CLAUDE_BODY\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("AGENTS_BODY\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := LoadContext(map[string]bool{}, false, true, "", root)
+	if !strings.Contains(got, "CLAUDE_BODY") {
+		t.Fatalf("CLAUDE.md not loaded when both present:\n%s", got)
+	}
+	if strings.Contains(got, "AGENTS_BODY") {
+		t.Fatalf("AGENTS.md should be skipped when CLAUDE.md exists:\n%s", got)
+	}
+
+	// Only AGENTS.md — it should be loaded as a fallback.
+	root2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root2, "AGENTS.md"), []byte("AGENTS_ONLY_BODY\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got2 := LoadContext(map[string]bool{}, false, true, "", root2)
+	if !strings.Contains(got2, "AGENTS_ONLY_BODY") {
+		t.Fatalf("AGENTS.md not loaded when CLAUDE.md absent:\n%s", got2)
+	}
+}
+
 // TestLoadModelContextWithSourceAt_AnchoredAtRootNotCwd proves the root-anchored
 // loader resolves {model}.OCODE.md from the supplied root even when the process
 // cwd is somewhere else entirely (the desktop shell boots with cwd "/"). The

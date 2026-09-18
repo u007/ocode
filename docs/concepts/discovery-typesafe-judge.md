@@ -17,6 +17,8 @@ When discovery is enabled and the TypeSafe provider is connected, a per-turn jud
 
 There is no separate config flag. `discoveryJudgeClient()` in `internal/agent/discovery_typesafe.go` returns a `*TypesafeClient` only when `newClientFn(a.config, "typesafe/jev-latest")` yields a client with a non-empty API key. A nil config, a non-TypeSafe factory result, or a keyless client all mean "no judge", and discovery behaves exactly as before (every candidate is seeded).
 
+The resolution is cached once per discovery state (`discoveryState.judge`, guarded by `sync.Once`), so the factory and its "no API key ... refusing to build client" debug line run once per session rather than on every turn and every `/discovery` status read. Connecting TypeSafe mid-session takes effect after the next `ResetDiscovery` (toggle `/discovery` off and on) or a restart.
+
 ## State and question shape
 
 `buildDiscoveryJudgeState` (pure, `internal/agent/discovery_typesafe.go:97`) assembles a structured map with three keys:

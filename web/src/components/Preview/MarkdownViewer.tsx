@@ -101,7 +101,7 @@ export default function MarkdownViewer({
           <MermaidViewer path={path} code={diagram} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={onOpenFile} />
         </div>
       )}
-      <div ref={ref} className="prose prose-sm prose-invert min-h-0 flex-1 overflow-auto p-3 select-text">
+      <div ref={ref} className="prose prose-sm prose-invert max-w-none min-h-0 flex-1 overflow-auto p-3 select-text">
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
       </div>
       {sel && <SelectionToolbar sel={sel} path={path} label="doc" projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}

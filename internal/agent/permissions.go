@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -1173,8 +1174,27 @@ func isExfiltrationRiskCommand(command string) bool {
 // it, making the matching always-ALLOW lines in the bundled gatekeeper
 // prompt dead text.
 func IsHarmfulBashCommand(command string) bool {
-	cmd := strings.TrimSpace(command)
-	fields := splitShellFields(cmd)
+	fields := splitShellFields(strings.TrimSpace(command))
+	if len(fields) == 0 {
+		return false
+	}
+	// Judge every command the fragment really runs: launcher wrappers
+	// (env/command/nohup/timeout/xargs/sudo/…), path-qualified binaries and
+	// shell re-exec/eval bodies are peeled by effectiveCommandWords so
+	// "bash -c 'git stash'" or "/usr/bin/git stash" is as harmful as the bare
+	// form (permissions_wrappers.go).
+	for _, words := range effectiveCommandWords(fields) {
+		if isHarmfulBashFields(words) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHarmfulBashFields is the per-command core of IsHarmfulBashCommand; it
+// expects an already-unwrapped command whose first word is the binary.
+func isHarmfulBashFields(fields []string) bool {
+	cmd := rebuildCommandLine(fields)
 	if len(fields) < 2 {
 		return false
 	}
@@ -1232,9 +1252,24 @@ func IsHarmfulBashCommand(command string) bool {
 // harmful operation that requires human approval even when the
 // auto-permission layer is active. Bash commands are checked via
 // IsHarmfulBashCommand; other tools can be added here as needed.
+//
+// A bash command is judged per constituent of a compound line, not as a
+// whole: IsHarmfulBashCommand only recognizes a command whose first word is
+// git, so "cd repo && git stash" would otherwise read as benign and reach the
+// auto-permission judge, which is exactly the case this gate exists to keep
+// in human hands. On a parse failure the whole line is checked as a fallback.
 func IsHarmfulRequest(req PermissionRequest) bool {
-	if req.ToolName == "bash" && req.Command != "" {
+	if req.ToolName != "bash" || req.Command == "" {
+		return false
+	}
+	parsed, err := parseShellCommandLine(req.Command)
+	if err != nil {
 		return IsHarmfulBashCommand(req.Command)
+	}
+	for _, c := range parsed {
+		if sub := rebuildCommandLine(c.cmdWords); sub != "" && IsHarmfulBashCommand(sub) {
+			return true
+		}
 	}
 	return false
 }
@@ -1476,38 +1511,80 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		// is on, else a human prompt (sandbox never disables auto). Ordinary
 		// shared/project writes under the data dir auto-allow; only auth.json
 		// inside it stays Ask.
-		// Force-flagged git push/pull must not ride the sandbox auto-allow:
-		// the harmful set's contract is "always require explicit human
-		// approval and must never auto-allow" (see decideSingleCommand), and
-		// a remote mutation is exactly the class the OS write-wall cannot
-		// constrain. Normal mode is unchanged (decideSingleCommand still
-		// asks); YOLO above remains the explicit promptless escape hatch.
-		if pm.mode == PermissionModeSandbox && isHarmfulForceCommand(command) {
-			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful force): tool=bash command=%q", command))
-			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_force")}
-		}
-		// Destructive git subcommand families (git stash, git checkout,
-		// git reset, git clean, git restore, git switch — see
-		// harmfulBashPrefixes) must not ride the sandbox auto-allow either.
-		// The OS write-wall confines file writes to classified roots, but
-		// these commands mutate the repo (history rewrite, branch switch,
-		// stash create/drop, untracked removal) entirely within the
-		// allowed workdir — the write-wall is blind to them. Any harmful
-		// git form already routes to Ask in normal mode via
-		// IsHarmfulBashCommand; here we extend that contract to sandbox.
-		// Read-only stash inspection forms ("git stash list"/"show") are
-		// explicitly excluded from IsHarmfulBashCommand and so pass
-		// through to the auto-allow below, mirroring normal-mode behavior.
-		if pm.mode == PermissionModeSandbox && IsHarmfulBashCommand(command) {
-			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful git): tool=bash command=%q", command))
-			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_git")}
-		}
-		if sd := pm.sensitiveSandboxDecision(command, args); sd != nil {
-			return *sd
-		}
-		if pm.mode == PermissionModeSandbox && sandboxSupported() {
-			pm.emitDebug("perm", "Decide ALLOW (sandbox, OS-wrapped): tool=bash")
-			return PermissionDecision{Level: PermissionAllow}
+		if pm.mode == PermissionModeSandbox {
+			// Per-constituent sandbox gate. The blanket OS-wrapped auto-allow
+			// below is reached before the compound parser at the tail of this
+			// bash branch, so the whole-command checks here are the only ones
+			// that run — and IsHarmfulBashCommand / isHarmfulForceCommand both
+			// require fields[0]=="git" (see gitSubcommandIndexSkippingC), so a
+			// destructive git form behind a benign first word
+			// ("cd repo && git stash") slips through. Parse here and apply the
+			// hard policy gates per fragment, so neither a destructive git form
+			// nor an explicit user ban can ride the sandbox auto-allow.
+			parsed, perr := parseShellCommandLine(command)
+			if perr == nil {
+				for _, c := range parsed {
+					sub := rebuildCommandLine(c.cmdWords)
+					if sub == "" {
+						continue
+					}
+					// Explicit user bans ("/ban add git stash" →
+					// permissions.bash.prefixes["git stash"]="deny") are hard
+					// policy and win here just as they do in
+					// decideSingleCommand. Before this gate sandbox returned
+					// Allow before the compound parser, so a banned prefix was
+					// silently auto-allowed (and a banned form hidden behind
+					// `cd X && …` was never even looked at).
+					if denied, ok := pm.matchBashPrefixRule(c.cmdWords, PermissionDeny); ok {
+						pm.emitDebug("perm", fmt.Sprintf("Decide DENY (sandbox banned prefix): prefix=%s command=%q", denied, sub))
+						return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+					}
+					// Destructive git subcommand families (git stash,
+					// git checkout, git reset, git clean, git restore,
+					// git switch — see harmfulBashPrefixes) must not ride the
+					// sandbox auto-allow. The OS write-wall confines file writes
+					// to classified roots, but these commands mutate the repo
+					// (history rewrite, branch switch, stash create/drop,
+					// untracked removal) entirely within the allowed workdir —
+					// the write-wall is blind to them. Read-only stash
+					// inspection forms ("git stash list"/"show") are excluded
+					// from IsHarmfulBashCommand and still auto-allow below.
+					if IsHarmfulBashCommand(sub) {
+						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful git): tool=bash command=%q", sub))
+						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_git")}
+					}
+					// "$g stash" / "$(which git) stash": the binary is a
+					// shell expansion the static gates cannot see through,
+					// so it must not ride the OS-wrapped auto-allow.
+					if isOpaqueCommandHead(c.cmdWords) {
+						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox opaque command): tool=bash command=%q", sub))
+						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.opaque_command")}
+					}
+					if isHarmfulForceCommand(sub) {
+						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful force): tool=bash command=%q", sub))
+						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_force")}
+					}
+				}
+			} else {
+				// Parse failure: fall back to the whole-command forms so a
+				// malformed line still cannot auto-allow a harmful form that
+				// starts with git.
+				if isHarmfulForceCommand(command) {
+					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful force): tool=bash command=%q", command))
+					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_force")}
+				}
+				if IsHarmfulBashCommand(command) {
+					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful git): tool=bash command=%q", command))
+					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_git")}
+				}
+			}
+			if sd := pm.sensitiveSandboxDecision(command, args); sd != nil {
+				return *sd
+			}
+			if sandboxSupported() {
+				pm.emitDebug("perm", "Decide ALLOW (sandbox, OS-wrapped): tool=bash")
+				return PermissionDecision{Level: PermissionAllow}
+			}
 		}
 
 		// Interpreter executions (python3 << EOF, node -e "...", etc.) are
@@ -1978,11 +2055,16 @@ func (pm *PermissionManager) AllowedRootsClassified() []sandbox.RootSpec {
 	for _, r := range tool.ExtraAllowedRoots() {
 		add(r, true)
 	}
-	// Managed cache dirs (truncated tool-results, cloned-repo cache): reads
-	// must keep working, but there is no reason to mutate them under sandbox.
-	for _, r := range tool.CacheRoots() {
-		add(r, false)
+	// Managed cache dirs. The truncated tool-results cache is WRITABLE: a
+	// nested ocode run (or go test of the truncation path) inside sandboxed
+	// bash writes oversized outputs there, and TruncateToolResult degrades to
+	// pass-through when the write is denied. The cloned-repo cache only needs
+	// reads under sandbox, so it stays read-only.
+	if r, ok := tool.ToolResultCacheRoot(); ok {
+		add(r, true)
 	}
+	// The cloned-repo cache is classified read-only at the END of this
+	// function (see below) so nesting against every writable root is known.
 	// Global data dir (~/.local/share/opencode: sessions, memory, usage,
 	// project/{slug}/ state) and config dir (~/.config/opencode): the data dir
 	// is classified WRITABLE so sandboxed bash has full access to the opencode
@@ -2034,6 +2116,16 @@ func (pm *PermissionManager) AllowedRootsClassified() []sandbox.RootSpec {
 	for _, r := range pathscope.DarwinUserDirs() {
 		add(r, true)
 	}
+	// A read-only root nested inside a writable one is a carve-out: NewRootSet
+	// expands the writable parent into its individual children. That is the
+	// right tool for auth.json, but for a cache dir it is only a nicety, and
+	// when XDG_STATE_HOME / OPENCODE_REPO_CACHE point under a large writable
+	// root (e.g. $TMPDIR) the expansion produces thousands of rules and
+	// sandbox-exec aborts on the oversized profile. So the repo cache is only
+	// classified read-only when no writable root already covers it.
+	if r, ok := tool.RepoCacheRoot(); ok && !coveredByWritable(specs, r) {
+		add(r, false)
+	}
 	sort.Slice(specs, func(i, j int) bool { return specs[i].Path < specs[j].Path })
 	return specs
 }
@@ -2069,6 +2161,21 @@ func isTempDirUnderRoots(rawPath string, roots []string) bool {
 // directory.
 func isTempDir(rawPath string) bool {
 	return pathscope.IsTempDir(rawPath)
+}
+
+// coveredByWritable reports whether p equals or lies inside any writable spec.
+func coveredByWritable(specs []sandbox.RootSpec, p string) bool {
+	for _, s := range specs {
+		if !s.Writable {
+			continue
+		}
+		rel, err := filepath.Rel(s.Path, p)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // goModCacheRoots returns the Go module cache directories. The module cache is
@@ -2681,6 +2788,15 @@ func allArgsAreTempDirs(cmdWords []string) bool {
 }
 
 func isSensitivePath(path string) bool {
+	return isSecretMaterialPath(path) || isRepoMetadataPath(path)
+}
+
+// isSecretMaterialPath reports whether path names credential-bearing material:
+// secret dotfiles, .env variants, SSH private-key filenames, certificate/key
+// files, and the AWS credentials directory. Reads and writes of these are
+// sensitive in every mode — a read can exfiltrate a credential, which is why
+// the sandbox carve-out does not exempt them for read-only commands.
+func isSecretMaterialPath(path string) bool {
 	clean := filepath.ToSlash(filepath.Clean(path))
 	base := filepath.Base(clean)
 
@@ -2721,15 +2837,28 @@ func isSensitivePath(path string) bool {
 		}
 	}
 
-	// Paths under sensitive directories
-	sensitiveDirs := []string{".git/", ".github/workflows/", ".aws/"}
-	for _, dir := range sensitiveDirs {
-		if strings.Contains("/"+clean+"/", "/"+dir) || strings.HasPrefix(clean, dir) {
-			return true
-		}
-	}
+	// Paths under sensitive directories holding credentials
+	return pathUnderSensitiveDir(clean, ".aws/")
+}
 
-	return false
+// isRepoMetadataPath reports whether path is inside a repository-metadata
+// directory whose WRITE is dangerous but whose READ is ordinary repo
+// inspection: a planted .git/hooks/* executes on the next git command, and a
+// planted .github/workflows/* runs in CI — both stay inside the workdir, so
+// the sandbox OS write-wall cannot constrain them. Reading or listing them
+// (ls .git/, cat .git/config) leaks no credential and is allowed
+// deterministically in normal mode, so isSensitivePath flags them as a whole
+// while the sandbox carve-out splits read from write (see sandboxSensitivePath).
+func isRepoMetadataPath(path string) bool {
+	clean := filepath.ToSlash(filepath.Clean(path))
+	return pathUnderSensitiveDir(clean, ".git/") || pathUnderSensitiveDir(clean, ".github/workflows/")
+}
+
+// pathUnderSensitiveDir applies the directory-containment rule used by the
+// sensitive-dir check: a trailing-slash dir name matches the directory itself
+// and everything beneath it.
+func pathUnderSensitiveDir(clean, dir string) bool {
+	return strings.Contains("/"+clean+"/", "/"+dir) || strings.HasPrefix(clean, dir)
 }
 
 // sensitiveSandboxDecision implements the sandbox-mode sensitive-set carve-out
@@ -2741,7 +2870,13 @@ func isSensitivePath(path string) bool {
 //   - ocode's auth.json (read or write) — the agent never legitimately needs it
 //   - ocode's global config dir (WRITE only) — guards the agent
 //     silently self-granting a permission rule by rewriting its own config
-//   - ~/.ssh and .env files (read or write)
+//   - secret material (isSecretMaterialPath: ~/.ssh, .env and friends, keys,
+//     certs, .aws/) read or write — a read can exfiltrate a credential
+//   - repo-metadata dirs (isRepoMetadataPath: .git/, .github/workflows/) on
+//     WRITE only — a planted hook/workflow runs arbitrary code and stays
+//     inside the workdir, where the OS write-wall is blind. Reading/listing
+//     them (ls .git/, cat .git/config) is ordinary repo inspection and
+//     auto-allows, matching normal mode.
 //
 // Ordinary writes under the shared data dir (~/.local/share/opencode,
 // including project/**) are NOT sensitive and auto-allow in sandbox; only
@@ -2758,12 +2893,12 @@ func (pm *PermissionManager) sensitiveSandboxDecision(command string, args json.
 		return nil
 	}
 
-	targets, isWrite := sandboxSensitiveTargets(command, pm.workDir)
+	targets, writeTargets := sandboxSensitiveTargets(command, pm.workDir)
 	if len(targets) == 0 {
 		return nil
 	}
 	for _, tgt := range targets {
-		if sandboxSensitivePath(tgt, isWrite) {
+		if sandboxSensitivePath(tgt, writeTargets[tgt]) {
 			pm.emitDebug("perm", fmt.Sprintf("sandbox sensitive ASK: command=%q", command))
 			return &PermissionDecision{
 				Level:   PermissionAsk,
@@ -2775,13 +2910,22 @@ func (pm *PermissionManager) sensitiveSandboxDecision(command string, args json.
 }
 
 // sandboxSensitiveTargets returns the absolute, resolved target paths a command
-// statically touches (path args + redirect targets) and whether the command is
-// a write-oriented operation. It mirrors the extractBashCommandPaths /
-// parseShellCommandLine redirection logic so the carve-out catches the common
-// read/write forms the matrix calls out (cat, redirect, tee, cp, editor).
-func sandboxSensitiveTargets(command, workDir string) (paths []string, write bool) {
+// statically touches (path args + redirect targets), plus the subset of those
+// targets that the command WRITES (or deletes). It mirrors the
+// extractBashCommandPaths / parseShellCommandLine redirection logic so the
+// carve-out catches the common read/write forms the matrix calls out (cat,
+// redirect, tee, cp, editor).
+//
+// Read vs write matters for repo-metadata dirs (.git/, .github/workflows/):
+// listing or reading them is ordinary repo inspection and must auto-allow in
+// sandbox exactly as it does in normal mode, while writing into them (a
+// planted .git/hooks/* or workflow) must still Ask, because the OS write-wall
+// cannot constrain a mutation that stays inside the workdir. Secret material
+// (.env, keys, certs) stays sensitive for reads too.
+func sandboxSensitiveTargets(command, workDir string) (paths []string, writeTargets map[string]bool) {
 	set := map[string]struct{}{}
-	add := func(p string) {
+	writeTargets = map[string]bool{}
+	add := func(p string, write bool) {
 		if p == "" || isAllowedDevicePath(p) {
 			return
 		}
@@ -2790,20 +2934,25 @@ func sandboxSensitiveTargets(command, workDir string) (paths []string, write boo
 			set[r] = struct{}{}
 			paths = append(paths, r)
 		}
+		if write {
+			writeTargets[r] = true
+		}
 	}
 
 	parsed, err := parseShellCommandLine(command)
 	if err != nil {
 		// Parse failure (unbalanced quotes, etc.): fall back to a flat,
 		// unsplit scan so a malformed compound line still gets some
-		// sensitive-path coverage rather than none.
+		// sensitive-path coverage rather than none. On a parse failure the
+		// write-ness of each fragment cannot be established, so every target
+		// is treated as a write — fail closed.
 		fields := splitShellFields(command)
 		if len(fields) > 0 {
 			for _, p := range extractBashCommandPaths(fields[0], fields) {
-				add(p)
+				add(p, true)
 			}
 		}
-		return paths, write
+		return paths, writeTargets
 	}
 	// Extract per fragment, not from a flat re-split of the whole compound
 	// line: a single splitShellFields(command) pass would hand every word
@@ -2812,20 +2961,124 @@ func sandboxSensitiveTargets(command, workDir string) (paths []string, write boo
 	// argument-skipping rules (e.g. grep's pattern-arg skip) to unrelated
 	// commands' words and mixing their path args together.
 	for _, cmd := range parsed {
-		if len(cmd.redirections) > 0 {
-			write = true // a redirection target is a write (or read) target
-		}
+		// Redirection targets are writes (>> file, > file, teardown creates).
 		for _, r := range cmd.redirections {
-			add(r)
+			add(r, true)
 		}
 		if len(cmd.cmdWords) == 0 {
 			continue
 		}
-		for _, p := range extractBashCommandPaths(cmd.cmdWords[0], cmd.cmdWords) {
-			add(p)
+		prefix := cmd.cmdWords[0]
+		positions := extractBashCommandPaths(prefix, cmd.cmdWords)
+		writePositions := writePositionalIndexes(prefix, cmd.cmdWords, positions)
+		for i, p := range positions {
+			add(p, writePositions[i])
 		}
 	}
-	return paths, write
+	return paths, writeTargets
+}
+
+// writePositionalIndexes reports, for the positional path args returned by
+// extractBashCommandPaths, which ones the command writes or deletes.
+//
+// Fail-closed: a target is treated as written unless the command is provably
+// read-only over its path arguments (commandReadsPathsOnly) or is a known
+// copy-like form whose only written arg is the destination. An unrecognized
+// command (truncate, dd, chmod, a custom script) therefore marks every path it
+// names as a write, so a repo-metadata target cannot slip through the
+// sandbox carve-out on the strength of an unknown command name.
+func writePositionalIndexes(prefix string, fields, positions []string) []bool {
+	writes := make([]bool, len(positions))
+	if len(positions) == 0 {
+		return writes
+	}
+	// Copy-like commands: the destination (last positional) is the write;
+	// earlier positionals are sources. extractBashCommandPaths preserves
+	// argument order, so the final entry is the destination.
+	switch prefix {
+	case "cp", "install", "ln":
+		writes[len(positions)-1] = true
+		return writes
+	case "mv":
+		// mv deletes its sources as well as writing the destination, so
+		// every positional is a write/delete target.
+		for i := range writes {
+			writes[i] = true
+		}
+		return writes
+	}
+	// Provably read-only over its path args → no writes.
+	if commandReadsPathsOnly(prefix, fields) {
+		return writes
+	}
+	// Unknown or write-capable: fail closed.
+	for i := range writes {
+		writes[i] = true
+	}
+	return writes
+}
+
+// commandReadsPathsOnly reports whether a single shell fragment provably only
+// reads the path arguments it names (never writes, truncates or deletes them).
+// It is deliberately conservative: false for anything not positively known to
+// be read-only, so the sandbox carve-out fails closed.
+func commandReadsPathsOnly(prefix string, fields []string) bool {
+	bin := filepath.Base(prefix)
+	// find/fd are read-only unless they can run a subprocess or delete.
+	switch bin {
+	case "find":
+		for _, f := range fields[1:] {
+			if findUnsafeFlags[f] {
+				return false
+			}
+		}
+		return true
+	case "fd":
+		for _, f := range fields[1:] {
+			if fdUnsafeFlags[f] {
+				return false
+			}
+		}
+		return true
+	// sed/awk are filters unless in-place editing is requested.
+	case "sed", "awk":
+		for _, f := range fields[1:] {
+			if f == "-i" || strings.HasPrefix(f, "-i") || f == "--in-place" {
+				return false
+			}
+		}
+		return true
+	case "git":
+		idx := gitSubcommandIndex(fields)
+		if idx == -1 {
+			return false
+		}
+		return gitReadOnlyPathSubcommands[fields[idx]]
+	}
+	// Capability catalog: anything classed read-only.
+	for _, cap := range commandCapabilities {
+		if cap.Behavior != commandReadOnly {
+			continue
+		}
+		if slices.Contains(cap.Aliases, bin) ||
+			slices.Contains(cap.UnixAliases, bin) ||
+			slices.Contains(cap.WindowsAliases, bin) {
+			return true
+		}
+	}
+	return false
+}
+
+// gitReadOnlyPathSubcommands are git subcommands that only read the repository
+// and never write a path they name. `config`, `branch`, `remote`, `add`,
+// `commit`, and the rest of the mutating families are intentionally excluded
+// (e.g. `git config --file .git/config <k> <v>` names a path it writes).
+var gitReadOnlyPathSubcommands = map[string]bool{
+	"status": true, "log": true, "diff": true, "show": true, "blame": true,
+	"rev-parse": true, "ls-files": true, "ls-tree": true, "ls-remote": true,
+	"reflog": true, "shortlog": true, "cat-file": true, "check-ignore": true,
+	"grep": true, "name-rev": true, "for-each-ref": true, "rev-list": true,
+	"describe": true, "count-objects": true, "fsck": true,
 }
 
 // sandboxSensitivePath classifies a resolved path against the sandbox sensitive
@@ -2863,9 +3116,21 @@ func sandboxSensitivePath(resolved string, write bool) bool {
 		}
 	}
 
-	// .env files (isSensitivePath already flags them; reuse for parity).
-	if isSensitivePath(clean) {
+	// Secret material (.env, .netrc, .npmrc, .pypirc, SSH key filenames,
+	// cert/key files, .aws/) is sensitive on READ or write: a read can
+	// exfiltrate a credential, which the OS write-wall cannot prevent.
+	if isSecretMaterialPath(clean) {
 		return true
+	}
+
+	// Repo-metadata dirs (.git/, .github/workflows/) are sensitive on WRITE
+	// only. A planted .git/hooks/* or workflow runs arbitrary code on the next
+	// git command / CI run, and stays inside the workdir so the OS write-wall
+	// is blind to it — hence the Ask. Reading or listing them (ls .git/,
+	// cat .git/config, ls .github/workflows/) leaks no credential and is
+	// deterministic-allow in normal mode, so it must not Ask in sandbox either.
+	if isRepoMetadataPath(clean) {
+		return write
 	}
 	return false
 }
@@ -4056,6 +4321,24 @@ func (pm *PermissionManager) matchBashPrefixRule(cmdWords []string, level Permis
 	if len(cmdWords) == 0 {
 		return "", false
 	}
+	if level == PermissionDeny {
+		// A ban must also catch the wrapped forms ("env git stash",
+		// "bash -c 'git stash'", "/usr/bin/git stash"): match every command
+		// the fragment really runs. Allow-level matching stays literal.
+		for _, words := range effectiveCommandWords(cmdWords) {
+			if prefix, ok := pm.matchBashPrefixRuleWords(words, level); ok {
+				return prefix, true
+			}
+		}
+		return "", false
+	}
+	return pm.matchBashPrefixRuleWords(cmdWords, level)
+}
+
+func (pm *PermissionManager) matchBashPrefixRuleWords(cmdWords []string, level PermissionLevel) (string, bool) {
+	if len(cmdWords) == 0 {
+		return "", false
+	}
 	keys := make([]string, 0, len(pm.bashPrefixes))
 	for prefix, prefixLevel := range pm.bashPrefixes {
 		if prefixLevel != level {
@@ -4086,9 +4369,17 @@ func (pm *PermissionManager) matchBashPrefixRule(cmdWords []string, level Permis
 				break
 			}
 		}
-		if matched {
-			return prefix, true
+		if !matched {
+			continue
 		}
+		// A "git stash" ban targets the mutating family (push/pop/apply/
+		// drop/clear, bare stash). The read-only inspection forms stay
+		// reachable — same carve-out IsHarmfulBashCommand applies.
+		if level == PermissionDeny && len(prefixWords) == 2 && prefixWords[0] == "git" && prefixWords[1] == "stash" &&
+			isReadOnlyGitStashForm(cmdWords[2:]) {
+			continue
+		}
+		return prefix, true
 	}
 	return "", false
 }
@@ -5496,12 +5787,20 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	}
 	// Then the granular rulePrefix (e.g. "git push"), which carries always-allow.
 	if level, exists := pm.bashPrefixes[rulePrefix]; exists {
-		if level == PermissionAsk {
-			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (prefix rule): prefix=%s", rulePrefix))
-			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
+		// A "git stash" deny bans the mutating family only; the read-only
+		// inspection forms are carved out of the ban (the same condition
+		// matchBashPrefixRule applies) and fall through to the subcommand
+		// allowlist below instead of being denied here. A broad "git" deny is
+		// handled above and still blocks them.
+		if !(level == PermissionDeny && len(cmd.cmdWords) >= 2 &&
+			rulePrefix == "git stash" && isReadOnlyGitStashForm(cmd.cmdWords[2:])) {
+			if level == PermissionAsk {
+				pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (prefix rule): prefix=%s", rulePrefix))
+				return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
+			}
+			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (prefix rule): prefix=%s", level, rulePrefix))
+			return PermissionDecision{Level: level}
 		}
-		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (prefix rule): prefix=%s", level, rulePrefix))
-		return PermissionDecision{Level: level}
 	}
 	// Finally a broad single-word ask rule (only reached when rulePrefix differs,
 	// i.e. git; a broad "git" allow cannot persist so only Ask remains here).

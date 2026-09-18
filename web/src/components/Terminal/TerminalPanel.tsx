@@ -171,7 +171,6 @@ export default function TerminalPanel({
   fontSize,
   projectPath,
   host,
-  remotePort,
 }: {
   id: string;
   active: boolean;
@@ -180,7 +179,6 @@ export default function TerminalPanel({
   fontSize: number;
   projectPath: string;
   host?: string;
-  remotePort?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -1276,7 +1274,7 @@ export default function TerminalPanel({
     // Backend switches intentionally do NOT restart existing terminals:
     // the PTY is host-local and would be lost. New terminals after a switch
     // use the new apiWsPath; a full reload migrates all.
-  }, [projectPath, host, remotePort, id]);
+  }, [projectPath, host, id]);
 
   // Apply scrollback changes without tearing down the pty.
   useEffect(() => {

@@ -4235,6 +4235,10 @@ func TestLLMStreamErrorIsRenderedButNotSentToLLM(t *testing.T) {
 func TestStreamedToolOutputLateDeltaNotAppendedAfterFinal(t *testing.T) {
 	// streamMsgEvent now live-persists the transcript — isolate session files.
 	t.Setenv("HOME", t.TempDir())
+	// The live persist is asynchronous: drain this session's queue before
+	// t.TempDir's RemoveAll cleanup (LIFO) so the background write can't race
+	// the directory removal.
+	t.Cleanup(func() { _ = session.Flush("test-stream-order", 2*time.Second) })
 	toolCallID := "call-stream-1"
 	m := model{
 		viewport:  fastviewport.New(80, 24),
@@ -7519,6 +7523,10 @@ func TestGetInitialToolsMatchesCanonicalList(t *testing.T) {
 func TestStreamedToolOutputDisplayContentPreferred(t *testing.T) {
 	// streamMsgEvent now live-persists the transcript — isolate session files.
 	t.Setenv("HOME", t.TempDir())
+	// The live persist is asynchronous: drain this session's queue before
+	// t.TempDir's RemoveAll cleanup (LIFO) so the background write can't race
+	// the directory removal.
+	t.Cleanup(func() { _ = session.Flush("test-display-content", 2*time.Second) })
 	toolCallID := "call-display-1"
 	// Truncated Content (what the LLM sees, with the notice) + full
 	// DisplayContent (what the UI must show).

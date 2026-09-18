@@ -91,9 +91,11 @@ func TestHandleSessionStatusCrossProject(t *testing.T) {
 	if snap.CWD != otherProj {
 		t.Fatalf("cwd = %q, want session's project %q", snap.CWD, otherProj)
 	}
-	// The seeded session has one user message ("hello") → estimated tokens > 0.
-	if snap.ContextCurrentTokens <= 0 {
-		t.Fatalf("context_current_tokens = %d, want > 0", snap.ContextCurrentTokens)
+	// context_current_tokens is the provider-reported value, not a chars/4
+	// estimate over the seeded transcript: with no live agent there is no
+	// usage reading, so the field is omitted (0) rather than fabricated.
+	if snap.ContextCurrentTokens != 0 {
+		t.Fatalf("context_current_tokens = %d, want 0 (no live provider usage)", snap.ContextCurrentTokens)
 	}
 	if snap.ContextModel == "" || snap.ContextMaxTokens <= 0 {
 		t.Fatalf("context = %s/%d, want model + window", snap.ContextModel, snap.ContextMaxTokens)
@@ -138,11 +140,10 @@ func TestSessionStateAndStatusForBridgedSession(t *testing.T) {
 
 // TestPublishTurnStatusSnapshotBroadcastsContext covers the post-turn sidebar
 // refresh: after a headless turn completes, publishTurnStatusSnapshot
-// broadcasts a session-tagged "status" event whose context fields were
-// computed from the just-persisted transcript — so the web Context gauge
-// moves without a tab switch. Regression guard for the bug where every
-// session-tagged status broadcast omitted (and thus zeroed) the context
-// fields.
+// broadcasts a session-tagged "status" event whose context fields carry the
+// backend's provider-reported usage — so the web Context gauge moves without a
+// tab switch. Regression guard for the bug where every session-tagged status
+// broadcast omitted (and thus zeroed) the context fields.
 func TestPublishTurnStatusSnapshotBroadcastsContext(t *testing.T) {
 	h := NewHandler()
 	if h.cfg != nil {
@@ -152,6 +153,17 @@ func TestPublishTurnStatusSnapshotBroadcastsContext(t *testing.T) {
 	id := session.NewSessionID()
 	saveSessionToDir(t, proj, id)
 	h.sessions.Register(id, proj)
+
+	// A live headless agent that has completed one LLM call reporting 777 input
+	// tokens — the backend-authoritative context occupancy the snapshot must
+	// carry (never a chars/4 estimate of the seeded transcript).
+	ag := agent.NewAgent(usageReportingClient{prompt: 777}, nil, nil, nil)
+	if _, err := ag.Step([]agent.Message{{Role: "user", Content: "hello"}}); err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	h.mu.Lock()
+	h.agents[id] = &agentSession{agent: ag}
+	h.mu.Unlock()
 
 	sub := h.subscribeHeadless()
 	defer h.unsubscribeHeadless(sub)
@@ -173,8 +185,8 @@ func TestPublishTurnStatusSnapshotBroadcastsContext(t *testing.T) {
 		if snap.CWD != proj {
 			t.Errorf("CWD = %q, want owning project %q", snap.CWD, proj)
 		}
-		if snap.ContextCurrentTokens <= 0 {
-			t.Errorf("context_current_tokens = %d, want > 0 from the seeded transcript", snap.ContextCurrentTokens)
+		if snap.ContextCurrentTokens != 777 {
+			t.Errorf("context_current_tokens = %d, want 777 (provider-reported)", snap.ContextCurrentTokens)
 		}
 		if snap.ContextModel != "gpt-4o-mini" {
 			t.Errorf("context_model = %q, want cfg model", snap.ContextModel)
@@ -186,6 +198,21 @@ func TestPublishTurnStatusSnapshotBroadcastsContext(t *testing.T) {
 		t.Fatal("no status event broadcast")
 	}
 }
+
+// usageReportingClient is a fake LLM client that reports a fixed prompt-token
+// count, so a Step records it as the agent's LastInputTokens.
+type usageReportingClient struct{ prompt int64 }
+
+func (c usageReportingClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
+	pt := c.prompt
+	return &agent.Message{
+		Role:    "assistant",
+		Content: "hi",
+		Usage:   &agent.TokenUsage{PromptTokens: &pt},
+	}, nil
+}
+func (usageReportingClient) GetProvider() string { return "fake" }
+func (usageReportingClient) GetModel() string    { return "fake-model" }
 
 // TestHandleSessionStateSurfacesLivePendingAsk covers the recovery path for a
 // session paused on a permission ask whose sentinel is NOT in the persisted

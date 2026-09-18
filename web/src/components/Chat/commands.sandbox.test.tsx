@@ -44,7 +44,7 @@ function ctx() {
       setMaskMode: async () => ({ mode: "" }),
       setMaskModel: async () => ({ model: "" }),
       getCommandContext: async () => ({ prompt: "" }),
-      getSessionContext: async () => ({ session_id: "", message_count: 0, estimated_tokens: 0 }),
+      getSessionContext: async () => ({ session_id: "", message_count: 0, current_tokens: 0 }),
     } as never,
   };
 }

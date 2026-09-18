@@ -132,7 +132,8 @@ func readContextFile(path string) (string, bool) {
 
 // LoadContext assembles the pre-cached system-prompt context. When discoveryOn
 // is true, the skill catalog is suppressed (replaced by the volatile tail
-// injector that lists only attached skills). All other context — AGENTS.md,
+// injector that lists only attached skills). AGENTS.md is loaded only when
+// CLAUDE.md is absent (CLAUDE.md takes priority). All other context —
 // plugins, model-specific OCODE.md, etc. — is unchanged.
 //
 // activeModel is the session's active model id (as returned by the LLM client)
@@ -143,17 +144,34 @@ func readContextFile(path string) (string, bool) {
 // across turns (see the prefix-cache contract).
 func LoadContext(enabled map[string]bool, memoryEnabled bool, discoveryOn bool, activeModel, root string) string {
 	var context string
-	files := []string{"AGENTS.md", "CLAUDE.md", "OCODE.md", ".cursorrules"}
+
+	// CLAUDE.md takes priority over AGENTS.md: if CLAUDE.md exists it is
+	// used and AGENTS.md is skipped; otherwise AGENTS.md is read when present.
+	claudePath := "CLAUDE.md"
+	if root != "" {
+		claudePath = filepath.Join(root, "CLAUDE.md")
+	}
+	if content, ok := readContextFileAt(root, claudePath); ok {
+		context += "\n--- CLAUDE.md ---\n" + content + "\n"
+	} else {
+		agentsPath := "AGENTS.md"
+		if root != "" {
+			agentsPath = filepath.Join(root, "AGENTS.md")
+		}
+		if content, ok := readContextFileAt(root, agentsPath); ok {
+			context += "\n--- AGENTS.md ---\n" + content + "\n"
+		}
+	}
 
 	// Anchor the always-on context files at the session's project root, not the
 	// process cwd. The desktop/web server boots with cwd "/" (or whatever
 	// project it was launched in) while each session is bound to its own
 	// project root — a remote/WSL project's root is not even on this machine —
-	// so a cwd-relative read injected ANOTHER project's AGENTS.md/CLAUDE.md
+	// so a cwd-relative read injected ANOTHER project's OCODE.md/.cursorrules
 	// into the session's cached system prompt. Same anchor rationale as
 	// loadModelContextWithSource below; root == "" preserves the cwd behavior
 	// callers relied on before roots were threaded through.
-	for _, f := range files {
+	for _, f := range []string{"OCODE.md", ".cursorrules"} {
 		path := f
 		if root != "" {
 			path = filepath.Join(root, f)

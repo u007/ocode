@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,6 +40,14 @@ type discoveryState struct {
 	// (observability for /discovery status). atomic because the TUI/HTTP status
 	// reader can run while the agent goroutine is mid-turn.
 	judgeVetoed atomic.Int64
+	// judge caches the TypeSafe judge resolution for this state's lifetime
+	// (judgeOnce guards it). Resolving through the shared client factory on
+	// every turn and every /discovery status read would re-emit NewClient's
+	// "no API key ... refusing to build client" debug line for everyone
+	// without a TypeSafe key. A /connect typesafe mid-session therefore takes
+	// effect on the next ResetDiscovery (/discovery toggle) or restart.
+	judgeOnce sync.Once
+	judge     *TypesafeClient
 }
 
 // discoveryWarmTimeout bounds a background corpus warm. Generous because a local

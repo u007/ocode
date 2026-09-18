@@ -116,12 +116,45 @@ What still asks (permission layer, not the OS):
 - `auth.json` (read or write) → Ask
 - ocode config dir (writes only) → Ask
 - `~/.ssh`, `.env` (read or write) → Ask
+- secret material reads in general (`isSecretMaterialPath`: `.netrc`,
+  `.npmrc`, `.pypirc`, SSH private-key filenames, `.pem`/`.key`/`.p12`/`.pfx`/
+  `.secrets`, `.aws/`) → Ask
+- **repo-metadata dirs (`.git/`, `.github/workflows/`) → Ask on WRITE only.**
+  Reading/listing them (`ls .git/`, `cat .git/config`) auto-allows in sandbox
+  exactly as in normal mode; a write/delete (a planted `.git/hooks/*` or
+  workflow) still asks, because it stays inside the workdir where the OS
+  write-wall is blind. `sandboxSensitivePath` splits them from
+  `isSecretMaterialPath` via `isRepoMetadataPath`, and
+  `sandboxSensitiveTargets` returns a per-target write map (fail-closed:
+  unknown commands mark their path args as writes) so
+  `truncate`/`dd`/`chmod`-style forms cannot slip through as "reads".
 - danger-`rm` heuristics → Ask
 - destructive git forms (`git stash`/`checkout`/`reset`/`clean`/`restore`/
   `switch`, plus force-flagged `git push`/`pull`) → Ask — the OS write-wall is
   blind to a repo mutation that stays inside the allowed workdir (history
   rewrite, branch switch, stash create/drop, untracked removal). Read-only
-  forms (`git stash list`/`show`) are unaffected and still auto-allow.
+  forms (`git stash list`/`show`) are unaffected and still auto-allow. The
+  check is applied to **every constituent of a compound command**, not just the
+  whole line: `cd repo && git stash` asks, because
+  `IsHarmfulBashCommand`/`isHarmfulForceCommand` only recognize a command whose
+  first word is `git` (the sandbox gate parses first; see `Decide` in
+  `internal/agent/permissions.go`).
+- explicit user bash deny rules (`permissions.bash.prefixes`, written by
+  `/ban add` or the permission dialog) → Deny (hard, never re-considered by the
+  auto-judge), enforced in sandbox too. A `git stash` ban targets the mutating
+  family (push/pop/apply/drop/clear, bare stash); the read-only inspection
+  forms (`list`/`show`) keep auto-allowing (`matchBashPrefixRule`).
+- the Ask → auto-judge hand-off (`IsHarmfulRequest` in `agent.go`) is per
+  constituent as well: any harmful fragment sends the whole line to a human,
+  never to the Jev judge.
+- wrappers are peeled before those checks (`effectiveCommandWords`,
+  `permissions_wrappers.go`): launcher prefixes (`env`, `command`, `nohup`,
+  `exec`, `time`, `nice`, `timeout`, `xargs`, `stdbuf`, `sudo`, `doas`, …),
+  path-qualified binaries (`/usr/bin/git`), and shell re-exec / `eval` bodies
+  (`bash -c 'git stash'`) are judged as the command they really run — for
+  both the harmful gate and `/ban` prefix denies. A command whose binary is a
+  shell expansion (`$g stash`, `$(which git) stash`) → Ask in sandbox
+  (`sandbox.opaque_command`), since nothing static can resolve it.
 - writes to permission-defining files (`.ocode/settings.json`,
   `.claude/settings.json`, ocode config gating files) and loopback requests to
   `/api/permissions*` → Ask (self-escalation guard, all modes)
@@ -990,7 +1023,9 @@ Rules for any change that touches tools or the base prompt:
   — the names-index stays a function of the doc set; only which ids become
   attached changes. Not connected, a judge transport/decode error, or a missing
   candidate answer all fail open (seed everything): the judge may only veto,
-  never attach fewer docs because of a failure. See
+  never attach fewer docs because of a failure. The judge client is resolved
+  once per discovery state (`discoveryState.judge`, `sync.Once`) so the
+  factory's no-key refusal log fires once, not every turn. See
   `internal/agent/discovery_typesafe.go` and
   `docs/concepts/discovery-typesafe-judge.md`.
 - **Role determines caching, not array position — because of the hoist.** The

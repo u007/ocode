@@ -1519,13 +1519,59 @@ func ExtraAllowedRoots() []string {
 // Paths are symlink-normalized; unresolvable roots are skipped.
 func CacheRoots() []string {
 	var out []string
-	if root, ok := normalizeRootPath(toolResultCacheDir()); ok {
+	if root, ok := ToolResultCacheRoot(); ok {
 		out = append(out, root)
 	}
-	if repoCache, err := repoCacheDir(); err == nil {
-		if root, ok := normalizeRootPath(repoCache); ok {
-			out = append(out, root)
-		}
+	if root, ok := RepoCacheRoot(); ok {
+		out = append(out, root)
 	}
 	return out
+}
+
+// ToolResultCacheRoot returns the symlink-normalized truncated tool-results
+// cache dir. Sandboxed bash must be able to WRITE here: a nested ocode (or a
+// go test of the truncation path) run from a sandboxed shell caches oversized
+// outputs into this dir, and a read-only classification silently disables
+// truncation for it.
+func ToolResultCacheRoot() (string, bool) {
+	return normalizeLazyDir(toolResultCacheDir())
+}
+
+// normalizeLazyDir is normalizeRootPath for dirs that are created lazily on
+// first use (the managed caches). normalizeRootPath gives up when neither the
+// path nor its parent exists yet, which would leave a fresh state dir out of
+// the sandbox root set until the first write — and under sandbox that first
+// write is exactly what gets denied. Walk up to the nearest existing ancestor,
+// resolve its symlinks, and re-append the missing tail.
+func normalizeLazyDir(p string) (string, bool) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", false
+	}
+	abs = filepath.Clean(abs)
+	var tail []string
+	cur := abs
+	for {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			parts := append([]string{resolved}, tail...)
+			return filepath.Clean(filepath.Join(parts...)), true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", false
+		}
+		tail = append([]string{filepath.Base(cur)}, tail...)
+		cur = parent
+	}
+}
+
+// RepoCacheRoot returns the symlink-normalized cloned-repo cache dir, or
+// false when it cannot be resolved.
+func RepoCacheRoot() (string, bool) {
+	repoCache, err := repoCacheDir()
+	if err != nil {
+		return "", false
+	}
+	return normalizeLazyDir(repoCache)
 }

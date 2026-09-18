@@ -57,6 +57,7 @@ func dialTerminalWithQuery(t *testing.T, wsURL, terminalID, extraQuery string) (
 
 func TestTerminalWSHistoryCursorReplaysOnlyPostSnapshotBytes(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
+	requirePTY(t)
 	h, _, wsURL := terminalTestHandler(t)
 
 	conn, resumed := dialTerminal(t, wsURL, "term-history-cursor")
@@ -180,6 +181,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // output produced before (and during) the disconnect.
 func TestTerminalWSReattachKeepsShell(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
+	requirePTY(t)
 	h, _, wsURL := terminalTestHandler(t)
 
 	conn, resumed := dialTerminal(t, wsURL, "term-reattach")
@@ -224,6 +226,7 @@ func TestTerminalWSReattachKeepsShell(t *testing.T) {
 // A terminal_id already owned by another project must not be hijacked.
 func TestTerminalWSReattachRejectsProjectMismatch(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
+	requirePTY(t)
 	h, _, wsURL := terminalTestHandler(t)
 	dialTerminal(t, wsURL, "term-mismatch")
 	// Point the live session at a different root, then try to reattach from
@@ -243,6 +246,7 @@ func TestTerminalWSReattachRejectsProjectMismatch(t *testing.T) {
 // elapses, so closed browser tabs in web mode never leak shells forever.
 func TestTerminalDetachTTLKillsShell(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
+	requirePTY(t)
 	h, _, wsURL := terminalTestHandler(t)
 	h.terminalSessions.detachTTL = 200 * time.Millisecond
 
@@ -260,6 +264,7 @@ func TestTerminalDetachTTLKillsShell(t *testing.T) {
 // killed on disconnect exactly as before.
 func TestTerminalWSNoIDKillsOnClose(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
+	requirePTY(t)
 	h, _, wsURL := terminalTestHandler(t)
 
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
@@ -281,6 +286,7 @@ func TestTerminalWSNoIDKillsOnClose(t *testing.T) {
 // away and closes the attached socket.
 func TestTerminalKillEndpoint(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
+	requirePTY(t)
 	h, srv, wsURL := terminalTestHandler(t)
 
 	conn, _ := dialTerminal(t, wsURL, "term-kill")
@@ -332,6 +338,7 @@ func TestTerminalWSConcurrentSameIDSpawnsOnce(t *testing.T) {
 	recorder := makeShellRecorder(t)
 	t.Setenv("SHELL", recorder.script)
 	t.Setenv("RECORDER_LOG", recorder.log)
+	requirePTY(t)
 	h, _, wsURL := terminalTestHandler(t)
 
 	const id = "term-race"

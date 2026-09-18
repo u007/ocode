@@ -1,16 +1,10 @@
 ---
 type: Concept
 title: Sandbox Permission Mode
-description: 'Concept doc for sandbox permission mode: four modes, persistence (Decision 2 superseded), destructive git Ask routing, sensitive-path carve-outs, security model, and platform support'
-tags:
-  - sandbox
-  - permissions
-  - security
-  - concept
-timestamp: 2026-09-16T17:01:30Z
+description: 'Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references'
+tags: []
+timestamp: 2026-09-18T05:05:30Z
 ---
-# Sandbox Permission Mode
-
 ## Decision
 
 The `sandbox` permission mode is the fourth mode alongside `normal`, `yolo`, and `locked`. It runs bash commands without prompts but confines OS-level filesystem writes to classified allowed roots (write-integrity only). It now **persists as a durable default** like any other mode, and **destructive git commands route to Ask** before the sandbox auto-allow.
@@ -56,14 +50,31 @@ Rationale: the OS write-wall confines file writes to classified roots but is bli
 
 Read-only forms (`git stash list`/`show`) are excluded via `isReadOnlyGitStashForm` (`permissions.go:577`) and still auto-allow.
 
-## Sensitive-path carve-outs (unchanged)
+## Sensitive-path carve-outs
 
-Sandbox mode does **not** bypass the existing sensitive-path Ask guards:
+Sandbox mode does **not** bypass the existing sensitive-path Ask guards, but it now distinguishes **read vs write** to avoid false-positive Asks on normal repo inspection.
 
-- `auth.json` (read or write) → Ask
-- ocode config dir writes → Ask
-- `~/.ssh`, `.env` (read or write) → Ask
-- Self-escalation guard (writes to permission-defining files) → Ask
+### Predicate split
+
+`isSensitivePath` (`permissions.go:2790`) is the OR of two named predicates:
+
+- **`isSecretMaterialPath()`** (line 2799) — credential-bearing material: `.env` + `.env.*` variants (safe templates excluded), `.netrc`/`.npmrc`/`.pypirc`, SSH private-key filenames (`id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa`), certificate/key suffixes (`.pem`/`.key`/`.p12`/`.pfx`/`.secrets`), and `.aws/`. **Ask on read OR write** — a read can exfiltrate a credential.
+
+- **`isRepoMetadataPath()`** (line 2852) — `.git/` and `.github/workflows/`. **Ask on WRITE only** — a planted `.git/hooks/*` or workflow executes arbitrary code and stays inside the workdir where the OS write-wall is blind. Reading/listing them (`ls .git/`, `cat .git/config`) auto-allows, matching normal mode.
+
+### Per-target write classification
+
+`sandboxSensitiveTargets` (`permissions.go:2919`) returns a per-target write map (`map[target]bool`) instead of a single command-wide bool. It is **fail-closed**: a target counts as written unless the fragment is provably read-only over its path args (`commandReadsPathsOnly`), or is copy-like (`cp`/`install`/`ln` destination only; `mv` marks every positional, since it deletes its sources). Unrecognized commands (`truncate`, `chmod`, `dd`, custom scripts) mark their path args as writes; parse failure marks every target as a write.
+
+### Carve-out rules
+
+`sandboxSensitivePath` (`permissions.go:3074`) classifies a resolved path against the sandbox sensitive set:
+
+- **auth.json / auth.profiles.json** (read or write) → Ask
+- **ocode config dir** (write only) → Ask — guards self-escalation via config rewrite
+- **~/.ssh** (read or write) → Ask
+- **Secret material** (`isSecretMaterialPath`) → Ask (read or write)
+- **Repo metadata** (`isRepoMetadataPath`) → Ask on write only; read/list auto-allows
 
 These route through the auto-permission judge when `auto` is on, else a human prompt.
 
@@ -92,3 +103,8 @@ Fail-closed on macOS/Linux: if mode is `sandbox` and a backend is supported but 
 - `isHarmfulForceCommand`: `internal/agent/permissions.go:721`
 - `IsHarmfulBashCommand`: `internal/agent/permissions.go:1175`
 - `isReadOnlyGitStashForm`: `internal/agent/permissions.go:577`
+- `isSensitivePath`: `internal/agent/permissions.go:2790`
+- `isSecretMaterialPath`: `internal/agent/permissions.go:2799`
+- `isRepoMetadataPath`: `internal/agent/permissions.go:2852`
+- `sandboxSensitiveTargets`: `internal/agent/permissions.go:2919`
+- `sandboxSensitivePath`: `internal/agent/permissions.go:3074`

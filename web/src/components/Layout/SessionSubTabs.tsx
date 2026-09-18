@@ -38,7 +38,9 @@ export default function SessionSubTabs() {
   const contextCurrent = chatSlice.tuiStatus?.context_current_tokens ?? 0;
   const contextMax = chatSlice.tuiStatus?.context_max_tokens ?? 0;
   const contextPct =
-    contextMax > 0 ? Math.min(100, Math.round((contextCurrent / contextMax) * 100)) : null;
+    contextMax > 0 && contextCurrent > 0
+      ? Math.min(100, Math.round((contextCurrent / contextMax) * 100))
+      : null;
 
   function formatTokenCount(n: number): string {
     if (n <= 0) return "0";

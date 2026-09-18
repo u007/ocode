@@ -754,54 +754,68 @@ export default function CoworkSidebar({
           {expandedSections.context && (
             <div className="px-4 pb-3">
               {contextMax > 0 ? (
-                <>
-                  <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
-                    <span>Used</span>
-                    <span className="font-mono text-muted-foreground">
-                      {formatTokenCount(contextCurrent)} / {formatTokenCount(contextMax)}
-                    </span>
-                  </div>
-                  <div className="h-2 w-full rounded bg-muted overflow-hidden">
-                    <div
-                      className={`h-full transition-all ${
-                        contextPct > 85
-                          ? "bg-red-500"
-                          : contextPct > 65
-                            ? "bg-yellow-500"
-                            : "bg-emerald-500"
-                      }`}
-                      style={{ width: `${contextPct}%` }}
-                    />
-                  </div>
-                  <div className="text-right text-[11px] text-muted-foreground mt-1">
-                    {contextPct}%
+                contextCurrent > 0 ? (
+                  <>
+                    <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+                      <span>Used</span>
+                      <span className="font-mono text-muted-foreground">
+                        {formatTokenCount(contextCurrent)} / {formatTokenCount(contextMax)}
+                      </span>
+                    </div>
+                    <div className="h-2 w-full rounded bg-muted overflow-hidden">
+                      <div
+                        className={`h-full transition-all ${
+                          contextPct > 85
+                            ? "bg-red-500"
+                            : contextPct > 65
+                              ? "bg-yellow-500"
+                              : "bg-emerald-500"
+                        }`}
+                        style={{ width: `${contextPct}%` }}
+                      />
+                    </div>
+                    <div className="text-right text-[11px] text-muted-foreground mt-1">
+                      {contextPct}%
+                      {contextModel && (
+                        <span className="ml-2 text-foreground font-mono">
+                          {contextModel}
+                        </span>
+                      )}
+                    </div>
+                    {(inputTokens > 0 || outputTokens > 0 || cachedTokens > 0 || totalTokens > 0) && (
+                      <div className="mt-2 space-y-0.5 text-[11px] text-muted-foreground">
+                        <div className="flex justify-between">
+                          <span>Input</span>
+                          <span className="font-mono">{formatTokenCount(inputTokens)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>Cached</span>
+                          <span className="font-mono">{formatTokenCount(cachedTokens)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>Output</span>
+                          <span className="font-mono">{formatTokenCount(outputTokens)}</span>
+                        </div>
+                        <div className="flex justify-between border-t border-border pt-0.5 mt-0.5 font-medium text-foreground">
+                          <span>Total</span>
+                          <span className="font-mono">{formatTokenCount(totalTokens > 0 ? totalTokens : inputTokens + outputTokens)}</span>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  // No provider-reported usage yet (e.g. a restored session
+                  // before its first turn). Never render a fabricated 0% bar —
+                  // say unknown instead.
+                  <div className="text-xs text-muted-foreground">
+                    Usage unknown — no provider reading yet
                     {contextModel && (
                       <span className="ml-2 text-foreground font-mono">
                         {contextModel}
                       </span>
                     )}
                   </div>
-                  {(inputTokens > 0 || outputTokens > 0 || cachedTokens > 0 || totalTokens > 0) && (
-                    <div className="mt-2 space-y-0.5 text-[11px] text-muted-foreground">
-                      <div className="flex justify-between">
-                        <span>Input</span>
-                        <span className="font-mono">{formatTokenCount(inputTokens)}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>Cached</span>
-                        <span className="font-mono">{formatTokenCount(cachedTokens)}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>Output</span>
-                        <span className="font-mono">{formatTokenCount(outputTokens)}</span>
-                      </div>
-                      <div className="flex justify-between border-t border-border pt-0.5 mt-0.5 font-medium text-foreground">
-                        <span>Total</span>
-                        <span className="font-mono">{formatTokenCount(totalTokens > 0 ? totalTokens : inputTokens + outputTokens)}</span>
-                      </div>
-                    </div>
-                  )}
-                </>
+                )
               ) : (
                 <div className="text-xs text-muted-foreground">
                   No context data yet

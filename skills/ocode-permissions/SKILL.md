@@ -30,7 +30,7 @@ Four session-level modes, stored in `ocodeconfig.json` → `permissions.mode`:
 | `normal` (default) | Follow tool and bash-prefix rules. Read/edit tools allowed; delete, bash, webfetch, websearch, task ask by default. |
 | `yolo` | Allow all permission-gated tools without prompting. Still respects hard safety blocks and agent-mode restrictions. |
 | `locked` | Read/search tools only. All write/edit/bash/network tools denied. |
-| `sandbox` | Bash runs without prompts, but the OS confines **writes** to the classified allowed roots (workspace/extra paths, opencode data dir, language caches, `~/.claude`, temp dirs). Write-integrity only — reads, exec, and network egress stay open. Secrets (`auth.json`, `~/.ssh`, `.env`) and ocode-config writes still **ask** (routed to the auto-judge when `auto` is on). Fail-closed: with no OS backend (Windows) it degrades to normal prompting. |
+| `sandbox` | Bash runs without prompts, but the OS confines **writes** to the classified allowed roots (workspace/extra paths, opencode data dir, language caches, `~/.claude`, temp dirs). Write-integrity only — reads, exec, and network egress stay open. Secrets (`auth.json`, `~/.ssh`, `.env`, keys/certs) and ocode-config writes still **ask** (routed to the auto-judge when `auto` is on). Repo-metadata dirs (`.git/`, `.github/workflows/`) ask on **write only** — listing/reading them (`ls .git/`, `cat .git/config`) auto-allows, matching normal mode. Fail-closed: with no OS backend (Windows) it degrades to normal prompting. |
 
 Toggle via `Ctrl+O` / `/yolo [on|off|status]` (yolo), `/sandbox [on|off|status]` (sandbox), the TUI permission-mode cycle, or the web mode selector. All four persist to `ocodeconfig.json` — `SavePermissionModeSwitch()` writes the mode verbatim, sandbox included (there is no longer a sandbox→normal clamp on the persist path).
 
@@ -96,6 +96,8 @@ Bash commands go through a multi-layer evaluation pipeline in `Decide()`:
 
 **Sandbox extension (HEAD `760b2037`):** in sandbox mode `Decide()` also returns `ask` for the force-flagged git push/pull forms (`isHarmfulForceCommand()`) and for any `IsHarmfulBashCommand()` match. The OS write-wall confines *file* writes but is blind to a repo mutation that stays inside the workdir (history rewrite, branch switch, stash create/drop, untracked removal), so those do not ride the sandbox auto-allow. Read-only `git stash list`/`show` are excluded from the harmful set and still auto-allow. Normal mode is unchanged; YOLO remains the promptless escape hatch.
 
+**Sandbox sensitive split (read vs write):** the sandbox sensitive gate distinguishes *secret material* from *repo metadata*. `.env`/keys/certs/`.aws/` and `~/.ssh`/`auth.json` ask on read or write; `.git/` and `.github/workflows/` ask only on write (a planted hook/workflow is the threat), so `ls .git/`, `cat .git/config`, and `ls .github/workflows/` auto-allow like any in-workdir read. The per-target write map from `sandboxSensitiveTargets` is fail-closed — an unrecognized command (e.g. `truncate`, `chmod`, a custom script) marks its path args as writes, and a parse failure marks every target as a write. `git ls-files` and `git status` were already in `bashSubcommandAllow` and are unaffected.
+
 ### 5b. YOLO mode shortcut
 
 If mode is `yolo` and the command is not hard-blocked → auto-allow.
@@ -145,12 +147,23 @@ Any absolute path outside the working directory → `ask` (unless the tool has a
 
 ### 6b. Sensitive paths
 
-`isSensitivePath()` (`permissions.go:2677`) flags these for `ask`:
-- Exact filenames: `.env`, `.netrc`, `.npmrc`, `.pypirc`
-- `.env.*` variants
-- SSH keys: `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`
-- Cert/key suffixes: `.pem`, `.key`, `.p12`, `.pfx`, `.secrets`
-- Sensitive directories: `.git/`, `.github/workflows/`, `.aws/`
+`isSensitivePath()` (`permissions.go:2789`) flags these for `ask`, and is the
+OR of two narrower predicates used to split read from write in sandbox:
+- **`isSecretMaterialPath()`** — secret on READ or write:
+  - Exact filenames: `.env`, `.netrc`, `.npmrc`, `.pypirc`
+  - `.env.*` variants (`.env.example`/`.sample`/`.template`/`.dist` excluded)
+  - SSH keys: `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`
+  - Cert/key suffixes: `.pem`, `.key`, `.p12`, `.pfx`, `.secrets`
+  - Sensitive directory: `.aws/`
+- **`isRepoMetadataPath()`** — write-only in sandbox, allow on read:
+  - Sensitive directories: `.git/`, `.github/workflows/`
+
+`sandboxSensitivePath()` reuses these: secret material is Ask for reads and
+writes, repo metadata is Ask only when the command writes/deletes the target
+(`sandboxSensitiveTargets` returns a per-target write map). `git ls-files`
+already auto-allows via `bashSubcommandAllow`; repo-metadata **reads**
+(`ls .git/`, `cat .git/config`) now auto-allow too, instead of asking because
+`isSensitivePath` was blanket-reused for the `.env` case alone.
 
 ### 6c. Path-glob patterns
 

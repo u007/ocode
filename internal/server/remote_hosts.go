@@ -360,12 +360,15 @@ func (reg *remoteHostRegistry) snapshotForRestart(host string) (remote.Transport
 // carries the stage that failed.
 func (reg *remoteHostRegistry) restart(host, path string, port int) (remoteHostStatus, error) {
 	transport, pid, savedPaths := reg.snapshotForRestart(host)
-	// Drop first so a failure at any later stage leaves no half-live entry.
-	reg.drop(host)
+	// Kill over the still-live transport, then drop unconditionally so a
+	// failure at any stage leaves no half-live entry.
+	var killErr error
 	if transport != nil && pid > 0 {
-		if err := remote.KillServer(transport, pid); err != nil {
-			return reg.status(host), &remoteHostStageError{Stage: "remote-kill", Err: err}
-		}
+		killErr = remote.KillServer(transport, pid)
+	}
+	reg.drop(host)
+	if killErr != nil {
+		return reg.status(host), &remoteHostStageError{Stage: "remote-kill", Err: killErr}
 	}
 	ws, err := reg.workspaceForPort(host, path, port)
 	if err != nil {

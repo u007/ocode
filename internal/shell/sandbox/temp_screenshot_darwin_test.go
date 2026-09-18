@@ -17,8 +17,8 @@ import (
 // /private/var/... canonical path — and a write to an existing dir outside
 // the granted roots still fails at the OS level.
 func TestSeatbeltTempScreenshotWriteEndToEnd(t *testing.T) {
-	if newWrapper().Available() == false {
-		t.Skip("sandbox-exec unavailable")
+	if !seatbeltAvailable() {
+		t.Skip("sandbox-exec unavailable (missing or nested sandbox_apply denied)")
 	}
 	tmp := os.TempDir()
 	canonical, err := filepath.EvalSymlinks(filepath.Clean(tmp))

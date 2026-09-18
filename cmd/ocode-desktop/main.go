@@ -28,6 +28,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/bundled"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/desktop"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/remote"
@@ -381,6 +382,36 @@ func main() {
 	window.OnWindowEvent(events.Common.WindowClosing, func(*application.WindowEvent) {
 		showQuittingIndicator(window)
 		app.Quit()
+	})
+
+	// After a rebuild, macOS invalidates the TCC grants the app previously held
+	// (they are keyed to the code signature), so the file tree, terminal, and
+	// computer-use tool silently lose access. Once the UI is up, re-request
+	// every grant the user enabled — the startup reconcile. It runs off the UI
+	// thread because each request can block on an OS consent dialog.
+	var sysPermReconcileOnce sync.Once
+	window.OnWindowEvent(events.Common.WindowRuntimeReady, func(*application.WindowEvent) {
+		sysPermReconcileOnce.Do(func() {
+			crashguard.Go(func() {
+				results := handle.Srv.ReconcileSystemPermissions(context.Background())
+				if len(results) == 0 {
+					return
+				}
+				log.Printf("ocode-desktop: re-requested %d enabled OS permission(s) after startup", len(results))
+				for _, res := range results {
+					log.Printf("ocode-desktop: permission %s: %s (%s)", res.ID, res.Status, res.Message)
+				}
+				if notifier != nil {
+					if err := notifier.SendNotification(notifications.NotificationOptions{
+						ID:    "system-permissions-reconcile",
+						Title: "ocode re-requested OS permissions",
+						Body:  fmt.Sprintf("%d permission(s) need approval after this build", len(results)),
+					}); err != nil {
+						log.Printf("ocode-desktop: send system-permissions notification: %v", err)
+					}
+				}
+			})
+		})
 	})
 
 	// System tray for show/hide and quit.

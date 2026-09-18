@@ -4,7 +4,7 @@ import { dispatchCommand } from "./commands";
 type SessionContext = {
   session_id: string;
   message_count: number;
-  estimated_tokens: number;
+  current_tokens: number;
   max_tokens?: number;
   model?: string;
   /** The shared /context breakdown (internal/contextbudget). Present only when a
@@ -40,7 +40,7 @@ function context(opts: {
     vi.fn(async (id: string) => ({
       session_id: id,
       message_count: 0,
-      estimated_tokens: 0,
+      current_tokens: 0,
     }));
   return {
     ctx: {
@@ -74,7 +74,7 @@ describe("/context command", () => {
     const getSessionContext = vi.fn(async (id: string) => ({
       session_id: id,
       message_count: 7,
-      estimated_tokens: 12345,
+      current_tokens: 12345,
       max_tokens: 200000,
       model: "opencode-go/deepseek-v4.1-flash",
     }));
@@ -87,26 +87,51 @@ describe("/context command", () => {
     expect(getSessionContext).toHaveBeenCalledWith("ses_2026-01-02-030405-abcd", undefined);
     expect(content).toContain("## Context Budget");
     expect(content).toContain("opencode-go/deepseek-v4.1-flash");
-    expect(content).toContain("~12,345");
+    expect(content).toContain("12,345");
     expect(content).toContain("(6% used)");
+    // The backend value is reported as-is, never decorated as an estimate.
+    expect(content).not.toContain("~12,345");
+    expect(content).not.toContain("Estimated");
   });
 
   it("passes the session's host so a remote project's budget comes from that host", async () => {
     const getSessionContext = vi.fn(async (id: string) => ({
       session_id: id,
       message_count: 1,
-      estimated_tokens: 10,
+      current_tokens: 10,
     }));
     const { ctx } = context({ sessionId: "ses_remote", host: "devbox", getSessionContext });
     await dispatchCommand("/context", ctx);
     expect(getSessionContext).toHaveBeenCalledWith("ses_remote", "devbox");
   });
 
+  it("shows unknown instead of estimating when the backend has no provider usage", async () => {
+    const getSessionContext = vi.fn(async (id: string) => ({
+      session_id: id,
+      message_count: 42,
+      current_tokens: 0,
+      max_tokens: 200000,
+      model: "openai/gpt-4o",
+    }));
+    const { ctx } = context({
+      sessionId: "ses_2026-01-02-030405-abcd",
+      getSessionContext,
+    });
+    const result = await dispatchCommand("/context", ctx);
+    const content = result.messages?.[0]?.content ?? "";
+    expect(content).toContain("## Context Budget");
+    expect(content).toContain("- **Messages:** 42");
+    expect(content).toContain("unknown (no provider usage recorded");
+    // No fabricated percentage or estimate from the message transcript.
+    expect(content).not.toContain("% used");
+    expect(content).not.toContain("Estimated");
+  });
+
   it("renders the shared breakdown report when the server returns one", async () => {
     const getSessionContext = vi.fn(async (id: string) => ({
       session_id: id,
       message_count: 3,
-      estimated_tokens: 1000,
+      current_tokens: 1000,
       max_tokens: 200000,
       model: "openai/gpt-4o",
       report: {
@@ -160,6 +185,7 @@ describe("/context command", () => {
     expect(content).toContain("  - $0.0100");
     expect(content).toContain("no live agent");
     // The report path must not fall back to the four-field summary.
+    expect(content).not.toContain("- **Current tokens:**");
     expect(content).not.toContain("- **Estimated tokens:**");
   });
 

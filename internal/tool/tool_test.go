@@ -858,3 +858,35 @@ func TestResolveSearchRootAllowsGitIgnoreFiles(t *testing.T) {
 		t.Errorf("resolveSearchRoot(%q) must fail: git-ignore scope is the exact file", filepath.Dir(target))
 	}
 }
+
+// TestNormalizeLazyDirResolvesMissingCacheDir: cache dirs are created on first
+// write, so their sandbox root must resolve before they exist. Contract: ACTUAL
+// PATH (asserts the resolver output, symlinks resolved through the existing
+// ancestor), HARMLESS (everything lives under t.TempDir), CROSS-PLATFORM (no
+// OS-specific separators or build tags).
+func TestNormalizeLazyDirResolvesMissingCacheDir(t *testing.T) {
+	base := t.TempDir()
+	resolvedBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(base, "opencode", "tool-results")
+	got, ok := normalizeLazyDir(missing)
+	if !ok {
+		t.Fatalf("normalizeLazyDir(%q) unresolvable", missing)
+	}
+	if want := filepath.Join(resolvedBase, "opencode", "tool-results"); got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("resolver must not create the dir, stat err=%v", err)
+	}
+	// Existing dir resolves identically to normalizeRootPath.
+	if err := os.MkdirAll(missing, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	strict, ok := normalizeRootPath(missing)
+	if !ok || strict != got {
+		t.Fatalf("existing dir: normalizeRootPath=%q ok=%v, normalizeLazyDir=%q", strict, ok, got)
+	}
+}

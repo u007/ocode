@@ -37,6 +37,7 @@ import (
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/secretfile"
 	"github.com/u007/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/sysperm"
 	"github.com/u007/ocode/internal/tool"
 	"github.com/u007/ocode/internal/tts"
 	"github.com/u007/ocode/internal/version"
@@ -198,7 +199,7 @@ func isLoopbackBind(addr string) bool {
 
 func (s *Server) registerRoutes() {
 	// Unauthenticated only in --remote mode: lets a --remote server's reuse
-	// check (internal/remote's ServerAlive) probe liveness, via a curl
+	// check (internal/remote's serverHealthy) probe liveness, via a curl
 	// command executed directly on the remote host, before any tunnel or
 	// token has been established — that probe can't send an Authorization
 	// header (see healthProbeCmd's doc). Every other server requires the
@@ -405,6 +406,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/config/computer-use", s.authMiddleware(s.handleGetComputerUseConfig))
 	s.mux.HandleFunc("PUT /api/config/computer-use", s.authMiddleware(s.handleSetComputerUseConfig))
 	s.mux.HandleFunc("POST /api/config/computer-use/permissions", s.authMiddleware(s.handleRequestComputerUsePermissions))
+	s.mux.HandleFunc("GET /api/config/system-permissions", s.authMiddleware(s.handleGetSystemPermissions))
+	s.mux.HandleFunc("PUT /api/config/system-permissions", s.authMiddleware(s.handleSetSystemPermission))
+	s.mux.HandleFunc("DELETE /api/config/system-permissions", s.authMiddleware(s.handleDeleteSystemPermission))
+	s.mux.HandleFunc("POST /api/config/system-permissions/request", s.authMiddleware(s.handleRequestSystemPermissions))
 	s.mux.HandleFunc("GET /api/ocr/models", s.authMiddleware(s.handleGetOcrModels))
 	// Mask (secret redaction) config
 	s.mux.HandleFunc("GET /api/config/mask", s.authMiddleware(s.handleGetMaskConfig))
@@ -683,7 +688,7 @@ func (s *Server) mediaAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // healthMiddleware gates /api/health: unauthenticated only when the server
-// is running in --remote mode, since ServerAlive's exec-based probe
+// is running in --remote mode, since serverHealthy's exec-based probe
 // (internal/remote/serve.go's healthProbeCmd) runs as a plain curl command
 // on the remote host itself and deliberately never carries a token. Every
 // other server (including one with no username/password configured, same
@@ -2149,6 +2154,28 @@ func (s *Server) handleSetComputerUseConfig(w http.ResponseWriter, r *http.Reque
 }
 func (s *Server) handleRequestComputerUsePermissions(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleRequestComputerUsePermissions(w, r)
+}
+func (s *Server) handleGetSystemPermissions(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetSystemPermissions(w, r)
+}
+func (s *Server) handleSetSystemPermission(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetSystemPermission(w, r)
+}
+func (s *Server) handleDeleteSystemPermission(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleDeleteSystemPermission(w, r)
+}
+func (s *Server) handleRequestSystemPermissions(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleRequestSystemPermissions(w, r)
+}
+
+// ReconcileSystemPermissions re-requests the OS grants the user already enabled
+// but that are no longer present (the desktop startup path after a rebuild
+// invalidated macOS TCC grants).
+func (s *Server) ReconcileSystemPermissions(ctx context.Context) []sysperm.RequestResult {
+	if s.handler == nil {
+		return nil
+	}
+	return s.handler.ReconcileSystemPermissions(ctx)
 }
 func (s *Server) handleGetOcrModels(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetOcrModels(w, r)

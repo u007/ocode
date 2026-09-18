@@ -4,6 +4,7 @@ import CommitMsgForm from "./CommitMsgForm";
 import CompactForm from "./CompactForm";
 import AdvisorForm from "./AdvisorForm";
 import PermissionsForm from "./PermissionsForm";
+import SystemPermissionsForm from "./SystemPermissionsForm";
 import SecurityForm from "./SecurityForm";
 import TerminalForm from "./TerminalForm";
 import LogsForm from "./LogsForm";
@@ -37,6 +38,7 @@ export type SettingsGroupId =
   | "compact"
   | "advisor"
   | "permissions"
+  | "system-permissions"
   | "security"
   | "terminal"
   | "logs"
@@ -71,6 +73,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "compact", label: "Compact" },
   { id: "advisor", label: "Advisor" },
   { id: "permissions", label: "Permissions" },
+  { id: "system-permissions", label: "System Permissions" },
   { id: "security", label: "Security & Redaction" },
   { id: "terminal", label: "Terminal" },
   { id: "logs", label: "Logs" },
@@ -118,6 +121,8 @@ function renderGroup(id: SettingsGroupId) {
       return <AdvisorForm />;
     case "permissions":
       return <PermissionsForm />;
+    case "system-permissions":
+      return <SystemPermissionsForm />;
     case "security":
       return <SecurityForm />;
     case "terminal":

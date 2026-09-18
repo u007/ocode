@@ -17,6 +17,7 @@ import (
 	"github.com/u007/ocode/internal/hook"
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/sysperm"
 	"github.com/u007/ocode/internal/wallpaper"
 )
 
@@ -593,11 +594,16 @@ type OcodeConfig struct {
 	FakeAgent string `json:"fake_agent,omitempty"`
 	// Ocr holds the OCR tool configuration (backend, model, endpoint).
 	// Backend accepts openai-compat, paddle, and the lmstudio alias.
-	Ocr        ocr.OcrConfig           `json:"ocr"`
-	ImageGen   ImageGenConfig          `json:"imagegen"`
-	ComputerUse ComputerUseConfig       `json:"computer_use"`
-	Profiles   map[string]ProfileDelta `json:"profiles,omitempty"`
-	Extra    map[string]json.RawMessage
+	Ocr         ocr.OcrConfig     `json:"ocr"`
+	ImageGen    ImageGenConfig    `json:"imagegen"`
+	ComputerUse ComputerUseConfig `json:"computer_use"`
+	// SystemPermissions is the persisted on/off intent for the settings UI's
+	// System Permissions section (macOS TCC grants + custom paths). Live grant
+	// status is never stored here; internal/sysperm recomputes it and the
+	// desktop shell reconciles it at startup.
+	SystemPermissions sysperm.Config          `json:"system_permissions"`
+	Profiles          map[string]ProfileDelta `json:"profiles,omitempty"`
+	Extra             map[string]json.RawMessage
 }
 
 const (
@@ -837,6 +843,7 @@ type ocodeConfigFile struct {
 	Ocr                     *ocr.OcrConfig              `json:"ocr,omitempty"`
 	ImageGen                *ImageGenConfig             `json:"imagegen,omitempty"`
 	ComputerUse             *ComputerUseConfig          `json:"computer_use,omitempty"`
+	SystemPermissions       *sysperm.Config             `json:"system_permissions,omitempty"`
 	Profiles                map[string]ProfileDelta     `json:"profiles,omitempty"`
 	// Legacy fields (read from old configs for migration)
 	OcrModel   string `json:"ocr_model,omitempty"`
@@ -903,6 +910,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Extra:                   make(map[string]json.RawMessage),
 		ImageGen:                DefaultImageGenConfig(),
 		ComputerUse:             DefaultComputerUseConfig(),
+		SystemPermissions:       sysperm.DefaultConfig(),
 	}
 }
 
@@ -1489,6 +1497,19 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "computer_use")
 	}
 
+	if rawSP, ok := raw["system_permissions"]; ok && rawSP != nil {
+		var spCfg sysperm.Config
+		if err := json.Unmarshal(rawSP, &spCfg); err != nil {
+			log.Printf("config: invalid system_permissions in %s, keeping defaults: %v", path, err)
+		} else {
+			if spCfg.Entries == nil {
+				spCfg.Entries = map[string]sysperm.EntryConfig{}
+			}
+			cfg.SystemPermissions = spCfg
+		}
+		delete(raw, "system_permissions")
+	}
+
 	if _, ok := raw["profiles"]; ok {
 		if len(file.Profiles) > 0 {
 			if cfg.Profiles == nil {
@@ -2013,6 +2034,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	payload["ocr"] = cfg.Ocr
 	payload["imagegen"] = cfg.ImageGen
 	payload["computer_use"] = cfg.ComputerUse
+	payload["system_permissions"] = cfg.SystemPermissions
 	if cfg.TUI.Theme != "" || cfg.TUI.Mouse != nil || cfg.TUI.Scroll != 0 || cfg.TUI.LeaderTimeout != 0 || len(cfg.TUI.Keybinds) > 0 {
 		payload["tui"] = cfg.TUI
 	}
@@ -2020,7 +2042,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		// Canonical keys are set either by the Extra loop (preserving raw
 		// on-disk values that failed normalization) or overridden afterward
 		// by the canonical setters below when a valid normalized value exists.
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" {
 			continue
 		}
 		payload[k] = v

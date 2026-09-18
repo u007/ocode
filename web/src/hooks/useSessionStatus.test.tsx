@@ -83,8 +83,9 @@ describe("useSessionStatus", () => {
   // ── Context-field contract ────────────────────────────────────────────
   // TUIStatus uses `json:"context_current_tokens,omitempty"` etc., so 0 is
   // *omitted* (absent) on the wire, never `null` and never `0` (omitempty
-  // drops 0). `/api/sessions/{id}/context` instead always writes numeric
-  // zeros: `estimated_tokens: totalChars/4` (0 for empty transcript).
+  // drops 0). A session with no provider-reported usage yet (and no live
+  // agent) therefore carries no context_current_tokens at all — there is no
+  // char-count estimate fallback.
   it("propagates context_current_tokens / context_max_tokens when present", async () => {
     mockGetSessionStatus.mockResolvedValue({
       session_id: "s1",
@@ -98,9 +99,9 @@ describe("useSessionStatus", () => {
   });
 
   it("handles empty-message transcript (0 tokens omitted, not null)", async () => {
-    // Empty session: HandleSessionContext returns estimated_tokens: 0, max_tokens: window;
-    // HandleSessionStatus omits context_current_tokens/context_max_tokens when 0
-    // (omitempty) — never `null`.
+    // No live agent / no provider usage: HandleSessionStatus omits
+    // context_current_tokens (omitempty) — never `null`, never a fabricated
+    // estimate; context_max_tokens/model still resolve from the model window.
     mockGetSessionStatus.mockResolvedValue({
       session_id: "empty",
       context_max_tokens: 1048576,

@@ -30,12 +30,8 @@ okf_version: 0.1
 
 - [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) - TypeSafe relevance judge that vets discovery candidates per-turn, only when connected
 - [Remote Persistent Sessions and Terminals](concepts/remote-persistent-sessions-terminals.md) - Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, sidebar UI, and wake reconnect.
-- [Sandbox Permission Mode](concepts/sandbox-permission-mode.md) - Concept doc for sandbox permission mode: four modes, persistence (Decision 2 superseded), destructive git Ask routing, sensitive-path carve-outs, security model, and platform support
+- [Sandbox Permission Mode](concepts/sandbox-permission-mode.md) - Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references
 - [Server-Side Auto-Continue Loop](concepts/server-auto-continue.md) - Server-side auto-continue loop pattern: bounded chain with step-limit cutoff, judge dispatch, and visible end-of-turn status.
-
-# docs
-
-- [System Permissions Settings Section (macOS TCC + cross-platform)](docs/superpowers/specs/2026-09-18-system-permissions-design.md) - Design spec for System Permissions settings section covering macOS TCC grants with cross-platform support, detection/request, API, startup reconcile, and web UI.
 
 # gotchas
 
@@ -198,6 +194,7 @@ okf_version: 0.1
 - [Multi-Use Preview — Design Spec (Draft, 2026-09-10)](superpowers/specs/2026-09-10-preview-multipurpose-design.md) - Historical Draft (2026-09-10) design for sidebar PreviewHost + a full session Preview sub-tab. Updated 2026-09-17 with as-built note in §2: Files-tab .md behavior now Edit/Preview/Split mode switch in FileTabContent (superseding the spec's "Monaco by default" statement for that path); sidebar PreviewHost path unchanged. Known divergences §9 re-listed.
 - [Remote Persistent Sessions and Terminals Design](superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md) - Approved design: remote (SSH/WSL) project terminals run inside the host ocode serve --remote and survive laptop sleep/restart; version-mismatched remote servers are reused, surfaced, and restartable; sidebar lists remote chats and terminals for reattach.
 - [Remote-project port forwards in the web/desktop UI](superpowers/specs/2026-09-16-remote-project-port-forwards-design.md) - Design for restoring the Port forwards button so it works for the active remote SSH project (project-scoped /api/portmaps routes, per-project ssh -L forwards)
+- [System Permissions Settings Section (macOS TCC + cross-platform)](superpowers/specs/2026-09-18-system-permissions-design.md) - Design spec for System Permissions settings section covering macOS TCC grants with cross-platform support, detection/request, API, startup reconcile, and web UI.
 - [TTS Speech Playback Design Specification](superpowers/specs/2026-09-09-tts-speech-playback-design.md) - User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source).
 - [TUI Sidebar Title Expand/Collapse Design](superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md) - Design for sidebar title expand/collapse behavior, updated to match user decision: transient expansion, reset on session changes, no session JSON persistence.
 - [Web Compact Feedback Design](superpowers/specs/2026-09-18-web-compact-feedback-design.md) - Approved design for web/desktop /compact feedback beside composer: queued/running/complete/error states, queue semantics, test plan. Implementation complete.

@@ -39,7 +39,7 @@ Add visible feedback for the `/compact` slash command in the web/desktop UI. Pre
 | `web/src/lib/compactionState.ts` | Session-keyed `useSyncExternalStore` state (active/complete/error) — in-memory, survives SET_MESSAGES/remount, does not survive page reload |
 | `web/src/components/Chat/CompactionStatus.tsx` | Composer-area spinner, elapsed time, status text, and dismiss control for terminal state |
 | `web/src/components/Chat/ChatInput.tsx` | Renders `CompactionStatus` above input; derives queued state from `tabQueue`; blocks/serializes follow-on work during active compaction |
-| `web/src/lib/commands.ts` | `handleCompact` updates state and preserves host API routing |
+| `web/src/components/Chat/commands.ts` | `handleCompact` updates state and preserves host API routing |
 | `web/src/components/Chat/ChatPanel.tsx` | Old compact banner removed |
 
 ### Design
@@ -53,7 +53,7 @@ Status bar renders **above the composer input**, outside the transcript scroll a
 |-------|--------|
 | **Queued** | Status text (e.g. "Queued for compaction…") — shown when `/compact` is entered while a turn is active |
 | **Running** | Spinner + elapsed time counter (e.g. "Compacting… 12s"). Never times out — spinner persists until completion or error |
-| **Complete** | Before/after message counts displayed (e.g. "Compacted: 42 messages → 8 messages"). Auto-clears after a few seconds |
+| **Complete** | Before/after message counts displayed (e.g. "Compacted: 42 messages → 8 messages"). Persistent until dismissed, like Error — it does not auto-clear |
 | **Error** | Persistent error message with dismiss control. Does NOT auto-clear — user must dismiss explicitly |
 
 #### Queue Semantics
@@ -107,7 +107,7 @@ Covered by `web/src/components/Chat/ChatInput.compaction.test.tsx`:
 | Error state | Error persists until explicit dismiss |
 | Queue removal | Queued status clears when item removed |
 | Recall (new `/compact`) | Previous queued status clears |
-| Mount/unmount | State cleaned up on unmount |
+| Mount/unmount | State survives remount (module-level store); only a page reload clears it |
 | Message replacement (SET_MESSAGES) | State survives transcript replacement |
 
 **Verification:** Full suite (141 files / 1211 tests) + typecheck + build passed at time of implementation.

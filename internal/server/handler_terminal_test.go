@@ -12,9 +12,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 	"github.com/u007/ocode/internal/projects"
 )
+
+// requirePTY skips a test when the host cannot allocate a pseudo-terminal. The
+// terminal bridge is entirely pty-backed, so a host that denies /dev/ptmx
+// (notably a process already confined by ocode's own sandbox) turns every dial
+// into an opaque handshake failure instead of an intentional skip.
+func requirePTY(t *testing.T) {
+	t.Helper()
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("pty unavailable on this host: %v", err)
+	}
+	_ = ptmx.Close()
+	_ = tty.Close()
+}
 
 // terminalTestServer returns an httptest server serving only the terminal ws
 // endpoint, plus its ws:// URL. The direct handler is explicitly configured as
@@ -95,6 +110,7 @@ func TestTerminalWSRejectsUnregisteredProjectPath(t *testing.T) {
 // directory instead of the server workdir.
 func TestTerminalWSSpawnsShellInRequestedProject(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
+	requirePTY(t)
 	otherRoot := t.TempDir()
 
 	h := NewHandler()
@@ -150,6 +166,7 @@ func TestTerminalWSSpawnsShellInRequestedProject(t *testing.T) {
 
 func TestTerminalWSReadLimit(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
+	requirePTY(t)
 	_, wsURL := terminalTestServer(t)
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
@@ -195,9 +212,29 @@ func TestTerminalWSRejectsCrossOrigin(t *testing.T) {
 	}
 }
 
+// A cross-origin upgrade must be refused before any pty is spawned. The
+// upgrader's own CheckOrigin would refuse it too, but only after the shell had
+// already leaked; driving the handler with a plain (non-upgrade) request pins
+// the earlier gate without needing a working pty.
+func TestTerminalWSCrossOriginRefusedBeforeSpawn(t *testing.T) {
+	h := NewHandler()
+	h.workDir = t.TempDir()
+	h.SetTerminalAccessPolicy(false, true)
+
+	r := httptest.NewRequest(http.MethodGet, "/api/terminal/ws", nil)
+	r.Header.Set("Origin", "http://evil.example.com")
+	w := httptest.NewRecorder()
+	h.HandleTerminalWS(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d (cross-origin must be refused before spawn)", w.Code, http.StatusForbidden)
+	}
+}
+
 // A same-origin Origin header (what the SPA actually sends) is accepted.
 func TestTerminalWSAcceptsSameOrigin(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
+	requirePTY(t)
 	srv, wsURL := terminalTestServer(t)
 
 	hdr := http.Header{}
@@ -214,6 +251,7 @@ func TestTerminalWSAcceptsSameOrigin(t *testing.T) {
 
 func TestTerminalWSEchoesShellOutput(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
+	requirePTY(t)
 	_, wsURL := terminalTestServer(t)
 
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
@@ -258,6 +296,7 @@ func TestTerminalWSEchoesShellOutput(t *testing.T) {
 // promptly rather than leaving the read loop blocked forever.
 func TestTerminalWSClientCloseDoesNotHang(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
+	requirePTY(t)
 	srv, wsURL := terminalTestServer(t)
 
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
@@ -321,6 +360,7 @@ func TestTerminalWSSpawnsSSHShellForRemoteProject(t *testing.T) {
 	if _, err := exec.LookPath("ssh"); err != nil {
 		t.Skip("ssh not installed")
 	}
+	requirePTY(t)
 	h := NewHandler()
 	h.workDir = t.TempDir()
 	h.SetTerminalAccessPolicy(false, true)

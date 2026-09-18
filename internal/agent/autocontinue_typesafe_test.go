@@ -200,8 +200,8 @@ func TestAutoContinueJudgeAsyncTypesafeDetail(t *testing.T) {
 	}
 }
 
-func TestAutoContinueJudgeAsyncChatJudgeDetail(t *testing.T) {
-	// The chat judge path must still work and carry a Detail naming the model.
+func TestAutoContinueJudgeAsyncContinuousJudgeDetail(t *testing.T) {
+	// The continuous judge (chat/prose path) must still work and carry a Detail naming the model.
 	cfg := &config.Config{}
 	cfg.Ocode.AutoContinueModel = "opencode-go/mimo-v2.5"
 	a := NewAgent(nil, nil, cfg, nil)
@@ -219,13 +219,13 @@ func TestAutoContinueJudgeAsyncChatJudgeDetail(t *testing.T) {
 	if r.Err != nil || !r.Resume {
 		t.Fatalf("expected async resume, got %+v", r)
 	}
-	if !contains(r.Detail, "chat judge") {
-		t.Fatalf("Detail should name the chat judge: %q", r.Detail)
+	if !contains(r.Detail, "continuous judge") {
+		t.Fatalf("Detail should name the continuous judge: %q", r.Detail)
 	}
 }
 
-func TestAutoContinueJudgeAsyncChatJudgeDetailOnError(t *testing.T) {
-	// A failed chat-judge call must carry the error in Detail: the TUI renders
+func TestAutoContinueJudgeAsyncContinuousJudgeDetailOnError(t *testing.T) {
+	// A failed continuous-judge call must carry the error in Detail: the TUI renders
 	// only Detail on a non-resume verdict, so without it a judge failure looks
 	// like a silent finish (the defect this feature exists to remove).
 	cfg := &config.Config{}

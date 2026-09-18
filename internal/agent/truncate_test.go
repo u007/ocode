@@ -4,12 +4,105 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
+// Test contract for the tool-results cache (keep when editing these tests):
+//
+//  1. ACTUAL PATH — tests assert the real on-disk location the code resolves
+//     and writes to (<cache dir>/<toolUseID>.txt), not a mocked writer.
+//  2. HARMLESS — no test may read from or write into the user's real state
+//     dir (~/.local/state/opencode or %LOCALAPPDATA%\opencode). Every test
+//     that touches the cache calls isolateToolResultCache first.
+//  3. CROSS-PLATFORM — isolation goes through XDG_STATE_HOME, which
+//     toolResultCacheDir honors before any OS-specific branch; OS-specific
+//     branches are covered by skip-guarded subtests rather than build tags.
+//
+// isolateToolResultCache points the tool-results cache at a per-test temp dir
+// and returns the resolved cache dir.
+func isolateToolResultCache(t *testing.T) string {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir, err := toolResultCacheDir()
+	if err != nil {
+		t.Fatalf("toolResultCacheDir: %v", err)
+	}
+	return dir
+}
+
+func TestToolResultCacheDirResolution(t *testing.T) {
+	t.Run("xdg override wins everywhere", func(t *testing.T) {
+		base := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", base)
+		t.Setenv("LOCALAPPDATA", filepath.Join(base, "should-not-win"))
+		got, err := toolResultCacheDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := filepath.Join(base, "opencode", "tool-results"); got != want {
+			t.Fatalf("got %q want %q", got, want)
+		}
+	})
+	t.Run("windows falls back to LOCALAPPDATA", func(t *testing.T) {
+		if runtime.GOOS != "windows" {
+			t.Skip("windows-only branch")
+		}
+		base := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", "")
+		t.Setenv("LOCALAPPDATA", base)
+		got, err := toolResultCacheDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := filepath.Join(base, "opencode", "tool-results"); got != want {
+			t.Fatalf("got %q want %q", got, want)
+		}
+	})
+	t.Run("unix defaults to ~/.local/state", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("unix-only branch")
+		}
+		home := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", "")
+		t.Setenv("HOME", home)
+		got, err := toolResultCacheDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := filepath.Join(home, ".local", "state", "opencode", "tool-results"); got != want {
+			t.Fatalf("got %q want %q", got, want)
+		}
+	})
+}
+
+// TestTruncateToolResultWritesActualPath verifies the full result lands at
+// <cache dir>/<toolUseID>.txt — the path the truncation notice tells the model
+// to read back — with the untruncated content.
+func TestTruncateToolResultWritesActualPath(t *testing.T) {
+	dir := isolateToolResultCache(t)
+	input := strings.Repeat("row\n", maxToolResultLines+5)
+	got := TruncateToolResult("call_actual_path", input)
+
+	want := filepath.Join(dir, "call_actual_path.txt")
+	data, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatalf("expected full result at %q: %v", want, err)
+	}
+	if string(data) != input {
+		t.Fatalf("cached file content mismatch (%d bytes vs %d)", len(data), len(input))
+	}
+	// The notice embeds the path with %q, so compare against the quoted form
+	// (matters on Windows where backslashes are escaped).
+	if !strings.Contains(got, fmt.Sprintf("%q", want)) {
+		t.Fatalf("truncation notice must reference %q, got tail: %q", want, got[len(got)-300:])
+	}
+}
+
 func TestTruncateToolResultByLines(t *testing.T) {
+	isolateToolResultCache(t)
 	input := strings.Repeat("line\n", maxToolResultLines+20)
 	got := TruncateToolResult("tool-lines", input)
 
@@ -25,6 +118,7 @@ func TestTruncateToolResultByLines(t *testing.T) {
 }
 
 func TestTruncateToolResultByChars(t *testing.T) {
+	isolateToolResultCache(t)
 	input := strings.Repeat("x", maxToolResultChars+500)
 	got := TruncateToolResult("tool-chars", input)
 
@@ -40,19 +134,16 @@ func TestTruncateToolResultByChars(t *testing.T) {
 }
 
 func TestCleanupToolResults(t *testing.T) {
-	// We can't override toolResultCacheDir, so write files into the real
-	// cache dir and clean them up after.
+	cacheDir := isolateToolResultCache(t)
 	if err := CleanupToolResults(time.Hour); err != nil {
-		t.Fatalf("CleanupToolResults on empty/missing dir: %v", err)
+		t.Fatalf("CleanupToolResults on missing dir: %v", err)
 	}
 
-	// Write a fake tool-result file into the real cache dir so we can
+	// Write a fake tool-result file into the isolated cache dir so we can
 	// exercise the age check. We backdate its mtime to 3 days ago.
-	cacheDir, err := toolResultCacheDir()
-	if err != nil {
-		t.Skipf("cannot determine cache dir: %v", err)
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	_ = os.MkdirAll(cacheDir, 0o755)
 
 	stale := filepath.Join(cacheDir, "call_cleanup_test_stale.txt")
 	fresh := filepath.Join(cacheDir, "call_cleanup_test_fresh.txt")
@@ -68,9 +159,6 @@ func TestCleanupToolResults(t *testing.T) {
 	if err := os.Chtimes(stale, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(stale)
-	defer os.Remove(fresh)
-
 	if err := CleanupToolResults(48 * time.Hour); err != nil {
 		t.Fatalf("CleanupToolResults: %v", err)
 	}
@@ -87,6 +175,7 @@ func TestCleanupToolResults(t *testing.T) {
 // the char cap trips inside line 3 of a 200-line output, the model must be told
 // to continue at line 3 (and the byte offset of the cut), not at line 101.
 func TestTruncateToolResultCharCapHintsActualCutLine(t *testing.T) {
+	isolateToolResultCache(t)
 	long := strings.Repeat("y", maxToolResultChars*2)
 	input := "a\nb\n" + long + "\n" + strings.Repeat("c\n", 197)
 	got := TruncateToolResult("tool-cutline", input)

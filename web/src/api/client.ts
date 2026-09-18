@@ -499,7 +499,10 @@ async function remoteLifecycleRequest<T>(path: string, method: "GET" | "POST"): 
   const res = await fetch(apiPath(path), { method, headers: authHeaders() });
   if (!res.ok) {
     reportAuthFailure(res.status);
-    const body = (await res.json().catch(() => ({}))) as { error?: string; stage?: string };
+    const body = (await res.json().catch((err: unknown) => {
+      console.error(`remote lifecycle: non-JSON error body from ${path} (status ${res.status}):`, err);
+      return {};
+    })) as { error?: string; stage?: string };
     const message = body.error || res.statusText || `HTTP ${res.status}`;
     throw new Error(body.stage ? `${message} (stage: ${body.stage})` : message);
   }
@@ -1083,7 +1086,9 @@ export const api = {
     fetchJSON<{
       session_id: string;
       message_count: number;
-      estimated_tokens: number;
+      /** Provider-reported context occupancy from the backend (0 = none
+       *  recorded yet). Never a client-side estimate. */
+      current_tokens: number;
       max_tokens?: number;
       model?: string;
       /** Full token-budget breakdown shared with the TUI's local /context.
@@ -1149,7 +1154,7 @@ export const api = {
       undefined,
       host,
       projectPath,
-    ).then((r) => r.terminals ?? []),
+    ).then((r) => r.terminals),
   getSmallModelWithEnabled: () =>
     fetchJSON<{ model: string; enabled: boolean; priority: string }>(
       "/api/config/small-model",
@@ -1180,6 +1185,34 @@ export const api = {
     fetchJSON<import("../api/types").ComputerUsePermissionReport>(
       "/api/config/computer-use/permissions",
       { method: "POST" },
+    ),
+
+  // ── System Permissions (OS permission manager) ──
+  getSystemPermissions: () =>
+    fetchJSON<import("../api/types").SystemPermissionsResponse>(
+      "/api/config/system-permissions",
+    ),
+  // Toggle one entry, or add a custom path (send {path, label?}).
+  setSystemPermission: (payload: {
+    id?: string;
+    enabled?: boolean;
+    path?: string;
+    label?: string;
+  }) =>
+    fetchJSON<import("../api/types").SystemPermissionsResponse>(
+      "/api/config/system-permissions",
+      { method: "PUT", body: JSON.stringify(payload) },
+    ),
+  deleteSystemPermission: (id: string) =>
+    fetchJSON<import("../api/types").SystemPermissionsResponse>(
+      `/api/config/system-permissions?id=${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+  // With no id, reconciles every enabled-but-not-granted entry.
+  requestSystemPermissions: (id?: string) =>
+    fetchJSON<import("../api/types").SystemPermissionsResponse>(
+      "/api/config/system-permissions/request",
+      { method: "POST", body: JSON.stringify(id ? { id } : {}) },
     ),
 
   // ── OCR (legacy API, deprecated) ──

@@ -31,7 +31,18 @@ const (
 // the factory must yield a *TypesafeClient with a non-empty API key. A nil
 // config, a non-typesafe factory result, or a keyless client all mean "no
 // judge", and the caller keeps today's attach-everything behavior.
+//
+// The factory result is cached per discoveryState (see discoveryState.judge);
+// with no discovery state the lookup is uncached.
 func (a *Agent) discoveryJudgeClient() *TypesafeClient {
+	if a.disco == nil {
+		return a.resolveDiscoveryJudgeClient()
+	}
+	a.disco.judgeOnce.Do(func() { a.disco.judge = a.resolveDiscoveryJudgeClient() })
+	return a.disco.judge
+}
+
+func (a *Agent) resolveDiscoveryJudgeClient() *TypesafeClient {
 	if a.config == nil {
 		return nil
 	}

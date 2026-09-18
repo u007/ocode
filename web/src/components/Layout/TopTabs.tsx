@@ -27,7 +27,7 @@ const mainTabs = [
 export default function TopTabs({ activeTab, onTabSelect }: Props) {
   const { state: projectState } = useProjectState();
   const activeProjectPath = projectState.activeProject?.path ?? "";
-  const activeProjectHost = projectState.activeProject?.host ?? "";
+  const activeProjectHost = projectState.activeProject?.host;
   const sessionsCount = activeProjectPath ? (projectState.tabsByProject[activeProjectPath]?.length ?? 0) : 0;
   const [terminalCount, setTerminalCount] = useState(() => {
     try {
@@ -84,7 +84,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
     let cancelled = false;
     const fetchCounts = async () => {
       try {
-        const status = await api.getGitStatus(activeProjectPath, activeProjectHost || undefined);
+        const status = await api.getGitStatus(activeProjectPath, activeProjectHost);
         if (cancelled) return;
         setGitStaged(status.staged_files?.length ?? 0);
         setGitUnstaged(status.changed_files?.length ?? 0);

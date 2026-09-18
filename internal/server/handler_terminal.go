@@ -146,6 +146,16 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "terminal requires server authentication or a loopback bind address")
 		return
 	}
+	// Reject a cross-origin upgrade before any pty work. The upgrader's
+	// CheckOrigin would refuse this too, but only at Upgrade time — after the
+	// shell is spawned (and, for a reattach, after the id is reserved), leaking
+	// a live process for a request the browser will never use. Doing the same
+	// check here keeps cross-site WebSocket hijacking out of the spawn path and
+	// returns a real 403 instead of an opaque handshake failure.
+	if !terminalSameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin terminal upgrade refused")
+		return
+	}
 	// Fast-path refusal once shutdown has begun. This is best-effort only:
 	// a request that passes this check can still race the seal below; the
 	// table-level seal (reserve/put refusal + shutdown's two-phase snapshot)

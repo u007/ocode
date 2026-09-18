@@ -554,6 +554,14 @@ type Agent struct {
 	// turn apart from one truncated mid-task. atomic because Step() runs on
 	// the streaming goroutine while the TUI reads it from Update()'s goroutine.
 	stepLimitHit atomic.Bool
+	// lastInputTokens is the provider-reported input (prompt) token count of the
+	// most recent completed LLM call — an approximation of current context-window
+	// occupancy. It is set from resp.Usage in Step (covering every provider, not
+	// just the streaming-usage ones) and exposed via LastInputTokens so transports
+	// (the web/desktop server's Context gauge) report real backend usage instead
+	// of estimating token counts from message text. atomic because the server
+	// reads it from an HTTP/SSE goroutine while the turn goroutine writes it.
+	lastInputTokens atomic.Int64
 	// compactMu serialises async compaction passes so a slow summary call
 	// can't fire OnCompact twice for overlapping snapshots.
 	compactMu sync.Mutex
@@ -1397,6 +1405,12 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			}
 			a.emitDebug("LLM", fmt.Sprintf("← tokens in=%d out=%d", in, out))
 			a.warnIfNearWindow(in)
+			// Record the provider-reported input tokens as the current context
+			// occupancy. Only overwrite on a positive value: a provider that
+			// omits/zeroes prompt_tokens must not erase the last real reading.
+			if in > 0 {
+				a.lastInputTokens.Store(in)
+			}
 		}
 
 		newMsgs = append(newMsgs, *resp)
@@ -2319,13 +2333,18 @@ func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64) bool {
 			resume, detail, err = a.runAutoContinueJudgeTypesafe(client.(*TypesafeClient), snapshot, nil)
 		} else {
 			resume, err = a.runAutoContinueJudge(client, snapshot)
-			detail = "chat judge " + client.GetProvider() + "/" + client.GetModel()
-			// Mirror AutoContinueJudgeSync: a failed judge call must say so in
-			// Detail, or the TUI (which renders only Detail on a non-resume
-			// verdict) shows the judge name with no hint the call failed — the
-			// silent-finish symptom this feature exists to remove.
+			detail = "continuous judge " + client.GetProvider() + "/" + client.GetModel()
+			// Mirror AutoContinueJudgeSync's Detail exactly, including the
+			// verdict suffix: the TUI renders only Detail on a non-resume
+			// verdict, so a bare judge name left the user unable to tell
+			// "finished" from "failed" — the silent-finish symptom this
+			// feature exists to remove.
 			if err != nil {
 				detail += ": " + err.Error()
+			} else if resume {
+				detail += ": looks cut off — resuming"
+			} else {
+				detail += ": reply finished"
 			}
 		}
 		if a.OnAutoContinueJudge != nil {
@@ -2527,6 +2546,11 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 	// Subdirectory docs surfaced during the compacted span were volatile
 	// (never persisted) and are gone with the splice; let them re-surface.
 	a.resetDirMDSeen()
+	// The context occupancy is now unknown until the next provider call: the
+	// last reading describes a transcript shape that no longer exists. Clear it
+	// so the web/desktop Context gauge reports "unknown" instead of a stale
+	// pre-compaction number; the next Step records the fresh value.
+	a.lastInputTokens.Store(0)
 	res.ReplaceFrom = replaceFrom
 	res.ReplaceTo = tailStart
 	res.Summary = summaryMsg
@@ -2663,6 +2687,18 @@ func (a *Agent) CharsPerToken() float64 {
 		model = a.client.GetModel()
 	}
 	return charsPerTokenFor(provider, model)
+}
+
+// LastInputTokens returns the provider-reported input (prompt) token count of
+// the most recent completed LLM call, or 0 when no call has reported usage yet
+// (e.g. a freshly restored session before its first turn). Callers use it as
+// the authoritative context-window occupancy instead of estimating from
+// message text. Safe for concurrent use.
+func (a *Agent) LastInputTokens() int64 {
+	if a == nil {
+		return 0
+	}
+	return a.lastInputTokens.Load()
 }
 
 func (a *Agent) SetMode(m Mode) {

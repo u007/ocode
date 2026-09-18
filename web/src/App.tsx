@@ -1069,7 +1069,6 @@ function HomeApp() {
                                   active={pp === activeProjectPath && terminalFocused}
                                   projectPath={pp}
                                   host={metadata.host}
-                                  remotePort={metadata.remotePort}
                                 />
                               ) : (
                                 <div

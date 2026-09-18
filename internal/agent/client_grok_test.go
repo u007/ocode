@@ -38,6 +38,15 @@ func TestNewClientGrokAPIKey(t *testing.T) {
 func TestNewClientGrokSubscription(t *testing.T) {
 	// Register a grok subscription credential (SSO token + x.com cookies) and
 	// confirm NewClient routes to the grok.com backend with UseOAuth set.
+	//
+	// auth.Set persists to <GlobalDataDir>/auth.json. Redirect that root into a
+	// temp dir so the test never touches (or needs write access to) the real
+	// user store — under ocode's own sandbox that write is denied, and even
+	// unsandboxed it would mutate the developer's credentials.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
 	cred := auth.Credential{
 		Kind:            auth.KindOAuth,
 		AccessToken:     "sso-token",

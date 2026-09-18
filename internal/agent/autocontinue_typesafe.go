@@ -133,6 +133,12 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client *TypesafeClient, messages []
 // on a clean stop). The tail mirrors runAutoContinueJudge's budget — the last 6
 // non-empty messages, each trimmed, so one huge tool result cannot blow up the
 // request.
+//
+// In production stepErr is always nil and StepLimitHit is always false: both
+// dispatchers short-circuit the hard signals before calling (runTurn returns on
+// a Step error; the TUI and server resume deterministically on StepLimitHit).
+// The error/step-limit branches are the fallback for a direct caller, keeping
+// the rubric honest if one is ever handed a cut-off or failed turn.
 func (a *Agent) buildTypesafeAutoContinueState(messages []Message, stepErr error) map[string]any {
 	const tailN = 6
 	tail := messages
@@ -153,10 +159,11 @@ func (a *Agent) buildTypesafeAutoContinueState(messages []Message, stepErr error
 	state := map[string]any{
 		"transcript_tail": entries,
 	}
-	// How the turn ended, so Jev does not have to infer it. This is what makes
-	// the rubric's step-limit/error rows meaningful: computing it from a
-	// hard-coded nil error made it a constant, so a cut-off or failed turn was
-	// described to Jev as a natural finish.
+	// How the turn ended, so Jev does not have to infer it. Production callers
+	// reach here only for a naturally-ended turn (they short-circuit the hard
+	// step-limit signal and never pass a Step error), so in practice this is
+	// "finished within the step budget"; the other two cases keep a direct
+	// caller from describing a cut-off or failed turn as a natural finish.
 	switch {
 	case stepErr != nil:
 		state["turn_ended"] = "the turn failed with an error: " + stepErr.Error()
@@ -174,10 +181,14 @@ func (a *Agent) buildTypesafeAutoContinueState(messages []Message, stepErr error
 // AutoContinueJudgeSync is the server-turn variant of AutoContinueJudgeAsync:
 // headless turns run inside a synchronous HTTP goroutine with no event loop
 // to receive OnAutoContinueJudge, so the triage runs inline and returns the
-// verdict directly. stepErr is the error that ended the turn (nil on a clean
-// stop), threaded into the typesafe state so `turn_ended` describes the real
-// end reason. Same fail-closed contract: no judge configured →
+// verdict directly. Same fail-closed contract: no judge configured →
 // (false, "", nil); any judge error → (false, detail, err).
+//
+// stepErr lets a direct caller describe a failed turn to the typesafe judge.
+// Production dispatchers pass nil — runTurn returns on a Step error before
+// reaching auto-continue, and the step-limit case is resumed deterministically
+// before the judge is consulted — so the parameter is a safety net, not a
+// signal the current hosts send.
 func (a *Agent) AutoContinueJudgeSync(messages []Message, stepErr error) (bool, string, error) {
 	client, isTypesafe := a.autoContinueJudgeClientTyped()
 	if client == nil {
@@ -187,7 +198,7 @@ func (a *Agent) AutoContinueJudgeSync(messages []Message, stepErr error) (bool, 
 		return a.runAutoContinueJudgeTypesafe(client.(*TypesafeClient), messages, stepErr)
 	}
 	resume, err := a.runAutoContinueJudge(client, messages)
-	detail := "chat judge " + client.GetProvider() + "/" + client.GetModel()
+	detail := "continuous judge " + client.GetProvider() + "/" + client.GetModel()
 	if err != nil {
 		detail += ": " + err.Error()
 	} else if resume {

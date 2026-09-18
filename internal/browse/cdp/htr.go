@@ -47,6 +47,8 @@ import (
 	"sync"
 	"time"
 
+	gopsprocess "github.com/shirou/gopsutil/v4/process"
+
 	"github.com/u007/ocode/internal/filelock"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/tool"
@@ -527,24 +529,20 @@ func htrOwnerPath() (string, error) {
 	return filepath.Join(dir, htrOwnerFileName), nil
 }
 
-// pidAlive cross-platform: ps on unix, tasklist on windows. No new deps.
+// pidAlive reports whether pid names a running process. It uses gopsutil's
+// PidExists (signal 0 on unix, OpenProcess on Windows) instead of shelling out
+// to ps/tasklist: the browse/HTR paths run under ocode's own sandbox, where
+// spawning `ps` is denied and a live Chrome/HTR owner would be misread as dead
+// (removing a live SingletonLock, or stealing an active lease).
 func pidAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	if runtime.GOOS == "windows" {
-		// tasklist /FI "PID eq N" prints the PID row iff alive.
-		out, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH").Output()
-		if err != nil {
-			return false
-		}
-		return strings.Contains(string(out), strconv.Itoa(pid))
-	}
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	exists, err := gopsprocess.PidExists(int32(pid))
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(string(out)) != ""
+	return exists
 }
 
 func processStartToken(pid int) string {

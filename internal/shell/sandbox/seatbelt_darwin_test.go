@@ -7,13 +7,23 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
-// seatbeltAvailable is whether /usr/bin/sandbox-exec exists on this machine.
-func seatbeltAvailable() bool {
-	return fileExists("/usr/bin/sandbox-exec")
-}
+// seatbeltAvailable reports whether sandbox-exec can actually apply a profile
+// here. The binary existing is not enough: macOS refuses a nested sandbox_apply
+// (e.g. `go test` run from ocode's own sandbox mode), so the seatbelt exec
+// tests must skip rather than fail on a capability the host denies. Probed once
+// per test binary.
+var seatbeltAvailable = sync.OnceValue(func() bool {
+	if !fileExists("/usr/bin/sandbox-exec") {
+		return false
+	}
+	return exec.Command(
+		"/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true",
+	).Run() == nil
+})
 
 func fileExists(p string) bool {
 	fi, err := os.Stat(p)

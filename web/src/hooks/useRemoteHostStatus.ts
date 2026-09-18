@@ -49,6 +49,7 @@ export function useRemoteHostStatus(host: string | undefined, enabled: boolean):
           setError(null);
         })
         .catch((err) => {
+          console.error(`remote host status for ${host} failed:`, err);
           if (cancelledRef.current) return;
           setError(errorMessage(err));
         })
@@ -82,6 +83,7 @@ export function useRemoteHostStatus(host: string | undefined, enabled: boolean):
         if (!cancelledRef.current) setStatus(s);
       })
       .catch((err) => {
+        console.error(`remote host connect for ${host} failed:`, err);
         if (cancelledRef.current) return;
         const message = errorMessage(err);
         // Refresh first, then re-assert the action error: a successful refresh
@@ -105,6 +107,7 @@ export function useRemoteHostStatus(host: string | undefined, enabled: boolean):
         if (!cancelledRef.current) setStatus(s);
       })
       .catch((err) => {
+        console.error(`remote host restart for ${host} failed:`, err);
         if (cancelledRef.current) return;
         const message = errorMessage(err);
         // Refresh first, then re-assert the action error: a successful refresh

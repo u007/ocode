@@ -166,11 +166,18 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 }
 
 // applySessionContext fills snap's context-window fields (context_current_
-// tokens, context_max_tokens, context_model) for the session id from its
-// persisted transcript: current tokens are estimated from message characters
-// (chars/4), max tokens come from the model window. When the TUI bridge is
-// live and this is the bridged session, the bridge's provider-reported values
-// win over the estimate.
+// tokens, context_max_tokens, context_model) for the session id.
+//
+// context_current_tokens is ALWAYS the backend's provider-reported value, never
+// a character-count estimate over the persisted transcript:
+//   - the bridged TUI session uses the TUI's live ContextCurrentTokens, which
+//     it captured from the provider's last response;
+//   - a headless (web/desktop) session uses its live agent's LastInputTokens,
+//     captured from resp.Usage on the most recent LLM call.
+//
+// When neither is available (no live agent yet — e.g. a freshly restored
+// session before its first turn) the field stays 0 and is omitted from the wire
+// snapshot, so the gauge renders as unknown instead of a fabricated number.
 //
 // Every session-tagged status snapshot must go through this before it is
 // broadcast or returned: buildStatusSnapshot() alone omits all three fields,
@@ -178,29 +185,20 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 // the web sidebar's Context gauge drop to zero ("not reflected") until the
 // next per-session fetch.
 func (h *Handler) applySessionContext(snap *TUIStatus, id string) {
-	root := ""
-	if entry, err := h.sessions.Resolve(id); err == nil {
-		root = entry.ProjectRoot
-	}
-	var totalChars int
-	if s, err := session.LoadForDir(root, id); err == nil {
-		for _, msg := range s.Messages {
-			totalChars += len(msg.Content) + len(msg.ReasoningContent)
-			for _, tc := range msg.ToolCalls {
-				totalChars += len(tc.Function.Arguments)
-			}
-		}
-	}
-	current := totalChars / 4 // approximate token estimate from transcript chars (used only when no live TUI bridge value is present)
 	model := ""
 	maxTokens := 0
+	var current int64
+
 	if rc := h.RCBridge(); rc != nil && id == rc.SessionID {
 		if live := rc.TUIStatus(); live.ContextModel != "" {
 			model = live.ContextModel
 			maxTokens = live.ContextMaxTokens
-			if live.ContextCurrentTokens > 0 {
-				current = live.ContextCurrentTokens
-			}
+			current = int64(live.ContextCurrentTokens)
+		}
+	}
+	if current == 0 {
+		if as := h.lookupAgentSession(id); as != nil && as.agent != nil {
+			current = as.agent.LastInputTokens()
 		}
 	}
 	if model == "" && h.cfg != nil {
@@ -209,7 +207,7 @@ func (h *Handler) applySessionContext(snap *TUIStatus, id string) {
 	if maxTokens == 0 {
 		maxTokens = int(agent.ModelWindow(model))
 	}
-	snap.ContextCurrentTokens = current
+	snap.ContextCurrentTokens = int(current)
 	snap.ContextMaxTokens = maxTokens
 	snap.ContextModel = model
 }
@@ -241,11 +239,12 @@ func (h *Handler) applyTurnTiming(snap *TUIStatus, id string) {
 }
 
 // publishTurnStatusSnapshot broadcasts a fresh session-tagged "status" event
-// whose context fields were computed from the just-persisted transcript.
-// Called right after a headless turn completes so the web/desktop sidebar's
-// Context gauge moves with every turn instead of only on tab activation or
-// reconnect. No-op when an RC bridge is attached — the TUI owns the status
-// feed for its sessions and pushes its own snapshots.
+// whose context fields were resolved from the backend's provider-reported
+// usage (the just-finished turn's agent LastInputTokens). Called right after a
+// headless turn completes so the web/desktop sidebar's Context gauge moves with
+// every turn instead of only on tab activation or reconnect. No-op when an RC
+// bridge is attached — the TUI owns the status feed for its sessions and pushes
+// its own snapshots.
 func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 	if h.RCBridge() != nil {
 		return

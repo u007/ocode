@@ -288,7 +288,9 @@ export interface CommandContext {
     getSessionContext: (id: string, host?: string) => Promise<{
       session_id: string;
       message_count: number;
-      estimated_tokens: number;
+      /** Provider-reported context occupancy from the backend (0 = none
+       *  recorded yet). */
+      current_tokens: number;
       max_tokens?: number;
       model?: string;
       /** Full breakdown shared with the TUI's local /context. */
@@ -2225,19 +2227,25 @@ function renderContextReport(report: ContextBudgetReport): string {
 
 /** The four-field summary returned when no live agent was available (the
  *  session isn't attached to a running server-side agent, or a turn is in
- *  flight). Matches the pre-parity web output. */
+ *  flight). The token count is the backend's provider-reported value; it is
+ *  never estimated from the message transcript, so an unknown count is shown
+ *  as unknown rather than a fabricated "~N". */
 function renderContextSummary(c: {
   model?: string;
   message_count: number;
-  estimated_tokens: number;
+  current_tokens: number;
   max_tokens?: number;
 }): string {
-  const pct = c.max_tokens ? Math.round((c.estimated_tokens / c.max_tokens) * 100) : null;
+  const hasTokens = c.current_tokens > 0;
+  const pct =
+    c.max_tokens && hasTokens ? Math.round((c.current_tokens / c.max_tokens) * 100) : null;
   return [
     "## Context Budget",
     `- **Model:** ${c.model || "unknown"}`,
     `- **Messages:** ${c.message_count}`,
-    `- **Estimated tokens:** ~${c.estimated_tokens.toLocaleString()}`,
+    hasTokens
+      ? `- **Current tokens:** ${c.current_tokens.toLocaleString()}`
+      : "- **Current tokens:** unknown (no provider usage recorded for this session yet)",
     `- **Max context:** ${c.max_tokens ? c.max_tokens.toLocaleString() : "unknown"}${pct !== null ? ` (${pct}% used)` : ""}`,
   ].join("\n");
 }

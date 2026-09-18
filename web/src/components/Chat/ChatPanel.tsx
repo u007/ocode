@@ -697,23 +697,27 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
         </div>
       )}
       <div className="relative flex shrink-0 items-center justify-end gap-2 border-b border-border px-3 py-1">
-        <button
-          type="button"
-          className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
-          disabled={!selectedText}
-          title="Speak selected chat text"
-          onClick={() => requestSpeech(selectedText)}
-        >
-          <Volume2 className="h-3.5 w-3.5" /> Speak selection
-        </button>
-        <button
-          type="button"
-          className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-          title="Speak visible chat text"
-          onClick={() => requestSpeech(renderedSpeechTexts(scrollRef.current))}
-        >
-          <Volume2 className="h-3.5 w-3.5" /> Speak visible
-        </button>
+        {messages.length > 0 && (
+          <>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+              disabled={!selectedText}
+              title="Speak selected chat text"
+              onClick={() => requestSpeech(selectedText)}
+            >
+              <Volume2 className="h-3.5 w-3.5" /> Speak selection
+            </button>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+              title="Speak visible chat text"
+              onClick={() => requestSpeech(renderedSpeechTexts(scrollRef.current))}
+            >
+              <Volume2 className="h-3.5 w-3.5" /> Speak visible
+            </button>
+          </>
+        )}
         {/* Anchored to the header's bottom edge (top-full) so the "scroll to
             top" affordance floats at the TOP-right of the transcript rather
             than stacked above the scroll-to-bottom button at the bottom. */}
