@@ -286,6 +286,37 @@ describe("eventBus", () => {
     expect(reconnect).toHaveBeenCalledTimes(1);
   });
 
+  it("reconnects immediately on wake after backoff has saturated", async () => {
+    eventBus.on("text", () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.length).toBe(1);
+
+    // Fail consecutive attempts (never opening a stream, so the delay keeps
+    // doubling) until the backoff saturates at RECONNECT_MAX_MS.
+    let delay = RECONNECT_BASE_MS;
+    for (let i = 0; i < 5; i++) {
+      calls[calls.length - 1].reject(new Error("drop"));
+      await vi.advanceTimersByTimeAsync(0); // schedule the retry
+      await vi.advanceTimersByTimeAsync(delay); // let it fire
+      delay = Math.min(delay * 2, RECONNECT_MAX_MS);
+    }
+    expect(delay).toBe(RECONNECT_MAX_MS);
+    expect(calls.length).toBe(6);
+
+    // One more failure leaves a retry pending at the full 30s delay.
+    calls[5].reject(new Error("drop"));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(RECONNECT_MAX_MS - 1);
+    expect(calls.length).toBe(6); // the pending timer has not fired
+
+    // A wake must not wait out the remaining backoff.
+    window.dispatchEvent(new Event("online"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.length).toBe(7);
+    calls[6].resolve(new Response(new FakeStream().body, { status: 200 }));
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
   // ── per-host streams: remote project sessions ───────────────────────────
   // The SPA routes a remote session through /api/remote/{host}/api/*; the
   // event bus is host-level, so it keeps one stream per host with an open tab

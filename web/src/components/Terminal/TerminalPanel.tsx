@@ -23,11 +23,12 @@ import "@xterm/xterm/css/xterm.css";
 import { registerFileLinkProvider } from "./terminalLinkProvider";
 import TerminalFindBar from "./TerminalFindBar";
 import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
-import { apiPath, apiWsPath, authHeaders, authToken, isRemoteSession } from "@/api/client";
+import { apiPath, apiWsPath, remoteApiBase, authHeaders, authToken, isRemoteSession } from "@/api/client";
 import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
 import { createTerminalSnapshot } from "./terminalSnapshot";
 import { registerTerminal, unregisterTerminal } from "@/lib/debug/terminalRegistry";
 import { playAlertSound } from "./terminalAlertSound";
+import { onWake } from "@/lib/wakeSignal";
 import { useTerminalState } from "../../stores/terminalStore";
 import { registerTerminalFocus, unregisterTerminalFocus } from "./terminalFocus";
 import { requestSpeech } from "../Speech/SpeechProvider";
@@ -51,12 +52,11 @@ export function buildTerminalWsConnection(opts: {
   projectPath: string | undefined;
   /** Remote project host (`[user@]host` or `wsl:<distro>`); undefined for local. */
   host?: string;
-  remotePort?: number;
   terminalId: string;
   isRemote: boolean;
   historyOffset?: number;
 }): { url: string; protocols: string[] | undefined } {
-  const { token, projectPath, host, remotePort, terminalId, isRemote, historyOffset } = opts;
+  const { token, projectPath, host, terminalId, isRemote, historyOffset } = opts;
   const params = new URLSearchParams();
   let protocols: string[] | undefined;
   if (token) {
@@ -67,20 +67,23 @@ export function buildTerminalWsConnection(opts: {
     }
   }
   // project_path pins the shell's cwd to this tab's project; the server
-  // validates it against its registered project roots. terminal_id lets the
-  // terminal-processes emitter (Processes tab) correlate a pid with this tab.
+  // validates it against its registered project roots. It is also what the
+  // local proxy uses to register the project on the host for a remote socket
+  // (a WebSocket handshake cannot set the X-Ocode-Project header).
   if (projectPath) params.set("project_path", projectPath);
-  // host marks an ocode Remote project: the server then pty-starts
-  // ssh/wsl.exe into host:project_path instead of a local shell.
-  if (host) params.set("host", host);
-  if (host && remotePort) params.set("port", String(remotePort));
   params.set("terminal_id", terminalId);
   if (historyOffset !== undefined) params.set("history_offset", String(historyOffset));
   const query = params.toString();
+  // A remote (SSH/WSL) project's shell runs inside the host's
+  // `ocode serve --remote`, reached through the local server's reverse proxy
+  // (/api/remote/{host}/api/...). No host=/port= params: the host would
+  // otherwise try to ssh from itself to itself. Local projects keep the bare
+  // path so their URLs stay byte-identical.
+  const base = host ? remoteApiBase(host) : "";
   // apiWsPath keeps the tailscale --set-path prefix and respects the
   // configured backend origin (same-origin vs hub). Handles ws/wss
   // conversion for absolute backend URLs.
-  const url = apiWsPath(`/api/terminal/ws${query ? `?${query}` : ""}`);
+  const url = apiWsPath(`${base}/api/terminal/ws${query ? `?${query}` : ""}`);
   return { url, protocols };
 }
 
@@ -452,18 +455,18 @@ export default function TerminalPanel({
   );
 
   const handleNewTerminal = useCallback(() => {
-    openTerminal(projectPath);
+    openTerminal(projectPath, host);
     setCtxMenu(null);
-  }, [openTerminal, projectPath]);
+  }, [openTerminal, projectPath, host]);
 
   const handleCloseTerminal = useCallback(() => {
     // Mark this close as intentional so the WebSocket onclose handler
     // does not attempt to reconnect — the server has been told to kill
     // the shell (DELETE /api/terminal/{id}) and the shell is gone.
     manualCloseRef.current = true;
-    closeTerminal(projectPath, id);
+    closeTerminal(projectPath, id, host);
     setCtxMenu(null);
-  }, [closeTerminal, projectPath, id]);
+  }, [closeTerminal, projectPath, host, id]);
 
   // External find trigger (e.g. from future callers dispatching
   // ocode:terminal-find). HandleFind already opens locally, but this keeps
@@ -776,7 +779,7 @@ export default function TerminalPanel({
     // while the user is already looking at this terminal.
     const onAttention = () => {
       if (!readyRef.current || activeRef.current) return;
-      markAlerted(projectPath, id);
+      markAlerted(projectPath, id, host);
       playAlertSound();
     };
     // ── Cmd/Ctrl+C copy & Cmd/Ctrl+V paste ────────────────────────────
@@ -816,7 +819,7 @@ export default function TerminalPanel({
     // parser handlers as well so titles are captured even when a terminal is
     // hidden in the background. This also covers terminals whose title is
     // restored/replayed before xterm emits its public title event.
-    const applyProgramTitle = (title: string) => setOscTitle(projectPath, id, title);
+    const applyProgramTitle = (title: string) => setOscTitle(projectPath, id, title, host);
     const titleDisp = term.onTitleChange(applyProgramTitle);
     const osc0TitleDisp = term.parser.registerOscHandler(0, (title) => {
       applyProgramTitle(title);
@@ -877,7 +880,6 @@ export default function TerminalPanel({
         token: authToken(),
         projectPath,
         host,
-        remotePort,
         terminalId: id,
         isRemote: isRemoteSession(),
         historyOffset,
@@ -1121,7 +1123,6 @@ export default function TerminalPanel({
       id,
       projectPath,
       host,
-      remotePort,
       decoder: terminalDecoder,
       signal: restoreController.signal,
       onText: (text) => {
@@ -1189,6 +1190,19 @@ export default function TerminalPanel({
       if (attachedRef.current && sock?.readyState === WebSocket.OPEN) sock.send(data);
     });
 
+    // On wake (network back / tab visible), skip the exponential backoff and
+    // reconnect now if the socket is not open. Without this, a laptop that
+    // slept mid-backoff can wait up to 30s before the first retry.
+    const offWake = onWake(() => {
+      if (sock && (sock.readyState === WebSocket.OPEN || sock.readyState === WebSocket.CONNECTING)) return;
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      reconnectAttemptRef.current = 0;
+      connectSocket();
+    });
+
     const observer = new ResizeObserver(() => fitAndResize.current());
     observer.observe(el);
 
@@ -1213,6 +1227,7 @@ export default function TerminalPanel({
       window.removeEventListener("blur", snapshot.endSelection);
       document.removeEventListener("visibilitychange", onPageHide);
       window.removeEventListener("pagehide", onPageHide);
+      offWake();
       observer.disconnect();
       dataSub.dispose();
       selectionDisp.dispose();

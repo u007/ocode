@@ -1,4 +1,5 @@
 import { apiPath, authHeaders, readSSEStream, remoteApiBase, reportAuthFailure } from "../api/client";
+import { onWake } from "./wakeSignal";
 
 /**
  * eventBus — the single frontend transport for the unified server event bus.
@@ -93,9 +94,16 @@ class EventBus {
   /** Remote hosts with at least one open tab. The local "" stream always runs. */
   private hosts: string[] = [];
   private started = false;
-  private readonly onOnline = () => {
-    // Interface change / network back: a stream opened on the old route
-    // may be silently dead; don't wait out the liveness window.
+
+  /** Unsubscribe for the shared wake trigger (online / visibilitychange). */
+  private unsubscribeWake: (() => void) | null = null;
+
+  /** Wake signal: reconnect every stream now instead of waiting out the
+   *  backoff timer. `restartConnection` clears the pending timer and resets
+   *  the per-connection delay, so a connection that had backed off to 30s
+   *  recovers within a tick of the network returning. */
+  private readonly onWakeSignal = () => {
+    if (!this.started) return;
     this.restart();
   };
 
@@ -174,7 +182,7 @@ class EventBus {
   start(): void {
     if (this.started || typeof fetch === "undefined") return;
     this.started = true;
-    window.addEventListener("online", this.onOnline);
+    this.unsubscribeWake = onWake(this.onWakeSignal);
     this.syncConnections();
     for (const conn of this.connections.values()) this.openStream(conn);
   }
@@ -183,7 +191,8 @@ class EventBus {
    *  resets every piece of state so a fresh start behaves like first boot. */
   stop(): void {
     this.started = false;
-    window.removeEventListener("online", this.onOnline);
+    this.unsubscribeWake?.();
+    this.unsubscribeWake = null;
     for (const conn of this.connections.values()) this.closeConnection(conn);
     this.connections.clear();
     this.handlers.clear();
