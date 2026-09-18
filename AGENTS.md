@@ -22,13 +22,17 @@ name). Do not duplicate content between the two — update here only.
   `POST /v1/systemone` answers typed choice/score/noul questions and never
   generates text. `NewClient` builds a `TypesafeClient` whose `Chat` fails
   with `ErrTypesafeDecisionOnly`; its only consumers are the auto-permission
-  judge (`consultPermissionModel` → `askPermissionModelTypesafe`) and the
+  judge (`consultPermissionModel` → `askPermissionModelTypesafe`), the
   auto-continue triage judge (`Ocode.AutoContinueModel = "typesafe/<model>"` →
   `runAutoContinueJudgeTypesafe` in `internal/agent/autocontinue_typesafe.go`,
   a Decide() call answering a typed continue/end choice over the transcript
-  tail). Both send the request as structured state and threshold the choice
-  `confidence` against `permissions.auto.min_confidence`. Never route it
-  through the chat, compaction, small-model, or interpreter-effects paths.
+  tail), and the discovery relevance judge (`judgeDiscoveryCandidates` in
+  `internal/agent/discovery_typesafe.go`, one noul question per
+  embedder-selected skill/doc/MCP candidate). All send the request as
+  structured state and threshold the answer against
+  `permissions.auto.min_confidence` (choice `confidence`, noul
+  yes-probability). Never route it through the chat, compaction, small-model,
+  or interpreter-effects paths.
 - Every request to an `opencode*` provider must carry `X-Opencode-Session`, an
   opaque ID stable for one conversation (Zen/Go pin the conversation to one
   upstream for prompt caching; some Go models 400 without it). All transports
@@ -146,9 +150,12 @@ the command errors before starting (no silent unsandboxed execution).
 
 ## Context Loading
 
-- `AGENTS.md`, `CLAUDE.md`, `OCODE.md`, and `.cursorrules` (plus every
+- `CLAUDE.md`, `AGENTS.md`, `OCODE.md`, and `.cursorrules` (plus every
   `.opencode/rules/*.md`) are loaded at session start by
-  `internal/agent/context.go::LoadContext`.
+  `internal/agent/context.go::LoadContext`. **`CLAUDE.md` takes
+  priority over `AGENTS.md`**: when both are present, only
+  `CLAUDE.md` is loaded; when only `AGENTS.md` is present, it is
+  loaded as a fallback.
 - **The always-on context files resolve from the session's project root**
   (`root`), not the server process cwd. A server hosts many projects and the
   desktop `.app` boots with cwd `/`, so a cwd-relative read injected the wrong
@@ -912,6 +919,18 @@ Rules for any change that touches tools or the base prompt:
 - **Tool sets that grow must be grow-only/sticky within a session** (see the
   discovery `Session`). A no-new-attachment turn then sends a byte-identical
   tools array → full cache hit; only growth turns pay a re-cache.
+- **Discovery candidates pass through the TypeSafe relevance judge before
+  attaching.** `Session.Select` ranks and returns the not-yet-attached
+  candidates *without* mutating the sticky set; `RunDiscovery` then judges them
+  when TypeSafe is connected (one `noul` question per candidate in a single
+  `Decide` call) and seeds only those whose noul meets
+  `permissions.auto.min_confidence`. It never changes `renderDiscoveryContext`
+  — the names-index stays a function of the doc set; only which ids become
+  attached changes. Not connected, a judge transport/decode error, or a missing
+  candidate answer all fail open (seed everything): the judge may only veto,
+  never attach fewer docs because of a failure. See
+  `internal/agent/discovery_typesafe.go` and
+  `docs/concepts/discovery-typesafe-judge.md`.
 - **Role determines caching, not array position — because of the hoist.** The
   Anthropic builder (`chatAnthropic` → `collectAndRemoveSystemMessages` in
   `client.go`) pulls **every `system`-role message — including tail ones — into

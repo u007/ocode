@@ -73,7 +73,7 @@ Configuration is split across two files:
 
 ### Provider API Keys
 
-Supported providers: **OpenAI**, **Anthropic**, **Google (Gemini)**, **Z.AI**, **Alibaba (Qwen)**, **GitHub Copilot**, **DeepSeek (opencode-go)**, **Minimax**, **Grok**, **Novita AI**, **Ollama Cloud**, **Cloudflare Gateway**, **TypeSafe AI** (`TYPESAFE_API_KEY`; Jev is decision-only — select `typesafe/jev-latest` with `/permissions model`, not as the chat model)
+Supported providers: **OpenAI**, **Anthropic**, **Google (Gemini)**, **Z.AI**, **Alibaba (Qwen)**, **GitHub Copilot**, **DeepSeek (opencode-go)**, **Minimax**, **Grok**, **Novita AI**, **Ollama Cloud**, **Cloudflare Gateway**, **TypeSafe AI** (`TYPESAFE_API_KEY`; Jev is decision-only — select `typesafe/jev-latest` with `/permissions model`, not as the chat model). When discovery is enabled, a connected TypeSafe provider also activates the discovery relevance judge automatically: it vetoes embedder-selected skills/docs/MCP tools Jev deems not needed for the current request (no separate flag; `/discover` status shows `judge: typesafe/jev-latest`).
 
 Configure via `apiKeys` in config or provider-specific env vars:
 - `OPENAI_API_KEY`
@@ -355,7 +355,7 @@ ocode models --provider anthropic
 | GitHub Copilot | gpt-4o, claude-3-5-sonnet (via Copilot) |
 | DeepSeek (opencode-go) | deepseek-v4-flash, deepseek-v4 |
 | Minimax | minimax-m3 |
-| TypeSafe AI | jev-latest (permission judge only) |
+| TypeSafe AI | jev-latest (permission judge, auto-continue triage, discovery relevance judge) |
 | Grok | grok-3, grok-3-mini (via grok.com subscription) |
 | Cloudflare Gateway | Various models via Cloudflare Workers AI |
 

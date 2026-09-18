@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-09-18 — Desktop: System Permissions settings section (macOS TCC + cross-platform)
+
+- Request: a settings section that detects which OS permission areas ocode is requesting, lets each be toggled on/off permanently, prompts the OS when switched on, and re-requests the enabled ones on startup — because rebuilding the desktop app resets macOS TCC grants.
+
+- **New `internal/sysperm` package (stdlib-only, cross-platform).** A catalog of OS permission areas with live detect/request. macOS (`catalog_darwin.go`): Full Disk Access, Files & Folders (Desktop / Documents / Downloads / iCloud Drive / Network / Removable volumes), Accessibility, Screen Recording, Automation. Detection reuses the proven computer-use primitives (JXA `AXIsProcessTrusted`, TCC.db readability, `screencapture` probe, System Events `osascript`) and opens the matching System Settings pane where macOS has no consent dialog. Folder grants are only probed once the user has requested them, so opening the page never raises a dialog; the UI labels the unverifiable ones honestly (`not_determined` / `unknown`). Windows and Linux return informational `not_required` entries — the section still renders.
+
+- **Persistence (`ocodeconfig.json` → `system_permissions`).** Only intent is stored (`enabled`, `requested`, plus `path`/`label` for custom paths); live status is recomputed on every read. Toggling off records deny and stops auto-requesting (no `tccutil reset` — that is blunt and system-wide). "Past accessed dirs" are surfaced automatically from saved projects and the server workdir, and users can add/remove custom paths.
+
+- **API (`internal/server/handler_sysperm.go`).** `GET`/`PUT`/`DELETE /api/config/system-permissions` plus `POST /api/config/system-permissions/request` (one id, or reconcile all enabled). `Server.ReconcileSystemPermissions` is the desktop startup entry point. The catalog and requester are overridable so tests never fire a real OS prompt.
+
+- **Desktop startup reconcile (`cmd/ocode-desktop/main.go`).** On `WindowRuntimeReady`, a crash-guarded goroutine re-requests every enabled-but-not-granted entry and sends one notification if any need approval — the actual rebuild fix. It never runs in CLI/server/headless/tests.
+
+- **Web (`web/src/components/Settings/SystemPermissionsForm.tsx`, new "System Permissions" group).** Per-entry status badge, persistent toggle, Request button, custom-path add/remove, and "Request all enabled".
+
+- Tests: `internal/sysperm/sysperm_test.go` + `catalog_darwin_test.go`, `internal/config/systempermissions_config_test.go`, `internal/server/handler_sysperm_test.go`, `web/src/components/Settings/SystemPermissionsForm.test.tsx`. Spec: `docs/superpowers/specs/2026-09-18-system-permissions-design.md`.
+
+## 2026-09-18 — Discovery: TypeSafe relevance judge gates embedder selections
+
+- Request: when discovery is enabled and the TypeSafe provider is connected, ask Jev per turn whether each embedder-selected skill, project doc, or MCP tool is actually needed, and attach only the confirmed ones.
+- **`discovery.Session.Select` (new, `internal/discovery/engine.go`).** Non-mutating sibling of `Discover`: ranks, applies the rank-relative policy, and returns the not-yet-attached candidates without touching the sticky set. `Discover` is now exactly `Select` + `Seed`.
+- **`internal/agent/discovery_typesafe.go` (new).** `judgeDiscoveryCandidates` sends the current request, a bounded transcript tail, and one `noul` question per candidate in a single `Decide` call; a candidate attaches only when its yes-probability meets `permissions.auto.min_confidence`. `discoveryJudgeClient` activates the judge only when the shared client factory yields a keyed `TypesafeClient` — no new config flag.
+- **Wiring (`internal/agent/discovery_glue.go`).** `RunDiscoveryForMessages` (used by `Step`) passes the live message list as the judge tail; `RunDiscovery` remains for callers without one. No new candidates → no judge call; not connected or any judge failure → every candidate attaches (fail-open, as before); a real veto leaves the doc unattached so it is re-judged next turn. `renderDiscoveryContext` is unchanged — only which ids become attached changes.
+- **Observability.** `/discovery` status gains a `judge: typesafe/jev-latest (vetoed N this session)` line (omitted when not connected) via `DiscoveryStatusInfo.Judge` / `JudgeVetoed`; debug lines `discovery_typesafe kept=… vetoed=… min=… model=…` plus one per candidate.
+- Tests: `internal/discovery/engine_test.go`, `internal/agent/discovery_typesafe_test.go`, `internal/agent/discovery_glue_test.go`. Concept doc `docs/concepts/discovery-typesafe-judge.md`.
+
 ## 2026-09-18 — Web/desktop: visible `/compact` feedback beside the composer
 
 - Request: `/compact` ran silently in the web/desktop UI — no indication it was in progress, that it completed, or that it failed.
