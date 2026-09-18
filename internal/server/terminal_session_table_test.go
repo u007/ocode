@@ -1,6 +1,9 @@
 package server
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestTerminalSessionTableInvalidateProject(t *testing.T) {
 	table := newTerminalSessionTable()
@@ -93,5 +96,22 @@ func TestTerminalSessionTableAbandonAfterCompleteIsNoop(t *testing.T) {
 	table.abandon("done") // must be a no-op, not a double close
 	if table.lookup("done") != sess {
 		t.Fatal("abandon after completeCreate evicted the published session")
+	}
+}
+
+// TestSetRemoteModeUsesRemoteDetachTTL pins the 24h detach TTL for a --remote
+// server: a laptop asleep overnight must not reap the host's detached shells,
+// while a normal desktop/serve process keeps the 30 min safety net.
+func TestSetRemoteModeUsesRemoteDetachTTL(t *testing.T) {
+	s := New("127.0.0.1:0", "", "tok", nil)
+	if got := s.handler.terminalSessions.detachTTL; got != terminalDetachTTL {
+		t.Fatalf("fresh handler detachTTL = %s, want %s", got, terminalDetachTTL)
+	}
+	s.SetRemoteMode(true)
+	if got := s.handler.terminalSessions.detachTTL; got != terminalDetachTTLRemote {
+		t.Fatalf("remote-mode detachTTL = %s, want %s", got, terminalDetachTTLRemote)
+	}
+	if terminalDetachTTLRemote != 24*time.Hour {
+		t.Fatalf("terminalDetachTTLRemote = %s, want 24h", terminalDetachTTLRemote)
 	}
 }

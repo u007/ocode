@@ -31,7 +31,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
   const sessionsCount = activeProjectPath ? (projectState.tabsByProject[activeProjectPath]?.length ?? 0) : 0;
   const [terminalCount, setTerminalCount] = useState(() => {
     try {
-      const saved = loadProjectTerminals(activeProjectPath);
+      const saved = loadProjectTerminals(activeProjectPath, activeProjectHost);
       return saved?.terminals.length ?? 0;
     } catch {
       return 0;
@@ -40,7 +40,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
   useEffect(() => {
     const update = () => {
       try {
-        const saved = loadProjectTerminals(activeProjectPath);
+        const saved = loadProjectTerminals(activeProjectPath, activeProjectHost);
         setTerminalCount(saved?.terminals.length ?? 0);
       } catch {
         setTerminalCount(0);
@@ -57,7 +57,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("ocode:terminals-changed", onCustom);
     };
-  }, [activeProjectPath]);
+  }, [activeProjectPath, activeProjectHost]);
   const tabsRef = useRef<HTMLDivElement | null>(null);
   const activeRef = useRef<HTMLButtonElement | null>(null);
   const [overflowing, setOverflowing] = useState(false);

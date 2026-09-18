@@ -292,13 +292,14 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     dispatch: projectDispatch,
   } = useProjectState();
   const activeProjectPath = projectState.activeProject?.path ?? "";
+  const activeProjectHost = projectState.activeProject?.host;
   useBrowserPersistence(activeProjectPath);
 
   const chatDispatch = useChatDispatch();
   const { available: terminalAvailable } = useTerminalConfig();
   const { state: terminalState, openTerminal, closeTerminal, setActiveId: setActiveTerminalId, renameTerminal, clearAlert } =
     useTerminalState();
-  const { terminals, activeId: activeTerminalId } = getProjectTerminals(terminalState, activeProjectPath);
+  const { terminals, activeId: activeTerminalId } = getProjectTerminals(terminalState, activeProjectPath, activeProjectHost);
   const {
     tabs: browserTabs,
     activeId: activeBrowserId,
@@ -334,9 +335,9 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     if (!activeTerminalId || activeTerminalId === PROCESSES_TAB_ID) return;
     const active = terminals.find((t) => t.id === activeTerminalId);
     if (!active?.alerted) return;
-    const timer = setTimeout(() => clearAlert(activeProjectPath, activeTerminalId), 3000);
+    const timer = setTimeout(() => clearAlert(activeProjectPath, activeTerminalId, activeProjectHost), 3000);
     return () => clearTimeout(timer);
-  }, [focusedKind, activeTerminalId, terminals, activeProjectPath, clearAlert]);
+  }, [focusedKind, activeTerminalId, terminals, activeProjectPath, activeProjectHost, clearAlert]);
 
   const chatIds = useMemo(() => chatTabs.map((t) => t.id), [chatTabs]);
   const terminalIds = useMemo(() => terminals.map((t) => t.id), [terminals]);
@@ -397,7 +398,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
       if (e.button !== 0) return;
       const alreadyActive = focusedKind === "terminal" && activeTerminalId === id;
       onFocusKindChange("terminal");
-      setActiveTerminalId(activeProjectPath, id);
+      setActiveTerminalId(activeProjectPath, id, activeProjectHost);
       // Single left-click on the already-active terminal should still focus
       // the shell (active effect won't re-fire). Double-click's second click
       // has detail === 2, so it won't steal focus from the rename input.
@@ -405,7 +406,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         focusTerminalById(id);
       }
     },
-    [activeProjectPath, setActiveTerminalId, onFocusKindChange, focusedKind, activeTerminalId],
+    [activeProjectPath, activeProjectHost, setActiveTerminalId, onFocusKindChange, focusedKind, activeTerminalId],
   );
 
   const handleBrowserClick = useCallback(
@@ -443,8 +444,8 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   }, [closeBrowserTab]);
 
   const doCloseTerminal = useCallback((id: string) => {
-    closeTerminal(activeProjectPath, id);
-  }, [closeTerminal, activeProjectPath]);
+    closeTerminal(activeProjectPath, id, activeProjectHost);
+  }, [closeTerminal, activeProjectPath, activeProjectHost]);
 
   const confirmPendingClose = useCallback(() => {
     if (!pendingClose) return;
@@ -535,9 +536,9 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     } else if (target.kind === "browser") {
       renameBrowserTab(target.id, title);
     } else {
-      renameTerminal(activeProjectPath, target.id, title);
+      renameTerminal(activeProjectPath, target.id, title, activeProjectHost);
     }
-  }, [editing, editValue, projectDispatch, projectState, renameTerminal, renameBrowserTab, activeProjectPath]);
+  }, [editing, editValue, projectDispatch, projectState, renameTerminal, renameBrowserTab, activeProjectPath, activeProjectHost]);
 
   const handleNewChat = useCallback(() => {
     onFocusKindChange("chat");
@@ -546,8 +547,8 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
 
   const handleNewTerminal = useCallback(() => {
     onFocusKindChange("terminal");
-    openTerminal(activeProjectPath);
-  }, [activeProjectPath, openTerminal, onFocusKindChange]);
+    openTerminal(activeProjectPath, activeProjectHost);
+  }, [activeProjectPath, activeProjectHost, openTerminal, onFocusKindChange]);
 
   const isLoadingChatTab = (tabId: string, initialized: boolean) => !tabId.startsWith("new-") && !initialized;
 
@@ -682,7 +683,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         <button
           onClick={() => {
             onFocusKindChange("terminal");
-            setActiveTerminalId(activeProjectPath, PROCESSES_TAB_ID);
+            setActiveTerminalId(activeProjectPath, PROCESSES_TAB_ID, activeProjectHost);
           }}
           className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors border ${
             focusedKind === "terminal" && activeTerminalId === PROCESSES_TAB_ID

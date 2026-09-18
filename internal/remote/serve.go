@@ -27,6 +27,11 @@ type ServeState struct {
 	Token      string    `json:"token"`
 	Version    string    `json:"version"`
 	StartedAt  time.Time `json:"startedAt"`
+	// Outdated reports that a reused server runs a different version than the
+	// connecting client. It is derived at discovery time and never persisted to
+	// the state file (json:"-"), so a state file written by an older server is
+	// unaffected by the field.
+	Outdated bool `json:"-"`
 }
 
 const remoteStateFilePath = "~/.ocode/remote/serve.json"
@@ -75,16 +80,13 @@ func healthProbeCmd(port int) string {
 	)
 }
 
-// ServerAlive decides whether a discovered ServeState describes a server
-// this client can reuse: the process must still be running, its version
-// must match the connecting client's version exactly (a stale binary is
-// never reused — same rule as the TUI's ActivateAndVerify), and it must
-// actually answer /api/health with 200 (catches "process alive but HTTP
-// stack wedged," and degrades gracefully when curl is unavailable).
-func ServerAlive(t Transport, state ServeState, localVersion string) bool {
-	if state.Version != localVersion {
-		return false
-	}
+// serverHealthy reports whether a discovered ServeState describes a server
+// this client can reuse: the process must still be running and it must answer
+// /api/health with 200. Version is deliberately not part of this decision —
+// a version-mismatched but healthy server is reused (EnsureRemoteServer flags
+// it Outdated) rather than replaced, so its terminals and in-flight turns are
+// not orphaned.
+func serverHealthy(t Transport, state ServeState) bool {
 	if res, err := t.Exec(pidAliveCmd(state.PID)); err != nil || res.ExitCode != 0 {
 		return false
 	}
@@ -93,6 +95,14 @@ func ServerAlive(t Transport, state ServeState, localVersion string) bool {
 		return false
 	}
 	return strings.TrimSpace(res.Stdout) == "200"
+}
+
+// ServerAlive reports whether a discovered server is alive and healthy. The
+// localVersion argument is retained for compatibility; version no longer
+// affects the decision (see serverHealthy).
+func ServerAlive(t Transport, state ServeState, localVersion string) bool {
+	_ = localVersion
+	return serverHealthy(t, state)
 }
 
 func launchServerCmd(ver string) string {
@@ -148,30 +158,70 @@ func StartFreshServer(t Transport, ver string) (ServeState, error) {
 	return ServeState{}, fmt.Errorf("remote server did not write its state file within %s — check ~/.ocode/remote/serve.log on the remote", time.Duration(serveStatePollAttempts)*serveStatePollInterval)
 }
 
-// EnsureRemoteServer implements the reuse-vs-fresh decision table: discover
-// → alive+matching-version → reuse; anything else (missing, dead,
-// version-mismatched, unhealthy) → start fresh. reused reports which path
-// was taken, for progress reporting. staleVersionPID is nonzero only when a
-// discovered server is still running but was skipped for a version
-// mismatch: the old server is left running but ignored, and the caller
-// prints a notice with its pid so the operator can decide whether to kill
-// it manually.
-func EnsureRemoteServer(t Transport, ver string) (state ServeState, reused bool, staleVersionPID int, err error) {
-	if existing, ok := DiscoverServer(t); ok {
-		if ServerAlive(t, existing, ver) {
-			return existing, true, 0, nil
-		}
-		if existing.Version != ver {
-			if res, execErr := t.Exec(pidAliveCmd(existing.PID)); execErr == nil && res.ExitCode == 0 {
-				staleVersionPID = existing.PID
-			}
-		}
+// EnsureRemoteServer implements the reuse-vs-fresh decision table: discover →
+// alive and healthy → reuse (flagging Outdated when the version differs);
+// anything else (missing, dead, unhealthy) → start fresh at the local version.
+// reused reports which path was taken, for progress reporting.
+func EnsureRemoteServer(t Transport, ver string) (state ServeState, reused bool, err error) {
+	if existing, ok := DiscoverServer(t); ok && serverHealthy(t, existing) {
+		existing.Outdated = existing.Version != ver
+		return existing, true, nil
 	}
 	fresh, err := StartFreshServer(t, ver)
 	if err != nil {
-		return ServeState{}, false, staleVersionPID, err
+		return ServeState{}, false, err
 	}
-	return fresh, false, staleVersionPID, nil
+	// A freshly launched server always reports the local version; a stale
+	// Outdated value can never leak in from the state file (json:"-").
+	fresh.Outdated = false
+	return fresh, false, nil
+}
+
+// killTERMCmd / killKILLCmd are the two signal commands KillServer issues.
+// Package-level funcs (not inline fmt.Sprintf calls) so tests can assert the
+// exact command sequence.
+func killTERMCmd(pid int) string { return fmt.Sprintf("kill %d 2>/dev/null", pid) }
+func killKILLCmd(pid int) string { return fmt.Sprintf("kill -9 %d 2>/dev/null", pid) }
+
+// killServerPoll* bound how long KillServer waits for a terminated process to
+// disappear. Package-level vars so tests can shrink them.
+var (
+	killServerPollAttempts = 20
+	killServerPollInterval = 100 * time.Millisecond
+)
+
+// KillServer terminates the remote server process pid with SIGTERM, waits
+// (bounded) for it to exit, escalates to SIGKILL once, and finally removes the
+// remote state file so a later discovery cannot reuse the dead pid. It returns
+// an error if the process is still alive after SIGKILL.
+func KillServer(t Transport, pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("kill remote server: invalid pid %d", pid)
+	}
+	if res, err := t.Exec(killTERMCmd(pid)); err != nil {
+		return fmt.Errorf("kill remote server pid %d: %w: %s", pid, err, res.Stderr)
+	}
+	alive := true
+	for i := 0; i < killServerPollAttempts; i++ {
+		res, err := t.Exec(pidAliveCmd(pid))
+		if err != nil || res.ExitCode != 0 {
+			alive = false
+			break
+		}
+		time.Sleep(killServerPollInterval)
+	}
+	if alive {
+		if res, err := t.Exec(killKILLCmd(pid)); err != nil {
+			return fmt.Errorf("kill -9 remote server pid %d: %w: %s", pid, err, res.Stderr)
+		}
+		if res, err := t.Exec(pidAliveCmd(pid)); err == nil && res.ExitCode == 0 {
+			return fmt.Errorf("remote server pid %d still alive after SIGKILL", pid)
+		}
+	}
+	if res, err := t.Exec("rm -f " + shellQuotePath(remoteStateFilePath)); err != nil {
+		return fmt.Errorf("remove remote state file: %w: %s", err, res.Stderr)
+	}
+	return nil
 }
 
 // tunnelArgs builds the ssh argument list for StartTunnel. It carries the same

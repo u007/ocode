@@ -1,10 +1,9 @@
-import { apiPath, authHeaders } from "@/api/client";
+import { apiPath, authHeaders, remoteApiBase } from "@/api/client";
 
 export interface TerminalHistoryRestoreOptions {
   id: string;
   projectPath: string;
   host?: string;
-  remotePort?: number;
   pageSize?: number;
   signal?: AbortSignal;
   /** Share decoder state with the following WebSocket byte stream. */
@@ -79,7 +78,6 @@ export async function restoreTerminalHistory({
   id,
   projectPath,
   host,
-  remotePort,
   pageSize = 64 * 1024,
   signal,
   onSnapshotEnd,
@@ -100,14 +98,18 @@ export async function restoreTerminalHistory({
     const params = new URLSearchParams({ offset: String(offset), limit: String(pageSize) });
     if (snapshotEnd !== undefined) params.set("snapshot_end", String(snapshotEnd));
     if (host) {
-      params.set("host", host);
-      if (remotePort) params.set("port", String(remotePort));
       params.set("project_path", projectPath);
     } else {
       params.set("project", projectPath);
     }
-    const response = await fetch(apiPath(`/api/terminal/${encodeURIComponent(id)}/history?${params}`), {
-      headers: authHeaders(),
+    // A remote project's history lives on the host. Route through the local
+    // reverse proxy and tag the project so the proxy registers it (a fetch can
+    // set the header; the terminal WebSocket cannot and uses project_path).
+    const headers = new Headers(authHeaders());
+    if (host && projectPath) headers.set("X-Ocode-Project", projectPath);
+    const prefix = host ? remoteApiBase(host) : "";
+    const response = await fetch(apiPath(`${prefix}/api/terminal/${encodeURIComponent(id)}/history?${params}`), {
+      headers,
       signal,
     });
     if (response.status === 404) {

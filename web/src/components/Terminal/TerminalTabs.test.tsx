@@ -55,6 +55,7 @@ vi.mock("@/api/client", () => ({
   },
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
+  remoteApiBase: (host?: string) => (host ? `/api/remote/${encodeURIComponent(host)}` : ""),
   authToken: () => "tok",
   authHeaders: () => ({}),
   authedFetch: (...args: unknown[]) => authedFetchMock(...args),
@@ -101,6 +102,7 @@ class MockSocket {
 beforeEach(() => {
   sockets.length = 0;
   disposeSpy.mockClear();
+  authedFetchMock.mockClear();
   window.localStorage.clear();
   vi.stubGlobal("WebSocket", MockSocket as unknown as typeof WebSocket);
   terminalFetchMock = vi.fn(() => Promise.resolve(new Response("", { status: 404 })));
@@ -132,13 +134,16 @@ describe("TerminalTabs", () => {
     expect(sockets[0].url).toContain(`project_path=${encodeURIComponent("/project")}`);
   });
 
-  it("starts a remote terminal once with its trusted host", async () => {
+  it("starts a remote terminal once through the remote proxy, with no host param", async () => {
     await renderTabs("/remote", "dev@example.com");
 
     expect(sockets).toHaveLength(1);
-    expect(sockets[0].url).toContain(`host=${encodeURIComponent("dev@example.com")}`);
+    const prefix = `/api/remote/${encodeURIComponent("dev@example.com")}/api/terminal/ws`;
+    expect(sockets[0].url).toContain(prefix);
+    expect(sockets[0].url).not.toContain("host=");
+    expect(sockets[0].url).not.toContain("port=");
     const historyRequest = terminalFetchMock.mock.calls.find(([input]) => String(input).includes("/history"));
-    expect(historyRequest?.[0]).toContain(`host=${encodeURIComponent("dev@example.com")}`);
+    expect(historyRequest?.[0]).toContain(`/api/remote/${encodeURIComponent("dev@example.com")}/api/terminal/`);
     expect(disposeSpy).not.toHaveBeenCalled();
   });
 
@@ -170,7 +175,7 @@ describe("TerminalTabs", () => {
     await waitFor(() => expect(sockets).toHaveLength(2));
     expect(oldSocket.close).toHaveBeenCalled();
     expect(disposeSpy).toHaveBeenCalled();
-    expect(sockets[1].url).toContain(`host=${encodeURIComponent("new@example.com")}`);
+    expect(sockets[1].url).toContain(`/api/remote/${encodeURIComponent("new@example.com")}/api/terminal/ws`);
   });
 
   it("opens an additional terminal (and socket) via the imperative openTerminal() handle", async () => {
@@ -196,6 +201,25 @@ describe("TerminalTabs", () => {
     // also kill it server-side.
     const secondId = new URL(secondSocket.url).searchParams.get("terminal_id");
     expect(authedFetchMock).toHaveBeenCalledWith(`/api/terminal/${secondId}`, { method: "DELETE" });
+  });
+
+  it("kills a remote terminal through the proxy with the project header", async () => {
+    const { ref } = await renderTabs("/remote", "dev@example.com");
+    ref.current?.openTerminal();
+    await waitFor(() => expect(sockets.length).toBe(2));
+    const secondSocket = sockets[1];
+    const secondId = new URL(secondSocket.url).searchParams.get("terminal_id");
+
+    expect(ref.current?.closeActiveTerminal()).toBe(true);
+    await waitFor(() =>
+      expect(authedFetchMock).toHaveBeenCalledWith(
+        `/api/remote/${encodeURIComponent("dev@example.com")}/api/terminal/${secondId}`,
+        expect.objectContaining({ method: "DELETE" }),
+      ),
+    );
+    const call = authedFetchMock.mock.calls.find(([url]) => String(url).includes("/api/terminal/"));
+    const headers = (call?.[1] as RequestInit | undefined)?.headers as Headers;
+    expect(headers.get("X-Ocode-Project")).toBe("/remote");
   });
 
   it("closeActiveTerminal() returns false once no terminal remains", async () => {

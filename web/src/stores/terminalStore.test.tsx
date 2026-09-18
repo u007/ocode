@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { TerminalProvider, useTerminalState, getProjectTerminals, terminalDisplayTitle, PROCESSES_TAB_ID } from "./terminalStore";
 
 function Harness({ projectPath }: { projectPath: string }) {
-  const { state, activate, openTerminal, closeTerminal, setActiveId, renameTerminal, setOscTitle, markAlerted, clearAlert } =
+  const { state, activate, openTerminal, closeTerminal, setActiveId, renameTerminal, setOscTitle, markAlerted, clearAlert, attachTerminal } =
     useTerminalState();
   const { terminals, activeId, live } = getProjectTerminals(state, projectPath);
   return (
@@ -20,6 +20,7 @@ function Harness({ projectPath }: { projectPath: string }) {
       <button onClick={() => openTerminal(projectPath)}>open</button>
       <button onClick={() => activeId && closeTerminal(projectPath, activeId)}>close-active</button>
       <button onClick={() => setActiveId(projectPath, PROCESSES_TAB_ID)}>focus-processes</button>
+      <button onClick={() => attachTerminal(projectPath, undefined, "remote-1", "Remote shell")}>attach</button>
       {terminals.map((t) => (
         <span key={t.id}>
           <button onClick={() => markAlerted(projectPath, t.id)}>{`mark-${t.id}`}</button>
@@ -198,5 +199,24 @@ describe("terminalStore", () => {
       const saved = JSON.parse(window.localStorage.getItem("ocode.ui.terminals.project.v1")!);
       expect(saved.projects["/proj"].terminals[0].oscTitle).toBe("⦿ ocode — fix bug");
     });
+  });
+});
+
+describe("attachTerminal", () => {
+  it("adds a tab with the given id once and ignores a second call", () => {
+    render(
+      <TerminalProvider>
+        <Harness projectPath="/proj" />
+      </TerminalProvider>,
+    );
+
+    act(() => screen.getByText("attach").click());
+    expect(screen.getByTestId("live").textContent).toBe("true");
+    expect(screen.getByTestId("count").textContent).toBe("1");
+    expect(screen.getByTestId("titles").textContent).toBe("Remote shell");
+    expect(screen.getByTestId("active-id").textContent).toBe("remote-1");
+
+    act(() => screen.getByText("attach").click());
+    expect(screen.getByTestId("count").textContent).toBe("1");
   });
 });

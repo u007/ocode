@@ -199,6 +199,20 @@ func (rw *RemoteWorkspace) SetAPIURL(url string) {
 	rw.localAPIURL = url
 }
 
+// ServeState returns the workspace's discovered server state (version, pid,
+// Outdated, ports). It satisfies the server-side host registry interface; the
+// exported State field cannot also be a method name.
+func (rw *RemoteWorkspace) ServeState() ServeState {
+	return rw.State
+}
+
+// ServeTransport returns the transport used to reach the host. It satisfies
+// the server-side host registry interface (which needs it for KillServer); the
+// exported Transport field cannot also be a method name.
+func (rw *RemoteWorkspace) ServeTransport() Transport {
+	return rw.Transport
+}
+
 // BrowseURL returns the local URL for the browse origin via the SSH tunnel.
 // Returns empty string when the remote server has no browse origin.
 // The local port matches the remote port (per StartTunnel contract).
@@ -244,12 +258,15 @@ func (rw *RemoteWorkspace) ensureBinary() error {
 	return nil
 }
 
-// discoverOrStartServer checks for a reusable remote server or starts a fresh one.
+// discoverOrStartServer delegates to EnsureRemoteServer so the reuse-vs-fresh
+// decision (and the Outdated flag) has a single implementation shared with the
+// CLI's ConnectWeb path.
 func (rw *RemoteWorkspace) discoverOrStartServer() (ServeState, error) {
-	if state, ok := rw.discoverServer(); ok && ServerAlive(rw.Transport, state, version.Version) {
-		return state, nil
+	state, _, err := EnsureRemoteServer(rw.Transport, version.Version)
+	if err != nil {
+		return ServeState{}, err
 	}
-	return rw.startFreshServer()
+	return state, nil
 }
 
 // discoverServer reads the remote state file on the remote host.

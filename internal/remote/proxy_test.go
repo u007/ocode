@@ -3,6 +3,7 @@ package remote
 import (
 	"bufio"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -261,5 +262,179 @@ func TestInjectAuth_EmptyRemoteToken_NoAuth(t *testing.T) {
 	}
 	if req.Header.Get("Authorization") != "" {
 		t.Errorf("Authorization should be empty for empty remote token, got %q", req.Header.Get("Authorization"))
+	}
+}
+
+// headerTokens splits a comma-separated HTTP header value into trimmed,
+// non-empty tokens.
+func headerTokens(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func TestInjectAuth_UpgradeReplacesBearerSubprotocol(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/terminal/ws?token=local", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Protocol", "ocode.bearer.local-tok, other")
+
+	InjectAuth(req, "remote-secret")
+
+	got := headerTokens(req.Header.Get("Sec-WebSocket-Protocol"))
+	var hasOther, hasRemote, hasLocal bool
+	for _, p := range got {
+		switch p {
+		case "other":
+			hasOther = true
+		case WSProtocolPrefix + "remote-secret":
+			hasRemote = true
+		case "ocode.bearer.local-tok":
+			hasLocal = true
+		}
+	}
+	if !hasOther {
+		t.Errorf("offered non-bearer protocol dropped: got %v", got)
+	}
+	if !hasRemote {
+		t.Errorf("remote bearer subprotocol not injected: got %v", got)
+	}
+	if hasLocal {
+		t.Errorf("local bearer subprotocol not stripped: got %v", got)
+	}
+}
+
+func TestInjectAuth_UpgradeNoOfferedProtocols(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/terminal/ws?token=local", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+
+	InjectAuth(req, "remote-secret")
+
+	if got := req.Header.Get("Sec-WebSocket-Protocol"); got != WSProtocolPrefix+"remote-secret" {
+		t.Errorf("Sec-WebSocket-Protocol = %q, want %q", got, WSProtocolPrefix+"remote-secret")
+	}
+}
+
+func TestInjectAuth_NonUpgradeLeavesSubprotocolAlone(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/sessions?token=local", nil)
+	req.Header.Set("Sec-WebSocket-Protocol", "ocode.bearer.local-tok, other")
+
+	InjectAuth(req, "remote-secret")
+
+	if got := req.Header.Get("Sec-WebSocket-Protocol"); got != "ocode.bearer.local-tok, other" {
+		t.Errorf("non-upgrade subprotocol modified: got %q", got)
+	}
+}
+
+// upgradeBackend starts a backend that answers every request with a raw 101
+// Switching Protocols response carrying the given Sec-WebSocket-Protocol, then
+// holds the connection open. Only real listeners can carry a 101 — a
+// ResponseRecorder is not a Hijacker.
+func upgradeBackend(t *testing.T, proto string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("backend ResponseWriter is not a Hijacker")
+			return
+		}
+		conn, brw, err := hj.Hijack()
+		if err != nil {
+			t.Errorf("backend hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+			"Upgrade: websocket\r\n" +
+			"Connection: Upgrade\r\n"
+		if proto != "" {
+			resp += "Sec-WebSocket-Protocol: " + proto + "\r\n"
+		}
+		resp += "\r\n"
+		if _, err := brw.WriteString(resp); err != nil {
+			t.Errorf("backend write: %v", err)
+			return
+		}
+		if err := brw.Flush(); err != nil {
+			t.Errorf("backend flush: %v", err)
+			return
+		}
+		io.Copy(io.Discard, conn)
+	}))
+}
+
+// rawUpgrade dials addr, performs a websocket upgrade handshake offering
+// offered (when non-empty), and returns the response headers.
+func rawUpgrade(t *testing.T, addr, offered string) http.Header {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	var sb strings.Builder
+	sb.WriteString("GET /api/terminal/ws?project_path=/tmp HTTP/1.1\r\n")
+	sb.WriteString("Host: " + addr + "\r\n")
+	sb.WriteString("Connection: Upgrade\r\n")
+	sb.WriteString("Upgrade: websocket\r\n")
+	if offered != "" {
+		sb.WriteString("Sec-WebSocket-Protocol: " + offered + "\r\n")
+	}
+	sb.WriteString("\r\n")
+	if _, err := conn.Write([]byte(sb.String())); err != nil {
+		t.Fatalf("write upgrade request: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read upgrade response: %v", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+	return resp.Header
+}
+
+func TestNewAPIProxy_Upgrade101RestoresBrowserSubprotocol(t *testing.T) {
+	backend := upgradeBackend(t, WSProtocolPrefix+"remote-secret")
+	defer backend.Close()
+
+	proxy, err := NewAPIProxy(backend.URL, "remote-secret", nil)
+	if err != nil {
+		t.Fatalf("NewAPIProxy: %v", err)
+	}
+	liveSrv := httptest.NewServer(proxy)
+	defer liveSrv.Close()
+
+	hdr := rawUpgrade(t, liveSrv.Listener.Addr().String(), "other")
+	if got := hdr.Get("Sec-WebSocket-Protocol"); got != "other" {
+		t.Errorf("Sec-WebSocket-Protocol = %q, want %q", got, "other")
+	}
+	for _, v := range hdr.Values("Sec-WebSocket-Protocol") {
+		if strings.Contains(v, "remote-secret") {
+			t.Errorf("remote token leaked to browser in subprotocol: %q", v)
+		}
+	}
+}
+
+func TestNewAPIProxy_Upgrade101DeletesSubprotocolWhenNoneOffered(t *testing.T) {
+	backend := upgradeBackend(t, WSProtocolPrefix+"remote-secret")
+	defer backend.Close()
+
+	proxy, err := NewAPIProxy(backend.URL, "remote-secret", nil)
+	if err != nil {
+		t.Fatalf("NewAPIProxy: %v", err)
+	}
+	liveSrv := httptest.NewServer(proxy)
+	defer liveSrv.Close()
+
+	hdr := rawUpgrade(t, liveSrv.Listener.Addr().String(), "")
+	if got := hdr.Values("Sec-WebSocket-Protocol"); len(got) != 0 {
+		t.Errorf("Sec-WebSocket-Protocol = %v, want absent", got)
 	}
 }

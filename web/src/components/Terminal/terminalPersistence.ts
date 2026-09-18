@@ -121,8 +121,18 @@ function gcBuffers(file: PersistedTabsFile) {
 
 // ── Project-scoped persistence (current) ─────────────────────────────────────
 
-export function loadProjectTerminals(projectPath: string): PersistedSessionTerminals | null {
-  const key = projectPath || "__global__";
+/** Host-qualified key for a project's terminal tabs. Remote projects use
+ *  `host::path` so a local and a remote project at the same path never share
+ *  tabs or reattach ids; local projects keep the bare path so pre-existing
+ *  entries still load. Deliberately mirrors projectStore's projectSessionKey
+ *  (same `host::path` shape) without importing the React store — persistence is
+ *  used by tests and non-React callers that must not pull in the store. */
+export function projectTerminalsKey(path: string, host?: string): string {
+  return (host ? `${host}::${path}` : path) || "__global__";
+}
+
+export function loadProjectTerminals(projectPath: string, host?: string): PersistedSessionTerminals | null {
+  const key = projectTerminalsKey(projectPath, host);
   const file = readProjectTabsFile();
   const entry = file.projects[key];
   if (!entry || !Array.isArray(entry.terminals) || entry.terminals.length === 0) return null;
@@ -133,8 +143,8 @@ export function loadProjectTerminals(projectPath: string): PersistedSessionTermi
  *  longer open in *any* project. Terminals are intentionally project-scoped
  *  so switching chat sessions within the same project never hides or kills
  *  the pty. */
-export function saveProjectTerminals(projectPath: string, terminals: PersistedTerminal[], activeId: string) {
-  const key = projectPath || "__global__";
+export function saveProjectTerminals(projectPath: string, terminals: PersistedTerminal[], activeId: string, host?: string) {
+  const key = projectTerminalsKey(projectPath, host);
   const file = readProjectTabsFile();
   if (terminals.length === 0) {
     delete file.projects[key];
@@ -152,8 +162,8 @@ export function saveProjectTerminals(projectPath: string, terminals: PersistedTe
   gcProjectBuffers(file);
 }
 
-export function dropProjectTerminals(projectPath: string) {
-  const key = projectPath || "__global__";
+export function dropProjectTerminals(projectPath: string, host?: string) {
+  const key = projectTerminalsKey(projectPath, host);
   const file = readProjectTabsFile();
   if (!(key in file.projects)) return;
   delete file.projects[key];

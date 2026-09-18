@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/api/client", () => ({
   apiPath: (path: string) => path,
   authHeaders: () => ({ Authorization: "Bearer test" }),
+  remoteApiBase: (host?: string) => (host ? `/api/remote/${encodeURIComponent(host)}` : ""),
 }));
 
 import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
@@ -48,7 +49,8 @@ describe("restoreTerminalHistory", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[1][0])).toContain("offset=5");
     expect(String(fetchMock.mock.calls[1][0])).toContain("snapshot_end=11");
-    expect(fetchMock.mock.calls[0][1]).toEqual(expect.objectContaining({ headers: { Authorization: "Bearer test" } }));
+    const headers = fetchMock.mock.calls[0][1].headers as Headers;
+    expect(headers.get("Authorization")).toBe("Bearer test");
   });
 
   it("handles an empty exact-boundary snapshot without looping", async () => {
@@ -137,5 +139,29 @@ describe("restoreTerminalHistory", () => {
     const restore = restoreTerminalHistory({ id: "t1", projectPath: "/project", signal: controller.signal });
     controller.abort();
     await expect(restore).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("routes a remote project's history through the proxy with the project header", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(page("t1", 0, new Uint8Array(), 0, true))));
+    vi.stubGlobal("fetch", fetchMock);
+    await restoreTerminalHistory({ id: "t1", projectPath: "/srv/app", host: "user@box" });
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("/api/remote/user%40box/api/terminal/t1/history");
+    expect(url).not.toContain("host=");
+    expect(url).not.toContain("port=");
+    expect(url).toContain("project_path=%2Fsrv%2Fapp");
+    const headers = fetchMock.mock.calls[0][1].headers as Headers;
+    expect(headers.get("X-Ocode-Project")).toBe("/srv/app");
+  });
+
+  it("keeps local project history off the proxy and header-free", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(page("t1", 0, new Uint8Array(), 0, true))));
+    vi.stubGlobal("fetch", fetchMock);
+    await restoreTerminalHistory({ id: "t1", projectPath: "/project" });
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).not.toContain("/api/remote/");
+    expect(url).toContain("project=%2Fproject");
+    const headers = fetchMock.mock.calls[0][1].headers as Headers;
+    expect(headers.get("X-Ocode-Project")).toBeNull();
   });
 });

@@ -240,6 +240,15 @@ func (h *Handler) SetTerminalAccessPolicy(authConfigured, loopback bool) {
 	h.mu.Unlock()
 }
 
+// SetTerminalDetachTTL sets how long a detached shell is kept alive awaiting
+// reattach. Called by Server.SetRemoteMode(true) to extend it to 24 h on the
+// host; a fresh handler defaults to the 30 min local TTL.
+func (h *Handler) SetTerminalDetachTTL(d time.Duration) {
+	h.terminalSessions.mu.Lock()
+	h.terminalSessions.detachTTL = d
+	h.terminalSessions.mu.Unlock()
+}
+
 // lspManagerFor returns the LSP manager rooted at the given project root,
 // creating it on first use. Sessions on the same project share a manager so
 // multiple tabs don't spawn redundant language-server processes; sessions on

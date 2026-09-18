@@ -62,6 +62,7 @@ vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 vi.mock("@/api/client", () => ({
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
+  remoteApiBase: (host?: string) => (host ? `/api/remote/${encodeURIComponent(host)}` : ""),
   authToken: () => "tok",
   authHeaders: () => ({}),
   isRemoteSession: () => false,
@@ -79,6 +80,7 @@ vi.mock("./terminalPersistence", () => ({
   // panel's `id` prop ("t1") for the alert to attach.
   loadProjectTerminals: () => ({ terminals: [{ id: "t1", title: "Terminal 1" }], activeId: "t1" }),
   saveProjectTerminals: vi.fn(),
+  projectTerminalsKey: (path: string, host?: string) => (host ? `${host}::${path}` : path),
   loadTerminalBuffer: () => null,
   saveTerminalBuffer: vi.fn(),
 }));

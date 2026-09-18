@@ -836,3 +836,24 @@ export interface ContextBudgetReport {
   sections: ContextBudgetSection[];
   notes?: string[];
 }
+
+/** Remote host server state, from the local server's lifecycle endpoints
+ *  (GET/POST /api/remote/{host}/status|connect|restart). `outdated` marks a
+ *  reused remote server whose version differs from the local build. */
+export interface RemoteHostStatus {
+  host: string;
+  connected: boolean;
+  version: string;
+  local_version: string;
+  outdated: boolean;
+  pid: number;
+}
+
+/** One live terminal session on a remote host, from GET /api/terminal. */
+export interface RemoteTerminalEntry {
+  id: string;
+  title: string;
+  pid: number;
+  started_at: string;
+  attached: boolean;
+}

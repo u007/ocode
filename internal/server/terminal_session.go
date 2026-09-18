@@ -88,6 +88,13 @@ type terminalSession struct {
 	detachTTL time.Duration
 	onExit    func(*terminalSession)
 
+	// startedAt is when the shell was spawned; the list endpoint sorts by it.
+	// title is the last OSC window title the shell advertised, or "" (this
+	// server does not parse OSC titles; the field exists so the SPA can echo
+	// its own persisted title back in the inventory).
+	startedAt time.Time
+	title     string
+
 	mu          sync.Mutex
 	writeMu     sync.Mutex
 	ws          *websocket.Conn
@@ -115,6 +122,7 @@ func newTerminalSession(id, project string, cmd *exec.Cmd, ptmx *os.File, detach
 		cmd:       cmd,
 		ptmx:      ptmx,
 		detachTTL: detachTTL,
+		startedAt: time.Now(),
 		history:   newTerminalHistory(project, id),
 		onExit:    onExit,
 		done:      make(chan struct{}),
@@ -135,6 +143,23 @@ func (s *terminalSession) attached() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ws != nil
+}
+
+// snapshot returns the session's list-visible fields under the session mutex.
+func (s *terminalSession) snapshot() terminalListEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pid := 0
+	if s.cmd != nil && s.cmd.Process != nil {
+		pid = s.cmd.Process.Pid
+	}
+	return terminalListEntry{
+		ID:        s.id,
+		Title:     s.title,
+		PID:       pid,
+		StartedAt: s.startedAt,
+		Attached:  s.ws != nil,
+	}
 }
 
 // hasExited reports whether the shell has terminated (set by exit() before

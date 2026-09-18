@@ -299,3 +299,30 @@ func TestConnectFatalOnSyncFailure(t *testing.T) {
 		t.Fatal("Connect succeeded despite sync failure, want fatal error")
 	}
 }
+
+// TestWorkspaceDiscoverOrStartServerFlagsOutdated proves the desktop host
+// registry path shares the new reuse policy: an alive, healthy, mismatched
+// server is reused (not replaced) and the returned state is flagged Outdated
+// so the sidebar can show the amber marker.
+func TestWorkspaceDiscoverOrStartServerFlagsOutdated(t *testing.T) {
+	existing := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "0.0.0-old"}
+	ft := newConnectFakeTransport(existing)
+
+	rw := &RemoteWorkspace{
+		Transport:  ft,
+		RemotePath: "/home/user/proj",
+	}
+
+	state, err := rw.discoverOrStartServer()
+	if err != nil {
+		t.Fatalf("discoverOrStartServer: %v", err)
+	}
+	if !state.Outdated {
+		t.Fatalf("expected Outdated=true for a mismatched alive server, got %+v", state)
+	}
+	for _, c := range ft.execCalls {
+		if strings.Contains(c, "nohup") && strings.Contains(c, "serve --remote") {
+			t.Fatalf("discoverOrStartServer launched a fresh server instead of reusing: %q", c)
+		}
+	}
+}

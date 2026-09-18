@@ -2,7 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +15,7 @@ import (
 
 	"github.com/u007/ocode/internal/remote"
 	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/version"
 )
 
 // fakeWorkspace implements remoteHostWorkspace for testing without SSH.
@@ -17,6 +23,8 @@ type fakeWorkspace struct {
 	apiURL     string
 	token      string
 	disconnect func() error
+	state      remote.ServeState
+	transport  remote.Transport
 }
 
 func (f *fakeWorkspace) APIURL() string { return f.apiURL }
@@ -27,6 +35,8 @@ func (f *fakeWorkspace) Disconnect() error {
 	}
 	return nil
 }
+func (f *fakeWorkspace) ServeState() remote.ServeState    { return f.state }
+func (f *fakeWorkspace) ServeTransport() remote.Transport { return f.transport }
 
 func TestWorkspaceFor_SingleConnect(t *testing.T) {
 	// 20 goroutines calling workspaceFor("h", "/p") concurrently should
@@ -628,5 +638,187 @@ func TestDropWithoutEntryClearsRegisteredPaths(t *testing.T) {
 	reg.drop("h") // no live entry for this host
 	if !reg.markRegistered("h", "/p") {
 		t.Fatal("markRegistered after drop = false, want true (drop must clear the path set)")
+	}
+}
+
+// recordingTransport is a remote.Transport that records every Exec command and
+// reports a dead pid for `kill -0` so KillServer takes its fast path. killErr,
+// when set, makes the initial SIGTERM command fail so the remote-kill stage is
+// observable.
+type recordingTransport struct {
+	mu      sync.Mutex
+	calls   []string
+	killErr error
+}
+
+func (r *recordingTransport) Exec(command string) (remote.ExecResult, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, command)
+	r.mu.Unlock()
+	if r.killErr != nil && strings.HasPrefix(command, "kill ") {
+		return remote.ExecResult{}, r.killErr
+	}
+	if strings.Contains(command, "kill -0") {
+		return remote.ExecResult{ExitCode: 1}, nil // dead immediately
+	}
+	return remote.ExecResult{}, nil
+}
+
+func (r *recordingTransport) ExecStdin(string, io.Reader) (remote.ExecResult, error) {
+	return remote.ExecResult{}, nil
+}
+func (r *recordingTransport) ExecInteractive(string) error        { return nil }
+func (r *recordingTransport) Copy(io.Reader, int64, string) error { return nil }
+func (r *recordingTransport) Describe() string                    { return "recording" }
+
+func (r *recordingTransport) hasCall(prefix string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.calls {
+		if strings.HasPrefix(c, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestStatus_NeverConnected(t *testing.T) {
+	reg := newTestRegistry(func(remote.Target, string) (remoteHostWorkspace, error) {
+		t.Fatal("status must not connect")
+		return nil, nil
+	})
+	st := reg.status("h")
+	if st.Connected {
+		t.Error("expected connected=false for a host that never connected")
+	}
+	if st.Version != "" {
+		t.Errorf("version = %q, want empty", st.Version)
+	}
+	if st.LocalVersion != version.Version {
+		t.Errorf("local_version = %q, want %q", st.LocalVersion, version.Version)
+	}
+	if st.Host != "h" {
+		t.Errorf("host = %q, want h", st.Host)
+	}
+}
+
+func TestStatus_ConnectedReportsVersionAndOutdated(t *testing.T) {
+	ws := &fakeWorkspace{
+		apiURL: "http://127.0.0.1:9",
+		token:  "t",
+		state:  remote.ServeState{Version: "1.0.0", Outdated: true, PID: 42},
+	}
+	reg := newTestRegistry(func(remote.Target, string) (remoteHostWorkspace, error) {
+		return ws, nil
+	})
+	if _, err := reg.workspaceForPort("h", "/p", 0); err != nil {
+		t.Fatalf("workspaceForPort: %v", err)
+	}
+	st := reg.status("h")
+	if !st.Connected || st.Version != "1.0.0" || !st.Outdated || st.PID != 42 {
+		t.Fatalf("status = %+v, want connected version=1.0.0 outdated=true pid=42", st)
+	}
+	if st.LocalVersion != version.Version {
+		t.Errorf("local_version = %q, want %q", st.LocalVersion, version.Version)
+	}
+}
+
+// TestRestart_KillsDropsReconnectsAndReregisters pins the restart sequence:
+// kill the old pid, drop the entry, reconnect (fresh server), and re-register
+// every path that was registered on the host.
+func TestRestart_KillsDropsReconnectsAndReregisters(t *testing.T) {
+	var mu sync.Mutex
+	var registered []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/projects" {
+			var body struct {
+				Path string `json:"path"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			registered = append(registered, body.Path)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	tpt := &recordingTransport{}
+	oldWS := &fakeWorkspace{
+		apiURL:    "http://127.0.0.1:9",
+		token:     "old",
+		transport: tpt,
+		state:     remote.ServeState{Version: "0.0.1", Outdated: true, PID: 42},
+	}
+	newWS := &fakeWorkspace{
+		apiURL: srv.URL,
+		token:  "new",
+		state:  remote.ServeState{Version: version.Version, PID: 99},
+	}
+	var connects atomic.Int32
+	reg := newTestRegistry(func(remote.Target, string) (remoteHostWorkspace, error) {
+		if connects.Add(1) == 1 {
+			return oldWS, nil
+		}
+		return newWS, nil
+	})
+
+	// Seed a registered path so restart has something to re-register.
+	reg.markRegistered("h", "/p1")
+	if _, err := reg.workspaceForPort("h", "/p1", 0); err != nil {
+		t.Fatalf("initial connect: %v", err)
+	}
+
+	st, err := reg.restart("h", "/p1", 0)
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if connects.Load() != 2 {
+		t.Fatalf("connect calls = %d, want 2 (initial + restart)", connects.Load())
+	}
+	if !tpt.hasCall("kill 42") {
+		t.Fatalf("old pid not killed; calls: %v", tpt.calls)
+	}
+	mu.Lock()
+	gotRegistered := append([]string(nil), registered...)
+	mu.Unlock()
+	if len(gotRegistered) != 1 || gotRegistered[0] != "/p1" {
+		t.Fatalf("re-registered paths = %v, want [/p1]", gotRegistered)
+	}
+	if !st.Connected || st.PID != 99 || st.Version != version.Version || st.Outdated {
+		t.Fatalf("restart status = %+v, want connected new server", st)
+	}
+}
+
+// TestRestart_KillFailureLeavesEntryDropped: a kill failure reports the
+// remote-kill stage and leaves no live entry, so the next request reconnects.
+func TestRestart_KillFailureLeavesEntryDropped(t *testing.T) {
+	tpt := &recordingTransport{killErr: errors.New("kill: operation not permitted")}
+	oldWS := &fakeWorkspace{
+		apiURL:    "http://127.0.0.1:9",
+		token:     "old",
+		transport: tpt,
+		state:     remote.ServeState{Version: "0.0.1", PID: 42},
+	}
+	reg := newTestRegistry(func(remote.Target, string) (remoteHostWorkspace, error) {
+		return oldWS, nil
+	})
+	if _, err := reg.workspaceForPort("h", "/p", 0); err != nil {
+		t.Fatalf("initial connect: %v", err)
+	}
+
+	_, err := reg.restart("h", "/p", 0)
+	if err == nil {
+		t.Fatal("expected a restart error")
+	}
+	var stageErr *remoteHostStageError
+	if !errors.As(err, &stageErr) || stageErr.Stage != "remote-kill" {
+		t.Fatalf("error %v does not carry remote-kill stage", err)
+	}
+	reg.mu.Lock()
+	_, present := reg.byHost["h"]
+	reg.mu.Unlock()
+	if present {
+		t.Fatal("restart failure left a live registry entry; want dropped")
 	}
 }

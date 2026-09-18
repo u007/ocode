@@ -28,6 +28,8 @@ type fakeTestWorkspace struct {
 	token      string
 	disconnect func() error
 	projects   []string
+	state      remote.ServeState
+	transport  remote.Transport
 }
 
 func (f *fakeTestWorkspace) APIURL() string { return f.apiURL }
@@ -38,6 +40,8 @@ func (f *fakeTestWorkspace) Disconnect() error {
 	}
 	return nil
 }
+func (f *fakeTestWorkspace) ServeState() remote.ServeState    { return f.state }
+func (f *fakeTestWorkspace) ServeTransport() remote.Transport { return f.transport }
 
 func newTestProxyHandler(t *testing.T, host, path string, ws *fakeTestWorkspace) *Handler {
 	t.Helper()
@@ -724,5 +728,37 @@ func TestHandleRemoteProxy_ConnectUsesSavedPathAndPort(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("connect was not called for a path-less request")
+	}
+}
+
+// TestHandleRemoteProxy_ProjectPathQueryRegisters: a terminal WebSocket can't
+// set the X-Ocode-Project header, so the proxy must derive the project from
+// the ?project_path= query param and register it on the host before forwarding.
+func TestHandleRemoteProxy_ProjectPathQueryRegisters(t *testing.T) {
+	ws := &fakeTestWorkspace{apiURL: "http://unused", token: "remote-tok"}
+	remote := fakeRemoteServer(t, ws)
+	defer remote.Close()
+	ws.apiURL = remote.URL
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	injectProxy(t, h.remoteHosts, "user@realhost", ws)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/remote/user@realhost/api/terminal/ws?token=local&project_path=%2Fhome%2Fuser%2Fproject&terminal_id=t1", nil)
+	setPathValues(r, map[string]string{"host": "user@realhost", "rest": "terminal/ws"})
+	h.HandleRemoteProxy(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	found := false
+	for _, p := range ws.projects {
+		if p == "/home/user/project" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("project_path query did not register the project, got %v", ws.projects)
 	}
 }

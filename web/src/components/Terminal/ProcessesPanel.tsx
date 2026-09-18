@@ -96,10 +96,10 @@ const MAX_WIDTH = 600;
  * no process to measure. Browser rows cover the standalone `tab:` surfaces
  * (side panels are excluded).
  */
-export default function ProcessesPanel({ projectPath }: { projectPath: string }) {
+export default function ProcessesPanel({ projectPath, host }: { projectPath: string; host?: string }) {
   const [stats, setStats] = useState<Record<string, TerminalProcessStat>>({});
   const [titles, setTitles] = useState<Record<string, string>>(() => {
-    const saved = loadProjectTerminals(projectPath);
+    const saved = loadProjectTerminals(projectPath, host);
     if (!saved) return {};
     return Object.fromEntries(saved.terminals.map((t) => [t.id, t.title]));
   });
@@ -240,7 +240,7 @@ export default function ProcessesPanel({ projectPath }: { projectPath: string })
   }, [projectPath, chatTabsKey, browserTabsKey]);
 
   function refreshTitles() {
-    const saved = loadProjectTerminals(projectPath);
+    const saved = loadProjectTerminals(projectPath, host);
     if (saved) {
       setTitles(Object.fromEntries(saved.terminals.map((t) => [t.id, t.title])));
     }

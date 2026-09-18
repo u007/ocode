@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -42,26 +43,26 @@ func TestDiscoverServerCorruptFileTreatedAsMissing(t *testing.T) {
 	}
 }
 
-func TestServerAliveRequiresPidAndVersionAndHealth(t *testing.T) {
+func TestServerAliveRequiresPidAndHealth(t *testing.T) {
 	state := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "0.8.85"}
 
 	ft := newFakeTransport()
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
 	if !ServerAlive(ft, state, "0.8.85") {
-		t.Fatal("expected alive: pid alive, version matches, health 200")
+		t.Fatal("expected alive: pid alive, health 200")
+	}
+
+	// Version is no longer part of liveness: a mismatched but healthy server
+	// is reused (EnsureRemoteServer flags Outdated), never treated as dead.
+	if !ServerAlive(ft, state, "0.9.0") {
+		t.Fatal("expected alive despite version mismatch: version no longer gates reuse")
 	}
 
 	ftDeadPid := newFakeTransport()
 	ftDeadPid.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 1}
 	if ServerAlive(ftDeadPid, state, "0.8.85") {
 		t.Fatal("expected not alive: pid check failed")
-	}
-
-	ftVersionMismatch := newFakeTransport()
-	ftVersionMismatch.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
-	if ServerAlive(ftVersionMismatch, state, "0.9.0") {
-		t.Fatal("expected not alive: version mismatch")
 	}
 
 	ftBadHealth := newFakeTransport()
@@ -128,7 +129,7 @@ func TestEnsureRemoteServerReusesLiveMatchingServer(t *testing.T) {
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
 
-	state, reused, staleVersionPID, err := EnsureRemoteServer(ft, "0.8.85")
+	state, reused, err := EnsureRemoteServer(ft, "0.8.85")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -138,8 +139,8 @@ func TestEnsureRemoteServerReusesLiveMatchingServer(t *testing.T) {
 	if state != existing {
 		t.Errorf("got %+v, want %+v", state, existing)
 	}
-	if staleVersionPID != 0 {
-		t.Errorf("expected staleVersionPID=0 on reuse, got %d", staleVersionPID)
+	if state.Outdated {
+		t.Errorf("expected Outdated=false for a matching version, got true")
 	}
 	for _, c := range ft.execCalls {
 		if c == launchServerCmd("0.8.85") {
@@ -168,7 +169,7 @@ func TestEnsureRemoteServerStartsFreshWhenStale(t *testing.T) {
 	_ = origExec
 	// Simulate "file now exists" by having a second fakeTransport wrapper
 	// switch its answer after the launch call is observed.
-	state, reused, staleVersionPID, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85")
+	state, reused, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -178,39 +179,89 @@ func TestEnsureRemoteServerStartsFreshWhenStale(t *testing.T) {
 	if state != fresh {
 		t.Errorf("got %+v, want %+v", state, fresh)
 	}
-	if staleVersionPID != 0 {
-		t.Errorf("expected staleVersionPID=0 for a dead-pid stale server, got %d", staleVersionPID)
+	if state.Outdated {
+		t.Errorf("expected a freshly started server to be not Outdated, got true")
 	}
 }
 
-// TestEnsureRemoteServerReportsStaleVersionPID covers the spec's "version
-// mismatch on reuse" case: the discovered server is alive but running a
-// different version, so it must be left running (never killed
-// automatically) while EnsureRemoteServer reports its pid for the caller to
-// print as an operator notice.
-func TestEnsureRemoteServerReportsStaleVersionPID(t *testing.T) {
-	stale := ServeState{PID: 42, Port: 4096, Token: "oldtok", Version: "0.8.84"}
+// TestEnsureRemoteServerReusesMismatchedAliveServer pins the new version
+// policy: a discovered server that is alive and healthy is reused even when
+// its version differs from the client's, and is flagged Outdated for the UI.
+// No launch command may run — replacing it would orphan its terminals.
+func TestEnsureRemoteServerReusesMismatchedAliveServer(t *testing.T) {
+	existing := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "1.0.0"}
+	data, _ := json.Marshal(existing)
+
+	ft := newFakeTransport()
+	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(data)}
+	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
+	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
+
+	state, reused, err := EnsureRemoteServer(ft, "2.0.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reused {
+		t.Fatal("expected reused=true for an alive mismatched server")
+	}
+	want := existing
+	want.Outdated = true
+	if state != want {
+		t.Errorf("got %+v, want %+v", state, want)
+	}
+	for _, c := range ft.execCalls {
+		if c == launchServerCmd("2.0.0") {
+			t.Error("EnsureRemoteServer launched a fresh server instead of reusing the alive mismatched one")
+		}
+	}
+}
+
+// TestEnsureRemoteServerReplacesDeadMismatchedServer: a mismatched server
+// whose pid is dead is still replaced with a fresh one (and never flagged
+// Outdated).
+func TestEnsureRemoteServerReplacesDeadMismatchedServer(t *testing.T) {
+	stale := ServeState{PID: 42, Port: 4096, Token: "oldtok", Version: "1.0.0"}
 	data, _ := json.Marshal(stale)
 	fresh := ServeState{PID: 999, Port: 4097, Token: "newtok", Version: "0.8.85", StartedAt: time.Now().Round(0)}
 	freshData, _ := json.Marshal(fresh)
 
 	ft := newFakeTransport()
 	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(data)}
-	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0} // still running, just wrong version
+	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 1} // dead
 	ft.execResults[launchServerCmd("0.8.85")] = ExecResult{ExitCode: 0}
 
-	state, reused, staleVersionPID, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85")
+	state, reused, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if reused {
-		t.Error("expected reused=false")
+		t.Error("expected reused=false for a dead mismatched server")
 	}
 	if state != fresh {
 		t.Errorf("got %+v, want %+v", state, fresh)
 	}
-	if staleVersionPID != 42 {
-		t.Errorf("expected staleVersionPID=42, got %d", staleVersionPID)
+	if state.Outdated {
+		t.Errorf("expected freshly started server to be not Outdated, got true")
+	}
+}
+
+// TestEnsureRemoteServerMatchingVersionNotOutdated: the existing reuse path
+// must not flag a same-version server Outdated.
+func TestEnsureRemoteServerMatchingVersionNotOutdated(t *testing.T) {
+	existing := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "2.0.0"}
+	data, _ := json.Marshal(existing)
+
+	ft := newFakeTransport()
+	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(data)}
+	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
+	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
+
+	state, reused, err := EnsureRemoteServer(ft, "2.0.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reused || state.Outdated {
+		t.Fatalf("reused=%v outdated=%v, want reused=true outdated=false", reused, state.Outdated)
 	}
 }
 
@@ -357,5 +408,81 @@ func TestTunnelArgsHasKeepalive(t *testing.T) {
 		if !strings.Contains(joined, opt) {
 			t.Fatalf("tunnel ssh missing %s: %q", opt, joined)
 		}
+	}
+}
+
+// aliveScriptTransport answers pidAliveCmd with a scripted number of "alive"
+// responses before reporting dead, so KillServer's term-then-kill sequence is
+// observable without real processes.
+type aliveScriptTransport struct {
+	*fakeTransport
+	pid   int
+	alive int
+}
+
+func (a *aliveScriptTransport) Exec(command string) (ExecResult, error) {
+	if command == pidAliveCmd(a.pid) {
+		a.fakeTransport.execCalls = append(a.fakeTransport.execCalls, command)
+		if a.alive > 0 {
+			a.alive--
+			return ExecResult{ExitCode: 0}, nil
+		}
+		return ExecResult{ExitCode: 1}, nil
+	}
+	return a.fakeTransport.Exec(command)
+}
+
+func TestKillServer_TermThenKill(t *testing.T) {
+	oldAttempts, oldInterval := killServerPollAttempts, killServerPollInterval
+	killServerPollAttempts, killServerPollInterval = 5, time.Millisecond
+	defer func() { killServerPollAttempts, killServerPollInterval = oldAttempts, oldInterval }()
+
+	ft := newFakeTransport()
+	tpt := &aliveScriptTransport{fakeTransport: ft, pid: 42, alive: 2}
+	if err := KillServer(tpt, 42); err != nil {
+		t.Fatalf("KillServer: %v", err)
+	}
+	if !slices.Contains(ft.execCalls, killTERMCmd(42)) {
+		t.Fatalf("missing SIGTERM command in %v", ft.execCalls)
+	}
+	if slices.Contains(ft.execCalls, killKILLCmd(42)) {
+		t.Fatalf("escalated to SIGKILL though the pid died from SIGTERM: %v", ft.execCalls)
+	}
+	aliveProbes := 0
+	for _, c := range ft.execCalls {
+		if c == pidAliveCmd(42) {
+			aliveProbes++
+		}
+	}
+	if aliveProbes != 3 {
+		t.Fatalf("pid probes = %d, want 3 (alive, alive, dead): %v", aliveProbes, ft.execCalls)
+	}
+	if !slices.Contains(ft.execCalls, "rm -f "+shellQuotePath(remoteStateFilePath)) {
+		t.Fatalf("state file not removed: %v", ft.execCalls)
+	}
+}
+
+func TestKillServer_StillAlive(t *testing.T) {
+	oldAttempts, oldInterval := killServerPollAttempts, killServerPollInterval
+	killServerPollAttempts, killServerPollInterval = 2, time.Millisecond
+	defer func() { killServerPollAttempts, killServerPollInterval = oldAttempts, oldInterval }()
+
+	ft := newFakeTransport()
+	tpt := &aliveScriptTransport{fakeTransport: ft, pid: 7, alive: 100}
+	if err := KillServer(tpt, 7); err == nil {
+		t.Fatal("expected an error when the pid is still alive after SIGKILL")
+	}
+	if !slices.Contains(ft.execCalls, killKILLCmd(7)) {
+		t.Fatalf("expected SIGKILL escalation: %v", ft.execCalls)
+	}
+}
+
+func TestKillServer_InvalidPID(t *testing.T) {
+	ft := newFakeTransport()
+	if err := KillServer(ft, 0); err == nil {
+		t.Fatal("expected an error for a non-positive pid")
+	}
+	if len(ft.execCalls) != 0 {
+		t.Fatalf("expected no remote commands for an invalid pid, got %v", ft.execCalls)
 	}
 }

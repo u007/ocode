@@ -1,9 +1,20 @@
 package server
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
+
+// terminalListEntry is one live terminal session in the GET /api/terminal
+// inventory. Time is serialized as RFC3339 by encoding/json.
+type terminalListEntry struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"started_at"`
+	Attached  bool      `json:"attached"`
+}
 
 // terminalDetachTTL is how long a shell whose websocket went away is kept
 // alive waiting for the same terminal_id to reattach. It covers page reloads
@@ -16,6 +27,13 @@ import (
 // far sooner than the TTL — the TTL serves as a final safety net for
 // sessions where the ping goroutine itself couldn't detect the failure.
 const terminalDetachTTL = 30 * time.Minute
+
+// terminalDetachTTLRemote is the detach TTL used when the server runs in
+// --remote mode. The point of the remote terminal path is that the pty is a
+// child of the host's `ocode serve --remote`, so it must outlive a laptop
+// that is asleep overnight; 24 h keeps a detached shell through a full sleep
+// cycle while still bounding a truly abandoned one.
+const terminalDetachTTLRemote = 24 * time.Hour
 
 // terminalSessionTable owns every live pty shell keyed by the frontend's
 // terminal id, so a reconnecting socket can find and reattach to its shell
@@ -206,6 +224,32 @@ func (t *terminalSessionTable) count() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.sessions)
+}
+
+// listForProject returns the live, named sessions for a project key, sorted by
+// start time ascending. Anonymous sessions are excluded because they have no
+// id to reattach by.
+//
+// unpaginated: bounded by live pty count
+func (t *terminalSessionTable) listForProject(project string) []terminalListEntry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entries := make([]terminalListEntry, 0, len(t.sessions))
+	for _, s := range t.sessions {
+		if s == nil || s.project != project || !s.resumable {
+			continue
+		}
+		entries = append(entries, s.snapshot())
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		// Tie-break on id so a list computed from a map iteration with equal
+		// timestamps is still deterministic.
+		if entries[i].StartedAt.Equal(entries[j].StartedAt) {
+			return entries[i].ID < entries[j].ID
+		}
+		return entries[i].StartedAt.Before(entries[j].StartedAt)
+	})
+	return entries
 }
 
 // sealForShutdown refuses all future admissions (reserve/put) and returns the

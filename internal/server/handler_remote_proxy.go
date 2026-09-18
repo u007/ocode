@@ -156,6 +156,15 @@ func resolveProjectPath(r *http.Request) string {
 		return h
 	}
 
+	// 2b. ?project_path= query param. The terminal endpoints (WS + history +
+	// list) carry the project as project_path, and a WebSocket handshake cannot
+	// set the X-Ocode-Project header, so without this the proxy would admit the
+	// socket on host alone and never register the project on the remote — the
+	// remote's own project-root check would then 403 the shell.
+	if p := r.URL.Query().Get("project_path"); p != "" {
+		return p
+	}
+
 	// 3. project_path from a JSON POST body (for POST /api/chat).
 	// Read the body and replace r.Body so the proxy still forwards it.
 	if r.Method == http.MethodPost && r.Body != nil {

@@ -33,6 +33,7 @@ import (
 	"github.com/u007/ocode/internal/browse"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/paths"
+	"github.com/u007/ocode/internal/remote"
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/secretfile"
 	"github.com/u007/ocode/internal/snapshot"
@@ -300,6 +301,14 @@ func (s *Server) registerRoutes() {
 	// specific pattern ahead of the generic /api/ handlers by specificity,
 	// not registration order.
 	s.mux.HandleFunc("/api/remote/{host}/api/{rest...}", s.authMiddleware(s.handler.HandleRemoteProxy))
+	// Remote host lifecycle (local server, never proxied): status reports what
+	// the registry knows without connecting; connect brings the host up;
+	// restart kills and restarts the host's server. Registered next to the
+	// proxy; their literal {host}/status paths never collide with the
+	// {host}/api/{rest...} catch-all.
+	s.mux.HandleFunc("GET /api/remote/{host}/status", s.authMiddleware(s.handler.HandleRemoteStatus))
+	s.mux.HandleFunc("POST /api/remote/{host}/connect", s.authMiddleware(s.handler.HandleRemoteConnect))
+	s.mux.HandleFunc("POST /api/remote/{host}/restart", s.authMiddleware(s.handler.HandleRemoteRestart))
 
 	// Files
 	s.mux.HandleFunc("POST /api/files/undo", s.authMiddleware(s.handleUndo))
@@ -381,6 +390,7 @@ func (s *Server) registerRoutes() {
 	// authMiddleware's ?token= support.
 	s.mux.HandleFunc("GET /api/terminal/ws", s.authMiddleware(s.handleTerminalWS))
 	s.mux.HandleFunc("GET /api/terminal/processes", s.authMiddleware(s.handleTerminalProcesses))
+	s.mux.HandleFunc("GET /api/terminal", s.authMiddleware(s.handler.HandleTerminalList))
 	s.mux.HandleFunc("DELETE /api/terminal/{id}", s.authMiddleware(s.handleTerminalKill))
 	s.mux.HandleFunc("GET /api/terminal/{id}/history", s.authMiddleware(s.handleTerminalHistory))
 	s.mux.HandleFunc("GET /api/config/advisor", s.authMiddleware(s.handleGetAdvisor))
@@ -546,7 +556,7 @@ func realIP(r *http.Request) string {
 // remoteWSProtocolPrefix namespaces the token carried in Sec-WebSocket-
 // Protocol so it can't collide with a real subprotocol a future WS endpoint
 // might negotiate.
-const remoteWSProtocolPrefix = "ocode.bearer."
+const remoteWSProtocolPrefix = remote.WSProtocolPrefix
 
 // remoteWSToken extracts the bearer token from a Sec-WebSocket-Protocol
 // header value (which may list multiple comma-separated protocols, per
@@ -1417,6 +1427,11 @@ func (s *Server) SetWorkDir(dir string) {
 // before constructing the listener.
 func (s *Server) SetRemoteMode(v bool) {
 	s.remoteMode = v
+	if v {
+		// The terminal pty is a child of the host's --remote process; a
+		// detached shell must survive a laptop asleep overnight.
+		s.handler.SetTerminalDetachTTL(terminalDetachTTLRemote)
+	}
 }
 
 // remoteServeState is the JSON shape written to ~/.ocode/remote/serve.json

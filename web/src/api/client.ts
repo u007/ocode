@@ -490,6 +490,28 @@ export async function readSSEStream<T = unknown>(
   if (buffer) dispatchFrame(buffer);
 }
 
+/** Calls one remote-host lifecycle endpoint (status/connect/restart). Those
+ *  live at /api/remote/{host}/<action> on the LOCAL server, so the path is
+ *  built here rather than via the host-prefixing fetchJSON. On a non-2xx the
+ *  thrown Error carries the body's `error` and `stage` so the UI can say which
+ *  stage failed (remote-connect / remote-kill / remote-register). */
+async function remoteLifecycleRequest<T>(path: string, method: "GET" | "POST"): Promise<T> {
+  const res = await fetch(apiPath(path), { method, headers: authHeaders() });
+  if (!res.ok) {
+    reportAuthFailure(res.status);
+    const body = (await res.json().catch(() => ({}))) as { error?: string; stage?: string };
+    const message = body.error || res.statusText || `HTTP ${res.status}`;
+    throw new Error(body.stage ? `${message} (stage: ${body.stage})` : message);
+  }
+  const text = await res.text();
+  if (!text.trim()) return undefined as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`Non-JSON response from ${path} (status ${res.status})`);
+  }
+}
+
 export const api = {
   listSessions: (opts?: { limit?: number; offset?: number }) => {
     const params = new URLSearchParams();
@@ -1100,6 +1122,34 @@ export const api = {
   // status without a TUI bridge.
   getSessionStatus: (id: string, host?: string) =>
     fetchJSON<TUIStatus>(`/api/sessions/${id}/status`, undefined, host),
+  // ── Remote host lifecycle (local server, never proxied) ──
+  // These hit /api/remote/{host}/<action> on the local server. status never
+  // connects; connect brings the host up; restart kills and restarts its
+  // `ocode serve --remote` (unguarded — running turns and terminals die).
+  getRemoteHostStatus: (host: string) =>
+    remoteLifecycleRequest<import("../api/types").RemoteHostStatus>(
+      `/api/remote/${encodeURIComponent(host)}/status`,
+      "GET",
+    ),
+  connectRemoteHost: (host: string) =>
+    remoteLifecycleRequest<import("../api/types").RemoteHostStatus>(
+      `/api/remote/${encodeURIComponent(host)}/connect`,
+      "POST",
+    ),
+  restartRemoteHost: (host: string) =>
+    remoteLifecycleRequest<import("../api/types").RemoteHostStatus>(
+      `/api/remote/${encodeURIComponent(host)}/restart`,
+      "POST",
+    ),
+  // Live terminals on a remote host, via the existing reverse proxy. The
+  // project header lets the proxy register the project on first use.
+  listRemoteTerminals: (host: string, projectPath: string) =>
+    fetchJSON<{ terminals: import("../api/types").RemoteTerminalEntry[] }>(
+      `/api/terminal?project_path=${encodeURIComponent(projectPath)}`,
+      undefined,
+      host,
+      projectPath,
+    ).then((r) => r.terminals ?? []),
   getSmallModelWithEnabled: () =>
     fetchJSON<{ model: string; enabled: boolean; priority: string }>(
       "/api/config/small-model",

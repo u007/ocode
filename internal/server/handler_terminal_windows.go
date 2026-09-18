@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 )
 
 // HandleTerminalWS is unavailable on Windows: the pty bridge is built on
@@ -27,6 +28,12 @@ func (h *Handler) HandleTerminalKill(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotImplemented, "interactive terminal is not supported on Windows")
 }
 
+// HandleTerminalList mirrors the Unix inventory endpoint: no pty sessions
+// exist on Windows, so the route is present but unimplemented.
+func (h *Handler) HandleTerminalList(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotImplemented, "interactive terminal is not supported on Windows")
+}
+
 // HandleTerminalHistory mirrors the other terminal stubs so the history route
 // remains present in the Windows build even though no pty log is created.
 func (h *Handler) HandleTerminalHistory(w http.ResponseWriter, r *http.Request) {
@@ -38,10 +45,18 @@ func (h *Handler) HandleTerminalHistory(w http.ResponseWriter, r *http.Request) 
 type terminalSession struct {
 	resumable bool
 	project   string
+	startedAt time.Time
+	title     string
 }
 
 func (s *terminalSession) hasExited() bool { return true }
 func (s *terminalSession) kill()           {}
+
+// snapshot is never reached on Windows (no pty sessions exist) but must exist
+// for terminalSessionTable.listForProject to compile.
+func (s *terminalSession) snapshot() terminalListEntry {
+	return terminalListEntry{}
+}
 
 // shutdownGracefully is a no-op on Windows: no pty processes exist (see
 // terminal_kill_windows.go), so there is nothing to signal or drain. Present

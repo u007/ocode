@@ -68,7 +68,7 @@ describe("buildTerminalWsConnection", () => {
     }
   });
 
-  it("adds host for a remote (SSH/WSL) project so the server opens the shell there", () => {
+  it("routes a remote (SSH/WSL) project through the remote proxy, with no host/port params", () => {
     const { url } = buildTerminalWsConnection({
       token: "",
       projectPath: "~/app",
@@ -76,8 +76,11 @@ describe("buildTerminalWsConnection", () => {
       terminalId: "t1",
       isRemote: false,
     });
-    expect(url).toContain("host=dev%40box");
+    expect(url).toContain("/api/remote/dev%40box/api/terminal/ws");
     expect(url).toContain("project_path=%7E%2Fapp");
+    expect(url).toContain("terminal_id=t1");
+    expect(url).not.toContain("host=");
+    expect(url).not.toContain("port=");
   });
 
   it("adds a history cursor for a gap-free REST-to-WebSocket handoff", () => {
@@ -91,15 +94,15 @@ describe("buildTerminalWsConnection", () => {
     expect(url).toContain("history_offset=12345");
   });
 });
-
-  it("includes an edited SSH port for remote terminal connections", () => {
-    const { url } = buildTerminalWsConnection({
-      token: "",
+  it("keeps a remote project's local token out of the proxied URL and offers it as a subprotocol", () => {
+    const { url, protocols } = buildTerminalWsConnection({
+      token: "localtok",
       projectPath: "/srv/app",
       host: "bob@new.example",
-      remotePort: 2222,
       terminalId: "t1",
-      isRemote: false,
+      isRemote: true,
     });
-    expect(url).toContain("port=2222");
+    expect(url).toContain("/api/remote/bob%40new.example/api/terminal/ws");
+    expect(url).not.toContain("localtok");
+    expect(protocols).toEqual(["ocode.bearer.localtok"]);
   });

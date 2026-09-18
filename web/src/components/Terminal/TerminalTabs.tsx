@@ -27,7 +27,7 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
   function TerminalTabs({ active, projectPath, host, remotePort }, ref) {
     const { available, loading, error, scrollbackLines, fontFamily, fontSize } = useTerminalConfig();
     const { state: terminalState, activate, openTerminal, closeTerminal } = useTerminalState();
-    const { terminals: peekedTerminals, activeId, live } = getProjectTerminals(terminalState, projectPath);
+    const { terminals: peekedTerminals, activeId, live } = getProjectTerminals(terminalState, projectPath, host);
     // Real panels (real pty + WebSocket) only exist once this project is live —
     // a peeked (never-visited) project's saved ids must stay pty-less until the
     // user actually switches to it, or every registered project would open a
@@ -37,17 +37,17 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
 
     useEffect(() => {
       if (!active || !available) return;
-      activate(projectPath);
-    }, [active, available, projectPath, activate]);
+      activate(projectPath, host);
+    }, [active, available, projectPath, host, activate]);
 
     useImperativeHandle(ref, () => ({
-      openTerminal: () => openTerminal(projectPath),
+      openTerminal: () => openTerminal(projectPath, host),
       closeActiveTerminal: () => {
         if (!activeId || !terminals.some((t) => t.id === activeId)) return false;
         // `closeTerminal` (the store action) returns false if the live terminal
         // is already gone — so a second synchronous call (same render tick)
         // falls through to false instead of removing a neighbour.
-        return closeTerminal(projectPath, activeId);
+        return closeTerminal(projectPath, activeId, host);
       },
       focusTerminal: (id?: string) => {
         const target = id ?? activeId;
@@ -77,7 +77,7 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
       <div className="relative h-full bg-card">
         {active && (
           <div className={activeId === PROCESSES_TAB_ID ? "absolute inset-0" : "absolute inset-0 hidden"}>
-            <ProcessesPanel projectPath={projectPath} />
+            <ProcessesPanel projectPath={projectPath} host={host} />
           </div>
         )}
 

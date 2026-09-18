@@ -136,6 +136,7 @@ vi.mock("../../stores/projectStore", () => ({
     state: stateFake,
     ...actionsFake,
   }),
+  projectSessionKey: (path: string, host?: string) => (host ? `${host}::${path}` : path),
 }));
 
 vi.mock("../../stores/chatStore", () => ({
@@ -146,6 +147,19 @@ vi.mock("../../stores/chatStore", () => ({
 vi.mock("../../stores/terminalStore", () => ({
   useTerminalState: () => ({
     state: terminalStateFake,
+  }),
+  getProjectTerminals: () => ({ terminals: [], activeId: "", live: false }),
+}));
+
+vi.mock("../../hooks/useRemoteHostStatus", () => ({
+  useRemoteHostStatus: () => ({
+    status: { host: "", connected: false, version: "", local_version: "", outdated: false, pid: 0 },
+    loading: false,
+    error: null,
+    busy: "idle",
+    refresh: vi.fn(),
+    connect: vi.fn(),
+    restart: vi.fn(),
   }),
 }));
 
@@ -416,5 +430,19 @@ describe("ProjectSidebar remote right-click edit", () => {
     const railButton = screen.getByLabelText("devbox:/home/user/app");
     fireEvent.contextMenu(railButton);
     expect(screen.getByText("Remove from group")).toBeDefined();
+  });
+
+  it("renders the remote status line only for host projects", () => {
+    stateFake.projects = [remoteProject("/home/user/app", "devbox"), project("/local/app", "")];
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    // One host row gets a status line; the local row does not.
+    expect(screen.getAllByTestId("remote-project-status")).toHaveLength(1);
+  });
+
+  it("a host row's context menu exposes Restart remote server", () => {
+    const { container } = render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    const nameNode = container.querySelector(".group.relative .truncate.font-medium");
+    fireEvent.contextMenu(nameNode!);
+    expect(screen.getByText("Restart remote server")).toBeDefined();
   });
 });

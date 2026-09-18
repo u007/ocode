@@ -779,6 +779,33 @@ func (h *Handler) HandleTerminalProcesses(w http.ResponseWriter, r *http.Request
 	}
 }
 
+type terminalListResponse struct {
+	Terminals []terminalListEntry `json:"terminals"`
+}
+
+// HandleTerminalList returns the live, named terminal sessions for one project
+// so the SPA can offer reattach when localStorage no longer knows the ids
+// (cleared storage, a new machine, or a remote project whose tabs were never
+// saved locally). Project resolution and the access gate mirror the history
+// handler; anonymous sessions are excluded by the table.
+func (h *Handler) HandleTerminalList(w http.ResponseWriter, r *http.Request) {
+	if !h.terminalAccessAllowed() {
+		writeError(w, http.StatusForbidden, "terminal requires server authentication or a loopback bind address")
+		return
+	}
+	project, status, message := h.resolveTerminalHistoryProject(r)
+	if status != 0 {
+		writeError(w, status, message)
+		return
+	}
+	// unpaginated: bounded by live pty count
+	entries := h.terminalSessions.listForProject(project)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(terminalListResponse{Terminals: entries}); err != nil {
+		log.Printf("terminal list: failed to encode response: %v", err)
+	}
+}
+
 // remoteProjectRegistered reports whether (host, path) is a remote project
 // entry in the projects store. Path is matched verbatim, as AddRemote
 // stores it (no Clean — its conventions belong to the remote).

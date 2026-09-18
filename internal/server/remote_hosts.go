@@ -7,11 +7,13 @@ import (
 	"log"
 	"net/http/httputil"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/u007/ocode/internal/remote"
 	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/version"
 )
 
 // remoteHostWorkspace is the subset of remote.RemoteWorkspace that the
@@ -21,7 +23,33 @@ type remoteHostWorkspace interface {
 	APIURL() string
 	Token() string
 	Disconnect() error
+	// ServeState / ServeTransport expose the discovered server state and the
+	// host transport for the lifecycle endpoints (status/restart). They are
+	// named with the Serve prefix because RemoteWorkspace already has State and
+	// Transport fields, and Go forbids a method sharing a field's name.
+	ServeState() remote.ServeState
+	ServeTransport() remote.Transport
 }
+
+// remoteHostStatus is the JSON body of the remote host lifecycle endpoints.
+type remoteHostStatus struct {
+	Host         string `json:"host"`
+	Connected    bool   `json:"connected"`
+	Version      string `json:"version"`
+	LocalVersion string `json:"local_version"`
+	Outdated     bool   `json:"outdated"`
+	PID          int    `json:"pid"`
+}
+
+// remoteHostStageError tags a lifecycle failure with the stage that failed so
+// the HTTP handler can report it in the JSON error body's `stage` field.
+type remoteHostStageError struct {
+	Stage string
+	Err   error
+}
+
+func (e *remoteHostStageError) Error() string { return e.Err.Error() }
+func (e *remoteHostStageError) Unwrap() error { return e.Err }
 
 // remoteHostEntry holds a connected workspace for a single host. The per-entry
 // mutex serializes concurrent connect attempts for the same host without
@@ -268,6 +296,87 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 
 	log.Printf("remote: connected to host %s at %s (took %v)", host, ws.APIURL(), time.Since(start))
 	return ws, nil
+}
+
+// status reports what the registry knows about host without connecting. A host
+// that has never connected (or was dropped) reports connected=false and no
+// version; LocalVersion is always the local build's version.
+func (reg *remoteHostRegistry) status(host string) remoteHostStatus {
+	st := remoteHostStatus{Host: host, LocalVersion: version.Version}
+	reg.mu.Lock()
+	if e, ok := reg.byHost[host]; ok {
+		e.mu.Lock()
+		if e.connected && e.workspace != nil {
+			ws := e.workspace.ServeState()
+			st.Connected = true
+			st.Version = ws.Version
+			st.Outdated = ws.Outdated
+			st.PID = ws.PID
+		}
+		e.mu.Unlock()
+	}
+	reg.mu.Unlock()
+	return st
+}
+
+// connectHost brings host up (discover-or-start the remote server, open the
+// tunnel, register the project) and returns the resulting status. Named
+// connectHost, not connect, because the registry already has a connect field.
+func (reg *remoteHostRegistry) connectHost(host, path string, port int) (remoteHostStatus, error) {
+	if _, err := reg.workspaceForPort(host, path, port); err != nil {
+		return reg.status(host), &remoteHostStageError{Stage: "remote-connect", Err: err}
+	}
+	return reg.status(host), nil
+}
+
+// snapshotForRestart reads the connected workspace's transport and pid and the
+// set of paths registered on the host, all before drop clears them.
+func (reg *remoteHostRegistry) snapshotForRestart(host string) (remote.Transport, int, []string) {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	var transport remote.Transport
+	pid := 0
+	if e, ok := reg.byHost[host]; ok {
+		e.mu.Lock()
+		if e.connected && e.workspace != nil {
+			transport = e.workspace.ServeTransport()
+			pid = e.workspace.ServeState().PID
+		}
+		e.mu.Unlock()
+	}
+	paths := make([]string, 0, len(reg.registeredPaths[host]))
+	for p := range reg.registeredPaths[host] {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	return transport, pid, paths
+}
+
+// restart kills the connected remote server (if any), drops the host entry,
+// reconnects (which starts a fresh server at the local version), and
+// re-registers every project that was registered on the host. Restart is
+// unguarded by design: it kills running turns and terminals. On any failure the
+// entry is left dropped so the next request reconnects; the returned error
+// carries the stage that failed.
+func (reg *remoteHostRegistry) restart(host, path string, port int) (remoteHostStatus, error) {
+	transport, pid, savedPaths := reg.snapshotForRestart(host)
+	// Drop first so a failure at any later stage leaves no half-live entry.
+	reg.drop(host)
+	if transport != nil && pid > 0 {
+		if err := remote.KillServer(transport, pid); err != nil {
+			return reg.status(host), &remoteHostStageError{Stage: "remote-kill", Err: err}
+		}
+	}
+	ws, err := reg.workspaceForPort(host, path, port)
+	if err != nil {
+		return reg.status(host), &remoteHostStageError{Stage: "remote-connect", Err: err}
+	}
+	for _, p := range savedPaths {
+		if err := ensureRemoteProject(context.Background(), ws, reg, host, p); err != nil {
+			return reg.status(host), &remoteHostStageError{Stage: "remote-register", Err: err}
+		}
+	}
+	return reg.status(host), nil
 }
 
 // errConnectSuperseded is returned when a drop()/closeAll() removed the entry

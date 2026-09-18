@@ -42,6 +42,7 @@ import {
   MessageSquare,
   Server,
   Globe,
+  RotateCw,
 } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -50,6 +51,8 @@ import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "../ui/
 import { Separator } from "../ui/separator";
 import DirectoryBrowser from "./DirectoryBrowser";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
+import { RemoteProjectStatus } from "./RemoteProjectStatus";
+import { useRemoteHostStatus } from "../../hooks/useRemoteHostStatus";
 import { computeProjectDrag, projectDragKey } from "../../lib/projectDrag";
 import { buttonVariants } from "../ui/button";
 import { cn } from "@/lib/utils";
@@ -365,6 +368,9 @@ function SortableProjectRow({
   const indicators = useProjectIndicators(project.path);
   const status = indicators.status;
   const rename = useInlineRename(project.name, onRename);
+  // Remote host status is owned here (not inside RemoteProjectStatus) so the
+  // row's context menu can trigger the same Restart. Disabled for local rows.
+  const hostStatus = useRemoteHostStatus(project.host, !!project.host);
   // Warm both of the project's loads while the pointer is still on the row:
   // the session list (so `selectProject` finds a cache hit and the switch never
   // blocks on a round-trip) and the project's active transcript (so the chat
@@ -379,6 +385,9 @@ function SortableProjectRow({
   const contextItems: ContextMenuItem[] = useMemo(() => {
     const items: ContextMenuItem[] = [
       ...(project.host && onEdit ? [{ label: "Edit connection", icon: <Pencil className="w-3.5 h-3.5" />, onClick: onEdit }] : []),
+      ...(project.host
+        ? [{ label: "Restart remote server", icon: <RotateCw className="w-3.5 h-3.5" />, onClick: hostStatus.restart }]
+        : []),
       { label: "Rename", icon: <Pencil className="w-3.5 h-3.5" />, onClick: rename.start },
       { label: "Remove", icon: <Trash2 className="w-3.5 h-3.5" />, onClick: onRemove, destructive: true },
       { separator: true, label: "", onClick: () => {} },
@@ -419,7 +428,7 @@ function SortableProjectRow({
     }
 
     return items;
-  }, [groups, project.group, rename.start, onRemove, onCreateGroup, onAddToGroup, onRemoveFromGroup]);
+  }, [groups, project.group, project.host, rename.start, onRemove, onCreateGroup, onAddToGroup, onRemoveFromGroup, onEdit, hostStatus.restart]);
 
   const {
     attributes,
@@ -503,6 +512,7 @@ function SortableProjectRow({
                 )}
               </>
             )}
+            {project.host && <RemoteProjectStatus project={project} statusState={hostStatus} />}
           </div>
           <span className="flex items-center gap-1 shrink-0">
             <ProjectBadges indicators={indicators} />
