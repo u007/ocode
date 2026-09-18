@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Bundle the ocode-desktop binary into a minimal macOS .app.
-# Usage: scripts/bundle-macos.sh <binary> <output.app>
+# Usage: scripts/bundle-macos.sh <binary> <output.app> [remote-binaries/<version>]
+# The optional version directory must contain all four remote CLI targets.
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  echo "usage: $0 <binary> <output.app>" >&2
+if [[ $# -ne 2 && $# -ne 3 ]]; then
+  echo "usage: $0 <binary> <output.app> [remote-binaries/<version>]" >&2
   exit 1
 fi
 
@@ -18,11 +19,41 @@ if [[ ! -f "$BINARY" ]]; then
   exit 1
 fi
 
+# Validate the complete set before removing an existing app. Two-argument
+# callers continue to produce the original desktop-only bundle.
+REMOTE_DIR=""
+TARGETS=(linux-amd64 linux-arm64 darwin-amd64 darwin-arm64)
+if [[ $# -eq 3 ]]; then
+  REMOTE_DIR="$3"
+  if [[ ! -d "$REMOTE_DIR" ]]; then
+    echo "error: remote binary version directory not found: $REMOTE_DIR" >&2
+    exit 1
+  fi
+  REMOTE_DIR="$(cd "$REMOTE_DIR" && pwd)"
+  REMOTE_VERSION="$(basename "$REMOTE_DIR")"
+  for target in "${TARGETS[@]}"; do
+    if [[ ! -f "$REMOTE_DIR/ocode-$target" || ! -s "$REMOTE_DIR/ocode-$target" ]]; then
+      echo "error: remote binary missing or empty: $REMOTE_DIR/ocode-$target" >&2
+      exit 1
+    fi
+  done
+fi
+
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BINARY" "$APP/Contents/MacOS/ocode"
 chmod +x "$APP/Contents/MacOS/ocode"
+
+# Resources must be in place before any downstream bundle codesigning.
+if [[ -n "$REMOTE_DIR" ]]; then
+  REMOTE_DEST="$APP/Contents/Resources/remote-binaries/$REMOTE_VERSION"
+  mkdir -p "$REMOTE_DEST"
+  for target in "${TARGETS[@]}"; do
+    cp "$REMOTE_DIR/ocode-$target" "$REMOTE_DEST/ocode-$target"
+    chmod +x "$REMOTE_DEST/ocode-$target"
+  done
+fi
 
 if [[ -f "$ICON" ]]; then
   cp "$ICON" "$APP/Contents/Resources/appicon.icns"

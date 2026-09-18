@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -68,21 +69,34 @@ func BinaryExists(t Transport, ver string) bool {
 // LocalBuild is a locally-produced (or reused) binary ready to upload.
 type LocalBuild struct {
 	Path   string // local filesystem path
-	Reused bool   // true when the running binary itself was reused (platform match)
+	Reused bool   // true for a borrowed executable/bundled artifact; callers must not delete it
 }
 
-// PrepareLocalBuild returns a binary for goos/goarch, either by reusing the
-// currently-running executable (when its platform matches) or by
-// cross-compiling from a source checkout. moduleDir is the ocode repo root
-// (containing go.mod); pass "" to auto-detect from the running executable's
-// location and, failing that, the current working directory.
+// PrepareLocalBuild prefers a version-matched bundled CLI, then the running
+// CLI (never the desktop GUI) on a matching platform, then a source build.
+// moduleDir is the ocode repo root (containing go.mod); pass "" to search
+// upward from the current working directory for the source-build fallback.
 func PrepareLocalBuild(goos, goarch, moduleDir string) (LocalBuild, error) {
-	if goos == runtime.GOOS && goarch == runtime.GOARCH {
-		if exe, err := os.Executable(); err == nil {
-			if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-				return LocalBuild{Path: resolved, Reused: true}, nil
-			}
-		}
+	exe, _ := os.Executable()
+	info, ok := debug.ReadBuildInfo()
+	isCLI := ok && info.Path == "github.com/u007/ocode"
+	return prepareLocalBuild(goos, goarch, moduleDir, exe, isCLI)
+}
+
+func prepareLocalBuild(goos, goarch, moduleDir, exe string, isCLI bool) (LocalBuild, error) {
+	if _, _, err := unameToGoEnv(goos, goarch); err != nil {
+		return LocalBuild{}, err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	if path, err := bundledRemoteBinary(exe, goos, goarch); err != nil {
+		return LocalBuild{}, err
+	} else if path != "" {
+		return LocalBuild{Path: path, Reused: true}, nil
+	}
+	if isCLI && exe != "" && goos == runtime.GOOS && goarch == runtime.GOARCH {
+		return LocalBuild{Path: exe, Reused: true}, nil
 	}
 
 	dir := moduleDir
@@ -90,7 +104,7 @@ func PrepareLocalBuild(goos, goarch, moduleDir string) (LocalBuild, error) {
 		var err error
 		dir, err = findModuleRoot()
 		if err != nil {
-			return LocalBuild{}, fmt.Errorf("no local binary matches %s/%s and no ocode source checkout found to cross-compile from (%w); install Go and run from the ocode repo, or connect to a matching-platform host", goos, goarch, err)
+			return LocalBuild{}, fmt.Errorf("no bundled CLI for %s/%s version %s and no ocode source checkout found to cross-compile from (%w); rebuild the desktop app with make desktop-app, or install Go and run from the ocode repo", goos, goarch, version.Version, err)
 		}
 	}
 

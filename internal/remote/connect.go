@@ -118,10 +118,10 @@ func runPrepareStages(opts ConnectOptions, progress *Progress) (Transport, *tool
 		progress.Start("build", fmt.Sprintf("ocode v%s", ver))
 		progress.Done("already installed")
 	} else {
-		progress.Start("build", fmt.Sprintf("building ocode v%s for %s/%s", ver, goos, goarch))
+		progress.Start("build", fmt.Sprintf("preparing ocode v%s for %s/%s", ver, goos, goarch))
 		build, err := PrepareLocalBuild(goos, goarch, opts.ModuleDir)
 		if err != nil {
-			progress.Fail(err, "install Go, or run from an ocode source checkout")
+			progress.Fail(err, "rebuild with make desktop-app, or install Go and run from an ocode source checkout")
 			return nil, sup, err
 		}
 		if !build.Reused {

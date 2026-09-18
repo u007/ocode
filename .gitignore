@@ -2,6 +2,7 @@
 /ocode-desktop
 /bin/ocode
 /bin/ocode-desktop
+/bin/remote-binaries/
 *.test
 *.out
 .env
@@ -60,6 +61,9 @@ web/dist/*
 !web/dist/.gitkeep
 *.tsbuildinfo
 internal/agent/models-snapshot.json
+# Built binary of tools/gen-models-snapshot (`go build -o gen-models-snapshot …`);
+# never commit the platform-specific artifact.
+/gen-models-snapshot
 ocodeconfig.json
 .opencode/snapshots
 
@@ -91,4 +95,3 @@ ocode.exe
 .ocode/uploads
 
 .medusa/
-

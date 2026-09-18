@@ -1,5 +1,59 @@
 # Changelog
 
+## 2026-09-18 — Web/desktop: visible `/compact` feedback beside the composer
+
+- Request: `/compact` ran silently in the web/desktop UI — no indication it was in progress, that it completed, or that it failed.
+
+- **State store (`web/src/lib/compactionState.ts`, new).** Session-keyed `useSyncExternalStore` state (`active` / `complete` / `error`), in-memory like `tabQueue`/`tabDrafts`: survives `SET_MESSAGES` and composer remounts, not a page reload. `handleCompact` sets `active` synchronously *before* awaiting the API, closing the submission race; the old `ocode:compact-start`/`ocode:compact` `CustomEvent` bridge is gone. `dismissCompaction` refuses to hide an active operation.
+
+- **Status UI (`web/src/components/Chat/CompactionStatus.tsx`, new; rendered by `ChatInput` above the composer).** Spinner + elapsed-seconds counter while active, before/after message counts on complete, a persistent dismissible error on failure, and a "Compaction queued — waiting for the current work to finish" line when `/compact` was entered mid-turn. This deliberately lives outside the transcript, which `SET_MESSAGES` replaces right after a compaction — the old ephemeral transcript banner in `ChatPanel` is removed.
+
+- **Queue/submit serialization (`ChatInput.tsx`).** Compaction now counts as busy: sends and command submissions are parked in `tabQueue`, and the queue drain takes a single-owner guard and re-checks compaction state across its `await`, so follow-on work never starts on top of a running compaction.
+
+- Tests: `web/src/components/Chat/ChatInput.compaction.test.tsx`; design spec `docs/superpowers/specs/2026-09-18-web-compact-feedback-design.md`. README `/compact` row notes the web/desktop feedback.
+
+## 2026-09-18 — Auto-continue pre-merge fixes: resumed-step transcript, scoped sync reply, persisted notices
+
+- Four review findings against the 2026-09-17 auto-continue feature, all fixed inside the server turn loop (`internal/server/agent_session.go`):
+  - **Resumed Step lost the prior Step's rows.** `Agent.Step` returns its new messages without mutating the caller's slice, so the loop appended them only to `as.messages` and the next Step re-planned from scratch instead of continuing. The LLM input slice is now kept in lockstep (`messages = append(messages, resp...)`).
+  - **Synchronous reply leaked the whole session.** The string returned to `POST /api/chat` (no `async:true`) was built from all of `as.messages`, growing every turn for scheduler/Telegram/external callers; it now spans `as.messages[turnBaseLen:]` — this turn only.
+  - **Mid-chain notices never reached disk.** The auto-continue notice and resume prompt are appended directly to `messages`; a new `agentSession.liveAppend` (wired by `wireLivePersist` for headless turns) mirrors them into the in-flight live-persist view, so the turn-end reconcile sees a prefix instead of duplicating/reordering rows on a concurrent-writer conflict.
+  - **UI-only notices were serialized to OpenAI-compatible providers.** `convertToOpenAIMessages` emitted `{"role":"assistant","content":""}` for a notice-only row, which strict servers reject; it is now skipped (Anthropic already dropped zero-block messages).
+
+- **One confidence policy.** `resolveAutoJudgeMinConfidence()` / `autoJudgeMinConfidenceDefault` (0.85) now back the auto-permission TypeSafe verdict, the interpreter-effects verifier, and auto-continue triage; a configured `permissions.auto.min_confidence` still wins.
+
+- **Typesafe triage sees the real end reason.** `runAutoContinueJudgeTypesafe` takes the Step error and `buildTypesafeAutoContinueState` writes `turn_ended` from it (failed / cut off by step limit / natural finish) rather than a hardcoded "finished within budget". The step-limit short-circuit was removed because every production dispatcher owns that hard signal.
+
+- **TUI parity.** Both `/rc` settle branches now append the same transient decline hint (`agentAutoContinueDeclineDetail`) as the generic streamDone path, so a declined auto-continue never silently reads as done; `autoContinueMaxChain` aliases `agent.AutoContinueChainCap` instead of a literal 4.
+
+- Tests: `internal/server/agent_session_autocontinue_test.go` (+ resumed Step carries the prior tool row, + reply contains only this turn), `internal/agent/notice_serialization_test.go` (new), `internal/agent/autocontinue_typesafe_test.go` updated for the `stepErr` parameter. Docs: `docs/concepts/server-auto-continue.md`, `docs/gotchas/auto-continue-turn-transcript-rebase.md`.
+
+## 2026-09-18 — Fixes: computer-permission report, agent-runs routing fallback, question-answer shape
+
+- **Computer-use permission report (`internal/computer/permissions*.go`).** `PermissionReport.Granted` is now documented and computed as "every grant this platform can *detect* is present": macOS Screen Recording has no scriptable grant poll, so a successful `screencapture` probe proves capability, not consent — a blank screenshot is still possible with `Granted=true`. A probe that *errors* still clears `Granted`, and the report line + settings UI carry the Screen Recording caveat.
+
+- **Web agent-runs seed routing (`web/src/hooks/useAgentRuns.ts`, `web/src/lib/trustedProject.ts`).** New `countProjectMatches` distinguishes "path absent from the project list" (0) from "path claimed by two saved projects" (>1). While the project snapshot is loading, an absent path still defers; once it is `ready`, the project genuinely does not exist for this server, so the local seed runs (the pre-change behavior) instead of leaving the agents rail empty. Ambiguous paths keep deferring.
+
+- **Question-answer echo shape (`web/src/components/Chat/TurnParts.tsx`, `web/src/stores/chatStore.tsx`, `skills/ocode-web/SKILL.md`, `docs/gotchas/question-answer-transcript-echo.md`).** Corrected the claim that the optimistic client rewrite is byte-identical to the server payload: `questionAnswerPayload` re-marshals with `omitempty`, so it is shape-compatible, not byte-identical. Rendering is unaffected; do not assert byte equality.
+
+- **Repo hygiene.** Version 0.8.99 → 0.8.100; removed the committed ~9 MB `gen-models-snapshot` build artifact and gitignored it alongside `bin/remote-binaries/`.
+
+## 2026-09-18 — Desktop bundles cross-platform remote CLIs
+
+- `make desktop-app` bundles versioned Linux/macOS CLI binaries for amd64 and arm64. SSH and WSL provisioning prefer these executable-relative artifacts, so Finder launches from `/` no longer need Go or a local checkout to deploy a remote server.
+- Matching-platform provisioning no longer mistakes the desktop GUI executable for the CLI. Bundled artifacts are borrowed (never deleted after upload); source-build fallback and remote `--version` verification remain in place.
+- Added bundled-selection tests with cwd `/` and no Go on PATH, plus packaging validation for missing artifacts.
+
+## 2026-09-18 — Web Git tab: resizable, persisted file-list column
+
+- Request: "git tab on web ui pls allow for resizable column, persist it". The left column (Staged/Unstaged/Commits) was a fixed `w-72 md:w-80` and could not be widened even though diffs commonly need the room.
+
+- **Web (`web/src/components/Git/GitPanel.tsx`).** The left column now uses the existing `useResizableSidebar` hook (`storageKey: "ocode.ui.git-panel.width"`, default 288, min 180, max 520) instead of a fixed width class, and a `role="separator"` drag handle sits between it and the diff pane. The handle mirrors the app sidebar / file-tree pattern: pointer drag resizes, double-click resets to the default, and the width persists to `localStorage` on every change, so it survives a reload and the force-mounted panel's view switches.
+
+- **Hook (`web/src/hooks/useResizableSidebar.ts`).** `setPointerCapture` is now called with optional chaining (matching `useResizableSplit`), so the drag is safe where the API is absent (jsdom, older browsers).
+
+- Tests: `web/src/components/Git/GitPanel.test.tsx` (+2: drag resizes and writes `ocode.ui.git-panel.width`, pointerup stops tracking; a stored width is restored on mount and double-click resets). `npx vitest run` 1217/1218 green (the one failure, `ChatPanel` scroll-position, passes in isolation — full-suite flake, unrelated), `tsgo --noEmit` clean.
+
 ## 2026-09-17 — Auto-continue: server-turn loop + visible end-of-turn status + typesafe (Jev) triage
 
 - Requests: (1) "auto continue call after loop end is not working, seems still hang, no display output like its done or need more"; (2) "implement support for typesafe jev model alike auto permission, but this is triage to determine if we need to continue or end".

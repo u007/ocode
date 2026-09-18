@@ -5585,3 +5585,19 @@ func envVarPermissionRequest(args json.RawMessage, command, resolved string, isS
 		OutOfScopePath: outPath,
 	}
 }
+
+// autoJudgeMinConfidenceDefault is the shared default confidence floor for every
+// TypeSafe-backed judge: the auto-permission verdict (permission_typesafe.go),
+// the interpreter-effects verifier (permission_interpreter.go), and the
+// auto-continue triage (autocontinue_typesafe.go). A configured
+// permissions.auto.min_confidence overrides it.
+const autoJudgeMinConfidenceDefault = 0.85
+
+// resolveAutoJudgeMinConfidence returns the configured confidence floor, or the
+// shared default when unset. One policy value, one resolver.
+func (a *Agent) resolveAutoJudgeMinConfidence() float64 {
+	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.MinConfidence > 0 {
+		return a.config.Ocode.Permissions.Auto.MinConfidence
+	}
+	return autoJudgeMinConfidenceDefault
+}

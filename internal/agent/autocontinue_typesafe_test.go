@@ -52,7 +52,7 @@ func TestAutoContinueTypesafeContinueVerdict(t *testing.T) {
 	resume, detail, err := a.AutoContinueJudgeSync([]Message{
 		{Role: "user", Content: "build the thing"},
 		{Role: "assistant", Content: "Here is the first half of the imp"},
-	})
+	}, nil)
 	if err != nil || !resume {
 		t.Fatalf("expected resume, got resume=%v err=%v detail=%q", resume, err, detail)
 	}
@@ -93,7 +93,7 @@ func TestAutoContinueTypesafeEndVerdict(t *testing.T) {
 	resume, detail, err := a.AutoContinueJudgeSync([]Message{
 		{Role: "user", Content: "hi"},
 		{Role: "assistant", Content: "Done — all tests pass."},
-	})
+	}, nil)
 	if err != nil || resume {
 		t.Fatalf("expected no resume, got resume=%v err=%v", resume, err)
 	}
@@ -106,7 +106,7 @@ func TestAutoContinueTypesafeLowConfidenceFailsClosed(t *testing.T) {
 	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.4, "mid_task"))
 	resume, detail, err := a.AutoContinueJudgeSync([]Message{
 		{Role: "assistant", Content: "working on it"},
-	})
+	}, nil)
 	if err != nil || resume {
 		t.Fatalf("expected fail-closed no-resume, got resume=%v err=%v", resume, err)
 	}
@@ -117,7 +117,7 @@ func TestAutoContinueTypesafeLowConfidenceFailsClosed(t *testing.T) {
 
 func TestAutoContinueTypesafeUnknownChoiceIsNotResumed(t *testing.T) {
 	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("maybe", 0.9, "finished"))
-	resume, detail, err := a.AutoContinueJudgeSync(nil)
+	resume, detail, err := a.AutoContinueJudgeSync(nil, nil)
 	if err != nil || resume {
 		t.Fatalf("expected no resume on unknown choice, got resume=%v err=%v", resume, err)
 	}
@@ -128,7 +128,7 @@ func TestAutoContinueTypesafeUnknownChoiceIsNotResumed(t *testing.T) {
 
 func TestAutoContinueTypesafeMissingVerdictFailsClosed(t *testing.T) {
 	a, _ := newAutoContinueTypesafeJudge(t, `{"model":"jev-latest","answers":{},"usage":{"input_tokens":1,"output_tokens":1}}`)
-	resume, detail, err := a.AutoContinueJudgeSync(nil)
+	resume, detail, err := a.AutoContinueJudgeSync(nil, nil)
 	if err != nil || resume {
 		t.Fatalf("expected no resume, got resume=%v err=%v", resume, err)
 	}
@@ -137,23 +137,31 @@ func TestAutoContinueTypesafeMissingVerdictFailsClosed(t *testing.T) {
 	}
 }
 
-func TestAutoContinueTypesafeStepLimitShortCircuits(t *testing.T) {
+func TestAutoContinueTypesafeStepLimitStateReportedNotShortCircuited(t *testing.T) {
 	a, h := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("end", 0.99, "finished"))
-	// Simulate the step-limit cutoff: the hard signal must resume WITHOUT a
-	// triage call (the fake would answer "end", which must be ignored).
+	// The caller owns the hard /max-step signal: every production dispatcher
+	// checks StepLimitHit first and resumes deterministically without a triage
+	// call. If a caller were to invoke the judge anyway, the function must not
+	// fabricate a resume it might mistake for a judge verdict — it reports the
+	// real end reason in the state and lets the judge decide.
 	a.stepLimitHit.Store(true)
-	resume, detail, err := a.AutoContinueJudgeSync(nil)
-	if err != nil || !resume {
-		t.Fatalf("expected hard-signal resume, got resume=%v err=%v", resume, err)
+	resume, _, err := a.AutoContinueJudgeSync(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(detail, "step-limit") {
-		t.Fatalf("detail should name the step-limit path: %q", detail)
+	if resume {
+		t.Fatal("step-limited turn must not fabricate a resume without a triage call")
 	}
+
 	h.mu.Lock()
-	called := h.body != nil
+	body := h.body
 	h.mu.Unlock()
-	if called {
-		t.Fatal("step-limited turns must not spend a triage call")
+	if body == nil {
+		t.Fatal("the triage call should have been made (no step-limit short-circuit)")
+	}
+	state, _ := body["state"].(map[string]any)
+	if got, _ := state["turn_ended"].(string); !strings.Contains(got, "step limit") {
+		t.Fatalf("state.turn_ended = %q, want the step-limit wording", got)
 	}
 }
 
@@ -167,7 +175,7 @@ func TestAutoContinueTypesafeTransportErrorFailsClosed(t *testing.T) {
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
 		return newTypesafeClient("k", "jev-latest", "http://127.0.0.1:1")
 	}
-	resume, detail, err := a.AutoContinueJudgeSync(nil)
+	resume, detail, err := a.AutoContinueJudgeSync(nil, nil)
 	if err == nil || resume {
 		t.Fatalf("expected error + no resume, got resume=%v err=%v", resume, err)
 	}
@@ -216,9 +224,35 @@ func TestAutoContinueJudgeAsyncChatJudgeDetail(t *testing.T) {
 	}
 }
 
+func TestAutoContinueJudgeAsyncChatJudgeDetailOnError(t *testing.T) {
+	// A failed chat-judge call must carry the error in Detail: the TUI renders
+	// only Detail on a non-resume verdict, so without it a judge failure looks
+	// like a silent finish (the defect this feature exists to remove).
+	cfg := &config.Config{}
+	cfg.Ocode.AutoContinueModel = "opencode-go/mimo-v2.5"
+	a := NewAgent(nil, nil, cfg, nil)
+	prev := newClientFn
+	t.Cleanup(func() { newClientFn = prev })
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		return &MockClient{Err: errors.New("judge transport down")}
+	}
+	done := make(chan AutoContinueJudgeResult, 1)
+	a.OnAutoContinueJudge = func(r AutoContinueJudgeResult) { done <- r }
+	if !a.AutoContinueJudgeAsync([]Message{{Role: "assistant", Content: "partial"}}, 1) {
+		t.Fatal("Async dispatch should start")
+	}
+	r := <-done
+	if r.Err == nil {
+		t.Fatalf("expected the judge error to propagate, got %+v", r)
+	}
+	if !contains(r.Detail, "judge transport down") {
+		t.Fatalf("Detail must describe the failure, got %q", r.Detail)
+	}
+}
+
 func TestAutoContinueJudgeSyncNoModelNoCall(t *testing.T) {
 	a := &Agent{client: &MockClient{}, config: &config.Config{}}
-	resume, detail, err := a.AutoContinueJudgeSync(nil)
+	resume, detail, err := a.AutoContinueJudgeSync(nil, nil)
 	if resume || err != nil || detail != "" {
 		t.Fatalf("no judge configured: expected (false,\"\",nil), got (%v,%q,%v)", resume, detail, err)
 	}
@@ -245,9 +279,68 @@ func TestAutoContinueTypesafeStateTailBounded(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		msgs = append(msgs, Message{Role: "assistant", Content: "long content here"})
 	}
-	state := a.buildTypesafeAutoContinueState(msgs)
+	state := a.buildTypesafeAutoContinueState(msgs, nil)
 	tail := state["transcript_tail"].([]map[string]any)
 	if len(tail) != 6 {
 		t.Fatalf("tail = %d entries, want 6", len(tail))
+	}
+}
+
+func TestAutoContinueTypesafeStateTurnEndedReflectsReason(t *testing.T) {
+	a := &Agent{config: &config.Config{}}
+	msgs := []Message{{Role: "assistant", Content: "partial"}}
+
+	if got, _ := a.buildTypesafeAutoContinueState(msgs, nil)["turn_ended"].(string); !strings.Contains(got, "finished") {
+		t.Fatalf("natural-stop turn_ended = %q, want the natural completion wording", got)
+	}
+	if got, _ := a.buildTypesafeAutoContinueState(msgs, errors.New("boom"))["turn_ended"].(string); !strings.Contains(got, "boom") {
+		t.Fatalf("errored-turn turn_ended = %q, want the error", got)
+	}
+	a.stepLimitHit.Store(true)
+	if got, _ := a.buildTypesafeAutoContinueState(msgs, nil)["turn_ended"].(string); !strings.Contains(got, "step limit") {
+		t.Fatalf("step-limited turn_ended = %q, want the step-limit wording", got)
+	}
+}
+
+func TestAutoContinueTypesafeStateContentCapped(t *testing.T) {
+	a := &Agent{config: &config.Config{}}
+	big := strings.Repeat("x", 5000)
+	state := a.buildTypesafeAutoContinueState([]Message{{Role: "assistant", Content: big}}, nil)
+
+	tail, ok := state["transcript_tail"].([]map[string]any)
+	if !ok || len(tail) != 1 {
+		t.Fatalf("transcript_tail = %v, want one entry", state["transcript_tail"])
+	}
+	content, _ := tail[0]["content"].(string)
+	if !strings.HasSuffix(content, "…(truncated)") {
+		head := content
+		if len(head) > 40 {
+			head = head[:40]
+		}
+		t.Fatalf("content not marked truncated: %q", head)
+	}
+	// The cap is 4000 chars of body plus the marker; anything larger would blow
+	// up the Decide request.
+	if got, want := len(content), 4000+len("…(truncated)"); got != want {
+		t.Fatalf("capped content length = %d, want %d", got, want)
+	}
+}
+
+func TestAutoContinueTypesafeReasonLabelRendered(t *testing.T) {
+	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.95, "mid_task"))
+	a.SetMaxSteps(0)
+	_, detail, err := a.AutoContinueJudgeSync([]Message{
+		{Role: "assistant", Content: "I will continue with the next part"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := typesafeAutoContinueReasonLabel("mid_task")
+	if !strings.Contains(detail, want) {
+		t.Fatalf("detail should carry the reason label %q, got %q", want, detail)
+	}
+	// The raw key must not leak through: the label is the user-facing text.
+	if strings.Contains(detail, "reason: mid_task") {
+		t.Fatalf("detail rendered the raw reason key instead of its label: %q", detail)
 	}
 }

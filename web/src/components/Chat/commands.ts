@@ -11,6 +11,7 @@ import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../../api/client";
 import { isTempSessionTabId } from "../../lib/tabDrafts";
+import { getCompactionState, setCompactionState } from "../../lib/compactionState";
 
 import {
   Plus,
@@ -1367,14 +1368,12 @@ async function handleCompact(ctx: CommandContext): Promise<CommandResult> {
     };
   }
 
+  // Synchronous state change closes the submission race before the API awaits.
+  if (getCompactionState(sessionId)?.status === "active") return { handled: true };
+  setCompactionState(sessionId, { status: "active", startedAt: Date.now() });
   try {
-    try {
-      window.dispatchEvent(new CustomEvent("ocode:compact-start", { detail: { sessionId } }));
-    } catch {}
     const result = await ctx.api.compactSession(sessionId, ctx.host);
-    try {
-      window.dispatchEvent(new CustomEvent("ocode:compact", { detail: { sessionId, originalLen: result.original_len, compactedLen: result.compacted_len } }));
-    } catch {}
+    setCompactionState(sessionId, { status: "complete", originalLen: result.original_len, compactedLen: result.compacted_len });
     return {
       handled: true,
       messages: [{
@@ -1383,6 +1382,7 @@ async function handleCompact(ctx: CommandContext): Promise<CommandResult> {
       }],
     };
   } catch (err) {
+    setCompactionState(sessionId, { status: "error", error: err instanceof Error ? err.message : String(err) });
     return {
       handled: true,
       messages: [{

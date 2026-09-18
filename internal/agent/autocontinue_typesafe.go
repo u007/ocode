@@ -6,12 +6,6 @@ import (
 	"strings"
 )
 
-// autoContinueMinConfidence is the confidence floor for a TypeSafe triage
-// "continue" verdict, mirroring the auto-permission judge's
-// permissions.auto.min_confidence default: an ambiguous "looks cut off" below
-// the floor fails closed (no resume).
-const autoContinueMinConfidence = 0.85
-
 // Typesafe auto-continue triage question keys. The verdict question decides;
 // the reason question is advisory (Jev cannot write prose, so it picks a
 // typed category explaining the verdict).
@@ -63,16 +57,17 @@ Choose "continue" only when the evidence is unambiguous; otherwise choose "end" 
 // Returns (resume, detail, err): resume=false on any error or ambiguous
 // answer (fail closed — never auto-resume on an unclear verdict), and detail
 // is a user-facing one-liner naming the verdict and why.
-func (a *Agent) runAutoContinueJudgeTypesafe(client *TypesafeClient, messages []Message) (bool, string, error) {
-	stepLimited := a.StepLimitHit()
-	if stepLimited {
-		// The hard signal already justifies a resume; Jev only adds noise and
-		// latency here. Report the deterministic outcome directly so callers
-		// render one consistent line either way.
-		return true, "typesafe/" + client.Model + ": step-limit cutoff — resuming without triage", nil
-	}
-
-	state := a.buildTypesafeAutoContinueState(messages)
+//
+// Precondition: the caller owns the hard /max-step signal. Every production
+// dispatcher (server autoContinueShouldResume, the TUI's shouldAutoContinue
+// guards) checks StepLimitHit first and resumes deterministically without a
+// triage call, so this function is reached only for naturally-ended turns.
+// It deliberately has no step-limit short-circuit: a caller that skipped that
+// guard would otherwise be handed a resume=true it might mistake for a judge
+// verdict (and fire the wrong resume prompt). Instead the state reports the
+// real end reason (buildTypesafeAutoContinueState) and Jev decides.
+func (a *Agent) runAutoContinueJudgeTypesafe(client *TypesafeClient, messages []Message, stepErr error) (bool, string, error) {
+	state := a.buildTypesafeAutoContinueState(messages, stepErr)
 	reasonCriteria := make(map[string]string, len(typesafeAutoContinueReasons))
 	for _, r := range typesafeAutoContinueReasons {
 		reasonCriteria[r.Key] = r.Label
@@ -106,10 +101,7 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client *TypesafeClient, messages []
 		return false, detail, nil
 	}
 
-	minConfidence := autoContinueMinConfidence
-	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.MinConfidence > 0 {
-		minConfidence = a.config.Ocode.Permissions.Auto.MinConfidence
-	}
+	minConfidence := a.resolveAutoJudgeMinConfidence()
 	reasonKey := ""
 	if r, ok := resp.Answers[typesafeAutoContinueReasonKey]; ok && r.Type == "choice" {
 		reasonKey = r.Choice
@@ -137,10 +129,11 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client *TypesafeClient, messages []
 
 // buildTypesafeAutoContinueState assembles the structured triage request: the
 // conversation tail (roles + bounded content), plus how the turn ended so Jev
-// does not have to infer it. The tail mirrors runAutoContinueJudge's budget —
-// the last 6 non-empty messages, each trimmed, so one huge tool result cannot
-// blow up the request.
-func (a *Agent) buildTypesafeAutoContinueState(messages []Message) map[string]any {
+// does not have to infer it. stepErr is the Step error that ended the turn (nil
+// on a clean stop). The tail mirrors runAutoContinueJudge's budget — the last 6
+// non-empty messages, each trimmed, so one huge tool result cannot blow up the
+// request.
+func (a *Agent) buildTypesafeAutoContinueState(messages []Message, stepErr error) map[string]any {
 	const tailN = 6
 	tail := messages
 	if len(tail) > tailN {
@@ -160,9 +153,16 @@ func (a *Agent) buildTypesafeAutoContinueState(messages []Message) map[string]an
 	state := map[string]any{
 		"transcript_tail": entries,
 	}
-	if step := a.StepLimitHitDetail(nil); step != "" {
-		state["turn_ended"] = step
-	} else {
+	// How the turn ended, so Jev does not have to infer it. This is what makes
+	// the rubric's step-limit/error rows meaningful: computing it from a
+	// hard-coded nil error made it a constant, so a cut-off or failed turn was
+	// described to Jev as a natural finish.
+	switch {
+	case stepErr != nil:
+		state["turn_ended"] = "the turn failed with an error: " + stepErr.Error()
+	case a.StepLimitHit():
+		state["turn_ended"] = "the turn was cut off by the step limit (max steps reached); the reply is a forced summary of unfinished work"
+	default:
 		state["turn_ended"] = "the reply finished within the step budget"
 	}
 	if a.config != nil {
@@ -174,15 +174,17 @@ func (a *Agent) buildTypesafeAutoContinueState(messages []Message) map[string]an
 // AutoContinueJudgeSync is the server-turn variant of AutoContinueJudgeAsync:
 // headless turns run inside a synchronous HTTP goroutine with no event loop
 // to receive OnAutoContinueJudge, so the triage runs inline and returns the
-// verdict directly. Same fail-closed contract: no judge configured →
+// verdict directly. stepErr is the error that ended the turn (nil on a clean
+// stop), threaded into the typesafe state so `turn_ended` describes the real
+// end reason. Same fail-closed contract: no judge configured →
 // (false, "", nil); any judge error → (false, detail, err).
-func (a *Agent) AutoContinueJudgeSync(messages []Message) (bool, string, error) {
+func (a *Agent) AutoContinueJudgeSync(messages []Message, stepErr error) (bool, string, error) {
 	client, isTypesafe := a.autoContinueJudgeClientTyped()
 	if client == nil {
 		return false, "", nil
 	}
 	if isTypesafe {
-		return a.runAutoContinueJudgeTypesafe(client.(*TypesafeClient), messages)
+		return a.runAutoContinueJudgeTypesafe(client.(*TypesafeClient), messages, stepErr)
 	}
 	resume, err := a.runAutoContinueJudge(client, messages)
 	detail := "chat judge " + client.GetProvider() + "/" + client.GetModel()
@@ -203,7 +205,7 @@ func (a *Agent) AutoContinueEnabled() bool {
 	return a.config != nil && a.config.Ocode.AutoContinueEnabled
 }
 
-// AutoContinueChainCap mirrors the TUI's autoContinueMaxChain so every host
-// (TUI, headless server, scheduler) shares one bound on consecutive
-// auto-fired resumes.
+// AutoContinueChainCap is the single bound on consecutive auto-fired resumes
+// shared by every host (TUI, headless server, scheduler); the TUI aliases it and
+// the server's autoContinueChainCap wraps it.
 const AutoContinueChainCap = 4

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,12 +26,22 @@ type scriptedAutoContinueClient struct {
 	bodies         []string
 	handler        func(call int) string
 	toolCallsUntil int // first N rounds answer with a tool_call (drives the Step loop)
+	// roleSeqs records the roles of the input messages for each Chat call. A
+	// resumed Step must receive the previous Step's rows, so a call that runs
+	// after a resume must carry a tool row; before that regression was fixed
+	// the resumed input was base + resume hint only (no assistant/tool rows).
+	roleSeqs [][]string
 }
 
 func (c *scriptedAutoContinueClient) Chat(messages []agent.Message, _ []map[string]interface{}) (*agent.Message, error) {
 	c.mu.Lock()
 	c.calls++
 	n := c.calls
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Role)
+	}
+	c.roleSeqs = append(c.roleSeqs, roles)
 	c.mu.Unlock()
 	if len(messages) > 0 {
 		c.mu.Lock()
@@ -159,6 +170,27 @@ func TestRunTurnAutoContinueStepLimitResumes(t *testing.T) {
 	if !sawResume {
 		t.Fatalf("resume prompt not found in transcript: %+v", as.messages)
 	}
+
+	// Regression: a resumed Step's LLM input must carry the rows the previous
+	// Step produced. Round 1 answers with a tool_call, so any Chat call made by
+	// a resumed Step must include a tool row. Before the fix the resumed slice
+	// was base + resume hint only, and only the first Step's own summarize call
+	// ever carried a tool row (exactly one such call).
+	cl.mu.Lock()
+	var withToolRow int
+	for _, roles := range cl.roleSeqs {
+		for _, r := range roles {
+			if r == "tool" {
+				withToolRow++
+				break
+			}
+		}
+	}
+	seqs := append([][]string(nil), cl.roleSeqs...)
+	cl.mu.Unlock()
+	if withToolRow < 2 {
+		t.Fatalf("resumed Step did not receive the previous step's rows: %d of %d Chat calls carried a tool row (want >=2); roleSeqs=%v", withToolRow, len(seqs), seqs)
+	}
 }
 
 // TestRunTurnAutoContinueDisabledStopsImmediately covers the off toggle: a
@@ -276,7 +308,7 @@ func TestRunTurnAutoContinuePermissionAskBlocksResume(t *testing.T) {
 	cl.handler = func(call int) string { return "done" }
 	as.messages = append(as.messages, agent.Message{Role: "tool", ToolID: "t1", Content: toolSentinelPermissionAsk()})
 
-	should, _ := h.autoContinueShouldResume(id, as, 0, nil)
+	should, _ := h.autoContinueShouldResume(id, as, 0)
 	if should {
 		t.Fatal("pending permission ask must block auto-continue")
 	}
@@ -286,4 +318,68 @@ func TestRunTurnAutoContinuePermissionAskBlocksResume(t *testing.T) {
 // exact shape tailIsPermissionAsk looks for).
 func toolSentinelPermissionAsk() string {
 	return "PERMISSION_ASK:{\"tool\":\"bash\",\"reason\":\"test\"}"
+}
+
+// TestRunTurnReplyIsCurrentTurnOnly pins the synchronous reply contract: the
+// string runTurn returns to POST /api/chat callers must be this turn's
+// assistant text, not the whole session transcript. Building it from all of
+// as.messages made the reply grow with every prior turn.
+func TestRunTurnReplyIsCurrentTurnOnly(t *testing.T) {
+	h, id, cl := autoContinueTestServer(t, "")
+	h.mu.Lock()
+	h.cfg.Ocode.MaxSteps = 0
+	h.cfg.Ocode.AutoContinueEnabled = false
+	h.mu.Unlock()
+	as := h.lookupAgentSession(id)
+	as.agent.SetMaxSteps(0)
+	// A prior turn's assistant text already in the transcript must never leak
+	// into this turn's synchronous reply.
+	as.messages = append(as.messages, agent.Message{Role: "assistant", Content: "PRIOR-TURN-LEAK"})
+	cl.handler = func(int) string { return "current reply" }
+
+	reply, err := h.runTurn(id, as, "question", turnOptions{})
+	if err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+	if strings.Contains(reply, "PRIOR-TURN-LEAK") {
+		t.Fatalf("reply leaked prior-turn text: %q", reply)
+	}
+	if !strings.Contains(reply, "current reply") {
+		t.Fatalf("reply = %q, want it to contain the current turn's text", reply)
+	}
+}
+
+// TestAutoContinueMidChainRowsReachLivePersist pins the reconcile
+// precondition for issue 3: the mid-chain notice and resume prompt appended
+// directly to as.messages must also be mirrored into the live-persist view.
+// Without the liveAppend hook the on-disk view lacks these rows, so a
+// concurrent-writer rebase at turn end treats the transcript suffix as
+// non-prefix and duplicates/reorders rows.
+func TestAutoContinueMidChainRowsReachLivePersist(t *testing.T) {
+	h, id, cl := autoContinueTestServer(t, "")
+	as := h.lookupAgentSession(id)
+	as.agent.SetMaxSteps(0)
+	cl.handler = func(int) string { return "ok" }
+
+	var live []agent.Message
+	as.liveAppend = func(m agent.Message) { live = append(live, m) }
+
+	if _, ok := h.fireAutoContinue(id, as, true); !ok {
+		t.Fatal("fireAutoContinue did not fire")
+	}
+
+	if len(live) != 2 {
+		t.Fatalf("live view got %d rows, want 2 (notice + resume prompt): %+v", len(live), live)
+	}
+	if live[0].Notice == "" {
+		t.Fatalf("live view row 0 is not the notice: %+v", live[0])
+	}
+	if live[1].Role != "user" {
+		t.Fatalf("live view row 1 is not the resume prompt: %+v", live[1])
+	}
+	// The live view must be the same tail as the transcript, in the same order.
+	tail := as.messages[len(as.messages)-2:]
+	if tail[0].Notice != live[0].Notice || tail[1].Content != live[1].Content || tail[1].UserSeq != live[1].UserSeq {
+		t.Fatalf("live view diverged from transcript tail: live=%+v transcript=%+v", live, tail)
+	}
 }

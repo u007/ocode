@@ -2313,10 +2313,20 @@ func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64) bool {
 		var err error
 		var detail string
 		if isTypesafe {
-			resume, detail, err = a.runAutoContinueJudgeTypesafe(client.(*TypesafeClient), snapshot)
+			// The async caller only dispatches after a turn that ended cleanly
+			// (the TUI guards on msg.err == nil), so there is no step error to
+			// report to the judge.
+			resume, detail, err = a.runAutoContinueJudgeTypesafe(client.(*TypesafeClient), snapshot, nil)
 		} else {
 			resume, err = a.runAutoContinueJudge(client, snapshot)
 			detail = "chat judge " + client.GetProvider() + "/" + client.GetModel()
+			// Mirror AutoContinueJudgeSync: a failed judge call must say so in
+			// Detail, or the TUI (which renders only Detail on a non-resume
+			// verdict) shows the judge name with no hint the call failed — the
+			// silent-finish symptom this feature exists to remove.
+			if err != nil {
+				detail += ": " + err.Error()
+			}
 		}
 		if a.OnAutoContinueJudge != nil {
 			a.OnAutoContinueJudge(AutoContinueJudgeResult{Gen: gen, Resume: resume, Err: err, Detail: detail})

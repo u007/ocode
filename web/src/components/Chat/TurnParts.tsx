@@ -101,9 +101,11 @@ export function StatusBlock({ text }: { text: string }) {
 }
 
 // Parses an answered `question` tool result. The server replaces the pending
-// QUESTION_PROMPT sentinel in place with exactly the JSON array the browser
-// posted (handler_questions.go questionAnswerPayload — the same payload the
-// model receives as the tool result). Recognizing it lets the transcript show
+// QUESTION_PROMPT sentinel in place with the shape-compatible payload parsed
+// from the browser's answers (handler_questions.go questionAnswerPayload — the
+// same payload the model receives as the tool result; optional fields are
+// omitempty, so it is not necessarily byte-identical to what the client sent).
+// Recognizing it lets the transcript show
 // the questions and the selected answers instead of a raw JSON blob. Returns
 // null for the unanswered sentinel and for anything that is not an answer
 // payload, so callers fall back to the generic rendering.

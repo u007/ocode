@@ -26,6 +26,21 @@ vi.mock("@/lib/eventBus", () => ({
   },
 }));
 
+// jsdom has no PointerEvent (see FileTabContent.test.tsx) and `fireEvent
+// .pointerDown` silently drops `clientX` when it falls back to a plain Event —
+// the column-resize drag relies on clientX propagation, so polyfill it.
+if (typeof window.PointerEvent === "undefined") {
+  class PointerEventPolyfill extends MouseEvent {
+    pointerId: number;
+    constructor(type: string, params: PointerEventInit = {}) {
+      super(type, params);
+      this.pointerId = params.pointerId ?? 1;
+    }
+  }
+  // @ts-expect-error assigning a minimal polyfill onto jsdom's window
+  window.PointerEvent = PointerEventPolyfill;
+}
+
 import GitPanel from "./GitPanel";
 
 /** Simulates the server pushing a git_status event (background refresh). */
@@ -37,6 +52,7 @@ async function emitGitStatus(project = "/proj") {
 }
 
 const GIT_PANEL_SECTIONS_KEY = "ocode.ui.git-panel.v1";
+const GIT_PANEL_WIDTH_KEY = "ocode.ui.git-panel.width";
 
 /** Waits for the portal context menu (rendered into document.body) to open. */
 async function openContextMenuRow(fileName: string) {
@@ -328,5 +344,45 @@ describe("GitPanel", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // --- resizable file-list column -----------------------------------------
+  //
+  // The left column (files + commits) is drag-resizable and the width is
+  // persisted, matching the app sidebar/file-tree. `useResizableSidebar`
+  // resolves the width from localStorage and writes it back on every change.
+
+  it("resizes the file-list column by dragging its divider and persists it", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+
+    const handle = screen.getByRole("separator", { name: /resize file list and diff/i });
+    const column = handle.previousElementSibling as HTMLElement;
+    expect(column.style.width).toBe("288px");
+
+    fireEvent.pointerDown(handle, { clientX: 288, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 388, pointerId: 1 });
+    expect(column.style.width).toBe("388px");
+
+    // The width is persisted immediately (not only on pointerup).
+    await waitFor(() => expect(window.localStorage.getItem(GIT_PANEL_WIDTH_KEY)).toBe("388"));
+
+    // Releasing the pointer stops tracking.
+    fireEvent.pointerUp(window, { pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 120, pointerId: 1 });
+    expect(column.style.width).toBe("388px");
+  });
+
+  it("restores a persisted column width on mount and resets on double-click", async () => {
+    window.localStorage.setItem(GIT_PANEL_WIDTH_KEY, "400");
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+
+    const handle = screen.getByRole("separator", { name: /resize file list and diff/i });
+    const column = handle.previousElementSibling as HTMLElement;
+    expect(column.style.width).toBe("400px");
+
+    fireEvent.doubleClick(handle);
+    expect(column.style.width).toBe("288px");
   });
 });

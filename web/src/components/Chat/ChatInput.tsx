@@ -10,6 +10,8 @@ import { apiPath, authHeaders } from "@/api/client";
 import EditorContextChip from "./EditorContextChip";
 import { RESTORE_EVENT } from "../../lib/inputRestore";
 import { CHAT_INPUT_DEBOUNCE_MS, joinChatInputBatch } from "../../lib/chatInputBatch";
+import { getCompactionState, isCompactCommand, useCompactionState } from "../../lib/compactionState";
+import CompactionStatus from "./CompactionStatus";
 
 interface ChatInputProps {
   /** Called when a slash command is entered. */
@@ -86,6 +88,16 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // output of msg1, producing confusing turn ordering.
   const [shellInFlight, setShellInFlight] = useState(false);
   const [queueCount, setQueueCount] = useState(0);
+  const compaction = useCompactionState(sessionTabId);
+  const compacting = compaction?.status === "active";
+  const drainingRef = useRef(new Set<string | null | undefined>());
+  const mountedRef = useRef(true);
+  const sessionRef = useRef(sessionTabId);
+  sessionRef.current = sessionTabId;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const [delayedCount, setDelayedCount] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const dragCounterRef = useRef(0);
@@ -226,8 +238,12 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // PERMISSION_ASK sentinel) — otherwise the composer unlocks and the queue
   // drains while the dialog is still up, starting a new turn on top of an
   // unresolved permission ask.
-  const busy = isStreaming || shellInFlight || !!pendingPermission;
+  const busy = isStreaming || shellInFlight || !!pendingPermission || compacting;
   const effectiveBusy = busy || wasInterrupted;
+  // Compaction is read synchronously from its store at drain time; a render
+  // may still describe it as active just after its promise has settled.
+  const workBlockedRef = useRef(false);
+  workBlockedRef.current = isStreaming || shellInFlight || !!pendingPermission || wasInterrupted;
   const prevBusyRef = useRef(busy);
   const prevWasInterruptedRef = useRef(wasInterrupted);
 
@@ -278,6 +294,12 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     delayedInputsRef.current = [];
     setDelayedCount(0);
 
+    // A pending debounce must not send into a compaction begun elsewhere.
+    if (getCompactionState(sessionTabId)?.status === "active") {
+      pushQueued(sessionTabId, { kind: "message", text: combined });
+      setQueueCount(getQueue(sessionTabId).length);
+      return true;
+    }
     const accepted = await sendMessage(combined);
     if (!accepted) {
       setInput(combined);
@@ -301,21 +323,31 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   };
 
   const drainQueue = useCallback(async () => {
-    for (;;) {
-      const item = shiftUndispatched(sessionTabId);
-      setQueueCount(getQueue(sessionTabId).length);
-      if (!item) break;
-      const outcome = item.kind === "command"
-        ? await dispatchCommand(item.text)
-        : { startedTurn: true, accepted: await sendMessage(item.text) };
-      if (!outcome.accepted) {
-        unshiftQueued(sessionTabId, item);
+    // Compaction completion also produces a busy->idle transition. Only one
+    // drain may own this queue, including across that async boundary.
+    if (drainingRef.current.has(sessionTabId)) return;
+    drainingRef.current.add(sessionTabId);
+    try {
+      for (;;) {
+        if (!mountedRef.current || sessionRef.current !== sessionTabId ||
+            workBlockedRef.current || getCompactionState(sessionTabId)?.status === "active") break;
+        const item = shiftUndispatched(sessionTabId);
         setQueueCount(getQueue(sessionTabId).length);
-        break;
+        if (!item) break;
+        const outcome = item.kind === "command"
+          ? await dispatchCommand(item.text)
+          : { startedTurn: true, accepted: await sendMessage(item.text) };
+        if (!outcome.accepted) {
+          unshiftQueued(sessionTabId, item);
+          setQueueCount(getQueue(sessionTabId).length);
+          break;
+        }
+        if (outcome.startedTurn) break;
       }
-      if (outcome.startedTurn) break;
+    } finally {
+      drainingRef.current.delete(sessionTabId);
     }
-  }, [sessionTabId, sendMessage]);
+  }, [sessionTabId, sendMessage, onSlashCommand]);
 
   useEffect(() => {
     const wasInterruptedJustCleared = prevWasInterruptedRef.current && !wasInterrupted;
@@ -448,12 +480,18 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           await flushDelayedMessages();
           return;
         }
-        if (effectiveBusy) {
+        if (effectiveBusy || drainingRef.current.has(sessionTabId) || getCompactionState(sessionTabId)?.status === "active") {
           pushQueued(sessionTabId, { kind: "command", text: trimmed });
           setQueueCount(getQueue(sessionTabId).length);
           return;
         }
-        const outcome = await dispatchCommand(trimmed);
+        const pending = dispatchCommand(trimmed);
+        if (isCompactCommand(trimmed)) {
+          // The command sets active state synchronously. Release the physical
+          // submit guard after this event so later inputs can join the queue.
+          queueMicrotask(() => { submittingRef.current = false; });
+        }
+        const outcome = await pending;
         if (!outcome.accepted) {
           setInput(trimmed);
           setDraft(sessionTabId, trimmed);
@@ -493,10 +531,9 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       const finalMessage = parts.join(" ");
       setAttachedFiles([]);
 
-      if (wasInterrupted) {
-        // Interrupted barrier: queue without dispatched flag so FIFO order is
-        // preserved and nothing is injected into the live agent loop while
-        // paused. Resume will drain in order.
+      if (wasInterrupted || compacting || drainingRef.current.has(sessionTabId) || getCompactionState(sessionTabId)?.status === "active") {
+        // Local barriers: queue without injecting into a paused/compacting
+        // session or overtaking the command currently owned by the drain.
         pushQueued(sessionTabId, { kind: "message", text: finalMessage });
         setQueueCount(getQueue(sessionTabId).length);
         return;
@@ -695,6 +732,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
             </span>
           ))}
       </div>
+      <CompactionStatus sessionId={sessionTabId} queued={getQueue(sessionTabId).some((item) => !item.dispatched && item.kind === "command" && isCompactCommand(item.text))} />
       {queueCount > 0 && (
         <div className="text-xs text-muted-foreground mb-1">
           {queueCount} queued — press ↑ in an empty box to edit the last one

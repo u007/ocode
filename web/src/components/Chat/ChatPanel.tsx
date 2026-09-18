@@ -88,35 +88,6 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
     window.dispatchEvent(new CustomEvent("ocode:assistant-complete", { detail: { text, atBottom: atBottomRef.current } }));
   }, [initialized, messages, slice.isStreaming, slice.turnActive]);
 
-  // Display-only feedback for /compact (and any auto-compaction completion).
-  // This banner is ephemeral UI only — it does not mutate chatStore messages,
-  // so it survives the SSE "messages" SET_MESSAGES that replaces the transcript
-  // immediately after compaction and would otherwise wipe a synthetic ADD_MESSAGE.
-  const [compactNotice, setCompactNotice] = useState<string | null>(null);
-  useEffect(() => {
-    const startHandler = (e: Event) => {
-      const ce = e as CustomEvent<{ sessionId: string }>;
-      if (!ce.detail || ce.detail.sessionId !== sessionId) return;
-      setCompactNotice("Compacting conversation…");
-    };
-    const doneHandler = (e: Event) => {
-      const ce = e as CustomEvent<{ sessionId: string; originalLen: number; compactedLen: number }>;
-      if (!ce.detail || ce.detail.sessionId !== sessionId) return;
-      setCompactNotice(`Compacted: ${ce.detail.originalLen} → ${ce.detail.compactedLen} messages`);
-    };
-    window.addEventListener("ocode:compact-start", startHandler as EventListener);
-    window.addEventListener("ocode:compact", doneHandler as EventListener);
-    return () => {
-      window.removeEventListener("ocode:compact-start", startHandler as EventListener);
-      window.removeEventListener("ocode:compact", doneHandler as EventListener);
-    };
-  }, [sessionId]);
-  useEffect(() => {
-    if (!compactNotice) return;
-    const t = setTimeout(() => setCompactNotice(null), 8000);
-    return () => clearTimeout(t);
-  }, [compactNotice]);
-
   // Restore-to-input truncation: TUI truncates messages[:index] when restoring a
   // user message. This listener owns history mutation; ChatInput only handles
   // the draft. Uses entry.originalIndex (absolute messages index), not the
@@ -764,12 +735,6 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
         onScroll={handleScroll}
         onMouseUp={() => setSelectedText(window.getSelection()?.toString().trim() ?? "")}
       >
-        {compactNotice && (
-          <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100 flex items-center justify-between gap-2">
-            <span>{compactNotice}</span>
-            <button type="button" aria-label="Dismiss" onClick={() => setCompactNotice(null)} className="text-amber-700 dark:text-amber-200 hover:opacity-70 text-xs px-1">✕</button>
-          </div>
-        )}
         {initialized && messages.length > 0 && (
           <div ref={topRef} className="py-4">
             {loadingMore && (

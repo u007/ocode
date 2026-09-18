@@ -29,11 +29,13 @@ okf_version: 0.1
 # concepts
 
 - [Sandbox Permission Mode](concepts/sandbox-permission-mode.md) - Concept doc for sandbox permission mode: four modes, persistence (Decision 2 superseded), destructive git Ask routing, sensitive-path carve-outs, security model, and platform support
+- [Server-Side Auto-Continue Loop](concepts/server-auto-continue.md) - Server-side auto-continue loop pattern: bounded chain with step-limit cutoff, judge dispatch, and visible end-of-turn status.
 
 # gotchas
 
 - [Agent Replacement — Input Queuing & Stream Event Epochs](gotchas/agent-replacement-input-queuing.md) - Architectural decision and solution pattern for queuing user input during agent replacement and using stream event epochs to prevent stale events from mutating the new session.
 - [AIHubMix Test — Global Cache State Leakage](gotchas/aihubmix-test-cache-leak.md) - AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures
+- [Auto-continue turn transcript rebase: capture base length before the loop](gotchas/auto-continue-turn-transcript-rebase.md) - Gotcha: turn transcript persistence silently fails if turnBaseLen is not captured before the auto-continue loop, because resume prompts grow the messages length and cause hard-diverge on reconcile.
 - [Auto-Permission Dependency Binaries — Policy Decision](gotchas/auto-permission-dependency-bin-policy.md) - Deliberate security-policy expansion in bundled auto-permission gatekeeper prompt v1.9.x that auto-allows direct invocation of project/toolchain dependency binaries, with accepted residual risk and maintainer rules.
 - [Auto-Permission Prompt Prose Code Audit Gap](gotchas/auto-permission-prompt-prose-code-audit-gap.md) - The bundled gatekeeper prompt v1.9.0 enumerated non-existent git config forms (e.g., --set) and omitted real ones. Resolved in v1.9.2: prose synced with the –c dangerous-key list and a code backstop (`gitConfigWriteArgs` in IsHarmfulBashCommand, internal/agent/permissions.go) hard-blocks git config writes; ~25 regression cases in TestIsHarmfulBashCommand_GitConfigWrites (internal/agent/permissions_test.go). Prose and code must be audited together.
 - [Auto-Permission Prompt — Load-Semantics Flip](gotchas/auto-permission-prompt-load-semantics-flip.md) - The load-semantics flip from self-healing to pure-read introduces a silent stale-gatekeeper trap with no proactive surfacing, distinct from the existing TOCTOU race gotcha.
@@ -76,7 +78,7 @@ okf_version: 0.1
 - [Plugin Install Rollback Bug](gotchas/plugin-install-rollback-bug.md) - Security gotcha: failed plugin installs leave stale directories and orphaned MCP registrations due to incorrect path handling in deferred cleanup.
 - [Plugin Removal — Root Directory Deletion Risk](gotchas/plugin-removal-root-deletion.md) - Security gotcha: removal validation must reject deletion of an entire approved plugin root directory, not just validate child paths.
 - [Port forwards Disable/Enable: URL composed past query + supervisor retained-terminal collision](gotchas/port-forwards-url-composition-and-supervisor-restart.md) - Two bugs broke Port forwards Disable/Enable: URL helper returned query-terminated string callers appended path segments onto (port landed inside project param), and process supervisor retained terminal records blocking stable-ID restart. Includes the test blind spot where widget API mocks can never catch malformed URLs.
-- [Question-answer transcript echo: client must mirror server payload byte-for-byte](gotchas/question-answer-transcript-echo.md) - Gotcha: optimistic client rewrite of QUESTION_PROMPT sentinel must match applyQuestionAnswer payload shape exactly; sentinel is never rendered.
+- [Question-answer transcript echo: client must mirror server payload shape](gotchas/question-answer-transcript-echo.md) - Gotcha: optimistic client rewrite of QUESTION_PROMPT sentinel must match applyQuestionAnswer payload shape exactly; sentinel is never rendered.
 - [Radix Select Empty String Sentinel](gotchas/radix-select-empty-string-sentinel.md) - Radix Select rejects empty strings as item values; use a sentinel value instead
 - [Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary](gotchas/remote-project-path-trust-boundary.md) - Gotcha: saved remote project paths can enter the local filesystem allowlist — keep host-aware and out of local root validation
 - [Remote Terminal Custom Port Omitted from WebSocket](gotchas/remote-terminal-custom-port-omitted.md) - TerminalPanel propagates remotePort for history restoration but omits it from the live WebSocket connection, breaking non-default SSH port routing.
@@ -191,6 +193,7 @@ okf_version: 0.1
 - [Remote-project port forwards in the web/desktop UI](superpowers/specs/2026-09-16-remote-project-port-forwards-design.md) - Design for restoring the Port forwards button so it works for the active remote SSH project (project-scoped /api/portmaps routes, per-project ssh -L forwards)
 - [TTS Speech Playback Design Specification](superpowers/specs/2026-09-09-tts-speech-playback-design.md) - User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source).
 - [TUI Sidebar Title Expand/Collapse Design](superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md) - Design for sidebar title expand/collapse behavior, updated to match user decision: transient expansion, reset on session changes, no session JSON persistence.
+- [Web Compact Feedback Design](superpowers/specs/2026-09-18-web-compact-feedback-design.md) - Approved design for web/desktop /compact feedback beside composer: queued/running/complete/error states, queue semantics, test plan. Implementation complete.
 
 # Unclassified
 

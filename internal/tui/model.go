@@ -112,8 +112,9 @@ const (
 
 // autoContinueMaxChain caps consecutive auto-fired /autocontinue resumes
 // (see model.autoContinueCount) so a model that keeps re-hitting the
-// /max-step cap can't loop forever unattended.
-const autoContinueMaxChain = 4
+// /max-step cap can't loop forever unattended. It aliases the shared cap in the
+// agent package so the TUI, the headless server, and the scheduler cannot drift.
+const autoContinueMaxChain = agent.AutoContinueChainCap
 
 // shouldAutoContinue decides whether the just-finished turn should trigger an
 // auto-continue resume. Pulled out as a pure function (rather than inlined in
@@ -4946,6 +4947,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.pendingRCAutoContinue = false
+			// Surface why the chain declined (off toggle / cap exhausted) — the
+			// same transient hint the generic streamDone path appends at :5143.
+			if detail := m.agentAutoContinueDeclineDetail(msg.err, stepLimitHit); detail != "" {
+				m.messages = append(m.messages, message{
+					role:      roleAssistant,
+					text:      hintStyle.Render("~ " + detail),
+					transient: true,
+				})
+				m.rerenderTranscriptAndMaybeScroll()
+			}
 			// The chain has genuinely settled — reset streaming state here too.
 			// The pre-existing RC early-return paths never reached the normal
 			// TUI settle code below (m.streaming = false etc.), so without this
@@ -5003,6 +5014,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if msg.err == nil && !stepLimitHit && m.maybeDispatchAutoContinueJudge(true) {
 				return m, nil
+			}
+			// Surface why the chain declined (off toggle / cap exhausted) — the
+			// same transient hint the generic streamDone path appends at :5143.
+			if detail := m.agentAutoContinueDeclineDetail(msg.err, stepLimitHit); detail != "" {
+				m.messages = append(m.messages, message{
+					role:      roleAssistant,
+					text:      hintStyle.Render("~ " + detail),
+					transient: true,
+				})
+				m.rerenderTranscriptAndMaybeScroll()
 			}
 			// The chain has genuinely settled — reset streaming state here too
 			// (see the matching comment in the RC-chain-continuation branch

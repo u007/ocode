@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { eventBus } from "../lib/eventBus";
-import { getTrustedTerminalProject } from "../lib/trustedProject";
+import { countProjectMatches, getTrustedTerminalProject } from "../lib/trustedProject";
 import { findProjectPathForTab, useProjectState } from "../stores/projectStore";
 import type { AgentRun } from "../api/types";
 
@@ -55,6 +55,20 @@ export function useAgentRuns(sessionId: string | null): AgentRunsState {
     if (!realSessionId) return { host: undefined, unresolved: false, projectPath: undefined };
     const projectPath = findProjectPathForTab(projectState, realSessionId);
     if (!projectPath) return { host: undefined, unresolved: false, projectPath: undefined };
+    const matches = countProjectMatches(projectState.projects, projectPath);
+    if (matches > 1) {
+      // Two saved projects claim the same path — routing either way could seed
+      // a remote session's tree onto the local server (or vice versa). Wait for
+      // the snapshot to disambiguate.
+      return { host: undefined, unresolved: true, projectPath };
+    }
+    if (matches === 0) {
+      // The path is not in the project list. While the snapshot is still
+      // loading that is expected, so wait; once it is ready the project
+      // genuinely does not exist for this server, and deferring forever would
+      // leave the agents rail empty — fall back to the pre-change local seed.
+      return { host: undefined, unresolved: projectState.projectsStatus !== "ready", projectPath };
+    }
     const trusted = getTrustedTerminalProject(projectState.projects, projectPath);
     if (!trusted.known) return { host: undefined, unresolved: true, projectPath };
     return { host: trusted.host, unresolved: false, projectPath };

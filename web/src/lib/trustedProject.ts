@@ -26,6 +26,24 @@ export function getTrustedTerminalProject(
 }
 
 /**
+ * How many saved projects claim a path. The single-match trust rule collapses
+ * 0 (absent — the project is unknown to this server) and >1 (ambiguous — two
+ * hosts claim the same path), but callers sometimes need to tell them apart:
+ * absent-because-still-loading differs from absent-because-it-does-not-exist,
+ * and only the latter may safely fall back to local routing.
+ */
+export function countProjectMatches(
+  projects: readonly Pick<Project, "path">[],
+  projectPath: string,
+): number {
+  let n = 0;
+  for (const p of projects) {
+    if (p.path === projectPath) n++;
+  }
+  return n;
+}
+
+/**
  * The active project as a port-forward target, or null when it is not one.
  *
  * Uses the same single-match trust rule as getTrustedTerminalProject: an

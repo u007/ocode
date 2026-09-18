@@ -12,9 +12,13 @@ import (
 type PermissionReport struct {
 	// Platform is the runtime.GOOS the report was produced on.
 	Platform string `json:"platform"`
-	// Granted is true when nothing blocks the computer tool on this platform:
-	// either every required grant is present, or the platform requires no
-	// explicit grant at all.
+	// Granted is true when every grant this platform can *detect* is present:
+	// Accessibility and Automation on macOS, or "no explicit grant required" on
+	// Windows/Linux. On macOS Screen Recording is not verifiable — a denied
+	// grant still produces a wallpaper-only capture with no error — so
+	// Granted=true does not guarantee it; the report's Screen Recording line
+	// carries that caveat. A Screen Recording probe that *errors* does clear
+	// Granted, because that is a detectable problem.
 	Granted bool `json:"granted"`
 	// Lines are human-readable per-permission status lines, in the order the
 	// permissions were requested.

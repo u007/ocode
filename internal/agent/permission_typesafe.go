@@ -122,10 +122,7 @@ func (a *Agent) askPermissionModelTypesafe(client *TypesafeClient, toolName stri
 		return false, "TypeSafe judge returned no verdict", false
 	}
 
-	minConfidence := 0.85
-	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.MinConfidence > 0 {
-		minConfidence = a.config.Ocode.Permissions.Auto.MinConfidence
-	}
+	minConfidence := a.resolveAutoJudgeMinConfidence()
 	pAllow := ans.Probabilities["allow"]
 	// The concern answer is advisory: it explains a verdict but never decides
 	// one, so a missing or odd concern degrades to a generic reason.

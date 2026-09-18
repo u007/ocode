@@ -112,28 +112,18 @@ describe("useAgentRuns remote host routing", () => {
     await waitFor(() => expect(hoisted.listAgentRuns).toHaveBeenCalledWith("sess-local", undefined));
   });
 
-  it("skips the seed when the tab's project is not in the saved snapshot", async () => {
-    // `/ghost` is not among the saved projects, so `getTrustedTerminalProject`
-    // returns `known:false`. The host is genuinely unresolvable — neither a
-    // local nor a remote fetch is correct — so no request may fire.
+  it("falls back to a local seed when the tab's project is absent from a ready snapshot", async () => {
+    // `/ghost` is not among the saved projects. The snapshot has loaded (status
+    // "ready"), so the project genuinely does not exist for this server:
+    // deferring forever would leave the agents rail empty, so seed the local
+    // server — the pre-change behavior. (While the snapshot is still loading the
+    // same route defers; the ambiguous-path test below covers the deferral.)
     hoisted.listProjects.mockResolvedValue([remoteProject]);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const { result } = renderSeeded("sess-ghost", {
-        tabs: [{ id: "sess-ghost", projectPath: "/ghost", title: "Ghost", activeSubTab: "chat" }],
-      });
+    renderSeeded("sess-ghost", {
+      tabs: [{ id: "sess-ghost", projectPath: "/ghost", title: "Ghost", activeSubTab: "chat" }],
+    });
 
-      await waitFor(() =>
-        expect(warn).toHaveBeenCalledWith("useAgentRuns: deferring seed for unresolved project", {
-          sessionId: "sess-ghost",
-          projectPath: "/ghost",
-        }),
-      );
-      expect(hoisted.listAgentRuns).not.toHaveBeenCalled();
-      expect(result.current.loaded).toBe(false);
-    } finally {
-      warn.mockRestore();
-    }
+    await waitFor(() => expect(hoisted.listAgentRuns).toHaveBeenCalledWith("sess-ghost", undefined));
   });
 
   it("skips the seed for a path saved as both local and remote (ambiguous)", async () => {

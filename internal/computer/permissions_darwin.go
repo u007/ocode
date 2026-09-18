@@ -34,14 +34,19 @@ func platformRequestPermissions(ctx context.Context) PermissionReport {
 	rep := PermissionReport{Platform: "darwin"}
 
 	axGranted, axLine := requestAccessibility(ctx)
-	srRequested, srLine := requestScreenRecording(ctx)
+	srProbeOK, srLine := requestScreenRecording(ctx)
 	autoGranted, autoLine := requestAutomation(ctx)
 
 	rep.Lines = []string{axLine, srLine, autoLine}
-	rep.Granted = axGranted && srRequested && autoGranted
+	// Granted reflects only what is detectable: Accessibility and Automation
+	// are verifiable grants, and a Screen Recording probe that errors is a real
+	// problem. A *successful* probe is not a grant check (macOS has no
+	// scriptable one), so Granted=true must never be read as "Screen Recording
+	// is granted" — the report line says so and the settings UI shows it.
+	rep.Granted = axGranted && srProbeOK && autoGranted
 
 	if rep.Granted {
-		rep.Lines = append(rep.Lines, "All detectable permissions are in place. Relaunch ocode-desktop or your terminal after changing any of them.")
+		rep.Lines = append(rep.Lines, "All detectable permissions are in place. Screen Recording has no scriptable check — if screenshots come back blank, enable your terminal or ocode-desktop in System Settings → Privacy & Security → Screen Recording and relaunch ocode.")
 		return rep
 	}
 
@@ -52,7 +57,7 @@ func platformRequestPermissions(ctx context.Context) PermissionReport {
 	if !axGranted {
 		missing++
 	}
-	if !srRequested {
+	if !srProbeOK {
 		missing++
 	}
 	if !autoGranted {
@@ -64,7 +69,7 @@ func platformRequestPermissions(ctx context.Context) PermissionReport {
 		pane = privacyRoot
 	case !axGranted:
 		pane = accessibilityPane
-	case !srRequested:
+	case !srProbeOK:
 		pane = screenRecordingPane
 	case !autoGranted:
 		pane = automationPane

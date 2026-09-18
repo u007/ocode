@@ -309,6 +309,20 @@ make desktop        # build bin/ocode-desktop (requires cgo + platform SDK)
 make desktop-app    # macOS: bundle bin/ocode.app via scripts/bundle-macos.sh
 ```
 
+`make desktop-app` also cross-compiles the CLI for Linux and macOS, each in
+amd64 and arm64 variants, and ships them in
+`Contents/Resources/remote-binaries/<version>/`. SSH provisioning automatically
+selects the target's bundled CLI and uploads it to `~/.ocode/bin/<version>/ocode`;
+WSL uses the Linux variant through the same provisioning path. Connecting does
+not require Go, a source checkout, or a binary download. Binaries are built from
+the same source version as the app, and the uploaded CLI's `--version` is checked
+before launch. This increases app size and desktop-app build time.
+
+For bare desktop binaries, `make desktop-remote-binaries` prepares the sibling
+`bin/remote-binaries/<version>/` directory; ship it alongside `ocode-desktop`.
+Without a bundled artifact, provisioning can still compile from an ocode source
+checkout with Go installed. The desktop GUI itself is never uploaded as a CLI.
+
 Platform prerequisites: macOS — Xcode Command Line Tools; Linux — `webkit2gtk-4.1-dev`, `libgtk-3-dev` (no dock badge on Linux); Windows — WebView2 runtime (bootstrapped by Wails). Pinned to `github.com/wailsapp/wails/v3 v3.0.0-alpha2.111` (alpha — API may drift).
 
 The macOS bundle is unsigned (Gatekeeper prompts on other machines); signing/installers are tracked in `TODO.md`.
@@ -334,6 +348,8 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/agents` | | Show active/queued subagents and the concurrency limit, or set it with `/agents limit <n>` (0 = unlimited; persisted to `ocodeconfig.json`) |
 | `/agent` | | Switch agent definition (`build`, `plan`, `review`, `debug`, `docs`, …) |
 | `/compact` | `[focus]` | Manually compact context; optional focus guides summary |
+> **Web/Desktop feedback:** When running `/compact` in the web or desktop UI, a status indicator appears above the composer showing queued/running/complete/error state with elapsed time and before/after message counts. Errors persist until dismissed.
+
 | `/recap` | `[model|status|enable|disable]` | Summarize conversation / manage recap model |
 | `/context` | | Show context window token budget and system prompt, plus Knowledge Bundle, Memory, and Discovery sections |
 | `/review` | `[file|commit|branch|pr]` | AI code review with actionable findings |

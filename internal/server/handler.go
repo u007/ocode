@@ -336,7 +336,14 @@ type agentSession struct {
 	// an in-place credential edit on the same profile (not just a switch to a
 	// different profile) also triggers a rebuild — see reconcileProfileAgent.
 	credVersion int64
-	mu          sync.Mutex
+	// liveAppend mirrors a mid-turn transcript row into the in-flight
+	// live-persist view (set by wireLivePersist for headless turns). Without it,
+	// rows appended directly to messages — the auto-continue notice and resume
+	// prompt — never reach disk, and a concurrent-writer reconcile at turn end
+	// sees a non-prefix suffix and duplicates/reorders rows. Nil for bridged
+	// turns, where the TUI persists its own transcript.
+	liveAppend func(agent.Message)
+	mu         sync.Mutex
 }
 
 func NewHandler() *Handler {

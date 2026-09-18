@@ -1,6 +1,6 @@
 ---
 type: Gotcha
-title: 'Question-answer transcript echo: client must mirror server payload byte-for-byte'
+title: 'Question-answer transcript echo: client must mirror server payload shape'
 description: 'Gotcha: optimistic client rewrite of QUESTION_PROMPT sentinel must match applyQuestionAnswer payload shape exactly; sentinel is never rendered.'
 tags:
   - web
@@ -11,7 +11,7 @@ tags:
   - client-echo
 timestamp: 2026-09-17T12:33:27Z
 ---
-# Question-answer transcript echo: client must mirror server payload byte-for-byte
+# Question-answer transcript echo: client must mirror server payload shape
 
 ## What changed
 
@@ -46,16 +46,25 @@ only after the continuation turn's `messages` snapshot landed).
    - The raw `QUESTION_PROMPT:` sentinel is suppressed from rendering
      everywhere, including the live stream.
 
-## Constraint: payload shape must match byte-for-byte
+## Constraint: payload shape must stay compatible (not byte-identical)
 
 The optimistic local rewrite deliberately duplicates
 `applyQuestionAnswer`'s in-place replacement. Any change to the answer
 payload shape (`QuestionAnswerPayload` in `web/src/api/types.ts` —
 `{header?, question, answers: [{label, text?, custom?}]}`) must change
 **both** the client echo and the server's `questionAnswerPayload` struct
-(`internal/server/handler_questions.go`). A mismatch produces a silent
-divergence: the model sees one payload shape while the transcript renders
-another.
+(`internal/server/handler_questions.go`).
+
+The two payloads are **shape-compatible, not byte-identical**. The server
+re-marshals the browser's answers through `questionAnswerPayload`, whose
+`header`, `text`, and `custom` fields carry `omitempty`
+(`handler_questions.go:29-39`). An answer with an empty custom text or a
+`custom: false` therefore serializes without those keys server-side but with
+them in the client's `JSON.stringify(answers)`. Rendering is unaffected (the
+card treats missing and falsy fields the same), and the turn-end snapshot
+replaces the optimistic value with the server's copy, so the divergence is
+invisible. Do not assert byte equality between the two — assert that both
+parse to the same displayed card, and keep the field sets aligned.
 
 ## Constraint: sentinel never rendered
 

@@ -226,10 +226,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	client = a.bindOpenCodeSessionID(client)
 	pinDeterministicSampling(client)
 
-	minConfidence := 0.85
-	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.MinConfidence > 0 {
-		minConfidence = a.config.Ocode.Permissions.Auto.MinConfidence
-	}
+	minConfidence := a.resolveAutoJudgeMinConfidence()
 	roots := a.permissions.AllowedRoots()
 
 	payload := map[string]interface{}{

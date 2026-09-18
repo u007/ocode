@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
+import { useResizableSidebar } from "@/hooks/useResizableSidebar";
 import { ContextMenu } from "@/components/Layout/ContextMenu";
 import type { ContextMenuItem } from "@/components/Layout/ContextMenu";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -136,6 +137,16 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
     items: ContextMenuItem[];
     position: { x: number; y: number };
   } | null>(null);
+
+  // Left file-list / commits column width. Drag-to-resize, persisted to
+  // localStorage so the split survives a reload (same hook as the app sidebar
+  // and file tree). Replaces the old fixed `w-72 md:w-80` column.
+  const filePane = useResizableSidebar({
+    storageKey: "ocode.ui.git-panel.width",
+    defaultWidth: 288,
+    minWidth: 180,
+    maxWidth: 520,
+  });
 
   // showNotice displays a transient success message for 5 seconds. Any prior
   // timer is cleared so rapid actions don't leave a stale message on screen.
@@ -533,8 +544,12 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
 
       {/* Body */}
       <div className="flex flex-1 min-h-0">
-        {/* Left: staged / unstaged / commits */}
-        <div className="w-72 md:w-80 shrink-0 border-r border-border flex flex-col min-h-0 bg-muted/10">
+        {/* Left: staged / unstaged / commits — width is drag-resizable and
+            persisted (see `filePane`). */}
+        <div
+          className="shrink-0 flex flex-col min-h-0 bg-muted/10"
+          style={{ width: filePane.width }}
+        >
           <FileSection
             title="Staged changes"
             stagedPane
@@ -665,6 +680,19 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
             )}
           </div>
         </div>
+
+        {/* Drag handle between the file list and the diff pane. Double-click
+            restores the default width. */}
+        <div
+          ref={filePane.handleRef}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize file list and diff"
+          title="Drag to resize · double-click to reset"
+          onPointerDown={filePane.onPointerDown}
+          onDoubleClick={filePane.resetToDefault}
+          className="w-1 shrink-0 cursor-col-resize bg-border hover:bg-accent active:bg-accent"
+        />
 
         {/* Right: diff pane */}
         <div className="flex-1 min-h-0 flex flex-col">

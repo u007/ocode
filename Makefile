@@ -4,6 +4,9 @@ APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
 LDFLAGS  := -ldflags="-s -w"
 OUTDIR   := release
+DESKTOP_REMOTE_DIR := bin/remote-binaries/$(VERSION)
+
+.PHONY: desktop-remote-binaries
 
 # HTR is bundled only into managed-Chrome builds. Source checkouts are kept
 # outside this repository so ordinary contributors can build ocode with HTR
@@ -66,9 +69,18 @@ desktop: web-build bundle-desktop-assets prepare-htr-assets
 install-desktop: web-build desktop desktop-app
 	$(DESKTOP_INSTALL)
 
-## desktop-app: build and bundle ocode.app (macOS only)
-desktop-app: desktop
-	./scripts/bundle-macos.sh bin/ocode-desktop bin/ocode.app
+# Shared prerequisites run once, even under make -j with desktop. Crossbuilds
+# are sequential so any failed target stops packaging (no unchecked wait).
+desktop-remote-binaries: web-build prepare-htr-assets
+	mkdir -p "$(DESKTOP_REMOTE_DIR)"
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-linux-amd64" .
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-linux-arm64" .
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-darwin-amd64" .
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-darwin-arm64" .
+
+## desktop-app: build and bundle ocode.app with remote CLIs (macOS only)
+desktop-app: desktop desktop-remote-binaries
+	./scripts/bundle-macos.sh bin/ocode-desktop bin/ocode.app "$(DESKTOP_REMOTE_DIR)"
 
 # prepare-htr-assets creates the archive consumed by internal/browse/cdp's
 # go:embed. It builds the sibling daemon for the selected target and copies the

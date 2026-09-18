@@ -23,9 +23,16 @@
 
 
 
+
+## 2026-09-18
+
+* **Update**: Web Compact Feedback Design ([superpowers/specs/2026-09-18-web-compact-feedback-design.md](/superpowers/specs/2026-09-18-web-compact-feedback-design.md))
+* **Creation**: Web Compact Feedback Design ([superpowers/specs/2026-09-18-web-compact-feedback-design.md](/superpowers/specs/2026-09-18-web-compact-feedback-design.md))
 ## 2026-09-17
 
-* **Update**: Question-answer transcript echo: client must mirror server payload byte-for-byte ([gotchas/question-answer-transcript-echo.md](/gotchas/question-answer-transcript-echo.md))
+* **Creation**: Auto-continue turn transcript rebase: capture base length before the loop ([gotchas/auto-continue-turn-transcript-rebase.md](/gotchas/auto-continue-turn-transcript-rebase.md))
+* **Creation**: Server-Side Auto-Continue Loop ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
+* **Update**: Question-answer transcript echo: client must mirror server payload shape ([gotchas/question-answer-transcript-echo.md](/gotchas/question-answer-transcript-echo.md))
 * **Update**: Computer use ([computer-use.md](/computer-use.md))
 * **Update**: Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary ([gotchas/remote-project-path-trust-boundary.md](/gotchas/remote-project-path-trust-boundary.md))
 * **Update**: Terminal Shells Survive Page Reload (Detach / Reattach) ([architecture/terminal-detach-reattach.md](/architecture/terminal-detach-reattach.md))

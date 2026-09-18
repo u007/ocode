@@ -602,8 +602,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return updateSession(state, action.sessionId, (s) => ({ ...s, pendingQuestion: null }));
     case "QUESTION_ANSWERED":
       // Optimistic echo of the answers the browser just POSTed. The server
-      // rewrites the pending `question` tool result in place with exactly this
-      // JSON (handler_questions.go applyQuestionAnswer), so mirroring it here
+      // rewrites the pending `question` tool result in place with the
+      // shape-compatible payload parsed from the same answers
+      // (handler_questions.go applyQuestionAnswer -> questionAnswerPayload,
+      // whose optional fields are omitempty — so equal shape, not necessarily
+      // byte-identical), so mirroring it here
       // makes the Q&A visible the instant the dialog is submitted instead of
       // only when the continuation turn's `messages` snapshot lands. The
       // snapshot later replaces the message with equivalent content, so this

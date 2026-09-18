@@ -730,6 +730,13 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		}
 
 		as.messages = append(as.messages, resp...)
+		// Keep the LLM input (`messages`) in lockstep with the persisted
+		// transcript. Agent.Step returns its newMsgs without mutating the
+		// caller's slice, so without this the resumed Step below would receive
+		// the original user turn + resume hint with none of the assistant/tool
+		// rows the step just produced — the model would re-plan from scratch
+		// instead of continuing.
+		messages = append(messages, resp...)
 
 		// General-purpose auto-continue (mirrors the TUI streamDoneMsg path):
 		// a turn cut off by the /max-step cap resumes immediately up to the
@@ -737,9 +744,9 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		// configured judge model (typesafe Decide or chat YES/NO). A pause on
 		// an unresolved permission/question ask never auto-continues — the
 		// turn is over until the dialog is answered.
-		should, triageDetail := h.autoContinueShouldResume(sessionID, as, autoContinueCount, err)
+		should, triageDetail := h.autoContinueShouldResume(sessionID, as, autoContinueCount)
 		if should {
-			if hint, ok := h.fireAutoContinue(sessionID, as, headless, autoContinueCount); ok {
+			if hint, ok := h.fireAutoContinue(sessionID, as, headless); ok {
 				autoContinueCount++
 				messages = append(messages, hint)
 				continue
@@ -750,7 +757,7 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		// does not silently look done. StepLimitHitDetail covers the
 		// step-limit/error cases below; this covers the judge verdict.
 		if triageDetail != "" {
-			h.appendTranscriptNotice(sessionID, as, headless, triageDetail)
+			h.appendTranscriptNotice(as, headless, triageDetail)
 		}
 
 		break
@@ -760,11 +767,15 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 	// natural completion, so the web UI shows "cut off / declined" instead of
 	// silently looking done (the TUI parity gap this closes).
 	if detail := as.agent.StepLimitHitDetail(nil); detail != "" {
-		h.appendTranscriptNotice(sessionID, as, headless, detail)
+		h.appendTranscriptNotice(as, headless, detail)
 	}
 
 	var reply strings.Builder
-	for _, m := range as.messages {
+	// Only this turn's rows — everything appended after the base captured
+	// before the auto-continue loop. Iterating all of as.messages (the previous
+	// behavior) returned the whole session's assistant text to the synchronous
+	// POST /api/chat callers, growing every turn.
+	for _, m := range as.messages[turnBaseLen:] {
 		if m.Role == "assistant" && m.Content != "" {
 			reply.WriteString(m.Content)
 		}
@@ -813,8 +824,7 @@ const autoContinueChainCap = agent.AutoContinueChainCap
 // pause on an unresolved permission/question ask, an errored turn, or a
 // session waiting on its dialog never auto-continues. detail is the
 // user-facing triage outcome for the transcript.
-func (h *Handler) autoContinueShouldResume(sessionID string, as *agentSession, chainCount int, stepErr error) (should bool, detail string) {
-	_ = sessionID
+func (h *Handler) autoContinueShouldResume(sessionID string, as *agentSession, chainCount int) (should bool, detail string) {
 	if as == nil || as.agent == nil {
 		return false, ""
 	}
@@ -829,9 +839,6 @@ func (h *Handler) autoContinueShouldResume(sessionID string, as *agentSession, c
 	if chainCount >= autoContinueChainCap {
 		return false, ""
 	}
-	if stepErr != nil {
-		return false, ""
-	}
 	// Hard signal first (free, no extra LLM call): the turn was cut off by
 	// the /max-step cap and forced into "stop and summarize".
 	if as.agent.StepLimitHit() {
@@ -839,7 +846,9 @@ func (h *Handler) autoContinueShouldResume(sessionID string, as *agentSession, c
 	}
 	// Natural stop: ask the configured triage judge whether the reply looks
 	// interrupted. No judge configured → skip silently (opt-in feature).
-	resume, detail, err := as.agent.AutoContinueJudgeSync(as.messages)
+	// The caller's Step error never reaches here (runTurn returns on it), so
+	// there is no end-of-turn error to report to the judge.
+	resume, detail, err := as.agent.AutoContinueJudgeSync(as.messages, nil)
 	if err != nil {
 		log.Printf("serve: auto-continue judge for %s: %v", sessionID, err)
 	}
@@ -853,11 +862,10 @@ func (h *Handler) autoContinueShouldResume(sessionID string, as *agentSession, c
 // prompt as a user message (transcript + LLM input) and returns it so the
 // runTurn loop can feed the next Step. Mirrors the TUI fireAutoContinue
 // wording so both surfaces read the same.
-func (h *Handler) fireAutoContinue(sessionID string, as *agentSession, headless bool, chainCount int) (agent.Message, bool) {
+func (h *Handler) fireAutoContinue(sessionID string, as *agentSession, headless bool) (agent.Message, bool) {
 	if as == nil || as.agent == nil {
 		return agent.Message{}, false
 	}
-	_ = chainCount
 	stepLimited := as.agent.StepLimitHit()
 	continuePrompt := "Continue the task from where you left off; do not just repeat any previous summary."
 	if stepLimited {
@@ -872,9 +880,14 @@ func (h *Handler) fireAutoContinue(sessionID string, as *agentSession, headless 
 	}
 	hint := fmt.Sprintf("↩ auto-continue — %s, resuming", reason)
 	notice := agent.Message{Role: "assistant", Content: "", Notice: hint}
-	h.appendTranscriptMessage(sessionID, as, headless, notice)
+	h.appendTranscriptMessage(as, headless, notice)
 	prompt := agent.Message{Role: "user", Content: continuePrompt, UserSeq: nextUserSeq(as.messages)}
 	as.messages = append(as.messages, prompt)
+	// Keep the live-persisted view in lockstep with the transcript (see
+	// appendTranscriptMessage) so the turn-end reconcile sees a prefix.
+	if headless && as.liveAppend != nil {
+		as.liveAppend(prompt)
+	}
 	if headless {
 		h.broadcastEvent(SSEEvent{
 			SessionID: sessionID,
@@ -888,22 +901,25 @@ func (h *Handler) fireAutoContinue(sessionID string, as *agentSession, headless 
 // appendTranscriptMessage adds a UI-only message to the transcript (persisted
 // with the turn, shown by the web) WITHOUT feeding it to the LLM: runTurn's
 // `messages` slice is the LLM input and deliberately does not receive it.
-// Content is empty and the text rides Message.Notice, which the providers
-// never serialize — the same contract as the TUI's transient messages.
-func (h *Handler) appendTranscriptMessage(sessionID string, as *agentSession, headless bool, m agent.Message) {
+// Content is empty and the text rides Message.Notice; both provider builders
+// keep it out of the request (the OpenAI converter skips notice-only rows;
+// Anthropic drops zero-block messages), the same contract as the TUI's
+// transient messages.
+func (h *Handler) appendTranscriptMessage(as *agentSession, headless bool, m agent.Message) {
 	as.messages = append(as.messages, m)
-	if headless {
-		// The transcript snapshot broadcast happens at turn end; a mid-chain
-		// notice would need a separate frame the frontend has no case for,
-		// so keep these turn-boundary-only (they describe the turn's end).
-		_ = sessionID
+	// Mirror into the live-persist view (headless only; bridged turns persist
+	// their own transcript). A mid-chain row that only lives in memory makes the
+	// turn-end reconcile merge a suffix that is not a prefix of what is on disk,
+	// duplicating step rows and reordering this row.
+	if headless && as.liveAppend != nil {
+		as.liveAppend(m)
 	}
 }
 
 // appendTranscriptNotice surfaces an end-of-turn status one-liner (why the
 // turn ended) in the transcript without polluting the LLM input.
-func (h *Handler) appendTranscriptNotice(sessionID string, as *agentSession, headless bool, detail string) {
-	h.appendTranscriptMessage(sessionID, as, headless, agent.Message{Role: "assistant", Content: "", Notice: detail})
+func (h *Handler) appendTranscriptNotice(as *agentSession, headless bool, detail string) {
+	h.appendTranscriptMessage(as, headless, agent.Message{Role: "assistant", Content: "", Notice: detail})
 }
 
 // commitPartialTranscript stores, persists and mirrors the transcript of a
@@ -1458,10 +1474,11 @@ func (h *Handler) wireLivePersist(sessionID string, as *agentSession, base []age
 	if err := h.saveSessionAsync(sessionID, "", live, nil); err != nil {
 		log.Printf("serve: live persist for %s: %v", sessionID, err)
 	}
-	as.agent.OnMessage = func(m agent.Message) {
-		if prev != nil {
-			prev(m)
-		}
+	// appendLive is shared by the OnMessage wrapper (step messages) and by
+	// appendTranscriptMessage/fireAutoContinue (mid-chain notice and resume
+	// prompt). Both must feed the same view or the turn-end reconcile sees a
+	// suffix that is not a prefix of what was persisted.
+	appendLive := func(m agent.Message) {
 		mu.Lock()
 		live = append(live, m)
 		cp := append([]agent.Message(nil), live...)
@@ -1470,6 +1487,13 @@ func (h *Handler) wireLivePersist(sessionID string, as *agentSession, base []age
 			log.Printf("serve: live persist for %s: %v", sessionID, err)
 		}
 	}
+	as.agent.OnMessage = func(m agent.Message) {
+		if prev != nil {
+			prev(m)
+		}
+		appendLive(m)
+	}
+	as.liveAppend = appendLive
 }
 
 // loadSession is the read-side counterpart to saveSession: it resolves the

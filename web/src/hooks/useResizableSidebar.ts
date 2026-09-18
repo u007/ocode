@@ -65,7 +65,7 @@ export function useResizableSidebar(options: Options = {}) {
       e.stopPropagation();
 
       // Capture the pointer so we get events even if the cursor leaves the handle
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
 
       dragRef.current = { startX: e.clientX, startWidth: width };
 

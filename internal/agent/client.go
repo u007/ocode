@@ -2659,6 +2659,16 @@ func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[strin
 			}
 		}
 
+		// UI-only transcript notices (Message.Notice) are assistant messages
+		// with empty content and no tool calls. They carry nothing for the
+		// model: Anthropic's builder drops zero-block messages, but this
+		// converter would emit {"role":"assistant","content":""}, which strict
+		// OpenAI-compatible servers reject. Skip them so a persisted
+		// end-of-turn notice never reaches a provider request.
+		if m.Role == "assistant" && m.Notice != "" && m.Content == "" && len(m.ToolCalls) == 0 {
+			continue
+		}
+
 		glm := isGLMModel(c.Model)
 		msg := map[string]interface{}{
 			"role":    m.Role,
