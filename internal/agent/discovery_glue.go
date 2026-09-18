@@ -35,6 +35,10 @@ type discoveryState struct {
 	initErr    string // last resolve error (fail-open reason)
 	lastPinned map[string]struct{}
 	warming    atomic.Bool // a background corpus warm is in flight (single-flight)
+	// judgeVetoed counts candidates the TypeSafe judge kept out this session
+	// (observability for /discovery status). atomic because the TUI/HTTP status
+	// reader can run while the agent goroutine is mid-turn.
+	judgeVetoed atomic.Int64
 }
 
 // discoveryWarmTimeout bounds a background corpus warm. Generous because a local
@@ -297,8 +301,25 @@ func (a *Agent) discoveryDocs() []discovery.Doc {
 }
 
 // RunDiscovery ranks the query and grows the sticky set. No-op when discovery is
-// off or has failed open. Fail-open on any error.
+// off or has failed open. Fail-open on any error. It carries no transcript tail
+// for the TypeSafe judge; callers holding the live message list should use
+// RunDiscoveryForMessages so the judge can see the conversation.
 func (a *Agent) RunDiscovery(query string) {
+	a.runDiscovery(query, nil)
+}
+
+// RunDiscoveryForMessages derives the discovery query from the message list and
+// runs discovery with those messages available to the TypeSafe judge. Step uses
+// this so the judge sees the same conversation the embedder ranked against.
+func (a *Agent) RunDiscoveryForMessages(messages []Message) {
+	a.runDiscovery(discoveryQueryFromMessages(messages, a.workDir), messages)
+}
+
+// runDiscovery is the shared implementation behind both entry points. It ranks
+// the query (Select) and then decides what joins the sticky set: when TypeSafe
+// is connected it judges the candidates and seeds only the kept ones, otherwise
+// (or on any judge failure) it seeds every candidate — today's behavior.
+func (a *Agent) runDiscovery(query string, tail []Message) {
 	// The "context" knowledge sub-agent already has dedicated doc_search/
 	// doc_get tools over the OKF bundle; it does not need the repo-wide
 	// markdown summarization pass (mdSummarizePass) or embedder warm-up.
@@ -338,29 +359,52 @@ func (a *Agent) RunDiscovery(query string) {
 		a.emitDebug("DISCOVERY", fmt.Sprintf("corpus warm deferred to background: %v", err))
 		return
 	}
-	// Discover embeds the query against a (now-warm) corpus. On a hot cache
-	// this is normally fast, but nothing bounded it before: any embedder
-	// slowness (network latency, a local model server serializing this
-	// behind other work) stalled the whole turn before the first streamed
-	// token, with no timeout to fail open like Warm has. Give it the same
-	// tight per-turn budget.
+	// Select embeds the query against a (now-warm) corpus. On a hot cache this is
+	// normally fast, but nothing bounded it before: any embedder slowness
+	// (network latency, a local model server serializing this behind other work)
+	// stalled the whole turn before the first streamed token, with no timeout to
+	// fail open like Warm has. Give it the same tight per-turn budget.
 	rankCtx, rankCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	added, err := a.disco.session.Discover(rankCtx, query)
+	candidates, err := a.disco.session.Select(rankCtx, query)
 	rankCancel()
 	if err != nil {
 		a.emitDebug("DISCOVERY", fmt.Sprintf("rank failed (fail-open, all attached): %v", err))
 		a.disco.enabled = false
 		return
 	}
-	if len(added) > 0 && a.OnDiscovery != nil {
-		names := make([]string, 0, len(added))
-		for _, d := range added {
+	if len(candidates) == 0 {
+		return // nothing new: no judge call, no attach, no OnDiscovery
+	}
+
+	// The TypeSafe judge may veto candidates the embedder proposed. It runs only
+	// when TypeSafe is connected; any failure keeps every candidate (fail-open —
+	// the judge must never attach fewer docs than today's behavior).
+	keep := candidates
+	if client := a.discoveryJudgeClient(); client != nil {
+		judged, jerr := a.judgeDiscoveryCandidates(client, tail, query, candidates)
+		if jerr != nil {
+			a.emitDebug("DISCOVERY", fmt.Sprintf("typesafe judge failed (fail-open, all attached): %v", jerr))
+		} else {
+			keep = judged
+			if vetoed := len(candidates) - len(keep); vetoed > 0 {
+				a.disco.judgeVetoed.Add(int64(vetoed))
+			}
+		}
+	}
+	ids := make([]string, 0, len(keep))
+	for _, d := range keep {
+		ids = append(ids, d.ID)
+	}
+	a.disco.session.Seed(ids)
+	if len(keep) > 0 && a.OnDiscovery != nil {
+		names := make([]string, 0, len(keep))
+		for _, d := range keep {
 			names = append(names, d.Name)
 		}
 		a.OnDiscovery(strings.Join(names, ", "))
 	}
 	a.emitDebug("DISCOVERY", fmt.Sprintf("turn rank: %d newly attached, %d total (q=%.60q)",
-		len(added), len(a.disco.session.Attached()), query))
+		len(keep), len(a.disco.session.Attached()), query))
 }
 
 // startBackgroundWarm warms the corpus off the turn's critical path with a

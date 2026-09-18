@@ -1246,7 +1246,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// (discovery context, attached markdown) append user-role messages that
 	// would mask the real goal if derived from the final message list.
 	userGoal := lastUserContent(messages)
-	a.RunDiscovery(discoveryQueryFromMessages(messages, a.workDir))
+	a.RunDiscoveryForMessages(messages)
 	messages = a.PrepareMessages(messages, "")
 	// Order matters for cache stability: stable content
 	// (PrepareMessages output) is followed by the volatile

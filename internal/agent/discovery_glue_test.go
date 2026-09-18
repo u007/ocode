@@ -3,11 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/u007/ocode/internal/config"
@@ -522,5 +525,253 @@ func TestKaizenSkillAdvertisedInDiscovery(t *testing.T) {
 	}
 	if !containsSubstr(names, "conduct-tuning-tencent-hy3") {
 		t.Fatalf("active names-index must list the tuning skill:\n%s", names)
+	}
+}
+
+// --- TypeSafe discovery judge wiring (Tasks 3/4) -------------------------
+
+// discoveryGlueTool is a tool with a distinct description so the discovery
+// corpus text (name + ": " + description) ranks it predictably.
+type discoveryGlueTool struct{ name, desc string }
+
+func (d discoveryGlueTool) Name() string                       { return d.name }
+func (d discoveryGlueTool) Description() string                { return d.desc }
+func (d discoveryGlueTool) Definition() map[string]interface{} { return map[string]interface{}{"name": d.name} }
+func (d discoveryGlueTool) Execute(json.RawMessage) (string, error) {
+	return "", nil
+}
+func (d discoveryGlueTool) Parallel() bool { return false }
+
+// newDiscoveryGlueAgent builds a discovery-enabled gate agent whose corpus is
+// two MCP docs with strong, distinct descriptions, plus whatever skills the
+// host machine has on its search path.
+func newDiscoveryGlueAgent(t *testing.T) *Agent {
+	t.Helper()
+	a := newGateAgent()
+	a.config = &config.Config{}
+	a.tools["Notion/search"] = discoveryGlueTool{name: "Notion/search", desc: "search notion pages"}
+	a.tools["Notion/update"] = discoveryGlueTool{name: "Notion/update", desc: "update notion pages"}
+	eng := discovery.NewEngine(discovery.FakeEmbedder{Dimension: 64}, t.TempDir())
+	a.disco = &discoveryState{
+		enabled: true,
+		engine:  eng,
+		session: discovery.NewSession(eng),
+	}
+	return a
+}
+
+// discoveryGlueJudgeServer answers every noul question with defaultNoul, except
+// ids in vetoed (answered 0.0), and counts requests so tests can assert when the
+// judge was (not) consulted.
+type discoveryGlueJudgeServer struct {
+	mu          sync.Mutex
+	requests    int
+	body        map[string]any
+	defaultNoul float64
+	vetoed      map[string]bool
+	status      int
+}
+
+func newDiscoveryGlueJudgeServer(t *testing.T, defaultNoul float64, vetoed map[string]bool, status int) (*discoveryGlueJudgeServer, *httptest.Server) {
+	t.Helper()
+	h := &discoveryGlueJudgeServer{defaultNoul: defaultNoul, vetoed: vetoed, status: status}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.requests++
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("judge decode: %v", err)
+		}
+		h.body = body
+		if h.status != 0 {
+			http.Error(w, "boom", h.status)
+			return
+		}
+		answers := map[string]any{}
+		if qs, ok := body["questions"].(map[string]any); ok {
+			for id := range qs {
+				noul := h.defaultNoul
+				if h.vetoed[id] {
+					noul = 0
+				}
+				answers[id] = map[string]any{"type": "noul", "noul": noul}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "jev-latest",
+			"answers": answers,
+			"usage":   map[string]any{"input_tokens": 5, "output_tokens": 1},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return h, srv
+}
+
+func (h *discoveryGlueJudgeServer) requestCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.requests
+}
+
+func (h *discoveryGlueJudgeServer) asked(id string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	qs, ok := h.body["questions"].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = qs[id]
+	return ok
+}
+
+func (h *discoveryGlueJudgeServer) setVetoed(id string, veto bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.vetoed == nil {
+		h.vetoed = map[string]bool{}
+	}
+	h.vetoed[id] = veto
+}
+
+func useJudgeFactory(t *testing.T, srv *httptest.Server) {
+	t.Helper()
+	prev := newClientFn
+	t.Cleanup(func() { newClientFn = prev })
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		return newTypesafeClient("k", "jev-latest", srv.URL)
+	}
+}
+
+func useNonTypesafeFactory(t *testing.T) {
+	t.Helper()
+	prev := newClientFn
+	t.Cleanup(func() { newClientFn = prev })
+	newClientFn = func(_ *config.Config, _ string) LLMClient { return &MockClient{} }
+}
+
+const discoveryGlueQuery = "notion search pages update"
+
+func TestRunDiscoveryNoJudgeWhenTypesafeNotConnected(t *testing.T) {
+	a := newDiscoveryGlueAgent(t)
+	h, _ := newDiscoveryGlueJudgeServer(t, 0.99, nil, 0)
+	useNonTypesafeFactory(t)
+
+	a.RunDiscovery(discoveryGlueQuery)
+	if h.requestCount() != 0 {
+		t.Fatalf("judge must not be called without a connected typesafe client, got %d requests", h.requestCount())
+	}
+	for _, id := range []string{"mcp:Notion/search", "mcp:Notion/update"} {
+		if !a.disco.session.IsAttached(id) {
+			t.Fatalf("%s must attach when the judge is not connected", id)
+		}
+	}
+}
+
+func TestRunDiscoveryJudgeVetoesCandidate(t *testing.T) {
+	a := newDiscoveryGlueAgent(t)
+	h, srv := newDiscoveryGlueJudgeServer(t, 0.99, map[string]bool{"mcp:Notion/update": true}, 0)
+	useJudgeFactory(t, srv)
+
+	var got string
+	a.OnDiscovery = func(names string) { got = names }
+
+	a.RunDiscovery(discoveryGlueQuery)
+
+	if !h.asked("mcp:Notion/update") {
+		t.Fatalf("vetoed doc must have been a candidate; questions=%v", h.body["questions"])
+	}
+	if a.disco.session.IsAttached("mcp:Notion/update") {
+		t.Fatal("vetoed doc must not be attached")
+	}
+	if !a.disco.session.IsAttached("mcp:Notion/search") {
+		t.Fatal("kept doc must be attached")
+	}
+	if strings.Contains(got, "Notion/update") {
+		t.Fatalf("OnDiscovery must not name a vetoed doc, got %q", got)
+	}
+	if !strings.Contains(got, "Notion/search") {
+		t.Fatalf("OnDiscovery must name the kept doc, got %q", got)
+	}
+}
+
+func TestRunDiscoveryJudgeFailureAttachesAll(t *testing.T) {
+	a := newDiscoveryGlueAgent(t)
+	h, srv := newDiscoveryGlueJudgeServer(t, 0.99, nil, http.StatusInternalServerError)
+	useJudgeFactory(t, srv)
+
+	a.RunDiscovery(discoveryGlueQuery)
+
+	if h.requestCount() != 1 {
+		t.Fatalf("judge should have been attempted once, got %d", h.requestCount())
+	}
+	for _, id := range []string{"mcp:Notion/search", "mcp:Notion/update"} {
+		if !a.disco.session.IsAttached(id) {
+			t.Fatalf("%s must attach on judge failure (fail-open)", id)
+		}
+	}
+}
+
+func TestRunDiscoveryVetoedDocReJudgedNextTurn(t *testing.T) {
+	a := newDiscoveryGlueAgent(t)
+	h, srv := newDiscoveryGlueJudgeServer(t, 0.99, map[string]bool{"mcp:Notion/update": true}, 0)
+	useJudgeFactory(t, srv)
+
+	a.RunDiscovery(discoveryGlueQuery)
+	if a.disco.session.IsAttached("mcp:Notion/update") {
+		t.Fatal("update should be vetoed on the first turn")
+	}
+	if h.requestCount() != 1 {
+		t.Fatalf("first turn should consult the judge once, got %d", h.requestCount())
+	}
+
+	// The doc was vetoed, so it is still an unattached candidate: the next turn
+	// must re-judge it, and a change of verdict must attach it.
+	h.setVetoed("mcp:Notion/update", false)
+	a.RunDiscovery(discoveryGlueQuery)
+	if h.requestCount() != 2 {
+		t.Fatalf("vetoed doc must be re-judged next turn, got %d requests", h.requestCount())
+	}
+	if !a.disco.session.IsAttached("mcp:Notion/update") {
+		t.Fatal("update must attach once the judge keeps it")
+	}
+}
+
+func TestRunDiscoveryNoJudgeCallWhenNothingNew(t *testing.T) {
+	a := newDiscoveryGlueAgent(t)
+	h, srv := newDiscoveryGlueJudgeServer(t, 0.99, nil, 0)
+	useJudgeFactory(t, srv)
+
+	a.RunDiscovery(discoveryGlueQuery)
+	if h.requestCount() != 1 {
+		t.Fatalf("first turn should consult the judge once, got %d", h.requestCount())
+	}
+	a.RunDiscovery(discoveryGlueQuery)
+	if h.requestCount() != 1 {
+		t.Fatalf("no new candidates means no judge call, got %d requests", h.requestCount())
+	}
+}
+
+func TestRunDiscoveryForMessagesSendsTranscriptTail(t *testing.T) {
+	a := newDiscoveryGlueAgent(t)
+	h, srv := newDiscoveryGlueJudgeServer(t, 0.99, nil, 0)
+	useJudgeFactory(t, srv)
+
+	a.RunDiscoveryForMessages([]Message{
+		{Role: "user", Content: "please search notion pages and update them"},
+	})
+	if h.requestCount() != 1 {
+		t.Fatalf("judge should be consulted once, got %d", h.requestCount())
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.body["state"] == nil {
+		t.Fatal("judge request must carry state")
+	}
+	state, _ := h.body["state"].(map[string]any)
+	tail, _ := state["transcript_tail"].([]any)
+	if len(tail) != 1 {
+		t.Fatalf("RunDiscoveryForMessages must pass the messages as judge tail, got %v", state["transcript_tail"])
 	}
 }
