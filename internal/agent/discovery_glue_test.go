@@ -775,3 +775,26 @@ func TestRunDiscoveryForMessagesSendsTranscriptTail(t *testing.T) {
 		t.Fatalf("RunDiscoveryForMessages must pass the messages as judge tail, got %v", state["transcript_tail"])
 	}
 }
+
+func TestDiscoveryStatusReportsJudge(t *testing.T) {
+	// Connected + one vetoed turn: status names the judge and counts the veto.
+	a := newDiscoveryGlueAgent(t)
+	_, srv := newDiscoveryGlueJudgeServer(t, 0.99, map[string]bool{"mcp:Notion/update": true}, 0)
+	useJudgeFactory(t, srv)
+	a.RunDiscovery(discoveryGlueQuery)
+
+	st := a.DiscoveryStatus()
+	if st.Judge != discoveryJudgeModel {
+		t.Fatalf("Judge = %q, want %q", st.Judge, discoveryJudgeModel)
+	}
+	if st.JudgeVetoed != 1 {
+		t.Fatalf("JudgeVetoed = %d, want 1", st.JudgeVetoed)
+	}
+
+	// Not connected: no judge line.
+	b := newDiscoveryGlueAgent(t)
+	useNonTypesafeFactory(t)
+	if got := b.DiscoveryStatus().Judge; got != "" {
+		t.Fatalf("Judge should be empty when typesafe is not connected, got %q", got)
+	}
+}

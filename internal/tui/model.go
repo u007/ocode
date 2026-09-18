@@ -9631,6 +9631,9 @@ func (m *model) showDiscoverStatus() {
 		if !st.Active && st.InitErr != "" {
 			fmt.Fprintf(&b, "  note:    fail-open (%s)\n", st.InitErr)
 		}
+		if st.Judge != "" {
+			fmt.Fprintf(&b, "  judge:   %s (vetoed %d this session)\n", st.Judge, st.JudgeVetoed)
+		}
 		// All names below are injected into the names-index; ● marks docs whose
 		// full summary is also injected (attached), ○ marks name-only.
 		attachedSet := make(map[string]bool, len(st.Attached))

@@ -444,6 +444,11 @@ type DiscoveryStatusInfo struct {
 	AllMD          []string // project-doc names with a ready summary (injected into the names-index)
 	MDPending      int      // md files discovered but not yet summarized (background in flight)
 	InitErr        string
+	// Judge is the TypeSafe relevance judge model ("typesafe/jev-latest") when
+	// TypeSafe is connected, or "" when the judge is not active. JudgeVetoed is
+	// the running count of candidates the judge kept out this session.
+	Judge       string
+	JudgeVetoed int
 }
 
 // DiscoveryStatus reports the current discovery state (for /discover status, /context).
@@ -456,6 +461,12 @@ func (a *Agent) DiscoveryStatus() DiscoveryStatusInfo {
 	if a.disco != nil {
 		st.Active = a.disco.enabled
 		st.InitErr = a.disco.initErr
+		st.JudgeVetoed = int(a.disco.judgeVetoed.Load())
+		// The judge's activation condition is TypeSafe connectivity (the shared
+		// factory yielding a keyed *TypesafeClient), the sole "connected" check.
+		if a.disco.enabled && a.discoveryJudgeClient() != nil {
+			st.Judge = discoveryJudgeModel
+		}
 		if a.disco.session != nil {
 			st.Attached = a.disco.session.Attached()
 			for _, id := range st.Attached {
