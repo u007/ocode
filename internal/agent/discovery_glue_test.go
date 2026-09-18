@@ -534,9 +534,11 @@ func TestKaizenSkillAdvertisedInDiscovery(t *testing.T) {
 // corpus text (name + ": " + description) ranks it predictably.
 type discoveryGlueTool struct{ name, desc string }
 
-func (d discoveryGlueTool) Name() string                       { return d.name }
-func (d discoveryGlueTool) Description() string                { return d.desc }
-func (d discoveryGlueTool) Definition() map[string]interface{} { return map[string]interface{}{"name": d.name} }
+func (d discoveryGlueTool) Name() string        { return d.name }
+func (d discoveryGlueTool) Description() string { return d.desc }
+func (d discoveryGlueTool) Definition() map[string]interface{} {
+	return map[string]interface{}{"name": d.name}
+}
 func (d discoveryGlueTool) Execute(json.RawMessage) (string, error) {
 	return "", nil
 }
