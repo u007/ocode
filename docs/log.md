@@ -27,6 +27,8 @@
 
 ## 2026-09-19
 
+* **Update**: Files-Tab OS-Native Reveal (Open/Show in Finder/Explorer/File Manager) ([gotchas/files-tab-os-native-reveal.md](/gotchas/files-tab-os-native-reveal.md))
+* **Creation**: Files-Tab OS-Native Reveal (Open/Show in Finder/Explorer/File Manager) ([gotchas/files-tab-os-native-reveal.md](/gotchas/files-tab-os-native-reveal.md))
 * **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
 * **Update**: Remote Persistent Sessions and Terminals Design ([superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md](/superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md))
 * **Creation**: Terminal close semantics and OSC title source ([gotchas/terminal-close-and-osc-title.md](/gotchas/terminal-close-and-osc-title.md))
