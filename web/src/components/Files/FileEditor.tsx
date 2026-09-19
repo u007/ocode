@@ -708,7 +708,7 @@ function FileEditorImpl({
     // path. Errors degrade per-source (non-repo dirs fail the git calls,
     // unchanged files 404 the session diff) without failing the others.
     const sessionDiffP: Promise<ChangeDiff | null> =
-      api.getChangeDiff(session, path).catch(() => null);
+      api.getChangeDiff(session, path, projectHost).catch(() => null);
     const gitStatusP: Promise<GitStatus | undefined> = projectRoot
       ? api.getGitStatus(projectRoot, projectHost).catch(() => undefined)
       : Promise.resolve(undefined);

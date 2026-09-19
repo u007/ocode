@@ -31,9 +31,13 @@ interface ChatPanelProps {
    *  `new-<ts>` tab id. One ChatPanel is mounted per open tab (App.tsx),
    *  so this never changes across this instance's lifetime. */
   sessionId: string;
+  /** SSH/WSL host of the tab's project (undefined for local). Routes the
+   *  transcript fetch — and the prefetch hand-off — through /api/remote/{host}
+   *  so a remote session's messages load instead of 404ing locally. */
+  host?: string;
 }
 
-function ChatPanel({ sessionId }: ChatPanelProps) {
+function ChatPanel({ sessionId, host }: ChatPanelProps) {
   // Scoped to this tab's own session: getSessionSlice returns the exact same
   // object reference across dispatches that don't touch this session (see
   // updateSession's immutable per-key update), so other tabs' streamed
@@ -399,7 +403,7 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
     // flight or resolved — use it so the tab paints straight from warm data
     // instead of starting a cold round-trip. Falls back to a fresh fetch when
     // nothing is warm or the warm entry is stale.
-    (takePrefetchedSession(sessionId) ?? api.getSession(sessionId, { limit: SESSION_PREFETCH_LIMIT }))
+    (takePrefetchedSession(sessionId, host) ?? api.getSession(sessionId, { limit: SESSION_PREFETCH_LIMIT }, host))
       .then((detail) => {
         if (cancelled || generation !== loadGenerationRef.current) return;
         // Mirrors MERGE_SNAPSHOT guard in chatStore.tsx — only committed
@@ -447,7 +451,7 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [sessionId, dispatch, projectDispatch]);
+  }, [sessionId, host, dispatch, projectDispatch]);
 
   // A new session (or any session-id change) starts with a clean tail lock:
   // there is no prior reader scroll intent to preserve. ChatPanel is keyed by
@@ -613,6 +617,22 @@ function ChatPanel({ sessionId }: ChatPanelProps) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // `/search [query]` / `/find [query]` from the composer dispatches this event
+  // so the command route (App → commands.ts) doesn't need a direct handle on
+  // this tab's find-bar state. Same visibility guard as Ctrl/Cmd+F: only the
+  // visible tab reacts (hidden tabs have offsetParent === null).
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      if (scrollRef.current?.offsetParent === null) return;
+      const query = (e as CustomEvent<{ query?: string }>).detail?.query ?? "";
+      setSearchQuery(query);
+      setMatchCursor(-1);
+      setSearchOpen(true);
+    };
+    window.addEventListener("ocode:open-chat-search", onOpen);
+    return () => window.removeEventListener("ocode:open-chat-search", onOpen);
   }, []);
 
   const closeSearch = useCallback(() => {

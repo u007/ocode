@@ -530,4 +530,18 @@ describe("terminal alert badge auto-clear timer", () => {
     // The host should have been passed to closeSession
     expect(api.closeSession).toHaveBeenCalledWith("s-remote", "devbox");
   });
+
+  it("stacks full-width session rows on phones and keeps the grid from sm up", () => {
+    // Regression: the pills were fixed at 208px, so once the mobile sidebar /
+    // cowork overlay squeezed the centre column they painted over the action
+    // buttons ("sessions tab list messy").
+    const { container } = renderBar();
+    const pill = screen.getByRole("tab", { name: /chat one/i });
+    expect(pill.className).toMatch(/w-full/);
+    expect(pill.className).toMatch(/sm:w-52/);
+
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.className).toMatch(/flex-col/);
+    expect(root.className).toMatch(/sm:grid/);
+  });
 });

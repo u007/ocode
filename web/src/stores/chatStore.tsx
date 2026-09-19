@@ -102,6 +102,89 @@ export function extractPendingFromMessages(messages: Message[]): {
   return { pendingPermission, permissionQueue, pendingQuestion: question };
 }
 
+// ── LLM context for a pending ask ─────────────────────────────────
+// The permission/question ask events carry only the tool and its arguments, so
+// the dialog cannot show *why* the agent is asking. Derive the assistant
+// message that immediately preceded the ask from the session state instead:
+// the in-progress live buffer while the turn is paused, or the persisted
+// transcript on a reload/rehydrate.
+export interface AskContext {
+  /** Assistant reasoning ("thinking") for the message behind the ask. */
+  thinking?: string;
+  /** Assistant prose that introduced the tool call / question. */
+  text?: string;
+}
+
+// Live parts that do not delimit an assistant message: transient status
+// ("Checking permission for …") and discovery/indexing notices can be appended
+// mid-turn between an assistant message's prose and its tool bubbles, so they
+// must not break the walk-back.
+function isTransientLivePart(part: LivePart): boolean {
+  return part.kind === "status" || part.kind === "notice";
+}
+
+// Pull the assistant message the pending ask belongs to out of the live
+// buffer. Tool parts delimit messages (one assistant message can carry several
+// tool calls); trailing tool/status/notice parts are skipped so the walk-back
+// starts on the message's prose.
+function liveAskContext(live: LivePart[]): AskContext | null {
+  let end = live.length;
+  while (end > 0 && (live[end - 1].kind === "tool" || isTransientLivePart(live[end - 1]))) {
+    end--;
+  }
+  if (end === 0) return null;
+  let start = end;
+  while (start > 0) {
+    const part = live[start - 1];
+    if (part.kind === "thinking" || part.kind === "text" || isTransientLivePart(part)) {
+      start--;
+      continue;
+    }
+    break; // tool part — previous assistant message boundary
+  }
+  const parts = live.slice(start, end);
+  const thinking = parts
+    .filter((p): p is { kind: "thinking"; text: string } => p.kind === "thinking")
+    .map((p) => p.text)
+    .join("")
+    .trim();
+  const text = parts
+    .filter((p): p is { kind: "text"; text: string } => p.kind === "text")
+    .map((p) => p.text)
+    .join("")
+    .trim();
+  if (!thinking && !text) return null;
+  return { thinking: thinking || undefined, text: text || undefined };
+}
+
+/** Assistant message (prose + reasoning) that led to the currently-pending
+ *  permission/question ask, for display inside the ask dialog. Prefers the
+ *  live buffer (mid-turn pause); falls back to the last assistant message in
+ *  the transcript (reload/rehydrate). Returns null when neither holds an
+ *  assistant message, so callers render nothing rather than an empty panel. */
+export function extractAskContext(
+  messages: Message[],
+  live: LivePart[],
+): AskContext | null {
+  const fromLive = liveAskContext(live);
+  if (fromLive) return fromLive;
+  // The transcript only carries the pending ask once the server has written
+  // its sentinel as a trailing tool message (extractPendingFromMessages). With
+  // no trailing tool run the live buffer is mid-turn and the last committed
+  // assistant message belongs to an earlier turn — showing it would
+  // misattribute the ask, so return nothing instead.
+  if (trailingToolRunStart(messages) === messages.length) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    const thinking = (msg.reasoning_content ?? "").trim();
+    const text = (msg.content ?? "").trim();
+    if (!thinking && !text) return null;
+    return { thinking: thinking || undefined, text: text || undefined };
+  }
+  return null;
+}
+
 export interface PermissionRequest {
   tool: string;
   command?: string;
@@ -189,6 +272,14 @@ export interface SessionSlice {
   // per-session override; for a real session tuiStatus.permission_mode wins.
   // Undefined = never picked (follows the config default).
   permissionMode?: string;
+  // Optimistic per-session advisor on/off, written the instant the sidebar's
+  // checkbox is clicked so the flip is visible during the PUT round trip. It
+  // shadows tuiStatus.advisor_enabled until an authoritative snapshot confirms
+  // the same value (see SET_TUI_STATUS), then clears to undefined. Kept (not
+  // cleared) while a snapshot disagrees, so a background status poll that raced
+  // the in-flight PUT cannot clobber the just-clicked state. Undefined = no
+  // pending flip; fall back to the session's snapshot / the process default.
+  advisorEnabled?: boolean;
 }
 
 export const emptySessionSlice: SessionSlice = {
@@ -282,6 +373,10 @@ export type ChatAction =
   | { type: "SET_SMALL_MODEL_ENABLED"; enabled: boolean }
   | { type: "SET_ADVISOR_MODEL"; model: string }
   | { type: "SET_ADVISOR_ENABLED"; enabled: boolean }
+  // Optimistic per-session advisor gate (see SessionSlice.advisorEnabled).
+  // Session-scoped: never touches the global s.advisorEnabled. `enabled:
+  // undefined` clears the pending flip so the authoritative snapshot wins.
+  | { type: "SET_SESSION_ADVISOR_ENABLED"; sessionId: string; enabled?: boolean }
   | { type: "SET_OCR_MODEL"; model: string }
   | { type: "SET_OCR_ENABLED"; enabled: boolean }
   | { type: "SET_OCR_BACKEND"; backend: string }
@@ -394,6 +489,34 @@ export function capMessages(
   };
 }
 
+/** True when `next` is provably older than the snapshot already displayed.
+ *
+ *  Status snapshots reach a session slice from four independent writers whose
+ *  responses can resolve out of order — a 15s poll, the visibilitychange
+ *  refresh, the server's session-tagged SSE push, and a mutation's own
+ *  refetch. Without an ordering guard a slow GET issued *before* a user
+ *  mutation lands *after* the fresher push and reverts the UI to the old
+ *  value until the next poll ("it works out of the blue later").
+ *
+ *  `updated_at` is stamped server-side when the snapshot is built
+ *  (buildStatusSnapshot / HandleSessionStatus / pushSessionStatusSnapshot),
+ *  so it orders snapshots correctly across all four transports.
+ *
+ *  Comparisons are deliberately conservative: two snapshots with no
+ *  parseable `updated_at` are never treated as stale, and equal timestamps
+ *  are accepted (a same-instant writer must still be able to update fields
+ *  the other one omitted). */
+export function isStaleStatus(
+  prev: TUIStatus | null | undefined,
+  next: TUIStatus | null | undefined,
+): boolean {
+  if (!prev || !next) return false;
+  const prevAt = Date.parse(prev.updated_at ?? "");
+  const nextAt = Date.parse(next.updated_at ?? "");
+  if (Number.isNaN(prevAt) || Number.isNaN(nextAt)) return false;
+  return nextAt < prevAt;
+}
+
 function updateSession(
   state: ChatState,
   sessionId: string,
@@ -479,6 +602,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, advisorModel: action.model };
     case "SET_ADVISOR_ENABLED":
       return { ...state, advisorEnabled: action.enabled };
+    case "SET_SESSION_ADVISOR_ENABLED":
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        advisorEnabled: action.enabled,
+      }));
     case "SET_OCR_MODEL":
       return { ...state, ocrModel: action.model };
     case "SET_OCR_ENABLED":
@@ -723,11 +851,30 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       });
     case "SET_SPENDING":
       return { ...state, spendingUSD: action.spendingUSD };
-    case "SET_TUI_STATUS":
+    case "SET_TUI_STATUS": {
+      // Reject a snapshot generated before the one already displayed. The four
+      // writers (15s poll, visibility refresh, SSE push, mutation refetch)
+      // resolve out of order, so without this a slow GET issued before a
+      // mutation clobbers the fresher snapshot with the old value and only the
+      // next poll repairs it ("works out of the blue later").
+      if (isStaleStatus(getSessionSlice(state, action.sessionId).tuiStatus, action.status)) {
+        return state;
+      }
       return {
-        ...updateSession(state, action.sessionId, (s) => ({ ...s, tuiStatus: action.status })),
+        ...updateSession(state, action.sessionId, (s) => {
+          // Reconcile an optimistic advisor flip with the authoritative
+          // snapshot: clear it once the snapshot carries the same value (the
+          // truth now lives in tuiStatus). A snapshot that still disagrees is
+          // a poll that raced the in-flight PUT, so keep the optimistic value
+          // rather than flashing the checkbox back. A snapshot without the
+          // field (older payload) leaves the pending flip alone.
+          const authoritative = action.status?.advisor_enabled;
+          const confirmed = s.advisorEnabled !== undefined && authoritative === s.advisorEnabled;
+          return { ...s, tuiStatus: action.status, advisorEnabled: confirmed ? undefined : s.advisorEnabled };
+        }),
         tuiStatusReady: true,
       };
+    }
     case "SET_STATUS_LOADING":
       return updateSession(state, action.sessionId, (s) => ({
         ...s,

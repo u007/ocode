@@ -10,6 +10,7 @@ import type { DiscoveryConfig } from "../../api/client";
 // PUT (the endpoint replaces the whole block, so embedding model/backend,
 // pinned skills and ignore paths must survive the toggle).
 vi.mock("../../stores/projectStore", () => ({
+  findProjectPathForTab: () => undefined,
   useProjectState: () => ({
     activeTabId: "session-1",
     state: { activeProject: null },

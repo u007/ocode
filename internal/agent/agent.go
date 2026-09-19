@@ -135,6 +135,18 @@ func (a *Agent) SetSessionID(sessionID string) {
 	}
 }
 
+// sessionIDValue returns the debug-log session id set by SetSessionID, or ""
+// when this agent was not built for a server session (the TUI). Locked read —
+// the field is otherwise only accessed directly at construction / by emitDebug.
+func (a *Agent) sessionIDValue() string {
+	if a == nil {
+		return ""
+	}
+	a.opencodeSessionMu.Lock()
+	defer a.opencodeSessionMu.Unlock()
+	return a.sessionID
+}
+
 // SetOpenCodeSessionID sets the logical conversation identity used by
 // OpenCode requests without changing the session id used to scope debug logs.
 // The TUI uses this because it deliberately keeps debug entries process-global.
@@ -562,6 +574,13 @@ type Agent struct {
 	// of estimating token counts from message text. atomic because the server
 	// reads it from an HTTP/SSE goroutine while the turn goroutine writes it.
 	lastInputTokens atomic.Int64
+	// compactedContextTokens is the estimated context-window occupancy of the
+	// transcript produced by the most recent compaction. The provider-reported
+	// lastInputTokens is cleared on compaction (it described the pre-compaction
+	// shape), so transports fall back to this estimate to show the reduced
+	// context immediately instead of "unknown" until the next provider call.
+	// atomic for the same cross-goroutine reason as lastInputTokens.
+	compactedContextTokens atomic.Int64
 	// compactMu serialises async compaction passes so a slow summary call
 	// can't fire OnCompact twice for overlapping snapshots.
 	compactMu sync.Mutex
@@ -2551,6 +2570,17 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 	// so the web/desktop Context gauge reports "unknown" instead of a stale
 	// pre-compaction number; the next Step records the fresh value.
 	a.lastInputTokens.Store(0)
+	// Record the estimate for the post-splice transcript so the gauge can show
+	// the reduced context immediately (see CompactedContextTokens). This is the
+	// same CurrentContextEstimate the TUI uses for its own sidebar; the summary
+	// marker makes it ignore pre-compaction Usage and fall back to the heuristic.
+	spliced := make([]Message, 0, len(messages)-(tailStart-replaceFrom)+1)
+	spliced = append(spliced, messages[:replaceFrom]...)
+	spliced = append(spliced, summaryMsg)
+	spliced = append(spliced, messages[tailStart:]...)
+	if est, _ := CurrentContextEstimate(spliced, a.CharsPerToken()); est > 0 {
+		a.compactedContextTokens.Store(int64(est))
+	}
 	res.ReplaceFrom = replaceFrom
 	res.ReplaceTo = tailStart
 	res.Summary = summaryMsg
@@ -2699,6 +2729,18 @@ func (a *Agent) LastInputTokens() int64 {
 		return 0
 	}
 	return a.lastInputTokens.Load()
+}
+
+// CompactedContextTokens returns the estimated context-window occupancy of the
+// transcript produced by the most recent compaction, or 0 when no compaction
+// has run on this agent. It is a fallback for callers that would otherwise
+// report LastInputTokens==0 as "unknown" after a compaction cleared the
+// provider reading. Safe for concurrent use.
+func (a *Agent) CompactedContextTokens() int64 {
+	if a == nil {
+		return 0
+	}
+	return a.compactedContextTokens.Load()
 }
 
 func (a *Agent) SetMode(m Mode) {
@@ -5081,6 +5123,18 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 		} else if client := NewClient(a.config, spec.Model); client != nil {
 			a.emitDebug("AGENT", fmt.Sprintf("spec %q: switching client to %s", spec.Name, spec.Model))
 			client = a.bindOpenCodeSessionID(client)
+			// Also carry the debug-log sessionID: NewClient only binds the
+			// *opencode* session id, so without this a swapped purpose/small
+			// client's emitDebug would fall back to the process-global sink and
+			// its TOKENS rows would leak into every open Logs tab (the same
+			// clutter subagent SetSessionID exists to prevent). Guarded by a
+			// read-only accessor so a client built outside a session-scoped
+			// agent stays untagged.
+			if gc, ok := client.(*GenericClient); ok {
+				if sid := a.sessionIDValue(); sid != "" {
+					gc.setSessionID(sid)
+				}
+			}
 			a.client = client
 			a.clearEnvironmentPromptCache()
 			a.preloadedModelContext = "" // model may have changed; reload model-specific context lazily

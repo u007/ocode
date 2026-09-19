@@ -31,12 +31,15 @@ okf_version: 0.1
 - [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) - Added turn-rank judge token to the "How to observe" section of the Discovery TypeSafe Relevance Judge concept doc.
 - [Discovery Web Surfaces](concepts/discovery-web-surfaces.md) - Discovery visibility in the web UI: live transient notices via SSE and runtime status endpoint, with map-race safety rule.
 - [Doc Search Relevance Judge](concepts/doc-search-relevance-judge.md) - TypeSafe/Jev relevance judge for doc_search results — filters out-of-scope knowledge docs before get_top body inlining.
+- [Host and project scoping for web session/project reads](concepts/web-session-host-scoping.md) - Every session/project-scoped web read must carry host and project path; command context, resolved surfaces, and the threading rule
 - [Remote Persistent Sessions and Terminals](concepts/remote-persistent-sessions-terminals.md) - Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, sidebar UI, and wake reconnect.
 - [Sandbox Permission Mode](concepts/sandbox-permission-mode.md) - Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references
 - [Server-Side Auto-Continue Loop](concepts/server-auto-continue.md) - Decoupled auto-continue confidence floor from permissions.auto.min_confidence: 0.6 vs 0.85, added model-set warning note.
+- [Web Ask Dialog LLM Context Preview](concepts/web-ask-dialog-llm-context.md) - Permission/question ask dialogs now show the LLM's last message and thinking for user context
 
 # gotchas
 
+- [After Compaction: Publish Status Snapshot + Record Estimate or Context Gauge Goes Stale](gotchas/compaction-context-gauge-stale-after-splice.md) - Gotcha: after compaction the server must publish a status snapshot and the agent must record a post-splice estimate, else the Context gauge goes stale; the compaction notice is the persisted [ocode:compaction-summary] system message
 - [Agent Replacement — Input Queuing & Stream Event Epochs](gotchas/agent-replacement-input-queuing.md) - Architectural decision and solution pattern for queuing user input during agent replacement and using stream event epochs to prevent stale events from mutating the new session.
 - [AIHubMix Test — Global Cache State Leakage](gotchas/aihubmix-test-cache-leak.md) - AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures
 - [Auto-continue turn transcript rebase: capture base length before the loop](gotchas/auto-continue-turn-transcript-rebase.md) - Gotcha: turn transcript persistence silently fails if turnBaseLen is not captured before the auto-continue loop, because resume prompts grow the messages length and cause hard-diverge on reconcile.
@@ -79,6 +82,7 @@ okf_version: 0.1
 - [PATH Shadowing Can Bypass Sandbox Discovery](gotchas/shell-sandbox-path-shadowing.md) - Gotcha: PATH-based sandbox-exec/bwrap discovery can be shadowed by user-writable executables, requiring hardening to prevent security bypasses.
 - [PDF preview fails on WebKit with `undefined is not a function (near '...e of t...')`](gotchas/pdf-preview-webkit-async-iterator.md) - WebKit ReadableStream async-iterator gap kills pdf.js text layer — feature-detected shim fix
 - [Pending ask recovery from live session state (sentinel-less transcript)](gotchas/pending-ask-recovery-live-session-state.md) - Added async turn_error bus event as a fourth recovery trigger for pending-ask hydration, updated sentinel names, updated timestamp.
+- [Per-session LLM spend accumulator](gotchas/per-session-llm-spend-accumulator.md) - Per-session LLM spend accumulator — persistence key, seeding, carry-on-replace, and the daily-total fallback
 - [Permission Evaluation and Unknown Tool Guard](gotchas/permission-evaluation-and-unknown-tool-guard.md) - Documenting established permission-path invariants for unknown tool rejection and safe permission evaluation, including read-target existence checks to avoid TOCTOU issues (deprecated)
 - [Pinned pip requirement sets need an upper Python bound, not just a minimum](gotchas/tts-pinned-python-upper-bound-needed.md) - Gotcha: pinned pip requirement sets need an upper Python bound — an unconstrained upper lets pip resolve against an interpreter whose wheels don't satisfy the most restrictive Requires-Python, producing a misleading resolver dump.
 - [Plugin Auto-Permission — Arbitrary Execution Risk](gotchas/plugin-auto-permission-security.md) - Updated gotcha: blanket OS temp auto-permission is now a deliberate v1.8.0 policy, not an unresolved regression. Historical v1.5.0 tightening preserved.
@@ -106,6 +110,8 @@ okf_version: 0.1
 - [TUI Leaves Mouse Tracking On After Silent Exit — Diagnose via tui-crash.log](gotchas/tui-mouse-garbage-after-idle-crash-log.md) - After long idle with two TUI instances, the shell prompt appeared under the still-visible frame and every mouse move printed "35;14;1M" garbage. No panic, no zsh job message, no resume summary. Root cause unconfirmed; fd 2 is now mirrored to ~/.local/share/ocode/logs/tui-crash.log with tty job-control state so the next occurrence self-reports.
 - [TUI Selection Context Lost on Double Preparation](gotchas/tui-selection-context-lost-on-double-preparation.md) - Confirmed regression: Agent.Step re-prepares TUI-prepared messages with an empty selection and removes the existing [ocode:selection] context.
 - [Version-Changelog Mismatch](gotchas/version-changelog-mismatch.md) - Version mismatch between version.go (0.8.83) and CHANGES.md resolved — CHANGES.md [Unreleased] now includes –– **Version Bump** — 0.8.82 → 0.8.83 entry; `go test ./internal/version/` passes as of this commit. Status updated to resolved-as-of-this-commit.
+- [Web model picker must open from the cached model list, not a live refresh](gotchas/web-model-picker-cached-not-live.md) - Gotcha: web model picker slowness — cached open, batch scan, render cap, gzip, configured filter
+- [Web UI Mobile Layout Breakage (≤767px)](gotchas/web-ui-mobile-layout-breakage.md) - Gotcha: web UI mobile layout broke because sidebar CSS reserved space on phones, default-open sidebars never closed, a CSS grid collapsed the tab strip, and the floating bottom bar overflowed the viewport edge. Five root causes, responsive fixes, and regression tests.
 - [Web/Desktop Chat Went Stale Because a Dead SSE Body Never Errors](gotchas/web-sse-stream-silent-death-liveness.md) - Gotcha: desktop/web chat "lost streaming, then loaded the reply from storage, then stopped updating". The fetch-based /api/events body can go silently dead (WKWebView suspend, sleep/wake, interface change) without erroring or ending, and the client ignored the server keepalive pings, so nothing ever reconnected.
 - [Writable-Root Validation Prevents Confinement Defeat](gotchas/shell-sandbox-writable-root-validation.md) - Gotcha: writable-root validation must canonicalize paths and reject filesystem-volume roots (/) to prevent confinement defeat from env vars like TMPDIR.
 
@@ -206,7 +212,8 @@ okf_version: 0.1
 - [System Permissions Settings Section (macOS TCC + cross-platform)](superpowers/specs/2026-09-18-system-permissions-design.md) - Design spec for System Permissions settings section covering macOS TCC grants with cross-platform support, detection/request, API, startup reconcile, and web UI.
 - [TTS Speech Playback Design Specification](superpowers/specs/2026-09-09-tts-speech-playback-design.md) - User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source).
 - [TUI Sidebar Title Expand/Collapse Design](superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md) - Design for sidebar title expand/collapse behavior, updated to match user decision: transient expansion, reset on session changes, no session JSON persistence.
-- [Web Compact Feedback Design](superpowers/specs/2026-09-18-web-compact-feedback-design.md) - Approved design for web/desktop /compact feedback beside composer: queued/running/complete/error states, queue semantics, test plan. Implementation complete.
+- [Web Compact Feedback Design](superpowers/specs/2026-09-18-web-compact-feedback-design.md) - Approved design for web/desktop /compact feedback beside composer: queued/running/complete/error states, queue semantics, test plan. Implementation complete. (deprecated)
+- [Web Compact Feedback — Final Implementation](superpowers/specs/2026-09-19-web-compact-feedback-final.md) - Superseding spec for the web compact feedback design — final implementation with backend status snapshot, transcript-persisted notice, and simplified composer states
 
 # Unclassified
 
@@ -419,6 +426,7 @@ okf_version: 0.1
 - [2026-09-12-computer-use-tool-design.md](superpowers/specs/2026-09-12-computer-use-tool-design.md)
 - [2026-09-13-remote-project-editing.md](superpowers/specs/2026-09-13-remote-project-editing.md)
 - [2026-09-17-remote-project-agent-on-host-design.md](superpowers/specs/2026-09-17-remote-project-agent-on-host-design.md)
+- [2026-09-19-session-switch-context-changes-logs.md](superpowers/specs/2026-09-19-session-switch-context-changes-logs.md)
 - [telegram-bot.md](telegram-bot.md)
 - [web-desktop-parity-todo.md](web-desktop-parity-todo.md)
 

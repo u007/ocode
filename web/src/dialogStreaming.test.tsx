@@ -193,9 +193,10 @@ describe("dialogs stay open while chat is streaming", () => {
     // The real dialog received the active session's project host from App
     // (`host={activeSessionHost}`): its host-scoped model list request carries
     // `devbox`. Dropping that prop while `sessionId` remains would call
-    // listModels without a host and fail here.
+    // listModels without a host and fail here. The open path is the cached
+    // list (live refresh is the dialog's explicit Refresh button).
     await waitFor(() =>
-      expect(api.listModels).toHaveBeenCalledWith({ refresh: true }, "devbox"),
+      expect(api.listModels).toHaveBeenCalledWith({ configured: true }, "devbox"),
     );
 
     // Streaming burst through the real router. Start with session_started so

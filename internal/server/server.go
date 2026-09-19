@@ -247,6 +247,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/git/reset-remote", s.authMiddleware(s.handler.HandleGitResetRemote))
 	s.mux.HandleFunc("GET /api/theme", s.authMiddleware(s.handleGetTheme))
 	s.mux.HandleFunc("GET /api/themes", s.authMiddleware(s.handleListThemes))
+	// CLI-utility detection/install (the web/desktop `/tools` command). Install
+	// is async: POST starts a job and the client polls its status.
+	s.mux.HandleFunc("GET /api/cli-tools", s.authMiddleware(s.handler.HandleListCliTools))
+	s.mux.HandleFunc("POST /api/cli-tools/install", s.authMiddleware(s.handler.HandleStartCliToolsInstall))
+	s.mux.HandleFunc("GET /api/cli-tools/install/{id}", s.authMiddleware(s.handler.HandleGetCliToolsInstallStatus))
 	s.mux.HandleFunc("GET /api/files/tree", s.authMiddleware(s.handleFileTree))
 	s.mux.HandleFunc("GET /api/files/search", s.authMiddleware(s.handleFileSearch))
 	s.mux.HandleFunc("GET /api/files/search/stream", s.authMiddleware(s.handleFileSearchStream))
@@ -1536,8 +1541,10 @@ func (s *Server) Serve(ln net.Listener) error {
 // serveHandler is the final HTTP boundary for the route registry. Keeping the
 // CORS wrapper here ensures routes registered after New (for example, optional
 // scheduler routes) cannot bypass it through a more-specific ServeMux pattern.
+// gzip sits outermost so its Vary/Content-Encoding headers apply to every /api
+// response, including ones whose routes are registered later.
 func (s *Server) serveHandler() http.Handler {
-	return http.HandlerFunc(corsMiddleware(s.mux.ServeHTTP))
+	return gzipMiddleware(corsMiddleware(s.mux.ServeHTTP))
 }
 
 // Shutdown gracefully stops the server within ctx. It first tears down agent

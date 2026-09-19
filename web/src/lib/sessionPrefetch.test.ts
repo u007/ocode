@@ -31,7 +31,7 @@ describe("sessionPrefetch", () => {
     prefetchSession("s1");
     prefetchSession("s1");
     expect(getSession).toHaveBeenCalledTimes(1);
-    expect(getSession).toHaveBeenCalledWith("s1", { limit: SESSION_PREFETCH_LIMIT });
+    expect(getSession).toHaveBeenCalledWith("s1", { limit: SESSION_PREFETCH_LIMIT }, undefined);
   });
 
   it("hands the warm promise to the consumer exactly once", async () => {
@@ -79,5 +79,18 @@ describe("sessionPrefetch", () => {
     getSession.mockRejectedValue(failure);
     prefetchSession("s2");
     await expect(takePrefetchedSession("s2")).rejects.toThrow("offline");
+  });
+
+  it("routes a remote prefetch through the project host and never serves it to local", async () => {
+    getSession.mockResolvedValue(detail("s1"));
+    prefetchSession("s1", "james@217.216.72.49");
+
+    // Same id, different host: the warm entry must not be served.
+    expect(takePrefetchedSession("s1")).toBeUndefined();
+    // Matching host consumes it.
+    const warm = takePrefetchedSession("s1", "james@217.216.72.49");
+    expect(warm).toBeDefined();
+    await expect(warm).resolves.toMatchObject({ id: "s1" });
+    expect(getSession).toHaveBeenCalledWith("s1", { limit: SESSION_PREFETCH_LIMIT }, "james@217.216.72.49");
   });
 });

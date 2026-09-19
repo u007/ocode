@@ -145,6 +145,7 @@ func (h *Handler) finishSessionTitle(sessionID, title string) {
 	}
 	h.applySessionContext(&snap, sessionID)
 	h.applySessionPermissionFields(&snap, sessionID)
+	h.applySessionAdvisorFields(&snap, sessionID)
 	h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "status", Data: snap})
 }
 

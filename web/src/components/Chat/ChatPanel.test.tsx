@@ -1139,6 +1139,33 @@ describe("ChatPanel", () => {
     expect(items.length).toBe(2);
   });
 
+  it("opens the find bar when /search dispatches ocode:open-chat-search", async () => {
+    const msgs = Array.from({ length: 5 }, (_, i) => mk("user", `message ${i} FINDME${i}`));
+    render(
+      <ChatProvider>
+        <LiveSeed sessionId="sess-search-event" messages={msgs} />
+        <ChatPanel sessionId="sess-search-event" />
+      </ChatProvider>,
+    );
+    await tick();
+
+    // No bar before the command runs.
+    expect(screen.queryByPlaceholderText(/Find in chat/i)).toBeNull();
+
+    // `/search <query>` (commands.ts) dispatches this event; the visible tab
+    // opens its bar with the query prefilled and jumps to the first match.
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("ocode:open-chat-search", { detail: { query: "FINDME3" } }),
+      );
+    });
+    await tick();
+
+    const input = screen.getByPlaceholderText(/Find in chat/i) as HTMLInputElement;
+    expect(input.value).toBe("FINDME3");
+    expect(screen.getByText("1/1")).toBeInTheDocument();
+  });
+
   it("search highlights grouped result content and jumps to its parent group", async () => {
     const msgs: Message[] = [
       { role: "assistant", content: "", tool_calls: [{ id: "call-s1", function: { name: "read", arguments: '{"path":"a.go"}' } }] },
@@ -1186,6 +1213,6 @@ describe("ChatPanel", () => {
     // starting a cold fetch (the mock's default impl never resolves, so a
     // second call would hang and fail the assertion above).
     expect(api.getSession).toHaveBeenCalledTimes(1);
-    expect(api.getSession).toHaveBeenCalledWith(PREFETCHED_SESSION_ID, { limit: 100 });
+    expect(api.getSession).toHaveBeenCalledWith(PREFETCHED_SESSION_ID, { limit: 100 }, undefined);
   });
 });

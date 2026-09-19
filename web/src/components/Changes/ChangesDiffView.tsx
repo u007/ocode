@@ -3,10 +3,12 @@ import { api } from "@/api/client";
 
 interface Props {
   session?: string;
+  /** SSH/WSL host of the session's project (undefined for local). */
+  host?: string;
   path: string;
 }
 
-export default function ChangesDiffView({ session, path }: Props) {
+export default function ChangesDiffView({ session, host, path }: Props) {
   const [patch, setPatch] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -15,7 +17,7 @@ export default function ChangesDiffView({ session, path }: Props) {
     setPatch(null);
     setError(null);
     api
-      .getChangeDiff(session, path)
+      .getChangeDiff(session, path, host)
       .then((res) => {
         if (!cancelled) setPatch(res.patch);
       })
@@ -25,7 +27,7 @@ export default function ChangesDiffView({ session, path }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [session, path]);
+  }, [session, host, path]);
 
   if (error) return <div className="p-2 text-xs text-red-400">{error}</div>;
   if (patch === null) return <div className="p-2 text-xs text-muted-foreground">Loading diff…</div>;

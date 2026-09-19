@@ -27,6 +27,16 @@
 
 ## 2026-09-19
 
+* **Update**: Web UI Mobile Layout Breakage (≤767px) ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
+* **Creation**: Host and project scoping for web session/project reads ([concepts/web-session-host-scoping.md](/concepts/web-session-host-scoping.md))
+* **Creation**: Per-session LLM spend accumulator ([gotchas/per-session-llm-spend-accumulator.md](/gotchas/per-session-llm-spend-accumulator.md))
+* **Creation**: Web UI Mobile Layout Breakage (≤767px) ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
+* **Update**: Web model picker must open from the cached model list, not a live refresh ([gotchas/web-model-picker-cached-not-live.md](/gotchas/web-model-picker-cached-not-live.md))
+* **Creation**: Web model picker must open from the cached model list, not a live refresh ([docs/gotchas/web-model-picker-cached-not-live.md](/docs/gotchas/web-model-picker-cached-not-live.md))
+* **Creation**: Web Ask Dialog LLM Context Preview ([concepts/web-ask-dialog-llm-context.md](/concepts/web-ask-dialog-llm-context.md))
+* **Creation**: After Compaction: Publish Status Snapshot + Record Estimate or Context Gauge Goes Stale ([gotchas/compaction-context-gauge-stale-after-splice.md](/gotchas/compaction-context-gauge-stale-after-splice.md))
+* **Creation**: Web Compact Feedback — Final Implementation ([superpowers/specs/2026-09-19-web-compact-feedback-final.md](/superpowers/specs/2026-09-19-web-compact-feedback-final.md))
+* **Deprecation**: Web Compact Feedback Design: Superseded by the actual implementation which changed the design significantly: (1) backend now publishes a status snapshot after compaction via publishTurnStatusSnapshot so the Context gauge stays accurate, (2) the "complete" compaction state was removed — only "active" and "error" states remain, (3) the compaction notice moved from a composer bar into the transcript as a persisted [ocode:compaction-summary] system message rendered by CompactionNotice.tsx, (4) clearCompaction was added to compactionState.ts. See superseding spec and gotcha below. ([superpowers/specs/2026-09-18-web-compact-feedback-design.md](/superpowers/specs/2026-09-18-web-compact-feedback-design.md))
 * **Update**: Files-Tab OS-Native Reveal (Open/Show in Finder/Explorer/File Manager) ([gotchas/files-tab-os-native-reveal.md](/gotchas/files-tab-os-native-reveal.md))
 * **Creation**: Files-Tab OS-Native Reveal (Open/Show in Finder/Explorer/File Manager) ([gotchas/files-tab-os-native-reveal.md](/gotchas/files-tab-os-native-reveal.md))
 * **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))

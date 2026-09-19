@@ -120,13 +120,38 @@ describe("useTurnWatchdogAll", () => {
 
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("s1"));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("s2"));
-    expect(mockGetSessionState).toHaveBeenCalledWith("s1");
-    expect(mockGetSessionState).toHaveBeenCalledWith("s2");
+    expect(mockGetSessionState).toHaveBeenCalledWith("s1", undefined);
+    expect(mockGetSessionState).toHaveBeenCalledWith("s2", undefined);
     // The turn finished server-side while the client thought it active, so
     // the committed transcript is refetched (recovery = refetch, not replay).
-    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE });
-    expect(mockGetSession).toHaveBeenCalledWith("s2", { limit: RECONCILE_PAGE_SIZE });
+    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, undefined);
+    expect(mockGetSession).toHaveBeenCalledWith("s2", { limit: RECONCILE_PAGE_SIZE }, undefined);
     warn.mockRestore();
+  });
+
+  it("routes the stall reconcile through the session's host", async () => {
+    // A remote session's /state + transcript live on its host's server; the
+    // watchdog must forward the host or the reconcile 404s locally.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    renderHook(
+      () => {
+        useTurnWatchdogAll(new Set(["s1"]), new Map([["s1", "devbox"]]));
+        const dispatch = useChatDispatch();
+        useEffect(() => {
+          dispatch({ type: "SET_TURN_STATE", sessionId: "s1", turnActive: true });
+        }, [dispatch]);
+        return null;
+      },
+      { wrapper: Wrapper },
+    );
+    mockGetSessionState.mockResolvedValue({ bootstrap_stage: "ready", turn_active: false, last_seq: 9 });
+    mockGetSession.mockResolvedValue({ messages: [], total: 0 });
+    vi.advanceTimersByTime(STALL_THRESHOLD_MS + 5_000);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mockGetSessionState).toHaveBeenCalledWith("s1", "devbox");
+    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, "devbox");
   });
 
   it("does not re-mark a stall that was already reported", async () => {

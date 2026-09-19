@@ -114,6 +114,31 @@ func TestApplySpecModel_ClearsPreloadedModelContextOnClientSwap(t *testing.T) {
 	}
 }
 
+// TestApplySpecModel_CarriesDebugSessionIDOntoSwappedClient is the regression
+// guard for the subagent Logs-tab leak: when a purpose/small-model spec swaps
+// the client, the replacement carries the debug-log sessionID (not just the
+// opencode affinity id), so its TOKENS rows are attributed to the owning chat
+// instead of falling back to the process-global sink. Reverting the
+// sessionIDValue re-tag in applySpecModel makes this fail.
+func TestApplySpecModel_CarriesDebugSessionIDOntoSwappedClient(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	a := &Agent{
+		client: &GenericClient{Provider: "openai", Model: "gpt-4o-mini"},
+		config: &config.Config{},
+	}
+	a.SetSessionID("ses_swap_attr")
+
+	a.applySpecModel(&AgentSpec{Name: "swap", Model: "openai/gpt-4o"})
+
+	gc, ok := a.client.(*GenericClient)
+	if !ok {
+		t.Fatalf("client swapped to %T, want *GenericClient", a.client)
+	}
+	if got := gc.sessionIDValue(); got != "ses_swap_attr" {
+		t.Fatalf("swapped client debug sessionID = %q, want ses_swap_attr", got)
+	}
+}
+
 func TestDefaultTemperatureMinimaxM2(t *testing.T) {
 	tests := []string{
 		"minimax/minimax-m2.5",

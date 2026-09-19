@@ -297,4 +297,100 @@ describe("TerminalPanel history restore timeout", () => {
       vi.useRealTimers();
     }
   });
+
+  it("does not open a second live socket when a stalled restore resolves after the timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const deferred: { resolve?: (response: Response) => void } = {};
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          () =>
+            new Promise<Response>((resolve) => {
+              deferred.resolve = resolve;
+            }),
+        ),
+      );
+
+      const { unmount } = render(
+        <TerminalPanel id="t1" active projectPath="/project" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
+      );
+
+      await act(async () => {
+        vi.advanceTimersByTime(15000);
+        await Promise.resolve();
+      });
+      expect(h.sockets).toHaveLength(1);
+      expect(h.sockets[0].readyState).toBe(MockSocket.OPEN);
+
+      // The stalled REST fetch resolves after the timeout already aborted the
+      // controller and attached the live socket. The success path must NOT
+      // attach a second socket: two live sockets for one terminal id make the
+      // server's supersede close them in turn, and each close reconnects —
+      // the endless ~1s "connection lost" loop on remote terminals.
+      deferred.resolve?.(new Response("missing", { status: 404 }));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(h.sockets).toHaveLength(1);
+      expect(h.sockets[0].readyState).toBe(MockSocket.OPEN);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// Two live sockets for one terminal id on the host server supersede each other
+// in turn: each new attach closes the previous socket, whose unexpected close
+// arms another reconnect. The loop runs forever at the 1s backoff floor and
+// makes a remote terminal print "[terminal connection lost — reconnecting in
+// 1s…]" once per second. A socket that is no longer the panel's current one
+// must never arm a reconnect or paint a lost banner.
+describe("TerminalPanel reconnect supersede", () => {
+  it("ignores onclose from a socket that was superseded by a later reconnect", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("missing", { status: 404 })));
+
+      const { unmount } = render(
+        <TerminalPanel id="t1" active projectPath="/project" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
+      );
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(h.sockets).toHaveLength(1);
+      const first = h.sockets[0];
+
+      // Unexpected drop: the panel arms a 1s reconnect, then opens a new socket.
+      first.readyState = 3; // CLOSED
+      await act(async () => {
+        first.onclose?.({ wasClean: false, code: 1006, reason: "" });
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+      expect(h.sockets).toHaveLength(2);
+      const second = h.sockets[1];
+      expect(second.readyState).toBe(MockSocket.OPEN);
+
+      // A late onclose from the superseded socket must be inert. Without the
+      // socketRef guard it arms another reconnect and a third socket appears.
+      await act(async () => {
+        first.onclose?.({ wasClean: false, code: 1006, reason: "" });
+        vi.advanceTimersByTime(5000);
+        await Promise.resolve();
+      });
+      expect(h.sockets).toHaveLength(2);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

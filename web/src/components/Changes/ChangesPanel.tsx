@@ -10,6 +10,10 @@ const REFRESH_INTERVAL = 10_000;
 
 interface Props {
   session?: string;
+  /** SSH/WSL host of the session's project (undefined for local). Routes the
+   *  list/diff/undo calls through /api/remote/{host} so a remote session's
+   *  changes come from that host's server instead of the local one. */
+  host?: string;
   /** True while this panel's session tab + sub-tab is frontmost. One of
    *  these is mounted per open session tab (hidden via CSS), so background
    *  instances must not poll — N hidden tabs would hammer /api/changes. */
@@ -18,7 +22,7 @@ interface Props {
 
 type PendingUndo = { path: string; kind: "file" | "block" } | null;
 
-function ChangesPanel({ session, active = true }: Props) {
+function ChangesPanel({ session, host, active = true }: Props) {
   const [files, setFiles] = useState<FileChange[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -27,7 +31,7 @@ function ChangesPanel({ session, active = true }: Props) {
 
   const refresh = useCallback(async () => {
     try {
-      const res = await api.listChanges(session);
+      const res = await api.listChanges(session, host);
       setFiles(res);
       setError(null);
     } catch (err) {
@@ -35,7 +39,7 @@ function ChangesPanel({ session, active = true }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [session]);
+  }, [session, host]);
 
   useEffect(() => {
     refresh();
@@ -50,9 +54,9 @@ function ChangesPanel({ session, active = true }: Props) {
     if (!pendingUndo) return;
     try {
       if (pendingUndo.kind === "file") {
-        await api.undoChangeFile(session, pendingUndo.path);
+        await api.undoChangeFile(session, pendingUndo.path, host);
       } else {
-        await api.undoChangeBlock(session, pendingUndo.path);
+        await api.undoChangeBlock(session, pendingUndo.path, host);
       }
       await refresh();
     } catch (err) {
@@ -60,7 +64,7 @@ function ChangesPanel({ session, active = true }: Props) {
     } finally {
       setPendingUndo(null);
     }
-  }, [pendingUndo, session, refresh]);
+  }, [pendingUndo, session, host, refresh]);
 
   if (loading && files.length === 0) {
     return <div className="p-3 text-xs text-muted-foreground">Loading changes…</div>;
@@ -83,7 +87,7 @@ function ChangesPanel({ session, active = true }: Props) {
       </div>
       {selectedPath && (
         <div className="border-t border-border max-h-[40vh] overflow-y-auto">
-          <ChangesDiffView session={session} path={selectedPath} />
+          <ChangesDiffView session={session} host={host} path={selectedPath} />
         </div>
       )}
       <Dialog open={pendingUndo !== null} onOpenChange={(open) => !open && setPendingUndo(null)}>

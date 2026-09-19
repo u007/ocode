@@ -89,10 +89,12 @@ func TestHandleSessionContextOmitsReportWithoutLiveAgent(t *testing.T) {
 	if resp.Report != nil {
 		t.Fatal("report must be omitted when no live agent is available")
 	}
-	// No live provider usage: the endpoint reports 0 (unknown) rather than
-	// fabricating a chars/4 estimate from this session's persisted transcript.
-	if resp.CurrentTokens != 0 {
-		t.Fatalf("current_tokens = %d, want 0 (no backend provider usage)", resp.CurrentTokens)
+	// With no live provider usage the endpoint falls back to a chars/4
+	// estimate over the persisted transcript (so the web gauge shows a value
+	// instead of "unknown" after a session switch). The seeded transcript is
+	// "hello" (5 chars) -> 1 token.
+	if resp.CurrentTokens != 1 {
+		t.Fatalf("current_tokens = %d, want 1 (persisted-transcript estimate)", resp.CurrentTokens)
 	}
 }
 

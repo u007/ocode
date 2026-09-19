@@ -1101,7 +1101,7 @@ func (c *GenericClient) chatCopilot(ctx context.Context, messages []Message, too
 	msg.Usage = usage
 	if usage != nil {
 		msg.Spend = usage.Spend(msg.Model)
-		usage.DebugLog(msg.Model)
+		usage.DebugLog(msg.Model, c.emitDebug)
 	}
 	return msg, nil
 }
@@ -1205,7 +1205,7 @@ func (c *GenericClient) chatGrokSubscription(ctx context.Context, messages []Mes
 	msg.Usage = usage
 	if usage != nil {
 		msg.Spend = usage.Spend(msg.Model)
-		usage.DebugLog(msg.Model)
+		usage.DebugLog(msg.Model, c.emitDebug)
 	}
 	return msg, nil
 }
@@ -1317,7 +1317,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	msg.Usage = usage
 	if usage != nil {
 		msg.Spend = usage.Spend(msg.Model)
-		usage.DebugLog(msg.Model)
+		usage.DebugLog(msg.Model, c.emitDebug)
 	}
 	return msg, nil
 }
@@ -1422,7 +1422,7 @@ func (c *GenericClient) chatGoogle(ctx context.Context, messages []Message, tool
 	msg.Usage = usage
 	if usage != nil {
 		msg.Spend = usage.Spend(msg.Model)
-		usage.DebugLog(msg.Model)
+		usage.DebugLog(msg.Model, c.emitDebug)
 	}
 	return msg, nil
 }
@@ -3300,7 +3300,7 @@ func (c *GenericClient) chatOpenAIResponsesAttempt(ctx context.Context, messages
 		} else if usage != nil {
 			msg.Usage = usage
 			msg.Spend = usage.Spend(msg.Model)
-			usage.DebugLog(msg.Model)
+			usage.DebugLog(msg.Model, c.emitDebug)
 		}
 	}
 	return msg, nil
@@ -4269,6 +4269,27 @@ var keyOptionalProviders = map[string]bool{
 	"local":       true, // /localmodel-managed local server, no key
 }
 
+// KeyOptionalProvider reports whether a provider can serve requests without an
+// API key — local servers and free tiers. Single source of truth for callers
+// (e.g. the model-list visibility filter) that must not hide usable providers
+// just because no credential is stored.
+func KeyOptionalProvider(id string) bool { return keyOptionalProviders[id] }
+
+// ProviderEnvVars returns provider id -> env var for every keyed provider this
+// build can call. It is the authoritative env-var map (the `providers` table
+// below), including ids absent from auth.Providers (e.g. mistral, 302ai,
+// xiaomi-token-plan-*) — callers that must detect a configured provider from a
+// set env var use this rather than re-deriving a partial list.
+func ProviderEnvVars() map[string]string {
+	out := make(map[string]string, len(providers))
+	for id, p := range providers {
+		if p.envKey != "" {
+			out[id] = p.envKey
+		}
+	}
+	return out
+}
+
 // providerAliases normalizes domain-spelled provider ids to the canonical
 // registry id, so a model string like "runinfra.ai/nvidia/..." parses as
 // provider "runinfra" and every provider-keyed behavior downstream — stored
@@ -4958,7 +4979,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	msg.Usage = usage
 	if usage != nil {
 		msg.Spend = usage.Spend(msg.Model)
-		usage.DebugLog(msg.Model)
+		usage.DebugLog(msg.Model, c.emitDebug)
 	}
 	return msg, nil
 }

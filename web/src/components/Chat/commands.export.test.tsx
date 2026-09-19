@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { dispatchCommand } from "./commands";
+import { getCompactionState } from "../../lib/compactionState";
 import { api } from "../../api/client";
 
 // /export and /export-claude call the module-level `api` (not ctx.api), so the
@@ -113,7 +114,10 @@ describe("ctx.host threading", () => {
       api: { compactSession: mockCompact } as never,
     } as never);
     expect(mockCompact).toHaveBeenCalledWith(REAL_ID, HOST);
-    expect(result.messages?.[0]?.content).toContain("100 → 50");
+    // Completion feedback is the inline transcript notice, not a composer bar
+    // or a returned assistant message, so the compaction state is cleared.
+    expect(getCompactionState(REAL_ID)).toBeUndefined();
+    expect(result.messages).toBeUndefined();
   });
 
   it("/recap passes ctx.host to ctx.api.recapSession", async () => {

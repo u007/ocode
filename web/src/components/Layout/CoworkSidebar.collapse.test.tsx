@@ -4,6 +4,7 @@ import CoworkSidebar from "./CoworkSidebar";
 import { ChatProvider } from "../../stores/chatStore";
 
 vi.mock("../../stores/projectStore", () => ({
+  findProjectPathForTab: () => undefined,
   useProjectState: () => ({
     activeTabId: "session-1",
     state: { activeProject: null },

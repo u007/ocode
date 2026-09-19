@@ -1,9 +1,10 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { api } from "../../api/client";
 import { useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import type { ModelInfo } from "../../api/types";
-import { advisorSelectionPayload, partitionModelSections } from "./modelSelection";
-import { Search, Check, Star, X } from "lucide-react";
+import { advisorSelectionPayload, capProviderGroups, LOCAL_MODELS_PROVIDER, LOCAL_MODELS_UNCAPPED, partitionModelSections } from "./modelSelection";
+import { reportActionError } from "../../lib/actionErrors";
+import { Search, Check, Star, X, RefreshCw } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -63,6 +64,15 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   // Model id whose favorite toggle request is in flight; its star is disabled
   // until the response resyncs, so double-clicks can't race the shared file.
   const [pendingFavorite, setPendingFavorite] = useState<string | null>(null);
+  // True while the explicit Refresh action is fetching live provider lists.
+  const [refreshing, setRefreshing] = useState(false);
+  // "All providers" toggle (default off): off requests configured=true, so
+  // only providers with credentials/config are listed. On requests the full
+  // registry (~8k models). Reset to off each time the dialog opens.
+  const [showAllProviders, setShowAllProviders] = useState(false);
+  // Monotonic load token: a late cached/refresh response must not overwrite a
+  // newer open (e.g. the dialog was closed and reopened for another purpose).
+  const loadSeqRef = useRef(0);
   const [permissionModelState, setPermissionModelState] = useState("");
   const [explorerModelState, setExplorerModelState] = useState("");
   const [contextModelState, setContextModelState] = useState("");
@@ -81,71 +91,147 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   });
   const dispatch = useChatDispatch();
 
+  // Fire-and-forget persistence with VISIBLE failure reporting. This dialog
+  // closes immediately on pick (handleSelect/handleClear end with onClose), so
+  // a dialog-local error banner would unmount before the user could read it —
+  // failures route to the app-wide ActionErrorToast instead. Without this a
+  // rejected write (404/500) was console.error-only, leaving the picker looking
+  // like it accepted a model that never took effect.
+  const persist = (what: string, fn: () => Promise<unknown>) => {
+    fn().catch((err) => {
+      console.error(`${what} failed`, err);
+      reportActionError(err, what);
+    });
+  };
+
   // Pass `host` only when present so a local call stays byte-identical — an
   // explicit trailing `undefined` would change every local request's arity.
   const hostArgs = useMemo<[] | [string]>(() => (host ? [host] : []), [host]);
 
-  useEffect(() => {
-    if (open) {
-      setSearch("");
-      // Load the standard registry models, augmented for the permission,
-      // Security & Redaction (mask), and auto-continue judge purposes with
-      // the user's enabled local/LM Studio models — mirroring the TUI's
-      // permission-model, redaction-model and autocontinue-model pickers,
-      // which list enabled LocalModels. The permission judge and auto-continue
-      // judge are typically local models, so they must be selectable here.
-      const loadModels = async () => {
-        const base = await api.listModels({ refresh: true }, ...hostArgs);
-        if (purpose === "mask" || purpose === "permission" || purpose === "autocontinue") {
-          try {
-            const local = await api.getLocalModelsConfig();
-            const extra: ModelInfo[] = Object.entries(local)
-              .filter(([, v]) => v.enabled)
-              .map(([id]) => ({ name: id, model: id, provider: "Local Models", active: false }));
-            if (extra.length > 0) setModels([...base, ...extra]);
-            else setModels(base);
-          } catch {
-            setModels(base);
-          }
-        } else {
-          setModels(base);
-        }
-      };
-      loadModels().catch(console.error);
-      api.getConfigModel().then((res) => {
-        dispatch({ type: "SET_MODEL", model: res.model });
-      }).catch(console.error);
-      api.getSmallModel().then((res) => {
-        dispatch({ type: "SET_SMALL_MODEL", model: res.model });
-      }).catch(console.error);
-      api.getAdvisor().then((res) => {
-        dispatch({ type: "SET_ADVISOR_MODEL", model: res.model });
-      }).catch(console.error);
-      api.getAdvisorFull().then((res) => {
-        setAdvisorClaudeCode(res.claude_code);
-      }).catch(console.error);
-      if (purpose === "permission") {
-        api.getPermissionModel().then((res) => {
-          setPermissionModelState(res.model ?? "");
-        }).catch(console.error);
+  // Augment the registry list for the permission, Security & Redaction (mask),
+  // and auto-continue judge purposes with the user's enabled local/LM Studio
+  // models — mirroring the TUI's permission-model, redaction-model and
+  // autocontinue-model pickers, which list enabled LocalModels. The permission
+  // judge and auto-continue judge are typically local models, so they must be
+  // selectable here. Shared by the initial cached load and the Refresh action.
+  const withLocalModels = useCallback(
+    async (base: ModelInfo[]): Promise<ModelInfo[]> => {
+      if (purpose !== "mask" && purpose !== "permission" && purpose !== "autocontinue") {
+        return base;
       }
-      if (purpose === "explorer" && !currentValues?.explorer) {
-        api.getExplorerModel().then((res) => {
-          setExplorerModelState(res.model ?? "");
-        }).catch(console.error);
+      try {
+        const local = await api.getLocalModelsConfig();
+        const extra: ModelInfo[] = Object.entries(local)
+          .filter(([, v]) => v.enabled)
+          .map(([id]) => ({ name: id, model: id, provider: LOCAL_MODELS_PROVIDER, active: false }));
+        return extra.length > 0 ? [...base, ...extra] : base;
+      } catch {
+        return base;
       }
-      if (purpose === "context" && !currentValues?.context) {
-        api.getContextModel().then((res) => {
-          setContextModelState(res.model ?? "");
-        }).catch(console.error);
+    },
+    [purpose],
+  );
+
+  // Loads the model list (cached, or live-refreshed when `refresh` is set) and
+  // augments it. `showAll` selects the full registry vs configured providers
+  // only. Guarded by loadSeqRef so a late response from a previous open or
+  // toggle cannot clobber newer state.
+  const loadList = useCallback(
+    async (opts: { refresh?: boolean; showAll: boolean }) => {
+      const seq = ++loadSeqRef.current;
+      const apiOpts: { refresh?: boolean; configured?: boolean } = {};
+      if (opts.refresh) apiOpts.refresh = true;
+      if (!opts.showAll) apiOpts.configured = true;
+      let base: ModelInfo[];
+      try {
+        base = await api.listModels(apiOpts, ...hostArgs);
+      } catch (err) {
+        // A failed list leaves the picker blank — surface it, or the dialog
+        // looks like the registry is simply empty (e.g. a remote session whose
+        // request reached a server that does not know it).
+        console.error("load models failed", err);
+        reportActionError(err, "Loading the model list");
+        return;
       }
-      if (purpose === "autocontinue" && !currentValues?.autocontinue) {
-        api.getAutoContinue().then((res) => {
-          setAutoContinueModelState(res.model ?? "");
-        }).catch(console.error);
-      }
+      const next = await withLocalModels(base);
+      if (loadSeqRef.current === seq) setModels(next);
+    },
+    [hostArgs, withLocalModels],
+  );
+
+  // Explicit live refresh (web counterpart of the TUI picker's ctrl+r). Only
+  // this path passes `refresh: true`, which makes the server fetch live
+  // provider lists over the network and can take several seconds — never put
+  // it on the open path.
+  const refreshModels = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await loadList({ refresh: true, showAll: showAllProviders });
+    } catch (err) {
+      console.error("refresh models failed", err);
+      reportActionError(err, "Refreshing the model list");
+    } finally {
+      setRefreshing(false);
     }
-  }, [open, dispatch, purpose, currentValues?.explorer, currentValues?.context, currentValues?.autocontinue, hostArgs]);
+  }, [refreshing, showAllProviders, loadList]);
+
+  // Flip between configured-only and the full registry (no refetch of the
+  // config fields, so search text is preserved). loadList's seq guard drops the
+  // in-flight response from the previous mode. The state updater stays pure —
+  // StrictMode double-invokes it, so the fetch must not live inside.
+  const toggleShowAllProviders = useCallback(() => {
+    const next = !showAllProviders;
+    setShowAllProviders(next);
+    loadList({ showAll: next }).catch(console.error);
+  }, [showAllProviders, loadList]);
+
+  useEffect(() => {
+    if (!open) return;
+    setSearch("");
+    // Default off: every open starts from configured providers only.
+    setShowAllProviders(false);
+    // Late responses from a previous open (or from a Refresh) must not clobber
+    // the current dialog state (loadList's seq guard).
+    // Cached list first so the picker renders immediately. The registry can be
+    // thousands of models and a live refresh takes seconds, so opening never
+    // blocks on the network; the Refresh action below is the live path.
+    // configured=true keeps only providers with credentials/config — the
+    // hundreds of other registry providers are unusable noise.
+    loadList({ showAll: false }).catch(console.error);
+    api.getConfigModel().then((res) => {
+      dispatch({ type: "SET_MODEL", model: res.model });
+    }).catch(console.error);
+    api.getSmallModel().then((res) => {
+      dispatch({ type: "SET_SMALL_MODEL", model: res.model });
+    }).catch(console.error);
+    api.getAdvisor().then((res) => {
+      dispatch({ type: "SET_ADVISOR_MODEL", model: res.model });
+    }).catch(console.error);
+    api.getAdvisorFull().then((res) => {
+      setAdvisorClaudeCode(res.claude_code);
+    }).catch(console.error);
+    if (purpose === "permission") {
+      api.getPermissionModel().then((res) => {
+        setPermissionModelState(res.model ?? "");
+      }).catch(console.error);
+    }
+    if (purpose === "explorer" && !currentValues?.explorer) {
+      api.getExplorerModel().then((res) => {
+        setExplorerModelState(res.model ?? "");
+      }).catch(console.error);
+    }
+    if (purpose === "context" && !currentValues?.context) {
+      api.getContextModel().then((res) => {
+        setContextModelState(res.model ?? "");
+      }).catch(console.error);
+    }
+    if (purpose === "autocontinue" && !currentValues?.autocontinue) {
+      api.getAutoContinue().then((res) => {
+        setAutoContinueModelState(res.model ?? "");
+      }).catch(console.error);
+    }
+  }, [open, dispatch, purpose, currentValues?.explorer, currentValues?.context, currentValues?.autocontinue, loadList]);
 
   const filteredModels = models.filter(
     (m) =>
@@ -193,6 +279,13 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     return acc;
   }, {} as Record<string, ModelInfo[]>);
   const providerGroups = sections ? sections.providers : groupedModels;
+  // Mounting every provider row makes the dialog's first paint slow on the
+  // full registry (~8k models). Cap the unfiltered render and point at the
+  // search box; search filters the full list, so nothing becomes unreachable.
+  // The client-appended Local Models group is exempt: those rows are the
+  // typically-local judge models, and must not be pushed out by a large
+  // configured registry.
+  const cappedProviders = capProviderGroups(providerGroups, undefined, LOCAL_MODELS_UNCAPPED);
 
   const getCurrentModel = () => {
     switch (purpose) {
@@ -221,7 +314,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     switch (purpose) {
       case "small":
         dispatch({ type: "SET_SMALL_MODEL", model: modelId });
-        api.setSmallModel(modelId).catch(console.error);
+        persist("Changing the small model", () => api.setSmallModel(modelId));
         break;
       case "advisor":
         {
@@ -231,7 +324,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           // Carry the current claude_code through the PUT: the server flips
           // claude_code to (provider === "claude-code") whenever provider is
           // set, which would silently disable CLI mode on any non-CLI pick.
-          api.setAdvisorFull({ ...selection, claude_code: advisorClaudeCode }).catch(console.error);
+          persist("Changing the advisor model", () => api.setAdvisorFull({ ...selection, claude_code: advisorClaudeCode }));
         }
         break;
       case "main":
@@ -249,6 +342,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           // lands on the same tab within one frame.
           api.setSessionModel(sessionId, modelId, ...hostArgs).catch((err) => {
             console.error("set session model failed", err);
+            reportActionError(err, "Changing this session's model");
             // On failure, refetch this session's status so the sidebar shows
             // the model actually in effect rather than a stale value.
             api
@@ -258,28 +352,28 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           });
         } else {
           dispatch({ type: "SET_MODEL", model: modelId });
-          api.setConfigModel(modelId).catch(console.error);
+          persist("Changing the model", () => api.setConfigModel(modelId));
         }
         break;
       case "permission":
         onPick?.(purpose, modelId, selectedModel);
         // If no form owns this pick (sidebar direct trigger), persist directly.
         if (!onPick) {
-          api.setPermissionModel(modelId).catch(console.error);
+          persist("Changing the permission model", () => api.setPermissionModel(modelId));
         }
         break;
       case "explorer":
         onPick?.(purpose, modelId, selectedModel);
         if (!onPick) {
           setExplorerModelState(modelId);
-          api.setExplorerModel(modelId).catch(console.error);
+          persist("Changing the explorer model", () => api.setExplorerModel(modelId));
         }
         break;
       case "context":
         onPick?.(purpose, modelId, selectedModel);
         if (!onPick) {
           setContextModelState(modelId);
-          api.setContextModel(modelId).catch(console.error);
+          persist("Changing the context model", () => api.setContextModel(modelId));
         }
         break;
       case "autocontinue":
@@ -289,7 +383,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           // model directly. Leave the on/off gate untouched — mirroring the
           // TUI's `/autocontinue model <name>`, which never toggles the gate.
           setAutoContinueModelState(modelId);
-          api.setAutoContinue({ model: modelId }).catch(console.error);
+          persist("Changing the auto-continue model", () => api.setAutoContinue({ model: modelId }));
         }
         break;
       default:
@@ -333,12 +427,12 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     switch (purpose) {
       case "small":
         dispatch({ type: "SET_SMALL_MODEL", model: "" });
-        api.setSmallModel("auto").catch(console.error);
+        persist("Clearing the small model", () => api.setSmallModel("auto"));
         break;
       case "advisor":
         dispatch({ type: "SET_ADVISOR_MODEL", model: "" });
         onPick?.(purpose, "");
-        api.setAdvisorFull({ model: "", provider: "", claude_code: advisorClaudeCode }).catch(console.error);
+        persist("Clearing the advisor model", () => api.setAdvisorFull({ model: "", provider: "", claude_code: advisorClaudeCode }));
         break;
       case "main":
         if (sessionId && sessionId.startsWith("new-")) {
@@ -346,6 +440,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         } else if (sessionId) {
           api.clearSessionModel(sessionId, ...hostArgs).catch((err) => {
             console.error("clear session model failed", err);
+            reportActionError(err, "Clearing this session's model");
             api
               .getSessionStatus(sessionId, ...hostArgs)
               .then((st) => dispatch({ type: "SET_TUI_STATUS", sessionId, status: st }))
@@ -353,27 +448,27 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           });
         } else {
           dispatch({ type: "SET_MODEL", model: "" });
-          api.setConfigModel("").catch(console.error);
+          persist("Clearing the model", () => api.setConfigModel(""));
         }
         break;
       case "permission":
         onPick?.(purpose, "");
         if (!onPick) {
-          api.setPermissionModel("").catch(console.error);
+          persist("Clearing the permission model", () => api.setPermissionModel(""));
         }
         break;
       case "explorer":
         onPick?.(purpose, "");
         if (!onPick) {
           setExplorerModelState("");
-          api.setExplorerModel("auto").catch(console.error);
+          persist("Clearing the explorer model", () => api.setExplorerModel("auto"));
         }
         break;
       case "context":
         onPick?.(purpose, "");
         if (!onPick) {
           setContextModelState("");
-          api.setContextModel("auto").catch(console.error);
+          persist("Clearing the context model", () => api.setContextModel("auto"));
         }
         break;
       case "autocontinue":
@@ -382,7 +477,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           // Clear = judge model cleared, gate untouched (TUI parity: "auto"/
           // "none" clears the model, meaning StepLimitHit-only resumes).
           setAutoContinueModelState("");
-          api.setAutoContinue({ clear: true }).catch(console.error);
+          persist("Clearing the auto-continue model", () => api.setAutoContinue({ clear: true }));
         }
         break;
       default:
@@ -467,18 +562,46 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           <DialogTitle className="text-foreground">{PURPOSE_TITLES[purpose]}</DialogTitle>
         </DialogHeader>
 
-        {/* Search */}
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <input
-            type="text"
-            placeholder="Search models..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 bg-muted border border-border rounded-md text-sm text-foreground placeholder-muted-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-            autoFocus
-          />
+        {/* Search + live refresh. The list opens from the cached registry
+            instantly; Refresh fetches live provider lists (TUI ctrl+r). */}
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Search models..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 bg-muted border border-border rounded-md text-sm text-foreground placeholder-muted-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              autoFocus
+            />
+          </div>
+          <button
+            type="button"
+            onClick={refreshModels}
+            disabled={refreshing}
+            aria-label="Refresh model list"
+            title="Fetch live provider model lists (may take a few seconds)"
+            className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-md text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+            {refreshing ? "Refreshing" : "Refresh"}
+          </button>
         </div>
+
+        {/* Default off: only providers with credentials/config are listed. On
+            fetches the full registry (~8k models), which is what makes the
+            default list fast. Reset to off on every open. */}
+        <label className="flex items-center gap-2 text-xs text-muted-foreground select-none cursor-pointer">
+          <input
+            type="checkbox"
+            checked={showAllProviders}
+            onChange={toggleShowAllProviders}
+            aria-label="Show all providers"
+            className="h-3.5 w-3.5 accent-blue-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+          All providers (including unconfigured)
+        </label>
 
         {/* Clear button */}
         <button
@@ -509,7 +632,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
               {sections.favorites.map((m) => renderRow(m, { withProvider: true }))}
             </div>
           )}
-          {Object.entries(providerGroups).map(([provider, providerModels]) => (
+          {Object.entries(cappedProviders.groups).map(([provider, providerModels]) => (
             <div key={provider} className="mb-4">
               <div className="px-2 py-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                 {provider}
@@ -517,6 +640,11 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
               {providerModels.map((m) => renderRow(m))}
             </div>
           ))}
+          {cappedProviders.hidden > 0 && (
+            <div className="px-3 py-2 text-xs text-muted-foreground">
+              {cappedProviders.hidden.toLocaleString()} more models not shown — type to refine your search.
+            </div>
+          )}
           {filteredModels.length === 0 && (
             <div className="text-center py-8 text-muted-foreground text-sm">
               No models found

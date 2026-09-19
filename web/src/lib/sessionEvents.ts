@@ -41,6 +41,11 @@ export interface SessionEventRouter {
    *  caller files it under the active project. Single-arg callbacks keep
    *  working — the second arg is purely additive. */
   onNewTab?: (id: string, project?: string) => void;
+  /** Resolve the SSH/WSL host for a session (undefined for local). Session
+   *  reconcile/hydrate fetches must route through /api/remote/{host} or a
+   *  remote session's request hits the local server and 404s. Optional so
+   *  existing routers/tests keep compiling. */
+  hostFor?: (sessionId: string) => string | undefined;
 }
 
 // Coalesces high-frequency "thinking"/"text" deltas into fixed-interval
@@ -227,7 +232,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       // placeholder is replaced even when no LLM-generated status arrives yet
       // (auto fallback title derived from first user message). Use
       // Promise.resolve to tolerate mocked sync returns in tests.
-      void Promise.resolve(api.getSession(eventSessionId)).then((detail: any) => {
+      void Promise.resolve(api.getSession(eventSessionId, undefined, r.hostFor?.(eventSessionId))).then((detail: any) => {
         const t = detail?.title?.trim() || "";
         if (t && t !== "New session") {
           r.projectDispatch({ type: "UPDATE_TAB_TITLE", id: eventSessionId, title: t });
@@ -249,7 +254,12 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         });
       }
     }
-    if (status.advisor_enabled !== undefined) {
+    // Only a process-global snapshot seeds the shared fallback store. A
+    // session-tagged status carries that chat's own advisor gate (per-session
+    // since the toggle was scoped); writing it to the global store would leak
+    // one chat's on/off into the pre-session/draft fallback. Mirrors the
+    // deliberate main_model handling below.
+    if (!eventSessionId && status.advisor_enabled !== undefined) {
       r.dispatch({ type: "SET_ADVISOR_ENABLED", enabled: !!status.advisor_enabled });
     }
     if (status.advisor_model !== undefined) {
@@ -634,9 +644,10 @@ export async function reconcileOpenSessions(
   await Promise.all(
     realIds.map(async (sessionId) => {
       try {
+        const host = router.hostFor?.(sessionId);
         const [state, detail] = await Promise.all([
-          api.getSessionState(sessionId),
-          api.getSession(sessionId, { limit: RECONCILE_PAGE_SIZE }),
+          api.getSessionState(sessionId, host),
+          api.getSession(sessionId, { limit: RECONCILE_PAGE_SIZE }, host),
         ]);
         // Turn state from the authoritative server snapshot. Preserve the
         // client's running state when the turn is merely paused on a pending
@@ -736,7 +747,7 @@ export async function hydratePendingAsks(
 ): Promise<void> {
   if (!sessionId || sessionId.startsWith("new-")) return;
   try {
-    const state = await api.getSessionState(sessionId);
+    const state = await api.getSessionState(sessionId, router.hostFor?.(sessionId));
     dispatchPendingAsks(sessionId, state.pending_asks, router.dispatch);
   } catch (err) {
     console.warn(`eventBus: hydrate pending asks failed for ${sessionId}`, err);

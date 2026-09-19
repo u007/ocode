@@ -1,5 +1,6 @@
 import { useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
+import { useSessionHost } from "../../hooks/useSessionHost";
 import { api } from "../../api/client";
 import { useEffect, useState } from "react";
 import type { LSPStatus, FileStatus, MCPStatus } from "../../api/types";
@@ -14,6 +15,10 @@ interface Props {
 // StatusBar so the user can drill in without leaving the chat.
 export default function StatusPanel({ onClose }: Props) {
   const { activeTabId } = useProjectState();
+  // SSH/WSL host of the active tab (undefined for local). These status
+  // sources are per-server, so a remote project must query its own host or it
+  // shows the local machine's LSP/modified/spend data.
+  const sessionHost = useSessionHost(activeTabId ?? undefined);
   const spendingUSD = useChatSelector((s) => s.spendingUSD);
   const { tuiStatus } = useChatSelector((s) => getSessionSlice(s, activeTabId));
   const [files, setFiles] = useState<FileStatus[]>([]);
@@ -27,28 +32,32 @@ export default function StatusPanel({ onClose }: Props) {
   // the whole tui-status snapshot, but they are session-scoped (modified files
   // live in the session's project), so a stale []-deps fetch would show the
   // previous session's data after a tab switch.
+  //
+  // NOTE: GET /api/files/modified is TUI-bridge-only (`rc == nil` → empty), so
+  // in headless web/desktop the modified-files list is always empty. That is a
+  // pre-existing limitation of the endpoint, not a host-routing issue.
   useEffect(() => {
     let cancelled = false;
     api
-      .getModifiedFiles()
+      .getModifiedFiles(sessionHost)
       .then((res) => {
         if (!cancelled) setFiles(res.modified_files || []);
       })
       .catch(console.error);
     api
-      .getLSPStatuses()
+      .getLSPStatuses(sessionHost)
       .then((res) => {
         if (!cancelled) setLsps(res.lsp_servers || []);
       })
       .catch(console.error);
     api
-      .getSpending()
+      .getSpending(sessionHost)
       .then((res) => {
         if (!cancelled) setSpending(res);
       })
       .catch(console.error);
     api
-      .getMCP()
+      .getMCP(sessionHost)
       .then((res) => {
         if (!cancelled) setMcp(res);
       })
@@ -56,7 +65,7 @@ export default function StatusPanel({ onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [activeTabId]);
+  }, [activeTabId, sessionHost]);
 
   // Enable/disable an MCP server with an optimistic toggle (rolled back on
   // failure).
@@ -95,7 +104,9 @@ export default function StatusPanel({ onClose }: Props) {
   // snapshot's list if that endpoint isn't reachable (e.g. headless).
   const modified = files.length > 0 ? files : snap?.modified_files || [];
   const lsp = lsps.length > 0 ? lsps : snap?.lsp_servers || [];
-  const spendUSD = spendingUSD ?? spending?.spending_usd ?? snap?.spending_usd ?? null;
+  // Per-session snapshot spend wins; the global store / /api/spending value is
+  // the process-wide daily total, used only as a fallback.
+  const spendUSD = snap?.spending_usd ?? spendingUSD ?? spending?.spending_usd ?? null;
 
   return (
     <div className="flex flex-col h-full overflow-auto bg-background text-foreground">

@@ -31,7 +31,11 @@ function env(event: string, over: Partial<BusEnvelope> = {}): BusEnvelope {
   return { event, project: "/proj", session_id: "s1", seq: 1, data: {}, ...over };
 }
 
-function makeRouter(openIds: string[] = ["s1"], onNewTab?: (id: string, project?: string) => void) {
+function makeRouter(
+  openIds: string[] = ["s1"],
+  onNewTab?: (id: string, project?: string) => void,
+  hostFor?: (sessionId: string) => string | undefined,
+) {
   const actions: ChatAction[] = [];
   const projectActions: unknown[] = [];
   let state: ChatState = initialState;
@@ -44,6 +48,7 @@ function makeRouter(openIds: string[] = ["s1"], onNewTab?: (id: string, project?
     projectDispatch: (a) => void projectActions.push(a),
     getState: () => state,
     onNewTab,
+    hostFor,
   };
   return { router, actions, projectActions, getState: () => state };
 }
@@ -404,10 +409,14 @@ describe("routeBusEnvelope", () => {
     expect(getState().sessions["old"]?.turnActive).toBe(false);
   });
 
-  it("status events do not create a slice for an unknown session but still patch process-level globals — and never the global model", () => {
+  it("session-tagged status never leaks its advisor gate into the global fallback; a process-global status still seeds it", () => {
     const { router, getState } = makeRouter(["s1"]);
+    // A session-tagged snapshot carries that chat's own advisor gate
+    // (per-session since the toggle was scoped): it must not overwrite the
+    // shared pre-session/draft fallback, nor create a slice for an unopened
+    // session, nor replace the global model.
     routeBusEnvelope(
-      env("status", { session_id: "ghost", data: { advisor_enabled: true, main_model: "m" } }),
+      env("status", { session_id: "ghost", data: { advisor_enabled: false, main_model: "m" } }),
       router,
     );
     expect(getState().sessions["ghost"]).toBeUndefined();
@@ -417,6 +426,10 @@ describe("routeBusEnvelope", () => {
     // made one tab's model leak across every tab — the global stays at its
     // startup (config) value.
     expect(getState().model).toBeNull();
+
+    // A genuinely process-global snapshot (no session id) still seeds it.
+    routeBusEnvelope(env("status", { session_id: "", data: { advisor_enabled: false } }), router);
+    expect(getState().advisorEnabled).toBe(false);
   });
 
   it("warns for a session-scoped event without any session id", () => {
@@ -516,10 +529,19 @@ describe("reconcileOpenSessions", () => {
     await reconcileOpenSessions(new Set(["s1", "new-9"]), router);
 
     expect(mockGetSessionState).toHaveBeenCalledTimes(1);
-    expect(mockGetSessionState).toHaveBeenCalledWith("s1");
-    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE });
+    expect(mockGetSessionState).toHaveBeenCalledWith("s1", undefined);
+    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, undefined);
     expect(actions.some((a) => a.type === "SET_TURN_STATE" && a.sessionId === "s1" && !a.turnActive)).toBe(true);
     expect(actions.some((a) => a.type === "MERGE_SNAPSHOT" && a.sessionId === "s1")).toBe(true);
+  });
+
+  it("routes reconcile through the session's host", async () => {
+    mockGetSessionState.mockResolvedValue({ bootstrap_stage: "ready", turn_active: false, last_seq: 11 });
+    mockGetSession.mockResolvedValue({ messages: [{ role: "assistant", content: "rec" }], total: 1 });
+    const { router } = makeRouter(["s1"], undefined, (id) => (id === "s1" ? "devbox" : undefined));
+    await reconcileOpenSessions(new Set(["s1"]), router);
+    expect(mockGetSessionState).toHaveBeenCalledWith("s1", "devbox");
+    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, "devbox");
   });
 
   it("hydrates the permission dialog from live pending_asks when the transcript has no sentinel", async () => {
@@ -840,7 +862,7 @@ describe("pending-ask recovery from the live error frame", () => {
     await vi.waitFor(() => {
       expect(getState().sessions["s1"].pendingPermission?.request_id).toBe("call-1");
     });
-    expect(mockGetSessionState).toHaveBeenCalledWith("s1");
+    expect(mockGetSessionState).toHaveBeenCalledWith("s1", undefined);
   });
 
   it("hydrates from the legacy error frame too", async () => {

@@ -11,6 +11,8 @@ tags:
   - frontend
   - tui
 timestamp: 2026-09-17T16:39:22Z
+status: deprecated
+deprecated_reason: 'Superseded by the actual implementation which changed the design significantly: (1) backend now publishes a status snapshot after compaction via publishTurnStatusSnapshot so the Context gauge stays accurate, (2) the "complete" compaction state was removed — only "active" and "error" states remain, (3) the compaction notice moved from a composer bar into the transcript as a persisted [ocode:compaction-summary] system message rendered by CompactionNotice.tsx, (4) clearCompaction was added to compactionState.ts. See superseding spec and gotcha below.'
 ---
 # Web Compact Feedback Design
 

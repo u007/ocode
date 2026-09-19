@@ -76,6 +76,27 @@ html.light {
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
   }
+
+  /*
+   * Cap a fixed, vertically-centred dialog (ask/permission prompts) to the
+   * visible viewport so tall content scrolls internally instead of painting
+   * off the top and bottom edges.
+   *
+   * `100vh` is the LARGE viewport on mobile browsers — it ignores the dynamic
+   * URL bar / home indicator, so a `calc(100vh - 2rem)` dialog still overshoots
+   * while that chrome is shown. `dvh` tracks the actual visible area. The
+   * fallback and the upgrade MUST live in separate rules: CSS minifiers drop
+   * the earlier of two same-property declarations in one rule, which would
+   * leave old browsers (no `dvh`) with no cap at all.
+   */
+  .dialog-viewport-max {
+    max-height: calc(100vh - 2rem);
+  }
+  @supports (height: 100dvh) {
+    .dialog-viewport-max {
+      max-height: calc(100dvh - 2rem);
+    }
+  }
 }
 
 /* ── Inline diff decorations (FileEditor.tsx) ── */

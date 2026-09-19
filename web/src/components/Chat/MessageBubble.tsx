@@ -8,6 +8,7 @@ import {
   linkifyPlainText,
 } from "../../lib/fileLinks";
 import { ThinkingBlock, ToolBlock } from "./TurnParts";
+import CompactionNotice, { isCompactionSummary } from "./CompactionNotice";
 import { renderedSpeechText } from "../Speech/speechUtils";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
@@ -182,6 +183,14 @@ export function AssistantText({ content, onSpeak }: { content: string; onSpeak?:
 }
 
 function MessageBubble({ message, highlight = "", toolName = "", sessionId, messageIndex }: Props) {
+  // Synthetic compaction summary (spliced by the agent): render it as a
+  // dedicated inline notice rather than the raw `[ocode:compaction-summary]`
+  // marker. This is the durable "compact notice" — the composer's transient
+  // status bar is not retained after completion.
+  if (isCompactionSummary(message.content)) {
+    return <CompactionNotice content={message.content} />;
+  }
+
   // Tool result message (role "tool"): no tool name is carried on the message
   // itself, only tool_call_id — the caller resolves toolName from that.
   if (message.role === "tool") {

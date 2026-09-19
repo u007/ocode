@@ -13,7 +13,10 @@ export default function SpeechToolbar() {
   const canRetry = status?.engine?.availability !== "unavailable" && Boolean(error);
   if (!visible) return null;
   return (
-    <div className="fixed bottom-2 left-1/2 z-40 flex max-w-[calc(100vw-1rem)] -translate-x-1/2 items-center gap-2 rounded-lg border border-border bg-card/95 px-3 py-2 text-xs shadow-lg backdrop-blur">
+    // Mobile: full-width bottom bar that WRAPS, so nothing is clipped off the
+    // right edge (the old single-line pill overflowed a 390px viewport). ≥sm
+    // keeps the original centered, non-wrapping pill.
+    <div className="fixed bottom-2 inset-x-2 z-40 flex flex-wrap items-center justify-center gap-1.5 rounded-lg border border-border bg-card/95 px-2 py-2 text-xs shadow-lg backdrop-blur sm:inset-x-auto sm:left-1/2 sm:max-w-[calc(100vw-1rem)] sm:-translate-x-1/2 sm:flex-nowrap sm:justify-start sm:gap-2 sm:px-3">
       <Volume2 className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
       <span className="max-w-32 truncate text-muted-foreground" title={status?.engine?.label ?? config?.engine ?? "browser-native"}>
         {status?.engine?.label ?? "Browser Native"}

@@ -947,26 +947,36 @@ Rules:
   sidebar's reattach list when localStorage is empty.
 
 
-## Web/Desktop Context gauge: provider-reported only
+## Web/Desktop Context gauge: provider-reported first, estimate as fallback
 The web/desktop Context gauge (`TUIStatus.context_current_tokens`) and the
-`/context` summary (`current_tokens`) MUST carry the backend's
-provider-reported context occupancy — never a character-count estimate over
-the session transcript.
+`/context` summary (`current_tokens`) carry the backend's provider-reported
+context occupancy whenever one exists. A character-count estimate over the
+session transcript is used ONLY as a last-resort fallback, never in preference
+to a provider reading.
 
 - **Source of truth:** `Agent.LastInputTokens()`, an atomic set from
   `resp.Usage` inside `Step` (so it covers every provider, not just the
   streaming-usage ones). The bridged TUI session keeps using its own live
   `ContextCurrentTokens`.
+- **Resolution chain (identical in both entry points):** live TUI value →
+  `Agent.LastInputTokens()` → `Agent.CompactedContextTokens()` (a `/compact`
+  clears `LastInputTokens`, so the agent records a post-splice estimate) →
+  `estimateContextFromTranscript` / `estimateContextFromMessages` (chars/4 over
+  the persisted transcript, for a restored / idle-evicted session with no live
+  agent in this process).
 - **One resolution, two entry points:** `Handler.applySessionContext` (status
-  snapshots) and `Handler.HandleSessionContext` (the `/context` endpoint) both
-  resolve current tokens the same way, and the report's
-  `contextbudget.Input.ContextTokens` override is fed the same value so the
-  report's Context row and the summary cannot disagree.
-- **0 means "no provider usage recorded yet"** (e.g. a session restored before
-  its first turn) and is omitted on the wire (`omitempty`), rendering as
-  unknown. Do NOT reintroduce a `len(content)/4` fallback: it fabricated a
-  number that diverged from the real provider count and made the desktop gauge
-  disagree with the TUI.
+  snapshots) and `Handler.HandleSessionContext` (the `/context` endpoint) MUST
+  walk the SAME chain, and the report's `contextbudget.Input.ContextTokens`
+  override is fed the same value so the report's Context row and the summary
+  cannot disagree. Label the override's `ContextSource` by origin: a provider
+  reading (or its post-compaction tail estimate) is `"actual"`; the chars/4
+  transcript fallback is `"estimated"` — never present an estimate as "actual".
+- **Why the fallback exists:** the earlier rule forbade any estimate, so a
+  session whose agent had been idle-evicted or restored-after-restart rendered
+  the gauge as "unknown" until its next turn — a confusing regression on every
+  tab switch. Provider numbers still always win, and the fallback is the same
+  `CurrentContextEstimate` heuristic the TUI already uses for compaction, so the
+  web and TUI agree rather than diverging.
 - **API shape:** `GET /api/sessions/:id/context` returns `current_tokens`
   (renamed from `estimated_tokens`), alongside `max_tokens` / `model` / the
   optional `report`.

@@ -85,6 +85,29 @@ func (h *Handler) HandleInit(w http.ResponseWriter, r *http.Request) {
 	// same fallback hazard). h.workDir is set explicitly by the desktop boot
 	// path via SetWorkDir before serving.
 	wd := h.workDir
+	// A multi-project web/desktop client sends the tab's own project root so
+	// /init seeds THAT repo rather than the server's default workdir. The root
+	// must be one of the server's allowed projects (same trust boundary as
+	// session resolution and /api/files/*).
+	var body struct {
+		Project string `json:"project"`
+	}
+	if err := readBodyJSON(r, &body); err == nil && body.Project != "" {
+		// Same trust boundary as session resolution and /api/files/*: only a
+		// root this server serves may be seeded.
+		allowed := false
+		for _, root := range h.allowedProjectRoots() {
+			if root == body.Project {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			writeError(w, http.StatusForbidden, "project is not registered with this server")
+			return
+		}
+		wd = body.Project
+	}
 	if wd == "" {
 		var err error
 		wd, err = os.Getwd()

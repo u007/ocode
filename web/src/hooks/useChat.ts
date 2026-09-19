@@ -4,6 +4,7 @@ import {
   useChatDispatch,
   useChatStateRef,
   getSessionSlice,
+  extractAskContext,
 } from "../stores/chatStore";
 import { useProjectState, findProjectPathForTab } from "../stores/projectStore";
 import { api, ApiError } from "../api/client";
@@ -44,6 +45,20 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   );
   const pendingQuestion = useChatSelector(
     (s) => getSessionSlice(s, sessionId).pendingQuestion,
+  );
+  // The assistant message (prose + reasoning) behind the pending ask, shown
+  // inside the permission/question dialogs. Shallow-compared so streamed
+  // deltas elsewhere in the store do not re-render App; null whenever nothing
+  // is pending, so the common case is an O(1) selector return.
+  const askContext = useChatSelector(
+    (s) => {
+      const slice = getSessionSlice(s, sessionId);
+      if (!slice.pendingPermission && !slice.pendingQuestion) return null;
+      return extractAskContext(slice.messages, slice.live);
+    },
+    (a, b) =>
+      (a?.thinking ?? "") === (b?.thinking ?? "") &&
+      (a?.text ?? "") === (b?.text ?? ""),
   );
   // The SSH/WSL host for that path (undefined for a local project). A `!`
   // command must run on the machine that owns the project — sending it to a
@@ -306,5 +321,6 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     isStreaming,
     pendingPermission,
     pendingQuestion,
+    askContext,
   };
 }

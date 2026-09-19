@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { FolderGit2, GitBranch, Paperclip, CalendarClock, MessageSquare, MoreHorizontal, Settings } from "lucide-react";
+import { FolderGit2, GitBranch, Paperclip, CalendarClock, MessageSquare, MoreHorizontal, Settings, PanelLeft } from "lucide-react";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import SyncStatusWidget from "./SyncStatusWidget";
@@ -13,6 +13,12 @@ import { eventBus } from "@/lib/eventBus";
 interface Props {
   activeTab: string;
   onTabSelect: (value: string) => void;
+  /**
+   * Mobile-only: opens the project sidebar drawer. On phones the sidebar
+   * defaults closed and has no inline rail, so this button is the only way
+   * back to the project list once it is dismissed.
+   */
+  onMenuToggle?: () => void;
 }
 
 const mainTabs = [
@@ -24,7 +30,7 @@ const mainTabs = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
-export default function TopTabs({ activeTab, onTabSelect }: Props) {
+export default function TopTabs({ activeTab, onTabSelect, onMenuToggle }: Props) {
   const { state: projectState } = useProjectState();
   const activeProjectPath = projectState.activeProject?.path ?? "";
   const activeProjectHost = projectState.activeProject?.host;
@@ -161,6 +167,19 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
 
   return (
     <header className="flex items-center border-b border-border bg-card h-12 px-4 overflow-hidden">
+      {/* Mobile: project-drawer launcher. Hidden ≥md, where the sidebar is an
+          inline column with its own rail/collapse affordances. */}
+      {onMenuToggle && (
+        <button
+          type="button"
+          onClick={onMenuToggle}
+          aria-label="Open projects sidebar"
+          title="Open projects sidebar"
+          className="md:hidden mr-2 -ml-1 p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted shrink-0"
+        >
+          <PanelLeft className="w-4 h-4" />
+        </button>
+      )}
       {/* Left: Logo */}
       <div className="flex items-center gap-2 mr-6 shrink-0">
         <div className="w-6 h-6 rounded bg-blue-600 flex items-center justify-center text-xs font-bold">

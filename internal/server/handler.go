@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/contextbudget"
@@ -77,6 +78,11 @@ type Handler struct {
 	// encrypt/decrypt jobs (see handler_secret.go), streaming progress as
 	// secret_progress/secret_done/secret_error/secret_cancelled events on bus.
 	secretJobs *secretjob.Manager
+	// cliToolJobs tracks background CLI-utility installs started by the
+	// web/desktop `/tools` command (see handler_clitools.go). Install shells
+	// out to the platform package manager and can block for minutes, so it is
+	// job-id + poll rather than a long-held request.
+	cliToolJobs *cliToolJobManager
 
 	// bus is the unified tagged event bus (Part 02). Every emitters publishes
 	// envelopes here; /api/events streams them to web clients.
@@ -93,9 +99,13 @@ type Handler struct {
 	// server is done once per process instead of once per session - see
 	// newMCPCache.
 	mcpCache *mcpCache
-	// advisorEnabled is the runtime gate for the advisor tool, shared by all
-	// agents this handler creates. Seeded from config, flipped from the web
-	// sidebar, never persisted back to config.
+	// advisorEnabled is the process-wide runtime gate for the advisor tool,
+	// used by sessions with no per-session override and by the pre-session
+	// sidebar/Settings fallback. Seeded from config, flipped from the web
+	// Settings form, never persisted back to config. A chat that toggles the
+	// advisor persists its own override in transcript metadata
+	// (advisorEnabledMetadataKey) and never touches this field, so one chat's
+	// toggle cannot leak into another. See advisor_session.go.
 	advisorEnabled bool
 	// windowProfiles caches windowId -> activeProfile (empty = Default).
 	// Hydrated from window-state.json once at startup; mutated only via
@@ -355,6 +365,11 @@ type agentSession struct {
 	// turns, where the TUI persists its own transcript.
 	liveAppend func(agent.Message)
 	mu         sync.Mutex
+	// spentMicros is this session's accumulated LLM spend in USD micros
+	// (1e-6 USD), summed from each turn's Step messages' Spend plus side-path
+	// calls (advisor/compact) via OnSideUsage. Atomic: written by the turn
+	// goroutine and read by HTTP status handlers without taking as.mu.
+	spentMicros atomic.Int64
 }
 
 func NewHandler() *Handler {
@@ -410,6 +425,7 @@ func NewHandler() *Handler {
 		mediaTokens:       newMediaTokenStore(),
 		terminalProcsWake: make(chan struct{}, 1),
 		secretJobs:        secretjob.NewManager(),
+		cliToolJobs:       newCLIToolJobManager(),
 		saveLocks:         make(map[string]*sync.Mutex),
 		pendingCancel:     make(map[string]bool),
 		turnInFlight:      make(map[string]int),
@@ -1265,6 +1281,11 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 	providerFilter := strings.TrimSpace(r.URL.Query().Get("provider"))
 	refreshParam := strings.TrimSpace(r.URL.Query().Get("refresh"))
 	refresh := refreshParam == "1" || strings.EqualFold(refreshParam, "true")
+	// configured=true trims the registry to providers this server actually has
+	// credentials/config for (see configuredProviderIDs). Opt-in so direct API
+	// consumers can still enumerate the full registry.
+	configuredParam := strings.TrimSpace(r.URL.Query().Get("configured"))
+	configuredOnly := configuredParam == "1" || strings.EqualFold(configuredParam, "true")
 
 	// Mirror the TUI model picker ordering (openModelPicker in
 	// internal/tui/picker.go): Recently Used first, then ★ Favorites, then the
@@ -1355,12 +1376,32 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Remaining registry models, alphabetically by provider then model
-	// (equivalent to sorting the "provider/model" ids).
+	// (equivalent to sorting the "provider/model" ids). With configured=true,
+	// providers without credentials/config are dropped here — recents and
+	// favorites above are always kept so a user's own picks never vanish.
+	var configured map[string]bool
+	if configuredOnly {
+		configured = h.configuredProviderIDs()
+		// Keep the currently configured model visible even if its provider has
+		// no resolvable credential, so the active row is never missing.
+		if currentModel != "" {
+			if p, _, ok := splitModelID(currentModel); ok {
+				configured[p] = true
+			}
+		}
+	}
 	rest := make([]string, 0, len(registry))
 	for _, id := range registry {
-		if !shown[id] {
-			rest = append(rest, id)
+		if shown[id] {
+			continue
 		}
+		if configuredOnly {
+			provider := providerOfModelID(id)
+			if !configured[provider] && !agent.KeyOptionalProvider(provider) {
+				continue
+			}
+		}
+		rest = append(rest, id)
 	}
 	sort.Strings(rest)
 	for _, id := range rest {
@@ -1415,20 +1456,26 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 // annotateModelFlags computes, for every listed model, whether an injectable
 // model-specific custom prompt exists ({model}.OCODE.md via the root-anchored
 // loader) and whether a force-injected Kaizen tuning directive is admitted for
-// it in this project. The Kaizen stack is detected ONCE for all models; the
-// custom-prompt check reads only matching files. Root is the server's anchored
-// workdir — never the process cwd (desktop boots with cwd "/").
+// it in this project. Both checks are batched: the Kaizen stack is detected
+// once and the *.OCODE.md search dirs are scanned once for the whole list, so
+// annotating thousands of picker models does not perform a per-model directory
+// scan. Root is the server's anchored workdir — never the process cwd (desktop
+// boots with cwd "/").
 func (h *Handler) annotateModelFlags(root string, models []ModelInfo) {
+	if len(models) == 0 {
+		return
+	}
 	ids := make([]string, 0, len(models))
 	for _, m := range models {
 		ids = append(ids, m.Name)
 	}
 	kaizen := skill.KaizenDigestAdmittedForModels(root, ids)
+	promptKinds := agent.ModelContextKindsAt(root, ids)
 	for i := range models {
 		if kaizen[models[i].Name] {
 			models[i].HasKaizen = true
 		}
-		if res := agent.LoadModelContextWithSourceAt(root, models[i].Name); res.Kind != "" {
+		if promptKinds[models[i].Name] != "" {
 			models[i].HasModelPrompt = true
 		}
 	}
@@ -1452,6 +1499,65 @@ func splitModelID(id string) (provider, model string, ok bool) {
 	return "", "", false
 }
 
+// providerOfModelID returns the provider prefix of a "provider/model" id, or
+// "other" for an id without a slash (matching the ModelInfo.Provider fallback).
+func providerOfModelID(id string) string {
+	if provider, _, ok := splitModelID(id); ok {
+		return provider
+	}
+	return "other"
+}
+
+// configuredProviderIDs returns the provider ids this server can actually call:
+// any stored credential or OAuth token, a set provider env var, an explicit
+// config `provider` block, or a keyless local provider. Used by
+// HandleListModels?configured=true to drop the hundreds of registry providers
+// the user has no account with. It deliberately does NOT resolve/refresh OAuth
+// tokens (see auth.Get/auth.List) so a list request never triggers a network
+// refresh.
+func (h *Handler) configuredProviderIDs() map[string]bool {
+	out := make(map[string]bool)
+	h.mu.Lock()
+	cfg := h.cfg
+	h.mu.Unlock()
+	if cfg != nil {
+		for id := range cfg.Provider {
+			if id != "" {
+				out[id] = true
+			}
+		}
+	}
+	// Every stored credential counts, including provider ids that are not in
+	// the auth registry (custom/gateway providers such as xiaomi-token-plan-sgp).
+	for id := range auth.List() {
+		if id != "" {
+			out[id] = true
+		}
+	}
+	for _, p := range auth.Providers {
+		// A set env var (from the curated auth registry) counts as configured.
+		if p.EnvVar != "" && os.Getenv(p.EnvVar) != "" {
+			out[p.ID] = true
+			continue
+		}
+		// Keyless/local provider (lmstudio) — usable without credentials.
+		if p.EnvVar == "" && p.OAuthFlow == "" {
+			out[p.ID] = true
+		}
+	}
+	// The agent package's provider table is the authoritative env-var source and
+	// covers keyed providers absent from auth.Providers (mistral, 302ai,
+	// xiaomi-token-plan-*, chutes-coding, z.ai, …). Without this a user whose key
+	// is env-only (no stored credential) would lose those providers from the
+	// configured picker.
+	for id, env := range agent.ProviderEnvVars() {
+		if env != "" && os.Getenv(env) != "" {
+			out[id] = true
+		}
+	}
+	return out
+}
+
 func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, id string) {
 	as, err := h.getOrCreateAgentSession(id)
 	if err != nil {
@@ -1463,14 +1569,15 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 	// holding h.mu across it would freeze every other session's turn for its
 	// whole duration.
 	as.mu.Lock()
-	defer as.mu.Unlock()
 
 	result, enabled := as.agent.Compact(as.messages)
 	if !enabled {
+		as.mu.Unlock()
 		writeError(w, http.StatusUnprocessableEntity, "compaction disabled in config")
 		return
 	}
 	if !result.OK {
+		as.mu.Unlock()
 		if result.Err != nil {
 			writeError(w, http.StatusInternalServerError, result.Err.Error())
 			return
@@ -1500,6 +1607,15 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 			Data:      as.messages,
 		})
 	}
+	as.mu.Unlock()
+
+	// Refresh the per-session status snapshot so the web/desktop sidebar's
+	// Context gauge reflects the compacted transcript immediately. Without
+	// this the gauge kept the stale pre-compaction reading until the next turn.
+	// Runs after the unlock: publishTurnStatusSnapshot resolves sessions and
+	// broadcasts, and keeping it outside the as.mu region preserves the
+	// as.mu → h.mu lock order. No-op when an RC bridge owns the status feed.
+	h.publishTurnStatusSnapshot(id)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"original_len":  result.OriginalLen,
@@ -1673,24 +1789,42 @@ func (h *Handler) HandleSessionContext(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// Context occupancy is ALWAYS the backend's provider-reported value, never a
-	// chars/4 estimate over the persisted transcript: the bridged TUI's live
-	// value for its session, else the session's live agent LastInputTokens.
-	// Zero means "no provider usage recorded yet" and is reported as such
-	// rather than fabricated from message text.
+	// Context occupancy prefers the backend's provider-reported value: the
+	// bridged TUI's live value for its session, else the session's live agent
+	// LastInputTokens, then the agent's post-compaction estimate (LastInputTokens
+	// is cleared by a /compact). Only when no live agent exists in this process
+	// (restored/idle-evicted session) does it fall back to a chars/4 estimate
+	// over the persisted transcript. This is the SAME chain applySessionContext
+	// uses — the two entry points must agree (see the AGENTS.md rule).
 	model := ""
 	maxTokens := 0
 	var current int64
+	// currentSource records where the value came from so the token-budget
+	// report does not label a chars/4 estimate "actual" (provider readings are
+	// "actual"/"actual+tail"; the compacted heuristic is "estimated").
+	currentSource := ""
 	if rc := h.RCBridge(); rc != nil && rc.SessionID == id {
 		if live := rc.TUIStatus(); live.ContextModel != "" {
 			model = live.ContextModel
 			maxTokens = live.ContextMaxTokens
 			current = int64(live.ContextCurrentTokens)
+			currentSource = "actual"
 		}
 	}
 	if current == 0 {
 		if as := h.lookupAgentSession(id); as != nil && as.agent != nil {
 			current = as.agent.LastInputTokens()
+			if current > 0 {
+				currentSource = "actual"
+			} else if current = as.agent.CompactedContextTokens(); current > 0 {
+				currentSource = "estimated"
+			}
+		}
+	}
+	if current == 0 {
+		current = estimateContextFromMessages(s.Messages)
+		if current > 0 {
+			currentSource = "estimated"
 		}
 	}
 	if model == "" {
@@ -1722,13 +1856,18 @@ func (h *Handler) HandleSessionContext(w http.ResponseWriter, r *http.Request, i
 			WorkDir:  entry.ProjectRoot,
 			Config:   cfg,
 		}
-		// Override the report's derived context estimate with the same
-		// provider-reported value the summary carries, so the report's Context
-		// row and the summary agree instead of the report re-deriving an
-		// estimate from message text.
+		// Override the report's derived context estimate with the same value
+		// the summary carries, so the report's Context row and the summary
+		// agree instead of the report re-deriving an estimate from message
+		// text. The source follows the value: a provider reading is "actual",
+		// a post-compaction / transcript chars/4 fallback is "estimated".
 		if current > 0 {
 			in.ContextTokens = current
-			in.ContextSource = "actual"
+			if currentSource != "" {
+				in.ContextSource = currentSource
+			} else {
+				in.ContextSource = "actual"
+			}
 		}
 		resp["report"] = contextbudget.Build(in)
 	}

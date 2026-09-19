@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -13,9 +14,11 @@ import (
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/usage"
 )
 
 // bootstrapMCPTimeout bounds the MCP tool enumeration wait during session
@@ -47,6 +50,155 @@ func (h *Handler) lookupAgentSession(id string) *agentSession {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.agents[id]
+}
+
+// spentUSDMetadataKey is the session-metadata key holding the per-session
+// accumulated LLM spend (USD), written at turn end and read back for a
+// restored (non-live) session.
+//
+// It is deliberately the same key the TUI's sidebarTelemetry writes and reads
+// (telemetryFromSessionMetadata), so a session that moves between the TUI and
+// a headless web/desktop turn keeps ONE running total, and a session created
+// by the TUI shows its history in the web sidebar instead of starting at 0.
+const spentUSDMetadataKey = "spend"
+
+// addSpendUSD adds v USD to the session's accumulated spend. Safe for
+// concurrent use (atomic).
+func (as *agentSession) addSpendUSD(v float64) {
+	if as == nil || v == 0 {
+		return
+	}
+	as.spentMicros.Add(int64(math.Round(v * 1e6)))
+}
+
+// seedSpend raises the accumulator to a restored session total, never lowers
+// it. Called at agent build with the persisted total and at a rebuild with the
+// outgoing agent's live total, so the gauge never regresses to 0 when an agent
+// is rebuilt (profile reconcile, model switch, plugin reload, idle eviction,
+// server restart) — that regression was why a session's spend history
+// disappeared.
+func (as *agentSession) seedSpend(usd float64) {
+	if as == nil || usd <= 0 {
+		return
+	}
+	micros := int64(math.Round(usd * 1e6))
+	for {
+		cur := as.spentMicros.Load()
+		if micros <= cur || as.spentMicros.CompareAndSwap(cur, micros) {
+			return
+		}
+	}
+}
+
+// sessionSpendFromMetadata extracts the persisted per-session spend total from
+// transcript metadata, tolerating the numeric shapes a JSON round-trip can
+// produce (float64) and typed writers (int, int64, float32).
+func sessionSpendFromMetadata(md map[string]any) float64 {
+	if md == nil {
+		return 0
+	}
+	switch v := md[spentUSDMetadataKey].(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case int:
+		return float64(v)
+	}
+	return 0
+}
+
+// spendUSD returns the session's accumulated spend in USD.
+func (as *agentSession) spendUSD() float64 {
+	if as == nil {
+		return 0
+	}
+	return float64(as.spentMicros.Load()) / 1e6
+}
+
+// addSpendFromMessages adds the Spend of a Step's new messages to the
+// session total. The main turn's spend lives on its assistant/tool messages;
+// summing the Step delta (never the whole transcript) avoids double counting.
+func (as *agentSession) addSpendFromMessages(msgs []agent.Message) {
+	var delta float64
+	for i := range msgs {
+		if msgs[i].Spend != nil {
+			delta += *msgs[i].Spend
+		}
+	}
+	as.addSpendUSD(delta)
+}
+
+// persistSessionSpend writes the session's accumulated spend into its
+// transcript metadata so the web/desktop gauge survives an agent rebuild,
+// idle eviction, or server restart. Metadata-only, so it cannot conflict with
+// filtered transcript rows (see session.UpdateMetadataForDir).
+func (h *Handler) persistSessionSpend(sessionID string, usd float64) {
+	if sessionID == "" {
+		return
+	}
+	projectRoot := h.sessionProjectRoot(sessionID)
+	if projectRoot == "" {
+		return
+	}
+	if err := session.UpdateMetadataForDir(projectRoot, sessionID, func(md map[string]any) {
+		md[spentUSDMetadataKey] = usd
+	}); err != nil {
+		log.Printf("serve: persist spend for %s: %v", sessionID, err)
+	}
+}
+
+// recordTurnUsage writes one usage-ledger row per Step message that carried
+// provider usage, attributed to sessionID — the headless counterpart of the
+// TUI's recordUsageFromMessage (internal/tui/model.go). Written
+// asynchronously so a slow ledger write never blocks the turn; failures are
+// logged, never fatal. promptTokens is normalized (excludes cache reads) so
+// ledger ratios stay uniform across providers.
+func (h *Handler) recordTurnUsage(sessionID string, as *agentSession, msgs []agent.Message) {
+	provider := ""
+	if as != nil && as.agent != nil {
+		provider = as.agent.GetProvider()
+	}
+	for i := range msgs {
+		msg := msgs[i]
+		if msg.Usage == nil && msg.Spend == nil {
+			continue
+		}
+		model := msg.Model
+		if model == "" && as != nil {
+			model = as.model
+		}
+		promptTokens := int64(0)
+		completionTokens := int64(0)
+		cacheReadTokens := int64(0)
+		totalTokens := int64(0)
+		if u := msg.Usage; u != nil {
+			promptTokens = u.NormalizedPromptTokens()
+			if u.CompletionTokens != nil {
+				completionTokens = *u.CompletionTokens
+			}
+			if u.CacheReadTokens != nil {
+				cacheReadTokens = *u.CacheReadTokens
+			}
+			if u.TotalTokens != nil {
+				totalTokens = *u.TotalTokens
+			} else {
+				totalTokens = promptTokens + cacheReadTokens + completionTokens
+			}
+		}
+		spend := 0.0
+		if msg.Spend != nil {
+			spend = *msg.Spend
+		}
+		crashguard.Go(func() {
+			if err := usage.RecordUsageForSession(time.Now(), sessionID, model, provider,
+				promptTokens, completionTokens, cacheReadTokens, totalTokens, spend); err != nil {
+				log.Printf("usage: record for session %s: %v", sessionID, err)
+			}
+		})
+	}
 }
 
 // advisorFlag reads the shared advisor gate under h.mu (it is flipped from the
@@ -217,9 +369,30 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		h.publishBootstrapWarning(sessionID, "mcp", "MCP enumeration did not finish within 30s; proceeding without stragglers")
 	}
 
-	ag.SetAdvisorEnabled(h.advisorFlag())
+	// Seed the runtime advisor gate from the session's own persisted override
+	// when it has one; sessions that never toggled follow the process-wide
+	// default. Per-session on purpose: one chat's advisor toggle must never
+	// leak into another chat, and a resume/restart re-seeds from metadata.
+	ag.SetAdvisorEnabled(h.advisorSeed(sessionID, h.advisorFlag()))
 	h.wireCompactCallbacks(sessionID, ag)
 	as := &agentSession{agent: ag, messages: messages, model: model, profile: prof, credVersion: auth.ProfileCredentialVersion()}
+	// Restore this session's spend history before anything reads the gauge. The
+	// total lives in transcript metadata (the same "spend" key the TUI writes),
+	// and a freshly built agent starts at zero, so without this seed the
+	// sidebar would show only the current turn's spend after a rebuild/resume.
+	if prev, err := session.LoadForDir(projectRoot, sessionID); err == nil {
+		as.seedSpend(sessionSpendFromMetadata(prev.Metadata))
+	}
+	// Accumulate side-path spend (advisor, compaction, title, …) into this
+	// session's own total. The main turn's spend is recorded from Step
+	// messages in runTurn; without this, side queries would vanish from the
+	// web's per-session gauge (the TUI wires the same callback for its own
+	// sidebar). Uses the atomic accumulator, so no as.mu needed here.
+	ag.OnSideUsage = func(_, _, _, _ int64, spend *float64) {
+		if spend != nil {
+			as.addSpendUSD(*spend)
+		}
+	}
 	h.publishBootstrapStage(sessionID, "ready")
 	return as, "", nil
 }
@@ -308,8 +481,13 @@ func (h *Handler) replaceAgentSession(id string, as *agentSession) {
 	old, ok := h.agents[id]
 	h.agents[id] = as
 	h.mu.Unlock()
-	if ok && old != as && old.agent != nil && !h.sessions.IsTurnActive(id) {
-		old.agent.Shutdown()
+	if ok && old != as {
+		// Never let a rebuild regress the session's spend: the outgoing agent
+		// holds turn spend that may not be persisted to metadata yet.
+		as.seedSpend(old.spendUSD())
+		if old.agent != nil && !h.sessions.IsTurnActive(id) {
+			old.agent.Shutdown()
+		}
 	}
 }
 
@@ -746,6 +924,16 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		}
 
 		as.messages = append(as.messages, resp...)
+		// Accumulate this Step's main-path spend into the session total so the
+		// web/desktop Context panel can show a per-session figure.
+		as.addSpendFromMessages(resp)
+		// Mirror the TUI's usage ledger for headless turns: web/desktop LLM
+		// calls were never recorded, so /api/spending and /usage undercounted
+		// them. Records carry the session id, so a session's spend can be
+		// summed back (usage.SessionSpend) even if its metadata total is lost.
+		if headless {
+			h.recordTurnUsage(sessionID, as, resp)
+		}
 		// Keep the LLM input (`messages`) in lockstep with the persisted
 		// transcript. Agent.Step returns its newMsgs without mutating the
 		// caller's slice, so without this the resumed Step below would receive
@@ -1384,8 +1572,8 @@ func (h *Handler) applyCompactResult(sessionID string, r agent.CompactResult) {
 		return
 	}
 	as.mu.Lock()
-	defer as.mu.Unlock()
 	if len(as.messages) < r.OriginalLen || r.ReplaceFrom < 0 || r.ReplaceTo > len(as.messages) || r.ReplaceFrom > r.ReplaceTo {
+		as.mu.Unlock()
 		log.Printf("serve: auto-compaction result for session %s dropped: transcript changed (len=%d, splice=[%d:%d), snapshot=%d)",
 			sessionID, len(as.messages), r.ReplaceFrom, r.ReplaceTo, r.OriginalLen)
 		return
@@ -1406,6 +1594,14 @@ func (h *Handler) applyCompactResult(sessionID string, r agent.CompactResult) {
 			Data:      as.messages,
 		})
 	}
+	as.mu.Unlock()
+
+	// Refresh the per-session status snapshot so the sidebar's Context gauge
+	// reflects the shrunken transcript. Async auto-compaction runs on its own
+	// goroutine; without this push the gauge kept the stale pre-compaction
+	// reading until the next turn. Runs after the unlock (no-op under an RC
+	// bridge).
+	h.publishTurnStatusSnapshot(sessionID)
 }
 
 // saveSession persists a transcript to the session's owning project's storage

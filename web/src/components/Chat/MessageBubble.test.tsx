@@ -80,3 +80,20 @@ describe("MessageBubble theme-surface classes", () => {
     expect(bubble!.textContent).toContain("hello world");
   });
 });
+
+describe("MessageBubble compaction notice", () => {
+  it("renders the persisted compaction summary as an inline notice, not a raw marker", () => {
+    render(
+      <MessageBubble
+        message={{
+          role: "system",
+          content: "[ocode:compaction-summary]\nCompacted summary covering 24 messages\n\nbody text",
+        }}
+      />,
+    );
+    const notice = screen.getByTestId("compaction-notice");
+    expect(notice).toHaveTextContent("Compacted summary covering 24 messages");
+    expect(screen.queryByText(/\[ocode:compaction-summary\]/)).not.toBeInTheDocument();
+  });
+});
+

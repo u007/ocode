@@ -531,10 +531,16 @@ func (h *Handler) HandleSetAdvisor(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HandleGetAdvisorEnabled reports whether the advisor tool is currently exposed.
-// This is a runtime, session-lifetime toggle — it is NOT read from or written to
-// config.
+// HandleGetAdvisorEnabled reports whether the advisor tool is currently
+// exposed. With ?session_id=<id> it reports that chat session's effective gate
+// (live agent → persisted per-session override → process default); without it,
+// the process-wide default. The per-session value is a runtime, session-lifetime
+// toggle backed by the session's transcript metadata — it is NOT read from or
+// written to config.
 func (h *Handler) HandleGetAdvisorEnabled(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	// h.rc and h.rc.Agent() are read under h.mu (and the effective resolver
+	// below must be called with no handler lock held — it re-takes h.mu).
 	h.mu.Lock()
 	enabled := h.advisorEnabled
 	if h.rc != nil {
@@ -543,25 +549,56 @@ func (h *Handler) HandleGetAdvisorEnabled(w http.ResponseWriter, r *http.Request
 		}
 	}
 	h.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]bool{"enabled": enabled})
+	if sessionID == "" {
+		writeJSON(w, http.StatusOK, map[string]bool{"enabled": enabled})
+		return
+	}
+	enabled = h.effectiveSessionAdvisorEnabled(sessionID, enabled)
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": enabled, "session_id": sessionID})
 }
 
-// HandleSetAdvisorEnabled flips the advisor tool on/off for every live agent this
-// handler controls (and the bridged TUI agent, if any). It deliberately does NOT
-// persist to config — the change lasts only for the agents' lifetime.
+// HandleSetAdvisorEnabled flips the advisor tool on/off. With a session_id it is
+// scoped to that one chat session: the session's live agent is updated and the
+// override is persisted to its transcript metadata (survives resume/restart);
+// every other session is untouched. Without a session_id it keeps the original
+// process-wide runtime behavior for the Settings → Advisor form and the
+// pre-session sidebar fallback. Neither path writes the global config.
 func (h *Handler) HandleSetAdvisorEnabled(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Enabled bool `json:"enabled"`
+		Enabled   bool   `json:"enabled"`
+		SessionID string `json:"session_id"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "enabled is required")
+		return
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(r.URL.Query().Get("session_id"))
+	}
+	if sessionID != "" {
+		// A typo would otherwise persist an orphan override that can never take
+		// effect; require the session to resolve.
+		if h.sessionProjectRoot(sessionID) == "" {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if err := h.applySessionAdvisorEnabled(sessionID, req.Enabled); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// Session-tagged push: only the requesting chat's sidebar re-renders.
+		h.pushSessionStatusSnapshot(sessionID)
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": req.Enabled, "session_id": sessionID})
 		return
 	}
 
 	h.mu.Lock()
 	h.advisorEnabled = req.Enabled
 	for _, as := range h.agents {
-		as.agent.SetAdvisorEnabled(req.Enabled)
+		if as.agent != nil {
+			as.agent.SetAdvisorEnabled(req.Enabled)
+		}
 	}
 	if h.rc != nil {
 		if ag := h.rc.Agent(); ag != nil {

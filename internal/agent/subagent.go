@@ -442,6 +442,16 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	// and the tab never reflects sub-agent edits.
 	subAgent.shareChangeTrackingFrom(t.mainAgent)
 
+	// Inherit the parent's session id so this sub-agent's own debug-log entries
+	// (TOOL/TOOLS/PERMISSION/…) are attributed to the owning chat session
+	// instead of leaking into every open Logs tab as process-global entries.
+	// Mirrors ask.go's child.SetSessionID(a.sessionID); the snapshot store is
+	// already the parent's and bound to that session, so SwitchSession is a
+	// no-op and the shared changes registry is untouched.
+	if t.mainAgent.sessionID != "" {
+		subAgent.SetSessionID(t.mainAgent.sessionID)
+	}
+
 	// Propagate the parent's project root so the sub-agent's file writes are
 	// confined against the project (not the process cwd) and appear on the
 	// changes tab — same as the main agent. Plain field assignment (not

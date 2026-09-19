@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { apiPath, authHeaders } from "@/api/client";
+import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
 import { useLogPrefs } from "@/hooks/useLogPrefs";
 import { Trash2, Pause, Play, Filter } from "lucide-react";
@@ -38,7 +38,7 @@ const KIND_COLORS: Record<string, string> = {
 
 const KIND_FILTERS = ["ALL", "LLM", "TOOL", "AGENT", "ERROR", "SESSION", "GIT", "PROFILE"];
 
-function LogPanel({ active, sessionId }: { active: boolean; sessionId: string }) {
+function LogPanel({ active, sessionId, host }: { active: boolean; sessionId: string; host?: string }) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [streaming, setStreaming] = useState(true);
   const [filter, setFilter] = useState("ALL");
@@ -133,11 +133,8 @@ function LogPanel({ active, sessionId }: { active: boolean; sessionId: string })
       prevLogsCountRef.current = null;
     }
     let cancelled = false;
-    fetch(apiPath(`/api/logs?session_id=${encodeURIComponent(sessionId)}`), { headers: authHeaders() })
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
+    api
+      .getLogs(sessionId, host)
       .then((data) => {
         if (cancelled) return;
         setLogs(data as LogEntry[]);
@@ -151,7 +148,7 @@ function LogPanel({ active, sessionId }: { active: boolean; sessionId: string })
     return () => {
       cancelled = true;
     };
-  }, [sessionId, active]);
+  }, [sessionId, active, host]);
 
   // Live logs arrive as `logs` envelopes on the shared event bus (the single
   // /api/events connection). The `streaming` toggle pauses consumption (the
@@ -239,10 +236,7 @@ function LogPanel({ active, sessionId }: { active: boolean; sessionId: string })
   const handleClear = async () => {
     if (!window.confirm("Clear logs for this session?")) return;
     try {
-      await fetch(apiPath(`/api/logs?session_id=${encodeURIComponent(sessionId)}`), {
-        method: "DELETE",
-        headers: authHeaders(),
-      });
+      await api.clearLogs(sessionId, host);
       setLogs([]);
     } catch (err) {
       console.error("Failed to clear logs:", err);

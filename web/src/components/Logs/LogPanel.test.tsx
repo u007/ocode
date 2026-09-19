@@ -64,6 +64,9 @@ beforeEach(() => {
     vi.fn().mockResolvedValue({
       ok: true,
       json: async () => [],
+      // fetchJSON reads res.text() then JSON.parse (never res.json()), so the
+      // stub must provide text() as well.
+      text: async () => "[]",
     }),
   );
   busHandlers.clear();
@@ -157,7 +160,9 @@ describe("LogPanel scroll behavior", () => {
     // backlog from the server (bounded ring) — simulate that here. Every
     // active flip refetches, so the default mock answers [] and the final
     // activation gets the missed entry via mockResolvedValueOnce.
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => [] });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => [], text: async () => "[]" });
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
     const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
     await act(async () => {});
@@ -179,6 +184,7 @@ describe("LogPanel scroll behavior", () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => [{ kind: "TOOL", message: "hidden entry" }],
+      text: async () => JSON.stringify([{ kind: "TOOL", message: "hidden entry" }]),
     });
     act(() => rerender(<LogPanel active={true} sessionId="test-session" />));
     await act(async () => {}); // flush the activation refetch
@@ -377,5 +383,17 @@ describe("LogPanel scroll behavior", () => {
     act(() => rerender(<LogPanel active={true} sessionId="session-b" />));
     await act(async () => {});
     expect(screen.getByTitle("Enable auto-scroll")).toBeInTheDocument();
+  });
+
+  it("routes a remote session's log fetch through the project host", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, text: async () => "[]" });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+    render(<LogPanel active sessionId="s1" host="james@217.216.72.49" />);
+    await act(async () => {});
+    const url = String(fetchMock.mock.calls[0]?.[0]);
+    expect(url).toContain("/api/remote/james%40217.216.72.49/api/logs");
+    expect(url).toContain("session_id=s1");
   });
 });

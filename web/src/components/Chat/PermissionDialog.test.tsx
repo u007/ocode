@@ -249,10 +249,12 @@ describe("PermissionDialog", () => {
     expect(content!.className).toContain("sm:max-w-2xl");
     expect(content!.className).not.toContain("max-w-md");
     expect(content!.className).toContain("w-[calc(100%-2rem)]");
-    // Tall content stays bounded vertically inside the dialog, and horizontal
-    // overflow from any descendant is explicitly clipped (no sideways scroll
-    // past the dialog edge).
-    expect(content!.className).toContain("max-h-[calc(100vh-2rem)]");
+    // Tall content stays bounded vertically inside the dialog (the shared
+    // dvh-aware cap, so it also holds under mobile browser chrome), and
+    // horizontal overflow from any descendant is explicitly clipped (no
+    // sideways scroll past the dialog edge).
+    expect(content!.className).toContain("dialog-viewport-max");
+    expect(content!.className).not.toContain("max-h-[calc(100vh-2rem)]");
     expect(content!.className).toContain("overflow-y-auto");
     expect(content!.className).toContain("overflow-x-clip");
 
@@ -301,5 +303,30 @@ describe("PermissionDialog", () => {
     expect(toolExplanation.className).toContain("[overflow-wrap:anywhere]");
     expect(toolExplanation.textContent).toContain(longTool);
     second.unmount();
+  });
+});
+
+describe("PermissionDialog model context", () => {
+  it("shows the last model message and its thinking", () => {
+    renderDialog({
+      context: {
+        text: "Cleaning the build output before redeploying.",
+        thinking: "The dist directory is stale, so remove it first.",
+      },
+    });
+    const region = screen.getByRole("region", { name: "Last model message" });
+    expect(region.textContent).toContain(
+      "Cleaning the build output before redeploying.",
+    );
+    expect(region.textContent).toContain(
+      "The dist directory is stale, so remove it first.",
+    );
+  });
+
+  it("renders no model-context panel without a context", () => {
+    renderDialog();
+    expect(
+      screen.queryByRole("region", { name: "Last model message" }),
+    ).toBeNull();
   });
 });

@@ -36,6 +36,12 @@ type Record struct {
 	CacheReadTokens  int64     `json:"crt,omitempty"`
 	TotalTokens      int64     `json:"tt"`
 	Spend            float64   `json:"sp,omitempty"`
+	// SessionID attributes the call to the chat session that produced it.
+	// Empty for legacy rows and for callers without a session (e.g. an
+	// untagged utility call); such rows are process-global. It lets a
+	// session's own spend history survive a lost transcript-metadata total
+	// (see QuerySession / Handler.applySessionSpending).
+	SessionID string `json:"sid,omitempty"`
 }
 
 // ModelSummary aggregates usage for a single model.
@@ -221,22 +227,9 @@ func recordsPath() (string, error) {
 	return filepath.Join(dir, "records.jsonl"), nil
 }
 
-// RecordUsage writes a single usage record to the JSON-lines file.
-// It is safe for concurrent calls. promptTokens must already exclude
-// cacheReadTokens (see Record's doc comment) — callers with a
-// *agent.TokenUsage should pass NormalizedPromptTokens(), not the raw
-// provider PromptTokens field.
-func RecordUsage(t time.Time, model string, provider string, promptTokens, completionTokens, cacheReadTokens, totalTokens int64, spend float64) error {
-	rec := Record{
-		Timestamp:        t,
-		Model:            model,
-		Provider:         provider,
-		PromptTokens:     promptTokens,
-		CompletionTokens: completionTokens,
-		CacheReadTokens:  cacheReadTokens,
-		TotalTokens:      totalTokens,
-		Spend:            spend,
-	}
+// Append writes one record to the JSON-lines file. It is safe for concurrent
+// calls and is the single low-level writer; prefer the RecordUsage helpers.
+func Append(rec Record) error {
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("usage: marshal record: %w", err)
@@ -265,6 +258,33 @@ func RecordUsage(t time.Time, model string, provider string, promptTokens, compl
 		return fmt.Errorf("usage: write record: %w", err)
 	}
 	return nil
+}
+
+// RecordUsage writes a single unattributed (process-global) usage record.
+// It is safe for concurrent calls. promptTokens must already exclude
+// cacheReadTokens (see Record's doc comment) — callers with a
+// *agent.TokenUsage should pass NormalizedPromptTokens(), not the raw
+// provider PromptTokens field.
+func RecordUsage(t time.Time, model string, provider string, promptTokens, completionTokens, cacheReadTokens, totalTokens int64, spend float64) error {
+	return RecordUsageForSession(t, "", model, provider, promptTokens, completionTokens, cacheReadTokens, totalTokens, spend)
+}
+
+// RecordUsageForSession writes one usage record attributed to sessionID (empty
+// for an untagged/process-global call). This is what lets a session's spend
+// history be summed back from the ledger (see QuerySession) when its
+// transcript-metadata total is missing.
+func RecordUsageForSession(t time.Time, sessionID, model, provider string, promptTokens, completionTokens, cacheReadTokens, totalTokens int64, spend float64) error {
+	return Append(Record{
+		Timestamp:        t,
+		SessionID:        sessionID,
+		Model:            model,
+		Provider:         provider,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		CacheReadTokens:  cacheReadTokens,
+		TotalTokens:      totalTokens,
+		Spend:            spend,
+	})
 }
 
 // RecordUsageFromTokens is a convenience wrapper that accepts individual
@@ -296,6 +316,49 @@ func Query(from, to time.Time) ([]Record, error) {
 		return records[i].Timestamp.Before(records[j].Timestamp)
 	})
 	return records, nil
+}
+
+// SessionSpend sums the spend of every ledger record attributed to sessionID.
+// It reads the records file directly rather than going through the time-window
+// query cache, which is shaped for [from,to] lookups, not session filters.
+// Records are append-only, so a full scan is bounded by the file size and only
+// runs on the fallback path (a session with no persisted metadata total).
+func SessionSpend(sessionID string) (float64, error) {
+	if sessionID == "" {
+		return 0, nil
+	}
+	path, err := recordsPath()
+	if err != nil {
+		return 0, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("usage: open records file: %w", err)
+	}
+	defer f.Close()
+
+	var total float64
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var rec Record
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue // skip corrupt lines, mirroring queryCached
+		}
+		if rec.SessionID == sessionID {
+			total += rec.Spend
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("usage: scan records file: %w", err)
+	}
+	return total, nil
 }
 
 // Summarize aggregates records into a Summary grouped by model.

@@ -156,7 +156,7 @@ function TabPill({
           onClick({ button: 0, detail: 1 } as unknown as React.MouseEvent);
         }
       }}
-      className={`relative flex w-52 items-center gap-1 overflow-hidden px-2.5 py-1 rounded-md text-[13px] leading-4 cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+      className={`relative flex w-full sm:w-52 items-center gap-1 overflow-hidden px-2.5 py-1 rounded-md text-[13px] leading-4 cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
         isActive ? "bg-muted/80 text-foreground border border-border/70 shadow-sm" : "bg-card/20 text-muted-foreground border border-transparent hover:bg-muted/50 hover:text-foreground"
       }`}
     >
@@ -585,7 +585,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           editValue={editValue}
           onEditValueChange={setEditValue}
           onClick={(e) => handleChatClick(e, id, displayTitle)}
-          onHover={() => prefetchSession(id)}
+          onHover={() => prefetchSession(id, resolveSessionHost(projectState, id))}
           onStartRename={() => startRename("chat", id, displayTitle || "")}
           onCommitRename={commitRename}
           onCancelRename={() => setEditing(null)}
@@ -644,9 +644,13 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     );
   };
 
+  // Phones stack the tab list above the action buttons and give each session a
+  // full-width row; ≥sm keeps the original two-column grid with 208px pills.
+  // Without this the fixed-width pills painted over the action column once the
+  // sidebar/cowork panels squeezed the centre column.
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start px-2 pt-2 gap-2 bg-card border-b border-border min-w-0 w-full">
-      <div className="min-w-0 flex flex-wrap gap-x-0.5 gap-y-1 items-start py-1.5">
+    <div className="flex flex-col gap-1 sm:grid sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-2 items-stretch sm:items-start px-2 pt-2 bg-card border-b border-border min-w-0 w-full">
+      <div className="min-w-0 flex flex-col gap-1 sm:flex-row sm:flex-wrap sm:gap-x-0.5 sm:gap-y-1 items-stretch sm:items-start py-1.5">
         <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           <SortableContext items={order} strategy={rectSortingStrategy}>
             {order.map(renderPill)}
@@ -654,7 +658,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         </DndContext>
       </div>
 
-      <div className="shrink-0 flex justify-end items-center gap-0.5 py-1.5">
+      <div className="shrink-0 flex flex-wrap justify-start sm:justify-end items-center gap-0.5 py-1.5">
       <button
         onClick={handleNewChat}
         aria-label="New chat session"

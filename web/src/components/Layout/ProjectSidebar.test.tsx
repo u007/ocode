@@ -536,3 +536,55 @@ describe("ProjectSidebar remote hover cold-connect guard", () => {
     );
   });
 });
+
+// ── Mobile off-canvas drawer ─────────────────────────────────────────────────
+// On phones the sidebar is a fixed left drawer with a scrim, not an inline
+// column and not the 40px collapsed rail — otherwise it permanently eats a
+// slice of an already narrow viewport and squeezes the session tab list.
+
+describe("ProjectSidebar mobile drawer", () => {
+  beforeEach(() => {
+    stateFake.projects = [project("/one", ""), project("/two", "")];
+    stateFake.groups = [];
+    stateFake.activeProject = null;
+    stateFake.loading = false;
+    stateFake.tabsByProject = {};
+    stateFake.activeTabByProject = {};
+    actionsFake.selectProject.mockClear();
+  });
+
+  it("renders an off-canvas drawer (not the collapsed rail) when closed", () => {
+    const { container } = render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} isMobile />);
+    const drawer = container.querySelector(".fixed.inset-y-0.left-0");
+    expect(drawer).not.toBeNull();
+    expect(drawer!.className).toMatch(/-translate-x-full/);
+    // Closed ⇒ no scrim, and the expanded body is still mounted for the slide.
+    expect(container.querySelector(".fixed.inset-0")).toBeNull();
+    expect(screen.getByText("Add project")).toBeDefined();
+  });
+
+  it("renders the drawer on-screen with a backdrop when open, and closes on backdrop tap", () => {
+    const onToggle = vi.fn();
+    const { container } = render(<ProjectSidebar isOpen onToggle={onToggle} isMobile />);
+    const drawer = container.querySelector(".fixed.inset-y-0.left-0");
+    expect(drawer!.className).toMatch(/translate-x-0/);
+    const backdrop = container.querySelector(".fixed.inset-0.z-40");
+    expect(backdrop).not.toBeNull();
+    fireEvent.click(backdrop!);
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("dismisses the drawer after selecting a project", () => {
+    const onToggle = vi.fn();
+    render(<ProjectSidebar isOpen onToggle={onToggle} isMobile />);
+    fireEvent.click(screen.getByText("one"));
+    expect(actionsFake.selectProject).toHaveBeenCalledTimes(1);
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the inline collapsed rail on desktop (no mobile prop)", () => {
+    const { container } = render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} />);
+    expect(container.querySelector(".fixed.inset-y-0.left-0")).toBeNull();
+    expect(container.querySelector(".w-10")).not.toBeNull();
+  });
+});

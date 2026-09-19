@@ -393,7 +393,7 @@ function SortableProjectRow({
     if (!remoteReady) return;
     prefetchProjectSessions(project);
     const tabId = sidebarState.activeTabByProject[project.path];
-    if (tabId) prefetchSession(tabId);
+    if (tabId) prefetchSession(tabId, project.host);
   }, [prefetchProjectSessions, sidebarState.activeTabByProject, project, remoteReady]);
 
   const contextItems: ContextMenuItem[] = useMemo(() => {
@@ -922,7 +922,7 @@ function CollapsedProjectButton({
     if (!remoteReady) return;
     prefetchProjectSessions(project);
     const tabId = railState.activeTabByProject[project.path];
-    if (tabId) prefetchSession(tabId);
+    if (tabId) prefetchSession(tabId, project.host);
   }, [prefetchProjectSessions, railState.activeTabByProject, project, remoteReady]);
   const showCount = indicators.sessionCount > 0;
   // Prioritize overlays: pending > terminal alert > streaming > stalled.
@@ -1050,9 +1050,15 @@ interface Props {
   onToggle: () => void;
   /** Current width in pixels. When set, overrides the default w-60. */
   width?: number;
+  /**
+   * When true, render as an off-canvas left drawer with a backdrop instead of
+   * an inline flex column. Mirrors CoworkSidebar's mobile branch: the drawer is
+   * always mounted (so it can slide) and the collapsed rail is skipped.
+   */
+  isMobile?: boolean;
 }
 
-export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
+export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Props) {
   const {
     state,
     selectProject,
@@ -1167,6 +1173,28 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
     [createGroup, setProjectGroup, state.activeProject],
   );
 
+  // Mobile: off-canvas left drawer + backdrop. The body is shared with the
+  // desktop expanded branch via the hoisted renderExpandedInner() below; the
+  // collapsed rail is intentionally skipped on mobile (a 40px rail would still
+  // consume a column of an already narrow viewport, and the drawer's closed
+  // state — translate-x-full — already means "hidden").
+  if (isMobile) {
+    return (
+      <>
+        {isOpen && (
+          <div className="fixed inset-0 z-40 bg-black/50" onClick={onToggle} aria-hidden="true" />
+        )}
+        <div
+          className={`fixed inset-y-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col border-r border-border bg-background transition-transform duration-200 ${
+            isOpen ? "translate-x-0" : "-translate-x-full"
+          }`}
+        >
+          {renderExpandedInner()}
+        </div>
+      </>
+    );
+  }
+
   // Collapsed state for sidebar
   if (!isOpen) {
     return (
@@ -1204,12 +1232,12 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
     );
   }
 
-  // Expanded state
-  return (
-    <div
-      className="flex flex-col border-r border-border bg-background flex-shrink-0"
-      style={width ? { width: `${width}px` } : undefined}
-    >
+  // Shared body of the expanded sidebar (header + project list + add-project
+  // footer + dialogs). A hoisted function declaration (not a const) so the
+  // mobile drawer branch above can call it without duplicating ~140 lines.
+  function renderExpandedInner() {
+    return (
+      <>
 
       {/* Header */}
       <div className="flex items-center justify-between px-4 h-12 border-b border-border">
@@ -1256,7 +1284,12 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
                       key={projectDragKey(project.path, project.host)}
                       project={project}
                       isActive={state.activeProject?.path === project.path && (state.activeProject?.host ?? "") === (project.host ?? "")}
-                      onSelect={() => selectProject(project)}
+                      onSelect={() => {
+                        selectProject(project);
+                        // On mobile the list is a drawer: picking a project
+                        // should dismiss it so the workspace is visible.
+                        if (isMobile) onToggle();
+                      }}
                       onEdit={project.host ? () => setEditingRemote(project) : undefined}
                       onRemove={() => removeProject(project.path, project.host)}
                       onRename={(name) => renameProject(project.path, name, project.host)}
@@ -1351,6 +1384,18 @@ export default function ProjectSidebar({ isOpen, onToggle, width }: Props) {
       <EditRemoteDialog project={editingRemote} onClose={() => setEditingRemote(null)} onSave={updateRemoteProject} />
       <CreateGroupDialog open={creatingGroup} onClose={() => setCreatingGroup(false)} onCreate={handleCreateGroup} />
       <DirectoryBrowser open={browserOpen} onOpenChange={setBrowserOpen} onSelect={(path) => { setNewPath(path); setBrowserOpen(false); }} />
+      </>
+    );
+  }
+
+  // Expanded state (desktop inline column; mobile is handled by the drawer
+  // branch above).
+  return (
+    <div
+      className="flex flex-col border-r border-border bg-background flex-shrink-0"
+      style={width ? { width: `${width}px` } : undefined}
+    >
+      {renderExpandedInner()}
     </div>
   );
 }

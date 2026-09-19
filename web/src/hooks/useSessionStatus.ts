@@ -18,7 +18,7 @@ import { eventBus } from "../lib/eventBus";
  * triggers exactly one status fetch regardless of how many panels read the
  * slice.
  */
-export function useSessionStatus(sessionId: string | null): void {
+export function useSessionStatus(sessionId: string | null, host?: string): void {
   const dispatch = useChatDispatch();
 
   useEffect(() => {
@@ -33,7 +33,7 @@ export function useSessionStatus(sessionId: string | null): void {
         dispatch({ type: "SET_STATUS_LOADING", sessionId, loading: true });
       }
       api
-        .getSessionStatus(sessionId)
+        .getSessionStatus(sessionId, host)
         .then((status) => {
           if (cancelled) return;
           dispatch({ type: "SET_TUI_STATUS", sessionId, status });
@@ -69,5 +69,5 @@ export function useSessionStatus(sessionId: string | null): void {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [sessionId, dispatch]);
+  }, [sessionId, host, dispatch]);
 }

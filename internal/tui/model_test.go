@@ -1957,6 +1957,26 @@ func TestBuildTUIStatusSnapshotIncludesOcrBackendAndBackendModel(t *testing.T) {
 	}
 }
 
+func TestBuildTUIStatusSnapshotIncludesSessionSpend(t *testing.T) {
+	// The TUI's own sidebar has always shown this; the snapshot must carry it
+	// too or the web/desktop gauge falls back to the process-wide daily total
+	// even for the session it is displaying.
+	m := model{}
+	spend := 0.4321
+	m.sessionTelemetry.spend = &spend
+
+	snap := m.buildTUIStatusSnapshot()
+	if snap.SpendingUSD != spend {
+		t.Fatalf("SpendingUSD = %v, want %v", snap.SpendingUSD, spend)
+	}
+
+	// No telemetry yet → omitted (0), so the web keeps its daily-total fallback.
+	idle := model{}
+	if idleSnap := idle.buildTUIStatusSnapshot(); idleSnap.SpendingUSD != 0 {
+		t.Fatalf("SpendingUSD = %v for a session with no usage, want 0", idleSnap.SpendingUSD)
+	}
+}
+
 func TestBuildTUIStatusSnapshotIncludesActivityFields(t *testing.T) {
 	// When the agent is idle the activity fields must be absent.
 	m := model{}

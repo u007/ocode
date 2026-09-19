@@ -15636,6 +15636,13 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 	snap.OutputTokens = m.sessionTelemetry.outputTokens
 	snap.CachedTokens = m.sessionTelemetry.cachedTokens
 	snap.TotalTokens = m.sessionTelemetry.totalTokens
+	// Per-session spend. sidebarTelemetry has tracked this all along (and
+	// persists it to the session's "spend" metadata), but the snapshot never
+	// carried it, so the web/desktop sidebar had to fall back to the
+	// process-wide daily total even for the session it was showing.
+	if m.sessionTelemetry.spend != nil {
+		snap.SpendingUSD = *m.sessionTelemetry.spend
+	}
 	// Modified files + LSP servers come from the embedded helpers.
 	snap.ModifiedFiles = m.collectModifiedFiles()
 	snap.LSPServers = m.collectLSPStatuses()

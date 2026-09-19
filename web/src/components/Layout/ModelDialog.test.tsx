@@ -311,7 +311,7 @@ describe("ModelDialog remote session host", () => {
     );
 
     await waitFor(() =>
-      expect(hoisted.api.listModels).toHaveBeenCalledWith({ refresh: true }, "devbox"),
+      expect(hoisted.api.listModels).toHaveBeenCalledWith({ configured: true }, "devbox"),
     );
 
     fireEvent.click(await screen.findByText("gpt-c"));
@@ -329,7 +329,7 @@ describe("ModelDialog remote session host", () => {
       </ProjectProvider>,
     );
 
-    await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalledWith({ refresh: true }, "devbox"));
+    await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalledWith({ configured: true }, "devbox"));
 
     // The displayed star state comes from the host's list, so the write must
     // land on the host's model.json too — a local write would corrupt it.
@@ -381,5 +381,126 @@ describe("ModelDialog autocontinue purpose", () => {
     await waitFor(() =>
       expect(hoisted.api.setAutoContinue).toHaveBeenCalledWith({ clear: true }),
     );
+  });
+});
+
+// ── Model-list loading (open must be instant; live fetch is explicit) ──────
+describe("ModelDialog model-list loading", () => {
+  it("opens from the cached list and never blocks on a live refresh", async () => {
+    render(<ModelDialog open onClose={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(hoisted.api.listModels).toHaveBeenCalledWith({ configured: true }),
+    );
+    // A refresh on open is a multi-second network round trip — must not happen.
+    expect(hoisted.api.listModels).not.toHaveBeenCalledWith(expect.objectContaining({ refresh: true }));
+    await waitFor(() => expect(screen.getByText("Recently Used")).toBeInTheDocument());
+  });
+
+  it("Refresh fetches live provider lists and updates the rows", async () => {
+    render(<ModelDialog open onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("Recently Used")).toBeInTheDocument());
+
+    hoisted.api.listModels.mockResolvedValueOnce([
+      { name: "openai/gpt-live", model: "gpt-live", provider: "openai", active: false },
+    ]);
+    fireEvent.click(screen.getByLabelText("Refresh model list"));
+
+    await waitFor(() =>
+      expect(hoisted.api.listModels).toHaveBeenCalledWith({ refresh: true, configured: true }),
+    );
+    await waitFor(() => expect(screen.getByText("gpt-live")).toBeInTheDocument());
+  });
+});
+
+describe("ModelDialog provider render cap", () => {
+  it("caps the unfiltered provider list and points at search", async () => {
+    // 6 providers × 100 = 600 > MAX_VISIBLE_PROVIDER_MODELS (500), so the last
+    // provider is dropped entirely and the hint reports the hidden count.
+    const many: ModelInfo[] = [];
+    for (let p = 0; p < 6; p++) {
+      for (let m = 0; m < 100; m++) {
+        many.push({
+          name: `p${p}/p${p}-m${m}`,
+          model: `p${p}-m${m}`,
+          provider: `p${p}`,
+          active: false,
+        });
+      }
+    }
+    hoisted.api.listModels.mockResolvedValueOnce(many);
+    render(<ModelDialog open onClose={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(screen.getByText(/100 more models not shown/)).toBeInTheDocument(),
+    );
+    // The last provider's rows are beyond the budget and are not mounted.
+    expect(screen.queryByText("p5-m0")).toBeNull();
+    // The first provider's rows are present.
+    expect(screen.getAllByText("p0-m0").length).toBeGreaterThan(0);
+  });
+
+  it("keeps enabled local judge models selectable even when the registry fills the cap", async () => {
+    // 6 providers × 100 = 600 > 500: without the Local Models exemption the
+    // client-appended local group would be beyond the budget and unmounted.
+    const many: ModelInfo[] = [];
+    for (let p = 0; p < 6; p++) {
+      for (let m = 0; m < 100; m++) {
+        many.push({
+          name: `p${p}/p${p}-m${m}`,
+          model: `p${p}-m${m}`,
+          provider: `p${p}`,
+          active: false,
+        });
+      }
+    }
+    hoisted.api.listModels.mockResolvedValueOnce(many);
+    hoisted.api.getLocalModelsConfig.mockResolvedValueOnce({ "bonsai-8b": { enabled: true } });
+    render(<ModelDialog open onClose={vi.fn()} purpose="permission" />);
+
+    await waitFor(() => expect(screen.getByText("bonsai-8b")).toBeInTheDocument());
+    // The cap still trimmed the registry.
+    expect(screen.queryByText("p5-m0")).toBeNull();
+  });
+});
+
+describe("ModelDialog all-providers toggle", () => {
+  const unconfigured: ModelInfo = {
+    name: "nano-gpt/only-unconfigured",
+    model: "only-unconfigured",
+    provider: "nano-gpt",
+    active: false,
+  };
+
+  it("defaults to configured-only, loads the full registry when toggled on, and resets off on reopen", async () => {
+    const { rerender } = render(<ModelDialog open onClose={vi.fn()} />);
+    // Default: opened with configured=true and the unconfigured row is absent.
+    await waitFor(() =>
+      expect(hoisted.api.listModels).toHaveBeenCalledWith({ configured: true }),
+    );
+    expect(screen.getByLabelText("Show all providers")).not.toBeChecked();
+    expect(screen.queryByText("only-unconfigured")).toBeNull();
+
+    // Toggle on: no configured param, full list rendered.
+    hoisted.api.listModels.mockResolvedValueOnce([
+      ...hoisted.models.map((m) => ({ ...m })),
+      unconfigured,
+    ]);
+    fireEvent.click(screen.getByLabelText("Show all providers"));
+    await waitFor(() =>
+      expect(hoisted.api.listModels).toHaveBeenCalledWith({}),
+    );
+    await waitFor(() => expect(screen.getByText("only-unconfigured")).toBeInTheDocument());
+
+    // Close and reopen: the toggle resets to off (default) and the list is
+    // requested configured-only again.
+    hoisted.api.listModels.mockClear();
+    rerender(<ModelDialog open={false} onClose={vi.fn()} />);
+    rerender(<ModelDialog open onClose={vi.fn()} />);
+    await waitFor(() =>
+      expect(hoisted.api.listModels).toHaveBeenCalledWith({ configured: true }),
+    );
+    expect(screen.getByLabelText("Show all providers")).not.toBeChecked();
+    expect(screen.queryByText("only-unconfigured")).toBeNull();
   });
 });

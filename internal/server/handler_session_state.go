@@ -10,6 +10,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/usage"
 )
 
 // HandleSessionState is the reconcile endpoint (Part 03). The frontend derives
@@ -159,11 +160,15 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 		}
 	}
 	h.applySessionContext(&snap, id)
+	h.applySessionSpending(&snap, id)
 	h.applyTurnTiming(&snap, id)
 	// Permission mode is per session: without this the snapshot would report
 	// the process-wide config default and a chat's yolo/sandbox toggle would
 	// look global in the sidebar again.
 	h.applySessionPermissionFields(&snap, id)
+	// Advisor gate is per session too: stamp the chat's own value so one tab's
+	// toggle does not render on every other tab's sidebar.
+	h.applySessionAdvisorFields(&snap, id)
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 
 	writeJSON(w, http.StatusOK, snap)
@@ -172,22 +177,32 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 // applySessionContext fills snap's context-window fields (context_current_
 // tokens, context_max_tokens, context_model) for the session id.
 //
-// context_current_tokens is ALWAYS the backend's provider-reported value, never
-// a character-count estimate over the persisted transcript:
+// context_current_tokens prefers the backend's provider-reported value:
 //   - the bridged TUI session uses the TUI's live ContextCurrentTokens, which
 //     it captured from the provider's last response;
 //   - a headless (web/desktop) session uses its live agent's LastInputTokens,
-//     captured from resp.Usage on the most recent LLM call.
+//     captured from resp.Usage on the most recent LLM call;
+//   - when the agent has compacted, LastInputTokens was cleared (it described
+//     the pre-compaction shape) and is replaced by the agent's
+//     CompactedContextTokens estimate of the spliced transcript, so a /compact
+//     makes the sidebar gauge reflect the reduced context instead of going
+//     "unknown" until the next turn.
 //
-// When neither is available (no live agent yet — e.g. a freshly restored
-// session before its first turn) the field stays 0 and is omitted from the wire
-// snapshot, so the gauge renders as unknown instead of a fabricated number.
+// When neither is available — no live agent in this process, e.g. a restored
+// session whose agent was idle-evicted (30 min) or never built since server
+// start — it falls back to a chars/4 estimate over the persisted transcript so
+// switching tabs shows a value instead of "unknown". Provider/TUI readings
+// always win over the estimate.
 //
 // Every session-tagged status snapshot must go through this before it is
 // broadcast or returned: buildStatusSnapshot() alone omits all three fields,
 // and because they are omitempty on the wire, a snapshot without them makes
 // the web sidebar's Context gauge drop to zero ("not reflected") until the
 // next per-session fetch.
+//
+// This must stay lock-free with respect to the agentSession mutex: it is
+// called from publishTurnStatusSnapshot, which runTurn/permission-continuation
+// invoke while holding as.mu. Both agent reads are atomic.
 func (h *Handler) applySessionContext(snap *TUIStatus, id string) {
 	model := ""
 	maxTokens := 0
@@ -203,7 +218,15 @@ func (h *Handler) applySessionContext(snap *TUIStatus, id string) {
 	if current == 0 {
 		if as := h.lookupAgentSession(id); as != nil && as.agent != nil {
 			current = as.agent.LastInputTokens()
+			if current == 0 {
+				current = as.agent.CompactedContextTokens()
+			}
 		}
+	}
+	if current == 0 {
+		// No provider reading available in this process — fall back to the
+		// persisted transcript so a session switch does not render "unknown".
+		current = h.estimateContextFromTranscript(id)
 	}
 	if model == "" && h.cfg != nil {
 		model = h.effectiveSessionModel(id)
@@ -214,6 +237,74 @@ func (h *Handler) applySessionContext(snap *TUIStatus, id string) {
 	snap.ContextCurrentTokens = int(current)
 	snap.ContextMaxTokens = maxTokens
 	snap.ContextModel = model
+}
+
+// applySessionSpending sets snap's per-session spend (spending_usd) with a
+// strict precedence so the same spend is never counted twice:
+//
+//  1. the live agent's accumulated total (the authoritative in-process value);
+//  2. the session's persisted "spend" metadata (survives rebuild/restart; the
+//     same key the TUI's sidebarTelemetry writes);
+//  3. only when BOTH are absent, the usage ledger's rows tagged with this
+//     session id (usage.SessionSpend) — recovery for a session whose metadata
+//     total was lost.
+//
+// Zero means unknown and is omitted (omitempty), so the web falls back to the
+// process-wide daily total.
+func (h *Handler) applySessionSpending(snap *TUIStatus, id string) {
+	if as := h.lookupAgentSession(id); as != nil {
+		if v := as.spendUSD(); v > 0 {
+			snap.SpendingUSD = v
+			return
+		}
+	}
+	projectRoot := h.sessionProjectRoot(id)
+	if projectRoot == "" {
+		return
+	}
+	if s, err := session.LoadForDir(projectRoot, id); err == nil {
+		if v := sessionSpendFromMetadata(s.Metadata); v > 0 {
+			snap.SpendingUSD = v
+			return
+		}
+	}
+	// Last resort: sum this session's attributed ledger rows. Only reached when
+	// there is no live agent and no persisted metadata total, so it cannot
+	// double-count either of the values above.
+	if v, err := usage.SessionSpend(id); err == nil && v > 0 {
+		snap.SpendingUSD = v
+	}
+}
+
+// estimateContextFromTranscript approximates the current context-window
+// occupancy of a session from its persisted transcript (chars/4). It is the
+// fallback used by applySessionContext/HandleSessionContext only when no
+// provider-reported value exists. Returns 0 when the session cannot be
+// resolved/loaded.
+func (h *Handler) estimateContextFromTranscript(id string) int64 {
+	entry, err := h.sessions.Resolve(id)
+	if err != nil {
+		return 0
+	}
+	s, err := session.LoadForDir(entry.ProjectRoot, id)
+	if err != nil {
+		return 0
+	}
+	return estimateContextFromMessages(s.Messages)
+}
+
+// estimateContextFromMessages sums the transcript's character weight (content,
+// reasoning, and tool-call arguments) and divides by 4. Kept in one place so
+// every fallback path uses the same approximation.
+func estimateContextFromMessages(msgs []agent.Message) int64 {
+	var totalChars int
+	for _, msg := range msgs {
+		totalChars += len(msg.Content) + len(msg.ReasoningContent)
+		for _, tc := range msg.ToolCalls {
+			totalChars += len(tc.Function.Arguments)
+		}
+	}
+	return int64(totalChars / 4)
 }
 
 // applyTurnTiming fills snap's turn timing fields from the SessionManager's
@@ -244,11 +335,16 @@ func (h *Handler) applyTurnTiming(snap *TUIStatus, id string) {
 
 // publishTurnStatusSnapshot broadcasts a fresh session-tagged "status" event
 // whose context fields were resolved from the backend's provider-reported
-// usage (the just-finished turn's agent LastInputTokens). Called right after a
-// headless turn completes so the web/desktop sidebar's Context gauge moves with
-// every turn instead of only on tab activation or reconnect. No-op when an RC
-// bridge is attached — the TUI owns the status feed for its sessions and pushes
-// its own snapshots.
+// usage (the just-finished turn's agent LastInputTokens, or the agent's
+// post-compaction estimate after a /compact). Called right after a headless
+// turn completes and after a manual/auto compaction so the web/desktop
+// sidebar's Context gauge moves with every change instead of only on tab
+// activation or reconnect. No-op when an RC bridge is attached — the TUI owns
+// the status feed for its sessions and pushes its own snapshots.
+//
+// Callers must NOT hold as.mu (applySessionContext reads only agent atomics to
+// stay safe for the callers that already do, but keeping session/broadcast work
+// out of the locked region avoids inverting the as.mu → h.mu lock order).
 func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 	if h.RCBridge() != nil {
 		return
@@ -263,6 +359,7 @@ func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 		}
 	}
 	h.applySessionContext(&snap, sessionID)
+	h.applySessionSpending(&snap, sessionID)
 	if projectRoot != "" {
 		if s, err := session.LoadForDir(projectRoot, sessionID); err == nil && !s.CreatedAt.IsZero() {
 			snap.SessionCreatedAt = s.CreatedAt.UTC().Format(time.RFC3339Nano)
@@ -271,10 +368,17 @@ func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 	h.applyTurnTiming(&snap, sessionID)
 	// Per-session permission mode (see applySessionPermissionFields).
 	h.applySessionPermissionFields(&snap, sessionID)
+	// Per-session advisor gate (see applySessionAdvisorFields).
+	h.applySessionAdvisorFields(&snap, sessionID)
 	// Reflect the session's effective (override-or-default) model so the
 	// sidebar's Context gauge and Model row stay in sync per session.
 	snap.MainModel = h.effectiveSessionModel(sessionID)
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	// Persist the per-session spend total so it survives an agent rebuild /
+	// idle eviction / restart; the snapshot above carries it for the live gauge.
+	if as := h.lookupAgentSession(sessionID); as != nil {
+		h.persistSessionSpend(sessionID, as.spendUSD())
+	}
 	h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "status", Data: snap})
 }
 
@@ -349,8 +453,10 @@ func (h *Handler) pushSessionStatusSnapshot(id string) {
 		snap.CWD = entry.ProjectRoot
 	}
 	h.applySessionContext(&snap, id)
+	h.applySessionSpending(&snap, id)
 	h.applyTurnTiming(&snap, id)
 	h.applySessionPermissionFields(&snap, id)
+	h.applySessionAdvisorFields(&snap, id)
 	if snap.SessionCreatedAt == "" {
 		if entry, err := h.sessions.Resolve(id); err == nil {
 			if s, err := session.LoadForDir(entry.ProjectRoot, id); err == nil && !s.CreatedAt.IsZero() {

@@ -215,9 +215,17 @@ func (u *TokenUsage) Spend(model string) *float64 {
 	return u.SpendWithPricing(modelPricing)
 }
 
-func (u *TokenUsage) DebugLog(model string) {
+// DebugLog appends a TOKENS debug-log entry through emit, which callers pass
+// as the owning client's emitDebug so the entry is attributed to that client's
+// session. A nil emit falls back to the process-global sink. Passing the
+// emitter (rather than calling the package-level emitDebug here) is what keeps
+// per-session token usage out of every other session's Logs tab.
+func (u *TokenUsage) DebugLog(model string, emit func(kind, msg string)) {
 	if u == nil {
 		return
+	}
+	if emit == nil {
+		emit = emitDebug
 	}
 	prompt := int64(0)
 	if u.PromptTokens != nil {
@@ -235,7 +243,7 @@ func (u *TokenUsage) DebugLog(model string) {
 	if u.CacheWriteTokens != nil {
 		cacheWrite = *u.CacheWriteTokens
 	}
-	emitDebug("TOKENS", fmt.Sprintf("model=%s input=%d cache_read=%d cache_write=%d output=%d",
+	emit("TOKENS", fmt.Sprintf("model=%s input=%d cache_read=%d cache_write=%d output=%d",
 		model, prompt, cacheRead, cacheWrite, completion))
 }
 

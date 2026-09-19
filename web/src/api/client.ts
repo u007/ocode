@@ -537,13 +537,15 @@ async function remoteLifecycleRequest<T>(path: string, method: "GET" | "POST"): 
 }
 
 export const api = {
-  listSessions: (opts?: { limit?: number; offset?: number }) => {
+  listSessions: (opts?: { limit?: number; offset?: number }, host?: string) => {
     const params = new URLSearchParams();
     if (opts?.limit) params.set("limit", String(opts.limit));
     if (opts?.offset) params.set("offset", String(opts.offset));
     const qs = params.toString();
     return fetchJSON<SessionListResponse>(
       `/api/sessions${qs ? `?${qs}` : ""}`,
+      undefined,
+      host,
     );
   },
   getSession: (id: string, opts?: { limit?: number; offset?: number }, host?: string) => {
@@ -561,14 +563,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ keepUntil }),
     }, host),
-  listModels: (opts?: { provider?: string; refresh?: boolean }, host?: string) => {
+  listModels: (opts?: { provider?: string; refresh?: boolean; configured?: boolean }, host?: string) => {
     const params = new URLSearchParams();
     if (opts?.provider) params.set("provider", opts.provider);
     if (opts?.refresh) params.set("refresh", "true");
+    // configured=true trims the response to providers with credentials/config on
+    // the server that answers (the host's own state for a remote session).
+    if (opts?.configured) params.set("configured", "true");
     const qs = params.toString();
     return fetchJSON<ModelInfo[]>(`/api/models${qs ? `?${qs}` : ""}`, undefined, host);
   },
-  listAgents: () => fetchJSON<AgentInfo[]>("/api/config/agents"),
+  listAgents: (host?: string) => fetchJSON<AgentInfo[]>("/api/config/agents", undefined, host),
   listAgentRuns: (session?: string, host?: string) =>
     fetchJSON<AgentRun[]>(
       `/api/agents/runs${session ? `?session=${encodeURIComponent(session)}` : ""}`,
@@ -1027,7 +1032,7 @@ export const api = {
       body: JSON.stringify({ deviceCode }),
     }),
   syncLogout: () => fetchEmpty("/api/sync/logout", { method: "POST" }),
-  getMCP: () => fetchJSON<MCPStatus[]>("/api/mcp"),
+  getMCP: (host?: string) => fetchJSON<MCPStatus[]>("/api/mcp", undefined, host),
   getAdvisor: () =>
     fetchJSON<{ model: string }>("/api/config/advisor"),
   setAdvisor: (model: string) =>
@@ -1035,14 +1040,30 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
-  // Runtime advisor on/off toggle — session-lifetime only, never persisted to config.
-  getAdvisorEnabled: () =>
-    fetchJSON<{ enabled: boolean }>("/api/config/advisor-enabled"),
-  setAdvisorEnabled: (enabled: boolean) =>
-    fetchJSON<{ enabled: boolean }>("/api/config/advisor-enabled", {
-      method: "PUT",
-      body: JSON.stringify({ enabled }),
-    }),
+  // Advisor on/off gate. With a sessionId it reads/writes that chat session's
+  // own override (persisted to the session transcript metadata by the server,
+  // never to global config); without one it is the process-wide default used
+  // by the Settings form and the pre-session sidebar fallback. `host` routes a
+  // session-scoped call to a remote project's server (/api/remote/<host>/…) —
+  // without it the PUT hits the local server, which cannot resolve that
+  // session and 404s, leaving a remote tab's toggle silently inert.
+  getAdvisorEnabled: (sessionId?: string, host?: string) =>
+    fetchJSON<{ enabled: boolean }>(
+      sessionId
+        ? `/api/config/advisor-enabled?session_id=${encodeURIComponent(sessionId)}`
+        : "/api/config/advisor-enabled",
+      undefined,
+      host,
+    ),
+  setAdvisorEnabled: (enabled: boolean, sessionId?: string, host?: string) =>
+    fetchJSON<{ enabled: boolean }>(
+      "/api/config/advisor-enabled",
+      {
+        method: "PUT",
+        body: JSON.stringify(sessionId ? { enabled, session_id: sessionId } : { enabled }),
+      },
+      host,
+    ),
   // Interactive pty terminal configuration for the server's single workdir.
   // The terminal itself is always enabled; these are availability/scrollback.
   // Pass a remote project's host+path to describe THAT host's shells instead
@@ -1102,12 +1123,12 @@ export const api = {
   // change). The web also subscribes to the "status" SSE event so the bar
   // updates live without polling.
   getTUIStatus: () => fetchJSON<TUIStatus>("/api/tui-status"),
-  getSpending: () =>
-    fetchJSON<{ spending_usd: number; records: number }>("/api/spending"),
-  getLSPStatuses: () =>
-    fetchJSON<{ lsp_servers: LSPStatus[] }>("/api/lsp/statuses"),
-  getModifiedFiles: () =>
-    fetchJSON<{ modified_files: FileStatus[] }>("/api/files/modified"),
+  getSpending: (host?: string) =>
+    fetchJSON<{ spending_usd: number; records: number }>("/api/spending", undefined, host),
+  getLSPStatuses: (host?: string) =>
+    fetchJSON<{ lsp_servers: LSPStatus[] }>("/api/lsp/statuses", undefined, host),
+  getModifiedFiles: (host?: string) =>
+    fetchJSON<{ modified_files: FileStatus[] }>("/api/files/modified", undefined, host),
   getSessionContext: (id: string, host?: string) =>
     fetchJSON<{
       session_id: string;
@@ -1476,15 +1497,17 @@ export const api = {
     }),
 
   // ── File edit history ──
-  undoFileChange: (session?: string) =>
+  undoFileChange: (session?: string, host?: string) =>
     fetchJSON<{ path: string; action: string }>(
       `/api/files/undo${session ? `?session=${encodeURIComponent(session)}` : ""}`,
       { method: "POST" },
+      host,
     ),
-  redoFileChange: (session?: string) =>
+  redoFileChange: (session?: string, host?: string) =>
     fetchJSON<{ path: string; action: string }>(
       `/api/files/redo${session ? `?session=${encodeURIComponent(session)}` : ""}`,
       { method: "POST" },
+      host,
     ),
 
   // ── File content save (PUT) ──
@@ -1593,43 +1616,55 @@ export const api = {
     ),
 
   // ── Usage ──
-  getUsage: (range?: string) =>
-    fetchJSON<UsageSummary>(
-      `/api/usage${range ? `?range=${encodeURIComponent(range)}` : ""}`,
-    ),
+  // `sessionId` scopes the summary to that chat's attributed ledger rows
+  // (per-session spend history); `host` routes a remote session's read to its
+  // own server.
+  getUsage: (range?: string, sessionId?: string, host?: string) => {
+    const params = new URLSearchParams();
+    if (range) params.set("range", range);
+    if (sessionId) params.set("session_id", sessionId);
+    const q = params.toString();
+    return fetchJSON<UsageSummary>(`/api/usage${q ? `?${q}` : ""}`, undefined, host);
+  },
 
   // ── Init ──
-  initProject: () =>
+  initProject: (project?: string, host?: string) =>
     fetchJSON<{ path: string; status: string }>("/api/init", {
       method: "POST",
-    }),
+      body: JSON.stringify({ project: project || undefined }),
+    }, host),
 
   // ── Permissions ──
   // Permission modes are PER CHAT SESSION. Every read/write takes an optional
   // sessionId so a yolo/sandbox toggle on one tab never leaks into another
   // chat or project. Omitting it (settings form) reports/inspects the
-  // persisted config default.
-  getPermissions: (sessionId?: string) =>
+  // persisted config default. `host` routes a remote session's call to its
+  // own server so the toggle applies to the session that actually lives there.
+  getPermissions: (sessionId?: string, host?: string) =>
     fetchJSON<PermissionsResponse>(
       `/api/permissions${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`,
+      undefined,
+      host,
     ),
-  getYolo: (sessionId?: string) =>
+  getYolo: (sessionId?: string, host?: string) =>
     fetchJSON<{ yolo: boolean }>(
       `/api/permissions/yolo${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`,
+      undefined,
+      host,
     ),
-  setYolo: (enabled: boolean, sessionId?: string) =>
+  setYolo: (enabled: boolean, sessionId?: string, host?: string) =>
     fetchJSON<{ yolo: boolean }>("/api/permissions/yolo", {
       method: "PUT",
       body: JSON.stringify({ enabled, session_id: sessionId }),
-    }),
+    }, host),
   /** Set one chat session's live permission mode: normal|yolo|locked|sandbox.
    *  The override is persisted in that session's metadata so it survives
    *  resume and restart; it never affects any other session. */
-  setPermissionMode: (mode: string, sessionId?: string) =>
+  setPermissionMode: (mode: string, sessionId?: string, host?: string) =>
     fetchJSON<{ mode: string; session_id?: string }>("/api/permissions/mode", {
       method: "PUT",
       body: JSON.stringify({ mode, session_id: sessionId }),
-    }),
+    }, host),
   /** The persisted default permission mode new TUI/web/RC sessions start in. */
   getPermissionModeConfig: () =>
     fetchJSON<PermissionModeConfigResponse>("/api/config/ocode/permissions-mode"),
@@ -1641,11 +1676,11 @@ export const api = {
     }),
 
   // ── Agent selection ──
-  setAgent: (name: string, sessionId?: string) =>
+  setAgent: (name: string, sessionId?: string, host?: string) =>
     fetchJSON<{ name: string; description: string }>("/api/config/agent", {
       method: "PUT",
       body: JSON.stringify({ name, session_id: sessionId }),
-    }),
+    }, host),
 
   // ── MCP enable/disable ──
   setMCPEnabled: (name: string, enabled: boolean) =>
@@ -1683,10 +1718,21 @@ export const api = {
   listSkills: () => fetchJSON<SkillEntry[]>("/api/skills"),
 
   // ── Command context (repo-analysis prompts for /standup, /changes, /review) ──
-  getCommandContext: (name: string, args?: string) =>
-    fetchJSON<{ prompt: string }>(
-      `/api/command-context/${encodeURIComponent(name)}${args ? `?args=${encodeURIComponent(args)}` : ""}`,
-    ),
+  // `project` selects which registered repo root the prompt is assembled from
+  // (the server resolves it against its registry); `host` routes the call to a
+  // remote project's server. Without both, a remote/multi-project tab got the
+  // server's default workdir instead of its own repo.
+  getCommandContext: (name: string, args?: string, project?: string, host?: string) => {
+    const params = new URLSearchParams();
+    if (args) params.set("args", args);
+    if (project) params.set("project", project);
+    const qs = params.toString();
+    return fetchJSON<{ prompt: string }>(
+      `/api/command-context/${encodeURIComponent(name)}${qs ? `?${qs}` : ""}`,
+      undefined,
+      host,
+    );
+  },
 
   // ── Slash-command parity (/paths, /mem, /ban, /autocontinue, /connect, /docs) ──
   getPathsInfo: (project?: string) => {
@@ -1720,33 +1766,33 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ provider, api_key }),
     }),
-  getDocsStatus: (project?: string) => {
+  getDocsStatus: (project?: string, host?: string) => {
     const query = project ? `?project=${encodeURIComponent(project)}` : "";
-    return fetchJSON<{ enabled: boolean; text: string }>(`/api/docs/status${query}`);
+    return fetchJSON<{ enabled: boolean; text: string }>(`/api/docs/status${query}`, undefined, host);
   },
-  docsInit: (project?: string) => {
+  docsInit: (project?: string, host?: string) => {
     const query = project ? `?project=${encodeURIComponent(project)}` : "";
     return fetchJSON<{ result: string; annotate_prompt?: string }>(`/api/docs/init${query}`, {
       method: "POST",
-    });
+    }, host);
   },
-  docsUpdate: (sessionId: string, focus: string, project?: string) => {
+  docsUpdate: (sessionId: string, focus: string, project?: string, host?: string) => {
     const params = new URLSearchParams();
     if (project) params.set("project", project);
     const query = params.toString();
     return fetchJSON<{ result: string }>(`/api/docs/update${query ? `?${query}` : ""}`, {
       method: "POST",
       body: JSON.stringify({ session_id: sessionId, focus }),
-    });
+    }, host);
   },
-  docsCleanup: (confirm: boolean, project?: string) => {
+  docsCleanup: (confirm: boolean, project?: string, host?: string) => {
     const params = new URLSearchParams();
     if (project) params.set("project", project);
     const query = params.toString();
     return fetchJSON<{ result: string }>(`/api/docs/cleanup${query ? `?${query}` : ""}`, {
       method: "POST",
       body: JSON.stringify({ confirm }),
-    });
+    }, host);
   },
 
   // ── GitHub (backing /github pr|issue) ──
@@ -1812,23 +1858,48 @@ export const api = {
       }),
     }, host),
   // ── Changes tab (session file changes) ──
-  listChanges: (session?: string) =>
+  // `host` routes a remote (SSH/WSL) project's session-scoped request through
+  // /api/remote/{host}; without it the local server answers (and returns an
+  // empty list / 404) for a remote session.
+  listChanges: (session?: string, host?: string) =>
     fetchJSON<FileChange[]>(
       `/api/changes${session ? `?session=${encodeURIComponent(session)}` : ""}`,
+      undefined,
+      host,
     ),
-  getChangeDiff: (session: string | undefined, path: string) =>
+  getChangeDiff: (session: string | undefined, path: string, host?: string) =>
     fetchJSON<ChangeDiff>(
       `/api/changes/diff?${session ? `session=${encodeURIComponent(session)}&` : ""}path=${encodeURIComponent(path)}`,
+      undefined,
+      host,
     ),
-  undoChangeFile: (session: string | undefined, path: string) =>
+  undoChangeFile: (session: string | undefined, path: string, host?: string) =>
     fetchJSON<Record<string, never>>(
       `/api/changes/undo-file${session ? `?session=${encodeURIComponent(session)}` : ""}`,
       { method: "POST", body: JSON.stringify({ path }) },
+      host,
     ),
-  undoChangeBlock: (session: string | undefined, path: string) =>
+  undoChangeBlock: (session: string | undefined, path: string, host?: string) =>
     fetchJSON<Record<string, never>>(
       `/api/changes/undo-block${session ? `?session=${encodeURIComponent(session)}` : ""}`,
       { method: "POST", body: JSON.stringify({ path }) },
+      host,
+    ),
+
+  // ── Session logs (Logs tab) ──
+  // Session-scoped; `host` routes a remote project's logs to that host's
+  // server instead of showing the local server's ring buffer.
+  getLogs: (sessionId: string, host?: string) =>
+    fetchJSON<{ kind: string; message: string; session_id?: string }[]>(
+      `/api/logs?session_id=${encodeURIComponent(sessionId)}`,
+      undefined,
+      host,
+    ),
+  clearLogs: (sessionId: string, host?: string) =>
+    fetchJSON<{ status: string }>(
+      `/api/logs?session_id=${encodeURIComponent(sessionId)}`,
+      { method: "DELETE" },
+      host,
     ),
 
   // ── Secret (age-encrypted file/dir) management ──
@@ -1840,6 +1911,22 @@ export const api = {
   secretScan: (path: string, mode: "encrypt" | "decrypt") =>
     fetchJSON<SecretScanResponse>(
       `/api/secret/scan?path=${encodeURIComponent(path)}&mode=${mode}`,
+    ),
+  // CLI-utility detection/install — the `/tools` command's data source. These
+  // hit the local server; a remote project's SPA routes them through
+  // /api/remote/<host>/… so the probe runs on the remote host's PATH.
+  getCliTools: (host?: string) => fetchJSON<CliToolsResponse>("/api/cli-tools", undefined, host),
+  startCliToolsInstall: (tool: string, host?: string) =>
+    fetchJSON<CliToolInstallStartResponse>(
+      "/api/cli-tools/install",
+      { method: "POST", body: JSON.stringify({ tool }) },
+      host,
+    ),
+  getCliToolsInstallStatus: (jobId: string, host?: string) =>
+    fetchJSON<CliToolInstallStatusResponse>(
+      `/api/cli-tools/install/${encodeURIComponent(jobId)}`,
+      undefined,
+      host,
     ),
   secretEncrypt: (path: string, passphrase: string, confirmPassphrase: string) =>
     fetchJSON<SecretTransformResponse>("/api/secret/encrypt", {
@@ -1942,6 +2029,46 @@ export interface SecretScanResponse {
   path: string;
   is_dir: boolean;
   file_count?: number;
+}
+
+/** GET /api/cli-tools — the `/tools` command's status payload. */
+export interface CliToolsResponse {
+  platform: string;
+  package_manager: string;
+  /** Present only when no supported package manager is on PATH. */
+  manager_hint?: string;
+  tools: CliToolStatus[];
+}
+
+export interface CliToolStatus {
+  name: string;
+  aliases?: string[];
+  description: string;
+  project?: string;
+  found: boolean;
+  /** Resolved binary name (an alias of `name`); absent when not found. */
+  command?: string;
+}
+
+/** POST /api/cli-tools/install — the started background install job. */
+export interface CliToolInstallStartResponse {
+  job_id: string;
+  tool: string;
+  status: "running";
+}
+
+/** GET /api/cli-tools/install/{id} — one poll of an install job. */
+export interface CliToolInstallStatusResponse {
+  job_id: string;
+  tool: string;
+  status: "running" | "done" | "error";
+  manager?: string;
+  /** Captured package-manager output (tail). */
+  output?: string;
+  error?: string;
+  no_manager?: boolean;
+  /** Remediation shown when `no_manager` is true. */
+  hint?: string;
 }
 
 export interface SecretTransformResponse {

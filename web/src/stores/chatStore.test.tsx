@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { MAX_SLICE_MESSAGES, QUESTION_DISMISSED_RESULT, chatReducer, getSessionSlice, getTurnState, initialState } from "./chatStore";
-import type { Message } from "../api/types";
+import { MAX_SLICE_MESSAGES, QUESTION_DISMISSED_RESULT, chatReducer, extractAskContext, getSessionSlice, getTurnState, initialState } from "./chatStore";
+import type { LivePart, Message } from "../api/types";
 import type { ChatState } from "./chatStore";
 
 function initial(): ChatState {
@@ -329,6 +329,116 @@ describe("chatStore Part 05 turn/status state", () => {
     expect(getSessionSlice(state, "a").tuiStatus?.session_title).toBe("T");
     expect(getSessionSlice(state, "b").tuiStatus).toBeNull();
     expect(state.tuiStatusReady).toBe(true);
+  });
+
+  it("SET_TUI_STATUS rejects a stale snapshot so it cannot clobber a fresher one", () => {
+    let state = initial();
+    // The fresh snapshot (e.g. the SSE push right after a successful PUT).
+    state = chatReducer(state, {
+      type: "SET_TUI_STATUS",
+      sessionId: "a",
+      status: { advisor_enabled: true, updated_at: "2026-09-19T12:00:10Z" },
+    });
+    // A GET issued BEFORE that push now resolves with the older snapshot. It
+    // must be dropped: applying it is the "toggle reverts, then works out of
+    // the blue on the next poll" bug.
+    state = chatReducer(state, {
+      type: "SET_TUI_STATUS",
+      sessionId: "a",
+      status: { advisor_enabled: false, updated_at: "2026-09-19T12:00:05Z" },
+    });
+    expect(getSessionSlice(state, "a").tuiStatus?.advisor_enabled).toBe(true);
+
+    // A genuinely newer snapshot still lands.
+    state = chatReducer(state, {
+      type: "SET_TUI_STATUS",
+      sessionId: "a",
+      status: { advisor_enabled: false, updated_at: "2026-09-19T12:00:15Z" },
+    });
+    expect(getSessionSlice(state, "a").tuiStatus?.advisor_enabled).toBe(false);
+  });
+
+  it("SET_TUI_STATUS accepts snapshots with equal or missing updated_at", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_TUI_STATUS",
+      sessionId: "a",
+      status: { advisor_enabled: true, updated_at: "2026-09-19T12:00:10Z" },
+    });
+    // Equal timestamp: a same-instant writer must still be able to fill in
+    // fields the other snapshot omitted.
+    state = chatReducer(state, {
+      type: "SET_TUI_STATUS",
+      sessionId: "a",
+      status: { advisor_enabled: true, session_title: "T", updated_at: "2026-09-19T12:00:10Z" },
+    });
+    expect(getSessionSlice(state, "a").tuiStatus?.session_title).toBe("T");
+    // No parseable timestamp on either side: never treated as stale.
+    state = chatReducer(state, {
+      type: "SET_TUI_STATUS",
+      sessionId: "a",
+      status: { advisor_enabled: false },
+    });
+    expect(getSessionSlice(state, "a").tuiStatus?.advisor_enabled).toBe(false);
+  });
+
+  it("SET_TUI_STATUS clears a confirmed optimistic advisor flip but keeps a disagreeing one", () => {
+    let state = initial();
+    // A confirmed snapshot (same value) retires the optimistic shadow.
+    state = chatReducer(state, {
+      type: "SET_SESSION_ADVISOR_ENABLED",
+      sessionId: "a",
+      enabled: true,
+    });
+    state = chatReducer(state, {
+      type: "SET_TUI_STATUS",
+      sessionId: "a",
+      status: { advisor_enabled: true },
+    });
+    expect(getSessionSlice(state, "a").advisorEnabled).toBeUndefined();
+    expect(getSessionSlice(state, "a").tuiStatus?.advisor_enabled).toBe(true);
+
+    // A poll that raced the in-flight PUT still reports the old value; the
+    // optimistic flip must survive it rather than flashing the checkbox back.
+    state = chatReducer(state, {
+      type: "SET_SESSION_ADVISOR_ENABLED",
+      sessionId: "a",
+      enabled: true,
+    });
+    state = chatReducer(state, {
+      type: "SET_TUI_STATUS",
+      sessionId: "a",
+      status: { advisor_enabled: false },
+    });
+    expect(getSessionSlice(state, "a").advisorEnabled).toBe(true);
+
+    // A snapshot without the field leaves the pending flip alone too.
+    state = chatReducer(state, {
+      type: "SET_TUI_STATUS",
+      sessionId: "a",
+      status: { session_title: "T" },
+    });
+    expect(getSessionSlice(state, "a").advisorEnabled).toBe(true);
+  });
+
+  it("SET_SESSION_ADVISOR_ENABLED is per-session, never touches the global gate", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_ADVISOR_ENABLED", enabled: true });
+    state = chatReducer(state, {
+      type: "SET_SESSION_ADVISOR_ENABLED",
+      sessionId: "a",
+      enabled: false,
+    });
+    expect(getSessionSlice(state, "a").advisorEnabled).toBe(false);
+    expect(getSessionSlice(state, "b").advisorEnabled).toBeUndefined();
+    expect(state.advisorEnabled).toBe(true);
+    // `undefined` clears the pending flip.
+    state = chatReducer(state, {
+      type: "SET_SESSION_ADVISOR_ENABLED",
+      sessionId: "a",
+      enabled: undefined,
+    });
+    expect(getSessionSlice(state, "a").advisorEnabled).toBeUndefined();
   });
 
   it("SET_SESSION_MODEL is per-session, never touches the global model", () => {
@@ -1019,5 +1129,110 @@ describe("chatStore in-memory message cap", () => {
       requestId: "q2",
     });
     expect(getSessionSlice(state, "a").pendingQuestion).toBeNull();
+  });
+});
+
+describe("extractAskContext", () => {
+  const assistantWithTool = (opts: {
+    content?: string;
+    reasoning?: string;
+    id?: string;
+  }): Message => ({
+    role: "assistant",
+    content: opts.content ?? "",
+    reasoning_content: opts.reasoning,
+    tool_calls: [
+      {
+        id: opts.id ?? "call-1",
+        type: "function",
+        function: { name: "bash", arguments: "{}" },
+      },
+    ],
+  });
+
+  it("falls back to the last assistant message in the transcript", () => {
+    const messages: Message[] = [
+      { role: "user", content: "deploy it" },
+      assistantWithTool({
+        content: "I'll clean the build dir first.",
+        reasoning: "Build output is stale.",
+      }),
+      { role: "tool", content: "PERMISSION_ASK:{}", tool_call_id: "call-1" },
+    ];
+    expect(extractAskContext(messages, [])).toEqual({
+      text: "I'll clean the build dir first.",
+      thinking: "Build output is stale.",
+    });
+  });
+
+  it("prefers the live buffer while the turn is paused", () => {
+    const messages: Message[] = [
+      { role: "user", content: "deploy it" },
+      assistantWithTool({
+        content: "stale transcript text",
+        reasoning: "stale reasoning",
+      }),
+      { role: "tool", content: "PERMISSION_ASK:{}", tool_call_id: "call-1" },
+    ];
+    const live: LivePart[] = [
+      { kind: "thinking", text: "Fresh reasoning." },
+      { kind: "text", text: "About to run the build." },
+      { kind: "tool", tool: "bash", callId: "call-1", command: "rm -rf build" },
+    ];
+    expect(extractAskContext(messages, live)).toEqual({
+      thinking: "Fresh reasoning.",
+      text: "About to run the build.",
+    });
+  });
+
+  it("returns only the assistant message behind the pending ask in a multi-round turn", () => {
+    const live: LivePart[] = [
+      { kind: "thinking", text: "First round." },
+      { kind: "text", text: "Reading the config." },
+      { kind: "tool", tool: "read", callId: "call-1", output: "..." },
+      { kind: "thinking", text: "Second round." },
+      { kind: "text", text: "Now removing the stale build." },
+      { kind: "tool", tool: "bash", callId: "call-2", command: "rm -rf build" },
+    ];
+    expect(extractAskContext([], live)).toEqual({
+      thinking: "Second round.",
+      text: "Now removing the stale build.",
+    });
+  });
+
+  it("treats transient status/notice parts as transparent", () => {
+    const live: LivePart[] = [
+      { kind: "thinking", text: "Need to clean up." },
+      { kind: "text", text: "Running the cleanup." },
+      { kind: "status", text: "Checking permission for bash (auto)…" },
+      { kind: "notice", text: "Discovered: foo" },
+      { kind: "tool", tool: "bash", callId: "call-1", command: "rm -rf build" },
+    ];
+    expect(extractAskContext([], live)).toEqual({
+      thinking: "Need to clean up.",
+      text: "Running the cleanup.",
+    });
+  });
+
+  it("returns null when neither the live buffer nor the transcript has an assistant message", () => {
+    expect(extractAskContext([{ role: "user", content: "hi" }], [])).toBeNull();
+    expect(
+      extractAskContext([], [{ kind: "status", text: "Checking…" }]),
+    ).toBeNull();
+  });
+
+  it("does not fall back to an older assistant message while the live buffer is mid-turn", () => {
+    // The pending ask belongs to the in-progress turn (live has its tool
+    // bubble) but the model emitted no prose for it. The last committed
+    // assistant message is from the PREVIOUS turn — showing it would
+    // misattribute the ask, so nothing is rendered.
+    const messages: Message[] = [
+      { role: "user", content: "first turn" },
+      { role: "assistant", content: "Answering the first turn." },
+    ];
+    const live: LivePart[] = [
+      { kind: "tool", tool: "bash", callId: "call-1", command: "rm -rf build" },
+    ];
+    expect(extractAskContext(messages, live)).toBeNull();
   });
 });

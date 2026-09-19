@@ -26,16 +26,17 @@ async function reconcileSession(
   dispatch: (a: ChatAction) => void,
   getState: () => ChatState,
   sessionId: string,
+  host?: string,
 ): Promise<void> {
   try {
     const wasActive = getTurnState(getState(), sessionId).turnActive;
-    const state = await api.getSessionState(sessionId);
+    const state = await api.getSessionState(sessionId, host);
     // Fetch the transcript whenever the server reports the turn inactive: that
     // is the case where the turn may have actually finished OR merely paused on
     // a pending permission/question whose sentinel lives in the transcript.
     let detail: Awaited<ReturnType<typeof api.getSession>> | null = null;
     if (!state.turn_active) {
-      detail = await api.getSession(sessionId, { limit: RECONCILE_PAGE_SIZE });
+      detail = await api.getSession(sessionId, { limit: RECONCILE_PAGE_SIZE }, host);
     }
     const slice = getSessionSlice(getState(), sessionId);
     const transcriptPending = detail ? extractPendingFromMessages(detail.messages) : null;
@@ -70,6 +71,7 @@ export function runWatchdogTick(
   sessionIds: Iterable<string>,
   getState: () => ChatState,
   dispatch: (a: ChatAction) => void,
+  hostById?: ReadonlyMap<string, string | undefined>,
 ): void {
   const now = Date.now();
   for (const sessionId of sessionIds) {
@@ -84,7 +86,7 @@ export function runWatchdogTick(
         );
         dispatch({ type: "SET_TURN_STALLED", sessionId, stalled: true });
       }
-      void reconcileSession(dispatch, getState, sessionId);
+      void reconcileSession(dispatch, getState, sessionId, hostById?.get(sessionId));
     }
   }
 }
@@ -111,16 +113,22 @@ export function runWatchdogTick(
  * SessionTabSync's `reconcileOpenSessions`, so this hook only owns the
  * periodic stall check.
  */
-export function useTurnWatchdogAll(openSessionIds: ReadonlySet<string>): void {
+export function useTurnWatchdogAll(
+  openSessionIds: ReadonlySet<string>,
+  hostById?: ReadonlyMap<string, string | undefined>,
+): void {
   const dispatch = useChatDispatch();
   // Purely imperative (read inside the interval tick, not JSX) — must not
   // re-render this always-mounted hook's owner on every dispatch.
   const stateRef = useChatStateRef();
   const idsRef = useRef(openSessionIds);
   idsRef.current = openSessionIds;
+  const hostsRef = useRef(hostById);
+  hostsRef.current = hostById;
 
   useEffect(() => {
-    const tick = () => runWatchdogTick(idsRef.current, () => stateRef.current, dispatch);
+    const tick = () =>
+      runWatchdogTick(idsRef.current, () => stateRef.current, dispatch, hostsRef.current);
     tick(); // cover sessions that were already stalled/turn-active at mount
     const interval = window.setInterval(tick, WATCHDOG_INTERVAL_MS);
     return () => clearInterval(interval);

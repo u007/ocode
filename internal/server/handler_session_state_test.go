@@ -91,11 +91,12 @@ func TestHandleSessionStatusCrossProject(t *testing.T) {
 	if snap.CWD != otherProj {
 		t.Fatalf("cwd = %q, want session's project %q", snap.CWD, otherProj)
 	}
-	// context_current_tokens is the provider-reported value, not a chars/4
-	// estimate over the seeded transcript: with no live agent there is no
-	// usage reading, so the field is omitted (0) rather than fabricated.
-	if snap.ContextCurrentTokens != 0 {
-		t.Fatalf("context_current_tokens = %d, want 0 (no live provider usage)", snap.ContextCurrentTokens)
+	// context_current_tokens prefers a provider reading, but with no live agent
+	// it falls back to a chars/4 estimate over the persisted transcript so a
+	// restored session's gauge shows a value instead of "unknown" after a
+	// session switch. The seeded transcript is "hello" (5 chars) -> 1 token.
+	if snap.ContextCurrentTokens != 1 {
+		t.Fatalf("context_current_tokens = %d, want 1 (persisted-transcript estimate)", snap.ContextCurrentTokens)
 	}
 	if snap.ContextModel == "" || snap.ContextMaxTokens <= 0 {
 		t.Fatalf("context = %s/%d, want model + window", snap.ContextModel, snap.ContextMaxTokens)

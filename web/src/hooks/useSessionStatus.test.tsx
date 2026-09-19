@@ -35,7 +35,7 @@ describe("useSessionStatus", () => {
     mockGetSessionStatus.mockResolvedValue({ session_id: "s1", main_model: "m1" });
     renderHook(() => useSessionStatus("s1"), { wrapper: Wrapper });
     expect(mockGetSessionStatus).toHaveBeenCalledTimes(1);
-    expect(mockGetSessionStatus).toHaveBeenCalledWith("s1");
+    expect(mockGetSessionStatus).toHaveBeenCalledWith("s1", undefined);
     await waitFor(() => expect(mockGetSessionStatus).toHaveBeenCalled());
   });
 
@@ -49,7 +49,7 @@ describe("useSessionStatus", () => {
     await Promise.resolve();
     rerender({ id: "s2" });
     expect(mockGetSessionStatus).toHaveBeenCalledTimes(2);
-    expect(mockGetSessionStatus).toHaveBeenLastCalledWith("s2");
+    expect(mockGetSessionStatus).toHaveBeenLastCalledWith("s2", undefined);
   });
 
   it("placeholder new-* tabs skip the fetch entirely", () => {
@@ -83,9 +83,9 @@ describe("useSessionStatus", () => {
   // ── Context-field contract ────────────────────────────────────────────
   // TUIStatus uses `json:"context_current_tokens,omitempty"` etc., so 0 is
   // *omitted* (absent) on the wire, never `null` and never `0` (omitempty
-  // drops 0). A session with no provider-reported usage yet (and no live
-  // agent) therefore carries no context_current_tokens at all — there is no
-  // char-count estimate fallback.
+  // drops 0). With no provider reading and no live agent the server now falls
+  // back to a persisted-transcript estimate, so a real (non-empty) transcript
+  // carries a positive value after a session switch.
   it("propagates context_current_tokens / context_max_tokens when present", async () => {
     mockGetSessionStatus.mockResolvedValue({
       session_id: "s1",
@@ -95,7 +95,7 @@ describe("useSessionStatus", () => {
     });
     renderHook(() => useSessionStatus("s1"), { wrapper: Wrapper });
     await waitFor(() => expect(mockGetSessionStatus).toHaveBeenCalledTimes(1));
-    expect(mockGetSessionStatus).toHaveBeenCalledWith("s1");
+    expect(mockGetSessionStatus).toHaveBeenCalledWith("s1", undefined);
   });
 
   it("handles empty-message transcript (0 tokens omitted, not null)", async () => {
@@ -110,7 +110,14 @@ describe("useSessionStatus", () => {
     });
     renderHook(() => useSessionStatus("empty"), { wrapper: Wrapper });
     await waitFor(() => expect(mockGetSessionStatus).toHaveBeenCalledTimes(1));
-    expect(mockGetSessionStatus).toHaveBeenCalledWith("empty");
+    expect(mockGetSessionStatus).toHaveBeenCalledWith("empty", undefined);
+  });
+
+  it("routes a remote session's status fetch through the project host", async () => {
+    mockGetSessionStatus.mockResolvedValue({ session_id: "s1" });
+    renderHook(() => useSessionStatus("s1", "james@217.216.72.49"), { wrapper: Wrapper });
+    await waitFor(() => expect(mockGetSessionStatus).toHaveBeenCalledTimes(1));
+    expect(mockGetSessionStatus).toHaveBeenCalledWith("s1", "james@217.216.72.49");
   });
 
   // ── Cross-process staleness: 15s poll + visibility ─────────────────────

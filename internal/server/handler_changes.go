@@ -3,8 +3,11 @@ package server
 import (
 	"errors"
 	"net/http"
+	"path/filepath"
 
 	"github.com/u007/ocode/internal/changes"
+	"github.com/u007/ocode/internal/paths"
+	"github.com/u007/ocode/internal/snapshot"
 )
 
 // changeAuthorDTO mirrors changes.ChangeAuthor for the web.
@@ -77,7 +80,11 @@ const timeFormatRFC3339 = "2006-01-02T15:04:05.999999999Z07:00"
 func (h *Handler) changesSnapshot(sessionID string) []fileChangeDTO {
 	ag := h.activeAgentForRuns(sessionID)
 	if ag == nil {
-		return []fileChangeDTO{}
+		// No live agent: a restored / idle-evicted / never-built session. Its
+		// backups are still journaled, so rehydrate them read-only instead of
+		// returning an empty list (which made the Changes tab go blank on every
+		// session/project switch).
+		return h.journalChangesSnapshot(sessionID)
 	}
 	if ag.Changes() == nil {
 		return []fileChangeDTO{}
@@ -86,6 +93,50 @@ func (h *Handler) changesSnapshot(sessionID string) []fileChangeDTO {
 	out := make([]fileChangeDTO, 0, len(list))
 	for _, fc := range list {
 		out = append(out, buildFileChangeDTO(fc))
+	}
+	return out
+}
+
+// journalChangesSnapshot reconstructs a session's file-change list from the
+// per-project snapshot journal (snapshots.sqlite) without a live agent. It is
+// the read-only counterpart to Agent.SetSessionID's Store.SwitchSession
+// rehydration: it opens a throwaway in-memory store bound to the session,
+// replays the journal, and walks it through a throwaway changes.Registry.
+//
+// Undo is deliberately reported as unavailable (Undoable=false) because the
+// undo endpoints resolve a live agent and would fail; the diff endpoint can
+// still render against FirstBackupPath.
+func (h *Handler) journalChangesSnapshot(sessionID string) []fileChangeDTO {
+	if sessionID == "" {
+		return []fileChangeDTO{}
+	}
+	entry, err := h.sessions.Resolve(sessionID)
+	if err != nil || entry.ProjectRoot == "" {
+		return []fileChangeDTO{}
+	}
+	base, err := paths.GlobalDataDir()
+	if err != nil {
+		return []fileChangeDTO{}
+	}
+	snapDir := filepath.Join(base, "project", paths.ProjectSlug(entry.ProjectRoot), "snapshots")
+	store := snapshot.NewStore(snapshot.NewAgentID(), snapDir)
+	// SwitchSession binds the session and replays its journaled snapshots
+	// (Rehydrate is a no-op on an empty, unbound store).
+	store.SwitchSession(sessionID)
+	if len(store.Snapshots()) == 0 {
+		return []fileChangeDTO{}
+	}
+	reg := changes.NewRegistry()
+	if err := reg.AttachSnapshotStore("main", store); err != nil {
+		return []fileChangeDTO{}
+	}
+	list := reg.List()
+	out := make([]fileChangeDTO, 0, len(list))
+	for _, fc := range list {
+		dto := buildFileChangeDTO(fc)
+		dto.Undoable = false
+		dto.UndoAllTCID = ""
+		out = append(out, dto)
 	}
 	return out
 }

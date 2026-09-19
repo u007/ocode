@@ -899,8 +899,38 @@ export default function TerminalPanel({
       // that the replay re-applies; the TUI itself is gone, so the mode must be
       // cleared even though the reattach is `resumed:true`.
       const isHistoryAttach = historyOffset !== undefined;
+      // A supersede race (the reconnect timer and an onWake/wake-triggered
+      // connect both firing, or a late history-restore fallback) must never
+      // leave two live sockets for one terminal id. Two sockets attach to the
+      // same server session; each new attach closes the previous one, whose
+      // onclose then reconnects again — an endless ~1s ping-pong that also
+      // respawns the shell after a tab close (each reconnect re-creates the
+      // session if the kill already landed). Close the socket this panel was
+      // still holding before opening its replacement; the stale socket's
+      // onclose is ignored because socketRef no longer points at it (the
+      // handler guards below compare against socketRef.current).
+      const previous = socketRef.current;
       sock = nextSocket;
       socketRef.current = nextSocket;
+      if (
+        previous &&
+        previous !== nextSocket &&
+        (previous.readyState === WebSocket.OPEN || previous.readyState === WebSocket.CONNECTING)
+      ) {
+        try {
+          previous.close();
+        } catch {
+          // Already closing/closed — nothing to clean up.
+        }
+      }
+      // Opening a socket supersedes any pending reconnect: a history-restore
+      // attach (connectSocket(result.snapshotEnd)) or an onWake can race the
+      // 1s reconnect timer and otherwise open a second socket. Cancel it here
+      // rather than relying on onopen, which may run after the timer fired.
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       reconnectingRef.current = false;
       // Reset only the handshake gate here — NOT reconnectAttemptRef. This
       // function also runs from the reconnect timer, so clearing the attempt
@@ -909,6 +939,10 @@ export default function TerminalPanel({
       attachedRef.current = false;
 
       nextSocket.onopen = () => {
+        // A superseded socket can still fire onopen (it was CONNECTING when
+        // replaced). Ignore it so the supersede can't steal the fit/resize or
+        // reset the live socket's backoff state.
+        if (disposed || socketRef.current !== nextSocket) return;
         readyRef.current = true;
         fitAndResize.current();
         // A fresh connection succeeded — cancel any pending reconnect
@@ -957,6 +991,9 @@ export default function TerminalPanel({
         return pendingBytes === 0 && pendingChunks.length === 0;
       };
       nextSocket.onmessage = (ev) => {
+        // Ignore frames from a socket that has been superseded; its buffered
+        // output was replaced by the new socket's own replay.
+        if (socketRef.current !== nextSocket) return;
         if (typeof ev.data === "string") {
           let msg: { type?: string; resumed?: boolean };
           try {
@@ -1012,7 +1049,7 @@ export default function TerminalPanel({
         if (chunkRafId === 0) chunkRafId = requestAnimationFrame(flushChunks);
       };
       nextSocket.onerror = () => {
-        if (disposed) return;
+        if (disposed || socketRef.current !== nextSocket) return;
         console.error("terminal: websocket error on", url);
         term.write("\r\n\x1b[31m[terminal connection error]\x1b[0m\r\n");
       };
@@ -1020,7 +1057,10 @@ export default function TerminalPanel({
         // The panel unmounted (tab/project closed): never reconnect. The
         // cleanup already saved the buffer and cleared its timer; a reconnect
         // here would outlive the component and resurrect the shell.
-        if (disposed) return;
+        // A superseded socket (socketRef moved on) must also stay dead: it was
+        // replaced deliberately, and reconnecting from it would start the
+        // two-socket ping-pong the supersede path exists to stop.
+        if (disposed || socketRef.current !== nextSocket) return;
         const remainder = terminalDecoder.decode();
         // Flush every queued render chunk BEFORE the ended banner and the
         // final save: WebSocket frames are decoded into pendingChunks and
@@ -1158,6 +1198,11 @@ export default function TerminalPanel({
         restoreTimer = null;
       }
       if (restoreCancelled) return;
+      // The bounded restore timer may have already fired — it aborts the fetch
+      // and attaches the live socket. If the fetch had still resolved, calling
+      // connectSocket here would open a second socket for the same pty. Bail
+      // the same way the .catch path does.
+      if (restoreController.signal.aborted) return;
       if (result.kind === "missing") {
         // Only announce the fallback when there is actually a cached
         // buffer to fall back to; a brand-new terminal has nothing to restore.

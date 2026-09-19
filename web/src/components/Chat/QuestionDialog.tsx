@@ -21,6 +21,8 @@ import type {
   QuestionAnswerPayload,
   QuestionAnswerValue,
 } from "@/api/types";
+import type { AskContext } from "@/stores/chatStore";
+import AskContextPreview from "./AskContextPreview";
 
 interface Props {
   open: boolean;
@@ -32,6 +34,8 @@ interface Props {
   ) => Promise<boolean>;
   /** Cancel/dismiss the prompt without answering it (TUI Esc parity). */
   onCancel: (requestId: string) => Promise<boolean>;
+  /** Assistant message (prose + reasoning) that led to this prompt. */
+  context?: AskContext | null;
 }
 
 const OTHER_LABEL = "Something else";
@@ -85,6 +89,7 @@ export default function QuestionDialog({
   questions,
   onSubmit,
   onCancel,
+  context,
 }: Props) {
   const optionsPerQuestion = useMemo(
     () => questions.map(displayOptions),
@@ -260,10 +265,10 @@ export default function QuestionDialog({
     // stray click cannot discard a half-answered multi-question form.
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && void handleCancel()}>
       <DialogContent
-        className="sm:max-w-lg bg-card border-border"
+        className="dialog-viewport-max sm:max-w-lg bg-card border-border flex flex-col overflow-hidden"
         onInteractOutside={(e) => e.preventDefault()}
       >
-        <DialogHeader>
+        <DialogHeader className="shrink-0">
           <DialogTitle className="flex items-center gap-2 text-foreground">
             <HelpCircle className="w-5 h-5 text-blue-400" />
             {questions.length === 1
@@ -272,27 +277,34 @@ export default function QuestionDialog({
           </DialogTitle>
         </DialogHeader>
 
-        {questions.length === 1 ? (
-          renderQuestion(questions[0], 0)
-        ) : (
-          <Tabs defaultValue="0" className="w-full">
-            <TabsList className="flex-wrap">
-              {questions.map((q, qi) => (
-                <TabsTrigger key={qi} value={String(qi)}>
-                  {(q.header || `Question ${qi + 1}`) +
-                    (isAnswered(qi) ? " ✓" : "")}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-            {questions.map((q, qi) => (
-              <TabsContent key={qi} value={String(qi)} className="mt-3">
-                {renderQuestion(q, qi)}
-              </TabsContent>
-            ))}
-          </Tabs>
-        )}
+        {/* Everything that can grow (model context, question text, long option
+            lists) scrolls here, so the Cancel/Submit row stays pinned and
+            reachable no matter how tall the prompt is. */}
+        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-clip">
+          <AskContextPreview context={context} />
 
-        <div className="flex justify-end gap-2 pt-2">
+          {questions.length === 1 ? (
+            renderQuestion(questions[0], 0)
+          ) : (
+            <Tabs defaultValue="0" className="w-full">
+              <TabsList className="flex-wrap">
+                {questions.map((q, qi) => (
+                  <TabsTrigger key={qi} value={String(qi)}>
+                    {(q.header || `Question ${qi + 1}`) +
+                      (isAnswered(qi) ? " ✓" : "")}
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+              {questions.map((q, qi) => (
+                <TabsContent key={qi} value={String(qi)} className="mt-3">
+                  {renderQuestion(q, qi)}
+                </TabsContent>
+              ))}
+            </Tabs>
+          )}
+        </div>
+
+        <div className="flex shrink-0 justify-end gap-2 pt-2">
           <Button
             type="button"
             variant="ghost"

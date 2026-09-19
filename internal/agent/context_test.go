@@ -559,3 +559,48 @@ func TestLoadModelContextWithSourceAt_WildcardMatch(t *testing.T) {
 		t.Fatalf("wildcard root-anchored lookup failed: %+v", res)
 	}
 }
+
+// TestModelContextKindsAt_AgreesWithPerModelLookup pins the batched
+// (single directory scan) annotation used by the web model picker to the
+// per-model loader it replaced: for every id the resolved kind must match,
+// including exact, wildcard, .opencode/, embedded, and non-matching models.
+func TestModelContextKindsAt_AgreesWithPerModelLookup(t *testing.T) {
+	isolateHome(t)
+	root := gitInit(t, map[string]string{
+		"deepseek-v4-flash.OCODE.md": "ROOT_EXACT\n",
+		"minimax-m*.OCODE.md":        "ROOT_WILDCARD\n",
+		"*.OCODE.md":                 "BARE_STAR\n",
+		"minimax-*.5.OCODE.md":       "INTERNAL_STAR\n",
+	})
+	if err := os.MkdirAll(filepath.Join(root, ".opencode"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".opencode", "gpt-5.OCODE.md"),
+		[]byte("OPENCODE_EXACT\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fsys := fstest.MapFS{
+		"qwen-3.OCODE.md": &fstest.MapFile{Data: []byte("EMBEDDED\n")},
+	}
+	SetBundledModelConfigFS(fsys)
+	t.Cleanup(func() { SetBundledModelConfigFS(nil) })
+
+	ids := []string{
+		"opencode-go/deepseek-v4-flash", // provider-prefixed exact
+		"deepseek-v4-flash:free",        // variant + -free normalized to exact
+		"minimax-m2.5",                  // wildcard
+		"minimax-m2.7",                  // wildcard sibling
+		"minimax-*.5",                   // internal '*' is literal
+		"gpt-5",                         // .opencode/ exact
+		"openai/qwen-3",                 // embedded fallback
+		"claude-sonnet-4-6",             // no match (bare '*' must not match)
+		"",                              // empty id
+	}
+	got := ModelContextKindsAt(root, ids)
+	for _, id := range ids {
+		want := LoadModelContextWithSourceAt(root, id).Kind
+		if got[id] != want {
+			t.Errorf("kind mismatch for %q: batch=%q single=%q", id, got[id], want)
+		}
+	}
+}

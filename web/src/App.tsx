@@ -16,6 +16,7 @@ import { useBrowserStore, browserActions, type StateKey } from "./lib/browserSto
 import { loadViewStateForProject, saveViewStateForProject, type FocusedKind } from "./lib/viewPersistence";
 import { api, isRemoteSession, authToken, setAuthFailureHandler } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
+import ActionErrorToast from "./components/common/ActionErrorToast";
 import AttentionSoundBridge from "./components/common/AttentionSoundBridge";
 import RemoteReconnect from "./components/RemoteReconnect";
 import ChatPanel from "./components/Chat/ChatPanel";
@@ -160,13 +161,23 @@ function HomeApp() {
     const sessionTitle = activeTab?.title?.trim() || projectState.activeProject?.path?.split("/").pop() || "";
     document.title = sessionTitle ? "ocode - " + sessionTitle : ("ocode - " + (pkg.version || ""));
   }, [activeTabId, projectState.activeProject, tabs, projectState.tabsByProject]);
-  const { resolvePermission, pendingPermission, pendingQuestion, submitQuestionAnswers, cancelQuestion } = useChat(activeTabId);
+  const { resolvePermission, pendingPermission, pendingQuestion, askContext, submitQuestionAnswers, cancelQuestion } = useChat(activeTabId);
   // Host of the active session's project. The model dialog and the command
   // context route their session-scoped calls there so a remote session's model
   // list and context come from that host's server, never the local one.
   const activeSessionHost = useSessionHost(activeTabId ?? undefined);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [coworkOpen, setCoworkOpen] = useState(true);
+  // Start collapsed on phones: the sidebar is an off-canvas drawer there, and
+  // an inline open drawer would cover the whole viewport on first paint (the
+  // media-query listener below only reacts to a breakpoint *change*, so a
+  // direct load at ≤767px never fires it). Desktop keeps the previous default.
+  const [sidebarOpen, setSidebarOpen] = useState(() =>
+    typeof window === "undefined" ? true : window.innerWidth >= 768,
+  );
+  // Same phone default for the right rail: on mobile it is a fixed overlay
+  // with a scrim, so opening by default would cover the workspace on load.
+  const [coworkOpen, setCoworkOpen] = useState(() =>
+    typeof window === "undefined" ? true : window.innerWidth >= 768,
+  );
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const sidebar = useResizableSidebar();
@@ -179,14 +190,24 @@ function HomeApp() {
   });
 
   // Part 05: per-session status on tab activation + streaming watchdog.
-  useSessionStatus(activeTabId);
+  useSessionStatus(activeTabId, activeSessionHost);
   // Watches every open tab (any project), not just the active one, so a
   // turn stalling in a backgrounded tab still gets detected and reconciled.
   const openSessionIds = useMemo(
     () => new Set(Object.values(projectState.tabsByProject).flat().map((t) => t.id)),
     [projectState.tabsByProject],
   );
-  useTurnWatchdogAll(openSessionIds);
+  // Per-session SSH/WSL host for the watchdog's reconcile fetch. A remote
+  // session's /state + transcript live on its host's server; without the host
+  // the reconcile 404s and a stalled remote turn is never recovered.
+  const sessionHosts = useMemo(() => {
+    const map = new Map<string, string | undefined>();
+    for (const tab of Object.values(projectState.tabsByProject).flat()) {
+      map.set(tab.id, resolveSessionHost(projectState, tab.id));
+    }
+    return map;
+  }, [projectState, projectState.tabsByProject]);
+  useTurnWatchdogAll(openSessionIds, sessionHosts);
 
   // Declare the viewed projects on the shared bus (drives the server's
   // subscriber-aware git/spending emitters). All open tabs' projects count,
@@ -769,7 +790,7 @@ function HomeApp() {
       commandName: baseCmd,
       args: cmd.slice(baseCmd.length).trim(),
       api: {
-        listSessions: () => api.listSessions().then((r) => r.sessions),
+        listSessions: (host) => api.listSessions(undefined, host).then((r) => r.sessions),
         getSession: (id, opts?, host?) => api.getSession(id, opts, host),
         getOcrConfig: () => api.getOcrConfig(),
         setOcrConfig: (cfg) => api.setOcrConfig(cfg),
@@ -787,11 +808,11 @@ function HomeApp() {
         setMaskEnabled: (enabled) => api.setMaskEnabled(enabled),
         setMaskMode: (mode) => api.setMaskMode(mode),
         setMaskModel: (model) => api.setMaskModel(model),
-        getCommandContext: (name, args) => api.getCommandContext(name, args),
+        getCommandContext: (name, args, project, host) => api.getCommandContext(name, args, project, host),
         getSessionContext: (id, host) => api.getSessionContext(id, host),
-        getLSPStatuses: () => api.getLSPStatuses(),
+        getLSPStatuses: (host) => api.getLSPStatuses(host),
         listSkills: () => api.listSkills(),
-        getMCP: () => api.getMCP(),
+        getMCP: (host) => api.getMCP(host),
         getGithubPR: (owner, repo, number) => api.getGithubPR(owner, repo, number),
         getGithubIssues: (owner, repo, state) => api.getGithubIssues(owner, repo, state),
         getAgentRuns: (host) => api.listAgentRuns(undefined, host),
@@ -812,15 +833,15 @@ function HomeApp() {
         setPathsConfig: (paths, uploadDir) => api.setPathsConfig(paths, uploadDir),
         getMemoryStatus: () => api.getMemoryStatus(),
         setBashRule: (prefix, level) => api.setBashRule(prefix, level),
-        getPermissions: () => api.getPermissions(),
+        getPermissions: (sessionId, host) => api.getPermissions(sessionId, host),
         getAutoContinue: () => api.getAutoContinue(),
         setAutoContinue: (fields) => api.setAutoContinue(fields),
         connectProvider: (provider, apiKey) => api.connectProvider(provider, apiKey),
         addProject: (path) => api.addProject(path),
-        getDocsStatus: () => api.getDocsStatus(),
-        docsInit: () => api.docsInit(),
-        docsUpdate: (sessionId, focus) => api.docsUpdate(sessionId, focus),
-        docsCleanup: (confirm) => api.docsCleanup(confirm),
+        getDocsStatus: (project, host) => api.getDocsStatus(project, host),
+        docsInit: (project, host) => api.docsInit(project, host),
+        docsUpdate: (sessionId, focus, project, host) => api.docsUpdate(sessionId, focus, project, host),
+        docsCleanup: (confirm, project, host) => api.docsCleanup(confirm, project, host),
         getImageGenConfig: () => api.getImageGenConfig(),
         setImageGenConfig: (cfg) => api.setImageGenConfig(cfg),
         getDiscoveryConfig: () => api.getDiscoveryConfig(),
@@ -830,15 +851,46 @@ function HomeApp() {
         setLocalModelsConfig: (models) => api.setLocalModelsConfig(models),
         syncLoginStart: () => api.syncLoginStart(),
         syncLogout: () => api.syncLogout(),
+        getFakeAgent: () => api.getFakeAgentConfig(),
+        setFakeAgent: (name) => api.setFakeAgentConfig(name),
+        getEditorConfig: () => api.getEditorConfig(),
+        setEditorConfig: (editor, editorMode, ideMode) => api.setEditorConfig(editor, editorMode, ideMode),
+        getThemes: () => api.getThemes(),
+        getTheme: (name) => api.getTheme(name),
+        getTUISettings: () => api.getTUISettings(),
+        setTUISettings: (cfg) => api.setTUISettings(cfg),
+        getExplorerModel: () => api.getExplorerModel(),
+        setExplorerModel: (model) => api.setExplorerModel(model),
+        setExplorerModelEnabled: (enabled) => api.setExplorerModelEnabled(enabled),
+        getContextModel: () => api.getContextModel(),
+        setContextModel: (model) => api.setContextModel(model),
+        setContextModelEnabled: (enabled) => api.setContextModelEnabled(enabled),
+        getCliTools: (host) => api.getCliTools(host),
+        startCliToolsInstall: (tool, host) => api.startCliToolsInstall(tool, host),
+        getCliToolsInstallStatus: (jobId, host) => api.getCliToolsInstallStatus(jobId, host),
       },
       getMessages: () => getSessionSlice(chatStateRef.current, targetSessionId).messages,
       getSessionId: () => targetSessionId,
+      // Delivers a command result that arrives AFTER the handler returned
+      // (/tools install reports its outcome here once the background job
+      // finishes). No-op without a target tab — a draft has no transcript yet.
+      notify: (content) => {
+        if (!targetSessionId) return;
+        dispatch({
+          type: "ADD_MESSAGE",
+          sessionId: targetSessionId,
+          message: { role: "assistant", content },
+        });
+      },
       setDraftPermissionMode: (mode) => {
         if (targetSessionId) {
           dispatch({ type: "SET_SESSION_PERMISSION_MODE", sessionId: targetSessionId, mode });
         }
       },
       host: targetHost,
+      // Repo/docs-scoped commands (/lsp, /mcp, /changes, /review, /docs) must
+      // read the tab's own project, not the server's default workdir.
+      projectPath: targetProjectPath,
     });
 
     if (!result.handled) return { handled: false, accepted: true };
@@ -985,11 +1037,13 @@ function HomeApp() {
         <ProjectSidebar
           isOpen={sidebarOpen}
           onToggle={() => setSidebarOpen(!sidebarOpen)}
-          width={sidebarOpen ? sidebar.width : undefined}
+          width={sidebarOpen && !isMobile ? sidebar.width : undefined}
+          isMobile={isMobile}
         />
 
-        {/* Sidebar resize handle */}
-        {sidebarOpen && (
+        {/* Sidebar resize handle — desktop only: the mobile sidebar is a fixed
+            overlay, so an inline handle would be a dead 1px divider at x=0. */}
+        {sidebarOpen && !isMobile && (
           <div
             ref={sidebar.handleRef}
             role="separator"
@@ -1022,7 +1076,11 @@ function HomeApp() {
           <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)} className="flex flex-col flex-1 overflow-hidden">
             <div className="flex items-center justify-between gap-2 border-b pr-2">
               <div className="flex-1 min-w-0">
-                <TopTabs activeTab={activeView} onTabSelect={(v) => setActiveView(v as typeof activeView)} />
+                <TopTabs
+                  activeTab={activeView}
+                  onTabSelect={(v) => setActiveView(v as typeof activeView)}
+                  onMenuToggle={isMobile ? () => setSidebarOpen((open) => !open) : undefined}
+                />
               </div>
               <ProfileSwitcher />
             </div>
@@ -1224,7 +1282,7 @@ function HomeApp() {
                               active chat tab's project. One instance only. */}
                           {isActive && <RemoteVersionBanner host={projectState.activeProject?.host} />}
                           <div className="relative flex-1 min-h-0 overflow-hidden">
-                            <ChatPanel sessionId={tab.id} />
+                            <ChatPanel sessionId={tab.id} host={resolveSessionHost(projectState, tab.id)} />
                           </div>
                           <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
                           <ChatInput
@@ -1264,7 +1322,7 @@ function HomeApp() {
                       if (!visitedTabsRef.current.has(key) && !isActive) return null;
                       return (
                         <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
-                          <ChangesPanel session={tab.id} active={isActive} />
+                          <ChangesPanel session={tab.id} host={resolveSessionHost(projectState, tab.id)} active={isActive} />
                         </div>
                       );
                     })}
@@ -1274,7 +1332,7 @@ function HomeApp() {
                       if (!visitedTabsRef.current.has(key) && !isActive) return null;
                       return (
                         <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
-                          <LogPanel active={isActive} sessionId={tab.id} />
+                          <LogPanel active={isActive} sessionId={tab.id} host={resolveSessionHost(projectState, tab.id)} />
                         </div>
                       );
                     })}
@@ -1449,7 +1507,11 @@ function HomeApp() {
           activeSubTab: activeSessionTab?.activeSubTab,
           focusedKind,
         }) && coworkOpen && (
-          <div className="w-72 flex-shrink-0 flex flex-col min-h-0 self-stretch overflow-hidden">
+          // On mobile CoworkSidebar renders itself as a `fixed` right overlay,
+          // so the wrapper must NOT reserve its desktop width — a `w-72`
+          // flex-shrink-0 box would still eat 288px of the flex row and squeeze
+          // the session tab list to zero width.
+          <div className={isMobile ? "" : "w-72 flex-shrink-0 flex flex-col min-h-0 self-stretch overflow-hidden"}>
             <CoworkSidebar
               isOpen={coworkOpen}
               onClose={() => setCoworkOpen(false)}
@@ -1491,6 +1553,7 @@ function HomeApp() {
           scope={pendingPermission.scope}
           prefix={pendingPermission.prefix}
           outOfScopePath={pendingPermission.out_of_scope_path}
+          context={askContext}
           requestId={pendingPermission.request_id}
           onDecide={resolvePermission}
         />
@@ -1505,6 +1568,7 @@ function HomeApp() {
           questions={pendingQuestion.questions}
           onSubmit={submitQuestionAnswers}
           onCancel={cancelQuestion}
+          context={askContext}
         />
       )}
 
@@ -1563,7 +1627,11 @@ export default function App() {
                 <Route path="/session/:id" element={<SessionPage />} />
 	                <Route path="*" element={<HomeApp />} />
 	              </Routes>
-	              <SpeechToolbar />
+              <SpeechToolbar />
+              {/* Settings-action failures (sidebar toggles, model picks) are
+                  otherwise only console.error'd. Root-mounted so it survives
+                  the ModelDialog closing on pick. */}
+              <ActionErrorToast />
 	              </SpeechProvider>
 	            </BrowserTabsProvider>
           </TerminalProvider>

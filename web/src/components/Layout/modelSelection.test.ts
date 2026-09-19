@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { advisorSelectionPayload, partitionModelSections } from "./modelSelection";
+import { advisorSelectionPayload, capProviderGroups, LOCAL_MODELS_PROVIDER, LOCAL_MODELS_UNCAPPED, partitionModelSections } from "./modelSelection";
 import type { ModelInfo } from "../../api/types";
 
 const model = (
@@ -79,5 +79,65 @@ describe("advisorSelectionPayload", () => {
       provider: "anthropic",
       model: "claude-sonnet-4-6",
     });
+  });
+});
+
+describe("capProviderGroups", () => {
+  it("keeps every row when the total is under the limit", () => {
+    const groups = {
+      a: [model("a/1"), model("a/2")],
+      b: [model("b/1")],
+    };
+    const cap = capProviderGroups(groups, 10);
+    expect(names(Object.values(cap.groups).flat())).toEqual(["a/1", "a/2", "b/1"]);
+    expect(cap.hidden).toBe(0);
+  });
+
+  it("splits the last visible provider at the limit and counts the rest as hidden", () => {
+    const groups = {
+      a: [model("a/1"), model("a/2")],
+      b: [model("b/1"), model("b/2"), model("b/3")],
+      c: [model("c/1")],
+    };
+    const cap = capProviderGroups(groups, 4);
+    // a (2) fits, b is truncated to 2, c is dropped entirely.
+    expect(Object.keys(cap.groups)).toEqual(["a", "b"]);
+    expect(names(cap.groups.a)).toEqual(["a/1", "a/2"]);
+    expect(names(cap.groups.b)).toEqual(["b/1", "b/2"]);
+    expect(cap.hidden).toBe(2); // b/3 + c/1
+  });
+
+  it("preserves provider and per-provider model order", () => {
+    const groups = {
+      z: [model("z/1")],
+      a: [model("a/1"), model("a/2")],
+    };
+    const cap = capProviderGroups(groups, 2);
+    expect(Object.keys(cap.groups)).toEqual(["z", "a"]);
+    expect(names(cap.groups.a)).toEqual(["a/1"]);
+    expect(cap.hidden).toBe(1);
+  });
+
+  it("never trims or counts uncapped groups against the budget", () => {
+    const groups = {
+      a: Array.from({ length: 5 }, (_, i) => model(`a/${i}`)),
+      [LOCAL_MODELS_PROVIDER]: [model("local-1"), model("local-2")],
+    };
+    // Budget smaller than provider a alone: without the exemption the local
+    // group would be sliced to zero.
+    const cap = capProviderGroups(groups, 3, LOCAL_MODELS_UNCAPPED);
+    expect(names(cap.groups[LOCAL_MODELS_PROVIDER])).toEqual(["local-1", "local-2"]);
+    expect(names(cap.groups.a)).toEqual(["a/0", "a/1", "a/2"]);
+    expect(cap.hidden).toBe(2); // a/3 + a/4 only; locals are not counted
+  });
+
+  it("trims the local group when it is not exempted (regression guard)", () => {
+    const groups = {
+      a: Array.from({ length: 5 }, (_, i) => model(`a/${i}`)),
+      [LOCAL_MODELS_PROVIDER]: [model("local-1"), model("local-2")],
+    };
+    const cap = capProviderGroups(groups, 3);
+    expect(cap.groups[LOCAL_MODELS_PROVIDER]).toBeUndefined();
+    expect(cap.hidden).toBe(4); // a/3 + a/4 + both locals
   });
 });

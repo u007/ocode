@@ -23,6 +23,7 @@ vi.mock("../../api/client", () => ({
 let tabsByProject: Record<string, { id: string; title: string }[]> = {};
 
 vi.mock("../../stores/projectStore", () => ({
+  findProjectPathForTab: () => undefined,
   useProjectState: () => ({
     state: { tabsByProject },
     dispatch: vi.fn(),
@@ -150,8 +151,8 @@ describe("SessionTabSync", () => {
     await act(async () => {}); // flush the reconcile promise chain
 
     expect(mockGetSessionState).toHaveBeenCalledTimes(1);
-    expect(mockGetSessionState).toHaveBeenCalledWith("s1");
-    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE });
+    expect(mockGetSessionState).toHaveBeenCalledWith("s1", undefined);
+    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, undefined);
   });
 
   it("refreshing mid-turn populates the transcript from disk despite turn_active=true", async () => {

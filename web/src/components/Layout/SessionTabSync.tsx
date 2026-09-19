@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useChatDispatch, useChatStateRef, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
+import { resolveSessionHost } from "../../hooks/useSessionHost";
 import { eventBus } from "../../lib/eventBus";
 import { api } from "../../api/client";
 import { applyReconcileState } from "../../hooks/useTurnWatchdog";
@@ -59,6 +60,13 @@ export default function SessionTabSync({ onNewTab }: SessionTabSyncProps) {
   // useChatStateRef must not force a re-render on every dispatch.
   const chatStateRef = useChatStateRef();
 
+  // Host resolver read through a ref so the stable router closure always sees
+  // the current project state without re-subscribing every bus event on every
+  // project change. Remote sessions must route reconcile/hydrate through their
+  // host's server (see SessionEventRouter.hostFor).
+  const hostForRef = useRef<(id: string) => string | undefined>(() => undefined);
+  hostForRef.current = (id) => resolveSessionHost(projectState, id);
+
   useEffect(() => {
     const router: SessionEventRouter = {
       openSessionIds: openSessionIdsRef.current,
@@ -66,6 +74,7 @@ export default function SessionTabSync({ onNewTab }: SessionTabSyncProps) {
       projectDispatch,
       getState: () => chatStateRef.current,
       onNewTab,
+      hostFor: (id) => hostForRef.current(id),
     };
     // The bus dispatches per-event-type (no wildcard) — subscribe to every
     // event routeBusEnvelope handles individually.
@@ -100,6 +109,7 @@ export default function SessionTabSync({ onNewTab }: SessionTabSyncProps) {
       projectDispatch,
       getState: () => chatStateRef.current,
       onNewTab,
+      hostFor: (id) => hostForRef.current(id),
     };
     void reconcileOpenSessions(new Set(openSessionIdsRef.current), router);
   }, [chatDispatch, onNewTab, realTabKey]);
@@ -120,7 +130,7 @@ export default function SessionTabSync({ onNewTab }: SessionTabSyncProps) {
     if (!activeTabId || activeTabId === prev || activeTabId.startsWith("new-")) return;
     let cancelled = false;
     api
-      .getSessionState(activeTabId)
+      .getSessionState(activeTabId, hostForRef.current(activeTabId))
       .then((state) => {
         if (!cancelled) {
           const slice = getSessionSlice(chatStateRef.current, activeTabId);

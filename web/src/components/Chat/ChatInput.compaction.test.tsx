@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import ChatInput from "./ChatInput";
 import { dispatchCommand, type CommandContext } from "./commands";
 import { clearQueue, dispatchQueueChanged, getQueue } from "../../lib/tabQueue";
-import { dismissCompaction, getCompactionState, setCompactionState } from "../../lib/compactionState";
+import { clearCompaction, getCompactionState, setCompactionState } from "../../lib/compactionState";
 import { clearDraft } from "../../lib/tabDrafts";
 import { ChatProvider, useChatDispatch, type ChatAction } from "../../stores/chatStore";
 import type { Dispatch } from "react";
@@ -59,8 +59,7 @@ describe("composer compaction lifecycle", () => {
     for (const id of [A, B]) {
       clearQueue(id);
       clearDraft(id);
-      setCompactionState(id, { status: "complete", originalLen: 0, compactedLen: 0 });
-      dismissCompaction(id);
+      clearCompaction(id);
     }
   });
   afterEach(() => { vi.useRealTimers(); });
@@ -81,7 +80,10 @@ describe("composer compaction lifecycle", () => {
     await act(async () => { view.rerender(composer()); });
     expect(compactSession).toHaveBeenCalledExactlyOnceWith(A, "user@remote");
     expect(sendMessage).not.toHaveBeenCalled();
-    expect(screen.getByText("Compacted: 24 → 6 messages")).toBeInTheDocument();
+    // Completion feedback now lives in the transcript (the persisted
+    // compaction-summary notice), so the composer bottom bar is dropped.
+    expect(screen.queryByText(/Compacted:/)).not.toBeInTheDocument();
+    expect(getCompactionState(A)).toBeUndefined();
     expect(screen.queryByText(/Compaction queued/)).not.toBeInTheDocument();
   });
 
@@ -121,15 +123,17 @@ describe("composer compaction lifecycle", () => {
     render(composer());
     expect(screen.getByText(/12s elapsed/)).toBeInTheDocument();
     await act(async () => { request.resolve({ original_len: 42, compacted_len: 7 }); });
-    expect(screen.getByText("Compacted: 42 → 7 messages")).toBeInTheDocument();
-    expect(getCompactionState(B)).toBeUndefined();
-    act(() => { vi.advanceTimersByTime(60000); });
-    expect(screen.getByText("Compacted: 42 → 7 messages")).toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText("Dismiss compaction status"));
     expect(screen.queryByText(/Compacted:/)).not.toBeInTheDocument();
+    expect(getCompactionState(A)).toBeUndefined();
+    // The composer bar is not retained after completion — no lingering notice
+    // and no dismiss button (previously it stayed until clicked).
+    act(() => { vi.advanceTimersByTime(60000); });
+    expect(screen.queryByText(/Compacted:/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Dismiss compaction status")).not.toBeInTheDocument();
+    expect(getCompactionState(B)).toBeUndefined();
   });
 
-  it("survives transcript replacement without creating a second feedback banner", async () => {
+  it("drops the composer bar after completion even if the transcript is replaced", async () => {
     const request = deferred();
     compactSession.mockReturnValueOnce(request.promise);
     render(<ChatProvider><TranscriptHarness /></ChatProvider>);
@@ -137,8 +141,10 @@ describe("composer compaction lifecycle", () => {
     act(() => { transcriptDispatch({ type: "SET_MESSAGES", sessionId: A, messages: [] }); });
     expect(screen.getAllByText(/Compacting conversation/)).toHaveLength(1);
     await act(async () => { request.resolve({ original_len: 80, compacted_len: 5 }); });
-    act(() => { transcriptDispatch({ type: "SET_MESSAGES", sessionId: A, messages: [{ role: "assistant", content: "summary" }] }); });
-    expect(screen.getAllByText("Compacted: 80 → 5 messages")).toHaveLength(1);
+    act(() => { transcriptDispatch({ type: "SET_MESSAGES", sessionId: A, messages: [{ role: "system", content: "[ocode:compaction-summary]\nCompacted summary covering 80 messages\n\nbody" }] }); });
+    expect(screen.queryByText(/Compacted:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Compacting conversation/)).not.toBeInTheDocument();
+    expect(getCompactionState(A)).toBeUndefined();
   });
 
   it.each([false, true])("does not block a different tab while compaction is active (started via queue: %s)", async (queued) => {
@@ -179,7 +185,7 @@ describe("composer compaction lifecycle", () => {
     await act(async () => { vi.advanceTimersByTime(1500); });
     expect(sendMessage).not.toHaveBeenCalled();
     expect(getQueue(A)).toEqual([{ kind: "message", text: "delayed message" }]);
-    await act(async () => { setCompactionState(A, { status: "complete", originalLen: 12, compactedLen: 3 }); });
+    await act(async () => { clearCompaction(A); });
     expect(sendMessage).toHaveBeenCalledExactlyOnceWith("delayed message");
   });
 

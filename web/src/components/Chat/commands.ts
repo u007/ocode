@@ -11,7 +11,8 @@ import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../../api/client";
 import { isTempSessionTabId } from "../../lib/tabDrafts";
-import { getCompactionState, setCompactionState } from "../../lib/compactionState";
+import { getCompactionState, setCompactionState, clearCompaction } from "../../lib/compactionState";
+import { applyThemeColors } from "../../hooks/useTheme";
 
 import {
   Plus,
@@ -117,7 +118,7 @@ export const COMMANDS: CommandDef[] = [
   { name: "/discover", description: "Codebase discovery: enable/disable/status/model/ignore", icon: Search },
   { name: "/login", description: "Link this app via device-code login", icon: Shield },
   { name: "/logout", description: "Unlink sync + revoke token", icon: Shield },
-  { name: "/mcp-auth", description: "MCP OAuth (requires desktop/TUI browser flow)", icon: Radio },
+  { name: "/mcp-auth", description: "MCP OAuth — run in the TUI (token is shared)", icon: Radio },
   { name: "/learn", description: "Audit and improve project skills ([focus])", icon: Sparkles },
   { name: "/doc-sync", description: "Sync docs with recent changes ([session|all])", icon: FileText },
   { name: "/docs", description: "Knowledge system: on|off|status|init|update|cleanup", icon: FileText },
@@ -126,6 +127,27 @@ export const COMMANDS: CommandDef[] = [
   { name: "/image", description: "Image gen: status|enable|disable|model|timeout", icon: Sparkles },
   { name: "/upload", description: "Show or set the upload directory", icon: FileDown },
   { name: "/connect", description: "Store a provider API key (/connect provider key)", icon: Bot },
+
+  // ── TUI-parity commands ──
+  // These mirror entries in internal/tui/commands.go's `commandSpecs`. The
+  // first group is fully functional on the web/desktop SPA; the second group
+  // is architecturally TUI-only and answers with an explanatory message
+  // rather than silently falling through to the LLM (which is how
+  // `/fake-agent` used to "disappear").
+  { name: "/fake-agent", description: "Show or switch the harness identity presented to the LLM", icon: Bot },
+  { name: "/explorer-model", description: "Explorer agent model: status | enable | disable | model [name]", icon: Cpu },
+  { name: "/context-model", description: "Context agent model: status | enable | disable | model [name]", icon: Cpu },
+  { name: "/editor", description: "Show or set the default external editor", icon: Terminal },
+  { name: "/editor-mode", description: "Set editor open mode (external|tmux-split|tmux-window)", icon: Terminal },
+  { name: "/themes", description: "List or switch the color theme", icon: Sparkles },
+  { name: "/tools", description: "Detect/install CLI utilities (fd, rg, fzf, eza, bat, grep)", icon: Terminal },
+  { name: "/ide", description: "Live VS Code context — desktop/TUI only", icon: Bot },
+  { name: "/secret", description: "Encrypt/decrypt files — use the Files context menu", icon: Shield },
+  { name: "/sidebar", description: "Toggle the sidebar — use the header toggle on web", icon: Terminal },
+  { name: "/details", description: "Tool details are always shown on the web", icon: Eye },
+  { name: "/sound", description: "Alert sounds — configure in Settings > Terminal", icon: Activity },
+  { name: "/rc", description: "Remote-control the session — this IS the web UI", icon: Radio },
+  { name: "/exit", description: "Close the session tab — use the tab's X", icon: Trash2 },
 ];
 
 // ─── Dynamic commands (custom commands + skills from the server) ──────────────
@@ -264,7 +286,7 @@ export interface CommandContext {
   args: string;
   /** Caller-provided helpers the handler can use. */
   api: {
-    listSessions: () => Promise<{ id: string; title: string }[]>;
+    listSessions: (host?: string) => Promise<{ id: string; title: string }[]>;
     getSession: (id: string, opts?: { limit?: number; offset?: number }, host?: string) => Promise<{ messages?: Message[]; title?: string }>;
     getOcrConfig: () => Promise<OcrConfig>;
     setOcrConfig: (cfg: OcrConfig) => Promise<OcrConfig>;
@@ -283,7 +305,7 @@ export interface CommandContext {
     setMaskMode: (mode: string) => Promise<{ mode: string }>;
     setMaskModel: (model: string) => Promise<{ model: string }>;
     /** Fetch an assembled LLM prompt for a repo-analysis command (/standup, /changes, /review). */
-    getCommandContext: (name: string, args?: string) => Promise<{ prompt: string }>;
+    getCommandContext: (name: string, args?: string, project?: string, host?: string) => Promise<{ prompt: string }>;
     /** Token budget for the current session (/context). */
     getSessionContext: (id: string, host?: string) => Promise<{
       session_id: string;
@@ -297,11 +319,11 @@ export interface CommandContext {
       report?: import("../../api/types").ContextBudgetReport;
     }>;
     /** LSP server status + aggregated diagnostic counts (/lsp). */
-    getLSPStatuses: () => Promise<{ lsp_servers: import("../../api/types").LSPStatus[] }>;
+    getLSPStatuses: (host?: string) => Promise<{ lsp_servers: import("../../api/types").LSPStatus[] }>;
     /** Available skills (/skills). */
     listSkills: () => Promise<import("../../api/types").SkillEntry[]>;
     /** MCP server status (/mcp). */
-    getMCP: () => Promise<import("../../api/types").MCPStatus[]>;
+    getMCP: (host?: string) => Promise<import("../../api/types").MCPStatus[]>;
     /** GitHub PR details + diff (/github pr). */
     getGithubPR: (owner: string, repo: string, number: number) => Promise<{ pr: Record<string, unknown>; diff?: string }>;
     /** GitHub issue list (/github issue list). */
@@ -332,15 +354,15 @@ export interface CommandContext {
     setPathsConfig?: (extra_allowed_paths: string[], upload_dir: string) => Promise<unknown>;
     getMemoryStatus?: () => Promise<import("../../api/types").MemoryStatusResponse>;
     setBashRule?: (prefix: string, level: "allow" | "deny" | "ask") => Promise<unknown>;
-    getPermissions?: () => Promise<PermissionsResponse>;
+    getPermissions?: (sessionId?: string, host?: string) => Promise<PermissionsResponse>;
     getAutoContinue?: () => Promise<{ enabled: boolean; model: string }>;
     setAutoContinue?: (fields: { enabled?: boolean; model?: string; clear?: boolean }) => Promise<{ enabled: boolean; model: string }>;
     connectProvider?: (provider: string, api_key: string) => Promise<{ provider: string; key: string }>;
     addProject?: (path: string) => Promise<unknown>;
-    getDocsStatus?: () => Promise<{ enabled: boolean; text: string }>;
-    docsInit?: () => Promise<{ result: string; annotate_prompt?: string }>;
-    docsUpdate?: (sessionId: string, focus: string) => Promise<{ result: string }>;
-    docsCleanup?: (confirm: boolean) => Promise<{ result: string }>;
+    getDocsStatus?: (project?: string, host?: string) => Promise<{ enabled: boolean; text: string }>;
+    docsInit?: (project?: string, host?: string) => Promise<{ result: string; annotate_prompt?: string }>;
+    docsUpdate?: (sessionId: string, focus: string, project?: string, host?: string) => Promise<{ result: string }>;
+    docsCleanup?: (confirm: boolean, project?: string, host?: string) => Promise<{ result: string }>;
     getImageGenConfig?: () => Promise<import("../../api/client").ImageGenConfig>;
     setImageGenConfig?: (cfg: import("../../api/client").ImageGenConfig) => Promise<unknown>;
     getDiscoveryConfig?: () => Promise<import("../../api/client").DiscoveryConfig>;
@@ -351,6 +373,29 @@ export interface CommandContext {
     setLocalModelsConfig?: (models: Record<string, { enabled: boolean; max_parallel: number }>) => Promise<unknown>;
     syncLoginStart?: () => Promise<{ deviceCode: string; userCode: string; verifyUrl: string; expiresIn: number }>;
     syncLogout?: () => Promise<unknown>;
+
+    // ── TUI-parity commands (/fake-agent, /editor, /themes, purpose models) ──
+    getFakeAgent?: () => Promise<{ fake_agent: string; active: string; options: string[] }>;
+    setFakeAgent?: (name: string) => Promise<{ fake_agent: string; active: string; options: string[] }>;
+    getEditorConfig?: () => Promise<{ editor: string; editor_mode: string; ide_mode: string }>;
+    setEditorConfig?: (editor: string, editorMode: string, ideMode: string) => Promise<{ editor: string; editor_mode: string; ide_mode: string }>;
+    getThemes?: () => Promise<import("../../api/types").ThemesListResponse>;
+    getTheme?: (name?: string) => Promise<import("../../api/types").ThemeResponse>;
+    getTUISettings?: () => Promise<import("../../api/client").TUISettings>;
+    setTUISettings?: (cfg: import("../../api/client").TUISettings) => Promise<import("../../api/client").TUISettings>;
+    getExplorerModel?: () => Promise<{ model: string; enabled: boolean }>;
+    setExplorerModel?: (model: string) => Promise<{ model: string; enabled: boolean }>;
+    setExplorerModelEnabled?: (enabled: boolean) => Promise<{ model: string; enabled: boolean }>;
+    getContextModel?: () => Promise<{ model: string; enabled: boolean }>;
+    setContextModel?: (model: string) => Promise<{ model: string; enabled: boolean }>;
+    setContextModelEnabled?: (enabled: boolean) => Promise<{ model: string; enabled: boolean }>;
+    /** CLI-utility detection (/tools). `host` routes a remote project's probe
+     *  to that host's server, so status reflects the remote PATH. */
+    getCliTools?: (host?: string) => Promise<import("../../api/client").CliToolsResponse>;
+    /** Start a background install (/tools <name>); returns a pollable job id.
+     *  Install shells out to the package manager and can take minutes. */
+    startCliToolsInstall?: (tool: string, host?: string) => Promise<import("../../api/client").CliToolInstallStartResponse>;
+    getCliToolsInstallStatus?: (jobId: string, host?: string) => Promise<import("../../api/client").CliToolInstallStatusResponse>;
   };
   /** Current messages in the chat store (used by /export). */
   getMessages?: () => Message[];
@@ -363,6 +408,15 @@ export interface CommandContext {
     setDraftPermissionMode?: (mode: string) => void;
   /** SSH/WSL host for the current session's project (undefined for local). */
   host?: string;
+  /** Registered project root for the current tab. Threaded into the
+   *  repo/docs-scoped reads (/lsp, /mcp, /changes, /review, /docs) so a
+   *  multi-project or remote tab reads ITS repo, not the server default. */
+  projectPath?: string;
+  /** Append an assistant message to THIS tab's transcript after the command
+   *  handler has already returned. Used by /tools <name>, whose install runs
+   *  in the background (package managers can take minutes) — the handler
+   *  returns a "started" notice and this delivers the outcome. */
+  notify?: (content: string) => void;
 }
 
 /** Dispatch a slash command to the appropriate handler. */
@@ -382,6 +436,8 @@ export async function dispatchCommand(
 
     // ── Frontend-handled with API calls ──
     case "/session":
+    case "/sessions":
+    case "/resume":
       return handleSession(args, ctx);
 
     case "/ocr":
@@ -410,10 +466,10 @@ export async function dispatchCommand(
 
     // ── Usage / init ──
     case "/usage":
-      return handleUsage(args);
+      return handleUsage(args, ctx);
 
     case "/init":
-      return handleInit();
+      return handleInit(ctx);
 
     // ── Permissions ──
     case "/permissions":
@@ -447,11 +503,14 @@ export async function dispatchCommand(
       return handleShare(ctx);
 
     case "/btw":
+    case "/by-the-way":
       return handleBtw(args, ctx);
 
     // ── Repo-analysis commands: server assembles the full prompt, client
     //    sends it verbatim through the normal chat pipeline (TUI parity) ──
     case "/standup":
+    case "/catchup":
+      return handleCommandContext("/standup", args, ctx);
     case "/changes":
     case "/review":
     case "/learn":
@@ -486,6 +545,7 @@ export async function dispatchCommand(
       return handlePaths(ctx);
 
     case "/cd":
+    case "/cwd":
       return handleCd(args, ctx);
 
     case "/add-dir":
@@ -558,8 +618,56 @@ export async function dispatchCommand(
     case "/advisor":
       return handleAdvisor(ctx);
 
-    // ── Fall through to LLM (the agent may interpret them) ──
+    // ── Harness identity (TUI /fake-agent parity) ──
+    case "/fake-agent":
+      return handleFakeAgent(args, ctx);
+
+    // ── Purpose-model overrides (TUI /explorer-model, /context-model parity) ──
+    case "/explorer-model":
+      return handlePurposeModel("explorer", args, ctx);
+    case "/context-model":
+      return handlePurposeModel("context", args, ctx);
+
+    // ── Editor config (TUI /editor, /editor-mode parity) ──
+    case "/editor":
+      return handleEditor(args, ctx);
+    case "/editor-mode":
+      return handleEditorMode(args, ctx);
+
+    // ── Theme picker (TUI /themes parity) ──
+    case "/themes":
+    case "/theme":
+      return handleThemes(args, ctx);
+
+    // ── In-chat find bar (TUI /search, /find parity) ──
     case "/search":
+      return handleSearch(args);
+    case "/find":
+      return handleSearch(args);
+
+    // ── TUI-only commands: answer with a pointer instead of falling through
+    //    to the LLM (which turned e.g. `/fake-agent status` into a model turn). ──
+    case "/ide":
+      return handleTuiOnly("/ide", "The live VS Code (Claude Code extension) context bridge runs in the TUI. The web UI uses editor tabs + the context chip instead.");
+    case "/secret":
+      return handleSecretHelp(args, ctx);
+    case "/tools":
+    case "/tool":
+      return handleTools(args, ctx);
+    case "/sidebar":
+      return handleTuiOnly("/sidebar", "The web UI sidebar is toggled with the button in the app header (or the mobile menu button).");
+    case "/details":
+      return handleTuiOnly("/details", "The web/desktop chat always renders tool execution details inline — there is no separate toggle.");
+    case "/sound":
+      return handleTuiOnly("/sound", "Alert sounds are configured in Settings > Terminal (enable toggle + optional custom sound).");
+    case "/rc":
+      return handleTuiOnly("/rc", "This IS the remote-control web UI. `/rc` starts it from the TUI; there is nothing to start from here.");
+    case "/exit":
+    case "/quit":
+    case "/q":
+      return handleTuiOnly("/exit", "Close this session's tab with the tab bar's X (the app stays open).");
+
+    // ── Fall through to LLM (the agent may interpret them) ──
     default:
       return { handled: false };
   }
@@ -600,7 +708,7 @@ async function handleSession(
 
   // /session list (or bare /session)
   try {
-    const sessions = await ctx.api.listSessions();
+    const sessions = await ctx.api.listSessions(ctx.host);
     if (sessions.length === 0) {
       return {
         handled: true,
@@ -913,7 +1021,7 @@ async function handleTitle(args: string, ctx: CommandContext): Promise<CommandRe
 
 async function handleUndo(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const res = await api.undoFileChange(activeSessionId(ctx));
+    const res = await api.undoFileChange(activeSessionId(ctx), ctx.host);
     return {
       handled: true,
       messages: [{ role: "assistant", content: `Undid last change to \`${res.path}\`.` }],
@@ -925,7 +1033,7 @@ async function handleUndo(ctx: CommandContext): Promise<CommandResult> {
 
 async function handleRedo(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const res = await api.redoFileChange(activeSessionId(ctx));
+    const res = await api.redoFileChange(activeSessionId(ctx), ctx.host);
     return {
       handled: true,
       messages: [{ role: "assistant", content: `Redid change to \`${res.path}\`.` }],
@@ -935,10 +1043,10 @@ async function handleRedo(ctx: CommandContext): Promise<CommandResult> {
   }
 }
 
-async function handleUsage(args: string): Promise<CommandResult> {
+async function handleUsage(args: string, ctx: CommandContext): Promise<CommandResult> {
   const range = args.trim() || undefined;
   try {
-    const summary = await api.getUsage(range);
+    const summary = await api.getUsage(range, activeSessionId(ctx), ctx.host);
     return {
       handled: true,
       messages: [{ role: "assistant", content: formatUsage(summary) }],
@@ -948,9 +1056,9 @@ async function handleUsage(args: string): Promise<CommandResult> {
   }
 }
 
-async function handleInit(): Promise<CommandResult> {
+async function handleInit(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const res = await api.initProject();
+    const res = await api.initProject(ctx.projectPath, ctx.host);
     const verb = res.status === "created" ? "Created" : "Found existing";
     return {
       handled: true,
@@ -963,7 +1071,7 @@ async function handleInit(): Promise<CommandResult> {
 
 async function handlePermissions(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const p = await api.getPermissions(activeSessionId(ctx));
+    const p = await api.getPermissions(activeSessionId(ctx), ctx.host);
     return {
       handled: true,
       messages: [{ role: "assistant", content: formatPermissions(p) }],
@@ -979,7 +1087,7 @@ async function handleYolo(args: string, ctx: CommandContext): Promise<CommandRes
 
   try {
     if (sub === "" || sub === "status") {
-      const { yolo } = await api.getYolo(sessionId);
+      const { yolo } = await api.getYolo(sessionId, ctx.host);
       return {
         handled: true,
         messages: [{
@@ -996,7 +1104,7 @@ async function handleYolo(args: string, ctx: CommandContext): Promise<CommandRes
           messages: [{ role: "assistant", content: "YOLO mode: **on** — applies to this new chat once you send a message." }],
         };
       }
-      await api.setYolo(true, sessionId);
+      await api.setYolo(true, sessionId, ctx.host);
       return {
         handled: true,
         messages: [{ role: "assistant", content: "YOLO mode: **on** — tools are auto-approved for this chat." }],
@@ -1010,7 +1118,7 @@ async function handleYolo(args: string, ctx: CommandContext): Promise<CommandRes
           messages: [{ role: "assistant", content: "YOLO mode: **off** for this new chat." }],
         };
       }
-      await api.setYolo(false, sessionId);
+      await api.setYolo(false, sessionId, ctx.host);
       return {
         handled: true,
         messages: [{ role: "assistant", content: "YOLO mode: **off** for this chat." }],
@@ -1031,7 +1139,7 @@ async function handleSandbox(args: string, ctx: CommandContext): Promise<Command
 
   try {
     if (sub === "" || sub === "status") {
-      const perm = await api.getPermissions(sessionId);
+      const perm = await api.getPermissions(sessionId, ctx.host);
       const behavior = perm.effective_behavior;
       return {
         handled: true,
@@ -1051,7 +1159,7 @@ async function handleSandbox(args: string, ctx: CommandContext): Promise<Command
           messages: [{ role: "assistant", content: "Sandbox mode: **on** — applies to this new chat once you send a message." }],
         };
       }
-      await api.setPermissionMode("sandbox", sessionId);
+      await api.setPermissionMode("sandbox", sessionId, ctx.host);
       return {
         handled: true,
         messages: [{ role: "assistant", content: "Sandbox mode: **on** — filesystem writes are OS-confined to writable roots." }],
@@ -1065,7 +1173,7 @@ async function handleSandbox(args: string, ctx: CommandContext): Promise<Command
           messages: [{ role: "assistant", content: "Sandbox mode: **off** for this new chat." }],
         };
       }
-      await api.setPermissionMode("normal", sessionId);
+      await api.setPermissionMode("normal", sessionId, ctx.host);
       return {
         handled: true,
         messages: [{ role: "assistant", content: "Sandbox mode: **off** (back to normal)." }],
@@ -1084,7 +1192,7 @@ async function handleAgent(args: string, ctx: CommandContext): Promise<CommandRe
   const name = args.trim();
   try {
     if (!name) {
-      const agents = await api.listAgents();
+      const agents = await api.listAgents(ctx.host);
       const lines = agents
         .slice()
         .sort((a, b) => a.name.localeCompare(b.name))
@@ -1099,7 +1207,7 @@ async function handleAgent(args: string, ctx: CommandContext): Promise<CommandRe
     }
 
     const sessionId = activeSessionId(ctx);
-    const res = await api.setAgent(name, sessionId);
+    const res = await api.setAgent(name, sessionId, ctx.host);
     return {
       handled: true,
       messages: [{
@@ -1411,15 +1519,12 @@ async function handleCompact(ctx: CommandContext): Promise<CommandResult> {
   if (getCompactionState(sessionId)?.status === "active") return { handled: true };
   setCompactionState(sessionId, { status: "active", startedAt: Date.now() });
   try {
-    const result = await ctx.api.compactSession(sessionId, ctx.host);
-    setCompactionState(sessionId, { status: "complete", originalLen: result.original_len, compactedLen: result.compacted_len });
-    return {
-      handled: true,
-      messages: [{
-        role: "assistant",
-        content: `Compacted: **${result.original_len} → ${result.compacted_len}** messages.`,
-      }],
-    };
+    await ctx.api.compactSession(sessionId, ctx.host);
+    // Completion is reported by the persisted compaction-summary notice now
+    // rendered inline in the transcript, so drop the composer bottom bar
+    // instead of retaining a "Compacted: X → Y" banner until dismissed.
+    clearCompaction(sessionId);
+    return { handled: true };
   } catch (err) {
     setCompactionState(sessionId, { status: "error", error: err instanceof Error ? err.message : String(err) });
     return {
@@ -1545,7 +1650,7 @@ async function handleCommandContext(
 ): Promise<CommandResult> {
   const name = commandName.slice(1); // strip leading "/"
   try {
-    const { prompt } = await ctx.api.getCommandContext(name, args || undefined);
+    const { prompt } = await ctx.api.getCommandContext(name, args || undefined, ctx.projectPath, ctx.host);
     return { handled: true, prompt };
   } catch (err) {
     return {
@@ -2027,7 +2132,120 @@ async function handleLogout(ctx: CommandContext): Promise<CommandResult> {
 // ─── /mcp-auth — browser OAuth gate ────────────────────────────────────────
 
 function handleMcpAuth(): CommandResult {
-  return ok("**/mcp-auth requires the desktop app or TUI**: MCP OAuth completes through a localhost redirect + system browser, which the browser-based client cannot host. Run `/mcp-auth <server>` inside the TUI/desktop shell.");
+  return ok("**/mcp-auth is TUI-only**: MCP OAuth completes through a localhost callback (127.0.0.1:8085) plus a system-browser launch, which only the terminal client hosts. Run `/mcp-auth <server>` in the TUI, then the token is shared (it is stored in the same `mcp-auth.json` the web/desktop server reads).");
+}
+
+// ─── /tools, /tool — CLI utility detection + install ────────────────────────
+
+/** How often to poll a running install job. Installs are minutes-scale, so a
+ *  couple of seconds is responsive without hammering the server. */
+const CLI_TOOL_POLL_INTERVAL_MS = 2000;
+/** Give up polling after this long. The server's own install timeout is 10
+ *  minutes; this is a client-side backstop so a lost job cannot poll forever. */
+const CLI_TOOL_POLL_TIMEOUT_MS = 11 * 60 * 1000;
+
+async function handleTools(args: string, ctx: CommandContext): Promise<CommandResult> {
+  const name = args.trim().split(/\s+/)[0] ?? "";
+
+  // Status (bare `/tools`) — a PATH probe, cheap enough to run inline.
+  if (!name) {
+    if (!ctx.api.getCliTools) return unsupported("/tools");
+    try {
+      const res = await ctx.api.getCliTools(ctx.host);
+      const lines: string[] = [
+        `## CLI tools`,
+        `Platform: \`${res.platform}\` · package manager: ${res.package_manager ? `\`${res.package_manager}\`` : "_none found_"}`,
+        "",
+      ];
+      for (const t of res.tools) {
+        if (t.found) {
+          const alias = t.command && t.command !== t.name ? ` (found as \`${t.command}\`)` : "";
+          lines.push(`- ✅ **${t.name}**${alias} — ${t.description}`);
+        } else {
+          lines.push(`- ⬜ **${t.name}** — ${t.description} · install with \`/tools ${t.name}\``);
+        }
+      }
+      lines.push(
+        "",
+        "Install with `/tools <name>`. The install runs in the background and reports back here when it finishes.",
+      );
+      if (!res.package_manager && res.manager_hint) {
+        lines.push("", res.manager_hint);
+      }
+      return ok(lines.join("\n"));
+    } catch (err) {
+      return fail("/tools", err);
+    }
+  }
+
+  // Install (`/tools <name>`). Returns immediately; the result is delivered
+  // via ctx.notify because a package-manager run can take minutes and the
+  // composer is blocked for the whole await of a command handler.
+  if (!ctx.api.startCliToolsInstall) return unsupported("/tools");
+  const start = ctx.api.startCliToolsInstall;
+  const status = ctx.api.getCliToolsInstallStatus;
+  const host = ctx.host;
+  const notify = ctx.notify;
+  try {
+    const started = await start(name, host);
+    // Without a status endpoint or a way to deliver a late result (a draft tab
+    // has no transcript yet) the install would run unreported — so don't
+    // promise an outcome that cannot arrive.
+    if (!status || !notify) {
+      return ok(
+        `Started installing **${started.tool}** (job \`${started.job_id}\`). This build can't report the outcome here — run \`/tools\` again to check.`,
+      );
+    }
+    void pollCliToolInstall(started.job_id, name, status, host, notify);
+    return ok(
+      `Installing **${started.tool}** in the background… This can take a few minutes; the result will appear here.`,
+    );
+  } catch (err) {
+    return fail("/tools", err);
+  }
+}
+
+/** pollCliToolInstall waits for a background install to finish and reports the
+ *  outcome through `notify`. Runs detached from the command handler: the
+ *  handler has already returned, so there is nothing to await it. */
+async function pollCliToolInstall(
+  jobId: string,
+  tool: string,
+  getStatus: (jobId: string, host?: string) => Promise<import("../../api/client").CliToolInstallStatusResponse>,
+  host: string | undefined,
+  notify: (content: string) => void,
+): Promise<void> {
+  const deadline = Date.now() + CLI_TOOL_POLL_TIMEOUT_MS;
+  // A single transient poll failure must not abandon a live install; only give
+  // up once the deadline passes.
+  for (;;) {
+    await new Promise((r) => setTimeout(r, CLI_TOOL_POLL_INTERVAL_MS));
+    if (Date.now() > deadline) {
+      notify(`Install of **${tool}** is taking longer than expected and is no longer being tracked. Check the package manager directly.`);
+      return;
+    }
+    let s: import("../../api/client").CliToolInstallStatusResponse;
+    try {
+      s = await getStatus(jobId, host);
+    } catch {
+      continue; // transient; retry until the deadline
+    }
+    if (s.status === "running") continue;
+    if (s.status === "done") {
+      const via = s.manager ? ` via \`${s.manager}\`` : "";
+      notify([
+        `✅ Installed **${s.tool}**${via}.`,
+        s.output ? `\n\`\`\`\n${s.output}\n\`\`\`` : "",
+      ].join(""));
+      return;
+    }
+    notify([
+      `❌ Install of **${s.tool}** failed: ${s.error ?? "unknown error"}`,
+      s.hint ? `\n\n${s.hint}` : "",
+      s.output ? `\n\n\`\`\`\n${s.output}\n\`\`\`` : "",
+    ].join(""));
+    return;
+  }
 }
 
 // ─── /docs [...] — knowledge system ────────────────────────────────────────
@@ -2039,7 +2257,7 @@ async function handleDocs(args: string, ctx: CommandContext): Promise<CommandRes
   if (!sub || sub === "status") {
     if (!ctx.api.getDocsStatus) return unsupported("/docs status");
     try {
-      return ok((await ctx.api.getDocsStatus()).text);
+      return ok((await ctx.api.getDocsStatus(ctx.projectPath, ctx.host)).text);
     } catch (err) {
       return fail("/docs", err);
     }
@@ -2059,7 +2277,7 @@ async function handleDocs(args: string, ctx: CommandContext): Promise<CommandRes
   if (sub === "init") {
     if (!ctx.api.docsInit) return unsupported("/docs init");
     try {
-      const r = await ctx.api.docsInit();
+      const r = await ctx.api.docsInit(ctx.projectPath, ctx.host);
       if (r.annotate_prompt) {
         // New bundle: mirror the TUI by dispatching the annotation pass as a
         // normal turn right after reporting init.
@@ -2079,7 +2297,7 @@ async function handleDocs(args: string, ctx: CommandContext): Promise<CommandRes
     const sessionId = activeSessionId(ctx);
     if (!sessionId) return ok("No active session — open a chat first so the maintenance pass has an agent to run on.");
     try {
-      return ok((await ctx.api.docsUpdate(sessionId, parts.slice(1).join(" "))).result);
+      return ok((await ctx.api.docsUpdate(sessionId, parts.slice(1).join(" "), ctx.projectPath, ctx.host)).result);
     } catch (err) {
       return fail("/docs", err);
     }
@@ -2088,7 +2306,7 @@ async function handleDocs(args: string, ctx: CommandContext): Promise<CommandRes
     if (!ctx.api.docsCleanup) return unsupported("/docs cleanup");
     const confirm = parts.slice(1).some((a) => a === "--yes" || a === "-y");
     try {
-      return ok((await ctx.api.docsCleanup(confirm)).result);
+      return ok((await ctx.api.docsCleanup(confirm, ctx.projectPath, ctx.host)).result);
     } catch (err) {
       return fail("/docs", err);
     }
@@ -2101,7 +2319,7 @@ async function handleDocs(args: string, ctx: CommandContext): Promise<CommandRes
 async function handleBan(args: string, ctx: CommandContext): Promise<CommandResult> {
   if (!ctx.api.getPermissions) return unsupported("/ban");
   try {
-    const perms = await ctx.api.getPermissions();
+    const perms = await ctx.api.getPermissions(activeSessionId(ctx), ctx.host);
     const parts = args.trim().split(/\s+/).filter(Boolean);
     const sub = parts[0]?.toLowerCase();
 
@@ -2380,7 +2598,7 @@ async function handleContext(ctx: CommandContext): Promise<CommandResult> {
 
 async function handleLsp(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const { lsp_servers } = await ctx.api.getLSPStatuses();
+    const { lsp_servers } = await ctx.api.getLSPStatuses(ctx.host);
     if (!lsp_servers?.length) {
       return {
         handled: true,
@@ -2480,7 +2698,7 @@ async function handleSkills(ctx: CommandContext): Promise<CommandResult> {
 
 async function handleMcp(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const servers = await ctx.api.getMCP();
+    const servers = await ctx.api.getMCP(ctx.host);
     if (!servers.length) {
       return {
         handled: true,
@@ -2702,4 +2920,241 @@ async function handleAdvisor(ctx: CommandContext): Promise<CommandResult> {
       messages: [{ role: "assistant", content: "**Advisor model:** default" }],
     };
   }
+}
+
+// ─── TUI-parity handlers ─────────────────────────────────────────────────────
+//
+// These mirror internal/tui/commands.go. The functional group persists through
+// the same REST endpoints the Settings forms use, so a slash command and a
+// Settings edit cannot diverge. The TUI-only group answers with a pointer to
+// the web equivalent rather than silently falling through to the LLM.
+
+// ─── /fake-agent [name|status] — harness identity ──────────────────────────
+
+async function handleFakeAgent(args: string, ctx: CommandContext): Promise<CommandResult> {
+  if (!ctx.api.getFakeAgent) return unsupported("/fake-agent");
+  try {
+    const cur = await ctx.api.getFakeAgent();
+    const name = args.trim().toLowerCase();
+    if (!name || name === "status") {
+      return ok(
+        `**Harness identity:** \`${cur.active || cur.fake_agent}\`\n\n` +
+          `Options: ${cur.options.map((o) => `\`${o}\``).join(" · ")}\n` +
+          `Example: \`/fake-agent claude-code\``,
+      );
+    }
+    if (!ctx.api.setFakeAgent) return unsupported("/fake-agent");
+    const res = await ctx.api.setFakeAgent(name);
+    return ok(`**Harness identity:** \`${res.active}\` — applies to subsequent LLM requests.`);
+  } catch (err) {
+    return fail("/fake-agent", err);
+  }
+}
+
+// ─── /explorer-model, /context-model — purpose model overrides ──────────────
+
+type PurposeKind = "explorer" | "context";
+
+const PURPOSE_META: Record<
+  PurposeKind,
+  {
+    title: string;
+    appliesTo: string;
+  }
+> = {
+  explorer: { title: "Explorer Model", appliesTo: "explore, scout" },
+  context: { title: "Context Model", appliesTo: "context, doc-sync" },
+};
+
+function renderPurposeStatus(
+  kind: PurposeKind,
+  state: { model: string; enabled: boolean },
+): CommandResult {
+  const meta = PURPOSE_META[kind];
+  const model = state.model || "(not set — will use small model, then main model)";
+  return ok(
+    [
+      `## ${meta.title}`,
+      "",
+      `- **Model:** ${state.model ? `\`${state.model}\`` : model}`,
+      `- **Enabled:** ${state.enabled ? "● enabled" : "○ disabled"}`,
+      `- **Applies to:** ${meta.appliesTo}`,
+      "",
+      `Usage: \`/${kind}-model [status|enable|disable|model [name|auto]]\``,
+    ].join("\n"),
+  );
+}
+
+async function handlePurposeModel(
+  kind: PurposeKind,
+  args: string,
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const name = `/${kind}-model`;
+  const api = ctx.api;
+  const get = kind === "explorer" ? api.getExplorerModel : api.getContextModel;
+  const set = kind === "explorer" ? api.setExplorerModel : api.setContextModel;
+  const setEnabled = kind === "explorer" ? api.setExplorerModelEnabled : api.setContextModelEnabled;
+
+  const parts = args.trim().split(/\s+/).filter(Boolean);
+  const sub = parts[0]?.toLowerCase();
+  try {
+    if (!sub || sub === "status") {
+      if (!get) return unsupported(name);
+      return renderPurposeStatus(kind, await get());
+    }
+    if (sub === "enable" || sub === "on" || sub === "disable" || sub === "off") {
+      if (!setEnabled) return unsupported(`${name} ${sub}`);
+      const enabled = sub === "enable" || sub === "on";
+      const res = await setEnabled(enabled);
+      return ok(`**${PURPOSE_META[kind].title}:** ${res.enabled ? "enabled" : "disabled"}.`);
+    }
+    // `/x-model model` opens the picker; `/x-model model <id>` writes directly;
+    // a bare `/x-model <id>` is accepted too (TUI's handleExplorerModelSub).
+    if (sub === "model") {
+      const target = parts.slice(1).join(" ").trim();
+      if (!target) {
+        // The picker writes through the same endpoints once a model is chosen,
+        // so it needs the setter — but not the (unused) enabled gate.
+        if (!set) return unsupported(`${name} model`);
+        return { handled: true, openModelPicker: true, modelPickerPurpose: kind };
+      }
+      if (target.toLowerCase() === "auto") {
+        if (!set) return unsupported(`${name} model auto`);
+        await set("auto");
+        return ok(`**${PURPOSE_META[kind].title}** cleared — falling back to the small model, then the main model.`);
+      }
+      if (!set) return unsupported(`${name} model`);
+      const res = await set(target);
+      return ok(`**${PURPOSE_META[kind].title}:** \`${res.model || target}\`.`);
+    }
+    // Bare value: treat as a model id.
+    if (!set) return unsupported(name);
+    if (sub === "auto") {
+      await set("auto");
+      return ok(`**${PURPOSE_META[kind].title}** cleared — falling back to the small model, then the main model.`);
+    }
+    const res = await set(parts.join(" "));
+    return ok(`**${PURPOSE_META[kind].title}:** \`${res.model || parts.join(" ")}\`.`);
+  } catch (err) {
+    return fail(name, err);
+  }
+}
+
+// ─── /editor [command], /editor-mode [mode] ─────────────────────────────────
+
+async function handleEditor(args: string, ctx: CommandContext): Promise<CommandResult> {
+  if (!ctx.api.getEditorConfig) return unsupported("/editor");
+  try {
+    const cfg = await ctx.api.getEditorConfig();
+    const editor = args.trim();
+    if (!editor) {
+      return ok(
+        `**Default editor:** ${cfg.editor ? `\`${cfg.editor}\`` : "(not set)"}\n\n` +
+          `Set with \`/editor <command>\` or Settings > Editor.`,
+      );
+    }
+    if (!ctx.api.setEditorConfig) return unsupported("/editor");
+    await ctx.api.setEditorConfig(editor, cfg.editor_mode, cfg.ide_mode);
+    return ok(`**Default editor:** \`${editor}\`.`);
+  } catch (err) {
+    return fail("/editor", err);
+  }
+}
+
+const EDITOR_MODES = ["external", "tmux-split", "tmux-window"];
+
+async function handleEditorMode(args: string, ctx: CommandContext): Promise<CommandResult> {
+  if (!ctx.api.getEditorConfig) return unsupported("/editor-mode");
+  try {
+    const cfg = await ctx.api.getEditorConfig();
+    const mode = args.trim().toLowerCase();
+    if (!mode) {
+      return ok(
+        `**Editor mode:** \`${cfg.editor_mode || "external"}\`\n\n` +
+          `Options: ${EDITOR_MODES.map((m) => `\`${m}\``).join(" · ")}`,
+      );
+    }
+    if (!EDITOR_MODES.includes(mode)) {
+      return ok(`Unknown editor mode \`${mode}\`. Use ${EDITOR_MODES.join(" | ")}.`);
+    }
+    if (!ctx.api.setEditorConfig) return unsupported("/editor-mode");
+    await ctx.api.setEditorConfig(cfg.editor, mode, cfg.ide_mode);
+    return ok(`**Editor mode:** \`${mode}\`.`);
+  } catch (err) {
+    return fail("/editor-mode", err);
+  }
+}
+
+// ─── /themes [name] — color theme ───────────────────────────────────────────
+
+async function handleThemes(args: string, ctx: CommandContext): Promise<CommandResult> {
+  if (!ctx.api.getThemes || !ctx.api.getTheme) return unsupported("/themes");
+  try {
+    const list = await ctx.api.getThemes();
+    const name = args.trim().toLowerCase();
+    if (!name) {
+      return ok(
+        [
+          "## Themes",
+          "",
+          list.themes.map((t) => `- ${t.name === list.current ? "**" : ""}\`${t.name}\`${t.name === list.current ? " (current)**" : ""} — ${t.label}`).join("\n"),
+          "",
+          "Switch with `/themes <name>` or Settings > Theme.",
+        ].join("\n"),
+      );
+    }
+    const match = list.themes.find((t) => t.name.toLowerCase() === name);
+    if (!match) {
+      return ok(`Unknown theme \`${name}\`. Available: ${list.themes.map((t) => `\`${t.name}\``).join(", ")}.`);
+    }
+    // Fetch the palette, apply it live, and persist the name so the pick
+    // survives a reload (the server's GET /api/theme reads the same config).
+    const resp = await ctx.api.getTheme(match.name);
+    applyThemeColors(resp.colors);
+    // Best-effort persist: a config endpoint that is missing (older server)
+    // must not throw away the already-applied live theme change.
+    if (ctx.api.getTUISettings && ctx.api.setTUISettings) {
+      const cur = await ctx.api.getTUISettings();
+      await ctx.api.setTUISettings({ ...cur, theme: match.name });
+    }
+    return ok(`**Theme:** ${match.label} (\`${match.name}\`).`);
+  } catch (err) {
+    return fail("/themes", err);
+  }
+}
+
+// ─── /search, /find — open the in-chat find bar ─────────────────────────────
+
+function handleSearch(args: string): CommandResult {
+  const query = args.trim();
+  // ChatPanel owns the find bar state and listens for this event; each tab
+  // guards on its own visibility. Mirrors the TUI's /search <query>.
+  window.dispatchEvent(new CustomEvent("ocode:open-chat-search", { detail: { query } }));
+  return ok(
+    query
+      ? `Find bar opened for **${query}**.`
+      : "Find bar opened. Type to search this conversation (Ctrl/Cmd+F also works).",
+  );
+}
+
+// ─── TUI-only command pointers ──────────────────────────────────────────────
+
+function handleTuiOnly(name: string, reason: string): CommandResult {
+  return ok(`**${name}** is not available in the web/desktop UI. ${reason}`);
+}
+
+function handleSecretHelp(args: string, ctx: CommandContext): CommandResult {
+  const sub = args.trim().toLowerCase();
+  if (!sub || sub === "status") {
+    return ok(
+      [
+        `**/secret** encrypts/decrypts files in place — the web UI does this from the **Files** tab: right-click a file (or folder) → **Encrypt / Decrypt**.`,
+        "",
+        "The TUI's `/secret <init|encrypt|decrypt|rekey>` runs the interactive CLI, which needs a local terminal.",
+        ctx.projectPath ? `\nProject: \`${ctx.projectPath}\`` : "",
+      ].join("\n"),
+    );
+  }
+  return handleTuiOnly("/secret", "Use the Files tab context menu (Encrypt / Decrypt), or run `ocode secret` in a terminal.");
 }

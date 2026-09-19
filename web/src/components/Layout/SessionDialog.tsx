@@ -145,8 +145,8 @@ export default function SessionDialog() {
                     disabled={loading}
                     // Warm the transcript before the click lands so the tab
                     // opens without a cold fetch + loading spinner.
-                    onMouseEnter={() => prefetchSession(session.id)}
-                    onFocus={() => prefetchSession(session.id)}
+                    onMouseEnter={() => prefetchSession(session.id, activeProject.host)}
+                    onFocus={() => prefetchSession(session.id, activeProject.host)}
                     onMouseDown={(e) => {
                       if (e.button === 1 && open) {
                         e.preventDefault(); // suppress middle-click autoscroll

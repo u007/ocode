@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/u007/ocode/internal/usage"
 )
@@ -10,6 +11,25 @@ func (h *Handler) HandleGetUsage(w http.ResponseWriter, r *http.Request) {
 	rangeLabel := r.URL.Query().Get("range")
 	if rangeLabel == "" {
 		rangeLabel = "day"
+	}
+
+	// ?session_id= scopes the summary to one chat session's attributed ledger
+	// rows (the same records the per-session spend gauge sums). Without it the
+	// endpoint keeps its process-wide behavior.
+	if sessionID := r.URL.Query().Get("session_id"); sessionID != "" {
+		recs, err := usage.Query(time.Time{}, time.Now())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		scoped := make([]usage.Record, 0, len(recs))
+		for _, rec := range recs {
+			if rec.SessionID == sessionID {
+				scoped = append(scoped, rec)
+			}
+		}
+		writeJSON(w, http.StatusOK, usage.Summarize(scoped))
+		return
 	}
 
 	labelMap := map[string]string{

@@ -162,7 +162,10 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const cwd = snap?.cwd || "";
   const ctxCur = snap?.context_current_tokens ?? 0;
   const ctxMax = snap?.context_max_tokens ?? 0;
-  const spending = spendingUSD ?? snap?.spending_usd ?? 0;
+  // Prefer the per-session snapshot value (populated for headless sessions by
+  // the server's per-session accumulator); the global store value is the
+  // process-wide daily total, used only as a fallback before a snapshot lands.
+  const spending = snap?.spending_usd ?? spendingUSD ?? 0;
   const modifiedCount = snap?.modified_files?.length ?? 0;
   const lspCount = snap?.lsp_servers?.length ?? 0;
   const extraPathsCount = snap?.extra_allowed_paths?.length ?? 0;

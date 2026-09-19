@@ -8,6 +8,7 @@ import { api } from "../../api/client";
 // reported bug: toggling yolo in one chat changed every other chat/project,
 // because the sidebar PUT a session-less process-global mode.
 vi.mock("../../stores/projectStore", () => ({
+  findProjectPathForTab: () => undefined,
   useProjectState: () => ({
     activeTabId: "session-1",
     state: { activeProject: null },

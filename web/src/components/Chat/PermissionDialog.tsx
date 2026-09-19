@@ -15,6 +15,8 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import type { PermissionDecision } from "@/api/types";
+import type { AskContext } from "@/stores/chatStore";
+import AskContextPreview from "./AskContextPreview";
 
 // Shell control-flow keywords are not real commands, so an "always allow
 // prefix" rule for them is meaningless. Mirrors agent.ShellControlKeywords.
@@ -41,6 +43,8 @@ interface Props {
   prefix?: string;
   /** Out-of-workspace target path for path-scope asks. */
   outOfScopePath?: string;
+  /** Assistant message (prose + reasoning) that led to this ask. */
+  context?: AskContext | null;
   requestId: string;
   onDecide: (requestId: string, decision: PermissionDecision) => Promise<PermissionDecideResult>;
 }
@@ -87,6 +91,7 @@ export default function PermissionDialog({
   scope,
   prefix,
   outOfScopePath,
+  context,
   requestId,
   onDecide,
 }: Props) {
@@ -207,7 +212,7 @@ export default function PermissionDialog({
         }
       }}
     >
-      <DialogContent className="max-h-[calc(100vh-2rem)] w-[calc(100%-2rem)] overflow-x-clip overflow-y-auto sm:max-w-2xl bg-card border-border">
+      <DialogContent className="dialog-viewport-max w-[calc(100%-2rem)] overflow-x-clip overflow-y-auto sm:max-w-2xl bg-card border-border">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-foreground">
             {confirming ? (
@@ -222,6 +227,8 @@ export default function PermissionDialog({
         <div className="space-y-4">
           {!confirming && (
             <>
+              <AskContextPreview context={context} />
+
               {denyReason && (
                 <div className="max-w-full rounded-lg border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-200">
                   <div className="font-medium">Auto-denied by LLM permission model:</div>

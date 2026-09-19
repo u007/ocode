@@ -81,8 +81,11 @@ type TUIStatus struct {
 	ContextCurrentTokens int    `json:"context_current_tokens,omitempty"`
 	ContextMaxTokens     int    `json:"context_max_tokens,omitempty"`
 	ContextModel         string `json:"context_model,omitempty"`
-	// Spending (USD) accumulated for the current session / day. Sourced from
-	// the usage package; nil if no usage has been recorded yet.
+	// Spending (USD) accumulated for THIS session (main turn + side paths like
+	// advisor/compaction/title). In the TUI it mirrors sidebarTelemetry.spend;
+	// on the server it comes from the per-session accumulator or the session's
+	// persisted "spend" metadata. 0 means unknown and is omitted, letting the
+	// web fall back to the process-wide daily total (GET /api/spending).
 	SpendingUSD  float64 `json:"spending_usd,omitempty"`
 	InputTokens  int64   `json:"input_tokens,omitempty"`
 	OutputTokens int64   `json:"output_tokens,omitempty"`

@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { Loader2, X } from "lucide-react";
 import { dismissCompaction, useCompactionState } from "../../lib/compactionState";
 
-/** Composer feedback deliberately lives outside the replaceable transcript. */
+/** Composer feedback for an in-flight (or failed) compaction. Completion is
+ *  reported by the persisted compaction-summary notice in the transcript, so
+ *  this bar is not retained once compaction finishes. */
 export default function CompactionStatus({ sessionId, queued }: { sessionId?: string | null; queued: boolean }) {
   const state = useCompactionState(sessionId);
   const [now, setNow] = useState(Date.now);
@@ -21,7 +23,6 @@ export default function CompactionStatus({ sessionId, queued }: { sessionId?: st
       {active && <Loader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin" />}
       <div className="min-w-0 flex-1 break-words">
         {active && <div>Compacting conversation… {Math.max(0, Math.floor((now - state.startedAt) / 1000))}s elapsed</div>}
-        {state?.status === "complete" && <div>Compacted: {state.originalLen} → {state.compactedLen} messages</div>}
         {state?.status === "error" && <div>Compaction failed: {state.error}</div>}
         {queued && <div>Compaction queued — waiting for the current work to finish. The running turn will not be interrupted.</div>}
       </div>

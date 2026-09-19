@@ -5,6 +5,7 @@ import type {
   QuestionAnswerPayload,
   QuestionPrompt,
 } from "@/api/types";
+import type { AskContext } from "@/stores/chatStore";
 
 function renderDialog(
   overrides: Partial<{
@@ -14,6 +15,7 @@ function renderDialog(
       answers: QuestionAnswerPayload[],
     ) => Promise<boolean>;
     onCancel: (requestId: string) => Promise<boolean>;
+    context: AskContext;
   }> = {},
 ) {
   const questions: QuestionPrompt[] = [
@@ -36,6 +38,7 @@ function renderDialog(
       questions={overrides.questions ?? questions}
       onSubmit={overrides.onSubmit ?? onSubmit}
       onCancel={overrides.onCancel ?? onCancel}
+      context={overrides.context}
     />,
   );
   return {
@@ -180,5 +183,78 @@ describe("QuestionDialog", () => {
     await waitFor(() => expect(onCancel).toHaveBeenCalledWith(requestId));
     // Failure keeps the dialog mounted and the button usable for a retry.
     await waitFor(() => expect((cancel as HTMLButtonElement).disabled).toBe(false));
+  });
+});
+
+describe("QuestionDialog model context", () => {
+  it("shows the last model message and its thinking", () => {
+    renderDialog({
+      context: {
+        text: "I need a decision before writing the migration.",
+        thinking: "The schema change is ambiguous.",
+      },
+    });
+    const region = screen.getByRole("region", { name: "Last model message" });
+    expect(region.textContent).toContain(
+      "I need a decision before writing the migration.",
+    );
+    expect(region.textContent).toContain(
+      "The schema change is ambiguous.",
+    );
+  });
+
+  it("renders no model-context panel without a context", () => {
+    renderDialog();
+    expect(
+      screen.queryByRole("region", { name: "Last model message" }),
+    ).toBeNull();
+  });
+});
+
+describe("QuestionDialog viewport bounding", () => {
+  it("caps the dialog to the viewport and scrolls a tall prompt internally", () => {
+    renderDialog({
+      questions: [
+        {
+          header: "Scope of data",
+          question: "Pick one? " + "q".repeat(400),
+          options: [
+            { label: "Visual parity only", description: "d".repeat(300) },
+            { label: "Full DevTools parity", description: "e".repeat(300) },
+          ],
+        },
+      ],
+      context: {
+        text: "A long model message. ".repeat(200),
+        thinking: "Thinking hard. ".repeat(200),
+      },
+    });
+
+    const content = screen
+      .getByText("Scope of data")
+      .closest('[role="dialog"]') as HTMLElement | null;
+    expect(content).toBeTruthy();
+
+    // Height is capped by the shared dvh-aware utility (no fixed height, no
+    // unbounded growth) and the content is a flex column so one child can
+    // scroll while the header/footer stay put.
+    expect(content!.className).toContain("dialog-viewport-max");
+    expect(content!.className).toContain("flex-col");
+    expect(content!.className).toContain("overflow-hidden");
+
+    // The scrollable region owns the tall content…
+    const scroller = content!.querySelector(".overflow-y-auto") as HTMLElement | null;
+    expect(scroller).toBeTruthy();
+    expect(scroller!.className).toContain("flex-1");
+    expect(scroller!.className).toContain("min-h-0");
+    expect(scroller!.contains(screen.getByText(/Pick one\?/))).toBe(true);
+
+    // …and the decisions are pinned outside it, so Submit/Deny can never be
+    // scrolled out of reach on a long prompt.
+    const submit = screen.getByRole("button", { name: /submit/i });
+    const cancel = screen.getByRole("button", { name: /^cancel$/i });
+    expect(scroller!.contains(submit)).toBe(false);
+    expect(scroller!.contains(cancel)).toBe(false);
+    expect(submit.closest(".shrink-0")).toBeTruthy();
   });
 });

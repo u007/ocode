@@ -2,7 +2,9 @@ import { useState, useEffect } from "react";
 import { api, apiPath, authHeaders, type DiscoveryConfig } from "../../api/client";
 import { useChatSelector, useChatDispatch, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
+import { resolveSessionHost } from "../../hooks/useSessionHost";
 import { eventBus } from "../../lib/eventBus";
+import { reportActionError } from "../../lib/actionErrors";
 import type { AgentInfo, LSPStatus } from "../../api/types";
 import PluginsPanel from "./PluginsPanel";
 import ReasoningLevelSelector from "./ReasoningLevelSelector";
@@ -138,12 +140,16 @@ export default function CoworkSidebar({
   const globalSmallModelEnabled = useChatSelector((s) => s.smallModelEnabled);
   const { activeTabId: sessionId } = projectState;
   const activeProject = projectState.state.activeProject ?? null;
+  // SSH/WSL host for the active session (undefined for local). Session-scoped
+  // API calls below must route through /api/remote/{host} for a remote
+  // project, or they hit the local server and return the wrong data.
+  const sessionHost = resolveSessionHost(projectState.state, sessionId ?? undefined);
   // `sessionModel` is the per-session slice field — a draft tab's locally-picked
   // model before the session exists server-side (see SessionSlice.model). The
   // authoritative model for a real session is `tuiStatus.main_model`, which is
   // that tab's own status snapshot (per-session since the multiproject event
   // work), so switching tabs shows each session's own model, not one global.
-  const { tuiStatus, messages, model: sessionModel } = useChatSelector((s) =>
+  const { tuiStatus, messages, model: sessionModel, advisorEnabled: sessionAdvisorEnabled } = useChatSelector((s) =>
     getSessionSlice(s, sessionId),
   );
   // Draft ("new-*") tab's locally-picked permission mode. Hook lives here
@@ -152,6 +158,16 @@ export default function CoworkSidebar({
     (s) => getSessionSlice(s, sessionId).permissionMode,
   );
   const effectiveModel = tuiStatus?.main_model || sessionModel || "";
+  // This tab's advisor on/off. Precedence: a pending optimistic flip (visible
+  // during the PUT round trip) → the session's own snapshot → the process
+  // default backing a draft/pre-session tab. `tuiStatus.advisor_enabled` is
+  // per-session (stamped by applySessionAdvisorFields), so switching tabs shows
+  // each chat's own gate instead of one global value.
+  const advisorOn =
+    sessionAdvisorEnabled ??
+    tuiStatus?.advisor_enabled ??
+    config.advisorEnabled ??
+    globalAdvisorEnabled;
 
   // ── Session title display — mirrors TUI's sidebarDisplayTitle() ────────────
   // Priority: explicit session_title → first user prompt (truncated) → "Untitled".
@@ -187,7 +203,7 @@ export default function CoworkSidebar({
         projectState.dispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: res.title, manual: true });
       } else if (sessionId) {
         // Fallback: refetch status so the SSE broadcast path still updates the tab
-        const st = await api.getSessionStatus(sessionId).catch(() => null);
+        const st = await api.getSessionStatus(sessionId, sessionHost).catch(() => null);
         if (st?.session_title) {
           dispatch({ type: "SET_TUI_STATUS", sessionId, status: st as any });
           projectState.dispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: st.session_title, manual: true });
@@ -235,7 +251,7 @@ export default function CoworkSidebar({
   }, [activeProject?.path]);
 
   useEffect(() => {
-    api.listAgents().then(setAgents).catch(console.error);
+    api.listAgents(sessionHost).then(setAgents).catch(console.error);
 
     // Fetch the main model name plus the other process-level defaults that
     // back the pre-session sidebar fallbacks (see ConfigState).
@@ -310,9 +326,10 @@ export default function CoworkSidebar({
     setSelectedAgent(name);
     setAgentBusy(true);
     api
-      .setAgent(name, sessionId || undefined)
+      .setAgent(name, sessionId || undefined, sessionHost)
       .catch((err) => {
         console.error("failed to switch agent", err);
+        reportActionError(err, "Switching agent");
         setSelectedAgent(prev);
       })
       .finally(() => setAgentBusy(false));
@@ -376,12 +393,13 @@ export default function CoworkSidebar({
           dispatch({ type: "SET_SESSION_PERMISSION_MODE", sessionId, mode: next });
         }
       } else {
-        await api.setPermissionMode(next, sessionId);
-        const status = await api.getSessionStatus(sessionId);
+        await api.setPermissionMode(next, sessionId, sessionHost);
+        const status = await api.getSessionStatus(sessionId, sessionHost);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
       }
     } catch (e) {
       console.error("set permission mode error", e);
+      reportActionError(e, "Changing permission mode");
     } finally {
       setModeLoading(false);
     }
@@ -394,32 +412,67 @@ export default function CoworkSidebar({
     try {
       await api.setPermissionModelEnabled(enabled);
       if (sessionId) {
-        const status = await api.getSessionStatus(sessionId);
+        const status = await api.getSessionStatus(sessionId, sessionHost);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
       }
     } catch (e) {
       console.error("toggle perm enabled error", e);
+      reportActionError(e, "Toggling auto-permission");
     } finally {
       setPermLoading(false);
     }
   };
 
   const toggleAdvisor = async () => {
-    const current = tuiStatus?.advisor_enabled ?? config.advisorEnabled ?? globalAdvisorEnabled;
+    const current = advisorOn;
     const next = !current;
     setAdvisorLoading(true);
-    dispatch({ type: "SET_ADVISOR_ENABLED", enabled: next });
+    // A real session's toggle is scoped to that tab and persisted per session
+    // by the server, so it must not clobber the shared global default that
+    // backs draft/pre-session tabs. Only the fallback path writes the store.
+    const targetSessionId = sessionId && !isDraftTab ? sessionId : undefined;
+    if (targetSessionId) {
+      // Optimistic per-session flip so the checkbox moves on click instead of
+      // waiting for the PUT + snapshot round trip. The reducer clears it once a
+      // snapshot confirms the same value; a racing background poll that still
+      // disagrees leaves it in place rather than flashing back.
+      dispatch({ type: "SET_SESSION_ADVISOR_ENABLED", sessionId: targetSessionId, enabled: next });
+    } else {
+      dispatch({ type: "SET_ADVISOR_ENABLED", enabled: next });
+    }
     try {
-      await api.setAdvisorEnabled(next);
-      if (sessionId) {
-        const status = await api.getSessionStatus(sessionId);
-        dispatch({ type: "SET_TUI_STATUS", sessionId, status });
+      // Pass the host only when present so a local call stays byte-identical;
+      // a remote project's session must reach that host's server.
+      await api.setAdvisorEnabled(next, targetSessionId, ...(sessionHost ? [sessionHost] : []));
+      if (targetSessionId) {
+        const status = await api.getSessionStatus(targetSessionId, sessionHost);
+        dispatch({ type: "SET_TUI_STATUS", sessionId: targetSessionId, status });
+        // The refetch is authoritative (the server persists synchronously
+        // before the PUT returns), so retire the optimistic shadow now. The
+        // reducer's keep-on-disagreement rule only needs to cover polls that
+        // raced the in-flight PUT; a snapshot fetched after completion must
+        // always win, even in the pathological partial-write case.
+        dispatch({ type: "SET_SESSION_ADVISOR_ENABLED", sessionId: targetSessionId, enabled: undefined });
       } else {
         setConfig((prev) => ({ ...prev, advisorEnabled: next }));
       }
     } catch (e) {
       console.error("toggle advisor error", e);
-      dispatch({ type: "SET_ADVISOR_ENABLED", enabled: current ?? true });
+      reportActionError(e, "Toggling the advisor");
+      if (targetSessionId) {
+        // Revert the optimistic flip, then refetch so the sidebar shows the
+        // value actually in effect (the PUT may have partially applied).
+        dispatch({ type: "SET_SESSION_ADVISOR_ENABLED", sessionId: targetSessionId, enabled: current });
+        api
+          .getSessionStatus(targetSessionId, sessionHost)
+          .then((status) => {
+            dispatch({ type: "SET_TUI_STATUS", sessionId: targetSessionId, status });
+            dispatch({ type: "SET_SESSION_ADVISOR_ENABLED", sessionId: targetSessionId, enabled: undefined });
+          })
+          .catch(() => {});
+      } else {
+        dispatch({ type: "SET_ADVISOR_ENABLED", enabled: current ?? true });
+      }
     } finally {
       setAdvisorLoading(false);
     }
@@ -433,13 +486,14 @@ export default function CoworkSidebar({
     try {
       await api.setSmallModelEnabled(next);
       if (sessionId) {
-        const status = await api.getSessionStatus(sessionId);
+        const status = await api.getSessionStatus(sessionId, sessionHost);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
       } else {
         setConfig((prev) => ({ ...prev, smallModelEnabled: next }));
       }
     } catch (e) {
       console.error("toggle small model error", e);
+      reportActionError(e, "Toggling the small model");
       dispatch({ type: "SET_SMALL_MODEL_ENABLED", enabled: current ?? false });
     } finally {
       setSmallLoading(false);
@@ -453,13 +507,14 @@ export default function CoworkSidebar({
     try {
       await api.setExplorerModelEnabled(next);
       if (sessionId) {
-        const status = await api.getSessionStatus(sessionId);
+        const status = await api.getSessionStatus(sessionId, sessionHost);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
       } else {
         setConfig((prev) => ({ ...prev, explorerModelEnabled: next }));
       }
     } catch (e) {
       console.error("toggle explorer model error", e);
+      reportActionError(e, "Toggling the explorer model");
     } finally {
       setExplorerLoading(false);
     }
@@ -472,13 +527,14 @@ export default function CoworkSidebar({
     try {
       await api.setContextModelEnabled(next);
       if (sessionId) {
-        const status = await api.getSessionStatus(sessionId);
+        const status = await api.getSessionStatus(sessionId, sessionHost);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
       } else {
         setConfig((prev) => ({ ...prev, contextModelEnabled: next }));
       }
     } catch (e) {
       console.error("toggle context model error", e);
+      reportActionError(e, "Toggling the context model");
     } finally {
       setContextLoading(false);
     }
@@ -495,13 +551,14 @@ export default function CoworkSidebar({
     try {
       await api.setAutoContinue({ enabled: next });
       if (sessionId) {
-        const status = await api.getSessionStatus(sessionId);
+        const status = await api.getSessionStatus(sessionId, sessionHost);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
       } else {
         setConfig((prev) => ({ ...prev, autoContinueEnabled: next }));
       }
     } catch (e) {
       console.error("toggle auto-continue error", e);
+      reportActionError(e, "Toggling auto-continue");
     } finally {
       setAutoContinueLoading(false);
     }
@@ -520,6 +577,7 @@ export default function CoworkSidebar({
       setDiscoveryCfg(saved && typeof saved.enabled === "boolean" ? saved : next);
     } catch (e) {
       console.error("toggle discovery error", e);
+      reportActionError(e, "Toggling discovery");
     } finally {
       setDiscoveryLoading(false);
     }
@@ -646,8 +704,8 @@ export default function CoworkSidebar({
           >
             <div className="flex items-center justify-between gap-2">
               <span className="text-muted-foreground">Advisor</span>
-              <span className={`font-mono text-[11px] ${(tuiStatus?.advisor_enabled ?? config.advisorEnabled ?? globalAdvisorEnabled) ? "text-emerald-400" : "text-muted-foreground"}`}>
-                {(tuiStatus?.advisor_enabled ?? config.advisorEnabled ?? globalAdvisorEnabled) ? "●on" : "○off"}
+              <span className={`font-mono text-[11px] ${advisorOn ? "text-emerald-400" : "text-muted-foreground"}`}>
+                {advisorOn ? "●on" : "○off"}
               </span>
             </div>
             <div className="text-foreground font-mono truncate">
@@ -658,7 +716,7 @@ export default function CoworkSidebar({
             <span className="text-xs text-muted-foreground">Advisor enabled</span>
             <input
               type="checkbox"
-              checked={Boolean(tuiStatus?.advisor_enabled ?? config.advisorEnabled ?? globalAdvisorEnabled)}
+              checked={Boolean(advisorOn)}
               disabled={advisorLoading}
               onChange={toggleAdvisor}
               className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
