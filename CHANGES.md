@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-09-19 — Spend history ledger + remaining command-context host routing
+
+- Follow-up to the session-switch work: (a) headless (web/desktop) LLM calls were never written to the usage ledger, and the ledger had no session attribution, so a session's spend history could not be recovered when its transcript metadata total was missing; (b) a handful of slash-command handlers still called session/project-scoped endpoints without the tab's SSH host.
+
+- **Spend ledger attribution (`internal/usage/usage.go`).** `Record` gains `SessionID string json:"sid,omitempty"` (additive; legacy rows without `sid` still decode). `Append` is the single low-level writer; `RecordUsage` keeps its signature (delegates to an unattributed record, so the TUI call site is untouched) and new `RecordUsageForSession(...)` writes an attributed row. New `SessionSpend(sessionID)` sums one session's rows directly from the file (deliberately bypassing the time-window `queryCached` path, which is `[from,to]`-shaped, not session-shaped).
+
+- **Headless recording (`internal/server/agent_session.go`).** New `recordTurnUsage` runs on the headless path of `runTurn` and writes one ledger row per Step message carrying usage/spend, tagged with the session id — the web/desktop counterpart of the TUI's `recordUsageFromMessage`. Async via `crashguard.Go`; `promptTokens` normalized so cross-provider ratios stay uniform.
+
+- **Recoverable per-session spend (`internal/server/handler_session_state.go`).** `applySessionSpending` now has strict precedence: live agent total → persisted `spend` metadata → **only when both are absent**, `usage.SessionSpend(id)`. This recovers history lost from metadata without double-counting. Also `GET /api/usage?session_id=` scopes the summary to one session's attributed rows (`internal/server/handler_usage.go`).
+
+- **Command-context host routing (`web/src/api/client.ts`, `web/src/components/Chat/commands.ts`).** Optional `host` added to `undoFileChange`/`redoFileChange`/`getPermissions`/`getYolo`/`setYolo`/`setPermissionMode`/`setAgent`/`listAgents`/`getUsage` (plus `sessionId`/`host` on `getUsage`, and `project`/`host` on `initProject`); `ctx.host` (+ `ctx.projectPath` for `/init`) threaded at every call site. `POST /api/init` now accepts an optional `project` body field, validated against `allowedProjectRoots()` (same trust boundary as session resolution), so `/init` seeds the tab's repo rather than the server default. `CoworkSidebar` passes `sessionHost` to `listAgents`/`setAgent`/`setPermissionMode`; the settings form stays deliberately global.
+
+- Tests: `internal/usage/session_spend_test.go` (session-id round-trip incl. legacy row, per-session sum, missing-file zero, wire-shape omitempty), `internal/server/session_spend_test.go` additions (ledger fallback — mutation-verified to fail with the fallback disabled; live-wins precedence), and updated arg-arity expectations in `commands.sandbox.test.tsx` / `CoworkSidebar.permissionScope.test.tsx`. `go build ./...`, `gofmt`, `go vet` clean; full `go test ./internal/...` passes; `tsgo --noEmit` clean; full web suite 170 files / 1482 tests passes.
+
+- Residual: sessions that ran headless turns *before* this ships have no attributed ledger rows and no metadata total, so their historical spend is unrecoverable (rows before now are unattributed). New turns accrue correctly.
+
+- Files: `internal/usage/usage.go`, `internal/usage/session_spend_test.go` (new), `internal/server/agent_session.go`, `internal/server/handler_session_state.go`, `internal/server/handler_usage.go`, `internal/server/handler_info.go`, `internal/server/session_spend_test.go`, `web/src/api/client.ts`, `web/src/components/Chat/commands.ts`, `web/src/components/Chat/commands.sandbox.test.tsx`, `web/src/components/Layout/CoworkSidebar.tsx`, `web/src/components/Layout/CoworkSidebar.permissionScope.test.tsx`, `web/src/App.tsx`, `CHANGES.md`.
+
 ## 2026-09-19 — Ask dialogs bounded to the viewport with an internal scroller
 
 User report: the `ask`/question popup "is not bounded max by the screen height causing overshoot window vertically."
