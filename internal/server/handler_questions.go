@@ -194,9 +194,10 @@ func (h *Handler) HandleDismissQuestion(w http.ResponseWriter, r *http.Request) 
 // the TUI answer path (submitQuestionAnswers): inject the selected answers as
 // the question tool result, then re-run the agent.
 //
-// Only works in headless serve mode, where the server owns the agent. In /rc
-// bridge mode the TUI owns the agent and its own question dialog; the server has
-// no hook to resolve it without TUI changes, so it returns 409 (see TODO.md).
+// In /rc bridge mode the TUI owns the agent and its own question dialog, so the
+// answers are forwarded over the bridge as RCResolution{Answers} and the TUI
+// applies them to its dialog (it broadcasts question_resolved itself). Headless
+// serve mode, where the server owns the agent, resolves and continues inline.
 func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RequestID string                  `json:"request_id"`

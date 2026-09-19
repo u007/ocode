@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/shell/sandbox"
 )
@@ -275,6 +277,38 @@ func TestGetPermissionsStatusShape(t *testing.T) {
 	if got["effective_behavior"] != wantBehavior {
 		t.Fatalf("effective_behavior = %v, want %v", got["effective_behavior"], wantBehavior)
 	}
+}
+
+// TestGetPermissionsConfigReadIsRaceFree pins the lock scope of
+// HandleGetPermissions: LoadFromOcode walks the config's Permissions.Tools /
+// Bash.Prefixes maps, and the rule setters mutate those same maps under h.mu.
+// Reading them after unlocking was a concurrent map read/write (a Go fatal, not
+// just a -race warning). Run with -race to catch a regression.
+func TestGetPermissionsConfigReadIsRaceFree(t *testing.T) {
+	h, _, _ := permModeHandler(t, 1)
+	h.mu.Lock()
+	if h.cfg == nil {
+		h.cfg = &config.Config{}
+	}
+	h.cfg.Ocode.Permissions.Tools = map[string]string{"read": "allow"}
+	h.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			h.HandleGetPermissions(rec, httptest.NewRequest("GET", "/api/permissions", nil))
+		}()
+		go func() {
+			defer wg.Done()
+			body, _ := json.Marshal(map[string]string{"tool": "bash", "level": "allow"})
+			rec := httptest.NewRecorder()
+			h.HandleSetPermission(rec, httptest.NewRequest("POST", "/api/permissions", bytes.NewReader(body)))
+		}()
+	}
+	wg.Wait()
 }
 
 // TestSessionStatusCarriesPerSessionPermissionMode locks the SSE/status path:

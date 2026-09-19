@@ -41,22 +41,29 @@ func (h *Handler) HandleGetPermissions(w http.ResponseWriter, r *http.Request) {
 	// into another chat or project), so the web passes its active session id.
 	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
 
+	// Build the manager from the config WHILE holding h.mu. LoadFromOcode
+	// iterates Permissions.Tools and Bash.Prefixes, and the rule setters
+	// (HandleSetPermission / HandleSetBashRule) mutate those same maps under
+	// h.mu — so reading them after unlocking is a concurrent map read/write
+	// (a Go fatal, not just a race-detector warning). Only the cheap map walk
+	// happens under the lock; the session-scoped resolution below re-takes it.
 	h.mu.Lock()
 	cfg := h.cfg
-	h.mu.Unlock()
-
 	if cfg == nil {
+		h.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, "config not loaded")
 		return
 	}
-
 	pm := agent.NewPermissionManager()
 	pm.LoadFromOcode(cfg.Ocode.Permissions)
+	h.mu.Unlock()
 
 	// The session's live mode wins over the config default: a toggle moves its
 	// agent without touching the durable config, and GET must report what is
 	// actually in force for that session. Without a session id the config
-	// default is the only honest answer.
+	// default is the only honest answer. Called with no lock held:
+	// effectivePermissionMode reads the RC bridge and agent map (h.mu) and may
+	// load session metadata from disk.
 	liveMode := h.effectivePermissionMode(sessionID, pm)
 
 	type ruleEntry struct {
@@ -131,8 +138,14 @@ func (h *Handler) sessionPermissionMode(sessionID string) (agent.PermissionMode,
 	if sessionID == "" {
 		return "", false
 	}
-	mode, ok := sessionPermissionModeForDir(h.sessionProjectRoot(sessionID), sessionID)
-	return mode, ok
+	projectRoot := h.sessionProjectRoot(sessionID)
+	if projectRoot == "" {
+		// Unresolvable session: LoadForDir("") would fall back to the process
+		// workdir and could read an unrelated project's storage. Report no
+		// override so the caller uses the config default instead.
+		return "", false
+	}
+	return sessionPermissionModeForDir(projectRoot, sessionID)
 }
 
 // sessionPermissionModeForDir loads the permission-mode override from the

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-19 — Review fixes: per-session permission GET race + changelog version bump
+
+- **`internal/server/handler_permissions.go` — concurrent map read/write in `HandleGetPermissions`.** The per-session rework copied the `h.cfg` pointer under `h.mu`, then called `pm.LoadFromOcode(cfg.Ocode.Permissions)` **after** unlocking. `LoadFromOcode` iterates `Permissions.Tools` / `Bash.Prefixes`, while `HandleSetPermission` and `HandleSetBashRule` mutate those same maps under `h.mu` — a Go `fatal error: concurrent map read and map write`, not merely a `-race` warning. Fixed by building the manager while holding the lock (the pre-change scope) and unlocking before `effectivePermissionMode`, which re-takes `h.mu` and may read session metadata from disk. Regression: `TestGetPermissionsConfigReadIsRaceFree` (concurrent GET + POST `/api/permissions`; verified to fail under `-race` against the pre-fix lock scope).
+
+- **`CHANGES.md` version bump corrected** to `0.8.97 → 0.8.102`; the `[Unreleased]` line still read `0.8.101` after the version was bumped to `0.8.102`, failing `TestVersionMatchesChangelog` (the only failing package in `go test ./...`).
+
+- **Docs/robustness nits from the same review.** `HandleAnswerQuestion`'s comment still claimed the `/rc` bridge path "returns 409" — it now forwards `RCResolution{Answers}` to the TUI; corrected. `sessionPermissionMode` now returns `ok=false` for an unresolvable session instead of calling `LoadForDir("")`, which falls back to the process workdir and could read an unrelated project's storage.
+
 ## 2026-09-19 — Files tab: right-click a file/folder to open it in Finder / Explorer / the Linux file manager
 
 - Requested: "files tab explorer need the os native open in explorer or open in finder the directory via right click, or right click to show the file location on finder or explorer or thunar or ubuntu or what ever linux or wayland preset file explorer". The TUI already had this (`ctrl+o` reveal in `internal/tui/files_model.go`), but the web Files tab context menu had no such action, and the server `POST /api/files/open` only accepted `mode: "editor" | "os"` and rejected directories outright.
@@ -1097,7 +1105,7 @@
 ## [Unreleased]
 
 - **Remote web session routing (2026-09-17)** — open tabs register their remote hosts with the event bus; session model selection, command context, and agent-run seed requests follow the session host. Agent-run caches are host-scoped, unresolved project snapshots defer seed requests, and clearing the active project clears the event bus's active host. Regression coverage includes host inventory, model-dialog routing, command context, project-store state, and agent-run loading.
-- **Version Bump** — 0.8.97 → 0.8.101
+- **Version Bump** — 0.8.97 → 0.8.102
 - **Web/Desktop: Computer Use settings group** (`web/src/components/Settings/`) — new `ComputerUseForm.tsx` (enable checkbox + Save, loads `GET /api/config/computer-use`, saves `PUT /api/config/computer-use`) registered as its own `computer-use` nav entry in `SettingsPanel.tsx` (`OCODE_GROUPS` after OCR + `renderGroup` case). Renders the shared `computer.StatusLines` block, so the panel shows the platform backend and the macOS permission reminder without probing the desktop. Regression suite: `ComputerUseForm.test.tsx` (nav registration verified to fail without the `OCODE_GROUPS` entry). `docs/computer-use.md` updated to document the panel as the third toggle surface.
 - **Agent: remove state reflection feature** (`internal/agent/`) — deleted `state_reflect.go`, `state_reflect_test.go`, `agent_state_reflect_methods.go` and the `reflectState` field / `reflectTail` call from `agent.go`; the reflection hook that appended user messages on preview/browser snapshot changes is removed entirely
 - **LSP diagnostics: fingerprint only emitted diagnostics** (`internal/agent/lsp_inject.go`) — `injectLSPDelta` now records `a.lspSeen[uri]` after the line-cap check and rendering, so diagnostics that were skipped or never delivered are not permanently marked as reported
