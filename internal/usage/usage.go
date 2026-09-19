@@ -40,7 +40,7 @@ type Record struct {
 	// Empty for legacy rows and for callers without a session (e.g. an
 	// untagged utility call); such rows are process-global. It lets a
 	// session's own spend history survive a lost transcript-metadata total
-	// (see QuerySession / Handler.applySessionSpending).
+	// (see SessionSpend).
 	SessionID string `json:"sid,omitempty"`
 }
 

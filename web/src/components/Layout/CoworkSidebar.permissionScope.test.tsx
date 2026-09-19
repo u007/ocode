@@ -66,7 +66,7 @@ describe("CoworkSidebar permission-mode scoping", () => {
     const pill = await screen.findByRole("button", { name: /^normal/i });
     fireEvent.click(pill);
     await waitFor(() =>
-      expect(api.setPermissionMode).toHaveBeenCalledWith("yolo", "session-1"),
+      expect(api.setPermissionMode).toHaveBeenCalledWith("yolo", "session-1", undefined),
     );
   });
 

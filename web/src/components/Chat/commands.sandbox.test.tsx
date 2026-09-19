@@ -59,14 +59,14 @@ describe("/sandbox command", () => {
 
   it("on invokes setPermissionMode('sandbox', sessionId) — scoped, never global", async () => {
     const res = await dispatchCommand("/sandbox on", ctx("ses_abc"));
-    expect(mockSetPermissionMode).toHaveBeenCalledWith("sandbox", "ses_abc");
+    expect(mockSetPermissionMode).toHaveBeenCalledWith("sandbox", "ses_abc", undefined);
     expect(res.handled).toBe(true);
     expect(res.messages?.[0]?.content).toContain("Sandbox mode");
   });
 
   it("off invokes setPermissionMode('normal', sessionId)", async () => {
     await dispatchCommand("/sandbox off", ctx("ses_xyz"));
-    expect(mockSetPermissionMode).toHaveBeenCalledWith("normal", "ses_xyz");
+    expect(mockSetPermissionMode).toHaveBeenCalledWith("normal", "ses_xyz", undefined);
   });
 
   it("status reads getPermissions scoped to the session and reports confined behavior", async () => {
@@ -79,7 +79,7 @@ describe("/sandbox command", () => {
       bash_rules: [],
     } as never);
     const res = await dispatchCommand("/sandbox status", ctx("ses_stat"));
-    expect(mockGetPermissions).toHaveBeenCalledWith("ses_stat");
+    expect(mockGetPermissions).toHaveBeenCalledWith("ses_stat", undefined);
     expect(res.messages?.[0]?.content).toContain("**on**");
     expect(res.messages?.[0]?.content).toContain("confined");
   });
@@ -92,7 +92,7 @@ describe("/yolo command", () => {
 
   it("on invokes setYolo(true, sessionId) — scoped, never global", async () => {
     await dispatchCommand("/yolo on", ctx("ses_yolo"));
-    expect(api.setYolo).toHaveBeenCalledWith(true, "ses_yolo");
+    expect(api.setYolo).toHaveBeenCalledWith(true, "ses_yolo", undefined);
   });
 });
 
