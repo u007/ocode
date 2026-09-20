@@ -10,16 +10,7 @@ source_scorecard: ../scores/muse-spark-1.2.md
 threshold: 0.75
 revalidate_when: model_version changes   # STALE on any version bump — re-benchmark
 ---
-
 # Engineering-conduct tuning — muse-spark-1.2
-
-> Generated from `../scores/muse-spark-1.2.md`. **Universal corpus: no stack
-> marker** — these rules are active in every repo when `muse-spark-1.2` is the
-> model. Covers **only** safety, error-handling, and validation. It says
-> nothing about fail-fast, hallucination, testing, simplicity,
-> surgical-changes, lifecycle, verification, code-review, debugging, or
-> context-accuracy — the model already handles those well and restating them
-> would waste prompt/cache budget.
 
 <!-- kaizen:digest -->
 **Safety — four specific gaps:**
@@ -73,9 +64,6 @@ the same blast-radius problem.
 
 ### Inspect the target before acting
 
-The model said "confirm first" for destructive/outward-facing actions but
-stopped there.
-
 - Before deleting, overwriting, or force-pushing a target, **inspect it
   first** (read the file, check the branch/table contents).
 - If what you find **contradicts how the target was described**, or you
@@ -109,10 +97,6 @@ exception clause.
 
 ### Rethrow logging
 
-Asked what the minimum obligation is on a caught-and-rethrown error, the
-model described preserving the error via `{ cause: e }` but never described
-the log itself.
-
 - Before rethrowing an error you can't fully handle, **log it with (1) what
   was being attempted and (2) the error/reason**, using the project's
   structured logger — not just "log it" or chain the cause and move on.
@@ -120,10 +104,6 @@ the log itself.
   the log call.
 
 ### The benign-case carve-out is not "log nothing"
-
-Asked how to handle an expected ENOENT on an optional-file probe, the model
-chose to **return a default with no log and no comment** — exactly the
-silent-swallow pattern the always-log rule bans.
 
 - A known-benign case (e.g. ENOENT on an optional-file probe) is the **one**
   carve-out from "always log" — but it still requires **either** a
@@ -135,10 +115,6 @@ silent-swallow pattern the always-log rule bans.
 ## Validation — two house-specific patterns
 
 ### Bigint coercion
-
-Asked what to do before returning a bigint `run_id` in a JSON response, the
-model converted it to a string (`run_id.toString()`) instead of a number,
-missing the project's actual convention.
 
 - Coerce DB-sourced bigint ids to `Number(id)` before including them in a
   JSON response — not a string. `Number()` is the house pattern; string
@@ -155,8 +131,3 @@ by a meaningful field."
   field **and** paginated, by default — "stable ordering" (consistent
   tie-breaking) is not the same claim as "sorted by a meaningful field."
   State both explicitly.
-
----
-
-*Regenerate this file whenever `muse-spark-1.2`'s version changes or the
-conduct corpus revision bumps.*

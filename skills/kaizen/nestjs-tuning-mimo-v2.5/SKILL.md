@@ -10,16 +10,9 @@ source_scorecard: ../scores/mimo-v2.5.md
 threshold: 0.75
 revalidate_when: model_version changes   # STALE on any version bump — re-benchmark
 ---
-
 # NestJS tuning — mimo-v2.5
 
-> Generated from `../scores/mimo-v2.5.md` (corpus_rev 1). Covers **only** the
-> tag this exact model scored below 0.75 on. It says nothing about modules, DI,
-> controllers/routing, pipes/validation, guards/interceptors, exception
-> filters, or async providers — the model already handles those well, and
-> restating them would waste prompt/cache budget.
-
-## Lifecycle hooks — shutdown order and version facts (weak: lifecycle 0.64)
+## Lifecycle hooks — shutdown order and version facts
 
 - Shutdown hook order is **`onModuleDestroy()` → `beforeApplicationShutdown()`
   → `onApplicationShutdown()`** — in that exact sequence. Do not place
@@ -36,8 +29,3 @@ revalidate_when: model_version changes   # STALE on any version bump — re-benc
 - Nest **awaits** a Promise-returning lifecycle hook before moving to the
   next phase — state this explicitly when asked about async hooks, don't just
   say hooks "run during bootstrap".
-
----
-
-*Regenerate this file whenever `mimo-v2.5`'s version changes or the NestJS
-corpus revision bumps.*

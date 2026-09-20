@@ -9,16 +9,9 @@ source_scorecard: ../scores/mimo-v2.5.md
 threshold: 0.75
 revalidate_when: model_version changes
 ---
-
 # VB.NET tuning — mimo-v2.5
 
-> Generated from `../scores/mimo-v2.5.md` (corpus_rev 1). Covers **only** the
-> tag this exact model scored below 0.75 on. It says nothing about
-> syntax-basics, properties, nullability, error-handling, linq-query, oop, or
-> conversions-arrays — the model already handles those well, and restating them
-> would waste prompt/cache budget.
-
-## Events: WithEvents/Handles vs AddHandler/RemoveHandler (weak: events 0.69)
+## Events: WithEvents/Handles vs AddHandler/RemoveHandler
 
 - When explaining `WithEvents` + `Handles`, always state explicitly that the
   compiler wires the handler **with no explicit `AddHandler` call** — this is

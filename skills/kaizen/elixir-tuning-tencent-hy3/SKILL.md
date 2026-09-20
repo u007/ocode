@@ -17,14 +17,7 @@ source_scorecard: ../scores/tencent__hy3.md
 threshold: 0.75
 revalidate_when: model_version changes
 ---
-
 # Elixir corrections for tencent/hy3
-
-hy3 is strong across most of the Elixir stack (94% overall; immutability,
-processes/OTP, protocols/behaviours, enum/stream, concurrency all ≥ 0.88).
-The one area below threshold is **pattern-matching** (subscore 0.70). The
-sections below target only the specific mistakes it made — everything else it
-already knows, so nothing else is restated here.
 
 ## Pattern-matching: state the failure modes and the guard whitelist
 
@@ -32,7 +25,7 @@ hy3 explains *how* matching binds variables but repeatedly omits the hard
 edges: the exception names, the "not assignment" framing, and what guards are
 actually allowed to contain. Always include these.
 
-### `=` is a match, NOT assignment (elixir-pm-01)
+### `=` is a match, NOT assignment
 
 hy3 correctly said `{:ok, value} = fetch()` binds `value` and raises on a
 `{:error, _}` shape, but never made the core conceptual point that `=` is not
@@ -45,7 +38,7 @@ assignment. Always add it explicitly:
 - A variable already bound can still appear on the left; a bare variable
   rebinds, which is exactly why the "it's assignment" mental model is wrong.
 
-### Guards use `when` and are restricted to a whitelist (elixir-pm-02)
+### Guards use `when` and are restricted to a whitelist
 
 This is hy3's weakest answer (0.33). It described function-head clauses and
 top-to-bottom ordering correctly, but called guards merely "boolean

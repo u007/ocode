@@ -10,16 +10,9 @@ source_scorecard: ../scores/mimo-v2.5.md
 threshold: 0.75
 revalidate_when: model_version changes   # STALE on any version bump — re-benchmark
 ---
-
 # Next.js tuning — mimo-v2.5
 
-> Generated from `../scores/mimo-v2.5.md` (corpus_rev 1). Covers **only** the
-> tags this exact model scored below 0.75 on. It says nothing about app-router,
-> server-components, data-fetching, caching, rendering, server-actions,
-> route-handlers, streaming, or navigation — the model already handles those
-> well, and restating them would waste prompt/cache budget.
-
-## Metadata API (weak: metadata 0.67)
+## Metadata API
 
 - The static `metadata` export and `generateMetadata` are **Server Component
   only**. A file with `"use client"` cannot export `metadata` — state this
@@ -30,8 +23,3 @@ revalidate_when: model_version changes   # STALE on any version bump — re-benc
   pass resolves once. Say this explicitly: it avoids double-fetching the same
   data for the head tags and the page body, it isn't a separate unrelated
   fetch.
-
----
-
-*Regenerate this file whenever `mimo-v2.5`'s version changes or the Next.js
-corpus revision bumps.*

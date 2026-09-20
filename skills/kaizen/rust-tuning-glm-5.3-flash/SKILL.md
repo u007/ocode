@@ -19,12 +19,7 @@ source_scorecard: ../scores/glm-5.3-flash.md
 threshold: 0.75
 revalidate_when: model_version changes
 ---
-
 # Rust corrections for glm-5.3-flash
-
-glm-5.3-flash is strong across the stack. One area falls below threshold:
-**async**. The sections below target only the specific mistakes it made
-there — nothing else is restated here.
 
 <!-- kaizen:digest -->
 **Rust async — always name the mechanism, not just the effect:**

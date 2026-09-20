@@ -10,17 +10,9 @@ source_scorecard: ../scores/mimo-v2.5.md
 threshold: 0.75
 revalidate_when: model_version changes   # STALE on any version bump — re-benchmark
 ---
-
 # Rails tuning — mimo-v2.5
 
-> Generated from `../scores/mimo-v2.5.md` (corpus_rev 1). Covers **only**
-> `migrations-schema` (0.72), the sole tag this exact model scored below 0.75
-> on. It says nothing about activerecord, querying, callbacks-transactions,
-> controllers-routing, views-helpers, concerns-services, or caching-jobs — the
-> model already handles those well (all ≥ 0.94), and restating them would
-> waste prompt/cache budget.
-
-## Migrations & schema (weak: migrations-schema 0.72)
+## Migrations & schema
 
 - **`schema.rb` and `structure.sql` are both the canonical schema *dump*, not
   documentation.** Their job is to let `db:schema:load` build a fresh
@@ -43,8 +35,3 @@ revalidate_when: model_version changes   # STALE on any version bump — re-benc
      substitute an unrelated risk (e.g. "removing a column") for this one —
      the index-build lock is the specific second foot-gun to name, distinct
      from the column-default/NOT NULL case.
-
----
-
-*Regenerate this file whenever `mimo-v2.5`'s version changes or the `ror`
-corpus revision bumps.*

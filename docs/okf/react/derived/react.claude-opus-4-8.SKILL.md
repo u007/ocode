@@ -11,18 +11,9 @@ threshold: 0.75
 revalidate_when: model_version changes   # STALE on any version bump — re-benchmark
 illustrative: true   # teaching placeholder, NOT a real eval — never embedded/shipped
 ---
-
 # React tuning — claude-opus-4-8
 
-> Generated from `../scores/claude-opus-4-8.md` (corpus_rev 1). Covers **only**
-> the tags this exact model scored below 0.75 on. It says nothing about hooks,
-> reconciliation, state, effects, perf, or context — the model already handles
-> those well, and restating them would waste prompt/cache budget.
->
-> **This is a worked EXAMPLE derived from an illustrative scorecard.** Re-derive
-> from a real evaluation before shipping.
-
-## Server Components & the client boundary (weak: rsc 0.58)
+## Server Components & the client boundary
 
 - `"use client"` is a **module-level boundary marker**, not a per-component
   switch. The directive makes that file *and everything it imports* part of the
@@ -37,7 +28,7 @@ illustrative: true   # teaching placeholder, NOT a real eval — never embedded/
   mount on the client and causes a render→fetch→render loading waterfall. State
   the timing difference, don't just say "fetch on the server".
 
-## Suspense & transitions (weak: suspense 0.55)
+## Suspense & transitions
 
 - Name the **mechanism** for what suspends: a component suspends when it reads a
   not-yet-ready resource — a pending Promise (e.g. via `use()`), a
@@ -48,14 +39,9 @@ illustrative: true   # teaching placeholder, NOT a real eval — never embedded/
   expensive render happens in the background. Frame it as urgent-vs-transition
   scheduling with `isPending` for pending UI — not "makes it async/faster".
 
-## Refs (weak: refs 0.67, low-n)
+## Refs
 
 - React 19: **`ref` is a normal prop** on function components; `forwardRef` is no
   longer required and is being phased out. When explaining "let a parent attach
   a ref to a child", give the React 19 answer, not only the legacy `forwardRef`
   wrap. (Low sample size — treat as a nudge, confirm against the current corpus.)
-
----
-
-*Regenerate this file whenever `claude-opus-4-8`'s version changes or the React
-corpus revision bumps.*

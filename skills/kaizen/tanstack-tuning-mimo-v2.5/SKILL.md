@@ -17,15 +17,7 @@ source_scorecard: ../scores/mimo-v2.5.md
 threshold: 0.75
 revalidate_when: model_version changes
 ---
-
 # TanStack corrections for mimo-v2.5
-
-mimo-v2.5 is strong across almost the entire stack (90% overall; query-keys,
-caching, invalidation, mutations, query-fn, suspense, prefetch,
-router-loaders, and router-typesafety are all ≥ 0.78). The one area below
-threshold is **router-search** (subscore 0.61). The sections below target
-only the specific mistakes it made there — everything else it already knows,
-so nothing else is restated here.
 
 ## router-search: reading is not the same as writing
 
@@ -61,9 +53,6 @@ different mechanisms:
   `loaderDeps` is the actual mechanism the question is testing.
 
 ## router-search: what validateSearch buys `useSearch()` specifically
-
-When asked what type-safety `validateSearch` unlocks app-wide, always name
-`useSearch()` as one of the typed surfaces, not just `<Link>`/`navigate`:
 
 - `Route.useSearch()` returns the fully validated/typed search object — not
   just `<Link to>`/`navigate()` accepting a schema-shaped `search` prop.

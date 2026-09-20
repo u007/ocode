@@ -128,6 +128,7 @@ okf_version: 0.1
 
 - [okf/_schema/scorecard.template.md](okf/_schema/scorecard.template.md)
 - [okf/conduct/scores/deepseek-v4-flash.md](okf/conduct/scores/deepseek-v4-flash.md)
+- [okf/conduct/scores/deepseek-v4.1-flash.md](okf/conduct/scores/deepseek-v4.1-flash.md)
 - [okf/conduct/scores/glm-5.3-flash.md](okf/conduct/scores/glm-5.3-flash.md)
 - [okf/conduct/scores/mimo-v2.5.md](okf/conduct/scores/mimo-v2.5.md)
 - [okf/conduct/scores/muse-spark-1.2.md](okf/conduct/scores/muse-spark-1.2.md)
@@ -248,6 +249,7 @@ okf_version: 0.1
 - [stack-detection.md](okf/_schema/stack-detection.md)
 - [deepseek-v4-flash.md](okf/conduct/answers/deepseek-v4-flash.md)
 - [deepseek-v4-flash.spotcheck.md](okf/conduct/answers/deepseek-v4-flash.spotcheck.md)
+- [deepseek-v4.1-flash.md](okf/conduct/answers/deepseek-v4.1-flash.md)
 - [glm-5.3-flash.md](okf/conduct/answers/glm-5.3-flash.md)
 - [mimo-v2.5.md](okf/conduct/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/conduct/answers/muse-spark-1.2.md)
@@ -255,6 +257,7 @@ okf_version: 0.1
 - [tencent__hy3.md](okf/conduct/answers/tencent__hy3.md)
 - [tencent__hy3.with-skill.md](okf/conduct/answers/tencent__hy3.with-skill.md)
 - [conduct.deepseek-v4-flash.SKILL.md](okf/conduct/derived/conduct.deepseek-v4-flash.SKILL.md)
+- [conduct.deepseek-v4.1-flash.SKILL.md](okf/conduct/derived/conduct.deepseek-v4.1-flash.SKILL.md)
 - [conduct.glm-5.3-flash.SKILL.md](okf/conduct/derived/conduct.glm-5.3-flash.SKILL.md)
 - [conduct.mimo-v2.5.SKILL.md](okf/conduct/derived/conduct.mimo-v2.5.SKILL.md)
 - [conduct.muse-spark-1.2.SKILL.md](okf/conduct/derived/conduct.muse-spark-1.2.SKILL.md)

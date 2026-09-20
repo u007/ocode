@@ -9,16 +9,9 @@ source_scorecard: ../scores/muse-spark-1.2.md
 threshold: 0.75
 revalidate_when: model_version changes
 ---
-
 # VB.NET tuning — muse-spark-1.2
 
-> Generated from `../scores/muse-spark-1.2.md` (corpus_rev 1). Covers **only**
-> the tag this exact model scored below 0.75 on. It says nothing about
-> syntax-basics, properties, nullability, error-handling, linq-query, oop, or
-> conversions-arrays — the model already handles those well, and restating them
-> would waste prompt/cache budget.
-
-## Events: WithEvents/Handles and AddHandler/RemoveHandler edge cases (weak: events 0.69)
+## Events: WithEvents/Handles and AddHandler/RemoveHandler edge cases
 
 - A single `Handles` clause can bind **one method to multiple events** by
   comma-separating them: `Handles btn1.Click, btn2.Click`. State this whenever

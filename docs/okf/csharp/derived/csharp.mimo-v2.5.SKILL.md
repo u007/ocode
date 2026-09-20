@@ -17,15 +17,7 @@ source_scorecard: ../scores/mimo-v2.5.md
 threshold: 0.75
 revalidate_when: model_version changes
 ---
-
 # C# corrections for mimo-v2.5
-
-mimo-v2.5 is strong across most of the stack (84% overall; linq,
-delegates-events, generics, disposal, async, and collections-spans are all
-≥ 0.78). Two areas fall below threshold: **types-nullability** (0.73) and
-**pattern-matching** (0.63). The sections below target only the specific
-mistakes it made there — everything else it already knows, so nothing else
-is restated here.
 
 ## types-nullability: record class positional members are init-only by default
 
