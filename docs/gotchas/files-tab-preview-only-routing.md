@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
-description: 'Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown Edit/Preview/Split mode switch. Updated 2026-09-17 with markdown mode switch section, useResizableSplit, live content propagation, automaticLayout, and re-verified test-suite status.'
+description: 'Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown Edit/Preview/Split mode switch. Updated 2026-09-17 with markdown mode switch section, useResizableSplit, live content propagation, automaticLayout, and re-verified test-suite status. Updated 2026-09-20: editor panes are hidden (not unmounted) across project switches, so viewer state survives them too.'
 resource: web/src/components/Files/FileTabContent.tsx
 tags:
   - gotcha
@@ -74,9 +74,25 @@ allowlist; `previewKindForPath` remains the sidebar/`PreviewSurface` dispatch
 helper.
 
 `FileTabContent` also owns the PDF-page and PPTX-slide state
-(`FileTabContent.tsx:22`, `:23`) that the controlled viewers need; every editor
-tab stays mounted (hidden, not unmounted — see `App.tsx:1013`), so this state
-survives tab switches.
+(`FileTabContent.tsx:78-79`) that the controlled viewers need; every editor
+tab stays mounted (hidden, not unmounted — `App.tsx` renders panes for **all**
+`editorTabs` and hides non-visible ones with the CSS `hidden` class, gated by a
+`visitedEditorTabsRef` lazy-mount set), so this state survives tab switches
+**and project switches** (2026-09-20). `visibleEditorTabs` still drives the tab
+bar, the resolved active id, context attachments, and save/close; the per-tab
+`session` prop is gated on a `visibleEditorTabIds` Set so a background
+project's pane does not fetch diff decorations for the active session.
+
+### Project switch (2026-09-20)
+
+A project switch used to reset an open preview because App rendered panes from
+`visibleEditorTabs = visibleEditorTabsForProject(editorTabs, activeProject)`,
+removing the outgoing project's `FileTabContent` from the tree. Panes now stay
+mounted and are hidden with CSS. The sidebar `PreviewHost` still remounts on a
+project switch (its `key={sideStateKey}` changes with `activeTabId`), so it
+persists shell state per project via `web/src/components/Preview/sidebarPreviewState.ts`,
+and per-file viewer state lives in `web/src/lib/previewViewState.ts`. See
+`gotchas/project-scope-is-mounting-not-visibility.md` for the full mechanism.
 
 ## Markdown mode switch (2026-09-17)
 

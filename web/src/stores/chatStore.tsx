@@ -229,6 +229,19 @@ export interface SessionSlice {
   totalMessages: number; // total messages on server
   hasMore: boolean; // whether older messages exist
   loadingMore: boolean; // currently fetching older messages
+  // Server index of `messages[0]`: how many transcript messages precede the
+  // loaded window. Lets a server search index (`GET /api/sessions/{id}/search`)
+  // be translated into a local position as `serverIndex - windowStartServerIndex`.
+  //
+  // Why an explicit anchor instead of deriving it: `totalMessages` is the
+  // server's count, but ADD_MESSAGE (App.tsx, for command replies like /help or
+  // /recap status) appends a CLIENT-ONLY message that is never persisted —
+  // so `totalMessages - messages.length` drifts negative and blind arithmetic
+  // would jump to the wrong bubble. Injections only ever append at the tail, so
+  // they never move this anchor. Maintained by MERGE_SNAPSHOT / PREPEND_MESSAGES
+  // (see updateSession); -1 means "not yet known", and callers must fall back
+  // to a tail reload rather than guess.
+  windowStartServerIndex: number;
   // True once this session's first page has been fetched at least once.
   // Lets ChatPanel skip re-fetching on remount and lets OpenSessionBar know
   // when a tab's "loading" spinner should clear.
@@ -293,6 +306,7 @@ export const emptySessionSlice: SessionSlice = {
   totalMessages: 0,
   hasMore: false,
   loadingMore: false,
+  windowStartServerIndex: -1,
   initialized: false,
   collapsedRunIds: [],
   tuiStatus: null,
@@ -552,7 +566,17 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return updateSession(state, action.sessionId, (s) => {
         const grown = [...s.messages, action.message];
         const capped = capMessages(grown, s.totalMessages || grown.length);
-        return { ...s, messages: capped.messages, hasMore: capped.hasMore || s.hasMore };
+        // If the append pushed the window past the cap it trims the HEAD, which
+        // moves the window start forward by exactly the number dropped. Without
+        // this the anchor would go stale and a search jump would land short.
+        const trimmed = grown.length - capped.messages.length;
+        return {
+          ...s,
+          messages: capped.messages,
+          windowStartServerIndex:
+            s.windowStartServerIndex >= 0 ? s.windowStartServerIndex + trimmed : -1,
+          hasMore: capped.hasMore || s.hasMore,
+        };
       });
     }
     case "SET_MESSAGES":
@@ -571,6 +595,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           initialized: true,
           hasMore: capped.hasMore,
           totalMessages: Math.max(s.totalMessages, action.messages.length),
+          // The turn-boundary broadcast carries the WHOLE transcript, so the
+          // window start is however many messages the cap trimmed off the head.
+          windowStartServerIndex: Math.max(0, action.messages.length - capped.messages.length),
           pendingPermission: pending.pendingPermission,
           permissionQueue: pending.permissionQueue,
           pendingQuestion: pending.pendingQuestion,
@@ -630,7 +657,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           msgs.push({ role: "assistant", content: action.delta });
         }
         const capped = capMessages(msgs, s.totalMessages || msgs.length);
-        return { ...s, messages: capped.messages, hasMore: capped.hasMore || s.hasMore };
+        // Same head-trim accounting as ADD_MESSAGE: a streamed append that
+        // exceeds the cap drops from the head and advances the window start.
+        const trimmed = msgs.length - capped.messages.length;
+        return {
+          ...s,
+          messages: capped.messages,
+          windowStartServerIndex:
+            s.windowStartServerIndex >= 0 ? s.windowStartServerIndex + trimmed : -1,
+          hasMore: capped.hasMore || s.hasMore,
+        };
       });
     case "LIVE_DELTA":
       return updateSession(state, action.sessionId, (s) => {
@@ -930,12 +966,26 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, tuiStatusReady: action.ready };
     case "PREPEND_MESSAGES":
       // Older messages loaded via scroll-up. Prepend and update pagination state.
+      //
+      // The anchor advances by exactly the number of messages prepended: the
+      // new window starts `len(action.messages)` transcript positions earlier
+      // than it did. Callers always request a contiguous older block ending at
+      // the current window start, so this subtraction is exact. A slice with no
+      // anchor yet (-1, e.g. a slice populated purely by live SSE before its
+      // first page resolved) adopts the position implied by this page.
       return updateSession(state, action.sessionId, (s) => {
         const hasMore = action.messages.length > 0 && s.messages.length + action.messages.length < action.total;
+        const nextStart = s.windowStartServerIndex >= 0
+          // Clamp at 0: a well-formed contiguous prefix never underflows, but a
+          // racing/duplicate prepend could, and a negative anchor is treated as
+          // "unknown" by consumers (silently disabling server anchoring).
+          ? Math.max(0, s.windowStartServerIndex - action.messages.length)
+          : Math.max(0, action.total - s.messages.length - action.messages.length);
         return {
           ...s,
           messages: [...action.messages, ...s.messages],
           totalMessages: action.total,
+          windowStartServerIndex: nextStart,
           hasMore,
           loadingMore: false,
         };
@@ -1001,6 +1051,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           ...s,
           messages: capped.messages,
           totalMessages: action.total,
+          // A snapshot is always a TAIL page of the transcript (getSession
+          // returns the newest N), so the window start is exactly the messages
+          // the snapshot is short of the server total.
+          windowStartServerIndex: Math.max(0, action.total - capped.messages.length),
           hasMore: capped.hasMore,
           live: s.turnActive ? s.live : [],
           initialized: true,

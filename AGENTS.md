@@ -56,6 +56,12 @@ name). Do not duplicate content between the two — update here only.
   model+provider from turn one so prompt caching engages immediately; also
   groups the session in OpenRouter logs). `setOpenRouterAttributionHeaders`
   sets it alongside the `HTTP-Referer`/`X-Title` attribution headers.
+  Because the conversation ID is the session id itself, `/reset-id`
+  (`session.RekeyForDir` + `Agent.RekeySession`/`RekeyOpenCodeSession`, and
+  `snapshot.Store.RekeySession` for the undo journal) re-keys a chat to a
+  fresh `ses_…` id while preserving the transcript. Any new session-id-keyed
+  map or journal must be moved by that path too, or `/reset-id` leaves it
+  stranded under the deleted id.
 
 ## Git Worktrees
 The default location for `git worktree` checkouts is `.worktrees/` in the

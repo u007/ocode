@@ -634,6 +634,38 @@ func TestMultiFileEditToolAcrossFiles(t *testing.T) {
 	}
 }
 
+// A multiedit-shaped call (top-level path, oldString/newString edits) must be
+// rejected with a schema error, not "cannot read : ... is a directory".
+func TestMultiFileEditToolRejectsWrongSchema(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd) //nolint:errcheck
+
+	if err := os.WriteFile("config.py", []byte("PORT = 8080\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := MultiFileEditTool{}
+	args, _ := json.Marshal(map[string]interface{}{
+		"path": "config.py",
+		"edits": []map[string]interface{}{
+			{"oldString": "PORT = 8080", "newString": "PORT = 9090"},
+		},
+	})
+
+	_, err := tool.Execute(args)
+	if err == nil || !strings.Contains(err.Error(), "edit 1: missing required field(s)") {
+		t.Fatalf("expected schema error, got %v", err)
+	}
+	got, _ := os.ReadFile("config.py")
+	if string(got) != "PORT = 8080\n" {
+		t.Fatalf("file must be untouched, got %q", string(got))
+	}
+}
+
 func TestExpandTilde(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {

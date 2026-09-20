@@ -52,11 +52,17 @@ export default function MediaViewer({
   projectRoot,
   projectHost,
   kind,
+  active = true,
 }: {
   path: string;
   projectRoot?: string;
   projectHost?: string;
   kind: "audio" | "video";
+  /** False while the owning tab/pane is hidden. display:none does not pause a
+   *  media element, and every visited pane stays mounted across tabs/projects,
+   *  so a backgrounded video would otherwise keep playing (and keep its
+   *  decoder/network active). */
+  active?: boolean;
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -65,6 +71,15 @@ export default function MediaViewer({
   const streamRetriesRef = useRef(0);
   const blobUrlRef = useRef("");
   const cancelledRef = useRef(false);
+  const mediaRef = useRef<HTMLMediaElement | null>(null);
+
+  // Pause on hide. The pane is hidden with `display:none` (not unmounted), which
+  // does not stop playback; the user re-presses play when they return.
+  useEffect(() => {
+    if (active) return;
+    const el = mediaRef.current;
+    if (el && !el.paused) el.pause();
+  }, [active]);
 
   const isRemote = !!projectHost;
 
@@ -143,6 +158,9 @@ export default function MediaViewer({
     <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 overflow-auto bg-muted/20 p-4">
       {kind === "video" ? (
         <video
+          ref={(el) => {
+            mediaRef.current = el;
+          }}
           src={src}
           controls
           playsInline
@@ -151,7 +169,16 @@ export default function MediaViewer({
           className="max-h-full max-w-full rounded border border-border"
         />
       ) : (
-        <audio src={src} controls preload="metadata" onError={onMediaError} className="w-full max-w-xl" />
+        <audio
+          ref={(el) => {
+            mediaRef.current = el;
+          }}
+          src={src}
+          controls
+          preload="metadata"
+          onError={onMediaError}
+          className="w-full max-w-xl"
+        />
       )}
       <div className="max-w-full truncate font-mono text-[11px] text-muted-foreground" title={path}>
         {path}

@@ -30,6 +30,14 @@ func ProfileCredentialVersion() int64 {
 	return profileVersion.Load()
 }
 
+// SetProfileCredentialVersionForTest pins the credential version. Exists only
+// so a test that must mutate the process-global profile store (which bumps the
+// version on every write) can restore it afterwards; a leaked bump makes every
+// agent cached with an older snapshot look stale and rebuild unexpectedly.
+func SetProfileCredentialVersionForTest(v int64) {
+	profileVersion.Store(v)
+}
+
 // ProfileAuthPath returns the ocode-only sidecar path for per-profile credentials:
 //
 //	<OcodeGlobalDataDir>/auth.profiles.json  (0600)

@@ -1435,6 +1435,13 @@ func (t MultiFileEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage)
 	var fileOrder []string
 
 	for i, e := range params.Edits {
+		// Fail fast on a wrong-schema call (e.g. the multiedit shape with a
+		// top-level path and oldString/newString edits): an empty per-edit
+		// path otherwise resolves to the workdir and surfaces as a confusing
+		// "cannot read : ... is a directory".
+		if e.Path == "" || e.Search == "" {
+			return "", fmt.Errorf("edit %d: missing required field(s); each edit needs path, search, replace", i+1)
+		}
 		safe, err := confinedPath(ctx, e.Path)
 		if err != nil {
 			return "", err

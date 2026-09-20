@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import FileTabContent from "./FileTabContent";
+import { previewViewKey, savePreviewViewState } from "../../lib/previewViewState";
 
 // jsdom has no PointerEvent (see UnifiedTabBar.drag.test.tsx) — the split
 // divider drag relies on clientX propagation, so polyfill it before import-time
@@ -20,8 +21,13 @@ if (typeof window.PointerEvent === "undefined") {
 // Keep the routing test free of Monaco / pdf.js / docx-preview dependencies.
 vi.mock("./FileEditor", () => ({ default: () => <div data-testid="monaco" /> }));
 vi.mock("../Preview/PreviewSurface", () => ({
-  default: ({ kind, content }: { kind: string; content?: string }) => (
-    <div data-testid={`preview-${kind}`} data-content={content ?? ""} />
+  default: ({ kind, content, page, slide }: { kind: string; content?: string; page?: number; slide?: number }) => (
+    <div
+      data-testid={`preview-${kind}`}
+      data-content={content ?? ""}
+      data-page={String(page ?? "")}
+      data-slide={String(slide ?? "")}
+    />
   ),
 }));
 vi.mock("../Preview/LegacyOfficePane", () => ({ default: () => <div data-testid="legacy-office" /> }));
@@ -150,5 +156,23 @@ describe("FileTabContent markdown modes", () => {
     await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
     expect(screen.queryByRole("group", { name: /markdown view mode/i })).toBeNull();
     expect(screen.queryByTestId("preview-markdown")).toBeNull();
+  });
+});
+
+describe("FileTabContent viewer-state persistence", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("restores a PDF's last page on mount", async () => {
+    savePreviewViewState(previewViewKey("docs/report.pdf", "/proj"), { page: 9 });
+    render(<FileTabContent path="docs/report.pdf" projectRoot="/proj" content="" />);
+    await waitFor(() => expect(screen.getByTestId("preview-pdf")).toBeInTheDocument());
+    expect(screen.getByTestId("preview-pdf").getAttribute("data-page")).toBe("9");
+  });
+
+  it("keys the restored page by project so two projects' same-path PDFs differ", async () => {
+    savePreviewViewState(previewViewKey("docs/report.pdf", "/proj-a"), { page: 9 });
+    render(<FileTabContent path="docs/report.pdf" projectRoot="/proj-b" content="" />);
+    await waitFor(() => expect(screen.getByTestId("preview-pdf")).toBeInTheDocument());
+    expect(screen.getByTestId("preview-pdf").getAttribute("data-page")).toBe("1");
   });
 });

@@ -1,16 +1,18 @@
 ---
 type: Gotcha
 title: Web/Desktop Chat Went Stale Because a Dead SSE Body Never Errors
-description: 'Gotcha: desktop/web chat "lost streaming, then loaded the reply from storage, then stopped updating". The fetch-based /api/events body can go silently dead (WKWebView suspend, sleep/wake, interface change) without erroring or ending, and the client ignored the server keepalive pings, so nothing ever reconnected.'
-tags:
-  - gotcha
-  - web
-  - desktop
-  - sse
-  - eventBus
-  - reconnect
-timestamp: 2026-09-10T00:00:00Z
+description: 'Added a note about a second failure mode: turn_active:true with no heartbeat during permission/question continuations causes a false "stalled" badge; continuations must publish heartbeats.'
+tags: []
+timestamp: 2026-09-20T10:44:16Z
 ---
+# Web/Desktop Chat Went Stale Because a Dead SSE Body Never Errors
+
+**Type:** Gotcha  
+**Description:** Gotcha: desktop/web chat "lost streaming, then loaded the reply from storage, then stopped updating". The fetch-based /api/events body can go silently dead (WKWebView suspend, sleep/wake, interface change) without erroring or ending, and the client ignored the server keepalive pings, so nothing ever reconnected.  
+**Tags:** gotcha, web, desktop, sse, eventBus, reconnect  
+
+---
+
 ## Problem
 
 In the desktop app (and browser web UI) a chat session would intermittently
@@ -55,3 +57,27 @@ out the window.
 Any long-lived fetch/SSE consumer must measure liveness on raw bytes and
 reconnect itself; never rely on the browser reporting a dead socket. Keep the
 client window > 2× the server keepalive interval.
+
+---
+
+## Related failure mode: false "stalled" badge during permission/question continuations
+
+A different root cause produced the same symptom — a permanent false "stalled"
+badge on the web project sidebar for sessions that were actively working:
+
+- `runTurn` starts the `turn_heartbeat` ticker (10s) while it holds
+  `turnActive=true`, but the permission-resolve continuation
+  (`HandleResolvePermission`) and question-answer continuation
+  (`HandleAnswerQuestion`) did **not** start a heartbeat even though they too
+  hold `turnActive=true` while streaming. A continuation that ran for minutes
+  therefore reported `turn_active:true` with zero `turn_heartbeat` events.
+- The web stall watchdog (`useTurnWatchdog.ts`, threshold 30s) saw
+  `turn_active:true` + no heartbeat for 30s and marked the session "stalled".
+- The sidebar reconcile deliberately **keeps** the stall while the server
+  reports `turn_active:true` — so the badge never cleared.
+
+Fix: both continuations now call `(*Handler).startTurnHeartbeat(sessionID)`
+(defined in `internal/server/agent_session.go`) right after
+`setTurnActive(true)`, with `defer` to stop it on unwind. The server-side
+contract is that **every** code path holding `turnActive=true` must publish
+heartbeats for its duration — see `docs/superpowers/plans/2026-08-12-multiproject-event-architecture/03-async-bootstrap-turn-state.md` (Part 03, Task 4) for the full contract.

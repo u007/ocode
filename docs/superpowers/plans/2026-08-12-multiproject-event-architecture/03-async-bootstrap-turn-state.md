@@ -1,3 +1,9 @@
+---
+type: Guide
+title: Part 03 — Async Bootstrap, Turn State Machine, Reconcile & Status Endpoints
+description: 'Updated Task 4 and constraint: turn_heartbeat must fire for ALL turnActive=true states (runTurn, permission-resolve, question-answer continuations), not just main runTurn turns.'
+timestamp: 2026-09-20T10:44:16Z
+---
 # Part 03 — Async Bootstrap, Turn State Machine, Reconcile & Status Endpoints
 
 **Goal:** `POST /api/chat` persists the user message and returns 202

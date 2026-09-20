@@ -127,6 +127,35 @@ func (s *Store) SwitchSession(sessionID string) {
 	s.Rehydrate()
 }
 
+// RekeySession rebinds this store from oldID to newID for a session rekey
+// (/reset-id): it migrates this session's journaled rows to newID and updates
+// the bound session id. Unlike SwitchSession it does NOT Reset the live
+// snapshot history — the conversation (and therefore its in-flight undo
+// history) is the same session under a new id, so the Changes tab must keep
+// working. A no-op when the store is unbound or already bound to newID.
+func (s *Store) RekeySession(oldID, newID string) {
+	if s == nil || newID == "" {
+		return
+	}
+	s.mu.Lock()
+	cur := s.sessionID
+	baseDir := s.baseDir
+	if cur == newID {
+		s.mu.Unlock()
+		return
+	}
+	s.sessionID = newID
+	s.version++
+	s.mu.Unlock()
+	if baseDir != "" && oldID != "" && oldID != newID {
+		if j := journalFor(baseDir); j != nil {
+			if err := j.rekeySession(oldID, newID); err != nil {
+				log.Printf("snapshot: rekey journal %s -> %s: %v", oldID, newID, err)
+			}
+		}
+	}
+}
+
 // Rehydrate loads this store's session's journaled snapshots from the
 // journal in baseDir. It only fills an EMPTY store (a rebuilt agent);
 // a store that already holds in-process snapshots is left untouched so

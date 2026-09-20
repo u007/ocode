@@ -92,7 +92,7 @@ describe("CoworkSidebar discovery toggle", () => {
     fireEvent.click(toggle);
 
     await waitFor(() =>
-      expect(api.setDiscoveryConfig).toHaveBeenCalledWith({ ...DISCOVERY_ON, enabled: false }),
+      expect(api.setDiscoveryConfig).toHaveBeenCalledWith({ ...DISCOVERY_ON, enabled: false }, undefined),
     );
     // The other fields must be carried through untouched.
     const sent = vi.mocked(api.setDiscoveryConfig).mock.calls[0][0];

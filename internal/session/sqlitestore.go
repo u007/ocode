@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
@@ -217,16 +218,75 @@ func readHistoryGen(dir, id string) (int64, error) {
 	return 0, fmt.Errorf("session: read history_gen %s: %w", id, err)
 }
 
+// indexMu serializes this process's access to the shared per-project index
+// databases. WAL plus busy_timeout cover cross-process writers, but
+// same-process contention — several sessions of one project streaming at once
+// — hits SQLITE_BUSY on lock paths that do not consult the busy handler
+// (database/WAL file creation, and lock acquisition when the file is brand
+// new), so the process serializes its own index access. Index operations are
+// tiny and infrequent, so a single lock is not a throughput concern.
+var indexMu sync.Mutex
+
+// withIndexDB serializes and scopes one index operation: it takes indexMu,
+// opens (creating the schema if needed) the project's index.sqlite, runs fn,
+// and closes the handle. Callers must not retain the *sql.DB past fn.
+//
+// Transient lock contention (SQLITE_BUSY) retries the whole operation with
+// backoff. WAL + busy_timeout cover most cases, but acquiring the lock (or
+// creating the database/WAL file) for a brand-new index.sqlite does not
+// consult the busy handler and can return SQLITE_BUSY immediately — the flake
+// seen when several sessions of one project first write concurrently. Every fn
+// passed here is idempotent (upsert / delete-by-id / read), so a whole retry is
+// safe.
+func withIndexDB(dir string, fn func(*sql.DB) error) error {
+	indexMu.Lock()
+	defer indexMu.Unlock()
+	var err error
+	for attempt := 0; attempt < 8; attempt++ {
+		err = withIndexDBOnce(dir, fn)
+		if err == nil || !isBusyErr(err) {
+			return err
+		}
+		time.Sleep(time.Duration(5*(attempt+1)) * time.Millisecond)
+	}
+	return err
+}
+
+// withIndexDBOnce is the single-attempt body of withIndexDB.
+func withIndexDBOnce(dir string, fn func(*sql.DB) error) error {
+	db, err := openIndexDB(dir)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return fn(db)
+}
+
 // openIndexDB opens (creating if needed) the shared per-project
 // index.sqlite, with one row per migrated session — see queryIndexMetas
 // in Task 3 for why: it lets listing serve migrated sessions from a
 // single indexed query instead of opening every session file.
+//
+// Callers should prefer withIndexDB, which serializes in-process access;
+// calling this directly bypasses indexMu.
 func openIndexDB(dir string) (*sql.DB, error) {
 	db, err := openDB(indexDBPath(dir))
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(`
+	// The schema DDL runs in an explicit transaction rather than a bare
+	// Exec: openDB sets _txlock=immediate, so Begin takes the write lock at
+	// BEGIN and a concurrent writer blocks up to busy_timeout. A bare Exec is
+	// an implicit (deferred) transaction, whose lock upgrade returns
+	// SQLITE_BUSY immediately without consulting busy_timeout — the failure
+	// seen when several sessions of one project stream concurrently and race
+	// to create the shared index.
+	tx, err := db.Begin()
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("session: begin index schema: %w", err)
+	}
+	if _, err := tx.Exec(`
 		CREATE TABLE IF NOT EXISTS sessions (
 			id         TEXT PRIMARY KEY,
 			title      TEXT NOT NULL DEFAULT '',
@@ -235,12 +295,18 @@ func openIndexDB(dir string) (*sql.DB, error) {
 			clone_of   TEXT NOT NULL DEFAULT ''
 		)
 	`); err != nil {
+		tx.Rollback()
 		db.Close()
 		return nil, fmt.Errorf("session: create index table: %w", err)
 	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS sessions_updated_at_idx ON sessions(updated_at DESC)`); err != nil {
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS sessions_updated_at_idx ON sessions(updated_at DESC)`); err != nil {
+		tx.Rollback()
 		db.Close()
 		return nil, fmt.Errorf("session: create index idx: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("session: commit index schema: %w", err)
 	}
 	return db, nil
 }
@@ -710,17 +776,14 @@ func readSqliteSession(path string) (*Session, error) {
 // shared index.sqlite so listing (queryIndexMetas) can serve migrated
 // sessions from one indexed query instead of opening every session file.
 func upsertIndexRow(dir string, meta ocodeMeta) error {
-	db, err := openIndexDB(dir)
-	if err != nil {
+	return withIndexDB(dir, func(db *sql.DB) error {
+		_, err := db.Exec(
+			`INSERT INTO sessions (id, title, created_at, updated_at, clone_of) VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at, clone_of=excluded.clone_of`,
+			meta.ID, meta.Title, meta.CreatedAt, meta.UpdatedAt, meta.CloneOf,
+		)
 		return err
-	}
-	defer db.Close()
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, title, created_at, updated_at, clone_of) VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at, clone_of=excluded.clone_of`,
-		meta.ID, meta.Title, meta.CreatedAt, meta.UpdatedAt, meta.CloneOf,
-	)
-	return err
+	})
 }
 
 // deleteIndexRow removes a session's row from the project's index.sqlite.
@@ -733,13 +796,10 @@ func deleteIndexRow(dir, id string) error {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil
 	}
-	db, err := openIndexDB(dir)
-	if err != nil {
+	return withIndexDB(dir, func(db *sql.DB) error {
+		_, err := db.Exec(`DELETE FROM sessions WHERE id = ?`, id)
 		return err
-	}
-	defer db.Close()
-	_, err = db.Exec(`DELETE FROM sessions WHERE id = ?`, id)
-	return err
+	})
 }
 
 // queryIndexMetas returns metadata for every migrated (.sqlite-format)
@@ -751,27 +811,29 @@ func queryIndexMetas(dir string) ([]ocodeMeta, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil, nil
 	}
-	db, err := openIndexDB(dir)
+	var metas []ocodeMeta
+	err := withIndexDB(dir, func(db *sql.DB) error {
+		// Reset on each (retry) attempt so a transient busy error cannot leave a
+		// partially-appended slice that the retry then duplicates.
+		metas = nil
+		rows, err := db.Query(`SELECT id, title, created_at, updated_at, clone_of FROM sessions`)
+		if err != nil {
+			return fmt.Errorf("session: query index: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var m ocodeMeta
+			if err := rows.Scan(&m.ID, &m.Title, &m.CreatedAt, &m.UpdatedAt, &m.CloneOf); err != nil {
+				return fmt.Errorf("session: scan index row: %w", err)
+			}
+			metas = append(metas, m)
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
-
-	rows, err := db.Query(`SELECT id, title, created_at, updated_at, clone_of FROM sessions`)
-	if err != nil {
-		return nil, fmt.Errorf("session: query index: %w", err)
-	}
-	defer rows.Close()
-
-	var metas []ocodeMeta
-	for rows.Next() {
-		var m ocodeMeta
-		if err := rows.Scan(&m.ID, &m.Title, &m.CreatedAt, &m.UpdatedAt, &m.CloneOf); err != nil {
-			return nil, fmt.Errorf("session: scan index row: %w", err)
-		}
-		metas = append(metas, m)
-	}
-	return metas, rows.Err()
+	return metas, nil
 }
 
 // mergeMetas combines legacy-format metadata (from a directory scan) with

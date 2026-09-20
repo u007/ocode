@@ -135,6 +135,57 @@ func (a *Agent) SetSessionID(sessionID string) {
 	}
 }
 
+// RekeySession re-tags this agent from oldID to newID after a session rekey
+// (/reset-id): it moves the debug-log session id, the OpenCode/provider
+// conversation identity (X-Opencode-Session / x-session-id), the permission
+// manager's session, the LLM client's session, and the snapshot store's
+// journal — all in place, without rebuilding the agent. This is what makes
+// /reset-id change the provider header while keeping the live conversation
+// (tools, TODO state, in-memory history) intact.
+//
+// It is the rekey analogue of SetSessionID but deliberately does NOT call
+// SwitchSession on the snapshot store: the store's live undo history belongs
+// to the same conversation, so it must survive the id change (see
+// Store.RekeySession).
+func (a *Agent) RekeySession(oldID, newID string) {
+	if a == nil || newID == "" {
+		return
+	}
+	a.opencodeSessionMu.Lock()
+	a.sessionID = newID
+	a.opencodeSessionID = newID
+	a.opencodeSessionMu.Unlock()
+	if a.permissions != nil {
+		a.permissions.sessionID = newID
+	}
+	if gc, ok := a.client.(*GenericClient); ok {
+		gc.setSessionID(newID)
+	}
+	if a.snapshotStore != nil {
+		a.snapshotStore.RekeySession(oldID, newID)
+	}
+}
+
+// RekeyOpenCodeSession is the TUI's rekey entry point: like RekeySession it
+// moves the provider conversation identity and the snapshot store's journal,
+// but it deliberately does NOT set the debug-log sessionID (the TUI keeps its
+// debug entries process-global; see SetOpenCodeSessionID). Use this whenever
+// the caller never called SetSessionID.
+func (a *Agent) RekeyOpenCodeSession(oldID, newID string) {
+	if a == nil || newID == "" {
+		return
+	}
+	a.opencodeSessionMu.Lock()
+	a.opencodeSessionID = newID
+	a.opencodeSessionMu.Unlock()
+	if gc, ok := a.client.(*GenericClient); ok {
+		gc.setOpencodeSessionID(newID)
+	}
+	if a.snapshotStore != nil {
+		a.snapshotStore.RekeySession(oldID, newID)
+	}
+}
+
 // sessionIDValue returns the debug-log session id set by SetSessionID, or ""
 // when this agent was not built for a server session (the TUI). Locked read —
 // the field is otherwise only accessed directly at construction / by emitDebug.
@@ -2092,6 +2143,17 @@ func (a *Agent) Compact(messages []Message) (CompactResult, bool) {
 		return CompactResult{}, false
 	}
 	return a.runCompact(messages, rt, "", true), true
+}
+
+// CompactWithFocus is Compact with an optional focus string steering the
+// summary (the TUI's `/compact [focus]`). An empty focus is identical to
+// Compact, so callers that never pass one keep the original behaviour.
+func (a *Agent) CompactWithFocus(messages []Message, focus string) (CompactResult, bool) {
+	rt := a.resolveCompactRuntime(true)
+	if !rt.Enabled {
+		return CompactResult{}, false
+	}
+	return a.runCompact(messages, rt, focus, true), true
 }
 
 // Recap generates a full conversation recap synchronously using the small model.

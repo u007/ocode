@@ -40,6 +40,9 @@ function setDpr(value: number) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The viewer persists zoom/scroll per file; a case must not inherit the
+  // previous one's position (all cases reuse path="doc.pdf").
+  localStorage.clear();
   mocks.getDocument.mockImplementation(() => ({ promise: Promise.resolve(mocks.doc) }));
   mocks.getPage.mockImplementation(async () => ({
     getViewport: mocks.getViewport,

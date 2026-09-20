@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockIsRemoteSession = vi.hoisted(() => vi.fn(() => false));
@@ -95,5 +95,51 @@ describe("ShareDialog", () => {
       window.dispatchEvent(new CustomEvent("ocode:copy-desktop-url"));
     });
     expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("copies the URL via the execCommand fallback from inside the modal focus scope", async () => {
+    // The dialog is a Radix modal, so a scratch textarea appended to
+    // document.body sits OUTSIDE the FocusScope: Radix bounces focus back into
+    // the dialog, the scratch field is never the active selection, and
+    // document.execCommand("copy") reports true while copying nothing. That
+    // made the button show "Copied" with an empty clipboard.
+    //
+    // Emulate WKWebView: execCommand always returns true, but the copied value
+    // only exists when the active element really is the scratch textarea.
+    const writeText = vi.fn(async () => {
+      throw new Error("clipboard denied");
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+
+    const copied: string[] = [];
+    const execCommand = vi.fn((command: string) => {
+      if (command === "copy") {
+        const active = document.activeElement as HTMLElement | null;
+        if (active && active.tagName === "TEXTAREA") {
+          copied.push((active as HTMLTextAreaElement).value);
+        }
+      }
+      return true;
+    });
+    (document as unknown as { execCommand: unknown }).execCommand = execCommand;
+
+    mockShareResponses({ tailscale: "https://host.tailnet.ts.net/desktop" });
+    render(<ShareDialog />);
+    openShareDialog();
+    await waitFor(() =>
+      expect(screen.getByTestId("share-dialog-copy")).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByTestId("share-dialog-copy"));
+
+    await waitFor(() => expect(execCommand).toHaveBeenCalled());
+    expect(copied).toEqual([
+      "https://host.tailnet.ts.net/desktop/?token=test-token",
+    ]);
+    // A false "Copied" must not be reported when nothing was written.
+    expect(screen.queryByTestId("share-dialog-copy-failed")).toBeNull();
   });
 });

@@ -390,6 +390,37 @@ describe("routeBusEnvelope", () => {
     clearQueue("s9");
   });
 
+  it("session_rekeyed rebinds an open tab to the new session id", () => {
+    const { router, actions, projectActions } = makeRouter(["old-id"]);
+    setDraft("old-id", "draft");
+    pushQueued("old-id", { kind: "message", text: "queued" });
+    routeBusEnvelope(
+      env("session_rekeyed", { session_id: "new-id", data: { session_id: "new-id", old_id: "old-id" } }),
+      router,
+    );
+    expect(actions.some((a) => a.type === "REKEY_SESSION" && a.oldId === "old-id" && a.newId === "new-id")).toBe(true);
+    expect(projectActions).toEqual([
+      expect.objectContaining({ type: "UPDATE_TAB_ID", oldId: "old-id", newId: "new-id" }),
+    ]);
+    expect(router.openSessionIds.has("old-id")).toBe(false);
+    expect(router.openSessionIds.has("new-id")).toBe(true);
+    expect(getDraft("new-id")).toBe("draft");
+    expect(getQueue("new-id")).toEqual([{ kind: "message", text: "queued" }]);
+    clearDraft("new-id");
+    clearQueue("new-id");
+  });
+
+  it("session_rekeyed for an untracked session does not rebind other tabs", () => {
+    const { router, actions, projectActions } = makeRouter(["unrelated"]);
+    routeBusEnvelope(
+      env("session_rekeyed", { session_id: "new-id", data: { session_id: "new-id", old_id: "not-open" } }),
+      router,
+    );
+    expect(actions.some((a) => a.type === "REKEY_SESSION")).toBe(false);
+    expect(projectActions).toEqual([]);
+    expect(router.openSessionIds.has("unrelated")).toBe(true);
+  });
+
   it("does not create a slice for a never-opened session (memory-leak guard)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { router, getState } = makeRouter(["s1"]);

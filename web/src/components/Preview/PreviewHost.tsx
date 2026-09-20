@@ -6,6 +6,7 @@ import { api } from "../../api/client";
 import PreviewSurface from "./PreviewSurface";
 import LegacyOfficePane from "./LegacyOfficePane";
 import { dispatchOpenPreview } from "../../lib/previewKind";
+import { loadSidebarPreviewState, saveSidebarPreviewState, type SidebarPreviewState } from "./sidebarPreviewState";
 
 type Surface = "browser" | "preview";
 
@@ -37,6 +38,7 @@ export default function PreviewHost({
   projectHost,
   request,
   nonce,
+  onConsumeActivation,
 }: {
   stateKey: StateKey;
   projectRoot?: string;
@@ -45,10 +47,27 @@ export default function PreviewHost({
   projectHost?: string;
   request: PreviewOpenRequest | null;
   nonce: number;
+  /** Acknowledge a consumed activation so it is not replayed after this panel
+   *  remounts (App remounts it on every session/project switch). */
+  onConsumeActivation?: () => void;
 }) {
-  const [surface, setSurface] = useState<Surface>("browser");
-  const [doc, setDoc] = useState<Doc | null>(null);
-  const [page, setPage] = useState(1);
+  // Restore the project's last sidebar state on MOUNT. The panel is keyed by
+  // the active session tab, so a project switch unmounts and remounts it —
+  // without this the file, page, and active tab all reset. Read once per mount
+  // (not per render) and seed the initial state from it.
+  const initialRef = useRef<SidebarPreviewState | null | undefined>(undefined);
+  if (initialRef.current === undefined) {
+    initialRef.current = loadSidebarPreviewState(projectRoot, projectHost);
+  }
+  const initial = initialRef.current;
+
+  const [surface, setSurface] = useState<Surface>(initial?.surface === "preview" ? "preview" : "browser");
+  const [doc, setDoc] = useState<Doc | null>(() =>
+    initial?.surface === "preview" && initial.path && initial.kind
+      ? { path: initial.path, kind: initial.kind, projectRoot: initial.projectRoot, projectHost: initial.projectHost }
+      : null,
+  );
+  const [page, setPage] = useState(() => Math.max(1, initial?.page ?? 1));
   const [osOpenState, setOsOpenState] = useState<string | null>(null);
   const lastNonceRef = useRef(0);
 
@@ -62,10 +81,18 @@ export default function PreviewHost({
   // For a remote doc the button is therefore hidden: showing it would open
   // an unrelated server-local file (or 400) while implying the remote file
   // opened.
-  const [unsupported, setUnsupported] = useState<{ path: string; projectRoot?: string } | null>(null);
+  const [unsupported, setUnsupported] = useState<{ path: string; projectRoot?: string } | null>(() =>
+    initial?.surface === "preview" && initial.unsupportedPath
+      ? { path: initial.unsupportedPath, projectRoot: initial.projectRoot }
+      : null,
+  );
   useEffect(() => {
     if (!request || nonce === lastNonceRef.current) return;
     lastNonceRef.current = nonce;
+    // The activation is one-shot: acknowledge it immediately so a later remount
+    // of this panel cannot replay it over the state restored for another
+    // project. App opens the panel off the same nonce.
+    onConsumeActivation?.();
     const resolved = resolvePreviewDoc(request.path, request.kind);
     if (!resolved.kind) {
       setDoc(null);
@@ -79,9 +106,43 @@ export default function PreviewHost({
     setDoc({ path: request.path, kind: resolved.kind, projectRoot: anchor, projectHost: anchorHost });
     setPage(Math.max(1, request.page));
     setSurface("preview");
+    // onConsumeActivation is a stable App callback; not a trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request, nonce, projectRoot, projectHost]);
 
-  // Follow project switches for the open doc's anchor.
+  // Persist the shell state for this project so the next mount (project switch
+  // back) restores it. Runs on mount too, which just rewrites the restored
+  // value — idempotent. A doc whose anchor differs from this pane's project
+  // (a request that carried its own root/host) must NOT be stored under this
+  // project's key, or switching here would later restore a foreign file.
+  useEffect(() => {
+    const docBelongsHere =
+      !!doc &&
+      (doc.projectHost ?? "") === (projectHost ?? "") &&
+      (!doc.projectRoot || doc.projectRoot === projectRoot);
+    // Same containment check for the legacy fallback: a request that carried
+    // another project's root must not be restored from this project's slot.
+    const unsupportedBelongsHere =
+      !!unsupported && (unsupported.projectRoot ?? projectRoot ?? "") === (projectRoot ?? "");
+    // A foreign doc/unsupported entry cannot be stored here — but do NOT fall
+    // through to writing the path-less snapshot: that would overwrite this
+    // project's valid saved preview with an empty entry, so switching away and
+    // back would drop it. Leave the stored state untouched instead.
+    if ((doc && !docBelongsHere) || (unsupported && !unsupportedBelongsHere)) return;
+    saveSidebarPreviewState(projectRoot, projectHost, {
+      surface,
+      path: docBelongsHere ? doc.path : undefined,
+      kind: docBelongsHere ? doc.kind : undefined,
+      projectRoot: docBelongsHere ? doc.projectRoot : undefined,
+      projectHost: docBelongsHere ? doc.projectHost : undefined,
+      page: docBelongsHere ? page : undefined,
+      unsupportedPath: unsupportedBelongsHere ? unsupported.path : undefined,
+    });
+  }, [projectRoot, projectHost, surface, doc, page, unsupported]);
+
+  // Follow project switches for the open doc's anchor (defensive: a project
+  // change normally remounts this panel, in which case the initial-read above
+  // already applied the right project's state).
   useEffect(() => {
     setDoc((d) => (d && !d.projectRoot && projectRoot ? { ...d, projectRoot } : d));
   }, [projectRoot]);

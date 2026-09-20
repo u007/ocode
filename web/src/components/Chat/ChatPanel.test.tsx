@@ -31,6 +31,10 @@ vi.mock("../../api/client", () => ({
           hoisted.resolve.current = res as (v: unknown) => void;
         }),
     ),
+    // Default: never resolves, so the find bar keeps using its instant local
+    // matches (the pre-existing tests' behaviour). Tests that exercise the
+    // full-transcript path override this with mockResolvedValue.
+    searchSession: vi.fn(() => new Promise<unknown>(() => {})),
   },
 }));
 
@@ -185,11 +189,15 @@ function LiveSeed({
   messages,
   live,
   hasMore,
+  total,
 }: {
   sessionId: string;
   messages?: Message[];
   live?: string[];
   hasMore?: boolean;
+  /** Explicit transcript length. Lets a test seed a small loaded window of a
+   *  much longer transcript (windowStartServerIndex = total - messages.length). */
+  total?: number;
 }) {
   const dispatch = useChatDispatch();
   useLayoutEffect(() => {
@@ -198,7 +206,7 @@ function LiveSeed({
         type: "MERGE_SNAPSHOT",
         sessionId,
         messages,
-        total: messages.length + (hasMore ? 5 : 0),
+        total: total ?? messages.length + (hasMore ? 5 : 0),
       });
     }
     live?.forEach((text) => dispatch({ type: "LIVE_DELTA", sessionId, kind: "text", delta: text }));
@@ -942,7 +950,7 @@ describe("ChatPanel", () => {
     expect(api.getSession).toHaveBeenCalledWith("sess-page", {
       limit: 50,
       offset: initial.length,
-    });
+    }, undefined);
 
     act(() => {
       hoisted.resolve.current({
@@ -1214,5 +1222,212 @@ describe("ChatPanel", () => {
     // second call would hang and fail the assertion above).
     expect(api.getSession).toHaveBeenCalledTimes(1);
     expect(api.getSession).toHaveBeenCalledWith(PREFETCHED_SESSION_ID, { limit: 100 }, undefined);
+  });
+
+  describe("full-transcript search (/search, Ctrl/Cmd+F)", () => {
+    const SEARCH_SESSION = "sess-full-search";
+    // Transcript is 300 messages; only the last 10 are loaded, so
+    // windowStartServerIndex = 290 and server index 5 is NOT in the window.
+    const TOTAL = 300;
+    const WINDOW_START = 290;
+
+    /** The 10 newest messages (server 290..299). */
+    function tailMessages(): Message[] {
+      return Array.from({ length: 10 }, (_, i) =>
+        mk(i % 2 === 0 ? "user" : "assistant", `recent ${i} tail${i}`),
+      );
+    }
+
+    /** Server indices [5, 290): the prefix a jump must fetch. */
+    function prefixMessages(): Message[] {
+      return Array.from({ length: WINDOW_START - 5 }, (_, i) =>
+        i === 0
+          ? mk("assistant", "ancient-token hidden in history")
+          : mk(i % 2 === 0 ? "user" : "assistant", `old ${i}`),
+      );
+    }
+
+    async function waitForDebounce() {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 260));
+      });
+    }
+
+    async function openFind(query: string) {
+      fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+      await tick();
+      const input = screen.getByPlaceholderText(/Find in chat/i) as HTMLInputElement;
+      fireEvent.change(input, { target: { value: query } });
+      await waitForDebounce();
+      return input;
+    }
+
+    it("queries the server for the whole transcript and shows the in-view note", async () => {
+      (api.searchSession as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+        total: 3,
+        indices: [5, 295, 297],
+        truncated: false,
+        scanned: TOTAL,
+      });
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId={SEARCH_SESSION} messages={tailMessages()} total={TOTAL} />
+          <ChatPanel sessionId={SEARCH_SESSION} />
+        </ChatProvider>,
+      );
+      await tick();
+
+      await openFind("match");
+
+      expect(api.searchSession).toHaveBeenCalledWith(SEARCH_SESSION, "match", {}, undefined);
+      // 3 hits total, 2 of them in the loaded window (295, 297).
+      expect(await screen.findByText("3 total, 2 in view")).toBeInTheDocument();
+      // The out-of-window hit is still navigable, so the counter is not "No matches".
+      expect(screen.getByText("1/3")).toBeInTheDocument();
+    });
+
+    it("does not query the server for a draft tab", async () => {
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId="new-draft" messages={[mk("user", "draft match")]} total={1} />
+          <ChatPanel sessionId="new-draft" />
+        </ChatProvider>,
+      );
+      await tick();
+      await openFind("match");
+      expect(api.searchSession).not.toHaveBeenCalled();
+    });
+
+    it("fetches the older prefix when jumping to an out-of-window match", async () => {
+      (api.searchSession as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+        total: 1,
+        indices: [5],
+        truncated: false,
+        scanned: TOTAL,
+      });
+      const prefix = prefixMessages();
+      // The mount effect still issues its own getSession({limit:100}) (seeding
+      // races the passive effect), so key the mock on the jump fetch's offset
+      // rather than relying on call ORDER — a mockResolvedValueOnce would be
+      // consumed by the mount call and leave the jump fetch hanging.
+      (api.getSession as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+        (_id: string, opts?: { limit?: number; offset?: number }) =>
+          Promise.resolve(
+            opts?.offset
+              ? { messages: prefix, total: TOTAL }
+              : { messages: tailMessages(), total: TOTAL },
+          ),
+      );
+
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId={SEARCH_SESSION} messages={tailMessages()} total={TOTAL} />
+          <ChatPanel sessionId={SEARCH_SESSION} />
+        </ChatProvider>,
+      );
+      await tick();
+      await openFind("ancient-token");
+
+      // A jump to the single off-window hit issues exactly one prefix fetch:
+      // offset = loaded window size (10), limit = walk back to the match
+      // (290 - 5). Filtering on `offset` ignores the mount tail fetch and
+      // proves the jump did not refetch in a loop.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      const jumpCalls = (api.getSession as unknown as ReturnType<typeof vi.fn>).mock.calls
+        .filter((c: unknown[]) => (c[1] as { offset?: number } | undefined)?.offset);
+      expect(jumpCalls).toHaveLength(1);
+      expect(jumpCalls[0]).toEqual([
+        SEARCH_SESSION,
+        { limit: WINDOW_START - 5, offset: 10 },
+        undefined,
+      ]);
+
+      // After the prepend resolves the match is inside the loaded window, so
+      // the "0 in view" note clears and the hit is navigable in-window.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(screen.queryByText("1 total, 0 in view")).toBeNull();
+    });
+
+    it("jumps to a server hit on a tool RESULT folded into its parent bubble", async () => {
+      // Regression: the server reports the index of the tool RESULT message,
+      // which is consumed by its tool-group and therefore absent from
+      // renderEntries. Without registering result indices, the result index
+      // mapped to entryPos -1: buildJumpTargets could not collapse it into its
+      // call, so "next" selected the dead duplicate (counter 1/3 below instead
+      // of 1/2) and the jump neither scrolled nor fetched.
+      (api.searchSession as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+        total: 3,
+        // 290 = the assistant call, 291 = its tool result (folded into 290),
+        // 5 = an unrelated off-window hit.
+        indices: [290, 291, 5],
+        truncated: false,
+        scanned: TOTAL,
+      });
+      // The window's first two rows are the tool call + its result; the rest
+      // of the tail keeps the window at 10 so windowStartServerIndex is 290.
+      const msgs: Message[] = [
+        { role: "assistant", content: "", tool_calls: [{ id: "call-r1", function: { name: "bash", arguments: '{"command":"ls"}' } }] },
+        { role: "tool", content: "RESULT_ONLY_TOKEN_xyz command output", tool_call_id: "call-r1" },
+        ...tailMessages().slice(2),
+      ];
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId={`${SEARCH_SESSION}-result`} messages={msgs} total={TOTAL} />
+          <ChatPanel sessionId={`${SEARCH_SESSION}-result`} />
+        </ChatProvider>,
+      );
+      await tick();
+
+      await openFind("RESULT_ONLY_TOKEN_xyz");
+      await tick();
+
+      // With the result registered against its parent, 290 and 291 collapse to
+      // ONE navigable target → 2 targets (the call-group + off-window 5).
+      // Without it, 291 stays unresolved → 3 targets and a dead press. The
+      // count also proves the server result resolved (a pending query would
+      // fall back to 1 local target, "1/1").
+      expect(screen.getByText("1/2")).toBeInTheDocument();
+
+      // No prefix fetch before any jump: the collapsed target is in-window.
+      const prefixCalls = (api.getSession as unknown as ReturnType<typeof vi.fn>).mock.calls
+        .filter((c: unknown[]) => (c[1] as { offset?: number } | undefined)?.offset);
+      expect(prefixCalls).toHaveLength(0);
+
+      // "Next" selects the in-window collapsed target → the scroll effect runs
+      // (entryPos >= 0) and the scroll-to-bottom affordance appears. In jsdom
+      // the virtualizer cannot layout-scroll, so the affordance stands in for
+      // "the jump actually happened".
+      fireEvent.click(screen.getByLabelText(/Next match/i));
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 650));
+      });
+      expect(screen.getByRole("button", { name: /scroll to bottom/i })).toBeInTheDocument();
+    });
+
+
+    it("falls back to in-window matches when the server query fails", async () => {
+      (api.searchSession as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("boom"),
+      );
+      // Silence the deliberate console.warn from the failure path.
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId={SEARCH_SESSION} messages={tailMessages()} total={TOTAL} />
+          <ChatPanel sessionId={SEARCH_SESSION} />
+        </ChatProvider>,
+      );
+      await tick();
+      await openFind("tail3");
+
+      // Local matcher still finds the loaded message; no crash, no note.
+      expect(screen.getByText("1/1")).toBeInTheDocument();
+      expect(screen.queryByText(/total,/)).toBeNull();
+      warn.mockRestore();
+    });
   });
 });

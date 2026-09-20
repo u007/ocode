@@ -45,6 +45,7 @@ import {
   GitBranch,
   CalendarClock,
   Radio,
+  RefreshCw,
 } from "lucide-react";
 
 // ─── Command Definition ────────────────────────────────────────────────────
@@ -73,6 +74,7 @@ export const COMMANDS: CommandDef[] = [
   { name: "/agent", description: "List or switch the active agent", icon: Bot },
   { name: "/session", description: "List, load, or resume sessions", icon: History },
   { name: "/title", description: "Set the current session title", icon: Type },
+  { name: "/reset-id", description: "Re-key this chat with a fresh session id (keeps the conversation)", icon: RefreshCw },
   { name: "/ocr", description: "Show OCR status, enable/disable, set model", icon: Eye },
   { name: "/computer", description: "Show computer-use status, enable/disable", icon: Eye },
   { name: "/search", description: "Find a message by keyword", icon: Search },
@@ -274,6 +276,10 @@ export interface CommandResult {
   modelPickerPurpose?: import("../../components/Layout/ModelDialog").ModelDialogTab;
   /** Updated session title for tab label updates. */
   title?: string;
+  /** Re-key the current tab to a new session id (server /reset-id). App.tsx
+   *  dispatches REKEY_SESSION + UPDATE_TAB_ID so the tab, draft and queue all
+   *  follow the new id — the same machinery a `new-*` tab uses on first send. */
+  rekeyTo?: { oldId: string; newId: string };
 }
 
 /**
@@ -296,7 +302,7 @@ export interface CommandContext {
     getOcrEnabled: () => Promise<{ enabled: boolean; model: string }>;
     setOcrEnabled: (enabled: boolean) => Promise<unknown>;
     setOcrModel: (model: string) => Promise<unknown>;
-    compactSession: (id: string, host?: string) => Promise<{ original_len: number; compacted_len: number }>;
+    compactSession: (id: string, host?: string, focus?: string) => Promise<{ original_len: number; compacted_len: number }>;
     recapSession: (id: string, host?: string) => Promise<{ recap: string }>;
     shareSession: (id: string, host?: string) => Promise<{ markdown: string }>;
     btwSession: (id: string, content: string, host?: string) => Promise<{ status: string }>;
@@ -334,19 +340,20 @@ export interface CommandContext {
     getAgentRuns?: (host?: string) => Promise<{ id: string; agent?: string; title?: string; status?: string; state?: string }[]>;
     /** Scheduled jobs (/cron). */
     getCronJobs?: () => Promise<{ id: string | number; name?: string; next_run?: string }[]>;
-    /** Small-model config (/small-model). */
-    getSmallModelWithEnabled?: () => Promise<{ model: string; enabled: boolean }>;
+    /** Small-model config (/small-model). `host` routes a remote session's
+     *  read/write to the server that runs it. */
+    getSmallModelWithEnabled?: (host?: string) => Promise<{ model: string; enabled: boolean }>;
     /** Advisor model (/advisor). */
-    getAdvisor?: () => Promise<{ model: string }>;
+    getAdvisor?: (host?: string) => Promise<{ model: string }>;
 
     // ── Slash-command parity additions ──
     getLimitsConfig?: () => Promise<{ max_steps: number; image_max_dim: number; max_concurrent_agents: number; undo_max_age_delta: number }>;
     setLimitsConfig?: (fields: { max_steps: number; image_max_dim: number; max_concurrent_agents: number; undo_max_age_delta: number }) => Promise<unknown>;
-    getThinkingBudget?: () => Promise<{ budget: number; level: string; levels: { level: string; budget: number }[] }>;
-    setThinkingBudget?: (level: string) => Promise<unknown>;
+    getThinkingBudget?: (host?: string) => Promise<{ budget: number; level: string; levels: { level: string; budget: number }[] }>;
+    setThinkingBudget?: (level: string, host?: string) => Promise<unknown>;
     listModels?: (host?: string) => Promise<{ name: string; model: string; provider: string; active: boolean }[]>;
-    getConfigModel?: () => Promise<{ model: string }>;
-    setConfigModel?: (model: string) => Promise<unknown>;
+    getConfigModel?: (host?: string) => Promise<{ model: string }>;
+    setConfigModel?: (model: string, host?: string) => Promise<unknown>;
     getFeaturesConfig?: () => Promise<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>;
     setFeaturesConfig?: (memory_enabled: boolean, doc_prompt_enabled: boolean) => Promise<unknown>;
     getPathsInfo?: () => Promise<{ work_dir: string; extra_allowed_paths: string[]; upload_dir: string; text: string }>;
@@ -355,8 +362,8 @@ export interface CommandContext {
     getMemoryStatus?: () => Promise<import("../../api/types").MemoryStatusResponse>;
     setBashRule?: (prefix: string, level: "allow" | "deny" | "ask") => Promise<unknown>;
     getPermissions?: (sessionId?: string, host?: string) => Promise<PermissionsResponse>;
-    getAutoContinue?: () => Promise<{ enabled: boolean; model: string }>;
-    setAutoContinue?: (fields: { enabled?: boolean; model?: string; clear?: boolean }) => Promise<{ enabled: boolean; model: string }>;
+    getAutoContinue?: (host?: string) => Promise<{ enabled: boolean; model: string }>;
+    setAutoContinue?: (fields: { enabled?: boolean; model?: string; clear?: boolean }, host?: string) => Promise<{ enabled: boolean; model: string }>;
     connectProvider?: (provider: string, api_key: string) => Promise<{ provider: string; key: string }>;
     addProject?: (path: string) => Promise<unknown>;
     getDocsStatus?: (project?: string, host?: string) => Promise<{ enabled: boolean; text: string }>;
@@ -365,12 +372,12 @@ export interface CommandContext {
     docsCleanup?: (confirm: boolean, project?: string, host?: string) => Promise<{ result: string }>;
     getImageGenConfig?: () => Promise<import("../../api/client").ImageGenConfig>;
     setImageGenConfig?: (cfg: import("../../api/client").ImageGenConfig) => Promise<unknown>;
-    getDiscoveryConfig?: () => Promise<import("../../api/client").DiscoveryConfig>;
-    setDiscoveryConfig?: (cfg: import("../../api/client").DiscoveryConfig) => Promise<unknown>;
+    getDiscoveryConfig?: (host?: string) => Promise<import("../../api/client").DiscoveryConfig>;
+    setDiscoveryConfig?: (cfg: import("../../api/client").DiscoveryConfig, host?: string) => Promise<unknown>;
     /** Config + live runtime discovery status for one session (/discover status). */
     getDiscoveryStatus?: (id: string, host?: string) => Promise<import("../../api/client").DiscoveryStatus>;
-    getLocalModelsConfig?: () => Promise<Record<string, { enabled: boolean; max_parallel: number }>>;
-    setLocalModelsConfig?: (models: Record<string, { enabled: boolean; max_parallel: number }>) => Promise<unknown>;
+    getLocalModelsConfig?: (host?: string) => Promise<Record<string, { enabled: boolean; max_parallel: number }>>;
+    setLocalModelsConfig?: (models: Record<string, { enabled: boolean; max_parallel: number }>, host?: string) => Promise<unknown>;
     syncLoginStart?: () => Promise<{ deviceCode: string; userCode: string; verifyUrl: string; expiresIn: number }>;
     syncLogout?: () => Promise<unknown>;
 
@@ -383,12 +390,12 @@ export interface CommandContext {
     getTheme?: (name?: string) => Promise<import("../../api/types").ThemeResponse>;
     getTUISettings?: () => Promise<import("../../api/client").TUISettings>;
     setTUISettings?: (cfg: import("../../api/client").TUISettings) => Promise<import("../../api/client").TUISettings>;
-    getExplorerModel?: () => Promise<{ model: string; enabled: boolean }>;
-    setExplorerModel?: (model: string) => Promise<{ model: string; enabled: boolean }>;
-    setExplorerModelEnabled?: (enabled: boolean) => Promise<{ model: string; enabled: boolean }>;
-    getContextModel?: () => Promise<{ model: string; enabled: boolean }>;
-    setContextModel?: (model: string) => Promise<{ model: string; enabled: boolean }>;
-    setContextModelEnabled?: (enabled: boolean) => Promise<{ model: string; enabled: boolean }>;
+    getExplorerModel?: (host?: string) => Promise<{ model: string; enabled: boolean }>;
+    setExplorerModel?: (model: string, host?: string) => Promise<{ model: string; enabled: boolean }>;
+    setExplorerModelEnabled?: (enabled: boolean, host?: string) => Promise<{ model: string; enabled: boolean }>;
+    getContextModel?: (host?: string) => Promise<{ model: string; enabled: boolean }>;
+    setContextModel?: (model: string, host?: string) => Promise<{ model: string; enabled: boolean }>;
+    setContextModelEnabled?: (enabled: boolean, host?: string) => Promise<{ model: string; enabled: boolean }>;
     /** CLI-utility detection (/tools). `host` routes a remote project's probe
      *  to that host's server, so status reflects the remote PATH. */
     getCliTools?: (host?: string) => Promise<import("../../api/client").CliToolsResponse>;
@@ -396,6 +403,25 @@ export interface CommandContext {
      *  Install shells out to the package manager and can take minutes. */
     startCliToolsInstall?: (tool: string, host?: string) => Promise<import("../../api/client").CliToolInstallStartResponse>;
     getCliToolsInstallStatus?: (jobId: string, host?: string) => Promise<import("../../api/client").CliToolInstallStatusResponse>;
+
+    // ── Subcommand parity: /recap, /agents, /cron ──
+    /** Recap model config (/recap status|enable|disable). */
+    getRecapConfig?: (host?: string) => Promise<{ recap_model: string; recap_model_enabled: boolean; recap_timeout_seconds: number }>;
+    setRecapConfig?: (recapModel: string, recapModelEnabled: boolean, recapTimeoutSeconds: number, host?: string) => Promise<{ recap_model: string; recap_model_enabled: boolean; recap_timeout_seconds: number }>;
+    /** One scheduled job's detail (/cron describe). */
+    getCronJob?: (id: string) => Promise<import("../../api/types").CronJob>;
+    /** Remove a scheduled job (/cron remove). */
+    deleteCronJob?: (id: string) => Promise<unknown>;
+
+    // ── MCP OAuth (/mcp-auth) ──
+    /** Start an MCP OAuth flow; returns a pollable job id. */
+    startMCPAuth?: (name: string, host?: string) => Promise<{ job_id: string; server: string; status: string; browser_note?: string }>;
+    /** Poll an MCP OAuth job started by startMCPAuth. */
+    getMCPAuthStatus?: (jobId: string, host?: string) => Promise<{ job_id: string; server: string; status: string; error?: string }>;
+
+    // ── Session identity (/reset-id) ──
+    /** Re-key a chat with a fresh session id, keeping the transcript. */
+    resetSessionId?: (sessionId: string, host?: string) => Promise<{ old_id: string; new_id: string }>;
   };
   /** Current messages in the chat store (used by /export). */
   getMessages?: () => Message[];
@@ -457,6 +483,10 @@ export async function dispatchCommand(
     case "/title":
       return handleTitle(args, ctx);
 
+    case "/reset-id":
+      return handleResetId(ctx);
+
+
     // ── File edit history ──
     case "/undo":
       return handleUndo(ctx);
@@ -469,7 +499,10 @@ export async function dispatchCommand(
       return handleUsage(args, ctx);
 
     case "/init":
-      return handleInit(ctx);
+      // Runs the same AGENTS.md analysis prompt the TUI does. Previously this
+      // called POST /api/init, which only wrote a static stub file — so `/init`
+      // on the web produced a placeholder where the TUI produced real content.
+      return handleCommandContext("/init", args, ctx);
 
     // ── Permissions ──
     case "/permissions":
@@ -494,10 +527,10 @@ export async function dispatchCommand(
       return handleMask(args, ctx);
 
     case "/compact":
-      return handleCompact(ctx);
+      return handleCompact(args, ctx);
 
     case "/recap":
-      return handleRecap(ctx);
+      return handleRecap(args, ctx);
 
     case "/share":
       return handleShare(ctx);
@@ -566,7 +599,7 @@ export async function dispatchCommand(
       return handleLogout(ctx);
 
     case "/mcp-auth":
-      return handleMcpAuth();
+      return handleMcpAuth(args, ctx);
 
     case "/docs":
     case "/doc-mode":
@@ -597,7 +630,7 @@ export async function dispatchCommand(
 
     // ── Status lists (assistant message) ──
     case "/agents":
-      return handleAgents(ctx);
+      return handleAgents(args, ctx);
 
     case "/skills":
       return handleSkills(ctx);
@@ -606,7 +639,7 @@ export async function dispatchCommand(
       return handleMcp(ctx);
 
     case "/cron":
-      return handleCron(ctx);
+      return handleCron(args, ctx);
 
     case "/github":
       return handleGithub(args, ctx);
@@ -987,7 +1020,33 @@ async function handleExportClaude(ctx: CommandContext): Promise<CommandResult> {
   }
 }
 
+async function handleResetId(ctx: CommandContext): Promise<CommandResult> {
+  const sessionId = activeSessionId(ctx);
+  if (!sessionId) {
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: "No active session to reset — send a message first." }],
+    };
+  }
+  const reset = ctx.api.resetSessionId ?? ((id: string, host?: string) => api.resetSessionId(id, host));
+  try {
+    const res = await reset(sessionId, ctx.host);
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `Reset session id: \`${res.old_id}\` → \`${res.new_id}\`\n\nThe conversation is unchanged; the provider will treat it as a new chat.`,
+      }],
+
+      rekeyTo: { oldId: res.old_id, newId: res.new_id },
+    };
+  } catch (err) {
+    return errorMessage("Failed to reset session id", err);
+  }
+}
+
 async function handleTitle(args: string, ctx: CommandContext): Promise<CommandResult> {
+
   const title = args.trim();
   if (!title) {
     return {
@@ -1053,19 +1112,6 @@ async function handleUsage(args: string, ctx: CommandContext): Promise<CommandRe
     };
   } catch (err) {
     return errorMessage("Failed to fetch usage", err);
-  }
-}
-
-async function handleInit(ctx: CommandContext): Promise<CommandResult> {
-  try {
-    const res = await api.initProject(ctx.projectPath, ctx.host);
-    const verb = res.status === "created" ? "Created" : "Found existing";
-    return {
-      handled: true,
-      messages: [{ role: "assistant", content: `${verb} \`${res.path}\`.` }],
-    };
-  } catch (err) {
-    return errorMessage("Init failed", err);
   }
 }
 
@@ -1506,7 +1552,7 @@ async function handleMask(args: string, ctx: CommandContext): Promise<CommandRes
   };
 }
 
-async function handleCompact(ctx: CommandContext): Promise<CommandResult> {
+async function handleCompact(args: string, ctx: CommandContext): Promise<CommandResult> {
   const sessionId = activeSessionId(ctx);
   if (!sessionId) {
     return {
@@ -1519,7 +1565,9 @@ async function handleCompact(ctx: CommandContext): Promise<CommandResult> {
   if (getCompactionState(sessionId)?.status === "active") return { handled: true };
   setCompactionState(sessionId, { status: "active", startedAt: Date.now() });
   try {
-    await ctx.api.compactSession(sessionId, ctx.host);
+    // Optional focus steers the summary (TUI `/compact <focus>`); an empty
+    // focus is the plain compaction the no-arg form has always done.
+    await ctx.api.compactSession(sessionId, ctx.host, args.trim() || undefined);
     // Completion is reported by the persisted compaction-summary notice now
     // rendered inline in the transcript, so drop the composer bottom bar
     // instead of retaining a "Compacted: X → Y" banner until dismissed.
@@ -1537,7 +1585,78 @@ async function handleCompact(ctx: CommandContext): Promise<CommandResult> {
   }
 }
 
-async function handleRecap(ctx: CommandContext): Promise<CommandResult> {
+async function handleRecap(args: string, ctx: CommandContext): Promise<CommandResult> {
+  const parts = args.trim().split(/\s+/).filter(Boolean);
+  const sub = parts[0]?.toLowerCase();
+
+  // ── Config subcommands (TUI parity: /recap status|enable|disable|model) ──
+  // These MUST be checked before the default "run a recap" branch: a bare
+  // `handleRecap` ignoring its args would spend an LLM call on `/recap status`.
+  if (sub === "status" || sub === "enable" || sub === "on" || sub === "disable" || sub === "off") {
+    if (!ctx.api.getRecapConfig || !ctx.api.setRecapConfig) return unsupported("/recap");
+    try {
+      const cur = await ctx.api.getRecapConfig(ctx.host);
+      if (sub === "status") {
+        const model = cur.recap_model
+          ? `\`${cur.recap_model}\``
+          : "(not set — will use small model, then main model)";
+        return ok(
+          [
+            "## Recap Status",
+            "",
+            `- **Model:** ${model}`,
+            `- **Auto-recap:** ${cur.recap_model_enabled ? "● enabled" : "○ disabled"}`,
+            `- **Timeout:** ${cur.recap_timeout_seconds}s`,
+            "",
+            "Usage: `/recap [status|enable|disable|model <id>|auto]`",
+          ].join("\n"),
+        );
+      }
+      const enabled = sub === "enable" || sub === "on";
+      await ctx.api.setRecapConfig(cur.recap_model, enabled, cur.recap_timeout_seconds, ctx.host);
+      return ok(`**Recap model:** ${enabled ? "enabled" : "disabled"}.`);
+    } catch (err) {
+      return fail("/recap", err);
+    }
+  }
+
+  if (sub === "auto") {
+    // Top-level `auto` is advertised in the usage string below and must clear
+    // the model, exactly like `model auto`. Falling through to the default
+    // branch would spend an LLM call on a config command (the same class of
+    // bug as `/recap status` used to be).
+    if (!ctx.api.getRecapConfig || !ctx.api.setRecapConfig) return unsupported("/recap");
+    try {
+      const cur = await ctx.api.getRecapConfig(ctx.host);
+      await ctx.api.setRecapConfig("", cur.recap_model_enabled, cur.recap_timeout_seconds, ctx.host);
+      return ok("**Recap model** cleared — falling back to the small model, then the main model.");
+    } catch (err) {
+      return fail("/recap", err);
+    }
+  }
+
+  if (sub === "model") {
+    if (!ctx.api.getRecapConfig || !ctx.api.setRecapConfig) return unsupported("/recap");
+    const target = parts.slice(1).join(" ").trim();
+    if (!target) {
+      // No-arg mirrors the TUI's recap-model picker; App opens the dialog.
+      return { handled: true, openModelPicker: true, modelPickerPurpose: "recap" };
+    }
+    try {
+      const cur = await ctx.api.getRecapConfig(ctx.host);
+      const model = target.toLowerCase() === "auto" ? "" : target;
+      await ctx.api.setRecapConfig(model, cur.recap_model_enabled, cur.recap_timeout_seconds, ctx.host);
+      return ok(
+        model
+          ? `**Recap model:** \`${model}\`.`
+          : "**Recap model** cleared — falling back to the small model, then the main model.",
+      );
+    } catch (err) {
+      return fail("/recap", err);
+    }
+  }
+
+  // ── Default: run a recap now ──
   const sessionId = activeSessionId(ctx);
   if (!sessionId) {
     return {
@@ -1716,7 +1835,7 @@ async function handleMaxStep(args: string, ctx: CommandContext): Promise<Command
 async function handleEffort(args: string, ctx: CommandContext): Promise<CommandResult> {
   if (!ctx.api.getThinkingBudget || !ctx.api.setThinkingBudget) return unsupported("/effort");
   try {
-    const cur = await ctx.api.getThinkingBudget();
+    const cur = await ctx.api.getThinkingBudget(ctx.host);
     const key = args.trim().toLowerCase();
     if (!key) {
       return ok([
@@ -1731,7 +1850,7 @@ async function handleEffort(args: string, ctx: CommandContext): Promise<CommandR
       return ok(`Unknown level \`${key}\`. Use ${cur.levels.map((l) => l.level).join(" | ")}.`);
     }
     const level = known?.level ?? key;
-    const r = await ctx.api.setThinkingBudget(level);
+    const r = await ctx.api.setThinkingBudget(level, ctx.host);
     const budget = (r as { budget?: number })?.budget ?? EFFORT_LEVELS[level] ?? 0;
     return ok(`**Reasoning effort:** ${budget === 0 ? "off" : level} (${budget.toLocaleString()} tokens).`);
   } catch (err) {
@@ -1776,7 +1895,7 @@ async function handleModels(args: string, ctx: CommandContext): Promise<CommandR
         );
       }
     }
-    await ctx.api.setConfigModel(name);
+    await ctx.api.setConfigModel(name, ctx.host);
     return ok(`**Model:** switched to \`${name}\`. Applies to this and new sessions.`);
   } catch (err) {
     return fail("/models", err);
@@ -1810,16 +1929,16 @@ async function handleAutoContinue(args: string, ctx: CommandContext): Promise<Co
     const parts = args.trim().split(/\s+/).filter(Boolean);
     const sub = parts[0]?.toLowerCase();
     if (!sub || sub === "status") {
-      const cur = await ctx.api.getAutoContinue();
+      const cur = await ctx.api.getAutoContinue(ctx.host);
       const model = cur.model ? `\`${cur.model}\`` : "(none — StepLimitHit only)";
       return ok(`**Auto-continue:** ${cur.enabled ? "enabled" : "disabled"}\n**Judge model:** ${model}`);
     }
     if (["on", "true", "yes", "enable"].includes(sub)) {
-      const r = await ctx.api.setAutoContinue({ enabled: true });
+      const r = await ctx.api.setAutoContinue({ enabled: true }, ctx.host);
       return ok(`**Auto-continue:** enabled. Judge model: ${r.model ? `\`${r.model}\`` : "(none)"}`);
     }
     if (["off", "false", "no", "disable"].includes(sub)) {
-      await ctx.api.setAutoContinue({ enabled: false });
+      await ctx.api.setAutoContinue({ enabled: false }, ctx.host);
       return ok("**Auto-continue:** disabled.");
     }
     if (sub === "model") {
@@ -1830,10 +1949,10 @@ async function handleAutoContinue(args: string, ctx: CommandContext): Promise<Co
         return { handled: true, openModelPicker: true, modelPickerPurpose: "autocontinue" };
       }
       if (["auto", "none", "off"].includes(target.toLowerCase())) {
-        const r = await ctx.api.setAutoContinue({ clear: true });
+        const r = await ctx.api.setAutoContinue({ clear: true }, ctx.host);
         return ok(`**Auto-continue judge model cleared** — falling back to StepLimitHit only. Enabled: ${r.enabled}.`);
       }
-      const r = await ctx.api.setAutoContinue({ model: target });
+      const r = await ctx.api.setAutoContinue({ model: target }, ctx.host);
       // Setting the judge model does not enable the feature; say so when the
       // gate is off so the user doesn't configure a judge and assume it fires.
       const gate = r.enabled ? "" : "\n**Auto-continue is still DISABLED** — run `/autocontinue on` to arm it.";
@@ -1947,7 +2066,7 @@ async function handleAddDir(args: string, ctx: CommandContext): Promise<CommandR
 async function handleLocalModel(args: string, ctx: CommandContext): Promise<CommandResult> {
   if (!ctx.api.getLocalModelsConfig || !ctx.api.setLocalModelsConfig) return unsupported("/localmodel");
   try {
-    const models = await ctx.api.getLocalModelsConfig();
+    const models = await ctx.api.getLocalModelsConfig(ctx.host);
     const names = Object.keys(models).sort();
     const parts = args.trim().split(/\s+/).filter(Boolean);
     const sub = parts[0]?.toLowerCase();
@@ -1978,7 +2097,7 @@ async function handleLocalModel(args: string, ctx: CommandContext): Promise<Comm
           max_parallel: next[t]?.max_parallel ?? 1,
         };
       }
-      await ctx.api.setLocalModelsConfig(next);
+      await ctx.api.setLocalModelsConfig(next, ctx.host);
       return ok(`${sub === "add" ? "Registered" : sub === "enable" ? "Enabled" : "Disabled"}: ${targets.map((t) => `\`${t}\``).join(", ")}.`);
     }
     if (sub === "limit") {
@@ -1988,7 +2107,7 @@ async function handleLocalModel(args: string, ctx: CommandContext): Promise<Comm
         return ok("Usage: `/localmodel limit <name> <1|2>`.");
       }
       if (!models[name]) return ok(`Unknown local model \`${name}\`.`);
-      await ctx.api.setLocalModelsConfig({ ...models, [name]: { ...models[name], max_parallel: parallel } });
+      await ctx.api.setLocalModelsConfig({ ...models, [name]: { ...models[name], max_parallel: parallel } }, ctx.host);
       return ok(`**${name}:** max_parallel=${parallel}. (Applies to instances started by this server.)`);
     }
     if (sub === "hf-token") {
@@ -2040,7 +2159,7 @@ function renderDiscoveryRuntime(s: import("../../api/client").DiscoveryStatus): 
 async function handleDiscover(args: string, ctx: CommandContext): Promise<CommandResult> {
   if (!ctx.api.getDiscoveryConfig || !ctx.api.setDiscoveryConfig) return unsupported("/discover");
   try {
-    const cfg = await ctx.api.getDiscoveryConfig();
+    const cfg = await ctx.api.getDiscoveryConfig(ctx.host);
     const parts = args.trim().split(/\s+/).filter(Boolean);
     const sub = parts[0]?.toLowerCase();
 
@@ -2065,13 +2184,13 @@ async function handleDiscover(args: string, ctx: CommandContext): Promise<Comman
       return ok(lines.join("\n"));
     }
     if (sub === "enable" || sub === "disable") {
-      await ctx.api.setDiscoveryConfig({ ...cfg, enabled: sub === "enable" });
+      await ctx.api.setDiscoveryConfig({ ...cfg, enabled: sub === "enable" }, ctx.host);
       return ok(`**Discovery:** ${sub === "enable" ? "enabled" : "disabled"}.`);
     }
     if (sub === "model") {
       const target = parts.slice(1).join(" ").trim();
       if (!target) return ok("Usage: `/discover model <provider/model>`. The interactive picker is TUI-only.");
-      await ctx.api.setDiscoveryConfig({ ...cfg, embedding_model: target });
+      await ctx.api.setDiscoveryConfig({ ...cfg, embedding_model: target }, ctx.host);
       return ok(`**Embedding model:** \`${target}\`.`);
     }
     if (sub === "ignore") {
@@ -2090,7 +2209,7 @@ async function handleDiscover(args: string, ctx: CommandContext): Promise<Comman
       } else {
         return ok("Usage: `/discover ignore [add|remove|clear] [path…]`.");
       }
-      await ctx.api.setDiscoveryConfig({ ...cfg, ignore_paths: paths });
+      await ctx.api.setDiscoveryConfig({ ...cfg, ignore_paths: paths }, ctx.host);
       return ok(`**Ignored paths updated:** ${paths.length ? paths.map((p) => `\`${p}\``).join(", ") : "(none)"}`);
     }
     return ok("Usage: `/discover [enable|disable|status|model <id>|ignore …]`.");
@@ -2131,8 +2250,93 @@ async function handleLogout(ctx: CommandContext): Promise<CommandResult> {
 
 // ─── /mcp-auth — browser OAuth gate ────────────────────────────────────────
 
-function handleMcpAuth(): CommandResult {
-  return ok("**/mcp-auth is TUI-only**: MCP OAuth completes through a localhost callback (127.0.0.1:8085) plus a system-browser launch, which only the terminal client hosts. Run `/mcp-auth <server>` in the TUI, then the token is shared (it is stored in the same `mcp-auth.json` the web/desktop server reads).");
+// ─── /mcp-auth <server> — MCP OAuth ─────────────────────────────────────────
+
+/** How often to poll a running auth flow. The flow waits up to 2 minutes for
+ *  the browser callback, so a short interval keeps the UI responsive. */
+const MCP_AUTH_POLL_INTERVAL_MS = 1500;
+/** Client-side backstop: the server's own flow times out at 2 minutes. */
+const MCP_AUTH_POLL_TIMEOUT_MS = 3 * 60 * 1000;
+
+/**
+ * Starts an MCP OAuth flow and reports its outcome asynchronously.
+ *
+ * The server gates the flow to loopback callers: it launches a system browser
+ * and listens on 127.0.0.1:8085 for the callback, which only works when the
+ * browser and the server share a machine. That is true for the desktop app and
+ * a local web session, but NOT for a remote SSH session — there the local
+ * server refuses to proxy the auth route (403) rather than open a browser on
+ * the wrong machine and wait two minutes for a callback it never receives.
+ * Previously the web UI claimed `/mcp-auth` was TUI-only, which sent desktop
+ * users in a circle.
+ *
+ * The flow can take up to two minutes, so — like `/tools` — the handler starts
+ * it and returns immediately; the outcome is delivered via `ctx.notify` by a
+ * detached poll. Awaiting the poll inline would block the composer for the
+ * whole wait with no progress feedback.
+ */
+async function handleMcpAuth(args: string, ctx: CommandContext): Promise<CommandResult> {
+  const name = args.trim().split(/\s+/)[0] ?? "";
+  if (!name) {
+    return ok("Usage: `/mcp-auth <server>` — starts an OAuth flow for a remote MCP server. Use `/mcp` to list servers.");
+  }
+  if (!ctx.api.startMCPAuth) return unsupported("/mcp-auth");
+
+  const getStatus = ctx.api.getMCPAuthStatus;
+  const notify = ctx.notify;
+  try {
+    // Surface the server's own refusal (remote/non-loopback) verbatim: it
+    // explains where to run the command instead.
+    const started = await ctx.api.startMCPAuth(name, ctx.host);
+
+    // Without a status endpoint or a way to deliver a late result (a draft tab
+    // has no transcript yet) don't promise an outcome that cannot arrive.
+    if (!getStatus || !notify) {
+      return ok(
+        `**MCP OAuth started for \`${name}\`.** ${started.browser_note ?? "A browser window should have opened."} ` +
+          `Finish in the browser, then re-run \`/mcp\` to confirm.`,
+      );
+    }
+    void pollMcpAuth(started.job_id, name, getStatus, ctx.host, notify);
+    return ok(`**MCP OAuth started for \`${name}\`.** Finish in the browser window; the result will appear here.`);
+  } catch (err) {
+    return fail("/mcp-auth", err);
+  }
+}
+
+/** pollMcpAuth waits for a background OAuth flow to settle and reports the
+ *  outcome through `notify`. Runs detached from the command handler: the
+ *  handler has already returned, so there is nothing to await it. */
+async function pollMcpAuth(
+  jobId: string,
+  name: string,
+  getStatus: (jobId: string, host?: string) => Promise<{ status: string; error?: string }>,
+  host: string | undefined,
+  notify: (content: string) => void,
+): Promise<void> {
+  const deadline = Date.now() + MCP_AUTH_POLL_TIMEOUT_MS;
+  // A single transient poll failure must not abandon a live flow; only give up
+  // once the deadline passes.
+  for (;;) {
+    await new Promise((r) => setTimeout(r, MCP_AUTH_POLL_INTERVAL_MS));
+    if (Date.now() > deadline) {
+      notify(`**MCP authentication for \`${name}\` is still running.** Finish in the browser window, then re-run \`/mcp\` to confirm.`);
+      return;
+    }
+    let st: { status: string; error?: string };
+    try {
+      st = await getStatus(jobId, host);
+    } catch {
+      continue; // transient; retry until the deadline
+    }
+    if (st.status === "running") continue;
+    if (st.status === "done") {
+      notify(`**MCP authentication successful for \`${name}\`.** The token is stored and shared by the TUI and web/desktop server.`);
+      return;
+    }
+    notify(`**MCP authentication failed for \`${name}\`:** ${st.error || "unknown error"}`);
+    return;
+  }
 }
 
 // ─── /tools, /tool — CLI utility detection + install ────────────────────────
@@ -2631,7 +2835,34 @@ async function handleLsp(ctx: CommandContext): Promise<CommandResult> {
 
 // ─── /agents — subagent status ────────────────────────────────────────────
 
-async function handleAgents(ctx: CommandContext): Promise<CommandResult> {
+async function handleAgents(args: string, ctx: CommandContext): Promise<CommandResult> {
+  const parts = args.trim().split(/\s+/).filter(Boolean);
+  const sub = parts[0]?.toLowerCase();
+
+  // /agents limit [n] — TUI parity. Reads/writes max_concurrent_agents through
+  // the shared limits config (the same field Settings > Limits edits).
+  if (sub === "limit") {
+    if (!ctx.api.getLimitsConfig || !ctx.api.setLimitsConfig) return unsupported("/agents limit");
+    try {
+      const cur = await ctx.api.getLimitsConfig();
+      const raw = parts[1];
+      if (raw === undefined) {
+        const lim = cur.max_concurrent_agents;
+        return ok(
+          `**Max concurrent agents:** ${lim === 0 ? "0 (unlimited)" : lim}\n\nUsage: \`/agents limit <n>\` — 0 = unlimited.`,
+        );
+      }
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 0) {
+        return ok(`Invalid number: \`${raw}\`. Provide a non-negative integer (0 = unlimited).`);
+      }
+      await ctx.api.setLimitsConfig({ ...cur, max_concurrent_agents: n });
+      return ok(`**Max concurrent agents:** ${n === 0 ? "0 (unlimited)" : n}.`);
+    } catch (err) {
+      return fail("/agents", err);
+    }
+  }
+
   try {
     const runs = await ctx.api.getAgentRuns?.(ctx.host);
     if (!runs || !runs.length) {
@@ -2728,7 +2959,49 @@ async function handleMcp(ctx: CommandContext): Promise<CommandResult> {
 
 // ─── /cron — scheduled jobs ───────────────────────────────────────────────
 
-async function handleCron(ctx: CommandContext): Promise<CommandResult> {
+async function handleCron(args: string, ctx: CommandContext): Promise<CommandResult> {
+  const parts = args.trim().split(/\s+/).filter(Boolean);
+  const sub = parts[0]?.toLowerCase();
+
+  // ── /cron describe <id> — full job JSON (TUI parity) ──
+  if (sub === "describe") {
+    if (!ctx.api.getCronJob) return unsupported("/cron describe");
+    const id = parts[1];
+    if (!id) return ok("Usage: `/cron describe <id>`.");
+    try {
+      const job = await ctx.api.getCronJob(id);
+      return ok("```json\n" + JSON.stringify(job, null, 2) + "\n```");
+    } catch (err) {
+      return fail("/cron", err);
+    }
+  }
+
+  // ── /cron remove <id> — destructive, so require the explicit id ──
+  if (sub === "remove") {
+    if (!ctx.api.deleteCronJob) return unsupported("/cron remove");
+    const id = parts[1];
+    if (!id) return ok("Usage: `/cron remove <id>`.");
+    try {
+      await ctx.api.deleteCronJob(id);
+      return ok(`Removed scheduled job \`${id}\`.`);
+    } catch (err) {
+      return fail("/cron", err);
+    }
+  }
+
+  // ── /cron add … — the TUI has a multi-form parser; on the web point at the
+  //    Cron tab, which is the full editor (and cannot mis-parse a schedule). ──
+  if (sub === "add") {
+    return ok(
+      "Create scheduled jobs from the **Cron** tab (top nav) — it validates the schedule and shows next-run times. " +
+        "The TUI's `/cron add every_ms|at|cron …` parser is not available here.",
+    );
+  }
+
+  if (sub && sub !== "list") {
+    return ok("Usage: `/cron [list|describe <id>|remove <id>]` — create jobs from the Cron tab.");
+  }
+
   try {
     const jobs = await ctx.api.getCronJobs?.();
     if (!jobs || !jobs.length) {
@@ -2886,7 +3159,7 @@ async function handleGithub(args: string, ctx: CommandContext): Promise<CommandR
 
 async function handleSmallModel(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const cfg = await ctx.api.getSmallModelWithEnabled?.();
+    const cfg = await ctx.api.getSmallModelWithEnabled?.(ctx.host);
     const model = cfg?.model || "not configured";
     const enabled = cfg?.enabled ?? true;
     return {
@@ -2906,7 +3179,7 @@ async function handleSmallModel(ctx: CommandContext): Promise<CommandResult> {
 
 async function handleAdvisor(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const cfg = await ctx.api.getAdvisor?.();
+    const cfg = await ctx.api.getAdvisor?.(ctx.host);
     return {
       handled: true,
       messages: [{
@@ -3001,12 +3274,12 @@ async function handlePurposeModel(
   try {
     if (!sub || sub === "status") {
       if (!get) return unsupported(name);
-      return renderPurposeStatus(kind, await get());
+      return renderPurposeStatus(kind, await get(ctx.host));
     }
     if (sub === "enable" || sub === "on" || sub === "disable" || sub === "off") {
       if (!setEnabled) return unsupported(`${name} ${sub}`);
       const enabled = sub === "enable" || sub === "on";
-      const res = await setEnabled(enabled);
+      const res = await setEnabled(enabled, ctx.host);
       return ok(`**${PURPOSE_META[kind].title}:** ${res.enabled ? "enabled" : "disabled"}.`);
     }
     // `/x-model model` opens the picker; `/x-model model <id>` writes directly;
@@ -3021,20 +3294,20 @@ async function handlePurposeModel(
       }
       if (target.toLowerCase() === "auto") {
         if (!set) return unsupported(`${name} model auto`);
-        await set("auto");
+        await set("auto", ctx.host);
         return ok(`**${PURPOSE_META[kind].title}** cleared — falling back to the small model, then the main model.`);
       }
       if (!set) return unsupported(`${name} model`);
-      const res = await set(target);
+      const res = await set(target, ctx.host);
       return ok(`**${PURPOSE_META[kind].title}:** \`${res.model || target}\`.`);
     }
     // Bare value: treat as a model id.
     if (!set) return unsupported(name);
     if (sub === "auto") {
-      await set("auto");
+      await set("auto", ctx.host);
       return ok(`**${PURPOSE_META[kind].title}** cleared — falling back to the small model, then the main model.`);
     }
-    const res = await set(parts.join(" "));
+    const res = await set(parts.join(" "), ctx.host);
     return ok(`**${PURPOSE_META[kind].title}:** \`${res.model || parts.join(" ")}\`.`);
   } catch (err) {
     return fail(name, err);

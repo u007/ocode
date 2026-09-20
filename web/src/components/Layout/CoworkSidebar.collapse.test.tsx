@@ -126,7 +126,7 @@ describe("CoworkSidebar auto-continue row", () => {
     // judge model must not be touched by the checkbox).
     const checkbox = screen.getByRole("checkbox", { name: "Auto-continue enabled" });
     fireEvent.click(checkbox);
-    await waitFor(() => expect(api.setAutoContinue).toHaveBeenCalledWith({ enabled: true }));
+    await waitFor(() => expect(api.setAutoContinue).toHaveBeenCalledWith({ enabled: true }, undefined));
 
     // The model-name button opens the judge picker for the autocontinue purpose.
     fireEvent.click(screen.getByText("(step-limit only)"));

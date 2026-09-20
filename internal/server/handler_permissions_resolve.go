@@ -303,11 +303,17 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// reload during this continuation's streaming can buffer/replay it too
 	// (see appendLiveFrame) instead of only covering the turn's first Step.
 	h.sessions.setTurnActive(sessID, true)
+	// Step can run for minutes. Publish heartbeats for its duration or the
+	// web client's stall watchdog marks the still-running continuation
+	// "stalled" (see startTurnHeartbeat). The stop defer is declared last so it
+	// runs first, keeping the existing drain/setTurnActive(false) order intact.
+	stopHeartbeat := h.startTurnHeartbeat(sessID)
 	defer h.sessions.setTurnActive(sessID, false)
 	// A close that arrived while this continuation was running (turnActive
 	// true) could not release the agent mid-Step; drain the marker once the
 	// continuation unwinds, exactly like the async-job and sync-turn paths.
 	defer h.drainPendingClose(sessID)
+	defer stopHeartbeat()
 
 	resp, err := as.agent.Step(working)
 	if err != nil {

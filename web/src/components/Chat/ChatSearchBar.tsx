@@ -58,6 +58,9 @@ interface Props {
   onNext: () => void;
   onPrev: () => void;
   onClose: () => void;
+  // Optional secondary text shown after the counter, e.g. "12 total, 3 in view"
+  // when the full-transcript search found hits outside the loaded window.
+  note?: string;
 }
 
 // ChatSearchBar is the in-chat find bar for the web SPA — the counterpart to
@@ -72,6 +75,7 @@ export default function ChatSearchBar({
   onNext,
   onPrev,
   onClose,
+  note,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -117,6 +121,11 @@ export default function ChatSearchBar({
       >
         {counter}
       </span>
+      {note && query.trim() !== "" && (
+        <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+          {note}
+        </span>
+      )}
       <Button
         type="button"
         variant="ghost"

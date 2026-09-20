@@ -6,6 +6,38 @@ import (
 	"testing"
 )
 
+// TestLandlockApplicableRights locks the file-vs-directory rights split.
+// landlock_add_rule(2) rejects a rule whose parent_fd is a regular file when
+// the mask carries a directory-only right, with EINVAL; the mutation set
+// includes many (REMOVE_*, MAKE_*, REFER), so an unmasked file root aborted the
+// whole ruleset and every sandboxed command failed ("landlock rule for
+// ...: invalid argument"). A directory root keeps the full mask.
+func TestLandlockApplicableRights(t *testing.T) {
+	dirOnly := uint64(landlockReadDir | landlockRemoveDir | landlockRemoveFile |
+		landlockMakeDir | landlockMakeReg | landlockRefer)
+	fileOnly := uint64(landlockExecute | landlockWriteFile | landlockReadFile | landlockTruncate)
+
+	// Directory: nothing is stripped.
+	full := dirOnly | fileOnly | 0x800 /* MAKE_BLOCK, also dir-only */
+	if got := landlockApplicableRights(full, true); got != full {
+		t.Fatalf("directory mask = %#x, want unchanged %#x", got, full)
+	}
+
+	// Regular file: directory-only rights stripped, file rights kept.
+	got := landlockApplicableRights(full, false)
+	want := fileOnly
+	if got != want {
+		t.Fatalf("file mask = %#x, want %#x", got, want)
+	}
+	if got&(landlockReadDir|landlockRemoveDir|landlockRemoveFile|landlockMakeDir|landlockMakeReg|landlockRefer) != 0 {
+		t.Fatalf("file mask retained a directory-only right: %#x", got)
+	}
+	// The mask must not accidentally grant more than it was given.
+	if landed := landlockApplicableRights(landlockReadFile, false); landed != landlockReadFile {
+		t.Fatalf("file mask widened: %#x", landed)
+	}
+}
+
 // TestBuildBwrapArgvLocksShape locks the bwrap argv contract: ro-bind "/" ->
 // rw binds per writable (canonical) root -> command argv; egress shared, /proc
 // mounted, die-with-parent.

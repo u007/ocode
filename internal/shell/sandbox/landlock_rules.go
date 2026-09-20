@@ -39,9 +39,41 @@ func buildBwrapArgv(writableRoots []string, bashArgs []string) []string {
 	return argv
 }
 
+// Named Landlock filesystem access rights (values mirror <linux/landlock.h>).
+// landlockWriteFile lives with the mutation bits below; the rest are grouped
+// here so the file-vs-directory split is legible.
+const (
+	landlockExecute  = 0x1
+	landlockReadFile = 0x4
+	landlockReadDir  = 0x8
+)
+
 // landlockReadExec is the broad read+exec right set granted over the whole
 // filesystem (ABI-v1-safe core, no TRUNCATE/REFER/IOCTL).
-const landlockReadExec = 0x1 | 0x4 | 0x8 // EXECUTE | READ_FILE | READ_DIR
+const landlockReadExec = landlockExecute | landlockReadFile | landlockReadDir
+
+// landlockFileRights is the subset of the filesystem rights Landlock accepts
+// when a rule's parent_fd refers to a regular file rather than a directory:
+// landlock_add_rule(2) returns EINVAL if the allowed mask carries a
+// directory-only right (READ_DIR, REMOVE_DIR/REMOVE_FILE, every MAKE_*, and
+// REFER) for a non-directory. A writable root is normally a directory, but the
+// permission layer also grants individual FILES for write — projects.json and
+// the global git-ignore files, which NewRootSet's protected-file carve-out
+// expands out of the writable global data dir. IOCTL_DEV is deliberately
+// absent: the mutation set never handles it (see landlockMutationForABI), so it
+// can never appear in a rule's allowed mask.
+const landlockFileRights = landlockExecute | landlockWriteFile | landlockReadFile | landlockTruncate
+
+// landlockApplicableRights masks allowed down to the rights Landlock accepts
+// for the object type behind fd. Without this a FILE writable root aborts the
+// whole ruleset build ("landlock rule for ...: invalid argument") and, because
+// the confiner is fail-closed, every sandboxed command dies before it runs.
+func landlockApplicableRights(allowed uint64, isDir bool) uint64 {
+	if isDir {
+		return allowed
+	}
+	return allowed & landlockFileRights
+}
 
 // landlockNullDevice is the singleton discard target outside every writable
 // root that tools open O_WRONLY/O_RDWR (`2>/dev/null`, git, ssh, pagers).

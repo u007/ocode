@@ -50,6 +50,9 @@ async function mount(container: HTMLElement) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The viewer persists zoom/scroll per file; a case must not inherit the
+  // previous one's position (all cases reuse path="doc.pdf").
+  localStorage.clear();
   mocks.renderMock.mockImplementation(() => ({ promise: Promise.resolve(), cancel: vi.fn() }));
   mocks.getPage.mockImplementation(async () => ({
     getViewport: () => ({ width: 400, height: 500, scale: 1.5, transform: [1.5, 0, 0, -1.5, 0, 500] }),

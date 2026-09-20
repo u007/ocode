@@ -2,6 +2,7 @@ package session
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -471,5 +472,62 @@ func TestReadHistoryGenEmptyDBDefaultsZero(t *testing.T) {
 	}
 	if gen != 0 {
 		t.Fatalf("readHistoryGen = %d, want 0", gen)
+	}
+}
+
+// withIndexDB must retry transient SQLITE_BUSY (brand-new index file / WAL lock
+// acquisition does not consult busy_timeout) — the flake where several sessions
+// of one project first write at once fails the index refresh.
+func TestWithIndexDBRetriesTransientBusy(t *testing.T) {
+	dir := t.TempDir()
+	attempts := 0
+	err := withIndexDB(dir, func(db *sql.DB) error {
+		attempts++
+		if attempts < 3 {
+			return errors.New("simulated: database is locked (5) (SQLITE_BUSY)")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withIndexDB: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3 (busy must be retried)", attempts)
+	}
+}
+
+// A non-busy error is a real failure and must NOT be retried.
+func TestWithIndexDBDoesNotRetryNonBusy(t *testing.T) {
+	dir := t.TempDir()
+	sentinel := errors.New("boom")
+	attempts := 0
+	err := withIndexDB(dir, func(db *sql.DB) error {
+		attempts++
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err = %v, want sentinel", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+// queryIndexMetas resets its accumulator per attempt, so a retried read cannot
+// duplicate rows.
+func TestQueryIndexMetasRetryDoesNotDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	if err := upsertIndexRow(dir, ocodeMeta{ID: "ses_a", Title: "A"}); err != nil {
+		t.Fatalf("upsertIndexRow: %v", err)
+	}
+	if err := upsertIndexRow(dir, ocodeMeta{ID: "ses_b", Title: "B"}); err != nil {
+		t.Fatalf("upsertIndexRow: %v", err)
+	}
+	metas, err := queryIndexMetas(dir)
+	if err != nil {
+		t.Fatalf("queryIndexMetas: %v", err)
+	}
+	if len(metas) != 2 {
+		t.Fatalf("len(metas) = %d, want 2", len(metas))
 	}
 }

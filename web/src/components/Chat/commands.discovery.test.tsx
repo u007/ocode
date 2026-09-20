@@ -42,7 +42,7 @@ function discovery(opts: {
   sessionId?: string | null;
   host?: string;
   getDiscoveryStatus?: (id: string, host?: string) => Promise<unknown>;
-  getDiscoveryConfig?: () => Promise<unknown>;
+  getDiscoveryConfig?: (host?: string) => Promise<unknown>;
 } = {}) {
   const hasSessionId = "sessionId" in opts;
   const setDiscoveryConfig = vi.fn(async (c: unknown) => c);
@@ -132,9 +132,9 @@ describe("/discover command", () => {
   });
 
   it("still enables and disables via the config PUT", async () => {
-    const { ctx, setDiscoveryConfig } = discovery({ sessionId: "ses_real" });
+    const { ctx, setDiscoveryConfig } = discovery({ sessionId: "ses_real", host: "buildbox" });
     const result = await dispatchCommand("/discover disable", ctx);
-    expect(setDiscoveryConfig).toHaveBeenCalledWith({ ...CONFIG, enabled: false });
+    expect(setDiscoveryConfig).toHaveBeenCalledWith({ ...CONFIG, enabled: false }, "buildbox");
     expect(result.messages?.[0]?.content).toContain("disabled");
   });
 });

@@ -249,6 +249,77 @@ func TestHandleAnswerQuestionResolvesAndContinues(t *testing.T) {
 	}
 }
 
+// blockingStepClient blocks every Chat call until release is closed, letting a
+// test observe a continuation Step in flight (and the heartbeats it must
+// publish) before it completes.
+type blockingStepClient struct{ release chan struct{} }
+
+func (c *blockingStepClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
+	<-c.release
+	return &agent.Message{Role: "assistant", Content: "continued"}, nil
+}
+func (c *blockingStepClient) GetProvider() string { return "fake" }
+func (c *blockingStepClient) GetModel() string    { return "fake-model" }
+
+// waitForBusEvent drains sub until it sees event or the timeout elapses.
+func waitForBusEvent(sub chan Envelope, event string, timeout time.Duration) bool {
+	deadline := time.After(timeout)
+	for {
+		select {
+		case env := <-sub:
+			if env.Event == event {
+				return true
+			}
+		case <-deadline:
+			return false
+		}
+	}
+}
+
+// TestHandleAnswerQuestionContinuationEmitsHeartbeats is the regression guard
+// for the false "stalled" project badge. The question-answer continuation holds
+// turnActive=true while its Step runs, so it must publish turn_heartbeat for the
+// client stall watchdog (which keeps a server-reported turn_active:true marked
+// stopped until a real heartbeat clears it). Before the fix the continuation set
+// turnActive without ever starting the heartbeat ticker.
+func TestHandleAnswerQuestionContinuationEmitsHeartbeats(t *testing.T) {
+	h := NewHandler()
+	h.turnHeartbeatInterval = 5 * time.Millisecond
+	client := &blockingStepClient{release: make(chan struct{})}
+	as := &agentSession{
+		agent: agent.NewAgent(client, nil, nil, nil),
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "deploy"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: questionAskContent(t, sampleQuestion())},
+		},
+	}
+	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir())
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	body := `{"request_id":"call-1","answers":[{"header":"Deploy target","question":"Where should I deploy?","answers":[{"label":"Staging"}]}]}`
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
+		h.HandleAnswerQuestion(httptest.NewRecorder(), req)
+	}()
+
+	if !waitForBusEvent(sub, "turn_heartbeat", 2*time.Second) {
+		t.Fatal("question continuation published no turn_heartbeat while its Step was running")
+	}
+	close(client.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("question continuation did not return after the Step was released")
+	}
+}
+
 // TestHandleAnswerQuestionForwardsMultipleSelection verifies the RC bridge keeps
 // every selected answer for a multi-select question (it must not collapse to the
 // first selection as the old code did).

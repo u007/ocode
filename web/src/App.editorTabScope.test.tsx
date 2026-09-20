@@ -206,8 +206,13 @@ describe("Files tab editor-tab scoping", () => {
     // must fall back to the local tab instead of leaving a hidden tab active.
     expect(tabBar.activeId).toBe("editor-/local::b.ts");
 
-    const panes = screen.getAllByTestId("editor-pane").map((el) => el.getAttribute("data-path"));
-    expect(panes).toContain("b.ts");
-    expect(panes).not.toContain("a.ts");
+    const panes = screen.getAllByTestId("editor-pane").map((el) => ({
+      path: el.getAttribute("data-path"),
+      hidden: el.parentElement?.classList.contains("hidden") ?? false,
+    }));
+    // Both projects' panes stay MOUNTED (so their viewer state survives a
+    // switch); the inactive project's pane is hidden, not removed.
+    expect(panes.find((p) => p.path === "b.ts")).toMatchObject({ hidden: false });
+    expect(panes.find((p) => p.path === "a.ts")).toMatchObject({ hidden: true });
   });
 });

@@ -58,4 +58,22 @@ describe("MediaViewer", () => {
     await waitFor(() => expect(container.querySelector("video")?.getAttribute("src")).toContain("fresh"));
     expect(api.getMediaToken).toHaveBeenCalledTimes(2);
   });
+
+  it("pauses playback when the pane is hidden", async () => {
+    vi.mocked(api.getMediaToken).mockResolvedValue({ token: "t" });
+    const pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    const { container, rerender } = render(
+      <MediaViewer path="media/clip.mp4" projectRoot="/proj" kind="video" active />,
+    );
+    await waitFor(() => expect(container.querySelector("video")).toBeTruthy());
+
+    // display:none does not stop playback; the element reports playing so the
+    // guard takes the pause branch.
+    const video = container.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "paused", { configurable: true, get: () => false });
+
+    rerender(<MediaViewer path="media/clip.mp4" projectRoot="/proj" kind="video" active={false} />);
+    await waitFor(() => expect(pause).toHaveBeenCalled());
+    pause.mockRestore();
+  });
 });

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -403,11 +404,14 @@ func ReconcileAppend(id, title string, messages []agent.Message, baseLen int, me
 	return err
 }
 
-// ReconcileAppendWithMessages is ReconcileAppend, but returns the filtered
+// ReconcileAppendWithMessages is ReconcileAppend, but returns the merged
 // transcript when a concurrent append required a rebase. The returned slice is
 // nil when the initial save succeeded without a rebase. Callers that keep a
 // resident transcript can replace it with the returned slice to stay aligned
-// with rows inserted by another writer.
+// with rows inserted by another writer. The merge keeps whatever the caller
+// still holds unresolved — notably a trailing PERMISSION_ASK/QUESTION sentinel
+// and the assistant tool-call that raised it — so a pending ask survives the
+// rebase instead of being silently dropped from the resident transcript.
 func ReconcileAppendWithMessages(id, title string, messages []agent.Message, baseLen int, metadata map[string]any) ([]agent.Message, error) {
 	dir, err := GetStorageDir()
 	if err != nil {
@@ -465,7 +469,20 @@ func reconcileAppendToDirWithMessages(dir, id, title string, messages []agent.Me
 		}
 		err = persistToDir(dir, id, title, merged, metadata, false, 0, false)
 		if err == nil {
-			return removeIncompleteToolRequests(merged), nil
+			// Return the merged transcript UNFILTERED (not the loader's
+			// removeIncompleteToolRequests view). The caller keeps this as its
+			// resident/live transcript, and the non-rebase path leaves the
+			// resident transcript untouched — i.e. it still holds the trailing
+			// PERMISSION_ASK/QUESTION sentinel and the assistant tool-call that
+			// produced it. Returning the filtered view erased that round from
+			// memory: tailIsPermissionAsk went false (so the next user message
+			// started a fresh turn and the orphaned call was re-executed,
+			// raising a brand-new ask — the "it keeps asking again" loop) and
+			// the resolve handlers could no longer find the sentinel to answer
+			// (ses_2026-09-18-233409-df1a92d3). The merge's actual purpose —
+			// inserting another writer's rows into the resident view — is
+			// served by the merged slice itself.
+			return merged, nil
 		}
 		lastErr = err
 		if !isConflictErr(err) && !isConstraintErr(err) {
@@ -495,21 +512,107 @@ func rebaseAppend(stored, ours []agent.Message, baseLen int) ([]agent.Message, b
 	if baseLen < 0 || baseLen > len(ours) {
 		return nil, false
 	}
+	// Fast path: ours is the RAW transcript (e.g. the resident view after a
+	// prior rebase, or a fresh raw load) and its base is byte-identical to
+	// stored raw. This MUST be tried before the normalization below:
+	// stripUncompletedToolCalls nulls the tool_calls of an assistant row paused
+	// on an unresolved ask, so comparing normalized-ours against RAW stored
+	// disagrees on that row. And once such a row is inside the base, the
+	// filtered fallback is SHORTER than baseLen (removeIncompleteToolRequests
+	// drops the sentinel row and the emptied assistant row), so samePrefix
+	// returns false and the merge hard-diverges even though the two
+	// transcripts are identical. Comparing raw-to-raw first fixes that.
+	if samePrefix(stored, ours, baseLen) {
+		return mergeAppend(stored, stored, ours, ours, baseLen), true
+	}
+	// oursNorm carries the same rows at the same indices as ours, but with
+	// assistant tool-calls that have no completed result stripped — the exact
+	// normalization removeIncompleteToolRequests applies to stored rows. A turn
+	// that paused on an ask ends with an assistant row whose tool-call result is
+	// still the PERMISSION_ASK/QUESTION sentinel, so the caller's in-memory
+	// transcript keeps the call while the loader view of the disk transcript
+	// (where that row was already live-written) does not. Comparing the raw row
+	// against the filtered one fails, the merge misreads our own live-written
+	// row as an unsaved suffix, and appends a byte-identical duplicate
+	// (ses_2026-09-18-233409-df1a92d3: assistant row stored twice before every
+	// pending ask).
+	oursNorm := stripUncompletedToolCalls(ours)
 	view := stored
-	if !samePrefix(view, ours, baseLen) {
+	if !samePrefix(view, oursNorm, baseLen) {
 		view = removeIncompleteToolRequests(stored)
-		if !samePrefix(view, ours, baseLen) {
+		if !samePrefix(view, oursNorm, baseLen) {
 			return nil, false
 		}
 	}
+	// Append the caller's real rows (with their tool-calls intact), not the
+	// normalized comparison form.
+	return mergeAppend(stored, view, oursNorm, ours, baseLen), true
+}
+
+// mergeAppend merges for rebaseAppend: start from the raw stored transcript,
+// walk `view` from baseLen consuming the next unsaved `ref` row whenever a
+// stored row matches it byte-for-byte, then append the unmatched tail of `out`
+// (the caller's real rows, with tool-calls intact). `view`/`ref` are the
+// comparison pair (raw/raw, or filtered/filtered); `sorted` and `out` may
+// differ from them because the persisted result keeps the raw forms.
+func mergeAppend(stored, view, ref, out []agent.Message, baseLen int) []agent.Message {
 	merged := append([]agent.Message(nil), stored...)
 	next := baseLen
 	for i := baseLen; i < len(view); i++ {
-		if next < len(ours) && sameMessage(view[i], ours[next]) {
+		if next < len(ref) && sameMessage(view[i], ref[next]) {
 			next++
 		}
 	}
-	return append(merged, ours[next:]...), true
+	return append(merged, out[next:]...)
+}
+
+// stripUncompletedToolCalls returns a copy of messages in which every assistant
+// tool-call whose result is absent or still a pending sentinel in the same
+// slice has been removed. It approximates the normalization
+// removeIncompleteToolRequests applies to stored rows, but keeps every row so
+// the result stays INDEX-ALIGNED with the input.
+//
+// It deliberately diverges from removeIncompleteToolRequests in two ways, and
+// the divergence is load-bearing for rebaseAppend's positional guard:
+//   - it keeps incomplete tool rows (removeIncompleteToolRequests drops them),
+//     and
+//   - it keeps assistant rows whose tool-calls all filtered out, setting
+//     ToolCalls to nil (removeIncompleteToolRequests drops such a row when it
+//     becomes fully empty).
+//
+// Keeping the rows means the comparison pair is the same length as the base
+// coordinates. Dropping them (as the filtered view does) makes the filtered
+// slice SHORTER than baseLen once an incomplete row is inside the base, so
+// samePrefix reports a false divergence. For that reason this function is only
+// for comparison inside rebaseAppend — never use it as a substitute for
+// removeIncompleteToolRequests on the persistence path, which must drop the
+// rows a loader should not see.
+func stripUncompletedToolCalls(messages []agent.Message) []agent.Message {
+	completed := make(map[string]struct{})
+	for _, msg := range messages {
+		if msg.Role == "tool" && msg.ToolID != "" && !isIncompleteToolResult(msg.Content) {
+			completed[msg.ToolID] = struct{}{}
+		}
+	}
+	out := append([]agent.Message(nil), messages...)
+	for i := range out {
+		m := &out[i]
+		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+			continue
+		}
+		kept := make([]agent.ToolCall, 0, len(m.ToolCalls))
+		for _, call := range m.ToolCalls {
+			if _, ok := completed[call.ID]; ok {
+				kept = append(kept, call)
+			}
+		}
+		if len(kept) == 0 {
+			m.ToolCalls = nil
+		} else if len(kept) != len(m.ToolCalls) {
+			m.ToolCalls = kept
+		}
+	}
+	return out
 }
 
 // samePrefix reports whether the first n messages of a and b are byte-equal
@@ -1481,6 +1584,12 @@ func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
 	return allRefs, total, nil
 }
 
+// ErrNoStoredSession is returned by RekeyForDir when the id to rekey has no
+// persisted transcript (registry-only / brand-new chat): there is nothing to
+// copy, and silently minting an empty new session would lose the caller's
+// expectation that the conversation carried over.
+var ErrNoStoredSession = errors.New("session: no stored transcript for id")
+
 // Delete removes a session file and updates the index — whichever
 // on-disk format the session id currently exists in.
 func Delete(id string) error {
@@ -1488,7 +1597,113 @@ func Delete(id string) error {
 	if err != nil {
 		return err
 	}
+	return deleteInDir(dir, id)
+}
 
+// RekeyForDir copies session oldID's transcript, title, metadata and
+// created_at under a freshly generated session id, then deletes oldID (its
+// file(s) in every on-disk format plus its index rows). It is the on-disk
+// half of the `/reset-id` command: the conversation is preserved, but the
+// session id — and therefore the `X-Opencode-Session` / `x-session-id`
+// provider header derived from it — changes, busting provider-side
+// cache/rate-limit/sticky-routing grouping.
+//
+// Quiescence is the CALLER's contract: oldID must have no in-flight turn and
+// no queued live async write when this is called. The server drains with
+// FlushForDir and releases the agent first; the TUI writes synchronously.
+// Without that, a queued live snapshot for oldID could land after the delete
+// and resurrect the old file.
+//
+// The stored transcript is copied RAW (without the loader's
+// removeIncompleteToolRequests filtering) so orphan tool results and ask
+// sentinels survive the move, exactly like a metadata-only write.
+func RekeyForDir(projectRoot, oldID string) (string, error) {
+	if oldID == "" {
+		return "", ErrNoStoredSession
+	}
+	dir, err := GetStorageDirForPath(projectRoot)
+	if err != nil {
+		return "", err
+	}
+	old, err := loadRawSessionFromDir(dir, oldID)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrNoStoredSession
+		}
+		return "", err
+	}
+	if old == nil {
+		return "", ErrNoStoredSession
+	}
+
+	newID := NewSessionID()
+	now := time.Now()
+	created := old.CreatedAt
+	if created.IsZero() {
+		created = now
+	}
+	// Preserve title/title_generated and metadata verbatim; only the id and
+	// timestamps move. A brand-new sqlite file is written directly (rather
+	// than through persistToDir) so created_at survives instead of being
+	// reset to now and the title is not re-derived from the first message.
+	moved := Session{
+		ID:             newID,
+		Title:          old.Title,
+		TitleGenerated: old.TitleGenerated,
+		Messages:       old.Messages,
+		CreatedAt:      created,
+		UpdatedAt:      now,
+		Metadata:       old.Metadata,
+	}
+	if err := writeSqliteSessionFull(dir, moved); err != nil {
+		return "", err
+	}
+	if err := refreshIndexRow(dir, newID); err != nil {
+		return "", err
+	}
+	if err := deleteInDir(dir, oldID); err != nil {
+		// The new session is already durable and indexed; report the stale old
+		// id rather than pretending the whole rekey failed. The caller can
+		// retry the delete or ignore the orphan (it no longer resolves as the
+		// live session).
+		return newID, fmt.Errorf("session: rekey wrote %s but deleting %s failed: %w", newID, oldID, err)
+	}
+	return newID, nil
+}
+
+// loadRawSessionFromDir loads a session from dir WITHOUT the
+// removeIncompleteToolRequests filtering loadFromDir applies, so a rekey
+// copies the stored transcript byte-for-byte. Returns a nil Session and no
+// error when no file exists for any candidate id.
+func loadRawSessionFromDir(dir, id string) (*Session, error) {
+	for _, candidate := range sessionCandidateIDs(id) {
+		sqlitePath := sqliteSessionPath(dir, candidate)
+		if fileExists(sqlitePath) {
+			return readSqliteSession(sqlitePath)
+		}
+	}
+	for _, candidate := range sessionCandidateIDs(id) {
+		ojsonlPath := ojsonlSessionPath(dir, candidate)
+		if fileExists(ojsonlPath) {
+			return loadOjsonlSession(ojsonlPath)
+		}
+	}
+	path, data, err := readSessionFile(dir, id)
+	if err != nil {
+		return nil, nil
+	}
+	var s Session
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, fmt.Errorf("session file %s is corrupt: %w", path, err)
+	}
+	return &s, nil
+}
+
+// deleteInDir removes id's file(s) in every on-disk format from dir, clears
+// the ojsonl write-state cache, and drops its rows from index.sqlite and the
+// legacy index.json. Shared by Delete and RekeyForDir so both leave the same
+// on-disk residue.
+func deleteInDir(dir, id string) error {
 	for _, p := range []string{
 		sqliteSessionPath(dir, id),
 		filepath.Join(dir, id+".json"),

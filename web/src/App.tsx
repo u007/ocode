@@ -368,10 +368,18 @@ function HomeApp() {
   } = useEditorTabs();
 
   // Editor tabs are global state (so switching projects preserves each
-  // project's open files), but the Files tab must only ever show the ACTIVE
+  // project's open files), but the Files tab must only ever SHOW the ACTIVE
   // project's tabs. Otherwise a file left open in a remote SSH project stays
   // on screen after switching to a local project (and vice versa) — the
   // "files tab shows remote files while a local project is focused" bug.
+  //
+  // Scoping is a visibility concern only, NOT a mounting one: every project's
+  // panes stay mounted and are hidden with CSS (same convention the chat,
+  // terminal, and browser surfaces use). Unmounting them reset the viewer
+  // state to page 1 / zoom 100% / scroll 0 on every project switch — the
+  // "PDF re-rendered from the start" bug. `visibleEditorTabs` still drives the
+  // tab bar, the active id, context attachments, and Cmd+S/Cmd+W; only the
+  // pane rendering below iterates the full `editorTabs`.
   const visibleEditorTabs = useMemo(
     () => visibleEditorTabsForProject(editorTabs, projectState.activeProject),
     [editorTabs, projectState.activeProject],
@@ -383,6 +391,10 @@ function HomeApp() {
     () => resolveVisibleEditorTabId(visibleEditorTabs, activeEditorTabId),
     [visibleEditorTabs, activeEditorTabId],
   );
+  // Identity set of visible tab ids: pane rendering keeps every project's tabs
+  // mounted, so a per-tab props decision (e.g. which session's diff
+  // decorations to fetch) needs a fast "is this tab in the active project".
+  const visibleEditorTabIds = useMemo(() => new Set(visibleEditorTabs.map((t) => t.id)), [visibleEditorTabs]);
 
   // Editor tabs opted into the LLM loop, preserving their project root so we
   // can filter per session-tab and avoid leaking files across projects. Omit
@@ -412,7 +424,7 @@ function HomeApp() {
   // The `preview_open` agent tool and `ocode:open-preview` events (file tree
   // "Preview in sidebar", diagram node links) arrive as request + nonce; a
   // fresh nonce opens the side panel so the file is actually visible.
-  const { request: previewRequest, nonce: previewNonce } = usePreviewActivation(activeTabId);
+  const { request: previewRequest, nonce: previewNonce, consume: consumePreviewActivation } = usePreviewActivation(activeTabId);
   const [previewContext, setPreviewContext] = useState<PreviewSelection | null>(null);
 
   useEffect(() => {
@@ -712,7 +724,9 @@ function HomeApp() {
     setModelDialogOpen(true);
   };
 
-  const rekeySession = useCallback((tempTabId: string, sessionId: string) => {
+  // `placeholderTitle` is set only for a brand-new `new-*` tab; a /reset-id
+  // rekey passes nothing so it keeps the tab's existing (preserved) title.
+  const rekeySession = useCallback((tempTabId: string, sessionId: string, placeholderTitle?: string) => {
     dispatch({ type: "REKEY_SESSION", oldId: tempTabId, newId: sessionId });
     rekeyQueue(tempTabId, sessionId);
     rekeyDraft(tempTabId, sessionId);
@@ -720,7 +734,7 @@ function HomeApp() {
       type: "UPDATE_TAB_ID",
       oldId: tempTabId,
       newId: sessionId,
-      newTitle: "New session",
+      newTitle: placeholderTitle,
     });
     // The REKEY/UPDATE_TAB_ID dispatches above are batched, so this render's
     // projectState still owns the tab under its OLD id. Resolve the host from
@@ -754,7 +768,7 @@ function HomeApp() {
         if (!projectPath) throw new Error("Select a project before starting a chat.");
         const host = resolveSessionHost(projectState, sessionId, { fallbackToActive: true });
         const result = await api.chat(content, undefined, undefined, sessionId, projectPath, host);
-        rekeySession(sessionId, result.sessionId);
+        rekeySession(sessionId, result.sessionId, "New session");
       } else {
         const host = resolveSessionHost(projectState, sessionId);
         await api.sendMessage(sessionId, content, host);
@@ -800,7 +814,7 @@ function HomeApp() {
         getOcrEnabled: () => api.getOcrEnabled(),
         setOcrEnabled: (enabled) => api.setOcrEnabled(enabled),
         setOcrModel: (model) => api.setOcrModel(model),
-        compactSession: (id, host?) => api.compactSession(id, host),
+        compactSession: (id, host?, focus?) => api.compactSession(id, host, focus),
         recapSession: (id, host?) => api.recapSession(id, host),
         shareSession: (id, host?) => api.shareSession(id, host),
         btwSession: (id, content, host?) => api.btwSession(id, content, host),
@@ -813,19 +827,24 @@ function HomeApp() {
         getLSPStatuses: (host) => api.getLSPStatuses(host),
         listSkills: () => api.listSkills(),
         getMCP: (host) => api.getMCP(host),
+        startMCPAuth: (name, host) => api.startMCPAuth(name, host),
+        getMCPAuthStatus: (jobId, host) => api.getMCPAuthStatus(jobId, host),
+        resetSessionId: (sessionId, host) => api.resetSessionId(sessionId, host),
         getGithubPR: (owner, repo, number) => api.getGithubPR(owner, repo, number),
         getGithubIssues: (owner, repo, state) => api.getGithubIssues(owner, repo, state),
         getAgentRuns: (host) => api.listAgentRuns(undefined, host),
         getCronJobs: () => api.listCronJobs().then((r) => r.jobs),
-        getSmallModelWithEnabled: () => api.getSmallModelWithEnabled(),
-        getAdvisor: () => api.getAdvisor(),
+        getCronJob: (id) => api.getCronJob(id),
+        deleteCronJob: (id) => api.deleteCronJob(id),
+        getSmallModelWithEnabled: (host?) => api.getSmallModelWithEnabled(host),
+        getAdvisor: (host?) => api.getAdvisor(host),
         getLimitsConfig: () => api.getLimitsConfig(),
         setLimitsConfig: (fields) => api.setLimitsConfig(fields),
-        getThinkingBudget: () => api.getThinkingBudget(),
-        setThinkingBudget: (budget) => api.setThinkingBudget(budget),
+        getThinkingBudget: (host?) => api.getThinkingBudget(host),
+        setThinkingBudget: (budget, host?) => api.setThinkingBudget(budget, host),
         listModels: (host) => api.listModels(undefined, host),
-        getConfigModel: () => api.getConfigModel(),
-        setConfigModel: (model) => api.setConfigModel(model),
+        getConfigModel: (host?) => api.getConfigModel(host),
+        setConfigModel: (model, host?) => api.setConfigModel(model, host),
         getFeaturesConfig: () => api.getFeaturesConfig(),
         setFeaturesConfig: (memoryEnabled, docPromptEnabled) => api.setFeaturesConfig(memoryEnabled, docPromptEnabled),
         getPathsInfo: () => api.getPathsInfo(),
@@ -834,8 +853,8 @@ function HomeApp() {
         getMemoryStatus: () => api.getMemoryStatus(),
         setBashRule: (prefix, level) => api.setBashRule(prefix, level),
         getPermissions: (sessionId, host) => api.getPermissions(sessionId, host),
-        getAutoContinue: () => api.getAutoContinue(),
-        setAutoContinue: (fields) => api.setAutoContinue(fields),
+        getAutoContinue: (host?) => api.getAutoContinue(host),
+        setAutoContinue: (fields, host?) => api.setAutoContinue(fields, host),
         connectProvider: (provider, apiKey) => api.connectProvider(provider, apiKey),
         addProject: (path) => api.addProject(path),
         getDocsStatus: (project, host) => api.getDocsStatus(project, host),
@@ -844,11 +863,11 @@ function HomeApp() {
         docsCleanup: (confirm, project, host) => api.docsCleanup(confirm, project, host),
         getImageGenConfig: () => api.getImageGenConfig(),
         setImageGenConfig: (cfg) => api.setImageGenConfig(cfg),
-        getDiscoveryConfig: () => api.getDiscoveryConfig(),
-        setDiscoveryConfig: (cfg) => api.setDiscoveryConfig(cfg),
+        getDiscoveryConfig: (host?) => api.getDiscoveryConfig(host),
+        setDiscoveryConfig: (cfg, host?) => api.setDiscoveryConfig(cfg, host),
         getDiscoveryStatus: (id, host) => api.getDiscoveryStatus(id, host),
-        getLocalModelsConfig: () => api.getLocalModelsConfig(),
-        setLocalModelsConfig: (models) => api.setLocalModelsConfig(models),
+        getLocalModelsConfig: (host?) => api.getLocalModelsConfig(host),
+        setLocalModelsConfig: (models, host?) => api.setLocalModelsConfig(models, host),
         syncLoginStart: () => api.syncLoginStart(),
         syncLogout: () => api.syncLogout(),
         getFakeAgent: () => api.getFakeAgentConfig(),
@@ -859,15 +878,17 @@ function HomeApp() {
         getTheme: (name) => api.getTheme(name),
         getTUISettings: () => api.getTUISettings(),
         setTUISettings: (cfg) => api.setTUISettings(cfg),
-        getExplorerModel: () => api.getExplorerModel(),
-        setExplorerModel: (model) => api.setExplorerModel(model),
-        setExplorerModelEnabled: (enabled) => api.setExplorerModelEnabled(enabled),
-        getContextModel: () => api.getContextModel(),
-        setContextModel: (model) => api.setContextModel(model),
-        setContextModelEnabled: (enabled) => api.setContextModelEnabled(enabled),
+        getExplorerModel: (host?) => api.getExplorerModel(host),
+        setExplorerModel: (model, host?) => api.setExplorerModel(model, host),
+        setExplorerModelEnabled: (enabled, host?) => api.setExplorerModelEnabled(enabled, host),
+        getContextModel: (host?) => api.getContextModel(host),
+        setContextModel: (model, host?) => api.setContextModel(model, host),
+        setContextModelEnabled: (enabled, host?) => api.setContextModelEnabled(enabled, host),
         getCliTools: (host) => api.getCliTools(host),
         startCliToolsInstall: (tool, host) => api.startCliToolsInstall(tool, host),
         getCliToolsInstallStatus: (jobId, host) => api.getCliToolsInstallStatus(jobId, host),
+        getRecapConfig: (host) => api.getRecapConfig(host),
+        setRecapConfig: (model, enabled, timeout, host) => api.setRecapConfig(model, enabled, timeout, host),
       },
       getMessages: () => getSessionSlice(chatStateRef.current, targetSessionId).messages,
       getSessionId: () => targetSessionId,
@@ -921,6 +942,14 @@ function HomeApp() {
     if (result.newSession) {
       openNewSessionTab(isNewSessionTabEmpty(targetSessionId), targetProjectPath);
     }
+    if (result.rekeyTo) {
+      // /reset-id: the server re-keyed the session under a new id and returned
+      // the old/new pair. Reuse the same tab-rekey machinery a `new-*` tab uses
+      // on first send, so the chat slice, draft, queue and project tab all
+      // follow the new id. Re-key BEFORE returning so the tab the user is
+      // looking at already points at the new session when the next render runs.
+      rekeySession(result.rekeyTo.oldId, result.rekeyTo.newId);
+    }
     if (result.download) {
       triggerDownload(result.download.filename, result.download.content, result.download.mimeType);
     }
@@ -932,7 +961,7 @@ function HomeApp() {
   // arrives first. REKEY_SESSION/UPDATE_TAB_ID are both idempotent (no-op if
   // the old id is already gone), so running this twice is safe.
   const handleSessionCreated = (tempTabId: string, sessionId: string) => {
-    rekeySession(tempTabId, sessionId);
+    rekeySession(tempTabId, sessionId, "New session");
   };
 
   // --- Stable callbacks for the memoized per-tab children -------------------
@@ -1014,6 +1043,16 @@ function HomeApp() {
   if (activeSessionTab) {
     visitedTabsRef.current.add(`${activeSessionTab.id}:${activeSessionTab.activeSubTab}`);
   }
+  // Same lazy display:none policy for editor panes: a tab mounts once it has
+  // been the visible active tab for its project, then stays mounted (hidden)
+  // so its viewer/Monaco state survives tab AND project switches. The gate
+  // matters because pane rendering iterates ALL projects' tabs now — without
+  // it an app reload would eagerly spin up Monaco/pdf.js for every restored
+  // tab in every project. A never-visited tab has no in-memory state to lose;
+  // it restores its page/scroll from `previewViewState` when first shown.
+  const visitedEditorTabsRef = useRef<Set<string>>(new Set());
+  if (visibleActiveEditorTabId) visitedEditorTabsRef.current.add(visibleActiveEditorTabId);
+
 
   // Refs to TerminalTabs instances so Ctrl/Cmd+T can open a new terminal.
   // Keyed by project path (terminal is project-scoped, not session-scoped,
@@ -1210,31 +1249,54 @@ function HomeApp() {
                         No file open
                       </div>
                     )}
-                    {visibleEditorTabs.map((et) => (
-                      <div
-                        key={et.id}
-                        className={et.id === visibleActiveEditorTabId ? "absolute inset-0" : "absolute inset-0 hidden"}
-                      >
-                        <FileTabContent
-                          path={et.path}
-                          projectRoot={et.projectRoot}
-                          projectHost={et.projectHost}
-                          persistKey={et.id}
-                          content={et.content}
-                          isBinary={et.isBinary}
-                          onChange={(value) => handleEditorChange(et.id, value)}
-                          onOpenFile={openFileAndShow}
-                          readOnly={false}
-                          session={activeTabId ?? undefined}
-                          diffVersion={et.diffVersion}
-                          onSelectionChange={handleSelectionChange}
-                          externalChange={et.externalChange}
-                          onReloadFromDisk={() => reloadTabFromDisk(et.id)}
-                          onDismissExternalChange={() => dismissExternalChange(et.id)}
-                          onForceSave={() => forceSaveEditorTab(et.id)}
-                        />
-                      </div>
-                    ))}
+                    {/* Each open tab mounts once it has been viewed, then stays
+                        mounted (hidden) — so a viewer keeps its page/zoom/scroll
+                        and Monaco its cursor/undo across tab AND project
+                        switches. Tabs from other projects are kept too (hidden),
+                        which is what makes a switch back instant and
+                        state-preserving; the `visitedEditorTabsRef` gate avoids
+                        eagerly mounting every restored tab on first load.
+
+                        Memory tradeoff (accepted): because nothing unmounts, a
+                        visited tab's parsed document / Monaco model stays
+                        resident for the app's lifetime. The big per-page canvas
+                        cost is NOT retained — `active` tells viewers when their
+                        pane is hidden and PdfViewer releases its rasterized
+                        window (rebuilt on show) while MediaViewer pauses
+                        playback. The parsed pdf.js document and the blob copy
+                        are deliberately kept (re-parsing on every switch-back
+                        would be slow); that residual is bounded by the number
+                        of PDF tabs actually opened. */}
+                    {editorTabs.map((et) => {
+                      if (!visitedEditorTabsRef.current.has(et.id) && et.id !== visibleActiveEditorTabId) return null;
+                      return (
+                        <div
+                          key={et.id}
+                          data-editor-pane={et.id}
+                          className={et.id === visibleActiveEditorTabId ? "absolute inset-0" : "absolute inset-0 hidden"}
+                        >
+                          <FileTabContent
+                            path={et.path}
+                            projectRoot={et.projectRoot}
+                            projectHost={et.projectHost}
+                            persistKey={et.id}
+                            content={et.content}
+                            isBinary={et.isBinary}
+                            active={et.id === visibleActiveEditorTabId}
+                            onChange={(value) => handleEditorChange(et.id, value)}
+                            onOpenFile={openFileAndShow}
+                            readOnly={false}
+                            session={visibleEditorTabIds.has(et.id) ? activeTabId ?? undefined : undefined}
+                            diffVersion={et.diffVersion}
+                            onSelectionChange={handleSelectionChange}
+                            externalChange={et.externalChange}
+                            onReloadFromDisk={() => reloadTabFromDisk(et.id)}
+                            onDismissExternalChange={() => dismissExternalChange(et.id)}
+                            onForceSave={() => forceSaveEditorTab(et.id)}
+                          />
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </TabsContent>
@@ -1470,6 +1532,7 @@ function HomeApp() {
                         projectHost={projectState.activeProject?.host}
                         request={previewRequest}
                         nonce={previewNonce}
+                        onConsumeActivation={consumePreviewActivation}
                       />
                     </div>
                   </div>

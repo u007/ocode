@@ -120,7 +120,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         return base;
       }
       try {
-        const local = await api.getLocalModelsConfig();
+        const local = await api.getLocalModelsConfig(...hostArgs);
         const extra: ModelInfo[] = Object.entries(local)
           .filter(([, v]) => v.enabled)
           .map(([id]) => ({ name: id, model: id, provider: LOCAL_MODELS_PROVIDER, active: false }));
@@ -129,7 +129,13 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         return base;
       }
     },
-    [purpose],
+    // `hostArgs` is REQUIRED here: the body reads it, and `purpose` does not
+    // change when the session's host resolves (undefined → "devbox") or the
+    // active tab switches. Without it useCallback returns the stale closure,
+    // so `loadList` (which does depend on hostArgs) reruns and augments the
+    // list from the LOCAL server — the permission/mask/auto-continue pickers
+    // then silently omit the remote host's enabled local models.
+    [purpose, hostArgs],
   );
 
   // Loads the model list (cached, or live-refreshed when `refresh` is set) and
@@ -199,39 +205,39 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     // configured=true keeps only providers with credentials/config — the
     // hundreds of other registry providers are unusable noise.
     loadList({ showAll: false }).catch(console.error);
-    api.getConfigModel().then((res) => {
+    api.getConfigModel(...hostArgs).then((res) => {
       dispatch({ type: "SET_MODEL", model: res.model });
     }).catch(console.error);
-    api.getSmallModel().then((res) => {
+    api.getSmallModel(...hostArgs).then((res) => {
       dispatch({ type: "SET_SMALL_MODEL", model: res.model });
     }).catch(console.error);
-    api.getAdvisor().then((res) => {
+    api.getAdvisor(...hostArgs).then((res) => {
       dispatch({ type: "SET_ADVISOR_MODEL", model: res.model });
     }).catch(console.error);
-    api.getAdvisorFull().then((res) => {
+    api.getAdvisorFull(...hostArgs).then((res) => {
       setAdvisorClaudeCode(res.claude_code);
     }).catch(console.error);
     if (purpose === "permission") {
-      api.getPermissionModel().then((res) => {
+      api.getPermissionModel(...hostArgs).then((res) => {
         setPermissionModelState(res.model ?? "");
       }).catch(console.error);
     }
     if (purpose === "explorer" && !currentValues?.explorer) {
-      api.getExplorerModel().then((res) => {
+      api.getExplorerModel(...hostArgs).then((res) => {
         setExplorerModelState(res.model ?? "");
       }).catch(console.error);
     }
     if (purpose === "context" && !currentValues?.context) {
-      api.getContextModel().then((res) => {
+      api.getContextModel(...hostArgs).then((res) => {
         setContextModelState(res.model ?? "");
       }).catch(console.error);
     }
     if (purpose === "autocontinue" && !currentValues?.autocontinue) {
-      api.getAutoContinue().then((res) => {
+      api.getAutoContinue(...hostArgs).then((res) => {
         setAutoContinueModelState(res.model ?? "");
       }).catch(console.error);
     }
-  }, [open, dispatch, purpose, currentValues?.explorer, currentValues?.context, currentValues?.autocontinue, loadList]);
+  }, [open, dispatch, purpose, currentValues?.explorer, currentValues?.context, currentValues?.autocontinue, loadList, hostArgs]);
 
   const filteredModels = models.filter(
     (m) =>
@@ -314,7 +320,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     switch (purpose) {
       case "small":
         dispatch({ type: "SET_SMALL_MODEL", model: modelId });
-        persist("Changing the small model", () => api.setSmallModel(modelId));
+        persist("Changing the small model", () => api.setSmallModel(modelId, ...hostArgs));
         break;
       case "advisor":
         {
@@ -324,7 +330,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           // Carry the current claude_code through the PUT: the server flips
           // claude_code to (provider === "claude-code") whenever provider is
           // set, which would silently disable CLI mode on any non-CLI pick.
-          persist("Changing the advisor model", () => api.setAdvisorFull({ ...selection, claude_code: advisorClaudeCode }));
+          persist("Changing the advisor model", () => api.setAdvisorFull({ ...selection, claude_code: advisorClaudeCode }, ...hostArgs));
         }
         break;
       case "main":
@@ -352,28 +358,28 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           });
         } else {
           dispatch({ type: "SET_MODEL", model: modelId });
-          persist("Changing the model", () => api.setConfigModel(modelId));
+          persist("Changing the model", () => api.setConfigModel(modelId, ...hostArgs));
         }
         break;
       case "permission":
         onPick?.(purpose, modelId, selectedModel);
         // If no form owns this pick (sidebar direct trigger), persist directly.
         if (!onPick) {
-          persist("Changing the permission model", () => api.setPermissionModel(modelId));
+          persist("Changing the permission model", () => api.setPermissionModel(modelId, ...hostArgs));
         }
         break;
       case "explorer":
         onPick?.(purpose, modelId, selectedModel);
         if (!onPick) {
           setExplorerModelState(modelId);
-          persist("Changing the explorer model", () => api.setExplorerModel(modelId));
+          persist("Changing the explorer model", () => api.setExplorerModel(modelId, ...hostArgs));
         }
         break;
       case "context":
         onPick?.(purpose, modelId, selectedModel);
         if (!onPick) {
           setContextModelState(modelId);
-          persist("Changing the context model", () => api.setContextModel(modelId));
+          persist("Changing the context model", () => api.setContextModel(modelId, ...hostArgs));
         }
         break;
       case "autocontinue":
@@ -383,7 +389,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           // model directly. Leave the on/off gate untouched — mirroring the
           // TUI's `/autocontinue model <name>`, which never toggles the gate.
           setAutoContinueModelState(modelId);
-          persist("Changing the auto-continue model", () => api.setAutoContinue({ model: modelId }));
+          persist("Changing the auto-continue model", () => api.setAutoContinue({ model: modelId }, ...hostArgs));
         }
         break;
       default:
@@ -427,12 +433,12 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     switch (purpose) {
       case "small":
         dispatch({ type: "SET_SMALL_MODEL", model: "" });
-        persist("Clearing the small model", () => api.setSmallModel("auto"));
+        persist("Clearing the small model", () => api.setSmallModel("auto", ...hostArgs));
         break;
       case "advisor":
         dispatch({ type: "SET_ADVISOR_MODEL", model: "" });
         onPick?.(purpose, "");
-        persist("Clearing the advisor model", () => api.setAdvisorFull({ model: "", provider: "", claude_code: advisorClaudeCode }));
+        persist("Clearing the advisor model", () => api.setAdvisorFull({ model: "", provider: "", claude_code: advisorClaudeCode }, ...hostArgs));
         break;
       case "main":
         if (sessionId && sessionId.startsWith("new-")) {
@@ -448,27 +454,27 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           });
         } else {
           dispatch({ type: "SET_MODEL", model: "" });
-          persist("Clearing the model", () => api.setConfigModel(""));
+          persist("Clearing the model", () => api.setConfigModel("", ...hostArgs));
         }
         break;
       case "permission":
         onPick?.(purpose, "");
         if (!onPick) {
-          persist("Clearing the permission model", () => api.setPermissionModel(""));
+          persist("Clearing the permission model", () => api.setPermissionModel("", ...hostArgs));
         }
         break;
       case "explorer":
         onPick?.(purpose, "");
         if (!onPick) {
           setExplorerModelState("");
-          persist("Clearing the explorer model", () => api.setExplorerModel("auto"));
+          persist("Clearing the explorer model", () => api.setExplorerModel("auto", ...hostArgs));
         }
         break;
       case "context":
         onPick?.(purpose, "");
         if (!onPick) {
           setContextModelState("");
-          persist("Clearing the context model", () => api.setContextModel("auto"));
+          persist("Clearing the context model", () => api.setContextModel("auto", ...hostArgs));
         }
         break;
       case "autocontinue":
@@ -477,7 +483,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           // Clear = judge model cleared, gate untouched (TUI parity: "auto"/
           // "none" clears the model, meaning StepLimitHit-only resumes).
           setAutoContinueModelState("");
-          persist("Clearing the auto-continue model", () => api.setAutoContinue({ clear: true }));
+          persist("Clearing the auto-continue model", () => api.setAutoContinue({ clear: true }, ...hostArgs));
         }
         break;
       default:

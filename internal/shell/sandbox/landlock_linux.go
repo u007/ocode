@@ -123,14 +123,26 @@ func setNoNewPrivs() error {
 
 // landlockAddPathBeneath grants allowed rights for path and everything beneath
 // it, skipping paths that cannot be opened (missing roots — never widen).
+//
+// allowed is masked to the rights Landlock accepts for the object type: a
+// ruleset rule whose parent_fd is a regular FILE rejects any directory-only
+// right with EINVAL, which would abort the whole ruleset and (fail-closed)
+// break every sandboxed command. Writable roots are usually directories, but
+// NewRootSet's protected-file carve-out yields individual files (projects.json,
+// the global git-ignore files).
 func landlockAddPathBeneath(rulesetFd int, path string, allowed uint64) error {
 	fd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil // missing/unopenable: skip
 	}
 	defer syscall.Close(fd)
+	var st unix.Stat_t
+	isDir := true
+	if err := unix.Fstat(fd, &st); err == nil {
+		isDir = st.Mode&unix.S_IFMT == unix.S_IFDIR
+	}
 	rule := unix.LandlockPathBeneathAttr{
-		Allowed_access: allowed,
+		Allowed_access: landlockApplicableRights(allowed, isDir),
 		Parent_fd:      int32(fd),
 	}
 	_, _, errno := unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE,

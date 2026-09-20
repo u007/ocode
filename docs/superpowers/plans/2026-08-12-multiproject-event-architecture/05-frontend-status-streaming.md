@@ -1,3 +1,9 @@
+---
+type: Guide
+title: Part 05 — Frontend Status on Activation + Streaming Watchdog
+description: Clarified that turn-active for the 30s stall watchdog includes permission-resolve and question-answer continuation Steps, not just runTurn.
+timestamp: 2026-09-20T10:44:16Z
+---
 # Part 05 — Frontend Status on Activation + Streaming Watchdog
 
 **Goal:** Sidebar/status panels stay populated across session and project

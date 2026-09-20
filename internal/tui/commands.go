@@ -111,6 +111,7 @@ func init() {
 		{name: "/login", help: "Log in and enable encrypted config sync", handler: runSyncLoginCmd},
 		{name: "/logout", aliases: []string{"/sync-logout"}, help: "Log out and stop config sync", handler: runSyncLogoutCmd},
 		{name: "/session", aliases: []string{"/sessions", "/resume"}, usage: "/session [list|load <id>]", help: "Choose a session to resume", handler: runSessionCmd},
+		{name: "/reset-id", usage: "/reset-id", help: "Re-key this chat with a fresh session id (keeps the conversation)", handler: runResetIDCmd},
 		{name: "/compact", usage: "/compact [focus]", help: "Summarise older context to free tokens; optional focus guides the summary", handler: runCompactCmd},
 		{name: "/recap", usage: "/recap [model|status|enable|disable]", help: "Summarize conversation / manage recap model", handler: runRecapCmd},
 		{name: "/changes", help: "Analyze repo changes: diffs, LSP errors, and in-progress specs", handler: runChangesCmd},
@@ -349,6 +350,11 @@ func runExportClaudeCmd(m *model, args []string) tea.Cmd {
 
 func runNewCmd(m *model, args []string) tea.Cmd {
 	return m.handleNewCmd(args)
+}
+
+func runResetIDCmd(m *model, args []string) tea.Cmd {
+	m.handleResetIDCmd(args)
+	return nil
 }
 
 func runThinkingCmd(m *model, args []string) tea.Cmd {

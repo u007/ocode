@@ -78,7 +78,7 @@ describe("composer compaction lifecycle", () => {
     chat.permission = null;
     chat.interrupted = false;
     await act(async () => { view.rerender(composer()); });
-    expect(compactSession).toHaveBeenCalledExactlyOnceWith(A, "user@remote");
+    expect(compactSession).toHaveBeenCalledExactlyOnceWith(A, "user@remote", undefined);
     expect(sendMessage).not.toHaveBeenCalled();
     // Completion feedback now lives in the transcript (the persisted
     // compaction-summary notice), so the composer bottom bar is dropped.

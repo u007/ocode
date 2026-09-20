@@ -30,6 +30,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/commandctx"
 	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/contextbudget"
@@ -73,8 +74,9 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
 
-//go:embed initialize_prompt.txt
-var initializePromptTemplate string
+// initializePromptTemplate moved to internal/commandctx (embedded there) so the
+// TUI's /init and the server's /api/command-context/init emit the identical
+// prompt. See commandctx.Init.
 
 // rcPendingPerm records a permission ask awaiting a remote (Telegram) decision.
 type rcPendingPerm struct {
@@ -11516,6 +11518,66 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	}
 }
 
+// handleResetIDCmd re-keys the current chat with a fresh session id while
+// keeping the transcript: it copies the session under a new `ses_…` id on
+// disk, deletes the old id, and re-tags the live agent, the provider
+// conversation identity (X-Opencode-Session / x-session-id) and the todo
+// plan. This busts provider-side cache/rate-limit/sticky-routing grouping
+// without starting over.
+//
+// It refuses mid-turn: the on-disk rekey must not race a running Step, and
+// queued live writes for the old id could resurrect it after the delete. It
+// also refuses while /rc is active — the server-side bridge caches the
+// session id and must not be mutated underneath the HTTP goroutines.
+func (m *model) handleResetIDCmd(args []string) {
+	if m.sessionID == "" {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No active session to reset — start a conversation first."})
+		m.rerenderTranscriptAndMaybeScroll()
+		return
+	}
+	if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 || m.showPermDialog {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Cannot reset the session id while a turn is running."})
+		m.rerenderTranscriptAndMaybeScroll()
+		return
+	}
+	if m.rcBridge != nil || m.rcSrv != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Cannot reset the session id while /rc remote control is active — run /rc off first."})
+		m.rerenderTranscriptAndMaybeScroll()
+		return
+	}
+
+	oldID := m.sessionID
+	// Drain any queued live snapshot for the old id before the delete. The
+	// stream guard above covers an active turn, but the turn-end synchronous
+	// save is what the live queue coalesces behind; a snapshot enqueued in the
+	// same frame the stream ended would otherwise land after the delete and
+	// recreate the old file.
+	if err := session.FlushForDir(m.workDir, oldID, 10*time.Second); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Could not drain pending writes: %v", err)})
+		m.rerenderTranscriptAndMaybeScroll()
+		return
+	}
+	newID, err := session.RekeyForDir(m.workDir, oldID)
+	if err != nil {
+		msg := fmt.Sprintf("Failed to reset session id: %v", err)
+		if errors.Is(err, session.ErrNoStoredSession) {
+			msg = "No stored transcript to reset yet — send a message first."
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: msg})
+		m.rerenderTranscriptAndMaybeScroll()
+		return
+	}
+
+	m.sessionID = newID
+	if m.agent != nil {
+		m.agent.RekeyOpenCodeSession(oldID, newID)
+	}
+	tool.RekeyTodoSession(oldID, newID)
+	m.broadcastTUIStatus()
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Reset session id: %s → %s\nThe conversation is unchanged; the provider will treat it as a new chat.", oldID, newID)})
+	m.rerenderTranscriptAndMaybeScroll()
+}
+
 func (m *model) resetSessionAgent() tea.Cmd {
 	prev := m.agent
 	var next *agent.Agent
@@ -12284,7 +12346,7 @@ func formatBtwActivity(am agent.Message) string {
 }
 
 func (m *model) handleInitCmd(args []string) tea.Cmd {
-	prompt := strings.ReplaceAll(initializePromptTemplate, "$ARGUMENTS", strings.Join(args, " "))
+	prompt := commandctx.Init(args)
 	if m.agent != nil {
 		m.agent.ResetSubagentDispatch()
 	}

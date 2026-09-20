@@ -83,6 +83,10 @@ type Handler struct {
 	// out to the platform package manager and can block for minutes, so it is
 	// job-id + poll rather than a long-held request.
 	cliToolJobs *cliToolJobManager
+	// mcpAuthJobs tracks background MCP OAuth flows started by the web/desktop
+	// `/mcp-auth` command (see handler_mcp_auth.go). The flow blocks up to 2
+	// minutes waiting for the browser callback, so it is job-id + poll.
+	mcpAuthJobs *mcpAuthJobManager
 
 	// bus is the unified tagged event bus (Part 02). Every emitters publishes
 	// envelopes here; /api/events streams them to web clients.
@@ -426,6 +430,7 @@ func NewHandler() *Handler {
 		terminalProcsWake: make(chan struct{}, 1),
 		secretJobs:        secretjob.NewManager(),
 		cliToolJobs:       newCLIToolJobManager(),
+		mcpAuthJobs:       newMCPAuthJobManager(),
 		saveLocks:         make(map[string]*sync.Mutex),
 		pendingCancel:     make(map[string]bool),
 		turnInFlight:      make(map[string]int),
@@ -1565,12 +1570,21 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// Optional focus steering the summary (the TUI's `/compact [focus]`). A
+	// body is optional so the existing no-focus callers are unaffected.
+	var body struct {
+		Focus string `json:"focus"`
+	}
+	if r.Body != nil {
+		_ = readBodyJSON(r, &body)
+	}
+
 	// Compaction is an LLM call. It runs under the per-session lock only —
 	// holding h.mu across it would freeze every other session's turn for its
 	// whole duration.
 	as.mu.Lock()
 
-	result, enabled := as.agent.Compact(as.messages)
+	result, enabled := as.agent.CompactWithFocus(as.messages, body.Focus)
 	if !enabled {
 		as.mu.Unlock()
 		writeError(w, http.StatusUnprocessableEntity, "compaction disabled in config")

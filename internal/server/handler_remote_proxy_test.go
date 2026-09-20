@@ -772,3 +772,62 @@ func TestHandleRemoteProxy_ProjectPathQueryRegisters(t *testing.T) {
 		t.Fatalf("project_path query did not register the project, got %v", ws.projects)
 	}
 }
+
+func TestMCPAuthRestPathMatching(t *testing.T) {
+	cases := []struct {
+		rest string
+		want bool
+	}{
+		{"mcp/linear/auth", true},
+		{"mcp/auth/job-123", true},
+		{"mcp", false},
+		{"mcp/linear/enable", false},
+		{"mcp/linear/disable", false},
+		{"chat", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isMCPAuthRestPath(c.rest); got != c.want {
+			t.Errorf("isMCPAuthRestPath(%q) = %v, want %v", c.rest, got, c.want)
+		}
+	}
+}
+
+// An SSH remote must refuse the proxied MCP OAuth routes BEFORE connecting:
+// the ssh -L tunnel makes the remote's own loopback gate pass, which would
+// launch a browser on the wrong machine and hang the client for its full poll
+// timeout.
+func TestRemoteProxyRefusesMCPAuthForSSHHost(t *testing.T) {
+	h := NewHandler()
+	h.SetWorkDir(t.TempDir())
+	store, err := projects.NewStoreAt(t.TempDir() + "/projects.json")
+	if err != nil {
+		t.Fatalf("projects store: %v", err)
+	}
+	h.projects = store
+	if err := store.AddRemote("user@realhost", "/home/user/project"); err != nil {
+		t.Fatalf("add remote project: %v", err)
+	}
+	connectCalled := false
+	h.remoteHosts = newTestRegistry(func(remote.Target, string) (remoteHostWorkspace, error) {
+		connectCalled = true
+		return nil, fmt.Errorf("must not connect")
+	})
+
+	for _, rest := range []string{"mcp/linear/auth", "mcp/auth/job-123"} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("POST", "/api/remote/user@realhost/api/"+rest+"?token=local", nil)
+		setPathValues(r, map[string]string{"host": "user@realhost", "rest": rest})
+		h.HandleRemoteProxy(w, r)
+
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("%s: expected 403, got %d: %s", rest, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "127.0.0.1:8085") {
+			t.Errorf("%s: refusal did not explain the callback constraint: %s", rest, w.Body.String())
+		}
+	}
+	if connectCalled {
+		t.Error("MCP auth proxy must refuse before opening a remote connection")
+	}
+}

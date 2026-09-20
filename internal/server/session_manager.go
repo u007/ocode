@@ -333,6 +333,36 @@ func (m *SessionManager) setAgent(sessionID string, as *agentSession) {
 	m.mu.Unlock()
 }
 
+// Rekey moves the registry entry for oldID to newID, preserving the resolved
+// project root, window binding, resident agent, pending queue and last
+// sequence watermark. It is the registry half of the /reset-id command: the
+// on-disk transcript and every live in-memory tag move to newID, so all
+// session-scoped lookups must resolve under the new id immediately.
+//
+// The caller must have quiesced oldID first (no active turn, live writers
+// drained) and moved the Handler.agents mirror entry. A missing oldID entry
+// registers a fresh one under newID (the rekey still needs a resolvable
+// target for a registry-only session). Returns the moved entry.
+func (m *SessionManager) Rekey(oldID, newID, projectRoot string) *sessionEntry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if oldID == "" || newID == "" || oldID == newID {
+		return m.entries[newID]
+	}
+	entry, ok := m.entries[oldID]
+	if !ok {
+		entry = &sessionEntry{SessionID: newID, ProjectRoot: projectRoot}
+	}
+	delete(m.entries, oldID)
+	entry.SessionID = newID
+	if projectRoot != "" {
+		entry.ProjectRoot = projectRoot
+	}
+	entry.lastActivity = time.Now()
+	m.entries[newID] = entry
+	return entry
+}
+
 // touch updates the entry's last-activity stamp (used at turn start).
 func (m *SessionManager) touch(sessionID string) {
 	m.mu.Lock()

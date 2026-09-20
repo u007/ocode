@@ -182,6 +182,19 @@ func (j *Journal) loadSession(sessionID string) ([]Snapshot, error) {
 	return out, rows.Err()
 }
 
+// rekeySession moves every journaled row from oldID to newID so a session
+// rekey (/reset-id) keeps its undo history under the new id. Best-effort by
+// contract (like append): a failure is logged by the caller and the in-memory
+// store is still rebound, so at worst the Changes tab loses previously
+// journaled snapshots for the old id rather than the rekey failing.
+func (j *Journal) rekeySession(oldID, newID string) error {
+	if oldID == "" || newID == "" || oldID == newID {
+		return nil
+	}
+	_, err := j.db.Exec(`UPDATE snapshot SET session_id = ? WHERE session_id = ?`, newID, oldID)
+	return err
+}
+
 // gc prunes journal rows older than cutoff (deleting their backup files)
 // and then removes orphan backup files in the dir older than cutoff that no
 // remaining row references. The orphan pass also cleans up the pre-journal

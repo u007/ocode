@@ -5,6 +5,7 @@ import PreviewSurface from "../Preview/PreviewSurface";
 import LegacyOfficePane from "../Preview/LegacyOfficePane";
 import { isLegacyOfficePath, isMarkdownPath, previewOnlyKindForPath } from "../../lib/previewKind";
 import { useResizableSplit } from "../../hooks/useResizableSplit";
+import { loadPreviewViewState, previewViewKey, savePreviewViewState } from "../../lib/previewViewState";
 import { cn } from "../../lib/utils";
 
 // Monaco (and its workers) is the single largest dependency in the app. It is
@@ -65,16 +66,29 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
  * Routing lives here rather than in `FileEditor` so `FileEditor` stays a pure
  * Monaco surface (it is reused by TextViewer / MarkdownViewer for real text).
  */
-export default function FileTabContent(props: FileEditorProps) {
+export default function FileTabContent(props: FileEditorProps & { active?: boolean }) {
   const previewKind = previewOnlyKindForPath(props.path);
   // Page/slide for the paginated viewers (PDF, PPTX). PreviewSurface's viewers
   // are controlled by their host, so the Files tab owns the state; it survives
-  // tab switches because every editor tab stays mounted (hidden, not unmounted).
-  const [page, setPage] = useState(1);
-  const [slide, setSlide] = useState(1);
+  // tab switches AND project switches because every editor tab stays mounted
+  // (hidden, not unmounted). It is also persisted (under the file's canonical
+  // identity, shared with PdfViewer's own zoom/scroll entry) so an app reload —
+  // the one case that does unmount — resumes where the reader left off.
+  const fileViewKey = previewViewKey(props.path, props.projectRoot, props.projectHost);
+  const [page, setPage] = useState(() => Math.max(1, loadPreviewViewState(fileViewKey)?.page ?? 1));
+  const [slide, setSlide] = useState(() => Math.max(1, loadPreviewViewState(fileViewKey)?.page ?? 1));
   const [mode, setMode] = useState<MarkdownMode>("edit");
   const split = useResizableSplit();
   const previewContent = useDebouncedValue(props.content, PREVIEW_DEBOUNCE_MS);
+
+  // Persist the paginated viewer's position for this file. Only one of the two
+  // viewers is ever mounted for a given file, so pick the index that belongs to
+  // this format (a PPTX drives `slide`, a PDF drives `page`) — `page || slide`
+  // would be wrong because the unused one stays at its initial 1.
+  useEffect(() => {
+    if (!previewKind) return;
+    savePreviewViewState(fileViewKey, { page: previewKind === "pptx" ? slide : page });
+  }, [fileViewKey, previewKind, page, slide]);
 
   const { onOpenFile, projectRoot: propsProjectRoot } = props;
   const handleOpenFile = useCallback(
@@ -98,6 +112,7 @@ export default function FileTabContent(props: FileEditorProps) {
           onPageChange={setPage}
           slide={slide}
           onSlideChange={setSlide}
+          active={props.active}
         />
       </div>
     );

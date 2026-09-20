@@ -78,10 +78,19 @@ type ProjectSidebarItem = {
   groupProjects?: Project[];
 };
 
+/**
+ * Single source of truth for the project-sidebar list. Both the expanded list
+ * and the collapsed rail render from this, so a project can never appear in one
+ * and not the other. Group order is by `group.order`; projects keep their
+ * persisted order within a group (never a name sort). Projects belonging to a
+ * collapsed group are omitted, and so are projects whose `group` no longer
+ * matches a known group (the backend ungroups on delete/rename, so those are
+ * stale/race states), matching the expanded view.
+ */
 export function buildProjectSidebarOrder(
   projects: Project[],
   groups: ProjectGroup[],
-): { orderedProjects: Project[]; visibleItems: ProjectSidebarItem[] } {
+): ProjectSidebarItem[] {
   // Keep the input order within each group. It is the persisted project order
   // used by the expanded sidebar and must not be replaced with a name sort.
   const sortedGroups = [...groups].sort((a, b) => a.order - b.order);
@@ -92,12 +101,10 @@ export function buildProjectSidebarOrder(
     projectsByGroup[key].push(project);
   }
 
-  const orderedProjects: Project[] = [];
   const visibleItems: ProjectSidebarItem[] = [];
 
   for (const group of sortedGroups) {
     const groupProjects = projectsByGroup[group.name] || [];
-    orderedProjects.push(...groupProjects);
     visibleItems.push({ type: "group", data: group, groupProjects });
     if (!group.collapsed) {
       for (const project of groupProjects) {
@@ -106,24 +113,13 @@ export function buildProjectSidebarOrder(
     }
   }
 
-  // Ungrouped projects remain after all groups, matching the expanded view.
+  // Ungrouped projects remain after all groups.
   const ungrouped = projectsByGroup[""] || [];
-  orderedProjects.push(...ungrouped);
   for (const project of ungrouped) {
     visibleItems.push({ type: "project", data: project });
   }
 
-  // Keep orphaned projects in the collapsed rail. The expanded view has
-  // historically omitted them because there is no group header to render
-  // them under, but the old collapsed rail still included every project.
-  const knownGroups = new Set(groups.map((group) => group.name));
-  for (const project of projects) {
-    if (project.group && !knownGroups.has(project.group)) {
-      orderedProjects.push(project);
-    }
-  }
-
-  return { orderedProjects, visibleItems };
+  return visibleItems;
 }
 
 /** Derive per-project indicators from open tabs, chat slices, and terminal alerts.
@@ -1099,9 +1095,20 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
   }, [addRemoteProject]);
 
   // Build the sorted list: groups first (in group order), then ungrouped projects
-  const { orderedProjects, visibleItems: sortedItems } = useMemo(() => {
+  const sortedItems = useMemo(() => {
     return buildProjectSidebarOrder(state.projects || [], state.groups || []);
   }, [state.projects, state.groups]);
+
+  // The collapsed rail mirrors the expanded list exactly — same projects, same
+  // order, projects in a collapsed group hidden — so a project never appears in
+  // one surface and not the other. Uncapped: the rail scrolls instead.
+  const railProjects = useMemo(
+    () =>
+      sortedItems
+        .filter((item) => item.type === "project")
+        .map((item) => item.data as Project),
+    [sortedItems],
+  );
 
   // DnD sensors
   const sensors = useSensors(
@@ -1209,23 +1216,29 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
             <TooltipContent side="right">Show project sidebar</TooltipContent>
           </Tooltip>
           <Separator className="my-2 w-6" />
-          {state.projects.length > 0 && (
-            <div className="flex flex-col gap-1">
-              {orderedProjects.slice(0, 5).map((p) => (
-                <CollapsedProjectButton
-                  key={projectDragKey(p.path, p.host)}
-                  project={p}
-                  isActive={state.activeProject?.path === p.path && (state.activeProject?.host ?? "") === (p.host ?? "")}
-                  onSelect={() => selectProject(p)}
-                  onEdit={p.host ? () => setEditingRemote(p) : undefined}
-                  onToggleExpand={onToggle}
-                  onRemove={() => removeProject(p.path, p.host)}
-                  onAddToGroup={(group) => setProjectGroup(p.path, group, p.host)}
-                  onRemoveFromGroup={() => setProjectGroup(p.path, "", p.host)}
-                  groups={state.groups}
-                />
-              ))}
-            </div>
+          {railProjects.length > 0 && (
+            // Scroll instead of capping, so every project in the expanded list
+            // is reachable from the rail. ScrollArea's overlay scrollbar keeps
+            // a classic one from eating the 40px column. `min-h-0` lets the
+            // flex child shrink below its content height so it scrolls.
+            <ScrollArea className="flex-1 min-h-0 w-full">
+              <div className="flex flex-col items-center gap-1 py-1">
+                {railProjects.map((p) => (
+                  <CollapsedProjectButton
+                    key={projectDragKey(p.path, p.host)}
+                    project={p}
+                    isActive={state.activeProject?.path === p.path && (state.activeProject?.host ?? "") === (p.host ?? "")}
+                    onSelect={() => selectProject(p)}
+                    onEdit={p.host ? () => setEditingRemote(p) : undefined}
+                    onToggleExpand={onToggle}
+                    onRemove={() => removeProject(p.path, p.host)}
+                    onAddToGroup={(group) => setProjectGroup(p.path, group, p.host)}
+                    onRemoveFromGroup={() => setProjectGroup(p.path, "", p.host)}
+                    groups={state.groups}
+                  />
+                ))}
+              </div>
+            </ScrollArea>
           )}
         </div>
       </TooltipProvider>

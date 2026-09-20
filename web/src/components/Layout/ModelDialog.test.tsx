@@ -32,9 +32,15 @@ const hoisted = vi.hoisted(() => {
         : ["anthropic/claude-a"],
     })),
     setConfigModel: vi.fn(async () => ({})),
+    setSmallModel: vi.fn(async () => ({})),
+    setAdvisorFull: vi.fn(async () => ({})),
     getLocalModelsConfig: vi.fn(async () => ({})),
     getPermissionModel: vi.fn(async () => ({ model: "" })),
     setPermissionModel: vi.fn(async () => ({})),
+    getContextModel: vi.fn(async () => ({ model: "", enabled: true })),
+    setContextModel: vi.fn(async () => ({})),
+    getExplorerModel: vi.fn(async () => ({ model: "", enabled: true })),
+    setExplorerModel: vi.fn(async () => ({})),
     setSessionModel: vi.fn(async () => ({ model: "", session_id: "" })),
     clearSessionModel: vi.fn(async () => ({ model: "", session_id: "" })),
     getSessionStatus: vi.fn(async () => ({ main_model: "" })),
@@ -275,9 +281,9 @@ const remoteProject = {
 };
 
 /** Mirrors App's header wiring: resolve the active session's host, pass it in. */
-function HeaderModelDialog({ sessionId }: { sessionId: string }) {
+function HeaderModelDialog({ sessionId, purpose }: { sessionId: string; purpose?: import("./ModelDialog").ModelDialogTab }) {
   const host = useSessionHost(sessionId);
-  return <ModelDialog open onClose={vi.fn()} sessionId={sessionId} host={host} />;
+  return <ModelDialog open onClose={vi.fn()} sessionId={sessionId} host={host} purpose={purpose} />;
 }
 
 /** Register the remote project and bind the session to a tab under it. */
@@ -336,6 +342,87 @@ describe("ModelDialog remote session host", () => {
     fireEvent.click(await screen.findByLabelText("Favorite openai/gpt-c"));
     await waitFor(() =>
       expect(hoisted.api.setModelFavorite).toHaveBeenCalledWith("openai/gpt-c", true, "devbox"),
+    );
+  });
+
+  it("routes a small-model pick to the session's host", async () => {
+    render(
+      <ProjectProvider>
+        <SeedRemoteTab>
+          <HeaderModelDialog sessionId="sess-remote" purpose="small" />
+        </SeedRemoteTab>
+      </ProjectProvider>,
+    );
+
+    await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalledWith({ configured: true }, "devbox"));
+    // The dialog must seed its config reads from the host too.
+    await waitFor(() => expect(hoisted.api.getSmallModel).toHaveBeenCalledWith("devbox"));
+    expect(hoisted.api.getConfigModel).toHaveBeenCalledWith("devbox");
+    expect(hoisted.api.getAdvisor).toHaveBeenCalledWith("devbox");
+    expect(hoisted.api.getAdvisorFull).toHaveBeenCalledWith("devbox");
+
+    fireEvent.click(await screen.findByText("gpt-c"));
+    await waitFor(() =>
+      expect(hoisted.api.setSmallModel).toHaveBeenCalledWith("openai/gpt-c", "devbox"),
+    );
+  });
+
+  it("routes a context-model pick to the session's host", async () => {
+    render(
+      <ProjectProvider>
+        <SeedRemoteTab>
+          <HeaderModelDialog sessionId="sess-remote" purpose="context" />
+        </SeedRemoteTab>
+      </ProjectProvider>,
+    );
+
+    await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalledWith({ configured: true }, "devbox"));
+    await waitFor(() => expect(hoisted.api.getContextModel).toHaveBeenCalledWith("devbox"));
+
+    fireEvent.click(await screen.findByText("gpt-c"));
+    await waitFor(() =>
+      expect(hoisted.api.setContextModel).toHaveBeenCalledWith("openai/gpt-c", "devbox"),
+    );
+  });
+
+  it("routes an auto-continue pick to the session's host", async () => {
+    render(
+      <ProjectProvider>
+        <SeedRemoteTab>
+          <HeaderModelDialog sessionId="sess-remote" purpose="autocontinue" />
+        </SeedRemoteTab>
+      </ProjectProvider>,
+    );
+
+    await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalledWith({ configured: true }, "devbox"));
+    await waitFor(() => expect(hoisted.api.getAutoContinue).toHaveBeenCalledWith("devbox"));
+
+    fireEvent.click(await screen.findByText("gpt-c"));
+    await waitFor(() =>
+      expect(hoisted.api.setAutoContinue).toHaveBeenCalledWith({ model: "openai/gpt-c" }, "devbox"),
+    );
+  });
+
+  // The local-model augmentation runs inside `withLocalModels`, a useCallback.
+  // `purpose` does not change when the host resolves (undefined → "devbox"),
+  // so if `hostArgs` is omitted from that callback's deps the augmentation
+  // keeps a stale `[]` and fetches the LOCAL server's local models — the
+  // remote picker silently omits that host's enabled local judge models.
+  it("augments the permission/auto-continue list from the host's local models, not the local server", async () => {
+    render(
+      <ProjectProvider>
+        <SeedRemoteTab>
+          <HeaderModelDialog sessionId="sess-remote" purpose="autocontinue" />
+        </SeedRemoteTab>
+      </ProjectProvider>,
+    );
+
+    await waitFor(() => expect(hoisted.api.getAutoContinue).toHaveBeenCalledWith("devbox"));
+    // The LAST augmentation must carry the resolved host: the first render runs
+    // before SeedRemoteTab's effect resolves it, so an assertion on any call
+    // would pass on the stale-closure code.
+    await waitFor(() =>
+      expect(hoisted.api.getLocalModelsConfig).toHaveBeenLastCalledWith("devbox"),
     );
   });
 });

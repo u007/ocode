@@ -1,21 +1,12 @@
 import { useEffect } from "react";
 import { authedFetch } from "@/api/client";
 import { isDesktopShell } from "@/lib/desktopShell";
+import { getWindowId } from "@/lib/windowId";
 import { terminalRegistrySnapshot } from "@/lib/debug/terminalRegistry";
 import { estimateChatBytes } from "@/lib/memoryEstimate";
 import { useChatStateRef } from "@/stores/chatStore";
 
 const REPORT_INTERVAL_MS = 30_000;
-
-function windowId(): string {
-  const fromQuery = new URLSearchParams(window.location.search).get("windowId")?.trim();
-  if (fromQuery) return fromQuery;
-  try {
-    return sessionStorage.getItem("ocode.windowId") || "";
-  } catch {
-    return "";
-  }
-}
 
 /**
  * Pushes periodic renderer-memory-attribution samples to the backend
@@ -36,7 +27,7 @@ export default function FrontendMemoryReporter() {
 
   useEffect(() => {
     if (!isDesktopShell()) return;
-    const id = windowId();
+    const id = getWindowId();
 
     const tick = () => {
       const terminals = terminalRegistrySnapshot();

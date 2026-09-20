@@ -53,6 +53,7 @@ const criticalPublishTimeout = 3 * time.Second
 var sessionScopedEvents = map[string]bool{
 	"session_started":     true,
 	"session_bootstrap":   true,
+	"session_rekeyed":     true,
 	"user_message":        true,
 	"thinking":            true,
 	"text":                true,

@@ -3,8 +3,10 @@ title: Concurrent session writers — conflict semantics and recovery
 date: 2026-09-06
 status: resolved-with-follow-ups
 tags: [session, sqlite, concurrency, persistence]
+type: Gotcha
+description: Concurrent session writers — conflict semantics and recovery (updated with 2026-09-20 incident)
+timestamp: 2026-09-19T18:27:52Z
 ---
-
 # Concurrent session writers — conflict semantics and recovery
 
 Multiple ocode processes (TUI, desktop, web server) can write the same
@@ -39,10 +41,6 @@ below.
   converges (idempotent retry). Differing overlap: sync save →
   `ErrTranscriptConflict` (typed, via `session.IsConflictErr`); live write
   → silent drop (by design; the turn-end sync save is authoritative).
-  Live writes decide their suffix via `liveAppendStart` (2026-09-09): the
-  stored rows, or the loader's filtered view of them, must be a
-  byte-identical prefix of the snapshot; the rows past that prefix are
-  appended at the raw tail. Any other shape drops.
 - **Ordinary saves never shrink.** A sync save with FEWER messages than
   stored conflicts (`ErrTranscriptConflict`). The old delete-all-and-rewrite
   for shorter snapshots silently destroyed another writer's appended rows
@@ -108,8 +106,13 @@ below.
   A base that equals the LOADER's filtered view of the stored rows (see
   the next section) is not a divergence (2026-09-09): `rebaseAppend`
   retries the prefix match against `removeIncompleteToolRequests(stored)`,
-  keeps the raw rows in place and appends the unsaved suffix after them,
-  so the loader view of the result equals the caller's transcript.
+  keeps the raw rows in place and appends the unsaved suffix after them.
+  **The reconcile now returns the RAW merged view, not the loader's
+  filtered view** — the old claim that "the loader view of the result
+  equals the caller's transcript" is wrong. What must hold is only the
+  cross-turn invariant: the NEXT turn's save still finds a byte-identical
+  prefix on disk and converges (pinned by
+  `TestReconcileAppendFilteredResidentStaysConvergentAcrossTurns`).
   Divergence INSIDE the base has no safe merge: memory re-syncs to disk
   and the dropped in-memory suffix is logged explicitly, so the session
   stays writable instead of every later save conflicting forever.
@@ -123,11 +126,70 @@ transcript containing such rows loads SHORTER and shifted, so a
 full-snapshot "loaded view + new message" save compares a shifted sequence
 against stored rows and conflicts forever — every retry re-filters the
 same way. The tail insert dodges this for user messages and the metadata-only
-update dodges it for per-session model overrides; turn-end saves from a
+update dodges this for per-session model overrides; turn-end saves from a
 filtered base (resume a session that closed mid-ask, then let the next
 turn end) reconcile through the loader-view match in `rebaseAppend`.
 
-Incident (2026-09-09, ses_2026-09-09-111131-f098f1cb and
+## Incident (2026-09-20, ses_2026-09-18-233409-df1a92d3)
+
+Reported session: `ses_2026-09-18-233409-df1a92d3` ("it stream and then
+auto reset back to before my input", web/desktop). Stored transcript had 8
+adjacent byte-identical assistant pairs at the tail, each immediately
+followed by one `PERMISSION_ASK:` sentinel: `user, assistant(tool_calls),
+assistant(identical), tool(ask)` per turn. The user kept nudging
+("continue", "retry", "go on", "done?" ×4) while the agent re-raised a
+fresh ask (new tool-call id) every turn.
+
+Two coupled defects in the concurrent-writer reconcile (`internal/session/session.go`):
+
+1. **`rebaseAppend` compared a filtered disk view against the caller's raw rows.**
+   The caller's base could be the loader's view of disk
+   (`loadFromDir` → `removeIncompleteToolRequests` dropped an unanswered ask
+   round AND stripped assistant `tool_calls` whose result was still a
+   sentinel). The merge compared that *filtered* stored row against the
+   caller's *raw* in-memory row (calls intact) — never byte-equal — so it
+   treated its own already-live-written assistant row as an unsaved suffix
+   and appended a byte-identical duplicate.
+   **Fix** (`rebaseAppend` at `internal/session/session.go:510`): new
+   `stripUncompletedToolCalls` normalizes the caller's rows the same way
+   the filter applies to stored rows (index-preserving) so the comparison
+   is fair; the merge still appends the caller's real rows with
+   `tool_calls` intact.
+
+2. **`reconcileAppendToDirWithMessages` returned the filtered merge.**
+   `rebaseAppend` produced a merge whose last rows were still the raw
+   rows (calls intact), but `reconcileAppendToDirWithMessages` returned
+   `removeIncompleteToolRequests(merged)` — the filtered view.
+   `persistTurnTranscript` (`internal/server/agent_session.go:1145`) adopted
+   it as `as.messages`, erasing the trailing PERMISSION_ASK sentinel + its
+   tool-call from the resident transcript. `tailIsPermissionAsk` went
+   false (the next user message started a fresh turn, the orphaned call
+   was re-executed → a brand-new ask = the re-ask loop) and the resolve
+   handlers could no longer find the sentinel to answer.
+   **Fix**: return the merged transcript *unfiltered*; the non-rebase path
+   already leaves the resident transcript untouched, so this restores
+   parity with it.
+
+Both fixes are covered by regression tests, each verified failing against
+the pre-fix code by temporary revert:
+- `internal/session/conflict_test.go`
+  `TestReconcileAppendNoDuplicateWithUnresolvedAskCall` — fails pre-fix
+  with the exact duplicate `[... running live check running live check PERMISSION_ASK ...]`.
+- `internal/session/conflict_test.go`
+  `TestReconcileAppendFilteredResidentStaysConvergentAcrossTurns` —
+  filtered resident, consecutive ask-turns; fails pre-fix with both the
+  duplicated `a-A` and the lost pending ask.
+- `internal/server/agent_session_rebase_ask_test.go`
+  `TestRebaseKeepsResidentPendingAsk` — fails pre-fix with the sentinel +
+  call missing from the resident transcript.
+
+**Durable rule:** any rebase that replaces a resident transcript must
+preserve trailing unresolved ask sentinels (PERMISSION_ASK /
+QUESTION_PROMPT) and their tool-calls — the rebase result must not pass
+through `removeIncompleteToolRequests`; the next turn relies on them to
+detect the pending ask and converge.
+
+## Incident (2026-09-09, ses_2026-09-09-111131-f098f1cb and
 ses_2026-09-09-102110-ab14279d): both sessions paused on a `question`
 prompt, the user typed a chat message instead of answering, and the next
 turn ran from an agent rebuilt off the filtered disk copy (9 rows on disk,

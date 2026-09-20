@@ -9,12 +9,22 @@ import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
 import ModelPromptRow from "./ModelPromptRow";
 import { RESTORE_EVENT } from "../../lib/inputRestore";
 import { SESSION_PREFETCH_LIMIT, takePrefetchedSession } from "../../lib/sessionPrefetch";
+import {
+  buildJumpTargets,
+  inWindowMatchCount,
+  olderPrefixFetch,
+  serverIndexToLocal,
+  type ServerSearchResult,
+} from "../../lib/sessionSearch";
 import { requestSpeech } from "../Speech/SpeechProvider";
 import { lastRenderedSpeechText, renderedSpeechTexts } from "../Speech/speechUtils";
 import { ArrowDown, ArrowUp, Volume2 } from "lucide-react";
 
 const PAGE_SIZE = 50;
-
+/** Debounce for the full-transcript search query. Long enough to avoid a
+ *  request per keystroke, short enough that the out-of-window count settles
+ *  while the user is still reading the result. */
+const SEARCH_DEBOUNCE_MS = 200;
 /** Scroll a container to an offset. Falls back to the `scrollTop` property
  *  when `Element.prototype.scrollTo` is unavailable (jsdom), so the scroll
  *  affordances degrade instead of throwing under test. */
@@ -49,7 +59,7 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
   // Combined with `memo` below, a hidden tab only re-renders for its own chat
   // slice — never because a sibling tab became active.
   const projectDispatch = useProjectDispatch();
-  const { messages, live, hasMore, loadingMore } = slice;
+  const { messages, live, hasMore, loadingMore, windowStartServerIndex, totalMessages } = slice;
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const topRef = useRef<HTMLDivElement>(null);
@@ -135,14 +145,61 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
     return () => window.removeEventListener(RESTORE_EVENT, handler as EventListener);
   }, [sessionId, slice.messages, slice.hasMore, slice.isStreaming, slice.turnActive, slice.live, dispatch]);
 
-  // In-chat find bar (Ctrl/Cmd+F). Client-side, searches only loaded messages.
+  // In-chat find bar (Ctrl/Cmd+F). Match computation happens in TWO layers:
+  //   1. Instant, client-side, over the loaded window (below) — drives
+  //      highlighting and keeps typing responsive with no network.
+  //   2. A debounced server query over the WHOLE transcript, so hits outside
+  //      the loaded window (the store caps it at MAX_SLICE_MESSAGES) are not
+  //      silently missed. See lib/sessionSearch.ts and
+  //      internal/server/handler_session_search.go.
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [matchCursor, setMatchCursor] = useState(-1);
+  // Server-side result: total hits in the full transcript + their server
+  // indices. `null` until the debounced query resolves (or for a draft tab).
+  const [serverMatches, setServerMatches] = useState<ServerSearchResult | null>(null);
   // Set true while a search jump is scrolling so handleScroll doesn't fire the
   // scroll-up pagination loader (which would shift every message index and
   // land the highlight on the wrong bubble).
   const searchJumpRef = useRef(false);
+
+  // Debounced full-transcript search. The local matcher above keeps typing
+  // instant; this fills in the hits the loaded window does not contain. A
+  // stale response must not overwrite a newer query, so the effect is keyed on
+  // the query and guarded by `cancelled` (the same pattern the transcript
+  // fetch uses). Skipped for a draft tab (no server session yet) and while the
+  // bar is closed.
+  useEffect(() => {
+    const q = searchQuery.trim();
+    // Any query/open change invalidates the previous result SYNCHRONOUSLY.
+    // Otherwise the old indices stay live through the debounce + round-trip,
+    // so buildJumpTargets pairs the previous query's server hits with the new
+    // query's local highlight (wrong count, dead "next") until it resolves.
+    setServerMatches(null);
+    if (!searchOpen || !q || !sessionId || sessionId.startsWith("new-")) {
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      api.searchSession(sessionId, q, {}, host)
+        .then((res) => {
+          if (cancelled) return;
+          setServerMatches(res);
+        })
+        .catch((err) => {
+          // A search failure must not break the find bar: fall back to the
+          // in-window matches rather than surfacing a dialog-less error.
+          if (cancelled) return;
+          console.warn("session search failed", err);
+          setServerMatches(null);
+        });
+    }, SEARCH_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchOpen, searchQuery, sessionId, host]);
+
 
   // --- Virtualizer coordinate fix (Finding 2) ---------------------------------
   // `scrollMargin` is the offset (scroll-surface padding + the variable-height
@@ -371,9 +428,64 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
     return out;
   }, [renderEntries, searchQuery, messages]);
 
+  // Map a server transcript index to its render-entry position. Server indices
+  // live in the same post-load message array the virtualizer's `messages` holds
+  // (see handler_session_search.go), so the only translation needed is
+  // windowStartServerIndex. Several messages fold into one bubble (a tool call
+  // and its result), hence the collapse-to-one-entry in buildJumpTargets.
+  const entryPosByServerIndex = useMemo(() => {
+    const map = new Map<number, number>();
+    if (serverMatches === null || windowStartServerIndex < 0) return map;
+    const localPos = new Map<number, number>();
+    renderEntries.forEach((entry, pos) => {
+      localPos.set(entry.originalIndex, pos);
+      // A tool result folded into its parent group is not a top-level entry,
+      // so its server index is absent from LocalPos and a search hit on the
+      // result would map to entryPos -1 (a dead "next"). Register each result
+      // against its parent bubble; buildJumpTargets then collapses it into the
+      // same target as the call that produced it.
+      if (entry.kind === "tool-group") {
+        for (const c of entry.calls) {
+          if (c.resultIdx !== undefined) localPos.set(c.resultIdx, pos);
+        }
+      }
+    });
+    for (const si of serverMatches.indices) {
+      const local = serverIndexToLocal(si, messages, windowStartServerIndex);
+      if (local < 0) continue;
+      const pos = localPos.get(local);
+      if (pos !== undefined) map.set(si, pos);
+    }
+    return map;
+  }, [renderEntries, serverMatches, windowStartServerIndex, messages]);
+
+  // Ordered navigation targets: full-transcript hits when the server query has
+  // resolved, otherwise the instant local matches. See lib/sessionSearch.ts.
+  const jumpTargets = useMemo(
+    () =>
+      buildJumpTargets({
+        serverIndices: serverMatches?.indices ?? null,
+        entryPosByServerIndex,
+        localEntryPositions: matchEntryPositions,
+        windowStartServerIndex,
+      }),
+    [serverMatches, entryPosByServerIndex, matchEntryPositions, windowStartServerIndex],
+  );
+
+  // Secondary find-bar text. Only meaningful when the full-transcript search
+  // knows about more hits than the loaded window shows — otherwise it would
+  // just repeat the counter.
+  const searchNote = useMemo(() => {
+    if (serverMatches === null) return undefined;
+    const inView = inWindowMatchCount(serverMatches.indices, entryPosByServerIndex);
+    if (serverMatches.total <= inView) return undefined;
+    const totalLabel = serverMatches.truncated ? `${serverMatches.total}+` : `${serverMatches.total}`;
+    return `${totalLabel} total, ${inView} in view`;
+  }, [serverMatches, entryPosByServerIndex]);
+
   const currentMatchEntryPos =
-    matchCursor >= 0 && matchCursor < matchEntryPositions.length
-      ? matchEntryPositions[matchCursor]
+    matchCursor >= 0 && matchCursor < jumpTargets.length
+      ? jumpTargets[matchCursor].entryPos
       : -1;
 
   // Initial load: fetch the tail of this session's transcript once
@@ -645,8 +757,8 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
   // query, or the loaded message set shifted). -1 when there is nothing to jump
   // to so the counter reads "No matches" instead of "1/0".
   useEffect(() => {
-    setMatchCursor(matchEntryPositions.length > 0 ? 0 : -1);
-  }, [matchEntryPositions]);
+    setMatchCursor(jumpTargets.length > 0 ? 0 : -1);
+  }, [jumpTargets]);
 
   // Scroll the current match into view. Flag the jump so handleScroll skips the
   // pagination loader while the smooth scroll settles. Unlike a plain DOM
@@ -665,19 +777,73 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
     return () => clearTimeout(t);
   }, [currentMatchEntryPos, virtualizer]);
 
+  // When the selected match lives OUTSIDE the loaded window its entryPos is -1
+  // (see buildJumpTargets), so the scroll effect above has nothing to do. Load
+  // the contiguous prefix from the match up to the window start; PREPEND_MESSAGES
+  // then places it at local 0, the target recomputes with a resolved entryPos,
+  // and the scroll effect runs. Keyed by the server index via a ref so
+  // re-selecting the same off-window match does not refetch.
+  const pendingJumpRef = useRef<number | null>(null);
+  // Server indices we have already tried to fetch for this query. A match that
+  // is excluded from renderEntries (a sentinel QUESTION_PROMPT/PERMISSION_ASK
+  // tool message) can never resolve to an entry position, so without this the
+  // effect would refetch it on every re-render forever.
+  const attemptedJumpsRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    attemptedJumpsRef.current = new Set();
+  }, [searchQuery, sessionId]);
+  useEffect(() => {
+    if (matchCursor < 0 || matchCursor >= jumpTargets.length) return;
+    const target = jumpTargets[matchCursor];
+    if (target.entryPos >= 0) return; // already loaded — scroll effect handles it
+    // Bail on ANY in-flight prefix fetch, not just one for this target: a
+    // second overlapping fetch would race the first and both would prepend,
+    // duplicating ranges and (without the store clamp) driving the anchor
+    // negative. The user can press "next" again once this one settles.
+    if (pendingJumpRef.current !== null) return;
+    if (attemptedJumpsRef.current.has(target.serverIndex)) return; // already tried
+    const fetch = olderPrefixFetch(target.serverIndex, windowStartServerIndex, totalMessages);
+    if (!fetch) return;
+    pendingJumpRef.current = target.serverIndex;
+    attemptedJumpsRef.current.add(target.serverIndex);
+    dispatch({ type: "SET_LOADING_MORE", sessionId, loading: true });
+    api
+      .getSession(sessionId, fetch, host)
+      .then((detail) => {
+        if (detail.messages.length === 0) return;
+        dispatch({
+          type: "PREPEND_MESSAGES",
+          sessionId,
+          messages: detail.messages,
+          total: detail.total,
+        });
+      })
+      .catch((err) => {
+        // A failed jump must not break the find bar; the counter still shows
+        // the hit, it just cannot scroll to it. Clear the attempted marker so
+        // a transient network error does not permanently dead-end the target.
+        console.warn("search jump fetch failed", err);
+        attemptedJumpsRef.current.delete(target.serverIndex);
+      })
+      .finally(() => {
+        pendingJumpRef.current = null;
+        dispatch({ type: "SET_LOADING_MORE", sessionId, loading: false });
+      });
+  }, [matchCursor, jumpTargets, messages, windowStartServerIndex, totalMessages, sessionId, host, dispatch]);
+
   const gotoNextMatch = useCallback(() => {
     setMatchCursor((c) =>
-      matchEntryPositions.length === 0 ? -1 : (c + 1) % matchEntryPositions.length,
+      jumpTargets.length === 0 ? -1 : (c + 1) % jumpTargets.length,
     );
-  }, [matchEntryPositions.length]);
+  }, [jumpTargets.length]);
 
   const gotoPrevMatch = useCallback(() => {
     setMatchCursor((c) =>
-      matchEntryPositions.length === 0
+      jumpTargets.length === 0
         ? -1
-        : (c - 1 + matchEntryPositions.length) % matchEntryPositions.length,
+        : (c - 1 + jumpTargets.length) % jumpTargets.length,
     );
-  }, [matchEntryPositions.length]);
+  }, [jumpTargets.length]);
 
   // Pin to bottom immediately (used by the "jump to bottom" affordance).
   const scrollToBottom = useCallback((smooth = false) => {
@@ -747,11 +913,17 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
 
     if (!hasMore || loadingMore || sessionId.startsWith("new-") || searchJumpRef.current) return;
     if (el.scrollTop < 100) {
-      const currentCount = messages.length;
+      // Skip the SERVER rows already loaded (total - windowStart), not the
+      // local array length: client-only ADD_MESSAGE injections inflate the
+      // latter and would skip past the window start, leaving a gap. Fall back
+      // to the array length only when the anchor is unknown.
+      const loadedServerCount = windowStartServerIndex >= 0
+        ? Math.max(0, totalMessages - windowStartServerIndex)
+        : messages.length;
       dispatch({ type: "SET_LOADING_MORE", sessionId, loading: true });
 
       api
-        .getSession(sessionId, { limit: PAGE_SIZE, offset: currentCount })
+        .getSession(sessionId, { limit: PAGE_SIZE, offset: loadedServerCount }, host)
         .then((detail) => {
           if (detail.messages.length > 0) {
             const scrollHeightBefore = el.scrollHeight;
@@ -773,7 +945,7 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
           dispatch({ type: "SET_LOADING_MORE", sessionId, loading: false });
         });
     }
-  }, [hasMore, loadingMore, messages.length, sessionId, dispatch]);
+  }, [hasMore, loadingMore, messages.length, windowStartServerIndex, totalMessages, sessionId, host, dispatch]);
 
   // Role "tool" messages carry only tool_call_id, not the tool's name — resolve
   // it here from the assistant message that issued the call, so replayed
@@ -795,11 +967,12 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
           <ChatSearchBar
             query={searchQuery}
             onQueryChange={setSearchQuery}
-            matchCount={matchEntryPositions.length}
+            matchCount={jumpTargets.length}
             current={matchCursor}
             onNext={gotoNextMatch}
             onPrev={gotoPrevMatch}
             onClose={closeSearch}
+            note={searchNote}
           />
         </div>
       )}

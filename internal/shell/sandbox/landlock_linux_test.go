@@ -95,6 +95,34 @@ func TestLinuxAllowsDevNullWrite(t *testing.T) {
 	}
 }
 
+// TestLinuxAllowsFileWritableRoot is the regression for the Landlock EINVAL
+// lockout: a writable root that is a regular FILE (projects.json / the global
+// git-ignore files, which NewRootSet's protected-file carve-out expands out of
+// the writable data dir) used to be added with the full directory-capable mask.
+// landlock_add_rule(2) rejects that with EINVAL, aborting the ruleset, so the
+// confiner failed closed and EVERY sandboxed command died with
+// `sandbox-confine: landlock rule for ".../projects.json": invalid argument`.
+// The file must be accepted as a root and remain writable.
+func TestLinuxAllowsFileWritableRoot(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "projects.json")
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Only the FILE is writable — its parent directory is not, so a successful
+	// open+truncate proves the file-level write/truncate grant took effect.
+	if _, err := linuxManyBackends(t, []string{target}, "printf new > "+target); err != nil {
+		t.Fatalf("write to a file writable root failed: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("file writable root content = %q, want %q", got, "new")
+	}
+}
+
 // TestLinuxConfineEntrypointStripsProtocolEnv locks the env-scrubbing boundary
 // at the confiner level: the OCODE_SANDBOX_* vars must not leak into the
 // confined command's environment.

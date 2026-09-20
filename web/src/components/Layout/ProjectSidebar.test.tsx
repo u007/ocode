@@ -14,37 +14,7 @@ const project = (path: string, group: string): Project => ({
 });
 
 describe("buildProjectSidebarOrder", () => {
-  it("uses group order for the collapsed rail while keeping collapsed-group projects", () => {
-    const projects = [
-      project("/ungrouped", ""),
-      project("/second", "second"),
-      project("/first", "first"),
-    ];
-    const groups: ProjectGroup[] = [
-      { name: "first", order: 2, collapsed: false },
-      { name: "second", order: 1, collapsed: true },
-    ];
-
-    const { orderedProjects, visibleItems } = buildProjectSidebarOrder(projects, groups);
-
-    expect(orderedProjects.map((p) => p.path)).toEqual([
-      "/second",
-      "/first",
-      "/ungrouped",
-    ]);
-    expect(
-      visibleItems
-        .filter((item) => item.type === "project")
-        .map((item) => (item.data as Project).path),
-    ).toEqual(["/first", "/ungrouped"]);
-    expect(orderedProjects.slice(0, 5).map((p) => p.path)).toEqual([
-      "/second",
-      "/first",
-      "/ungrouped",
-    ]);
-  });
-
-  it("groups interleaved projects by group while preserving order within each group", () => {
+  it("orders groups by group order while preserving persisted order within each group", () => {
     // Raw store order interleaves the two groups (backend List() sorts by a
     // global order/AddedAt, not by group). The canonical order must regroup.
     const projects = [
@@ -59,38 +29,49 @@ describe("buildProjectSidebarOrder", () => {
       { name: "B", order: 2, collapsed: false },
     ];
 
-    const { orderedProjects, visibleItems } = buildProjectSidebarOrder(projects, groups);
+    const items = buildProjectSidebarOrder(projects, groups);
 
-    expect(orderedProjects.map((p) => p.path)).toEqual([
+    // Project items (ignoring group headers) must be the canonical order.
+    expect(
+      items
+        .filter((item) => item.type === "project")
+        .map((item) => (item.data as Project).path),
+    ).toEqual(["/A1", "/A2", "/B1", "/B2", "/U1"]);
+    // Header positions: A before its projects, B before its projects.
+    expect(items.map((item) => (item.type === "group" ? `group:${(item.data as ProjectGroup).name}` : (item.data as Project).path))).toEqual([
+      "group:A",
       "/A1",
       "/A2",
+      "group:B",
       "/B1",
       "/B2",
       "/U1",
     ]);
-    // The expanded list shows the identical project sequence (plus headers).
+  });
+
+  it("omits projects of collapsed groups, matching the expanded list", () => {
+    const items = buildProjectSidebarOrder(
+      [project("/A1", "A"), project("/B1", "B"), project("/U1", "")],
+      [
+        { name: "A", order: 1, collapsed: true },
+        { name: "B", order: 2, collapsed: false },
+      ],
+    );
     expect(
-      visibleItems
+      items
         .filter((item) => item.type === "project")
         .map((item) => (item.data as Project).path),
-    ).toEqual(["/A1", "/A2", "/B1", "/B2", "/U1"]);
+    ).toEqual(["/B1", "/U1"]);
   });
 
   it("handles empty inputs", () => {
-    expect(buildProjectSidebarOrder([], []).orderedProjects).toEqual([]);
-    expect(buildProjectSidebarOrder([], []).visibleItems).toEqual([]);
+    expect(buildProjectSidebarOrder([], [])).toEqual([]);
   });
 
-  it("keeps projects whose group no longer exists at the end of the collapsed rail", () => {
-    // Cannot normally happen (HandleDeleteGroup ungroups first), but the old
-    // collapsed rail included every project; preserve that, while the expanded
-    // view continues to omit orphans (no group header to render them under).
-    const { orderedProjects, visibleItems } = buildProjectSidebarOrder(
-      [project("/X", "gone")],
-      [],
-    );
-    expect(orderedProjects.map((p) => p.path)).toEqual(["/X"]);
-    expect(visibleItems).toEqual([]);
+  it("omits projects whose group no longer exists (no header to render them under)", () => {
+    // Cannot normally happen (HandleDeleteGroup ungroups first), but a stale
+    // dangling group must not resurrect a project in only one surface.
+    expect(buildProjectSidebarOrder([project("/X", "gone")], [])).toEqual([]);
   });
 });
 
@@ -206,16 +187,27 @@ describe("ProjectSidebar collapsed rail", () => {
     stateFake.activeProject = null;
   });
 
-  it("renders icons in the expanded list order, not the raw interleaved store order", () => {
+  it("renders every project in the expanded list order, uncapped", () => {
     render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} />);
 
-    // First button is the expand toggle (no label). The rail must show the
-    // first five projects in canonical order (A1, A2, B1, B2, U1) — the raw
-    // array order [A1, B1, A2, B2, U1] would interleave the groups.
-    expect(railLabels()).toEqual(["A1", "A2", "B1", "B2", "U1"]);
+    // First button is the expand toggle (no label). The rail must show ALL
+    // projects in canonical order (A1, A2, B1, B2, U1, U2) — the old rail
+    // capped at five, and the raw array order would interleave the groups.
+    expect(railLabels()).toEqual(["A1", "A2", "B1", "B2", "U1", "U2"]);
   });
 
-  it("keeps projects of collapsed groups in the rail at their group position", () => {
+  it("does not cap the rail: 12 projects are all rendered inside a scroll area", () => {
+    stateFake.projects = Array.from({ length: 12 }, (_, i) => project(`/P${i}`, ""));
+    stateFake.groups = [];
+
+    const { container } = render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} />);
+
+    expect(railLabels().filter((l) => l?.startsWith("P"))).toHaveLength(12);
+    // The overflow is scrollable rather than clipped/hidden.
+    expect(container.querySelector('[data-radix-scroll-area-viewport]')).not.toBeNull();
+  });
+
+  it("hides projects of collapsed groups, matching the expanded list", () => {
     stateFake.groups = [
       { name: "B", order: 1, collapsed: false },
       { name: "A", order: 2, collapsed: true },
@@ -223,7 +215,8 @@ describe("ProjectSidebar collapsed rail", () => {
 
     render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} />);
 
-    expect(railLabels()).toEqual(["B1", "B2", "A1", "A2", "U1"]);
+    // Group A is collapsed, so A1/A2 are hidden exactly as in the expanded view.
+    expect(railLabels()).toEqual(["B1", "B2", "U1", "U2"]);
   });
 });
 

@@ -51,6 +51,11 @@ export interface PreviewSurfaceProps {
    *  passes the current editor content so the rendered pane tracks unsaved
    *  edits. Only `markdown` consumes it; every other kind reads from disk. */
   content?: string;
+  /** False while the owning pane is hidden. Passed to viewers that must react
+   *  to visibility (PDF finds/rendered window, media playback). Defaults to
+   *  true so single-surface hosts (sidebar PreviewHost, PreviewTabPage) need
+   *  not thread it. */
+  active?: boolean;
 }
 
 export default function PreviewSurface({
@@ -64,6 +69,7 @@ export default function PreviewSurface({
   onSlideChange,
   onOpenFile,
   content,
+  active,
 }: PreviewSurfaceProps) {
   const handlePageChange = onPageChange ?? (() => {});
   const handleSlideChange = onSlideChange ?? (() => {});
@@ -71,7 +77,7 @@ export default function PreviewSurface({
   return (
     <div className="min-h-0 flex-1">
       <Suspense fallback={<ViewerLoading />}>
-        {kind === "pdf" && <PdfViewer path={path} projectRoot={projectRoot} projectHost={projectHost} page={page ?? 1} onPageChange={handlePageChange} />}
+        {kind === "pdf" && <PdfViewer path={path} projectRoot={projectRoot} projectHost={projectHost} page={page ?? 1} onPageChange={handlePageChange} active={active} />}
         {kind === "docx" && <DocxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
         {kind === "pptx" && <PptxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} slide={slide ?? 1} onSlideChange={handleSlideChange} />}
         {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
@@ -79,8 +85,8 @@ export default function PreviewSurface({
         {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} content={content} />}
         {kind === "text" && <TextViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
         {kind === "image" && <ImageViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
-        {kind === "audio" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="audio" />}
-        {kind === "video" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="video" />}
+        {kind === "audio" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="audio" active={active} />}
+        {kind === "video" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="video" active={active} />}
       </Suspense>
     </div>
   );

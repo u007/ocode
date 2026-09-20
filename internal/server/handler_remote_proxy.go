@@ -78,6 +78,29 @@ func (h *Handler) HandleRemoteProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// MCP OAuth cannot run through the proxy for an SSH host. The flow opens a
+	// system browser where the SERVER runs and waits for a 127.0.0.1:8085
+	// callback; proxied over `ssh -L`, the remote server sees RemoteAddr =
+	// 127.0.0.1 (the tunnel) so its own loopback gate passes, the browser opens
+	// on the WRONG machine, and the client polls for its full timeout before
+	// erroring. Refuse here, before connecting, with the same explanation.
+	// WSL is exempt: its server shares the Windows machine, so localhost does
+	// reach the callback. RemoteKind is "ssh" for SSH and "wsl" for WSL; an
+	// empty/unknown kind on a proxied host is treated as SSH.
+	if isMCPAuthRestPath(rest) {
+		kind := ""
+		if entry, ok := h.remoteProjectEntry(host, projectPath); ok {
+			kind = entry.RemoteKind
+		}
+		if kind != "wsl" {
+			writeError(w, http.StatusForbidden,
+				"MCP OAuth must run where the browser can reach the callback (127.0.0.1:8085). "+
+					"This session runs on a remote SSH host, so run /mcp-auth in the TUI there "+
+					"(or open the ocode desktop app on that machine).")
+			return
+		}
+	}
+
 	// Get or create the workspace + cached proxy. Pass the saved
 	// project's RemotePort (0 = default) so non-default SSH ports work.
 	ws, err := h.remoteHosts.workspaceForPort(host, projectPath, remotePort)
@@ -268,4 +291,21 @@ func (h *Handler) firstSavedProjectForHost(host string) (projects.Project, bool)
 		}
 	}
 	return projects.Project{}, false
+}
+
+// isMCPAuthRestPath reports whether a proxied sub-path ("api/" is already
+// stripped) is one of the MCP OAuth routes that must not run on a remote SSH
+// host: POST /api/mcp/{name}/auth and GET /api/mcp/auth/{id}. Mutating MCP
+// routes (enable/disable) and the listing are not matched.
+func isMCPAuthRestPath(rest string) bool {
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) < 2 || parts[0] != "mcp" {
+		return false
+	}
+	// GET /api/mcp/auth/{id}
+	if parts[1] == "auth" {
+		return true
+	}
+	// POST /api/mcp/{name}/auth
+	return len(parts) >= 3 && parts[len(parts)-1] == "auth"
 }

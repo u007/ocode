@@ -54,6 +54,11 @@ func (h *Handler) HandleCommandContext(w http.ResponseWriter, r *http.Request, n
 		prompt, err = commandctx.DocSync(workDir, mode)
 	case "mem-update":
 		prompt, err = commandctx.MemUpdate(workDir, args)
+	case "init":
+		// The web `/init [focus]` runs the same analysis prompt the TUI does,
+		// instead of the old static AGENTS.md stub. /api/init still exists for
+		// the explicit "just create the file" path.
+		prompt = commandctx.Init(args)
 	default:
 		writeError(w, http.StatusNotFound, "unknown command-context: "+name)
 		return

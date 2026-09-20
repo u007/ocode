@@ -355,6 +355,37 @@ func SetTodoSession(sessionID string) {
 	}
 }
 
+// RekeyTodoSession moves the current session's todo file and in-memory entry
+// from oldID to newID for a session rekey (/reset-id), so the plan follows the
+// conversation instead of being stranded under the deleted id. It is a no-op
+// when oldID is empty or has no todo file. Best-effort: the in-memory entry is
+// rebound regardless so the current session keeps rendering the plan.
+func RekeyTodoSession(oldID, newID string) {
+	if oldID == "" || newID == "" || oldID == newID {
+		return
+	}
+	oldPath := todoFilePath(oldID)
+	newPath := todoFilePath(newID)
+	if _, err := os.Stat(oldPath); err == nil {
+		if err := os.Rename(oldPath, newPath); err != nil {
+			// Cross-device rename is impossible here (same todoDir), so a
+			// failure is a real error; fall back to a copy so the plan is not
+			// lost, and log it.
+			logTodoError("rekey todo file "+oldPath+" -> "+newPath, err)
+		}
+	}
+	// Rebind the in-memory entry: preserve the loaded content but re-tag it.
+	todoStoreState.mu.Lock()
+	defer todoStoreState.mu.Unlock()
+	if ses, ok := todoStoreState.sessions[oldID]; ok {
+		delete(todoStoreState.sessions, oldID)
+		todoStoreState.sessions[newID] = ses
+	}
+	if todoStoreState.current == oldID {
+		todoStoreState.current = newID
+	}
+}
+
 // ResetTodoState clears the in-memory copy for the current session only. It
 // must NOT delete the file: the call sites move to a different session id, and
 // deleting the outgoing session's todo would destroy exactly the state the

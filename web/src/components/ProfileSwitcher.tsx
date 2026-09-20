@@ -1,32 +1,16 @@
 import { useEffect, useState } from "react"
 import { authedFetch } from "@/api/client"
 import { eventBus } from "@/lib/eventBus"
+import { getWindowId } from "@/lib/windowId"
 
 type Profile = { name: string; displayName: string; overrideCount: number; credentialCount: number }
 
-function getWindowId(): string {
-  if (typeof window === "undefined") return "win-1"
-  try {
-    // Prefer a stable window id threaded in by the desktop shell
-    // (?windowId=main). It survives webview reloads, so per-window profile
-    // state (active profile, chat config) stays bound to the same desktop
-    // window instead of resetting on every reload.
-    const fromURL = new URLSearchParams(window.location.search).get("windowId")
-    if (fromURL && fromURL.trim()) return fromURL.trim()
-    // Fallback: a per-tab random id for the standalone web server, where each
-    // browser tab is its own window.
-    let id = sessionStorage.getItem("ocode.windowId")
-    if (id) return id
-    id = `win-${crypto.randomUUID().slice(0, 8)}`
-    sessionStorage.setItem("ocode.windowId", id)
-    // keep a copy in localStorage for reloads that clear sessionStorage (rare),
-    // but don't reuse it for new tabs — each tab gets its own distinct id.
-    if (!localStorage.getItem("ocode.windowId")) localStorage.setItem("ocode.windowId", id)
-    return id
-  } catch {
-    return "win-1"
-  }
-}
+// Resolved once per app load through the shared helper so the profile pill and
+// every chat request agree on the window. The helper persists a URL-derived id
+// to sessionStorage, so a later SPA navigation (the desktop deep-link redirect)
+// that drops ?windowId= still resolves the same window instead of minting a
+// fresh random one — the divergence that made a picked profile invisible to an
+// already-open chat.
 const windowId = getWindowId()
 export function getActiveWindowId() { return windowId }
 

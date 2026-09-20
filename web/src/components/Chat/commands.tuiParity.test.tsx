@@ -13,7 +13,9 @@ import { COMMANDS, dispatchCommand } from "./commands";
  *      Settings forms use.
  */
 function ctx(api: Record<string, unknown> = {}) {
-  return { commandName: "test", args: "", api } as never;
+  // A remote session's host: purpose-model/effort/model-slash reads/writes must
+  // be routed to the server that runs the session, never the local one.
+  return { commandName: "test", args: "", host: "devbox", api } as never;
 }
 
 describe("COMMANDS registry ⇄ dispatch alignment", () => {
@@ -103,11 +105,11 @@ describe("/explorer-model and /context-model", () => {
       [enKey]: setEnabled,
     });
     const on = await dispatchCommand(`/${kind}-model enable`, c);
-    expect(setEnabled).toHaveBeenCalledWith(true);
+    expect(setEnabled).toHaveBeenCalledWith(true, "devbox");
     expect(on.messages?.[0]?.content).toContain("enabled");
 
     const off = await dispatchCommand(`/${kind}-model disable`, c);
-    expect(setEnabled).toHaveBeenCalledWith(false);
+    expect(setEnabled).toHaveBeenCalledWith(false, "devbox");
     expect(off.messages?.[0]?.content).toContain("disabled");
   });
 
@@ -125,7 +127,7 @@ describe("/explorer-model and /context-model", () => {
     expect(setExplorerModel).not.toHaveBeenCalled();
 
     await dispatchCommand("/explorer-model model openai/gpt-5", c);
-    expect(setExplorerModel).toHaveBeenCalledWith("openai/gpt-5");
+    expect(setExplorerModel).toHaveBeenCalledWith("openai/gpt-5", "devbox");
   });
 
   it("`model auto` clears the override", async () => {
@@ -138,8 +140,39 @@ describe("/explorer-model and /context-model", () => {
         setContextModelEnabled: vi.fn(),
       }),
     );
-    expect(setContextModel).toHaveBeenCalledWith("auto");
+    expect(setContextModel).toHaveBeenCalledWith("auto", "devbox");
     expect(result.messages?.[0]?.content).toContain("small model");
+  });
+});
+
+describe("/small-model and /advisor reads route to the session host", () => {
+  it("reads the small-model config from the session's host", async () => {
+    const getSmallModelWithEnabled = vi.fn(async () => ({ model: "x/y", enabled: true }));
+    const result = await dispatchCommand("/small-model", ctx({ getSmallModelWithEnabled }));
+    expect(getSmallModelWithEnabled).toHaveBeenCalledWith("devbox");
+    expect(result.messages?.[0]?.content).toContain("x/y");
+  });
+
+  it("reads the advisor model from the session's host", async () => {
+    const getAdvisor = vi.fn(async () => ({ model: "anthropic/claude" }));
+    const result = await dispatchCommand("/advisor", ctx({ getAdvisor }));
+    expect(getAdvisor).toHaveBeenCalledWith("devbox");
+    expect(result.messages?.[0]?.content).toContain("anthropic/claude");
+  });
+
+  it("routes the /localmodel registry read/write to the session's host", async () => {
+    const getLocalModelsConfig = vi.fn(async () => ({
+      "bonsai-8b": { enabled: false, max_parallel: 1 },
+    }));
+    const setLocalModelsConfig = vi.fn(async () => ({}));
+    const c = ctx({ getLocalModelsConfig, setLocalModelsConfig });
+
+    await dispatchCommand("/localmodel enable bonsai-8b", c);
+    expect(getLocalModelsConfig).toHaveBeenCalledWith("devbox");
+    expect(setLocalModelsConfig).toHaveBeenCalledWith(
+      { "bonsai-8b": { enabled: true, max_parallel: 1 } },
+      "devbox",
+    );
   });
 });
 
@@ -291,14 +324,10 @@ describe("TUI-only commands answer instead of falling through", () => {
     expect(result.messages?.[0]?.content).toContain("Files");
   });
 
-  it("/mcp-auth points at the TUI and never claims the desktop shell can run it", async () => {
-    const result = await dispatchCommand("/mcp-auth some-server", ctx());
+  it("/mcp-auth without a server name shows usage", async () => {
+    const result = await dispatchCommand("/mcp-auth", ctx());
     expect(result.handled).toBe(true);
-    const content = result.messages?.[0]?.content ?? "";
-    expect(content).toContain("TUI");
-    // The desktop app renders this same SPA, so "run it in the desktop shell"
-    // sent users in a circle.
-    expect(content).not.toContain("desktop shell");
+    expect(result.messages?.[0]?.content).toContain("Usage");
   });
 });
 

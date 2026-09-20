@@ -22,6 +22,7 @@ package session
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -730,4 +731,271 @@ func TestLiveSaveFromFilteredBaseAppends(t *testing.T) {
 		t.Fatalf("reload: %v", err)
 	}
 	assertContents(t, loaded.Messages, "u0", "u1", "r0", "r1")
+}
+
+// TestReconcileAppendNoDuplicateWithUnresolvedAskCall pins the duplicate-assistant
+// fix for ses_2026-09-18-233409-df1a92d3: a turn that pauses on a permission ask
+// ends with an assistant row whose tool-call result is still the PERMISSION_ASK
+// sentinel. The raw disk transcript holds that ask round from an earlier turn, so
+// the loader view (removeIncompleteToolRequests) is SHORTER than raw and drops
+// the call from the prior assistant row. The turn streams its own assistant row
+// (with a live tool-call) to disk mid-turn, then the turn-end reconcile compares
+// the caller's raw row against the FILTERED stored row — which no longer matches,
+// so the merge appended a byte-identical duplicate assistant row before every
+// pending ask.
+//
+// Before the fix the stored transcript gained a second copy of our assistant row
+// (raw 7 rows, 1 adjacent-identical pair). After it, the row is recognized as
+// already stored and only the genuinely new sentinel row is appended.
+func TestReconcileAppendNoDuplicateWithUnresolvedAskCall(t *testing.T) {
+	dir := t.TempDir()
+	id := "ses_conflict-dup-askcall"
+
+	// Prior history on disk: an assistant row whose ask result was never
+	// completed (the sentinel), so the loader view drops both the sentinel row
+	// and the call on the assistant row above it.
+	priorCall := agent.ToolCall{ID: "old-1", Type: "function"}
+	priorCall.Function.Name = "bash"
+	priorCall.Function.Arguments = "{}"
+	stored := []agent.Message{
+		{Role: "user", Content: "u0", UserSeq: 1},
+		{Role: "assistant", Content: "prior", ToolCalls: []agent.ToolCall{priorCall}},
+		{Role: "tool", ToolID: "old-1", Content: tool.SentinelPermissionAsk + `{"tool_name":"bash"}`},
+	}
+	if err := saveToDir(dir, id, "", stored, nil, false, 0); err != nil {
+		t.Fatalf("seed disk: %v", err)
+	}
+	loaded, err := loadFromDir(dir, id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// The loader view is shorter than raw and the prior call is gone.
+	assertContents(t, loaded.Messages, "u0", "prior")
+	if n := len(loaded.Messages[1].ToolCalls); n != 0 {
+		t.Fatalf("loader view must drop the unresolved call, got %d", n)
+	}
+
+	// The turn runs from the loader view: user message + the assistant row that
+	// raises a NEW ask, then the ask sentinel itself.
+	newCall := agent.ToolCall{ID: "new-1", Type: "function"}
+	newCall.Function.Name = "bash"
+	newCall.Function.Arguments = "{}"
+	userMsg := agent.Message{Role: "user", Content: "continue", UserSeq: 2}
+	assistantMsg := agent.Message{Role: "assistant", Content: "running live check", ToolCalls: []agent.ToolCall{newCall}}
+	sentinelMsg := agent.Message{Role: "tool", ToolID: "new-1", Content: tool.SentinelPermissionAsk + `{"tool_name":"bash"}`}
+	ours := append(append([]agent.Message(nil), loaded.Messages...), userMsg, assistantMsg, sentinelMsg)
+	baseLen := len(loaded.Messages) + 1 // everything through this turn's user message
+
+	// Mid-turn live writes landed the user message and the assistant row on disk
+	// before the turn-end sync save.
+	liveDisk := append(append([]agent.Message(nil), stored...), userMsg, assistantMsg)
+	if err := saveToDir(dir, id, "", liveDisk, nil, true, 0); err != nil {
+		t.Fatalf("live persist: %v", err)
+	}
+
+	if err := reconcileAppendToDir(dir, id, "", ours, baseLen, nil); err != nil {
+		t.Fatalf("reconcileAppendToDir: %v", err)
+	}
+
+	got := readStoredContents(t, dir, id)
+	// Exactly one copy of the assistant row, in order, with the new sentinel once.
+	assertContents(t, got, "u0", "prior", stored[2].Content, "continue", "running live check", sentinelMsg.Content)
+	for i := 1; i < len(got); i++ {
+		if sameMessage(got[i-1], got[i]) {
+			t.Fatalf("duplicate row at seq %d/%d: %+v", i-1, i, got[i])
+		}
+	}
+
+	// The loader view of the merged file is exactly the caller's transcript.
+	reloaded, err := loadFromDir(dir, id)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	assertContents(t, reloaded.Messages, "u0", "prior", "continue", "running live check")
+}
+
+// TestReconcileAppendFilteredResidentStaysConvergentAcrossTurns pins the
+// cross-turn invariant for a RAW-returning rebase: after the fix the caller's
+// resident transcript is the merged (raw) view, which no longer equals the
+// loader's filtered view of disk. The next turn must still reconcile.
+//
+// The session starts from a filtered base — a disk that already ends on an
+// unresolved ask, so loadFromDir drops that ask round and the resident is
+// shorter than disk. Every subsequent turn therefore takes the rebase path
+// (the resident's opening rows never byte-match the raw disk prefix). Before
+// the duplicate fix each turn appended a second copy of its own assistant row;
+// before the unfiltered-return fix the resident lost the pending ask each turn.
+func TestReconcileAppendFilteredResidentStaysConvergentAcrossTurns(t *testing.T) {
+	dir := t.TempDir()
+	id := "ses_conflict-filtered-resident-turns"
+
+	// Disk ends on an unresolved ask from a prior turn.
+	seedCall := agent.ToolCall{ID: "seed-1", Type: "function"}
+	seedCall.Function.Name = "bash"
+	seedCall.Function.Arguments = "{}"
+	seed := []agent.Message{
+		{Role: "user", Content: "seed-u", UserSeq: 1},
+		{Role: "assistant", Content: "seed-a", ToolCalls: []agent.ToolCall{seedCall}},
+		{Role: "tool", ToolID: "seed-1", Content: tool.SentinelPermissionAsk + `{"tool_name":"bash"}`},
+	}
+	if err := saveToDir(dir, id, "", seed, nil, false, 0); err != nil {
+		t.Fatalf("seed disk: %v", err)
+	}
+	loaded, err := loadFromDir(dir, id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// The resident is the filtered loader view (shorter than disk, no seed ask).
+	if len(loaded.Messages) != 2 {
+		t.Fatalf("loader view = %d rows, want 2", len(loaded.Messages))
+	}
+	resident := loaded.Messages
+
+	type step struct{ user, assistant, callID string }
+	steps := []step{
+		{"u-A", "a-A", "c1"},
+		{"u-B", "a-B", "c2"},
+	}
+
+	for n, s := range steps {
+		userMsg := agent.Message{Role: "user", Content: s.user, UserSeq: NextUserSeq(resident)}
+		base := append(append([]agent.Message(nil), resident...), userMsg)
+		baseLen := len(base)
+
+		call := agent.ToolCall{ID: s.callID, Type: "function"}
+		call.Function.Name = "bash"
+		call.Function.Arguments = "{}"
+		asst := agent.Message{Role: "assistant", Content: s.assistant, ToolCalls: []agent.ToolCall{call}}
+		sent := agent.Message{Role: "tool", ToolID: s.callID, Content: tool.SentinelPermissionAsk + `{"tool_name":"bash"}`}
+		ours := append(append([]agent.Message(nil), base...), asst, sent)
+
+		// Mid-turn live writes: the base (raw prefix + this turn's user message)
+		// then the assistant row must land on disk so the turn-end save
+		// conflicts and takes the rebase path.
+		if err := saveToDir(dir, id, "", base, nil, true, 0); err != nil {
+			t.Fatalf("turn %d live base: %v", n, err)
+		}
+		if err := saveToDir(dir, id, "", append(append([]agent.Message(nil), base...), asst), nil, true, 0); err != nil {
+			t.Fatalf("turn %d live asst: %v", n, err)
+		}
+
+		merged, err := reconcileAppendToDirWithMessages(dir, id, "", ours, baseLen, nil)
+		if err != nil {
+			t.Fatalf("turn %d reconcile hard-diverged (resident would reset): %v", n, err)
+		}
+		if merged != nil {
+			resident = merged
+		} else {
+			resident = ours
+		}
+		if !hasPendingAsk(resident) {
+			t.Fatalf("turn %d: resident lost its pending ask: %+v", n, contentsOf(resident))
+		}
+	}
+
+	got := readStoredContents(t, dir, id)
+	assertContents(t, got,
+		"seed-u", "seed-a", tool.SentinelPermissionAsk+`{"tool_name":"bash"}`,
+		"u-A", "a-A", tool.SentinelPermissionAsk+`{"tool_name":"bash"}`,
+		"u-B", "a-B", tool.SentinelPermissionAsk+`{"tool_name":"bash"}`)
+	for i := 1; i < len(got); i++ {
+		if sameMessage(got[i-1], got[i]) {
+			t.Fatalf("duplicate row at %d/%d: %+v", i-1, i, got[i])
+		}
+	}
+}
+
+// hasPendingAsk reports whether any row in msgs is an unresolved ask sentinel.
+func hasPendingAsk(msgs []agent.Message) bool {
+	for _, m := range msgs {
+		if m.Role == "tool" && strings.HasPrefix(m.Content, tool.SentinelPermissionAsk) {
+			return true
+		}
+	}
+	return false
+}
+
+// rebaseAppend must compare a RAW caller base against the raw stored prefix
+// before it applies stripUncompletedToolCalls' normalization. Otherwise an
+// assistant row paused on an unanswered ask (whose tool_calls the normalization
+// nulls) makes normalized-ours disagree with raw-stored, and the filtered
+// fallback is shorter than baseLen — so identical transcripts hard-diverged.
+func TestRebaseAppendRawBaseThroughUnfinishedAsk(t *testing.T) {
+	askCall := agent.ToolCall{ID: "q-1", Type: "function"}
+	askCall.Function.Name = "question"
+	askCall.Function.Arguments = "{}"
+	sentinel := tool.SentinelQuestionPrompt + "\n[]\n\n" + tool.SentinelWaitingForUser
+	stored := []agent.Message{
+		{Role: "user", Content: "u0", UserSeq: 1},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{askCall}},
+		{Role: "tool", ToolID: "q-1", Content: sentinel},
+		{Role: "user", Content: "u1", UserSeq: 2},
+	}
+	// The resident transcript is the raw disk prefix plus this turn's reply;
+	// baseLen covers the whole stored prefix, including the unfinished ask row.
+	ours := append(append([]agent.Message(nil), stored...), agent.Message{Role: "assistant", Content: "r0"})
+
+	merged, ok := rebaseAppend(stored, ours, len(stored))
+	if !ok {
+		t.Fatal("raw base including an unfinished ask row hard-diverged; want a clean merge")
+	}
+	if len(merged) != len(stored)+1 {
+		t.Fatalf("merged length = %d, want %d", len(merged), len(stored)+1)
+	}
+	for i := range stored {
+		if !sameMessage(merged[i], stored[i]) {
+			t.Fatalf("merged[%d] changed: %+v", i, merged[i])
+		}
+	}
+	if merged[len(stored)].Content != "r0" {
+		t.Fatalf("caller's unsaved reply missing: %+v", merged[len(stored)])
+	}
+
+	// Same base, but another writer appended a foreign row beyond it: the raw
+	// fast path must keep that row AND append ours without duplicating either.
+	withForeign := append(append([]agent.Message(nil), stored...), agent.Message{Role: "assistant", Content: "foreign"})
+	merged, ok = rebaseAppend(withForeign, ours, len(stored))
+	if !ok {
+		t.Fatal("raw base with a foreign append hard-diverged")
+	}
+	if len(merged) != len(withForeign)+1 {
+		t.Fatalf("merged length = %d, want %d", len(merged), len(withForeign)+1)
+	}
+	if merged[len(withForeign)-1].Content != "foreign" {
+		t.Fatalf("foreign row lost: %+v", merged[len(withForeign)-1])
+	}
+	if merged[len(withForeign)].Content != "r0" {
+		t.Fatalf("caller's reply missing after foreign row: %+v", merged[len(withForeign)])
+	}
+}
+
+// A filtered (loader-view) base whose length extends through the region an
+// unfinished ask round occupied must still reconcile via the filtered fallback.
+func TestRebaseAppendFilteredBaseThroughAskRegion(t *testing.T) {
+	askCall := agent.ToolCall{ID: "q-1", Type: "function"}
+	askCall.Function.Name = "question"
+	askCall.Function.Arguments = "{}"
+	stored := []agent.Message{
+		{Role: "user", Content: "u0", UserSeq: 1},
+		{Role: "assistant", Content: "prior", ToolCalls: []agent.ToolCall{askCall}},
+		{Role: "tool", ToolID: "q-1", Content: tool.SentinelQuestionPrompt + "\n[]\n\n" + tool.SentinelWaitingForUser},
+		{Role: "user", Content: "u1", UserSeq: 2},
+	}
+	// Loader view: the ask round is filtered out, so the base is u0/prior/u1.
+	ours := []agent.Message{
+		{Role: "user", Content: "u0", UserSeq: 1},
+		{Role: "assistant", Content: "prior"},
+		{Role: "user", Content: "u1", UserSeq: 2},
+		{Role: "assistant", Content: "r0"},
+	}
+	merged, ok := rebaseAppend(stored, ours, 3)
+	if !ok {
+		t.Fatal("filtered base through an ask region hard-diverged")
+	}
+	if len(merged) != len(stored)+1 {
+		t.Fatalf("merged length = %d, want %d", len(merged), len(stored)+1)
+	}
+	if merged[len(merged)-1].Content != "r0" {
+		t.Fatalf("caller's reply missing: %+v", merged[len(merged)-1])
+	}
 }

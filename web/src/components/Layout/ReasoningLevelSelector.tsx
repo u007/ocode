@@ -11,6 +11,10 @@ interface Props {
   thinkingBudget?: number;
   /** Disabled state when model selection is not available */
   disabled?: boolean;
+  /** SSH/WSL host of the active session; routes the write to the server that
+   *  runs that session. Without it a remote tab's level change wrote the local
+   *  server's config and the remote session kept its old effort. */
+  host?: string;
 }
 
 /**
@@ -18,7 +22,7 @@ interface Props {
  * Shows the current level as a clickable dropdown to cycle through
  * reasoning effort levels (off → low → med → high → xhigh → max).
  */
-export default function ReasoningLevelSelector({ thinkingBudget, disabled }: Props) {
+export default function ReasoningLevelSelector({ thinkingBudget, disabled, host }: Props) {
   const [isOpen, setIsOpen] = useState(false);
   const [currentLevel, setCurrentLevel] = useState<ReasoningLevel>("off");
 
@@ -49,7 +53,7 @@ export default function ReasoningLevelSelector({ thinkingBudget, disabled }: Pro
     setCurrentLevel(level);
     setIsOpen(false);
     try {
-      await api.setThinkingBudget(level);
+      await api.setThinkingBudget(level, host);
     } catch (err) {
       console.error("Failed to set reasoning level:", err);
       // Revert on failure so the user sees the actual state.

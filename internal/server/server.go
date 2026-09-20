@@ -216,6 +216,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.authMiddleware(s.handleGetSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/state", s.authMiddleware(s.handleSessionState))
 	s.mux.HandleFunc("GET /api/sessions/{id}/status", s.authMiddleware(s.handleSessionStatus))
+	s.mux.HandleFunc("GET /api/sessions/{id}/search", s.authMiddleware(s.handleSearchSession))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/model", s.authMiddleware(s.handleSetSessionModel))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/model", s.authMiddleware(s.handleClearSessionModel))
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.authMiddleware(s.handleSendMessage))
@@ -301,6 +302,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/context", s.authMiddleware(s.handleSessionContext))
 	s.mux.HandleFunc("GET /api/sessions/{id}/discovery", s.authMiddleware(s.handleSessionDiscovery))
 	s.mux.HandleFunc("POST /api/sessions/{id}/truncate", s.authMiddleware(s.handler.HandleTruncateSession))
+	s.mux.HandleFunc("POST /api/sessions/{id}/reset-id", s.authMiddleware(s.handleResetSessionID))
 	s.mux.HandleFunc("POST /api/sessions/{id}/cancel", s.authMiddleware(s.handleCancelSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/close", s.authMiddleware(s.handleCloseSession))
 	// Remote project proxy: /api/remote/{host}/api/{rest...} matches all
@@ -453,6 +455,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/mcp", s.authMiddleware(s.handleListMCP))
 	s.mux.HandleFunc("PUT /api/mcp/{name}/enable", s.authMiddleware(s.handleEnableMCP))
 	s.mux.HandleFunc("PUT /api/mcp/{name}/disable", s.authMiddleware(s.handleDisableMCP))
+	// MCP OAuth (the `/mcp-auth <server>` command). The handler itself refuses
+	// non-loopback callers — the browser callback only reaches a server running
+	// on the caller's own machine (see handler_mcp_auth.go).
+	s.mux.HandleFunc("POST /api/mcp/{name}/auth", s.authMiddleware(s.handleStartMCPAuth))
+	s.mux.HandleFunc("GET /api/mcp/auth/{id}", s.authMiddleware(s.handleGetMCPAuthStatus))
 
 	// Plugins
 	s.mux.HandleFunc("GET /api/plugins", s.pluginAuthMiddleware(s.handleListPlugins))
@@ -1216,6 +1223,11 @@ func (s *Server) handleSessionStatus(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSessionStatus(w, r, id)
 }
 
+func (s *Server) handleSearchSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleSearchSession(w, r, id)
+}
+
 func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.handler.HandleSetSessionModel(w, r, id)
@@ -1908,6 +1920,10 @@ func (s *Server) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleCloseSession(w, r, r.PathValue("id"))
 }
 
+func (s *Server) handleResetSessionID(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleResetSessionID(w, r, r.PathValue("id"))
+}
+
 // File shims
 func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) { s.handler.HandleUndo(w, r) }
 func (s *Server) handleRedo(w http.ResponseWriter, r *http.Request) { s.handler.HandleRedo(w, r) }
@@ -2244,6 +2260,14 @@ func (s *Server) handleEnableMCP(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleDisableMCP(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetMCPEnabled(w, r, r.PathValue("name"), false)
+}
+
+func (s *Server) handleStartMCPAuth(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleStartMCPAuth(w, r, r.PathValue("name"))
+}
+
+func (s *Server) handleGetMCPAuthStatus(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetMCPAuthStatus(w, r)
 }
 
 // Plugin shims

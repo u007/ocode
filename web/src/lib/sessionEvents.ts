@@ -161,6 +161,9 @@ const SESSION_SCOPED_EVENTS = new Set([
   "md_indexing",
   "error",
   "session_bootstrap",
+  // /reset-id: the session id changed; open tabs rebind (see the handler in
+  // routeBusEnvelope, which returns before the generic session-scoped path).
+  "session_rekeyed",
 ]);
 
 /** Every event name `routeBusEnvelope` handles — the two process-global ones
@@ -238,6 +241,25 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
           r.projectDispatch({ type: "UPDATE_TAB_TITLE", id: eventSessionId, title: t });
         }
       }).catch(() => {});
+    }
+    return;
+  }
+
+  if (event === "session_rekeyed") {
+    // A chat was re-keyed to a new session id (server /reset-id). The initiating
+    // tab rekeys from the command result; this handler covers every OTHER tab
+    // and window: if we are tracking the old id, rebind to the new one with the
+    // same store plumbing a `new-*` tab uses on first send.
+    const rekeyed = data as { session_id?: string; old_id?: string };
+    const oldId = rekeyed.old_id;
+    const newId = rekeyed.session_id || eventSessionId || "";
+    if (oldId && newId && oldId !== newId && r.openSessionIds.has(oldId)) {
+      r.dispatch({ type: "REKEY_SESSION", oldId, newId });
+      rekeyDraft(oldId, newId);
+      rekeyQueue(oldId, newId);
+      r.projectDispatch({ type: "UPDATE_TAB_ID", oldId, newId });
+      r.openSessionIds.delete(oldId);
+      r.openSessionIds.add(newId);
     }
     return;
   }

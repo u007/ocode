@@ -374,6 +374,11 @@ export function apiWsPath(path: string): string {
 import { normalizeBrowseURL } from "../lib/browseURL";
 export { normalizeBrowseURL };
 
+/** Per-window id shared with the ProfileSwitcher (see lib/windowId.ts). Chat
+ *  requests must bind to the same window whose active profile the pill set, or
+ *  a profile switch is invisible to the session. */
+import { getWindowId } from "../lib/windowId";
+
 // projQuery appends ?project=<root> for endpoints that select a registered
 // project root via the query string (git + fs mutation endpoints).
 function projQuery(project?: string, host?: string): string {
@@ -563,6 +568,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ keepUntil }),
     }, host),
+  // Full-transcript message search (/search, Ctrl/Cmd+F). Returns matching
+  // message INDICES in the server's post-load array — the same positions
+  // `getSession` paginates, so the find bar can jump to an off-window hit.
+  // See internal/server/handler_session_search.go for why this is server-side.
+  searchSession: (id: string, q: string, opts?: { limit?: number }, host?: string) => {
+    const params = new URLSearchParams({ q });
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    return fetchJSON<{
+      total: number;
+      indices: number[];
+      truncated: boolean;
+      scanned: number;
+    }>(`/api/sessions/${id}/search?${params.toString()}`, undefined, host);
+  },
   listModels: (opts?: { provider?: string; refresh?: boolean; configured?: boolean }, host?: string) => {
     const params = new URLSearchParams();
     if (opts?.provider) params.set("provider", opts.provider);
@@ -579,13 +598,18 @@ export const api = {
       `/api/agents/runs${session ? `?session=${encodeURIComponent(session)}` : ""}`,
       undefined, host,
     ),
-  getConfigModel: () =>
-    fetchJSON<{ model: string; context_max_tokens?: number }>("/api/config/model"),
-  setConfigModel: (model: string) =>
+  // `host` routes a session-scoped config read/write to a remote project's
+  // server (/api/remote/<host>/…). The agent that consumes these process-global
+  // gates runs on the session's own host, so omitting it writes the LOCAL
+  // config and the remote session's sidebar refetch then shows no change at
+  // all — the "toggle does nothing" symptom on remote SSH.
+  getConfigModel: (host?: string) =>
+    fetchJSON<{ model: string; context_max_tokens?: number }>("/api/config/model", undefined, host),
+  setConfigModel: (model: string, host?: string) =>
     fetchJSON<{ model: string }>("/api/config/model", {
       method: "PUT",
       body: JSON.stringify({ model }),
-    }),
+    }, host),
   // Per-session model override (Part: per-chat-session model). Sets the model
   // for one session only — persisted in its transcript metadata and reflected
   // in that session's status snapshot — without touching the global config
@@ -619,83 +643,89 @@ export const api = {
   // Extended-thinking (reasoning effort) budget for the main model. budget 0 =
   // off; levels list the canonical off/low/med/high/xhigh/max options shared
   // with the TUI's /effort command.
-  getThinkingBudget: () =>
+  getThinkingBudget: (host?: string) =>
     fetchJSON<{ budget: number; level: string; levels: { level: string; budget: number }[] }>(
       "/api/config/thinking-budget",
+      undefined,
+      host,
     ),
-  setThinkingBudget: (level: string) =>
+  setThinkingBudget: (level: string, host?: string) =>
     fetchJSON<{ budget: number; level: string; levels: { level: string; budget: number }[] }>(
       "/api/config/thinking-budget",
       { method: "PUT", body: JSON.stringify({ level }) },
+      host,
     ),
-  getSmallModel: () =>
-    fetchJSON<{ model: string; priority: string }>("/api/config/small-model"),
-  setSmallModel: (model: string) =>
+  getSmallModel: (host?: string) =>
+    fetchJSON<{ model: string; priority: string }>("/api/config/small-model", undefined, host),
+  setSmallModel: (model: string, host?: string) =>
     fetchJSON<{ model: string; source: string }>("/api/config/small-model", {
       method: "PUT",
       body: JSON.stringify({ model }),
-    }),
+    }, host),
   // Flip the runtime small-model on/off gate (persisted, mirrors the TUI's
   // small-model sidebar toggle).
-  setSmallModelEnabled: (enabled: boolean) =>
+  setSmallModelEnabled: (enabled: boolean, host?: string) =>
     fetchJSON<{ model: string; enabled: boolean; source: string }>("/api/config/small-model", {
       method: "PUT",
       body: JSON.stringify({ enabled }),
-    }),
+    }, host),
 
-  getPermissionModel: () =>
-    fetchJSON<{ model: string; enabled: boolean }>("/api/config/permission-model"),
-  setPermissionModel: (model: string) =>
+  getPermissionModel: (host?: string) =>
+    fetchJSON<{ model: string; enabled: boolean }>("/api/config/permission-model", undefined, host),
+  setPermissionModel: (model: string, host?: string) =>
     fetchJSON<{ model: string; enabled: boolean }>("/api/config/permission-model", {
       method: "PUT",
       body: JSON.stringify({ model }),
-    }),
-  setPermissionModelEnabled: (enabled: boolean) =>
+    }, host),
+  setPermissionModelEnabled: (enabled: boolean, host?: string) =>
     fetchJSON<{ model: string; enabled: boolean }>("/api/config/permission-model", {
       method: "PUT",
       body: JSON.stringify({ enabled }),
-    }),
+    }, host),
 
   // Explorer agent (explore/scout) model. Off or unset falls back to the
   // small model, then the main model — see agent.injectPurposeModelIfEligible.
-  getExplorerModel: () =>
-    fetchJSON<{ model: string; enabled: boolean }>("/api/config/explorer-model"),
-  setExplorerModel: (model: string) =>
+  getExplorerModel: (host?: string) =>
+    fetchJSON<{ model: string; enabled: boolean }>("/api/config/explorer-model", undefined, host),
+  setExplorerModel: (model: string, host?: string) =>
     fetchJSON<{ model: string; enabled: boolean }>("/api/config/explorer-model", {
       method: "PUT",
       body: JSON.stringify({ model }),
-    }),
-  setExplorerModelEnabled: (enabled: boolean) =>
+    }, host),
+  setExplorerModelEnabled: (enabled: boolean, host?: string) =>
     fetchJSON<{ model: string; enabled: boolean }>("/api/config/explorer-model", {
       method: "PUT",
       body: JSON.stringify({ enabled }),
-    }),
+    }, host),
 
   // Context agent (context/doc-sync) model. Off or unset falls back to the
   // small model, then the main model — see agent.injectPurposeModelIfEligible.
-  getContextModel: () =>
-    fetchJSON<{ model: string; enabled: boolean }>("/api/config/context-model"),
-  setContextModel: (model: string) =>
+  getContextModel: (host?: string) =>
+    fetchJSON<{ model: string; enabled: boolean }>("/api/config/context-model", undefined, host),
+  setContextModel: (model: string, host?: string) =>
     fetchJSON<{ model: string; enabled: boolean }>("/api/config/context-model", {
       method: "PUT",
       body: JSON.stringify({ model }),
-    }),
-  setContextModelEnabled: (enabled: boolean) =>
+    }, host),
+  setContextModelEnabled: (enabled: boolean, host?: string) =>
     fetchJSON<{ model: string; enabled: boolean }>("/api/config/context-model", {
       method: "PUT",
       body: JSON.stringify({ enabled }),
-    }),
+    }, host),
 
   // --- New/extended OcodeConfig endpoints (Plan 1: configuration-api-backend) ---
 
-  getRecapConfig: () =>
+  getRecapConfig: (host?: string) =>
     fetchJSON<{ recap_model: string; recap_model_enabled: boolean; recap_timeout_seconds: number }>(
       "/api/config/ocode/recap",
+      undefined,
+      host,
     ),
-  setRecapConfig: (recap_model: string, recap_model_enabled: boolean, recap_timeout_seconds: number) =>
+  setRecapConfig: (recap_model: string, recap_model_enabled: boolean, recap_timeout_seconds: number, host?: string) =>
     fetchJSON<{ recap_model: string; recap_model_enabled: boolean; recap_timeout_seconds: number }>(
       "/api/config/ocode/recap",
       { method: "PUT", body: JSON.stringify({ recap_model, recap_model_enabled, recap_timeout_seconds }) },
+      host,
     ),
 
   getCommitMsgConfig: () =>
@@ -710,14 +740,17 @@ export const api = {
   setCompactConfig: (cfg: CompactConfig) =>
     fetchJSON<CompactConfig>("/api/config/ocode/compact", { method: "PUT", body: JSON.stringify(cfg) }),
 
-  getAdvisorFull: () =>
+  getAdvisorFull: (host?: string) =>
     fetchJSON<{ model: string; provider: string; claude_code: boolean; checkpoints: string[] }>(
       "/api/config/advisor",
+      undefined,
+      host,
     ),
-  setAdvisorFull: (fields: Partial<{ model: string; provider: string; claude_code: boolean; checkpoints: string[] }>) =>
+  setAdvisorFull: (fields: Partial<{ model: string; provider: string; claude_code: boolean; checkpoints: string[] }>, host?: string) =>
     fetchJSON<{ model: string; provider: string; claude_code: boolean; checkpoints: string[] }>(
       "/api/config/advisor",
       { method: "PUT", body: JSON.stringify(fields) },
+      host,
     ),
 
   getAutoPermissionConfig: () => fetchJSON<AutoPermissionConfig>("/api/config/ocode/permissions-auto"),
@@ -735,9 +768,10 @@ export const api = {
   setMaskAdvanced: (fields: { base_url: string; fail_mode: string; allow_remote_tier2: boolean; custom_words: string[] }) =>
     fetchJSON<typeof fields>("/api/config/mask/advanced", { method: "PUT", body: JSON.stringify(fields) }),
 
-	getDiscoveryConfig: () => fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery"),
-	setDiscoveryConfig: (cfg: DiscoveryConfig) =>
-	  fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery", { method: "PUT", body: JSON.stringify(cfg) }),
+	getDiscoveryConfig: (host?: string) =>
+	  fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery", undefined, host),
+	setDiscoveryConfig: (cfg: DiscoveryConfig, host?: string) =>
+	  fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery", { method: "PUT", body: JSON.stringify(cfg) }, host),
 	/** Config + live runtime status for one session (/discover status). */
 	getDiscoveryStatus: (id: string, host?: string) =>
 	  fetchJSON<DiscoveryStatus>(`/api/sessions/${id}/discovery`, undefined, host),
@@ -826,13 +860,13 @@ export const api = {
   setPluginsEnabledConfig: (ast: boolean) =>
     fetchJSON<{ ast: boolean }>("/api/config/ocode/plugins-enabled", { method: "PUT", body: JSON.stringify({ ast }) }),
 
-  getLocalModelsConfig: () =>
-    fetchJSON<Record<string, { enabled: boolean; max_parallel: number }>>("/api/config/ocode/local-models"),
-  setLocalModelsConfig: (models: Record<string, { enabled: boolean; max_parallel: number }>) =>
+  getLocalModelsConfig: (host?: string) =>
+    fetchJSON<Record<string, { enabled: boolean; max_parallel: number }>>("/api/config/ocode/local-models", undefined, host),
+  setLocalModelsConfig: (models: Record<string, { enabled: boolean; max_parallel: number }>, host?: string) =>
     fetchJSON<Record<string, { enabled: boolean; max_parallel: number }>>("/api/config/ocode/local-models", {
       method: "PUT",
       body: JSON.stringify(models),
-    }),
+    }, host),
 
   getBackendConfig: () => fetchJSON<{ backend_url: string }>("/api/config/ocode/backend"),
   setBackendConfig: (backend_url: string) =>
@@ -1033,13 +1067,13 @@ export const api = {
     }),
   syncLogout: () => fetchEmpty("/api/sync/logout", { method: "POST" }),
   getMCP: (host?: string) => fetchJSON<MCPStatus[]>("/api/mcp", undefined, host),
-  getAdvisor: () =>
-    fetchJSON<{ model: string }>("/api/config/advisor"),
-  setAdvisor: (model: string) =>
+  getAdvisor: (host?: string) =>
+    fetchJSON<{ model: string }>("/api/config/advisor", undefined, host),
+  setAdvisor: (model: string, host?: string) =>
     fetchJSON<{ model: string }>("/api/config/advisor", {
       method: "PUT",
       body: JSON.stringify({ model }),
-    }),
+    }, host),
   // Advisor on/off gate. With a sessionId it reads/writes that chat session's
   // own override (persisted to the session transcript metadata by the server,
   // never to global config); without one it is the process-wide default used
@@ -1202,9 +1236,11 @@ export const api = {
       host,
       projectPath,
     ).then((r) => r.terminals),
-  getSmallModelWithEnabled: () =>
+  getSmallModelWithEnabled: (host?: string) =>
     fetchJSON<{ model: string; enabled: boolean; priority: string }>(
       "/api/config/small-model",
+      undefined,
+      host,
     ),
   // ── OCR (new structured API) ──
   getOcrConfig: () =>
@@ -1284,38 +1320,20 @@ export const api = {
   // output arrives over the session mirror (see SessionTabSync), which is where
   // the UI renders it from anyway.
   sendMessage: (sessionId: string, content: string, host?: string) => {
-    let windowId = ""
-    try {
-      windowId = new URLSearchParams(window.location.search).get("windowId")?.trim() || ""
-      if (!windowId) {
-        windowId = sessionStorage.getItem("ocode.windowId") || ""
-      }
-      if (!windowId) {
-        windowId = `win-${crypto.randomUUID().slice(0, 8)}`
-        sessionStorage.setItem("ocode.windowId", windowId)
-      }
-    } catch {}
+    // Must be the same window id the ProfileSwitcher wrote its active profile
+    // to (see getWindowId); re-deriving it here is what let the two diverge.
+    const windowId = getWindowId()
     return fetchJSON<ChatResponse>(`/api/sessions/${sessionId}/message`, {
       method: "POST",
-      headers: windowId ? { "X-Window-Id": windowId } : undefined,
+      headers: { "X-Window-Id": windowId },
       body: JSON.stringify({ content, windowId, async: true }),
     }, host)
   },
   chat: (content: string, sessionId?: string, model?: string, requestId?: string, projectPath?: string, host?: string, permissionMode?: string) => {
-    let windowId = ""
-    try {
-      windowId = new URLSearchParams(window.location.search).get("windowId")?.trim() || ""
-      if (!windowId) {
-        windowId = sessionStorage.getItem("ocode.windowId") || ""
-      }
-      if (!windowId) {
-        windowId = `win-${crypto.randomUUID().slice(0, 8)}`
-        sessionStorage.setItem("ocode.windowId", windowId)
-      }
-    } catch {}
+    const windowId = getWindowId()
     return fetchJSON<ChatResponse>("/api/chat", {
       method: "POST",
-      headers: windowId ? { "X-Window-Id": windowId } : undefined,
+      headers: { "X-Window-Id": windowId },
       body: JSON.stringify({
         content,
         sessionId,
@@ -1453,9 +1471,10 @@ export const api = {
       "/api/browse" + (path ? "?path=" + encodeURIComponent(path) : ""),
     ),
   // Session operations
-  compactSession: (id: string, host?: string) =>
+  compactSession: (id: string, host?: string, focus?: string) =>
     fetchJSON<{ original_len: number; compacted_len: number }>(
-      `/api/sessions/${encodeURIComponent(id)}/compact`, { method: "POST" },
+      `/api/sessions/${encodeURIComponent(id)}/compact`,
+      { method: "POST", body: JSON.stringify(focus ? { focus } : {}) },
       host,
     ),
   recapSession: (id: string, host?: string) =>
@@ -1689,6 +1708,22 @@ export const api = {
       { method: "PUT" },
     ),
 
+  // ── MCP OAuth (/mcp-auth) ──
+  // The server refuses non-loopback callers (the browser callback only reaches
+  // the machine running ocode), so a remote session surfaces a 403 explanation.
+  startMCPAuth: (name: string, host?: string) =>
+    fetchJSON<{ job_id: string; server: string; status: string; browser_note?: string }>(
+      `/api/mcp/${encodeURIComponent(name)}/auth`,
+      { method: "POST" },
+      host,
+    ),
+  getMCPAuthStatus: (jobId: string, host?: string) =>
+    fetchJSON<{ job_id: string; server: string; status: string; error?: string }>(
+      `/api/mcp/auth/${encodeURIComponent(jobId)}`,
+      undefined,
+      host,
+    ),
+
   // ── Plugins ──
   listPlugins: () => fetchJSON<PluginInfo[]>("/api/plugins"),
   setPluginEnabled: (name: string, enabled: boolean) =>
@@ -1754,13 +1789,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ prefix, level }),
     }),
-  getAutoContinue: () =>
-    fetchJSON<{ enabled: boolean; model: string }>("/api/config/ocode/autocontinue"),
-  setAutoContinue: (fields: { enabled?: boolean; model?: string; clear?: boolean }) =>
+  getAutoContinue: (host?: string) =>
+    fetchJSON<{ enabled: boolean; model: string }>("/api/config/ocode/autocontinue", undefined, host),
+  setAutoContinue: (fields: { enabled?: boolean; model?: string; clear?: boolean }, host?: string) =>
     fetchJSON<{ enabled: boolean; model: string }>("/api/config/ocode/autocontinue", {
       method: "PUT",
       body: JSON.stringify(fields),
-    }),
+    }, host),
   connectProvider: (provider: string, api_key: string) =>
     fetchJSON<{ provider: string; key: string }>("/api/auth/connect", {
       method: "POST",
@@ -1962,6 +1997,14 @@ export const api = {
    *  safe on idle sessions (server no-ops). */
   closeSession: (sessionId: string, host?: string) =>
     fetchJSON<{ cancelled: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
+      method: "POST",
+    }, host),
+  /** Re-key a chat with a fresh session id, keeping the transcript (/reset-id).
+   *  The provider's X-Opencode-Session / x-session-id header derives from the
+   *  session id, so this busts provider-side cache/rate-limit/sticky-routing
+   *  grouping. `host` routes remote (SSH/WSL) sessions to their own server. */
+  resetSessionId: (sessionId: string, host?: string) =>
+    fetchJSON<{ old_id: string; new_id: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/reset-id`, {
       method: "POST",
     }, host),
   // Port forwards. With a target, these hit the project-scoped family served by

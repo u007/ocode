@@ -826,12 +826,9 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		emitSessionStarted = true
 	}
 	h.sessions.setTurnActive(sessionID, true)
-	heartbeatStop := make(chan struct{})
-	heartbeatDone := make(chan struct{})
-	go h.turnHeartbeat(sessionID, heartbeatStop, heartbeatDone)
+	stopHeartbeat := h.startTurnHeartbeat(sessionID)
 	defer func() {
-		close(heartbeatStop)
-		<-heartbeatDone
+		stopHeartbeat()
 		h.sessions.setTurnActive(sessionID, false)
 		h.flushStrandedInjections(sessionID, as)
 	}()
@@ -1147,8 +1144,12 @@ func (h *Handler) persistTurnTranscript(sessionID string, as *agentSession, base
 	if err == nil {
 		if merged != nil {
 			// A successful rebase may have inserted another writer's rows
-			// between this turn's base and suffix. Keep the resident agent on
-			// the same filtered view that the next reload will use.
+			// between this turn's base and suffix. Adopt the merged transcript
+			// so the next turn's base matches disk. It is the UNFILTERED view:
+			// a trailing pending ask (PERMISSION_ASK/QUESTION sentinel + its
+			// tool-call) must survive here, or tailIsPermissionAsk goes false
+			// and the next user message re-executes the orphaned call instead of
+			// waiting for the dialog (ses_2026-09-18-233409-df1a92d3).
 			as.messages = merged
 		}
 		return
@@ -1222,6 +1223,24 @@ func (h *Handler) turnHeartbeat(sessionID string, stop <-chan struct{}, done cha
 		case <-ticker.C:
 			h.publishBusEvent("turn_heartbeat", sessionID, map[string]string{"session_id": sessionID})
 		}
+	}
+}
+
+// startTurnHeartbeat starts the periodic turn_heartbeat publisher for a
+// session and returns a function that stops and joins it. EVERY path that holds
+// turnActive=true must publish heartbeats for the duration, or the web client's
+// 30s stall watchdog (web/src/hooks/useTurnWatchdog.ts) marks a still-running
+// session "stalled". runTurn started the ticker inline; the permission-answer
+// and question-answer continuation Steps set turnActive without one, so a
+// continuation that streamed for minutes (with turn_active:true but no
+// heartbeat) showed up as a false "stalled" badge in the project list.
+func (h *Handler) startTurnHeartbeat(sessionID string) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go h.turnHeartbeat(sessionID, stop, done)
+	return func() {
+		close(stop)
+		<-done
 	}
 }
 

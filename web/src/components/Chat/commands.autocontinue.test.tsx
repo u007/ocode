@@ -23,6 +23,9 @@ function ctx(opts: { getAutoContinue?: () => Promise<{ enabled: boolean; model: 
     ctx: {
       commandName: "autocontinue",
       args: "",
+      // A remote session's host: every auto-continue read/write must reach the
+      // server that runs the session, not the local one.
+      host: "devbox",
       api: { getAutoContinue, setAutoContinue },
     } as never,
     getAutoContinue,
@@ -49,21 +52,21 @@ describe("/autocontinue command", () => {
     expect(result.handled).toBe(true);
     expect(result.messages?.[0]?.content).toContain("enabled");
     expect(result.messages?.[0]?.content).toContain("local/bonsai-8b");
-    expect(getAutoContinue).toHaveBeenCalled();
+    expect(getAutoContinue).toHaveBeenCalledWith("devbox");
   });
 
   it("on/off write only the gate; `model auto` clears the judge model only", async () => {
     const { ctx: onCtx, setAutoContinue: setOn } = ctx();
     await dispatchCommand("/autocontinue on", onCtx);
-    expect(setOn).toHaveBeenCalledWith({ enabled: true });
+    expect(setOn).toHaveBeenCalledWith({ enabled: true }, "devbox");
 
     const { ctx: offCtx, setAutoContinue: setOff } = ctx();
     await dispatchCommand("/autocontinue off", offCtx);
-    expect(setOff).toHaveBeenCalledWith({ enabled: false });
+    expect(setOff).toHaveBeenCalledWith({ enabled: false }, "devbox");
 
     const { ctx: clearCtx, setAutoContinue: setClear } = ctx();
     await dispatchCommand("/autocontinue model auto", clearCtx);
-    expect(setClear).toHaveBeenCalledWith({ clear: true });
+    expect(setClear).toHaveBeenCalledWith({ clear: true }, "devbox");
   });
 
   // Setting a judge model does not arm auto-continue. The reply must say the

@@ -230,6 +230,49 @@ func TestHandleResolvePermissionDeniesAndContinues(t *testing.T) {
 	}
 }
 
+// TestHandleResolvePermissionContinuationEmitsHeartbeats is the permission-side
+// twin of TestHandleAnswerQuestionContinuationEmitsHeartbeats: the resolve
+// continuation holds turnActive=true while its Step runs, so it must publish
+// turn_heartbeat or the client's stall watchdog marks the running session
+// "stalled" (the false project-list badge).
+func TestHandleResolvePermissionContinuationEmitsHeartbeats(t *testing.T) {
+	h := NewHandler()
+	h.turnHeartbeatInterval = 5 * time.Millisecond
+	client := &blockingStepClient{release: make(chan struct{})}
+	as := &agentSession{
+		agent: agent.NewAgent(client, nil, nil, nil),
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "clean the build"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: permissionAskContent(t, samplePermissionRequest())},
+		},
+	}
+	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir())
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	body := `{"request_id":"call-1","approved":false}`
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := httptest.NewRequest("POST", "/api/permissions/resolve", strings.NewReader(body))
+		h.HandleResolvePermission(httptest.NewRecorder(), req)
+	}()
+
+	if !waitForBusEvent(sub, "turn_heartbeat", 2*time.Second) {
+		t.Fatal("permission continuation published no turn_heartbeat while its Step was running")
+	}
+	close(client.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("permission continuation did not return after the Step was released")
+	}
+}
+
 // TestHandleResolvePermissionAlreadyResolved verifies the under-lock re-check:
 // once a later message follows the ask, a resolve attempt is a 409.
 func TestHandleResolvePermissionAlreadyResolved(t *testing.T) {

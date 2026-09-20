@@ -254,23 +254,27 @@ export default function CoworkSidebar({
     api.listAgents(sessionHost).then(setAgents).catch(console.error);
 
     // Fetch the main model name plus the other process-level defaults that
-    // back the pre-session sidebar fallbacks (see ConfigState).
+    // back the pre-session sidebar fallbacks (see ConfigState). These are
+    // session-scoped on the wire (host) because the values that matter are the
+    // ones on the SERVER THAT RUNS THE SESSION — a remote SSH project's
+    // defaults live on the remote, and reading the local server's config would
+    // show the wrong model/gate for every row.
     Promise.all([
-      api.getConfigModel().catch(() => null),
-      api.getThinkingBudget().catch(() => null),
-      api.getPermissionModel().catch(() => null),
-      api.getYolo().catch(() => null),
-      api.getRecapConfig().catch(() => null),
-      api.getAdvisor().catch(() => null),
-      api.getAdvisorEnabled().catch(() => null),
-      api.getSmallModelWithEnabled().catch(() => null),
-      api.getExplorerModel().catch(() => null),
-      api.getContextModel().catch(() => null),
-      api.getAutoContinue().catch(() => null),
+      api.getConfigModel(sessionHost).catch(() => null),
+      api.getThinkingBudget(sessionHost).catch(() => null),
+      api.getPermissionModel(sessionHost).catch(() => null),
+      api.getYolo(undefined, sessionHost).catch(() => null),
+      api.getRecapConfig(sessionHost).catch(() => null),
+      api.getAdvisor(sessionHost).catch(() => null),
+      api.getAdvisorEnabled(undefined, sessionHost).catch(() => null),
+      api.getSmallModelWithEnabled(sessionHost).catch(() => null),
+      api.getExplorerModel(sessionHost).catch(() => null),
+      api.getContextModel(sessionHost).catch(() => null),
+      api.getAutoContinue(sessionHost).catch(() => null),
       // Discovery is not part of the per-session TUI status snapshot, so the
       // sidebar row seeds itself from the persisted config endpoint (same one
       // the Settings → Discovery tab and /discover write).
-      api.getDiscoveryConfig().catch(() => null),
+      api.getDiscoveryConfig(sessionHost).catch(() => null),
     ])
       .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, advisorRes, advisorEnabledRes, smallRes, explorerRes, contextRes, autoContinueRes, discoveryRes]) => {
         setConfig({
@@ -301,7 +305,11 @@ export default function CoworkSidebar({
         }
       })
       .catch(console.error);
-  }, []);
+    // `sessionHost` is required here: the initial project may have no active
+    // session yet (host undefined), and the host resolves once a remote tab is
+    // activated — without it in deps the sidebar would keep showing the local
+    // server's defaults for a remote project.
+  }, [sessionHost]);
 
   const currentAgent = agents.find((a) => a.name === selectedAgent);
 
@@ -410,10 +418,12 @@ export default function CoworkSidebar({
     const enabled = !(tuiStatus?.permission_auto_allow ?? config.permissionModelEnabled);
     setPermLoading(true);
     try {
-      await api.setPermissionModelEnabled(enabled);
+      await api.setPermissionModelEnabled(enabled, sessionHost);
       if (sessionId) {
         const status = await api.getSessionStatus(sessionId, sessionHost);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
+      } else {
+        setConfig((prev) => ({ ...prev, permissionModelEnabled: enabled }));
       }
     } catch (e) {
       console.error("toggle perm enabled error", e);
@@ -484,7 +494,11 @@ export default function CoworkSidebar({
     setSmallLoading(true);
     dispatch({ type: "SET_SMALL_MODEL_ENABLED", enabled: next });
     try {
-      await api.setSmallModelEnabled(next);
+      // `sessionHost`: the small-model gate is process-global ON THE SERVER
+      // THAT RUNS THE SESSION. Without it a remote tab's toggle wrote the
+      // local server's config, then refetched the remote status — which was
+      // unchanged — so the toggle looked completely inert.
+      await api.setSmallModelEnabled(next, sessionHost);
       if (sessionId) {
         const status = await api.getSessionStatus(sessionId, sessionHost);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
@@ -505,7 +519,7 @@ export default function CoworkSidebar({
     const next = !current;
     setExplorerLoading(true);
     try {
-      await api.setExplorerModelEnabled(next);
+      await api.setExplorerModelEnabled(next, sessionHost);
       if (sessionId) {
         const status = await api.getSessionStatus(sessionId, sessionHost);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
@@ -525,7 +539,7 @@ export default function CoworkSidebar({
     const next = !current;
     setContextLoading(true);
     try {
-      await api.setContextModelEnabled(next);
+      await api.setContextModelEnabled(next, sessionHost);
       if (sessionId) {
         const status = await api.getSessionStatus(sessionId, sessionHost);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
@@ -549,7 +563,7 @@ export default function CoworkSidebar({
     const next = !current;
     setAutoContinueLoading(true);
     try {
-      await api.setAutoContinue({ enabled: next });
+      await api.setAutoContinue({ enabled: next }, sessionHost);
       if (sessionId) {
         const status = await api.getSessionStatus(sessionId, sessionHost);
         dispatch({ type: "SET_TUI_STATUS", sessionId, status });
@@ -573,7 +587,7 @@ export default function CoworkSidebar({
     const next: DiscoveryConfig = { ...discoveryCfg, enabled: !discoveryCfg.enabled };
     setDiscoveryLoading(true);
     try {
-      const saved = await api.setDiscoveryConfig(next);
+      const saved = await api.setDiscoveryConfig(next, sessionHost);
       setDiscoveryCfg(saved && typeof saved.enabled === "boolean" ? saved : next);
     } catch (e) {
       console.error("toggle discovery error", e);
@@ -874,6 +888,7 @@ export default function CoworkSidebar({
           <ReasoningLevelSelector
             thinkingBudget={tuiStatus?.thinking_budget ?? config.thinkingBudget}
             disabled={!onModelClick}
+            host={sessionHost}
           />
         </div>
 

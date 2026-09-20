@@ -113,7 +113,10 @@ describe("ctx.host threading", () => {
       host: HOST,
       api: { compactSession: mockCompact } as never,
     } as never);
-    expect(mockCompact).toHaveBeenCalledWith(REAL_ID, HOST);
+    // The third argument is the optional /compact <focus>; a bare /compact
+    // passes undefined so host threading stays explicit (an omitted arg would
+    // also hide a focus-forwarding regression).
+    expect(mockCompact).toHaveBeenCalledWith(REAL_ID, HOST, undefined);
     // Completion feedback is the inline transcript notice, not a composer bar
     // or a returned assistant message, so the compaction state is cleared.
     expect(getCompactionState(REAL_ID)).toBeUndefined();

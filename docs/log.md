@@ -25,8 +25,37 @@
 
 
 
+
+## 2026-09-20
+
+* **Creation**: Radix modal focus trap silently breaks the execCommand clipboard fallback ([gotchas/radix-modal-focus-trap-breaks-execCommand-clipboard.md](/gotchas/radix-modal-focus-trap-breaks-execCommand-clipboard.md))
+* **Update**: Profile switch does not affect an already-open chat session (window-id divergence) ([gotchas/profile-switch-window-id-divergence.md](/gotchas/profile-switch-window-id-divergence.md))
+* **Creation**: Profile switch does not affect an already-open chat session (window-id divergence) ([gotchas/profile-switch-window-id-divergence.md](/gotchas/profile-switch-window-id-divergence.md))
+* **Update**: Web/Desktop Chat Went Stale Because a Dead SSE Body Never Errors ([gotchas/web-sse-stream-silent-death-liveness.md](/gotchas/web-sse-stream-silent-death-liveness.md))
+* **Update**: Part 05 — Frontend Status on Activation + Streaming Watchdog ([superpowers/plans/2026-08-12-multiproject-event-architecture/05-frontend-status-streaming.md](/superpowers/plans/2026-08-12-multiproject-event-architecture/05-frontend-status-streaming.md))
+* **Update**: Part 03 — Async Bootstrap, Turn State Machine, Reconcile & Status Endpoints ([superpowers/plans/2026-08-12-multiproject-event-architecture/03-async-bootstrap-turn-state.md](/superpowers/plans/2026-08-12-multiproject-event-architecture/03-async-bootstrap-turn-state.md))
+* **Update**: Session Re-key via /reset-id ([docs/concepts/session-rekey-reset-id.md](/docs/concepts/session-rekey-reset-id.md))
+* **Creation**: Session Re-key via /reset-id ([docs/concepts/session-rekey-reset-id.md](/docs/concepts/session-rekey-reset-id.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Update**: Project scoping is visibility, not mounting — React key remounts ([gotchas/project-scope-is-mounting-not-visibility.md](/gotchas/project-scope-is-mounting-not-visibility.md))
+* **Update**: PDF viewer zoom, Space navigation, and find ([concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md))
+* **Creation**: Project scoping is visibility, not mounting — React key remounts ([gotchas/project-scope-is-mounting-not-visibility.md](/gotchas/project-scope-is-mounting-not-visibility.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Update**: Concurrent session writers — conflict semantics and recovery ([gotchas/session-writers-conflict-recovery.md](/gotchas/session-writers-conflict-recovery.md))
+* **Deprecation**: Concurrent session writers — conflict semantics and recovery: Path was incorrect — doc_write paths are relative to docs/ root. This file was created by mistake when the path docs/gotchas/session-writers-conflict-recovery.md was used (resolving to docs/docs/...); the correct location is gotchas/session-writers-conflict-recovery.md. Superseded by the update to that path. ([docs/gotchas/session-writers-conflict-recovery.md](/docs/gotchas/session-writers-conflict-recovery.md))
+* **Update**: Concurrent session writers — conflict semantics and recovery ([gotchas/session-writers-conflict-recovery.md](/gotchas/session-writers-conflict-recovery.md))
+* **Update**: Concurrent session writers — conflict semantics and recovery ([gotchas/session-writers-conflict-recovery.md](/gotchas/session-writers-conflict-recovery.md))
+* **Creation**: Concurrent session writers — conflict semantics and recovery ([docs/gotchas/session-writers-conflict-recovery.md](/docs/gotchas/session-writers-conflict-recovery.md))
+* **Update**: PDF viewer zoom, Space navigation, and find ([docs/concepts/pdf-viewer-zoom-find.md](/docs/concepts/pdf-viewer-zoom-find.md))
+* **Creation**: PDF viewer zoom, Space navigation, and find ([docs/concepts/pdf-viewer-zoom-find.md](/docs/concepts/pdf-viewer-zoom-find.md))
+* **Creation**: PDF viewer zoom, Space navigation, and find ([concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md))
 ## 2026-09-19
 
+* **Deprecation**: PDF viewer zoom, Space navigation, and find: Path was incorrect — doc_write paths are relative to docs/ root. Replaced by concepts/pdf-viewer-zoom-find.md. ([docs/concepts/pdf-viewer-zoom-find.md](/docs/concepts/pdf-viewer-zoom-find.md))
+* **Creation**: PDF viewer zoom, Space navigation, and find ([concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md))
+* **Creation**: PDF viewer zoom, Space navigation, and find ([docs/concepts/pdf-viewer-zoom-find.md](/docs/concepts/pdf-viewer-zoom-find.md))
 * **Update**: Web UI Mobile Layout Breakage (≤767px) ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
 * **Creation**: Host and project scoping for web session/project reads ([concepts/web-session-host-scoping.md](/concepts/web-session-host-scoping.md))
 * **Creation**: Per-session LLM spend accumulator ([gotchas/per-session-llm-spend-accumulator.md](/gotchas/per-session-llm-spend-accumulator.md))
