@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Remote Persistent Sessions and Terminals
-description: Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, sidebar UI, and wake reconnect.
+description: Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, sidebar UI and tab reveal, and wake reconnect.
 tags:
   - remote
   - terminal
@@ -10,7 +10,8 @@ tags:
   - sessions
   - sidebar
   - architecture
-timestamp: 2026-09-18T04:28:11Z
+timestamp: 2026-09-21T04:31:54Z
+resource: web/src/components/Layout/RemoteProjectStatus.tsx, web/src/lib/tabFocus.ts, web/src/App.tsx, CHANGES.md (2026-09-21)
 ---
 ## Overview
 
@@ -67,6 +68,27 @@ Any server, proxied for remote. `GET /api/terminal?project_path=…` → `{ "ter
 Below the existing `host:path` line, a status line reads `v1.2.3 · 2 chats (1 running) · 3 terminals`. `outdated=true` → amber dot before the version, an inline Restart action, and a "Restart remote server" context-menu item. `connected=false` → line reads `not connected` with a Connect action and no counts. Restart in progress → `restarting…`, action disabled. Clicking the status line expands the row: Chats (title, running badge, click opens the session as a tab) and Terminals (title, click attaches by ID, small kill icon calls the proxied DELETE).
 
 Hooks: `useRemoteHostStatus(host)` (fetch on mount, every 30 s while visible, and on every event-bus `onReconnect`) and `useRemoteTerminals(host, path)` (fetch when expanded and on event-bus reconnect).
+
+### Revealing an inventory tab (focus queue)
+
+Opening a chat or terminal from the inventory must reveal the tab the user just picked. The action rows live in `RemoteProjectStatus.tsx`, which is mounted in the sidebar — **outside `HomeApp`'s component tree** — so they cannot set `HomeApp`'s `activeView`/`focusedKind` directly. The bridge is `web/src/lib/tabFocus.ts`, a module-level TanStack Store (no provider) exposing:
+
+- `TabFocusRequest = { kind: "chat" | "terminal", projectPath, host?, terminalId? }`
+- `tabFocusActions.request(req)` — queues a request; a later request **replaces an unconsumed one** (the user's most recent click wins)
+- `tabFocusActions.clear()` — drops the pending request once applied
+- `useTabFocusRequest()` — `useSelector` over the store
+
+`RemoteProjectStatus.revealTab(...)` selects the clicked project first when it is not already active (`selectProject(project)`), then queues. Chat clicks also call `openSessionTab(s.id, title, project.path)` — the optional third `projectPath` binds the tab to the clicked project (per the `projectStore` contract, a caller resuming from a non-active project's list must thread the project through). Terminal clicks call `attachTerminal(project.path, host, t.id, title)` and pass `terminalId`. It ends by calling `onRevealTab?.()`.
+
+`HomeApp` consumes the queue in a **passive `useEffect`** (`web/src/App.tsx`, immediately after the view-persist effect) — deliberately NOT a layout effect: the per-project view restore (`loadViewStateForProject`) is a layout effect, so a request that lands in the same commit as a project switch is applied after the restore and wins ("Sessions + chat/terminal" beats the restored view). The effect gates on **(path, host)**, not path alone: it early-returns unless BOTH `request.projectPath === activeProject.path` AND `(request.host ?? "") === (activeProject.host ?? "")`. Path is not project identity — a local and a remote project can legitimately share an absolute path — so a request for the remote `/srv` must never be applied to the local one; the producer's `isActive` check in `revealTab` compares host the same way. While the gate is unmet the request stays queued until the switch lands. On match it calls `setActiveId(projectPath, terminalId, host)` for terminal requests, then `setActiveView("sessions")` + `setFocusedKind(request.kind)`, then `tabFocusActions.clear()`.
+
+**Mobile reachability / drawer dismissal.** Every inventory control stops propagation, so the sidebar row's `onSelect` — the only other drawer-dismiss path — never ran, and the revealed tab stayed hidden behind the off-canvas drawer. The dismiss action is threaded as an optional `onRevealTab?: () => void` on `RemoteProjectStatus`, called at the end of `revealTab(...)`; `ProjectSidebar`'s `SortableProjectRow` passes `onRevealTab={isMobile ? onToggle : undefined}`. Separately, the status *line*'s expand toggle previously did NOT stop propagation, so on mobile tapping it bubbled to the row's `onSelect`, dismissed the drawer, and made the Chats/Terminals list unusable; it now calls `e.stopPropagation()` before `setExpanded(...)`, matching the Connect/Restart buttons (and on desktop this also means clicking the status line no longer doubles as project selection). **Rule:** any control nested in a sidebar row that stops propagation must restore the drawer-dismiss / reachability behaviour itself, because `onSelect` is the only other path to it.
+
+Failure mode this prevents: without selecting the project AND binding the tab to it, the session tab is filed under whichever project is active and `resolveSessionHost` routes the remote session through the local server (`/api/...` instead of `/api/remote/{host}/...`).
+
+Testability hook: `<main>` in `App.tsx` carries `data-active-view` and `data-focused-kind` so tests can assert the revealed view/kind.
+
+Tests: `web/src/App.tabFocus.test.tsx` (a chat request overrides a restored Files view; a terminal request reveals the terminal half and activates the requested id; a request naming a non-active project is not applied and stays queued; and "does not apply a request whose host differs even when the path matches" — a `host: "dev@box"` request for `/proj` stays queued against the local `/proj`), `web/src/lib/tabFocus.test.ts` (queue/replace/clear), additions in `RemoteProjectStatus.test.tsx` (binds to the clicked project, selects a non-active project, queues the right focus) and `projectStore.test.tsx` (tab bound to the non-active project, host resolves). `web/src/App.tabFocusRemote.test.tsx` is the end-to-end one: it renders the real `App` + real `ProjectSidebar` + real `RemoteProjectStatus` (only `useRemoteHostStatus`, `useRemoteTerminals`, and heavy visual children stubbed) and asserts that ONE click on a chat in a NON-active remote project's inventory selects that project, binds the tab to it (the rendered chat panel carries `data-session-id`), and overrides that project's **persisted "Files" view** with Sessions — pinning the passive-effect-beats-layout-restore ordering. Two test-relevant details it encodes: the chat inventory row's handler is `onPointerUp` while the terminal row's is `onClick`; and the sidebar rows rebuild while boot auto-select lands, so the test settles boot before clicking. The load-bearing behaviors were mutation-verified by temporary revert. Cross-reference `CHANGES.md` 2026-09-21.
 
 ### Wake reconnect
 

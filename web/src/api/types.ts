@@ -64,6 +64,10 @@ export interface SessionInfo {
 export interface SessionDetail extends SessionInfo {
   messages: Message[];
   total: number;
+  /** Opaque stored-transcript token (see lib/sessionRevision). Moves whenever
+   *  any process writes this session, so the revalidation poll knows to
+   *  refetch. Absent for bridged/in-memory sessions. */
+  revision?: string;
 }
 
 export interface SessionListResponse {
@@ -498,6 +502,20 @@ export interface GitHunkRequest {
   hunk_index: number;
   action: GitHunkAction;
   staged: boolean;
+}
+
+/** One entry from `git stash list`. `index` is the position in the stash
+ *  reflog (stash@{index}) and is how the API addresses an entry. */
+export interface GitStash {
+  index: number;
+  ref: string;
+  hash: string;
+  short: string;
+  /** Reflog subject: "WIP on main: <base subject>" or "On main: <message>". */
+  message: string;
+  author: string;
+  /** ISO-8601 timestamp from git. */
+  date: string;
 }
 
 export interface ThemeColors {

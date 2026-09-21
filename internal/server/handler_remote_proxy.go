@@ -149,9 +149,53 @@ func (h *Handler) HandleRemoteProxy(w http.ResponseWriter, r *http.Request) {
 	// Rewrite the request path for the remote: /api/remote/{host}/api/{rest} → /api/{rest}
 	r.URL.Path = "/api/" + rest
 
+	// Forward the originating window's active profile so the remote builds its
+	// chat agent on the same credentials/config. The remote has no
+	// window-state.json (see applyProxiedActiveProfile), so without this a
+	// remote turn falls back to the base credentials.
+	h.injectProxiedActiveProfile(r)
+
 	// Serve via the cached proxy. The Director strips the local ?token= and
 	// injects the remote bearer token.
 	proxy.ServeHTTP(w, r)
+}
+
+// proxiedRemoteWindowID returns the window id a proxied request carries, using
+// the same precedence the chat handlers use (header, then query). The web
+// client always sends X-Window-Id on chat/send requests (web/src/api/client.ts),
+// so the header is the common case; the query fallbacks cover other callers.
+func proxiedRemoteWindowID(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Window-Id")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("windowId")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(r.URL.Query().Get("window_id"))
+}
+
+// injectProxiedActiveProfile stamps the originating desktop window's effective
+// profile onto the request. Any client-supplied profile headers are stripped
+// first so a browser cannot forge a profile (the remote only trusts the
+// authoritative marker this function sets). The empty/Default case uses an
+// explicit reset header instead of an empty X-Ocode-Active-Profile value so no
+// transport layer can silently drop the "back to base" signal.
+func (h *Handler) injectProxiedActiveProfile(r *http.Request) {
+	r.Header.Del(remoteActiveProfileHeader)
+	r.Header.Del(remoteProfileAuthoritativeHeader)
+	r.Header.Del(remoteProfileResetHeader)
+
+	windowID := proxiedRemoteWindowID(r)
+	if windowID == "" {
+		return
+	}
+	if profile := h.getEffectiveWindowProfile(windowID); profile != "" {
+		r.Header.Set(remoteActiveProfileHeader, profile)
+		r.Header.Set(remoteProfileAuthoritativeHeader, "1")
+		return
+	}
+	r.Header.Set(remoteProfileAuthoritativeHeader, "1")
+	r.Header.Set(remoteProfileResetHeader, "1")
 }
 
 // remoteProxyTarget extracts the host and the API sub-path from the request

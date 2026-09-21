@@ -2437,7 +2437,10 @@ func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64) bool {
 
 // runAutoContinueJudge sends the tail of the conversation to the judge client
 // and expects a bare YES/NO verdict. Any error, empty response, or anything
-// other than an unambiguous "YES" is treated as NO (fail closed).
+// other than an unambiguous "YES" is treated as NO (fail closed). The prompt
+// tells the judge to answer NO when the reply is waiting on the user (it asks
+// a question or requests feedback/confirmation) — a turn that has handed the
+// next move to the user must not be auto-resumed.
 func (a *Agent) runAutoContinueJudge(client LLMClient, messages []Message) (bool, error) {
 	const tailN = 6
 	tail := messages
@@ -2448,7 +2451,10 @@ func (a *Agent) runAutoContinueJudge(client LLMClient, messages []Message) (bool
 	b.WriteString("You are judging whether an AI assistant's most recent reply, below, was cut off mid-task " +
 		"(e.g. truncated output, an unfinished code block or sentence, or the assistant explicitly saying it will " +
 		"continue) versus a reply that naturally finished the user's request. " +
-		"Answer with exactly one word: YES if the reply looks cut off and should be resumed, NO otherwise.\n\n")
+		"Answer with exactly one word: YES if the reply looks cut off and should be resumed, NO otherwise.\n" +
+		"Do NOT resume a reply that is waiting on the user: if it ends by asking a question, or requests " +
+		"clarification, confirmation, feedback, approval, or a decision, answer NO — the user must respond first. " +
+		"A reply that ends in a question is not a cut-off mid-task reply.\n\n")
 	for _, m := range tail {
 		if m.Content == "" {
 			continue
@@ -3627,6 +3633,21 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 		}
 	}
 
+	// The user's per-category opt-outs are the one policy that may override the
+	// shipping addendum (which hard-codes "deny when a credential appears"), so
+	// they travel as a per-request fact next to the banned prefixes rather than
+	// inside a prompt the user cannot edit. Instruction-only on this path: the
+	// chat verdict carries no category, so a DENY cannot be attributed to an
+	// opted-out class and stands (fail closed). Jev, which does answer a
+	// category, gets the deterministic backstop in askPermissionModelTypesafe.
+	relaxedSection := ""
+	if keys := a.relaxedConcernKeys(); len(keys) > 0 {
+		relaxedSection = "\nRelaxed concern categories (the user has switched OFF enforcement of these — a call whose ONLY concern is one of them is ALLOWED even if a rule above says deny; the user has accepted that class of request):\n"
+		for _, k := range keys {
+			relaxedSection += "  - " + k + " (" + typesafeConcernLabel(k) + ")\n"
+		}
+	}
+
 	truncationNote := ""
 	if argsTruncated {
 		truncationNote = "\n\nNOTE: the arguments above are TRUNCATED — only a prefix of the request is shown, so the full effect is unknown. You must not approve a request you cannot fully see; answer DENY."
@@ -3639,7 +3660,7 @@ Tool: %s
 Arguments: %s
 Rule: %s
 Scope: %s
-%s%s%s
+%s%s%s%s
 Project context:
 %s
 Relative paths in the arguments — including "cd" targets — resolve against the
@@ -3666,7 +3687,7 @@ Keep your reply short. Examples of correctly formatted final lines:
 ALLOW: writes a test file inside the project directory
 ALLOW: read-only listing of project files
 DENY: deletes files outside the working directory
-These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, rule, scope, allowedRoots, bannedPrefixes, truncationNote, context)
+These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, rule, scope, allowedRoots, bannedPrefixes, relaxedSection, truncationNote, context)
 
 	// Insert the user's own local addendum (auto-permission-prompt.local.md)
 	// right after the bundled prompt, before this final prepend step runs.
@@ -3810,6 +3831,20 @@ func (a *Agent) verifyAutoGrant(toolName string, args json.RawMessage, req *Perm
 		// file-tool check below).
 		if req != nil && req.OutOfScopePath != "" {
 			return false, "command targets path outside allowed roots: " + req.OutOfScopePath
+		}
+		// A dangerous rm (force/recursive, targeting outside the allowed scope)
+		// carries its own contract: dangerousRmReason exists so that it "should
+		// always require human approval, regardless of YOLO mode or any
+		// persisted rm bash-prefix rule". The Ask it raises carries no
+		// OutOfScopePath, so without this check the judge's word alone — or a
+		// relaxed `destructive` category converting the judge's deny — would
+		// auto-grant it.
+		if parsed, err := parseShellCommandLine(cmd); err == nil {
+			for _, c := range parsed {
+				if reason := dangerousRmReason(a.permissions, c.cmdWords); reason != "" {
+					return false, "dangerous rm requires human approval: " + reason
+				}
+			}
 		}
 		// Deterministic truncation guard for executed custom scripts (advisor #1 & #2).
 		// If any script that would be shown to the LLM is truncated (by lines or bytes),
@@ -4329,6 +4364,17 @@ func (a *Agent) buildPermissionContext(toolName string, args json.RawMessage, ma
 		return true
 	}
 
+	// sensitiveContextFile reports whether a file whose contents would otherwise
+	// be embedded in the auto-permission judge's context must have those contents
+	// withheld. The judge is an LLM: shipping a credential-bearing file (.env,
+	// auth.json, SSH keys, …) into its prompt is the exact exposure the
+	// permission layer exists to prevent. Uses the same predicate scanToolResult
+	// applies to tool results, so a file that would be masked on the way to the
+	// model is also not read on the way to the judge.
+	sensitiveContextFile := func(p string) bool {
+		return redact.IsSensitiveFile(p) || isSecretMaterialPath(p)
+	}
+
 	// 1. Working directory and project type. Use the agent's workDir, not the
 	// process cwd: desktop/web sessions SetWorkDir without chdir-ing (the .app
 	// launches with cwd "/"), and a judge shown the wrong cwd reads a relative
@@ -4363,7 +4409,13 @@ func (a *Agent) buildPermissionContext(toolName string, args json.RawMessage, ma
 				targetPath = params.FilePath
 			}
 			if targetPath != "" {
-				if content, totalLines, err := readFileSnippet(targetPath, maxLinesPerSource); err == nil {
+				if sensitiveContextFile(targetPath) {
+					// Withhold the contents: the judge must not receive credential
+					// material. The path is already visible to the judge in the
+					// arguments, so the marker only prevents a misleading
+					// "empty/new file" reading.
+					addSection(fmt.Sprintf("Target file: %s", targetPath), "(contents withheld: sensitive file)")
+				} else if content, totalLines, err := readFileSnippet(targetPath, maxLinesPerSource); err == nil {
 					label := fmt.Sprintf("Target file: %s (%d lines total, showing first %d):", targetPath, totalLines, maxLinesPerSource)
 					addSection(label, content)
 				} else if !os.IsNotExist(err) {
@@ -4406,6 +4458,9 @@ func (a *Agent) buildPermissionContext(toolName string, args json.RawMessage, ma
 					if seenFiles[abs] || seenFiles[filepath.Clean(abs)] {
 						continue
 					}
+				}
+				if sensitiveContextFile(script) {
+					continue
 				}
 				content, totalLines, err := readFileSnippet(script, maxLinesPerSource)
 				if err != nil {
@@ -4465,6 +4520,12 @@ func (a *Agent) buildPermissionContext(toolName string, args json.RawMessage, ma
 					if seenFiles[abs] || seenFiles[filepath.Clean(abs)] {
 						continue
 					}
+				}
+				// A command that merely names a secret file (grep … .env, psql via
+				// $(…) from .env) must not drag that file's contents into the
+				// judge's prompt.
+				if sensitiveContextFile(file) {
+					continue
 				}
 				if content, totalLines, err := readFileSnippet(file, maxLinesPerSource); err == nil {
 					if addSection(fmt.Sprintf("Referenced file: %s (%d lines):", file, totalLines), content) {

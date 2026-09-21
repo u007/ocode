@@ -26,7 +26,10 @@ name). Do not duplicate content between the two — update here only.
   auto-continue triage judge (`Ocode.AutoContinueModel = "typesafe/<model>"` →
   `runAutoContinueJudgeTypesafe` in `internal/agent/autocontinue_typesafe.go`,
   a Decide() call answering a typed continue/end choice over the transcript
-  tail), the discovery relevance judge (`judgeDiscoveryCandidates` in
+  tail; the advisory `reason` becomes decisive for `awaiting_user`, which
+  vetoes a `continue` verdict so a reply that asks the user a question or
+  requests feedback is never auto-resumed), the discovery relevance judge
+  (`judgeDiscoveryCandidates` in
   `internal/agent/discovery_typesafe.go`, one noul question per
   embedder-selected skill/doc/MCP candidate), and the doc_search relevance
   judge (`judgeDocSearchResults` in `internal/agent/doc_search_typesafe.go`,
@@ -842,6 +845,41 @@ Rules for anything in `internal/server`:
   the loop goroutine (shared state like `lastGit` stays single-writer). Any new
   per-project work driven from a shared loop must follow that shape: a
   per-item deadline plus per-item fan-out, never a bare `exec.Command`.
+
+## Git subprocesses: `gitexec`, never a bare `exec.Command("git", …)`
+
+Every git child ocode spawns is a potential `.git/index.lock` contender, because
+`git status` and `git diff` refresh the index as an *optional* locked side
+effect. ocode polls git constantly — the git-status emitter for every viewed
+project every 10s, the web Git tab, the TUI file-tree badge ticker — so a bare
+`exec.Command("git", …)` makes ocode the background process git(1) warns about:
+the user's own `git add` then fails with `fatal: Unable to create
+'<repo>/.git/index.lock': File exists. Another git process seems to be running
+in this repository, or the lock file may be stale`. A probe SIGKILLed by its
+deadline (`gitStatusTimeout`) can also strand that lock.
+
+- **Every lock-capable git subprocess sets `cmd.Env = gitexec.Env()`**
+  (`internal/gitexec`), which adds `GIT_OPTIONAL_LOCKS=0` (git's
+  `--no-optional-locks`, de-duplicating an inherited value). It is safe on
+  mutations as well as probes: only *optional* locks are skipped, so `git add` /
+  `commit` / `stash` / `apply --cached` still take the real lock and still fail
+  loudly. Commands that never take a lock (`rev-parse`, `log`, `show`) don't
+  need it.
+- **Index-writing mutations are wrapped in `gitexec.WithLockRetry`**, which
+  retries only when `gitexec.LockHeld(err)` (git's "Unable to create
+  …index.lock" / "Another git process seems to be running") with a bounded
+  ~900ms schedule, then keeps git's stderr and appends the retry count so a lock
+  still present reads as stale rather than live. A failed lock acquisition means
+  git never started the operation, so re-running is safe.
+- In `internal/server` and `internal/tui` this is centralised in `gitRunInDir` /
+  `runGit`, and the git executable is a package var (`gitBinary`) so tests can
+  substitute a stub. Remote projects get the same treatment in the command
+  string `remoteGitCommand` builds (a leading `GIT_OPTIONAL_LOCKS=0`, valid in
+  both remote shells) plus `remoteGitMutation` for the retried mutations.
+  Regression suites: `internal/gitexec/gitexec_test.go`,
+  `internal/server/git_lock_retry_test.go`,
+  `internal/server/remote_git_lock_retry_test.go`,
+  `internal/tui/git_lock_retry_test.go`.
 
 ## Web/Desktop Server: project dirs are per-session, not per-process
 

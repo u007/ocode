@@ -63,7 +63,7 @@ function mockTree() {
 }
 
 // Regression: the file picker (ctrl/cmd+p) must land focus on the filter
-// input, NOT on the "Normal/Hidden" toggle button that precedes it in DOM
+// input, NOT on the hidden-files toggle button that precedes it in DOM
 // order — that button is the first tabbable element, which is what Radix's
 // default open-focus pass used to grab.
 describe("FilePicker initial focus", () => {

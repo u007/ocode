@@ -215,6 +215,81 @@ describe("ModelDialog favorites/recents sections", () => {
     expect(screen.getByLabelText("Favorite openai/gpt-c")).toBeInTheDocument();
   });
 
+  describe("advisor Claude Code (Read-Only CLI) section", () => {
+    it("offers the CLI section first in the advisor picker", async () => {
+      render(<ModelDialog open onClose={vi.fn()} purpose="advisor" />);
+      await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalled());
+
+      // Section header + full-id rows mirror the TUI's prepended section.
+      expect(await screen.findByText("Claude Code (Read-Only CLI)")).toBeInTheDocument();
+      expect(screen.getByText("claude-code/claude-sonnet-4-6")).toBeInTheDocument();
+      expect(screen.getByText("claude-code/claude-opus-5")).toBeInTheDocument();
+
+      // The synthetic group renders before the first registry provider.
+      const html = document.body.innerHTML;
+      expect(html.indexOf("Claude Code (Read-Only CLI)")).toBeLessThan(
+        html.indexOf(">anthropic<"),
+      );
+    });
+
+    it("selecting a CLI model turns the Claude Code backend on", async () => {
+      render(<ModelDialog open onClose={vi.fn()} purpose="advisor" />);
+      await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalled());
+
+      fireEvent.click(await screen.findByText("claude-code/claude-sonnet-5"));
+
+      await waitFor(() =>
+        expect(hoisted.api.setAdvisorFull).toHaveBeenCalledWith({
+          model: "claude-sonnet-5",
+          provider: "claude-code",
+          claude_code: true,
+        }),
+      );
+      // The store keeps the bare alias (the value the sidebar renders).
+      expect(hoisted.dispatchSpy).toHaveBeenCalledWith({
+        type: "SET_ADVISOR_MODEL",
+        model: "claude-sonnet-5",
+      });
+    });
+
+    it("turns the backend off when a registry model is picked (TUI parity)", async () => {
+      render(<ModelDialog open onClose={vi.fn()} purpose="advisor" />);
+      await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalled());
+
+      fireEvent.click(await screen.findByText("gpt-c"));
+
+      await waitFor(() =>
+        expect(hoisted.api.setAdvisorFull).toHaveBeenCalledWith({
+          model: "gpt-c",
+          provider: "openai",
+          claude_code: false,
+        }),
+      );
+    });
+
+    it("clearing the advisor also clears the CLI backend", async () => {
+      render(<ModelDialog open onClose={vi.fn()} purpose="advisor" />);
+      await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalled());
+
+      fireEvent.click(screen.getByText("Clear (not set)"));
+
+      await waitFor(() =>
+        expect(hoisted.api.setAdvisorFull).toHaveBeenCalledWith({
+          model: "",
+          provider: "",
+        }),
+      );
+    });
+
+    it("is not offered by any other picker", async () => {
+      render(<ModelDialog open onClose={vi.fn()} purpose="main" />);
+      await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalled());
+
+      expect(screen.queryByText("Claude Code (Read-Only CLI)")).toBeNull();
+      expect(screen.queryByText("claude-code/claude-sonnet-4-6")).toBeNull();
+    });
+  });
+
   describe("main model scoping (per-chat-session model)", () => {
     it("routes a main-model pick to the session endpoint, not the global config", async () => {
       render(<ModelDialog open onClose={vi.fn()} purpose="main" sessionId="ses_123" />);
@@ -359,7 +434,6 @@ describe("ModelDialog remote session host", () => {
     await waitFor(() => expect(hoisted.api.getSmallModel).toHaveBeenCalledWith("devbox"));
     expect(hoisted.api.getConfigModel).toHaveBeenCalledWith("devbox");
     expect(hoisted.api.getAdvisor).toHaveBeenCalledWith("devbox");
-    expect(hoisted.api.getAdvisorFull).toHaveBeenCalledWith("devbox");
 
     fireEvent.click(await screen.findByText("gpt-c"));
     await waitFor(() =>

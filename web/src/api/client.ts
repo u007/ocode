@@ -11,6 +11,7 @@ import type {
   GitCommit,
   GitWorkspace,
   GitHunkRequest,
+  GitStash,
   ThemeResponse,
   TUIStatus,
   LSPStatus,
@@ -52,6 +53,8 @@ import type {
 	ContextBudgetReport,
 } from "./types";
 
+import { noteSessionRevision } from "../lib/sessionRevision";
+
 export interface CompactConfig {
   enabled: boolean;
   summary_provider: string;
@@ -75,6 +78,20 @@ export interface AutoPermissionConfig {
   max_context_lines_per_source?: number;
   min_confidence?: number;
   grants?: unknown[];
+  /** Concern categories the user has switched OFF enforcing — see
+   *  {@link RelaxableConcern}. Absent or empty means every category is
+   *  enforced (the default), so the field is a negative set on purpose. */
+  relaxed_concerns?: string[];
+}
+
+/** One judge concern category that can be switched off in Settings → Permissions.
+ *  Served by GET /api/config/ocode/permissions-concerns so the checkbox list can
+ *  never drift from the Go rubric; `note` carries the caveat for categories a
+ *  deterministic Go guard already covers. */
+export interface RelaxableConcern {
+  key: string;
+  label: string;
+  note?: string;
 }
 
 export interface DiscoveryConfig {
@@ -561,7 +578,14 @@ export const api = {
     return fetchJSON<SessionDetail>(
       `/api/sessions/${id}${qs ? `?${qs}` : ""}`,
       undefined, host,
-    );
+    ).then((detail) => {
+      // Record the stored-transcript revision this transcript was fetched at,
+      // so the cross-process revalidation poll can detect an out-of-process
+      // write (see lib/sessionRevision). Centralized here because every
+      // transcript load path must leave the same baseline.
+      noteSessionRevision(id, host, detail.revision);
+      return detail;
+    });
   },
   truncateSession: (id: string, keepUntil: number, host?: string) =>
     fetchJSON<SessionDetail>(`/api/sessions/${id}/truncate`, {
@@ -759,6 +783,8 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(cfg),
     }),
+  getPermissionConcerns: () =>
+    fetchJSON<{ concerns: RelaxableConcern[] }>("/api/config/ocode/permissions-concerns"),
 
   getMaskAdvanced: () =>
     fetchJSON<{
@@ -954,10 +980,37 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ paths }),
     }),
-  gitStash: (message: string, paths: string[], project?: string, host?: string) =>
+  gitStash: (message: string, paths: string[], project?: string, host?: string, includeUntracked = false) =>
     fetchJSON<GitStatus>(`/api/git/stash${projQuery(project, host)}`, {
       method: "POST",
-      body: JSON.stringify({ paths, message }),
+      body: JSON.stringify({ paths, message, include_untracked: includeUntracked }),
+    }),
+
+  /** Stash entries of the repo, newest first. */
+  gitStashList: (project?: string, host?: string) =>
+    fetchJSON<GitStash[]>(`/api/git/stash/list${projQuery(project, host)}`),
+
+  /** Per-file diff of one stash entry (index = position in the stash list). */
+  gitStashShow: (index: number, project?: string, host?: string) => {
+    const params = new URLSearchParams({ index: String(index) });
+    if (project) params.set("project", project);
+    if (host) params.set("host", host);
+    return fetchJSON<GitDiffFile[]>(`/api/git/stash/show?${params.toString()}`);
+  },
+
+  /** Restore selected files from a stash entry into the working tree
+   *  (unstaged). The stash entry is kept. Returns the refreshed workspace. */
+  gitStashApply: (index: number, paths: string[], project?: string, host?: string) =>
+    fetchJSON<GitWorkspace>(`/api/git/stash/apply${projQuery(project, host)}`, {
+      method: "POST",
+      body: JSON.stringify({ index, paths }),
+    }),
+
+  /** Delete one stash entry. Returns the refreshed stash list. */
+  gitStashDrop: (index: number, project?: string, host?: string) =>
+    fetchJSON<GitStash[]>(`/api/git/stash/drop${projQuery(project, host)}`, {
+      method: "POST",
+      body: JSON.stringify({ index }),
     }),
   gitCommit: (message: string, paths: string[], project?: string, host?: string) =>
     fetchJSON<GitStatus>(`/api/git/commit${projQuery(project, host)}`, {
@@ -1185,6 +1238,12 @@ export const api = {
       bootstrap_stage: string;
       turn_active: boolean;
       last_seq: number;
+      // Opaque stored-transcript token (see lib/sessionRevision). The
+      // revalidation poll compares it against the revision the tab's
+      // transcript was fetched at and refetches when it moved — the
+      // cross-process sync signal for a write made by another ocode server
+      // sharing this project. Absent for bridged/in-memory sessions.
+      revision?: string;
       // Streaming text/thinking/tool_* frames still buffered from the
       // session's current turn (see appendLiveFrame server-side), replayed
       // by reconcileOpenSessions so a mid-turn reload doesn't lose the

@@ -1,4 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { Eye, EyeOff } from "lucide-react";
 import { useEffect, useState, useMemo, useRef } from "react";
 import {
   Command,
@@ -11,7 +12,7 @@ import {
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../ui/dialog";
 import { apiPath, authHeaders } from "../../api/client";
 import { parseKeywords, matchesKeywords } from "../../lib/keywordFilter";
-import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles } from "./showHiddenFilesPersistence";
+import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles, showHiddenFilesProjectKey } from "./showHiddenFilesPersistence";
 
 interface FileNode {
   name: string;
@@ -51,9 +52,25 @@ function flattenFiles(nodes: FileNode[]): string[] {
 export default function FilePicker({ open, onClose, onOpenFile, projectPath, projectHost }: Props) {
   const [files, setFiles] = useState<string[]>([]);
   const [query, setQuery] = useState("");
-  const [showHiddenFiles, setShowHiddenFiles] = useState(() => loadShowHiddenFiles());
+  // The choice is per project (and remote host); follow a project switch.
+  const hiddenProjectKey = showHiddenFilesProjectKey(projectPath, projectHost);
+  const [showHiddenFiles, setShowHiddenFiles] = useState(() => loadShowHiddenFiles(hiddenProjectKey));
 
-  useEffect(() => subscribeShowHiddenFiles(setShowHiddenFiles), []);
+  useEffect(() => {
+    setShowHiddenFiles(loadShowHiddenFiles(hiddenProjectKey));
+  }, [hiddenProjectKey]);
+
+  // Keep the picker and the Files-tab tree in sync for the active project.
+  useEffect(
+    () => subscribeShowHiddenFiles(hiddenProjectKey, setShowHiddenFiles),
+    [hiddenProjectKey],
+  );
+
+  const toggleShowHiddenFiles = () => {
+    const next = !showHiddenFiles;
+    saveShowHiddenFiles(hiddenProjectKey, next);
+    setShowHiddenFiles(next);
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -85,10 +102,6 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath, pro
   useEffect(() => {
     if (!open) setQuery("");
   }, [open]);
-
-  useEffect(() => {
-    saveShowHiddenFiles(showHiddenFiles);
-  }, [showHiddenFiles]);
 
   const keywords = useMemo(() => parseKeywords(query), [query]);
   const filteredFiles = useMemo(() => {
@@ -122,11 +135,13 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath, pro
           <div className="flex items-center gap-1 px-2 pt-1">
             <button
               type="button"
-              onClick={() => setShowHiddenFiles((v) => !v)}
-              className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${showHiddenFiles ? "bg-amber-500/20 text-amber-600 border-amber-500/30" : "bg-transparent text-muted-foreground border-border hover:bg-muted"}`}
-              title={showHiddenFiles ? "Showing hidden/ignored files" : "Showing normal files only"}
+              onClick={toggleShowHiddenFiles}
+              aria-pressed={showHiddenFiles}
+              className={`flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border transition-colors ${showHiddenFiles ? "bg-amber-500/20 text-amber-600 border-amber-500/30" : "bg-transparent text-muted-foreground border-border hover:bg-muted"}`}
+              title={showHiddenFiles ? "Showing hidden/ignored files (click to hide)" : "Showing normal files only (click to show hidden/ignored)"}
             >
-              {showHiddenFiles ? "Hidden" : "Normal"}
+              {showHiddenFiles ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+              <span>Hidden</span>
             </button>
           </div>
           <CommandInput placeholder="Filter by keywords..." value={query} onValueChange={setQuery} />

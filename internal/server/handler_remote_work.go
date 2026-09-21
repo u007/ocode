@@ -371,13 +371,19 @@ func remoteRunNetwork(ctx context.Context, rw remoteWork, command string) error 
 // remoteNetworkTimeout bounds fetch/pull/push/reset (which may transfer).
 const remoteNetworkTimeout = 120 * time.Second
 
-// remoteGitCommand builds "cd <dir> && git <args...>" with dir shell-quoted
-// (the remote shell interprets it). Args are NOT quoted: callers pass
-// repo-relative pathspecs already validated to contain no shell metachars
-// (see remotePathSpec), or fixed literals.
+// remoteGitCommand builds "cd <dir> && GIT_OPTIONAL_LOCKS=0 git <args...>" with
+// dir shell-quoted (the remote shell interprets it). Args are NOT quoted:
+// callers pass repo-relative pathspecs already validated to contain no shell
+// metachars (see remotePathSpec), or fixed literals.
+//
+// The env prefix is the same opt-out the local helpers apply (gitexec.Env):
+// without it ocode's remote status/diff probes refresh the index on the host
+// and take its .git/index.lock as a side effect, contending with the user's own
+// git on that machine. A leading VAR=value is POSIX sh syntax and both remote
+// shells (ssh → POSIX sh, WSL → sh) accept it; mandatory locks are unaffected.
 func remoteGitCommand(dir string, args ...string) string {
-	parts := make([]string, 0, len(args)+3)
-	parts = append(parts, "cd", shellQuotePathPOSIX(dir), "&&", "git")
+	parts := make([]string, 0, len(args)+4)
+	parts = append(parts, "cd", shellQuotePathPOSIX(dir), "&&", "GIT_OPTIONAL_LOCKS=0", "git")
 	parts = append(parts, args...)
 	return strings.Join(parts, " ")
 }

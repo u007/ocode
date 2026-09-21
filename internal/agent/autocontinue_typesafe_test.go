@@ -102,6 +102,62 @@ func TestAutoContinueTypesafeEndVerdict(t *testing.T) {
 	}
 }
 
+// A reply that is waiting on the user must not be auto-resumed even when the
+// verdict says continue (high confidence): the typed awaiting_user reason is
+// decisive. This is the "the stop is because it is asking for feedback or an
+// answer" case — without the veto the verdict alone would have resumed and
+// answered the user's question on their behalf.
+func TestAutoContinueTypesafeAwaitingUserVetoesContinue(t *testing.T) {
+	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.97, "awaiting_user"))
+	resume, detail, err := a.AutoContinueJudgeSync([]Message{
+		{Role: "user", Content: "add caching"},
+		{Role: "assistant", Content: "I can use Redis or an in-process LRU. Which would you prefer?"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resume {
+		t.Fatalf("awaiting_user must veto a continue verdict, got resume=true detail=%q", detail)
+	}
+	if !strings.Contains(detail, "waiting on the user") {
+		t.Fatalf("detail should explain the reply is waiting on the user: %q", detail)
+	}
+}
+
+// The chat-model judge (any non-typesafe AutoContinueModel) must be told to
+// answer NO when the reply is waiting on the user — otherwise a question-ending
+// turn reads as "incomplete" and gets resumed.
+func TestAutoContinueGenericJudgePromptCoversAwaitingUser(t *testing.T) {
+	prev := newClientFn
+	t.Cleanup(func() { newClientFn = prev })
+	cap := &scriptedCaptureClient{Responses: []string{"NO"}}
+	newClientFn = func(_ *config.Config, _ string) LLMClient { return cap }
+
+	cfg := &config.Config{}
+	cfg.Ocode.AutoContinueModel = "opencode-go/gpt-x"
+	cfg.Ocode.AutoContinueEnabled = true
+	a := NewAgent(nil, nil, cfg, nil)
+
+	resume, _, err := a.AutoContinueJudgeSync([]Message{
+		{Role: "assistant", Content: "Step 1 is done. Should I proceed with step 2?"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resume {
+		t.Fatal("a NO verdict must not resume")
+	}
+	if len(cap.Prompts) != 1 {
+		t.Fatalf("judge prompt count = %d, want 1", len(cap.Prompts))
+	}
+	p := cap.Prompts[0]
+	for _, want := range []string{"waiting on the user", "feedback", "question"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("judge prompt must mention %q to consider awaiting-user stops:\n%s", want, p)
+		}
+	}
+}
+
 func TestAutoContinueTypesafeLowConfidenceFailsClosed(t *testing.T) {
 	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.4, "mid_task"))
 	resume, detail, err := a.AutoContinueJudgeSync([]Message{

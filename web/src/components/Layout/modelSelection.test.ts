@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { advisorSelectionPayload, capProviderGroups, LOCAL_MODELS_PROVIDER, LOCAL_MODELS_UNCAPPED, partitionModelSections } from "./modelSelection";
+import { advisorSelectionPayload, capProviderGroups, claudeCodeAdvisorModelInfos, CLAUDE_CODE_ADVISOR_MODELS, CLAUDE_CODE_PROVIDER, LOCAL_MODELS_PROVIDER, LOCAL_MODELS_UNCAPPED, partitionModelSections } from "./modelSelection";
 import type { ModelInfo } from "../../api/types";
 
 const model = (
@@ -79,6 +79,38 @@ describe("advisorSelectionPayload", () => {
       provider: "anthropic",
       model: "claude-sonnet-4-6",
     });
+  });
+});
+
+describe("claudeCodeAdvisorModelInfos", () => {
+  it("builds claude-code rows carrying the full id and the bare model alias", () => {
+    const rows = claudeCodeAdvisorModelInfos();
+    expect(rows.map((r) => r.name)).toEqual(
+      CLAUDE_CODE_ADVISOR_MODELS.map((m) => `${CLAUDE_CODE_PROVIDER}/${m}`),
+    );
+    expect(rows.every((r) => r.provider === CLAUDE_CODE_PROVIDER)).toBe(true);
+    expect(rows.every((r) => r.active === false)).toBe(true);
+    // The payload the dialog PUTs must persist the bare alias — the server
+    // passes it to `claude -p --model`, which rejects a "provider/model" id.
+    expect(advisorSelectionPayload(rows[0])).toEqual({
+      model: "claude-sonnet-4-6",
+      provider: "claude-code",
+    });
+  });
+
+  it("offers the Claude Code CLI aliases the TUI picker lists", () => {
+    // Sync guard for internal/tui/picker.go prependClaudeCodeSection.
+    for (const alias of [
+      "claude-sonnet-4-6",
+      "claude-sonnet-5",
+      "claude-opus-4-8",
+      "claude-opus-4-7",
+      "claude-opus-5",
+      "claude-haiku-4-5",
+      "claude-fable-5",
+    ]) {
+      expect(CLAUDE_CODE_ADVISOR_MODELS).toContain(alias);
+    }
   });
 });
 

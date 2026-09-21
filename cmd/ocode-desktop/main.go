@@ -28,6 +28,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/bundled"
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/desktop"
 	"github.com/u007/ocode/internal/lsp"
@@ -145,6 +146,14 @@ func main() {
 	// Before any agent session can run a bash command: pin the login shell so
 	// Finder/Dock-launched processes still see the user's full PATH.
 	configureLoginShell()
+
+	// The pin above makes agent commands run via `<shell> -l -c`, which sources
+	// the login profiles (/etc/zprofile, ~/.zprofile) but NOT the interactive
+	// ~/.zshrc where ~/.local/bin is added. Prepend the user's bin dirs to the
+	// process PATH so the login shell (which preserves inherited entries) and
+	// every other child — the `!` composer command (internal/shell.Build), the
+	// advisor's `claude` subprocess — can resolve user-installed CLIs.
+	config.EnsureUserBinPath()
 
 	// macOS routes a held key to the accent chooser instead of repeating it.
 	// The shell embeds a real terminal (xterm) plus Monaco and chat inputs, all

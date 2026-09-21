@@ -39,6 +39,12 @@ func (a *Agent) resolveAutoContinueMinConfidence() float64 {
 	return autoContinueMinConfidenceDefault
 }
 
+// typesafeAutoContinueAwaitingUser is the typed reason that forces the turn to
+// end even when the verdict says "continue": a reply that is waiting on the
+// user (a question, or a request for feedback/confirmation) must never be
+// auto-resumed, because the next move belongs to the user.
+const typesafeAutoContinueAwaitingUser = "awaiting_user"
+
 // typesafeAutoContinueReasons is the closed set of triage outcome categories,
 // in the order they are described to the model. "finished" must stay first:
 // it is the expected answer for a reply that naturally completed.
@@ -46,7 +52,7 @@ var typesafeAutoContinueReasons = []typesafeConcern{
 	{"finished", "the reply completed the request; nothing is missing"},
 	{"mid_task", "the reply stopped mid-task and work visibly remains (it says it will continue, or the task is plainly unfinished)"},
 	{"truncated", "the reply looks mechanically truncated (an unclosed code block, a cut-off sentence)"},
-	{"awaiting_user", "the reply ends by asking the user a question or requesting input"},
+	{typesafeAutoContinueAwaitingUser, "the reply is waiting on the user: it ends by asking a question or requesting feedback, confirmation, approval, or a decision"},
 	{"errored", "the reply reports an error or failure and stopped"},
 }
 
@@ -67,7 +73,8 @@ Rules:
 - Judge the last assistant reply in the transcript; earlier turns are context.
 - Continue only when there is concrete remaining work the reply itself acknowledges or leaves visible: it says it will continue, a code block or sentence is cut off mid-way, or the requested task is plainly incomplete.
 - Stop when the reply reads as a natural completion: it answered the request, delivered the result, and ends cleanly — including short acknowledgements and status reports.
-- Stop when the reply ends with a question for the user or a report of a blocking error: continuing would not help.
+- Stop whenever the reply is waiting on the user. If it ends by asking a question, requests clarification, confirmation, feedback, approval, or a decision, the next move belongs to the user — choose "end", never "continue". A reply that ends in a question is not a cut-off mid-task reply.
+- Stop when the reply reports a blocking error: continuing would not help.
 - When the state says the turn was ended by the step limit, the reply is a forced summary of unfinished work: continue.
 - When the state says the turn failed with an error, do not continue: the caller surfaces the error instead.
 Choose "continue" only when the evidence is unambiguous; otherwise choose "end" so the turn finishes.`
@@ -81,7 +88,10 @@ Choose "continue" only when the evidence is unambiguous; otherwise choose "end" 
 //
 // Returns (resume, detail, err): resume=false on any error or ambiguous
 // answer (fail closed — never auto-resume on an unclear verdict), and detail
-// is a user-facing one-liner naming the verdict and why.
+// is a user-facing one-liner naming the verdict and why. A typed awaiting_user
+// reason vetoes a continue verdict outright: a reply that asks the user a
+// question or requests feedback must not be resumed even if the verdict alone
+// would have said continue.
 //
 // Precondition: the caller owns the hard /max-step signal. Every production
 // dispatcher (server autoContinueShouldResume, the TUI's shouldAutoContinue
@@ -103,7 +113,7 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client *TypesafeClient, messages []
 			Instructions: typesafeAutoContinueInstructions,
 			Criteria: map[string]string{
 				"continue": "The last reply was cut off mid-task and concrete work remains; the assistant should resume.",
-				"end":      "The last reply completed the request (or ends on a user question / blocking error); the turn is done.",
+				"end":      "The last reply completed the request, is waiting on the user (it asks a question or requests feedback/confirmation/input), or ends on a blocking error; the turn is done.",
 			},
 		},
 		typesafeAutoContinueReasonKey: {
@@ -140,6 +150,14 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client *TypesafeClient, messages []
 
 	switch ans.Choice {
 	case "continue":
+		// A reply that is waiting on the user must never be auto-resumed, even
+		// when the verdict says continue: Jev sometimes reads a question ending
+		// ("Which option do you want?") as unfinished work. The typed reason is
+		// otherwise advisory (the verdict decides), but awaiting_user is
+		// decisive — resuming would answer the user's question on their behalf.
+		if reasonKey == typesafeAutoContinueAwaitingUser {
+			return false, fmt.Sprintf("%s says continue but the reply is waiting on the user (asks a question or requests feedback) — not resuming", model), nil
+		}
 		if ans.Confidence < minConfidence {
 			return false, fmt.Sprintf("%s leaned continue but confidence %.2f is below the %.2f floor%s", model, ans.Confidence, minConfidence, reason), nil
 		}

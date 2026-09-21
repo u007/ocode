@@ -241,6 +241,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/git/unstage", s.authMiddleware(s.handler.HandleGitUnstage))
 	s.mux.HandleFunc("POST /api/git/discard", s.authMiddleware(s.handler.HandleGitDiscard))
 	s.mux.HandleFunc("POST /api/git/stash", s.authMiddleware(s.handler.HandleGitStash))
+	s.mux.HandleFunc("GET /api/git/stash/list", s.authMiddleware(s.handler.HandleGitStashList))
+	s.mux.HandleFunc("GET /api/git/stash/show", s.authMiddleware(s.handler.HandleGitStashShow))
+	s.mux.HandleFunc("POST /api/git/stash/apply", s.authMiddleware(s.handler.HandleGitStashApply))
+	s.mux.HandleFunc("POST /api/git/stash/drop", s.authMiddleware(s.handler.HandleGitStashDrop))
 	s.mux.HandleFunc("POST /api/git/commit", s.authMiddleware(s.handler.HandleGitCommit))
 	s.mux.HandleFunc("POST /api/git/fetch", s.authMiddleware(s.handler.HandleGitFetch))
 	s.mux.HandleFunc("POST /api/git/pull", s.authMiddleware(s.handler.HandleGitPull))
@@ -351,6 +355,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/compact", s.authMiddleware(s.handleSetCompactConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/permissions-auto", s.authMiddleware(s.handleGetAutoPermissionConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/permissions-auto", s.authMiddleware(s.handleSetAutoPermissionConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/permissions-concerns", s.authMiddleware(s.handleGetPermissionConcerns))
 	s.mux.HandleFunc("GET /api/config/ocode/discovery", s.authMiddleware(s.handleGetDiscoveryConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/discovery", s.authMiddleware(s.handleSetDiscoveryConfig))
 	s.mux.HandleFunc("GET /api/tts/engines", s.authMiddleware(s.handleTTSEngines))
@@ -2025,6 +2030,9 @@ func (s *Server) handleGetAutoPermissionConfig(w http.ResponseWriter, r *http.Re
 func (s *Server) handleSetAutoPermissionConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetAutoPermissionConfig(w, r)
 }
+func (s *Server) handleGetPermissionConcerns(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPermissionConcerns(w, r)
+}
 func (s *Server) handleGetDiscoveryConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetDiscoveryConfig(w, r)
 }
@@ -2471,6 +2479,11 @@ type SessionDetail struct {
 	SessionInfo
 	Messages []agent.Message `json:"messages"`
 	Total    int             `json:"total"`
+	// Revision is the stored-transcript token (see session.StoredRevisionForDir).
+	// Returned alongside the messages so a client can record the revision it
+	// fetched at, then detect an out-of-process change later by polling
+	// GET /api/sessions/:id/state. Omitted for bridged/in-memory sessions.
+	Revision string `json:"revision,omitempty"`
 }
 
 type ModelInfo struct {

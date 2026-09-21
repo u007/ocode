@@ -33,16 +33,33 @@ const sessions = [
   { id: "s1", title: "Chat one" },
   { id: "s2", title: "Chat two" },
 ];
+// Hoisted so the assertions below can read the same spy instances the
+// lazily-evaluated factories hand to the component.
+const projectStoreFake = vi.hoisted(() => ({
+  openSessionTab: vi.fn(),
+  selectProject: vi.fn(() => Promise.resolve()),
+  activeProject: { path: "/srv", host: "dev@box" } as { path: string; host?: string } | null,
+}));
 vi.mock("@/stores/projectStore", () => ({
   projectSessionKey: (path: string, host?: string) => (host ? `${host}::${path}` : path),
   useProjectState: () => ({
     state: {
       sessionsByProject: { "dev@box::/srv": { sessions } },
       tabsByProject: { "/srv": [] },
+      activeProject: projectStoreFake.activeProject,
     },
     prefetchProjectSessions: vi.fn(),
-    openSessionTab: vi.fn(),
+    openSessionTab: projectStoreFake.openSessionTab,
+    selectProject: projectStoreFake.selectProject,
   }),
+}));
+
+const mockTabFocusRequest = vi.fn();
+vi.mock("@/lib/tabFocus", () => ({
+  tabFocusActions: {
+    request: (...a: unknown[]) => mockTabFocusRequest(...a),
+    clear: vi.fn(),
+  },
 }));
 
 const project = { path: "/srv", host: "dev@box", name: "srv" } as unknown as Project;
@@ -78,6 +95,11 @@ describe("RemoteProjectStatus", () => {
     mockKill.mockReturnValue(Promise.resolve());
     mockLocalTerminals.mockReset();
     mockLocalTerminals.mockReturnValue([]);
+    projectStoreFake.openSessionTab.mockReset();
+    projectStoreFake.selectProject.mockReset();
+    projectStoreFake.selectProject.mockReturnValue(Promise.resolve());
+    projectStoreFake.activeProject = { path: "/srv", host: "dev@box" };
+    mockTabFocusRequest.mockReset();
     mockTerminals.mockReturnValue({
       terminals: [
         { id: "t1", title: "shell one", pid: 1, started_at: "", attached: false },
@@ -123,6 +145,45 @@ describe("RemoteProjectStatus", () => {
 
     fireEvent.click(screen.getByText("shell one"));
     expect(mockAttach).toHaveBeenCalledWith("/srv", "dev@box", "t1", "shell one");
+    // Opening from the inventory must reveal the terminal it attached.
+    expect(mockTabFocusRequest).toHaveBeenCalledWith({
+      kind: "terminal",
+      terminalId: "t1",
+      projectPath: "/srv",
+      host: "dev@box",
+    });
+  });
+
+  it("focuses the chat it opens, bound to this project", () => {
+    render(<RemoteProjectStatus project={project} statusState={state()} />);
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+    fireEvent.pointerUp(screen.getByText("Chat one"));
+
+    // Bound to the clicked project (not the active one) so a remote session is
+    // routed through its host, and queued for the app shell to reveal.
+    expect(projectStoreFake.openSessionTab).toHaveBeenCalledWith("s1", "Chat one", "/srv");
+    expect(mockTabFocusRequest).toHaveBeenCalledWith({
+      kind: "chat",
+      projectPath: "/srv",
+      host: "dev@box",
+    });
+    // Already active — no needless project switch.
+    expect(projectStoreFake.selectProject).not.toHaveBeenCalled();
+  });
+
+  it("selects a non-active project before revealing its tab", () => {
+    projectStoreFake.activeProject = { path: "/elsewhere" };
+    render(<RemoteProjectStatus project={project} statusState={state()} />);
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+    fireEvent.click(screen.getByText("shell one"));
+
+    expect(projectStoreFake.selectProject).toHaveBeenCalledWith(project);
+    expect(mockTabFocusRequest).toHaveBeenCalledWith({
+      kind: "terminal",
+      terminalId: "t1",
+      projectPath: "/srv",
+      host: "dev@box",
+    });
   });
 
   it("kills an inventory terminal through the store and refreshes the inventory", async () => {

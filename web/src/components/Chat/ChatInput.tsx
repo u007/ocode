@@ -5,7 +5,8 @@ import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, 
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
-import { Paperclip, X } from "lucide-react";
+import { Archive, FileText, Paperclip, Play, X } from "lucide-react";
+import QuickActionsBar, { type QuickActionItem } from "./QuickActionsBar";
 import { apiPath, authHeaders } from "@/api/client";
 import EditorContextChip from "./EditorContextChip";
 import { RESTORE_EVENT } from "../../lib/inputRestore";
@@ -369,6 +370,64 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const handleResume = useCallback(() => {
     resume();
   }, [resume]);
+
+  // ── Quick actions (strip below the send row) ──────────────────────────────
+  //
+  // Actions reuse the same dispatch/queue pipeline as a typed command so they
+  // behave identically while a turn is busy: they queue behind the running
+  // turn instead of interleaving. Unlike handleSend they deliberately never
+  // touch the composer draft or the @ref/editor context — clicking "Continue"
+  // must not clear what the user is already typing.
+  const runQuickDispatch = (text: string, kind: "command" | "message") => {
+    if (
+      effectiveBusy ||
+      drainingRef.current.has(sessionTabId) ||
+      getCompactionState(sessionTabId)?.status === "active"
+    ) {
+      pushQueued(sessionTabId, { kind, text });
+      setQueuedItems([...getQueue(sessionTabId)]);
+      return;
+    }
+    void dispatchCommand(text);
+  };
+
+  const runQuickAction = (id: string) => {
+    switch (id) {
+      case "compact":
+        runQuickDispatch("/compact", "command");
+        return;
+      case "recap":
+        runQuickDispatch("/recap", "command");
+        return;
+      case "continue":
+        // Context-aware: an interrupted turn is RESUMED (the pill is already
+        // labelled "Resume"); otherwise "continue" is a plain nudge message.
+        if (wasInterrupted) {
+          handleResume();
+          return;
+        }
+        runQuickDispatch("continue", "message");
+        return;
+      default:
+        return;
+    }
+  };
+
+  const quickActions: QuickActionItem[] = [
+    {
+      id: "compact",
+      label: "Compact",
+      icon: Archive,
+      title: compacting
+        ? "Compaction already in progress"
+        : "Compact conversation context (/compact)",
+      disabled: compacting,
+    },
+    wasInterrupted
+      ? { id: "continue", label: "Resume", icon: Play, title: "Resume the interrupted turn" }
+      : { id: "continue", label: "Continue", icon: Play, title: "Send 'continue' to keep the agent going" },
+    { id: "recap", label: "Recap", icon: FileText, title: "Generate session recap (/recap)" },
+  ];
 
   const updateDraft = (value: string) => {
     setInput(value);
@@ -844,6 +903,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           </Button>
         )}
       </div>
+      <QuickActionsBar actions={quickActions} onSelect={runQuickAction} />
     </div>
   );
 });

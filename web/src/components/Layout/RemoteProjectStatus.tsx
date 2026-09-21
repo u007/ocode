@@ -5,6 +5,7 @@ import type { AgentRun, Project } from "@/api/types";
 import type { RemoteHostStatusState } from "@/hooks/useRemoteHostStatus";
 import { useRemoteTerminals } from "@/hooks/useRemoteTerminals";
 import { eventBus } from "@/lib/eventBus";
+import { tabFocusActions } from "@/lib/tabFocus";
 import { projectSessionKey, useProjectState } from "@/stores/projectStore";
 import { getProjectTerminals, terminalDisplayTitle, useTerminalState } from "@/stores/terminalStore";
 
@@ -45,11 +46,23 @@ function useRunningSessions(): Set<string> {
  * The status hook is owned by the parent row (so its context menu can trigger
  * the same Restart); this component owns expansion and the terminal inventory.
  */
-export function RemoteProjectStatus({ project, statusState }: { project: Project; statusState: RemoteHostStatusState }) {
+export function RemoteProjectStatus({
+  project,
+  statusState,
+  onRevealTab,
+}: {
+  project: Project;
+  statusState: RemoteHostStatusState;
+  /** Called after a chat/terminal is revealed. The sidebar uses it to dismiss
+   *  the off-canvas drawer on mobile: the inventory's own controls stop
+   *  propagation, so the row's `onSelect` (which dismisses the drawer) never
+   *  runs, and the revealed tab would stay hidden behind the drawer. */
+  onRevealTab?: () => void;
+}) {
   const host = project.host ?? "";
   const [expanded, setExpanded] = useState(false);
   const { status, loading, busy, error, connect, restart } = statusState;
-  const { state: projectState, prefetchProjectSessions, openSessionTab } = useProjectState();
+  const { state: projectState, prefetchProjectSessions, openSessionTab, selectProject } = useProjectState();
   const { state: terminalState, attachTerminal, killTerminal: killTerminalTab } = useTerminalState();
   const running = useRunningSessions();
 
@@ -107,11 +120,36 @@ export function RemoteProjectStatus({ project, statusState }: { project: Project
 
   const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
 
+  // Opening a chat/terminal from this inventory must reveal it: the user needs
+  // to see the tab they just picked, not an unchanged main pane. This row lives
+  // outside App's tree, so it cannot set activeView/focusedKind itself — it
+  // queues the request in tabFocusStore, which the app shell applies once this
+  // project is the active one (see useTabFocusRequest in App.tsx). Selecting the
+  // project first is what makes this correct for a NON-active remote project:
+  // otherwise the session tab would be bound to whichever project is active and
+  // `resolveSessionHost` would route the remote session through the local server.
+  const revealTab = (focus: { kind: "chat" | "terminal"; terminalId?: string }) => {
+    const active = projectState.activeProject;
+    const isActive = active?.path === project.path && (active?.host ?? "") === (project.host ?? "");
+    if (!isActive) void selectProject(project);
+    tabFocusActions.request({ ...focus, projectPath: project.path, host: project.host });
+    onRevealTab?.();
+  };
+
   return (
     <div className="mt-0.5">
       <div
         className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer select-none"
-        onClick={() => setExpanded((v) => !v)}
+        // Stop propagation: this line is the inventory's expand/collapse
+        // control (role=button + aria-expanded), not a project selector — same
+        // as the Connect/Restart buttons inside it. Without this the click
+        // bubbled to the sidebar row's `onSelect`, which on mobile is what
+        // dismisses the drawer, so tapping the line to expand it closed the
+        // drawer before the Chats/Terminals list could be used.
+        onClick={(e) => {
+          e.stopPropagation();
+          setExpanded((v) => !v);
+        }}
         role="button"
         tabIndex={0}
         aria-expanded={expanded}
@@ -170,7 +208,8 @@ export function RemoteProjectStatus({ project, statusState }: { project: Project
                   onPointerDown={stop}
                   onPointerUp={(e) => {
                     e.stopPropagation();
-                    openSessionTab(s.id, s.title || s.id);
+                    revealTab({ kind: "chat" });
+                    openSessionTab(s.id, s.title || s.id, project.path);
                   }}
                 >
                   <MessageSquare className="w-3 h-3 shrink-0" />
@@ -202,6 +241,7 @@ export function RemoteProjectStatus({ project, statusState }: { project: Project
                     onClick={(e) => {
                       stop(e);
                       attachTerminal(project.path, host, t.id, title);
+                      revealTab({ kind: "terminal", terminalId: t.id });
                     }}
                   >
                     {title || `Terminal ${t.id.slice(0, 6)}`}

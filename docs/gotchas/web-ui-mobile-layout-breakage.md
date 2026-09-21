@@ -10,7 +10,7 @@ tags:
   - web-ui
   - sidebar
   - responsive
-timestamp: 2026-09-19T13:23:36Z
+timestamp: 2026-09-21T03:11:02Z
 ---
 # Web UI Mobile Layout Breakage (≤767px)
 
@@ -48,6 +48,8 @@ Five independent CSS/JS issues combined to break phone-width layouts (≤767px) 
 
 5. **`SpeechToolbar` wrapping bar on phones.** On mobile, `inset-x-2` + `flex-wrap` gives a full-width bar that wraps long content. No base `left-1/2` or translate — just `justify-center` and `gap-1.5`. At `sm` and above, the original centered single-line pill is reconstructed via `sm:inset-x-auto sm:left-1/2 sm:max-w-[calc(100vw-1rem)] sm:-translate-x-1/2 sm:flex-nowrap sm:justify-start sm:gap-2 sm:px-3`.
 
+6. **`ProjectSidebar` narrow-width row wrap (expanded row).** A separate narrow-width contract on the expanded `SortableProjectRow` (`web/src/components/Layout/ProjectSidebar.tsx`), independent of the mobile drawer. The row container is a wrapping flex line — `w-full justify-start flex-wrap gap-x-2 gap-y-1 px-2 h-auto py-2 text-sm` (was `gap-2`). The label block (`name` + `path` + `RemoteProjectStatus`) is `flex-1 min-w-[5rem] text-left` (was `min-w-0 flex-1`), holding a 5rem floor so the name never collapses. The trailing badge cluster (Bell "need attention", session count, streaming, stalled, pending, terminal beep) is `flex flex-wrap items-center gap-1 shrink-0 max-w-full` (added `flex-wrap max-w-full`). When the sidebar is too narrow for both a readable name and the badges, the badge cluster drops to a second line **under** the row instead of staying right and squeezing the name to nothing; it wraps as a unit (`shrink-0`) and, at the 160px minimum width, wraps internally rather than overflowing. Verified in headless Chromium at 160/200/240/280/320/400/500px — no horizontal overflow; 1 badge stays right down to 200px, 4–5 badges wrap at ≤240px. `cn()`/twMerge strips `buttonVariants`' `justify-center`, so the wrapped line is left-aligned. The collapsed icon rail (~line 1000) uses absolute overlays and is unaffected.
+
 ## Regression Tests
 
 All verified to **FAIL against the pre-fix code** by temporary mutation:
@@ -55,6 +57,7 @@ All verified to **FAIL against the pre-fix code** by temporary mutation:
 | File | Describe block | Cases |
 |------|---------------|-------|
 | `web/src/components/Layout/ProjectSidebar.test.tsx` | "ProjectSidebar mobile drawer" | 4 cases |
+| `web/src/components/Layout/ProjectSidebar.test.tsx` | "ProjectSidebar project indicators" — "wraps the badge cluster below a narrow row instead of squeezing the label" | pins the narrow-width CSS contract (row `flex-wrap`, label block `min-w-[5rem]`, cluster `shrink-0`) — jsdom has no layout engine, so it asserts the class contract; mutation-verified by reverting the two classes |
 | `web/src/components/Layout/UnifiedTabBar.test.tsx` | "stacks full-width session rows on phones…" | phones row stacking |
 | `web/src/components/Layout/TopTabs.test.tsx` | (new file) | 2 cases — menu button renders on mobile, hidden on desktop |
 | `web/src/components/Speech/SpeechToolbar.layout.test.tsx` | (new file) | asserts `flex-wrap`, `inset-x-2`, `sm:flex-nowrap`, `sm:left-1/2`, and no base `left-1/2` — mutation-verified to fail when `flex-wrap` is removed |

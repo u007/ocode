@@ -84,6 +84,19 @@ func mlxPythonPath() string {
 // call mlxPythonPath.
 func mlxPythonPATH() string { return mlxPythonPath() }
 
+// LoginShellPath returns the PATH of the user's interactive login shell,
+// resolved once per process. See mlxPythonPath for the probe's rationale and
+// hardening, and for why a Finder/Dock-launched desktop .app (launchd's bare
+// PATH — /usr/bin:/bin:/usr/sbin:/sbin) needs it.
+//
+// Exposed for callers that exec a user-installed CLI directly — e.g. the
+// advisor's `claude` subprocess in internal/agent — so they can resolve an
+// absolute binary path AND hand the child a PATH that can find the CLI's own
+// runtime (node). A failed probe yields the process's own PATH, so callers can
+// use this unconditionally without changing behavior for shell-launched
+// TUI/server runs.
+func LoginShellPath() string { return mlxPythonPath() }
+
 // mlxPythonBinaryQuoted returns mlxPythonBinary() shell-quoted for safe use
 // in a `bash -c` command line. Centralizes the Finder/Dock launchd PATH fix so
 // spawnMLXChatServer and spawnMLXServer share one call site and one comment.

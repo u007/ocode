@@ -5,7 +5,7 @@ import { PanelLeft, PanelLeftClose, PanelRight, PanelRightClose, Plus, X } from 
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, findProjectPathForTab, useProjectState } from "./stores/projectStore";
-import { TerminalProvider } from "./stores/terminalStore";
+import { TerminalProvider, useTerminalState } from "./stores/terminalStore";
 import { BrowserTabsProvider, useAllBrowserTabs, useBrowserTabs, useBrowserTabsDispatch } from "./stores/browserTabsStore";
 import { BrowserPanel } from "./components/Browser/BrowserPanel";
 import PreviewHost from "./components/Preview/PreviewHost";
@@ -14,6 +14,7 @@ import { usePreviewActivation } from "./components/Preview/usePreviewActivation"
 import { PREVIEW_CONTEXT_EVENT, type PreviewSelection } from "./lib/previewKind";
 import { useBrowserStore, browserActions, type StateKey } from "./lib/browserStore";
 import { loadViewStateForProject, saveViewStateForProject, type FocusedKind } from "./lib/viewPersistence";
+import { sessionAskSurfaceVisible } from "./lib/dialogScope";
 import { api, isRemoteSession, authToken, setAuthFailureHandler } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ActionErrorToast from "./components/common/ActionErrorToast";
@@ -71,8 +72,10 @@ import { notifyWailsRuntimeReady } from "./lib/wails";
 import { setPendingHighlight, peekPendingHighlight } from "./lib/fileSearchHighlight";
 import { eventBus } from "./lib/eventBus";
 import { OPEN_FILE_EVENT } from "./lib/fileLinks";
+import { tabFocusActions, useTabFocusRequest } from "./lib/tabFocus";
 import { useSessionStatus } from "./hooks/useSessionStatus";
 import { useTurnWatchdogAll } from "./hooks/useTurnWatchdog";
+import { useSessionRevisionSync } from "./hooks/useSessionRevisionSync";
 import FrontendMemoryReporter from "./lib/debug/frontendMemoryReporter";
 import { __setRevoker } from "./lib/browserStore";
 import { revokeBrowseSession } from "./api/client";
@@ -208,6 +211,11 @@ function HomeApp() {
     return map;
   }, [projectState, projectState.tabsByProject]);
   useTurnWatchdogAll(openSessionIds, sessionHosts);
+  // Cross-process sync: an ocode server sharing this project (desktop + dev
+  // server, TUI) writes the same session files, but its live events never
+  // reach our bus. Revalidate every open tab's stored revision so its writes
+  // — e.g. a /compact in the other UI — converge here too.
+  useSessionRevisionSync(openSessionIds, sessionHosts);
 
   // Declare the viewed projects on the shared bus (drives the server's
   // subscriber-aware git/spending emitters). All open tabs' projects count,
@@ -339,6 +347,37 @@ function HomeApp() {
     }, 300);
     return () => clearTimeout(t);
   }, [projectState.activeProject?.path, activeView, focusedKind]);
+
+  // Reveal a tab opened from outside this component (the remote project's
+  // chat/terminal inventory in the sidebar). Three properties make the reveal
+  // win over the per-project view restore above:
+  //  - it is declared AFTER that restore, so on a project switch the restore
+  //    has already run in the same commit (layout effects run in declaration
+  //    order); this pass then overwrites it (last writer wins — both setters
+  //    batch into one re-render);
+  //  - it is a PASSIVE effect, so it flushes before paint — no one-frame flash
+  //    of the restored view;
+  //  - it waits until the request's (path, host) is the active project,
+  //    otherwise it stays queued, so it can't be applied against the outgoing
+  //    project while the switch lands. The sidebar selects the project and
+  //    binds the tab to it as part of the same click.
+  const pendingTabFocus = useTabFocusRequest();
+  const { setActiveId: setActiveTerminalId } = useTerminalState();
+  useEffect(() => {
+    if (!pendingTabFocus) return;
+    if (pendingTabFocus.projectPath !== (projectState.activeProject?.path ?? "")) return;
+    // Path alone is not identity: a local and a remote project can share an
+    // absolute path. The producer (RemoteProjectStatus.revealTab) gates on
+    // (path, host); mirror that here so a request for the remote `/srv` is
+    // never applied to the local one.
+    if ((pendingTabFocus.host ?? "") !== (projectState.activeProject?.host ?? "")) return;
+    if (pendingTabFocus.kind === "terminal" && pendingTabFocus.terminalId) {
+      setActiveTerminalId(pendingTabFocus.projectPath, pendingTabFocus.terminalId, pendingTabFocus.host);
+    }
+    setActiveView("sessions");
+    setFocusedKind(pendingTabFocus.kind);
+    tabFocusActions.clear();
+  }, [pendingTabFocus, projectState.activeProject?.path, projectState.activeProject?.host, setActiveTerminalId]);
   useEffect(() => {
     const h = () => setActiveView("settings")
     window.addEventListener("ocode:open-settings-profiles", h)
@@ -658,6 +697,18 @@ function HomeApp() {
 
   const [filePickerOpen, setFilePickerOpen] = useState(false);
 
+  // Open a new chat tab AND reveal it — the keyboard/UI entry point shared by
+  // Ctrl/Cmd+N and Ctrl/Cmd+T's non-Sessions fallback. Mirrors UnifiedTabBar's
+  // "new chat" button (`handleNewChat`), which switches focus to the chat half
+  // before opening; without the view switch a shortcut pressed from
+  // Files/Settings would add the tab invisibly. `reuseIfEmpty` keeps the active
+  // blank `new-*` tab instead of stacking duplicates.
+  const openNewChat = useCallback(() => {
+    setActiveView("sessions");
+    setFocusedKind("chat");
+    openNewSessionTab(isNewSessionTabEmpty(activeTabId));
+  }, [activeTabId, openNewSessionTab]);
+
   useKeyboard({
     focusedKind,
     activeBrowserId,
@@ -667,7 +718,10 @@ function HomeApp() {
       browserActions.close(`tab:${id}`);
     },
     onNewSession: () => {
-      openNewSessionTab(isNewSessionTabEmpty(activeTabId));
+      // Ctrl/Cmd+N: the new-chat shortcut. Also reveals the chat half so it
+      // works from any view (the standard "new" binding; Ctrl/Cmd+T is the
+      // terminal counterpart).
+      openNewChat();
     },
     onNewTerminal: () => {
       // Ctrl/Cmd+T: on the merged sessions tab, always opens a new terminal
@@ -680,7 +734,7 @@ function HomeApp() {
         const proj = projectState.activeProject?.path ?? "";
         terminalRefs.current.get(proj)?.openTerminal();
       } else {
-        openNewSessionTab(isNewSessionTabEmpty(activeTabId));
+        openNewChat();
       }
     },
     onCommandPalette: () => setCmdOpen(true),
@@ -1035,6 +1089,18 @@ function HomeApp() {
     [projectState.tabsByProject],
   );
   const activeSessionTab = tabs.find((t) => t.id === activeTabId);
+  // Chat-session-bound dialogs (the permission/question asks, and any future
+  // session-scoped prompt) may only mount while this session's Chat sub-tab is
+  // actually on screen. Otherwise they render a full-screen Radix modal over a
+  // view the user is not working in — blocking the whole app for a session they
+  // cannot see. The pending ask stays in its per-session store slice, so it
+  // re-opens on return; the sidebar Bell badge and attention chime cover the
+  // out-of-sight case. See lib/dialogScope.
+  const sessionAskVisible = sessionAskSurfaceVisible({
+    activeView,
+    focusedKind,
+    activeSubTab: activeSessionTab?.activeSubTab,
+  });
   // Lazy display:none: keep visited tabs mounted (hidden) so scroll/virtualizer
   // state survives switches (instant CSS toggle), but avoid mounting all 40
   // panels eagerly on first load. Only tabs that have been visited once are
@@ -1111,7 +1177,11 @@ function HomeApp() {
         )}
 
         {/* Center content */}
-        <main className="flex flex-1 flex-col overflow-hidden">
+        <main
+          className="flex flex-1 flex-col overflow-hidden"
+          data-active-view={activeView}
+          data-focused-kind={focusedKind}
+        >
           <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)} className="flex flex-col flex-1 overflow-hidden">
             <div className="flex items-center justify-between gap-2 border-b pr-2">
               <div className="flex-1 min-w-0">
@@ -1602,8 +1672,9 @@ function HomeApp() {
         host={activeSessionHost}
       />
 
-      {/* Permission Dialog */}
-      {pendingPermission && (
+      {/* Permission Dialog — only while this session's Chat sub-tab is on
+          screen, so an ask never blocks a view the user is not working in. */}
+      {pendingPermission && sessionAskVisible && (
         <PermissionDialog
           open={true}
           tool={pendingPermission.tool}
@@ -1622,8 +1693,9 @@ function HomeApp() {
         />
       )}
 
-      {/* Question Dialog (agent `question` tool prompt) */}
-      {pendingQuestion && (
+      {/* Question Dialog (agent `question` tool prompt) — same surface gate as
+          the permission dialog above. */}
+      {pendingQuestion && sessionAskVisible && (
         <QuestionDialog
           key={pendingQuestion.request_id}
           open={true}

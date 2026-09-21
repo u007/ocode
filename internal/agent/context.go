@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/u007/ocode/internal/commands"
+	"github.com/u007/ocode/internal/gitexec"
 	"github.com/u007/ocode/internal/memory"
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/skill"
@@ -74,6 +75,10 @@ func gitShowHead(path string) string {
 func hasUnstagedChangesAt(root, path string) bool {
 	cmd := exec.Command("git", "diff", "--exit-code", "--", path)
 	cmd.Dir = root // "" inherits the process cwd
+	// GIT_OPTIONAL_LOCKS=0: this probe runs while reading context files, and a
+	// plain `git diff` refreshes the index (taking .git/index.lock) as a side
+	// effect.
+	cmd.Env = gitexec.Env()
 	// Exit code 0 = no diff, 1 = diff found, other = error
 	return cmd.Run() != nil
 }

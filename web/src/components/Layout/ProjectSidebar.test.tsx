@@ -119,6 +119,7 @@ vi.mock("../../stores/projectStore", () => ({
   useProjectState: () => ({
     state: stateFake,
     ...actionsFake,
+    openSessionTab: vi.fn(),
   }),
   projectSessionKey: (path: string, host?: string) => (host ? `${host}::${path}` : path),
 }));
@@ -131,8 +132,24 @@ vi.mock("../../stores/chatStore", () => ({
 vi.mock("../../stores/terminalStore", () => ({
   useTerminalState: () => ({
     state: terminalStateFake,
+    attachTerminal: vi.fn(),
+    killTerminal: vi.fn(() => Promise.resolve()),
   }),
   getProjectTerminals: () => ({ terminals: [], activeId: "", live: false }),
+}));
+
+// The remote inventory reads the host's terminal list; stub it so a connected
+// host renders a terminal row without a real fetch.
+const remoteTerminalsFake = vi.hoisted(() => ({
+  terminals: [] as { id: string; title: string; pid: number; started_at: string; attached: boolean }[],
+}));
+vi.mock("../../hooks/useRemoteTerminals", () => ({
+  useRemoteTerminals: () => ({
+    terminals: remoteTerminalsFake.terminals,
+    loading: false,
+    error: null,
+    refresh: vi.fn(),
+  }),
 }));
 
 const remoteHostFake = vi.hoisted(() => ({
@@ -346,6 +363,31 @@ describe("ProjectSidebar project indicators", () => {
     expect(screen.queryByTitle(/streaming/)).toBeNull();
     expect(screen.queryByTitle(/pending/)).toBeNull();
     expect(screen.queryByTitle(/beep/)).toBeNull();
+  });
+
+  it("wraps the badge cluster below a narrow row instead of squeezing the label", () => {
+    // jsdom has no layout engine, so this cannot assert geometry. It pins the
+    // CSS contract that produces the wrap: the row is a wrapping flex line
+    // (flex-wrap) and the label block holds a minimum width (min-w-[5rem])
+    // so a crowded row drops the badges to a second line rather than
+    // truncating the name to nothing. Verified in a real browser from
+    // 160px-500px: no horizontal overflow at any width; 4-5 badges wrap at
+    // <=240px while 1-3 stay on the right until ~200px.
+    stateFake.tabsByProject = { "/proj": [{ id: "s1" }, { id: "s2" }] };
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+
+    const nameEl = screen.getByText("proj");
+    const row = nameEl.closest('[role="button"]') as HTMLElement;
+    const labelBlock = nameEl.parentElement as HTMLElement;
+    const badgeCluster = screen.getByTitle("2 sessions open").parentElement as HTMLElement;
+
+    expect(row.className).toContain("flex-wrap");
+    expect(labelBlock.className).toContain("min-w-[5rem]");
+    // The badge cluster must not shrink (it wraps as a unit, never compresses).
+    expect(badgeCluster.className).toContain("shrink-0");
+    // The label is a direct flex child of the row, so it participates in the
+    // same wrap line as the badge cluster.
+    expect(row.contains(badgeCluster)).toBe(true);
   });
 });
 
@@ -572,6 +614,24 @@ describe("ProjectSidebar mobile drawer", () => {
     render(<ProjectSidebar isOpen onToggle={onToggle} isMobile />);
     fireEvent.click(screen.getByText("one"));
     expect(actionsFake.selectProject).toHaveBeenCalledTimes(1);
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("dismisses the drawer when a tab is opened from a remote project's inventory", async () => {
+    // Regression: the inventory's controls stop propagation, so the row's
+    // onSelect (the only other drawer-dismiss path) never ran and the revealed
+    // tab stayed hidden behind the drawer.
+    remoteHostFake.connected = true;
+    remoteTerminalsFake.terminals = [
+      { id: "t1", title: "shell one", pid: 1, started_at: "", attached: false },
+    ];
+    stateFake.projects = [remoteProject("/srv", "dev@box")];
+    const onToggle = vi.fn();
+    render(<ProjectSidebar isOpen onToggle={onToggle} isMobile />);
+
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+    fireEvent.click(await screen.findByText("shell one"));
+
     expect(onToggle).toHaveBeenCalledTimes(1);
   });
 

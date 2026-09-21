@@ -212,11 +212,11 @@ func (h *Handler) advisorFlag() bool {
 // projectHostFor returns the saved remote host for projectRoot when it is
 // registered as a remote (SSH/WSL) project on THIS server, else "" for a local
 // project. A non-empty result drives the environment prompt's "Project host"
-// line: per-project remote projects execute their chat agent on the local
-// server (only terminal/files/git are forwarded over SSH — see
-// docs/architecture/terminal-detach-reattach.md), so without the line the
-// <env> block mixed a remote project root with the local machine's
-// config/session/skill/runtime paths with no hint they are different machines.
+// line, which tells the model that the project root belongs to another machine
+// (remote-project chat traffic is proxied to that host's `ocode serve
+// --remote` process, so the project files, shell, home, and config/session
+// paths all resolve there — see
+// docs/superpowers/plans/2026-09-17-remote-project-agent-on-host/).
 //
 // h.projects.List() takes the store's own mutex, so this must be called with no
 // handler lock held (buildAgentSession already honors that).
@@ -329,10 +329,10 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 			pm.SetMode(mode)
 		}
 	}
-	// Tell the environment prompt when this project is a remote (SSH/WSL)
-	// project: the agent still runs locally, so without this the <env> block
-	// presented the remote root next to the local machine's paths. Empty for
-	// local projects, keeping their prompt byte-identical.
+	// Tag the environment prompt when this project is a remote (SSH/WSL)
+	// project, so the model knows the project root (and the paths around it)
+	// belong to another machine. Empty for local projects, keeping their prompt
+	// byte-identical.
 	ag.SetProjectHost(h.projectHostFor(projectRoot))
 	// Child (sub-agent) sessions persist next to their parent, in the same
 	// project's storage dir. The task tool calls this on every streamed
@@ -879,6 +879,18 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 	// ResetCancellation replaces a closed stop channel with a fresh one
 	// so the next Step isn't immediately cancelled.
 	as.agent.ResetCancellation()
+
+	// A new user-submitted turn is fresh direction, so clear the
+	// consecutive-subagent-dispatch counter the re-dispatch guard reads
+	// (agent.subagentDispatchLimit). Without this the guard counts across
+	// TURNS, not just within one runaway loop: the reset was wired into the
+	// TUI's send path only, so in the web/desktop (headless) server a resident
+	// agent that dispatched the same subagent N times was locked out for the
+	// rest of its life, across every later user message. Reset ONCE here, not
+	// per Step below, so an auto-continue chain inside one turn still shares
+	// the cap. (Cron does not need this: scheduler_runner builds a fresh agent
+	// per firing, whose counter starts at zero.)
+	as.agent.ResetSubagentDispatch()
 
 	// Auto-continue chain state (mirrors the TUI's autoContinueCount):
 	// consecutive auto-fired resumes within one runTurn call share the cap;
@@ -1534,6 +1546,10 @@ func (h *Handler) tryEnqueueInjection(sessionID, content string) bool {
 		return false
 	}
 	as.agent.EnqueueInjection(agent.Message{Role: "user", Content: content})
+	// Mid-turn injection is still NEW user input, so it must clear the
+	// consecutive-subagent-dispatch counter too — otherwise the guard keeps
+	// refusing with "without any new user input" after the user just sent one.
+	as.agent.ResetSubagentDispatch()
 	return true
 }
 

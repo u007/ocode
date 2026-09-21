@@ -1418,6 +1418,16 @@ func (h *Handler) HandleSetCompactConfig(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, req)
 }
 
+// HandleGetPermissionConcerns reports the catalog of judge concern categories the
+// user may switch off (Settings → Permissions, "Categories the judge must
+// enforce"). The catalog lives in the agent package next to the Jev rubric, so
+// the checkboxes, the rubric and the chat judge prompt share one vocabulary and
+// cannot drift; each entry carries the caveat for categories a deterministic Go
+// guard already covers.
+func (h *Handler) HandleGetPermissionConcerns(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"concerns": agent.RelaxableConcerns()})
+}
+
 // HandleGetAutoPermissionConfig reports the LLM auto-approval block.
 func (h *Handler) HandleGetAutoPermissionConfig(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()

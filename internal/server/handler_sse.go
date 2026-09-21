@@ -228,6 +228,10 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 	as.messages = append(as.messages, agent.Message{Role: "user", Content: message})
 	messages := append([]agent.Message(nil), as.messages...)
 	ag := as.agent
+	// New user turn = fresh direction: clear the consecutive-subagent-dispatch
+	// counter, exactly as runTurn does (this legacy endpoint is still used by
+	// Telegram and bypasses runTurn entirely).
+	ag.ResetSubagentDispatch()
 	sessModel := as.model
 
 	sendSSE(w, flusher, "session", map[string]string{"session_id": sessionID})

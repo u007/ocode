@@ -454,7 +454,10 @@ interface ProjectContextType {
   /** Warm a project's cached session list (hover preload). `force` revalidates
    *  even when the entry is still fresh. */
   prefetchProjectSessions: (project: Project, opts?: { force?: boolean }) => void;
-  openSessionTab: (sessionId: string, sessionTitle: string) => void;
+  /** Open (or focus) a session tab, bound to `projectPath` when given (for a
+   *  session picked from a non-active project's list) or to the active project
+   *  otherwise. */
+  openSessionTab: (sessionId: string, sessionTitle: string, projectPath?: string) => void;
   closeSessionTab: (sessionId: string) => void;
   addProject: (path: string) => Promise<void>;
   addRemoteProject: (host: string, path: string, port?: number) => Promise<void>;
@@ -712,13 +715,15 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     // ("+" button, Cmd/Ctrl+N, /new) via openNewSessionTab.
   }, [dispatch, refreshProjectSessions, store]);
 
-  /** Open (or focus) a session tab under the CURRENT active project. That
-   *  binding is what `resolveSessionHost` later reads to route every
-   *  session-scoped call, so a caller resuming a session from a non-active
-   *  project's list must thread that project through — a tab bound to the
-   *  local active project silently routes the resumed remote session locally. */
-  const openSessionTab = useCallback((sessionId: string, sessionTitle: string) => {
-    const path = state.activeProject?.path || "";
+  /** Open (or focus) a session tab. The tab is bound to `projectPath` when
+   *  given, else to the current active project. That binding is what
+   *  `resolveSessionHost` later reads to route every session-scoped call, so a
+   *  caller resuming a session from a non-active project's list must thread
+   *  that project through — a tab bound to the local active project silently
+   *  routes the resumed remote session locally. The owning project must
+   *  separately be made active for the tab to be visible. */
+  const openSessionTab = useCallback((sessionId: string, sessionTitle: string, projectPath?: string) => {
+    const path = projectPath || state.activeProject?.path || "";
     const tab: Tab = {
       id: sessionId,
       projectPath: path,

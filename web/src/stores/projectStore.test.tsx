@@ -608,4 +608,26 @@ describe("project session-list cache (snappy project switching)", () => {
     expect(result.current.state.tabsByProject["/remote"].map((t) => t.id)).toContain("remote-s1");
     expect(resolveSessionHost(result.current.state, "remote-s1")).toBe("dev@example.com");
   });
+
+  it("binds a session opened from a non-active project's list to that project", async () => {
+    const { result } = setup();
+    await act(async () => {});
+
+    // Active project is the local one; the user is browsing the remote
+    // project's chat list in the sidebar (RemoteProjectStatus).
+    await act(async () => {
+      result.current.dispatch({ type: "SET_PROJECTS", projects: [testProjectA, testRemoteProject] });
+      await result.current.selectProject(testProjectA);
+    });
+
+    await act(async () => {
+      result.current.openSessionTab("remote-s2", "Remote two", testRemoteProject.path);
+    });
+
+    // Threaded explicitly: with only the active project's path the tab would be
+    // filed under /proj-a and its session routed through the local server.
+    expect(result.current.state.tabsByProject["/remote"].map((t) => t.id)).toContain("remote-s2");
+    expect(resolveSessionHost(result.current.state, "remote-s2")).toBe("dev@example.com");
+    expect(result.current.state.tabsByProject["/proj-a"] ?? []).toHaveLength(0);
+  });
 });

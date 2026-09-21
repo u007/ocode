@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/u007/ocode/internal/gitexec"
 )
 
 // gitHunkRequest is the body of POST /api/git/hunk. Path may be project-
@@ -168,6 +170,9 @@ func gitDiffRawInDir(dir string, args ...string) (string, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	// Read-only probe, but `git diff` refreshes the index as a side effect, so
+	// it gets the same optional-lock opt-out as the status probes.
+	cmd.Env = gitexec.Env()
 	out, err := cmd.Output()
 	return strings.TrimRight(string(out), "\n"), err
 }
@@ -206,18 +211,25 @@ func splitDiffHunks(diff string) (header string, hunks []string) {
 // (--cached, --reverse, ...) are appended before the "-" that reads stdin.
 // --whitespace=nowarn keeps a user's whitespace policy from rejecting hunks
 // the UI is deliberately applying.
+//
+// `git apply --cached` takes .git/index.lock, so a hunk the user just clicked
+// must ride out a transient holder the same way `git add` does; a failed lock
+// acquisition means nothing was applied, which is what makes the retry safe.
 func gitApplyInDir(dir string, opts []string, patch string) error {
 	args := append([]string{"apply", "--whitespace=nowarn"}, opts...)
 	args = append(args, "-")
-	cmd := exec.Command("git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Stdin = strings.NewReader(patch)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%v:\n%s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return gitexec.WithLockRetry(func() error {
+		cmd := exec.Command("git", args...)
+		if dir != "" {
+			cmd.Dir = dir
+		}
+		cmd.Env = gitexec.Env()
+		cmd.Stdin = strings.NewReader(patch)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("%v:\n%s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	})
 }
 
 // isUntrackedPath reports whether the repo-relative spec is an untracked

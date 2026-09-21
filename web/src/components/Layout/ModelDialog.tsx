@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { api } from "../../api/client";
 import { useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import type { ModelInfo } from "../../api/types";
-import { advisorSelectionPayload, capProviderGroups, LOCAL_MODELS_PROVIDER, LOCAL_MODELS_UNCAPPED, partitionModelSections } from "./modelSelection";
+import { advisorSelectionPayload, capProviderGroups, claudeCodeAdvisorModelInfos, CLAUDE_CODE_PROVIDER, CLAUDE_CODE_SECTION_TITLE, LOCAL_MODELS_PROVIDER, LOCAL_MODELS_UNCAPPED, partitionModelSections } from "./modelSelection";
 import { reportActionError } from "../../lib/actionErrors";
 import { Search, Check, Star, X, RefreshCw } from "lucide-react";
 import {
@@ -56,11 +56,6 @@ interface Props {
 export default function ModelDialog({ open, onClose, purpose = "main", onPick, currentValues, sessionId, host }: Props) {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [search, setSearch] = useState("");
-  // The advisor's Claude Code toggle is owned by AdvisorForm; the dialog must
-  // carry the current value through a pick so the server's provider-change
-  // convention (provider set → claude_code = (provider === "claude-code"))
-  // cannot silently flip a toggle the user set explicitly.
-  const [advisorClaudeCode, setAdvisorClaudeCode] = useState(false);
   // Model id whose favorite toggle request is in flight; its star is disabled
   // until the response resyncs, so double-clicks can't race the shared file.
   const [pendingFavorite, setPendingFavorite] = useState<string | null>(null);
@@ -160,9 +155,19 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         return;
       }
       const next = await withLocalModels(base);
-      if (loadSeqRef.current === seq) setModels(next);
+      // The advisor picker prepends the Claude Code CLI section, mirroring the
+      // TUI (prependClaudeCodeSection in internal/tui/picker.go): Prepended —
+      // not appended — so the group renders first and is never the tail the
+      // 500-row render cap trims. Purpose-scoped, so no other picker ever
+      // offers a provider that only the advisor understands. The synthetic
+      // rows are part of `models`, so search filters them like any other row.
+      const rows =
+        purpose === "advisor" ? [...claudeCodeAdvisorModelInfos(), ...next] : next;
+      if (loadSeqRef.current === seq) setModels(rows);
     },
-    [hostArgs, withLocalModels],
+    // `purpose` is REQUIRED: the Claude Code rows are prepended only for the
+    // advisor picker, and a stale closure would leak (or omit) them.
+    [purpose, hostArgs, withLocalModels],
   );
 
   // Explicit live refresh (web counterpart of the TUI picker's ctrl+r). Only
@@ -213,9 +218,6 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     }).catch(console.error);
     api.getAdvisor(...hostArgs).then((res) => {
       dispatch({ type: "SET_ADVISOR_MODEL", model: res.model });
-    }).catch(console.error);
-    api.getAdvisorFull(...hostArgs).then((res) => {
-      setAdvisorClaudeCode(res.claude_code);
     }).catch(console.error);
     if (purpose === "permission") {
       api.getPermissionModel(...hostArgs).then((res) => {
@@ -327,10 +329,20 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           const selection = advisorSelectionPayload(selectedModel);
           dispatch({ type: "SET_ADVISOR_MODEL", model: selection.model });
           onPick?.(purpose, selection.model, selectedModel);
-          // Carry the current claude_code through the PUT: the server flips
-          // claude_code to (provider === "claude-code") whenever provider is
-          // set, which would silently disable CLI mode on any non-CLI pick.
-          persist("Changing the advisor model", () => api.setAdvisorFull({ ...selection, claude_code: advisorClaudeCode }, ...hostArgs));
+          // Mirror the TUI (`/advisor <provider/model>` → SaveAdvisorModel):
+          // the Claude Code CLI backend is ON exactly when the picked provider
+          // is the claude-code sentinel. Deriving it from the pick — rather
+          // than carrying the previous toggle through — is what makes the
+          // picker's "Claude Code (Read-Only CLI)" rows self-contained, and
+          // prevents claude_code from staying true after a registry pick (the
+          // advisor would otherwise shell out to `claude -p --model <non-claude
+          // -model>` instead of calling the picked provider's API).
+          persist("Changing the advisor model", () =>
+            api.setAdvisorFull(
+              { ...selection, claude_code: selectedModel.provider === CLAUDE_CODE_PROVIDER },
+              ...hostArgs,
+            ),
+          );
         }
         break;
       case "main":
@@ -438,7 +450,11 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
       case "advisor":
         dispatch({ type: "SET_ADVISOR_MODEL", model: "" });
         onPick?.(purpose, "");
-        persist("Clearing the advisor model", () => api.setAdvisorFull({ model: "", provider: "", claude_code: advisorClaudeCode }, ...hostArgs));
+        // Clearing provider too makes the server derive claude_code=false, so
+        // "not set" really reverts to the built-in default advisor (deepseek)
+        // rather than silently staying on the Claude Code CLI backend with its
+        // own default model. Mirrors the TUI's `/advisor default` reset.
+        persist("Clearing the advisor model", () => api.setAdvisorFull({ model: "", provider: "" }, ...hostArgs));
         break;
       case "main":
         if (sessionId && sessionId.startsWith("new-")) {
@@ -641,9 +657,14 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           {Object.entries(cappedProviders.groups).map(([provider, providerModels]) => (
             <div key={provider} className="mb-4">
               <div className="px-2 py-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                {provider}
+                {provider === CLAUDE_CODE_PROVIDER ? CLAUDE_CODE_SECTION_TITLE : provider}
               </div>
-              {providerModels.map((m) => renderRow(m))}
+              {providerModels.map((m) =>
+                // The Claude Code rows show the full "claude-code/<model>" id,
+                // exactly as the TUI's section does (there is no real registry
+                // provider header to disambiguate them).
+                renderRow(m, provider === CLAUDE_CODE_PROVIDER ? { withProvider: true } : undefined),
+              )}
             </div>
           ))}
           {cappedProviders.hidden > 0 && (

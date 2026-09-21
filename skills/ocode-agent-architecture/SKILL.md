@@ -162,6 +162,8 @@ TaskTool.Execute(args):
 **TaskCancelTool** (`task_cancel.go`) — cancels a background task by run ID.
 **Task DAG** (`task_dag.go`) — in-batch dependency scheduling when `task` calls declare `id`/`depends_on`.
 
+**Dispatch-guard lifecycle (step 3 above) — wire the reset into EVERY user-input entry point.** `subagentDispatchCount` only clears via `Agent.ResetSubagentDispatch()`; the counter increments per consecutive same-name dispatch and refuses past `subagentDispatchLimit` (3). It also resets implicitly when a *different* agent name is dispatched. The reset was originally wired into the TUI send paths only, so the headless server accumulated the count across turns and permanently locked an agent type out of the web/desktop UI. The three server entry points that accept user input are `Handler.runTurn` (HandleChat/HandleSendMessage), `HandleChatStream` (`handler_sse.go`, the legacy SSE endpoint still used by Telegram), and `tryEnqueueInjection` (a message spliced into the running turn) — all three must reset. Reset once per user turn, NOT per `Step`, or an auto-continue chain inside one turn would defeat the cap. Cron needs no reset: `scheduler_runner` builds a fresh agent per firing (counter starts at zero). Regression: `internal/server/agent_session_dispatch_guard_test.go`.
+
 ## 6. Compact / truncate
 
 **Compact** (`compact.go`): When the message list approaches the model's context window, `MaybeCompactAsync()` splices older turns, summarises them via a small-model LLM call, and replaces them in the message list. The spliced structure is: prefix (system + first user turn) + compacted middle + suffix (recent turns). Runs async to avoid blocking the main loop.

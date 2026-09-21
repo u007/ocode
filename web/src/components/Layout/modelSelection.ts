@@ -22,6 +22,52 @@ export function advisorSelectionPayload(
   };
 }
 
+/**
+ * Sentinel provider the server interprets as the Claude Code CLI backend.
+ * `PUT /api/advisor` derives `claude_code` from `provider === "claude-code"`
+ * (internal/server/handler_config.go), and the agent's AdvisorTool then shells
+ * out to `claude -p` with the configured model instead of calling a provider
+ * API (internal/agent/advisor_tool.go). The provider half of a claude-code
+ * selection is therefore never used to build an LLM client.
+ */
+export const CLAUDE_CODE_PROVIDER = "claude-code";
+
+/** Header for the Claude Code CLI group in the advisor picker. Mirrors the
+ *  TUI's "› Claude Code (Read-Only CLI)" section title (internal/tui/picker.go). */
+export const CLAUDE_CODE_SECTION_TITLE = "Claude Code (Read-Only CLI)";
+
+/**
+ * Claude model aliases offered under the Claude Code CLI section. MUST stay in
+ * sync with the `claudeCodeModels` list in `prependClaudeCodeSection`
+ * (internal/tui/picker.go) — both name the aliases the `claude` CLI accepts.
+ */
+export const CLAUDE_CODE_ADVISOR_MODELS: readonly string[] = [
+  "claude-sonnet-4-6",
+  "claude-sonnet-5",
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-opus-5",
+  "claude-haiku-4-5",
+  "claude-fable-5",
+];
+
+/**
+ * Picker rows for the advisor's Claude Code CLI section. The models.dev
+ * registry has no `claude-code` provider, so these are synthetic ModelInfo
+ * entries; giving them the normal shape lets them flow through the same
+ * search/filter/group/render path as registry models. `name` carries the full
+ * "claude-code/<model>" id the TUI displays, `model` the bare alias the server
+ * persists (see advisorSelectionPayload).
+ */
+export function claudeCodeAdvisorModelInfos(): ModelInfo[] {
+  return CLAUDE_CODE_ADVISOR_MODELS.map((model) => ({
+    name: `${CLAUDE_CODE_PROVIDER}/${model}`,
+    model,
+    provider: CLAUDE_CODE_PROVIDER,
+    active: false,
+  }));
+}
+
 /** The model list split into the picker's display sections. */
 export interface ModelSections {
   /** Recently used models, in saved order (first section in the picker). */

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   routeBusEnvelope,
   reconcileOpenSessions,
+  revalidateSession,
   RECONCILE_PAGE_SIZE,
   LIVE_DELTA_FLUSH_MS,
   cancelLiveDeltas,
@@ -9,6 +10,7 @@ import {
   __resetLastAppliedSeqForTests,
   type SessionEventRouter,
 } from "./sessionEvents";
+import { noteSessionRevision, resetSessionRevisions } from "./sessionRevision";
 import type { BusEnvelope } from "./eventBus";
 import type { ChatAction, ChatState } from "../stores/chatStore";
 import { chatReducer, initialState } from "../stores/chatStore";
@@ -916,5 +918,129 @@ describe("pending-ask recovery from the live error frame", () => {
     routeBusEnvelope(env("turn_error", { data: { error: "agent error: upstream" } }), router);
     await new Promise((r) => setTimeout(r, 0));
     expect(mockGetSessionState).not.toHaveBeenCalled();
+  });
+});
+
+describe("revalidateSession", () => {
+  beforeEach(() => {
+    mockGetSessionState.mockReset();
+    mockGetSession.mockReset();
+    resetSessionRevisions();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetSessionRevisions();
+  });
+
+  it("only polls state (no dispatch, no fetch) when the stored revision is unchanged", async () => {
+    noteSessionRevision("s1", undefined, "rev-1");
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 1,
+      revision: "rev-1",
+    });
+    const { router, actions } = makeRouter(["s1"]);
+    await revalidateSession("s1", router);
+
+    expect(mockGetSessionState).toHaveBeenCalledWith("s1", undefined);
+    expect(mockGetSession).not.toHaveBeenCalled();
+    expect(actions).toEqual([]);
+  });
+
+  it("refetches and merges the transcript when the stored revision moved", async () => {
+    noteSessionRevision("s1", undefined, "rev-1");
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 2,
+      revision: "rev-2",
+    });
+    mockGetSession.mockResolvedValue({
+      messages: [{ role: "assistant", content: "compact summary" }],
+      total: 1,
+    });
+    const { router, actions } = makeRouter(["s1"]);
+    await revalidateSession("s1", router);
+
+    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, undefined);
+    const merge = actions.find(
+      (a): a is Extract<ChatAction, { type: "MERGE_SNAPSHOT" }> => a.type === "MERGE_SNAPSHOT",
+    );
+    expect(merge).toBeTruthy();
+    expect(merge?.total).toBe(1);
+    expect(merge?.messages[0].content).toBe("compact summary");
+  });
+
+  it("does nothing beyond the state poll when there is no recorded baseline", async () => {
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 1,
+      revision: "rev-1",
+    });
+    const { router } = makeRouter(["s1"]);
+    await revalidateSession("s1", router);
+    expect(mockGetSession).not.toHaveBeenCalled();
+  });
+
+  it("skips entirely while this client's own turn is running (the live bus owns it)", async () => {
+    noteSessionRevision("s1", undefined, "rev-1");
+    const { router } = makeRouter(["s1"]);
+    router.dispatch({ type: "SET_TURN_STATE", sessionId: "s1", turnActive: true });
+    await revalidateSession("s1", router);
+
+    expect(mockGetSessionState).not.toHaveBeenCalled();
+    expect(mockGetSession).not.toHaveBeenCalled();
+  });
+
+  it("routes both fetches through the session's host", async () => {
+    noteSessionRevision("s1", "devbox", "rev-1");
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 1,
+      revision: "rev-2",
+    });
+    mockGetSession.mockResolvedValue({ messages: [], total: 0 });
+    const { router } = makeRouter(["s1"], undefined, () => "devbox");
+    await revalidateSession("s1", router);
+
+    expect(mockGetSessionState).toHaveBeenCalledWith("s1", "devbox");
+    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, "devbox");
+  });
+
+  it("arms the spinner when another process reports the turn active", async () => {
+    noteSessionRevision("s1", undefined, "rev-1");
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: true,
+      last_seq: 1,
+      revision: "rev-1",
+    });
+    const { router, getState } = makeRouter(["s1"]);
+    await revalidateSession("s1", router);
+
+    expect(getState().sessions["s1"]?.turnActive).toBe(true);
+    expect(mockGetSession).not.toHaveBeenCalled();
+  });
+
+  it("hydrates a live pending ask without a transcript refetch", async () => {
+    noteSessionRevision("s1", undefined, "rev-1");
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 1,
+      revision: "rev-1",
+      pending_asks: {
+        permissions: [{ request_id: "call-1", tool: "bash", command: "rm -rf build" }],
+      },
+    });
+    const { router, getState } = makeRouter(["s1"]);
+    await revalidateSession("s1", router);
+
+    expect(getState().sessions["s1"]?.pendingPermission?.request_id).toBe("call-1");
+    expect(mockGetSession).not.toHaveBeenCalled();
   });
 });

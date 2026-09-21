@@ -130,6 +130,11 @@ const continueVerdictJSON = `{"model":"jev-latest","answers":{"verdict":{"type":
 
 const endVerdictJSON = `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"end","probabilities":{"continue":0.1,"end":0.9},"confidence":0.95},"reason":{"type":"choice","choice":"finished","probabilities":{},"confidence":0.8}},"usage":{"input_tokens":5,"output_tokens":1}}`
 
+// awaitingUserVerdictJSON is the contradictory shape the veto exists for: a
+// high-confidence "continue" verdict with an awaiting_user reason (the reply
+// ends by asking the user a question or requesting feedback).
+const awaitingUserVerdictJSON = `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"continue","probabilities":{"continue":0.8,"end":0.2},"confidence":0.95},"reason":{"type":"choice","choice":"awaiting_user","probabilities":{},"confidence":0.9}},"usage":{"input_tokens":5,"output_tokens":1}}`
+
 // TestRunTurnAutoContinueStepLimitResumes covers the hard signal: with
 // maxSteps=1 every Step round trips the cap, and an enabled auto-continue
 // keeps resuming until the chain cap, appending the resume prompt as a real
@@ -288,6 +293,34 @@ func TestRunTurnAutoContinueTypesafeEndVerdictNoResume(t *testing.T) {
 	for _, m := range as.messages {
 		if m.Role == "user" && m.Content == "Continue the task from where you left off; do not just repeat any previous summary." {
 			t.Fatal("resume prompt must not exist after an end verdict")
+		}
+	}
+}
+
+// TestRunTurnAutoContinueAwaitingUserVetoesContinue: a reply that ends by
+// asking the user a question must not be auto-resumed, even when the triage
+// verdict is a high-confidence "continue" — the typed awaiting_user reason
+// vetoes it. The turn ends with an outcome notice and no resume prompt.
+func TestRunTurnAutoContinueAwaitingUserVetoesContinue(t *testing.T) {
+	url, bodies := newSystemoneStub(t, awaitingUserVerdictJSON)
+	h, id, cl := autoContinueTestServer(t, url)
+	h.mu.Lock()
+	h.cfg.Ocode.MaxSteps = 0
+	h.mu.Unlock()
+	as := h.lookupAgentSession(id)
+	as.agent.SetMaxSteps(0)
+	cl.handler = func(call int) string { return "Should I use Redis or an in-process LRU?" }
+
+	_, err := h.runTurn(id, as, "add caching", turnOptions{})
+	if err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+	if len(bodies()) == 0 {
+		t.Fatal("triage judge was never consulted")
+	}
+	for _, m := range as.messages {
+		if m.Role == "user" && m.Content == "Continue the task from where you left off; do not just repeat any previous summary." {
+			t.Fatalf("resume prompt must not exist when the reply is awaiting the user; messages=%v", as.messages)
 		}
 	}
 }

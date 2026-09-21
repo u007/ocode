@@ -228,6 +228,8 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 
 	minConfidence := a.resolveAutoJudgeMinConfidence()
 	roots := a.permissions.AllowedRoots()
+	relaxedKeys := a.relaxedConcernKeys()
+	relaxed := a.relaxedConcernSet()
 
 	payload := map[string]interface{}{
 		"tool_name":         "bash",
@@ -245,6 +247,11 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 			"text":      source,
 		},
 	}
+	if len(relaxedKeys) > 0 {
+		// Structured mirror of the prompt guidance below, so a model that reads
+		// the request JSON first still sees which categories the user accepted.
+		payload["relaxed_concerns"] = relaxedKeys
+	}
 	if ie.RemoteSpec != "" {
 		payload["remote_spec"] = ie.RemoteSpec
 	}
@@ -252,6 +259,11 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	if err != nil {
 		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_payload_fail err=%v", err))
 		return false, "could not build interpreter consultation payload", "", false
+	}
+
+	relaxedGuidance := ""
+	if len(relaxedKeys) > 0 {
+		relaxedGuidance = fmt.Sprintf("\n\t- The user has switched OFF enforcement of these concern categories: %s.\n\t  Report decision \"allow\" when the ONLY disqualifying effect is one of them, and keep\n\t  listing the effects accurately. Hard-blocked commands and subprocesses, and every\n\t  category you have NOT relaxed, are still refused by Go after your answer.", strings.Join(relaxedKeys, ", "))
 	}
 
 	prompt := fmt.Sprintf(`You are a permission gatekeeper for an AI coding assistant.
@@ -308,7 +320,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	  not belong there.
 	- Put ANYTHING you cannot resolve with confidence (dynamic paths, unresolved
 	  imports, eval/exec, dynamic code loading, truncated source) into "unknown".
-	- Use decision "ask" whenever you are not fully confident.`, string(payloadJSON))
+	- Use decision "ask" whenever you are not fully confident.%s`, string(payloadJSON), relaxedGuidance)
 
 	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.Prompt != "" {
 		prompt = a.config.Ocode.Permissions.Auto.Prompt + "\n\n" + prompt
@@ -339,9 +351,21 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	}
 	summary = strings.TrimSpace(resp.Summary)
 
-	if allowed, reason := a.verifyInterpreterEffects(ie, &resp, minConfidence, allowDestructive, truncated); !allowed {
+	if allowed, reason := a.verifyInterpreterEffectsWith(ie, &resp, minConfidence, allowDestructive, truncated, relaxed); !allowed {
 		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_reject lang=%s conf=%.2f reason=%s", ie.Language, resp.Confidence, reason))
 		return false, reason, summary, true
+	}
+
+	// A durable grant must not outlive the opt-out that produced it: when this
+	// allow NEEDED the user's relaxation (with everything enforced the same
+	// response would have been refused), grant this call only. Re-ticking the
+	// category then takes effect on the next invocation instead of being
+	// shadowed by a persisted exact grant.
+	if len(relaxed) > 0 {
+		if strictOK, _ := a.verifyInterpreterEffectsWith(ie, &resp, minConfidence, allowDestructive, truncated, nil); !strictOK {
+			a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_relaxed_allow lang=%s mode=%s conf=%.2f", ie.Language, ie.SourceMode, resp.Confidence))
+			return true, resp.Summary, summary, true
+		}
 	}
 
 	if ie.SourceMode == "heredoc" || ie.SourceMode == "inline_eval" {
@@ -369,9 +393,23 @@ func buildPermissionInterpreterRetryPrompt(parseErr error, finalText string) str
 	)
 }
 
-// verifyInterpreterEffects applies the deterministic acceptance rules. All must
-// hold for an auto-allow; the first failure returns a human-readable reason.
+// verifyInterpreterEffects applies the deterministic acceptance rules using this
+// agent's configured concern opt-outs (see relaxedConcernSet). All must hold for
+// an auto-allow; the first failure returns a human-readable reason.
 func (a *Agent) verifyInterpreterEffects(ie *InterpreterExec, resp *interpreterModelResponse, minConfidence float64, allowDestructive, truncated bool) (bool, string) {
+	return a.verifyInterpreterEffectsWith(ie, resp, minConfidence, allowDestructive, truncated, a.relaxedConcernSet())
+}
+
+// verifyInterpreterEffectsWith is verifyInterpreterEffects with the relaxed
+// categories supplied explicitly, so a caller can also ask "would this have
+// passed with everything enforced?". askPermissionModelInterpreter uses that to
+// refuse to persist a durable grant produced by a relaxation. relaxed may be
+// nil (everything enforced), which is the pre-opt-out behaviour.
+//
+// A relaxed category can never switch off the safety floor: the model's own
+// "allow" decision, the confidence floor, a hard-blocked raw command, and a
+// hard-blocked or harmful subprocess are always enforced.
+func (a *Agent) verifyInterpreterEffectsWith(ie *InterpreterExec, resp *interpreterModelResponse, minConfidence float64, allowDestructive, truncated bool, relaxed map[string]bool) (bool, string) {
 	pm := a.permissions
 	if strings.ToLower(strings.TrimSpace(resp.Decision)) != "allow" {
 		return false, "model deferred to human approval"
@@ -379,10 +417,10 @@ func (a *Agent) verifyInterpreterEffects(ie *InterpreterExec, resp *interpreterM
 	if resp.Confidence < minConfidence {
 		return false, fmt.Sprintf("confidence %.2f below threshold %.2f", resp.Confidence, minConfidence)
 	}
-	if len(resp.Effects.Unknown) > 0 {
+	if len(resp.Effects.Unknown) > 0 && !relaxed["truncated_or_unknown"] {
 		return false, "unresolved effects: " + strings.Join(resp.Effects.Unknown, ", ")
 	}
-	if truncated {
+	if truncated && !relaxed["truncated_or_unknown"] {
 		return false, "source truncated — cannot fully analyze"
 	}
 	if isHardBlockedCommand(ie.RawCommand) {
@@ -395,10 +433,10 @@ func (a *Agent) verifyInterpreterEffects(ie *InterpreterExec, resp *interpreterM
 			if p == "" {
 				continue
 			}
-			if !pm.IsPathWithinAllowedRoots(p) {
+			if !relaxed["outside_allowed_roots"] && !pm.IsPathWithinAllowedRoots(p) {
 				return false, fmt.Sprintf("%s path outside allowed roots: %s", kind, p)
 			}
-			if isSensitivePath(p) {
+			if !relaxed["secrets"] && isSensitivePath(p) {
 				return false, fmt.Sprintf("%s touches sensitive path: %s", kind, p)
 			}
 		}
@@ -423,23 +461,26 @@ func (a *Agent) verifyInterpreterEffects(ie *InterpreterExec, resp *interpreterM
 		if sub == "" {
 			continue
 		}
-		bin, wrappedAsk := classifyInterpreterSubprocess(sub)
-		if wrappedAsk {
-			return false, "subprocess requires review: " + sub
-		}
-		if bin == "" {
-			continue
-		}
+		// Hard-blocked and harmful subprocesses are never auto-granted, relaxed or
+		// not, so they are checked BEFORE the relaxable classification below — a
+		// destructive form behind a wrapper cannot ride a relaxed category.
 		if isHardBlockedCommand(sub) {
 			return false, "subprocess hard-blocked: " + sub
 		}
 		if IsHarmfulBashCommand(sub) {
 			return false, "subprocess harmful: " + sub
 		}
-		if isInterpreterSubprocessBinary(bin) {
+		bin, wrappedAsk := classifyInterpreterSubprocess(sub)
+		if wrappedAsk && !relaxed["subprocess_or_dynamic_code"] {
+			return false, "subprocess requires review: " + sub
+		}
+		if bin == "" {
+			continue
+		}
+		if isInterpreterSubprocessBinary(bin) && !relaxed["subprocess_or_dynamic_code"] {
 			return false, "subprocess spawns shell/interpreter: " + sub
 		}
-		if isNetworkSubprocessBinary(bin) && !subprocessTargetsLocalhost(sub) {
+		if isNetworkSubprocessBinary(bin) && !subprocessTargetsLocalhost(sub) && !relaxed["network"] {
 			return false, "subprocess has network capability: " + sub
 		}
 	}
@@ -456,11 +497,11 @@ func (a *Agent) verifyInterpreterEffects(ie *InterpreterExec, resp *interpreterM
 		if isLocalhostDomain(domain) {
 			continue
 		}
-		if pm.webfetchDomains[domain] != PermissionAllow {
+		if !relaxed["network"] && pm.webfetchDomains[domain] != PermissionAllow {
 			return false, "network target not allowed by policy: " + host
 		}
 	}
-	if (len(resp.Effects.Deletes) > 0 || len(resp.Effects.DBDestructive) > 0) && !allowDestructive {
+	if (len(resp.Effects.Deletes) > 0 || len(resp.Effects.DBDestructive) > 0) && !allowDestructive && !relaxed["destructive"] {
 		return false, "destructive effects require allow_destructive"
 	}
 	return true, ""

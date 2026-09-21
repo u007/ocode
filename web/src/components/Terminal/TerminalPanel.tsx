@@ -21,6 +21,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { registerFileLinkProvider } from "./terminalLinkProvider";
+import { buildTerminalOptions } from "./terminalOptions";
 import TerminalFindBar from "./TerminalFindBar";
 import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
 import { apiPath, apiWsPath, remoteApiBase, authHeaders, authToken, isRemoteSession } from "@/api/client";
@@ -630,27 +631,9 @@ export default function TerminalPanel({
     if (!el) return;
 
     const savedBuffer = loadTerminalBuffer(id);
-    const term = new Terminal({
-      cursorBlink: true,
-      scrollback: scrollbackLines,
-      fontFamily,
-      fontSize,
-      // Wheel/trackpad scrolled ~1 row per notch at the default
-      // scrollSensitivity (1), which feels very slow on large scrollback.
-      // 3x normal + 5x Alt-held fast scroll, instant (no smooth animation
-      // lag) keeps long-history navigation responsive.
-      scrollSensitivity: 3,
-      fastScrollSensitivity: 5,
-      smoothScrollDuration: 0,
-      theme: { background: "#18181b", foreground: "#e4e4e7" },
-      // Construct at the size the buffer was serialized at, so restoring it
-      // doesn't reflow/garble the text before the ResizeObserver-driven fit()
-      // ever runs. Falls back to xterm's defaults for legacy saved buffers
-      // (or no buffer) that carry no cols/rows.
-      ...(savedBuffer?.cols && savedBuffer?.rows
-        ? { cols: savedBuffer.cols, rows: savedBuffer.rows }
-        : {}),
-    });
+    const term = new Terminal(
+      buildTerminalOptions({ scrollbackLines, fontFamily, fontSize, savedBuffer }),
+    );
     const fit = new FitAddon();
     term.loadAddon(fit);
     const serialize = new SerializeAddon();

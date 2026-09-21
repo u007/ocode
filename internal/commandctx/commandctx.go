@@ -16,13 +16,17 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/u007/ocode/internal/gitexec"
 	"github.com/u007/ocode/internal/lsp"
 )
 
-// gitRun executes a git command in workDir and returns trimmed stdout.
+// gitRun executes a git command in workDir and returns trimmed stdout. The
+// child runs with GIT_OPTIONAL_LOCKS=0 so these ad-hoc prompt-building diffs
+// never take the index lock away from the user's own git commands.
 func gitRun(workDir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = workDir
+	cmd.Env = gitexec.Env()
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err

@@ -23,6 +23,7 @@ import (
 	"github.com/atotto/clipboard"
 	"github.com/mattn/go-runewidth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/gitexec"
 )
 
 type filesPreviewMsg struct {
@@ -1872,7 +1873,12 @@ func (m *filesModel) refreshGitStatus() {
 	if _, err := os.Stat(filepath.Join(m.workDir, ".git")); err != nil {
 		return
 	}
-	out, err := exec.Command("git", "-C", m.workDir, "status", "--short").Output()
+	// GIT_OPTIONAL_LOCKS=0: a plain `git status` refreshes the index (taking
+	// .git/index.lock) as a side effect, and this badge refresh runs on a UI
+	// ticker — it must not contend with the user's own git commands.
+	cmd := exec.Command("git", "-C", m.workDir, "status", "--short")
+	cmd.Env = gitexec.Env()
+	out, err := cmd.Output()
 	if err != nil {
 		m.statusMsg = "git status failed: " + err.Error()
 		return
@@ -1915,7 +1921,11 @@ func autoRefreshFilesGitStatusCmd(workDir string) tea.Cmd {
 		if _, err := os.Stat(filepath.Join(workDir, ".git")); err != nil {
 			return filesGitStatusUpdateMsg{gitStatus: map[string]string{}}
 		}
-		out, err := exec.Command("git", "-C", workDir, "status", "--short").Output()
+		// Same optional-lock opt-out as refreshGitStatus: this is a background
+		// ticker, not a user action.
+		cmd := exec.Command("git", "-C", workDir, "status", "--short")
+		cmd.Env = gitexec.Env()
+		out, err := cmd.Output()
 		if err != nil {
 			return filesGitStatusUpdateMsg{gitStatus: map[string]string{}}
 		}

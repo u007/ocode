@@ -1,5 +1,44 @@
 # TODO
 
+## Speech-to-Text (in-app dictation) — design approved, not implemented (2026-09-21)
+
+Design spec committed at
+`docs/superpowers/specs/2026-09-21-speech-to-text-design.md` (`7303fbc3`);
+the implementation plan has not been written yet.
+
+- **Runtime:** `sherpa-onnx` inside a pinned per-manifest Python venv,
+  mirroring the piper/kokoro engines in `internal/tts`. One package covers
+  canary, parakeet, whisper, SenseVoice, Silero VAD and streaming zipformer.
+  cgo (sherpa-onnx Go bindings) was rejected because the Makefile
+  cross-builds Windows+macOS+Linux and the only cgo file in the repo is
+  `cmd/ocode-desktop/native_darwin.go`.
+- **v1 catalog:** `canary-180m-flash` (default; en/de/fr/es + translation,
+  ~207 MB int8), `parakeet-tdt-0.6b-v3` (25 languages), `whisper-base`
+  (99 languages), `browser-native`. M1 ships catalog metadata for all four
+  but only canary is installable and validated end-to-end.
+- **Divergence from TTS:** STT needs a *warm, long-lived* worker process
+  (model load is ~0.5-2 s) rather than one process per request. Registered
+  with `tool.ProcessSupervisor`, idle-evicted, and reusing the
+  `ORT_DISABLE_TELEMETRY` hardening from `internal/tts/synth_env.go`.
+- **Capture:** `getUserMedia` + AudioWorklet at 16 kHz mono is the single
+  capture path for both the browser SPA and the Wails webview, so the Go
+  side needs no audio decoder (no ffmpeg, no cgo codec).
+- **Out of scope for v1:** system-wide push-to-talk hotkey, capture while
+  ocode is unfocused, pasting into other apps (macOS Accessibility),
+  streaming partials, TUI voice input.
+- **Verify before/while implementing** (left unresolved in the spec): the
+  exact `sherpa-onnx` wheel version and wheel availability per host triplet;
+  parakeet-v3/whisper-base HF file lists + SHA-256s (canary is pinned);
+  whether the Web Speech API is usable inside the Wails webview at all;
+  measured CPU latency per platform.
+- **Likeliest silent failure:** macOS mic permission. `scripts/bundle-macos.sh`
+  generates a minimal Info.plist with no `NSMicrophoneUsageDescription`, and
+  Wails ignores the `Permissions` map on macOS (wails#6067) — needs the
+  `com.apple.security.device.audio-input` entitlement and testing inside the
+  `.app`, not the bare dev binary.
+- Inherits the Piper TTS caveats below: pip wheels are version-pinned, not
+  hash-pinned, and only darwin/arm64 is validated live.
+
 ## Remote projects (agent on host) — follow-ups (2026-09-17)
 
 - Move terminal, Files-tab, git, and `!`-command traffic to the remote

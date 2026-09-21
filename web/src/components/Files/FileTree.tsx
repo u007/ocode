@@ -30,6 +30,7 @@ import {
   Columns2,
   Copy,
   Eye,
+  EyeOff,
   File,
   FilePlus2,
   Files,
@@ -55,7 +56,8 @@ import { dispatchOpenPreview, previewKindForPath } from "../../lib/previewKind";
 import SecretActionDialog from "./SecretActionDialog";
 import { loadFileTreeView, saveFileTreeView, type FileTreeViewMode } from "./fileTreeViewPersistence";
 import { loadFileSearchFilters, saveFileSearchFilters } from "./fileSearchFiltersPersistence";
-import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles } from "./showHiddenFilesPersistence";
+import { fileTreeRootKey, loadExpandedDirs, saveExpandedDirs } from "./fileTreeExpansionPersistence";
+import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles, showHiddenFilesProjectKey } from "./showHiddenFilesPersistence";
 
 // Suppress unused-import errors for in-progress secret/file-tree work (dirty
 // working tree from parallel feature). The build is strict (`noUnusedLocals`).
@@ -333,6 +335,10 @@ interface TreeNodeProps {
   includedPaths?: Set<string>;
   generation: number;
   showHiddenFiles: boolean;
+  /** Persisted expansion state for the tree root; undefined disables it. */
+  expandedPaths?: Set<string>;
+  /** Reports a user (or auto-prune) expansion change so it can be persisted. */
+  onToggleExpanded?: (path: string, expanded: boolean) => void;
 }
 
 function TreeNode({
@@ -349,11 +355,31 @@ function TreeNode({
   includedPaths,
   generation,
   showHiddenFiles,
+  expandedPaths,
+  onToggleExpanded,
 }: TreeNodeProps) {
-  const [expanded, setExpanded] = useState(!!forceExpanded);
+  const [expanded, setExpanded] = useState(
+    () => !!forceExpanded || (expandedPaths?.has(node.path) ?? false),
+  );
   const [children, setChildren] = useState<FileNode[] | null>(node.children ?? null);
   const [loadingChildren, setLoadingChildren] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Restore/refresh expansion from the persisted set. Nodes are remounted when
+  // the tree is rebuilt (project switch, reload), so seeding alone would miss
+  // a set that arrives in a later commit; reacting to its identity keeps the
+  // node in sync both ways (the parent set is updated on every toggle).
+  useEffect(() => {
+    if (forceExpanded || !expandedPaths) return;
+    const next = expandedPaths.has(node.path);
+    if (!next) {
+      // Mirror toggle(): a collapse must cancel an in-flight children fetch
+      // so it cannot complete into a collapsed node with a stale spinner.
+      abortRef.current?.abort();
+      setLoadingChildren(false);
+    }
+    setExpanded(next);
+  }, [expandedPaths, forceExpanded, node.path]);
 
   useEffect(() => {
     if (forceExpanded) {
@@ -394,7 +420,19 @@ function TreeNode({
           ),
           { headers: authHeaders(), signal: controller.signal },
         );
-        if (!res.ok) throw new Error("Failed to load directory");
+        if (!res.ok) {
+          // A persisted expansion can outlive its directory (deleted or
+          // renamed while another project was active). Collapse it and drop
+          // the stale entry instead of surfacing an error.
+          if (!controller.signal.aborted) {
+            console.warn(
+              `File tree: directory unavailable for ${node.path} (HTTP ${res.status}); collapsing`,
+            );
+            setExpanded(false);
+            onToggleExpanded?.(node.path, false);
+          }
+          return;
+        }
         const data: FileTreeResponse = await res.json();
         if (data.truncated) {
           console.warn(`File tree truncated under ${node.path}; not all entries were loaded`);
@@ -414,11 +452,13 @@ function TreeNode({
 
   const toggle = () => {
     if (forceExpanded) return;
-    if (expanded) {
+    const next = !expanded;
+    if (!next) {
       abortRef.current?.abort();
       setLoadingChildren(false);
     }
-    setExpanded(!expanded);
+    setExpanded(next);
+    onToggleExpanded?.(node.path, next);
   };
 
   const requestPath = treePathForRequest(projectRoot, node.path);
@@ -593,6 +633,8 @@ function TreeNode({
               menu={menu}
               includedPaths={includedPaths}
               generation={generation}
+              expandedPaths={expandedPaths}
+              onToggleExpanded={onToggleExpanded}
             />
           ))}
       </div>
@@ -796,10 +838,54 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
 
   // Miller-columns view (macOS Finder-style) — persisted view mode
   const [viewMode, setViewMode] = useState<FileTreeViewMode>(() => loadFileTreeView());
-  const [showHiddenFiles, setShowHiddenFiles] = useState(() => loadShowHiddenFiles());
+  // The hidden-files choice is remembered per project (and remote host), so
+  // switching projects does not carry one project's preference into another.
+  const hiddenProjectKey = showHiddenFilesProjectKey(projectPath, projectHost);
+  const [showHiddenFiles, setShowHiddenFiles] = useState(() => loadShowHiddenFiles(hiddenProjectKey));
 
-  // Sync with FilePicker (or any other surface) via storage events.
-  useEffect(() => subscribeShowHiddenFiles(setShowHiddenFiles), []);
+  // Follow a project switch: adopt the newly active project's saved choice.
+  useEffect(() => {
+    setShowHiddenFiles(loadShowHiddenFiles(hiddenProjectKey));
+  }, [hiddenProjectKey]);
+
+  // Keep the tree and the Cmd/Ctrl+P picker in sync for the active project.
+  useEffect(
+    () => subscribeShowHiddenFiles(hiddenProjectKey, setShowHiddenFiles),
+    [hiddenProjectKey],
+  );
+
+  const toggleShowHiddenFiles = useCallback(() => {
+    const next = !showHiddenFiles;
+    saveShowHiddenFiles(hiddenProjectKey, next);
+    setShowHiddenFiles(next);
+  }, [hiddenProjectKey, showHiddenFiles]);
+
+  // Persisted directory expansion, keyed by host + the root being browsed.
+  // Nodes remount when the tree is rebuilt on project/root switch, so this is
+  // what restores the folders the user had open (and survives app restarts).
+  const treeRootKey = useMemo(
+    () => fileTreeRootKey(projectPath, projectHost, activeRoot ?? projectPath),
+    [projectPath, projectHost, activeRoot],
+  );
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => loadExpandedDirs(treeRootKey));
+
+  useEffect(() => {
+    setExpandedDirs(loadExpandedDirs(treeRootKey));
+  }, [treeRootKey]);
+
+  const handleToggleExpanded = useCallback(
+    (path: string, isExpanded: boolean) => {
+      setExpandedDirs((prev) => {
+        const next = new Set(prev);
+        if (isExpanded) next.add(path);
+        else next.delete(path);
+        saveExpandedDirs(treeRootKey, next);
+        return next;
+      });
+    },
+    [treeRootKey],
+  );
+
   type ColumnEntry = { path: string; nodes: FileNode[] | null; loading: boolean; error?: string | null };
   const [columns, setColumns] = useState<ColumnEntry[]>([]);
   const [columnSelections, setColumnSelections] = useState<(string | null)[]>([]);
@@ -809,10 +895,6 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
   useEffect(() => {
     saveFileTreeView(viewMode);
   }, [viewMode]);
-
-  useEffect(() => {
-    saveShowHiddenFiles(showHiddenFiles);
-  }, [showHiddenFiles]);
 
   // Persist per-project content-search filters (exts, ignore globs, toggles)
   useEffect(() => {
@@ -1542,11 +1624,13 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
         <div className="flex items-center gap-1">
           <button
             type="button"
-            onClick={() => setShowHiddenFiles((v) => !v)}
-            className={`shrink-0 h-7 px-2 text-[11px] font-medium rounded border transition-colors ${showHiddenFiles ? "bg-amber-500/20 text-amber-600 border-amber-500/30" : "bg-transparent text-muted-foreground border-border hover:bg-muted hover:text-foreground"}`}
+            onClick={toggleShowHiddenFiles}
+            aria-pressed={showHiddenFiles}
             title={showHiddenFiles ? "Showing hidden and ignored files (click to hide)" : "Showing normal files only (click to show hidden/ignored)"}
+            className={`flex items-center gap-1 shrink-0 h-7 px-2 text-[11px] font-medium rounded border transition-colors ${showHiddenFiles ? "bg-amber-500/20 text-amber-600 border-amber-500/30" : "bg-transparent text-muted-foreground border-border hover:bg-muted hover:text-foreground"}`}
           >
-            {showHiddenFiles ? "Hidden" : "Normal"}
+            {showHiddenFiles ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+            <span>Hidden files</span>
           </button>
           <button
             type="button"
@@ -1957,6 +2041,8 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
                 menu={menu}
                 includedPaths={includedSet}
                 generation={refreshKey}
+                expandedPaths={expandedDirs}
+                onToggleExpanded={handleToggleExpanded}
               />
             ))}
           </div>

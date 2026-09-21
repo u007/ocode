@@ -324,3 +324,40 @@ func clampGitLogLimit(limit int) int {
 	}
 	return limit
 }
+
+// remoteGitStashList is HandleGitStashList over the transport. A repo with no
+// stashes (or a git failure such as a non-repo path) yields an empty list,
+// never null; a transport failure is returned so the caller does not render
+// an unreachable host as "no stashes".
+func remoteGitStashList(ctx context.Context, rw remoteWork) ([]GitStash, error) {
+	out, err := remoteRun(ctx, rw, remoteGitCommand(rw.Path, "stash", "list", "--format="+gitStashListFormat))
+	if err != nil {
+		if isRemoteTransportError(err) {
+			return nil, err
+		}
+		return []GitStash{}, nil
+	}
+	return parseGitStashList(out), nil
+}
+
+// remoteGitStashShow returns one stash entry's parsed diff over the transport.
+// The stash rev is built from the integer index on the server and shell-quoted
+// before it reaches the remote command.
+func remoteGitStashShow(ctx context.Context, rw remoteWork, index int) ([]GitDiffFile, error) {
+	rev, err := stashRev(index)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := remoteRun(ctx, rw, remoteGitCommand(rw.Path, "rev-parse", "--verify", remote.ShellQuote(rev)+"^{commit}"))
+	if err != nil || strings.TrimSpace(resolved) == "" {
+		return nil, fmt.Errorf("unknown stash")
+	}
+	out, err := remoteRun(ctx, rw, remoteGitCommand(rw.Path, "stash", "show", "-p", "--no-color", "--include-untracked", remote.ShellQuote(rev)))
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return []GitDiffFile{}, nil
+	}
+	return parseUnifiedDiff(out), nil
+}

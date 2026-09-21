@@ -6,6 +6,7 @@ import type { BusEnvelope } from "./eventBus";
 import { rekeyDraft } from "./tabDrafts";
 import { rekeyQueue, removeDispatchedQueuedByText, dispatchQueueChanged } from "./tabQueue";
 import { browserActions, type NavEvent, type TitleEvent, type NewTabEvent, type StateKey } from "./browserStore";
+import { sessionRevisionMoved, clearSessionRevision } from "./sessionRevision";
 
 /**
  * sessionEvents — pure routing of bus envelopes into chatStore/projectStore.
@@ -112,6 +113,9 @@ export function cancelLiveDeltas(sessionId: string): void {
  *  reopened; its agent rebuilds on the next turn. */
 export function closeSessionBackend(sessionId: string, host?: string): void {
   if (!sessionId || sessionId.startsWith("new-")) return;
+  // The tab is gone: drop its cross-process revision baseline so the map does
+  // not retain every session ever viewed over a long-lived desktop session.
+  clearSessionRevision(sessionId, host);
   api.closeSession(sessionId, host).catch((err) => {
     console.warn("close session backend failed", err);
   });
@@ -260,6 +264,8 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       r.projectDispatch({ type: "UPDATE_TAB_ID", oldId, newId });
       r.openSessionIds.delete(oldId);
       r.openSessionIds.add(newId);
+      // The old id no longer resolves; its revision baseline is dead weight.
+      clearSessionRevision(oldId, r.hostFor?.(oldId));
     }
     return;
   }
@@ -839,4 +845,72 @@ export function applyReconcileState(
       dispatch({ type: "SET_BOOTSTRAP_STAGE", sessionId, stage: state.bootstrap_stage });
     }
   }
+}
+
+/**
+ * Revalidate one open session against the server's stored-transcript revision
+ * (cross-process sync — see lib/sessionRevision).
+ *
+ * Cheap path: GET /state only. When the stored revision moved since this
+ * session's transcript was last fetched — an out-of-process `/compact` or a
+ * turn in another ocode process sharing this project — the transcript is
+ * refetched and merged, so the client converges without a reconnect.
+ *
+ * Turn state is applied only when it actually differs from the client's, so an
+ * idle poll of an unchanged session dispatches nothing (no render churn). A
+ * session whose own turn is running is skipped entirely — the live bus owns it.
+ */
+export async function revalidateSession(
+  sessionId: string,
+  router: Pick<SessionEventRouter, "dispatch" | "getState" | "hostFor">,
+): Promise<void> {
+  const slice = getSessionSlice(router.getState(), sessionId);
+  // A locally running turn owns the transcript: the shared bus already streams
+  // it, and a disk snapshot fetched mid-turn is staler than memory (the
+  // reducer's mid-turn guard would discard it anyway). Revalidation resumes at
+  // turn end — this also avoids a transcript fetch every interval during a
+  // long local turn.
+  if (slice.turnActive) return;
+  const host = router.hostFor?.(sessionId);
+  const state = await api.getSessionState(sessionId, host);
+  const moved = sessionRevisionMoved(sessionId, host, state.revision);
+  const hasClientAsk = !!(slice.pendingPermission || slice.pendingQuestion);
+  const livePending = state.pending_asks;
+  const hasLivePending =
+    (livePending?.permissions?.length ?? 0) > 0 ||
+    (livePending?.questions?.length ?? 0) > 0;
+
+  if (!moved) {
+    if (state.turn_active || (hasLivePending && !hasClientAsk)) {
+      applyReconcileState(
+        router.dispatch,
+        sessionId,
+        state,
+        hasClientAsk || hasLivePending,
+      );
+    }
+    if (hasLivePending) dispatchPendingAsks(sessionId, livePending, router.dispatch);
+    return;
+  }
+
+  const detail = await api.getSession(sessionId, { limit: RECONCILE_PAGE_SIZE }, host);
+  // The fetched transcript notes the new revision (api.getSession), so the
+  // next poll sees no movement unless another write lands.
+  const transcriptPending = extractPendingFromMessages(detail.messages);
+  const hasPendingAsk =
+    hasClientAsk ||
+    hasLivePending ||
+    !!transcriptPending.pendingPermission ||
+    !!transcriptPending.pendingQuestion;
+  applyReconcileState(router.dispatch, sessionId, state, hasPendingAsk);
+  // MERGE_SNAPSHOT (not SET_MESSAGES): its mid-turn guard preserves whatever
+  // live content this client already holds, and it carries the authoritative
+  // `total` from the fetch rather than the paginated window's length.
+  router.dispatch({
+    type: "MERGE_SNAPSHOT",
+    sessionId,
+    messages: detail.messages,
+    total: detail.total,
+  });
+  if (hasLivePending) dispatchPendingAsks(sessionId, livePending, router.dispatch);
 }

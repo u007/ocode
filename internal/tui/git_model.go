@@ -20,6 +20,7 @@ import (
 	"github.com/gen2brain/beeep"
 
 	"github.com/u007/ocode/internal/crashguard"
+	"github.com/u007/ocode/internal/gitexec"
 )
 
 type gitSection int
@@ -455,38 +456,51 @@ func (m *gitModel) gitRun(args ...string) (string, error) {
 	return gitRunInDir(m.workDir, args...)
 }
 
+// gitBinary is the git executable the TUI invokes. It is a var (not a literal)
+// so tests can substitute a stub — including one that reports its own
+// environment, to prove GIT_OPTIONAL_LOCKS=0 reaches the child.
+var gitBinary = "git"
+
+// runGit executes one git command under ctx and returns its stdout with
+// trailing newlines trimmed.
+//
+// stderr is folded into the error (it is where git explains *why*), the child
+// runs with GIT_OPTIONAL_LOCKS=0 (gitexec.Env) so the file-tree/git-tab status
+// probes never take the optional index lock, and a lock-contention failure is
+// retried briefly (gitexec.WithLockRetry): the holder is nearly always another
+// short-lived git process, so a stage keypress must not fail because of one.
+func runGit(ctx context.Context, dir string, args ...string) (string, error) {
+	var out string
+	err := gitexec.WithLockRetry(func() error {
+		cmd := exec.CommandContext(ctx, gitBinary, args...)
+		cmd.Dir = dir
+		cmd.Env = gitexec.Env()
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		b, cmdErr := cmd.Output()
+		out = strings.TrimRight(string(b), "\r\n")
+		if cmdErr != nil {
+			if msg := strings.TrimSpace(stderr.String()); msg != "" {
+				cmdErr = fmt.Errorf("%w: %s", cmdErr, msg)
+			}
+		}
+		return cmdErr
+	})
+	return out, err
+}
+
 // gitRunInDir is a package-level helper used by async goroutines that cannot
 // safely access the gitModel receiver. It mirrors gitRun's behaviour exactly.
 func gitRunInDir(dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			err = fmt.Errorf("%w: %s", err, msg)
-		}
-	}
-	return strings.TrimRight(string(out), "\r\n"), err
+	return runGit(ctx, dir, args...)
 }
 
 func (m *gitModel) gitRunTimeout(timeout time.Duration, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = m.workDir
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			err = fmt.Errorf("%w: %s", err, msg)
-		}
-	}
-	return strings.TrimRight(string(out), "\r\n"), err
+	return runGit(ctx, m.workDir, args...)
 }
 
 func (m *gitModel) aheadBehindString() string {

@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
+	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -436,6 +439,76 @@ func cleanEnvForTerminal() []string {
 // only provide analysis and advice.
 const claudeCodeAdvisorPrompt = `You are a READ-ONLY strategic advisor. DO NOT write, create, modify, or delete any files. DO NOT execute commands that change system state. Only read, analyze, and provide actionable advice. If the request is too vague or missing information only the caller can supply (findings not yet gathered, a decision only they can make), say so explicitly and list what's missing instead of guessing. Respond in under 300 words. Use enumerated steps.`
 
+// claudeCLIPathOnce/claudeCLIPathVal cache the resolved `claude` path for the
+// process lifetime (the login-shell probe behind it is comparatively expensive
+// and PATH does not change while ocode runs).
+var (
+	claudeCLIPathOnce sync.Once
+	claudeCLIPathVal  string
+)
+
+// claudeLoginShellPath is a test seam for discovery.LoginShellPath.
+var claudeLoginShellPath = discovery.LoginShellPath
+
+// claudeCLIPath resolves the `claude` CLI to an absolute path using the user's
+// interactive login-shell PATH (discovery.LoginShellPath).
+//
+// This is required, not cosmetic, for a Finder/Dock-launched desktop .app:
+// launchd gives it a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin), so a bare
+// exec.Command("claude", ...) cannot find an npm/nvm/~/.local install even
+// though `claude` works in the user's terminal. Go resolves a bare argv[0] via
+// exec.LookPath against the calling process's own PATH *before* cmd.Env is
+// consulted, so setting cmd.Env cannot change which binary runs — the same trap
+// discovery.mlxPythonBinary documents. Falls back to the bare name "claude" so
+// the resulting error still names the binary that was tried.
+func claudeCLIPath() string {
+	claudeCLIPathOnce.Do(func() {
+		claudeCLIPathVal = "claude"
+		for _, dir := range strings.Split(claudeLoginShellPath(), string(os.PathListSeparator)) {
+			if dir == "" {
+				continue
+			}
+			candidate := filepath.Join(dir, "claude")
+			info, err := os.Stat(candidate)
+			if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+				continue
+			}
+			claudeCLIPathVal = candidate
+			return
+		}
+	})
+	return claudeCLIPathVal
+}
+
+// withLoginShellPath returns env with its PATH replaced by the user's
+// login-shell PATH. Resolving `claude` to an absolute path is not enough on its
+// own: the CLI is a node-based script, so the child's own PATH must also be
+// able to find node (and anything else claude shells out to). A failed probe
+// yields the process's own PATH, which makes the replacement a no-op — TUI and
+// server runs launched from a shell are unaffected.
+func withLoginShellPath(env []string) []string {
+	shellPath := claudeLoginShellPath()
+	if shellPath == "" {
+		return env
+	}
+	out := make([]string, 0, len(env)+1)
+	replaced := false
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			if !replaced {
+				out = append(out, "PATH="+shellPath)
+				replaced = true
+			}
+			continue
+		}
+		out = append(out, kv)
+	}
+	if !replaced {
+		out = append(out, "PATH="+shellPath)
+	}
+	return out
+}
+
 // executeClaudeCodeAdvisor runs the Claude Code CLI (claude -p) to obtain
 // advisor output. It passes the prompt via -p, specifies the model via
 // --model, appends a read-only system prompt, and restricts tools to
@@ -459,13 +532,15 @@ func executeClaudeCodeAdvisor(parent context.Context, modelName, prompt, workDir
 	// locking the advisorRecursionGuard and leaking a goroutine.
 	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd := exec.CommandContext(ctx, claudeCLIPath(), args...)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
 
-	// Optimize environment variables for subprocess wrapper compatibility
-	cmd.Env = cleanEnvForTerminal()
+	// Optimize environment variables for subprocess wrapper compatibility.
+	// PATH comes from the user's login shell so the node-based CLI can find its
+	// own runtime from a Finder/Dock-launched desktop .app (bare launchd PATH).
+	cmd.Env = withLoginShellPath(cleanEnvForTerminal())
 
 	// Redirect stdin to /dev/null to avoid the 3s timeout warning
 	devNull, err := os.Open(os.DevNull)

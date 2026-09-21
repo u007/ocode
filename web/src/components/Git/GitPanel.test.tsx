@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { GitWorkspace } from "@/api/types";
+import type { GitStash, GitWorkspace } from "@/api/types";
 
 const mocks = vi.hoisted(() => ({
   getGitWorkspace: vi.fn(),
@@ -12,6 +12,11 @@ const mocks = vi.hoisted(() => ({
   gitPush: vi.fn(),
   gitFetch: vi.fn(),
   gitPull: vi.fn(),
+  gitStash: vi.fn(),
+  gitStashList: vi.fn(),
+  gitStashShow: vi.fn(),
+  gitStashApply: vi.fn(),
+  gitStashDrop: vi.fn(),
   /** git_status bus handlers registered by GitPanel. */
   gitStatusHandlers: [] as Array<(env: unknown) => void>,
 }));
@@ -118,6 +123,11 @@ describe("GitPanel", () => {
     mocks.gitPush.mockResolvedValue(workspace.status);
     mocks.gitFetch.mockResolvedValue(workspace.status);
     mocks.gitPull.mockResolvedValue(workspace.status);
+    mocks.gitStashList.mockResolvedValue([]);
+    mocks.gitStashShow.mockResolvedValue([]);
+    mocks.gitStashApply.mockResolvedValue(workspace);
+    mocks.gitStashDrop.mockResolvedValue([]);
+    mocks.gitStash.mockResolvedValue(workspace.status);
     mocks.gitStatusHandlers.length = 0;
     window.localStorage.clear();
   });
@@ -384,5 +394,105 @@ describe("GitPanel", () => {
 
     fireEvent.doubleClick(handle);
     expect(column.style.width).toBe("288px");
+  });
+});
+
+describe("GitPanel stash", () => {
+  const stashEntries: GitStash[] = [
+    {
+      index: 0,
+      ref: "stash@{0}",
+      hash: "abc123",
+      short: "abc123",
+      message: "WIP on main: abc123 base subject",
+      author: "Test",
+      date: new Date().toISOString(),
+    },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getGitWorkspace.mockResolvedValue(workspace);
+    mocks.gitLog.mockResolvedValue([]);
+    mocks.gitStashList.mockResolvedValue(stashEntries);
+    mocks.gitStashShow.mockResolvedValue([
+      { path: "stash-a.ts", status: "modified", patch: "" },
+      { path: "stash-b.ts", status: "modified", patch: "" },
+    ]);
+    mocks.gitStashApply.mockResolvedValue(workspace);
+    mocks.gitStashDrop.mockResolvedValue([]);
+    mocks.gitStash.mockResolvedValue(workspace.status);
+    mocks.gitStatusHandlers.length = 0;
+    window.localStorage.clear();
+  });
+
+  it("lists stashes and loads the selected stash's files", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    const entry = await screen.findByTitle("stash@{0}: WIP on main: abc123 base subject");
+    fireEvent.click(entry);
+
+    await waitFor(() => expect(mocks.gitStashShow).toHaveBeenCalledWith(0, "/proj", undefined));
+    expect(await screen.findByText("stash-a.ts")).toBeTruthy();
+    expect(screen.getByText("stash-b.ts")).toBeTruthy();
+  });
+
+  it("restores only the checked files from a stash (no overwrite confirmation)", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    fireEvent.click(await screen.findByTitle("stash@{0}: WIP on main: abc123 base subject"));
+    const checkbox = await screen.findByRole("checkbox", { name: "Select stash-a.ts" });
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: /Restore selected/ }));
+
+    await waitFor(() =>
+      expect(mocks.gitStashApply).toHaveBeenCalledWith(0, ["stash-a.ts"], "/proj", undefined),
+    );
+  });
+
+  it("confirms before restoring a file that has local changes", async () => {
+    mocks.gitStashShow.mockResolvedValue([
+      { path: "src/unstaged.ts", status: "modified", patch: "" },
+    ]);
+    render(<GitPanel projectPath="/proj" />);
+    fireEvent.click(await screen.findByTitle("stash@{0}: WIP on main: abc123 base subject"));
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: "Select src/unstaged.ts" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Restore selected/ }));
+
+    // The overwrite warning must appear and nothing is applied yet.
+    expect(await screen.findByText("Overwrite local changes?")).toBeTruthy();
+    expect(mocks.gitStashApply).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Overwrite and restore" }));
+    await waitFor(() =>
+      expect(mocks.gitStashApply).toHaveBeenCalledWith(0, ["src/unstaged.ts"], "/proj", undefined),
+    );
+  });
+
+  it("asks for confirmation before deleting a stash", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByTitle("stash@{0}: WIP on main: abc123 base subject");
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete stash@{0}" }));
+    const confirm = await screen.findByRole("button", { name: "Delete stash" });
+    expect(mocks.gitStashDrop).not.toHaveBeenCalled();
+
+    fireEvent.click(confirm);
+    await waitFor(() => expect(mocks.gitStashDrop).toHaveBeenCalledWith(0, "/proj", undefined));
+  });
+
+  it("stashes all changes with the dialog's message and untracked flag", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+
+    fireEvent.click(screen.getByRole("button", { name: "Stash all" }));
+    fireEvent.change(screen.getByPlaceholderText("Stash message (optional)"), {
+      target: { value: "wip: my stash" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Stash" }));
+
+    await waitFor(() =>
+      expect(mocks.gitStash).toHaveBeenCalledWith("wip: my stash", [], "/proj", undefined, true),
+    );
   });
 });

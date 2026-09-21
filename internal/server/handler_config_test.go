@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 )
 
@@ -134,6 +135,76 @@ func TestHandleSetAutoPermissionConfigPersists(t *testing.T) {
 	}
 	if got.Model != "existing-model" {
 		t.Errorf("Model must be preserved, got %q", got.Model)
+	}
+}
+
+// TestHandleGetPermissionConcernsServesRubricCatalog pins the settings checkbox
+// catalog to the judge's own rubric: the endpoint must expose every concern
+// category except "none", in rubric order, with the partly-gated caveats.
+func TestHandleGetPermissionConcernsServesRubricCatalog(t *testing.T) {
+	h := testConfigHandler(t)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/config/ocode/permissions-concerns", nil)
+	h.HandleGetPermissionConcerns(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var got struct {
+		Concerns []agent.RelaxableConcern `json:"concerns"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, w.Body.String())
+	}
+	want := agent.RelaxableConcerns()
+	if len(got.Concerns) != len(want) || len(want) == 0 {
+		t.Fatalf("catalog size = %d, want %d", len(got.Concerns), len(want))
+	}
+	for i := range want {
+		if got.Concerns[i].Key != want[i].Key || got.Concerns[i].Label != want[i].Label {
+			t.Errorf("concerns[%d] = %+v, want %+v", i, got.Concerns[i], want[i])
+		}
+	}
+	for _, c := range got.Concerns {
+		if c.Key == "none" {
+			t.Error("\"none\" must not be offered as an enforceable category")
+		}
+	}
+}
+
+// The PUT must round-trip the negative enforcement set (and the setter must not
+// invent a default: an omitted field stays empty = everything enforced).
+func TestHandleSetAutoPermissionConfigPersistsRelaxedConcerns(t *testing.T) {
+	h := testConfigHandler(t)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/permissions-auto",
+		strings.NewReader(`{"enabled":true,"relaxed_concerns":["secrets","network"]}`))
+	h.HandleSetAutoPermissionConfig(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.Permissions.Auto
+	h.mu.Unlock()
+	if got == nil || len(got.RelaxedConcerns) != 2 || !got.ConcernRelaxed("secrets") {
+		t.Fatalf("in-memory relaxed_concerns not updated: %+v", got)
+	}
+
+	// A later save with no opt-outs clears them (the form always sends the
+	// complete list, so the writer must not merge).
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("PUT", "/api/config/ocode/permissions-auto",
+		strings.NewReader(`{"enabled":true,"relaxed_concerns":[]}`))
+	h.HandleSetAutoPermissionConfig(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w2.Code, w2.Body.String())
+	}
+	h.mu.Lock()
+	got = h.cfg.Ocode.Permissions.Auto
+	h.mu.Unlock()
+	if len(got.RelaxedConcerns) != 0 {
+		t.Fatalf("relaxed_concerns should be cleared, got %#v", got.RelaxedConcerns)
 	}
 }
 

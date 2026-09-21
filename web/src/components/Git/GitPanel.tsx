@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronRight,
   AlertTriangle,
+  Archive,
 } from "lucide-react";
 import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
@@ -22,6 +23,7 @@ import type {
   GitCommit,
   GitDiffFile,
   GitHunkAction,
+  GitStash,
   GitWorkspace,
 } from "@/api/types";
 
@@ -36,9 +38,15 @@ interface PanelSections {
   staged: boolean;
   unstaged: boolean;
   commits: boolean;
+  stashes: boolean;
 }
 
-const DEFAULT_SECTIONS: PanelSections = { staged: true, unstaged: true, commits: true };
+const DEFAULT_SECTIONS: PanelSections = {
+  staged: true,
+  unstaged: true,
+  commits: true,
+  stashes: true,
+};
 
 function loadPanelSections(): PanelSections {
   try {
@@ -49,6 +57,7 @@ function loadPanelSections(): PanelSections {
       staged: typeof parsed.staged === "boolean" ? parsed.staged : true,
       unstaged: typeof parsed.unstaged === "boolean" ? parsed.unstaged : true,
       commits: typeof parsed.commits === "boolean" ? parsed.commits : true,
+      stashes: typeof parsed.stashes === "boolean" ? parsed.stashes : true,
     };
   } catch {
     return { ...DEFAULT_SECTIONS };
@@ -78,6 +87,7 @@ interface Props {
 type Selection =
   | { kind: "file"; path: string; staged: boolean }
   | { kind: "commit"; hash: string }
+  | { kind: "stash"; index: number }
   | null;
 
 /** Splits a unified patch into per-hunk blocks (each starting at its `@@`
@@ -104,6 +114,14 @@ function lineColor(line: string): string {
   return "text-muted-foreground";
 }
 
+/** Human-facing label for a stash reflog subject. %gs is either
+ *  "WIP on <branch>: <base subject>" or "On <branch>: <message>"; the part
+ *  after the first ": " is what the user actually cares about. */
+function stashLabel(subject: string): string {
+  const idx = subject.indexOf(": ");
+  return idx >= 0 ? subject.slice(idx + 2) : subject;
+}
+
 function timeAgo(iso: string): string {
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "";
@@ -122,6 +140,21 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
   const [workspace, setWorkspace] = useState<GitWorkspace | null>(null);
   const [commits, setCommits] = useState<GitCommit[]>([]);
   const [commitDiff, setCommitDiff] = useState<GitDiffFile[] | null>(null);
+  const [stashes, setStashes] = useState<GitStash[]>([]);
+  const [stashFiles, setStashFiles] = useState<GitDiffFile[] | null>(null);
+  // Paths ticked in the open stash's file list (multi-file restore).
+  const [checkedStashFiles, setCheckedStashFiles] = useState<string[]>([]);
+  // "Stash all changes" dialog: optional message + include-untracked toggle.
+  const [stashDialog, setStashDialog] = useState(false);
+  const [stashMessage, setStashMessage] = useState("");
+  const [stashIncludeUntracked, setStashIncludeUntracked] = useState(true);
+  // Confirmation dialogs for destructive / overwriting stash actions.
+  const [pendingDeleteStash, setPendingDeleteStash] = useState<GitStash | null>(null);
+  const [pendingRestoreStash, setPendingRestoreStash] = useState<{
+    index: number;
+    paths: string[];
+    overwrites: string[];
+  } | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [commitMessage, setCommitMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -176,17 +209,25 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
     if (!background) setError(null);
     setRefreshing(true);
     try {
-      const [ws, log] = await Promise.all([
+      const [ws, log, stashList] = await Promise.all([
         api.getGitWorkspace(projectPath, projectHost),
         api.gitLog(projectPath, 50, projectHost),
+        // A failed stash-list probe (older server, transient error) must not
+        // take down the whole workspace refresh.
+        api.gitStashList(projectPath, projectHost).catch(() => [] as GitStash[]),
       ]);
       setWorkspace(ws);
       setCommits(log);
-      // Selected file may have moved between panes or disappeared (discard):
-      // re-resolve against the fresh snapshot. Keep the viewed pane when the
-      // file is still there; flip only when it moved to the other list.
+      setStashes(stashList);
+      // Selection may no longer exist after a mutation/drop: re-resolve it
+      // against the fresh snapshots. A selected file can move between panes;
+      // a selected stash can be dropped (possibly by index shift).
       setSelection((sel) => {
-        if (!sel || sel.kind === "commit") return sel;
+        if (!sel) return sel;
+        if (sel.kind === "commit") return sel;
+        if (sel.kind === "stash") {
+          return stashList.some((s) => s.index === sel.index) ? sel : null;
+        }
         const inStaged = ws.staged.some((f) => f.path === sel.path);
         const inUnstaged = ws.unstaged.some((f) => f.path === sel.path);
         if (!inStaged && !inUnstaged) return null;
@@ -395,6 +436,95 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
       setError(e instanceof Error ? e.message : "failed to load commit diff");
       setCommitDiff(null);
     }
+  };
+
+  const selectStash = async (s: GitStash) => {
+    setSelection({ kind: "stash", index: s.index });
+    setStashFiles(null);
+    setCheckedStashFiles([]);
+    try {
+      const files = await api.gitStashShow(s.index, projectPath, projectHost);
+      setStashFiles(files);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed to load stash files");
+      setStashFiles([]);
+    }
+  };
+
+  const toggleStashFile = (path: string) =>
+    setCheckedStashFiles((prev) =>
+      prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path],
+    );
+
+  const toggleAllStashFiles = (paths: string[]) =>
+    setCheckedStashFiles((prev) =>
+      paths.length > 0 && paths.every((p) => prev.includes(p)) ? [] : [...paths],
+    );
+
+  // restoreStashFiles applies the selected files from the open stash into the
+  // working tree. The stash entry is kept — only the working tree changes.
+  const restoreStashFiles = async (index: number, paths: string[]) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const ws = await api.gitStashApply(index, paths, projectPath, projectHost);
+      setWorkspace(ws);
+      setCheckedStashFiles([]);
+      showNotice(`restored ${paths.length} file${paths.length === 1 ? "" : "s"} from stash`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed to restore stash files");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // requestRestore gates on local changes: `git restore --source` overwrites
+  // the working-tree copy silently, so a selected file that is also locally
+  // modified goes through a confirmation dialog first.
+  const requestRestore = (index: number, paths: string[]) => {
+    if (paths.length === 0) return;
+    const dirty = new Set(
+      [...(workspace?.staged ?? []), ...(workspace?.unstaged ?? [])].map((f) => f.path),
+    );
+    const overwrites = paths.filter((p) => dirty.has(p));
+    if (overwrites.length > 0) {
+      setPendingRestoreStash({ index, paths, overwrites });
+      return;
+    }
+    restoreStashFiles(index, paths);
+  };
+
+  const doRestoreStash = () => {
+    if (!pendingRestoreStash) return;
+    const { index, paths } = pendingRestoreStash;
+    setPendingRestoreStash(null);
+    restoreStashFiles(index, paths);
+  };
+
+  const doStashAll = () => {
+    const message = stashMessage;
+    const includeUntracked = stashIncludeUntracked;
+    setStashDialog(false);
+    setStashMessage("");
+    runMutation(
+      () => api.gitStash(message, [], projectPath, projectHost, includeUntracked),
+      "stashed changes",
+    );
+  };
+
+  const doDropStash = () => {
+    if (!pendingDeleteStash) return;
+    const stash = pendingDeleteStash;
+    setPendingDeleteStash(null);
+    runMutation(async () => {
+      await api.gitStashDrop(stash.index, projectPath, projectHost);
+      // The open stash no longer exists; clear its detail pane.
+      setSelection((sel) =>
+        sel?.kind === "stash" && sel.index === stash.index ? null : sel,
+      );
+      setStashFiles(null);
+      setCheckedStashFiles([]);
+    }, `dropped ${stash.ref}`);
   };
 
   if (!workspace) {
@@ -679,6 +809,91 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
               </div>
             )}
           </div>
+
+          {/* Stashes */}
+          <div
+            className={`min-h-0 flex flex-col border-t border-border ${
+              sections.stashes ? "flex-1" : "shrink-0"
+            }`}
+          >
+            <div className="px-3 py-1.5 text-xs uppercase tracking-wider text-muted-foreground flex items-center justify-between">
+              <button
+                onClick={() => toggleSection("stashes")}
+                title={sections.stashes ? "Collapse stashes" : "Expand stashes"}
+                className="flex items-center gap-1 min-w-0 text-left cursor-pointer hover:text-foreground"
+              >
+                {sections.stashes ? (
+                  <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5 shrink-0" />
+                )}
+                <span className="truncate">
+                  Stashes <span className="text-foreground/50">({stashes.length})</span>
+                </span>
+              </button>
+              <button
+                onClick={() => setStashDialog(true)}
+                disabled={busy || !status.has_changes}
+                title={
+                  status.has_changes
+                    ? "Stash all changes"
+                    : "Nothing to stash — the working tree is clean"
+                }
+                className="text-[10px] normal-case text-purple-400 hover:text-purple-300 hover:underline disabled:opacity-40 disabled:no-underline"
+              >
+                Stash all
+              </button>
+            </div>
+            {sections.stashes && (
+              <div className="flex-1 overflow-y-auto divide-y divide-border/60">
+                {stashes.length === 0 ? (
+                  <div className="px-3 py-2 text-xs text-muted-foreground/70 italic">
+                    No stashes
+                  </div>
+                ) : (
+                  stashes.map((s) => {
+                    const isSelected =
+                      selection?.kind === "stash" && selection.index === s.index;
+                    return (
+                      <div
+                        key={s.ref}
+                        className={`group flex items-center gap-1 pl-2 pr-1.5 py-1.5 hover:bg-muted/50 ${
+                          isSelected ? "bg-muted" : ""
+                        }`}
+                      >
+                        <button
+                          onClick={() => selectStash(s)}
+                          title={`${s.ref}: ${s.message}`}
+                          className="flex-1 min-w-0 text-left"
+                        >
+                          <div className="flex items-center gap-1.5 text-xs font-mono text-foreground truncate">
+                            <Archive className="w-3 h-3 shrink-0 text-muted-foreground" />
+                            <span className="text-purple-400 shrink-0">{s.ref}</span>
+                            <span className="truncate">{stashLabel(s.message)}</span>
+                          </div>
+                          <div className="pl-5 text-[11px] text-muted-foreground truncate">
+                            {s.author} · {timeAgo(s.date)}
+                          </div>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setPendingDeleteStash(s);
+                          }}
+                          disabled={busy}
+                          title={`Delete ${s.ref}`}
+                          aria-label={`Delete ${s.ref}`}
+                          className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-red-400 hover:text-red-300 disabled:opacity-40"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Drag handle between the file list and the diff pane. Double-click
@@ -700,6 +915,16 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
             <div className="flex-1 min-h-0 overflow-y-auto">
               <CommitDiff files={commitDiff} />
             </div>
+          ) : selection?.kind === "stash" ? (
+            <StashDiff
+              stash={stashes.find((s) => s.index === selection.index) ?? null}
+              files={stashFiles}
+              checked={checkedStashFiles}
+              busy={busy}
+              onToggle={toggleStashFile}
+              onToggleAll={toggleAllStashFiles}
+              onRestore={() => requestRestore(selection.index, checkedStashFiles)}
+            />
           ) : shownFile ? (
             <>
               {showBoth && (
@@ -823,6 +1048,121 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
             </Button>
             <Button variant="destructive" onClick={doResetRemote}>
               Reset to Remote
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Stash-all dialog */}
+      <Dialog open={stashDialog} onOpenChange={setStashDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Archive className="w-4 h-4 text-purple-400" />
+              Stash changes
+            </DialogTitle>
+          </DialogHeader>
+          <div className="mt-2 space-y-3">
+            <input
+              value={stashMessage}
+              onChange={(e) => setStashMessage(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") doStashAll();
+              }}
+              placeholder="Stash message (optional)"
+              className="w-full h-9 px-3 rounded-md bg-muted/40 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+            <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={stashIncludeUntracked}
+                onChange={(e) => setStashIncludeUntracked(e.target.checked)}
+              />
+              Include untracked files
+            </label>
+            <p className="text-xs text-muted-foreground">
+              Tracked changes are reverted to HEAD and saved in a stash entry you can
+              restore or delete later from the Stashes list.
+            </p>
+          </div>
+          <DialogFooter className="mt-4">
+            <Button
+              variant="outline"
+              onClick={() => setStashDialog(false)}
+              data-dialog-default-action
+            >
+              Cancel
+            </Button>
+            <Button onClick={doStashAll}>Stash</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete-stash confirmation */}
+      <Dialog
+        open={pendingDeleteStash !== null}
+        onOpenChange={(open) => !open && setPendingDeleteStash(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-500" />
+              Delete stash
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground mt-2">
+            Delete <span className="font-mono text-foreground">{pendingDeleteStash?.ref}</span>
+            {pendingDeleteStash ? ` (${stashLabel(pendingDeleteStash.message)})` : ""}? The stashed
+            changes will be permanently discarded. This cannot be undone.
+          </p>
+          <DialogFooter className="mt-4">
+            <Button
+              variant="outline"
+              onClick={() => setPendingDeleteStash(null)}
+              data-dialog-default-action
+            >
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={doDropStash}>
+              Delete stash
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Restore-overwrite confirmation */}
+      <Dialog
+        open={pendingRestoreStash !== null}
+        onOpenChange={(open) => !open && setPendingRestoreStash(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-500" />
+              Overwrite local changes?
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground mt-2">
+            Restoring from the stash will overwrite local changes in{" "}
+            {pendingRestoreStash?.overwrites.length ?? 0} selected file(s):
+          </p>
+          <ul className="mt-2 max-h-32 overflow-y-auto text-xs font-mono text-foreground space-y-0.5">
+            {pendingRestoreStash?.overwrites.map((p) => (
+              <li key={p} className="truncate">
+                {p}
+              </li>
+            ))}
+          </ul>
+          <DialogFooter className="mt-4">
+            <Button
+              variant="outline"
+              onClick={() => setPendingRestoreStash(null)}
+              data-dialog-default-action
+            >
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={doRestoreStash}>
+              Overwrite and restore
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1106,6 +1446,125 @@ function CommitDiff({ files }: { files: GitDiffFile[] }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/** Right-pane view of one stash entry: per-file checkboxes plus a restore
+ *  action for the checked files. Mirrors CommitDiff's rendering, but each
+ *  file is selectable instead of read-only. */
+function StashDiff({
+  stash,
+  files,
+  checked,
+  busy,
+  onToggle,
+  onToggleAll,
+  onRestore,
+}: {
+  stash: GitStash | null;
+  files: GitDiffFile[] | null;
+  checked: string[];
+  busy: boolean;
+  onToggle: (path: string) => void;
+  onToggleAll: (paths: string[]) => void;
+  onRestore: () => void;
+}) {
+  if (files === null) {
+    return (
+      <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
+        Loading stash files…
+      </div>
+    );
+  }
+  const paths = files.map((f) => f.path);
+  const allChecked = paths.length > 0 && paths.every((p) => checked.includes(p));
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <div className="px-3 py-2 border-b border-border flex items-center justify-between gap-2 shrink-0">
+        <div className="min-w-0">
+          <div className="text-xs font-mono text-purple-400">{stash?.ref ?? "stash"}</div>
+          <div className="text-[11px] text-muted-foreground truncate">
+            {stash ? stashLabel(stash.message) : ""}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {files.length > 0 && (
+            <label className="flex items-center gap-1 text-[11px] text-muted-foreground cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={allChecked}
+                onChange={() => onToggleAll(paths)}
+                aria-label="Select all stash files"
+              />
+              All
+            </label>
+          )}
+          <button
+            onClick={onRestore}
+            disabled={busy || checked.length === 0}
+            className="text-[11px] px-2 py-1 rounded bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 disabled:opacity-40"
+          >
+            Restore selected ({checked.length})
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {files.length === 0 ? (
+          <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
+            No file changes in this stash
+          </div>
+        ) : (
+          <div className="p-3">
+            {files.map((file) => {
+              const badge = STATUS_BADGES[file.status] || STATUS_BADGES.modified;
+              const hunks = splitHunks(file.patch);
+              return (
+                <div key={file.path} className="mb-4">
+                  <label className="flex items-center gap-2 mb-1 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={checked.includes(file.path)}
+                      onChange={() => onToggle(file.path)}
+                      aria-label={`Select ${file.path}`}
+                    />
+                    <span
+                      className={`inline-flex items-center justify-center w-5 h-5 rounded text-[10px] font-bold ${badge.color}`}
+                    >
+                      {badge.label}
+                    </span>
+                    <span className="font-mono text-xs text-foreground truncate">
+                      {file.path}
+                    </span>
+                  </label>
+                  {hunks.length === 0 ? (
+                    <pre className="text-xs font-mono whitespace-pre-wrap text-muted-foreground pl-7">
+                      {file.patch || "(binary file)"}
+                    </pre>
+                  ) : (
+                    hunks.map((hunk, i) => (
+                      <div key={i} className="pl-7">
+                        <div className="border border-border rounded-md overflow-hidden">
+                          <div className="text-blue-400 font-mono text-xs px-2 py-1.5 bg-muted/30 border-b border-border">
+                            {hunk[0]}
+                          </div>
+                          <div className="font-mono text-xs whitespace-pre-wrap px-2 py-1.5">
+                            {hunk.slice(1).map((line, j) => (
+                              <div key={j} className={lineColor(line)}>
+                                {line || " "}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

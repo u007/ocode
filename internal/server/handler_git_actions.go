@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,6 +13,11 @@ import (
 	"strings"
 	"time"
 )
+
+// errStashPathNotFound reports a restore path that is absent from the stash
+// entirely (as opposed to one the stash deleted, which is restorable). It is a
+// client error, not a git failure, so the handler answers 400.
+var errStashPathNotFound = errors.New("path not found in stash")
 
 // gitActionRequest is the shared body for git mutation endpoints. Paths may be
 // project-relative (as returned by the file tree) or absolute paths inside the
@@ -23,6 +29,23 @@ type gitActionRequest struct {
 	Paths   []string `json:"paths"`
 	Path    string   `json:"path"`
 	Message string   `json:"message"`
+	// IncludeUntracked makes a stash push also record untracked files
+	// (`git stash push -u`). It is only meaningful for the stash endpoint;
+	// the other actions ignore it.
+	IncludeUntracked bool `json:"include_untracked"`
+}
+
+// gitStashApplyRequest restores selected files from a stash entry into the
+// working tree. An empty Paths list is rejected — applying a whole stash is
+// `git stash apply`/`pop`, a distinct (stash-consuming) action.
+type gitStashApplyRequest struct {
+	Index int      `json:"index"`
+	Paths []string `json:"paths"`
+}
+
+// gitStashRefRequest addresses one stash entry by its list position.
+type gitStashRefRequest struct {
+	Index int `json:"index"`
 }
 
 // resolveRepoPath validates a single requested path against dir. It accepts
@@ -118,27 +141,35 @@ func resolveRepoPaths(dir string, paths []string) ([]string, error) {
 	return specs, nil
 }
 
-// prepareGitAction validates the request, resolves the target repo directory
-// via mutationProjectDir (registered + extra allowed roots, no global
-// broadening), enforces that it is a git repository, and resolves+validates
-// the requested paths to repo-relative pathspecs. It writes the error
-// response and returns ok=false on any failure.
-func (h *Handler) prepareGitAction(w http.ResponseWriter, r *http.Request) (dir string, specs []string, message string, ok bool) {
+// decodeGitAction decodes the shared git action body. It is separate from
+// prepareGitAction so handlers that need extra fields (stash's
+// include_untracked) can decode once and still reuse the path validation.
+// It writes the error response and returns ok=false on a malformed body.
+func decodeGitAction(w http.ResponseWriter, r *http.Request) (gitActionRequest, bool) {
 	var req gitActionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
-		return "", nil, "", false
+		return req, false
 	}
+	return req, true
+}
+
+// prepareGitActionFor validates an already-decoded request against the target
+// repo: it resolves the project directory via mutationProjectDir (registered +
+// extra allowed roots, no global broadening), enforces that it is a git
+// repository, and resolves+validates req's paths to repo-relative pathspecs.
+// It writes the error response and returns ok=false on any failure.
+func (h *Handler) prepareGitActionFor(w http.ResponseWriter, r *http.Request, req gitActionRequest) (dir string, specs []string, ok bool) {
 	dir, valid := h.mutationProjectDir(r)
 	if !valid {
 		writeError(w, http.StatusBadRequest, "unknown project")
-		return "", nil, "", false
+		return "", nil, false
 	}
 	// Detect a repository via git itself so worktrees and bare setups are
 	// recognised, not just a literal .git directory entry.
 	if out, err := gitRunInDir(dir, "rev-parse", "--is-inside-work-tree"); err != nil || strings.TrimSpace(out) != "true" {
 		writeError(w, http.StatusBadRequest, "not a git repository")
-		return "", nil, "", false
+		return "", nil, false
 	}
 	in := append([]string{}, req.Paths...)
 	if req.Path != "" {
@@ -147,6 +178,20 @@ func (h *Handler) prepareGitAction(w http.ResponseWriter, r *http.Request) (dir 
 	specs, err := resolveRepoPaths(dir, in)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return "", nil, false
+	}
+	return dir, specs, true
+}
+
+// prepareGitAction decodes the request and validates it against the target
+// repo. It writes the error response and returns ok=false on any failure.
+func (h *Handler) prepareGitAction(w http.ResponseWriter, r *http.Request) (dir string, specs []string, message string, ok bool) {
+	req, ok := decodeGitAction(w, r)
+	if !ok {
+		return "", nil, "", false
+	}
+	dir, specs, ok = h.prepareGitActionFor(w, r, req)
+	if !ok {
 		return "", nil, "", false
 	}
 	return dir, specs, req.Message, true
@@ -384,7 +429,7 @@ func (h *Handler) HandleGitStage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		args := append([]string{"add", "--"}, specs...)
-		if _, err := remoteRun(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
+		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
 			writeError(w, http.StatusInternalServerError, "git add failed: "+err.Error())
 			return
 		}
@@ -422,7 +467,7 @@ func (h *Handler) HandleGitUnstage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		args := append([]string{"reset", "--"}, specs...)
-		if _, err := remoteRun(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
+		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
 			writeError(w, http.StatusInternalServerError, "git reset failed: "+err.Error())
 			return
 		}
@@ -464,7 +509,7 @@ func (h *Handler) HandleGitDiscard(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		args := append([]string{"checkout", "HEAD", "--"}, specs...)
-		if _, err := remoteRun(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
+		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
 			if !strings.Contains(err.Error(), "pathspec") {
 				writeError(w, http.StatusInternalServerError, "git checkout failed: "+err.Error())
 				return
@@ -499,19 +544,15 @@ func (h *Handler) gitDiscardLocal(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) HandleGitStash(w http.ResponseWriter, r *http.Request) {
 	if host := hostParam(r); host != "" {
-		rw, specs, message, ok := h.remotePrepareGitAction(w, r, host)
+		req, ok := decodeGitAction(w, r)
 		if !ok {
 			return
 		}
-		args := []string{"stash", "push"}
-		if message != "" {
-			args = append(args, "-m", message)
+		rw, specs, ok := h.remotePrepareGitActionFor(w, r, host, req)
+		if !ok {
+			return
 		}
-		if len(specs) > 0 {
-			args = append(args, "--")
-			args = append(args, specs...)
-		}
-		if _, err := remoteRun(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
+		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, stashPushArgs(req, specs)...)); err != nil {
 			writeError(w, http.StatusInternalServerError, "git stash failed: "+err.Error())
 			return
 		}
@@ -521,24 +562,184 @@ func (h *Handler) HandleGitStash(w http.ResponseWriter, r *http.Request) {
 	h.gitStashLocal(w, r)
 }
 
-func (h *Handler) gitStashLocal(w http.ResponseWriter, r *http.Request) {
-	dir, specs, message, ok := h.prepareGitAction(w, r)
-	if !ok {
-		return
-	}
+// stashPushArgs builds the `git stash push` argv shared by the local and
+// remote paths: optional -m message, -u for untracked files, then the
+// validated pathspecs.
+func stashPushArgs(req gitActionRequest, specs []string) []string {
 	args := []string{"stash", "push"}
-	if message != "" {
-		args = append(args, "-m", message)
+	if req.Message != "" {
+		args = append(args, "-m", req.Message)
+	}
+	if req.IncludeUntracked {
+		args = append(args, "-u")
 	}
 	if len(specs) > 0 {
 		args = append(args, "--")
 		args = append(args, specs...)
 	}
-	if _, err := gitRunInDir(dir, args...); err != nil {
+	return args
+}
+
+func (h *Handler) gitStashLocal(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeGitAction(w, r)
+	if !ok {
+		return
+	}
+	dir, specs, ok := h.prepareGitActionFor(w, r, req)
+	if !ok {
+		return
+	}
+	if _, err := gitRunInDir(dir, stashPushArgs(req, specs)...); err != nil {
 		writeError(w, http.StatusInternalServerError, "git stash failed: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+}
+
+// HandleGitStashApply restores the selected files from a stash entry into the
+// working tree, leaving them unstaged (git restore --source). The stash entry
+// itself is kept — dropping it is a separate, explicitly confirmed action.
+func (h *Handler) HandleGitStashApply(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		h.remoteGitStashApply(w, r, host)
+		return
+	}
+	h.gitStashApplyLocal(w, r)
+}
+
+func (h *Handler) gitStashApplyLocal(w http.ResponseWriter, r *http.Request) {
+	var req gitStashApplyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	rev, rerr := stashRev(req.Index)
+	if rerr != nil {
+		writeError(w, http.StatusBadRequest, rerr.Error())
+		return
+	}
+	dir, specs, ok := h.prepareGitActionFor(w, r, gitActionRequest{Paths: req.Paths})
+	if !ok {
+		return
+	}
+	if len(specs) == 0 {
+		writeError(w, http.StatusBadRequest, "no paths provided")
+		return
+	}
+	resolved, verr := gitRunInDir(dir, "rev-parse", "--verify", rev+"^{commit}")
+	if verr != nil || resolved == "" {
+		writeError(w, http.StatusBadRequest, "unknown stash")
+		return
+	}
+	if err := restoreStashPaths(dir, resolved, specs); err != nil {
+		if errors.Is(err, errStashPathNotFound) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "git stash restore failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, gitWorkspaceForDir(dir))
+}
+
+// restoreStashPaths restores the selected paths from the stash commit
+// resolved to hash into the working tree, without staging them. Files that
+// were untracked when the stash was created live in the stash's third parent
+// (<hash>^3) rather than its main tree; files the stash deleted are removed
+// from the working tree (a path present in the stash's base — <hash>^1 — but
+// absent from the stash tree). Specs are repo-relative and already validated
+// by resolveRepoPaths.
+func restoreStashPaths(dir, hash string, specs []string) error {
+	tracked := gitPathSetForRev(dir, hash)
+	untracked := gitPathSetForRev(dir, hash+"^3")
+	base := gitPathSetForRev(dir, hash+"^1")
+	var inTree, inUntracked, deleted []string
+	for _, spec := range specs {
+		switch {
+		case tracked[spec]:
+			inTree = append(inTree, spec)
+		case untracked[spec]:
+			inUntracked = append(inUntracked, spec)
+		case base[spec]:
+			deleted = append(deleted, spec)
+		default:
+			return fmt.Errorf("%w: %s", errStashPathNotFound, spec)
+		}
+	}
+	if len(inTree) > 0 {
+		args := append([]string{"restore", "--source=" + hash, "--worktree", "--"}, inTree...)
+		if _, err := gitRunInDir(dir, args...); err != nil {
+			return err
+		}
+	}
+	if len(inUntracked) > 0 {
+		args := append([]string{"restore", "--source=" + hash + "^3", "--worktree", "--"}, inUntracked...)
+		if _, err := gitRunInDir(dir, args...); err != nil {
+			return err
+		}
+	}
+	for _, spec := range deleted {
+		abs, _, err := resolveRepoPath(dir, spec)
+		if err != nil {
+			return err
+		}
+		if rmErr := os.Remove(abs); rmErr != nil && !os.IsNotExist(rmErr) {
+			return rmErr
+		}
+	}
+	return nil
+}
+
+// gitPathSetForRev returns the set of repo-relative paths in a rev's tree. An
+// unresolvable rev (e.g. a stash with no third parent) yields an empty set.
+func gitPathSetForRev(dir, rev string) map[string]bool {
+	set := map[string]bool{}
+	out, err := gitRunInDir(dir, "ls-tree", "-r", "--name-only", rev)
+	if err != nil {
+		return set
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			set[line] = true
+		}
+	}
+	return set
+}
+
+// HandleGitStashDrop deletes one stash entry (?index resolution in the body)
+// and returns the refreshed stash list.
+func (h *Handler) HandleGitStashDrop(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		h.remoteGitStashDrop(w, r, host)
+		return
+	}
+	h.gitStashDropLocal(w, r)
+}
+
+func (h *Handler) gitStashDropLocal(w http.ResponseWriter, r *http.Request) {
+	var req gitStashRefRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	rev, rerr := stashRev(req.Index)
+	if rerr != nil {
+		writeError(w, http.StatusBadRequest, rerr.Error())
+		return
+	}
+	dir, ok := h.gitDirForMutation(w, r)
+	if !ok {
+		return
+	}
+	if _, err := gitRunInDir(dir, "rev-parse", "--verify", rev+"^{commit}"); err != nil {
+		writeError(w, http.StatusBadRequest, "unknown stash")
+		return
+	}
+	if _, err := gitRunInDir(dir, "stash", "drop", rev); err != nil {
+		writeError(w, http.StatusInternalServerError, "git stash drop failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, gitStashListForDir(dir))
 }
 
 func (h *Handler) HandleGitCommit(w http.ResponseWriter, r *http.Request) {
@@ -556,7 +757,7 @@ func (h *Handler) HandleGitCommit(w http.ResponseWriter, r *http.Request) {
 			args = append(args, "--")
 			args = append(args, specs...)
 		}
-		if _, err := remoteRun(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
+		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
 			writeError(w, http.StatusInternalServerError, "git commit failed: "+err.Error())
 			return
 		}

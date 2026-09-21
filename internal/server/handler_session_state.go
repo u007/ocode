@@ -26,7 +26,8 @@ import (
 // (registered explicitly, resolved from disk, or a bridged TUI session) gets a
 // state snapshot.
 func (h *Handler) HandleSessionState(w http.ResponseWriter, r *http.Request, id string) {
-	if _, err := h.sessions.Resolve(id); err != nil {
+	entry, err := h.sessions.Resolve(id)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
@@ -36,6 +37,18 @@ func (h *Handler) HandleSessionState(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	resp := sessionStateResponse{SessionState: state}
+	// Cross-process change signal (see session.StoredRevisionForDir): clients
+	// poll this endpoint and refetch an open session's transcript when the
+	// token moves. Computed only for a stored session — a bridged/in-memory
+	// session (or an unknown project root) has no file to watch and reports
+	// nothing, which callers treat as "never revalidate".
+	if entry.ProjectRoot != "" {
+		if rev, rerr := session.StoredRevisionForDir(entry.ProjectRoot, id); rerr != nil {
+			log.Printf("serve: session %s revision: %v", id, rerr)
+		} else {
+			resp.Revision = rev
+		}
+	}
 	// Attach the live pending ask (if any) from the resident agent's trailing
 	// tool round. The frontend already derives pending asks from a fetched
 	// transcript's sentinels, but that only works when the paused tool result
@@ -58,6 +71,14 @@ func (h *Handler) HandleSessionState(w http.ResponseWriter, r *http.Request, id 
 type sessionStateResponse struct {
 	SessionState
 	PendingAsks *PendingAsks `json:"pending_asks,omitempty"`
+	// Revision is an opaque token that changes when this session's STORED
+	// transcript changes — by any writer, in any process sharing the project's
+	// session storage (desktop + dev server, TUI, ...). The web client polls
+	// this endpoint while a tab is open and refetches the transcript when the
+	// token moves, which is how an out-of-process /compact (or any turn)
+	// reaches a client connected to a different server process. Absent for a
+	// bridged/in-memory session with no stored file.
+	Revision string `json:"revision,omitempty"`
 }
 
 // PendingAsks is the unresolved permission/question prompt(s) a live agent

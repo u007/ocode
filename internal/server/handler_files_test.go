@@ -75,6 +75,31 @@ func TestHandleFileTreeAnchorsToWorkDir(t *testing.T) {
 	}
 }
 
+// A persisted expanded directory can be deleted/renamed while another project
+// is active, so a stale expand request must read as "gone" (404) rather than a
+// generic 500 — the frontend collapses and forgets such a node instead of
+// surfacing an error.
+func TestHandleFileTreeMissingDirReturns404(t *testing.T) {
+	h, tmpDir := newFilesHandler(t)
+	if err := os.MkdirAll(filepath.Join(tmpDir, "present"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/files/tree?path="+url.QueryEscape(filepath.Join(tmpDir, "gone"))+"&depth=1", nil)
+	h.HandleFileTree(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("missing subtree: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("GET", "/api/files/tree?path="+url.QueryEscape(filepath.Join(tmpDir, "present"))+"&depth=1", nil)
+	h.HandleFileTree(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("present subtree: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleFileTreeDepthCap(t *testing.T) {
 	h, tmpDir := newFilesHandler(t)
 	// sub/deep/leaf.txt is 4 path components deep (within the default cap).

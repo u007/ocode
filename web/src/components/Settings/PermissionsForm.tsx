@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type AutoPermissionConfig } from "../../api/client";
+import { api, type AutoPermissionConfig, type RelaxableConcern } from "../../api/client";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
@@ -8,6 +8,7 @@ import ModelDialog from "../Layout/ModelDialog";
 const EMPTY_AUTO: AutoPermissionConfig = {
   enabled: false, allow_destructive: false, prompt: "",
   max_context_bytes: 0, max_context_sources: 0, max_context_lines_per_source: 0, min_confidence: 0,
+  relaxed_concerns: [],
 };
 
 const DEFAULT_MODE_OPTIONS: { value: string; auto: boolean; label: string }[] = [
@@ -29,6 +30,9 @@ export default function PermissionsForm() {
   const [defaultMode, setDefaultMode] = useState<string>("normal");
   const [loadedDefaultMode, setLoadedDefaultMode] = useState<string>("normal");
   const [auto, setAuto] = useState<AutoPermissionConfig>(EMPTY_AUTO);
+  // The checkbox catalog is served by Go (next to the Jev rubric) so the list,
+  // the rubric and the chat judge prompt share one vocabulary.
+  const [concerns, setConcerns] = useState<RelaxableConcern[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,15 +42,17 @@ export default function PermissionsForm() {
     setLoading(true);
     setError(null);
     try {
-      const [perms, autoCfg, defaultModeCfg] = await Promise.all([
+      const [perms, autoCfg, defaultModeCfg, concernsCfg] = await Promise.all([
         api.getPermissions(),
         api.getAutoPermissionConfig(),
         api.getPermissionModeConfig(),
+        api.getPermissionConcerns(),
       ]);
       setSandboxSupported(perms.sandbox_supported ?? true);
       setDefaultMode(defaultModeCfg.mode || "normal");
       setLoadedDefaultMode(defaultModeCfg.mode || "normal");
       setAuto({ ...EMPTY_AUTO, ...autoCfg });
+      setConcerns(concernsCfg?.concerns ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -77,6 +83,17 @@ export default function PermissionsForm() {
     } finally {
       setSaving(false);
     }
+  };
+
+  // Enforcement is stored inverted: a ticked box means "enforce", so it is the
+  // ABSENCE of the key from relaxed_concerns. Saving writes the unticked keys in
+  // catalog order, which keeps the persisted list stable and diffable.
+  const relaxedSet = new Set(auto.relaxed_concerns ?? []);
+  const toggleConcern = (key: string, enforced: boolean) => {
+    const next = new Set(auto.relaxed_concerns ?? []);
+    if (enforced) next.delete(key);
+    else next.add(key);
+    setAuto({ ...auto, relaxed_concerns: concerns.filter((c) => next.has(c.key)).map((c) => c.key) });
   };
 
   if (loading) {
@@ -206,6 +223,54 @@ export default function PermissionsForm() {
               onChange={(e) => setAuto({ ...auto, max_context_lines_per_source: Number(e.target.value) })}
               className="h-8 text-xs"
             />
+          </div>
+        </div>
+
+        <div className="border-t border-border pt-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="text-xs font-semibold text-foreground">Categories the judge must enforce</div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={() => setAuto({ ...auto, relaxed_concerns: [] })}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                className="text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={() => setAuto({ ...auto, relaxed_concerns: concerns.map((c) => c.key) })}
+              >
+                None
+              </button>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Ticked categories are enforced by the LLM judge. Untick one to let it auto-approve a
+            call whose ONLY concern is that category. Go's own guards — hard blocks, dangerous rm,
+            out-of-scope paths — always apply, so an unticked box cannot auto-grant those.
+          </p>
+          {concerns.length === 0 && (
+            <p className="text-xs text-muted-foreground/70">No categories reported by the server.</p>
+          )}
+          <div className="space-y-2">
+            {concerns.map((c) => (
+              <label key={c.key} className="flex items-start gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={!relaxedSet.has(c.key)}
+                  aria-label={`Enforce ${c.key}`}
+                  onChange={(e) => toggleConcern(c.key, e.target.checked)}
+                />
+                <span className="min-w-0">
+                  <span className="font-mono text-foreground">{c.key}</span>
+                  <span className="block">{c.label}</span>
+                  {c.note && <span className="block text-muted-foreground/70">{c.note}</span>}
+                </span>
+              </label>
+            ))}
           </div>
         </div>
       </div>

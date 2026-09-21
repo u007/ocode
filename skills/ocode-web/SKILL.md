@@ -72,7 +72,7 @@ web/
     │   ├── useChat.ts           # sendMessage, stop, resolvePermission, executeShell
     │   ├── useSessions.ts       # List/refresh sessions
     │   ├── useTheme.ts          # Fetch theme, hex→HSL conversion, CSS var injection
-    │   ├── useKeyboard.ts       # Global shortcuts (⌘K palette, ⌘N new, Escape)
+    │   ├── useKeyboard.ts       # Global shortcuts (⌘K palette, ⌘N new chat, ⌘T terminal, Escape)
     │   ├── useAgentRuns.ts      # SSE subscription to agent-run tree
     │   ├── useEditorTabs.ts     # Editor tab state and persistence
     │   ├── useIsMobile.ts       # Responsive breakpoint hook
@@ -367,9 +367,24 @@ Wired in `useKeyboard.ts`, registered in `App.tsx` top-level `useEffect`:
 | Shortcut | Action |
 |----------|--------|
 | `⌘K` / `Ctrl+K` | Open CommandPalette |
-| `⌘N` / `Ctrl+N` | New session |
-| `Escape` | Close dialogs / sidebar |
-| `⌘,` / `Ctrl+,` | Toggle CoworkSidebar |
+| `⌘P` / `Ctrl+P` | Open FilePicker |
+| `⌘S` / `Ctrl+S` | Save the active editor tab |
+| `⌘N` / `Ctrl+N` | New chat — reveals the Sessions view on the chat half, then opens (or reuses the blank) chat tab |
+| `⌘T` / `Ctrl+T` | New terminal on the Sessions view; the same new-chat action on any other view |
+| `⌘W` / `Ctrl+W` | Close the frontmost tab (browser/terminal/editor/chat) — **desktop shell only**; `Ctrl+W` is passed through inside `.xterm` (readline word-delete) |
+| `Escape` | Close the command palette / file picker (other dialogs handle their own Esc) |
+
+`⌘,` / `Ctrl+,` opens **Settings** — it is bound by the desktop native menu
+(`cmd/ocode-desktop/main.go` `buildAppMenu`), not by `useKeyboard.ts`, so it
+does nothing in a plain browser tab. There is no global CoworkSidebar
+shortcut.
+
+`⌘N` and `⌘T` are `useKeyboard`-only (no native menu accelerators; the Edit
+menu is `menu.AddRole(application.EditMenu)` and claims none of them). In a
+plain browser tab they are best-effort: `⌘N` is a new window and `⌘T` a new tab
+— both on Chrome's **non-overridable** list — so outside the desktop shell the
+reliable entry point is the tab bar buttons. `App.tsx` shares one `openNewChat`
+helper for both keys' chat path so the view switch cannot drift between them.
 
 All keyboard bindings are centralized — never register raw listeners in child components without a `useKeyboard` pattern.
 
@@ -426,3 +441,7 @@ All keyboard bindings are centralized — never register raw listeners in child 
 25. **OS-native file-manager reveal is local-only and server-labelled** — the Files-tab context menus (tree rows *and* Miller-column rows) offer "Open in Finder" (directory) / "Show in Finder" (file) via `api.revealInFileManager` → `POST /api/files/open {mode:"reveal"}`. Two rules: (a) `reveal` is the **only** open mode that accepts a directory (`editor`/`os` 404 it), and the per-platform argv lives in `internal/server/reveal.go` (`open -R` on darwin, `explorer /select,` on windows, `dbus-send …FileManager1.ShowItems` on linux with an `xdg-open` parent-folder fallback). (b) The action is **hidden for remote projects** (`canReveal: !projectHost`) because there is no remote branch — the server would reveal an unrelated path on the *local* machine. The menu noun comes from `GET /api/config/ocode/paths.platform` (the server's GOOS), never `navigator.platform`, which describes the browser, not the machine running the command.
 
 26. **Mobile (≤767px) is an overlay layout, not a squeezed desktop one** — `useIsMobile()` (`max-width: 767px`) drives it. Two rails that are inline flex columns on desktop become **fixed off-canvas drawers with a scrim** on phones: `ProjectSidebar` (left, `isMobile` prop) and `CoworkSidebar` (right, its own mobile branch). Rules when touching this: (a) a drawer is *always mounted* and slid with `translate-x`/`-translate-x-full` so the open/close animation works; the desktop collapsed rail (`w-10`) is skipped on mobile. (b) In `App.tsx` the drawer's flex wrapper must NOT reserve its desktop width on mobile — `CoworkSidebar`'s wrapper is `isMobile ? "" : "w-72 flex-shrink-0 …"`, otherwise the empty `w-72` box eats 288px of the row even though the `aside` is `position: fixed`, and `main` measured 0px wide. (c) `sidebarOpen`/`coworkOpen` **lazy-init from `window.innerWidth >= 768`**; the media-query listener only fires on a breakpoint *change*, so a direct load at ≤767px would otherwise leave both rails open. (d) The only mobile trigger for the project drawer is the `PanelLeft` button in `TopTabs` (`onMenuToggle`, `md:hidden`; hidden when the prop is absent), and selecting a project auto-dismisses the drawer. (e) `UnifiedTabBar` stacks as full-width session rows on phones (`flex-col sm:grid`, pills `w-full sm:w-52`) — fixed 208px pills painted over the action-button column once the rails squeezed the centre. (f) The floating bottom bar is **`SpeechToolbar`** (not the inline `StatusBar`): phones render it full-width and wrapping (`inset-x-2 flex-wrap`, ≥sm restores the centered `left-1/2 -translate-x-1/2 sm:flex-nowrap` pill) — the old nowrap row overflowed a 390px viewport and clipped its error/Retry. Regression tests: `ProjectSidebar.test.tsx` ("mobile drawer"), `UnifiedTabBar.test.tsx` ("stacks full-width"), `TopTabs.test.tsx`, `SpeechToolbar.layout.test.tsx`.
+
+27. **Out-of-tree view focus goes through `lib/tabFocus.ts` and is applied by a PASSIVE effect** — `activeView`/`focusedKind` are `HomeApp` state, so a component outside its tree cannot switch the view itself. The remote project's sidebar inventory (`RemoteProjectStatus`, Chats/Terminals) is the case in point: it calls `tabFocusActions.request({kind, projectPath, host?, terminalId?})` (`web/src/lib/tabFocus.ts`, a module-level TanStack store, no provider) and `HomeApp` consumes the queue. The consumer **must be a passive `useEffect`, not a layout effect**: the per-project view restore (`loadViewStateForProject`) is a layout effect, so a request that arrives in the same commit as a project switch has to run *after* it to win — and the effect must gate on `projectPath === activeProject.path` (staying queued otherwise) so it can't apply against the outgoing project. Opening a session from a NON-active project must both `selectProject` it and bind the tab to it (`openSessionTab(id, title, projectPath)`) — a tab bound to the active project routes the remote session through the local server (`resolveSessionHost`). On mobile, a nested row control that `stopPropagation()`s (the inventory rows) opts out of the row's `onSelect`, which is the only drawer-dismiss path: thread an `onRevealTab` callback to dismiss the drawer, and make the control's own expander `stopPropagation()` too (the status line originally didn't, so tapping it selected the project and closed the drawer before the list could be used). Regression: `App.tabFocusRemote.test.tsx` (real App + real sidebar, one click on a non-active remote project's chat overrides that project's persisted Files view with Sessions), plus `App.tabFocus.test.tsx` / `tabFocus.test.ts` / `RemoteProjectStatus.test.tsx` / `ProjectSidebar.test.tsx`.
+
+28. **Session-bound dialogs mount only on that session's Chat surface** — a pending permission/question ask is a per-session store value (`pendingPermission`/`pendingQuestion` in `chatStore`), but `activeTabId` (`projectStore.tsx` `activeTabId()`) tracks the active project's tab independently of `activeView`, `focusedKind` and the session sub-tab. Mounting `PermissionDialog`/`QuestionDialog` at the App root from `useChat(activeTabId)` therefore opened a full-screen Radix modal (`DialogPortal` + `fixed inset-0` overlay + focus trap) over the Files/Git/Cron/Assets/Settings view, the terminal half, or a non-Chat sub-tab of the same session — blocking the whole app for a session the user was not looking at. Gate every chat-session-bound dialog on `sessionAskSurfaceVisible({ activeView, focusedKind, activeSubTab })` (`web/src/lib/dialogScope.ts`), true only for `sessions` + `chat` + `chat`; `App.tsx` computes `sessionAskVisible` from `activeSessionTab?.activeSubTab` and gates with `{pendingPermission && sessionAskVisible && …}` (same for the question ask). The ask is not lost: it stays in its per-session slice and re-opens when the user returns to that session's Chat sub-tab; the project-sidebar Bell `pendingCount` badge and the `AttentionSoundBridge` chime are the off-surface signal. Regression: `web/src/lib/dialogScope.test.ts` (predicate matrix) + `web/src/App.askDialogScope.test.tsx` (mount/no-mount/re-open through the real App). Documented in `docs/concepts/session-bound-dialog-scoping.md`.

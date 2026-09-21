@@ -20,6 +20,7 @@ vi.mock("../../api/client", () => ({
     setAutoPermissionConfig: vi.fn(),
     setPermissionModel: vi.fn(),
     setYolo: vi.fn(),
+    getPermissionConcerns: vi.fn(),
   },
 }));
 
@@ -29,6 +30,7 @@ const mockSetPermissionMode = vi.mocked(api.setPermissionMode);
 const mockGetPermissionModeConfig = vi.mocked(api.getPermissionModeConfig);
 const mockSetPermissionModeConfig = vi.mocked(api.setPermissionModeConfig);
 const mockSetAuto = vi.mocked(api.setAutoPermissionConfig);
+const mockGetConcerns = vi.mocked(api.getPermissionConcerns);
 
 const EMPTY_AUTO = {
   enabled: false,
@@ -52,6 +54,7 @@ beforeEach(() => {
   } as never);
   mockGetAuto.mockResolvedValue(EMPTY_AUTO as never);
   mockGetPermissionModeConfig.mockResolvedValue({ mode: "normal" } as never);
+  mockGetConcerns.mockResolvedValue({ concerns: [] } as never);
 });
 
 describe("PermissionsForm is process-wide settings only", () => {

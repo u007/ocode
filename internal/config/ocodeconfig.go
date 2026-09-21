@@ -354,9 +354,9 @@ func validHTRNativeHostName(name string) bool {
 // When a model has a voice override, it takes precedence over the engine's
 // default voice from the manifest.
 type TTSConfig struct {
-	Engine    string            `json:"engine"`
-	Voice     string            `json:"voice,omitempty"`
-	Mode      string            `json:"mode"`
+	Engine     string            `json:"engine"`
+	Voice      string            `json:"voice,omitempty"`
+	Mode       string            `json:"mode"`
 	ModelVoice map[string]string `json:"model_voice,omitempty"`
 }
 
@@ -672,6 +672,27 @@ type AutoPermissionConfig struct {
 	// summary must meet for Go to auto-approve it (see the 2026-06-02 follow-up).
 	MinConfidence float64     `json:"min_confidence,omitempty"`
 	Grants        []AutoGrant `json:"grants,omitempty"`
+	// RelaxedConcerns holds the concern categories the user has chosen NOT to
+	// enforce (see agent.RelaxableConcerns for the catalog). A DENY whose only
+	// named concern is in this list is converted to an allow, subject to Go's
+	// deterministic guards (verifyAutoGrant). The set is negative on purpose:
+	// the empty value means "everything enforced", so today's behaviour needs no
+	// migration and a category added later defaults to enforced.
+	RelaxedConcerns []string `json:"relaxed_concerns,omitempty"`
+}
+
+// ConcernRelaxed reports whether the user has switched off enforcement of one
+// concern category. Nil-safe so callers need no nil check.
+func (a *AutoPermissionConfig) ConcernRelaxed(key string) bool {
+	if a == nil || key == "" {
+		return false
+	}
+	for _, k := range a.RelaxedConcerns {
+		if k == key {
+			return true
+		}
+	}
+	return false
 }
 
 type autoPermissionConfigFile struct {
@@ -684,6 +705,7 @@ type autoPermissionConfigFile struct {
 	MaxContextLinesPerSource *int        `json:"max_context_lines_per_source"`
 	MinConfidence            *float64    `json:"min_confidence"`
 	Grants                   []AutoGrant `json:"grants"`
+	RelaxedConcerns          []string    `json:"relaxed_concerns"`
 }
 
 type permissionConfigFile struct {
@@ -1609,6 +1631,11 @@ func applyAutoPermissionConfig(dst *AutoPermissionConfig, src *autoPermissionCon
 		// Replace (not append) — Grants is the persisted auto-grant list as
 		// derived by Go; the file is a complete snapshot of that list.
 		dst.Grants = append([]AutoGrant(nil), src.Grants...)
+	}
+	if src.RelaxedConcerns != nil {
+		// Replace (not append) — the file is a complete snapshot of the
+		// user's opt-outs, so unticking a box must not merge with the old set.
+		dst.RelaxedConcerns = append([]string(nil), src.RelaxedConcerns...)
 	}
 }
 

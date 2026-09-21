@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/u007/ocode/internal/gitexec"
 )
 
 // GitDiffFile represents a single file's diff in the working tree.
@@ -22,20 +24,35 @@ func (h *Handler) gitRun(args ...string) (string, error) {
 	return gitRunInDir(h.workDir, args...)
 }
 
+// gitRunInDir runs a git command in dir and returns its trimmed stdout. stderr
+// is folded into the error (it is where git says *why* it failed).
+//
+// Two ocode-specific behaviours ride along, both about .git/index.lock: the
+// child runs with GIT_OPTIONAL_LOCKS=0 (gitexec.Env) so ocode's frequent probes
+// never take the optional index lock, and a failed lock acquisition is retried
+// briefly (gitexec.WithLockRetry) because the holder is nearly always a
+// short-lived git process rather than a stale lock. A user clicking "Stage"
+// must not see a red error because something else ran git a moment earlier.
 func gitRunInDir(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			err = fmt.Errorf("%w: %s", err, msg)
+	var out string
+	err := gitexec.WithLockRetry(func() error {
+		cmd := exec.Command(gitBinary, args...)
+		if dir != "" {
+			cmd.Dir = dir
 		}
-	}
-	return strings.TrimSpace(string(out)), err
+		cmd.Env = gitexec.Env()
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		b, cmdErr := cmd.Output()
+		out = strings.TrimSpace(string(b))
+		if cmdErr != nil {
+			if msg := strings.TrimSpace(stderr.String()); msg != "" {
+				cmdErr = fmt.Errorf("%w: %s", cmdErr, msg)
+			}
+		}
+		return cmdErr
+	})
+	return out, err
 }
 
 type GitStatus struct {
@@ -131,9 +148,11 @@ func (h *Handler) mutationProjectDir(r *http.Request) (string, bool) {
 	return dir, true
 }
 
-// gitBinary is the git executable the git-status helpers invoke. It is a var
-// (not a literal) so tests can substitute a stub — e.g. one that never returns
-// — to exercise the gitStatusTimeout bound without mutating PATH process-wide.
+// gitBinary is the git executable every server git helper invokes (status
+// probes and mutations alike). It is a var (not a literal) so tests can
+// substitute a stub — e.g. one that never returns, to exercise the
+// gitStatusTimeout bound, or one that reports its own environment, to prove
+// GIT_OPTIONAL_LOCKS=0 reaches the child.
 var gitBinary = "git"
 
 // gitStatusTimeout bounds the total time gitStatusForDir spends running git
@@ -159,6 +178,12 @@ func gitStatusForDir(dir string) GitStatus {
 		if dir != "" {
 			cmd.Dir = dir
 		}
+		// GIT_OPTIONAL_LOCKS=0: `git status`/`git diff` otherwise refresh the
+		// index and take .git/index.lock as a side effect. This probe runs for
+		// every viewed project every 10s (emitters.go), so without it ocode is
+		// a permanent lock contender against the user's own git commands — and
+		// a probe SIGKILLed by gitStatusTimeout mid-write could strand the lock.
+		cmd.Env = gitexec.Env()
 		out, _ := cmd.Output()
 		return strings.TrimSpace(string(out))
 	}
@@ -248,6 +273,7 @@ func gitStatusForDir(dir string) GitStatus {
 	if dir != "" {
 		repoCmd.Dir = dir
 	}
+	repoCmd.Env = gitexec.Env()
 	_, err := repoCmd.Output()
 	status.IsRepo = err == nil
 	return status
@@ -566,4 +592,183 @@ func parseUnifiedDiff(diff string) []GitDiffFile {
 	}
 
 	return files
+}
+
+// --- Stash ---
+
+// GitStash describes one entry from `git stash list`. Index is the position in
+// the stash reflog (stash@{index}); the web UI addresses entries by it, never
+// by a caller-supplied ref string.
+type GitStash struct {
+	Index   int    `json:"index"`
+	Ref     string `json:"ref"`
+	Hash    string `json:"hash"`
+	Short   string `json:"short"`
+	Message string `json:"message"`
+	Author  string `json:"author"`
+	Date    string `json:"date"`
+}
+
+// gitStashListFormat emits one NUL-delimited record per stash: the reflog
+// selector (%gd → "stash@{0}"), full and short hash, the reflog subject
+// (%gs → "WIP on main: …" or "On main: <message>"), author date and name.
+const gitStashListFormat = "%gd%x00%H%x00%h%x00%gs%x00%aI%x00%an"
+
+// stashRev builds the reflog ref for a stash index. The server formats the
+// integer itself, so no caller-controlled text ever reaches the git argv.
+func stashRev(index int) (string, error) {
+	if index < 0 {
+		return "", fmt.Errorf("invalid stash index")
+	}
+	return fmt.Sprintf("stash@{%d}", index), nil
+}
+
+// parseStashIndex extracts N from a "stash@{N}" reflog selector.
+func parseStashIndex(ref string) (int, bool) {
+	const prefix = "stash@{"
+	if !strings.HasPrefix(ref, prefix) || !strings.HasSuffix(ref, "}") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(ref[len(prefix) : len(ref)-1])
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// parseGitStashList parses `git stash list --format=<gitStashListFormat>`,
+// newest first (the order git emits). An unexpected selector falls back to
+// emission order so the entry stays addressable.
+func parseGitStashList(out string) []GitStash {
+	stashes := make([]GitStash, 0)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, "\x00")
+		if len(fields) < 6 {
+			continue
+		}
+		idx, ok := parseStashIndex(fields[0])
+		if !ok {
+			idx = len(stashes)
+		}
+		stashes = append(stashes, GitStash{
+			Index:   idx,
+			Ref:     fields[0],
+			Hash:    fields[1],
+			Short:   fields[2],
+			Message: fields[3],
+			Date:    fields[4],
+			Author:  fields[5],
+		})
+	}
+	return stashes
+}
+
+// gitStashListForDir lists the stash entries of the repo at dir. A non-repo
+// dir (or a repo with no stashes) yields an empty slice, never null.
+func gitStashListForDir(dir string) []GitStash {
+	out, err := gitRunInDir(dir, "stash", "list", "--format="+gitStashListFormat)
+	if err != nil {
+		return []GitStash{}
+	}
+	return parseGitStashList(out)
+}
+
+// gitStashShowForDir returns the parsed per-file diff of one stash entry.
+// --include-untracked surfaces files that were untracked when the stash was
+// created: `git stash push -u` stores them in the stash's third parent and
+// without the flag they would be missing from the listing.
+func gitStashShowForDir(dir string, index int) ([]GitDiffFile, error) {
+	rev, err := stashRev(index)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := gitRunInDir(dir, "rev-parse", "--verify", rev+"^{commit}")
+	if err != nil || resolved == "" {
+		return nil, fmt.Errorf("unknown stash")
+	}
+	out, err := gitRunInDir(dir, "stash", "show", "-p", "--no-color", "--include-untracked", rev)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return []GitDiffFile{}, nil
+	}
+	return parseUnifiedDiff(out), nil
+}
+
+// stashIndexParam parses the required ?index= stash selector. It writes the
+// error response and returns ok=false when missing or malformed.
+func stashIndexParam(w http.ResponseWriter, r *http.Request) (int, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get("index"))
+	if raw == "" {
+		writeError(w, http.StatusBadRequest, "stash index is required")
+		return 0, false
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		writeError(w, http.StatusBadRequest, "invalid stash index")
+		return 0, false
+	}
+	return n, true
+}
+
+// HandleGitStashList lists the stash entries of the target repo. ?project= and
+// ?host= follow the same convention as the other git endpoints.
+func (h *Handler) HandleGitStashList(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		rw, err := h.remoteWorkFor(host, r.URL.Query().Get("project"))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		stashes, lerr := remoteGitStashList(r.Context(), rw)
+		if lerr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, stashes)
+		return
+	}
+	dir, ok := h.gitProjectDir(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
+		return
+	}
+	writeJSON(w, http.StatusOK, gitStashListForDir(dir))
+}
+
+// HandleGitStashShow returns the files changed by one stash entry (?index=N).
+func (h *Handler) HandleGitStashShow(w http.ResponseWriter, r *http.Request) {
+	index, ok := stashIndexParam(w, r)
+	if !ok {
+		return
+	}
+	if host := hostParam(r); host != "" {
+		rw, err := h.remoteWorkFor(host, r.URL.Query().Get("project"))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		files, serr := remoteGitStashShow(r.Context(), rw, index)
+		if serr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": serr.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, files)
+		return
+	}
+	dir, ok := h.gitProjectDir(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
+		return
+	}
+	files, err := gitStashShowForDir(dir, index)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, files)
 }

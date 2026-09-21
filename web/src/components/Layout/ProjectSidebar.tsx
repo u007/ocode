@@ -346,6 +346,9 @@ interface SortableProjectRowProps {
   project: Project;
   isActive: boolean;
   onSelect: () => void;
+  /** Mobile only: dismiss the off-canvas drawer once a tab has been opened
+   *  from the row's remote inventory (whose controls stop propagation). */
+  onRevealTab?: () => void;
   onEdit?: () => void;
   onRemove: () => void;
   onRename: (name: string) => Promise<void>;
@@ -359,6 +362,7 @@ function SortableProjectRow({
   project,
   isActive,
   onSelect,
+  onRevealTab,
   onEdit,
   onRemove,
   onRename,
@@ -461,7 +465,7 @@ function SortableProjectRow({
         <div
           className={cn(
             buttonVariants({ variant: "ghost" }),
-            `w-full justify-start gap-2 px-2 h-auto py-2 text-sm ${
+            `w-full justify-start flex-wrap gap-x-2 gap-y-1 px-2 h-auto py-2 text-sm ${
               isActive
                 ? "bg-primary/15 text-foreground border-l-2 border-primary"
                 : "text-muted-foreground border-l-2 border-transparent"
@@ -485,7 +489,7 @@ function SortableProjectRow({
           ) : (
             <FolderGit2 className="w-4 h-4 shrink-0 text-muted-foreground" />
           )}
-          <div className="min-w-0 flex-1 text-left">
+          <div className="flex-1 min-w-[5rem] text-left">
             {rename.editing ? (
               <>
                 <Input
@@ -522,9 +526,9 @@ function SortableProjectRow({
                 )}
               </>
             )}
-            {project.host && <RemoteProjectStatus project={project} statusState={hostStatus} />}
+            {project.host && <RemoteProjectStatus project={project} statusState={hostStatus} onRevealTab={onRevealTab} />}
           </div>
-          <span className="flex items-center gap-1 shrink-0">
+          <span className="flex flex-wrap items-center gap-1 shrink-0 max-w-full">
             <ProjectBadges indicators={indicators} />
             <SessionDot status={status} />
           </span>
@@ -1303,6 +1307,10 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
                         // should dismiss it so the workspace is visible.
                         if (isMobile) onToggle();
                       }}
+                      // Same drawer dismissal when a tab is opened from the
+                      // row's remote inventory, whose controls stop
+                      // propagation (so the onSelect above never runs).
+                      onRevealTab={isMobile ? onToggle : undefined}
                       onEdit={project.host ? () => setEditingRemote(project) : undefined}
                       onRemove={() => removeProject(project.path, project.host)}
                       onRename={(name) => renameProject(project.path, name, project.host)}

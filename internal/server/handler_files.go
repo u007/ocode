@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/u007/ocode/internal/gitexec"
 )
 
 type FileNode struct {
@@ -92,6 +94,19 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// A requested subtree that no longer exists is a 404, not a 500: the
+	// frontend lazily expands directories and persists that expansion, so a
+	// folder deleted/renamed while another project was active arrives here as
+	// a stale request. buildFileTree's os.Stat error would otherwise surface
+	// as a generic internal error the UI treats as a failure.
+	if _, statErr := os.Stat(base); statErr != nil {
+		if os.IsNotExist(statErr) {
+			writeError(w, http.StatusNotFound, "directory not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, statErr.Error())
+		return
+	}
 	// Anchor returned Path values to matchedRoot (the project root or extra
 	// dir the request resolved into) rather than to the requested subtree:
 	// the frontend re-requests a subdirectory's children by passing a
@@ -152,7 +167,12 @@ func gitStatusMapForDir(dir string) map[string]string {
 	if out, err := exec.Command("git", "-C", dir, "rev-parse", "--is-inside-work-tree").Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
 		return nil
 	}
-	out, err := exec.Command("git", "-c", "core.quotepath=false", "-C", dir, "status", "--short").Output()
+	// GIT_OPTIONAL_LOCKS=0: this badge probe serves the file tree on every
+	// request, and a plain `git status` would refresh the index (taking
+	// .git/index.lock) as a side effect — contending with the user's own git.
+	cmd := exec.Command("git", "-c", "core.quotepath=false", "-C", dir, "status", "--short")
+	cmd.Env = gitexec.Env()
+	out, err := cmd.Output()
 	if err != nil {
 		return nil
 	}

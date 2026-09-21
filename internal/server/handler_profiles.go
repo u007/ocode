@@ -187,6 +187,59 @@ func (h *Handler) getEffectiveWindowProfile(windowID string) string {
 	return h.getWindowProfile(windowID)
 }
 
+// Headers the local server's remote proxy stamps onto requests it forwards to
+// a remote `ocode serve --remote`. They carry the originating desktop window's
+// active profile so the remote builds its chat agent on the same profile.
+//
+// Why this is needed: the remote receives every profile's credentials and the
+// profile config deltas through the connect-time credential sync
+// (internal/remote/sync.go), but window-state.json — the per-window "which
+// profile is active" file — is NOT synced, and the remote server is launched
+// without OCODE_PROFILE. Its Handler.windowProfiles map is therefore empty and
+// a remote turn would otherwise fall back to the base credentials. The local
+// proxy is the only place that knows both the originating window id and that
+// window's active profile, so it forwards them per request
+// (see injectProxiedActiveProfile in handler_remote_proxy.go).
+const (
+	remoteActiveProfileHeader        = "X-Ocode-Active-Profile"
+	remoteProfileAuthoritativeHeader = "X-Ocode-Profile-Authoritative"
+	remoteProfileResetHeader         = "X-Ocode-Profile-Reset"
+)
+
+// applyProxiedActiveProfile applies the profile carried by a proxied remote
+// request onto this server's in-memory windowProfiles map, so
+// resolveSessionProfile picks it up for the next turn.
+//
+// It is deliberately narrow: it only acts when the request carries the
+// authoritative marker the local proxy sets (never a bare header a client
+// could forge) and a window id is bound. The mapping is never persisted to
+// disk — every proxied chat request re-sends it, and a remote server restart
+// simply loses it until the next request.
+func (h *Handler) applyProxiedActiveProfile(r *http.Request, windowID string) {
+	if windowID == "" {
+		return
+	}
+	// Both the profile and the reset signal are only trusted when the proxy's
+	// authoritative marker accompanies them; a bare reset header from a client
+	// hitting this server directly must not clear the binding.
+	if r.Header.Get(remoteProfileAuthoritativeHeader) != "1" {
+		return
+	}
+	h.windowProfilesMu.Lock()
+	defer h.windowProfilesMu.Unlock()
+	// An explicit reset (empty/Default profile) clears the window binding.
+	if r.Header.Get(remoteProfileResetHeader) == "1" {
+		delete(h.windowProfiles, windowID)
+		return
+	}
+	profile := strings.TrimSpace(r.Header.Get(remoteActiveProfileHeader))
+	if profile == "" {
+		delete(h.windowProfiles, windowID)
+		return
+	}
+	h.windowProfiles[windowID] = profile
+}
+
 // globalEffectiveProfile returns env override or most-recent window's profile
 // (win-1 preferred) for server-wide agent construction until per-session
 // window threading lands. Uses in-memory cache, no file I/O.

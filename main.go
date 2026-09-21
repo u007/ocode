@@ -127,6 +127,13 @@ func (r *serverSchedulerRunner) RunScheduledJob(ctx context.Context, j *schedule
 }
 
 func main() {
+	// Make user-installed CLIs resolvable for every shell and subprocess ocode
+	// spawns: ~/.local/bin and ~/bin are added by interactive shell rc files
+	// (~/.zshrc), which a login shell (`<shell> -l -c`) does NOT source — so a
+	// service/cron/minimal-env launch would otherwise fail with
+	// `zsh:1: command not found: claude`. See config.EnsureUserBinPath.
+	config.EnsureUserBinPath()
+
 	// Check for help flag at top level before any subcommand
 	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
 		printUsage()

@@ -7,14 +7,8 @@ type: Gotcha
 description: Concurrent session writers — conflict semantics and recovery (updated with 2026-09-20 incident)
 timestamp: 2026-09-19T18:27:52Z
 ---
-# Concurrent session writers — conflict semantics and recovery
 
-Multiple ocode processes (TUI, desktop, web server) can write the same
-session file: they share the per-project sessions dir, and the same session
-id can be open in more than one process at once. In-process writers
-serialize on the per-session stripe mutex (`lockFor`, live.go); across
-processes, coordination is the SQLite write lock plus the overlap check in
-`appendSqliteSessionOnce` (internal/session/sqlitestore.go).
+# Concurrent session writers — conflict semantics and recovery
 
 ## Incident (2026-09-06, ses_2026-09-06-021943-56a29b3c)
 
@@ -215,3 +209,39 @@ pollution — previously masked by the shrink-delete nuking the file.
 `TestLiveWorkerRetiresWhenIdle` mutates the global `liveIdleTimeout`;
 workers capture the timeout at creation (`liveWriter.idleTimeout`) so a
 still-running worker from an earlier test cannot race the global.
+
+## Cross-process UI convergence (live-sync protocol)
+
+The conflict contract above governs how two processes **write** to the
+same file. It says nothing about how a client **reads** — specifically, a
+client that has already loaded a transcript in **process A** will not see
+a write made by **process B** (a `/compact`, a turn-end save, etc.)
+without something pulling it in.
+
+This is now handled by **client-side revision revalidation** — see the
+concept doc at `../concepts/cross-process-session-sync.md` for the full
+design, code paths, test coverage, and limits. The short version:
+
+- The server exposes an opaque `revision` token on `GET /api/sessions/:id`
+  and `GET /api/sessions/:id/state`, computed by
+  `session.StoredRevisionForDir` (`internal/session/revision.go`) from
+  `meta.updated_at` + `meta.history_gen` (or file mtime+size for legacy
+  formats). It moves on any stored transcript change by any writer.
+- The web client records the revision each transcript was fetched at
+  (`web/src/lib/sessionRevision.ts`), and every open tab is polled every
+  15s (`web/src/hooks/useSessionRevisionSync.ts`): when the token moved,
+  the transcript is refetched and merged (`web/src/lib/sessionEvents.ts`
+  `revalidateSession`).
+- Baseline hygiene: cleared on tab close
+  (`closeSessionBackend`) and on `/reset-id` (the old id's baseline in the
+  `session_rekeyed` handler, `sessionEvents.ts`).
+
+**Not covered here (deliberate non-goals):** cross-process **turn state**
+is not synced — each server's session registry is per-process, so a turn
+running in another process shows `turn_active:false` locally (the
+transcript still converges as committed messages appear). Agent-memory
+reconciliation after an out-of-process compaction
+(`internal/server/agent_session.go applyCompactResult` — a resident agent
+in the non-writing process still holds stale in-memory messages until its
+next turn-end save surfaces `ErrTranscriptConflict`) is also out of scope;
+that is a server-side concern, not a UI-convergence one.

@@ -777,6 +777,10 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	if windowID != "" {
 		windowID = strings.TrimSpace(windowID)
 	}
+	// A proxied remote request carries the originating desktop window's active
+	// profile; apply it so buildAgentSession uses the same profile/keys the
+	// user selected locally (the remote has no window-state.json).
+	h.applyProxiedActiveProfile(r, windowID)
 
 	model := req.Model
 	if model == "" {
@@ -1083,6 +1087,19 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 		created = s.CreatedAt
 		updated = s.UpdatedAt
 	}
+	// Cross-process change signal: the client records this token against the
+	// transcript it just fetched, so a later out-of-process write is detected
+	// by comparing it with the revision reported by /state.
+	// Computed only for a stored session — a bridged/in-memory session has no
+	// file to watch and reports nothing (mirrors HandleSessionState).
+	revision := ""
+	if entry.ProjectRoot != "" {
+		if rev, rerr := session.StoredRevisionForDir(entry.ProjectRoot, id); rerr != nil {
+			log.Printf("serve: session %s revision: %v", id, rerr)
+		} else {
+			revision = rev
+		}
+	}
 	writeJSON(w, http.StatusOK, SessionDetail{
 		SessionInfo: SessionInfo{
 			ID:        id,
@@ -1092,6 +1109,7 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 		},
 		Messages: msgs,
 		Total:    total,
+		Revision: revision,
 	})
 }
 
@@ -1137,6 +1155,10 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 			entry = h.sessions.Lookup(id)
 		}
 	}
+	// A proxied remote request carries the originating desktop window's active
+	// profile; apply it before the reconcile below rebuilds the resident agent
+	// so this turn (and later ones) use the desktop's selected profile.
+	h.applyProxiedActiveProfile(r, windowID)
 
 	if rc := h.RCBridge(); rc != nil && id == rc.SessionID {
 		if req.Async {
