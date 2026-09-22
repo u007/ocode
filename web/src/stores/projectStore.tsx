@@ -49,6 +49,13 @@ export interface ProjectState {
    *  after persistence; those live in memory only. */
   tabsByProject: Record<string, Tab[]>;
   activeTabByProject: Record<string, string | null>;
+  /** Project paths whose tabs this window deleted (closed the last tab, or
+   *  rekeyed the project to a new path) but whose deletion has not yet been
+   *  acknowledged by a successful server write. While a path is pending it is
+   *  sent to the server as an explicit empty entry AND ignored by
+   *  `mergeExternalTabs`, so a `tabs_changed` refetch that races the debounced
+   *  write can't resurrect tabs the user just closed. Cleared on write success. */
+  pendingTabDeletes: string[];
   sessionPickerOpen: boolean;
   /** Persisted-tab restore bookkeeping: set once restore ran so the deep-link
    *  opener doesn't race it. */
@@ -74,7 +81,8 @@ export type ProjectAction =
   | { type: "RESTORE_TABS"; tabsByProject: Record<string, Tab[]>; activeTabByProject: Record<string, string | null> }
   | { type: "SET_SESSION_PICKER"; open: boolean }
   | { type: "SET_GROUPS"; groups: ProjectGroup[] }
-  | { type: "REKEY_TABS"; oldPath: string; newPath: string };
+  | { type: "REKEY_TABS"; oldPath: string; newPath: string }
+  | { type: "FLUSH_TAB_DELETES"; paths: string[] };
 
 /** How long a cached project session list is considered fresh. Within this
  *  window a switch reuses the cache without revalidating; past it the cached
@@ -92,6 +100,7 @@ const initialState: ProjectState = {
   sessionsByProject: {},
   tabsByProject: {},
   activeTabByProject: {},
+  pendingTabDeletes: [],
   sessionPickerOpen: false,
   tabsRestored: false,
   groups: [],
@@ -199,10 +208,18 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
       if (newActive === action.id) {
         newActive = list.length > 0 ? list[list.length - 1].id : null;
       }
+      // Closing a project's last tab is a deletion that must be sent to the
+      // server explicitly. Mark it pending so a `tabs_changed` refetch racing
+      // the debounced write can't restore the tabs we just closed.
+      const pending =
+        list.length === 0 && !state.pendingTabDeletes.includes(path)
+          ? [...state.pendingTabDeletes, path]
+          : state.pendingTabDeletes;
       return {
         ...state,
         tabsByProject: { ...state.tabsByProject, [path]: list },
         activeTabByProject: { ...state.activeTabByProject, [path]: newActive },
+        pendingTabDeletes: pending,
       };
     }
     case "SET_ACTIVE_TAB":
@@ -275,6 +292,15 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
     }
     case "SET_GROUPS":
       return { ...state, groups: Array.isArray(action.groups) ? action.groups : [] };
+    case "FLUSH_TAB_DELETES": {
+      // A write carrying these deletions reached the server; they no longer
+      // need to shadow incoming refetches.
+      const flushed = new Set(action.paths);
+      const pending = state.pendingTabDeletes.filter((p) => !flushed.has(p));
+      return pending.length === state.pendingTabDeletes.length
+        ? state
+        : { ...state, pendingTabDeletes: pending };
+    }
     case "REKEY_TABS": {
       // When a remote project's path changes, its tabs must move
       // to the new path key; otherwise they are orphaned under the
@@ -285,6 +311,10 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
       const tabs = state.tabsByProject[oldPath];
       if (!tabs || tabs.length === 0) return state;
       const nextTabs = { ...state.tabsByProject };
+      // Drop the old path locally and mark it a pending delete: the persist
+      // effect sends it as an explicit empty entry, and `mergeExternalTabs`
+      // ignores it until the write is acknowledged, so a refetch can't
+      // restore the orphaned old-path tabs before the delete lands.
       delete nextTabs[oldPath];
       nextTabs[newPath] = [...(nextTabs[newPath] || []), ...tabs];
       const nextActive = { ...state.activeTabByProject };
@@ -292,10 +322,14 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         nextActive[newPath] = nextActive[oldPath];
         delete nextActive[oldPath];
       }
+      const pending = state.pendingTabDeletes.includes(oldPath)
+        ? state.pendingTabDeletes
+        : [...state.pendingTabDeletes, oldPath];
       return {
         ...state,
         tabsByProject: nextTabs,
         activeTabByProject: nextActive,
+        pendingTabDeletes: pending,
       };
     }
     default:
@@ -354,11 +388,20 @@ function toServerTabs(state: ProjectState): Record<string, ServerProjectTabs> {
   const projects: Record<string, ServerProjectTabs> = {};
   for (const [path, tabs] of Object.entries(state.tabsByProject)) {
     const real = tabs.filter((t) => !t.id.startsWith("new-"));
-    if (real.length === 0) continue;
+    // Emit an explicit entry even when a known project has no real tabs left:
+    // the server treats an empty tab list as a deletion. Omitting the project
+    // instead would be read as "this window has never heard of it" and the
+    // server would preserve the old entry (it merges), so closed tabs would
+    // reappear on the next restore.
     projects[path] = {
       tabs: real.map((t) => ({ id: t.id, title: t.title, sub_tab: t.activeSubTab })),
-      active: state.activeTabByProject[path] ?? "",
+      active: real.length > 0 ? state.activeTabByProject[path] ?? "" : "",
     };
+  }
+  // Pending deletions are sent even when the path is no longer a known
+  // project (e.g. after REKEY_TABS removed the key).
+  for (const path of state.pendingTabDeletes) {
+    projects[path] = { tabs: [], active: "" };
   }
   return projects;
 }
@@ -403,11 +446,16 @@ function clearLegacyLocalTabs() {
 function mergeExternalTabs(prev: ProjectState, external: RestoredTabs): RestoredTabs | null {
   const mergedByProject: Record<string, Tab[]> = {};
   const mergedActive: Record<string, string | null> = { ...prev.activeTabByProject };
+  // A deletion this window made but hasn't persisted yet is authoritative:
+  // the server may still hold the old tabs for a moment, and re-adding them
+  // here would undo the close (and make the next PUT re-create them).
+  const pendingDeletes = new Set(prev.pendingTabDeletes);
   const allProjects = new Set<string>([
     ...Object.keys(prev.tabsByProject),
     ...Object.keys(external.tabsByProject),
   ]);
   for (const path of allProjects) {
+    if (pendingDeletes.has(path)) continue;
     const local = prev.tabsByProject[path] || [];
     const localNew = local.filter((t: Tab) => t.id.startsWith("new-"));
     const extReal = external.tabsByProject[path] || [];
@@ -561,11 +609,16 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     if (!state.tabsRestored) return; // never write before a restore settled
     const sync = syncRef.current;
     sync.dirty = true;
+    // Snapshot the deletions this write carries so we only clear the ones it
+    // actually persisted (a new deletion added mid-debounce is flushed by the
+    // next write).
+    const deletes = [...store.state.pendingTabDeletes];
     const t = setTimeout(async () => {
       sync.dirty = false;
       sync.writing = true;
       try {
         await api.setTabs(toServerTabs(store.state));
+        if (deletes.length > 0) dispatch({ type: "FLUSH_TAB_DELETES", paths: deletes });
       } catch (err) {
         console.error("Failed to persist tabs to server:", err);
       } finally {
@@ -577,7 +630,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       }
     }, 400);
     return () => clearTimeout(t);
-  }, [state.tabsByProject, state.activeTabByProject, state.tabsRestored, store, refetchTabs]);
+  }, [state.tabsByProject, state.activeTabByProject, state.pendingTabDeletes, state.tabsRestored, store, refetchTabs, dispatch]);
 
   // Restore persisted tabs once on mount (before projects load; applied for
   // whatever projects the server reports). If the server holds nothing yet,

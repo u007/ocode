@@ -218,6 +218,12 @@ export interface SessionSlice {
   live: LivePart[];
   isStreaming: boolean;
   error: string | null;
+  // True when the LAST turn ended on an LLM-loop failure (SSE turn_error /
+  // error frame), as opposed to a submit/validation failure — which also lands
+  // in `error` but has nothing to retry server-side. Drives the composer's
+  // retry action after a Stop or a failed turn. Cleared when a new turn starts
+  // (SET_ERROR null) or the user retries.
+  turnError: boolean;
   pendingPermission: PermissionRequest | null;
   // Permission asks superseded by a newer one before being answered — a
   // single agent round can pause on more than one at once when it dispatches
@@ -306,6 +312,7 @@ export const emptySessionSlice: SessionSlice = {
   live: [],
   isStreaming: false,
   error: null,
+  turnError: false,
   pendingPermission: null,
   permissionQueue: [],
   pendingQuestion: null,
@@ -440,6 +447,7 @@ export type ChatAction =
   | { type: "SET_TUI_STATUS"; sessionId: string; status: TUIStatus }
   | { type: "SET_STATUS_LOADING"; sessionId: string; loading: boolean }
   | { type: "SET_TURN_STATE"; sessionId: string; turnActive: boolean }
+  | { type: "SET_TURN_ERROR"; sessionId: string; turnError: boolean }
   | { type: "SET_TURN_HEARTBEAT"; sessionId: string }
   | { type: "SET_TURN_STALLED"; sessionId: string; stalled: boolean }
   | { type: "SET_BOOTSTRAP_STAGE"; sessionId: string; stage: string | null }
@@ -654,7 +662,20 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         isStreaming: action.isStreaming,
       }));
     case "SET_ERROR":
-      return updateSession(state, action.sessionId, (s) => ({ ...s, error: action.error }));
+      // A null error clears the whole error surface — including the retryable
+      // turn-error flag set by turn_error/error SSE frames — because it means a
+      // new turn is starting (send/retry) or the turn started cleanly. A
+      // non-null error only updates `error`: the retry flag is owned by the SSE
+      // handlers so a submit failure cannot masquerade as a retryable turn.
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        error: action.error,
+        turnError: action.error === null ? false : s.turnError,
+      }));
+    case "SET_TURN_ERROR":
+      return updateSession(state, action.sessionId, (s) =>
+        s.turnError === action.turnError ? s : { ...s, turnError: action.turnError },
+      );
     case "APPEND_DELTA":
       return updateSession(state, action.sessionId, (s) => {
         const msgs = [...s.messages];

@@ -3325,3 +3325,22 @@ func TestBannedGitStashPrefixSkipsReadOnlyForms(t *testing.T) {
 		}
 	}
 }
+
+// TestIsHarmfulRequestUsesFullCommandFromArgs: Decide reports only the first
+// segment that needs a human in Request.Command, so a benign asking segment
+// ("curl …") ahead of a harmful one ("git reset --hard") must not hide the
+// harmful segment from the auto-permission gate. The whole line lives in
+// Args; that is what IsHarmfulRequest must judge.
+func TestIsHarmfulRequestUsesFullCommandFromArgs(t *testing.T) {
+	full := `curl -s https://example.com/x && git reset --hard HEAD~1`
+	req := PermissionRequest{ToolName: "bash", Command: "curl -s https://example.com/x",
+		Args: json.RawMessage(`{"command":` + strconv.Quote(full) + `}`)}
+	if !IsHarmfulRequest(req) {
+		t.Fatalf("IsHarmfulRequest must see the harmful segment in Args, got false for %q", full)
+	}
+	benign := PermissionRequest{ToolName: "bash", Command: "curl -s https://example.com/x",
+		Args: json.RawMessage(`{"command":"curl -s https://example.com/x && git status"}`)}
+	if IsHarmfulRequest(benign) {
+		t.Fatal("benign compound must not be harmful")
+	}
+}

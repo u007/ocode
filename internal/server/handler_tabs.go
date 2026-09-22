@@ -36,15 +36,23 @@ type tabsAllResponse struct {
 
 // HandleSetTabs stores the open-session tab state. Two body shapes:
 //
-//   - `{projects: {root: {tabs:[{id,title,sub_tab}], active}}}` — a full
-//     replacement of every project's state (projects absent are dropped),
-//     matching the debounced whole-map writes of the web project store;
-//   - `{path, tabs:[{id,title}], active}` — a full replacement of one
-//     project's state.
+//   - `{projects: {root: {tabs:[{id,title,sub_tab}], active}}}` — a MERGE of
+//     every project the caller knows about. Each provided project replaces
+//     that project's entry; a provided project with an empty `tabs` list
+//     deletes it (how a window persists "I closed this project's last tab").
+//     Projects ABSENT from the body are preserved untouched.
+//   - `{path, tabs:[{id,title}], active}` — a merge of one project's state;
+//     an empty tab list clears it.
+//
+// The merge (rather than a whole-map replacement) is what keeps the desktop
+// app, a shared browser URL, and any concurrently running server process from
+// dropping each other's projects: a client only ever sends the projects it
+// knows about, and several servers share one tabs.json (see internal/tabs).
 //
 // Every successful write publishes an unscoped `tabs_changed` bus event so
-// other open windows (another browser, a shared Tailscale URL, the desktop
-// shell) refetch and converge on the same open tabs.
+// other windows on THIS server (another browser, a shared Tailscale URL, the
+// desktop shell) refetch and converge. The event bus is per-process; other
+// processes converge by reloading the shared file on their next read.
 func (h *Handler) HandleSetTabs(w http.ResponseWriter, r *http.Request) {
 	if h.tabsStore == nil {
 		writeError(w, http.StatusInternalServerError, "tab store not available")
@@ -61,18 +69,14 @@ func (h *Handler) HandleSetTabs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Projects != nil {
-		all := make(map[string]tabs.ProjectTabs, len(body.Projects))
+		patch := make(map[string]tabs.ProjectTabs, len(body.Projects))
 		for root, pt := range body.Projects {
 			if root == "" {
 				continue
 			}
-			clean := dropIDLessTabs(pt.Tabs)
-			if len(clean) == 0 {
-				continue
-			}
-			all[root] = tabs.ProjectTabs{Tabs: clean, Active: pt.Active}
+			patch[root] = tabs.ProjectTabs{Tabs: dropIDLessTabs(pt.Tabs), Active: pt.Active}
 		}
-		if err := h.tabsStore.ReplaceAll(all); err != nil {
+		if err := h.tabsStore.ApplyBulk(patch); err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("set tabs: %v", err))
 			return
 		}

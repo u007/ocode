@@ -487,6 +487,85 @@ describe("projectStore server-side tab persistence", () => {
     );
     expect(result.current.state.activeTabByProject["/proj-a"]).toBe("new-1");
   });
+
+  it("sends an explicit empty entry when a known project's last tab closes (server deletes it)", async () => {
+    projectApi.getTabs.mockResolvedValue({
+      projects: { "/proj-a": { tabs: [{ id: "s1", title: "One" }], active: "s1" } },
+    });
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    await act(async () => {
+      result.current.dispatch({ type: "SET_ACTIVE_PROJECT", project: testProjectA });
+      result.current.dispatch({ type: "REMOVE_TAB", id: "s1" });
+    });
+    // The bulk PUT merges, so the closed project must be sent as an explicit
+    // empty entry — omitting it would leave the old tabs on the server.
+    await waitFor(() => {
+      const calls = projectApi.setTabs.mock.calls;
+      expect(calls[calls.length - 1]?.[0]).toEqual({ "/proj-a": { tabs: [], active: "" } });
+    });
+  });
+
+  it("rekeys tabs onto the new path and explicitly empties the old path", async () => {
+    projectApi.getTabs.mockResolvedValue({
+      projects: { "/proj-a": { tabs: [{ id: "s1", title: "One" }], active: "s1" } },
+    });
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    await act(async () => {
+      result.current.dispatch({ type: "REKEY_TABS", oldPath: "/proj-a", newPath: "/proj-b" });
+    });
+    // The old path is gone locally but must be sent as an explicit deletion.
+    // (A later write, after the deletion is acknowledged, omits it again.)
+    await waitFor(() => {
+      expect(projectApi.setTabs.mock.calls.some((c) => {
+        const payload = c[0] as Record<string, unknown>;
+        return (
+          JSON.stringify(payload?.["/proj-a"]) === JSON.stringify({ tabs: [], active: "" }) &&
+          JSON.stringify(payload?.["/proj-b"]) ===
+            JSON.stringify({ tabs: [{ id: "s1", title: "One", sub_tab: "chat" }], active: "s1" })
+        );
+      })).toBe(true);
+    });
+    expect(result.current.state.tabsByProject["/proj-a"]).toBeUndefined();
+  });
+
+  it("clears a pending deletion once the write carrying it succeeds", async () => {
+    projectApi.getTabs.mockResolvedValue({
+      projects: { "/proj-a": { tabs: [{ id: "s1", title: "One" }], active: "s1" } },
+    });
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    await act(async () => {
+      result.current.dispatch({ type: "SET_ACTIVE_PROJECT", project: testProjectA });
+      result.current.dispatch({ type: "REMOVE_TAB", id: "s1" });
+    });
+    expect(result.current.state.pendingTabDeletes).toContain("/proj-a");
+    await waitFor(() => expect(result.current.state.pendingTabDeletes).toEqual([]));
+  });
+
+  it("does not resurrect a closed project when a refetch returns it before the delete is acknowledged", async () => {
+    projectApi.getTabs.mockResolvedValue({
+      projects: { "/proj-a": { tabs: [{ id: "s1", title: "One" }], active: "s1" } },
+    });
+    // The delete write fails, so the server still holds the old tabs and the
+    // deletion stays pending — exactly the race the pending set guards.
+    projectApi.setTabs.mockRejectedValue(new Error("offline"));
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    await act(async () => {
+      result.current.dispatch({ type: "SET_ACTIVE_PROJECT", project: testProjectA });
+      result.current.dispatch({ type: "REMOVE_TAB", id: "s1" });
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 500)); });
+    expect(result.current.state.pendingTabDeletes).toContain("/proj-a");
+    // Refetch (as a tabs_changed event would) still returns the old tabs.
+    await act(async () => {
+      busHandlers.get("tabs_changed")?.({ event: "tabs_changed", seq: 1, data: null });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(result.current.state.tabsByProject["/proj-a"] ?? []).toEqual([]);
+  });
 });
 
 describe("project session-list cache (snappy project switching)", () => {

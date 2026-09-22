@@ -111,9 +111,26 @@ class MockSocket {
 // tests can assert against.
 const writeText = vi.fn<(text: string) => Promise<void>>(() => Promise.resolve());
 
-beforeEach(() => {
+// jsdom has no navigator.clipboard at all; install the stub BEFORE the reset
+// writes below (writeClipboardText would otherwise take its execCommand
+// fallback, which jsdom also lacks).
+Object.defineProperty(navigator, "clipboard", {
+  value: { writeText },
+  configurable: true,
+  writable: true,
+});
+
+beforeEach(async () => {
   h.terminals.length = 0;
   h.sockets.length = 0;
+  // The panel dedupes same-text clipboard writes within a short window (one
+  // physical Cmd+C can legitimately take two copy paths in the desktop
+  // shell). Tests that intentionally re-copy the same text must not observe
+  // a leftover window from a previous test: run two throwaway writes so the
+  // last seen text is "" rather than a payload of the previous test, then
+  // clear the spy so per-test "never called" assertions stay valid.
+  await writeClipboardText("__reset__");
+  await writeClipboardText("");
   writeText.mockClear();
   vi.stubGlobal("WebSocket", MockSocket as unknown as typeof WebSocket);
   vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("", { status: 404 }))));
@@ -124,11 +141,6 @@ beforeEach(() => {
       disconnect() {}
     },
   );
-  Object.defineProperty(navigator, "clipboard", {
-    value: { writeText },
-    configurable: true,
-    writable: true,
-  });
 });
 
 afterEach(() => {
@@ -174,12 +186,99 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
     expect(mac.allowed).toBe(false); // xterm must not process the keydown
     expect(mac.defaultPrevented).toBe(true); // nor run native copy a second time
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("selected command output"));
+  });
 
-    // linux/windows: ctrlKey+C with selection → copy too
-    writeText.mockClear();
+  it("copies with Ctrl+C with a selection on linux/windows too", async () => {
+    render(<Panel />);
+    const term = h.terminals[0];
+    term.selectionText = "selected command output";
+
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+
     const win = fireKey({ key: "c", ctrlKey: true });
     expect(win.allowed).toBe(false);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("selected command output"));
+  });
+
+  it("dedupes same-text copies racing for one keystroke (menu copy event + keydown write)", async () => {
+    vi.useFakeTimers();
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    term.selectionText = "dup copy text";
+
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+
+    // Path 1: the desktop native Edit ▸ Copy role fires the WKWebView copy:
+    // selector → a DOM copy event over the xterm selection (the container
+    // listener writes it into clipboardData and marks it seen).
+    const host = container.firstElementChild as HTMLElement;
+    const store = new Map<string, string>();
+    const dt = {
+      setData: (type: string, value: string) => void store.set(type, value),
+      getData: (type: string) => store.get(type) ?? "",
+    };
+    const copyEv = new Event("copy", { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(copyEv, "clipboardData", { value: dt });
+    fireEvent(host, copyEv);
+    expect(copyEv.defaultPrevented).toBe(true);
+    expect(dt.getData("text/plain")).toBe("dup copy text");
+    expect(writeText).not.toHaveBeenCalled();
+
+    // Path 2: the SAME keystroke's keydown also reached the page; the
+    // Clipboard-API write must be recognized as the duplicate and dropped.
+    const key = fireKey({ key: "c", metaKey: true });
+    expect(key.allowed).toBe(false);
+    expect(key.defaultPrevented).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(writeText).not.toHaveBeenCalled();
+
+    // After the window passes, copying the same text again is a fresh,
+    // deliberate copy and must write.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    const again = fireKey({ key: "c", metaKey: true });
+    expect(again.allowed).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(writeText).toHaveBeenCalledWith("dup copy text");
+  });
+
+  it("dedupes mouse-up + debounced selection-change double writes", async () => {
+    vi.useFakeTimers();
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    term.selectionText = "dragged text";
+
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+
+    const host = container.firstElementChild as HTMLElement;
+    // Mouse-up inside the container: immediate copy-on-selection write.
+    fireEvent.mouseUp(host, { clientX: 10, clientY: 10 });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith("dragged text");
+
+    // The debounced onSelectionChange fallback then fires for the same
+    // settled selection: same text inside the window → no second write.
+    act(() => {
+      term._selectionChange?.();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    expect(writeText).toHaveBeenCalledTimes(1);
   });
 
   it("lets Ctrl+C fall through when there is no selection (SIGINT)", async () => {
@@ -421,6 +520,14 @@ describe("terminal copy-on-selection", () => {
 });
 
 describe("writeClipboardText fallback", () => {
+  // The dedupe guard lives at module scope; the reset in the global
+  // beforeEach covers the suites above. These tests call writeClipboardText
+  // directly, so reset here too.
+  beforeEach(async () => {
+    await writeClipboardText("__reset__");
+    await writeClipboardText("");
+    writeText.mockClear();
+  });
   it("preserves the field focused while an async write was pending", async () => {
     const original = document.createElement("input");
     const next = document.createElement("input");

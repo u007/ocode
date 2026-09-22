@@ -3224,6 +3224,13 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 					if decision.Request != nil {
 						req = *decision.Request
 					}
+					// Same harmful gate as the Ask branch below: a denied
+					// line that also carries a harmful segment (git reset
+					// --hard, stash, force-push …) stays with the human.
+					if IsHarmfulRequest(req) && !a.autoPermissionAllowsDestructive() {
+						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_fallback_harmful tool=%s command=%s", name, req.Command))
+						return denyToolMessage(name, decision), nil
+					}
 					allowed, reason, _, consulted := a.consultPermissionModel(name, args, &req)
 					if allowed {
 						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
@@ -4129,7 +4136,7 @@ func runPermissionModelLoop(stopCh <-chan struct{}, client LLMClient, messages [
 			default:
 			}
 			is429 := isRateLimitError(err)
-			isRetryable := is429 || isServerUnavailableError(err) || isRetryableLLMClientError(err)
+			isRetryable := isRetryableLLMError(err)
 			if !isRetryable {
 				break
 			}

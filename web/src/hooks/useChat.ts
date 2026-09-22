@@ -36,6 +36,12 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   const wasInterrupted = useChatSelector(
     (s) => getSessionSlice(s, sessionId).wasInterrupted,
   );
+  // True only for an LLM-loop failure (SSE turn_error/error), never a submit
+  // failure — so the composer's Retry is offered only when the server actually
+  // has a turn to re-run. See SessionSlice.turnError.
+  const turnError = useChatSelector(
+    (s) => getSessionSlice(s, sessionId).turnError,
+  );
   const isStreaming = useChatSelector((s) => {
     const slice = getSessionSlice(s, sessionId);
     return slice.isStreaming || slice.turnActive;
@@ -204,6 +210,32 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     dispatch({ type: "SET_WAS_INTERRUPTED", sessionId, wasInterrupted: false });
   }, [dispatch, sessionId]);
 
+  // Retry the last turn after a user Stop or an LLM-loop error: clear the stop
+  // gate / error state, then ask the server to re-run the existing transcript
+  // tail IN PLACE (POST /api/sessions/:id/retry). The server never appends a new
+  // user row, so the user's message is not duplicated — see HandleRetrySession.
+  // Mirrors the TUI's Ctrl+Y retry (model.retryLastLLMError). A draft (`new-*`)
+  // tab has no server session and nothing to retry.
+  const retryLastTurn = useCallback(async (): Promise<boolean> => {
+    if (!sessionId || sessionId.startsWith("new-")) return false;
+    dispatch({ type: "SET_WAS_INTERRUPTED", sessionId, wasInterrupted: false });
+    // SET_ERROR(null) also clears the retryable `turnError` flag (see chatStore).
+    dispatch({ type: "SET_ERROR", sessionId, error: null });
+    dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
+    try {
+      await api.retrySession(sessionId, projectHost);
+      return true;
+    } catch (err) {
+      dispatch({
+        type: "SET_ERROR",
+        sessionId,
+        error: err instanceof Error ? err.message : "retry failed",
+      });
+      dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+      return false;
+    }
+  }, [sessionId, dispatch, projectHost]);
+
   // Resolve a pending agent permission ask via the dedicated resolve endpoint
   // (NOT the config POST /api/permissions, which sets a tool rule). A confirmed
   // success dismisses the dialog; a retryable failure (network, 5xx) keeps it
@@ -327,7 +359,9 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     executeShell,
     stop,
     resume,
+    retryLastTurn,
     wasInterrupted,
+    turnError,
     resolvePermission,
     submitQuestionAnswers,
     cancelQuestion,

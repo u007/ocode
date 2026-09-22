@@ -2060,6 +2060,15 @@ export const api = {
     fetchJSON<{ cancelled: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
       method: "POST",
     }, host),
+  /** Re-run the last turn in place (the composer's Retry after a Stop or an
+   *  LLM-loop error). Unlike sendMessage, the server does NOT append a new user
+   *  row — it re-steps the existing transcript tail — so the user's message is
+   *  not duplicated. `host` routes remote (SSH/WSL) sessions to their server. */
+  retrySession: (sessionId: string, host?: string) =>
+    fetchJSON<ChatResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/retry`, {
+      method: "POST",
+      headers: { "X-Window-Id": getWindowId() },
+    }, host),
   /** Terminate the backend for a closed session (web/desktop tab close):
    *  cancels in-flight work AND releases the resident agent. Fire-and-forget
    *  safe on idle sessions (server no-ops). */

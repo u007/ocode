@@ -12,10 +12,14 @@ import {
   AlertTriangle,
   Archive,
   Check,
+  PanelLeft,
+  PanelLeftClose,
 } from "lucide-react";
 import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
+import { cn } from "@/lib/utils";
 import { useResizableSidebar } from "@/hooks/useResizableSidebar";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { ContextMenu } from "@/components/Layout/ContextMenu";
 import type { ContextMenuItem } from "@/components/Layout/ContextMenu";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -48,6 +52,9 @@ const DEFAULT_SECTIONS: PanelSections = {
   commits: true,
   stashes: true,
 };
+
+/** Height of the file-list pane when the panel is stacked on narrow viewports. */
+const MOBILE_FILE_PANE_HEIGHT = "45%";
 
 function loadPanelSections(): PanelSections {
   try {
@@ -196,7 +203,13 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
     defaultWidth: 288,
     minWidth: 180,
     maxWidth: 520,
+    // Adds a header toggle that collapses the pane to zero and persists it at
+    // `ocode.ui.git-panel.width.collapsed`.
+    collapsible: true,
   });
+  // Below the mobile breakpoint the panel stacks the file list above the diff
+  // instead of squeezing a two-column split.
+  const isMobile = useIsMobile();
 
   // showNotice displays a transient success message for 5 seconds. Any prior
   // timer is cleared so rapid actions don't leave a stale message on screen.
@@ -759,7 +772,7 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
   return (
       <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="px-3 py-2 border-b border-border flex items-center justify-between gap-2">
+      <div className="px-3 py-2 border-b border-border flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-xs text-muted-foreground uppercase tracking-wider shrink-0">
             Git
@@ -775,15 +788,15 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
             )}
           </span>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
           <input
             type="text"
             placeholder="Filter file..."
             value={fileFilter}
             onChange={(e) => setFileFilter(e.target.value)}
-            className="h-7 px-2 rounded-md bg-muted/40 border border-border text-xs focus:outline-none focus:ring-2 focus:ring-ring w-36 md:w-48"
+            className="h-7 px-2 rounded-md bg-muted/40 border border-border text-xs focus:outline-none focus:ring-2 focus:ring-ring w-28 sm:w-36 md:w-48"
           />
-          <span className="text-xs text-muted-foreground">
+          <span className="hidden sm:inline text-xs text-muted-foreground">
             {filteredStaged.length} staged · {filteredUnstaged.length} unstaged
           </span>
           <button
@@ -839,6 +852,19 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
           >
             <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`} />
           </button>
+          <button
+            onClick={filePane.toggleCollapsed}
+            aria-label={filePane.collapsed ? "Show file list" : "Hide file list"}
+            aria-expanded={!filePane.collapsed}
+            title={filePane.collapsed ? "Show file list" : "Hide file list"}
+            className="p-1 rounded hover:bg-muted/60 text-muted-foreground hover:text-foreground"
+          >
+            {filePane.collapsed ? (
+              <PanelLeft className="w-3.5 h-3.5" />
+            ) : (
+              <PanelLeftClose className="w-3.5 h-3.5" />
+            )}
+          </button>
         </div>
       </div>
 
@@ -858,13 +884,27 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
         </div>
       )}
 
-      {/* Body */}
-      <div className="flex flex-1 min-h-0">
+      {/* Body — side-by-side from the md breakpoint up, stacked (file list
+          above the diff) on narrower viewports. */}
+      <div
+        data-testid="git-body"
+        className={cn("flex flex-1 min-h-0", isMobile && "flex-col")}
+      >
         {/* Left: staged / unstaged / commits — width is drag-resizable and
-            persisted (see `filePane`). */}
+            persisted (see `filePane`). The header toggle collapses it to zero;
+            `overflow-hidden` clips the content while the width/height animates. */}
         <div
-          className="shrink-0 flex flex-col min-h-0 bg-muted/10"
-          style={{ width: filePane.width }}
+          data-testid="git-file-pane"
+          className={cn(
+            "shrink-0 flex flex-col min-h-0 bg-muted/10 overflow-hidden transition-[width,height] duration-100",
+            isMobile && "w-full",
+            isMobile && !filePane.collapsed && "border-b border-border",
+          )}
+          style={
+            isMobile
+              ? { height: filePane.collapsed ? 0 : MOBILE_FILE_PANE_HEIGHT }
+              : { width: filePane.collapsed ? 0 : filePane.width }
+          }
         >
           <FileSection
             title="Staged changes"
@@ -1089,17 +1129,20 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
         </div>
 
         {/* Drag handle between the file list and the diff pane. Double-click
-            restores the default width. */}
-        <div
-          ref={filePane.handleRef}
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize file list and diff"
-          title="Drag to resize · double-click to reset"
-          onPointerDown={filePane.onPointerDown}
-          onDoubleClick={filePane.resetToDefault}
-          className="w-1 shrink-0 cursor-col-resize bg-border hover:bg-accent active:bg-accent"
-        />
+            restores the default width. Hidden when the pane is collapsed, or
+            when the panel is stacked (a column resize is meaningless there). */}
+        {!filePane.collapsed && !isMobile && (
+          <div
+            ref={filePane.handleRef}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize file list and diff"
+            title="Drag to resize · double-click to reset"
+            onPointerDown={filePane.onPointerDown}
+            onDoubleClick={filePane.resetToDefault}
+            className="w-1 shrink-0 cursor-col-resize bg-border hover:bg-accent active:bg-accent"
+          />
+        )}
 
         {/* Right: diff pane */}
         <div className="flex-1 min-h-0 flex flex-col">

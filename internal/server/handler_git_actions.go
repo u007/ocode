@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/u007/ocode/internal/remote"
 )
 
 // errStashPathNotFound reports a restore path that is absent from the stash
@@ -552,7 +554,7 @@ func (h *Handler) HandleGitStash(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, stashPushArgs(req, specs)...)); err != nil {
+		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, remoteStashPushArgs(req, specs)...)); err != nil {
 			writeError(w, http.StatusInternalServerError, "git stash failed: "+err.Error())
 			return
 		}
@@ -566,9 +568,26 @@ func (h *Handler) HandleGitStash(w http.ResponseWriter, r *http.Request) {
 // remote paths: optional -m message, -u for untracked files, then the
 // validated pathspecs.
 func stashPushArgs(req gitActionRequest, specs []string) []string {
+	return stashPushArgsQuoted(req, specs, false)
+}
+
+// remoteStashPushArgs is stashPushArgs for the remote transport. It is a
+// separate entry point because the remote command is a shell command line:
+// the free-form message must be shell-quoted, while the local path passes
+// argv directly to exec and must NOT quote (quotes would become literal
+// characters in the message).
+func remoteStashPushArgs(req gitActionRequest, specs []string) []string {
+	return stashPushArgsQuoted(req, specs, true)
+}
+
+func stashPushArgsQuoted(req gitActionRequest, specs []string, quoteMessage bool) []string {
 	args := []string{"stash", "push"}
 	if req.Message != "" {
-		args = append(args, "-m", req.Message)
+		message := req.Message
+		if quoteMessage {
+			message = remote.ShellQuote(message)
+		}
+		args = append(args, "-m", message)
 	}
 	if req.IncludeUntracked {
 		args = append(args, "-u")
@@ -752,7 +771,11 @@ func (h *Handler) HandleGitCommit(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "commit message is required")
 			return
 		}
-		args := []string{"commit", "-m", message}
+		// The message is free-form user text and remoteGitCommand embeds argv
+		// in a shell command line, so it must be shell-quoted here: unquoted,
+		// the remote shell word-splits it and git parses the tail as pathspecs
+		// ("pathspec 'review' did not match any file(s)").
+		args := []string{"commit", "-m", remote.ShellQuote(message)}
 		if len(specs) > 0 {
 			args = append(args, "--")
 			args = append(args, specs...)

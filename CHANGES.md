@@ -1,5 +1,284 @@
 # Changelog
 
+## 2026-09-22 — Fix: retry the opencode-go thinking-mode 400 (`reasoning_content`)
+
+A thinking-mode conversation rejected by the gateway with
+
+```
+opencode-go error (400): {"error":{"type":"invalid_request_error",
+ "code":"invalid_request_error","message":"Upstream request failed:
+ [invalid_request_error] The `reasoning_content` in the thinking mode must be
+ passed back to the API."}}
+```
+
+now uses the normal retry budget instead of hard-failing the turn after one
+attempt. 400s are otherwise deliberately non-retryable, so this is a narrow
+exemption keyed on the request body: the error must be a typed provider status
+error with `Code == 400` whose body contains **both** `reasoning_content` and
+either `passed back` or `thinking mode` (`isRetryableThinkingModeRequestError`,
+`internal/agent/client.go`). Unrelated 400 `invalid_request_error`s — including
+one that merely names `reasoning_content` as an invalid type — still fail fast
+(1 attempt), pinned by `TestChatGenericInvalidRequest400DoesNotRetry` and
+`TestStatusErrorBodyTextDoesNotCauseRetry`.
+
+- New `isRetryableLLMError` is the single retryability policy shared by the main
+  `ChatWithContext` loop and the auto-permission judge's outer loop, replacing
+  the duplicated `is429 || isServerUnavailableError(err) || isRetryableLLMClientError(err)`
+  expression so the two loops can't drift. 429 budget/delay selection still uses
+  `isRateLimitError` directly.
+- Budget/delay follow the non-429 path: `llmMaxRetries` retries
+  (`llmMaxRetries+1` attempts), `llmRetryBaseDelay` backoff.
+- Tests (mutation-verified by flipping the status-code gate to 418 and
+  watching them fail): `TestIsRetryableThinkingModeRequestError`,
+  `TestChatRetriesThinkingModeReasoningContent400` (400 then success),
+  `TestChatThinkingMode400UsesUsualMaxRetries` (persistent → budget spent),
+  `TestChatGenericInvalidRequest400DoesNotRetry`.
+
+## 2026-09-22 — Feature: web/desktop composer Retry re-runs the last turn in place
+
+A stopped conversation or a turn that ended on an LLM-loop error now shows a
+small Retry icon (`RotateCcw`) beside the web chat input. Clicking it clears
+the stop/error state and re-runs the last turn **without duplicating the user's
+message** — the exact gap left by the existing Resume button, which only
+cleared the stop gate, and by the normal send path, which appends a new user
+row (`runTurn`).
+
+Key requirement: `runTurn` (internal/server/agent_session.go) always appends a
+user message, so re-sending the text would produce a second copy. The retry
+therefore uses a new in-place path:
+- `turnOptions.retryLast` — `runTurn` skips the user-row append and the
+  `user_message` SSE echo, stepping the agent over the existing transcript tail
+  (mirrors the TUI's Ctrl+Y `retryLastLLMError`).
+- `POST /api/sessions/{id}/retry` → `HandleRetrySession`
+  (`internal/server/handler_retry.go`): 409 when a turn is active or the
+  transcript has no user row; otherwise dispatches `retryLast` and 202s.
+  `executeTurnJob` skips persist/pending for a retry (the row is already
+  durable) and runs the single in-place turn. Remote (SSH/WSL) sessions reach
+  it through the existing `/api/remote/{host}` proxy.
+
+Client: `SessionSlice.turnError` distinguishes an LLM-loop failure (set by the
+`turn_error` bus frame and the headless SSE `error` frame, cleared on the next
+`turn_started`/`SET_ERROR(null)`) from a submit/validation failure, which sets
+`error` only — so Retry is offered only when the server has a turn to re-run.
+`useChat.retryLastTurn` (host-threaded) clears `wasInterrupted`/`turnError` and
+calls `api.retrySession`; `ChatInput` shows the icon when
+`!busy && (wasInterrupted || turnError)`.
+
+Tests: `internal/server/handler_retry_test.go` (no-duplicate in memory *and* on
+disk, 409 active turn, 409 nothing-to-retry; the no-duplicate assertion
+mutation-verified by reverting the guard),
+`web/src/components/Chat/ChatInput.retry.test.tsx` (6),
+`web/src/lib/sessionEvents.test.ts` (+3), and a host-routing test in
+`web/src/hooks/useChat.remoteHost.test.tsx`.
+
+## 2026-09-22 — Fix: terminal Cmd+C no longer double-copies in the desktop shell
+
+In the desktop app's terminal tab, one physical Cmd+C could write the
+clipboard twice (clipboard managers like Maccy/Paste showed the copy twice):
+the native Edit ▸ Copy menu role (Wails `application.EditMenu`, bound to
+`CmdOrCtrl+c`, firing the WKWebView `copy:` selector → a DOM `copy` event over
+the xterm canvas selection) AND the page keydown handled in
+`attachCustomKeyEventHandler` (async Clipboard-API write) can both run for the
+same keystroke — engine-dependent ordering. Copy-on-selection had the same
+race: container mouse-up plus the 150ms-debounced `onSelectionChange`
+fallback. Fix (`web/src/components/Terminal/TerminalPanel.tsx`): a shared
+same-text dedupe window (`DUPLICATE_COPY_WINDOW_MS` = 250ms). The first copy
+path to fire wins; `isDuplicateCopy()` drops a second write of identical text
+inside the window, and the container-level `copy` listener records every
+selection copy passing through the container via `markCopySeen` — including
+events xterm's own element listener already answered — so the keydown path is
+suppressed whichever side ran first. Different text always writes; Ctrl+C with
+no selection still falls through to SIGINT; copy-on-selection and the
+execCommand fallback are unchanged.
+Tests: `web/src/components/Terminal/TerminalPanel.copyOnSelect.test.tsx`
+(+2 dedupe suites and a split mac/ctrl copy test, 18 total; both dedupe tests
+mutation-verified by disabling the guard in place).
+
+## 2026-09-22 — Feature: project list shows each project's git changed-file count
+
+The web project sidebar (`web/src/components/Layout/ProjectSidebar.tsx`) now
+renders a violet `GitBranch` pill with the project's changed-file count
+(`staged + unstaged`, the same total the Git tab badge shows, tooltip
+`N changed files (M staged · K unstaged)`) — and a matching count chip on the
+collapsed-rail icon — for every project that has any, including projects with
+no open session. Counts come from a new shared store
+`web/src/lib/projectGitCounts.ts` (one entry per `host\0project`, so a row and
+its rail icon share a single `GET /api/git/status`): initial fetch, 60s poll
+while mounted (non-repo directories are re-probed only every 5 min), and an
+instant refresh on a `git_status` bus event. Projects with an open tab already
+receive those events; the rest are fetched because `eventBus.setProjects`
+declares only open-tab projects as "viewed". A remote project is only probed
+while its host is connected — `?host=` is the cold-connect path, so an
+unconnected host must never be dialed by rendering its row — and its badge
+clears when the host drops. A failed refresh keeps the last known counts so a
+transient error cannot flash every badge to zero.
+Tests: `web/src/lib/projectGitCounts.test.ts` (10),
+`web/src/components/Layout/ProjectSidebar.test.tsx` (+4; all mutation-verified
+by reverting the corresponding fix). Docs: `skills/ocode-web/SKILL.md` item 29.
+
+## 2026-09-22 — Fix: harmful git segment could reach the auto-permission judge
+
+`IsHarmfulRequest` (`internal/agent/permissions.go`) gated the auto-judge on
+`Request.Command`, which `Decide` fills with only the **first** segment of a
+compound bash line that needs a human. A benign asking segment ahead of a
+harmful one (`curl … && git reset --hard`, `cd /elsewhere && git checkout --
+file`) therefore bypassed the gate and the judge could approve it. The gate
+now judges the whole line from `req.Args` (fallback `req.Command`), and the
+Deny → auto-judge branch in `handleToolCall` runs the same gate. Tests:
+`TestIsHarmfulRequestUsesFullCommandFromArgs`,
+`TestHandleToolCallAutoPermissionHarmfulSegmentNotMaskedByEarlierAsk`. Gotcha:
+`docs/gotchas/auto-permission-harmful-segment-masked-by-earlier-ask.md`.
+
+## 2026-09-22 — Fix: Jev rubric explains temp_root_aliases
+
+`typesafeJudgeInstructions` (`internal/agent/permission_typesafe.go`) now states
+that a path under a `temp_root_aliases` alias (`/tmp/x`) is the same path as its
+`resolves_to` form (`/private/tmp/x`) and therefore inside `allowed_roots`.
+Without it a `/tmp` scratch write sat at allow 0.84–0.88 against the 0.85
+auto-grant floor (measured live, 2× each); with the line it is 0.91–0.94.
+
+## 2026-09-22 — Research: Laya as a local permission / auto-continue judge
+
+Evaluated the Laya System-1 model (3 checkpoints) against `typesafe/jev-latest`
+on 16 real bash tool calls and 13 real transcript tails from local sessions.
+Not usable zero-shot (auto-grants nothing, auto-continues nothing; instructions
+truncated to the 192/256-token head budget). Memory/latency table, context
+budgets and next steps in
+`docs/superpowers/specs/2026-09-22-laya-local-judge-evaluation.md`; harness in
+`docs/okf/_tools/laya-eval/`.
+
+## 2026-09-22 — Feature: Git panel file list is collapsible + responsive
+
+The web/desktop Git view (`web/src/components/Git/GitPanel.tsx`) now lets you
+hide the left file-list/commits column, and stacks it above the diff on narrow
+viewports instead of squeezing the two-column split.
+
+- **Collapsible pane**: the header gained a `PanelLeftClose`/`PanelLeft` toggle
+  (`aria-label` "Hide/Show file list") that collapses the pane to zero width and
+  persists the choice at `ocode.ui.git-panel.width.collapsed` through the
+  existing `useResizableSidebar({ collapsible: true })` hook. The resize
+  separator is hidden while collapsed; `overflow-hidden` plus a width/height
+  transition clips the content as the pane animates shut.
+- **Responsive**: below the 768px breakpoint (`useIsMobile`) the body becomes a
+  column — the file list (`w-full`, 45% height, bottom border) sits above the
+  diff, and the column-resize separator is omitted. The header now wraps, the
+  filter input narrows (`w-28 sm:w-36 md:w-48`) and the staged/unstaged counts
+  hide below `sm`.
+- **Tests** (`web/src/components/Git/GitPanel.test.tsx`): collapse toggle → zero
+  width + persisted key + separator removed; collapsed state restored on mount;
+  narrow viewport stacks (`flex-col`, `height: 45%`, no separator, toggle still
+  collapses). Existing resize/width tests are unchanged. Layout was additionally
+  verified against the built CSS in headless Chromium (288px side-by-side at
+  1024px; 375px-wide/270px-tall stacked at 375px; 0 width/height when collapsed).
+
+## 2026-09-22 — Fix: remote git commit/stash word-split a multi-word message
+
+Reported from the desktop UI on a remote SSH project: committing with a
+message like "review pagination" failed with
+`error: pathspec 'review' did not match any file(s) known to git`.
+
+Root cause: the remote git path builds a shell command line
+(`remoteGitCommand`), whereas the local path passes argv directly to `exec`.
+The commit message (and the stash `-m` message) were appended unquoted, so the
+remote shell word-split them and git — which accepts trailing pathspecs on
+`commit`/`stash push` — parsed the tail as pathspecs. The same defect was a
+remote command-injection hole (a message containing `;` or `$(...)` executed
+on the host).
+
+- **Fix** (`internal/server/handler_git_actions.go`): the remote commit now
+  passes `remote.ShellQuote(message)`, and the remote stash uses a new
+  `remoteStashPushArgs` (shell-quotes the message); `stashPushArgs` keeps the
+  raw message for the local exec path (quoting there would embed literal
+  quotes). `remoteGitCommand`'s contract comment now states that free-form
+  arguments must be `ShellQuote`d by the caller.
+- **Tests** (`internal/server/handler_git_message_quote_test.go`): remote
+  commit with a multi-word message, remote commit with shell metacharacters
+  (asserts the message does not execute on the host), remote stash with a
+  multi-word message, and a unit test pinning that only the remote variant
+  quotes. All mutation-verified — reverting the fix reproduces the exact
+  `pathspec … did not match` failure.
+
+## 2026-09-22 — Fix: shared tab bar dropped a project's tabs (browser showed 0)
+
+Reported: sharing the desktop session and opening the URL in a browser showed
+`mail-archive` with 0 open tabs, while the desktop app still had its chat +
+terminal. `tabs.json` (shared by the desktop `.app`, the dev server, and any
+other `ocode serve` process on the same global data dir) had lost the project
+entirely.
+
+Root cause: `PUT /api/tabs` was a whole-map REPLACE ("projects absent are
+dropped") backed by a per-process cache loaded once, with no cross-process
+lock and a non-atomic `os.WriteFile`. Any window or server process whose
+in-memory `tabsByProject` didn't include another's project overwrote the file
+and dropped it; other processes never saw a `tabs_changed` (the bus is
+per-process) and kept serving divergent state.
+
+- **Fix** (`internal/tabs`, `internal/server/handler_tabs.go`): the bulk PUT
+  now MERGES — each provided project replaces its entry, an empty tab list
+  deletes the project, and projects absent from the body are preserved. The
+  read-modify-write runs under a cross-process `filelock`, reloads the latest
+  on-disk state first, and writes atomically (temp file + rename). Reads
+  (`Get`/`All`) reload when another process changed the file.
+- **Client** (`web/src/stores/projectStore.tsx`): `toServerTabs` emits an
+  explicit empty entry for a known project whose last tab closed (so the
+  deletion persists), and `REKEY_TABS` removes the old path and marks it a
+  pending delete. A new `pendingTabDeletes` slice (populated on last-tab close
+  / rekey, cleared by `FLUSH_TAB_DELETES` after the write succeeds) is sent as
+  an explicit empty entry and makes `mergeExternalTabs` ignore those paths, so
+  a `tabs_changed` refetch that races the 400 ms debounced delete can't
+  resurrect tabs the user just closed.
+- **Tests**: `internal/tabs/tabs_test.go` (merge across store instances, empty
+  deletes, no temp-file litter), `handler_tabs_test.go` (merge preserves
+  absent / empty deletes), `projectStore.test.tsx` (explicit empty on last-tab
+  close; rekey empties the old path). All mutation-verified against the
+  pre-fix behavior.
+
+## 2026-09-22 — Session live-drop and replace writes are logged
+
+Incident `ses_2026-09-22-124117-caa39c49` (desktop): ~40 agent steps ran,
+zero persisted, transcript frozen at the user row with `history_gen=2`. Two
+mid-turn replaces superseded every queued live snapshot, and both live-drop
+paths in `appendSqliteSessionOnce` returned `false, nil` without a log line,
+so the trigger could not be attributed after the debug ring rotated.
+
+- **Fix** (`internal/session/sqlitestore.go`): log `live snapshot dropped
+  for <id>: superseded generation | stored rows are not a prefix` with
+  generations and row counts, and log every replace (`shrink A -> B` or
+  `rewrite of overlapping rows`) with its `history_gen` bump. Drop semantics
+  unchanged.
+- **Tests**: `internal/session/live_drop_log_test.go`.
+- **Doc**: incident write-up in `docs/gotchas/session-writers-conflict-recovery.md`.
+
+## 2026-09-22 — Fix: `/fake-agent` gave no visible feedback on a fresh session
+
+User report: "tui /fake agent no feedback, is it working?" The switch *was*
+working (the harness identity changed and persisted), but the confirmation
+never appeared on screen.
+
+- **Root cause** (`internal/tui/model.go`, `renderTranscript`): the empty-state
+  gate asked "does any message exist that is neither `transient` nor
+  `skipLLM`?" and blanked the whole viewport (or painted pipboy/LCARS art) when
+  the answer was no. `skipLLM` means "keep this out of the LLM prompt", not
+  "don't render" — but the gate conflated the two. `runFakeAgentCmd` marks its
+  replies `skipLLM` (correctly: the harness identity must not re-enter the
+  prompt), so on a brand-new session — where every message was the transient
+  "Started new session." notice plus the user's own `/fake-agent` echo — the
+  reply was added to `m.messages` and then hidden by the render gate.
+- **Fix**: the gate now excludes only *chrome* — transient notices and the
+  user's own slash-command echo (`role == roleUser && isCommandHistoryMessage`)
+  — and counts assistant-side output even when `skipLLM`. The empty state and
+  its art are preserved for a genuinely conversation-free session.
+- **Same class, also fixed**: a cron delivery (`model.go`, `roleAssistant` +
+  `skipLLM`, not transient) was likewise invisible on a fresh session. LLM
+  transport errors only escaped the bug because the preceding user message is
+  not `skipLLM`.
+- **Tests** (`internal/tui/command_test.go`): `TestFakeAgentFeedbackVisibleOnFreshSession`
+  (all four `/fake-agent` shapes render on a fresh session, and the reply still
+  does NOT leak into the LLM prompt), `TestFreshSessionStillRendersEmptyState`
+  (a bare launch and a `/theme` whose only trace is chrome still render empty),
+  `TestCronDeliveryVisibleOnFreshSession`. Mutation-verified: reverting the
+  predicate fails the first and third.
+
 ## 2026-09-22 — `/fake-agent opencode` now matches the real opencode wire fingerprint
 
 When the opencode harness is active (via `/fake-agent opencode`, Settings >

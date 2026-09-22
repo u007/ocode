@@ -376,6 +376,11 @@ const remoteNetworkTimeout = 120 * time.Second
 // callers pass repo-relative pathspecs already validated to contain no shell
 // metachars (see remotePathSpec), or fixed literals.
 //
+// Any FREE-FORM argument (a commit/stash message, a ref) is neither: it must
+// be wrapped with remote.ShellQuote by the caller before being passed here,
+// or the remote shell word-splits it and git mis-parses the tail (e.g. a
+// multi-word commit message becomes trailing pathspecs).
+//
 // The env prefix is the same opt-out the local helpers apply (gitexec.Env):
 // without it ocode's remote status/diff probes refresh the index on the host
 // and take its .git/index.lock as a side effect, contending with the user's own

@@ -805,7 +805,7 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 
 		// Determine retry strategy for this error.
 		is429 := isRateLimitError(err)
-		isRetryable := is429 || isServerUnavailableError(err) || isRetryableLLMClientError(err)
+		isRetryable := isRetryableLLMError(err)
 		if !isRetryable {
 			break
 		}
@@ -1054,6 +1054,46 @@ func isRetryableLLMClientError(err error) bool {
 		return strings.Contains(lower, "internal_error") || strings.Contains(lower, "refused_stream") || strings.Contains(lower, "enhance_your_calm") || strings.Contains(lower, "connect_error")
 	}
 	return false
+}
+
+// isRetryableThinkingModeRequestError reports whether err is a typed provider
+// status error rejecting a thinking-mode conversation because the assistant
+// `reasoning_content` was not echoed back. The observed signature is an HTTP
+// 400 from the opencode-go gateway whose body carries both the
+// `reasoning_content` field name and the thinking-mode requirement:
+//
+//	{"error":{"type":"invalid_request_error","code":"invalid_request_error",
+//	 "message":"Upstream request failed: [invalid_request_error] The
+//	 `reasoning_content` in the thinking mode must be passed back to the API."}}
+//
+// A 400 is otherwise non-retryable (see TestStatusErrorBodyTextDoesNotCauseRetry),
+// so this is a deliberately narrow exemption: the gateway re-validates
+// conversation state on each attempt, so a retry can re-establish the reasoning
+// continuity the first attempt missed. Budget/delay follow the non-429 path
+// (llmMaxRetries attempts, llmRetryBaseDelay backoff). Requiring BOTH the field
+// name and the thinking-mode phrasing keeps unrelated malformed-request 400s
+// (including a body that merely names `reasoning_content`) failing fast.
+func isRetryableThinkingModeRequestError(err error) bool {
+	var se *providerStatusError
+	if !errors.As(err, &se) || se.Code != http.StatusBadRequest {
+		return false
+	}
+	lower := strings.ToLower(se.Body)
+	if !strings.Contains(lower, "reasoning_content") {
+		return false
+	}
+	return strings.Contains(lower, "passed back") || strings.Contains(lower, "thinking mode")
+}
+
+// isRetryableLLMError is the single retryability policy shared by the main
+// ChatWithContext retry loop and the auto-permission judge's outer retry loop.
+// Keeping it in one place stops the two loops from drifting. Callers still
+// consult isRateLimitError separately to pick the 429 budget/delay.
+func isRetryableLLMError(err error) bool {
+	return isRateLimitError(err) ||
+		isServerUnavailableError(err) ||
+		isRetryableLLMClientError(err) ||
+		isRetryableThinkingModeRequestError(err)
 }
 
 // chatCopilot exchanges the stored GitHub OAuth token (held in APIKey) for a short-lived

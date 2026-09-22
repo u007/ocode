@@ -1,9 +1,9 @@
 ---
 type: Gotcha
 title: opencode-go per-model protocol routing & Anthropic tool schema flatness
-description: 'Two ocode bugs fixed 2026-09-17: opencode-go per-model routing by provider.npm, flat tool Definition() shape for chatAnthropic; 2026-09-18: HTTP 500 retried as transient with routing caveat.'
+description: 'Retry policy updated: 500 and thinking-mode 400 now retried'
 tags: []
-timestamp: 2026-09-18T12:22:29Z
+timestamp: 2026-09-22T14:29:37Z
 ---
 # opencode-go per-model protocol routing & Anthropic tool schema flatness
 
@@ -81,4 +81,51 @@ The delta-emitted gate is unchanged: a 500 after partial streamed deltas still d
 
 ---
 
-**Cite:** `internal/agent/client.go` (`usesAnthropicMessagesAPI`, `chatAnthropic`, `isServerUnavailableError`), `internal/agent/models_registry.go` (`modelEntry`, `ModelAPIPackageFromRegistry`), `internal/tool/preview.go`, `internal/tool/tool_test.go`, CHANGES.md entry "2026-09-17 — Union Alpha (opencode-go) works; Anthropic tool schemas fixed", `internal/agent/agent.go` (`ChatWithContext` retry loop, auto-permission judge loop)
+## 2026-09-22 — thinking-mode 400 (`reasoning_content` must be passed back) is now retried
+
+A thinking-mode conversation that omits the assistant `reasoning_content` to echo back now gets retried instead of hard-failing. The opencode-go gateway returns this HTTP 400:
+
+```json
+{"error":{"param":null,"type":"invalid_request_error","code":"invalid_request_error",
+"message":"Upstream request failed: [invalid_request_error] The `reasoning_content` in the thinking mode must be passed back to the API."}}
+```
+
+Previously this hard-failed the turn as "llm request failed after 1 attempt(s)" because 400 was not in `{429, 500, 502, 503, 504}`. 400 remains non-retryable by default — see the narrow exemption below.
+
+### New helper — `isRetryableThinkingModeRequestError(err)` (`internal/agent/client.go`)
+
+Returns `true` **only** when `err` is a typed `*providerStatusError` with **all three** conditions met:
+
+1. `Code == http.StatusBadRequest` (400), and
+2. the body contains the field name `reasoning_content`, and
+3. the body contains the phrasing `passed back` or `thinking mode` (case-insensitive).
+
+This is a deliberately narrow exemption. A 400 is otherwise non-retryable (see `TestStatusErrorBodyTextDoesNotCauseRetry` — a 400 body mentioning "timeout" or "eof" still fails fast). Requiring **both** the field name **and** the thinking-mode phrasing keeps unrelated malformed-request 400s (including bodies that merely name `reasoning_content`) failing fast. The gateway re-validates conversation state on each attempt, so a retry can re-establish the reasoning continuity the first attempt missed.
+
+### Shared policy — `isRetryableLLMError` (`internal/agent/client.go`)
+
+`isRetryableLLMError` is now the **single** retryability policy used by both retry loops:
+
+```
+isRetryableLLMError = isRateLimitError || isServerUnavailableError || isRetryableLLMClientError || isRetryableThinkingModeRequestError
+```
+
+Callers: the main `ChatWithContext` retry loop (`client.go` ~:808) and the auto-permission judge's outer retry loop (`agent.go` ~:4139). The two call sites no longer duplicate the boolean expression. Callers still check `isRateLimitError` separately to select the 429 budget/delay.
+
+**The `deltaEmitted` anti-duplication gate is unaffected.** A 400 arrives before any streamed deltas (it is a pre-stream rejection), so `deltaEmitted` is `false` and the gate never interferes.
+
+### Budget and delay
+
+Non-429 path: `llmMaxRetries` = 3 retries → 4 attempts total, delay `(attempt+1) × llmRetryBaseDelay` (500 ms base, zeroed in tests).
+
+### Tests (`internal/agent/client_test.go`, all mutation-verified by flipping the status-code gate to 418 so they fail)
+
+- `TestIsRetryableThinkingModeRequestError` — unit matrix including negatives: phrase without field name, field name without phrase, non-400 status, untyped `error` (not `*providerStatusError`), nil.
+- `TestChatRetriesThinkingModeReasoningContent400` — 400 then 200 success, exactly 2 calls.
+- `TestChatThinkingMode400UsesUsualMaxRetries` — persistent 400 → `llmMaxRetries + 1` attempts.
+- `TestChatGenericInvalidRequest400DoesNotRetry` — an unrelated 400 (`invalid_request_error` without the reasoning_content/thinking-mode phrasing) → 1 call, fails fast.
+- `TestStatusErrorBodyTextDoesNotCauseRetry` (existing) — a 400 body with "timeout"/"eof" wording still does not retry; green.
+
+---
+
+**Cite:** `internal/agent/client.go` (`isServerUnavailableError`, `isRetryableThinkingModeRequestError`, `isRetryableLLMError`, `ChatWithContext` retry loop), `internal/agent/agent.go` (auto-permission judge outer retry loop), `internal/agent/client_test.go` (`TestIsRetryableThinkingModeRequestError`, `TestChatRetriesThinkingModeReasoningContent400`, `TestChatThinkingMode400UsesUsualMaxRetries`, `TestChatGenericInvalidRequest400DoesNotRetry`, `TestStatusErrorBodyTextDoesNotCauseRetry`, `TestChatRetriesTransientServerStatusCodes`, `TestChat500UsesUsualMaxRetries`, `TestProviderStatusErrorClassification`), `internal/agent/models_registry.go` (`modelEntry`, `ModelAPIPackageFromRegistry`), `internal/tool/preview.go`, `internal/tool/tool_test.go`, CHANGES.md entry "2026-09-17 — Union Alpha (opencode-go) works; Anthropic tool schemas fixed"

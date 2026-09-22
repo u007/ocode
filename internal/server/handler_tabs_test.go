@@ -66,9 +66,11 @@ func TestHandleTabsBulkRoundTrip(t *testing.T) {
 	}
 }
 
-// A bulk PUT is a full replacement: projects absent from the body are
-// dropped, so closing every tab of a project in one window clears it for all.
-func TestHandleTabsBulkReplacesAll(t *testing.T) {
+// A bulk PUT merges: projects absent from the body are PRESERVED, so a window
+// (or a second server process) that doesn't know about another window's
+// project can't drop it. Deletion is explicit — a project the caller sends
+// with an empty tab list is removed.
+func TestHandleTabsBulkMergesAndDeletes(t *testing.T) {
 	h := testTabsHandler(t)
 	put := func(body string) {
 		t.Helper()
@@ -78,20 +80,30 @@ func TestHandleTabsBulkReplacesAll(t *testing.T) {
 			t.Fatalf("PUT status=%d body=%s", rr.Code, rr.Body.String())
 		}
 	}
-	put(`{"projects":{"/a":{"tabs":[{"id":"s1","title":"x"}],"active":"s1"},"/b":{"tabs":[{"id":"s2","title":"y"}],"active":"s2"}}}`)
-	put(`{"projects":{"/a":{"tabs":[{"id":"s1","title":"x"}],"active":"s1"}}}`)
+
+	// Window B opens /b and /c; a later write from a window that only knows
+	// about /a (and explicitly closed /b) must not drop /c.
+	put(`{"projects":{"/b":{"tabs":[{"id":"s2","title":"y"}],"active":"s2"},"/c":{"tabs":[{"id":"s3","title":"z"}],"active":"s3"}}}`)
+	put(`{"projects":{"/a":{"tabs":[{"id":"s1","title":"x"}],"active":"s1"},"/b":{"tabs":[],"active":""}}}`)
 
 	all := h.tabsStore.All()
-	if _, ok := all["/b"]; ok {
-		t.Fatalf("/b should have been dropped: %+v", all)
+	if _, ok := all["/c"]; !ok {
+		t.Fatalf("/c must be preserved by the merge (absent from the body): %+v", all)
 	}
-	if len(all) != 1 {
-		t.Fatalf("want 1 project, got %+v", all)
+	if _, ok := all["/a"]; !ok {
+		t.Fatalf("/a should be stored: %+v", all)
+	}
+	if _, ok := all["/b"]; ok {
+		t.Fatalf("/b was explicitly emptied and must be deleted: %+v", all)
+	}
+	if len(all) != 2 {
+		t.Fatalf("want 2 projects (/a,/c), got %+v", all)
 	}
 }
 
 // Tabs without an id are dropped from a bulk PUT (same rule as the per-path
-// form), and a project left with no tabs is not stored at all.
+// form), and a project left with no valid tabs is cleared (deleted) rather
+// than stored empty.
 func TestHandleTabsBulkDropsEmpty(t *testing.T) {
 	h := testTabsHandler(t)
 	rr := httptest.NewRecorder()

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -448,7 +449,10 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 	if live && existingGen != liveGen {
 		// Superseded pre-compaction snapshot: a synchronous shrink replaced
 		// the history after this snapshot was queued. Appending its suffix
-		// would resurrect compacted messages, so drop it entirely.
+		// would resurrect compacted messages, so drop it entirely. Logged:
+		// a run of these is how a transcript ends up frozen at its
+		// pre-persisted user row (ses_2026-09-22-124117-caa39c49).
+		log.Printf("session: live snapshot dropped for %s: superseded generation (snapshot gen %d, stored gen %d, snapshot %d msgs, stored %d rows)", id, liveGen, existingGen, len(messages), existingCount)
 		return false, nil
 	}
 
@@ -469,8 +473,16 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 			return false, err
 		}
 		n, ok := liveAppendStart(stored, messages)
-		if !ok || n >= len(messages) {
-			// No new messages (stale or identical queued snapshot) — leave
+		if !ok {
+			// Stale or foreign snapshot: the stored rows are not a prefix of
+			// it. Dropping is by design (the turn-end sync save is
+			// authoritative), but it must be visible — a silent run of
+			// these is indistinguishable from a persistence outage.
+			log.Printf("session: live snapshot dropped for %s: stored rows are not a prefix of the snapshot (snapshot %d msgs, stored %d rows, gen %d)", id, len(messages), existingCount, existingGen)
+			return false, nil
+		}
+		if n >= len(messages) {
+			// No new messages (identical queued snapshot) — leave
 			// everything untouched, including title, metadata, updated_at,
 			// and the index row. Title/metadata ride along only with
 			// genuinely new messages so an older snapshot can never
@@ -569,8 +581,15 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 		// Authoritative replacement (shrunk, or overlapping content
 		// rewritten): bump the generation in this same transaction so any
 		// queued pre-replacement live snapshot mismatches and drops
-		// instead of resurrecting history.
+		// instead of resurrecting history. Always logged: this is the only
+		// path that discards stored rows, so an unexplained transcript
+		// loss must be traceable to a specific replace.
 		newGen = existingGen + 1
+		if shrinking {
+			log.Printf("session: replace %s: shrink %d -> %d stored rows, history_gen %d -> %d", id, existingCount, len(messages), existingGen, newGen)
+		} else {
+			log.Printf("session: replace %s: rewrite of overlapping rows (%d stored, %d in snapshot), history_gen %d -> %d", id, existingCount, len(messages), existingGen, newGen)
+		}
 	}
 
 	if _, err := tx.Exec(

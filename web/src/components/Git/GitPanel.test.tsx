@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitStash, GitWorkspace } from "@/api/types";
 
 const mocks = vi.hoisted(() => ({
@@ -59,6 +59,30 @@ async function emitGitStatus(project = "/proj") {
 
 const GIT_PANEL_SECTIONS_KEY = "ocode.ui.git-panel.v1";
 const GIT_PANEL_WIDTH_KEY = "ocode.ui.git-panel.width";
+const GIT_PANEL_COLLAPSED_KEY = "ocode.ui.git-panel.width.collapsed";
+
+/** Mutable matchMedia result so a test can simulate a narrow viewport. */
+let mqMatches = false;
+
+beforeAll(() => {
+  // jsdom ships no matchMedia; useIsMobile reads it on first render.
+  window.matchMedia = ((media: string) => ({
+    get matches() {
+      return mqMatches;
+    },
+    media,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+});
+
+afterEach(() => {
+  mqMatches = false;
+});
 
 /** Waits for the portal context menu (rendered into document.body) to open. */
 async function openContextMenuRow(fileName: string) {
@@ -397,6 +421,60 @@ describe("GitPanel", () => {
 
     fireEvent.doubleClick(handle);
     expect(column.style.width).toBe("288px");
+  });
+
+  it("collapses the file-list pane from the header toggle and persists it", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+
+    const pane = screen.getByTestId("git-file-pane");
+    expect(pane.style.width).toBe("288px");
+    expect(
+      screen.getByRole("separator", { name: /resize file list and diff/i }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide file list" }));
+
+    // Collapsed: zero width, and the resize handle is gone.
+    expect(pane.style.width).toBe("0px");
+    expect(
+      screen.queryByRole("separator", { name: /resize file list and diff/i }),
+    ).toBeNull();
+    await waitFor(() =>
+      expect(window.localStorage.getItem(GIT_PANEL_COLLAPSED_KEY)).toBe("1"),
+    );
+
+    // The toggle flips to "Show" and restores the pane.
+    fireEvent.click(screen.getByRole("button", { name: "Show file list" }));
+    expect(pane.style.width).toBe("288px");
+  });
+
+  it("restores a collapsed file-list pane on mount", async () => {
+    window.localStorage.setItem(GIT_PANEL_COLLAPSED_KEY, "1");
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+
+    expect(screen.getByTestId("git-file-pane").style.width).toBe("0px");
+  });
+
+  it("stacks the file list above the diff on narrow viewports", async () => {
+    mqMatches = true;
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+
+    // Body switches to a column and a column-resize handle is meaningless.
+    expect(screen.getByTestId("git-body").className).toContain("flex-col");
+    expect(
+      screen.queryByRole("separator", { name: /resize file list and diff/i }),
+    ).toBeNull();
+
+    const pane = screen.getByTestId("git-file-pane");
+    expect(pane.style.height).toBe("45%");
+    expect(pane.style.width).toBe("");
+
+    // The header toggle still collapses the stacked list.
+    fireEvent.click(screen.getByRole("button", { name: "Hide file list" }));
+    expect(pane.style.height).toBe("0px");
   });
 });
 

@@ -562,7 +562,7 @@ The server exposes a REST + SSE surface under `/api/*` (see `internal/server/ser
 - **Events & logs:** `GET /api/events` (SSE, multiproject tagged bus), `GET /api/logs/stream`, `GET /api/tui-status`, `GET /api/spending`, `GET /api/lsp/statuses`
 - **Cron:** `GET/POST /api/cron/*` (jobs, outbox, targets)
 - **Projects:** `GET/POST /api/projects`, `DELETE /api/projects/{path...}`
-- **Open tabs:** `GET/PUT /api/tabs` — every project's open session tabs, server-side so all windows/origins share one tab bar (`tabs_changed` bus event on write)
+- **Open tabs:** `GET/PUT /api/tabs` — every project's open session tabs, server-side so all windows/origins share one tab bar (`tabs_changed` bus event on write). `PUT` MERGES: each provided project replaces its entry, an empty tab list deletes it, and projects absent from the body are preserved — so one window (or a second server process sharing the data dir) can't drop another's projects
 - **Uploads:** `POST /api/uploads` → `<project>/.ocode/uploads`
 - Auth via `?token=` for EventSource/WS; rate-limited; loopback-bound by default.
 

@@ -308,6 +308,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/truncate", s.authMiddleware(s.handler.HandleTruncateSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/reset-id", s.authMiddleware(s.handleResetSessionID))
 	s.mux.HandleFunc("POST /api/sessions/{id}/cancel", s.authMiddleware(s.handleCancelSession))
+	s.mux.HandleFunc("POST /api/sessions/{id}/retry", s.authMiddleware(s.handleRetrySession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/close", s.authMiddleware(s.handleCloseSession))
 	// Remote project proxy: /api/remote/{host}/api/{rest...} matches all
 	// methods and proxies to the remote server. ServeMux matches this more
@@ -1919,6 +1920,10 @@ func (s *Server) handleSessionDiscovery(w http.ResponseWriter, r *http.Request) 
 }
 func (s *Server) handleCancelSession(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleCancelSession(w, r, r.PathValue("id"))
+}
+
+func (s *Server) handleRetrySession(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleRetrySession(w, r, r.PathValue("id"))
 }
 
 func (s *Server) handleCloseSession(w http.ResponseWriter, r *http.Request) {

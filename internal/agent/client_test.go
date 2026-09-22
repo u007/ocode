@@ -1272,6 +1272,12 @@ func statusResponse(code int, body string) *http.Response {
 // parseOpenAIChatCompletionsStream accepts (one content delta + DONE).
 const openAIChatOKStream = "data: {\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n"
 
+// openCodeGoThinkingMode400Body is the exact response opencode-go returns when a
+// thinking-mode conversation omits the assistant `reasoning_content` that must be
+// echoed back. It is an HTTP 400 invalid_request_error — see
+// isRetryableThinkingModeRequestError and TestChatRetriesThinkingModeReasoningContent400.
+const openCodeGoThinkingMode400Body = "{\"error\":{\"param\":null,\"type\":\"invalid_request_error\",\"code\":\"invalid_request_error\",\"message\":\"Upstream request failed: [invalid_request_error] The `reasoning_content` in the thinking mode must be passed back to the API.\"}}"
+
 // stubLLMHTTP replaces the package-level llmHTTPClient for the duration of a
 // test and restores it (plus llmRetryBaseDelay, zeroed to keep retries fast)
 // on cleanup.
@@ -1355,6 +1361,76 @@ func TestChat500UsesUsualMaxRetries(t *testing.T) {
 	if !strings.Contains(err.Error(), fmt.Sprintf("llm request failed after %d attempt(s)", llmMaxRetries+1)) ||
 		!strings.Contains(err.Error(), "opencode-go error (500)") {
 		t.Fatalf("unexpected error format: %v", err)
+	}
+}
+
+// TestChatRetriesThinkingModeReasoningContent400 pins that the opencode-go
+// thinking-mode 400 ("reasoning_content ... must be passed back") is retried
+// instead of hard-failing the turn on the first attempt. Before the fix this
+// surfaced as "llm request failed after 1 attempt(s)".
+func TestChatRetriesThinkingModeReasoningContent400(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return statusResponse(http.StatusBadRequest, openCodeGoThinkingMode400Body), nil
+		}
+		return statusResponse(http.StatusOK, openAIChatOKStream), nil
+	}))
+
+	client := &GenericClient{Provider: "opencode-go", Model: "deepseek-v4.1-flash", BaseURL: "https://example.test/v1"}
+	msg, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("expected thinking-mode 400 to be retried to success, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 attempts (400 then success), got %d", got)
+	}
+	if msg == nil || msg.Content != "ok" {
+		t.Fatalf("expected final message content %q, got %+v", "ok", msg)
+	}
+}
+
+// TestChatThinkingMode400UsesUsualMaxRetries pins the budget for a persistent
+// thinking-mode 400: it uses the non-429 budget (llmMaxRetries retries, i.e.
+// llmMaxRetries+1 attempts) rather than fast-failing after one.
+func TestChatThinkingMode400UsesUsualMaxRetries(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return statusResponse(http.StatusBadRequest, openCodeGoThinkingMode400Body), nil
+	}))
+
+	client := &GenericClient{Provider: "opencode-go", Model: "deepseek-v4.1-flash", BaseURL: "https://example.test/v1"}
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if got := atomic.LoadInt32(&calls); got != int32(llmMaxRetries+1) {
+		t.Fatalf("expected %d attempts (usual max retry), got %d", llmMaxRetries+1, got)
+	}
+	if !strings.Contains(err.Error(), "opencode-go error (400)") {
+		t.Fatalf("unexpected error format: %v", err)
+	}
+}
+
+// TestChatGenericInvalidRequest400DoesNotRetry guards the narrowness of the
+// thinking-mode exemption: an unrelated 400 invalid_request_error must still
+// fail fast (1 attempt), not inherit the reasoning_content retry budget.
+func TestChatGenericInvalidRequest400DoesNotRetry(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return statusResponse(http.StatusBadRequest,
+			`{"error":{"type":"invalid_request_error","code":"invalid_request_error","message":"Upstream request failed: [invalid_request_error] unsupported parameter: temperature"}}`), nil
+	}))
+
+	client := &GenericClient{Provider: "opencode-go", Model: "deepseek-v4.1-flash", BaseURL: "https://example.test/v1"}
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("generic 400 invalid_request_error must fail fast; expected 1 call, got %d", got)
 	}
 }
 
@@ -1475,6 +1551,45 @@ func TestIsRetryableLLMClientError_HTTP2StreamErrors(t *testing.T) {
 				t.Errorf("isRetryableLLMClientError(%q) = %v, want %v", tc.err.Error(), got, tc.want)
 			}
 		})
+	}
+}
+
+func TestIsRetryableThinkingModeRequestError(t *testing.T) {
+	thinking400 := &providerStatusError{Provider: "opencode-go", Code: http.StatusBadRequest, Body: openCodeGoThinkingMode400Body}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"exact opencode-go thinking-mode 400 retries", thinking400, true},
+		{"case-insensitive body retries",
+			&providerStatusError{Provider: "p", Code: http.StatusBadRequest, Body: "REASONING_CONTENT MUST BE PASSED BACK"}, true},
+		{"thinking mode phrasing alone (no field name) does not retry",
+			&providerStatusError{Provider: "p", Code: http.StatusBadRequest, Body: "bad request in thinking mode"}, false},
+		{"field name alone (invalid type) does not retry",
+			&providerStatusError{Provider: "p", Code: http.StatusBadRequest, Body: "reasoning_content must be a string"}, false},
+		{"unrelated invalid_request_error does not retry",
+			&providerStatusError{Provider: "p", Code: http.StatusBadRequest, Body: `{"error":{"type":"invalid_request_error","message":"unsupported parameter"}}`}, false},
+		{"non-400 status does not retry via this exemption",
+			&providerStatusError{Provider: "p", Code: http.StatusServiceUnavailable, Body: openCodeGoThinkingMode400Body}, false},
+		{"untyped text alone does not retry", errors.New("reasoning_content in the thinking mode must be passed back"), false},
+		{"nil error does not retry", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRetryableThinkingModeRequestError(tc.err); got != tc.want {
+				t.Errorf("isRetryableThinkingModeRequestError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+
+	// errors.As must see through Chat's attempt-count wrap.
+	wrapped := fmt.Errorf("llm request failed after 1 attempt(s): %w", thinking400)
+	if !isRetryableThinkingModeRequestError(wrapped) {
+		t.Fatal("errors.As must see through the attempt-count wrap")
+	}
+	if !isRetryableLLMError(wrapped) {
+		t.Fatal("isRetryableLLMError must include the thinking-mode exemption")
 	}
 }
 

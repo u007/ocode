@@ -1,0 +1,2 @@
+{"C0":["continue","truncated"],"C2":["continue","truncated"],"M101":["continue","mid_task"],"M103":["continue","mid_task"],"M104":["continue","mid_task"],"M191":["continue","mid_task"],
+ "E20":["end","awaiting_user"],"E34":["end","awaiting_user"],"E40":["end","finished"],"E12":["end","errored"],"E5":["end","awaiting_user"],"E8":["end","finished"],"E42":["end","awaiting_user"],"E16":["drop","dup of M101"]}

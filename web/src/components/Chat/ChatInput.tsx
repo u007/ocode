@@ -6,7 +6,7 @@ import { getInputHistory, pushInputHistory } from "../../lib/tabInputHistory";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
-import { Archive, FileText, Paperclip, Play, X } from "lucide-react";
+import { Archive, FileText, Paperclip, Play, RotateCcw, X } from "lucide-react";
 import QuickActionsBar, { type QuickActionItem } from "./QuickActionsBar";
 import { apiPath, authHeaders } from "@/api/client";
 import EditorContextChip from "./EditorContextChip";
@@ -117,7 +117,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const delayedInputsRef = useRef<string[]>([]);
   const delayedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const delayedGenerationRef = useRef(0);
-  const { sendMessage, executeShell, stop, resume, wasInterrupted, isStreaming, pendingPermission, hasConversation } = useChat(sessionTabId ?? null, {
+  const { sendMessage, executeShell, stop, resume, retryLastTurn, wasInterrupted, turnError, isStreaming, pendingPermission, hasConversation } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
         onSessionCreated?.(sessionTabId, sessionId);
@@ -286,6 +286,13 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // unresolved permission ask.
   const busy = isStreaming || shellInFlight || !!pendingPermission || compacting;
   const effectiveBusy = busy || wasInterrupted;
+  // The composer's Retry affordance: offered after a user Stop (`wasInterrupted`)
+  // or an LLM-loop failure (`turnError`) once nothing is running and no ask owns
+  // the state. Clicking it clears the stop/error state and re-runs the last turn
+  // server-side IN PLACE (POST /api/sessions/:id/retry), so the user's message is
+  // never duplicated — see useChat.retryLastTurn / HandleRetrySession. A submit
+  // failure sets `error` but never `turnError`, so it does not offer Retry.
+  const showRetry = !busy && (wasInterrupted || turnError);
   // Compaction is read synchronously from its store at drain time; a render
   // may still describe it as active just after its promise has settled.
   const workBlockedRef = useRef(false);
@@ -962,6 +969,21 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           autoCapitalize="off"
           spellCheck={false}
         />
+        {showRetry && (
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-9 w-9 shrink-0"
+            onClick={() => {
+              void retryLastTurn();
+            }}
+            title="Retry the last message"
+            aria-label="Retry the last message"
+          >
+            <RotateCcw className="h-4 w-4" />
+          </Button>
+        )}
         {isStreaming ? (
           <Button
             type="button"

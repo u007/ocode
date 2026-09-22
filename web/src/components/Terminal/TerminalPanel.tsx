@@ -88,12 +88,47 @@ export function buildTerminalWsConnection(opts: {
   return { url, protocols };
 }
 
+// Debounce window for duplicate clipboard writes of the SAME text. In the
+// desktop shell one physical Cmd+C can legitimately take two copy paths: the
+// native Edit ▸ Copy menu role (bound to CmdOrCtrl+c, firing the WKWebView
+// `copy:` selector → a DOM copy event over the xterm selection) AND the page
+// keydown handled in attachCustomKeyEventHandler. Both carry identical text,
+// so the copy lands twice in clipboard managers (Maccy/Paste history). The
+// first writer arms this guard; a second write of the same text within the
+// window is a duplicate and is dropped. Different text always writes.
+const DUPLICATE_COPY_WINDOW_MS = 250;
+let lastCopyText = "";
+let lastCopyAt = 0;
+
+function isDuplicateCopy(text: string): boolean {
+  const now = Date.now();
+  const dup = text === lastCopyText && now - lastCopyAt < DUPLICATE_COPY_WINDOW_MS;
+  if (dup) return true;
+  markCopySeen(text);
+  return false;
+}
+
+/**
+ * Records that a clipboard write of `text` just happened (or is happening)
+ * without consuming the dedupe guard, so a second copy path for the SAME user
+ * action is recognized as a duplicate. Used by the DOM `copy` listener, whose
+ * write goes through the event's clipboardData rather than this module's
+ * Clipboard-API writer.
+ */
+function markCopySeen(text: string): void {
+  lastCopyText = text;
+  lastCopyAt = Date.now();
+}
+
 /**
  * Writes text to the system clipboard, falling back to the deprecated
  * execCommand path when the async Clipboard API is unavailable or denied
- * (older WebKit, permission refusal, non-secure context).
+ * (older WebKit, permission refusal, non-secure context). A same-text write
+ * racing another copy path for the same user action (desktop menu Copy +
+ * keydown, mouse-up + debounced selection-change) is deduplicated.
  */
 export async function writeClipboardText(text: string): Promise<void> {
+  if (isDuplicateCopy(text)) return;
   try {
     await navigator.clipboard.writeText(text);
   } catch {
@@ -608,14 +643,25 @@ export default function TerminalPanel({
   // event instead. xterm listens for that on its own element, but only when
   // it has an active selection; this parent-level listener covers the same
   // event with the same data (skipping when xterm already handled it), so a
-  // selection is copied whichever path the OS event took.
+  // selection is copied whichever path the OS event took. The markCopySeen
+  // bookkeeping is what stops the double copy: it records EVERY copy of a
+  // selection passing through this container — including events xterm's own
+  // listener answered — so copyViaShortcut's Clipboard-API write is
+  // recognized as the same copy and dropped when the keydown ALSO reaches
+  // the page (engine-dependent ordering).
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const onCopy = (e: ClipboardEvent) => {
-      if (e.defaultPrevented || !e.clipboardData) return;
       const sel = termRef.current?.getSelection() ?? "";
       if (!sel) return;
+      // Record this copy EVEN when xterm's element-level handler already
+      // answered it (defaultPrevented): the event is one half of a duplicate
+      // pair (native menu selector + keydown for the same Cmd+C), and the
+      // Clipboard-API keydown path must be suppressed for this same
+      // keystroke whichever side ran first.
+      markCopySeen(sel);
+      if (e.defaultPrevented || !e.clipboardData) return;
       e.preventDefault();
       e.clipboardData.setData("text/plain", sel);
     };

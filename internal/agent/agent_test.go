@@ -3238,3 +3238,64 @@ func TestAutoPermissionAddendumAdvisory(t *testing.T) {
 		t.Fatalf("newer: advisory missing newer wording")
 	}
 }
+
+// TestHandleToolCallAutoPermissionHarmfulSegmentNotMaskedByEarlierAsk: a
+// compound bash line whose first asking segment is benign must still be
+// routed to the human when a later segment is harmful, on both the Ask and
+// the Deny branch, even if the judge would approve.
+func TestHandleToolCallAutoPermissionHarmfulSegmentNotMaskedByEarlierAsk(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rule PermissionLevel
+	}{{"ask-path", PermissionAsk}, {"deny-path", PermissionDeny}} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Isolate from the developer's own ~/.claude deny rules, which
+			// would hard-deny the git segment before the gate under test.
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			mockTool := &MockTool{name: "bash", result: "executed"}
+			cfg := &config.Config{}
+			cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
+			a := NewAgent(nil, nil, cfg, nil)
+			a.Permissions().SetWorkDir(t.TempDir())
+			if tc.rule == PermissionDeny {
+				a.Permissions().SetRule("bash", PermissionDeny)
+			}
+			a.Permissions().SetAutoPermissionEnabled(true)
+			a.AddTools([]tool.Tool{mockTool})
+
+			prev := DebugAppend
+			t.Cleanup(func() { DebugAppend = prev })
+			DebugAppend = func(kind, msg string) {}
+
+			prevClientFn := newClientFn
+			t.Cleanup(func() { newClientFn = prevClientFn })
+			newClientFn = func(_ *config.Config, _ string) LLMClient {
+				return &MockClient{Response: &Message{Role: "assistant", Content: "ALLOW: looks fine"}}
+			}
+
+			asked := false
+			a.OnPermissionAsk = func(req PermissionRequest) PermissionResponse {
+				asked = true
+				return PermissionResponse{Level: PermissionDeny}
+			}
+			res, err := a.HandleToolCall("bash", json.RawMessage(`{"command":"curl -s https://example.com/x && git reset --hard HEAD~1"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res == "executed" {
+				t.Fatal("harmful compound must not execute on judge approval")
+			}
+			// The Ask branch hands the line to the human; the Deny branch
+			// keeps the static deny (it never asks) instead of letting the
+			// judge override it.
+			if tc.rule == PermissionAsk && !asked {
+				t.Fatalf("harmful segment must reach the human, got %q", res)
+			}
+			if tc.rule == PermissionDeny && !strings.HasPrefix(res, "denied:") {
+				t.Fatalf("harmful denied compound must stay denied, got %q", res)
+			}
+		})
+	}
+}

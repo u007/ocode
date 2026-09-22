@@ -177,7 +177,11 @@ What still asks (permission layer, not the OS):
   forms (`list`/`show`) keep auto-allowing (`matchBashPrefixRule`).
 - the Ask → auto-judge hand-off (`IsHarmfulRequest` in `agent.go`) is per
   constituent as well: any harmful fragment sends the whole line to a human,
-  never to the Jev judge.
+  never to the Jev judge. It judges the **whole line from `req.Args`**, not
+  `Request.Command` — Decide fills the latter with only the first segment that
+  needed a human, so `curl … && git reset --hard` would otherwise slip past
+  (see `docs/gotchas/auto-permission-harmful-segment-masked-by-earlier-ask.md`).
+  The same gate runs on the Deny → auto-judge branch.
 - wrappers are peeled before those checks (`effectiveCommandWords`,
   `permissions_wrappers.go`): launcher prefixes (`env`, `command`, `nohup`,
   `exec`, `time`, `nice`, `timeout`, `xargs`, `stdbuf`, `sudo`, `doas`, …),
@@ -1050,7 +1054,11 @@ Sub-directories:
 - `tabs.json` — open session tabs per project for the web/desktop UI
   (`GET/PUT /api/tabs`). Server-side, never `localStorage`: localStorage is
   per-origin, so a shared URL or a different port would otherwise open with
-  zero tabs.
+  zero tabs. Every server process on the machine shares this one file, so the
+  store merges under a cross-process lock (`internal/tabs`): a `PUT` replaces
+  only the projects it names, an empty tab list deletes a project, and
+  projects absent from the body are preserved. Never turn this back into a
+  whole-map replace — that silently drops another window/process's projects.
 
 The `{slug}` is a SHA-256 prefix of the git repo root path, making sessions
 project-scoped even when working from different checkouts. The TUI's

@@ -1,5 +1,65 @@
 # TODO
 
+## Laya local judge (`/localmodel`-style) — NOT doing, evaluated and rejected (2026-09-22)
+
+Plan was to run Laya (`convaiinnovations/laya`, non-generative decision model)
+locally like the embed model and let it replace `typesafe/jev-latest` for the
+auto-permission and auto-continue judges. Evaluated first; not building it.
+Full measurements: `docs/superpowers/specs/2026-09-22-laya-local-judge-evaluation.md`,
+harness in `docs/okf/_tools/laya-eval/`.
+
+Why not:
+
+- **Zero-shot it decides nothing.** On 16 real bash tool calls and 13 real
+  turn endings from local sessions, every Laya verdict sat in the 0.5–0.8
+  band. Under ocode's rules (allow needs ≥0.85, continue needs ≥0.6) it would
+  auto-grant 0 of 7 allowable calls, detect 0 of 9 deny cases, and resume 0 of
+  6 genuinely cut-off replies. Jev: 13/16 and 12/13 on the same cases. Wiring
+  it in equals "always ask" at 1.7 GB resident and a 60 s startup.
+- **The rubric-as-instructions design does not port.** Laya packs
+  instructions + options into a 192/256-token head and truncates the
+  instructions first; ocode's 871-token rubric is cut to ≈150 tokens and the
+  9-option concern question leaves ≈16 tokens of rubric. The state gets ≈317
+  tokens (English) and is cut from the end, so `allowed_roots` /
+  `banned_command_prefixes` vanish behind any long command. Raising
+  `max_len` to 2048/4096 is possible (config, not architecture) and was
+  measured: same 8/16 and 7/13, and it produced one wrong auto-grant
+  (`git push --force-with-lease` at allow 0.88) the shipped config did not.
+  Longer context is not the bottleneck; the model has not learned the task.
+- **Concern/reason labels are noise.** `banned_prefix` won 11–15 of 16
+  concern answers because the option word matches a state field; reason
+  probabilities were near-uniform (0.24–0.42).
+- **Memory budget cannot be met as asked.** Weights fit under 2 GB in
+  bf16/fp16 (0.66–0.85 GB) but the process never does: torch + MPS runtime
+  plus the load transient put every configuration at 2.7–4.1 GB peak RSS.
+  No int8/GGUF/MLX variants are published. Half precision is a manual cast
+  (the library forces fp32 on MPS/CPU); fp16 on MPS is 3–4× slower than fp32
+  for ModernBERT-large, bf16 is the usable cast.
+- **The multilingual checkpoint is uncalibrated** (T=1.0) and answered deny
+  0.7–0.9 on `sed -n`, `go build` and a localhost curl GET, and continue
+  0.7–0.8 on replies that end by asking the user. Dangerous behind a 0.85
+  floor. `typed-decisions` was never better than the English root.
+
+What would reopen it:
+
+- **Labelled data first, regardless of Laya.** Jev verdicts + state are
+  emitted through `Agent.emitDebug` into a 500-entry in-memory ring and never
+  reach disk. Mirror the `PERMISSION` and `AGENT` debug kinds to a rotating
+  file (`debuglog.MirrorKindToFile`, same as `compact.log`/`tokens.log` in
+  `internal/tui/model.go`). A few thousand rows is enough for the upstream
+  Kaggle fine-tuning notebook; that is the only credible path to usable
+  accuracy.
+- **A narrow cascade, auto-continue only.** The English checkpoint's
+  "does the reply announce its next action" yes/no question scored
+  0.86–0.99 on real mid-task cut-offs vs 0.13–0.47 on finished replies; with
+  "does it ask the user" it would have short-circuited 3 of 13 Jev calls
+  safely. Worth ~0.7 s per skipped call, needs thresholds set on real data.
+  Permission stays on Jev either way.
+- If built: one checkpoint (English, bf16 on MPS), python sidecar like
+  `mlx_embed_server.py` on loopback, `HF_HUB_OFFLINE=1` after first download,
+  warm-up predict, single-flight lock, `/localmodel`-style `status`/`limit`.
+  Budget ≈2.5 GB RSS steady state; do not advertise 2 GB.
+
 ## Interrupted-turn notice — follow-ups (2026-09-22)
 
 The web/desktop notice shipped (CHANGES.md 2026-09-22; concept page

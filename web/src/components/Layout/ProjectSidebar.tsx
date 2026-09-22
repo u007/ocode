@@ -43,6 +43,7 @@ import {
   Server,
   Globe,
   RotateCw,
+  GitBranch,
 } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -53,6 +54,7 @@ import DirectoryBrowser from "./DirectoryBrowser";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { RemoteProjectStatus } from "./RemoteProjectStatus";
 import { useRemoteHostStatus } from "../../hooks/useRemoteHostStatus";
+import { useProjectGitCounts } from "../../lib/projectGitCounts";
 import { projectTerminalsKey } from "../Terminal/terminalPersistence";
 import { computeProjectDrag, projectDragKey } from "../../lib/projectDrag";
 import { buttonVariants } from "../ui/button";
@@ -66,6 +68,13 @@ type ProjectIndicators = {
   stalledCount: number;
   pendingCount: number;
   terminalAlertCount: number;
+  /** Git working tree: staged, unstaged (incl. untracked), and their total —
+   *  the number the Git tab badge shows for the same project. Zero when the
+   *  project has no changes, is not a repo, or its remote host is not
+   *  connected. */
+  gitStaged: number;
+  gitUnstaged: number;
+  gitChanged: number;
   hasRealSession: boolean;
   anyStreaming: boolean;
   anyStalled: boolean;
@@ -122,12 +131,19 @@ export function buildProjectSidebarOrder(
   return visibleItems;
 }
 
-/** Derive per-project indicators from open tabs, chat slices, and terminal alerts.
- *  Covers: # sessions open, streaming count / stalled (chat streaming stopped),
- *  pending permission, and terminal beep (alerted). Optimized to only re-render
- *  when the aggregate counts actually change, not on every streamed token. */
+/** Derive per-project indicators from open tabs, chat slices, terminal alerts,
+ *  and the project's own git working tree. Covers: # sessions open, streaming
+ *  count / stalled (chat streaming stopped), pending permission, terminal beep
+ *  (alerted), and changed-file counts. Optimized to only re-render when the
+ *  aggregate counts actually change, not on every streamed token. */
 function useProjectIndicators(projectPath: string, host?: string): ProjectIndicators {
   const { state: projectState } = useProjectState();
+  // Git counts for a remote project are gated on its host being connected:
+  // GET /api/git/status?host= is the cold-connect path, so an unconnected
+  // host must not be dialed by merely rendering its row (see
+  // useProjectGitCounts / SortableProjectRow's hover guard).
+  const hostStatus = useRemoteHostStatus(host, !!host);
+  const gitCounts = useProjectGitCounts(projectPath, host, !host || !!hostStatus.status?.connected);
   const tabs = projectState.tabsByProject[projectPath] ?? [];
   const sessionCount = tabs.length;
   const hasRealSession = useMemo(
@@ -190,6 +206,9 @@ function useProjectIndicators(projectPath: string, host?: string): ProjectIndica
     stalledCount: chatAgg.stalledCount,
     pendingCount: chatAgg.pendingCount,
     terminalAlertCount,
+    gitStaged: gitCounts.staged,
+    gitUnstaged: gitCounts.unstaged,
+    gitChanged: gitCounts.total,
     hasRealSession,
     anyStreaming,
     anyStalled,
@@ -211,8 +230,23 @@ function SessionDot({ status }: { status: SessionStatus }) {
 }
 
 function ProjectBadges({ indicators }: { indicators: ProjectIndicators }) {
-  const { sessionCount, streamingCount, stalledCount, pendingCount, terminalAlertCount } = indicators;
-  const hasAny = sessionCount > 0 || streamingCount > 0 || stalledCount > 0 || pendingCount > 0 || terminalAlertCount > 0;
+  const {
+    sessionCount,
+    streamingCount,
+    stalledCount,
+    pendingCount,
+    terminalAlertCount,
+    gitStaged,
+    gitUnstaged,
+    gitChanged,
+  } = indicators;
+  const hasAny =
+    sessionCount > 0 ||
+    streamingCount > 0 ||
+    stalledCount > 0 ||
+    pendingCount > 0 ||
+    terminalAlertCount > 0 ||
+    gitChanged > 0;
   if (!hasAny) return null;
   // Unified attention signal: chat stopped (stalled), waiting for input
   // (pending permission/question), or terminal emitted a bell/notification
@@ -287,6 +321,18 @@ function ProjectBadges({ indicators }: { indicators: ProjectIndicators }) {
         >
           <Bell className="w-2.5 h-2.5" />
           {terminalAlertCount}
+        </span>
+      )}
+      {/* git working-tree changes (staged + unstaged) — informational, not an
+          attention signal, so it never joins the Bell total above */}
+      {gitChanged > 0 && (
+        <span
+          className="inline-flex items-center gap-0.5 rounded-full bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-violet-600 dark:text-violet-400 border border-violet-500/30"
+          title={`${gitChanged} changed file${gitChanged === 1 ? "" : "s"} (${gitStaged} staged · ${gitUnstaged} unstaged)`}
+          aria-label={`${gitChanged} git changed files`}
+        >
+          <GitBranch className="w-2.5 h-2.5" />
+          {gitChanged}
         </span>
       )}
     </span>
@@ -963,6 +1009,14 @@ function CollapsedProjectButton({
   ]
     .filter(Boolean)
     .join(" · ");
+  // The rail has one tooltip line; the git detail rides along with it so a
+  // project with changes but no open session still explains its badge.
+  const gitChanged = indicators.gitChanged;
+  const gitDetail =
+    gitChanged > 0
+      ? `${gitChanged} changed file${gitChanged === 1 ? "" : "s"} (${indicators.gitStaged} staged · ${indicators.gitUnstaged} unstaged)`
+      : null;
+  const tooltipLine = [showCount ? tooltipDetails : null, gitDetail].filter(Boolean).join(" · ");
   // Collapsed rail has no inline editor, so rename can't complete here;
   // expanding lets the rename finish in the expanded row (the expanded
   // row's Rename is the inline-edit entry point for remote SSH/WSL).
@@ -1019,6 +1073,18 @@ function CollapsedProjectButton({
               {indicators.sessionCount}
             </span>
           )}
+          {/* git changed-file count: bottom-left so it never collides with the
+              session count (top-right) or the attention/streaming dot
+              (bottom-right) */}
+          {gitChanged > 0 && (
+            <span
+              title={gitDetail ?? undefined}
+              aria-label={`${gitChanged} git changed files`}
+              className="absolute -bottom-0.5 -left-0.5 min-w-[14px] h-[14px] px-0.5 rounded-full bg-violet-600 text-white text-[8px] leading-[14px] font-bold text-center border border-background"
+            >
+              {gitChanged}
+            </span>
+          )}
           {overlayColor && (
             <span
               title={hasAttention ? `${attentionTotal} need attention (${overlayTitle})` : overlayTitle}
@@ -1037,7 +1103,7 @@ function CollapsedProjectButton({
         <div className="text-xs">
           <div className="font-medium">{project.name}</div>
           {project.host && <div className="text-sky-600 dark:text-sky-400 flex items-center gap-1"><Globe className="w-3 h-3" />{project.host}:{project.path}</div>}
-          {showCount && <div className="text-muted-foreground">{tooltipDetails}</div>}
+          {tooltipLine && <div className="text-muted-foreground">{tooltipLine}</div>}
         </div>
       </TooltipContent>
     </Tooltip>

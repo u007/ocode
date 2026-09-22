@@ -8,6 +8,7 @@ const mockSendMessage = vi.fn().mockResolvedValue({ status: "ok" });
 const mockChat = vi.fn().mockResolvedValue({ sessionId: "new-sess" });
 const mockCancelSession = vi.fn().mockResolvedValue({ cancelled: true });
 const mockGetSessionState = vi.fn().mockResolvedValue({ bootstrap_stage: "ready", turn_active: false, last_seq: 0 });
+const mockRetrySession = vi.fn().mockResolvedValue({ sessionId: "sess-remote" });
 const mockResolvePermission = vi.fn().mockResolvedValue({ ok: true });
 const mockAnswerQuestion = vi.fn().mockResolvedValue({ status: "ok" });
 
@@ -19,6 +20,7 @@ vi.mock("../api/client", async () => {
       sendMessage: (...a: unknown[]) => mockSendMessage(...a),
       chat: (...a: unknown[]) => mockChat(...a),
       cancelSession: (...a: unknown[]) => mockCancelSession(...a),
+      retrySession: (...a: unknown[]) => mockRetrySession(...a),
       getSessionState: (...a: unknown[]) => mockGetSessionState(...a),
       resolvePermission: (...a: unknown[]) => mockResolvePermission(...a),
       answerQuestion: (...a: unknown[]) => mockAnswerQuestion(...a),
@@ -77,6 +79,7 @@ describe("useChat remote host routing", () => {
     mockGetSessionState.mockClear();
     mockResolvePermission.mockClear();
     mockAnswerQuestion.mockClear();
+    mockRetrySession.mockClear();
   });
 
   // A tab bound to a remote project sends the host with chat and sendMessage.
@@ -243,5 +246,26 @@ describe("useChat remote host routing", () => {
     });
 
     expect(mockCancelSession).toHaveBeenCalledWith("sess-remote", "devbox");
+  });
+
+  // Retry (composer after Stop/LLM error) must reach the session's own server
+  // for a remote project — a local retry would re-run the wrong transcript.
+  it("passes host to retrySession for a remote project tab", async () => {
+    const { result } = renderWithSession("sess-remote");
+
+    act(() => {
+      result.current.project.dispatch({ type: "SET_PROJECTS", projects: [remoteProject, localProject] });
+      result.current.project.dispatch({ type: "SET_ACTIVE_PROJECT", project: remoteProject });
+      result.current.project.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "sess-remote", projectPath: "/srv/app", title: "Remote", activeSubTab: "chat" as const },
+      });
+    });
+
+    await act(async () => {
+      await result.current.chat.retryLastTurn();
+    });
+
+    expect(mockRetrySession).toHaveBeenCalledWith("sess-remote", "devbox");
   });
 });

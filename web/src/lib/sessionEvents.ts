@@ -393,6 +393,10 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
       const error = (data as { error?: string }).error || "turn failed";
       r.dispatch({ type: "SET_ERROR", sessionId, error });
+      // Mark this as a retryable LLM-loop failure so the composer offers Retry.
+      // A submit/validation failure sets `error` directly via useChat and must
+      // NOT set this flag (there is no dispatched turn to re-run).
+      r.dispatch({ type: "SET_TURN_ERROR", sessionId, turnError: true });
       // A send refused because the session is paused on a permission ask must
       // open the dialog, not just show the error (see PENDING_ASK_ERROR).
       if (error.includes(PENDING_ASK_ERROR)) scheduleHydratePendingAsks(sessionId, r);
@@ -611,6 +615,9 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         r.dispatch({ type: "SET_ERROR", sessionId, error });
         r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
         r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
+        // See the turn_error handler: this headless mirror frame reports an
+        // LLM-loop/continuation failure, which is retryable in place.
+        r.dispatch({ type: "SET_TURN_ERROR", sessionId, turnError: true });
         // See the turn_error handler: the async send path reports a refused
         // (pending-ask) send here, and the dialog must open.
         if (error?.includes(PENDING_ASK_ERROR)) scheduleHydratePendingAsks(sessionId, r);

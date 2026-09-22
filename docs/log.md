@@ -30,6 +30,16 @@
 
 ## 2026-09-22
 
+* **Update**: opencode-go per-model protocol routing & Anthropic tool schema flatness ([gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md](/gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md))
+* **Update**: opencode-go per-model protocol routing & Anthropic tool schema flatness ([gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md](/gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md))
+* **Update**: opencode-go per-model protocol routing & Anthropic tool schema flatness ([gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md](/gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md))
+* **Creation**: opencode-go per-model protocol routing & Anthropic tool schema flatness ([docs/gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md](/docs/gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md))
+* **Update**: Remote git commit/stash messages must be shell-quoted (remoteGitCommand contract) ([gotchas/remote-git-shell-quoting.md](/gotchas/remote-git-shell-quoting.md))
+* **Creation**: Remote git commit/stash messages must be shell-quoted (remoteGitCommand contract) ([gotchas/remote-git-shell-quoting.md](/gotchas/remote-git-shell-quoting.md))
+* **Update**: Shared tabs.json is written by every ocode server process — whole-map replace dropped projects ([gotchas/shared-tabs-json-multi-writer-clobber.md](/gotchas/shared-tabs-json-multi-writer-clobber.md))
+* **Creation**: Shared tabs.json is written by every ocode server process — whole-map replace dropped projects ([gotchas/shared-tabs-json-multi-writer-clobber.md](/gotchas/shared-tabs-json-multi-writer-clobber.md))
+* **Update**: TUI: skipLLM is not a render gate — fake-agent and cron replies vanish on fresh sessions ([gotchas/tui-skipllm-is-not-a-render-gate.md](/gotchas/tui-skipllm-is-not-a-render-gate.md))
+* **Creation**: TUI: skipLLM is not a render gate — fake-agent and cron replies vanish on fresh sessions ([gotchas/tui-skipllm-is-not-a-render-gate.md](/gotchas/tui-skipllm-is-not-a-render-gate.md))
 * **Creation**: File search result ordering: shortest path first ([concepts/file-search-shortest-path-ordering.md](/concepts/file-search-shortest-path-ordering.md))
 * **Update**: Web Chat Composer Input History (↑/↓ Navigation) ([concepts/web-chat-input-history.md](/concepts/web-chat-input-history.md))
 * **Update**: Web UI Global Keyboard Shortcuts ([concepts/web-keyboard-shortcuts.md](/concepts/web-keyboard-shortcuts.md))

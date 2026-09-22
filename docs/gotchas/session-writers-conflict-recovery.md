@@ -34,7 +34,11 @@ below.
 - **Divergent overlap conflicts (never silent).** Identical overlap
   converges (idempotent retry). Differing overlap: sync save →
   `ErrTranscriptConflict` (typed, via `session.IsConflictErr`); live write
-  → silent drop (by design; the turn-end sync save is authoritative).
+  → drop (by design; the turn-end sync save is authoritative). Since
+  2026-09-22 every live drop logs `session: live snapshot dropped for
+  <id>: <reason>` (superseded generation / stored rows are not a prefix)
+  and every replace logs `session: replace <id>: shrink|rewrite ...,
+  history_gen N -> N+1`. Neither path is silent any more.
 - **Ordinary saves never shrink.** A sync save with FEWER messages than
   stored conflicts (`ErrTranscriptConflict`). The old delete-all-and-rewrite
   for shorter snapshots silently destroyed another writer's appended rows
@@ -123,6 +127,35 @@ same way. The tail insert dodges this for user messages and the metadata-only
 update dodges this for per-session model overrides; turn-end saves from a
 filtered base (resume a session that closed mid-ask, then let the next
 turn end) reconcile through the loader-view match in `rebaseAppend`.
+
+## Incident (2026-09-22, ses_2026-09-22-124117-caa39c49)
+
+Desktop session, first message with two `@file` mentions. The agent ran
+~40 steps (snapshot journal: edits at 12:43, 12:50, 12:51), the UI "reset
+back to input msg", and the stored transcript held exactly one row (the
+user message) with `history_gen=2`, `page_count=4` (16 KB). The 16 KB file
+size with `auto_vacuum=0` proves the step rows were never inserted at all
+(deleted rows would have left the file grown); `freelist_count=0` alone
+does NOT prove that — deleted rows leave in-page free space, not freelist
+pages.
+
+What the disk shows: two authoritative replaces landed during the turn
+(`history_gen` only bumps on the replace rewrite path), so every queued
+live snapshot dropped on the generation guard, and the turn-end sync save
+then either conflicted on seq 0 (stored user row rewritten: the meta title
+carries the mentions once, the stored row three times) or was also
+superseded. The debug ring (500 entries) had rotated, and both live drop
+paths returned `false, nil` with no log line — so the trigger could not be
+attributed. Note the "Restore to input" truncate is NOT the likely
+trigger: `HandleTruncateSession` returns 409 while the turn is active and
+the web client gates on `turnActive`/`isStreaming` as well.
+
+Fix: the two live-drop paths and the replace path in
+`appendSqliteSessionOnce` now log (reason, generations, row counts).
+Regression: `TestLiveSnapshotsDroppedAfterMidTurnReplaceAreLogged`,
+`TestReplaceShrinkIsLogged` (`internal/session/live_drop_log_test.go`).
+Open lead: which caller rewrote seq 0 with the `@file` prefix duplicated —
+look for that `replace ...: rewrite of overlapping rows` line next time.
 
 ## Incident (2026-09-20, ses_2026-09-18-233409-df1a92d3)
 

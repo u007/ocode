@@ -777,9 +777,17 @@ type turnOptions struct {
 	// requestID correlates `session_started` back to the browser tab that
 	// asked for a brand-new session.
 	requestID string
+	// retryLast re-runs the existing transcript tail in place instead of
+	// appending a new user message. Set by HandleRetrySession (the composer's
+	// retry action after a Stop or an LLM-loop error); runTurn then skips both
+	// the user-row append and the `user_message` echo, so a retry never
+	// duplicates the user's message. Mirrors the TUI's Ctrl+Y retry
+	// (model.retryLastLLMError).
+	retryLast bool
 }
 
-// runTurn executes one agent turn: appends the user message, steps the agent,
+// runTurn executes one agent turn: appends the user message (unless
+// opts.retryLast re-runs the existing transcript tail), steps the agent,
 // persists the transcript and broadcasts the result to the SSE mirror. It
 // takes the per-session lock (so turns on one session serialize) and **never
 // takes h.mu**, so turns on different sessions run fully in parallel.
@@ -803,8 +811,15 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		return "", ErrPermissionPending
 	}
 
-	userSeq := nextUserSeq(as.messages)
-	as.messages = append(as.messages, agent.Message{Role: "user", Content: content, UserSeq: userSeq})
+	// A retry re-runs the transcript tail in place: the user's message is
+	// already the last turn in the transcript, so appending it again would
+	// duplicate it (and re-echo it to the browser). Skip both — Step runs on
+	// the existing rows, exactly like the TUI's Ctrl+Y retry.
+	var userSeq int
+	if !opts.retryLast {
+		userSeq = nextUserSeq(as.messages)
+		as.messages = append(as.messages, agent.Message{Role: "user", Content: content, UserSeq: userSeq})
+	}
 	messages := append([]agent.Message(nil), as.messages...)
 	// turnBaseLen is the turn's base transcript (everything through this
 	// turn's user message) — captured BEFORE the auto-continue loop below can
@@ -862,12 +877,15 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		// Broadcast the user message so the SSE mirror can echo it. The frame
 		// carries the same user_seq stamped on the persisted/transcript copy, so
 		// the web frontend can dedupe the snapshot-before-SSE race by
-		// (sessionId, user_seq) identity.
-		h.broadcastEvent(SSEEvent{
-			SessionID: sessionID,
-			Event:     "user_message",
-			Data:      map[string]any{"content": content, "user_seq": userSeq},
-		})
+		// (sessionId, user_seq) identity. A retry re-runs the existing tail, so
+		// there is no new user row to echo.
+		if !opts.retryLast {
+			h.broadcastEvent(SSEEvent{
+				SessionID: sessionID,
+				Event:     "user_message",
+				Data:      map[string]any{"content": content, "user_seq": userSeq},
+			})
+		}
 		h.wireHeadlessAgentCallbacks(sessionID, as.agent)
 		// Live-persist each completed step message as the turn streams, so a
 		// crash mid-turn loses at most the in-flight LLM round. Headless
@@ -1375,15 +1393,22 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 		return
 	}
 
-	// 1. Durable persist before the caller's 202.
-	if err := h.persistUserMessage(entry, job.content); err != nil {
-		log.Printf("serve error: persist user message for %s: %v", id, err)
-		job.err = err
+	// 1. Durable persist before the caller's 202. A retry has no new user row
+	// to persist — its message is already the transcript tail — so skip the
+	// write and the pending queue entirely; appending it again would duplicate
+	// the user's message in the transcript.
+	if job.opts.retryLast {
 		close(job.persistAck)
-		return
+	} else {
+		if err := h.persistUserMessage(entry, job.content); err != nil {
+			log.Printf("serve error: persist user message for %s: %v", id, err)
+			job.err = err
+			close(job.persistAck)
+			return
+		}
+		h.sessions.PushPending(id, job.content)
+		close(job.persistAck)
 	}
-	h.sessions.PushPending(id, job.content)
-	close(job.persistAck)
 
 	// Check for cancellation that arrived during persist or before bootstrap.
 	// If cancelled, keep the pending message for retry after Resume — don't
@@ -1440,6 +1465,25 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 			as.agent.Cancel()
 		}
 		h.publishTurnError(id, fmt.Errorf("cancelled"), "")
+		return
+	}
+
+	// 3a. A retry re-runs the existing transcript tail exactly once, in place —
+	// there is no queued message to drain. Mirrors runTurn's retryLast handling.
+	if job.opts.retryLast {
+		_, err := h.runTurn(id, as, "", job.opts)
+		// Treat a post-cancellation successful return as a cancellation so the
+		// pending-cancel marker does not linger (see the draining loop below).
+		if err == nil && as != nil && as.agent != nil && as.agent.Cancelled() {
+			err = fmt.Errorf("cancelled")
+		}
+		if errors.Is(err, ErrPermissionPending) {
+			h.publishTurnError(id, err, "")
+			return
+		}
+		if err != nil {
+			h.consumePendingCancel(id)
+		}
 		return
 	}
 

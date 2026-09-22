@@ -17354,14 +17354,26 @@ func (m *model) renderEmptyStateBackground() string {
 
 func (m *model) renderTranscript() {
 	// "Empty" for art purposes means no real conversation content exists yet.
-	// Transient notices (startup hints, "Started new session.", "Theme: pipboy/lcars")
-	// and skipLLM command echoes (/theme, /new, etc.) are UI chrome, not content.
+	// Chrome is excluded: transient notices (startup hints, "Started new
+	// session.", "Theme: pipboy/lcars", discovery/auto-continue banners) and the
+	// user's own slash-command echo (/theme, /new, ...).
+	//
+	// Assistant-side output must still count even when it is skipLLM. skipLLM
+	// means "keep out of the LLM prompt", NOT "don't render": command replies
+	// (/fake-agent, cron deliveries, transport errors) are marked skipLLM
+	// precisely so they never re-enter the prompt, but they are the only
+	// feedback the user gets. Gating the whole transcript on skipLLM hid them
+	// on a fresh session, which is why `/fake-agent` looked like a no-op.
 	hasRealContent := false
 	for _, msg := range m.messages {
-		if !msg.transient && !msg.skipLLM {
-			hasRealContent = true
-			break
+		if msg.transient {
+			continue
 		}
+		if msg.role == roleUser && isCommandHistoryMessage(msg) {
+			continue // the user's own "/cmd" echo
+		}
+		hasRealContent = true
+		break
 	}
 	if !hasRealContent {
 		// Clear stale rendered state (handleNewCmd handles the common

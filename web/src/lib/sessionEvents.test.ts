@@ -1115,3 +1115,38 @@ describe("interrupted-turn flag", () => {
     expect(getState().sessions["s1"].interrupted).toBe(true);
   });
 });
+
+describe("retryable turn errors (composer Retry)", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  // The composer's Retry must be offered for an LLM-loop failure — a turn_error
+  // bus frame — but NOT for a submit/validation failure, which sets `error`
+  // directly in useChat and has no dispatched turn to re-run.
+  it("marks an LLM turn_error as retryable and clears it when a new turn starts", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("turn_error", { data: { error: "boom" } }), router);
+    expect(getState().sessions["s1"].error).toBe("boom");
+    expect(getState().sessions["s1"].turnError).toBe(true);
+
+    routeBusEnvelope(env("turn_started"), router);
+    expect(getState().sessions["s1"].turnError).toBe(false);
+  });
+
+  it("marks a headless SSE error frame as retryable", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("error", { data: { error: "connection reset by peer" } }), router);
+    expect(getState().sessions["s1"].turnError).toBe(true);
+  });
+
+  it("keeps the turn-error flag when a non-null error is set (submit failure)", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("turn_error", { data: { error: "boom" } }), router);
+    // A submit failure replaces the message but must not fabricate a retry.
+    router.dispatch({ type: "SET_ERROR", sessionId: "s1", error: "network down" });
+    expect(getState().sessions["s1"].turnError).toBe(true);
+    expect(getState().sessions["s1"].error).toBe("network down");
+  });
+});

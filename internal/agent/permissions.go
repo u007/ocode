@@ -1302,13 +1302,27 @@ func isHarmfulBashFields(fields []string) bool {
 // git, so "cd repo && git stash" would otherwise read as benign and reach the
 // auto-permission judge, which is exactly the case this gate exists to keep
 // in human hands. On a parse failure the whole line is checked as a fallback.
+//
+// The whole line is taken from req.Args, not req.Command: Decide fills
+// Request.Command with only the first segment that needed a human, so a
+// benign asking segment ("curl …", "cd /elsewhere") ahead of a harmful one
+// ("… && git reset --hard") would otherwise hide the harmful segment from
+// this gate and hand the line to the auto-permission judge. req.Command is
+// the fallback for callers that build a request without args.
 func IsHarmfulRequest(req PermissionRequest) bool {
-	if req.ToolName != "bash" || req.Command == "" {
+	if req.ToolName != "bash" {
 		return false
 	}
-	parsed, err := parseShellCommandLine(req.Command)
+	command := bashCommand(req.Args)
+	if command == "" {
+		command = req.Command
+	}
+	if command == "" {
+		return false
+	}
+	parsed, err := parseShellCommandLine(command)
 	if err != nil {
-		return IsHarmfulBashCommand(req.Command)
+		return IsHarmfulBashCommand(command)
 	}
 	for _, c := range parsed {
 		if sub := rebuildCommandLine(c.cmdWords); sub != "" && IsHarmfulBashCommand(sub) {

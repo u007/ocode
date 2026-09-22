@@ -175,6 +175,26 @@ vi.mock("../../hooks/useRemoteHostStatus", () => ({
   }),
 }));
 
+// Git counts for the project list come from a shared store that fetches
+// GET /api/git/status itself; stub it so a mounted row makes no real request
+// (and so `enabled` — the remote cold-connect gate — is observable).
+const gitCountsFake = vi.hoisted(() => ({
+  calls: [] as Array<{ project: string; host?: string; enabled?: boolean }>,
+  byKey: {} as Record<string, { staged: number; unstaged: number; total: number; isRepo: boolean }>,
+}));
+
+vi.mock("../../lib/projectGitCounts", () => {
+  const zero = { staged: 0, unstaged: 0, total: 0, isRepo: false };
+  return {
+    NO_GIT_COUNTS: zero,
+    useProjectGitCounts: (project: string, host?: string, enabled?: boolean) => {
+      gitCountsFake.calls.push({ project, host, enabled });
+      if (enabled === false) return zero;
+      return gitCountsFake.byKey[`${host ?? ""}\u0000${project}`] ?? zero;
+    },
+  };
+});
+
 const prefetchSessionFake = vi.hoisted(() => vi.fn());
 vi.mock("../../lib/sessionPrefetch", () => ({
   prefetchSession: (...a: unknown[]) => prefetchSessionFake(...a),
@@ -186,6 +206,14 @@ function railLabels(): (string | null)[] {
     .map((b) => b.getAttribute("aria-label"))
     .filter(Boolean);
 }
+
+// Every test starts from a clean git-count fixture and a disconnected remote
+// host; individual tests opt in (e.g. set connected = true) after this runs.
+beforeEach(() => {
+  gitCountsFake.calls.length = 0;
+  Object.keys(gitCountsFake.byKey).forEach((k) => delete gitCountsFake.byKey[k]);
+  remoteHostFake.connected = false;
+});
 
 describe("ProjectSidebar collapsed rail", () => {
   beforeEach(() => {
@@ -234,6 +262,18 @@ describe("ProjectSidebar collapsed rail", () => {
 
     // Group A is collapsed, so A1/A2 are hidden exactly as in the expanded view.
     expect(railLabels()).toEqual(["B1", "B2", "U1", "U2"]);
+  });
+
+  it("shows the git changed-file count on a rail icon", () => {
+    gitCountsFake.byKey["\u0000/U1"] = { staged: 0, unstaged: 4, total: 4, isRepo: true };
+
+    render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} />);
+
+    const badge = screen.getByTitle("4 changed files (0 staged · 4 unstaged)");
+    expect(badge.getAttribute("aria-label")).toBe("4 git changed files");
+    expect(badge.textContent).toBe("4");
+    // Clean siblings show no git badge at all.
+    expect(screen.getAllByLabelText("4 git changed files")).toHaveLength(1);
   });
 });
 
@@ -388,6 +428,31 @@ describe("ProjectSidebar project indicators", () => {
     // The label is a direct flex child of the row, so it participates in the
     // same wrap line as the badge cluster.
     expect(row.contains(badgeCluster)).toBe(true);
+  });
+
+  it("shows the git changed-files badge for a dirty project, even with no open session", () => {
+    gitCountsFake.byKey["\u0000/proj"] = { staged: 1, unstaged: 2, total: 3, isRepo: true };
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    expect(screen.getByTitle("3 changed files (1 staged · 2 unstaged)")).toBeDefined();
+    expect(screen.getByLabelText("3 git changed files")).toBeDefined();
+  });
+
+  it("renders no git badge when the project has no changes", () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    expect(screen.queryByTitle(/changed file/)).toBeNull();
+    expect(screen.queryByLabelText(/git changed files/)).toBeNull();
+  });
+
+  it("asks for git counts only when the project's remote host is connected", () => {
+    // GET /api/git/status?host= is the cold-connect path: a disconnected
+    // host must never be dialed by rendering its row (sidebar hang guard).
+    remoteHostFake.connected = false;
+    stateFake.projects = [project("/proj", ""), remoteProject("/home/user/app", "devbox")];
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    const remote = gitCountsFake.calls.filter((c) => c.host === "devbox");
+    expect(remote.length).toBeGreaterThan(0);
+    expect(remote.every((c) => c.enabled === false)).toBe(true);
+    expect(gitCountsFake.calls.some((c) => !c.host && c.enabled === true)).toBe(true);
   });
 });
 

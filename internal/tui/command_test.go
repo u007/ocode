@@ -451,6 +451,104 @@ func TestLocalModelAndAutoContinueBypassBusyQueue(t *testing.T) {
 	}
 }
 
+// newFreshChatModel returns a model in the exact state the TUI shows for a
+// brand-new session: a single transient "Started new session." notice and
+// nothing else. renderTranscript on such a session must paint the empty state
+// (art), which is the precondition these /fake-agent tests exercise.
+func newFreshChatModel() *model {
+	return &model{
+		width:    80,
+		height:   24,
+		input:    textarea.New(),
+		viewport: fastviewport.New(80, 24),
+		styles:   ApplyThemeColors("tokyonight"),
+		messages: []message{{role: roleAssistant, text: "Started new session.", transient: true}},
+	}
+}
+
+// TestFakeAgentFeedbackVisibleOnFreshSession is a regression test for the
+// reported "tui /fake-agent no feedback" bug. runFakeAgentCmd marks its reply
+// skipLLM so the harness identity never re-enters the LLM prompt, but
+// renderTranscript's empty-state gate used to treat ANY skipLLM message as
+// chrome and blank the whole transcript — so on a fresh session (all messages
+// transient/skipLLM) the command produced no visible output at all, even
+// though the switch had actually applied.
+func TestFakeAgentFeedbackVisibleOnFreshSession(t *testing.T) {
+	restoreHarness := agent.ActiveHarness()
+	t.Cleanup(func() { _, _ = agent.SetActiveHarness(restoreHarness) })
+	t.Setenv("HOME", t.TempDir()) // SaveFakeAgent persists config on switch
+
+	for _, tc := range []struct {
+		command string
+		want    string
+	}{
+		{"/fake-agent", "Harness identity:"},        // bare = status
+		{"/fake-agent status", "Harness identity:"}, // explicit status
+		{"/fake-agent claude-code", "Harness identity:"},
+		{"/fake-agent bogus-harness", "Unknown harness"},
+	} {
+		m := newFreshChatModel()
+		updated, _ := m.handleCommand(tc.command)
+		got := updated.(*model)
+		got.renderTranscript()
+
+		view := stripANSI(got.viewport.View())
+		if !strings.Contains(view, tc.want) {
+			t.Fatalf("%s on a fresh session must render %q, got viewport=%q", tc.command, tc.want, view)
+		}
+		// The reply must stay out of the LLM prompt: this is why it is skipLLM
+		// in the first place, and the rendering fix must not have changed that.
+		snap, _ := got.buildAgentMessagesSnapshot()
+		for _, am := range snap {
+			if strings.Contains(am.Content, "Harness identity:") || strings.Contains(am.Content, "Unknown harness") {
+				t.Fatalf("%s leaked its reply into the LLM prompt: %#v", tc.command, snap)
+			}
+		}
+	}
+}
+
+// TestFreshSessionStillRendersEmptyState pins the other half of the fix: the
+// art/blank empty state must survive for a genuinely conversation-free session.
+// Transient notices and the user's own slash-command echo are chrome and must
+// not count as content, or every launch would show a bogus "/theme" turn.
+func TestFreshSessionStillRendersEmptyState(t *testing.T) {
+	// Case 1: nothing but the startup notice.
+	m := newFreshChatModel()
+	m.renderTranscript()
+	if view := strings.TrimSpace(stripANSI(m.viewport.View())); view != "" {
+		t.Errorf("fresh session must render the empty state, got %q", view)
+	}
+
+	// Case 2: a command whose only trace is chrome — the user's own "/theme"
+	// echo plus the transient "Theme: dracula" confirmation.
+	m2 := newFreshChatModel()
+	m2.messages = append(m2.messages,
+		message{role: roleUser, text: "/theme", skipLLM: true},
+		message{role: roleAssistant, text: "Theme: dracula", transient: true},
+	)
+	m2.renderTranscript()
+	if view := strings.TrimSpace(stripANSI(m2.viewport.View())); view != "" {
+		t.Errorf("theme-only session must still render the empty state, got %q", view)
+	}
+}
+
+// TestCronDeliveryVisibleOnFreshSession covers the same rendering gate via a
+// different producer: a cron delivery is skipLLM (it must not become prompt
+// content) but is user-facing feedback, so it must render on an otherwise
+// conversation-free session.
+func TestCronDeliveryVisibleOnFreshSession(t *testing.T) {
+	m := newFreshChatModel()
+	m.messages = append(m.messages, message{
+		role:    roleAssistant,
+		text:    "⏰ Scheduled job 'nightly-digest' completed: everything is fine",
+		skipLLM: true,
+	})
+	m.renderTranscript()
+	if view := stripANSI(m.viewport.View()); !strings.Contains(view, "nightly-digest") {
+		t.Fatalf("cron delivery must be visible on a fresh session, got %q", view)
+	}
+}
+
 // TestToolsBypassBusyQueue guards that /tools, /tool, and /plugin run
 // immediately while the agent streams. They are local detection/install
 // commands (PATH probes + package-manager tea.Cmd work) that never touch the
