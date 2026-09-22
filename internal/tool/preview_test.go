@@ -17,7 +17,7 @@ func previewArgs(t *testing.T, path string, page int) json.RawMessage {
 
 func TestPreviewOpenToolAcceptsPreviewable(t *testing.T) {
 	tool := &PreviewOpenTool{}
-	for _, p := range []string{"docs/deck.pptx", "spec.docx", "report.pdf", "flow.mmd", "notes.md", "main.go", "budget.xlsx", "legacy.xls", "data.csv", "song.mp3", "clip.mp4"} {
+	for _, p := range []string{"docs/deck.pptx", "spec.docx", "report.pdf", "flow.mmd", "notes.md", "notes.markdown", "docs/page.mdx", "main.go", "budget.xlsx", "legacy.xls", "data.csv", "song.mp3", "clip.mp4"} {
 		got, err := tool.Execute(previewArgs(t, p, 0))
 		if err != nil {
 			t.Errorf("path %q: unexpected error %v", p, err)
@@ -104,6 +104,20 @@ func TestPreviewOpenCoversOfficeSet(t *testing.T) {
 		".mp4": "video", ".webm": "video", ".mov": "video",
 	}
 	for ext, want := range media {
+		got, ok := previewOpenKinds[ext]
+		if !ok {
+			t.Errorf("previewOpenKinds missing %q", ext)
+			continue
+		}
+		if got != want {
+			t.Errorf("previewOpenKinds[%q] = %q, want %q", ext, got, want)
+		}
+	}
+	// Markdown family: the AI tool accepts these; the client resolves the
+	// rendered kind from the extension (MarkdownViewer for .md/.markdown/.mdx,
+	// Monaco `mdx` highlighting for .mdx).
+	markdown := map[string]string{".md": "text", ".markdown": "text", ".mdx": "text"}
+	for ext, want := range markdown {
 		got, ok := previewOpenKinds[ext]
 		if !ok {
 			t.Errorf("previewOpenKinds missing %q", ext)

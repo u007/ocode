@@ -67,12 +67,14 @@ const host = vi.hoisted(() => ({
   path: null as string | null,
   nonce: 0,
   consume: null as null | (() => void),
+  mounted: false,
 }));
 vi.mock("./components/Preview/PreviewHost", () => ({
   default: ({ request, nonce, onConsumeActivation }: { request: { path: string } | null; nonce: number; onConsumeActivation?: () => void }) => {
     host.path = request?.path ?? null;
     host.nonce = nonce;
     host.consume = onConsumeActivation ?? null;
+    host.mounted = true;
     return (
       <div data-testid="preview-host" data-path={request?.path ?? ""} data-nonce={String(nonce)}>
         <button type="button" data-testid="preview-consume" onClick={() => onConsumeActivation?.()}>
@@ -82,7 +84,6 @@ vi.mock("./components/Preview/PreviewHost", () => ({
     );
   },
 }));
-
 vi.mock("./components/Browser/BrowserPanel", () => ({ BrowserPanel: () => null }));
 vi.mock("./components/Chat/ChatPanel", () => ({ default: () => null }));
 vi.mock("./components/Chat/AgentPreview", () => ({ default: () => null }));
@@ -125,11 +126,26 @@ beforeEach(() => {
   host.path = null;
   host.nonce = 0;
   host.consume = null;
+  host.mounted = false;
   appApi.listProjects.mockReset().mockResolvedValue([{ path: "/proj", name: "proj" }]);
   appApi.getCurrentProject.mockReset().mockResolvedValue({ project: { path: "/proj", name: "proj" } });
   appApi.listProjectSessions.mockReset().mockResolvedValue([]);
   appApi.listGroups.mockReset().mockResolvedValue([]);
   appApi.getSpending.mockReset().mockResolvedValue({ spending_usd: 0 });
+});
+
+describe("App side-pane visibility scoping", () => {
+  it("mounts the pane only while the session tab is on the chat sub-tab", async () => {
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /new chat session/i }));
+    dispatchOpenPreview("docs/spec.md", 1, "/proj");
+    await screen.findByTestId("preview-host");
+    expect(host.mounted).toBe(true);
+  });
 });
 
 describe("App sidebar preview activation", () => {

@@ -25,6 +25,7 @@ func TestHandleFileRawServesPreviewable(t *testing.T) {
 		{"xlsx", "book.xlsx", []byte("PK\x03\x04 fake"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
 		{"xls", "legacy.xls", []byte("\xd0\xcf\x11\xe0 fake"), "application/vnd.ms-excel"},
 		{"csv", "data.csv", []byte("a,b\n1,2\n"), "text/csv; charset=utf-8"},
+		{"mdx", "page.mdx", []byte("# Hi\n\n<Chart />\n"), "text/markdown; charset=utf-8"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,6 +218,19 @@ func TestPreviewRawCoversOfficeSet(t *testing.T) {
 		".mov":  "video/quicktime",
 	}
 	for ext, wantCT := range media {
+		if got := previewRawTypes[ext]; got != wantCT {
+			t.Errorf("previewRawTypes[%q] = %q, want %q", ext, got, wantCT)
+		}
+	}
+	// Markdown family (incl. MDX): the raw endpoint serves source bytes as
+	// text/markdown; .mdx is previewed through MarkdownViewer, not a binary
+	// renderer.
+	markdown := map[string]string{
+		".md":       "text/markdown; charset=utf-8",
+		".markdown": "text/markdown; charset=utf-8",
+		".mdx":      "text/markdown; charset=utf-8",
+	}
+	for ext, wantCT := range markdown {
 		if got := previewRawTypes[ext]; got != wantCT {
 			t.Errorf("previewRawTypes[%q] = %q, want %q", ext, got, wantCT)
 		}

@@ -7,7 +7,7 @@ import { clearCompaction, setCompactionState } from "../../lib/compactionState";
 
 // Controllable stand-in for useChat so the context-aware Continue action can be
 // driven between "idle" and "interrupted" without touching the real store.
-const chat = vi.hoisted(() => ({ streaming: false, interrupted: false, permission: null as object | null }));
+const chat = vi.hoisted(() => ({ streaming: false, interrupted: false, permission: null as object | null, hasConversation: true }));
 const sendMessage = vi.fn().mockResolvedValue(true);
 const executeShell = vi.fn().mockResolvedValue({ output: "ok", exitCode: 0 });
 const resume = vi.fn();
@@ -20,6 +20,7 @@ vi.mock("../../hooks/useChat", () => ({
     isStreaming: chat.streaming,
     wasInterrupted: chat.interrupted,
     pendingPermission: chat.permission,
+    hasConversation: chat.hasConversation,
   }),
 }));
 vi.mock("./SlashCommandMenu", () => ({ default: () => null }));
@@ -49,6 +50,7 @@ describe("composer quick actions", () => {
     chat.streaming = false;
     chat.interrupted = false;
     chat.permission = null;
+    chat.hasConversation = true;
     sendMessage.mockResolvedValue(true);
     clearQueue(A);
     clearDraft(A);
@@ -118,5 +120,27 @@ describe("composer quick actions", () => {
     expect(btn).toBeDisabled();
     fireEvent.click(btn);
     expect(onSlashCommand).not.toHaveBeenCalled();
+  });
+
+  it("hides the whole strip on a new or empty session", () => {
+    chat.hasConversation = false;
+    render(composer());
+    // The strip is gone entirely, not just individually disabled: there is
+    // nothing to compact, continue, or recap yet.
+    expect(screen.queryByRole("toolbar", { name: "Quick actions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Compact conversation context (/compact)" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send 'continue' to keep the agent going" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Generate session recap (/recap)" })).not.toBeInTheDocument();
+  });
+
+  it("reveals the strip once the session has conversation content", () => {
+    chat.hasConversation = false;
+    const empty = render(composer());
+    expect(screen.queryByRole("toolbar", { name: "Quick actions" })).not.toBeInTheDocument();
+    empty.unmount();
+    chat.hasConversation = true;
+    render(composer());
+    expect(screen.getByRole("toolbar", { name: "Quick actions" })).toBeInTheDocument();
+    expect(compactBtn()).toBeInTheDocument();
   });
 });

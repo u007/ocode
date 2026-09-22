@@ -134,6 +134,19 @@ func (a *Agent) BasePromptMessages() []Message {
 	if a.spec != nil && strings.TrimSpace(a.spec.SystemPrompt) != "" {
 		agentPrompt = strings.TrimSpace(a.spec.SystemPrompt)
 	}
+	// Harness identity line (opencode parity): real opencode's system prompt
+	// opens by naming itself (anthropic.txt: "You are OpenCode, the best
+	// coding agent on the planet." / default.txt: "You are opencode, an
+	// interactive CLI tool that helps users with software engineering
+	// tasks."). Under the opencode harness the mode fragment carries that
+	// opening, so the model identifies as opencode while ocode's mode
+	// workflow still governs behavior. ocode harness adds nothing — the
+	// agent answers as ocode. Lives inside the cached system block: the
+	// harness only changes via /fake-agent, an explicit act that SHOULD
+	// re-cache the prefix.
+	if agentPrompt != "" && ActiveHarness() == HarnessOpencode {
+		agentPrompt = "You are opencode, an interactive CLI tool that helps users with software engineering tasks.\n" + agentPrompt
+	}
 	if agentPrompt != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptModeMarker + "\n" + agentPrompt})
 	}
@@ -234,7 +247,7 @@ func (a *Agent) environmentPrompt() string {
 		cwd = a.workDir
 	}
 	root := findWorkspaceRoot(cwd)
-	if a.envPromptDate == today && a.envPromptStr != "" && a.envPromptCwd == cwd && a.envPromptRoot == root && a.envPromptEnvHash == envHash(cwd, root, a.projectHost) {
+	if a.envPromptDate == today && a.envPromptStr != "" && a.envPromptCwd == cwd && a.envPromptRoot == root && a.envPromptEnvHash == envHash(cwd, root, a.projectHost) && a.envPromptHarness == ActiveHarness() {
 		return a.envPromptStr
 	}
 	provider, model := "", ""
@@ -263,14 +276,20 @@ func (a *Agent) environmentPrompt() string {
 		skillDirLines = append(skillDirLines, "    - "+d)
 	}
 
-	lines := []string{
-		fmt.Sprintf("You are powered by the model named %s.", modelID),
+	modelLines := []string{fmt.Sprintf("You are powered by the model named %s.", modelID)}
+	if ActiveHarness() == HarnessOpencode {
+		// Real opencode appends this second sentence
+		// (packages/opencode/src/session/system.ts); it names the raw
+		// provider/model pair so a provider-side harness check can key on it.
+		modelLines = append(modelLines, fmt.Sprintf("The exact model ID is %s.", modelID))
+	}
+	lines := append(modelLines,
 		"Here is some useful information about the environment you are running in:",
 		"<env>",
 		fmt.Sprintf("  Working directory: %s", cwd),
 		fmt.Sprintf("  Workspace root folder: %s", root),
 		fmt.Sprintf("  Is directory a git repo: %s", yesNo(isGitRepo(root))),
-	}
+	)
 	if isGitRepo(root) {
 		lines = append(lines, "  Git worktree directory: .worktrees/ (gitignored, project root)")
 	}
@@ -316,6 +335,7 @@ func (a *Agent) environmentPrompt() string {
 	a.envPromptCwd = cwd
 	a.envPromptRoot = root
 	a.envPromptEnvHash = envHash(cwd, root, a.projectHost)
+	a.envPromptHarness = ActiveHarness()
 	return result
 }
 

@@ -21,10 +21,12 @@ interface Props {
 }
 
 /**
- * QuickActionsBar — the always-visible quick-action strip rendered directly
- * below the composer's send row. Purely presentational: the parent owns what
- * each action does (ChatInput routes them through the same dispatch/queue
- * pipeline a typed message or slash command uses).
+ * QuickActionsBar — the quick-action strip rendered directly below the
+ * composer's send row. Purely presentational: the parent owns what each
+ * action does (ChatInput routes them through the same dispatch/queue
+ * pipeline a typed message or slash command uses) and whether the strip is
+ * shown at all (ChatInput hides it until the session has conversation
+ * content — see `hasConversation`).
  *
  * Deliberately not a dropdown: the actions are one click away, so the strip
  * keeps the common mid-conversation nudges (compact / continue / recap) out of

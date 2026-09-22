@@ -1,7 +1,8 @@
-import { memo, useState, type KeyboardEvent, useRef, useEffect, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
+import { memo, useState, type KeyboardEvent, useRef, useEffect, useLayoutEffect, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
 import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, QUEUE_CHANGED_EVENT, type QueueChangedDetail, type QueuedItem } from "../../lib/tabQueue";
+import { getInputHistory, pushInputHistory } from "../../lib/tabInputHistory";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
@@ -116,7 +117,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const delayedInputsRef = useRef<string[]>([]);
   const delayedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const delayedGenerationRef = useRef(0);
-  const { sendMessage, executeShell, stop, resume, wasInterrupted, isStreaming, pendingPermission } = useChat(sessionTabId ?? null, {
+  const { sendMessage, executeShell, stop, resume, wasInterrupted, isStreaming, pendingPermission, hasConversation } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
         onSessionCreated?.(sessionTabId, sessionId);
@@ -125,12 +126,47 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachRef = useRef<HTMLInputElement>(null);
+  // Input-history navigation (↑/↓). A ref rather than state: it only matters
+  // inside the keydown handler, and putting it in state would re-render the
+  // composer on every step. `historyIndex` is -1 when not navigating; entering
+  // history stashes the in-progress draft so ↓ past the newest entry restores
+  // it (mirrors the TUI's `inputHistoryIndex` / `unsavedInput`).
+  const historyIndexRef = useRef(-1);
+  const historyDraftRef = useRef("");
 
   useImperativeHandle(ref, () => ({
     focus: () => {
       textareaRef.current?.focus();
     },
   }));
+
+  // Auto-grow the composer: it starts as a single 1.5em-tall line and expands
+  // with the draft until it hits its `max-h-40` ceiling (then it scrolls
+  // internally). `scrollHeight` already includes the element's vertical
+  // padding, so using it directly as the height is an exact fit. The first read
+  // doubles as the hidden check: a `display:none` tab (and jsdom, which has no
+  // layout engine) reports 0 — leave those alone so revealing the tab keeps
+  // whatever height the last visible fit produced.
+  const fitTextarea = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el || el.scrollHeight <= 0) return;
+    // Must clear the explicit height *before* reading, otherwise a shrink keeps
+    // reporting the old (taller) box as its minimum scrollHeight.
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, []);
+
+  useLayoutEffect(() => {
+    fitTextarea();
+  }, [input, fitTextarea]);
+
+  // A narrower container (window/side-panel resize) rewraps the draft onto more
+  // lines, so re-fit rather than waiting for the next keystroke.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.addEventListener("resize", fitTextarea);
+    return () => window.removeEventListener("resize", fitTextarea);
+  }, [fitTextarea]);
 
   // Auto-focus the chat input when this session tab becomes active.
   useEffect(() => {
@@ -145,6 +181,9 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   useEffect(() => {
     setInput(getDraft(sessionTabId));
     setQueuedItems([...getQueue(sessionTabId)]);
+    // Switching tabs abandons any in-progress history walk for the old tab.
+    historyIndexRef.current = -1;
+    historyDraftRef.current = "";
 
     // A queue entry can be removed outside this component: sessionEvents drops
     // a dispatched (injected-while-streaming) entry when the server's
@@ -214,6 +253,9 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       const text = ce.detail.text ?? "";
       setInput(text);
       setDraft(sessionTabId, text);
+      // A programmatic restore is a fresh edit, not a history walk.
+      historyIndexRef.current = -1;
+      historyDraftRef.current = "";
       // Focus after state applies; queue microtask to ensure DOM updated.
       requestAnimationFrame(() => {
         const el = textareaRef.current;
@@ -272,9 +314,14 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         setShellInFlight(true);
         try {
           const result = await executeShell(command);
+          // The cwd line goes inside the fenced block: the message is rendered
+          // as markdown, where a bare `# cwd:` line would become a heading.
+          // Reporting the shell's directory makes a leaked `cd` visible in the
+          // transcript instead of silently changing where later commands run.
+          const cwdLine = result.cwd ? `\n# cwd: ${result.cwd}` : "";
           const outputMessage = result.exitCode === 0
-            ? `Shell command executed successfully:\n\`\`\`\n${result.output}\n\`\`\``
-            : `Shell command failed (exit code ${result.exitCode}):\n\`\`\`\n${result.error || result.output}\n\`\`\``;
+            ? `Shell command executed successfully:\n\`\`\`\n${result.output}${cwdLine}\n\`\`\``
+            : `Shell command failed (exit code ${result.exitCode}):\n\`\`\`\n${result.error || result.output}${cwdLine}\n\`\`\``;
           const accepted = await sendMessage(outputMessage);
           return { startedTurn: true, accepted };
         } finally {
@@ -378,6 +425,11 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // turn instead of interleaving. Unlike handleSend they deliberately never
   // touch the composer draft or the @ref/editor context — clicking "Continue"
   // must not clear what the user is already typing.
+  //
+  // The whole strip is hidden until the session has conversation content
+  // (`hasConversation`, from useChat): a brand-new/empty session has nothing
+  // to compact, continue, or recap, and the mid-conversation nudges were just
+  // noise there. The slash commands themselves are unaffected.
   const runQuickDispatch = (text: string, kind: "command" | "message") => {
     if (
       effectiveBusy ||
@@ -430,6 +482,17 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   ];
 
   const updateDraft = (value: string) => {
+    setInput(value);
+    setDraft(sessionTabId, value);
+    // Any non-history mutation (typing, slash selection, queued-item recall)
+    // leaves history mode, so the next ↑ starts from the newest entry again.
+    historyIndexRef.current = -1;
+    historyDraftRef.current = "";
+  };
+
+  // Apply a recalled history entry without counting as a fresh edit — it must
+  // NOT reset `historyIndexRef`, or the next ↑/↓ would restart the walk.
+  const applyHistoryValue = (value: string) => {
     setInput(value);
     setDraft(sessionTabId, value);
   };
@@ -523,6 +586,14 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     const trimmed = input.trim();
     if (!trimmed) return;
     submittingRef.current = true;
+    // Record the submitted input for ↑/↓ recall. This is the single submit
+    // choke point (immediate sends AND the queue/while-streaming branches all
+    // flow through here), so a message queued now and auto-drained later is
+    // recorded exactly once. `!shell` commands are skipped inside the helper
+    // (TUI parity — the transcript carries their output, not the command).
+    pushInputHistory(sessionTabId, trimmed);
+    historyIndexRef.current = -1;
+    historyDraftRef.current = "";
     let delayedSubmission = false;
     try {
       setInput("");
@@ -694,10 +765,56 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       }
     }
 
-    if (e.key === "ArrowUp" && input === "") {
-      if (restoreLastQueued()) {
+    // ── Input-history navigation (↑/↓) ──────────────────────────────────────
+    // Mirrors the TUI: ↑ walks back through previously submitted text, ↓ walks
+    // forward and, past the newest entry, restores the draft that was in the
+    // box when the walk began. Bare arrows only, and entering the walk requires
+    // the caret on the first line — so ordinary caret movement inside a
+    // multi-line draft is untouched.
+    const plainArrow = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey;
+    if (plainArrow && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      const history = getInputHistory(sessionTabId);
+      if (historyIndexRef.current !== -1 && history.length > 0) {
+        // Already walking: keep walking regardless of caret position — a
+        // recalled entry's caret is not meaningful (the TUI behaves the same).
+        if (e.key === "ArrowUp") {
+          if (historyIndexRef.current > 0) {
+            historyIndexRef.current -= 1;
+            applyHistoryValue(history[historyIndexRef.current]);
+          }
+        } else if (historyIndexRef.current < history.length - 1) {
+          historyIndexRef.current += 1;
+          applyHistoryValue(history[historyIndexRef.current]);
+        } else {
+          // Past the newest entry → restore the pre-walk draft and exit.
+          historyIndexRef.current = -1;
+          applyHistoryValue(historyDraftRef.current);
+          historyDraftRef.current = "";
+        }
         e.preventDefault();
         return;
+      }
+      historyIndexRef.current = -1;
+      if (e.key === "ArrowUp") {
+        const el = e.currentTarget;
+        const caretOnFirstLine =
+          el.selectionStart === el.selectionEnd &&
+          !el.value.slice(0, el.selectionStart ?? 0).includes("\n");
+        if (caretOnFirstLine) {
+          // An empty box first recalls a still-queued item (existing behavior);
+          // sent history is the fallback when the queue is empty.
+          if (input === "" && restoreLastQueued()) {
+            e.preventDefault();
+            return;
+          }
+          if (history.length > 0) {
+            historyIndexRef.current = history.length - 1;
+            historyDraftRef.current = input;
+            applyHistoryValue(history[historyIndexRef.current]);
+            e.preventDefault();
+            return;
+          }
+        }
       }
     }
 
@@ -834,9 +951,9 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         </button>
         <textarea
           ref={textareaRef}
-          className="flex-1 resize-none rounded-lg border border-border bg-muted p-3 text-sm text-foreground placeholder-muted-foreground focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-          rows={2}
-          placeholder="Type a message... (Enter to send, Shift+Enter for newline, / for commands, ! for shell)"
+          className="flex-1 resize-none overflow-y-auto max-h-40 rounded-lg border border-border bg-muted p-3 text-sm leading-[1.5em] text-foreground placeholder-muted-foreground focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          rows={1}
+          placeholder="Type a message... (Enter to send, Shift+Enter for newline, ↑/↓ history, / for commands, ! for shell)"
           value={input}
           onChange={(e) => updateDraft(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -903,7 +1020,9 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           </Button>
         )}
       </div>
-      <QuickActionsBar actions={quickActions} onSelect={runQuickAction} />
+      {hasConversation && (
+        <QuickActionsBar actions={quickActions} onSelect={runQuickAction} />
+      )}
     </div>
   );
 });

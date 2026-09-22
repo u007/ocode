@@ -56,6 +56,16 @@ export interface PreviewSurfaceProps {
    *  true so single-surface hosts (sidebar PreviewHost, PreviewTabPage) need
    *  not thread it. */
   active?: boolean;
+  /** Live-refresh revision from the sidebar PreviewHost: bumped whenever the
+   *  active session's tool stream mutates this file. Text-surface viewers
+   *  (markdown/text/mmd) refetch when it changes; other viewers ignore it.
+   *  Omitted (undefined) by hosts without live refresh (Files tab, Preview
+   *  tab page) — those keep the fetch-once behaviour. */
+  revision?: number;
+  /** True while the driving chat turn is running. Text-surface viewers use
+   *  it to keep tail-following armed so streaming file growth stays visible
+   *  (the "auto scroll" half of the sidebar preview behaviour). */
+  followTail?: boolean;
 }
 
 export default function PreviewSurface({
@@ -70,6 +80,8 @@ export default function PreviewSurface({
   onOpenFile,
   content,
   active,
+  revision,
+  followTail,
 }: PreviewSurfaceProps) {
   const handlePageChange = onPageChange ?? (() => {});
   const handleSlideChange = onSlideChange ?? (() => {});
@@ -81,9 +93,9 @@ export default function PreviewSurface({
         {kind === "docx" && <DocxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
         {kind === "pptx" && <PptxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} slide={slide ?? 1} onSlideChange={handleSlideChange} />}
         {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
-        {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} />}
-        {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} content={content} />}
-        {kind === "text" && <TextViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
+        {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} revision={revision} />}
+        {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} content={content} revision={revision} followTail={followTail} />}
+        {kind === "text" && <TextViewer path={path} projectRoot={projectRoot} projectHost={projectHost} revision={revision} />}
         {kind === "image" && <ImageViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
         {kind === "audio" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="audio" active={active} />}
         {kind === "video" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="video" active={active} />}

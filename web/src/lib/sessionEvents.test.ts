@@ -3,6 +3,7 @@ import {
   routeBusEnvelope,
   reconcileOpenSessions,
   revalidateSession,
+  applyReconcileState,
   RECONCILE_PAGE_SIZE,
   LIVE_DELTA_FLUSH_MS,
   cancelLiveDeltas,
@@ -1042,5 +1043,75 @@ describe("revalidateSession", () => {
 
     expect(getState().sessions["s1"]?.pendingPermission?.request_id).toBe("call-1");
     expect(mockGetSession).not.toHaveBeenCalled();
+  });
+});
+
+// The server-derived interrupted-turn flag (GET /state `interrupted`). It is a
+// separate slice field from wasInterrupted on purpose: wasInterrupted is the
+// live user-Stop signal that BLOCKS sending, so reusing it would disable the
+// Continue action the notice offers.
+describe("interrupted-turn flag", () => {
+  beforeEach(() => {
+    mockGetSessionState.mockReset();
+    mockGetSession.mockReset();
+    resetSessionRevisions();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetSessionRevisions();
+  });
+
+  it("maps state.interrupted onto that session's slice only, and back to false", () => {
+    const { router, getState } = makeRouter(["s1", "s2"]);
+
+    applyReconcileState(router.dispatch, "s1", {
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 1,
+      interrupted: true,
+    });
+    expect(getState().sessions["s1"].interrupted).toBe(true);
+    expect(getState().sessions["s2"]?.interrupted ?? false).toBe(false);
+
+    // A later payload WITHOUT the flag (server cleared it) resets the slice.
+    applyReconcileState(router.dispatch, "s1", {
+      bootstrap_stage: "",
+      turn_active: true,
+      last_seq: 2,
+    });
+    expect(getState().sessions["s1"].interrupted).toBe(false);
+  });
+
+  it("lands the flag from reconcileOpenSessions and threads the remote host", async () => {
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 3,
+      interrupted: true,
+    });
+    mockGetSession.mockResolvedValue({ messages: [{ role: "assistant", content: "working" }], total: 1 });
+    const { router, getState } = makeRouter(["s1"], undefined, (id) => (id === "s1" ? "devbox" : undefined));
+
+    await reconcileOpenSessions(new Set(["s1"]), router);
+
+    expect(mockGetSessionState).toHaveBeenCalledWith("s1", "devbox");
+    expect(getState().sessions["s1"].interrupted).toBe(true);
+  });
+
+  it("applies the flag from the revalidation poll when the revision moved", async () => {
+    noteSessionRevision("s1", undefined, "rev-1");
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 4,
+      revision: "rev-2",
+      interrupted: true,
+    });
+    mockGetSession.mockResolvedValue({ messages: [{ role: "assistant", content: "x" }], total: 1 });
+    const { router, getState } = makeRouter(["s1"]);
+
+    await revalidateSession("s1", router);
+
+    expect(getState().sessions["s1"].interrupted).toBe(true);
   });
 });

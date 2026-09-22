@@ -511,7 +511,7 @@ func (m filesModel) handlePasteMsg(msg tea.PasteMsg) (filesModel, tea.Cmd) {
 		return m, nil
 	case filesModeFuzzy:
 		m.fuzzyQuery += msg.Content
-		m.fuzzyResults = fuzzyFilter(m.allPaths, m.fuzzyQuery)
+		m.fuzzyResults = fuzzyFilterPaths(m.allPaths, m.fuzzyQuery)
 		m.fuzzyCursor = 0
 		return m, nil
 	case filesModeInFileSearch:

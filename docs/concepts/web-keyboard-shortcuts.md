@@ -1,15 +1,15 @@
 ---
 type: Concept
 title: Web UI Global Keyboard Shortcuts
-description: 'Canonical reference for the ocode web/desktop global keyboard shortcuts: ⌘/Ctrl+K palette, ⌘/Ctrl+P file picker, ⌘/Ctrl+S save, ⌘/Ctrl+N new chat (reveals the Sessions chat half), ⌘/Ctrl+T new terminal, ⌘/Ctrl+W close frontmost, Escape — plus the desktop-shell and xterm caveats.'
-resource: web/src/hooks/useKeyboard.ts; web/src/App.tsx:695-763
+description: 'Canonical reference for the ocode web/desktop global keyboard shortcuts: ⌘/Ctrl+K palette, ⌘/Ctrl+P file picker, ⌘/Ctrl+S save, ⌘/Ctrl+N new chat (reveals the Sessions chat half), ⌘/Ctrl+T new terminal, ⌘/Ctrl+W close frontmost, Escape — plus the desktop-shell and xterm caveats, and composer-local keys (Enter, Shift+Enter, ↑/↓, /, !).'
+resource: "web/src/hooks/useKeyboard.ts; web/src/App.tsx:695-763"
 tags:
   - web
   - keyboard
   - shortcuts
   - ui
   - reference
-timestamp: 2026-09-21T03:35:30Z
+timestamp: 2026-09-22T02:38:28Z
 ---
 # Web UI Global Keyboard Shortcuts
 
@@ -53,7 +53,7 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 - **⌘W is desktop-shell only.** `useKeyboard.ts:55` gates it on `isDesktopShell()` (Wails runtime present). In a plain browser the OS/webview consumes ⌘W to close the browser tab and it cannot be intercepted, so binding it would double-close. See the hook's header comment.
 - **Ctrl+W inside the embedded terminal is not stolen.** `useKeyboard.ts:55-69` (return at `:61`): if `!e.metaKey` and the event target is inside `.xterm`, the handler returns — Ctrl+W is readline's "delete previous word" while typing in the pty. Cmd+W (`metaKey`) is never sent to the pty, so it still closes the frontmost tab even when the terminal has focus (regression: `web/src/hooks/useKeyboard.test.ts` "closes via Cmd+W even when the embedded terminal has focus").
 - **⌘N and ⌘T have no native desktop menu accelerator.** The Wails webview receives the keys and `useKeyboard` handles them; `buildAppMenu` (`cmd/ocode-desktop/main.go:542`) binds only `CmdOrCtrl+,` (Settings) and `CmdOrCtrl+Shift+S` (Share). The Edit menu is the Wails role `menu.AddRole(application.EditMenu)`, whose accelerators are the standard ones (⌘Z / ⇧⌘Z, ⌘X, ⌘C, ⌘V, ⌘⇧⌥V, Backspace, ⌘A, plus the Speech submenu) — none is ⌘N or ⌘T. Adding/removing these bindings is hook-only.
-- **⌘N / ⌘T are browser-chrome shortcuts in a plain browser tab.** `Ctrl+N` is "new window" and `Ctrl+T` "new tab", both on Chrome's **non-overridable** list (`Ctrl+T`, `Ctrl+N`, `Ctrl+W`/`F4`, `Ctrl+Shift+T`, `Ctrl+Shift+N`, `Ctrl+Tab`, `F12`/`Ctrl+Shift+I`, `Ctrl+Shift+C`, `Ctrl+U`, `Ctrl+Shift+Del`), so `e.preventDefault()` cannot reliably claim them there. Contrast omnibox-family keys such as `Ctrl+K`, which pages *are* allowed to take (GitHub overrides it) — that is why ⌘K works in a browser while ⌘N/⌘T may not. The desktop shell is unaffected (its webview has no browser chrome), and outside it the reliable entry point is the tab-bar buttons.
+- **⌘N / ⌘T are browser-chrome shortcuts in a plain browser tab.** `Ctrl+N` is "new window" and `Ctrl+T` is "new tab", both on Chrome's **non-overridable** list (`Ctrl+T`, `Ctrl+N`, `Ctrl+W`/`F4`, `Ctrl+Shift+T`, `Ctrl+Shift+N`, `Ctrl+Tab`, `F12`/`Ctrl+Shift+I`, `Ctrl+Shift+C`, `Ctrl+U`, `Ctrl+Shift+Del`), so `e.preventDefault()` cannot reliably claim them there. Contrast omnibox-family keys such as `Ctrl+K`, which pages *are* allowed to take (GitHub overrides it) — that is why ⌘K works in a browser while ⌘N/⌘T may not. The desktop shell is unaffected (its webview has no browser chrome), and outside it the reliable entry point is the tab-bar buttons.
 - **No raw listeners in child components.** Registering bindings outside `useKeyboard` bypasses the desktop-shell and xterm guards above.
 - **Keep `skills/ocode-web/SKILL.md` §10 in sync.** That table lists the same bindings (⌘K, ⌘P, ⌘S, ⌘N, ⌘T, ⌘W, Escape, plus the note that ⌘, opens Settings via the native menu) — when a binding changes, update both this doc and the skill.
 
@@ -62,3 +62,17 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 - `web/src/hooks/useKeyboard.test.ts` — Cmd+W / Ctrl+W dispatch in the desktop shell, no binding in a plain browser, Ctrl+W not stolen inside `.xterm`, Cmd+W with terminal focus, plain W ignored, and ⌘N still fires `onNewSession`. Unchanged by the ⌘N-reveal work (the hook itself was not modified).
 - `web/src/App.newChatShortcut.test.tsx` — the App-level wiring: from a restored Files view, ⌘/Ctrl+N switches to the Sessions view on the chat half and clears the no-open-sessions empty state (a tab now exists); a second press reuses the blank tab rather than stacking (exactly one chat pane); with the terminal half active it moves focus back to chat; and ⌘/Ctrl+T outside Sessions performs the same reveal. Mutation-verified by temporary revert: dropping `setActiveView("sessions")` failed 3 of the 4, dropping `setFocusedKind("chat")` failed the terminal-half case, and dropping the `reuseIfEmpty` argument failed the reuse case.
 - `web/src/hooks/useKeyboard.browser.test.ts` — ⌘W closes the focused browser tab, falls back to session close when chat is focused or no active browser id.
+
+## Composer (chat input)
+
+The composer (`web/src/components/Chat/ChatInput.tsx`) has its own key handling inside `handleKeyDown` — these are **not** global bindings (they only fire when the textarea is focused) and are deliberately excluded from `useKeyboard`.
+
+| Shortcut | Action |
+|---|---|
+| `Enter` | Send the draft (`handleSend`) |
+| `Shift+Enter` | Newline in the composer (does not send) |
+| `↑` / `↓` | Walk sent-input history (see [web-chat-input-history.md](web-chat-input-history.md)) |
+| `/` | Open slash menu (command autocomplete) |
+| `!` | Shell command (sent as `!shell …`); excluded from history recall |
+
+**Caret gate for ↑/↓:** plain ↑ first enters the history walk **only** when the caret is on the first line (no newline above it) and there is no slash menu open. Once inside the walk (`historyIndexRef !== -1`), arrows keep walking regardless of caret position. Modifier keys (Shift/Alt/Meta/Ctrl) on arrow presses are ignored by the history handler, so ⌘↑ etc. fall through to the browser/default.

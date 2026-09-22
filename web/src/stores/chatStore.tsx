@@ -272,6 +272,12 @@ export interface SessionSlice {
   // streamWasInterrupted which prevents drainQueuedItems on cancel). Cleared
   // when the user resumes or starts a new turn.
   wasInterrupted: boolean;
+  // Server-derived "settled on an unfinished turn" flag (GET /state). Distinct
+  // from `wasInterrupted`, which is the live user-Stop signal that BLOCKS
+  // sending — reusing it would disable the Continue action this flag drives.
+  // The server is authoritative: the client sets it from each state payload
+  // and clears it optimistically only when the user clicks Continue.
+  interrupted: boolean;
   // Main model picked for a draft ("new-*") tab before the session exists
   // server-side. The sidebar shows it optimistically and the first message
   // sends it so the session starts with the chosen model; once the real
@@ -316,6 +322,7 @@ export const emptySessionSlice: SessionSlice = {
   turnStalled: false,
   statusLoading: false,
   wasInterrupted: false,
+  interrupted: false,
   model: undefined,
 };
 
@@ -438,6 +445,7 @@ export type ChatAction =
   | { type: "SET_BOOTSTRAP_STAGE"; sessionId: string; stage: string | null }
   | { type: "SET_TUI_STATUS_READY"; ready: boolean }
   | { type: "SET_WAS_INTERRUPTED"; sessionId: string; wasInterrupted: boolean }
+  | { type: "SET_INTERRUPTED"; sessionId: string; interrupted: boolean }
   | { type: "INTERRUPT"; sessionId: string }
   | { type: "REKEY_SESSION"; oldId: string; newId: string }
   | { type: "TOGGLE_RUN_COLLAPSED"; sessionId: string; runId: string }
@@ -949,6 +957,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }));
     case "SET_WAS_INTERRUPTED":
       return updateSession(state, action.sessionId, (s) => ({ ...s, wasInterrupted: action.wasInterrupted }));
+    case "SET_INTERRUPTED":
+      // Server-derived flag (see SessionSlice.interrupted). Assigned verbatim
+      // from each /state payload; the client has no other clearing logic.
+      return updateSession(state, action.sessionId, (s) =>
+        s.interrupted === action.interrupted ? s : { ...s, interrupted: action.interrupted },
+      );
     case "INTERRUPT":
       return updateSession(state, action.sessionId, (s) => ({
         ...s,

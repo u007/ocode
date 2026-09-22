@@ -62,6 +62,11 @@ func (h *Handler) HandleSessionState(w http.ResponseWriter, r *http.Request, id 
 	// it, then takes as.mu — preserving the as.mu → h.mu lock order (see
 	// agent_session.go).
 	resp.PendingAsks = h.livePendingAsks(id)
+	// Settled-on-an-unfinished-turn flag: the session is idle and unattended,
+	// and its stored/live transcript tail is not a reply. Drives the chat's
+	// "The previous reply was interrupted" notice. Fail-open (see
+	// sessionInterrupted).
+	resp.Interrupted = h.sessionInterrupted(id, entry.ProjectRoot)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -79,6 +84,14 @@ type sessionStateResponse struct {
 	// reaches a client connected to a different server process. Absent for a
 	// bridged/in-memory session with no stored file.
 	Revision string `json:"revision,omitempty"`
+	// Interrupted reports that the session has SETTLED on an unfinished turn:
+	// no turn is active or in flight, the session is not parked on an ask, and
+	// the last stored/live transcript row is not a reply — an answered ask, a
+	// user row, or a tool_calls-only assistant. The web chat renders an inline
+	// "The previous reply was interrupted" row with a Continue action. Absent
+	// (false) whenever we cannot tell, so a session never invents an
+	// interruption.
+	Interrupted bool `json:"interrupted,omitempty"`
 }
 
 // PendingAsks is the unresolved permission/question prompt(s) a live agent
@@ -155,6 +168,7 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 	}
 
 	snap := h.buildStatusSnapshot()
+	baseModel, baseCWD := snap.MainModel, snap.CWD
 	// Per-session model override takes precedence over the process-wide config
 	// model, so each chat tab shows and runs its own model instead of a single
 	// global value reflected across every open session.
@@ -171,6 +185,7 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 	if entry.ProjectRoot != "" {
 		snap.CWD = entry.ProjectRoot
 	}
+	applySessionModelPrompt(&snap, baseModel, baseCWD)
 	// Populate persisted session title so the web tab bar shows the
 	// authoritative title (auto fallback or LLM-generated) immediately,
 	// not just after a generated-title status broadcast.
@@ -371,6 +386,7 @@ func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 		return
 	}
 	snap := h.buildStatusSnapshot()
+	baseModel, baseCWD := snap.MainModel, snap.CWD
 	snap.SessionID = sessionID
 	var projectRoot string
 	if entry, err := h.sessions.Resolve(sessionID); err == nil {
@@ -394,6 +410,7 @@ func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 	// Reflect the session's effective (override-or-default) model so the
 	// sidebar's Context gauge and Model row stay in sync per session.
 	snap.MainModel = h.effectiveSessionModel(sessionID)
+	applySessionModelPrompt(&snap, baseModel, baseCWD)
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	// Persist the per-session spend total so it survives an agent rebuild /
 	// idle eviction / restart; the snapshot above carries it for the live gauge.
@@ -468,11 +485,13 @@ func (h *Handler) pushSessionStatusSnapshot(id string) {
 		return
 	}
 	snap := h.buildStatusSnapshot()
+	baseModel, baseCWD := snap.MainModel, snap.CWD
 	snap.SessionID = id
 	snap.MainModel = h.effectiveSessionModel(id)
 	if entry, err := h.sessions.Resolve(id); err == nil && entry.ProjectRoot != "" {
 		snap.CWD = entry.ProjectRoot
 	}
+	applySessionModelPrompt(&snap, baseModel, baseCWD)
 	h.applySessionContext(&snap, id)
 	h.applySessionSpending(&snap, id)
 	h.applyTurnTiming(&snap, id)

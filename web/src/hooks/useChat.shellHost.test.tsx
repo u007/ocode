@@ -81,7 +81,7 @@ describe("useChat.executeShell host routing", () => {
       await result.current.chat.executeShell("echo hi");
     });
 
-    expect(mockShellCommand).toHaveBeenCalledWith("echo hi", "/srv/app", "ci.local");
+    expect(mockShellCommand).toHaveBeenCalledWith("echo hi", "/srv/app", "ci.local", "sess-1");
   });
 
   // A local project keeps the historical call shape: no host, so the server
@@ -98,7 +98,7 @@ describe("useChat.executeShell host routing", () => {
       await result.current.chat.executeShell("echo hi");
     });
 
-    expect(mockShellCommand).toHaveBeenCalledWith("echo hi", "/local/app", undefined);
+    expect(mockShellCommand).toHaveBeenCalledWith("echo hi", "/local/app", undefined, "sess-1");
   });
 
   // The store allows a local and a remote project to share one path, and
@@ -120,6 +120,46 @@ describe("useChat.executeShell host routing", () => {
       await result.current.chat.executeShell("echo hi");
     });
 
-    expect(mockShellCommand).toHaveBeenCalledWith("echo hi", "/shared/app", undefined);
+    expect(mockShellCommand).toHaveBeenCalledWith("echo hi", "/shared/app", undefined, "sess-1");
+  });
+
+  // The tab id is the persistent-shell key: the server uses it to keep one
+  // shell per tab, so env/aliases/cwd persist between `!` commands.
+  it("passes the tab id as the persistent shell session key", async () => {
+    const { result } = renderHook(
+      () => ({ chat: useChat("tab-xyz"), project: useProjectState() }),
+      { wrapper: Wrapper },
+    );
+
+    act(() => {
+      result.current.project.dispatch({ type: "SET_PROJECTS", projects: [localProject] });
+      result.current.project.dispatch({ type: "SET_ACTIVE_PROJECT", project: localProject });
+    });
+
+    await act(async () => {
+      await result.current.chat.executeShell("echo hi");
+    });
+
+    expect(mockShellCommand).toHaveBeenCalledWith("echo hi", "/local/app", undefined, "tab-xyz");
+  });
+
+  // A request that never reaches the server has no cwd to report, so the hook
+  // falls back to the project path it would have run in.
+  it("reports the project path as cwd when the request fails", async () => {
+    const { result } = renderWithProjects();
+    mockShellCommand.mockRejectedValueOnce(new Error("network down"));
+
+    act(() => {
+      result.current.project.dispatch({ type: "SET_PROJECTS", projects: [localProject] });
+      result.current.project.dispatch({ type: "SET_ACTIVE_PROJECT", project: localProject });
+    });
+
+    let res: { cwd: string; error: string } | undefined;
+    await act(async () => {
+      res = await result.current.chat.executeShell("echo hi");
+    });
+
+    expect(res?.cwd).toBe("/local/app");
+    expect(res?.error).toBe("network down");
   });
 });

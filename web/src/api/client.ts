@@ -1261,6 +1261,11 @@ export const api = {
           questions: import("../api/types").QuestionPrompt[];
         }[];
       };
+      // The session has SETTLED on an unfinished turn (idle, unattended, and
+      // the transcript tail is not a reply) — see the server's
+      // Handler.sessionInterrupted. Drives the chat's interrupted-turn notice.
+      // Absent when false, so a missing flag never invents an interruption.
+      interrupted?: boolean;
     }>(`/api/sessions/${id}/state`, undefined, host),
   // Per-session status snapshot (Part 03): superset of /api/tui-status with
   // session_id populated and context_* included, so each tab renders its own
@@ -1412,10 +1417,14 @@ export const api = {
   // registered ocode Remote project: the server runs the command on that host
   // through the host's own login shell instead of locally. Omitted (or empty)
   // keeps the historical local execution.
-  shellCommand: (command: string, workDir?: string, host?: string) =>
-    fetchJSON<{ output: string; exitCode: number; error: string }>("/api/shell", {
+  // `session` is the tab id: for a LOCAL project the server keeps a persistent
+  // per-session shell keyed by it, so env/aliases/functions are present and
+  // state (cwd, exports) persists between `!` commands. `cwd` comes back on
+  // every server path.
+  shellCommand: (command: string, workDir?: string, host?: string, session?: string) =>
+    fetchJSON<{ output: string; exitCode: number; error: string; cwd: string }>("/api/shell", {
       method: "POST",
-      body: JSON.stringify({ command, workDir, host }),
+      body: JSON.stringify({ command, workDir, host, session }),
     }),
   listProjects: () => fetchJSON<Project[]>("/api/projects"),
   /** The saved project root matching the server's working directory (auto-added

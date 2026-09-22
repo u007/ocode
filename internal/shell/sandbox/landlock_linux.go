@@ -92,17 +92,14 @@ func applyConfineToSelf(writableRoots []string, shell string, shellArgs []string
 			return fmt.Errorf("landlock rule for %q: %w", root, err)
 		}
 	}
-	// Rule n+1: /dev/null stays writable even though it is outside every root —
-	// tools that discard output (`cmd 2>/dev/null`) or probe /dev/null fail
-	// closed without it. Only write (+truncate, ABI v3) is granted: /dev/null
-	// remains readable via the "/" rule above, and no other /dev node is
-	// touched.
-	nullRights := uint64(landlockWriteFile)
-	if abi >= 3 {
-		nullRights |= landlockTruncate
-	}
-	if err := landlockAddPathBeneath(rulesetFd, landlockNullDevice, nullRights); err != nil {
-		return fmt.Errorf("landlock rule for %q: %w", landlockNullDevice, err)
+	// Rules n+1..: the device nodes outside every writable root that still
+	// need an explicit write grant — /dev/null (discard target) and the pty
+	// pair (/dev/ptmx + the /dev/pts directory). /dev/null remains readable via
+	// the "/" rule above; no other /dev node is touched.
+	for _, grant := range landlockDeviceWriteGrants(abi) {
+		if err := landlockAddPathBeneath(rulesetFd, grant.path, grant.rights); err != nil {
+			return fmt.Errorf("landlock rule for %q: %w", grant.path, err)
+		}
 	}
 	if err := landlockRestrictSelf(rulesetFd); err != nil {
 		return fmt.Errorf("landlock_restrict_self: %w", err)

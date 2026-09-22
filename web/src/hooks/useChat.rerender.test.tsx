@@ -83,13 +83,25 @@ async function settle(counts: { renders: number }) {
 describe("useChat render cost", () => {
   it("does not re-render on streaming deltas that leave the returned fields unchanged", async () => {
     const { counts, hook } = setup("sess-1");
+    // Seed one committed message first so `hasConversation` is already true:
+    // the FIRST live part on an empty session legitimately flips it (that
+    // one-time render is pinned in useChat.test.tsx). Here we pin the steady
+    // state — mid-turn deltas must cost nothing.
+    act(() => {
+      hook.result.current.dispatch({
+        type: "SET_MESSAGES",
+        sessionId: "sess-1",
+        messages: [{ role: "user", content: "hello" }],
+      });
+    });
     await settle(counts);
     const before = counts.renders;
 
     act(() => {
       // A burst of the dispatches a streaming turn produces. None of these
       // touch pendingPermission / pendingQuestion / wasInterrupted /
-      // isStreaming (turnActive stays false), so the consumer must not render.
+      // isStreaming (turnActive stays false) and hasConversation is already
+      // true, so the consumer must not render.
       hook.result.current.dispatch({
         type: "LIVE_DELTA",
         sessionId: "sess-1",

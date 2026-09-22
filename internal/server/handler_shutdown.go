@@ -22,6 +22,11 @@ import (
 func (h *Handler) Shutdown(ctx context.Context) {
 	h.shutdownAgentSessions(ctx)
 	h.shutdownTerminals(ctx)
+	// Persistent `!` shells are independent of any turn, so they are closed
+	// alongside the terminals rather than through the agent teardown.
+	if h.shellSessions != nil {
+		h.shellSessions.closeAll()
+	}
 	h.flushLiveSessionWrites(ctx)
 	if h.remoteHosts != nil {
 		h.remoteHosts.closeAll(ctx)

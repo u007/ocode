@@ -345,19 +345,25 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           );
         }
         break;
-      case "main":
+      case "main": {
+        // A main-model pick sets BOTH this session's model and the process-wide
+        // default. A later new session has no override of its own and resolves
+        // through effectiveSessionModel → cfg.Model, so without the global
+        // write it would silently revert to the previous default. This mirrors
+        // the TUI, whose model pick sets cfg.Model + last_model
+        // (finishModelSwitch). Other open tabs are unaffected: each keeps its
+        // own per-session override, which still wins over the global default.
         if (sessionId && sessionId.startsWith("new-")) {
           // Draft tab — the session doesn't exist server-side yet. Keep the
           // pick local to this tab's slice; the first message sends it as the
           // request model, and the server persists it with the transcript.
           dispatch({ type: "SET_SESSION_MODEL", sessionId, model: modelId });
         } else if (sessionId) {
-          // Scope the pick to this session: persist a per-session override and
-          // let the server's session-tagged status broadcast update this tab's
-          // sidebar — never touch the global config model or other sessions.
-          // No optimistic local write: SET_TUI_STATUS replaces the whole
-          // snapshot, and the authoritative push from pushSessionStatusSnapshot
-          // lands on the same tab within one frame.
+          // Scope the pick to this session too: persist a per-session override
+          // and let the server's session-tagged status broadcast update this
+          // tab's sidebar. No optimistic local write: SET_TUI_STATUS replaces
+          // the whole snapshot, and the authoritative push from
+          // pushSessionStatusSnapshot lands on the same tab within one frame.
           api.setSessionModel(sessionId, modelId, ...hostArgs).catch((err) => {
             console.error("set session model failed", err);
             reportActionError(err, "Changing this session's model");
@@ -368,11 +374,15 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
               .then((st) => dispatch({ type: "SET_TUI_STATUS", sessionId, status: st }))
               .catch(console.error);
           });
-        } else {
-          dispatch({ type: "SET_MODEL", model: modelId });
-          persist("Changing the model", () => api.setConfigModel(modelId, ...hostArgs));
         }
+        // Persist the global default for EVERY main pick — including a
+        // session-scoped one — so the next new session starts on it. Routed to
+        // the session's host like every other session-scoped call, so a remote
+        // project's new sessions pick it up from that host's config.
+        dispatch({ type: "SET_MODEL", model: modelId });
+        persist("Changing the default model", () => api.setConfigModel(modelId, ...hostArgs));
         break;
+      }
       case "permission":
         onPick?.(purpose, modelId, selectedModel);
         // If no form owns this pick (sidebar direct trigger), persist directly.

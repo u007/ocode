@@ -54,6 +54,10 @@ const kindByExt: Record<string, PreviewKind> = {
   ".mmd": "mermaid",
   ".md": "markdown",
   ".markdown": "markdown",
+  // MDX is markdown-source-plus-JSX. The preview renders it as Markdown
+  // (react-markdown, no JSX evaluation — see isMarkdownPath); the editor
+  // highlights it with Monaco's `mdx` language, which does understand JSX.
+  ".mdx": "markdown",
   ".txt": "text",
   ".ts": "text",
   ".tsx": "text",
@@ -84,10 +88,15 @@ export function previewKindForPath(path: string): PreviewKind | null {
 const PREVIEW_ONLY_KINDS: ReadonlySet<PreviewKind> = new Set(["pdf", "docx", "pptx", "excel", "image", "audio", "video"]);
 
 /**
- * True for a Markdown document (`.md` / `.markdown`). Markdown is NOT
- * preview-only — it stays editable in Monaco — but the Files tab gives it an
- * Edit/Preview/Split mode switch (default: Edit) because a rendered preview is
- * useful alongside the source. See `FileTabContent`.
+ * True for a Markdown document (`.md` / `.markdown` / `.mdx`). Markdown is
+ * NOT preview-only — it stays editable in Monaco — but the Files tab gives it
+ * an Edit/Preview/Split mode switch (default: Edit) because a rendered preview
+ * is useful alongside the source. See `FileTabContent`.
+ *
+ * MDX (`.mdx`) is treated as Markdown for preview: react-markdown renders the
+ * prose. ESM import/export lines and JSX components are NOT evaluated — they
+ * render as source-level text — which is deliberate (MDX evaluation would
+ * execute arbitrary JavaScript from the file).
  */
 export function isMarkdownPath(path: string): boolean {
   return previewKindForPath(path) === "markdown";

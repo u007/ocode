@@ -5,6 +5,7 @@ import type { Message, SSEPermissionEvent, TUIStatus } from "../api/types";
 import type { BusEnvelope } from "./eventBus";
 import { rekeyDraft } from "./tabDrafts";
 import { rekeyQueue, removeDispatchedQueuedByText, dispatchQueueChanged } from "./tabQueue";
+import { rekeyInputHistory } from "./tabInputHistory";
 import { browserActions, type NavEvent, type TitleEvent, type NewTabEvent, type StateKey } from "./browserStore";
 import { sessionRevisionMoved, clearSessionRevision } from "./sessionRevision";
 
@@ -222,6 +223,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       r.dispatch({ type: "REKEY_SESSION", oldId: started.request_id, newId: eventSessionId });
       rekeyDraft(started.request_id, eventSessionId);
       rekeyQueue(started.request_id, eventSessionId);
+      rekeyInputHistory(started.request_id, eventSessionId);
       r.projectDispatch({
         type: "UPDATE_TAB_ID",
         oldId: started.request_id,
@@ -261,6 +263,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       r.dispatch({ type: "REKEY_SESSION", oldId, newId });
       rekeyDraft(oldId, newId);
       rekeyQueue(oldId, newId);
+      rekeyInputHistory(oldId, newId);
       r.projectDispatch({ type: "UPDATE_TAB_ID", oldId, newId });
       r.openSessionIds.delete(oldId);
       r.openSessionIds.add(newId);
@@ -815,10 +818,15 @@ function scheduleHydratePendingAsks(sessionId: string, router: SessionEventRoute
 export function applyReconcileState(
   dispatch: (a: ChatAction) => void,
   sessionId: string,
-  state: { bootstrap_stage: string; turn_active: boolean; last_seq: number },
+  state: { bootstrap_stage: string; turn_active: boolean; last_seq: number; interrupted?: boolean },
   hasPendingAsk = false,
   wasActive = false,
 ): void {
+  // Server-derived interrupted flag: assigned verbatim from EVERY state
+  // payload (idle or active) so it also clears when a turn starts or the tail
+  // becomes a reply. The optimistic hide on Continue is the only client-side
+  // clear — the server is otherwise authoritative.
+  dispatch({ type: "SET_INTERRUPTED", sessionId, interrupted: state.interrupted === true });
   if (!state.turn_active) {
     if (hasPendingAsk) {
       // Paused on a pending ask — OR a reload/reconnect that missed the ask

@@ -16354,9 +16354,16 @@ func fileSearchScore(r fileSearchResult, query string) int {
 }
 
 // filterFileSearchResults filters and sorts file search results by score.
+// Ties are broken by shortest path first (fewest segments, then
+// lexicographic); an empty query returns every file sorted shortest-first.
 func filterFileSearchResults(cache []fileSearchResult, query string) []fileSearchResult {
 	if strings.TrimSpace(query) == "" {
-		return cache
+		out := make([]fileSearchResult, len(cache))
+		copy(out, cache)
+		sort.SliceStable(out, func(i, j int) bool {
+			return lessPathShortest(out[i].path, out[j].path)
+		})
+		return out
 	}
 	type scoredItem struct {
 		score int
@@ -16372,7 +16379,7 @@ func filterFileSearchResults(cache []fileSearchResult, query string) []fileSearc
 		if scoredItems[i].score != scoredItems[j].score {
 			return scoredItems[i].score > scoredItems[j].score
 		}
-		return cache[scoredItems[i].idx].path < cache[scoredItems[j].idx].path
+		return lessPathShortest(cache[scoredItems[i].idx].path, cache[scoredItems[j].idx].path)
 	})
 	results := make([]fileSearchResult, len(scoredItems))
 	for i, s := range scoredItems {

@@ -60,6 +60,27 @@ func seatbeltProfileSafe(roots RootSet) (string, error) {
 	// rev-parse, less --version, ssh -V, gpg --version, npm --version all work
 	// without a /dev/tty grant.
 	sb.WriteString("(allow file-write* (path \"/dev/null\"))\n")
+	// pty devices: a sandboxed command that allocates a terminal opens
+	// /dev/ptmx O_RDWR and then its freshly created slave /dev/ttysNNN. Both
+	// are write operations, so the default deny above blocks posix_openpt with
+	// EPERM — which broke every pty-allocating tool under sandbox mode (test
+	// harnesses that spawn a pty, script(1), expect, tmux, `ssh -tt`,
+	// `docker -t`, and this repo's own pty integration tests).
+	//
+	// Residual surface: `^/dev/ttys[0-9]+$` also permits a DIRECT open of a
+	// slave belonging to another session (the TUI or a terminal-panel shell).
+	// Seatbelt cannot express "only the slave this command allocated", and the
+	// number is unknown at profile-generation time. Empirically the weaker
+	// /dev/tty path stays denied even with this grant (Seatbelt authorizes the
+	// literal /dev/tty path, not the slave it resolves to — verified with
+	// script(1) as the pty harness), so the accidental-prompt/alt-screen-
+	// corruption class the /dev/tty denial targets remains closed; reaching
+	// another terminal now requires enumerating /dev/ttys* and deliberately
+	// opening an unrelated pty. The sandbox is an accident/write-integrity
+	// boundary, not an adversarial one (whole-FS read and network egress are
+	// already open). /dev/tty itself is still never matched by this regex.
+	sb.WriteString("(allow file-write* (literal \"/dev/ptmx\"))\n")
+	sb.WriteString("(allow file-write* (regex #\"^/dev/ttys[0-9]+$\"))\n")
 	// Reads/exec open, so toolchains and interpreters keep working.
 	sb.WriteString("(allow file-read*)\n")
 	sb.WriteString("(allow process-exec*)\n")

@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/session"
 )
 
 // serverRepoRoot returns the repo root (has skills/kaizen + *.OCODE.md files)
@@ -110,5 +113,109 @@ func TestListModelsCarriesPromptFlags(t *testing.T) {
 	}
 	if !seen[tuned] || !seen[untuned] {
 		t.Fatalf("recents did not force both rows into the list; seen=%v", seen)
+	}
+}
+
+// TestSessionStatusRecomputesModelPromptForOverride is the regression guard for
+// the web sidebar showing the WRONG model's conduct banner after a per-session
+// model pick: buildStatusSnapshot derives ModelPrompt from the process-wide
+// cfg.Model, and the per-session snapshot builders then overwrite MainModel with
+// the session's effective (override) model WITHOUT recomputing ModelPrompt — so
+// the row paired the new model id with the old model's .OCODE.md/Kaizen line.
+func TestSessionStatusRecomputesModelPromptForOverride(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate global config scans
+	h := testHandlerWithConfig(t)
+	root := t.TempDir()
+	// Two distinct prompts. Neither model has an embedded fallback, so ModelPrompt
+	// is always Kind "file" and the basename identifies which model resolved.
+	for name, body := range map[string]string{
+		"alpha-model.OCODE.md": "alpha conduct",
+		"beta-model.OCODE.md":  "beta conduct",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	h.mu.Lock()
+	h.cfg.Model = "opencode-go/alpha-model"
+	h.workDir = root
+	h.mu.Unlock()
+
+	id := session.NewSessionID()
+	saveSessionToDir(t, root, id)
+	h.sessions.Register(id, root)
+	if err := session.UpdateMetadataForDir(root, id, func(md map[string]any) {
+		md["model"] = "opencode-go/beta-model"
+	}); err != nil {
+		t.Fatalf("set session override: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.HandleSessionStatus(rec, httptest.NewRequest("GET", "/api/sessions/"+id+"/status", nil), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var snap TUIStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if snap.MainModel != "opencode-go/beta-model" {
+		t.Fatalf("MainModel = %q, want the session override", snap.MainModel)
+	}
+	if snap.ModelPrompt == nil {
+		t.Fatal("ModelPrompt nil; want the session model's conduct banner")
+	}
+	if got := filepath.Base(snap.ModelPrompt.Path); got != "beta-model.OCODE.md" {
+		t.Fatalf("ModelPrompt path = %q, want beta-model.OCODE.md (session model, not the global alpha)", got)
+	}
+}
+
+// TestPushSessionStatusSnapshotRecomputesModelPrompt covers the SSE push the web
+// relies on for an immediate sidebar update after PUT /api/sessions/:id/model
+// (the poll path in HandleSessionStatus is covered above).
+func TestPushSessionStatusSnapshotRecomputesModelPrompt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	h := testHandlerWithConfig(t)
+	root := t.TempDir()
+	for name, body := range map[string]string{
+		"alpha-model.OCODE.md": "alpha conduct",
+		"beta-model.OCODE.md":  "beta conduct",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	h.mu.Lock()
+	h.cfg.Model = "opencode-go/alpha-model"
+	h.workDir = root
+	h.mu.Unlock()
+
+	id := session.NewSessionID()
+	saveSessionToDir(t, root, id)
+	h.sessions.Register(id, root)
+
+	// HandleSetSessionModel pushes the session-tagged "status" event the web
+	// relies on; subscribe first so it is captured.
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+	if rec := setSessionModel(t, h, id, "opencode-go/beta-model"); rec.Code != http.StatusOK {
+		t.Fatalf("set session model %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case ev := <-sub:
+		snap, ok := ev.Data.(TUIStatus)
+		if !ok {
+			t.Fatalf("status data type = %T, want TUIStatus", ev.Data)
+		}
+		if snap.MainModel != "opencode-go/beta-model" {
+			t.Fatalf("MainModel = %q, want session override", snap.MainModel)
+		}
+		if snap.ModelPrompt == nil || filepath.Base(snap.ModelPrompt.Path) != "beta-model.OCODE.md" {
+			t.Fatalf("ModelPrompt = %+v, want beta-model.OCODE.md", snap.ModelPrompt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no status event broadcast")
 	}
 }

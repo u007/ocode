@@ -664,6 +664,7 @@ type Agent struct {
 	envPromptCwd               string // cwd used to build envPromptStr
 	envPromptRoot              string // workspace root used to build envPromptStr
 	envPromptEnvHash           string // hash of NVM_DIR/PYENV_ROOT/PATH-relevant env for cache invalidation
+	envPromptHarness           string // harness identity used to build envPromptStr; /fake-agent switches must rebuild
 	// pipeline, if set, runs in-process hook callbacks for tool calls and chat
 	// requests. Field is named "pipeline" (not "hooks") because the hooks package
 	// is already imported under that name.
@@ -5291,6 +5292,7 @@ func (a *Agent) clearEnvironmentPromptCache() {
 	a.envPromptCwd = ""
 	a.envPromptRoot = ""
 	a.envPromptEnvHash = ""
+	a.envPromptHarness = ""
 }
 
 // modelContextRoot returns the project root the model-context search is anchored

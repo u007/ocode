@@ -333,6 +333,11 @@ func (c *GenericClient) setOpenRouterAttributionHeaders(req *http.Request) {
 	req.Header.Set("HTTP-Referer", preset.Referer)
 	req.Header.Set("X-Title", preset.Title)
 	req.Header.Set(openRouterSessionHeader, c.opencodeSessionID())
+	// Upstream opencode's openrouter provider is a NON-zen provider, so its
+	// prepared headers carry the affinity pair too — one conversation's
+	// turns stick to the same upstream provider for caching. The harness
+	// gate lives inside the helper.
+	c.setSessionAffinityHeaders(req)
 }
 
 // openRouterSessionHeader is OpenRouter's sticky-routing / log-grouping key.
@@ -350,6 +355,29 @@ func (c *GenericClient) setOpencodeSessionHeader(req *http.Request) {
 		return
 	}
 	req.Header.Set(opencodeSessionHeader, c.opencodeSessionID())
+}
+
+// setSessionAffinityHeaders mirrors real opencode's non-zen session headers
+// (packages/opencode/src/session/llm/request.ts): on EVERY request to a
+// provider whose id does NOT start with "opencode" it sends
+// `x-session-affinity: <sessionID>` + `X-Session-Id: <sessionID>` so the
+// backend groups one conversation's requests (cache/rate-limit stickiness).
+// Under the ocode harness this stays off — it is an opencode-specific wire
+// contract. Call it from chat transports that do not already route through
+// setOpenRouterAttributionHeaders (google, grok, codex-style endpoints);
+// openrouter paths get the same keys via their own helper.
+func (c *GenericClient) setSessionAffinityHeaders(req *http.Request) {
+	if req == nil || c == nil || ActiveHarness() != HarnessOpencode {
+		return
+	}
+	if c.isOpencodeProvider() {
+		// Zen providers carry x-opencode-session instead (already stamped by
+		// setOpencodeSessionHeader); upstream does not add affinity there.
+		return
+	}
+	id := c.opencodeSessionID()
+	req.Header.Set("x-session-affinity", id)
+	req.Header.Set("X-Session-Id", id)
 }
 
 func newOpencodeFallbackID() string {
@@ -1390,6 +1418,7 @@ func (c *GenericClient) chatGoogle(ctx context.Context, messages []Message, tool
 		req.Header.Set("x-goog-api-key", c.APIKey)
 	}
 	c.setOpencodeSessionHeader(req)
+	c.setSessionAffinityHeaders(req)
 	applyHarnessHeaders(req, c.Provider)
 	c.emitDebug("LLM", fmt.Sprintf("chatGoogle: url=%s model=%q", url, c.Model))
 
@@ -3078,6 +3107,7 @@ func (c *GenericClient) chatOpenAIResponsesAttempt(ctx context.Context, messages
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	c.setOpencodeSessionHeader(req)
+	c.setSessionAffinityHeaders(req)
 	if accountID != "" {
 		req.Header.Set("ChatGPT-Account-ID", accountID)
 	}
@@ -3762,6 +3792,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
 	c.setOpencodeSessionHeader(req)
+	c.setSessionAffinityHeaders(req)
 	if c.UseOAuth {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 		if c.ThinkingBudget > 0 {

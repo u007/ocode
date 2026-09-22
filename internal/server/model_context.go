@@ -40,3 +40,24 @@ func buildModelPromptInfo(root, model string) *ModelPromptInfo {
 	}
 	return info
 }
+
+// applySessionModelPrompt re-resolves the "◆ Model prompt" indicator for a
+// session-tagged snapshot after the caller has replaced MainModel and/or CWD
+// with the session's effective values (per-session model override, or a session
+// bound to another project root).
+//
+// buildStatusSnapshot resolves the banner from the process-wide cfg.Model +
+// server workDir, so without this a session with its own model override would
+// pair the NEW model id with the GLOBAL model's .OCODE.md + Kaizen line — the
+// stale "conduct" banner the desktop/web sidebar showed after a model switch.
+//
+// baseModel/baseCWD are the values the snapshot carried before the caller's
+// overrides. When neither changed, the banner buildStatusSnapshot already
+// computed is kept so the common path pays no second disk/git scan (resolving a
+// .OCODE.md runs git for tracked files — see agent.readContextFileAt).
+func applySessionModelPrompt(snap *TUIStatus, baseModel, baseCWD string) {
+	if snap.MainModel == baseModel && snap.CWD == baseCWD {
+		return
+	}
+	snap.ModelPrompt = buildModelPromptInfo(snap.CWD, snap.MainModel)
+}

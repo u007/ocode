@@ -21,6 +21,13 @@ func buildBwrapArgv(writableRoots []string, bashArgs []string) []string {
 		"--ro-bind", "/", "/",
 		"--proc", "/proc",
 		"--dev", "/dev",
+		// --dev creates a minimal devtmpfs without the pty nodes, so bind the
+		// host's master and slave directory back in. Without these, a sandboxed
+		// command that allocates a terminal (test harnesses, script(1),
+		// expect, tmux, `ssh -tt`) fails with EPERM/EIO — the bwrap counterpart
+		// of the Seatbelt profile's /dev/ptmx + /dev/ttys* rules.
+		"--dev-bind", landlockPtyMaster, landlockPtyMaster,
+		"--dev-bind", landlockPtySlaveDir, landlockPtySlaveDir,
 		"--share-net",
 		"--die-with-parent",
 	}
@@ -82,6 +89,43 @@ func landlockApplicableRights(allowed uint64, isDir bool) uint64 {
 // (see profile.go). /dev/tty is DELIBERATELY NOT granted, for the same
 // terminal-control reason documented there.
 const landlockNullDevice = "/dev/null"
+
+// landlockPtyMaster and landlockPtySlaveDir are the pty devices a sandboxed
+// command needs to allocate a terminal. Landlock denies an open that no rule
+// grants, so posix_openpt (open /dev/ptmx O_RDWR, then the slave /dev/pts/N)
+// fails without explicit write grants — the Linux counterpart of the Seatbelt
+// profile's /dev/ptmx + /dev/ttys* rules. The slave rule is on the /dev/pts
+// DIRECTORY: a path_beneath rule on a directory covers every slave beneath it
+// (Landlock has no dynamic per-slave path either). /dev/tty stays ungranted
+// (it is a singleton outside /dev/pts).
+const (
+	landlockPtyMaster   = "/dev/ptmx"
+	landlockPtySlaveDir = "/dev/pts"
+)
+
+// landlockDeviceGrant is one explicit write grant for a device node (or the
+// /dev/pts directory) that sits outside every writable root.
+type landlockDeviceGrant struct {
+	path   string
+	rights uint64
+}
+
+// landlockDeviceWriteGrants returns the device grants applied on top of the
+// writable roots: /dev/null (discard target) plus the pty pair. /dev/null gets
+// TRUNCATE at ABI v3 because tools truncate it via `> /dev/null`; the pty nodes
+// need only WRITE (their ioctls are not gated: the ruleset capability never
+// handles IOCTL_DEV — see landlockMutationForABI).
+func landlockDeviceWriteGrants(abi int) []landlockDeviceGrant {
+	nullRights := uint64(landlockWriteFile)
+	if abi >= 3 {
+		nullRights |= landlockTruncate
+	}
+	return []landlockDeviceGrant{
+		{path: landlockNullDevice, rights: nullRights},
+		{path: landlockPtyMaster, rights: landlockWriteFile},
+		{path: landlockPtySlaveDir, rights: landlockWriteFile},
+	}
+}
 
 // landlockMutation is the full write/mutation right set, gated per ABI below.
 const (

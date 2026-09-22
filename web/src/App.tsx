@@ -48,6 +48,7 @@ import SessionSubTabs from "./components/Layout/SessionSubTabs";
 import SessionTabSync from "./components/Layout/SessionTabSync";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import { shouldRenderCoworkSidebar } from "./components/Layout/coworkSidebarVisibility";
+import { shouldRenderSidePane } from "./lib/sidePaneVisibility";
 import ModelDialog from "./components/Layout/ModelDialog";
 import ShareDialog from "./components/Layout/ShareDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
@@ -67,6 +68,7 @@ import FilePicker from "./components/Files/FilePicker";
 import ConfirmCloseDialog from "./components/Files/ConfirmCloseDialog";
 import { isNewSessionTabEmpty, rekeyDraft } from "./lib/tabDrafts";
 import { rekeyQueue, clearQueue } from "./lib/tabQueue";
+import { rekeyInputHistory, clearInputHistory } from "./lib/tabInputHistory";
 import { cancelLiveDeltas, closeSessionBackend } from "./lib/sessionEvents";
 import { notifyWailsRuntimeReady } from "./lib/wails";
 import { setPendingHighlight, peekPendingHighlight } from "./lib/fileSearchHighlight";
@@ -765,6 +767,7 @@ function HomeApp() {
       closeSessionTab(activeTabId);
       cancelLiveDeltas(activeTabId);
       clearQueue(activeTabId);
+      clearInputHistory(activeTabId);
       dispatch({ type: "RESET", sessionId: activeTabId });
     },
     onEscape: () => {
@@ -784,6 +787,7 @@ function HomeApp() {
     dispatch({ type: "REKEY_SESSION", oldId: tempTabId, newId: sessionId });
     rekeyQueue(tempTabId, sessionId);
     rekeyDraft(tempTabId, sessionId);
+    rekeyInputHistory(tempTabId, sessionId);
     projectDispatch({
       type: "UPDATE_TAB_ID",
       oldId: tempTabId,
@@ -834,6 +838,16 @@ function HomeApp() {
       return false;
     }
   }, [dispatch, projectState, rekeySession]);
+
+  // Continue an interrupted turn (ChatPanel's notice): the same path as a typed
+  // message, with the literal text "continue". ChatPanel owns the optimistic
+  // hide; this owns the transport (busy-queueing, remote host, persistence).
+  const handleContinueInterrupted = useCallback(
+    (sessionId: string) => {
+      void sendCommandToSession(sessionId, "continue");
+    },
+    [sendCommandToSession],
+  );
 
   const handleCommand = async (cmd: string, targetSessionId: string | null = activeTabId): Promise<SlashCommandResult> => {
     const baseCmd = cmd.split(" ")[0];
@@ -1037,6 +1051,16 @@ function HomeApp() {
       handleSessionCreatedRef.current(tempTabId, sessionId),
     [],
   );
+
+  // Continue an interrupted turn is handed to every mounted ChatPanel, so its
+  // identity must be stable — an inline arrow would re-render all of them on
+  // any App render (see the memo on ChatPanel).
+  const handleContinueInterruptedRef = useRef(handleContinueInterrupted);
+  handleContinueInterruptedRef.current = handleContinueInterrupted;
+  const stableHandleContinueInterrupted = useCallback(
+    (sessionId: string) => handleContinueInterruptedRef.current(sessionId),
+    [],
+  );
   const handleClearPreviewContext = useCallback(() => setPreviewContext(null), []);
 
   // Editor files opted into the loop, bucketed by project root so each tab's
@@ -1089,6 +1113,14 @@ function HomeApp() {
     [projectState.tabsByProject],
   );
   const activeSessionTab = tabs.find((t) => t.id === activeTabId);
+  // The side pane accompanies a chat session (or the terminal); it must not
+  // show over the session tab's non-chat sub-tabs (Agents/Changes/Logs/
+  // Status/Preview). Pure gate, same pattern as shouldRenderCoworkSidebar.
+  const sidePaneVisible = shouldRenderSidePane({
+    activeView,
+    activeSubTab: activeSessionTab?.activeSubTab,
+    focusedKind,
+  });
   // Chat-session-bound dialogs (the permission/question asks, and any future
   // session-scoped prompt) may only mount while this session's Chat sub-tab is
   // actually on screen. Otherwise they render a full-screen Radix modal over a
@@ -1208,8 +1240,8 @@ function HomeApp() {
                   <button
                     type="button"
                     aria-label="Toggle browser panel"
-                    title="Toggle browser panel"
-                    disabled={focusedKind === "browser" || !sideStateKey}
+                    disabled={focusedKind === "browser" || !sideStateKey || !sidePaneVisible}
+                    title={sidePaneVisible ? "Toggle browser panel" : "Browser panel is available on the chat sub-tab"}
                     onClick={() => {
                       if (!sideStateKey) return;
                       if (browserOpen) {
@@ -1414,7 +1446,11 @@ function HomeApp() {
                               active chat tab's project. One instance only. */}
                           {isActive && <RemoteVersionBanner host={projectState.activeProject?.host} />}
                           <div className="relative flex-1 min-h-0 overflow-hidden">
-                            <ChatPanel sessionId={tab.id} host={resolveSessionHost(projectState, tab.id)} />
+                            <ChatPanel
+                              sessionId={tab.id}
+                              host={resolveSessionHost(projectState, tab.id)}
+                              onContinueInterrupted={stableHandleContinueInterrupted}
+                            />
                           </div>
                           <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
                           <ChatInput
@@ -1524,7 +1560,7 @@ function HomeApp() {
               Collapse keeps the surface mounted (BrowserPanel suppresses the
               iframe while `collapsed`, so the browse grant/session survives);
               close deletes the state and revokes the server session. */}
-          {sideStateKey && browserOpen && (
+          {sideStateKey && browserOpen && sidePaneVisible && (
             <>
               {sideTabState?.collapsed ? (
                 <button
@@ -1603,6 +1639,7 @@ function HomeApp() {
                         request={previewRequest}
                         nonce={previewNonce}
                         onConsumeActivation={consumePreviewActivation}
+                        sessionId={sidePanelKind === "chat" ? activeTabId : null}
                       />
                     </div>
                   </div>

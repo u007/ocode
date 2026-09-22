@@ -133,6 +133,10 @@ type Handler struct {
 	// terminalSessions owns the live pty shells so a reconnecting socket can
 	// reattach to its shell after a page reload instead of respawning it.
 	terminalSessions *terminalSessionTable
+	// shellSessions owns the persistent interactive shell a `!` command runs
+	// in, keyed by frontend tab id. Lazy-created on first use; closed on tab
+	// close, moved on /reset-id, reaped when idle.
+	shellSessions *shellSessionRegistry
 	// remoteProjectMu serializes remote terminal admission with edits to the
 	// saved remote-project identity. This closes the check-then-reserve race
 	// where an old terminal could be published after an edit commits.
@@ -411,21 +415,24 @@ func NewHandler() *Handler {
 	}
 
 	h := &Handler{
-		agents:            make(map[string]*agentSession),
-		cfg:               cfg,
-		advisorEnabled:    advisorEnabled,
-		workDir:           defaultWorkDir,
-		projects:          projStore,
-		projectGroups:     projGroupStore,
-		tabsStore:         tabsStore,
-		monaco:            monacoStore,
-		headlessSubs:      make(map[chan SSEEvent]struct{}),
-		toolOutput:        newToolOutputCoalescer(),
-		mcpCache:          newMCPCache(),
-		titleGen:          newTitleGenState(),
-		bus:               NewEventBus(),
-		terminalProcs:     newTerminalRegistry(),
-		terminalSessions:  newTerminalSessionTable(),
+		agents:           make(map[string]*agentSession),
+		cfg:              cfg,
+		advisorEnabled:   advisorEnabled,
+		workDir:          defaultWorkDir,
+		projects:         projStore,
+		projectGroups:    projGroupStore,
+		tabsStore:        tabsStore,
+		monaco:           monacoStore,
+		headlessSubs:     make(map[chan SSEEvent]struct{}),
+		toolOutput:       newToolOutputCoalescer(),
+		mcpCache:         newMCPCache(),
+		titleGen:         newTitleGenState(),
+		bus:              NewEventBus(),
+		terminalProcs:    newTerminalRegistry(),
+		terminalSessions: newTerminalSessionTable(),
+		shellSessions: newShellSessionRegistry(func(opts shellpkg.SessionOptions) (shellSession, error) {
+			return shellpkg.NewSession(opts)
+		}, defaultSessionIdleTimeout, time.Now),
 		mediaTokens:       newMediaTokenStore(),
 		terminalProcsWake: make(chan struct{}, 1),
 		secretJobs:        secretjob.NewManager(),
@@ -459,6 +466,11 @@ func NewHandler() *Handler {
 			as.agent.Shutdown()
 		}
 	})
+
+	// Reap persistent `!` shells that have been idle past the session idle
+	// timeout, so a tab that is never explicitly closed does not pin a shell
+	// (and its rc environment) for the life of the process.
+	h.shellSessions.startReaper(defaultSessionIdleTimeout / 4)
 
 	h.mcpCache.warm(cfg)
 	h.windowProfiles = make(map[string]string)
@@ -2064,6 +2076,13 @@ func (h *Handler) HandleShellCommand(w http.ResponseWriter, r *http.Request) {
 		Command string `json:"command"`
 		WorkDir string `json:"workDir,omitempty"`
 		Host    string `json:"host,omitempty"`
+		// Session is the opaque frontend tab key the persistent shell is
+		// scoped to. Empty keeps the historical one-shot path (back-compat for
+		// a client that has not been updated).
+		Session string `json:"session,omitempty"`
+		// Reset closes any existing shell for Session before running. Server
+		// side only in v1: no client sends it yet.
+		Reset bool `json:"reset,omitempty"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -2088,16 +2107,37 @@ func (h *Handler) HandleShellCommand(w http.ResponseWriter, r *http.Request) {
 		workDir = "."
 	}
 
-	res := shellpkg.Run(req.Command, workDir)
+	// Local `!` commands run in the session's persistent shell so the user's
+	// env/aliases/functions are present and state persists. Any failure to
+	// provide one (no pty, Windows, a racing close) degrades to the one-shot
+	// run rather than failing the command.
+	if req.Session != "" && h.shellSessions != nil {
+		res, cwd, err := h.shellSessions.run(r.Context(), req.Session, workDir, req.Command, req.Reset)
+		if err == nil {
+			writeShellCommandResponse(w, res, cwd)
+			return
+		}
+		log.Printf("server: persistent shell for session %q unavailable (%v); running one-shot", req.Session, err)
+	}
 
+	res := shellpkg.Run(req.Command, workDir)
+	writeShellCommandResponse(w, res, workDir)
+}
+
+// writeShellCommandResponse is the single response shape for POST /api/shell:
+// combined output, exit code, an error string, and the directory the command
+// ran in. cwd is present on every path (persistent shell, one-shot fallback,
+// remote) so the client never has to default a missing field.
+func writeShellCommandResponse(w http.ResponseWriter, res shellpkg.Result, cwd string) {
 	errMsg := ""
 	if res.Err != nil {
 		errMsg = res.Err.Error()
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"output":   res.Output,
 		"exitCode": res.ExitCode,
 		"error":    errMsg,
+		"cwd":      cwd,
 	})
 }
 
@@ -2121,5 +2161,8 @@ func (h *Handler) handleRemoteShellCommand(w http.ResponseWriter, r *http.Reques
 		"output":   res.Output,
 		"exitCode": res.ExitCode,
 		"error":    errMsg,
+		// The remote command runs in `path` (resolved by remoteWorkFor); report
+		// it so the response shape matches the local paths.
+		"cwd": path,
 	})
 }

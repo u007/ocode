@@ -19,6 +19,7 @@ import type { ChangeDiff, GitDiffFile, GitStatus } from "../../api/types";
 
 // Ensure Monaco is configured before any editor mounts.
 import "../../lib/monaco-setup";
+import { languageForFile } from "../../lib/editorLanguage";
 import { consumePendingHighlight, setPendingHighlight } from "../../lib/fileSearchHighlight";
 import {
   clearEditorModelInfo,
@@ -63,50 +64,6 @@ export interface FileEditorProps {
 }
 
 import { memo } from "react";
-
-// Map file extensions to Monaco language identifiers.
-function extensionToLanguage(filePath: string): string {
-  const ext = filePath.split(".").pop()?.toLowerCase() || "";
-  const langMap: Record<string, string> = {
-    ts: "typescript",
-    tsx: "typescript",
-    js: "javascript",
-    jsx: "javascript",
-    go: "go",
-    py: "python",
-    rb: "ruby",
-    rs: "rust",
-    java: "java",
-    kt: "kotlin",
-    swift: "swift",
-    c: "c",
-    h: "c",
-    cpp: "cpp",
-    hpp: "cpp",
-    css: "css",
-    scss: "scss",
-    less: "less",
-    html: "html",
-    json: "json",
-    xml: "xml",
-    yaml: "yaml",
-    yml: "yaml",
-    md: "markdown",
-    sql: "sql",
-    sh: "shell",
-    bash: "shell",
-    zsh: "shell",
-    dockerfile: "dockerfile",
-    toml: "plaintext",
-    tf: "terraform",
-    dart: "dart",
-    vue: "html",
-    svelte: "html",
-    graphql: "graphql",
-    gql: "graphql",
-  };
-  return langMap[ext] || "plaintext";
-}
 
 /**
  * Determine whether a hunk represents a modification (mix of del+add at the
@@ -213,7 +170,7 @@ function FileEditorImpl({
   const [editorMountVersion, setEditorMountVersion] = useState(0);
   // Binary / unsupported format detection
   const [forceEdit, setForceEdit] = useState(false);
-  const lang = language || extensionToLanguage(path);
+  const lang = language || languageForFile(path);
   const isBinary = isBinaryProp ?? (content !== null && content !== undefined && content.indexOf("\0") >= 0);
 
   // Refs for diff decoration cleanup

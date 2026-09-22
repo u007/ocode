@@ -1,5 +1,348 @@
 # Changelog
 
+## 2026-09-22 — `/fake-agent opencode` now matches the real opencode wire fingerprint
+
+When the opencode harness is active (via `/fake-agent opencode`, Settings >
+Backend, or `OCODE_FAKE_AGENT=opencode`), outbound LLM traffic now mirrors
+what real opencode actually sends — verified against the upstream source
+(packages/opencode at the same clone), not invented fields.
+
+- **Headers** (`internal/agent/harness.go`) — the opencode preset's
+  User-Agent changed from `opencode/1.0.0` to upstream's
+  `opencode/<channel>/<version>/cli` shape (installation/index.ts userAgent());
+  pinned at `opencode/latest/1.18.32/cli`. Referer normalized to
+  `https://opencode.ai/` (trailing slash, upstream form). New attribution
+  headers upstream sends per-provider: `X-Source: opencode` (llmgateway) and
+  `X-BILLING-INVOKE-ORIGIN: OpenCode` (nvidia); both are ignored elsewhere.
+  On Anthropic Messages requests the preset now merges
+  `fine-grained-tool-streaming-2025-05-14` into `anthropic-beta` alongside
+  ocode's existing `interleaved-thinking-2025-05-14` — upstream sends exactly
+  that pair (provider/provider.ts @ai-sdk/anthropic loader), so the merge is
+  idempotent with ocode's own flag.
+- **Session headers** (`internal/agent/client.go`) — new
+  `setSessionAffinityHeaders`: under the opencode harness every request to a
+  NON-zen provider (anthropic, google, openai-style, openrouter, …) carries
+  `x-session-affinity` + `X-Session-Id` with the same stable per-conversation
+  id `X-Opencode-Session` uses (upstream session/llm/request.ts stamps the
+  pair on every request; zen providers are excluded — they carry
+  `X-Opencode-Session` instead, already sent). Under the ocode harness the
+  pair stays off: it is opencode's wire contract, not ours. Wired into
+  chatGoogle, chatAnthropic, chatOpenAIResponses, and via
+  setOpenRouterAttributionHeaders for the two openai/openrouter transports.
+- **Body** (`internal/agent/harness.go`) — the opencode harness no longer
+  stamps `metadata.user_id: harness/opencode` / `metadata.harness`:
+  real opencode sends NO metadata on any provider (its conversation identity
+  travels in the headers above), so the fabricated map was a fingerprint
+  mismatch. Other harnesses keep their metadata stamps unchanged.
+- **System prompt** (`internal/agent/prompt.go`) — under the opencode
+  harness: (1) the env prompt's model line gains upstream's second sentence
+  "The exact model ID is <provider>/<model>."; (2) the mode fragment opens
+  with opencode's identity line "You are opencode, an interactive CLI tool
+  that helps users with software engineering tasks." (upstream
+  prompt/default.txt) followed by ocode's mode prompt, so the model
+  identifies as opencode while ocode's BUILD/PLAN/… workflow still governs
+  behavior. The `envPrompt` cache gained `envPromptHarness` as a key, so a
+  mid-session `/fake-agent` switch rebuilds the cached `<env>` block instead
+  of serving the previous harness's prompt. The ocode harness prompt is
+  byte-identical to before (all gates check the harness).
+- **Tests** — `harness_opencode_test.go` (fingerprint headers, no-metadata,
+  affinity headers incl. zen exclusion + ocode-harness off + stability),
+  `harness_wiring_test.go` (source assertion: every transport that stamps
+  X-Opencode-Session also stamps affinity, directly or via the openrouter
+  helper), `prompt_harness_test.go` (exact-ID line, identity line,
+  cache-invalidation on harness switch). All mutation-verified: reverting
+  each fix in place fails its test; full `internal/agent` suite green.
+
+## 2026-09-22 — Preview tail-follow, opaque permission floor, multi-select discard
+
+Four correctness fixes across the sidebar preview, the auto-permission judge,
+and the Git panel's multi-selection.
+
+- **Sidebar preview auto-scroll** (`web/src/components/Preview/MarkdownViewer.tsx`) —
+  a live-refresh `revision` bump only *arms* a pending follow; the pin now runs
+  when the refetched content actually lands. Previously the bump set
+  `lastRevRef` and pinned positions in the same render, so the follow fired
+  against the STALE document (and a turn that ended before the refetch resolved
+  cancelled it entirely) — the viewer never scrolled to the new tail. The
+  bottom-lock's scroll handler also existed twice (a mount-only
+  `addEventListener` on `ref.current` that ran while the viewer was still
+  rendering "Loading…" and bound to `null`, plus the working `onScroll` prop);
+  the dead mount effect is removed and the working `onScroll` prop kept.
+- **Opaque permission floor** (`internal/agent/permissions.go`) —
+  `resolveAutoJudgeOpaqueMinConfidence` now returns an explicitly configured
+  `permissions.auto.min_confidence` when set (new
+  `configuredAutoJudgeMinConfidence` seam), and the `0.75` opaque default only
+  when it is unset. A stricter user bar (e.g. `0.95`) is no longer silently
+  lowered to `0.75` for opaque/`truncated_or_unknown` requests; a permissive one
+  is still never raised. Docs updated (`AGENTS.md`,
+  `docs/concepts/auto-permission-enforced-categories.md`,
+  `skills/ocode-permissions/SKILL.md`).
+- **Multi-select discard** (`web/src/components/Git/GitPanel.tsx`) — the file
+  context menu's discard action now targets the whole pane selection (it
+  previously called `discardFile` for only the clicked row while its sibling
+  Stage/Unstage/Stash actions targeted N files). Each target carries its own
+  untracked flag: tracked paths revert in one bulk `git restore`, untracked
+  members are removed with the whole-file discard hunk, and the menu label reads
+  "Discard N files" / "Delete N files".
+- **Tests** — `MarkdownViewer.live.test.tsx` (pin must land on the refetched
+  content even when the turn ends first), `GitPanel.test.tsx` (bulk discard
+  routes tracked + untracked members correctly), and
+  `permission_typesafe_opaque_test.go` (a configured 0.95 still governs an
+  opaque allow; resolver table covers 0.5/0.75/0.85/0.95). All four fixes were
+  mutation-verified (reverted in place → tests fail → restored).
+
+## 2026-09-22 — File search results: shortest path first
+
+Ctrl+P file search (TUI and web/desktop) and the Files tab's file-name search
+now prefer shallower paths when results are otherwise tied, so root-level files
+surface above deeply nested ones instead of being buried by alphabetical or
+walk order.
+
+- **Rule** — relevance (fuzzy/keyword score) stays the primary sort key; the
+  tiebreak is fewest path segments first, then lexicographic. An unfiltered
+  (empty-query) list is ordered shortest-first. Shared helpers:
+  `internal/tui/path_order.go` (`pathSegmentCount` / `lessPathShortest`) and
+  `web/src/lib/filePathOrder.ts` (`pathSegmentCount` / `compareByShortestPath`)
+  so every surface agrees.
+- **TUI** — `filterFileSearchResults` (Ctrl+P) now breaks score ties by
+  shortest path and sorts the empty-query list shortest-first instead of
+  returning raw walk order. The Files tab `/` fuzzy finder uses the new
+  `fuzzyFilterPaths` (path-aware ordering); the session/project picker's generic
+  `fuzzyFilter` is deliberately unchanged.
+- **Web/Desktop** — the Ctrl+P `FilePicker` now ranks matches with `scoreMatch`
+  (relevance) and breaks ties by shortest path; with no query it lists files
+  shortest-first. The Files tab tree filter keeps its relevance sort and adds
+  the same segment-count tiebreak (siblings share a depth, so it is normally a
+  no-op and preserves the dirs-first convention).
+- **Not changed** — content-search results (TUI Ctrl+F / web Content mode) still
+  stream in walk order.
+- **Tests** — `internal/tui/file_search_order_test.go` and
+  `web/src/lib/filePathOrder.test.ts` unit-test the ordering rule;
+  `FilePicker.test.tsx` covers unfiltered and relevance-tie ordering, all
+  mutation-verified.
+
+## 2026-09-22 — Chat input history in the web/desktop composer (↑/↓)
+
+The web/desktop composer can now walk back through your own sent input with
+**↑** and forward with **↓**, matching the TUI's existing `Up/Down : Navigate
+input history`. Previously ↑ only recalled a still-queued item and did nothing
+once the queue was empty; there was no way to recall an earlier message.
+
+- **New per-tab history store** — `web/src/lib/tabInputHistory.ts`, a
+  module-level `Map<tabId, string[]>` mirroring `tabDrafts`/`tabQueue`. Entries
+  are recorded at the single submit choke point in `ChatInput.handleSend`, so
+  messages that were *queued* while busy (and auto-drained later) are recorded
+  exactly once. Append rules mirror the TUI: empty text and `!shell` commands
+  are skipped, an immediate repeat is collapsed, and each tab is capped at 200
+  entries. History is rekeyed on the temp `new-*` → real-session transition and
+  on `/reset-id`, and cleared when the tab closes.
+- **Deliberately not transcript-derived** — a transcript walk would surface the
+  `!shell` output wrapper and the huge server-assembled `/standup`-style
+  prompts the composer sends, none of which are what the user typed.
+- **Keys** — bare ↑/↓ only (no Shift/Alt/Cmd/Ctrl). ↑ enters the walk only when
+  the caret is on the first line and there is no selection, so ordinary caret
+  movement inside a multi-line draft is untouched; once walking, arrows keep
+  walking. Entering history stashes the in-progress draft so ↓ past the newest
+  entry restores it. An empty box still recalls a queued item first (existing
+  behavior), then falls through to sent history.
+- **Tests** — `web/src/lib/tabInputHistory.test.ts` (9) and
+  `web/src/components/Chat/ChatInput.history.test.tsx` (8), the latter
+  mutation-verified by disabling the walk (4 tests fail).
+
+## 2026-09-22 — Interrupted-turn notice in chat (web/desktop)
+
+A chat whose turn was cut off looked identical to one that simply finished — a
+question/ask was answered but no reply ever arrived, so the session read as "it
+reset / my work is gone". Reported case: the remote aimsai2 session
+`ses_2026-09-21-101152-d376c0b6`, where the app process was replaced 9 s after
+the answer was persisted. The chat now shows one inline row at the cut-off point
+— **"The previous reply was interrupted"** — with a **Continue** button that
+re-sends the turn through the normal message path (literal text `"continue"`).
+
+- **Server — `interrupted` on `GET /api/sessions/{id}/state`** (`omitempty`).
+  The rule is conjunctive and FAIL-OPEN: no active turn; **no turn job in
+  flight** (the per-session turn lock, which `executeTurnJob` holds for its
+  whole duration — persist → bootstrap → turn — so it is the only probe that
+  covers the pre-`turnActive` window); **not parked on an ask** (the per-session
+  agent lock is free, or no resident agent exists — this covers the
+  answer-continuation window); and the last transcript row is **unfinished**
+  (a user row, an answered-ask tool row, a tool_calls-only assistant). Every
+  probe is non-blocking `TryLock` — the `/state` poll every open tab hits must
+  never pin an HTTP connection behind a turn. An absent store, a legacy
+  format, or an undecodable row reports `false`; never invent an interruption.
+- **One shared tail rule** — `session.TranscriptTailUnfinished`
+  (`internal/session/transcript_tail.go`) classifies the resident agent's
+  in-memory transcript and the decoded stored row identically: a landed
+  assistant reply (content or notice) is complete; an unanswered
+  question/permission sentinel is *waiting* (the dialog owns it, not an
+  interruption); everything else is unfinished.
+- **One cheap read** — `session.StoredTranscriptStateForDir` returns the
+  revision token **and** the last stored row from a single sqlite open (one
+  `meta` SELECT + `SELECT data FROM messages ORDER BY seq DESC LIMIT 1`).
+  `StoredRevisionForDir` is now a thin wrapper, so no existing caller changed;
+  legacy `.ojsonl`/`.json` and unreadable sqlite still serve a file-token
+  revision but yield no tail (fail open).
+- **Client** — `SessionSlice.interrupted`, deliberately **not**
+  `wasInterrupted`: the latter is the live user-Stop signal `ChatInput` treats
+  as "sending blocked", so reusing it would disable the very Continue action.
+  It is assigned from each state payload in `applyReconcileState`, so the
+  reconnect reconcile and the 15 s `revalidateSession` poll both carry it, and
+  remote sessions work unchanged (the host computes it). No new endpoint, no
+  new client request.
+- **Notice + Continue** — `ChatPanel` renders the row at the very end of the
+  transcript (inside the scroll container, **not** a transcript entry, so it
+  never enters the message list or the search index) with `role="status"`
+  (informational — not `role="alert"`, which would interrupt a screen reader).
+  It is suppressed while `wasInterrupted`, a turn is active or streaming, live
+  parts are present, a question/permission is pending, the transcript is empty,
+  the tab is a draft (`new-*`), or the load failed. Continue hides the row
+  optimistically and calls App's stable `onContinueInterrupted`, which sends
+  `"continue"` through the existing send path (busy-queueing, remote host,
+  persistence).
+- **Accepted behavior (documented, not bugs):** a truncate-mid-round tail and a
+  failed bootstrap both read as interrupted once the user walks away — Continue
+  is a valid action there. A stopped turn whose client state was lost
+  (refresh/reload) shows the notice, which is correct: the reply *was*
+  interrupted.
+- **Verification.** Go: table test for the tail verdict (assistant-with-content,
+  assistant-with-notice, tool_calls-only, content-less assistant, user row,
+  answered-ask tool row, unanswered permission/question sentinel, multi-ask
+  round, empty transcript); handler tests for `interrupted:true` on an
+  answered-ask tail with no resident agent, `false` for a completed turn / a
+  pending ask / `turn_active:true` / an absent or unreadable store, and the two
+  false-positive windows against the **real mechanisms** (the turn lock held
+  directly; the agent lock held across the read). Web: store mapping
+  (per-session, clears on a later payload), reconcile + revalidation + remote
+  host threading, seven `ChatPanel` render/suppression cases, and an App-level
+  wiring test that pins the literal `"continue"`. Every new test was
+  mutation-verified (see the plan). Full suites green: `go test ./internal/...`,
+  `go test ./internal/server/ -race`, `npx vitest run` (204 files / 1757 tests),
+  `tsgo --noEmit`, `vite build`.
+- **Residual / follow-ups (TODO.md):** TUI parity, the desktop crash-log /
+  unclean-shutdown marker that would let the copy name the cause, and the
+  cross-process lock blind spot (another ocode process's in-flight turn is not
+  visible here — same limitation as cross-process turn state).
+- Files: `internal/session/transcript_tail.go` (new),
+  `internal/session/revision.go`, `internal/server/session_interrupted.go` (new),
+  `internal/server/handler_session_state.go`, `web/src/api/client.ts`,
+  `web/src/stores/chatStore.tsx`, `web/src/lib/sessionEvents.ts`,
+  `web/src/components/Chat/ChatPanel.tsx`, `web/src/App.tsx`, tests,
+  `CHANGES.md`.
+
+## 2026-09-21 — Persistent `!` shell: two real-pty bugs fixed (startup desync + PROMPT_SP blob)
+
+The persistent `!` shell's real-pty integration tests (`internal/shell/session_unix_test.go`) had only ever *skipped* (the agent ran under sandbox mode, which denied `/dev/ptmx`). Once the sandbox pty fix above landed they ran for the first time — and found two real bugs the pipe-backed fake could not reproduce.
+
+- **Startup desync — every `Run` returned the PREVIOUS command's output.** The prelude ends by installing the prompt hook, so the shell has already emitted a marker for the prompt after that install. Worse, the tty is still echoing at startup (the prelude's `stty -echo` has been *read* but not necessarily *executed*), so the echoed startup sentinel contained the ready token too. `waitStartup` matched the first marker after that echoed token — the prelude's own — so `spawn` returned one command early and every later `Run` was off by one: `sleep 30` returned instantly, exit codes read 0 for `false`, and outputs shifted by one command. Fix: the sentinel emits its token as two adjacent quoted words (`'__OCODE_''READY_<nonce>__'`) so the command TEXT never contains the literal token, and the handshake waits for the marker that follows the token rather than merely the next marker.
+- **`PROMPT_SP` space blob.** zsh's `PROMPT_SP` "clears" a partial line by writing spaces out to the full terminal width before every prompt; with the 400-column pty that appended ~400 spaces to every result even with an empty prompt. Fix: the prelude adds `unsetopt prompt_sp`.
+- **Verification.** All 11 real-pty tests now pass: `TestSessionRCFunctionsAvailable`, `…ExitCodeAndCwd`, `…StatePersists`, `…OutputIsClean`, `…DoesNotWriteHistory`, `…TimeoutRecovers`, `…ConcurrentRunsSerialize`, `…MultiLineAndIncompleteInput`, `…SilencesRCHooks`, `…CwdWithSpaces`, `…RejectsDelimiterLine`. Both fixes mutation-verified: reverting to the literal-token sentinel fails 6 of them (the desync); dropping `unsetopt prompt_sp` fails `TestSessionOutputIsClean` with the space blob. New no-pty tests: `TestStartupCommandPrintsTokenWithoutLiteral`, `TestPreludeDisablesPromptSp`.
+- Files: `internal/shell/session.go`, `internal/shell/session_unix.go`, `internal/shell/session_prelude_unix_test.go`, `CHANGES.md`.
+
+## 2026-09-21 — Sandbox mode: pty allocation now works (Seatbelt + Landlock/bwrap)
+
+Sandbox mode confines writes to the classified writable roots and re-granted only `/dev/null`, so `posix_openpt()` failed with EPERM (`/dev/ptmx` is opened `O_RDWR`, which is a write) — every pty-allocating command was unusable: test harnesses that spawn a pty, `script(1)`, `expect`, `tmux`, `ssh -tt`, `docker -t`, and this repo's own pty integration tests (`internal/shell/session_unix_test.go`, `internal/server/handler_terminal_test.go`), which skipped (via `requirePTY`) instead of running.
+
+- **Seatbelt (`internal/shell/sandbox/profile.go`)**: adds `(allow file-write* (literal "/dev/ptmx"))` and `(allow file-write* (regex #"^/dev/ttys[0-9]+$"))`. **Both** are required — `/dev/ptmx` alone is still EPERM, because the freshly created slave `/dev/ttysNNN` is the second write.
+- **Landlock (`landlock_rules.go` + `landlock_linux.go`)**: the explicit out-of-root device grants are now produced by `landlockDeviceWriteGrants(abi)` — `/dev/null` (write, plus truncate at ABI ≥ 3), `/dev/ptmx`, and the `/dev/pts` directory (a `path_beneath` rule on a directory covers every slave beneath it).
+- **bubblewrap (`buildBwrapArgv`)**: `--dev /dev` creates a minimal devtmpfs *without* the pty nodes, so the host's `--dev-bind /dev/ptmx` and `--dev-bind /dev/pts` are added.
+- **`/dev/tty` stays denied on both backends.** On macOS, Seatbelt authorizes the literal `/dev/tty` path rather than the slave it resolves to, so the pty grant does not re-open it — verified with `script(1)` as the pty harness; `TestSeatbeltDeniesDevTTYFreshOpen` still passes and now also guards this. On Linux `/dev/tty` is outside `/dev/pts`. Residual surface is documented in the profile comment: the slave regex also permits a *direct* open of another session's `/dev/ttysNNN`, which requires deliberately enumerating `/dev/ttys*` (the sandbox is an accident/write-integrity boundary, not an adversarial one).
+- **Verification.** Under real `sandbox-exec`, empirically: the old profile → `posix_openpt` "Operation not permitted"; with the two grants → `os.openpty()`, `script -q /dev/null …`, `expect`, and a `creack/pty` (`pty.Start`) program all succeed, while a fresh `/dev/tty` open still fails. New tests: `TestSeatbeltProfileGrantsDeviceNodes`, `TestSeatbeltAllowsPtyAllocation` (exec-level; skips where nested `sandbox_apply` is denied, like the other Seatbelt exec tests), `TestBuildBwrapArgvLocksShape` (dev-binds), `TestLandlockDeviceWriteGrants`. Mutation-verified: dropping the Seatbelt grants / the bwrap dev-binds / the `/dev/pts` grant each fails its test.
+- **Requires a rebuild/restart of the running ocode process** — the profile is generated per command by the binary in use, so a session already in sandbox mode keeps the old profile until then.
+- Files: `internal/shell/sandbox/profile.go`, `internal/shell/sandbox/landlock_rules.go`, `internal/shell/sandbox/landlock_linux.go`, `internal/shell/sandbox/profile_darwin_test.go`, `internal/shell/sandbox/landlock_rules_test.go`, `CHANGES.md`.
+
+## 2026-09-21 — MDX (`.mdx`) support in the preview and editor (web/desktop)
+
+`.mdx` files were treated as unknown: the sidebar/`preview_open` allowlists rejected them and the Files tab opened them as plain text with no preview. MDX now rides the Markdown path.
+
+- **Preview.** `kindByExt` (`web/src/lib/previewKind.ts`) maps `.mdx` → `markdown`, so the sidebar PreviewHost, the Files tab, and chat/`preview_open` directives all render an `.mdx` through `MarkdownViewer`. Because `.mdx` is not in `PREVIEW_ONLY_KINDS`, `isMarkdownPath` is true and the Files tab gets the Edit / Preview / Split mode switch (Edit default) exactly like `.md`/`.markdown`.
+- **Deliberately no MDX evaluation.** `react-markdown` renders the prose only: ESM `import`/`export` lines and JSX components appear as source-level text instead of being executed. Evaluating MDX would run arbitrary JavaScript from a previewed file, which a file viewer must not do.
+- **Editor.** The extension→Monaco-language table was extracted to `web/src/lib/editorLanguage.ts` (`languageForFile`), shared by `FileEditor` and `TextViewer` so the duplicated maps can no longer drift. `.mdx` → Monaco's bundled **`mdx`** grammar (Markdown + JSX, registered by the `monaco-editor` basic-languages contribution); `.markdown` also gained `markdown` (it previously fell through to plaintext).
+- **Server parity.** `preview_open`'s `previewOpenKinds` (`internal/tool/preview.go`) and `HandleFileRaw.previewRawTypes` (`internal/server/handler_files.go`) gained `.mdx` (and `previewOpenKinds` also gained `.markdown`), keeping the client/raw/tool allowlists in sync.
+- **Tests.** `web/src/lib/editorLanguage.test.ts` (new), `previewKind.test.ts` (`.mdx` → markdown, `isMarkdownPath` family), `FileTabContent.test.tsx` ("treats .mdx as markdown too"), `internal/tool/preview_test.go` (`.mdx`/`.markdown` accepted + allowlist sync), `internal/server/handler_preview_test.go` (`.mdx`/`.markdown` served as `text/markdown`). Mutation-verified: removing the `kindByExt` `.mdx` entry fails the previewKind and FileTabContent tests.
+- Docs: `skills/ocode-web/SKILL.md` (Markdown mode-switch rule).
+- Files: `web/src/lib/previewKind.ts`, `web/src/lib/editorLanguage.ts` (new), `web/src/components/Files/FileEditor.tsx`, `web/src/components/Preview/TextViewer.tsx`, `internal/tool/preview.go`, `internal/server/handler_files.go`, tests, `CHANGES.md`.
+
+## 2026-09-21 — Sidebar model pick now becomes the default for new sessions (web/desktop)
+
+Picking a model in the desktop/web right sidebar previously wrote only a per-session override (`PUT /api/sessions/{id}/model`), so the choice was pinned to that one chat tab and starting a new session silently reverted to the process-wide default model. A main-model pick now also writes the global config model (`PUT /api/config/model`), so the next new session — which has no override and resolves through `effectiveSessionModel → cfg.Model` — starts on the model the user last picked.
+
+- **`ModelDialog` `case "main"` updates the global default on every pick**, whether session-scoped or not, and dispatches the global `SET_MODEL` so the client's notion of the default stays in sync. The per-session override (or, for a draft `new-*` tab, the tab-local slice) is still written, so this tab switches immediately and other open tabs keep their own overrides (an explicit override still wins over the global default). Mirrors the TUI's `finishModelSwitch`, which sets `cfg.Model` + `last_model`.
+- **Scope.** Any main-model pick — the sidebar Model row, bare `/model`, or a draft tab — because they all open the same dialog. `Clear (not set)` is unchanged: it removes only the session override and leaves the global default alone. A remote session routes the global write to its own host (same `hostArgs` as the session override), so that project's new sessions pick it up from the host's config.
+- **Behavior change.** A main-model pick is no longer purely per-session: sessions that never picked a model of their own (including new ones) now follow this default. Tabs with an explicit override are unaffected.
+- **Tests.** `web/src/components/Layout/ModelDialog.test.tsx` — "scopes a main-model pick to the session AND records it as the global default" (session override + global write + `SET_MODEL`) and "keeps a draft tab's pick local to the tab and still records the global default". Mutation-verified: removing the global persist fails both.
+- Files: `web/src/components/Layout/ModelDialog.tsx`, `web/src/components/Layout/ModelDialog.test.tsx`, `CHANGES.md`.
+
+## 2026-09-21 — Sidebar preview pane: live refresh + auto-scroll on AI edits; chat-only scoping (web/desktop)
+
+The sidebar "Browser / Preview" pane had two problems. First, it never scrolled: the pane's PreviewSurface wrapper was a plain block (`min-h-0 flex-1` without `flex flex-col`), so MarkdownViewer's root `h-full` failed to resolve (a percentage height against a content-driven flex item falls back to auto) — a long document grew the viewer to its own content height, `overflow-auto` never engaged, there was no scrollbar, and nothing to auto-scroll. Second, it never refreshed when the AI edited the previewed file mid-turn: every text viewer fetches once on mount, so the pane stayed stale forever (live-verified: prose text length stayed 29 chars after the file grew 100×). It also showed on every session sub-tab (Agents/Changes/Logs/Status/Preview) although it is a chat companion.
+
+- **Live refresh.** `PreviewHost` accepts `sessionId` and subscribes to the session's `tool_start` SSE frames (`internal/server/handler.go:712` carries the tool name + raw argument JSON): a mutating tool (write/edit/multiedit/multi_file_edit/apply_patch/replace_lines/delete) whose args touch the previewed path bumps a `revision` counter; any same-session tool activity sets `turnActive` (cleared on `turn_done`/`turn_error`). `revision`/`followTail` thread through `PreviewSurface` into `MarkdownViewer` (refetch silently — the old content stays until the new text lands, no loading flash, scroll preserved — then pin to the tail), `TextViewer` (refetch skipped while the reader has unsaved edits, so a dirty draft is never clobbered), and `MmdViewer`. Pure helpers in `web/src/lib/previewLiveMutations.ts`: per-tool arg extraction (incl. `apply_patch` `*** Update/Add/Delete File:` hunk parsing) and root-aware path normalization (relative preview path vs absolute tool arg).
+- **Tail-following** mirrors ChatPanel's proven contract (`ChatPanel.tsx:596`): an `atBottomRef` lock maintained by the scroll listener, reset when the reader scrolls up, re-armed when the content no longer overflows; the pin effect follows the tail only while the reader is pinned (or `followTail` re-arms during streaming). Controlled mode (Files-tab split) is untouched: no refetch and no scroll yank while typing.
+- **Chat-only scoping.** New pure gate `web/src/lib/sidePaneVisibility.ts` (same pattern as `shouldRenderCoworkSidebar`): the pane renders only on the sessions view, on the chat/terminal focus, and while the active session tab is on the Chat sub-tab. The pane's open/collapsed state in browserStore is preserved, so returning to chat restores it. The 🌐 toggle is disabled with a hint title ("Browser panel is available on the chat sub-tab") while gated off.
+- **Layout fix.** `PreviewHost`'s two surface wrappers and `PreviewTabPage`'s `<main>` became definite-height flex columns (`flex min-h-0 flex-1 flex-col`), matching the host shape `FileTabContent` already documents. Live-verified in headless Chromium: a 6,939px document now reports `clientHeight 605` with a working scrollbar and `scrollTop 6334` pin instead of `clientHeight == scrollHeight`.
+- **Tests.** `previewLiveMutations.test.ts` (12), `sidePaneVisibility.test.ts` (5), `PreviewHost.test.tsx` live-refresh suite (5 — revision bump on matching mutating tool only, session-scoped followTail, turn_done/turn_error clearing, no subscription without a session), `MarkdownViewer.live.test.tsx` (5 — pinned tail-follow, scroll-up lock preserved, followTail re-arm, no-loading-flash silent refetch, no controlled-mode refetch), App-level pane mounting. Mutation-verified: disabling the revision bump fails the bump test, disabling `setTurnActive` fails 4, disabling the follow pin fails 2, disabling the refetch fails 3, forcing `sidePaneVisible=false` fails 3 App tests. Full web suite 200 files / 1739 tests green; `tsgo --noEmit` + `vite build` clean.
+- Files: `web/src/App.tsx`, `web/src/components/Preview/PreviewHost.tsx`, `web/src/components/Preview/PreviewSurface.tsx`, `web/src/components/Preview/MarkdownViewer.tsx`, `web/src/components/Preview/TextViewer.tsx`, `web/src/components/Preview/MmdViewer.tsx`, `web/src/components/Preview/PreviewTabPage.tsx`, `web/src/lib/previewLiveMutations.ts`, `web/src/lib/sidePaneVisibility.ts`, tests.
+
+
+## 2026-09-21 — Auto-permission: lower confidence floor for opaque commands (TypeSafe/Jev)
+
+The TypeSafe auto-permission judge required `permissions.auto.min_confidence` (default **0.85**) on an `allow` for *every* request. That is the right bar for a request the judge fully understands, but wrong for an **opaque** one: a command head that is an undefined variable (`$g --version`), an unreadable script, or a flag whose effect cannot be established. There the judge's own concern answer is `truncated_or_unknown` — "the effect cannot be determined" — and a 0.85 bar forwards correct, ordinary development commands to the human for no safety gain.
+
+- **New `autoJudgeOpaqueMinConfidenceDefault = 0.75`** (`internal/agent/permissions.go`) with `resolveAutoJudgeOpaqueMinConfidence()`, used only when the judge's concern answer is the new `concernTruncatedOrUnknown` constant (`internal/agent/permission_typesafe.go`). An opaque `allow` at 0.80 now auto-grants; every other concern (`none`, `secrets`, `network`, …) still needs 0.85.
+- **Never stricter than the normal floor.** The opaque resolver returns `min(normalFloor, 0.75)`: a configured `min_confidence` of 0.95 still governs (opaque = 0.75), and one of 0.5 is honoured rather than raised (opaque = 0.5).
+- **Fail-closed preserved.** 0.75 stays above TypeSafe's own "genuinely unsure / do not act" band (confidence < 0.5), `verifyAutoGrant` still runs after the floor check (hard blocks, out-of-scope paths, dangerous rm, truncated args/scripts), and a resolved-concern `allow` below 0.85 still defers.
+- **Scope.** Only the TypeSafe path has a confidence floor; the chat judge (`askPermissionModel`) is ALLOW/DENY text and the interpreter verifier keeps its own `minConfidence` plus independent `effects.unknown`/truncation refusals.
+- **Tests.** `internal/agent/permission_typesafe_opaque_test.go` — opaque allow@0.80 grants; boundary 0.75 grants / 0.74 defers; `none`/`secrets`/`network` at 0.80 still defer at 0.85; resolver table (unset / 0.5 / 0.75 / 0.95). Mutation-verified: disabling the concern→floor wiring fails the two opaque tests.
+- Docs: `AGENTS.md` TypeSafe thresholds section, `skills/ocode-permissions/SKILL.md` judge-backends section, `docs/concepts/auto-permission-enforced-categories.md`.
+- Files: `internal/agent/permissions.go`, `internal/agent/permission_typesafe.go`, `internal/agent/permission_typesafe_opaque_test.go`, `AGENTS.md`, `skills/ocode-permissions/SKILL.md`.
+
+## 2026-09-21 — `!` commands now run in a persistent, per-session shell (web/desktop)
+
+`!command` in the composer ran `<shell> -l -c <command>` in a fresh process. Because it is only a *login* shell it never sourced `~/.zshrc`, so the user's env and shell functions were absent (`cc` resolved to the C compiler, not the user's launcher; `~/.local/bin` needed the earlier PATH fix), and the rc load (~0.4–3s) was paid on every command. `!` now runs in one persistent pty-backed interactive shell per chat tab.
+
+- **New `internal/shell.Session`** (`session_unix.go`, pty; `session_other.go`, Windows stub): spawns `$SHELL -il` (plus `-o nozle` for zsh) once, installs a prelude (prompt blanking, `stty -echo -onlcr`, `HISTFILE` cleared, rc hook reset via `precmd_functions=() preexec_functions=()` / `trap - DEBUG`), then frames each command as a single `eval "$(cat <<'…' … )"` unit and reads back a marker printed by the shell's own prompt hook (`precmd` / `PROMPT_COMMAND`). The marker carries the real exit status and `$PWD`, so every result reports the cwd, a multi-line command collapses to one result with the last line's status, and an unterminated quote fails promptly instead of hanging.
+- **Server registry + wiring.** `internal/server/shell_sessions.go` keeps `map[tabId]*shell.Session` (lazy create, per-key mutex, idle reaper on the session idle timeout, project-switch rebase via `cd`). `POST /api/shell` gains `session` (the tab id) and a server-only `reset`, and returns `cwd` on **every** path (persistent shell, one-shot fallback, remote). Tab close closes the shell unconditionally — before the session-404 and close-pending branching — `/reset-id` rekeys it (so `!cd`/`!export` survive), and shutdown closes all.
+- **Fallback.** Any pty failure (or Windows) is logged and runs today's one-shot `shellpkg.Run`, so `!` never regresses to "nothing happens". Remote (`host`) commands stay one-shot over ssh, and the agent bash tool is untouched.
+- **Web.** `api.shellCommand(command, workDir, host, session)`; `useChat.executeShell` forwards the tab id and falls back to the project path for `cwd` when the request never reaches the server; the `!` result message renders `# cwd: <path>` (inside the code fence, because the message is rendered as markdown).
+- **Known limits.** Commands that read stdin or open a pager/editor block until the 600s timeout (pagers are pinned to `cat`); `TERM=dumb` means no colour in `!` output; a shell created by a `!` in a `new-*` draft tab before the first message is not rekeyed by the `new-*` → real-id rename (reaped by the idle timeout); remote `!` is not persistent.
+- **Tests.** `internal/shell/session_test.go` (framing/parsing, no pty) + `session_fake_unix_test.go` (pipe-backed `Run` state machine — runs under the sandbox) + `session_prelude_unix_test.go` (prelude syntax-checked with `-n` and its marker hook exercised against a real zsh/bash — runs under the sandbox) + `session_unix_test.go` (real pty; **skips** when `/dev/ptmx` is denied, i.e. under ocode's own sandbox) + `internal/server/handler_shell_session_test.go` (registry + handler against a pty-free fake shell). Mutation-verified: marker parse, delimiter rejection, timeout recovery, close, serialisation, dead-shell detection, close/reaper, session-key ignoring, `cwd`, `/reset-id` rekey, project rebase, and the frontend session argument + cwd line. Full web suite 200 files / 1739 tests green; `tsgo --noEmit`, `vite build`, `go build ./...`, `go vet` clean.
+- Files: `internal/shell/session.go`, `internal/shell/session_unix.go`, `internal/shell/session_other.go`, `internal/shell/session_test.go`, `internal/shell/session_fake_unix_test.go`, `internal/shell/session_prelude_unix_test.go`, `internal/shell/session_unix_test.go`, `internal/server/shell_sessions.go`, `internal/server/handler_shell_session_test.go`, `internal/server/handler.go`, `internal/server/handler_close.go`, `internal/server/handler_reset_id.go`, `internal/server/handler_shutdown.go`, `web/src/api/client.ts`, `web/src/hooks/useChat.ts`, `web/src/hooks/useChat.shellHost.test.tsx`, `web/src/components/Chat/ChatInput.tsx`, `web/src/components/Chat/ChatInput.test.tsx`, `CHANGES.md`.
+
+## 2026-09-21 — Git tab: per-file stash + Cmd/Ctrl/Shift multi-select (web/desktop)
+
+The Git tab's file rows only offered single-file Stage/Unstage/Discard, and "Stash all" was all-or-nothing — there was no way to stash one modified file (or a handful) from the list. The Files tab already had both (right-click → Stash…, checkbox/modifier multi-select). The backend already accepted a pathspec list (`POST /api/git/stash` `{paths}` → `git stash push -- <paths>`), so this was a UI gap.
+
+- **Per-file / multi-file stash.** Each working-tree row's right-click menu gains **Stash file** / **Stash N files** (both panes), opening the existing stash dialog pre-targeted at those paths — the dialog now lists the paths and titles itself "Stash N files"; `git stash push -- <paths>` reverts only those files.
+- **Multi-select on the file lists.** Rows get a checkbox; Cmd/Ctrl-click toggles a file, Shift-click selects — or, when both ends are already selected, clears — the contiguous block between the anchor and the clicked row. Selection is **pane-qualified** (`staged:<path>` / `unstaged:<path>`), because a partially staged file appears in both panes; bulk actions (Stage/Unstage/Stash N) only ever touch the pane the user picked in. Stale picks are pruned when the workspace refreshes (after a stage/stash/discard elsewhere), and a per-section "N selected ✕" clears the selection.
+- **Files tab.** Shift-click can now *deselect* a range too: it selects the block normally, and clears it when both the anchor and the clicked row are already selected (`deselectRange`). Right-click → Stash… and Cmd/Ctrl-click selection already existed there.
+- **Both UIs.** Web and desktop share the same bundle (`web/embed.go` `//go:embed all:dist`), so one change covers both; the desktop `.app` needs a rebuild to embed the new bundle.
+- **Tests.** `internal/server/handler_git_stash_test.go`: `TestGitStashPushSelectedPaths` (two selected files revert to HEAD and land in the stash; an unselected third file keeps its change) — mutation-verified by removing the pathspec from `stashPushArgs` (test fails). Web: `GitPanel.test.tsx` "per-file stash & multi-select" describe (per-path stash, staged-pane menu item, Cmd-click selection + "Stash 2 files" arguments, Shift-click select→deselect) and the new `FileTree.multiSelect.test.tsx` (Cmd-click toggle without opening, Shift-click range select→deselect) — the deselect test mutation-verified by forcing `rangeSelect`. All 116 `src/components/{Git,Files}` tests green; `tsgo --noEmit` + `vite build` clean.
+- Files: `web/src/components/Git/GitPanel.tsx`, `web/src/components/Git/GitPanel.test.tsx`, `web/src/components/Files/FileTree.tsx`, `web/src/components/Files/FileTree.multiSelect.test.tsx`, `internal/server/handler_git_stash_test.go`, `CHANGES.md`.
+
+## 2026-09-21 — Web/desktop: switching model left the "◆ Model prompt" (conduct) banner on the old model
+
+Reported as: after switching model in the web UI, the sidebar's "◆ Model prompt" row still shows the original model's `.OCODE.md` + Kaizen line. **Diagnosis: UI-only.** The prompt actually injected into the model was already correct — the display just lagged behind.
+
+- **Root cause: derived-field staleness in session-tagged snapshots.** `buildStatusSnapshot` (`internal/server/handler_tui_status.go`) resolves `ModelPrompt` from the process-wide `cfg.Model` + server workDir. The per-session snapshot builders then overwrite `MainModel` with the session's **effective** (override) model — but never recomputed `ModelPrompt`. The web main-model pick in a real session is a per-session override (`web/src/components/Layout/ModelDialog.tsx` → `PUT /api/sessions/:id/model` → `HandleSetSessionModel` → `pushSessionStatusSnapshot`), so both the pushed event and the `GET /api/sessions/:id/status` poll paired the *new* model id with the *global* model's banner.
+- **Why it is not a logical bug.** The next turn rebuilds the agent from `desiredModel := h.effectiveSessionModel(id)` (`internal/server/handler.go:1237` → `reconcileProfileAgent`), and the prompt loads `LoadModelContextWithSourceAt(a.modelContextRoot(), a.client.GetModel())` (`internal/agent/agent.go:5316`). Kaizen gating (`discovery_glue.go:254`) uses the live client model too. So the injected `[ocode:model_context]` and force-injected directives already follow the new model; only the status payload describing it was stale. (The TUI-bridged path was already correct — `internal/tui/model.go` memoizes the banner from the live agent.)
+- **Fix: `applySessionModelPrompt(snap, baseModel, baseCWD)`** in `internal/server/model_context.go` recomputes the banner **only** when the caller changed `MainModel`/`CWD` — so the common path (override == global, same project) pays no second disk/git scan (resolving a `.OCODE.md` runs git for tracked files via `readContextFileAt`). Wired into all four session-tagged builders: `HandleSessionStatus`, `pushSessionStatusSnapshot`, `publishTurnStatusSnapshot` (`handler_session_state.go`) and `finishSessionTitle` (`title_gen.go`).
+- **Bonus fix in `finishSessionTitle`:** it was missing the effective-model pin entirely, so the first turn's title broadcast could revert an overridden tab's sidebar model — and its banner — to the process-wide default until the next poll.
+- **Tests.** `internal/server/model_context_test.go`: `TestSessionStatusRecomputesModelPromptForOverride` + `TestPushSessionStatusSnapshotRecomputesModelPrompt` (two distinct `.OCODE.md` files, global `alpha-model` vs session `beta-model`). Both verified failing at HEAD (`MainModel=beta` yet `ModelPrompt.Path=alpha-model.OCODE.md`) and passing after. Full `internal/server` suite green; `go build ./...`, `go vet`, `gofmt` clean (an unrelated untracked `handler_shell_session_test.go` from concurrent WIP duplicates `postShell`; it was excluded from the suite run via `go test -overlay`).
+- **Note:** a running server/desktop keeps the stale banner until restarted/rebuilt; the desktop `.app` needs a rebuild to embed the new web bundle (no web-code change was needed — the row renders whatever `model_prompt` the server sends).
+- Files: `internal/server/model_context.go`, `internal/server/model_context_test.go`, `internal/server/handler_session_state.go`, `internal/server/handler_tui_status.go`, `internal/server/title_gen.go`, `CHANGES.md`.
+
+## 2026-09-21 — Web/desktop composer: 1.5em single-line default that auto-grows with the draft
+
+The chat composer (`ChatInput.tsx`) was a fixed `rows={2}` textarea — always ~two lines tall and never grew, so a long draft scrolled inside a box that also wasted a row when empty.
+
+- **Compact 1.5em default.** `rows={2}` → `rows={1}` and the textarea now carries `leading-[1.5em]`, so it starts as exactly one 1.5em-tall text line (each added line is another 1.5em).
+- **Auto-grow to an exact fit.** New `fitTextarea()` sets `height:auto` then `height = scrollHeight px` (`scrollHeight` already includes the vertical padding, so the box fits its content exactly). It runs in a `useLayoutEffect` keyed on `input` — typing, pasting, draft restore, command insertion and the post-send clear all re-fit — plus on `window` resize, since a narrower container rewraps the draft onto more lines.
+- **Ceiling + scroll.** `max-h-40` (10rem) + `overflow-y-auto` cap the growth (~7 lines at 1.5em); beyond that the textarea scrolls internally instead of swallowing the transcript.
+- **Hidden-tab guard.** A `display:none` tab (and jsdom) reports `scrollHeight` 0; the fit returns before touching the height there, so switching tabs never collapses a draft that was already fitted. The explicit height is cleared *before* re-reading — otherwise a shrink keeps measuring the old, taller box.
+- **Both UIs.** Web and desktop share this component (`web/embed.go` `//go:embed all:dist` → `web.FS()`, injected into both the headless server and `desktop.StartServer`), so one change covers both; the desktop `.app` needs a rebuild to embed the new bundle.
+- **Tests.** `web/src/components/Chat/ChatInput.autoGrow.test.tsx` (5): single-`rows`/class contract, grow to `scrollHeight`, shrink via the `auto` reset (models the browser's "explicit height floors scrollHeight" behaviour), window-resize refit, and hidden/no-layout no-op. Mutation-verified: dropping the `height:auto` reset fails the shrink test; removing `input` from the effect deps fails the grow + shrink tests. All 30 `src/components/Chat` suites (321 tests) green; `tsgo --noEmit` and `vite build` clean (generated CSS contains `line-height:1.5em` + `max-height:10rem`).
+- Files: `web/src/components/Chat/ChatInput.tsx`, `web/src/components/Chat/ChatInput.autoGrow.test.tsx`, `CHANGES.md`.
+
 ## 2026-09-21 — User CLIs in `~/.local/bin` are now on PATH for agent commands (desktop + web/`!` shell)
 
 Reported as a failing shell command: ``zsh:1: command not found: claude`` with `Shell command failed (exit code 127)` — `claude` (installed at `~/.local/bin/claude`) was invisible to every command ocode spawned, even though it works in the user's terminal.

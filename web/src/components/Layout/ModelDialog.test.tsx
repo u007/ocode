@@ -291,7 +291,7 @@ describe("ModelDialog favorites/recents sections", () => {
   });
 
   describe("main model scoping (per-chat-session model)", () => {
-    it("routes a main-model pick to the session endpoint, not the global config", async () => {
+    it("scopes a main-model pick to the session AND records it as the global default", async () => {
       render(<ModelDialog open onClose={vi.fn()} purpose="main" sessionId="ses_123" />);
       await waitFor(() => expect(screen.getByText("gpt-c")).toBeInTheDocument());
 
@@ -300,12 +300,18 @@ describe("ModelDialog favorites/recents sections", () => {
       await waitFor(() =>
         expect(hoisted.api.setSessionModel).toHaveBeenCalledWith("ses_123", "openai/gpt-c"),
       );
-      // The global config model must not be touched — that's what leaked the
-      // pick across every other open session tab.
-      expect(hoisted.api.setConfigModel).not.toHaveBeenCalled();
+      // The pick is also the new global default, so a later new session (no
+      // override of its own → effectiveSessionModel → cfg.Model) starts on it.
+      await waitFor(() =>
+        expect(hoisted.api.setConfigModel).toHaveBeenCalledWith("openai/gpt-c"),
+      );
+      expect(hoisted.dispatchSpy).toHaveBeenCalledWith({
+        type: "SET_MODEL",
+        model: "openai/gpt-c",
+      });
     });
 
-    it("keeps a draft tab's pick local to the tab (SET_SESSION_MODEL) — no API calls", async () => {
+    it("keeps a draft tab's pick local to the tab and still records the global default", async () => {
       render(<ModelDialog open onClose={vi.fn()} purpose="main" sessionId="new-1700000000" />);
       await waitFor(() => expect(screen.getByText("openai/gpt-b")).toBeInTheDocument());
 
@@ -316,8 +322,12 @@ describe("ModelDialog favorites/recents sections", () => {
         sessionId: "new-1700000000",
         model: "openai/gpt-b",
       });
+      // No session exists yet, so there is no session endpoint to call — but
+      // the global default must move so the NEXT new session starts on it.
       expect(hoisted.api.setSessionModel).not.toHaveBeenCalled();
-      expect(hoisted.api.setConfigModel).not.toHaveBeenCalled();
+      await waitFor(() =>
+        expect(hoisted.api.setConfigModel).toHaveBeenCalledWith("openai/gpt-b"),
+      );
     });
 
     it("clearing on a real session calls the session-scoped DELETE only", async () => {

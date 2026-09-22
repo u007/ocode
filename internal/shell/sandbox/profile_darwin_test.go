@@ -40,7 +40,7 @@ func TestSeatbeltProfileGrantsWritableRoots(t *testing.T) {
 // no-op) is granted; /dev/tty is DELIBERATELY not (a fresh open would let a
 // confined subprocess paint over the running TUI, bypassing captured output).
 // See seatbeltProfileSafe for the rationale and the empirical probe list.
-func TestSeatbeltProfileGrantsDevNullOnly(t *testing.T) {
+func TestSeatbeltProfileGrantsDeviceNodes(t *testing.T) {
 	roots := RootSet{WritableRoots: []string{t.TempDir()}, NetworkEgress: true}
 	profile := seatbeltProfile(roots)
 	if profile == "" {
@@ -48,6 +48,15 @@ func TestSeatbeltProfileGrantsDevNullOnly(t *testing.T) {
 	}
 	if !strings.Contains(profile, `(allow file-write* (path "/dev/null"))`) {
 		t.Fatalf("profile missing the /dev/null discard grant:\n%s", profile)
+	}
+	// The pty pair: without both, posix_openpt fails with EPERM under sandbox
+	// mode and no pty-allocating tool can run (see
+	// TestSeatbeltAllowsPtyAllocation for the exec-level proof).
+	if !strings.Contains(profile, `(allow file-write* (literal "/dev/ptmx"))`) {
+		t.Fatalf("profile missing the /dev/ptmx pty-master grant:\n%s", profile)
+	}
+	if !strings.Contains(profile, `(allow file-write* (regex #"^/dev/ttys[0-9]+$"))`) {
+		t.Fatalf("profile missing the /dev/ttys* pty-slave grant:\n%s", profile)
 	}
 	if strings.Contains(profile, `"/dev/tty"`) {
 		t.Fatalf("profile grants /dev/tty — a confined process could paint over the live TUI:\n%s", profile)
@@ -66,6 +75,29 @@ func TestSeatbeltAllowsDevNullDiscard(t *testing.T) {
 	}
 }
 
+// TestSeatbeltAllowsPtyAllocation exec-tests the pty device grants under real
+// sandbox-exec: script(1) allocates a pty (open /dev/ptmx O_RDWR, then its
+// fresh slave) and runs a command on it. Without BOTH grants this fails with
+// "Operation not permitted" from posix_openpt, which made every pty-allocating
+// tool (test harnesses, expect, tmux, `ssh -tt`, `docker -t`, this repo's own
+// pty integration tests) unusable under sandbox mode.
+func TestSeatbeltAllowsPtyAllocation(t *testing.T) {
+	if !seatbeltAvailable() {
+		t.Skip("/usr/bin/sandbox-exec not present")
+	}
+	if !fileExists("/usr/bin/script") {
+		t.Skip("/usr/bin/script not present")
+	}
+	out, err := runWrapped([]string{t.TempDir()},
+		"script", "-q", "/dev/null", "/bin/echo", "pty-alloc-ok")
+	if err != nil {
+		t.Fatalf("pty allocation under sandbox failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "pty-alloc-ok") {
+		t.Fatalf("pty-allocating command produced no output:\n%s", out)
+	}
+}
+
 // TestSeatbeltDeniesDevTTYFreshOpen exec-tests the /dev/tty denial under a
 // REAL controlling pseudo-terminal: script(1) forks the probe inside a fresh
 // pty session, so the child has /dev/tty even in headless test runs — this
@@ -73,7 +105,13 @@ func TestSeatbeltAllowsDevNullDiscard(t *testing.T) {
 // the wrong reason. Control first: unsandboxed under the pty, the fresh open
 // succeeds. Then confined (same pty harness, sandbox-exec outside the pty
 // fork): the fresh open of the tty device must be denied by the default
-// write rule (only /dev/null is granted — see TestSeatbeltProfileGrantsDevNullOnly).
+// write rule (only the pty device nodes and /dev/null are granted — see
+// TestSeatbeltProfileGrantsDeviceNodes).
+//
+// This is also the regression guard for the pty grant's residual surface:
+// granting ^/dev/ttys[0-9]+$ must NOT make the literal /dev/tty device
+// openable again (Seatbelt authorizes the literal path, not the slave it
+// resolves to).
 func TestSeatbeltDeniesDevTTYFreshOpen(t *testing.T) {
 	if !seatbeltAvailable() {
 		t.Skip("/usr/bin/sandbox-exec not present")

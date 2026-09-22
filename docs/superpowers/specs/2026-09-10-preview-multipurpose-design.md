@@ -1,29 +1,17 @@
 ---
 type: Decision
 title: Multi-Use Preview — Design Spec (Draft, 2026-09-10)
-description: 'Historical Draft (2026-09-10) design for sidebar PreviewHost + a full session Preview sub-tab. Updated 2026-09-17 with as-built note in §2: Files-tab .md behavior now Edit/Preview/Split mode switch in FileTabContent (superseding the spec''s "Monaco by default" statement for that path); sidebar PreviewHost path unchanged. Known divergences §9 re-listed.'
-resource: docs/superpowers/specs/2026-09-10-preview-multipurpose-design.md
-tags:
-  - preview
-  - design
-  - draft
-  - spec
-  - sidebar
-  - files-tab
-  - monaco
-  - pdf
-  - docx
-  - pptx
-  - markdown
-  - split-mode
-timestamp: 2026-09-17T07:53:56Z
+description: 'Decision: Historical draft for sidebar PreviewHost + session Preview sub-tab, updated 2026-09-21 for .mdx support in extension lists.'
+resource: ""
+tags: []
+timestamp: 2026-09-21T16:07:53Z
 ---
 # Multi-Use Preview — Design Spec (Draft, 2026-09-10)
 
 **Type:** Decision  
-**Description:** Historical Draft (2026-09-10) design for sidebar PreviewHost + a full session Preview sub-tab. Predates and does NOT cover the 2026-09-16 Files-tab auto-preview routing; diverges from shipped code on `.md` default (rendered MarkdownViewer, not Monaco+toggle) and on the PreviewSurface signature. See docs/gotchas/files-tab-preview-only-routing.md for shipped behavior.  
+**Description:** Historical Draft (2026-09-10) design for sidebar PreviewHost + a full session Preview sub-tab. Predates and does NOT cover the 2026-09-16 Files-tab auto-preview routing; diverges from shipped code on `.md` default (rendered MarkdownViewer, not Monaco+toggle) and on the PreviewSurface signature. See docs/gotchas/files-tab-preview-only-routing.md for shipped behavior. As of 2026-09-21, `.mdx` is supported alongside `.md`/`.markdown` in the markdown kind (previewable, editor default Edit with mode switch).  
 **Resource:** docs/superpowers/specs/2026-09-10-preview-multipurpose-design.md  
-**Tags:** preview, design, draft, spec, sidebar, files-tab, monaco, pdf, docx, pptx  
+**Tags:** preview, design, draft, spec, sidebar, files-tab, monaco, pdf, docx, pptx, markdown, mdx, split-mode  
 
 ---
 
@@ -38,9 +26,17 @@ timestamp: 2026-09-17T07:53:56Z
 
 Make preview multi-purpose:
 - **Sidebar** (`PreviewHost`, existing side rail): stays untouched — agent (`preview_open` tool) and manual activation.
-- **Full session-level sub-tab** (`Preview` sub-tab, added through existing `projectStore` / `SessionSubTabs` state rather than an isolated component): full-width preview/edit for any file the sidebar supports (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.mmd`/markdown, images, text/editable).
+- **Full session-level sub-tab** (`Preview` sub-tab, added through existing `projectStore` / `SessionSubTabs` state rather than an isolated component): full-width preview/edit for any file the sidebar supports (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.mmd`/markdown/MDX, images, text/editable).
 
 Both surfaces use shared rendering logic; activation is agent-driven (`PREVIEW_OPEN:` sentinel) or manual.
+
+<!-- as-built (2026-09-17): The above statement is now superseded for the **Files-tab** path.
+     `FileTabContent` (the sole Files-tab routing point) now renders an Edit / Preview / Split mode
+     switch for `.md`/`.markdown`/`.mdx` files, with Edit (Monaco) as the default. The preview pane is
+     resizable (`useResizableSplit`) and fed live (unsaved) content via `PreviewSurface`'s
+     `content?: string` prop → `MarkdownViewer` controlled mode. The sidebar `PreviewHost` path is
+     unchanged (still read-from-disk, no mode switch). See
+     `docs/gotchas/files-tab-preview-only-routing.md` §Markdown mode switch for the as-built detail. -->
 
 ## 2. Architecture (confirmed)
 
@@ -52,15 +48,7 @@ Both surfaces use shared rendering logic; activation is agent-driven (`PREVIEW_O
   - Page/slide index: stored locally in `PreviewTabPage` (not persisted) for `.pptx`/`.pdf`.
   - Dirty state: local to `PreviewTabPage`; new file selection replaces and clears dirty/edit state.
   - Promotion from sidebar → full tab: dispatch `ocode:preview-promote` event carrying `(path, kind, projectRoot)`; `App.tsx` listens, opens `PreviewTabPage` sub-tab with that file.
-- `.md` behavior: **Monaco by default for both sidebar and full tab** (`TextViewer` with saved edits); `MarkdownViewer` remains available via a rendered-preview toggle in `PreviewSurface`. This aligns `PreviewHost` (sidebar) with the shared renderer: sidebar keeps existing `.md` behavior but gains the same Monaco+toggle contract.
-
-<!-- as-built (2026-09-17): The above statement is now superseded for the **Files-tab** path.
-     `FileTabContent` (the sole Files-tab routing point) now renders an Edit / Preview / Split mode
-     switch for `.md`/`.markdown` files, with Edit (Monaco) as the default. The preview pane is
-     resizable (`useResizableSplit`) and fed live (unsaved) content via `PreviewSurface`'s
-     `content?: string` prop → `MarkdownViewer` controlled mode. The sidebar `PreviewHost` path is
-     unchanged (still read-from-disk, no mode switch). See
-     `docs/gotchas/files-tab-preview-only-routing.md` §Markdown mode switch for the as-built detail. -->
+- `.md`/`.mdx` behavior: **Monaco by default for both sidebar and full tab** (`TextViewer` with saved edits); `MarkdownViewer` remains available via a rendered-preview toggle in `PreviewSurface`. This aligns `PreviewHost` (sidebar) with the shared renderer: sidebar keeps existing `.md` behavior but gains the same Monaco+toggle contract. `.mdx` is rendered as Markdown in preview (never evaluated); editor uses Monaco `mdx` grammar. See `docs/gotchas/mdx-preview-not-evaluated.md`.
 
 ## 3. Data Flow (confirmed)
 
@@ -99,7 +87,7 @@ Before any backend change, compare current behavior in `internal/server/handler_
 
 - `GET /api/files/raw` concrete invariants:
   - Canonical path (`filepath.Clean` + `EvalSymlinks`) must resolve inside `project_root`; absolute paths without `project_root` rejected.
-  - Explicit extension allowlist (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.xls`, `.csv`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.mmd`, `.md`, `.txt`, `.html`).
+  - Explicit extension allowlist (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.xls`, `.csv`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.mmd`, `.md`, `.markdown`, `.mdx`, `.txt`, `.html`).
   - Size enforced by bounded streaming read (`io.LimitReader` to 32 MiB), not pre-read `Stat`.
   - Auth/session/project scoping preserved.
   - `.html` served with `Content-Type: text/html` but without inline execution privileges.
@@ -109,40 +97,14 @@ Before any backend change, compare current behavior in `internal/server/handler_
 - `PUT /api/files/content`:
   - Atomic write: write to temp file, then rename (`os.Rename`).
   - Conflict detection: compare content or `ModTime` before write; return 409 if changed since load.
-- Do NOT add duplicate APIs or alternate endpoints.
-- Monaco (`TextViewer`):
-  - Unique model URI per file path.
-  - Proper disposal on component unmount / file switch.
-  - Large-file limits; Ctrl/Cmd-S save; dirty indicator; concurrent external change detection.
 
-## 6. Activation Semantics ("both" — agent + manual)
+<!-- as-built (2026-09-17): See docs/gotchas/files-tab-preview-only-routing.md §Markdown mode switch.
+     as-built (2026-09-21): `.mdx` added to the markdown kind. MDX preview renders as Markdown
+     via react-markdown + remark-gfm and is NEVER evaluated (no arbitrary JS execution).
+     The editor uses Monaco's `mdx` basic-language grammar while the preview uses the `markdown` kind.
+     See docs/gotchas/mdx-preview-not-evaluated.md for the security rationale. -->
 
-- `preview_open` agent tool:
-  - Produces `PREVIEW_OPEN:` sentinel in tool result.
-  - `App.tsx` scans chat stream (existing `usePreviewActivation`); opens sidebar `PreviewHost` at requested path.
-  - If user wants full tab: sidebar provides "Open in full preview" action that promotes to `PreviewTabPage` (same path, same kind).
-- Manual:
-  - File tree "Preview in sidebar" → dispatches `ocode:open-preview` event (same as today).
-  - Full session `Preview` tab → user picks file via file picker; `PreviewSurface` renders.
+## Related
 
-## 7. Error Handling
-
-- Load failure → surface error in preview pane (not a toast — user is looking at it).
-- File too large for raw endpoint → show size warning with link to external app.
-- Permission denied → show lock icon + retry prompt (session may have expired).
-- Concurrent edit (dirty state) → discard warning before switching files (same contract as `PreviewHost`).
-
-## 8. Out of Scope
-
-- Editing inside the preview (markdown WYSIWYG, PDF annotation). The preview is read-only; edits happen in Monaco.
-- Collaborative preview (multiple cursors in the preview pane).
-- The Files-tab editor tab body routing by file kind (implemented separately in 2026-09-16; see `docs/gotchas/files-tab-preview-only-routing.md`).
-
-## 9. Divergences from Shipped Code
-
-This spec is a **historical draft** and does not describe the current Files-tab behavior. Known divergences:
-
-1. **Files-tab auto-preview is not in the spec.** The spec only covers sidebar `PreviewHost` and the session `Preview` sub-tab; it never routes Files-tab editor tabs by kind.
-2. **`.md` default differs.** The spec says Monaco by default with `MarkdownViewer` behind a toggle; the shipped `PreviewSurface` renders `MarkdownViewer` when `kind === "markdown"` (rendered markdown is the default for the sidebar path).
-3. **`PreviewSurface` signature differs.** The spec proposes `(path, kind, projectRoot, onSave)` (§4.1); the shipped component takes `(path, kind, projectRoot, projectHost, page, onPageChange, slide, onSlideChange, onOpenFile)` and has no `onSave`.
-4. **Media streaming is newer than the spec.** The spec has no capability-token or range-streaming concept.
+- `docs/gotchas/files-tab-preview-only-routing.md` — Files-tab routing, markdown mode switch, `.mdx` support
+- `docs/gotchas/mdx-preview-not-evaluated.md` — MDX preview renders as Markdown, never evaluated (security rule)

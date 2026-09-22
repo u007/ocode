@@ -11,6 +11,7 @@ import {
   ChevronRight,
   AlertTriangle,
   Archive,
+  Check,
 } from "lucide-react";
 import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
@@ -90,6 +91,12 @@ type Selection =
   | { kind: "stash"; index: number }
   | null;
 
+/** The two working-tree panes a file row can live in. */
+type PaneKey = "staged" | "unstaged";
+
+/** Pane-qualified key for the multi-select set (a path can be in both panes). */
+const paneKeyOf = (pane: PaneKey, path: string) => `${pane}:${path}`;
+
 /** Splits a unified patch into per-hunk blocks (each starting at its `@@`
  *  line; the diff preamble is dropped — the header row shows the file). */
 function splitHunks(patch: string): string[][] {
@@ -144,8 +151,18 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
   const [stashFiles, setStashFiles] = useState<GitDiffFile[] | null>(null);
   // Paths ticked in the open stash's file list (multi-file restore).
   const [checkedStashFiles, setCheckedStashFiles] = useState<string[]>([]);
-  // "Stash all changes" dialog: optional message + include-untracked toggle.
+  // Multi-select over the two working-tree file lists (the staged/unstaged
+  // panes). Keys are pane-qualified — `staged:<path>` / `unstaged:<path>` —
+  // because a partially staged file legitimately appears in both panes, and
+  // bulk actions must only touch the pane(s) the user picked in.
+  // `lastPickedKey` is the shift-click anchor.
+  const [pickedPaths, setPickedPaths] = useState<Set<string>>(new Set());
+  const [lastPickedKey, setLastPickedKey] = useState<string | null>(null);
+  // "Stash changes" dialog: optional message + include-untracked toggle.
+  // `stashTargets` is null for "stash everything", or an explicit pathspec list
+  // when the dialog is opened from a file row / a multi-selection.
   const [stashDialog, setStashDialog] = useState(false);
+  const [stashTargets, setStashTargets] = useState<string[] | null>(null);
   const [stashMessage, setStashMessage] = useState("");
   const [stashIncludeUntracked, setStashIncludeUntracked] = useState(true);
   // Confirmation dialogs for destructive / overwriting stash actions.
@@ -279,6 +296,26 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
     });
   }, [load, projectPath, projectHost]);
 
+  // Drop picked paths that no longer exist (staged/stashed/discarded elsewhere),
+  // so a stale selection can't target a file that has already left the repo
+  // state — and so the section header's "N selected" count stays honest.
+  useEffect(() => {
+    if (!workspace) return;
+    const valid = new Set<string>();
+    for (const f of workspace.staged ?? []) valid.add(paneKeyOf("staged", f.path));
+    for (const f of workspace.unstaged ?? []) valid.add(paneKeyOf("unstaged", f.path));
+    setPickedPaths((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set<string>();
+      for (const k of prev) {
+        if (valid.has(k)) next.add(k);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [workspace]);
+
   const runMutation = useCallback(
     async (fn: () => Promise<unknown>, successMessage?: string) => {
       setBusy(true);
@@ -300,18 +337,28 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
     runMutation(() => api.gitStage([path], projectPath, projectHost), "staged " + path);
   const unstageFile = (path: string) =>
     runMutation(() => api.gitUnstage([path], projectPath, projectHost), "unstaged " + path);
+  const discardTargets = (targets: { path: string; untracked: boolean }[]) => {
+    const tracked = targets.filter((t) => !t.untracked).map((t) => t.path);
+    const untracked = targets.filter((t) => t.untracked).map((t) => t.path);
+    const describe =
+      targets.length === 1
+        ? (targets[0].untracked ? "deleted " : "discarded ") + targets[0].path
+        : targets.every((t) => t.untracked)
+          ? `deleted ${targets.length} files`
+          : `discarded ${targets.length} files`;
+    return runMutation(async () => {
+      if (tracked.length > 0) await api.gitDiscard(tracked, projectPath, projectHost);
+      for (const path of untracked) {
+        await api.gitHunk(
+          { path, hunk_index: 0, action: "discard", staged: false },
+          projectPath,
+          projectHost,
+        );
+      }
+    }, describe);
+  };
   const discardFile = (path: string, untracked: boolean) =>
-    untracked
-      ? runMutation(
-          () =>
-            api.gitHunk(
-              { path, hunk_index: 0, action: "discard", staged: false },
-              projectPath,
-              projectHost,
-            ),
-          "deleted " + path,
-        )
-      : runMutation(() => api.gitDiscard([path], projectPath, projectHost), "discarded " + path);
+    discardTargets([{ path, untracked }]);
   const stageAll = (paths: string[]) =>
     runMutation(() => api.gitStage(paths, projectPath, projectHost), `staged ${paths.length} file(s)`);
   const unstageAll = (paths: string[]) =>
@@ -338,11 +385,27 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
     runMutation(() => api.gitResetRemote(projectPath, projectHost), "reset to remote");
   };
 
+  // Opens the stash dialog. With no paths it stashes the whole working tree;
+  // with paths it targets just those pathspecs (`git stash push -- <paths>`).
+  const openStashDialog = useCallback((paths?: string[]) => {
+    setStashTargets(paths && paths.length > 0 ? paths : null);
+    setStashMessage("");
+    setStashDialog(true);
+  }, []);
+
   // Right-click menu per file row. Actions mirror the row's hover buttons
   // (plus "Open in editor"); the set depends on which pane was clicked —
-  // a partially staged file's menu follows the clicked pane.
+  // a partially staged file's menu follows the clicked pane. `targets` is the
+  // effective selection: the whole pane selection when the row is part of it,
+  // otherwise just this row. Each target carries its own untracked flag so a
+  // bulk discard routes tracked paths to git restore and untracked ones to the
+  // delete hunk.
   const fileMenuItems = useCallback(
-    (f: GitDiffFile, stagedPane: boolean): ContextMenuItem[] => {
+    (
+      f: GitDiffFile,
+      stagedPane: boolean,
+      targets: { path: string; untracked: boolean }[],
+    ): ContextMenuItem[] => {
       const openItem: ContextMenuItem | null = onOpenFile
         ? {
             label: "Open in editor",
@@ -350,33 +413,53 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
             onClick: () => onOpenFile(f.path, projectPath),
           }
         : null;
+      const paths = targets.map((t) => t.path);
+      const n = paths.length;
       if (stagedPane) {
         return [
           {
-            label: "Unstage file",
+            label: n > 1 ? `Unstage ${n} files` : "Unstage file",
             icon: <ArrowDownToLine className="w-3.5 h-3.5" />,
-            onClick: () => unstageFile(f.path),
+            onClick: () => unstageAll(paths),
+          },
+          {
+            label: n > 1 ? `Stash ${n} files` : "Stash file",
+            icon: <Archive className="w-3.5 h-3.5" />,
+            onClick: () => openStashDialog(paths),
           },
           ...(openItem ? [openItem] : []),
         ];
       }
       const untracked = f.status === "untracked";
+      const discardLabel =
+        n > 1
+          ? targets.every((t) => t.untracked)
+            ? `Delete ${n} files`
+            : `Discard ${n} files`
+          : untracked
+            ? "Delete untracked file"
+            : "Discard changes";
       return [
         {
-          label: "Stage file",
+          label: n > 1 ? `Stage ${n} files` : "Stage file",
           icon: <ArrowUpToLine className="w-3.5 h-3.5" />,
-          onClick: () => stageFile(f.path),
+          onClick: () => stageAll(paths),
         },
         {
-          label: untracked ? "Delete untracked file" : "Discard changes",
+          label: discardLabel,
           icon: <Trash2 className="w-3.5 h-3.5" />,
           destructive: true,
-          onClick: () => discardFile(f.path, untracked),
+          onClick: () => discardTargets(targets),
+        },
+        {
+          label: n > 1 ? `Stash ${n} files` : "Stash file",
+          icon: <Archive className="w-3.5 h-3.5" />,
+          onClick: () => openStashDialog(paths),
         },
         ...(openItem ? [openItem] : []),
       ];
     },
-    [onOpenFile, projectPath, stageFile, unstageFile, discardFile],
+    [onOpenFile, projectPath, stageAll, unstageAll, discardTargets, openStashDialog],
   );
 
   const hunkAction = useCallback(
@@ -501,14 +584,16 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
     restoreStashFiles(index, paths);
   };
 
-  const doStashAll = () => {
+  const doStash = () => {
     const message = stashMessage;
     const includeUntracked = stashIncludeUntracked;
+    const paths = stashTargets ?? [];
     setStashDialog(false);
     setStashMessage("");
+    setStashTargets(null);
     runMutation(
-      () => api.gitStash(message, [], projectPath, projectHost, includeUntracked),
-      "stashed changes",
+      () => api.gitStash(message, paths, projectPath, projectHost, includeUntracked),
+      paths.length > 0 ? `stashed ${paths.length} file(s)` : "stashed changes",
     );
   };
 
@@ -538,6 +623,107 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
   const stagedFiles = workspace.staged ?? [];
   const unstagedFiles = workspace.unstaged ?? [];
   const status = workspace.status;
+
+  /** The picked paths belonging to one pane, in no particular order. */
+  const pickedPathsInPane = (pane: PaneKey): string[] => {
+    const prefix = pane + ":";
+    return Array.from(pickedPaths)
+      .filter((k) => k.startsWith(prefix))
+      .map((k) => k.slice(prefix.length));
+  };
+
+  const pickedCountInPane = (pane: PaneKey): number => {
+    const prefix = pane + ":";
+    let n = 0;
+    for (const k of pickedPaths) if (k.startsWith(prefix)) n++;
+    return n;
+  };
+
+  /** Clear the multi-selection (used by the section header's "N selected ✕"). */
+  const clearPicked = () => {
+    setPickedPaths(new Set());
+    setLastPickedKey(null);
+  };
+
+  /**
+   * Row click: plain selects one file (and shows its diff), Cmd/Ctrl-click
+   * toggles a file in the selection, Shift-click selects — or, when both ends
+   * are already selected, clears — the contiguous block between the anchor and
+   * the clicked row.
+   */
+  const handleFileRowClick = (f: GitDiffFile, pane: PaneKey, e: React.MouseEvent) => {
+    const key = paneKeyOf(pane, f.path);
+    const list = pane === "staged" ? stagedFiles : unstagedFiles;
+    if (e.shiftKey && lastPickedKey && lastPickedKey.startsWith(pane + ":")) {
+      const ai = list.findIndex((x) => paneKeyOf(pane, x.path) === lastPickedKey);
+      const bi = list.findIndex((x) => x.path === f.path);
+      if (ai >= 0 && bi >= 0) {
+        const [lo, hi] = ai < bi ? [ai, bi] : [bi, ai];
+        const range = list.slice(lo, hi + 1).map((x) => paneKeyOf(pane, x.path));
+        setPickedPaths((prev) => {
+          const next = new Set(prev);
+          const removing = next.has(key) && next.has(lastPickedKey);
+          for (const k of range) {
+            if (removing) next.delete(k);
+            else next.add(k);
+          }
+          return next;
+        });
+        return;
+      }
+    }
+    if (e.metaKey || e.ctrlKey) {
+      setPickedPaths((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      });
+      setLastPickedKey(key);
+      return;
+    }
+    setPickedPaths(new Set([key]));
+    setLastPickedKey(key);
+    selectFile(f, pane === "staged");
+  };
+
+  /** Toggle one row's membership in the multi-selection (its checkbox). */
+  const handleTogglePicked = (f: GitDiffFile, pane: PaneKey) => {
+    const key = paneKeyOf(pane, f.path);
+    setPickedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    setLastPickedKey(key);
+  };
+
+  /**
+   * Right-click a row: narrowing the selection to it when it isn't already
+   * picked, then opening the menu whose actions target the effective set.
+   */
+  const handleFileRowContextMenu = (f: GitDiffFile, pane: PaneKey, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const key = paneKeyOf(pane, f.path);
+    const list = pane === "staged" ? stagedFiles : unstagedFiles;
+    let targets: { path: string; untracked: boolean }[];
+    if (pickedPaths.has(key)) {
+      targets = pickedPathsInPane(pane).map((p) => ({
+        path: p,
+        untracked: list.find((x) => x.path === p)?.status === "untracked",
+      }));
+    } else {
+      targets = [{ path: f.path, untracked: f.status === "untracked" }];
+      setPickedPaths(new Set([key]));
+      setLastPickedKey(key);
+    }
+    setContextMenu({
+      items: fileMenuItems(f, pane === "staged", targets),
+      position: { x: e.clientX, y: e.clientY },
+    });
+  };
   const filterLower = fileFilter.trim().toLowerCase();
   const filteredStaged = filterLower
     ? stagedFiles.filter((f) => f.path.toLowerCase().includes(filterLower))
@@ -686,11 +872,14 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
             files={filteredStaged}
             selected={selection}
             busy={busy}
-            onSelect={(f) => selectFile(f, true)}
+            onRowClick={(f, e) => handleFileRowClick(f, "staged", e)}
+            onTogglePicked={(f) => handleTogglePicked(f, "staged")}
+            isPicked={(f) => pickedPaths.has(paneKeyOf("staged", f.path))}
+            pickedCount={pickedCountInPane("staged")}
+            onClearPicked={clearPicked}
             collapsed={!sections.staged}
             onToggle={() => toggleSection("staged")}
-            menuItems={(f) => fileMenuItems(f, true)}
-            onContextMenu={(items, position) => setContextMenu({ items, position })}
+            onRowContextMenu={(f, e) => handleFileRowContextMenu(f, "staged", e)}
             onSectionAction={
               filteredStaged.length > 1
                 ? { label: "Unstage all", fn: () => unstageAll(filteredStaged.map((f) => f.path)) }
@@ -717,11 +906,14 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
             files={filteredUnstaged}
             selected={selection}
             busy={busy}
-            onSelect={(f) => selectFile(f, false)}
+            onRowClick={(f, e) => handleFileRowClick(f, "unstaged", e)}
+            onTogglePicked={(f) => handleTogglePicked(f, "unstaged")}
+            isPicked={(f) => pickedPaths.has(paneKeyOf("unstaged", f.path))}
+            pickedCount={pickedCountInPane("unstaged")}
+            onClearPicked={clearPicked}
             collapsed={!sections.unstaged}
             onToggle={() => toggleSection("unstaged")}
-            menuItems={(f) => fileMenuItems(f, false)}
-            onContextMenu={(items, position) => setContextMenu({ items, position })}
+            onRowContextMenu={(f, e) => handleFileRowContextMenu(f, "unstaged", e)}
             onSectionAction={
               filteredUnstaged.length > 1
                 ? { label: "Stage all", fn: () => stageAll(filteredUnstaged.map((f) => f.path)) }
@@ -832,7 +1024,7 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
                 </span>
               </button>
               <button
-                onClick={() => setStashDialog(true)}
+                onClick={() => openStashDialog()}
                 disabled={busy || !status.has_changes}
                 title={
                   status.has_changes
@@ -1053,13 +1245,16 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
         </DialogContent>
       </Dialog>
 
-      {/* Stash-all dialog */}
+      {/* Stash dialog — "all changes" from the section header, or the picked
+          files when opened from a row / multi-selection. */}
       <Dialog open={stashDialog} onOpenChange={setStashDialog}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Archive className="w-4 h-4 text-purple-400" />
-              Stash changes
+              {stashTargets
+                ? `Stash ${stashTargets.length} file${stashTargets.length === 1 ? "" : "s"}`
+                : "Stash all changes"}
             </DialogTitle>
           </DialogHeader>
           <div className="mt-2 space-y-3">
@@ -1067,7 +1262,7 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
               value={stashMessage}
               onChange={(e) => setStashMessage(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") doStashAll();
+                if (e.key === "Enter") doStash();
               }}
               placeholder="Stash message (optional)"
               className="w-full h-9 px-3 rounded-md bg-muted/40 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring"
@@ -1081,9 +1276,19 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
               Include untracked files
             </label>
             <p className="text-xs text-muted-foreground">
-              Tracked changes are reverted to HEAD and saved in a stash entry you can
-              restore or delete later from the Stashes list.
+              {stashTargets
+                ? "The selected files are reverted to HEAD and saved in a stash entry you can restore or delete later from the Stashes list."
+                : "Tracked changes are reverted to HEAD and saved in a stash entry you can restore or delete later from the Stashes list."}
             </p>
+            {stashTargets && (
+              <ul className="max-h-32 overflow-y-auto rounded-md border border-border bg-muted/20 p-2 text-xs font-mono text-muted-foreground space-y-0.5">
+                {stashTargets.map((p) => (
+                  <li key={p} className="truncate">
+                    {p}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
           <DialogFooter className="mt-4">
             <Button
@@ -1093,7 +1298,7 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
             >
               Cancel
             </Button>
-            <Button onClick={doStashAll}>Stash</Button>
+            <Button onClick={doStash}>Stash</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1187,30 +1392,39 @@ function FileSection({
   files,
   selected,
   busy,
-  onSelect,
+  onRowClick,
+  onTogglePicked,
+  isPicked,
+  pickedCount,
+  onClearPicked,
   onSectionAction,
   rowActions,
   collapsed,
   onToggle,
-  menuItems,
-  onContextMenu,
+  onRowContextMenu,
 }: {
   title: string;
   stagedPane: boolean;
   files: GitDiffFile[];
   selected: Selection;
   busy: boolean;
-  onSelect: (f: GitDiffFile) => void;
+  /** Plain / Cmd-Ctrl / Shift-click handled by the parent (multi-select). */
+  onRowClick: (f: GitDiffFile, e: React.MouseEvent) => void;
+  /** Toggle one row's membership in the multi-selection (checkbox). */
+  onTogglePicked: (f: GitDiffFile) => void;
+  /** Whether a given row is part of the multi-selection. */
+  isPicked: (f: GitDiffFile) => boolean;
+  pickedCount: number;
+  onClearPicked: () => void;
   onSectionAction?: { label: string; fn: () => void };
   rowActions?: (f: GitDiffFile) => React.ReactNode;
   collapsed?: boolean;
   onToggle?: () => void;
-  menuItems?: (f: GitDiffFile) => ContextMenuItem[];
-  onContextMenu?: (items: ContextMenuItem[], position: { x: number; y: number }) => void;
+  onRowContextMenu: (f: GitDiffFile, e: React.MouseEvent) => void;
 }) {
   return (
     <div className="shrink-0 max-h-[34%] min-h-0 flex flex-col">
-      <div className="px-3 py-1.5 text-xs uppercase tracking-wider text-muted-foreground flex items-center justify-between">
+      <div className="px-3 py-1.5 text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-2">
         {onToggle ? (
           <button
             onClick={onToggle}
@@ -1231,6 +1445,16 @@ function FileSection({
             {title} <span className="text-foreground/50">({files.length})</span>
           </span>
         )}
+        {!collapsed && pickedCount > 0 && (
+          <button
+            onClick={onClearPicked}
+            title="Clear selection"
+            className="text-[10px] normal-case text-muted-foreground hover:text-foreground shrink-0"
+          >
+            {pickedCount} selected ✕
+          </button>
+        )}
+        <div className="flex-1" />
         {!collapsed && onSectionAction && (
           <button
             onClick={onSectionAction.fn}
@@ -1252,17 +1476,39 @@ function FileSection({
             <div className="divide-y divide-border/60">
               {files.map((f) => {
                 const badge = STATUS_BADGES[f.status] || STATUS_BADGES.modified;
+                const picked = isPicked(f);
                 const isSelected =
                   selected?.kind === "file" &&
                   selected.path === f.path &&
                   selected.staged === stagedPane;
-                const row = (
+                const rowState = picked
+                  ? "bg-accent text-accent-foreground"
+                  : isSelected
+                    ? "bg-muted"
+                    : "hover:bg-muted/50";
+                return (
                   <div
-                    onClick={() => onSelect(f)}
-                    className={`group flex items-center gap-1.5 pl-2 pr-1.5 py-1 text-sm cursor-pointer hover:bg-muted/50 ${
-                      isSelected ? "bg-muted" : ""
-                    }`}
+                    key={f.path}
+                    onClick={(e) => onRowClick(f, e)}
+                    onContextMenu={(e) => onRowContextMenu(f, e)}
+                    className={`group flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 text-sm cursor-pointer ${rowState}`}
                   >
+                    <button
+                      type="button"
+                      aria-label={`${picked ? "Deselect" : "Select"} ${f.path}`}
+                      aria-pressed={picked}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onTogglePicked(f);
+                      }}
+                      className={`shrink-0 w-3.5 h-3.5 rounded-sm border flex items-center justify-center transition-colors ${
+                        picked
+                          ? "bg-primary border-primary text-primary-foreground"
+                          : "border-border opacity-0 group-hover:opacity-100 hover:border-foreground/50"
+                      }`}
+                    >
+                      {picked && <Check className="w-3 h-3" />}
+                    </button>
                     <span
                       className={`inline-flex items-center justify-center w-5 h-5 shrink-0 rounded text-[10px] font-bold ${badge.color}`}
                     >
@@ -1272,19 +1518,6 @@ function FileSection({
                       {f.path}
                     </span>
                     {rowActions?.(f)}
-                  </div>
-                );
-                if (!menuItems) return <div key={f.path}>{row}</div>;
-                return (
-                  <div
-                    key={f.path}
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      onContextMenu?.(menuItems(f), { x: event.clientX, y: event.clientY });
-                    }}
-                  >
-                    {row}
                   </div>
                 );
               })}

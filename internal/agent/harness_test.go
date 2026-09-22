@@ -10,7 +10,7 @@ import (
 
 func TestNormalizeFakeAgent(t *testing.T) {
 	tests := map[string]string{
-		"":             "ocode",
+		"":            "ocode",
 		"ocode":       "ocode",
 		"OpenCode":    "opencode",
 		"claudecode":  "claude-code",

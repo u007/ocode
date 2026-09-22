@@ -19,6 +19,12 @@ const (
 	typesafeJudgeConcernKey = "concern"
 )
 
+// concernTruncatedOrUnknown is the concern category for a request whose effects
+// the judge could not establish (an undefined-variable command head, an
+// unreadable script, a flag whose effect is unknown). It is the signal that
+// switches the verdict to the lower opaque confidence floor.
+const concernTruncatedOrUnknown = "truncated_or_unknown"
+
 // typesafeConcern is one deny category. Key is the choice label Jev returns;
 // Label is the human-readable reason shown in the permission prompt and logs.
 type typesafeConcern struct {
@@ -38,7 +44,7 @@ var typesafeConcerns = []typesafeConcern{
 	{"network", "opens outbound network connections or downloads/uploads data"},
 	{"subprocess_or_dynamic_code", "spawns subprocesses or evaluates dynamic code from an interpreter"},
 	{"system_or_git_history", "modifies system configuration, git history, or force-pushes"},
-	{"truncated_or_unknown", "the source is truncated, unavailable, or the effect cannot be determined"},
+	{concernTruncatedOrUnknown, "the source is truncated, unavailable, or the effect cannot be determined"},
 }
 
 func typesafeConcernLabel(key string) string {
@@ -253,13 +259,20 @@ func (a *Agent) askPermissionModelTypesafe(client *TypesafeClient, toolName stri
 
 	minConfidence := a.resolveAutoJudgeMinConfidence()
 	pAllow := ans.Probabilities["allow"]
-	// The concern answer is advisory: it explains a verdict but never decides
-	// one, so a missing or odd concern degrades to a generic reason.
+	// The concern answer is advisory about WHY: it explains a verdict but never
+	// decides one, so a missing or odd concern degrades to a generic reason. It
+	// does select the confidence floor, though — a request the judge could not
+	// resolve (truncated_or_unknown) clears the lower opaque floor, because 0.85
+	// is the bar for a request the judge fully understands.
 	concernKey, concernConf := "", 0.0
 	if c, ok := resp.Answers[typesafeJudgeConcernKey]; ok && c.Type == "choice" {
 		concernKey, concernConf = c.Choice, c.Confidence
 	}
-	a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_typesafe_verdict tool=%s model=%s choice=%s confidence=%.3f p_allow=%.3f min=%.2f concern=%s concern_confidence=%.3f", toolName, modelLabel, ans.Choice, ans.Confidence, pAllow, minConfidence, concernKey, concernConf))
+	floor := minConfidence
+	if concernKey == concernTruncatedOrUnknown {
+		floor = a.resolveAutoJudgeOpaqueMinConfidence()
+	}
+	a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_typesafe_verdict tool=%s model=%s choice=%s confidence=%.3f p_allow=%.3f min=%.2f concern=%s concern_confidence=%.3f", toolName, modelLabel, ans.Choice, ans.Confidence, pAllow, floor, concernKey, concernConf))
 	concern := ""
 	if concernKey != "" && concernKey != "none" {
 		concern = "; concern: " + typesafeConcernLabel(concernKey)
@@ -267,8 +280,8 @@ func (a *Agent) askPermissionModelTypesafe(client *TypesafeClient, toolName stri
 
 	switch ans.Choice {
 	case "allow":
-		if ans.Confidence < minConfidence {
-			return false, fmt.Sprintf("TypeSafe judge leaned allow but confidence %.2f is below the %.2f floor%s", ans.Confidence, minConfidence, concern), true
+		if ans.Confidence < floor {
+			return false, fmt.Sprintf("TypeSafe judge leaned allow but confidence %.2f is below the %.2f floor%s", ans.Confidence, floor, concern), true
 		}
 		if ok, why := a.verifyAutoGrant(toolName, args, req); !ok {
 			return false, why, true

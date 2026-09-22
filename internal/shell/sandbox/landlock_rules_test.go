@@ -40,7 +40,9 @@ func TestLandlockApplicableRights(t *testing.T) {
 
 // TestBuildBwrapArgvLocksShape locks the bwrap argv contract: ro-bind "/" ->
 // rw binds per writable (canonical) root -> command argv; egress shared, /proc
-// mounted, die-with-parent.
+// mounted, die-with-parent, and the host pty nodes dev-bound back in (a
+// sandboxed command that allocates a terminal needs them; --dev alone omits
+// them).
 func TestBuildBwrapArgvLocksShape(t *testing.T) {
 	work := t.TempDir()
 	argv := buildBwrapArgv([]string{work}, []string{"/bin/bash", "-c", "echo hi"})
@@ -50,6 +52,8 @@ func TestBuildBwrapArgvLocksShape(t *testing.T) {
 		"--ro-bind", "/", "/",
 		"--proc", "/proc",
 		"--dev", "/dev",
+		"--dev-bind", landlockPtyMaster, landlockPtyMaster,
+		"--dev-bind", landlockPtySlaveDir, landlockPtySlaveDir,
 		"--share-net",
 		"--die-with-parent",
 	}
@@ -62,6 +66,40 @@ func TestBuildBwrapArgvLocksShape(t *testing.T) {
 
 	if !reflect.DeepEqual(argv, want) {
 		t.Fatalf("argv = %v\nwant = %v", argv, want)
+	}
+}
+
+// TestLandlockDeviceWriteGrants locks the device grants applied outside the
+// writable roots: /dev/null (write, plus truncate at ABI v3) and the pty pair
+// (/dev/ptmx + the /dev/pts directory, write only). Without the pty grants a
+// sandboxed command cannot allocate a terminal at all.
+func TestLandlockDeviceWriteGrants(t *testing.T) {
+	for _, tc := range []struct {
+		abi        int
+		nullRights uint64
+	}{
+		{abi: 1, nullRights: landlockWriteFile},
+		{abi: 2, nullRights: landlockWriteFile},
+		{abi: 3, nullRights: landlockWriteFile | landlockTruncate},
+		{abi: 5, nullRights: landlockWriteFile | landlockTruncate},
+	} {
+		grants := landlockDeviceWriteGrants(tc.abi)
+		byPath := map[string]uint64{}
+		for _, g := range grants {
+			byPath[g.path] = g.rights
+		}
+		if got := byPath[landlockNullDevice]; got != tc.nullRights {
+			t.Errorf("abi %d: /dev/null rights = %#x, want %#x", tc.abi, got, tc.nullRights)
+		}
+		if got := byPath[landlockPtyMaster]; got != landlockWriteFile {
+			t.Errorf("abi %d: %s rights = %#x, want write-only %#x", tc.abi, landlockPtyMaster, got, uint64(landlockWriteFile))
+		}
+		if got := byPath[landlockPtySlaveDir]; got != landlockWriteFile {
+			t.Errorf("abi %d: %s rights = %#x, want write-only %#x", tc.abi, landlockPtySlaveDir, got, uint64(landlockWriteFile))
+		}
+		if len(grants) != 3 {
+			t.Errorf("abi %d: %d grants, want 3: %v", tc.abi, len(grants), grants)
+		}
 	}
 }
 

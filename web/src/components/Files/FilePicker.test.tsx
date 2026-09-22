@@ -125,3 +125,47 @@ describe("FilePicker keyword filter", () => {
     expect(screen.queryByText("src/alpha.ts")).not.toBeInTheDocument();
   });
 });
+
+describe("FilePicker shortest-path ordering", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  const tree = [
+    { name: "model.go", path: "internal/tui/model.go", is_dir: false },
+    { name: "model.go", path: "model.go", is_dir: false },
+    { name: "readme.md", path: "docs/guide/deep/readme.md", is_dir: false },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fetchSpy = vi.spyOn(globalThis as any, "fetch").mockResolvedValue(mockTreeResponse(tree));
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  function renderedPaths() {
+    return screen.getAllByRole("option").map((el) => el.textContent);
+  }
+
+  it("orders the unfiltered list shortest path first", async () => {
+    render(<FilePicker open onClose={() => {}} onOpenFile={() => {}} projectPath="/proj" />);
+    await waitFor(() => expect(screen.getByText("model.go")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(renderedPaths()).toEqual(["model.go", "internal/tui/model.go", "docs/guide/deep/readme.md"]),
+    );
+  });
+
+  it("breaks relevance ties by shortest path", async () => {
+    render(<FilePicker open onClose={() => {}} onOpenFile={() => {}} projectPath="/proj" />);
+    await waitFor(() => expect(screen.getByText("model.go")).toBeInTheDocument());
+
+    const input = screen.getByPlaceholderText("Filter by keywords...") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "model" } });
+
+    // Both files match "model" with the same relevance (exact word in the
+    // filename); the shallower path must rank first. The deep readme is filtered out.
+    await waitFor(() => expect(renderedPaths()).toEqual(["model.go", "internal/tui/model.go"]));
+  });
+});
+

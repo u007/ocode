@@ -471,3 +471,46 @@ it("typing / does not render autocomplete suggestions and Enter submits the lite
   // Submits the literal text through the normal pipeline.
   expect(sendMessage).toHaveBeenCalledWith("/fake-agent status");
 });
+
+describe("ChatInput ! shell result", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    sendMessage.mockClear();
+    sendMessage.mockResolvedValue(true);
+    executeShell.mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function submitShell(command: string) {
+    render(<ChatInput sessionTabId="new-1" />);
+    const ta = getTextarea();
+    fireEvent.change(ta, { target: { value: `!${command}` } });
+    await act(async () => {
+      fireEvent.keyDown(ta, { key: "Enter" });
+    });
+    await tick();
+  }
+
+  // The shell's cwd is echoed so a leaked `cd` is visible in the transcript.
+  it("renders the cwd of a successful command", async () => {
+    executeShell.mockResolvedValue({ output: "hi", exitCode: 0, error: "", cwd: "/work/here" });
+    await submitShell("echo hi");
+
+    expect(executeShell).toHaveBeenCalledWith("echo hi");
+    expect(sendMessage).toHaveBeenCalledWith(expect.stringContaining("# cwd: /work/here"));
+    expect(sendMessage).toHaveBeenCalledWith(expect.stringContaining("executed successfully"));
+  });
+
+  it("renders the cwd of a failed command too", async () => {
+    executeShell.mockResolvedValue({ output: "", exitCode: 2, error: "boom", cwd: "/other/dir" });
+    await submitShell("false");
+
+    const calls = sendMessage.mock.calls;
+    const message = calls[calls.length - 1]?.[0] as string;
+    expect(message).toContain("failed (exit code 2)");
+    expect(message).toContain("# cwd: /other/dir");
+  });
+});

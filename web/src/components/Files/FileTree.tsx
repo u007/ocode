@@ -52,6 +52,7 @@ import {
 } from "lucide-react";
 import { api, apiPath, authHeaders, readSSEStream } from "@/api/client";
 import { parseKeywords, matchesKeywords, scoreMatch } from "@/lib/keywordFilter";
+import { pathSegmentCount } from "@/lib/filePathOrder";
 import { dispatchOpenPreview, previewKindForPath } from "../../lib/previewKind";
 import SecretActionDialog from "./SecretActionDialog";
 import { loadFileTreeView, saveFileTreeView, type FileTreeViewMode } from "./fileTreeViewPersistence";
@@ -94,6 +95,7 @@ interface FileMenuActions {
   clipboard: { op: "copy" | "cut"; paths: string[] } | null;
   toggleSelect: (p: string) => void;
   rangeSelect: (paths: string[]) => void;
+  deselectRange: (paths: string[]) => void;
   setSelection: (paths: string[]) => void;
   open: (p: string) => void;
   copyPath: (p: string) => void;
@@ -214,12 +216,15 @@ function filterTreeNodes(nodes: FileNode[], keywords: string[]): FileNode[] {
       });
     }
   }
-  // Sort by relevance score descending (stable sort preserves original order for ties)
+  // Sort by relevance score descending, then shortest path first. Siblings
+  // share a depth, so the tiebreak is normally a no-op; it keeps the shared
+  // shortest-path rule explicit for the filtered result set.
   if (keywords.length > 0) {
     out.sort((a, b) => {
       const scoreA = scoreMatch(`${a.name} ${a.path}`, keywords);
       const scoreB = scoreMatch(`${b.name} ${b.path}`, keywords);
-      return scoreB - scoreA;
+      if (scoreA !== scoreB) return scoreB - scoreA;
+      return pathSegmentCount(a.path) - pathSegmentCount(b.path);
     });
   }
   return out;
@@ -485,7 +490,14 @@ function TreeNode({
       const idxB = siblings.findIndex((s) => s.path === node.path);
       if (idxA >= 0 && idxB >= 0) {
         const [lo, hi] = idxA < idxB ? [idxA, idxB] : [idxB, idxA];
-        menu.rangeSelect(siblings.slice(lo, hi + 1).map((s) => s.path));
+        const range = siblings.slice(lo, hi + 1).map((s) => s.path);
+        // Shift-click selects the block, or clears it when both ends are
+        // already selected — that is how a range gets deselected.
+        if (menu.selectedPaths.has(lastClickedPath) && menu.selectedPaths.has(node.path)) {
+          menu.deselectRange(range);
+        } else {
+          menu.rangeSelect(range);
+        }
         return;
       }
     }
@@ -1370,6 +1382,15 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
     setSelectedPaths(new Set(paths));
   }, []);
 
+  const deselectRange = useCallback((paths: string[]) => {
+    setSelectedPaths((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set(prev);
+      for (const p of paths) next.delete(p);
+      return next;
+    });
+  }, []);
+
   const runGit = useCallback(
     async (fn: (paths: string[]) => Promise<unknown>, paths: string[]) => {
       try {
@@ -1426,6 +1447,7 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
     clipboard,
     toggleSelect,
     rangeSelect,
+    deselectRange,
     setSelection: (paths) => setSelectedPaths(new Set(paths)),
     open: (p) => onOpenFile(p, activeRoot),
     // Reveal runs on the LOCAL server host (no remote branch), so it is only

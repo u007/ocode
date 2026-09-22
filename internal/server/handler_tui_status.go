@@ -25,6 +25,11 @@ func (h *Handler) HandleGetTUIStatus(w http.ResponseWriter, r *http.Request, rc 
 // config — used for the headless (no TUI attached) fallback and to push fresh
 // state to the web after web-initiated config changes (model selection,
 // small-model toggle, etc.).
+//
+// ModelPrompt is resolved from the process-wide cfg.Model + server workDir. A
+// caller that then replaces MainModel/CWD with a SESSION's effective values must
+// follow with applySessionModelPrompt, or the banner keeps describing the global
+// model/project (see that helper).
 func (h *Handler) buildStatusSnapshot() TUIStatus {
 	snap := TUIStatus{
 		AdvisorEnabled: h.advisorEnabled,

@@ -5,6 +5,7 @@ import {
   dispatchOpenPreview,
   dispatchPreviewContext,
   isLegacyOfficePath,
+  isMarkdownPath,
   parsePreviewOpen,
   previewKindForPath,
   previewOnlyKindForPath,
@@ -18,6 +19,7 @@ describe("previewKindForPath", () => {
     expect(previewKindForPath("report.pdf")).toBe("pdf");
     expect(previewKindForPath("flow.mmd")).toBe("mermaid");
     expect(previewKindForPath("notes.md")).toBe("markdown");
+    expect(previewKindForPath("docs/page.mdx")).toBe("markdown");
     expect(previewKindForPath("main.go")).toBe("text");
     expect(previewKindForPath("photo.PNG")).toBe("image");
     expect(previewKindForPath("budget.xlsx")).toBe("excel");
@@ -52,11 +54,27 @@ describe("previewOnlyKindForPath", () => {
   it("keeps editable and unrenderable paths in the editor", () => {
     expect(previewOnlyKindForPath("main.go")).toBeNull();
     expect(previewOnlyKindForPath("notes.md")).toBeNull();
+    expect(previewOnlyKindForPath("page.mdx")).toBeNull();
     expect(previewOnlyKindForPath("flow.mmd")).toBeNull();
     expect(previewOnlyKindForPath("legacy.doc")).toBeNull();
     expect(previewOnlyKindForPath("movie.mkv")).toBeNull();
     expect(previewOnlyKindForPath("movie.avi")).toBeNull();
     expect(previewOnlyKindForPath("Makefile")).toBeNull();
+  });
+});
+
+// Regression: `.mdx` is Markdown-source-plus-JSX. It must route exactly like
+// `.md` — editable in Monaco with the Files-tab Edit/Preview/Split switch —
+// and never fall into the preview-only (binary) branch.
+describe("isMarkdownPath", () => {
+  it("covers the Markdown family including MDX", () => {
+    expect(isMarkdownPath("notes.md")).toBe(true);
+    expect(isMarkdownPath("notes.markdown")).toBe(true);
+    expect(isMarkdownPath("docs/page.mdx")).toBe(true);
+    expect(isMarkdownPath("PAGE.MDX")).toBe(true);
+    expect(isMarkdownPath("main.go")).toBe(false);
+    expect(isMarkdownPath("flow.mmd")).toBe(false);
+    expect(isMarkdownPath("Makefile")).toBe(false);
   });
 });
 

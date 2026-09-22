@@ -138,11 +138,18 @@ func (h *Handler) finishSessionTitle(sessionID, title string) {
 	// turn of a headless session, and a snapshot without them would wipe the
 	// sidebar's Context gauge until the next per-session fetch.
 	snap := h.buildStatusSnapshot()
+	baseModel, baseCWD := snap.MainModel, snap.CWD
 	snap.SessionID = sessionID
 	snap.SessionTitle = title
+	// This is a session-tagged snapshot, so pin it to the session's effective
+	// model/project like every other per-session builder: otherwise the first
+	// turn's title broadcast reverts an overridden chat's sidebar model (and its
+	// model-prompt banner) to the process-wide default until the next poll.
+	snap.MainModel = h.effectiveSessionModel(sessionID)
 	if entry, err := h.sessions.Resolve(sessionID); err == nil && entry.ProjectRoot != "" {
 		snap.CWD = entry.ProjectRoot
 	}
+	applySessionModelPrompt(&snap, baseModel, baseCWD)
 	h.applySessionContext(&snap, sessionID)
 	h.applySessionPermissionFields(&snap, sessionID)
 	h.applySessionAdvisorFields(&snap, sessionID)

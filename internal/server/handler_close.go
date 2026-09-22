@@ -26,6 +26,14 @@ import (
 // marked close-pending and executeTurnJob releases it the moment the turn (or
 // bootstrap) unwinds, so close never waits for the idle-eviction loop.
 func (h *Handler) HandleCloseSession(w http.ResponseWriter, r *http.Request, id string) {
+	// 0. Drop the session's persistent `!` shell first and unconditionally: it
+	// has no in-flight-turn dependency, so it must not be gated behind the
+	// 404 below or the close-pending dance (a shell left behind by an id the
+	// registry no longer knows would otherwise leak until the idle reaper).
+	if h.shellSessions != nil {
+		h.shellSessions.close(id)
+	}
+
 	if _, err := h.sessions.Resolve(id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return

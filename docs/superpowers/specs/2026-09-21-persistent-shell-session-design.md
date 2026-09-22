@@ -58,17 +58,29 @@ A **persistent, per-chat-session shell** for `!` commands so that:
 ### Keying and lifecycle
 
 - `useChat(sessionId)`'s first argument is the **tab id** — "a real session id, a
-  `new-*` draft id, or a temp tab id" (see its doc comment). It is stable across
-  `/reset-id` rekeys, so the shell survives a rekey without migration.
-  `executeShell` passes it as a new body field `session`.
+  `new-*` draft id, or a temp tab id" (see its doc comment). `executeShell`
+  passes it as a new body field `session`.
+- The tab id is **not** stable: `rekeySession(old, new)` (`web/src/App.tsx`,
+  `chatStore` `REKEY_SESSION`) renames it on `/reset-id` **and** on the
+  `new-*` → real-session rename after the first send. The registry therefore
+  exposes `Rekey(oldKey, newKey)`, and `HandleResetSessionID`
+  (`internal/server/handler_reset_id.go`, right after `session.RekeyForDir`
+  succeeds) moves the shell to the new key so `cd`/env survive a `/reset-id`.
+- The `new-*` → real-id rename happens client-side only (the server never sees
+  the draft id), so a shell created by a `!` in a draft tab **before the first
+  message** stays keyed under `new-<ts>`, is not reused after the rename, and
+  is not closed by tab close (`closeSessionBackend` skips `new-*` ids). It is
+  reaped by the idle timeout. This is an accepted v1 limitation; the cost is
+  one extra rc load for that tab.
 - The server keeps `map[key]*shell.Session`, created lazily on the first `!` for
   that key.
 - Closed on `POST /api/sessions/{id}/close` (`HandleCloseSession` in
   `internal/server/handler_close.go`) — already called by
-  `api.closeSession(tabId)` on tab close. That handler also has a
-  close-pending path when a turn is in flight, so shell teardown must run on
-  every path that actually releases the session. Backstops: an idle timeout
-  (30 min, matching `defaultSessionIdleTimeout`) and server shutdown.
+  `api.closeSession(tabId)` on tab close. The shell has no in-flight-turn
+  dependency, so it is closed **unconditionally and immediately** in that
+  handler (before the agent release / close-pending branching), not threaded
+  through `drainPendingClose`. Backstops: an idle timeout (30 min, matching
+  `defaultSessionIdleTimeout`) and server shutdown.
 - One command at a time per key (mutex + FIFO queue). Concurrent `!` commands
   from two tabs of the same session serialize rather than interleave.
 
@@ -90,27 +102,52 @@ A **persistent, per-chat-session shell** for `!` commands so that:
   - `PROMPT='' RPROMPT='' PROMPT2='' PROMPT_EOL_MARK=''`;
   - `HISTFILE=; unset HISTFILE; unsetopt inc_append_history share_history`
     (zsh) / `set +o history` (bash);
+  - neutralise rc-installed hooks, which defining `precmd()` alone does not
+    remove: `precmd_functions=() preexec_functions=(); unset -f preexec
+    2>/dev/null` (zsh; `add-zsh-hook` users such as starship, powerlevel10k,
+    iTerm2 shell integration and direnv would otherwise print into every
+    result) / `trap - DEBUG` (bash). `chpwd_functions` are left alone: a `cd`
+    hook is user-intended output;
   - install the completion-marker hook:
     - zsh: `precmd() { local st=$?; print -r -- "\n__OCODE_DONE_<nonce>__ $st $PWD" }`
       (capture `$?` first — entering the function is itself a command);
     - bash: `PROMPT_COMMAND='printf "\n__OCODE_DONE_<nonce>__ %s %s\n" "$?" "$PWD"'`
   - then one synchronizing sentinel, drained before the session is usable.
 - **`Run(ctx, command) -> (Result, cwd, error)`**:
-  1. write `command` + `\n` to the master;
+  1. write the command **wrapped as a single shell unit** to the master:
+     `eval "$(cat <<'__OCODE_CMD_<nonce>__'` + newline + `command` + newline +
+     `__OCODE_CMD_<nonce>__` + newline + `)"` + newline. The composer allows
+     Shift+Enter, so `command` may hold several complete lines; unwrapped, each
+     line would fire `precmd` and emit its own marker, and `Run` would return
+     at the first one while the rest leaked into the next `Run`. The heredoc
+     makes the shell consume the whole text as one command, so exactly one
+     marker follows, and `$?` is `eval`'s status, i.e. the last line's. The
+     quoted delimiter means no expansion happens in the heredoc itself; `eval`
+     then parses the text exactly as typed. A command whose text contains the
+     delimiter line is rejected with an error before anything is written;
   2. read until the marker line (or ctx deadline);
-  3. parse exit status and cwd; strip the marker, residual ANSI, and one
-     leading/trailing blank line;
+  3. parse exit status and cwd — the marker line is `<marker> <status> <rest>`
+     and **everything after the status is the cwd**, so paths with spaces
+     survive; strip the marker, residual ANSI, and one leading/trailing blank
+     line;
   4. return combined output + exit code + cwd.
 - Emitting the marker from the shell's own prompt hook (rather than appending an
-  epilogue to the command) is what makes multi-line commands and continuations
-  terminate correctly, and it reports the shell's real `$?`.
+  epilogue to the command) is what reports the shell's real `$?` and keeps the
+  framing independent of the command's syntax.
 
-### Why the marker must come from the prompt hook
+### Why the marker must come from the prompt hook, and why the heredoc wrap
 
 Appending `; printf …` to the user's command breaks on trailing `&&`, an open
 quote, a heredoc, or a line continuation. The prompt hook fires whenever the
 shell finishes a command and is ready for the next, so framing is independent of
 the command's syntax.
+
+The hook alone does not make incomplete input safe: a trailing `&&` or an open
+quote leaves the shell waiting for a continuation line, no marker arrives, and
+the command only ends when the 600s timeout fires. The heredoc/`eval` wrap
+turns that into an immediate `eval` syntax error with a non-zero `$?` and a
+prompt (marker) right after, and it is also what collapses a multi-line
+command into one marker (see `Run` step 1).
 
 ### Pty-cleanliness matrix (the cost of Approach B)
 
@@ -142,9 +179,12 @@ deliberately off; the terminal panel remains the place for a full-color session.
 
 - `POST /api/shell` body gains `session` (opaque key) and an optional
   `reset: true`, which closes any existing shell for that key before running
-  the command; response gains `cwd`.
+  the command; response gains `cwd` on **every** path: the persistent shell's
+  `$PWD`, the `workDir` the one-shot fallback ran in, and the remote path for
+  `host` requests — so the client never has to default a missing field.
 - `api.shellCommand(command, workDir, host, session)`; `useChat.executeShell`
-  passes the tab id.
+  passes the tab id. `reset` is a server-side flag only in v1: nothing in the
+  web client sends it, so the client signature does not carry it.
 - The `!` result message renders the returned cwd (e.g. a `# cwd: /tmp` line)
   so a leaked `cd` is visible rather than silent.
 
@@ -173,6 +213,15 @@ deliberately off; the terminal panel remains the place for a full-color session.
   respawned, next command works.
 - **Serialization**: two concurrent requests on one key run sequentially and
   both return correct results.
+- **Multi-line**: a two-line command returns both lines' output in one result
+  and the next `Run` is clean; an open-quote command returns a non-zero exit
+  promptly (no timeout).
+- **rc hooks**: a test rc that registers a `precmd`/`preexec` hook via
+  `add-zsh-hook` produces no hook output in the result.
+- **Project switch**: a request with a different `workDir` runs there and
+  reports it as `cwd`.
+- **Rekey**: after `/reset-id`, a `!` under the new id sees the old shell's
+  state.
 - **Lifecycle**: `POST /api/sessions/{id}/close` closes the shell; idle timeout
   reaps it; shutdown closes all.
 - **Fallback**: pty creation failure falls back to one-shot `shellpkg.Run`.

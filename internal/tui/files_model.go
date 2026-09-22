@@ -1233,13 +1233,13 @@ func (m filesModel) updateFuzzy(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 	case "backspace":
 		if len(m.fuzzyQuery) > 0 {
 			m.fuzzyQuery = m.fuzzyQuery[:len(m.fuzzyQuery)-1]
-			m.fuzzyResults = fuzzyFilter(m.allPaths, m.fuzzyQuery)
+			m.fuzzyResults = fuzzyFilterPaths(m.allPaths, m.fuzzyQuery)
 			m.fuzzyCursor = 0
 		}
 	default:
 		if len(msg.Text) > 0 {
 			m.fuzzyQuery += msg.Text
-			m.fuzzyResults = fuzzyFilter(m.allPaths, m.fuzzyQuery)
+			m.fuzzyResults = fuzzyFilterPaths(m.allPaths, m.fuzzyQuery)
 			m.fuzzyCursor = 0
 		}
 	}
@@ -2411,7 +2411,7 @@ func (m filesModel) fuzzyPopupView(width, height int, styles Styles) string {
 	// Ensure results are up to date
 	results := m.fuzzyResults
 	if results == nil {
-		results = fuzzyFilter(m.allPaths, m.fuzzyQuery)
+		results = fuzzyFilterPaths(m.allPaths, m.fuzzyQuery)
 	}
 
 	if len(results) == 0 {

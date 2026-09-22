@@ -11,7 +11,8 @@ import {
 } from "../ui/command";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../ui/dialog";
 import { apiPath, authHeaders } from "../../api/client";
-import { parseKeywords, matchesKeywords } from "../../lib/keywordFilter";
+import { parseKeywords, matchesKeywords, scoreMatch } from "../../lib/keywordFilter";
+import { compareByShortestPath } from "../../lib/filePathOrder";
 import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles, showHiddenFilesProjectKey } from "./showHiddenFilesPersistence";
 
 interface FileNode {
@@ -105,8 +106,17 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath, pro
 
   const keywords = useMemo(() => parseKeywords(query), [query]);
   const filteredFiles = useMemo(() => {
-    if (keywords.length === 0) return files;
-    return files.filter((p) => matchesKeywords(p, keywords));
+    // Unfiltered: shortest path first so root-level files surface above deep ones.
+    if (keywords.length === 0) return [...files].sort(compareByShortestPath);
+    // Filtered: relevance first, then shortest path as the tiebreaker.
+    return files
+      .filter((p) => matchesKeywords(p, keywords))
+      .sort((a, b) => {
+        const scoreA = scoreMatch(a, keywords);
+        const scoreB = scoreMatch(b, keywords);
+        if (scoreA !== scoreB) return scoreB - scoreA;
+        return compareByShortestPath(a, b);
+      });
   }, [files, keywords]);
 
   const listRef = useRef<HTMLDivElement>(null);

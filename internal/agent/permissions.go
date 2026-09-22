@@ -5961,11 +5961,45 @@ func envVarPermissionRequest(args json.RawMessage, command, resolved string, isS
 // permissions.auto.min_confidence overrides it.
 const autoJudgeMinConfidenceDefault = 0.85
 
+// configuredAutoJudgeMinConfidence returns the explicit permissions.auto
+// min_confidence and whether it was set (a positive value). Both the normal
+// and opaque floor resolvers defer to it whenever it is present.
+func (a *Agent) configuredAutoJudgeMinConfidence() (float64, bool) {
+	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.MinConfidence > 0 {
+		return a.config.Ocode.Permissions.Auto.MinConfidence, true
+	}
+	return 0, false
+}
+
 // resolveAutoJudgeMinConfidence returns the configured confidence floor, or the
 // shared default when unset. One policy value, one resolver.
 func (a *Agent) resolveAutoJudgeMinConfidence() float64 {
-	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.MinConfidence > 0 {
-		return a.config.Ocode.Permissions.Auto.MinConfidence
+	if v, ok := a.configuredAutoJudgeMinConfidence(); ok {
+		return v
 	}
 	return autoJudgeMinConfidenceDefault
+}
+
+// autoJudgeOpaqueMinConfidenceDefault is the lower floor the auto-permission
+// judge may clear for an OPAQUE request: one whose effects the judge itself
+// could not establish and labelled with the truncated_or_unknown concern (a
+// command head that is an undefined variable — "$g --version" — an unreadable
+// script, or a flag whose effect cannot be determined). Opaque requests are
+// exactly where a fixed 0.85 bar forwards correct, ordinary development
+// commands to the human, so they clear 0.75 instead. It stays above TypeSafe's
+// own "genuinely unsure / do not act" band (confidence < 0.5), so a coin-flip
+// verdict still fails closed. It is a DEFAULT only: an explicit
+// min_confidence always governs (see resolveAutoJudgeOpaqueMinConfidence).
+const autoJudgeOpaqueMinConfidenceDefault = 0.75
+
+// resolveAutoJudgeOpaqueMinConfidence returns the floor for an opaque request.
+// An explicitly configured min_confidence always governs — stricter (0.95) or
+// more permissive (0.5) alike — so the opaque relaxation can never silently
+// loosen the user's own bar. Only an unset value falls back to the opaque
+// default.
+func (a *Agent) resolveAutoJudgeOpaqueMinConfidence() float64 {
+	if v, ok := a.configuredAutoJudgeMinConfidence(); ok {
+		return v
+	}
+	return autoJudgeOpaqueMinConfidenceDefault
 }

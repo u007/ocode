@@ -2,19 +2,23 @@ import { useEffect, useState } from "react";
 import FileEditor from "../Files/FileEditor";
 import { api } from "../../api/client";
 import { previewKindForPath } from "../../lib/previewKind";
+import { languageForFile } from "../../lib/editorLanguage";
 import { Button } from "../ui/button";
 
-function languageFor(path: string): string {
-  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
-  const map: Record<string, string> = {
-    ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
-    go: "go", py: "python", json: "json", yaml: "yaml", yml: "yaml",
-    html: "html", css: "css", md: "markdown", sh: "shell", sql: "sql",
-  };
-  return map[ext] ?? "plaintext";
-}
-
-export default function TextViewer({ path, projectRoot, projectHost }: { path: string; projectRoot?: string; projectHost?: string }) {
+export default function TextViewer({
+  path,
+  projectRoot,
+  projectHost,
+  revision,
+}: {
+  path: string;
+  projectRoot?: string;
+  projectHost?: string;
+  /** Live-refresh revision from the sidebar PreviewHost. Refetched SILENTLY
+   *  (no loading flash) when it changes — but never while the reader has
+   *  unsaved edits, which would clobber their draft. */
+  revision?: number;
+}) {
   const [content, setContent] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [dirty, setDirty] = useState(false);
@@ -46,6 +50,29 @@ export default function TextViewer({ path, projectRoot, projectHost }: { path: s
       cancelled = true;
     };
   }, [path, projectRoot, projectHost]);
+
+  // Live refresh on revision bumps (AI edited the file mid-turn). Skipped
+  // while `dirty`: overwriting the draft would destroy the reader's unsaved
+  // edits. The next revision after they save/reload picks the new disk state.
+  useEffect(() => {
+    if (revision === undefined || revision === 0 || dirty) return;
+    let cancelled = false;
+    api
+      .getFileContent(path, projectRoot, projectHost)
+      .then((c) => {
+        if (cancelled || dirty) return;
+        setContent(c.content);
+        setDraft(c.content);
+        setIsBinary(c.is_binary);
+        setError(null);
+      })
+      .catch(() => {
+        // Keep the last good content on a transient refresh failure.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [revision, dirty, path, projectRoot, projectHost]);
 
   const save = async () => {
     setSaving(true);
@@ -114,7 +141,7 @@ export default function TextViewer({ path, projectRoot, projectHost }: { path: s
           projectRoot={projectRoot}
           projectHost={projectHost}
           content={content}
-          language={languageFor(path)}
+          language={languageForFile(path)}
           onChange={(v) => {
             setDraft(v);
             setDirty(v !== content);

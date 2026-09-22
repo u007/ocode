@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   getGitWorkspace: vi.fn(),
   gitLog: vi.fn(),
   gitHunk: vi.fn(),
+  gitDiscard: vi.fn(),
   gitStage: vi.fn(),
   gitUnstage: vi.fn(),
   gitCommit: vi.fn(),
@@ -117,6 +118,7 @@ describe("GitPanel", () => {
     mocks.getGitWorkspace.mockResolvedValue(workspace);
     mocks.gitLog.mockResolvedValue([]);
     mocks.gitHunk.mockResolvedValue(workspace);
+    mocks.gitDiscard.mockResolvedValue(workspace.status);
     mocks.gitStage.mockResolvedValue(workspace.status);
     mocks.gitUnstage.mockResolvedValue(workspace.status);
     mocks.gitCommit.mockResolvedValue(workspace.status);
@@ -128,6 +130,7 @@ describe("GitPanel", () => {
     mocks.gitStashApply.mockResolvedValue(workspace);
     mocks.gitStashDrop.mockResolvedValue([]);
     mocks.gitStash.mockResolvedValue(workspace.status);
+    mocks.gitDiscard.mockResolvedValue(workspace.status);
     mocks.gitStatusHandlers.length = 0;
     window.localStorage.clear();
   });
@@ -422,6 +425,7 @@ describe("GitPanel stash", () => {
     mocks.gitStashApply.mockResolvedValue(workspace);
     mocks.gitStashDrop.mockResolvedValue([]);
     mocks.gitStash.mockResolvedValue(workspace.status);
+    mocks.gitDiscard.mockResolvedValue(workspace.status);
     mocks.gitStatusHandlers.length = 0;
     window.localStorage.clear();
   });
@@ -494,5 +498,113 @@ describe("GitPanel stash", () => {
     await waitFor(() =>
       expect(mocks.gitStash).toHaveBeenCalledWith("wip: my stash", [], "/proj", undefined, true),
     );
+  });
+});
+
+describe("GitPanel per-file stash & multi-select", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getGitWorkspace.mockResolvedValue(workspace);
+    mocks.gitLog.mockResolvedValue([]);
+    mocks.gitStashList.mockResolvedValue([]);
+    mocks.gitStashShow.mockResolvedValue([]);
+    mocks.gitStashApply.mockResolvedValue(workspace);
+    mocks.gitStashDrop.mockResolvedValue([]);
+    mocks.gitStash.mockResolvedValue(workspace.status);
+    mocks.gitDiscard.mockResolvedValue(workspace.status);
+    mocks.gitStatusHandlers.length = 0;
+    window.localStorage.clear();
+  });
+
+  it("offers 'Stash file' on an unstaged row and stashes only that path", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+
+    const menu = await openContextMenuRow("src/unstaged.ts");
+    fireEvent.click(within(menu).getByRole("button", { name: "Stash file" }));
+
+    fireEvent.change(await screen.findByPlaceholderText("Stash message (optional)"), {
+      target: { value: "park this one" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Stash" }));
+
+    await waitFor(() =>
+      expect(mocks.gitStash).toHaveBeenCalledWith(
+        "park this one",
+        ["src/unstaged.ts"],
+        "/proj",
+        undefined,
+        true,
+      ),
+    );
+  });
+
+  it("offers 'Stash file' on a staged row too", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/staged.ts");
+
+    const menu = await openContextMenuRow("src/staged.ts");
+    expect(within(menu).getByRole("button", { name: "Stash file" })).toBeTruthy();
+  });
+
+  it("cmd-click multi-selects rows and stashes the whole selection", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+
+    // Modifier clicks build the selection without changing the diff pane.
+    fireEvent.click(screen.getByText("src/unstaged.ts"), { metaKey: true });
+    fireEvent.click(screen.getByText("src/untracked.txt"), { metaKey: true });
+    expect(await screen.findByText("2 selected ✕")).toBeTruthy();
+
+    const menu = await openContextMenuRow("src/unstaged.ts");
+    fireEvent.click(within(menu).getByRole("button", { name: "Stash 2 files" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Stash" }));
+
+    await waitFor(() =>
+      expect(mocks.gitStash).toHaveBeenCalledWith(
+        "",
+        ["src/unstaged.ts", "src/untracked.txt"],
+        "/proj",
+        undefined,
+        true,
+      ),
+    );
+  });
+
+  it("discards the whole multi-selection, deleting untracked members", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+
+    fireEvent.click(screen.getByText("src/unstaged.ts"), { metaKey: true });
+    fireEvent.click(screen.getByText("src/untracked.txt"), { metaKey: true });
+    expect(await screen.findByText("2 selected ✕")).toBeTruthy();
+
+    const menu = await openContextMenuRow("src/unstaged.ts");
+    fireEvent.click(within(menu).getByRole("button", { name: "Discard 2 files" }));
+
+    // Tracked members revert in one bulk call; the untracked one is removed
+    // with the whole-file discard hunk (git cannot restore an untracked file).
+    await waitFor(() =>
+      expect(mocks.gitDiscard).toHaveBeenCalledWith(["src/unstaged.ts"], "/proj", undefined),
+    );
+    expect(mocks.gitHunk).toHaveBeenCalledWith(
+      { path: "src/untracked.txt", hunk_index: 0, action: "discard", staged: false },
+      "/proj",
+      undefined,
+    );
+  });
+
+  it("shift-click selects a range, and shift-clicking it again deselects it", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+
+    fireEvent.click(screen.getByText("src/unstaged.ts"));
+    expect(await screen.findByText("1 selected ✕")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("src/untracked.txt"), { shiftKey: true });
+    expect(await screen.findByText("2 selected ✕")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("src/untracked.txt"), { shiftKey: true });
+    await waitFor(() => expect(screen.queryByText(/\d+ selected/)).toBeNull());
   });
 });

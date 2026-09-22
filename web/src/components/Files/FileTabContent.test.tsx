@@ -151,6 +151,16 @@ describe("FileTabContent markdown modes", () => {
     expect(screen.getByRole("group", { name: /markdown view mode/i })).toBeInTheDocument();
   });
 
+  it("treats .mdx as markdown too (MDX renders as Markdown)", async () => {
+    render(<FileTabContent path="docs/page.mdx" content="# Hi\n\n<Chart />" />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    const group = screen.getByRole("group", { name: /markdown view mode/i });
+    expect(group).toBeInTheDocument();
+    // Switching to Preview renders the same markdown surface the .md path uses.
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    expect(screen.getByTestId("preview-markdown")).toBeInTheDocument();
+  });
+
   it("adds no markdown mode switch to code or plain-text tabs", async () => {
     render(<FileTabContent path="src/main.go" content="package main" />);
     await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());

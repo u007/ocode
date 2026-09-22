@@ -20,6 +20,12 @@ const (
 	HarnessCodex      = "codex"
 )
 
+// opencodeVersion is the opencode release version the opencode harness
+// presents. Real opencode ships 1.x (packages/opencode/package.json); the
+// version is baked into its User-Agent as opencode/<channel>/<version>/cli.
+// Keep in loose sync when cloning upstream behavior changes.
+const opencodeVersion = "1.18.32"
+
 // harnessPreset describes the outbound fingerprints one harness presents.
 // Providers gate models/rate limits on these signals: User-Agent, OpenRouter
 // attribution (HTTP-Referer / X-Title), Anthropic beta flags, and the
@@ -44,9 +50,27 @@ func harnessPresets() map[string]harnessPreset {
 			Title:     "ocode",
 		},
 		HarnessOpencode: {
-			UserAgent: "opencode/1.0.0",
-			Referer:   "https://opencode.ai",
+			// Real opencode's UA shape is opencode/<channel>/<version>/<client>
+			// (packages/opencode/src/installation/index.ts userAgent()); release
+			// builds stamp channel "latest". The trailing "/cli" is the client
+			// field — CLI and desktop builds differ only here.
+			UserAgent: "opencode/latest/" + opencodeVersion + "/cli",
+			Referer:   "https://opencode.ai/",
 			Title:     "opencode",
+			// Real opencode sends this exact pair on Anthropic Messages
+			// requests (packages/opencode/src/provider/provider.ts custom
+			// loader for @ai-sdk/anthropic). ocode's own interleaved-thinking
+			// flag is already in the pair, so the merge is idempotent;
+			// fine-grained-tool-streaming is the delta.
+			AnthropicBeta: "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+			// X-Source is llmgateway's attribution header (real opencode sends
+			// it alongside HTTP-Referer/X-Title); X-BILLING-INVOKE-ORIGIN is
+			// nvidia's billing attribution, which real opencode sets to
+			// "OpenCode". Both are ignored by other providers.
+			ExtraHeaders: map[string]string{
+				"X-Source":                "opencode",
+				"X-BILLING-INVOKE-ORIGIN": "OpenCode",
+			},
 		},
 		HarnessClaudeCode: {
 			UserAgent:     "claude-cli/2.1.0 (external, cli)",
@@ -204,6 +228,12 @@ func applyHarnessHeaders(req *http.Request, provider string) {
 // accepts an opt-in metadata.user_id; OpenAI chat/completions and Responses
 // accept a free-form metadata map. Only set when the caller has not already
 // provided the key so explicit plugin values win.
+//
+// Exception: the opencode harness stamps NOTHING. Real opencode sends no
+// metadata.user_id / metadata.harness on any provider — its conversation
+// identity travels in headers (x-opencode-* for zen, x-session-affinity +
+// X-Session-Id elsewhere). A fabricated metadata map is a fingerprint
+// mismatch, not a match.
 func applyHarnessPayload(payload map[string]interface{}, provider string) {
 	if payload == nil {
 		return
@@ -211,6 +241,9 @@ func applyHarnessPayload(payload map[string]interface{}, provider string) {
 	harness := ActiveHarness()
 	if harness == "" {
 		harness = HarnessOcode
+	}
+	if harness == HarnessOpencode {
+		return
 	}
 	switch {
 	case provider == "anthropic" || strings.HasPrefix(provider, "opencode"):

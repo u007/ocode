@@ -529,7 +529,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/ocr` | | Show OCR status, toggle OCR, or set the OCR model | |
 | `/computer` | | Show computer-use status or enable/disable desktop control | |
 | `/image` | | Show imagegen status, toggle image generation, or set model | |
-| `/fake-agent` | | Show or switch the harness identity (default ocode) | |
+| `/fake-agent` | | Show or switch the harness identity (default ocode). `opencode` presents real opencode's wire fingerprint: UA `opencode/latest/<ver>/cli`, HTTP-Referer/X-Title/X-Source attribution, `x-session-affinity`+`X-Session-Id` on non-zen providers, Anthropic interleaved+fine-grained-tool-streaming beta pair, no fabricated metadata, and opencode identity lines in the system prompt | |
 | `/tools` | `/tool` | Detect/install CLI utilities (fd, rg, fzf, eza, bat, grep) | |
 | `/agent` | | Switch agent (build, plan, review, debug, docs) | |
 | `/search` | `/find` | Find a message by keyword (opens in-chat find bar) | |

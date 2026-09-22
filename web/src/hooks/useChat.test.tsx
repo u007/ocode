@@ -126,3 +126,43 @@ describe("useChat.sendMessage pending-ask recovery", () => {
     expect(result.current.chat.pendingPermission).toBeNull();
   });
 });
+
+describe("useChat.hasConversation", () => {
+  // The composer hides its quick-action strip (Compact / Continue / Recap) on
+  // a new or empty session; this flag is the single source for that decision,
+  // so a brand-new session must read false and anything with content true.
+  it("is false for an untouched session and true once messages exist", () => {
+    const { result } = setup();
+    expect(result.current.chat.hasConversation).toBe(false);
+    act(() => result.current.dispatch({
+      type: "SET_MESSAGES",
+      sessionId: "sess-1",
+      messages: [{ role: "user", content: "hello" }],
+    }));
+    expect(result.current.chat.hasConversation).toBe(true);
+  });
+
+  it("counts a streaming live buffer before any snapshot lands", () => {
+    const { result } = setup();
+    expect(result.current.chat.hasConversation).toBe(false);
+    act(() => result.current.dispatch({
+      type: "LIVE_DELTA",
+      sessionId: "sess-1",
+      kind: "text",
+      delta: "hi",
+    }));
+    expect(result.current.chat.hasConversation).toBe(true);
+  });
+
+  it("returns to false when a snapshot arrives with no messages", () => {
+    const { result } = setup();
+    act(() => result.current.dispatch({
+      type: "SET_MESSAGES",
+      sessionId: "sess-1",
+      messages: [{ role: "user", content: "hello" }],
+    }));
+    expect(result.current.chat.hasConversation).toBe(true);
+    act(() => result.current.dispatch({ type: "SET_MESSAGES", sessionId: "sess-1", messages: [] }));
+    expect(result.current.chat.hasConversation).toBe(false);
+  });
+});

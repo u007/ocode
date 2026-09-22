@@ -27,8 +27,34 @@
 
 
 
+
+## 2026-09-22
+
+* **Creation**: File search result ordering: shortest path first ([concepts/file-search-shortest-path-ordering.md](/concepts/file-search-shortest-path-ordering.md))
+* **Update**: Web Chat Composer Input History (↑/↓ Navigation) ([concepts/web-chat-input-history.md](/concepts/web-chat-input-history.md))
+* **Update**: Web UI Global Keyboard Shortcuts ([concepts/web-keyboard-shortcuts.md](/concepts/web-keyboard-shortcuts.md))
+* **Update**: Web UI Global Keyboard Shortcuts ([concepts/web-keyboard-shortcuts.md](/concepts/web-keyboard-shortcuts.md))
+* **Update**: Web UI Global Keyboard Shortcuts ([concepts/web-keyboard-shortcuts.md](/concepts/web-keyboard-shortcuts.md))
+* **Update**: Web UI Global Keyboard Shortcuts ([concepts/web-keyboard-shortcuts.md](/concepts/web-keyboard-shortcuts.md))
+* **Creation**: Web Chat Composer Input History (↑/↓ Navigation) ([concepts/web-chat-input-history.md](/concepts/web-chat-input-history.md))
+* **Update**: Interrupted Turn Notice ([concepts/interrupted-turn-notice.md](/concepts/interrupted-turn-notice.md))
+* **Creation**: Interrupted Turn Notice ([concepts/interrupted-turn-notice.md](/concepts/interrupted-turn-notice.md))
+* **Creation**: MDX Preview: Rendered as Markdown, Never Evaluated ([gotchas/mdx-preview-not-evaluated.md](/gotchas/mdx-preview-not-evaluated.md))
+* **Update**: Multi-Use Preview — Design Spec (Draft, 2026-09-10) ([superpowers/specs/2026-09-10-preview-multipurpose-design.md](/superpowers/specs/2026-09-10-preview-multipurpose-design.md))
+* **Creation**: Main model pick also sets the global default ([gotchas/main-model-pick-also-sets-global-default.md](/gotchas/main-model-pick-also-sets-global-default.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Deprecation**: Main model pick also sets the global default: Superseded — created at wrong depth (docs/docs/) by doc_write which prepends docs/; correct file written at docs/gotchas/ ([docs/gotchas/main-model-pick-also-sets-global-default.md](/docs/gotchas/main-model-pick-also-sets-global-default.md))
+* **Creation**: Main model pick also sets the global default ([docs/gotchas/main-model-pick-also-sets-global-default.md](/docs/gotchas/main-model-pick-also-sets-global-default.md))
 ## 2026-09-21
 
+* **Update**: Auto-Permission Enforced Categories ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Update**: Auto-Permission Enforced Categories ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Creation**: Persistent per-session shell for exclamation-mark commands ([concepts/persistent-shell-session.md](/concepts/persistent-shell-session.md))
+* **Update**: Git stash UI: list, per-file restore, delete ([concepts/git-stash-ui.md](/concepts/git-stash-ui.md))
+* **Update**: Web Composer Quick-Actions Strip ([concepts/web-composer-quick-actions.md](/concepts/web-composer-quick-actions.md))
+* **Creation**: Session-tagged snapshot: override base fields but recompute ALL derived fields ([gotchas/session-snapshot-stale-derived-fields.md](/gotchas/session-snapshot-stale-derived-fields.md))
+* **Deprecation**: Session-tagged snapshot: override base fields but recompute ALL derived fields: Created at wrong path (docs/docs/... due to double-prefix). Superseded by the correctly placed version at gotchas/session-snapshot-stale-derived-fields.md ([docs/gotchas/session-snapshot-stale-derived-fields.md](/docs/gotchas/session-snapshot-stale-derived-fields.md))
+* **Creation**: Session-tagged snapshot: override base fields but recompute ALL derived fields ([docs/gotchas/session-snapshot-stale-derived-fields.md](/docs/gotchas/session-snapshot-stale-derived-fields.md))
 * **Update**: Auto-Permission Enforced Categories ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
 * **Update**: Desktop subprocess PATH trap — bare CLI names fail under Finder/Dock-launched .app ([gotchas/desktop-subprocess-path-trap.md](/gotchas/desktop-subprocess-path-trap.md))
 * **Update**: Advisor Claude Code CLI backend on web/desktop ([concepts/advisor-claude-code-backend.md](/concepts/advisor-claude-code-backend.md))

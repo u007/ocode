@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Auto-Permission Enforced Categories
-description: '''Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, and the deterministic Go safety boundary that still applies.'''
+description: 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, and the opaque-floor override for truncated_or_unknown.'
 resource: internal/agent/permission_typesafe.go
 tags:
   - permissions
@@ -12,23 +12,15 @@ tags:
   - settings
   - web
   - interpreter
-timestamp: 2026-09-21T06:45:33Z
+timestamp: 2026-09-21T10:49:52Z
 ---
----
-type: Concept
-title: Auto-Permission Enforced Categories
-description: 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, and the deterministic Go safety boundary that still applies.'
-resource: internal/agent/permission_typesafe.go
-tags:
-  - permissions
-  - auto-permission
-  - typesafe
-  - jev
-  - config
-  - settings
-  - web
-  - interpreter
-timestamp: 2026-09-21T05:33:15Z
+# Auto-Permission Enforced Categories
+
+**Type:** Concept  
+**Description:** 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, and the opaque-floor override for truncated_or_unknown.'  
+**Resource:** internal/agent/permission_typesafe.go  
+**Tags:** permissions, auto-permission, typesafe, jev, config, settings, web, interpreter  
+
 ---
 ## Decision
 
@@ -96,6 +88,21 @@ Several categories carry a UI `note` (from `relaxableConcernNotes`, kept next to
 | `system_or_git_history` | Relaxes what reached the judge; hard-blocked git forms and a force-push never get here at all. |
 | `truncated_or_unknown` | Allows a call even when the judge cannot tell what it does, including interpreter sources with unresolved effects or truncated source. |
 
+## Opaque floor (TypeSafe/Jev path)
+
+Some requests are **opaque**: the command head is something the model cannot determine the effect of — a command whose first token is an undefined shell variable (e.g. `$g --version`), an interpreter script whose source cannot be read, or any other call whose effects cannot be determined. When `askPermissionModelTypesafe` returns a concern of `truncated_or_unknown` for such a request, the confidence floor for an `allow` verdict changes.
+
+**The opaque floor is `0.75` as a DEFAULT — an explicitly configured `min_confidence` always governs:**
+
+- If `permissions.auto.min_confidence` is **unset**, the effective floor becomes the opaque default `0.75` (the normal default `0.85` is relaxed for opaque requests).
+- If `min_confidence` is configured (any positive value — `0.70`, `0.85`, `0.95`), the configured value governs the opaque request too. A permissive configured value is never raised and a stricter configured value is never lowered: the opaque relaxation can never silently change the user's own bar.
+
+This is the **only** category that triggers the opaque relaxation. Every other concern (`outside_allowed_roots`, `destructive`, `secrets`, `banned_prefix`, `network`, `subprocess_or_dynamic_code`, `system_or_git_history`) keeps the normal `permissions.auto.min_confidence` floor (default `0.85`). The opaque relaxation does not apply when those categories are the concern, even if `truncated_or_unknown` is also present (the relaxation applies when `truncated_or_unknown` is the judge's concern answer, not when it merely appears elsewhere).
+
+**What the opaque floor does and does not do:** it only lowers the threshold for an `allow` verdict — a `deny` from the judge still defers to the human in full. The concern answer `truncated_or_unknown` does **not** decide the verdict; it only selects which floor applies. Deterministic `verifyAutoGrant` still runs after the floor check, so a hard-blocked command, dangerous `rm`, or other Go guard refusal still wins regardless of the lower floor.
+
+`resolveAutoJudgeOpaqueMinConfidence()` (`internal/agent/permissions.go`) returns the configured value when `permissions.auto.min_confidence` is set, and the `autoJudgeOpaqueMinConfidenceDefault = 0.75` constant only when it is unset.
+
 ## UI
 
 `PermissionsForm.tsx` loads the catalog and the auto-permission config in parallel. Each category is a checkbox with `aria-label="Enforce <key>"`; **ticked = enforced**, and saving writes `relaxed_concerns` = the **unticked** keys. `All` / `None` buttons set the array to `[]` / every key. The block renders a server-unavailable fallback when the catalog is empty.
@@ -105,6 +112,7 @@ For the interpreter path the judge prompt gained a guidance bullet (opt-out cate
 ## Tests
 
 - `internal/agent/permission_relaxed_concerns_test.go` — catalog/rubric parity, clause emptiness when nothing is relaxed, wire state + both question instructions, relaxed-deny honoured, deny stands when not attributable, out-of-scope guard still wins, dangerous rm refused on both the relaxed-deny and plain judge-allow routes (`TestRelaxedDestructiveCannotGrantDangerousRm`), chat prompt carries the section.
+- `internal/agent/permission_typesafe_opaque_test.go` — opaque allow@0.80 grants; boundary 0.75 grants / 0.74 defers; none/secrets/network at 0.80 still defer at 0.85; a configured 0.95 still governs an opaque allow that would otherwise clear 0.75; resolver table (unset uses the 0.75 default, 0.5/0.75/0.85/0.95 configured values all govern); mutation-verified.
 - `internal/agent/permission_interpreter_relaxed_test.go` — per-category strict-refuses / relaxed-allows table (plus "a different category must not allow it"), safety-floor subtests (model decision ask, confidence floor, hard-blocked raw command, hard-blocked/harmful subprocesses), config wiring via the `verifyInterpreterEffectsWith` wrapper, and the end-to-end grant rule through the `OnPermissionGrant` sink (`TestInterpreterRelaxedAllowDoesNotPersistGrant` — a relaxation-load-bearing allow does **not** persist a durable grant; `TestInterpreterStrictPathStillRefusesAndPersists` — strict refusal refuses and a clean strict allow persists its grant). Two mutations were verified to fail: removing the network relaxation, and letting relaxed grants persist.
 - `internal/config/relaxed_concerns_test.go` — round-trip, replace-not-merge, explicit-empty clear, nil-safety.
 - `internal/server/handler_config_test.go` — catalog endpoint and `permissions-auto` PUT round-trip.
@@ -112,7 +120,7 @@ For the interpreter path the judge prompt gained a guidance bullet (opt-out cate
 
 ## Related
 
-- Judge contract: the TypeSafe/Jev concern question plus the confidence floor `permissions.auto.min_confidence` (default `0.85`).
+- Judge contract: the TypeSafe/Jev concern answer does **not** decide the verdict — a `deny` still defers to the human. It only selects the confidence floor for an `allow` verdict: `truncated_or_unknown` → opaque floor `0.75` (`min(normal, 0.75)`), every other concern → `permissions.auto.min_confidence` (default `0.85`). Deterministic `verifyAutoGrant` runs after the floor check.
 - Design doc: `docs/superpowers/specs/2026-09-21-auto-permission-enforced-categories-design.md`.
 - Modes and how the auto-permission layer sits among them: [Sandbox Permission Mode](concepts/sandbox-permission-mode.md).
 - Shared Jev/TypeSafe vocabulary and confidence-floor conventions: [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md).

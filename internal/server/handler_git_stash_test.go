@@ -251,6 +251,55 @@ func TestGitStashPushIncludeUntracked(t *testing.T) {
 	}
 }
 
+// TestGitStashPushSelectedPaths covers the Git tab's per-file / multi-select
+// stash: `git stash push -- <pathspec>` must stash only the named files and
+// leave every other local modification in the working tree.
+func TestGitStashPushSelectedPaths(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	writeFile(t, filepath.Join(dir, "a.txt"), "base\n")
+	writeFile(t, filepath.Join(dir, "b.txt"), "base\n")
+	writeFile(t, filepath.Join(dir, "c.txt"), "base\n")
+	run(t, dir, "git", "add", "-A")
+	run(t, dir, "git", "commit", "-m", "init")
+
+	writeFile(t, filepath.Join(dir, "a.txt"), "base\na-changed\n")
+	writeFile(t, filepath.Join(dir, "b.txt"), "base\nb-changed\n")
+	writeFile(t, filepath.Join(dir, "c.txt"), "base\nc-changed\n")
+
+	h := gitStashHandler(t, dir)
+	rec := httptest.NewRecorder()
+	body := `{"paths":["a.txt","b.txt"],"message":"park a+b"}`
+	h.HandleGitStash(rec, httptest.NewRequest("POST", "/api/git/stash", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stash status = %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	// The two selected files revert to HEAD...
+	if got := readFileString(t, filepath.Join(dir, "a.txt")); got != "base\n" {
+		t.Errorf("a.txt after partial stash = %q, want HEAD content", got)
+	}
+	if got := readFileString(t, filepath.Join(dir, "b.txt")); got != "base\n" {
+		t.Errorf("b.txt after partial stash = %q, want HEAD content", got)
+	}
+	// ...while the unselected file keeps its local change.
+	if got := readFileString(t, filepath.Join(dir, "c.txt")); got != "base\nc-changed\n" {
+		t.Errorf("c.txt should be untouched by the partial stash, got %q", got)
+	}
+
+	// The stash entry must carry exactly the two selected files.
+	rec = httptest.NewRecorder()
+	h.HandleGitStashShow(rec, httptest.NewRequest("GET", "/api/git/stash/show?index=0", nil))
+	files := decodeBody[[]GitDiffFile](t, rec)
+	got := map[string]bool{}
+	for _, f := range files {
+		got[f.Path] = true
+	}
+	if !got["a.txt"] || !got["b.txt"] || got["c.txt"] {
+		t.Errorf("partial stash should hold a.txt+b.txt only, got %+v", files)
+	}
+}
+
 // TestRemoteGitStashOverFakeSSH exercises list/show/apply/drop through the
 // remote transport (fake ssh shim runs the commands locally).
 func TestRemoteGitStashOverFakeSSH(t *testing.T) {

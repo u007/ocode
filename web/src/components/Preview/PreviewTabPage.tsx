@@ -29,7 +29,7 @@ function PreviewTabPage({ projectRoot, projectHost }: { projectRoot?: string; pr
           projectHost={projectHost}
         />
       </aside>
-      <main className="flex-1 min-w-0 min-h-0 bg-background">
+      <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
         {!selected ? (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             Select a file to preview or edit.

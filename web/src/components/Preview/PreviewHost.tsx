@@ -7,6 +7,12 @@ import PreviewSurface from "./PreviewSurface";
 import LegacyOfficePane from "./LegacyOfficePane";
 import { dispatchOpenPreview } from "../../lib/previewKind";
 import { loadSidebarPreviewState, saveSidebarPreviewState, type SidebarPreviewState } from "./sidebarPreviewState";
+import { eventBus } from "../../lib/eventBus";
+import {
+  isMutatingTool,
+  mutatedPathsFromToolCall,
+  previewPathMutated,
+} from "../../lib/previewLiveMutations";
 
 type Surface = "browser" | "preview";
 
@@ -39,9 +45,13 @@ export default function PreviewHost({
   request,
   nonce,
   onConsumeActivation,
+  sessionId,
 }: {
   stateKey: StateKey;
   projectRoot?: string;
+  /** Active session id, used to route tool events on the SSE bus so the
+   *  previewed file refreshes live while the AI edits it. */
+  sessionId?: string | null;
   /** Fallback host for requests that don't carry their own (derived from
    *  the active project at the App boundary). */
   projectHost?: string;
@@ -70,6 +80,14 @@ export default function PreviewHost({
   const [page, setPage] = useState(() => Math.max(1, initial?.page ?? 1));
   const [osOpenState, setOsOpenState] = useState<string | null>(null);
   const lastNonceRef = useRef(0);
+  // Live-refresh revision: bumped whenever the active session's tool stream
+  // mutates the previewed file. Viewers (markdown/text/mmd) refetch on change;
+  // PDF/office viewers re-render from their own sources downstream.
+  const [revision, setRevision] = useState(0);
+  const revisionRef = useRef(0);
+  // Whether a turn is running (tool activity implies one) — viewers use this
+  // to re-arm tail-following while the AI keeps appending.
+  const [turnActive, setTurnActive] = useState(false);
 
   // New activation → show the file in the Preview tab, starting at the
   // requested page/slide. Legacy .doc/.ppt (see resolvePreviewDoc) land on
@@ -150,6 +168,51 @@ export default function PreviewHost({
     setDoc((d) => (d && !d.projectHost && projectHost ? { ...d, projectHost } : d));
   }, [projectHost]);
 
+  // ── Live refresh: watch the active session's tool stream ──
+  // When the AI mutates the previewed file mid-turn (tool_start carries the
+  // tool name + raw argument JSON), bump `revision` so the viewers refetch,
+  // and track turn state so tail-following can re-arm while it streams.
+  // Live view of the open doc for the event subscription below (the
+  // subscription must not resubscribe on every doc change, but path matching
+  // must always use the CURRENT doc — hence the ref).
+  const docRef = useRef<Doc | null>(null);
+  docRef.current = doc;
+  const rootRef = useRef(projectRoot);
+  rootRef.current = projectRoot;
+
+  useEffect(() => {
+    if (!sessionId) return;
+    const offStart = eventBus.on("tool_start", (env) => {
+      if (env.session_id && env.session_id !== sessionId) return;
+      const data = env.data as { tool?: string; command?: string };
+      if (!data?.tool) return;
+      // Any tool activity from this session means a turn is running — that is
+      // the tail-follow signal. Only MUTATING tools touching the previewed
+      // file bump the revision (viewers refetch).
+      setTurnActive(true);
+      if (!isMutatingTool(data.tool)) return;
+      const d = docRef.current;
+      const paths = mutatedPathsFromToolCall(data.tool, data.command);
+      if (d && previewPathMutated(d.path, paths, d.projectRoot ?? rootRef.current)) {
+        revisionRef.current += 1;
+        setRevision(revisionRef.current);
+      }
+    });
+    const offTurnDone = eventBus.on("turn_done", (env) => {
+      if (env.session_id && env.session_id !== sessionId) return;
+      setTurnActive(false);
+    });
+    const offTurnError = eventBus.on("turn_error", (env) => {
+      if (env.session_id && env.session_id !== sessionId) return;
+      setTurnActive(false);
+    });
+    return () => {
+      offStart();
+      offTurnDone();
+      offTurnError();
+    };
+  }, [sessionId]);
+
   const openWithOS = async (target?: string) => {
     const targetPath = target ?? doc?.path;
     // Legacy fallback keeps its own project root (multi-project windows);
@@ -197,7 +260,7 @@ export default function PreviewHost({
       </div>
 
       {surface === "browser" ? (
-        <div className="min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1 flex-col">
           <BrowserPanel key={stateKey} stateKey={stateKey} mode="side" />
         </div>
       ) : unsupported ? (
@@ -229,7 +292,7 @@ export default function PreviewHost({
               Copy path
             </button>
           </div>
-          <div className="min-h-0 flex-1">
+          <div className="flex min-h-0 flex-1 flex-col">
           <PreviewSurface
             path={doc.path}
             kind={doc.kind}
@@ -240,6 +303,8 @@ export default function PreviewHost({
             slide={page}
             onSlideChange={setPage}
             onOpenFile={openLinked}
+            revision={revision}
+            followTail={turnActive}
           />
           </div>
         </div>

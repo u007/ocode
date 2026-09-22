@@ -40,6 +40,16 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     const slice = getSessionSlice(s, sessionId);
     return slice.isStreaming || slice.turnActive;
   });
+  // Whether this session has any conversation content yet — committed messages
+  // or an in-progress turn streaming into the live buffer. Drives the
+  // composer's quick-action strip (Compact / Continue / Recap), which is
+  // hidden on a brand-new (`new-*`) tab or an empty session: there is nothing
+  // to compact, nothing to continue, and nothing to recap. A narrow boolean
+  // selector so streamed deltas never re-render consumers.
+  const hasConversation = useChatSelector((s) => {
+    const slice = getSessionSlice(s, sessionId);
+    return slice.messages.length > 0 || slice.live.length > 0;
+  });
   const pendingPermission = useChatSelector(
     (s) => getSessionSlice(s, sessionId).pendingPermission,
   );
@@ -288,22 +298,28 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   // Execute a shell command directly (for ! prefix commands). A remote
   // project's command runs on its host through the host's own login shell;
   // `host` is omitted for local projects so the server keeps its local path.
+  // The tab id is passed as `session` so a local command runs in the tab's
+  // persistent shell, carrying env/aliases and cwd between commands; `cwd` in
+  // the result is the directory the command actually ran in.
   const executeShell = useCallback(
     async (
       command: string,
-    ): Promise<{ output: string; exitCode: number; error: string }> => {
+    ): Promise<{ output: string; exitCode: number; error: string; cwd: string }> => {
       try {
-        return await api.shellCommand(command, projectPath, projectHost);
+        return await api.shellCommand(command, projectPath, projectHost, sessionId ?? undefined);
       } catch (err) {
         return {
           output: "",
           exitCode: 1,
           error:
             err instanceof Error ? err.message : "Failed to execute command",
+          // No server response: report the directory the command would have run
+          // in, so the client always has a cwd to show.
+          cwd: projectPath ?? "",
         };
       }
     },
-    [projectPath, projectHost],
+    [projectPath, projectHost, sessionId],
   );
 
   return {
@@ -319,6 +335,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     // optimistically on 202 (SET_STREAMING), confirmed by turn_started
     // (turnActive), cleared by turn_done/turn_error or a rejected submit.
     isStreaming,
+    hasConversation,
     pendingPermission,
     pendingQuestion,
     askContext,

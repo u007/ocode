@@ -36,7 +36,13 @@ name). Do not duplicate content between the two — update here only.
   one noul question per returned knowledge doc; wired only for the context
   subagent's doc tools). All send the request as structured state. Thresholds
   scale with the consequence of getting the decision wrong: the high-stakes
-  auto-permission judge uses `permissions.auto.min_confidence` (default 0.85);
+  auto-permission judge uses `permissions.auto.min_confidence` (default 0.85),
+  and drops to `autoJudgeOpaqueMinConfidenceDefault` (0.75) when the judge's own
+  concern answer is `truncated_or_unknown` — a request whose effects it could
+  not establish (an undefined-variable command head, an unreadable script). The
+  opaque default applies only when `min_confidence` is unset; an explicitly
+  configured value always governs, so the relaxation never tightens or loosens
+  the user's own bar;
   the two *relevance* judges (discovery + doc_search) share the lenient
   `relevanceJudgeMinConfidenceDefault` (0.5) because a relevance veto only
   hides a retrieval result and the product rule is "even slight relevancy

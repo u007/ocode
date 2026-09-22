@@ -27,6 +27,7 @@ describe("applyReconcileState", () => {
       { bootstrap_stage: "ready", turn_active: false, last_seq: 9 },
     );
     expect(actions).toEqual([
+      { type: "SET_INTERRUPTED", sessionId: "s1", interrupted: false },
       { type: "SET_TURN_STATE", sessionId: "s1", turnActive: false },
       { type: "SET_STREAMING", sessionId: "s1", isStreaming: false },
       { type: "SET_TURN_STALLED", sessionId: "s1", stalled: false },
@@ -40,6 +41,7 @@ describe("applyReconcileState", () => {
     const actions: unknown[] = [];
     applyReconcileState((a) => actions.push(a), "s1", { bootstrap_stage: "mcp", turn_active: true, last_seq: 3 }, false, true);
     expect(actions).toEqual([
+      { type: "SET_INTERRUPTED", sessionId: "s1", interrupted: false },
       { type: "SET_BOOTSTRAP_STAGE", sessionId: "s1", stage: "mcp" },
     ]);
   });
@@ -48,6 +50,7 @@ describe("applyReconcileState", () => {
     const actions: unknown[] = [];
     applyReconcileState((a) => actions.push(a), "s1", { bootstrap_stage: "mcp", turn_active: true, last_seq: 3 }, false, false);
     expect(actions).toEqual([
+      { type: "SET_INTERRUPTED", sessionId: "s1", interrupted: false },
       { type: "SET_TURN_STATE", sessionId: "s1", turnActive: true },
       { type: "SET_BOOTSTRAP_STAGE", sessionId: "s1", stage: "mcp" },
     ]);
@@ -57,6 +60,7 @@ describe("applyReconcileState", () => {
     const actions: unknown[] = [];
     applyReconcileState((a) => actions.push(a), "s1", { bootstrap_stage: "", turn_active: false, last_seq: 4 }, true, true);
     expect(actions).toEqual([
+      { type: "SET_INTERRUPTED", sessionId: "s1", interrupted: false },
       { type: "SET_TURN_STATE", sessionId: "s1", turnActive: true },
       { type: "SET_TURN_STALLED", sessionId: "s1", stalled: false },
     ]);

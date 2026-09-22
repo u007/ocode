@@ -91,6 +91,13 @@ func (h *Handler) HandleResetSessionID(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// Move the persistent `!` shell too, so a `!cd`/`!export` made under the
+	// old id survives the rekey instead of paying a fresh rc load. Best-effort:
+	// a missing shell is normal (the tab may never have run a `!` command).
+	if h.shellSessions != nil {
+		h.shellSessions.rekey(id, newID)
+	}
+
 	h.publishBusEvent("session_rekeyed", newID, map[string]string{
 		"session_id": newID,
 		"old_id":     id,

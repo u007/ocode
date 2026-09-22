@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../../api/client";
@@ -22,6 +22,8 @@ export default function MarkdownViewer({
   projectHost,
   onOpenFile,
   content,
+  revision,
+  followTail,
 }: {
   path: string;
   projectRoot?: string;
@@ -32,6 +34,15 @@ export default function MarkdownViewer({
    *  (possibly unsaved) editor content so the preview tracks typing without a
    *  save round-trip. Omit it for the normal read-from-disk behaviour. */
   content?: string;
+  /** Live-refresh revision from the sidebar PreviewHost. Bumped while the AI
+   *  edits this file mid-turn; the viewer refetches WITHOUT flashing the
+   *  loading placeholder (the old content stays until the new one arrives).
+   *  Undefined in hosts without live refresh (Files tab) — no extra fetches. */
+  revision?: number;
+  /** True while the driving chat turn is running. While set (or while a
+   *  revision just landed) the viewer follows the document tail when the
+   *  reader is pinned to the bottom — the sidebar preview's "auto scroll". */
+  followTail?: boolean;
 }) {
   // `content !== undefined` selects controlled mode. It is stable per mounted
   // viewer instance (the Files tab mounts a separate viewer per mode), so the
@@ -74,7 +85,100 @@ export default function MarkdownViewer({
     setIsBinary(false);
   }, [controlled, content]);
 
+  // Live refresh: when the sidebar PreviewHost bumps `revision` (the active
+  // session's tool stream mutated this file), refetch SILENTLY — the previous
+  // content stays rendered until the new text lands, so mid-turn edits don't
+  // flash the loading placeholder or reset the reader's scroll position.
+  // The initial revision (0) is handled by the mount fetch above.
+  useEffect(() => {
+    if (controlled || revision === undefined || revision === 0) return;
+    let cancelled = false;
+    api
+      .getFileContent(path, projectRoot, projectHost)
+      .then((c) => {
+        if (!cancelled) {
+          setIsBinary(c.is_binary);
+          setMd(c.content);
+          setError(null);
+        }
+      })
+      .catch(() => {
+        // Keep the last good content on a transient refresh failure.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [revision, controlled, path, projectRoot, projectHost]);
+
   const diagram = useMemo(() => (md ? extractMermaid(md) : null), [md]);
+
+  // ── Tail-following (sidebar auto-scroll) ──
+  // Mirrors ChatPanel's proven pattern: an atBottom lock maintained by the
+  // scroll listener, reset when the reader scrolls up, re-armed when the
+  // content no longer overflows or was replaced, and consulted by the pin
+  // effect so growth (a streaming AI edit) follows the tail only while the
+  // reader is pinned. The PreviewHost feeds `followTail` (turn running) so
+  // a reader who never scrolled keeps following through a whole turn.
+  const atBottomRef = useRef(true);
+  // Only react to tail-follow signals on revision changes, not on every md
+  // keystroke in controlled mode (Files-tab split renders while typing and
+  // must NOT yank the preview around).
+  // `lastRevRef` is seeded with the mount revision so an already-bumped
+  // counter (a viewer opened mid-turn) is a baseline, not a pending follow.
+  const lastRevRef = useRef<number | undefined>(revision);
+  // A revision bump and the refetched `md` land in SEPARATE renders (the
+  // refetch is async). The bump only arms this flag; the pin below is driven
+  // by the actual content landing, so it can never scroll against the stale
+  // document the refetch is about to replace.
+  const pendingFollowRef = useRef(false);
+  const lastMdRef = useRef<string | null | undefined>(md);
+
+  const handleScroll = () => {
+    const el = ref.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    atBottomRef.current = distance < 24;
+  };
+
+  // The scroller is rendered conditionally (the "Loading…"/binary branches
+  // return first), so the bottom-lock reads its position via React's onScroll
+  // prop — a mount-only addEventListener effect would bind to `ref.current`
+  // while it is still null and never recover. Do not also add a manual
+  // listener or every scroll runs handleScroll twice.
+
+  // A live-refresh revision bump is only a signal that content is coming: arm
+  // a pending follow, honoured once the refetched markdown actually lands.
+  useEffect(() => {
+    if (controlled || revision === undefined) return;
+    if (revision === lastRevRef.current) return;
+    lastRevRef.current = revision;
+    pendingFollowRef.current = true;
+  }, [revision, controlled]);
+
+  // Follow the tail when new content lands while the reader is pinned (or a
+  // turn is streaming). Runs only on an actual `md` change — never on a bare
+  // revision bump — so the pin always targets the document on screen.
+  useEffect(() => {
+    if (controlled) return;
+    const mdChanged = md !== lastMdRef.current;
+    lastMdRef.current = md;
+    if (!mdChanged) return;
+    const pending = pendingFollowRef.current;
+    pendingFollowRef.current = false;
+    if (!pending && !followTail) return;
+    const el = ref.current;
+    if (!el || el.clientHeight === 0) return;
+    // No scrollbar: nothing to be locked away from; re-arm and clear any
+    // stale pin state (same contract as ChatPanel).
+    if (el.scrollHeight - el.clientHeight <= 1) {
+      atBottomRef.current = true;
+      return;
+    }
+    if (atBottomRef.current || followTail) {
+      el.scrollTop = el.scrollHeight;
+      atBottomRef.current = true;
+    }
+  }, [md, followTail, controlled]);
 
   if (error) return <div className="p-4 text-xs text-red-400">Load failed: {error}</div>;
   if (isBinary && !forceEdit) return (
@@ -101,7 +205,7 @@ export default function MarkdownViewer({
           <MermaidViewer path={path} code={diagram} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={onOpenFile} />
         </div>
       )}
-      <div ref={ref} className="prose prose-sm prose-invert max-w-none min-h-0 flex-1 overflow-auto p-3 select-text">
+      <div ref={ref} onScroll={handleScroll} className="prose prose-sm prose-invert max-w-none min-h-0 flex-1 overflow-auto p-3 select-text">
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
       </div>
       {sel && <SelectionToolbar sel={sel} path={path} label="doc" projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}

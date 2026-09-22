@@ -1,5 +1,33 @@
 # TODO
 
+## Interrupted-turn notice — follow-ups (2026-09-22)
+
+The web/desktop notice shipped (CHANGES.md 2026-09-22; concept page
+`docs/concepts/interrupted-turn-notice.md`). Deliberately out of scope for v1,
+recorded rather than silently skipped:
+
+- **TUI parity for the derived `interrupted` flag.** The TUI has no reconcile
+  step that polls `GET /state`, so there is no equivalent surface today. A TUI
+  version would classify the live `agent` transcript tail against the same
+  `session.TranscriptTailUnfinished` rule and render a "Continue" affordance
+  (which could reuse the existing `"continue"` resume path). The Go rule is
+  already shared, so this is a rendering/plumbing task, not a new detection.
+- **Desktop crash log / unclean-shutdown marker.** The copy says "interrupted"
+  because the server cannot distinguish a process replacement from a
+  truncate/failed bootstrap. A durable unclean-shutdown marker (written at
+  boot, cleared at a clean exit) would let the notice name the cause precisely.
+- **Cross-process lock blind spot.** The settled-ness gate only sees THIS
+  process's turn/agent locks. A turn running in another ocode process sharing
+  the project (the TUI, a second server) is invisible, so during that turn the
+  stored tail can read as unfinished and the notice may appear until the
+  writing process's next stored append moves the revision. Same limitation as
+  cross-process turn state (see the session-revision notes); not a regression,
+  but worth a marker if it is ever reported.
+- **Pre-lock dispatch window.** Between `dispatchTurn` and `executeTurnJob`
+  taking the turn lock, a session whose stored tail was ALREADY unfinished can
+  briefly report `interrupted:true`. The client hides the row while a turn is
+  active/streaming, so this is not user-visible today; noted for completeness.
+
 ## Speech-to-Text (in-app dictation) — design approved, not implemented (2026-09-21)
 
 Design spec committed at
@@ -1996,3 +2024,37 @@ See docs/gotchas/chrome-tab-hang-unbounded-cdp-call.md for the full analysis.
 
 - [ ] **`internal/session` live tests fail under `-count>1`.** Running `go test ./internal/session/ -run TestLive -race -count=5` intermittently fails `TestLiveFlushAllDrainsEverySession` with `no such table: meta (1)` (and, before the shared-index serialization fix, `create index table: database is locked (5) (SQLITE_BUSY)`). Reproduced identically at the pristine baseline commit (`653bb55a`), so it is pre-existing and NOT a product regression. Mechanism: the live writer registry (`liveRegistry`) and its workers are process-global and outlive a single test iteration, so repeated runs of the same test in one process overlap with prior iterations' still-retiring workers; WAL cross-connection contention on a freshly (re)created per-test directory then surfaces. The default invocations (`-count=1`, with or without `-race`) are now stable: 8/8 `-race` suite runs and 25/25 targeted runs pass after the index serialization fix. A proper fix would isolate the global registry per test (e.g. a test-only reset/`t.Cleanup` drain), which is deferred because it touches production-visible helpers.
 - [ ] **Cross-process shared-index contention is still unverified.** The in-process serialization (`withIndexDB`) removes same-process `SQLITE_BUSY`; two ocode processes writing sessions in one project still rely on WAL + `busy_timeout(5000)`. The implicit-DDL failure mode is fixed (explicit `_txlock=immediate` transaction), but no test exercises two processes against one `index.sqlite`.
+
+## Persistent `!` shell — deferred verification & follow-ups (2026-09-21)
+
+Plan: `docs/superpowers/plans/2026-09-21-persistent-shell-session.md`
+(implemented; CHANGES.md carries the entry, concept page is
+`docs/concepts/persistent-shell-session.md`).
+
+- **Real-pty end-to-end verification — DONE (2026-09-21).** The blocker was the
+  session running under sandbox mode, where the Seatbelt profile denied
+  `/dev/ptmx`. After fixing the sandbox pty grants (see CHANGES.md), all 11
+  `internal/shell/session_unix_test.go` pty tests pass. That first real run also
+  found and fixed two bugs the pipe-backed fake could not: a startup desync
+  (every `Run` returned the previous command's output) and a `PROMPT_SP` space
+  blob appended to every result. In-sandbox coverage remains the pipe-backed
+  fake (`session_fake_unix_test.go`) plus the registry/handler tests
+  (`internal/server/handler_shell_session_test.go`).
+- **Bundle docs still describe the pre-pty sandbox.** The sandbox profile now
+  grants `/dev/ptmx` + `/dev/ttys*` (Seatbelt) and `/dev/ptmx` + `/dev/pts`
+  (Landlock/bwrap); `/dev/tty` remains denied. Update
+  `docs/architecture/shell-sandbox-*` and any gotcha that says "only /dev/null is
+  granted" through the context agent (it was failing its tool calls during this
+  work, so the page was written directly — see the entry above).
+
+- **Concept page authored directly, not via the context agent.** The context
+  sub-agent's tool calls failed repeatedly (`invalid tool call arguments for
+  doc_write` / `grep`), so the page body was written with the file editor; the
+  index entry had already been added by the agent. If the bundle's `log.md` needs
+  a matching entry, add it through the context agent once it is healthy.
+- **Draft-tab (`new-*`) shell is orphaned after the first message.** Per the
+  spec's accepted v1 limitation: a `!` run in a draft tab before the first
+  message keys its shell under `new-<ts>`, and the client-side rename to the real
+  session id never reaches the server, so the shell is only reclaimed by the idle
+  reaper. A future fix would defer shell creation until the tab has a real id, or
+  send an explicit rekey from the client.

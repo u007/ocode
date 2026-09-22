@@ -113,6 +113,50 @@ func fuzzyFilter(items []string, query string) []string {
 	return result
 }
 
+// fuzzyFilterPaths ranks file paths by fuzzy score, using shortest-path-first
+// (fewest segments, then lexicographic) as the tiebreaker so a shallow file
+// surfaces above a deeply nested one with the same relevance. An empty query
+// returns every path sorted shortest-first.
+//
+// Unlike fuzzyFilter this is specific to file paths; use it for the files-tab
+// fuzzy finder so the session/project picker keeps its own ordering.
+func fuzzyFilterPaths(items []string, query string) []string {
+	if strings.TrimSpace(query) == "" {
+		out := make([]string, len(items))
+		copy(out, items)
+		sort.SliceStable(out, func(i, j int) bool { return lessPathShortest(out[i], out[j]) })
+		return out
+	}
+	type scored struct {
+		s int
+		i int
+	}
+	out := make([]scored, 0, len(items))
+	for i, it := range items {
+		if s := fuzzyScore(it, query); s > 0 {
+			out = append(out, scored{s: s, i: i})
+		}
+	}
+	sort.SliceStable(out, func(a, b int) bool {
+		if out[a].s != out[b].s {
+			return out[a].s > out[b].s
+		}
+		ai, bi := items[out[a].i], items[out[b].i]
+		if lessPathShortest(ai, bi) {
+			return true
+		}
+		if lessPathShortest(bi, ai) {
+			return false
+		}
+		return out[a].i < out[b].i
+	})
+	result := make([]string, len(out))
+	for i, s := range out {
+		result[i] = items[s.i]
+	}
+	return result
+}
+
 // fuzzyFilterFunc is the generic form for arbitrary item types. The
 // caller supplies the searchable text for each item.
 func fuzzyFilterFunc[T any](items []T, query string, key func(T) string) []T {

@@ -35,6 +35,7 @@ Track tested features, provider integrations, and known issues.
 - [x] Foreground bash → background (`Ctrl+B`)
 - [x] Async agent runs with transcript capture
 - [x] Background process management (256KB circular buffer)
+- [x] Interrupted-turn notice + Continue in chat (web/desktop, 2026-09-22)
 
 ### Agents
 - [x] Advisor Tool

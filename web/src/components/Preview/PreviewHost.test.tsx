@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { api } from "../../api/client";
 import PreviewHost from "./PreviewHost";
 
@@ -11,13 +11,49 @@ vi.mock("../Browser/BrowserPanel", () => ({
   BrowserPanel: () => <div data-testid="browser-panel" />,
 }));
 
+// Capture subscriptions so tests can emit tool/turn events at the component.
+const busHandlers = new Map<string, Set<(env: unknown) => void>>();
+const busEnv = (event: string, session_id: string | undefined, data: unknown) => ({
+  event,
+  session_id,
+  seq: 1,
+  data,
+});
+vi.mock("../../lib/eventBus", () => ({
+  eventBus: {
+    on: (event: string, handler: (env: unknown) => void) => {
+      let set = busHandlers.get(event);
+      if (!set) {
+        set = new Set();
+        busHandlers.set(event, set);
+      }
+      set.add(handler);
+      return () => set!.delete(handler);
+    },
+  },
+}));
+function emit(event: string, session_id: string | undefined, data: unknown) {
+  for (const h of busHandlers.get(event) ?? []) h(busEnv(event, session_id, data));
+}
+
 vi.mock("../Files/FileEditor", () => ({ default: () => <div data-testid="file-editor" /> }));
 
 // Stub the heavy viewer surface so the tests only exercise PreviewHost's shell
-// state (surface/doc/page) and can observe the page it was handed.
+// state (surface/doc/page/revision/followTail) and can observe what it handed.
 vi.mock("./PreviewSurface", () => ({
-  default: ({ path, page }: { path: string; page: number }) => (
-    <div data-testid="preview-surface" data-path={path} data-page={String(page)} />
+  default: ({
+    path,
+    page,
+    revision,
+    followTail,
+  }: { path: string; page: number; revision?: number; followTail?: boolean }) => (
+    <div
+      data-testid="preview-surface"
+      data-path={path}
+      data-page={String(page)}
+      data-revision={revision === undefined ? "none" : String(revision)}
+      data-follow-tail={followTail ? "true" : "false"}
+    />
   ),
 }));
 // LegacyOfficePane stays REAL: its own test relies on the "Open in app" button.
@@ -171,5 +207,121 @@ describe("PreviewHost per-project persistence", () => {
       />,
     );
     expect(onConsumeActivation).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("PreviewHost live refresh (tool-stream driven)", () => {
+  beforeEach(() => {
+    busHandlers.clear();
+  });
+
+  it("bumps the revision when a mutating tool touches the previewed file", () => {
+    const view = render(
+      <PreviewHost
+        stateKey="side:chat:t1"
+        projectRoot="/proj"
+        sessionId="ses-1"
+        request={{ path: "docs/x.md", kind: "markdown", page: 1 }}
+        nonce={1}
+      />,
+    );
+    expect(screen.getByTestId("preview-surface").getAttribute("data-revision")).toBe("0");
+
+    act(() => {
+      emit("tool_start", "ses-1", { tool: "edit", command: '{"path":"/proj/docs/x.md"}' });
+    });
+    expect(screen.getByTestId("preview-surface").getAttribute("data-revision")).toBe("1");
+    expect(screen.getByTestId("preview-surface").getAttribute("data-follow-tail")).toBe("true");
+
+    // A second edit of the same file bumps again.
+    act(() => {
+      emit("tool_start", "ses-1", { tool: "write", command: '{"path":"docs/x.md","content":"v2"}' });
+    });
+    expect(screen.getByTestId("preview-surface").getAttribute("data-revision")).toBe("2");
+
+    view.unmount();
+  });
+
+  it("does not bump for unrelated files, non-mutating tools, or other sessions", () => {
+    render(
+      <PreviewHost
+        stateKey="side:chat:t1"
+        projectRoot="/proj"
+        sessionId="ses-1"
+        request={{ path: "docs/x.md", kind: "markdown", page: 1 }}
+        nonce={1}
+      />,
+    );
+    // Another session's tool activity must not flip followTail...
+    act(() => {
+      emit("tool_start", "ses-2", { tool: "write", command: '{"path":"docs/x.md"}' });
+    });
+    expect(screen.getByTestId("preview-surface").getAttribute("data-revision")).toBe("0");
+    expect(screen.getByTestId("preview-surface").getAttribute("data-follow-tail")).toBe("false");
+    // ...but same-session activity (even non-mutating) means the turn is
+    // running; only the FILE-MATCHING bumps are gated to mutating tools.
+    act(() => {
+      emit("tool_start", "ses-1", { tool: "read", command: '{"path":"docs/x.md"}' });
+      emit("tool_start", "ses-1", { tool: "edit", command: '{"path":"docs/other.md"}' });
+    });
+    expect(screen.getByTestId("preview-surface").getAttribute("data-revision")).toBe("0");
+    expect(screen.getByTestId("preview-surface").getAttribute("data-follow-tail")).toBe("true");
+  });
+
+  it("followTail clears on turn_done/turn_error for the same session", () => {
+    render(
+      <PreviewHost
+        stateKey="side:chat:t1"
+        projectRoot="/proj"
+        sessionId="ses-1"
+        request={{ path: "docs/x.md", kind: "markdown", page: 1 }}
+        nonce={1}
+      />,
+    );
+    act(() => {
+      emit("tool_start", "ses-1", { tool: "write", command: '{"path":"docs/x.md"}' });
+    });
+    expect(screen.getByTestId("preview-surface").getAttribute("data-follow-tail")).toBe("true");
+    act(() => {
+      emit("turn_done", "ses-1", {});
+    });
+    expect(screen.getByTestId("preview-surface").getAttribute("data-follow-tail")).toBe("false");
+  });
+
+  it("clears followTail on turn_error and re-arms on the next tool_start", () => {
+    render(
+      <PreviewHost
+        stateKey="side:chat:t1"
+        projectRoot="/proj"
+        sessionId="ses-1"
+        request={{ path: "docs/x.md", kind: "markdown", page: 1 }}
+        nonce={1}
+      />,
+    );
+    act(() => {
+      emit("tool_start", "ses-1", { tool: "edit", command: '{"path":"docs/x.md"}' });
+      emit("turn_error", "ses-1", { error: "boom" });
+    });
+    expect(screen.getByTestId("preview-surface").getAttribute("data-follow-tail")).toBe("false");
+    act(() => {
+      emit("tool_start", "ses-1", { tool: "read", command: '{"path":"anything"}' });
+    });
+    expect(screen.getByTestId("preview-surface").getAttribute("data-follow-tail")).toBe("true");
+  });
+
+  it("does not subscribe without a sessionId", () => {
+    render(
+      <PreviewHost
+        stateKey="side:chat:t1"
+        projectRoot="/proj"
+        request={{ path: "docs/x.md", kind: "markdown", page: 1 }}
+        nonce={1}
+      />,
+    );
+    act(() => {
+      emit("tool_start", "ses-1", { tool: "write", command: '{"path":"docs/x.md"}' });
+    });
+    expect(screen.getByTestId("preview-surface").getAttribute("data-revision")).toBe("0");
+    expect(busHandlers.get("tool_start")?.size ?? 0).toBe(0);
   });
 });

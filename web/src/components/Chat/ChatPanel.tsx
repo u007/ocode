@@ -45,9 +45,14 @@ interface ChatPanelProps {
    *  transcript fetch — and the prefetch hand-off — through /api/remote/{host}
    *  so a remote session's messages load instead of 404ing locally. */
   host?: string;
+  /** Continue the session's settled-but-unfinished turn (the server-reported
+   *  `interrupted` flag). App owns the send path (ChatPanel has none), so it
+   *  passes this callback down; must be a STABLE reference or the memo on this
+   *  component is defeated for every mounted tab. */
+  onContinueInterrupted?: (sessionId: string) => void;
 }
 
-function ChatPanel({ sessionId, host }: ChatPanelProps) {
+function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
   // Scoped to this tab's own session: getSessionSlice returns the exact same
   // object reference across dispatches that don't touch this session (see
   // updateSession's immutable per-key update), so other tabs' streamed
@@ -64,6 +69,14 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const topRef = useRef<HTMLDivElement>(null);
   const [initialized, setInitialized] = useState(false);
+  // Initial-load failure state. A transcript that could not be fetched must
+  // never render as the empty "Start a conversation" placeholder — that reads
+  // as "the whole conversation is gone" (reported after a desktop reload left
+  // a tab showing only the composer while the transcript was intact
+  // server-side). Surface the failure and offer a Retry instead.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadRetry, setLoadRetry] = useState(0);
+  const forceReloadRef = useRef(false);
   const loadGenerationRef = useRef(0);
   const stateRef = useRef(slice);
   stateRef.current = slice;
@@ -348,6 +361,38 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
   // -> re-render -> new totalSize). Frame-batched and value-guarded so no
   // stale margin causes the split-then-merge flicker.
   const blockRendered = initialized && messages.length > 0;
+
+  // Server-derived interrupted-turn flag: the session settled on a turn that
+  // never got a reply. Render an inline row at the END of the transcript (not a
+  // transcript entry — it must not enter the message list or the search index)
+  // offering a one-click Continue. Suppressed whenever the reply might still be
+  // coming or another affordance owns the state:
+  //   - `wasInterrupted` is the live user-Stop signal (ChatInput treats it as
+  //     "sending blocked"), so the two must never both show;
+  //   - a running/streaming turn or live parts mean work is in flight;
+  //   - a pending question/permission means the dialog owns it;
+  //   - an empty transcript, a draft (`new-*`) tab, or a failed load has
+  //     nothing to continue.
+  const showInterrupted =
+    initialized &&
+    slice.interrupted &&
+    !slice.wasInterrupted &&
+    !slice.turnActive &&
+    !slice.isStreaming &&
+    live.length === 0 &&
+    !slice.pendingPermission &&
+    !slice.pendingQuestion &&
+    !loadError &&
+    messages.length > 0 &&
+    !sessionId.startsWith("new-");
+
+  // Continue hides the row immediately (optimistic) and hands the session to
+  // App's send path; the server's next `turn_started`/state keeps it hidden.
+  const handleContinueInterrupted = () => {
+    dispatch({ type: "SET_INTERRUPTED", sessionId, interrupted: false });
+    onContinueInterrupted?.(sessionId);
+  };
+
   useLayoutEffect(() => {
     let raf = 0;
     const measure = () => {
@@ -498,18 +543,22 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
     let cancelled = false;
 
     if (!sessionId || sessionId.startsWith("new-")) {
+      setLoadError(null);
       setInitialized(true);
       return () => {
         cancelled = true;
       };
     }
-    if (stateRef.current.initialized) {
+    if (stateRef.current.initialized && !forceReloadRef.current) {
+      setLoadError(null);
       setInitialized(true);
       return () => {
         cancelled = true;
       };
     }
+    forceReloadRef.current = false;
     setInitialized(false);
+    setLoadError(null);
 
     // A hover prefetch (lib/sessionPrefetch) may already have this request in
     // flight or resolved — use it so the tab paints straight from warm data
@@ -558,12 +607,16 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
       .catch((err) => {
         if (cancelled || generation !== loadGenerationRef.current) return;
         console.error("Failed to load session:", err);
+        // Never fall through to the empty-conversation render on a failed
+        // fetch: that looks like the transcript was wiped when the request
+        // merely failed (a remote proxy error, a restart-time reconnect).
+        setLoadError(err instanceof Error ? err.message : "the transcript could not be fetched");
         setInitialized(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [sessionId, host, dispatch, projectDispatch]);
+  }, [sessionId, host, dispatch, projectDispatch, loadRetry]);
 
   // A new session (or any session-id change) starts with a clean tail lock:
   // there is no prior reader scroll intent to preserve. ChatPanel is keyed by
@@ -1045,9 +1098,29 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
         )}
 
         {messages.length === 0 && live.length === 0 && initialized && (
-          <div className="flex h-full items-center justify-center text-muted-foreground">
-            Start a conversation
-          </div>
+          loadError ? (
+            <div
+              className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center"
+              role="alert"
+            >
+              <div className="text-sm text-foreground">Couldn't load this conversation</div>
+              <div className="max-w-md break-words text-xs text-muted-foreground">{loadError}</div>
+              <button
+                type="button"
+                className="mt-1 rounded-md border border-border bg-card px-3 py-1 text-xs text-foreground transition-colors hover:bg-accent"
+                onClick={() => {
+                  forceReloadRef.current = true;
+                  setLoadRetry((n) => n + 1);
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          ) : (
+            <div className="flex h-full items-center justify-center text-muted-foreground">
+              Start a conversation
+            </div>
+          )
         )}
 
         {renderEntries.length > 0 && (
@@ -1157,6 +1230,22 @@ function ChatPanel({ sessionId, host }: ChatPanelProps) {
             (components/common/StatusBar.tsx), driven by the same
             isStreaming || turnActive signal — kept here only as a comment so
             nobody re-adds a duplicate label in the transcript. */}
+
+        {showInterrupted && (
+          <div
+            role="status"
+            className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground"
+          >
+            <span>The previous reply was interrupted</span>
+            <button
+              type="button"
+              onClick={handleContinueInterrupted}
+              className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-0.5 text-xs text-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            >
+              Continue
+            </button>
+          </div>
+        )}
 
         <div ref={bottomRef} />
       </div>
