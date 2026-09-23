@@ -209,6 +209,33 @@ func TestGitCommitRequiresMessage(t *testing.T) {
 	}
 }
 
+// TestGitCommitFailureSurfacesStdoutReason pins the fix for the opaque
+// "git commit failed: exit status 1" shown in the web/desktop Git panel.
+// `git commit` with nothing staged writes its explanation ("no changes added to
+// commit") to STDOUT, not stderr, so a stderr-only fold returned a bare exit
+// status and hid the reason. The error must carry git's own text.
+func TestGitCommitFailureSurfacesStdoutReason(t *testing.T) {
+	h := newGitTestHandler(t, true)
+	dir := h.workDir
+	writeFile(t, filepath.Join(dir, "tracked.txt"), "hello\n")
+	runGit(t, dir, "add", "tracked.txt")
+	runGit(t, dir, "commit", "-m", "init")
+	// Leave the edit unstaged: git commit has nothing staged and fails,
+	// explaining itself on stdout.
+	writeFile(t, filepath.Join(dir, "tracked.txt"), "hello changed\n")
+
+	r, w := call("/api/git/commit", map[string]any{"message": "nope"})
+	h.HandleGitCommit(w, r)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "no changes added to commit") &&
+		!strings.Contains(body, "nothing added to commit") {
+		t.Fatalf("commit failure did not surface git's stdout reason: %s", body)
+	}
+}
+
 func TestGitStageTraversalRejected(t *testing.T) {
 	h := newGitTestHandler(t, true)
 	r, w := call("/api/git/stage", map[string]any{"paths": []string{"../../etc/passwd"}})

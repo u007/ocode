@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-09-23 — Fix: "git commit failed: exit status 1" now explains itself
+
+Reported: the desktop Git panel showed a bare "git commit failed: exit status 1"
+with no reason when a commit failed.
+
+`gitRunInDir` (`internal/server/handler_git.go`) and the TUI twin `runGit`
+(`internal/tui/git_model.go`) captured stdout with `cmd.Output()` and, on
+failure, folded only **stderr** into the error. Git does not always write its
+explanation to stderr: `git commit` with nothing staged prints "no changes added
+to commit" (with the whole status block) to **stdout**, so the reason was
+discarded and the caller surfaced an opaque `exit status 1`. The remote path was
+already correct — `remoteRunRaw` falls back to stdout.
+
+- Both runners now use the same precedence as `remoteRunRaw`: on failure prefer
+  stderr, fall back to stdout, then `err.Error()`. A local commit with nothing
+  staged now reports
+  `git commit failed: exit status 1: On branch main … no changes added to commit (use "git add" and/or "git commit -a")`.
+- Tests: `internal/server/handler_fs_git_test.go`
+  `TestGitCommitFailureSurfacesStdoutReason` (real temp repo, unstaged edit →
+  asserts the 500 body carries "no changes added to commit") and
+  `internal/tui/git_model_test.go` `TestGitRunInDirSurfacesStdoutReason`.
+  Mutation-verified: with the stdout fallback removed both fail with exactly
+  `{"error":"git commit failed: exit status 1"}`.
+- The underlying failure is expected git behaviour (nothing was staged); this
+  change makes the panel say so instead of hiding it. `git log` outside a repo
+  (reason on stderr) still reports "not a git repository", covered by the
+  existing `TestGitRunInDirSurfacesStderr`.
+
 ## 2026-09-23 — Fix: a wheel over the terminal no longer scrolls the app window
 
 Reported: "on terminal tab on web ui and desktop, cannot scroll the claude code

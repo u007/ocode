@@ -64,6 +64,26 @@ func Env() []string {
 	return append(out, optionalLocksOff)
 }
 
+// WithOutput folds git's explanation of a failure into err so callers see more
+// than "exit status 1". stderr is where git usually explains itself, but not
+// always: `git commit` with nothing staged writes "no changes added to commit"
+// to STDOUT. So stderr wins, stdout is the fallback, and err is returned
+// unchanged when both are blank. A nil err is returned as nil. The fold also
+// feeds LockHeld, which matches on git's stderr text.
+func WithOutput(err error, stderr, stdout string) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(stderr)
+	if msg == "" {
+		msg = strings.TrimSpace(stdout)
+	}
+	if msg == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, msg)
+}
+
 // LockHeld reports whether err is git failing to acquire .git/index.lock.
 //
 // git prints "fatal: Unable to create '<path>/index.lock': File exists."

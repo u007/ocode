@@ -482,6 +482,22 @@ func TestGitRunInDirSurfacesStderr(t *testing.T) {
 	}
 }
 
+func TestGitRunInDirSurfacesStdoutReason(t *testing.T) {
+	dir := initGitRepoForPathSeparatorTest(t)
+	// `git commit` with nothing staged writes its explanation to STDOUT, not
+	// stderr. Before the fix the error was a bare "exit status 1" and the user
+	// could not tell why the commit failed.
+	writeFileForGitTest(t, dir, "other.txt", "changed\n")
+	_, err := gitRunInDir(dir, "commit", "-m", "nope")
+	if err == nil {
+		t.Fatal("expected error committing with nothing staged")
+	}
+	if !strings.Contains(err.Error(), "no changes added to commit") &&
+		!strings.Contains(err.Error(), "nothing added to commit") {
+		t.Fatalf("stdout reason not surfaced in error: %v", err)
+	}
+}
+
 func TestGitPreviewShowsTruncationNotice(t *testing.T) {
 	dir := initGitRepoForPathSeparatorTest(t)
 	writeFileForGitTest(t, dir, "big.txt", strings.Repeat("abcdefghijklmnopqrstuvwxyz\n", 3000))

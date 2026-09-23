@@ -56,6 +56,7 @@ okf_version: 0.1
 
 # gotchas
 
+- ["git commit failed: exit status 1" with no reason (git explains on stdout, not stderr)](gotchas/git-commit-opaque-exit-status.md) - git commit writes its reason on stdout; capturing only stderr hides the explanation
 - [After Compaction: Publish Status Snapshot + Record Estimate or Context Gauge Goes Stale](gotchas/compaction-context-gauge-stale-after-splice.md) - Gotcha: after compaction the server must publish a status snapshot and the agent must record a post-splice estimate, else the Context gauge goes stale; the compaction notice is the persisted [ocode:compaction-summary] system message
 - [Agent Replacement — Input Queuing & Stream Event Epochs](gotchas/agent-replacement-input-queuing.md) - Architectural decision and solution pattern for queuing user input during agent replacement and using stream event epochs to prevent stale events from mutating the new session.
 - [AIHubMix Test — Global Cache State Leakage](gotchas/aihubmix-test-cache-leak.md) - AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures

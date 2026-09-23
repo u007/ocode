@@ -31,6 +31,7 @@
 
 ## 2026-09-23
 
+* **Creation**: "git commit failed: exit status 1" with no reason (git explains on stdout, not stderr) ([gotchas/git-commit-opaque-exit-status.md](/gotchas/git-commit-opaque-exit-status.md))
 * **Update**: Desktop/Web Terminal Wheel Scroll Chains to the App Page (xterm.js Escape Gestures) ([gotchas/terminal-wheel-scroll-chaining.md](/gotchas/terminal-wheel-scroll-chaining.md))
 * **Creation**: Desktop/Web Terminal Wheel Scroll Chains to the App Page (xterm.js Escape Gestures) ([gotchas/terminal-wheel-scroll-chaining.md](/gotchas/terminal-wheel-scroll-chaining.md))
 * **Update**: Web UI Mobile Layout Breakage (≤767px)" ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))

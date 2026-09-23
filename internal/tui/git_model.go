@@ -464,11 +464,15 @@ var gitBinary = "git"
 // runGit executes one git command under ctx and returns its stdout with
 // trailing newlines trimmed.
 //
-// stderr is folded into the error (it is where git explains *why*), the child
-// runs with GIT_OPTIONAL_LOCKS=0 (gitexec.Env) so the file-tree/git-tab status
-// probes never take the optional index lock, and a lock-contention failure is
-// retried briefly (gitexec.WithLockRetry): the holder is nearly always another
-// short-lived git process, so a stage keypress must not fail because of one.
+// stderr is folded into the error (it is where git explains *why*), falling
+// back to stdout when stderr is empty — git does not always put the reason on
+// stderr (a bare `git commit` with nothing staged writes "no changes added to
+// commit" to stdout), so a stderr-only fold can surface "exit status 1" alone.
+// The child runs with GIT_OPTIONAL_LOCKS=0 (gitexec.Env) so the file-tree/git-tab
+// status probes never take the optional index lock, and a lock-contention
+// failure is retried briefly (gitexec.WithLockRetry): the holder is nearly
+// always another short-lived git process, so a stage keypress must not fail
+// because of one.
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	var out string
 	err := gitexec.WithLockRetry(func() error {
@@ -479,12 +483,7 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 		cmd.Stderr = &stderr
 		b, cmdErr := cmd.Output()
 		out = strings.TrimRight(string(b), "\r\n")
-		if cmdErr != nil {
-			if msg := strings.TrimSpace(stderr.String()); msg != "" {
-				cmdErr = fmt.Errorf("%w: %s", cmdErr, msg)
-			}
-		}
-		return cmdErr
+		return gitexec.WithOutput(cmdErr, stderr.String(), out)
 	})
 	return out, err
 }

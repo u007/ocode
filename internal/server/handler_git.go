@@ -24,8 +24,10 @@ func (h *Handler) gitRun(args ...string) (string, error) {
 	return gitRunInDir(h.workDir, args...)
 }
 
-// gitRunInDir runs a git command in dir and returns its trimmed stdout. stderr
-// is folded into the error (it is where git says *why* it failed).
+// gitRunInDir runs a git command in dir and returns its trimmed stdout. On
+// failure the error carries git's own explanation: stderr first, then stdout as
+// a fallback (see the fold below) — git does not always put the reason on
+// stderr, so a stderr-only fold can surface a bare "exit status 1".
 //
 // Two ocode-specific behaviours ride along, both about .git/index.lock: the
 // child runs with GIT_OPTIONAL_LOCKS=0 (gitexec.Env) so ocode's frequent probes
@@ -45,12 +47,7 @@ func gitRunInDir(dir string, args ...string) (string, error) {
 		cmd.Stderr = &stderr
 		b, cmdErr := cmd.Output()
 		out = strings.TrimSpace(string(b))
-		if cmdErr != nil {
-			if msg := strings.TrimSpace(stderr.String()); msg != "" {
-				cmdErr = fmt.Errorf("%w: %s", cmdErr, msg)
-			}
-		}
-		return cmdErr
+		return gitexec.WithOutput(cmdErr, stderr.String(), out)
 	})
 	return out, err
 }

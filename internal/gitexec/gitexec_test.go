@@ -172,3 +172,29 @@ func TestWithLockRetryDoesNotRetryOtherErrors(t *testing.T) {
 		t.Fatalf("attempts = %d, want 1 (non-lock errors are not retried)", attempts)
 	}
 }
+
+// TestWithOutput pins the fold precedence shared by the server and TUI git
+// runners: stderr wins, stdout is the fallback (`git commit` with nothing
+// staged explains itself on stdout), and blank output leaves err untouched.
+func TestWithOutput(t *testing.T) {
+	base := errors.New("exit status 1")
+	cases := []struct {
+		name, stderr, stdout, want string
+	}{
+		{"stderr wins", "fatal: bad\n", "ignored", "exit status 1: fatal: bad"},
+		{"stdout fallback", "  \n", "no changes added to commit\n", "exit status 1: no changes added to commit"},
+		{"both blank", "", " \n", "exit status 1"},
+	}
+	for _, tc := range cases {
+		got := WithOutput(base, tc.stderr, tc.stdout)
+		if got.Error() != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got.Error(), tc.want)
+		}
+		if !errors.Is(got, base) {
+			t.Errorf("%s: fold must wrap the original error", tc.name)
+		}
+	}
+	if WithOutput(nil, "stderr", "stdout") != nil {
+		t.Error("nil err must stay nil")
+	}
+}
