@@ -881,6 +881,27 @@ export default function TerminalPanel({
       if (event.button === 0) snapshot.beginSelection();
     };
     el.addEventListener("wheel", snapshot.input, { passive: true });
+    // A wheel gesture over the terminal must never scroll the app chrome.
+    // xterm consumes the wheels it can use (its own scrollback, or a mouse
+    // report forwarded to the running app); anything it leaves alone is handed
+    // to the browser, which then scrolls the nearest scrollable ancestor. In
+    // the desktop shell (WKWebView) even the non-scrollable document
+    // rubber-bands, so those leftover gestures moved the whole app window
+    // instead of the terminal. Swallow them here, while still letting this
+    // container's own overflow fallback scroll (a terminal taller than its box,
+    // e.g. between a font-size change and the next fit). Registered on the
+    // container rather than .xterm, and non-passive, so it runs after xterm's
+    // own handlers — those stop propagation whenever they consume, so this
+    // listener only ever sees gestures xterm ignored.
+    const onWheelGuard = (event: WheelEvent) => {
+      if (event.defaultPrevented) return;
+      const maxScrollTop = el.scrollHeight - el.clientHeight;
+      const canScrollBox =
+        event.deltaY < 0 ? el.scrollTop > 0 : event.deltaY > 0 ? el.scrollTop < maxScrollTop : false;
+      if (canScrollBox) return;
+      event.preventDefault();
+    };
+    el.addEventListener("wheel", onWheelGuard, { passive: false });
     el.addEventListener("keydown", snapshot.input, true);
     el.addEventListener("pointerdown", onSnapshotPointerDown, true);
     window.addEventListener("pointerup", snapshot.endSelection, true);
@@ -1306,6 +1327,7 @@ export default function TerminalPanel({
       parsedDisp?.dispose();
       resizeDisp?.dispose();
       el.removeEventListener("wheel", snapshot.input);
+      el.removeEventListener("wheel", onWheelGuard);
       el.removeEventListener("keydown", snapshot.input, true);
       el.removeEventListener("pointerdown", onSnapshotPointerDown, true);
       window.removeEventListener("pointerup", snapshot.endSelection, true);
@@ -1484,7 +1506,7 @@ export default function TerminalPanel({
       // auto": a scrollbar appears only when content genuinely overflows
       // (font resize before refit, tiny windows where even one row doesn't
       // fit). Horizontal overflow belongs to xterm, hence overflow-x-hidden.
-      className="relative h-full w-full bg-card overflow-y-auto overflow-x-hidden [&_.xterm]:p-2"
+      className="relative h-full w-full bg-card overflow-y-auto overflow-x-hidden overscroll-contain [&_.xterm]:p-2"
       onContextMenu={handleContextMenu}
       onMouseDown={(e) => {
         dragStartedRef.current = true;

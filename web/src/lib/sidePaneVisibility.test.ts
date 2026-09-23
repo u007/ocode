@@ -27,4 +27,17 @@ describe("shouldRenderSidePane", () => {
   it("hides with no session tab", () => {
     expect(shouldRenderSidePane({ activeView: "sessions", activeSubTab: undefined, focusedKind: "chat" })).toBe(false);
   });
+
+  it("never renders on mobile, even on the chat sub-tab", () => {
+    expect(shouldRenderSidePane({ ...base, activeSubTab: "chat", isMobile: true })).toBe(false);
+    // terminal focus is likewise gated off on mobile
+    expect(
+      shouldRenderSidePane({ activeView: "sessions", activeSubTab: "chat", focusedKind: "terminal", isMobile: true }),
+    ).toBe(false);
+  });
+
+  it("still renders on desktop (isMobile false / undefined)", () => {
+    expect(shouldRenderSidePane({ ...base, activeSubTab: "chat", isMobile: false })).toBe(true);
+    expect(shouldRenderSidePane({ ...base, activeSubTab: "chat" })).toBe(true);
+  });
 });

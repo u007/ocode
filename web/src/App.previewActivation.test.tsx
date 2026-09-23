@@ -118,8 +118,34 @@ vi.mock("./components/common/ErrorBoundary", () => ({
   default: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
+// Capture what App passes to the full-width Preview session sub-tab page. On
+// mobile the side pane is hidden, so a preview activation must land here.
+const previewTab = vi.hoisted(() => ({ mounted: false, path: null as string | null, nonce: 0 }));
+vi.mock("./components/Preview/PreviewTabPage", () => ({
+  default: ({ request, nonce }: { request?: { path: string } | null; nonce?: number }) => {
+    previewTab.mounted = true;
+    previewTab.path = request?.path ?? null;
+    previewTab.nonce = nonce ?? 0;
+    return <div data-testid="preview-tab-page" data-path={request?.path ?? ""} data-nonce={String(nonce ?? 0)} />;
+  },
+}));
+
 import App from "./App";
 import { dispatchOpenPreview } from "./lib/previewKind";
+
+/** Swap the matchMedia stub so `useIsMobile()` resolves the given value. */
+function setMobileMatchMedia(mobile: boolean) {
+  window.matchMedia = ((media: string) => ({
+    matches: mobile,
+    media,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+}
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -127,6 +153,9 @@ beforeEach(() => {
   host.nonce = 0;
   host.consume = null;
   host.mounted = false;
+  previewTab.mounted = false;
+  previewTab.path = null;
+  previewTab.nonce = 0;
   appApi.listProjects.mockReset().mockResolvedValue([{ path: "/proj", name: "proj" }]);
   appApi.getCurrentProject.mockReset().mockResolvedValue({ project: { path: "/proj", name: "proj" } });
   appApi.listProjectSessions.mockReset().mockResolvedValue([]);
@@ -188,5 +217,33 @@ describe("App sidebar preview activation", () => {
     await waitFor(() =>
       expect(Number(screen.getByTestId("preview-host").getAttribute("data-nonce"))).toBeGreaterThan(nonceBefore),
     );
+  });
+});
+
+describe("App side pane on mobile", () => {
+  it("never mounts the side pane, hides its toggle, and routes the preview activation to the Preview sub-tab", async () => {
+    setMobileMatchMedia(true);
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /new chat session/i }));
+
+    // The side pane's toggle is desktop-only; the browser lives in the tab
+    // strip on phones.
+    expect(screen.queryByRole("button", { name: /toggle browser panel/i })).toBeNull();
+
+    dispatchOpenPreview("docs/spec.md", 3, "/proj");
+
+    // The activation lands in the full-width Preview sub-tab (which becomes
+    // active), NOT in the side pane.
+    await waitFor(() => expect(previewTab.path).toBe("docs/spec.md"));
+    expect(previewTab.nonce).toBeGreaterThan(0);
+    expect(screen.getByTestId("preview-tab-page")).toBeTruthy();
+    expect(screen.queryByTestId("preview-host")).toBeNull();
+    expect(host.mounted).toBe(false);
+
+    setMobileMatchMedia(false);
   });
 });

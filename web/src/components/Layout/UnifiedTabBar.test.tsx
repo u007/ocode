@@ -87,7 +87,9 @@ beforeEach(() => {
 describe("UnifiedTabBar", () => {
   it("renders a chat pill with the chat emoji", () => {
     renderBar();
-    expect(screen.getByText("Chat One")).toBeTruthy();
+    // The dropdown trigger next to the pills duplicates the tab title text on
+    // phones, so scope the query to the pill itself.
+    expect(within(screen.getByRole("tab", { name: /chat one/i })).getByText("Chat One")).toBeTruthy();
   });
 
   it("renders a Browser add button and opens a browser pill", () => {
@@ -244,8 +246,8 @@ describe("UnifiedTabBar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(closeSessionTab).not.toHaveBeenCalled();
     expect(api.closeSession).not.toHaveBeenCalled();
-    // Tab still visible
-    expect(screen.getByText("Chat One")).toBeInTheDocument();
+    // Tab still visible (the pill — the dropdown trigger duplicates the text)
+    expect(screen.getByRole("tab", { name: "Chat One" })).toBeInTheDocument();
   });
 
   it("middle-click on a chat tab closes immediately without confirmation", async () => {
@@ -323,7 +325,9 @@ describe("UnifiedTabBar", () => {
       JSON.stringify({ version: 1, projects: { "/proj": ["term:term-1-1", "chat:s1"] } }),
     );
     renderBar();
-    const labels = screen.getAllByText(/Chat One|Terminal 1/).map((el) => el.textContent);
+    // Pill order in the DOM mirrors the saved tab order. (Assert via role so
+    // the mobile dropdown trigger's title copy can't pollute the query.)
+    const labels = screen.getAllByRole("tab").map((t) => t.getAttribute("aria-label"));
     expect(labels).toEqual(["Terminal 1", "Chat One"]);
   });
 
@@ -332,6 +336,141 @@ describe("UnifiedTabBar", () => {
     expect(screen.getByText("Processes")).toBeTruthy();
     expect(screen.getByText("All sessions")).toBeTruthy();
   });
+
+  it("shows the tab dropdown on phones and keeps the pill grid from lg up", () => {
+    // Regression: the pills were fixed at 208px, so once the mobile sidebar /
+    // cowork overlay squeezed the centre column they painted over the action
+    // buttons ("sessions tab list messy"). Phones/tablets now collapse the
+    // strip into a dropdown whose trigger shows the ACTIVE tab, while the
+    // new-chat/new-terminal/new-browser buttons stay on the right.
+    const { container } = renderBar();
+
+    // The action cluster is rendered exactly once and shared by both layouts.
+    expect(screen.getByRole("button", { name: /new chat session/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /new terminal/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /new browser tab/i })).toBeInTheDocument();
+
+    // Dropdown trigger shows the active tab (emoji + title + chevron).
+    const trigger = screen.getByTestId("mobile-tab-dropdown-trigger");
+    expect(trigger).toHaveAttribute("aria-label", "Sessions: Chat One");
+    expect(trigger).toHaveTextContent("Chat One");
+
+    // The pill grid still exists for ≥lg (unchanged desktop experience).
+    const pill = screen.getByRole("tab", { name: /chat one/i });
+    expect(pill.className).toMatch(/w-full/);
+    expect(pill.className).toMatch(/lg:w-52/);
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.className).toMatch(/lg:grid/);
+  });
+
+  it("opens a dropdown of all session tabs and switches on row click", () => {
+    projectFake.tabs = [
+      { id: "s1", projectPath: "/proj", title: "Chat One", activeSubTab: "chat" },
+      { id: "s2", projectPath: "/proj", title: "Chat Two", activeSubTab: "chat" },
+    ];
+    projectFake.activeTabId = "s1";
+    const { onFocusKindChange } = renderBar();
+
+    fireEvent.click(screen.getByTestId("mobile-tab-dropdown-trigger"));
+    const items = screen.getAllByTestId("mobile-tab-dropdown-item");
+    // Every tab + the Processes pseudo-tab are listed.
+    expect(items).toHaveLength(3);
+
+    // The Processes row routes to the Processes view.
+    const processes = items.find((el) => el.textContent?.includes("Processes"))!;
+    fireEvent.click(within(processes).getByText("Processes"));
+    expect(onFocusKindChange).toHaveBeenCalledWith("terminal");
+
+    // Reopen — clicking a different chat row activates it via the same
+    // session-open path the pills use (keep-alive surfaces are switched).
+    fireEvent.click(screen.getByTestId("mobile-tab-dropdown-trigger"));
+    const second = screen
+      .getAllByTestId("mobile-tab-dropdown-item")
+      .find((el) => el.textContent?.includes("Chat Two"))!;
+    fireEvent.click(within(second).getByText("Chat Two"));
+    expect(onFocusKindChange).toHaveBeenCalledWith("chat");
+    expect(openSessionTab).toHaveBeenCalledWith("s2", "Chat Two");
+  });
+
+  it("shows a pending dot on dropdown rows for tabs waiting on a response", () => {
+    projectFake.tabs = [
+      { id: "s1", projectPath: "/proj", title: "Chat One", activeSubTab: "chat" },
+      { id: "s2", projectPath: "/proj", title: "Chat Two", activeSubTab: "chat" },
+    ];
+    projectFake.activeTabId = "s1";
+    function SeedPending() {
+      const dispatch = useChatDispatch();
+      useEffect(() => {
+        dispatch({ type: "PERMISSION_REQUEST", sessionId: "s2", permission: { tool: "bash", request_id: "r2" } });
+      }, [dispatch]);
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <TerminalProvider>
+          <BrowserTabsProvider>
+            <SeedPending />
+            <UnifiedTabBar focusedKind="chat" onFocusKindChange={() => {}} />
+          </BrowserTabsProvider>
+        </TerminalProvider>
+      </ChatProvider>,
+    );
+    const items = () => screen.getAllByTestId("mobile-tab-dropdown-item");
+    fireEvent.click(screen.getByTestId("mobile-tab-dropdown-trigger"));
+    const pending = (title: string) =>
+      within(items().find((el) => el.textContent?.includes(title))!).getByTestId("mobile-tab-dropdown-pending");
+    expect(pending("Chat Two").dataset.active).toBe("true");
+    expect(pending("Chat One").dataset.active).toBe("false");
+    // The trigger's own slot is a transparent placeholder of the same size.
+    expect(screen.getByTestId("mobile-tab-dropdown-active-pending").dataset.active).toBe("false");
+  });
+
+  it("shows the unread bell on an alerted terminal row in the dropdown", () => {
+    window.localStorage.setItem(
+      "ocode.ui.terminals.project.v1",
+      JSON.stringify({ version: 1, projects: { "/proj": { terminals: [{ id: "term-1-1", title: "Terminal 1" }], activeId: "term-1-1" } } }),
+    );
+    function SeedAlert() {
+      const { activate, markAlerted } = useTerminalState();
+      useEffect(() => {
+        // activate() marks the project's terminal region live; alerts only
+        // surface on live entries (peeked terminals never show the bell).
+        activate("/proj");
+        markAlerted("/proj", "term-1-1");
+      }, [activate, markAlerted]);
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <TerminalProvider>
+          <BrowserTabsProvider>
+            <SeedAlert />
+            <UnifiedTabBar focusedKind="chat" onFocusKindChange={() => {}} />
+          </BrowserTabsProvider>
+        </TerminalProvider>
+      </ChatProvider>,
+    );
+    fireEvent.click(screen.getByTestId("mobile-tab-dropdown-trigger"));
+    const termRow = screen
+      .getAllByTestId("mobile-tab-dropdown-item")
+      .find((el) => el.textContent?.includes("Terminal 1"))!;
+    expect(within(termRow).getByTestId("mobile-tab-dropdown-alert")).toBeInTheDocument();
+  });
+
+  it("closing a tab from the dropdown goes through the same confirmation", () => {
+    renderBar();
+    fireEvent.click(screen.getByTestId("mobile-tab-dropdown-trigger"));
+    const item = screen
+      .getAllByTestId("mobile-tab-dropdown-item")
+      .find((el) => el.textContent?.includes("Chat One"))!;
+    fireEvent.click(within(item).getByLabelText("Close Chat One"));
+    expect(closeSessionTab).not.toHaveBeenCalled();
+    expect(screen.getByText(/Close chat tab\?/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(closeSessionTab).not.toHaveBeenCalled();
+    expect(screen.getByRole("tab", { name: "Chat One" })).toBeInTheDocument();
+  });
+
 });
 
 // --- Terminal alert badge auto-clear (3s) timer -------------------------------
@@ -531,17 +670,4 @@ describe("terminal alert badge auto-clear timer", () => {
     expect(api.closeSession).toHaveBeenCalledWith("s-remote", "devbox");
   });
 
-  it("stacks full-width session rows on phones and keeps the grid from sm up", () => {
-    // Regression: the pills were fixed at 208px, so once the mobile sidebar /
-    // cowork overlay squeezed the centre column they painted over the action
-    // buttons ("sessions tab list messy").
-    const { container } = renderBar();
-    const pill = screen.getByRole("tab", { name: /chat one/i });
-    expect(pill.className).toMatch(/w-full/);
-    expect(pill.className).toMatch(/sm:w-52/);
-
-    const root = container.firstElementChild as HTMLElement;
-    expect(root.className).toMatch(/flex-col/);
-    expect(root.className).toMatch(/sm:grid/);
-  });
 });

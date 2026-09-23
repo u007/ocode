@@ -18,6 +18,7 @@ import { sessionAskSurfaceVisible } from "./lib/dialogScope";
 import { api, isRemoteSession, authToken, setAuthFailureHandler } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ActionErrorToast from "./components/common/ActionErrorToast";
+import { reportActionError } from "./lib/actionErrors";
 import AttentionSoundBridge from "./components/common/AttentionSoundBridge";
 import RemoteReconnect from "./components/RemoteReconnect";
 import ChatPanel from "./components/Chat/ChatPanel";
@@ -461,6 +462,9 @@ function HomeApp() {
     return activeEditorContext;
   }, [activeEditorContext, visibleEditorTabs]);
 
+  // Mobile responsive
+  const isMobile = useIsMobile();
+
   // ── Sidebar PreviewHost: AI/file-tree activation + highlight context ──
   // The `preview_open` agent tool and `ocode:open-preview` events (file tree
   // "Preview in sidebar", diagram node links) arrive as request + nonce; a
@@ -469,10 +473,17 @@ function HomeApp() {
   const [previewContext, setPreviewContext] = useState<PreviewSelection | null>(null);
 
   useEffect(() => {
-    if (previewNonce === 0 || !sideStateKey) return;
+    if (previewNonce === 0) return;
+    // Mobile has no side pane, so surface the activation in the session's
+    // Preview sub-tab instead — PreviewTabPage consumes the request + nonce.
+    if (isMobile) {
+      if (activeTabId) projectDispatch({ type: "SET_TAB_SUB_TAB", id: activeTabId, subTab: "preview" });
+      return;
+    }
+    if (!sideStateKey) return;
     panelClosedByUser.current.delete(sideStateKey);
     browserActions.open(sideStateKey);
-  }, [previewNonce, sideStateKey]);
+  }, [previewNonce, sideStateKey, isMobile, activeTabId, projectDispatch]);
 
   // Preview highlight (Ask LLM) → chat composer chip; cleared on tab switch.
   useEffect(() => {
@@ -593,8 +604,9 @@ function HomeApp() {
     projectDispatch({ type: "SET_TAB_SUB_TAB", id: sessionId, subTab: "agents" });
   };
 
-  // Mobile responsive
-  const isMobile = useIsMobile();
+  // Mobile responsive: auto-dismiss the project drawer when the viewport
+  // crosses into mobile. (`isMobile` itself is derived once, near the preview
+  // activation block, so both consumers share the same value.)
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 767px)");
     let lastWasMobile = mq.matches;
@@ -1120,6 +1132,7 @@ function HomeApp() {
     activeView,
     activeSubTab: activeSessionTab?.activeSubTab,
     focusedKind,
+    isMobile,
   });
   // Chat-session-bound dialogs (the permission/question asks, and any future
   // session-scoped prompt) may only mount while this session's Chat sub-tab is
@@ -1237,25 +1250,31 @@ function HomeApp() {
                   <div className="flex-1 min-w-0">
                     <UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={setFocusedKind} />
                   </div>
-                  <button
-                    type="button"
-                    aria-label="Toggle browser panel"
-                    disabled={focusedKind === "browser" || !sideStateKey || !sidePaneVisible}
-                    title={sidePaneVisible ? "Toggle browser panel" : "Browser panel is available on the chat sub-tab"}
-                    onClick={() => {
-                      if (!sideStateKey) return;
-                      if (browserOpen) {
-                        panelClosedByUser.current.add(sideStateKey);
-                        browserActions.close(sideStateKey);
-                      } else {
-                        panelClosedByUser.current.delete(sideStateKey);
-                        browserActions.open(sideStateKey);
-                      }
-                    }}
-                    className="mx-1 flex shrink-0 items-center rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors border border-border disabled:opacity-40"
-                  >
-                    🌐
-                  </button>
+                  {/* The side pane is desktop-only (shouldRenderSidePane gates
+                      on isMobile), so its toggle is hidden on phones — the
+                      browser lives in the tab strip's browser pills / "New
+                      browser tab" button there. */}
+                  {!isMobile && (
+                    <button
+                      type="button"
+                      aria-label="Toggle browser panel"
+                      disabled={focusedKind === "browser" || !sideStateKey || !sidePaneVisible}
+                      title={sidePaneVisible ? "Toggle browser panel" : "Browser panel is available on the chat sub-tab"}
+                      onClick={() => {
+                        if (!sideStateKey) return;
+                        if (browserOpen) {
+                          panelClosedByUser.current.add(sideStateKey);
+                          browserActions.close(sideStateKey);
+                        } else {
+                          panelClosedByUser.current.delete(sideStateKey);
+                          browserActions.open(sideStateKey);
+                        }
+                      }}
+                      className="mx-1 flex shrink-0 items-center rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors border border-border disabled:opacity-40"
+                    >
+                      🌐
+                    </button>
+                  )}
                 </div>
               )}
             <div className="flex flex-1 min-h-0">
@@ -1395,6 +1414,14 @@ function HomeApp() {
                             onReloadFromDisk={() => reloadTabFromDisk(et.id)}
                             onDismissExternalChange={() => dismissExternalChange(et.id)}
                             onForceSave={() => forceSaveEditorTab(et.id)}
+                            // Header Save button (touch devices have no Cmd/Ctrl+S).
+                            // saveEditorTab sets its own conflict banner / dialog
+                            // error and rethrows; surface the rest as a toast so a
+                            // failed tap is never silent.
+                            dirty={et.isDirty}
+                            onSave={() => {
+                              void saveEditorTab(et.id).catch((err) => reportActionError(err, "Save file"));
+                            }}
                           />
                         </div>
                       );
@@ -1518,9 +1545,20 @@ function HomeApp() {
                       const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "preview";
                       const key = `${tab.id}:preview`;
                       if (!visitedTabsRef.current.has(key) && !isActive) return null;
+                      // On mobile there is no side pane, so the preview
+                      // activation (AI `preview_open` tool / "Preview in
+                      // sidebar") is consumed by this full-width sub-tab
+                      // instead. Desktop keeps it in the side pane.
+                      const takesActivation = isMobile && tab.id === activeTabId;
                       return (
                         <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
-                          <PreviewTabPage projectRoot={tab.projectPath} projectHost={projectState.projects.find((p) => p.path === tab.projectPath)?.host} />
+                          <PreviewTabPage
+                            projectRoot={tab.projectPath}
+                            projectHost={projectState.projects.find((p) => p.path === tab.projectPath)?.host}
+                            request={takesActivation ? previewRequest : null}
+                            nonce={takesActivation ? previewNonce : 0}
+                            onConsumeActivation={takesActivation ? consumePreviewActivation : undefined}
+                          />
                         </div>
                       );
                     })}

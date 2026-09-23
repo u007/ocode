@@ -28,6 +28,19 @@
 
 
 
+
+## 2026-09-23
+
+* **Update**: Desktop/Web Terminal Wheel Scroll Chains to the App Page (xterm.js Escape Gestures) ([gotchas/terminal-wheel-scroll-chaining.md](/gotchas/terminal-wheel-scroll-chaining.md))
+* **Creation**: Desktop/Web Terminal Wheel Scroll Chains to the App Page (xterm.js Escape Gestures) ([gotchas/terminal-wheel-scroll-chaining.md](/gotchas/terminal-wheel-scroll-chaining.md))
+* **Update**: Web UI Mobile Layout Breakage (≤767px)" ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
+* **Update**: Web UI Global Keyboard Shortcuts ([concepts/web-keyboard-shortcuts.md](/concepts/web-keyboard-shortcuts.md))
+* **Creation**: Web UI Mobile Layout Breakage (≤767px) ([docs/gotchas/web-ui-mobile-layout-breakage.md](/docs/gotchas/web-ui-mobile-layout-breakage.md))
+* **Update**: Web UI Mobile Layout Breakage (≤767px) ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
+* **Update**: Linux Sandbox Lockout: Confiner Shell Path, /dev/null, and Binary Dispatch ([gotchas/linux-sandbox-lockout-confiner-shell-devnull-dispatch.md](/gotchas/linux-sandbox-lockout-confiner-shell-devnull-dispatch.md))
+* **Update**: Sandbox Writable-Root Must Exist on Disk ([gotchas/sandbox-writable-root-must-exist.md](/gotchas/sandbox-writable-root-must-exist.md))
+* **Update**: Seatbelt Profile Test Coverage Gap ([gotchas/seatbelt-profile-test-coverage-gap.md](/gotchas/seatbelt-profile-test-coverage-gap.md))
+
 ## 2026-09-22
 
 * **Update**: opencode-go per-model protocol routing & Anthropic tool schema flatness ([gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md](/gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md))

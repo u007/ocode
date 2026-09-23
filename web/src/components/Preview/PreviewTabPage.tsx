@@ -1,11 +1,55 @@
-import { memo, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import FilePicker from "../Files/FilePicker";
 import PreviewSurface from "./PreviewSurface";
-import { previewKindForPath } from "../../lib/previewKind";
+import { previewKindForPath, type PreviewOpenRequest } from "../../lib/previewKind";
 
-function PreviewTabPage({ projectRoot, projectHost }: { projectRoot?: string; projectHost?: string }) {
+interface SelectedFile {
+  path: string;
+  kind: string;
+  projectRoot?: string;
+  projectHost?: string;
+  page?: number;
+}
+
+function PreviewTabPage({
+  projectRoot,
+  projectHost,
+  request,
+  nonce,
+  onConsumeActivation,
+}: {
+  projectRoot?: string;
+  projectHost?: string;
+  /** One-shot preview activation, supplied by App on MOBILE only: the side
+   *  pane that normally owns it is not rendered at that breakpoint, so this
+   *  full-width sub-tab consumes it instead (AI `preview_open` tool /
+   *  "Preview in sidebar"). Undefined on desktop. */
+  request?: PreviewOpenRequest | null;
+  /** Monotonic activation nonce; a fresh value re-applies `request` even when
+   *  the path is unchanged. */
+  nonce?: number;
+  /** Acknowledge the activation so a remount does not replay it. */
+  onConsumeActivation?: () => void;
+}) {
   const [filePickerOpen, setFilePickerOpen] = useState(false);
-  const [selected, setSelected] = useState<{ path: string; kind: string; projectRoot?: string; projectHost?: string } | null>(null);
+  const [selected, setSelected] = useState<SelectedFile | null>(null);
+
+  // Apply a mobile preview activation. Keyed on the monotonic nonce (not the
+  // request identity) so re-requesting the same file still re-selects it; the
+  // request itself is read at apply time.
+  useEffect(() => {
+    if (!nonce || !request) return;
+    setSelected({
+      path: request.path,
+      kind: request.kind ?? previewKindForPath(request.path) ?? "text",
+      projectRoot: request.projectRoot ?? projectRoot,
+      projectHost: request.projectHost ?? projectHost,
+      page: request.page,
+    });
+    onConsumeActivation?.();
+    // Only the nonce is a trigger; request/projectRoot/host are read when it fires.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nonce]);
 
   return (
     <div className="flex h-full w-full min-h-0">
@@ -40,6 +84,7 @@ function PreviewTabPage({ projectRoot, projectHost }: { projectRoot?: string; pr
             kind={selected.kind as any}
             projectRoot={selected.projectRoot}
             projectHost={selected.projectHost}
+            page={selected.page}
           />
         )}
       </main>
@@ -47,6 +92,8 @@ function PreviewTabPage({ projectRoot, projectHost }: { projectRoot?: string; pr
   );
 }
 
-/** Props are primitives (`projectRoot`, `projectHost`), so a parent re-render —
- *  e.g. another tab or project becoming active — is a no-op here. */
+/** Props are primitives (`projectRoot`, `projectHost`) plus a one-shot
+ *  activation (`request`/`nonce`/`onConsumeActivation` — the request identity
+ *  is stable while pending and the callback is memoised), so a parent
+ *  re-render — e.g. another tab or project becoming active — is a no-op here. */
 export default memo(PreviewTabPage);

@@ -54,6 +54,19 @@
   * {
     @apply border-border;
   }
+  /*
+   * The app is a single full-height SPA: the document itself is never meant to
+   * scroll (App.tsx renders `h-screen`). Without this, any gesture the web
+   * content leaves to the browser — e.g. a wheel over a terminal that xterm
+   * could not use — rubber-bands the whole page in the desktop shell's
+   * WKWebView, which reads as "the window scrolls instead of the terminal".
+   * Inner panels keep their own scrolling; only overscroll/chaining past them
+   * (and the document-level bounce) is disabled.
+   */
+  html,
+  body {
+    overscroll-behavior: none;
+  }
   body {
     @apply bg-background text-foreground;
   }

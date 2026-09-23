@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Web UI Global Keyboard Shortcuts
-description: 'Canonical reference for the ocode web/desktop global keyboard shortcuts: ⌘/Ctrl+K palette, ⌘/Ctrl+P file picker, ⌘/Ctrl+S save, ⌘/Ctrl+N new chat (reveals the Sessions chat half), ⌘/Ctrl+T new terminal, ⌘/Ctrl+W close frontmost, Escape — plus the desktop-shell and xterm caveats, and composer-local keys (Enter, Shift+Enter, ↑/↓, /, !).'
+description: 'Concept: web UI keyboard shortcuts'
 resource: "web/src/hooks/useKeyboard.ts; web/src/App.tsx:695-763"
 tags:
   - web
@@ -9,7 +9,7 @@ tags:
   - shortcuts
   - ui
   - reference
-timestamp: 2026-09-22T02:38:28Z
+timestamp: 2026-09-22T18:24:11Z
 ---
 # Web UI Global Keyboard Shortcuts
 
@@ -27,7 +27,7 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 |---|---|
 | `⌘K` / `Ctrl+K` | Open CommandPalette (`onCommandPalette`) |
 | `⌘P` / `Ctrl+P` | Open FilePicker (`onFilePicker`) |
-| `⌘S` / `Ctrl+S` | Save the visible editor tab (`onSave`) |
+| `⌘S` / `Ctrl+S` | Save the visible editor tab (`onSave`) — also exposed as a **header Save button** (`<Save />`, `aria-label="Save file"`) in `FileEditor`/`FileTabContent` for touch devices that have no keyboard; both paths invoke the same `saveEditorTab` call (`:1423` in `App.tsx`) |
 | `⌘N` / `Ctrl+N` | New chat — reveals the merged **Sessions** view on the chat half, then opens (or reuses the blank) chat tab (`onNewSession` → `openNewChat`). Identical to the tab-bar "new chat" button |
 | `⌘T` / `Ctrl+T` | New terminal on the merged **Sessions** view; on any other view the same new-chat reveal (`onNewTerminal`) |
 | `⌘W` / `Ctrl+W` | Close the frontmost thing (desktop shell only — see caveats) |
@@ -54,6 +54,7 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 - **Ctrl+W inside the embedded terminal is not stolen.** `useKeyboard.ts:55-69` (return at `:61`): if `!e.metaKey` and the event target is inside `.xterm`, the handler returns — Ctrl+W is readline's "delete previous word" while typing in the pty. Cmd+W (`metaKey`) is never sent to the pty, so it still closes the frontmost tab even when the terminal has focus (regression: `web/src/hooks/useKeyboard.test.ts` "closes via Cmd+W even when the embedded terminal has focus").
 - **⌘N and ⌘T have no native desktop menu accelerator.** The Wails webview receives the keys and `useKeyboard` handles them; `buildAppMenu` (`cmd/ocode-desktop/main.go:542`) binds only `CmdOrCtrl+,` (Settings) and `CmdOrCtrl+Shift+S` (Share). The Edit menu is the Wails role `menu.AddRole(application.EditMenu)`, whose accelerators are the standard ones (⌘Z / ⇧⌘Z, ⌘X, ⌘C, ⌘V, ⌘⇧⌥V, Backspace, ⌘A, plus the Speech submenu) — none is ⌘N or ⌘T. Adding/removing these bindings is hook-only.
 - **⌘N / ⌘T are browser-chrome shortcuts in a plain browser tab.** `Ctrl+N` is "new window" and `Ctrl+T` is "new tab", both on Chrome's **non-overridable** list (`Ctrl+T`, `Ctrl+N`, `Ctrl+W`/`F4`, `Ctrl+Shift+T`, `Ctrl+Shift+N`, `Ctrl+Tab`, `F12`/`Ctrl+Shift+I`, `Ctrl+Shift+C`, `Ctrl+U`, `Ctrl+Shift+Del`), so `e.preventDefault()` cannot reliably claim them there. Contrast omnibox-family keys such as `Ctrl+K`, which pages *are* allowed to take (GitHub overrides it) — that is why ⌘K works in a browser while ⌘N/⌘T may not. The desktop shell is unaffected (its webview has no browser chrome), and outside it the reliable entry point is the tab-bar buttons.
+- **Save has a touch-path button.** The Files-tab editor header (`FileEditor.tsx:862-878`) renders a Save button (lucide `Save`, `aria-label="Save file"`) when `onSave` is provided and `dirty` is true — disabled otherwise. This is the only save mechanism on touch devices (no keyboard). Read-only surfaces (`TextViewer`/`MarkdownViewer`) pass no `onSave`, so no button renders there. Save failures surface via `reportActionError(…, "Save file")` → `ActionErrorToast`; a 409 conflict also sets the in-editor external-change banner.
 - **No raw listeners in child components.** Registering bindings outside `useKeyboard` bypasses the desktop-shell and xterm guards above.
 - **Keep `skills/ocode-web/SKILL.md` §10 in sync.** That table lists the same bindings (⌘K, ⌘P, ⌘S, ⌘N, ⌘T, ⌘W, Escape, plus the note that ⌘, opens Settings via the native menu) — when a binding changes, update both this doc and the skill.
 
@@ -62,6 +63,8 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 - `web/src/hooks/useKeyboard.test.ts` — Cmd+W / Ctrl+W dispatch in the desktop shell, no binding in a plain browser, Ctrl+W not stolen inside `.xterm`, Cmd+W with terminal focus, plain W ignored, and ⌘N still fires `onNewSession`. Unchanged by the ⌘N-reveal work (the hook itself was not modified).
 - `web/src/App.newChatShortcut.test.tsx` — the App-level wiring: from a restored Files view, ⌘/Ctrl+N switches to the Sessions view on the chat half and clears the no-open-sessions empty state (a tab now exists); a second press reuses the blank tab rather than stacking (exactly one chat pane); with the terminal half active it moves focus back to chat; and ⌘/Ctrl+T outside Sessions performs the same reveal. Mutation-verified by temporary revert: dropping `setActiveView("sessions")` failed 3 of the 4, dropping `setFocusedKind("chat")` failed the terminal-half case, and dropping the `reuseIfEmpty` argument failed the reuse case.
 - `web/src/hooks/useKeyboard.browser.test.ts` — ⌘W closes the focused browser tab, falls back to session close when chat is focused or no active browser id.
+- `web/src/components/Files/FileEditor.save.test.tsx` — header Save button: renders disabled when not dirty, enabled and calls `onSave` when dirty, omitted entirely when `onSave` is undefined (read-only surfaces).
+- `web/src/App.editorTabScope.test.tsx` — "wires a Save handler and the dirty flag into each editor pane".
 
 ## Composer (chat input)
 

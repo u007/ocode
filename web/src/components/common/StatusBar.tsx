@@ -2,8 +2,13 @@ import { useEffect, useState } from "react";
 import { useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { Button } from "@/components/ui/button";
-import { PanelRight, Mic, MicOff, Activity } from "lucide-react";
+import { PanelRight, Mic, MicOff, Activity, ChevronDown, ChevronUp } from "lucide-react";
 import { useSpeech } from "../../components/Speech/SpeechProvider";
+import {
+  loadStatusBarCollapsed,
+  saveStatusBarCollapsed,
+  subscribeStatusBarCollapsed,
+} from "./statusBarCollapse";
 import type { ToolActivityStatus } from "../../api/types";
 
 interface Props {
@@ -127,6 +132,17 @@ export const elapsedMsSinceForTests = elapsedMsSince;
 
 export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const { activeTabId } = useProjectState();
+  // Collapsible: collapsed keeps a slim row with the working indicator + error
+  // (this bar is the single synchronized "working" signal — see
+  // runningStatusParts) and hides the detail rows. Preference persists across
+  // reloads and syncs across windows/tabs.
+  const [collapsed, setCollapsed] = useState(loadStatusBarCollapsed);
+  useEffect(() => subscribeStatusBarCollapsed(setCollapsed), []);
+  const toggleCollapsed = () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    saveStatusBarCollapsed(next);
+  };
   const spendingUSD = useChatSelector((s) => s.spendingUSD);
   // Scoped to the active tab's session: other tabs' streamed tokens don't
   // re-render this always-mounted status bar.
@@ -204,6 +220,45 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
     ? "~/" + cwd.substring(homePrefix.length + 1)
     : cwd;
 
+  // The running signal — shared by the expanded row 1 and the collapsed slim
+  // row so collapsing never hides the working indicator.
+  const runningIndicator =
+    runningParts.length > 0 ? (
+      <span className="flex items-center gap-1 text-blue-400" title="Agent running status">
+        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-blue-500" />
+        <span className="truncate max-w-[28rem]">{runningParts.join("  ·  ")}</span>
+      </span>
+    ) : isRunning && currentInputElapsedLabel ? (
+      <span className="text-blue-400" title="Elapsed since current input">
+        · {currentInputElapsedLabel}
+      </span>
+    ) : null;
+
+  if (collapsed) {
+    return (
+      <div className="flex items-center border-t border-border px-4 py-1 text-xs text-muted-foreground">
+        <div className="flex items-center gap-3 min-w-0 flex-wrap">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={toggleCollapsed}
+            title="Expand status bar"
+            aria-label="Expand status bar"
+          >
+            <ChevronUp className="h-4 w-4" />
+          </Button>
+          {runningIndicator}
+          {error && (
+            <span className="text-red-400 truncate max-w-[28rem]" title={error}>
+              {error}
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col border-t border-border px-4 py-1.5 text-xs text-muted-foreground gap-0.5">
       {/* Row 1: IDE, subagent, streaming */}
@@ -224,21 +279,7 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
               · model: {mainModel}{reasoningLevel !== null ? ` (reasoning=${reasoningLevel})` : ""}
             </span>
           )}
-          {runningParts.length > 0 && (
-            <span
-              className="flex items-center gap-1 text-blue-400"
-              title="Agent running status"
-            >
-              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-blue-500" />
-              <span className="truncate max-w-[28rem]">{runningParts.join("  ·  ")}</span>
-            </span>
-          )}
-          {/* Current-input elapsed when running but no detailed activity yet */}
-          {isRunning && runningParts.length === 0 && currentInputElapsedLabel && (
-            <span className="text-blue-400" title="Elapsed since current input">
-              · {currentInputElapsedLabel}
-            </span>
-          )}
+          {runningIndicator}
           {/* Last turn took — mirrors TUI's "✓ done at … · took …" */}
           {!isRunning && lastTookLabel && (
             <span className="text-muted-foreground" title={lastEndedLabel ? `Done at ${lastEndedLabel}` : "Last turn duration"}>
@@ -281,6 +322,16 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
             </Button>
           )}
           <SpeechToolbarToggle />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={toggleCollapsed}
+            title="Collapse status bar"
+            aria-label="Collapse status bar"
+          >
+            <ChevronDown className="h-4 w-4" />
+          </Button>
           <span>ocode web</span>
         </div>
       </div>

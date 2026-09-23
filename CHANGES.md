@@ -1,5 +1,133 @@
 # Changelog
 
+## 2026-09-23 — Fix: a wheel over the terminal no longer scrolls the app window
+
+Reported: "on terminal tab on web ui and desktop, cannot scroll the claude code
+that run inside the terminal, only can scroll the window" — over a fullscreen
+Claude Code session (alternate screen + mouse capture), a wheel/trackpad gesture
+moved the whole app page instead of the terminal.
+
+xterm consumes the wheel gestures it can use and calls
+`preventDefault()` + `stopPropagation()` when it does: scrolling its own
+scrollback, or forwarding a mouse report to the TUI that owns the mouse (which
+is how Claude Code's fullscreen renderer scrolls its conversation). Gestures it
+leaves alone — the scrollback at either edge, a mouse report the app never
+answered, `deltaY === 0` — were handed to the browser, which scrolls the nearest
+scrollable ancestor. In the desktop shell (WKWebView) even the non-scrollable
+document rubber-bands, so those leftover gestures visibly moved the whole app
+window.
+
+- `web/src/components/Terminal/TerminalPanel.tsx`: the terminal container now
+  registers a non-passive `onWheelGuard` (plus `overscroll-contain`). It sits on
+  the container, not `.xterm`, so it runs after xterm's own handlers — the
+  ones that stop propagation when they consume — and only ever sees gestures
+  xterm ignored. Those it `preventDefault()`s, except when the container's own
+  `overflow-y-auto` fallback can still scroll in that direction (a terminal
+  taller than its box between a font-size change and the next fit).
+- `web/src/index.css`: `overscroll-behavior: none` on `html, body`. The app is a
+  full-height SPA that is never meant to scroll the document; this kills the
+  desktop webview's page-level rubber-band for any leftover gesture (over app
+  chrome or an overlay, not just the terminal) while leaving every inner panel's
+  own scrolling intact.
+- Tests: `web/src/components/Terminal/TerminalPanel.wheelGuard.test.tsx` (4) —
+  an unconsumed wheel over the terminal is swallowed; a gesture xterm consumed
+  (stop-propagation from a deeper surface) is left alone; the container's own
+  overflow fallback still scrolls in both directions and is swallowed at its
+  edges; the container carries `overscroll-contain`. Mutation-verified: with the
+  listener removed, the two swallow assertions fail.
+- Live-verified against the running desktop app's server (real pty, real Claude
+  Code, headless Chromium): with 2000px of scrollable room inserted above the
+  app, a wheel over the sidebar moved the page 2000→800 while every gesture over
+  the terminal kept it pinned at 2000; the shell scrollback still scrolled to the
+  top and bottom, and a fullscreen Claude Code conversation still received its
+  mouse reports (10/60/20/60 SGR wheel reports) and scrolled. The guard fired
+  only at the scrollback edges (the gestures xterm could not use). Built CSS
+  carries both `overscroll-behavior:none` and `overscroll-behavior:contain`;
+  `tsgo --noEmit`, `vite build` and the Terminal+Layout suites (306 tests) are
+  green.
+
+## 2026-09-23 — Mobile/tablet session tabs become a dropdown, action buttons stay right
+
+On phones *and* tablets (below `lg`, <1024px — including a desktop window
+dragged narrow, so the desktop app gets it too) the `UnifiedTabBar` no longer
+stacks the session/terminal/browser tabs as full-width rows. The strip
+collapses into a single **dropdown** whose closed trigger shows the ACTIVE tab
+(emoji + title + chevron) and whose open list keeps full pill parity: pending
+dot, terminal unread bell, close X (same confirm dialog), rename via
+double-click, plus the Processes pseudo-tab. The new-chat / new-terminal /
+new-browser / Processes / All-sessions buttons remain on the RIGHT of the same
+row instead of wrapping below. ≥1024px keeps the original two-column grid with
+208px drag-reorder pills — desktop behaviour unchanged.
+
+- `web/src/components/Layout/UnifiedTabBar.tsx`: new `MobileTabDropdown` (Radix
+  Popover, `role="listbox"`/`option`) + shared `tabEntries` metadata next to
+  the pill `renderPill`; the pill grid moves from the `sm:` to the `lg:`
+  breakpoint; the action cluster is rendered once and shared by both layouts
+  (single DOM copy, buttons never duplicated).
+- Selection routes through the exact same activation handlers as the pills, so
+  the keep-alive surfaces are switched, never unmounted; the Processes button
+  was extracted to a `goProcesses` callback reused by the dropdown row.
+- Tests: `UnifiedTabBar.test.tsx` — the old "stacks full-width" contract is
+  replaced by "shows the tab dropdown on phones and keeps the pill grid from
+  lg up" plus dropdown open/switch, pending dot, unread bell (activate +
+  markAlerted), and close-confirmation describes; three earlier assertions that
+  matched the tab title text were re-scoped to the pill role (the trigger
+  duplicates the active title). All mutation-verified via the suite.
+- Live-verified in headless Chromium at 390/768/1024/1280px (correct
+  branch visibility per breakpoint, buttons share the dropdown's row,
+  dropdown lists all session tabs and switches the active session) and
+  `tsgo --noEmit` + `vite build` clean. NOTE: the right-hand CoworkSidebar
+  still treats ≥768px as desktop (its own `useIsMobile` ≤767 hook), so at
+  exactly 768–1023px with the cowork rail open the dropdown is squeezed —
+  pre-existing rail behaviour, unchanged by this work.
+
+On phones (≤767px) the right-hand "Browser / Preview" side pane beside the chat
+is no longer rendered — a fixed-width `flex-shrink-0` child had no room next to
+the chat column and overflowed the viewport. Browser and preview stay reachable
+as **tabs**, matching the rest of the mobile overlay layout.
+
+- `shouldRenderSidePane` (`web/src/lib/sidePaneVisibility.ts`) gains an
+  `isMobile` gate: the pane is desktop-only. App hides its 🌐 "Toggle browser
+  panel" button at that breakpoint (the `UnifiedTabBar` browser pills / "New
+  browser tab" button and the session **Preview** sub-tab remain the entry
+  points).
+- A preview activation (AI `preview_open` tool or file-tree "Preview in
+  sidebar") is no longer a silent no-op on mobile: App switches the active
+  session sub-tab to **Preview** and hands the one-shot `request`/`nonce`/
+  `onConsumeActivation` to `PreviewTabPage`, which shows the requested file
+  (honouring its page). Desktop behaviour is unchanged.
+- Files: `web/src/lib/sidePaneVisibility.ts`,
+  `web/src/components/Preview/PreviewTabPage.tsx`, `web/src/App.tsx`,
+  `web/src/lib/sidePaneVisibility.test.ts` (+2 mobile cases),
+  `web/src/App.previewActivation.test.tsx` (mobile describe),
+  `web/src/components/Preview/PreviewTabPage.activation.test.tsx` (new, 4
+  tests) — all mutation-verified (removing the mobile gate, the sub-tab
+  routing, or the consume effect fails 5 tests), `skills/ocode-web/SKILL.md`.
+
+## 2026-09-23 — Feature: the chat status bar is collapsible (web + desktop)
+
+The bottom status bar under the web chat (and the desktop app, which embeds
+the same SPA) now has a chevron toggle that collapses it to a single slim row.
+Collapsing hides the detail rows (model/subagent, session, cwd, context, spend,
+files/LSP) but keeps the two signals the bar owns: the synchronized
+`working…`/tool indicator (`runningStatusParts`, still the single working
+indicator for the session) and the last error — so a collapsed bar can never
+look idle during a running turn.
+
+- Preference is persisted in `localStorage` (`ocode.ui.statusBarCollapsed.v1`)
+  and synced across windows/tabs via a same-document `CustomEvent` plus the
+  cross-document `storage` event — the `AgentPreview` collapse pattern
+  (`web/src/components/common/statusBarCollapse.ts`).
+- The shared `runningIndicator` fragment is rendered by both the expanded row
+  and the collapsed row, so the two render paths cannot drift.
+- Files: `web/src/components/common/StatusBar.tsx`,
+  `web/src/components/common/statusBarCollapse.ts` (new),
+  `web/src/components/common/statusBarCollapse.test.ts` (new, 8 tests),
+  `web/src/components/common/StatusBar.collapse.test.tsx` (new, 6 tests,
+  mutation-verified: dropping the collapsed branch fails 4, dropping the
+  `saveStatusBarCollapsed` call fails 2), `skills/ocode-web/SKILL.md`,
+  `CHANGES.md`.
+
 ## 2026-09-22 — Fix: retry the opencode-go thinking-mode 400 (`reasoning_content`)
 
 A thinking-mode conversation rejected by the gateway with

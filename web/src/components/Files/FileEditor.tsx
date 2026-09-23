@@ -1,9 +1,10 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
-import { Loader2, Settings2, HelpCircle } from "lucide-react";
+import { Loader2, Settings2, HelpCircle, Save } from "lucide-react";
 import { api } from "../../api/client";
 import { Button } from "../ui/button";
+import { cn } from "../../lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -55,6 +56,13 @@ export interface FileEditorProps {
   onReloadFromDisk?: () => void;
   onDismissExternalChange?: () => void;
   onForceSave?: () => void;
+  /** Called when the user clicks the header Save button. The button is only
+   *  rendered when this is provided — read-only preview surfaces (TextViewer /
+   *  MarkdownViewer) pass nothing. It exists so touch devices, which have no
+   *  Cmd/Ctrl+S, can still save; desktop users keep the shortcut. */
+  onSave?: () => void;
+  /** Whether the buffer has unsaved edits. Enables the header Save button. */
+  dirty?: boolean;
   /** Initial highlight to apply (from content search). If provided, highlights all matches after mount. */
   initialHighlight?: { query: string; line?: number } | null;
   /** Open another file in the Files tab. Only consumed by `FileTabContent`'s
@@ -149,6 +157,8 @@ function FileEditorImpl({
   onReloadFromDisk,
   onDismissExternalChange,
   onForceSave,
+  onSave,
+  dirty = false,
   initialHighlight,
 }: FileEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
@@ -214,6 +224,10 @@ function FileEditorImpl({
   // stable caller that forwards through a ref.
   const onChangeRef = useRef(onChange);
   const onSelectionChangeRef = useRef(onSelectionChange);
+  // The parent inlines `() => saveEditorTab(id)` on every render; the memoized
+  // outer wrapper skips re-rendering on identity changes, so forward through a
+  // ref (same reason as onChangeRef) to always call the latest handler.
+  const onSaveRef = useRef(onSave);
   // Last model value this component forwarded to the parent via onChange.
   const lastEmittedRef = useRef<string>(content);
   // Latest incoming content, readable from mount/async callbacks.
@@ -224,6 +238,9 @@ function FileEditorImpl({
   useEffect(() => {
     onSelectionChangeRef.current = onSelectionChange;
   }, [onSelectionChange]);
+  useEffect(() => {
+    onSaveRef.current = onSave;
+  }, [onSave]);
 
   const stableOnChange = useCallback((val: string | undefined) => {
     // Remember what WE emitted so the external-content sync effect can tell
@@ -836,11 +853,28 @@ function FileEditorImpl({
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Editor header */}
-      <div className="flex items-center justify-between px-4 py-1.5 border-b border-border bg-muted/30 text-xs text-muted-foreground">
-        <span className="font-mono">{path}</span>
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between gap-2 px-4 py-1.5 border-b border-border bg-muted/30 text-xs text-muted-foreground">
+        <span className="font-mono truncate min-w-0">{path}</span>
+        <div className="flex shrink-0 items-center gap-2">
           {readOnly && (
-            <span className="text-muted-foreground/60 italic">read-only</span>
+            <span className="hidden text-muted-foreground/60 italic sm:inline">read-only</span>
+          )}
+          {onSave && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "h-6 px-1.5 gap-1",
+                dirty ? "text-foreground hover:bg-muted" : "text-muted-foreground",
+              )}
+              disabled={!dirty}
+              onClick={() => onSaveRef.current?.()}
+              title={dirty ? "Save file (Cmd/Ctrl+S)" : "No unsaved changes"}
+              aria-label="Save file"
+            >
+              <Save className="w-3.5 h-3.5" />
+              <span className="text-xs">Save</span>
+            </Button>
           )}
           <Button
             variant="ghost"
@@ -860,7 +894,7 @@ function FileEditorImpl({
             title="Editor settings & extensions"
           >
             <Settings2 className="w-3.5 h-3.5" />
-            <span className="text-xs">Settings</span>
+            <span className="hidden text-xs sm:inline">Settings</span>
           </Button>
         </div>
       </div>
@@ -971,6 +1005,9 @@ function arePropsEqual(prev: FileEditorProps, next: FileEditorProps): boolean {
     prev.diffVersion === next.diffVersion &&
     prev.persistKey === next.persistKey &&
     prev.externalChange === next.externalChange &&
+    // `dirty` drives the header Save button's enabled state; `onSave` identity
+    // is deliberately ignored (forwarded through onSaveRef, like onChange).
+    prev.dirty === next.dirty &&
     // Callbacks are forwarded through refs inside the component (stable
     // `stableOnChange` / selection ref), so their identity is intentionally
     // ignored here — the parent inlines `(v) => handleEditorChange(id, v)`

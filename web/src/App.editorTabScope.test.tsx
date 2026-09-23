@@ -133,8 +133,14 @@ vi.mock("./components/Layout/EditorTabBar", () => ({
     );
   },
 }));
+const paneProps = vi.hoisted(() => ({
+  byPath: {} as Record<string, { onSave?: unknown; dirty?: unknown }>,
+}));
 vi.mock("./components/Files/FileTabContent", () => ({
-  default: ({ path }: { path: string }) => <div data-testid="editor-pane" data-path={path} />,
+  default: ({ path, onSave, dirty }: { path: string; onSave?: unknown; dirty?: unknown }) => {
+    paneProps.byPath[path] = { onSave, dirty };
+    return <div data-testid="editor-pane" data-path={path} />;
+  },
 }));
 
 vi.mock("./components/Browser/BrowserPanel", () => ({ BrowserPanel: () => null }));
@@ -179,6 +185,7 @@ beforeEach(() => {
   window.localStorage.clear();
   tabBar.items = [];
   tabBar.activeId = null;
+  paneProps.byPath = {};
   appApi.listProjects.mockReset().mockResolvedValue([REMOTE_PROJECT, LOCAL_PROJECT]);
   // Boot auto-selects the local project as the active project.
   appApi.getCurrentProject.mockReset().mockResolvedValue({ project: LOCAL_PROJECT });
@@ -214,5 +221,21 @@ describe("Files tab editor-tab scoping", () => {
     // switch); the inactive project's pane is hidden, not removed.
     expect(panes.find((p) => p.path === "b.ts")).toMatchObject({ hidden: false });
     expect(panes.find((p) => p.path === "a.ts")).toMatchObject({ hidden: true });
+  });
+
+  it("wires a Save handler and the dirty flag into each editor pane", async () => {
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(tabBar.items.length).toBeGreaterThan(0));
+
+    // The header Save button lives in FileEditor (touch devices have no
+    // Cmd/Ctrl+S), so App must hand each pane a save callback and the tab's
+    // dirty state — otherwise the button never renders.
+    const local = paneProps.byPath["b.ts"];
+    expect(typeof local?.onSave).toBe("function");
+    expect(local?.dirty).toBe(false);
   });
 });

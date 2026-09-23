@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { X, List, Plus, Loader2, Bell } from "lucide-react";
+import { X, List, Plus, Loader2, Bell, ChevronDown } from "lucide-react";
 import {
   DndContext,
   closestCenter,
@@ -35,6 +35,7 @@ import { loadTabOrder, saveTabOrder, reconcileTabOrder, type UnifiedTabKey } fro
 import { focusTerminalById } from "../Terminal/terminalFocus";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 
 function truncateTitle(s: string, maxLen: number): string {
   s = s.replace(/\n/g, " ").trim();
@@ -156,7 +157,7 @@ function TabPill({
           onClick({ button: 0, detail: 1 } as unknown as React.MouseEvent);
         }
       }}
-      className={`relative flex w-full sm:w-52 items-center gap-1 overflow-hidden px-2.5 py-1 rounded-md text-[13px] leading-4 cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+      className={`relative flex w-full lg:w-52 items-center gap-1 overflow-hidden px-2.5 py-1 rounded-md text-[13px] leading-4 cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
         isActive ? "bg-muted/80 text-foreground border border-border/70 shadow-sm" : "bg-card/20 text-muted-foreground border border-transparent hover:bg-muted/50 hover:text-foreground"
       }`}
     >
@@ -271,6 +272,190 @@ function BrowserTabPill({
   }, [s?.url, id, onNavigated]);
   const displayTitle = manualTitle ?? s?.pageTitle ?? fallbackTitle ?? "New tab";
   return <TabPill {...props} title={displayTitle} isLoading={!!s?.loading} />;
+}
+
+/** One row of the mobile/tablet tab-switcher dropdown. `key` is the same
+ *  composite key the pill strip uses (plus the synthetic "term:processes"
+ *  entry for the Processes pseudo-tab, which has no pill). */
+type TabEntryKind = "chat" | "terminal" | "browser";
+
+interface TabEntry {
+  key: UnifiedTabKey | "term:processes";
+  kind: TabEntryKind;
+  id: string;
+  emoji: string;
+  title: string;
+  isActive: boolean;
+  hasPending?: boolean;
+  hasAlert?: boolean;
+  isLoading?: boolean;
+}
+
+interface MobileTabDropdownProps {
+  entries: TabEntry[];
+  onActivate: (e: React.MouseEvent, entry: TabEntry) => void;
+  onRequestClose: (e: React.MouseEvent, entry: TabEntry) => void;
+  editing: { kind: FocusedKind; id: string } | null;
+  editValue: string;
+  onEditValueChange: (v: string) => void;
+  onStartRename: (kind: FocusedKind, id: string, title: string) => void;
+  onCommitRename: () => void;
+  onCancelRename: () => void;
+}
+
+/** Phone/tablet presentation of the tab strip: a single dropdown whose closed
+ *  trigger shows the ACTIVE tab (emoji + title + chevron), opening into a
+ *  list with full pill parity (pending dot, unread bell, close button, rename
+ *  via double-click). Select a row with the exact same activation handlers
+ *  the desktop pills use, so switching never unmounts the keep-alive surface.
+ */
+function MobileTabDropdown({
+  entries,
+  onActivate,
+  onRequestClose,
+  editing,
+  editValue,
+  onEditValueChange,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+}: MobileTabDropdownProps) {
+  const [open, setOpen] = useState(false);
+  const active = entries.find((e) => e.isActive) ?? entries[0] ?? null;
+  if (!active) return null;
+  const activeTitle = active.title || active.id;
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          data-testid="mobile-tab-dropdown-trigger"
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          aria-label={`Sessions: ${activeTitle}`}
+          title={activeTitle}
+          className="flex min-w-0 w-full items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-[13px] leading-4 text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <span aria-hidden data-testid="mobile-tab-dropdown-active-icon" className="flex h-4 w-4 shrink-0 items-center justify-center text-[13px]">
+            {active.isLoading ? (
+              <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-muted-foreground" />
+            ) : (
+              active.emoji
+            )}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-left">{activeTitle}</span>
+          <span
+            aria-hidden
+            data-testid="mobile-tab-dropdown-active-pending"
+            data-active={active.hasPending ? "true" : "false"}
+            className={`h-1.5 w-1.5 shrink-0 rounded-full ${active.hasPending ? "bg-amber-400" : "bg-transparent"}`}
+          />
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" sideOffset={4} className="w-72 max-w-[calc(100vw-1.25rem)] p-1.5">
+        <div role="listbox" aria-label="Session tabs" className="flex max-h-[60vh] flex-col gap-0.5 overflow-y-auto">
+          {entries.map((entry) => {
+            const title = entry.title || entry.id;
+            const isEditingThis = editing?.kind === entry.kind && editing.id === entry.id;
+            return (
+              <div
+                key={entry.key}
+                role="option"
+                aria-selected={entry.isActive}
+                data-testid="mobile-tab-dropdown-item"
+                tabIndex={0}
+                title={title}
+                className={`flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] leading-4 outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                  entry.isActive
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                }`}
+                onClick={(e) => {
+                  onActivate(e, entry);
+                  setOpen(false);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onActivate(e as unknown as React.MouseEvent, entry);
+                    setOpen(false);
+                  }
+                }}
+                onDoubleClick={(e) => {
+                  if (entry.key === "term:processes") return;
+                  e.stopPropagation();
+                  onStartRename(entry.kind, entry.id, title);
+                }}
+              >
+                <span aria-hidden className="flex h-4 w-4 shrink-0 items-center justify-center text-[13px]">
+                  {entry.isLoading ? (
+                    <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-muted-foreground" />
+                  ) : (
+                    entry.emoji
+                  )}
+                </span>
+                {isEditingThis ? (
+                  <input
+                    autoFocus
+                    value={editValue}
+                    onChange={(e) => onEditValueChange(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onBlur={onCommitRename}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") onCommitRename();
+                      else if (e.key === "Escape") onCancelRename();
+                    }}
+                    className="min-w-0 flex-1 rounded bg-background px-1 text-[13px] text-foreground outline-none border border-blue-500"
+                  />
+                ) : (
+                  <span className="min-w-0 flex-1 truncate">{title}</span>
+                )}
+                {entry.hasAlert && (
+                  <span
+                    aria-hidden
+                    title="Unread activity (terminal bell or notification)"
+                    data-testid="mobile-tab-dropdown-alert"
+                    className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-red-500 text-white"
+                  >
+                    <Bell className="h-2 w-2" />
+                  </span>
+                )}
+                <span
+                  aria-hidden
+                  data-testid="mobile-tab-dropdown-pending"
+                  data-active={entry.hasPending ? "true" : "false"}
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${entry.hasPending ? "bg-amber-400" : "bg-transparent"}`}
+                />
+                {entry.key !== "term:processes" && (
+                  <button
+                    type="button"
+                    aria-label={`Close ${title}`}
+                    title={`Close ${title}`}
+                    className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRequestClose(e, entry);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onRequestClose(e as unknown as React.MouseEvent, entry);
+                      }
+                    }}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 type PendingTabClose = { kind: "chat" | "browser" | "terminal"; id: string; title: string } | null;
@@ -516,6 +701,37 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     doCloseTerminal(id);
   }, [doCloseTerminal]);
 
+  const goProcesses = useCallback(() => {
+    onFocusKindChange("terminal");
+    setActiveTerminalId(activeProjectPath, PROCESSES_TAB_ID, activeProjectHost);
+  }, [onFocusKindChange, setActiveTerminalId, activeProjectPath, activeProjectHost]);
+
+  // Mobile/tablet dropdown routing: same handlers as the desktop pills, so the
+  // keep-alive surfaces are merely switched, never unmounted.
+  const activateEntry = useCallback(
+    (e: React.MouseEvent, entry: TabEntry) => {
+      if (entry.key === "term:processes") {
+        goProcesses();
+        return;
+      }
+      if (entry.kind === "chat") handleChatClick(e, entry.id, entry.title);
+      else if (entry.kind === "terminal") handleTerminalClick(e, entry.id);
+      else handleBrowserClick(e, entry.id);
+    },
+    [handleChatClick, handleTerminalClick, handleBrowserClick, goProcesses],
+  );
+
+  const requestCloseEntry = useCallback(
+    (e: React.MouseEvent, entry: TabEntry) => {
+      e.stopPropagation();
+      if (entry.key === "term:processes") return;
+      if (entry.kind === "chat") handleRequestCloseChat(e, entry.id);
+      else if (entry.kind === "browser") handleRequestCloseBrowser(e, entry.id);
+      else handleRequestCloseTerminal(e, entry.id);
+    },
+    [handleRequestCloseChat, handleRequestCloseBrowser, handleRequestCloseTerminal],
+  );
+
   const handleNewBrowser = useCallback(() => {
     const id = openBrowserTab();
     // The panel renders nothing without a store slice — open it up front.
@@ -564,6 +780,72 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
 
   const chatById = new Map(chatTabs.map((t) => [t.id, t]));
   const terminalById = new Map(terminals.map((t) => [t.id, t]));
+
+  // One metadata row per tab, shared by the desktop pills (renderPill) and the
+  // mobile/tablet dropdown entries below. Keep the two in lockstep when adding
+  // a tab kind. title/emoji/active mirror what the pill renders.
+  const tabEntryFor = (key: UnifiedTabKey): TabEntry | null => {
+    if (key.startsWith("chat:")) {
+      const id = key.slice("chat:".length);
+      const tab = chatById.get(id);
+      if (!tab) return null;
+      const derived = chatDerived.find((d) => d.id === id);
+      return {
+        key,
+        kind: "chat" as const,
+        id,
+        emoji: "💬",
+        title: derived?.displayTitle ?? tab.title,
+        isActive: focusedKind === "chat" && activeChatId === id,
+        hasPending: derived?.hasPending ?? false,
+        isLoading: isLoadingChatTab(id, derived?.initialized ?? false),
+      };
+    }
+    if (key.startsWith("browser:")) {
+      const id = key.slice("browser:".length);
+      const tab = browserTabs.find((t) => t.id === id);
+      if (!tab) return null;
+      return {
+        key,
+        kind: "browser" as const,
+        id,
+        emoji: "🌐",
+        title: tab.manualTitle ?? tab.title,
+        isActive: focusedKind === "browser" && activeBrowserId === id,
+      };
+    }
+    const id = key.slice("term:".length);
+    const term = terminalById.get(id);
+    if (!term) return null;
+    return {
+      key,
+      kind: "terminal" as const,
+      id,
+      emoji: "⌨️",
+      title: terminalDisplayTitle(term),
+      isActive: focusedKind === "terminal" && activeTerminalId === id,
+      hasAlert: !!term.alerted,
+    };
+  };
+
+  // The Processes pseudo-tab has no pill, but mobile users still need to reach
+  // it from the dropdown (and the trigger must show it while it is focused).
+  const processesActive = focusedKind === "terminal" && activeTerminalId === PROCESSES_TAB_ID;
+  const tabEntries: TabEntry[] = [];
+  for (const key of order) {
+    const entry = tabEntryFor(key);
+    if (entry) tabEntries.push(entry);
+  }
+  if (terminalAvailable) {
+    tabEntries.push({
+      key: "term:processes",
+      kind: "terminal",
+      id: PROCESSES_TAB_ID,
+      emoji: "⌨️",
+      title: "Processes",
+      isActive: processesActive,
+    });
+  }
 
   const renderPill = (key: string) => {
     if (key.startsWith("chat:")) {
@@ -644,21 +926,12 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     );
   };
 
-  // Phones stack the tab list above the action buttons and give each session a
-  // full-width row; ≥sm keeps the original two-column grid with 208px pills.
-  // Without this the fixed-width pills painted over the action column once the
-  // sidebar/cowork panels squeezed the centre column.
-  return (
-    <div className="flex flex-col gap-1 sm:grid sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-2 items-stretch sm:items-start px-2 pt-2 bg-card border-b border-border min-w-0 w-full">
-      <div className="min-w-0 flex flex-col gap-1 sm:flex-row sm:flex-wrap sm:gap-x-0.5 sm:gap-y-1 items-stretch sm:items-start py-1.5">
-        <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-          <SortableContext items={order} strategy={rectSortingStrategy}>
-            {order.map(renderPill)}
-          </SortableContext>
-        </DndContext>
-      </div>
-
-      <div className="shrink-0 flex flex-wrap justify-start sm:justify-end items-center gap-0.5 py-1.5">
+  // Phones/tablets (<lg) collapse the tab strip into a single dropdown whose
+  // trigger shows the ACTIVE tab, with the new-tab/Processes/All-sessions
+  // buttons staying on the RIGHT of that same row. ≥lg restores the original
+  // two-column grid: wrapping 208px pills + a right-aligned action column.
+  const actions = (
+    <>
       <button
         onClick={handleNewChat}
         aria-label="New chat session"
@@ -693,10 +966,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
 
       {terminalAvailable && (
         <button
-          onClick={() => {
-            onFocusKindChange("terminal");
-            setActiveTerminalId(activeProjectPath, PROCESSES_TAB_ID, activeProjectHost);
-          }}
+          onClick={goProcesses}
           className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors border ${
             focusedKind === "terminal" && activeTerminalId === PROCESSES_TAB_ID
               ? "bg-accent text-accent-foreground "
@@ -713,9 +983,40 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         title="Browse all sessions"
       >
         <List className="w-3.5 h-3.5" />
-        <span className="hidden sm:inline">All sessions</span>
+        <span className="hidden lg:inline">All sessions</span>
       </button>
+    </>
+  );
+
+  return (
+    <div className="flex items-center gap-1 lg:grid lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-2 lg:items-start px-2 pt-2 bg-card border-b border-border min-w-0 w-full">
+      <div className="min-w-0 flex-1 lg:flex-none">
+        {/* Phones/tablets: session tabs → dropdown, buttons stay on the right
+            of the same row (the actions cluster below is shrink-0). */}
+        <div className="lg:hidden flex items-center gap-1 py-1.5">
+          <MobileTabDropdown
+            entries={tabEntries}
+            onActivate={activateEntry}
+            onRequestClose={requestCloseEntry}
+            editing={editing}
+            editValue={editValue}
+            onEditValueChange={setEditValue}
+            onStartRename={startRename}
+            onCommitRename={commitRename}
+            onCancelRename={() => setEditing(null)}
+          />
+        </div>
+        {/* Desktop ≥lg: the drag-and-drop pill strip. */}
+        <div className="hidden lg:flex lg:flex-wrap lg:gap-x-0.5 lg:gap-y-1 items-stretch lg:items-start py-1.5">
+          <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <SortableContext items={order} strategy={rectSortingStrategy}>
+              {order.map(renderPill)}
+            </SortableContext>
+          </DndContext>
+        </div>
       </div>
+
+      <div className="shrink-0 flex flex-wrap justify-start lg:justify-end items-center gap-0.5 py-1.5">{actions}</div>
 
       {pendingClose && (
         <Dialog open onOpenChange={(o) => !o && cancelPendingClose()}>
