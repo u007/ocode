@@ -111,7 +111,7 @@ export default function PreviewHost({
     // of this panel cannot replay it over the state restored for another
     // project. App opens the panel off the same nonce.
     onConsumeActivation?.();
-    const resolved = resolvePreviewDoc(request.path, request.kind);
+    const resolved = resolvePreviewDoc(request.path);
     if (!resolved.kind) {
       setDoc(null);
       setUnsupported({ path: resolved.unsupported, projectRoot: request.projectRoot ?? projectRoot });

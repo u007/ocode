@@ -4,7 +4,7 @@ title: Multi-Use Preview — Design Spec (Draft, 2026-09-10)
 description: 'Decision: Historical draft for sidebar PreviewHost + session Preview sub-tab, updated 2026-09-21 for .mdx support in extension lists.'
 resource: ""
 tags: []
-timestamp: 2026-09-21T16:07:53Z
+timestamp: 2026-09-23T08:19:01Z
 ---
 # Multi-Use Preview — Design Spec (Draft, 2026-09-10)
 
@@ -87,7 +87,7 @@ Before any backend change, compare current behavior in `internal/server/handler_
 
 - `GET /api/files/raw` concrete invariants:
   - Canonical path (`filepath.Clean` + `EvalSymlinks`) must resolve inside `project_root`; absolute paths without `project_root` rejected.
-  - Explicit extension allowlist (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.xls`, `.csv`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.mmd`, `.md`, `.markdown`, `.mdx`, `.txt`, `.html`).
+  - **Extension classification:** files are classified in three tiers — (1) specialized renderers (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.xls`, `.csv`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, audio, video, `.mmd`, `.md`, `.markdown`, `.mdx`) rendered by the appropriate viewer; (2) binary/no-renderer extensions (`.zip`, `.tar`, `.gz`, `.7z`, `.rar`, `.exe`, `.dll`, `.so`, fonts, databases, `.mkv`, `.avi`, `.doc`, `.ppt`, `.docm`, `.xlsm`, `.pptm`, etc.) are refused or routed to OS-open fallback; (3) everything else (including `.txt`, `.sql`, `.js`, `.py`, extensionless, dotfiles) is treated as **text** and served via `/api/files/content` with a NUL-byte binary gate (`GET /api/files/content` returns `is_binary` from a NUL sniff). See `docs/gotchas/files-tab-preview-only-routing.md` §Open-classification model.
   - Size enforced by bounded streaming read (`io.LimitReader` to 32 MiB), not pre-read `Stat`.
   - Auth/session/project scoping preserved.
   - `.html` served with `Content-Type: text/html` but without inline execution privileges.
@@ -99,12 +99,4 @@ Before any backend change, compare current behavior in `internal/server/handler_
   - Conflict detection: compare content or `ModTime` before write; return 409 if changed since load.
 
 <!-- as-built (2026-09-17): See docs/gotchas/files-tab-preview-only-routing.md §Markdown mode switch.
-     as-built (2026-09-21): `.mdx` added to the markdown kind. MDX preview renders as Markdown
-     via react-markdown + remark-gfm and is NEVER evaluated (no arbitrary JS execution).
-     The editor uses Monaco's `mdx` basic-language grammar while the preview uses the `markdown` kind.
-     See docs/gotchas/mdx-preview-not-evaluated.md for the security rationale. -->
-
-## Related
-
-- `docs/gotchas/files-tab-preview-only-routing.md` — Files-tab routing, markdown mode switch, `.mdx` support
-- `docs/gotchas/mdx-preview-not-evaluated.md` — MDX preview renders as Markdown, never evaluated (security rule)
+-->

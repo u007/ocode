@@ -2,7 +2,7 @@
 type: Gotcha
 title: 'MDX Preview: Rendered as Markdown, Never Evaluated'
 description: 'Gotcha: MDX preview renders as Markdown (never evaluates JS for security); editor uses Monaco mdx grammar, preview uses markdown kind.'
-timestamp: 2026-09-21T16:07:53Z
+timestamp: 2026-09-23T08:19:01Z
 ---
 # MDX Preview: Rendered as Markdown, Never Evaluated
 
@@ -12,8 +12,6 @@ timestamp: 2026-09-21T16:07:53Z
 **Tags:** gotcha, web, mdx, preview, markdown, security, monaco, editor, language  
 
 ---
-
-# MDX Preview: Rendered as Markdown, Never Evaluated
 
 Since 2026-09-21, the ocode web/desktop file preview and editor support `.mdx` files. Two rules govern how they are handled, and both are load-bearing:
 
@@ -39,13 +37,14 @@ The two surfaces use different language identifiers for the same file extension:
 | Surface | Language/Kind | Source |
 |---------|--------------|--------|
 | Editor (Monaco, FileEditor / FileTabContent edit mode) | `mdx` | `web/src/lib/editorLanguage.ts` `languageForFile` → Monaco 0.53 bundled `mdx` basic-language |
-| Preview (`MarkdownViewer`, `previewKindForPath`) | `markdown` | `web/src/lib/previewKind.ts` `kindByExt` → `".mdx": "markdown"` |
+| Preview (`MarkdownViewer`, `previewKindForPath`) | `markdown` | `web/src/lib/previewKind.ts` specialized renderer set → `".mdx": "markdown"` |
 
 Why different? The preview pipeline treats MDX as a markdown-family format (render with react-markdown + remark-gfm). The editor pipeline uses Monaco's grammar for syntax highlighting — Monaco 0.53 ships a bundled `mdx` basic-language, so that is what the editor uses. This is an intentional divergence, not a bug.
 
 ## Extension-to-kind mapping
 
-`kindByExt` (`web/src/lib/previewKind.ts`):
+`kindByExt` (`web/src/lib/previewKind.ts`) is now a **specialized renderer
+map** (not a general allowlist):
 - `.md`, `.markdown`, `.mdx` → `"markdown"` (previewable via `MarkdownViewer`)
 - `.md`, `.markdown`, `.mdx` → **NOT** in `PREVIEW_ONLY_KINDS` (Files tab shows Edit/Preview/Split mode switch, default Edit)
 
@@ -58,8 +57,16 @@ Why different? The preview pipeline treats MDX as a markdown-family format (rend
 
 ## Server parity
 
-- `internal/tool/preview.go` `previewOpenKinds`: `".mdx": "text"`, `".markdown": "text"`
-- `internal/server/handler_files.go` `previewRawTypes`: `".markdown"` and `".mdx"` both `text/markdown; charset=utf-8`
+- `internal/tool/preview.go` `previewOpenKinds`: specialized renderers +
+  markdown family (`.mdx`/`.markdown` → `"text"`); `previewNonTextExts` holds
+  the binary denylist (mirrors `web/src/lib/previewKind.ts` `NON_PREVIEWABLE_EXTS`)
+- `internal/server/handler_files.go` `previewRawTypes`: `.markdown"` and ".mdx"`
+  both `text/markdown; charset=utf-8`
+
+**Sync contract:** specialized renderer extensions (here `.mdx`, `.markdown`)
+must appear consistently in `kindByExt`, `previewOpenKinds`, and `previewRawTypes`.
+The binary denylist (`NON_PREVIEWABLE_EXTS`/`previewNonTextExts`) is maintained
+independently and need not appear in `previewRawTypes`.
 
 ## Tests
 
@@ -73,5 +80,5 @@ Mutation-verified: removing the `kindByExt` `.mdx` entry causes 3 tests to fail.
 
 ## Related
 
-- `docs/gotchas/files-tab-preview-only-routing.md` — Files-tab routing, markdown/MDX mode switch
+- `docs/gotchas/files-tab-preview-only-routing.md` — Files-tab routing, markdown/MDX mode switch, open-classification model, UTF-16 BOM transcoding
 - `docs/superpowers/specs/2026-09-10-preview-multipurpose-design.md` — design spec, updated for `.mdx`

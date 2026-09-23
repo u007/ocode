@@ -277,6 +277,140 @@ func HTRHealthy(port int, lg *log.Logger) bool {
 	return htrHealthyForInstance(port, owner.Socket, owner.Identity)
 }
 
+// HTRTab is one connected browser tab as reported by the managed daemon's
+// GET /api/tabs. Fields mirror htrcli's api.TabInfo.
+type HTRTab struct {
+	ID      int    `json:"id"`
+	URL     string `json:"url"`
+	Title   string `json:"title"`
+	Active  bool   `json:"active"`
+	Browser string `json:"browser,omitempty"`
+}
+
+// HTRDaemonInfo is a read-only snapshot of the managed daemon for the settings
+// UI. Unlike EnsureHTRServe it takes no lease and never starts anything, and it
+// only ever describes the daemon named by ocode's owner marker — a standalone
+// htrcli daemon (port 3845, no marker) is never reported.
+type HTRDaemonInfo struct {
+	Running bool   `json:"running"`
+	Managed bool   `json:"managed"`
+	Addr    string `json:"addr"`
+	Port    int    `json:"port"`
+	Socket  string `json:"socket"`
+	Binary  string `json:"binary"`
+}
+
+// htrTabsResponse is the daemon's GET /api/tabs body (htrcli wraps replies as
+// {"ok":bool,"data":...}).
+type htrTabsResponse struct {
+	OK   bool     `json:"ok"`
+	Data []HTRTab `json:"data"`
+}
+
+// HTRDaemonStatus reports whether the ocode-managed daemon is running. port is
+// the configured HTR port (0 = managed default, honoring HTR_PORT); socketPath
+// is the configured socket override ("" = managed default).
+func HTRDaemonStatus(port int, socketPath string) HTRDaemonInfo {
+	p := htrPortEnv(port)
+	info := HTRDaemonInfo{Addr: htrAddr(p), Port: p}
+	if resolved, err := ResolveHTRSocketPath(socketPath); err == nil {
+		info.Socket = resolved
+	}
+	owner, err := readHTROwner()
+	if err != nil || owner.Port != p || owner.Identity == "" {
+		return info
+	}
+	info.Binary = owner.Executable
+	if owner.Socket != "" {
+		info.Socket = owner.Socket
+	}
+	if !pidAlive(owner.PID) || !htrHealthyForInstance(owner.Port, owner.Socket, owner.Identity) {
+		return info
+	}
+	info.Running = true
+	info.Managed = true
+	return info
+}
+
+// StopHTRServe terminates the ocode-managed `htrcli serve` daemon recorded in
+// ocode's owner marker for the configured port. sup may be nil; when non-nil
+// the supervisor record is marked killed so an immediate restart can replace
+// it. A standalone htrcli daemon is never touched. Stopping an already-stopped
+// daemon is a no-op that reports Running:false.
+func StopHTRServe(sup *tool.ProcessSupervisor, port int, lg *log.Logger) (HTRStatus, error) {
+	p := htrPortEnv(port)
+	addr := htrAddr(p)
+	if lg == nil {
+		lg = log.Default()
+	}
+	owner, err := readHTROwner()
+	if err != nil || owner.Port != p || owner.PID <= 0 {
+		return HTRStatus{Running: false, Addr: addr}, nil
+	}
+	markerPath, pathErr := htrOwnerPath()
+	if !pidAlive(owner.PID) {
+		if pathErr == nil {
+			_ = os.Remove(markerPath)
+		}
+		return HTRStatus{Running: false, Addr: addr, Socket: owner.Socket}, nil
+	}
+	// Only ever kill a process positively attributable to ocode: either the
+	// owner marker's executable/start-token match, or the managed identity's
+	// bearer-protected health probe answers.
+	if !processMatchesOwner(owner) && !htrHealthyForInstance(owner.Port, owner.Socket, owner.Identity) {
+		return HTRStatus{Running: true, Addr: addr, Socket: owner.Socket},
+			fmt.Errorf("managed htr daemon pid %d could not be verified; refusing to stop it", owner.PID)
+	}
+	proc, err := os.FindProcess(owner.PID)
+	if err != nil {
+		return HTRStatus{Running: true, Addr: addr, Socket: owner.Socket}, fmt.Errorf("find htr daemon pid %d: %w", owner.PID, err)
+	}
+	if err := proc.Kill(); err != nil {
+		return HTRStatus{Running: true, Addr: addr, Socket: owner.Socket}, fmt.Errorf("stop htr daemon pid %d: %w", owner.PID, err)
+	}
+	if pathErr == nil {
+		_ = os.Remove(markerPath)
+	}
+	if sup != nil {
+		sup.MarkKilledPID(htrServeID, owner.PID, 0)
+	}
+	lg.Printf("htr: stopped managed daemon pid %d on %s", owner.PID, addr)
+	return HTRStatus{Running: false, Addr: addr, Socket: owner.Socket}, nil
+}
+
+// ListHTRTabs returns the browser tabs connected to the managed daemon via its
+// bearer-protected GET /api/tabs. It fails when no managed daemon is recorded
+// in ocode's owner marker (a standalone daemon is never queried).
+func ListHTRTabs(port int) ([]HTRTab, error) {
+	p := htrPortEnv(port)
+	owner, err := readHTROwner()
+	if err != nil || owner.Port != p || owner.Identity == "" {
+		return nil, fmt.Errorf("managed htr daemon is not running on %s", htrAddr(p))
+	}
+	req, err := http.NewRequest(http.MethodGet, "http://"+htrAddr(p)+"/api/tabs", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+owner.Identity)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("query htr tabs: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("query htr tabs: daemon returned %s", resp.Status)
+	}
+	var body htrTabsResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return nil, fmt.Errorf("decode htr tabs: %w", err)
+	}
+	if !body.OK {
+		return nil, fmt.Errorf("query htr tabs: daemon reported an error")
+	}
+	return body.Data, nil
+}
+
 // htrOwner is the multi-process ownership record.
 type htrOwner struct {
 	Identity   string    `json:"identity"`

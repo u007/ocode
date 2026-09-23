@@ -39,8 +39,9 @@ const (
 	PermissionModeLocked PermissionMode = "locked"
 	// PermissionModeSandbox runs bash without prompts but confines OS-level
 	// writes to the classified allowed roots (write-integrity only: reads,
-	// exec, and network egress stay open). It never outlives the session —
-	// the persist path clamps it back to normal.
+	// exec, and network egress stay open). It is a first-class mode: it can be a
+	// session's live mode and can be persisted as the default for new sessions
+	// (SavePermissionModeSwitch) — it is no longer clamped on the persist path.
 	PermissionModeSandbox PermissionMode = "sandbox"
 )
 

@@ -75,6 +75,45 @@ function isEditableTarget(t: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
 }
 
+/** Shared 2D context for text metrics (null where canvas is unavailable). */
+let metricsCtx: CanvasRenderingContext2D | null | undefined;
+function getMetricsCtx(): CanvasRenderingContext2D | null {
+  if (metricsCtx === undefined) metricsCtx = canBlit() ? document.createElement("canvas").getContext("2d") : null;
+  return metricsCtx;
+}
+
+/** Ascent as a fraction of the font's line box, as pdf.js's TextLayer
+ *  computes it: measured from the browser font when metrics are available,
+ *  else the PDF font's own ascent/descent, else pdf.js's 0.8. Cached per
+ *  family + PDF metrics: several embedded fonts map to one DOM family and the
+ *  metric fallback differs between them. */
+const ascentCache = new Map<string, number>();
+function textAscentRatio(fontFamily: string, style: { ascent?: number; descent?: number }): number {
+  const key = `${fontFamily}|${style.ascent ?? ""}|${style.descent ?? ""}`;
+  const cached = ascentCache.get(key);
+  if (cached !== undefined) return cached;
+  let ratio = 0.8;
+  const ctx = getMetricsCtx();
+  const m = ctx ? (ctx.font = `30px ${fontFamily}`, ctx.measureText("")) : null;
+  if (m && m.fontBoundingBoxAscent) {
+    ratio = m.fontBoundingBoxAscent / (m.fontBoundingBoxAscent + Math.abs(m.fontBoundingBoxDescent));
+  } else if (style.ascent) {
+    ratio = style.ascent;
+  } else if (style.descent) {
+    ratio = 1 + style.descent;
+  }
+  ascentCache.set(key, ratio);
+  return ratio;
+}
+
+/** Width of `str` as the DOM will lay it out; 0 where canvas is unavailable. */
+function measureTextWidth(str: string, fontSize: number, fontFamily: string): number {
+  const ctx = getMetricsCtx();
+  if (!ctx) return 0;
+  ctx.font = `${fontSize}px ${fontFamily}`;
+  return ctx.measureText(str).width;
+}
+
 /** One-time probe: can this environment give us a 2D context for blitting?
  *  jsdom (and other no-canvas environments) answer false, so the viewer skips
  *  the copy and just sizes the backing store — enough for tests. */
@@ -378,9 +417,31 @@ export default function PdfViewer({
       for (const item of tc.items) {
         if (!("str" in item) || !item.str) continue;
         const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+        // pdf.js omits a styles entry for some fonts (e.g. Type3); default
+        // the family rather than throw and lose the rest of the page's text.
+        const style = tc.styles[item.fontName] ?? { fontFamily: "sans-serif" };
+        const fontFamily = style.fontFamily;
+        const fontHeight = Math.hypot(tx[2], tx[3]);
+        const angle = Math.atan2(tx[1], tx[0]) + (style.vertical ? Math.PI / 2 : 0);
+        // pdf.js gives the item's origin at its baseline; the span's box starts
+        // at the ascender, so lift it by the font ascent (mirrors pdf.js
+        // TextLayer) or the selection highlight sits one line below the ink.
+        const fontAscent = fontHeight * textAscentRatio(fontFamily, style);
+        const left = angle === 0 ? tx[4] : tx[4] + fontAscent * Math.sin(angle);
+        const top = angle === 0 ? tx[5] - fontAscent : tx[5] - fontAscent * Math.cos(angle);
         const span = document.createElement("span");
         span.textContent = item.str;
-        span.style.cssText = `position:absolute;left:${tx[4]}px;top:${tx[5]}px;font-size:${Math.abs(tx[0]) || 10}px;line-height:1;white-space:pre;`;
+        span.style.cssText = `position:absolute;left:${left}px;top:${top}px;font-size:${fontHeight}px;font-family:${fontFamily};line-height:1;white-space:pre;transform-origin:0 0;`;
+        // The DOM font's advance widths differ from the embedded font's, so
+        // stretch the span to the item's rendered width or the highlight
+        // drifts along the line.
+        const rotate = angle !== 0 ? `rotate(${angle}rad)` : "";
+        let scaleX = "";
+        if (item.str.length > 1) {
+          const measured = measureTextWidth(item.str, fontHeight, fontFamily);
+          if (measured > 0) scaleX = `scaleX(${(item.width * viewport.scale) / measured})`;
+        }
+        if (rotate || scaleX) span.style.transform = `${rotate} ${scaleX}`.trim();
         target.appendChild(span);
         target.appendChild(document.createTextNode(" "));
       }

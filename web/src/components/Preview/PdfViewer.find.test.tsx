@@ -23,9 +23,10 @@ const mocks = vi.hoisted(() => {
     render: renderMock,
     getTextContent: async () => ({
       items: [
-        { str: "Alpha beta", transform: [10, 0, 0, 10, 0, 0], width: 100, height: 10 },
-        { str: n === 2 ? ` gamma BetA ${n}delta` : ` gamma beta${n}delta`, transform: [10, 0, 0, 10, 0, 50], width: 100, height: 10 },
+        { str: "Alpha beta", fontName: "f1", transform: [10, 0, 0, 10, 0, 0], width: 100, height: 10 },
+        { str: n === 2 ? ` gamma BetA ${n}delta` : ` gamma beta${n}delta`, fontName: "f1", transform: [10, 0, 0, 10, 0, 50], width: 100, height: 10 },
       ],
+      styles: { f1: { fontFamily: "sans-serif", ascent: 0.9, descent: -0.2, vertical: false } },
     }),
   }));
   const doc = { numPages: 3, cleanup: vi.fn(), getPage };

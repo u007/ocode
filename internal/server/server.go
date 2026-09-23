@@ -390,6 +390,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/limits", s.authMiddleware(s.handleSetLimitsConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/browser", s.authMiddleware(s.handleGetBrowserConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/browser", s.authMiddleware(s.handleSetBrowserConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/htr", s.authMiddleware(s.handleGetHTRStatus))
+	s.mux.HandleFunc("POST /api/config/ocode/htr/start", s.authMiddleware(s.handleStartHTR))
+	s.mux.HandleFunc("POST /api/config/ocode/htr/stop", s.authMiddleware(s.handleStopHTR))
+	s.mux.HandleFunc("GET /api/config/ocode/htr/tabs", s.authMiddleware(s.handleListHTRTabs))
 	s.mux.HandleFunc("GET /api/config/ocode/features", s.authMiddleware(s.handleGetFeaturesConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/features", s.authMiddleware(s.handleSetFeaturesConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/profile-debug", s.authMiddleware(s.handleGetProfileDebugConfig))
@@ -861,49 +865,15 @@ func LoadBrowseOptions(supervisor *tool.ProcessSupervisor) *BrowseOptions {
 func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOptions) error {
 	var bOpts browse.Options
 	if opts != nil {
-		htr := cdp.HTROptions{
-			Enabled:        opts.HTREnabled,
-			CliPath:        opts.HTRCliPath,
-			ExtensionDir:   opts.HTRExtensionPath,
-			Port:           opts.HTRPort,
-			SocketPath:     opts.HTRSocketPath,
-			NativeHostName: opts.HTRNativeHostName,
-			BrowserPath:    opts.ChromePath,
-		}
-		htrNotice := ""
-		if htr.Enabled {
-			if htr.BrowserPath == "" {
-				if browserPath, findErr := cdp.FindChrome(""); findErr == nil {
-					htr.BrowserPath = browserPath
-				}
-			}
-			if notice := cdp.HTRBrowserCompatibilityNotice(htr.BrowserPath); notice != "" {
-				htr.Enabled = false
-				htrNotice = notice
-			}
-			if htr.Enabled {
-				if socketPath, err := cdp.ResolveHTRSocketPath(htr.SocketPath); err != nil {
-					htr.Enabled = false
-					htrNotice = "HTR automation is unavailable: " + err.Error() + ". Browsing continues without the HTR extension."
-				} else {
-					htr.SocketPath = socketPath
-				}
-			}
-			if htr.Enabled {
-				hostName := htr.NativeHostName
-				if hostName == "" {
-					hostName = cdp.DefaultHTRNativeHostName
-				}
-				assets, err := cdp.ResolveHTRAssetsForHost(htr.ExtensionDir, htr.CliPath, hostName)
-				if err != nil {
-					htr.Enabled = false
-					htrNotice = "HTR automation is unavailable: " + err.Error() + ". Browsing continues without the HTR extension."
-				} else {
-					htr.ExtensionDir = assets.ExtensionDir
-					htr.CliPath = assets.CliPath
-				}
-			}
-		}
+		htr, htrNotice := resolveManagedHTROptions(config.BrowserConfig{
+			ChromePath:        opts.ChromePath,
+			HTREnabled:        opts.HTREnabled,
+			HTRExtensionPath:  opts.HTRExtensionPath,
+			HTRCliPath:        opts.HTRCliPath,
+			HTRPort:           opts.HTRPort,
+			HTRSocketPath:     opts.HTRSocketPath,
+			HTRNativeHostName: opts.HTRNativeHostName,
+		})
 		bOpts = browse.Options{
 			ChromePath:        opts.ChromePath,
 			IdleTimeout:       time.Duration(opts.IdleTimeoutMinutes) * time.Minute,
@@ -2129,6 +2099,18 @@ func (s *Server) handleGetFeaturesConfig(w http.ResponseWriter, r *http.Request)
 }
 func (s *Server) handleSetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetFeaturesConfig(w, r)
+}
+func (s *Server) handleGetHTRStatus(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetHTRStatus(w, r)
+}
+func (s *Server) handleStartHTR(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleStartHTR(w, r)
+}
+func (s *Server) handleStopHTR(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleStopHTR(w, r)
+}
+func (s *Server) handleListHTRTabs(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListHTRTabs(w, r)
 }
 func (s *Server) handleGetProfileDebugConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetProfileDebugConfig(w, r)

@@ -2,7 +2,6 @@ package server
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -927,7 +926,7 @@ func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isBinary := bytes.IndexByte(data, 0) >= 0
+	data, isBinary := editorTextContent(data)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"path":      path,

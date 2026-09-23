@@ -32,6 +32,31 @@ func TestPreviewOpenToolAcceptsPreviewable(t *testing.T) {
 	}
 }
 
+// TestPreviewOpenToolDefaultsText: text is the default, not an allowlist.
+// Regression: `.sql`, `.java`, `Makefile`, … used to be rejected with
+// "file type is not sidebar-previewable" purely because their extension was
+// missing from a hand-maintained text list.
+func TestPreviewOpenToolDefaultsText(t *testing.T) {
+	tool := &PreviewOpenTool{}
+	for _, p := range []string{
+		"schema.sql", "Main.java", "app.rb", "lib.rs", "deploy.sh",
+		"config.toml", "infra.tf", "pom.xml", "style.ini", "query.graphql",
+		"Makefile", "LICENSE", ".gitignore", "types.d.ts", "notes.env",
+	} {
+		got, err := tool.Execute(previewArgs(t, p, 0))
+		if err != nil {
+			t.Errorf("path %q: unexpected error %v", p, err)
+			continue
+		}
+		if !strings.HasPrefix(got, PreviewOpenSentinel) {
+			t.Errorf("path %q: result %q missing sentinel", p, got)
+		}
+		if !strings.Contains(got, "kind=text") {
+			t.Errorf("path %q: expected kind=text, got %q", p, got)
+		}
+	}
+}
+
 func TestPreviewOpenToolRespectsPage(t *testing.T) {
 	tool := &PreviewOpenTool{}
 	got, err := tool.Execute(previewArgs(t, "report.pdf", 4))
@@ -57,6 +82,10 @@ func TestPreviewOpenToolRejects(t *testing.T) {
 		{"unknown ext", "movie.mkv", 0},
 		{"unknown video ext", "movie.avi", 0},
 		{"binary", "app.exe", 0},
+		{"archive", "bundle.zip", 0},
+		{"font", "font.ttf", 0},
+		{"sqlite", "db.sqlite", 0},
+		{"unsupported image", "scan.tiff", 0},
 		{"legacy doc (OS-open fallback, never previewed)", "old.doc", 0},
 		{"legacy ppt (OS-open fallback, never previewed)", "old.ppt", 0},
 		{"negative page", "report.pdf", -1},

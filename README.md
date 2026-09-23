@@ -26,7 +26,7 @@ Our custom **FastViewport** component renders 1000 message pairs in **0.73ms** �
 OpenAI, Anthropic, Google Gemini, Zhipu Z.AI, Alibaba, GitHub Copilot, Novita AI, Ollama Cloud, OpenRouter, OrcaRouter, AIHubMix — bring your own model or use the one best suited to the task. Switch mid-conversation with `/model`. Use a cheap model for compaction and a powerful one for code. No vendor lock-in, no gatekeeping.
 
 ### 🔒 Permissions you can trust
-First-class permission modes (`normal` / `yolo` / `locked`) with per-tool rules, bash-prefix granularity, scope confinement, and an optional **LLM auto-permission model** that makes smart allow/deny decisions so you stay in flow. The advisor module catches risky operations before they happen. No silent `rm -rf`.
+First-class permission modes (`normal` / `yolo` / `locked` / `sandbox`) with per-tool rules, bash-prefix granularity, scope confinement, and an optional **LLM auto-permission model** that makes smart allow/deny decisions so you stay in flow. **Sandbox** runs shell without prompts while the OS (Seatbelt / Landlock / bwrap) blocks writes outside the workspace. The advisor module catches risky operations before they happen. No silent `rm -rf`.
 
 ### 🔧 Extensible by design
 A clean Go package architecture makes it trivial to add providers, tools, plugins, commands, and skills. The skill ecosystem, plugin registry, and custom command loader mean ocode grows with your workflow — not the other way around.
@@ -84,7 +84,9 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 | **Task Contracts** | Optional `expected_output` per `task` dispatch — small-model verifier checks shape and retries once in place |
 | **Slash Command Queue** | Commands entered while streaming/compacting are queued and drained automatically — only instant UI commands bypass (see [Slash Commands](#-slash-commands)) |
 | **Persistent Todo Plans** | `todowrite` / `todoread` / `todo_update` backed by `.ocode/todo/<session>.md` (revision + flock, snapshot-captured, re-anchored every turn) |
-| **In-Chat Find Bar** | `Ctrl+F` / `/search` / `/find` on the chat tab |
+| **In-Chat Find Bar** | `Ctrl+F` / `/search` / `/find` on the chat tab — server-side over the **whole transcript**, not just the loaded window ("N total, M in view"), with prefix backfill when jumping to an older match |
+| **Auto-Continue** | `/autocontinue` auto-resumes a turn cut off by `/max-step` (optionally judged by a small model); persists across TUI and web turns |
+| **Interrupted-Turn Notice** | A turn cut off after an answered ask surfaces a Continue action in the transcript |
 
 ### 🔧 Tool System — 40 Built-ins
 
@@ -124,7 +126,7 @@ Full git capability built into the TUI — no context-switching to a separate to
 | **AI Commit Messages** | `Ctrl+G` auto-generates from staged changes (configurable `commit_msg_model`) |
 | **Push / Pull / Fetch** | `Ctrl+O` / `Ctrl+P` / `Ctrl+G` |
 | **Branch Management** | Create, delete, checkout branches |
-| **Stash Operations** | Stash, apply, list stashes |
+| **Stash Operations** | Stash, apply, list stashes; the web Git tab adds per-file/multi-file stash, per-file restore, and delete |
 | **AI Code Review** | `/review` reviews working directory, files, commits, branches, or GitHub PRs |
 
 Web parity: the **Git** tab (`GET /api/git/*`) renders the same diff with file status
@@ -218,6 +220,9 @@ See **[docs/plugins.md](docs/plugins.md)** for the complete reference.
 | **Normal** | Follow tool & bash-prefix rules; project-confined writes auto-allowed; delete, shell, network, delegation ask |
 | **YOLO** | Allow permission-gated tools without prompting (respecting hard safety blocks); `ocode --yolo` / `/yolo` |
 | **Locked** | Read/search-only — no mutations |
+| **Sandbox** | Shell runs without prompts, but the OS write-wall confines writes to the workspace + allowed dirs; touching secrets (`auth.json`, `~/.ssh`, `.env`) or config still asks. Network stays open — write protection, not full containment. Toggle with `/sandbox` or the web sidebar mode pill |
+
+- **Per-session + persisted default:** the live mode applies to one chat session (stored in its metadata, surviving resume/restart) and never leaks across chats/projects; the mode a brand-new session starts in is `ocodeconfig.json` → `permissions.mode`, which also accepts `sandbox`.
 
 - **Per-tool rules:** `allow` / `ask` / `deny` for every tool
 - **Bash prefix rules:** Granular two-word subcommand control (e.g. `git push` allowed, `git push --force` always asks); managed via `/ban` (deny list) and `/permissions`
@@ -260,7 +265,12 @@ A React + shadcn/ui + Tailwind SPA that mirrors the TUI experience, served by th
 | **Live Status** | Real-time model, context, LSP, spending, modified files | `StatusPanel`, `CoworkSidebar`; `GET /api/tui-status`, `/api/spending` |
 | **Web Shell** | `!` prefix runs local shell commands inline with live stdout/stderr streaming | `POST /api/shell` |
 | **Theming** | CSS variables auto-mapped from TUI theme | `GET /api/themes`, `GET /api/theme` |
-| **Mobile** | Overlay sidebar with backdrop on viewports < 768px | `App.tsx` `matchMedia` |
+| **Composer** | Quick-actions strip (compact / continue / recap), ↑/↓ input history, auto-growing draft, per-turn Retry | `ChatInput`, `useChat`; `POST /api/sessions/{id}/message` |
+| **Preview pane** | Sidebar preview for PDF (zoom / pan / find), DOCX, PPTX, Mermaid, images, text; live-refreshes and tail-follows AI edits; scoped to the chat sub-tab | `PreviewHost`, `PdfViewer`; `GET /api/files/content` |
+| **Ask dialogs** | Permission / question prompts show the assistant message (and thinking) that led to the ask; bounded to the viewport | `PermissionDialog`, `QuestionDialog`, `AskContextPreview` |
+| **Project list** | Per-project git changed-file count badge plus attention counts (streaming / stalled) | `ProjectSidebar` |
+| **Cross-process sync** | Transcripts converge across ocode processes (desktop + dev server + TUI) via a 15s revision poll | `useSessionRevisionSync`; `GET /api/sessions/{id}/state` |
+| **Mobile / Responsive** | Below `lg` (<1024px — phones *and* tablets) the tab bar collapses to a dropdown showing the active session; overlay sidebar with backdrop below 768px; narrow project rows wrap their status badges; action buttons stay right-aligned | `UnifiedTabBar`, `App.tsx` |
 
 ### 📚 Knowledge Bundle (`/docs` — OKF v0.1)
 
@@ -360,6 +370,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/login` | | Log in and enable encrypted config sync |
 | `/logout` | `/sync-logout` | Log out and stop config sync |
 | `/new` | `/clear` | Start a fresh session |
+| `/reset-id` | | Re-key this chat with a fresh session id (keeps the conversation) — useful when a provider groups cache/routing by session id |
 | `/export` | | Save chat as Markdown |
 | `/export-claude` | | Append chat to Claude Code JSONL |
 | `/share` | | Generate shareable session link |
@@ -386,11 +397,16 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/permissions` | `[auto-add|auto-remove|mode|auto|model|<tool>]` | View or set tool, bash auto-allow, and LLM auto-permissions |
 | `/ban` | `[list|add <cmd...>|remove <cmd...>|clear]` | Manage banned bash command prefixes (multi-word prefixes supported; no prefixes banned by default) |
 | `/yolo` | `[on|off|status]` | Toggle YOLO permissions mode |
+| `/sandbox` | `[on|off|status]` | Toggle Sandbox permissions mode (OS write-wall confinement; no prompts for shell, secrets/config still ask) |
 | `/small-model` | `[model]` | Show or switch the small model (used for lightweight tasks: title, discovery, compaction fallback) |
+| `/explorer-model` | `[status|enable|disable|model [name]]` | Show or switch the explorer agent (explore/scout) model; falls back to small, then main |
+| `/context-model` | `[status|enable|disable|model [name]]` | Show or switch the context agent (context/doc-sync) model; falls back to small, then main |
 | `/github` | `<pr|issue|workflow> [args]` | GitHub PR / issue / workflow commands |
 | `/plugin` | `[list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|confirm|cancel]` | Plugin management |
 | `/skills` | | List available skills |
 | `/commands` | | List all available commands (built-in + custom + skill-as-command) |
+| `/tools` | `[name]` | Detect/install CLI utilities (`fd`, `rg`, `fzf`, `eza`, `bat`, `grep`); bare lists status, with a name installs it. Alias: `/tool` |
+| `/fake-agent` | `[name|status]` | Show or switch the harness identity the LLM loop presents (`ocode`, `opencode`, `claude-code`, `cline`, `kilo-code`, `codex`); default `ocode` |
 | `/mcp` | `[list|enable <server>|disable <server>]` | List or toggle MCP servers |
 | `/mcp-auth` | `<server>` | Authenticate with a remote MCP server via OAuth |
 | `/editor` | `[command]` | Choose default external editor |
@@ -401,9 +417,12 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/sound` | `[on|off|test]` | Toggle terminal bell on task completion |
 | `/details` | | Toggle tool execution details in the transcript |
 | `/max-step` | `/max-steps` `[n]` | Show or set the max tool-call steps before auto-summary |
+| `/autocontinue` | | `[on|off|status|model [name]]` — auto-resume a turn cut off by `/max-step` (or judged interrupted by an optional judge model) |
 | `/mask` | `[on|off|status|mode [lenient|full]|model [name]|list]` | Secret redaction: toggle, set mode, pick tier-2 local model, or list detected secrets |
+| `/secret` | `<init|encrypt|decrypt|rekey> [path]` | Encrypt/decrypt a file or dir, or change the project passphrase |
 | `/ocr` | `[status|enable|disable|model [name]]` | OCR status / toggle / model selection (from LM Studio) |
 | `/image` | `[status|enable|disable|model [provider/model]]` | Image generation status / toggle / model selection |
+| `/computer` | `[status|enable|disable]` | Show computer-use status or enable/disable desktop control for new sessions |
 | `/localmodel` | | Manage locally-run chat/completion model instances (e.g. Bonsai 8B 1-bit) that LM Studio can't serve |
 | `/usage` | `[hour|day|week|month|last-month|last-3-month|all]` | Show LLM token usage summary by model and date range |
 | `/cron` | `[list|describe <id>|remove <id>|add <kind> <args> <message...>]` | Manage scheduled jobs (see `docs/scheduled-jobs.md`) |
@@ -556,7 +575,7 @@ The server exposes a REST + SSE surface under `/api/*` (see `internal/server/ser
 - **Models & agents:** `GET /api/models`, `GET /api/agents/runs/stream`
 - **Files & git:** `GET /api/files/tree`, `GET/PUT /api/files/content`, `GET /api/git/status|diff`, `POST /api/git/fetch|pull|push|reset-remote`, `GET /api/changes`, `POST /api/changes/undo-*`
 - **Terminal & shell:** `POST /api/shell`, `GET /api/terminal/ws` (WebSocket), `GET /api/terminal/processes`
-- **Config:** `GET/PUT /api/config/ocode/*` (11 sections: recap, commit-msg, compact, permissions-auto, discovery, tui, editor, imagegen, paths, limits, features) + `/api/config/{model,thinking-budget,small-model,terminal,advisor,ocr,mask,agents}`
+- **Config:** `GET/PUT /api/config/ocode/*` (recap, commit-msg, compact, permissions-auto, permissions-mode, discovery, tui, editor, imagegen, paths, limits, features, autocontinue, browser, local-models, tts, fake-agent, …) + `/api/config/{model,thinking-budget,small-model,terminal,advisor,ocr,mask,agents}`
 - **Permissions / questions / RC:** `GET/POST /api/permissions`, `POST /api/questions`, `POST /api/permissions/resolve`, `POST /api/rc/*`
 - **MCP / plugins / skills / commands:** `GET /api/mcp`, `GET /api/plugins`, `GET /api/skills`, `GET /api/commands`
 - **Events & logs:** `GET /api/events` (SSE, multiproject tagged bus), `GET /api/logs/stream`, `GET /api/tui-status`, `GET /api/spending`, `GET /api/lsp/statuses`
@@ -584,7 +603,7 @@ ocode shares opencode's overall shape (TUI agent, multi-provider, MCP, sessions)
 
 ### Permissions
 
-ocode adds **first-class permission modes** (`normal`, `yolo`, `locked`) with per-tool rules, bash-prefix granularity, scope confinement, path expansion, and LLM-driven auto-permission decisions — stored in `ocodeconfig.json`. opencode handles permissions inline with less granularity.
+ocode adds **first-class permission modes** (`normal`, `yolo`, `locked`, `sandbox`) with per-tool rules, bash-prefix granularity, scope confinement, path expansion, OS-level sandbox confinement, and LLM-driven auto-permission decisions — stored in `ocodeconfig.json`. opencode handles permissions inline with less granularity.
 
 ### Sessions
 
@@ -643,6 +662,12 @@ ocode adds **first-class permission modes** (`normal`, `yolo`, `locked`) with pe
 - **Secret redaction** (`/mask`) with tier-1 regex + tier-2 local LLM scanning, lenient/full modes, local-only endpoint guard
 - **Telegram bot** bridge
 - **Memory system** (`/mem`) — user / project / global scopes with injection toggle
+- **Sandbox permission mode** — a 4th mode that runs shell without prompts while the OS write-wall (Seatbelt / Landlock / bwrap) confines writes to the workspace
+- **Session re-keying** (`/reset-id`) — a fresh session id for the same transcript (defeats provider session-id cache/routing grouping)
+- **Git stash UI** — per-file / multi-file stash, per-file restore, and delete (TUI + web)
+- **PDF viewer** — zoom, Space-pan, and full-document find in the web preview
+- **Cross-process session sync** — a transcript written by another ocode process converges via a revision poll
+- **Auto-continue + interrupted-turn notice** — resume turns cut off by `/max-step` or by a lost ask continuation
 
 ### What ocode does **not** have (vs opencode)
 

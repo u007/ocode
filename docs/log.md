@@ -31,6 +31,14 @@
 
 ## 2026-09-23
 
+* **Creation**: Embedded HTR Extension and Managed Daemon Design ([docs/superpowers/specs/2026-09-09-embedded-htr-extension-design.md](/docs/superpowers/specs/2026-09-09-embedded-htr-extension-design.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming) ([docs/gotchas/files-tab-preview-only-routing.md](/docs/gotchas/files-tab-preview-only-routing.md))
+* **Creation**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming) ([docs/gotchas/files-tab-preview-only-routing.md](/docs/gotchas/files-tab-preview-only-routing.md))
+* **Update**: Multi-Use Preview — Design Spec (Draft, 2026-09-10) ([superpowers/specs/2026-09-10-preview-multipurpose-design.md](/superpowers/specs/2026-09-10-preview-multipurpose-design.md))
+* **Update**: MDX Preview: Rendered as Markdown, Never Evaluated ([gotchas/mdx-preview-not-evaluated.md](/gotchas/mdx-preview-not-evaluated.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Deprecation**: Files Tab Auto-Previews Binary/Office Formats (Preview-Only Routing): Superseded by docs/gotchas/files-tab-preview-only-routing.md — duplicate created during prior edit. ([gotchas/files-tab-preview-only-routing copy.md](/gotchas/files-tab-preview-only-routing copy.md))
 * **Creation**: "git commit failed: exit status 1" with no reason (git explains on stdout, not stderr) ([gotchas/git-commit-opaque-exit-status.md](/gotchas/git-commit-opaque-exit-status.md))
 * **Update**: Desktop/Web Terminal Wheel Scroll Chains to the App Page (xterm.js Escape Gestures) ([gotchas/terminal-wheel-scroll-chaining.md](/gotchas/terminal-wheel-scroll-chaining.md))
 * **Creation**: Desktop/Web Terminal Wheel Scroll Chains to the App Page (xterm.js Escape Gestures) ([gotchas/terminal-wheel-scroll-chaining.md](/gotchas/terminal-wheel-scroll-chaining.md))

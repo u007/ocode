@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -9,7 +11,9 @@ import (
 	"testing"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/browse/cdp"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // testConfigHandler builds a *Handler with a zero-valued in-memory OcodeConfig
@@ -700,5 +704,169 @@ func TestHandleSetBackendConfigAcceptsLocalhost(t *testing.T) {
 	h.mu.Unlock()
 	if got != "http://localhost:4096" {
 		t.Fatalf("BackendURL = %q, want http://localhost:4096", got)
+	}
+}
+
+// stubHTRSeams replaces the HTR lifecycle seams with fakes so handler tests
+// never resolve assets, probe a port, or spawn a process.
+func stubHTRSeams(t *testing.T) (*int, *int, *bool) {
+	t.Helper()
+	origEnsure, origStop, origStatus, origTabs, origOpts := ensureHTRServeFn, stopHTRServeFn, htrDaemonStatusFn, listHTRTabsFn, htrOptionsFn
+	t.Cleanup(func() {
+		ensureHTRServeFn, stopHTRServeFn, htrDaemonStatusFn, listHTRTabsFn, htrOptionsFn = origEnsure, origStop, origStatus, origTabs, origOpts
+	})
+	startCalls, stopCalls := 0, 0
+	running := false
+	ensureHTRServeFn = func(sup *tool.ProcessSupervisor, opts cdp.HTROptions, lg *log.Logger) (cdp.HTRStatus, error) {
+		startCalls++
+		running = true
+		return cdp.HTRStatus{Running: true, Addr: "127.0.0.1:3846"}, nil
+	}
+	stopHTRServeFn = func(sup *tool.ProcessSupervisor, port int, lg *log.Logger) (cdp.HTRStatus, error) {
+		stopCalls++
+		running = false
+		return cdp.HTRStatus{Running: false}, nil
+	}
+	htrDaemonStatusFn = func(port int, socketPath string) cdp.HTRDaemonInfo {
+		return cdp.HTRDaemonInfo{Running: running, Managed: running, Addr: "127.0.0.1:3846", Port: 3846, Binary: "/opt/htrcli"}
+	}
+	listHTRTabsFn = func(port int) ([]cdp.HTRTab, error) {
+		return []cdp.HTRTab{{ID: 3, URL: "https://example.com", Title: "Example", Active: true, Browser: "chrome"}}, nil
+	}
+	htrOptionsFn = func(browser config.BrowserConfig) (cdp.HTROptions, string) {
+		return cdp.HTROptions{Enabled: browser.HTREnabled, Port: browser.HTRPort}, ""
+	}
+	return &startCalls, &stopCalls, &running
+}
+
+func TestHandleHTRLifecycle(t *testing.T) {
+	h := testConfigHandler(t)
+	startCalls, stopCalls, _ := stubHTRSeams(t)
+
+	// Status before start: stopped and disabled (zero-value browser config).
+	var st htrStatusResponse
+	w := httptest.NewRecorder()
+	h.HandleGetHTRStatus(w, httptest.NewRequest("GET", "/api/config/ocode/htr", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status code = %d", w.Code)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Running || st.Enabled {
+		t.Fatalf("pre-start status = %+v", st)
+	}
+
+	// Start: enables, starts exactly one, reports the port label.
+	w = httptest.NewRecorder()
+	h.HandleStartHTR(w, httptest.NewRequest("POST", "/api/config/ocode/htr/start", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("start code = %d body=%s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if *startCalls != 1 {
+		t.Fatalf("start calls = %d, want 1", *startCalls)
+	}
+	if !st.Enabled || !st.Running || st.Port != 3846 || st.Addr != "127.0.0.1:3846" || st.Binary != "/opt/htrcli" {
+		t.Fatalf("start status = %+v", st)
+	}
+	h.mu.Lock()
+	enabled := h.cfg.Ocode.Browser.HTREnabled
+	h.mu.Unlock()
+	if !enabled {
+		t.Fatal("start must persist htr_enabled=true")
+	}
+
+	// List tabs.
+	w = httptest.NewRecorder()
+	h.HandleListHTRTabs(w, httptest.NewRequest("GET", "/api/config/ocode/htr/tabs", nil))
+	var tabsResp struct {
+		Tabs  []cdp.HTRTab `json:"tabs"`
+		Error string       `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &tabsResp); err != nil {
+		t.Fatal(err)
+	}
+	if tabsResp.Error != "" || len(tabsResp.Tabs) != 1 || tabsResp.Tabs[0].ID != 3 {
+		t.Fatalf("tabs response = %+v", tabsResp)
+	}
+
+	// Stop: disables and stops.
+	w = httptest.NewRecorder()
+	h.HandleStopHTR(w, httptest.NewRequest("POST", "/api/config/ocode/htr/stop", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("stop code = %d body=%s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if *stopCalls != 1 {
+		t.Fatalf("stop calls = %d, want 1", *stopCalls)
+	}
+	if st.Enabled || st.Running {
+		t.Fatalf("stop status = %+v", st)
+	}
+	h.mu.Lock()
+	enabled = h.cfg.Ocode.Browser.HTREnabled
+	h.mu.Unlock()
+	if enabled {
+		t.Fatal("stop must persist htr_enabled=false")
+	}
+
+	// PUT /browser with htr_enabled live-applies the toggle.
+	w = httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/browser", strings.NewReader(`{"screencast_quality":90,"htr_enabled":true}`))
+	h.HandleSetBrowserConfig(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("browser PUT code = %d body=%s", w.Code, w.Body.String())
+	}
+	if *startCalls != 2 {
+		t.Fatalf("PUT htr_enabled=true must live-start: start calls = %d, want 2", *startCalls)
+	}
+}
+
+func TestHandleStartHTRSurfacesFailure(t *testing.T) {
+	h := testConfigHandler(t)
+	origEnsure, origStatus, origOpts := ensureHTRServeFn, htrDaemonStatusFn, htrOptionsFn
+	t.Cleanup(func() {
+		ensureHTRServeFn, htrDaemonStatusFn, htrOptionsFn = origEnsure, origStatus, origOpts
+	})
+	htrOptionsFn = func(browser config.BrowserConfig) (cdp.HTROptions, string) {
+		return cdp.HTROptions{Enabled: true}, ""
+	}
+	htrDaemonStatusFn = func(port int, socketPath string) cdp.HTRDaemonInfo {
+		return cdp.HTRDaemonInfo{Addr: "127.0.0.1:3846", Port: 3846}
+	}
+	ensureHTRServeFn = func(sup *tool.ProcessSupervisor, opts cdp.HTROptions, lg *log.Logger) (cdp.HTRStatus, error) {
+		return cdp.HTRStatus{}, errors.New("htrcli not found")
+	}
+
+	w := httptest.NewRecorder()
+	h.HandleStartHTR(w, httptest.NewRequest("POST", "/api/config/ocode/htr/start", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("code = %d", w.Code)
+	}
+	var st htrStatusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Running || !strings.Contains(st.Error, "htrcli not found") {
+		t.Fatalf("failure status = %+v", st)
+	}
+
+	// PUT /browser live-apply must surface the same failure as htr_error.
+	w = httptest.NewRecorder()
+	h.HandleSetBrowserConfig(w, httptest.NewRequest("PUT", "/api/config/ocode/browser", strings.NewReader(`{"screencast_quality":90,"htr_enabled":true}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("browser PUT code = %d", w.Code)
+	}
+	var put map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &put); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := put["htr_error"].(string); !strings.Contains(got, "htrcli not found") {
+		t.Fatalf("browser PUT htr_error = %q, want start failure", got)
 	}
 }

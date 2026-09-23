@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -290,5 +291,192 @@ func TestEmbeddedExtensionNativeHostNameIsNamespaced(t *testing.T) {
 	}
 	if strings.Contains(string(data), "com.htrcontrol.host") || !strings.Contains(string(data), "com.test.htr") {
 		t.Fatalf("rewritten extension = %q", data)
+	}
+}
+
+// freePort returns a currently-unused loopback TCP port so status/stop tests
+// never collide with a real managed daemon in the developer environment.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func TestHTRDaemonStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	identity := "status-managed"
+	socket := "status-socket"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/health" {
+			serveHTRHealth(w, r, identity, socket)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	port, _ := strconv.Atoi(strings.Split(u.Host, ":")[1])
+
+	// No owner marker: reported stopped but still labeled with addr/port.
+	info := HTRDaemonStatus(port, socket)
+	if info.Running || info.Managed {
+		t.Fatalf("no marker must report stopped: %+v", info)
+	}
+	if info.Port != port || info.Addr != htrAddr(port) {
+		t.Fatalf("addr/port = %q/%d, want %q/%d", info.Addr, info.Port, htrAddr(port), port)
+	}
+
+	// Owner marker + healthy daemon: running, managed, binary from the marker.
+	if err := htrWriteOwner(identity, port, os.Getpid(), socket, "/opt/htrcli", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	info = HTRDaemonStatus(port, socket)
+	if !info.Running || !info.Managed {
+		t.Fatalf("healthy marker must report running: %+v", info)
+	}
+	if info.Binary != "/opt/htrcli" {
+		t.Fatalf("binary = %q, want /opt/htrcli", info.Binary)
+	}
+}
+
+func TestStopHTRServe_NoMarkerIsNoop(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	st, err := StopHTRServe(nil, freePort(t), log.Default())
+	if err != nil {
+		t.Fatalf("no-op stop → %v", err)
+	}
+	if st.Running {
+		t.Fatalf("no marker must report not running: %+v", st)
+	}
+}
+
+func TestStopHTRServe_RemovesStaleMarker(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	port := freePort(t)
+	// PID 999999 is not alive; the marker is stale and must be cleaned up.
+	if err := htrWriteOwner("stale", port, 999999, "stale-socket", os.Args[0], time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	st, err := StopHTRServe(nil, port, log.Default())
+	if err != nil {
+		t.Fatalf("stale stop → %v", err)
+	}
+	if st.Running {
+		t.Fatalf("stale marker must report not running: %+v", st)
+	}
+	if _, err := readHTROwner(); err == nil {
+		t.Fatal("stale owner marker must be removed")
+	}
+}
+
+func TestStopHTRServe_RefusesUnverified(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	port := freePort(t)
+	// Our own PID is alive, but neither the executable match nor a managed
+	// health probe can attribute it to ocode, so the stop must refuse.
+	if err := htrWriteOwner("unverified", port, os.Getpid(), "unverified-socket", filepath.Join(t.TempDir(), "not-a-real-binary"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := StopHTRServe(nil, port, log.Default()); err == nil {
+		t.Fatal("unverified daemon must not be stopped")
+	}
+	if _, err := readHTROwner(); err != nil {
+		t.Fatal("a refused stop must keep the owner marker")
+	}
+}
+
+func TestStopHTRServe_KillsVerifiedDaemon(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX sleep helper process")
+	}
+	t.Setenv("HOME", t.TempDir())
+	identity := "stop-managed"
+	socket := "stop-socket"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/health" {
+			serveHTRHealth(w, r, identity, socket)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	port, _ := strconv.Atoi(strings.Split(u.Host, ":")[1])
+
+	helper := exec.Command("sleep", "30")
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = helper.Process.Kill() }()
+
+	// The executable does not match the helper's comm, so verification comes
+	// from the managed health probe.
+	if err := htrWriteOwner(identity, port, helper.Process.Pid, socket, os.Args[0], time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	sup := newTestSupervisor(t)
+	if _, err := StopHTRServe(sup, port, log.Default()); err != nil {
+		t.Fatalf("stop verified daemon → %v", err)
+	}
+	if _, err := readHTROwner(); err == nil {
+		t.Fatal("owner marker must be removed after stop")
+	}
+	// Wait reaps the killed child; a kill surfaces as a non-nil error.
+	done := make(chan error, 1)
+	go func() { done <- helper.Wait() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("helper exited cleanly, expected it to be killed")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("helper pid %d still alive after stop", helper.Process.Pid)
+	}
+}
+
+func TestListHTRTabs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	identity := "tabs-managed"
+	socket := "tabs-socket"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+identity {
+			w.WriteHeader(401)
+			_, _ = fmt.Fprint(w, `{"ok":false,"error":"unauthorized"}`)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/health":
+			serveHTRHealth(w, r, identity, socket)
+		case "/api/tabs":
+			w.WriteHeader(200)
+			_, _ = fmt.Fprint(w, `{"ok":true,"data":[{"id":7,"url":"https://example.com","title":"Example","active":true,"browser":"chrome"}]}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	port, _ := strconv.Atoi(strings.Split(u.Host, ":")[1])
+
+	// No marker: a standalone/absent daemon is never queried.
+	if _, err := ListHTRTabs(port); err == nil {
+		t.Fatal("listing without an owner marker must error")
+	}
+	if err := htrWriteOwner(identity, port, os.Getpid(), socket, "/opt/htrcli", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	tabs, err := ListHTRTabs(port)
+	if err != nil {
+		t.Fatalf("list tabs → %v", err)
+	}
+	if len(tabs) != 1 {
+		t.Fatalf("tabs = %+v, want 1", tabs)
+	}
+	if tabs[0].ID != 7 || tabs[0].URL != "https://example.com" || !tabs[0].Active || tabs[0].Browser != "chrome" {
+		t.Fatalf("tab = %+v", tabs[0])
 	}
 }

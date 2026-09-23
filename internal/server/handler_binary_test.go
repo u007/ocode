@@ -47,3 +47,33 @@ func TestHandleFileContentBinaryDetection(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleFileContentTranscodesUTF16 pins the handler wiring: a UTF-16 file
+// (full of NUL bytes) must be served as UTF-8 text, not flagged binary.
+func TestHandleFileContentTranscodesUTF16(t *testing.T) {
+	h, tmpDir := newFilesHandler(t)
+	const want = "SELECT 1;\n-- 注釈\n"
+	path := filepath.Join(tmpDir, "utf16.sql")
+	if err := os.WriteFile(path, utf16Bytes(want, true, true), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	h.HandleFileContent(w, httptest.NewRequest("GET", "/api/files/content?path="+filepath.Base(path), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Content  string `json:"content"`
+		IsBinary bool   `json:"is_binary"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.IsBinary {
+		t.Errorf("UTF-16 text must not be binary")
+	}
+	if resp.Content != want {
+		t.Errorf("content mismatch:\n got %q\nwant %q", resp.Content, want)
+	}
+}

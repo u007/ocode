@@ -30,9 +30,38 @@ describe("previewKindForPath", () => {
     expect(previewKindForPath("screen.webm")).toBe("video");
   });
 
-  it("returns null for unknown or missing extensions", () => {
+  it("defaults textual and extensionless paths to text", () => {
+    // Regression: a narrow text allowlist used to bounce every one of these to
+    // "Format Not Supported" in the sidebar preview (and refuse them in the
+    // preview_open tool). Text is the default now; the content endpoint's
+    // NUL-byte sniff is the real binary gate.
+    expect(previewKindForPath("schema.sql")).toBe("text");
+    expect(previewKindForPath("Main.java")).toBe("text");
+    expect(previewKindForPath("script.sh")).toBe("text");
+    expect(previewKindForPath("app.rb")).toBe("text");
+    expect(previewKindForPath("config.toml")).toBe("text");
+    expect(previewKindForPath("infra.tf")).toBe("text");
+    expect(previewKindForPath("pom.xml")).toBe("text");
+    expect(previewKindForPath("style.ini")).toBe("text");
+    expect(previewKindForPath("query.graphql")).toBe("text");
+    expect(previewKindForPath("Makefile")).toBe("text");
+    expect(previewKindForPath("LICENSE")).toBe("text");
+    expect(previewKindForPath(".gitignore")).toBe("text");
+    expect(previewKindForPath("src/.env")).toBe("text");
+    expect(previewKindForPath("types.d.ts")).toBe("text");
+  });
+
+  it("returns null only for known binary formats with no renderer", () => {
     expect(previewKindForPath("movie.mkv")).toBeNull();
-    expect(previewKindForPath("Makefile")).toBeNull();
+    expect(previewKindForPath("movie.avi")).toBeNull();
+    expect(previewKindForPath("app.exe")).toBeNull();
+    expect(previewKindForPath("bundle.zip")).toBeNull();
+    expect(previewKindForPath("archive.tar.gz")).toBeNull();
+    expect(previewKindForPath("old.doc")).toBeNull();
+    expect(previewKindForPath("font.ttf")).toBeNull();
+    expect(previewKindForPath("db.sqlite")).toBeNull();
+    // Mixed-case extensions are lowercased before the denylist lookup.
+    expect(previewKindForPath("debug.dSYM")).toBeNull();
   });
 });
 
@@ -140,24 +169,24 @@ describe("preview events", () => {
 
 describe("resolvePreviewDoc", () => {
   it("resolves known kinds directly", () => {
-    expect(resolvePreviewDoc("report.pdf", "pdf")).toEqual({ kind: "pdf", unsupported: null });
-    expect(resolvePreviewDoc("budget.xlsx", "excel")).toEqual({ kind: "excel", unsupported: null });
+    expect(resolvePreviewDoc("report.pdf")).toEqual({ kind: "pdf", unsupported: null });
+    expect(resolvePreviewDoc("budget.xlsx")).toEqual({ kind: "excel", unsupported: null });
   });
 
   it("falls unknown-but-textual requests through to the text editor", () => {
-    expect(resolvePreviewDoc("Main.java", "text")).toEqual({ kind: "text", unsupported: null });
-    expect(resolvePreviewDoc("Makefile", "text")).toEqual({ kind: "text", unsupported: null });
+    expect(resolvePreviewDoc("Main.java")).toEqual({ kind: "text", unsupported: null });
+    expect(resolvePreviewDoc("Makefile")).toEqual({ kind: "text", unsupported: null });
   });
 
   it("sends legacy .doc/.ppt to the OS fallback, never a fake preview", () => {
-    expect(resolvePreviewDoc("old.doc", "text")).toEqual({ kind: null, unsupported: "old.doc" });
-    expect(resolvePreviewDoc("old.ppt", "text")).toEqual({ kind: null, unsupported: "old.ppt" });
+    expect(resolvePreviewDoc("old.doc")).toEqual({ kind: null, unsupported: "old.doc" });
+    expect(resolvePreviewDoc("old.ppt")).toEqual({ kind: null, unsupported: "old.ppt" });
     // …but the modern formats still preview.
-    expect(resolvePreviewDoc("new.docx", "text").kind).toBe("docx");
-    expect(resolvePreviewDoc("new.pptx", "text").kind).toBe("pptx");
+    expect(resolvePreviewDoc("new.docx").kind).toBe("docx");
+    expect(resolvePreviewDoc("new.pptx").kind).toBe("pptx");
   });
 
   it("sends non-text unknowns to the fallback", () => {
-    expect(resolvePreviewDoc("movie.mkv", "pdf")).toEqual({ kind: null, unsupported: "movie.mkv" });
+    expect(resolvePreviewDoc("movie.mkv")).toEqual({ kind: null, unsupported: "movie.mkv" });
   });
 });

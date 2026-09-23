@@ -1,5 +1,96 @@
 # Changelog
 
+## 2026-09-23 — HTR daemon: start/stop + tab list from Settings > Browser
+
+The managed `htrcli serve` daemon was auto-started at ocode boot but had no
+lifecycle API or UI — Settings > Browser exposed none of the HTR fields, so a
+failed daemon could not be restarted and a running one could not be stopped.
+
+- New API (`internal/server/handler_config.go`, `server.go`):
+  - `GET /api/config/ocode/htr` — enabled + live status (running/managed/addr/
+    port/binary/socket).
+  - `POST /api/config/ocode/htr/start` — persists `htr_enabled=true` and ensures
+    exactly one managed daemon (reuses a healthy instance).
+  - `POST /api/config/ocode/htr/stop` — persists `htr_enabled=false` and stops
+    the managed daemon (a standalone :3845 daemon is never touched).
+  - `GET /api/config/ocode/htr/tabs` — connected browser tabs (title/url/active/
+    browser) via the daemon's bearer-protected `/api/tabs`.
+  - `PUT /api/config/ocode/browser` now live-applies `htr_enabled` (start/stop).
+  Failures are reported in the status body's `error` at HTTP 200 so the UI keeps
+  the status fields and shows the reason inline.
+- `cdp` gained `StopHTRServe` (verifies the owner marker's executable/start-token
+  or a passing managed health probe before killing; marks the supervisor record
+  killed so an immediate restart can replace it), `HTRDaemonStatus`, and
+  `ListHTRTabs` (`internal/browse/cdp/htr.go`). `resolveManagedHTROptions`
+  (`internal/server/htr.go`) factors the boot asset/socket/chrome resolution so
+  StartBrowse and the UI start use identical options.
+- Settings > Browser gained an "HTR NControl daemon" section: status dot with the
+  port it started on (`Running — 127.0.0.1:3846`), binary path, enabled checkbox,
+  Start/Stop buttons, and a "List tabs" button
+  (`web/src/components/Settings/BrowserForm.tsx`, `web/src/api/client.ts`).
+- Tests: `internal/browse/cdp/htr_test.go` (status; stop kills a verified helper,
+  refuses an unverified PID, cleans a stale marker; tabs envelope),
+  `handler_config_test.go` (lifecycle via injected seams, failure surface,
+  live-apply), `web/.../BrowserForm.test.tsx` (6).
+- Live-verified: auto-start spawns one owned daemon on the configured port; stop
+  removes it; start recreates exactly one; tabs returns `[]` with no extension
+  connected; Playwright confirmed the Settings status/port/start/stop/list-tabs
+  flow.
+- Web suite 216 files / 1859 tests green; `tsgo` + `vite build` clean;
+  `go build ./...`, `go vet`, cdp + server config tests green.
+
+## 2026-09-23 — Fix: text formats no longer misclassified as binary/unsupported
+
+Reported: "file preview/editor on web/desktop ui assume a lot of format as
+binary, like mdx, sql, pls check other format also to fix these."
+
+Two independent causes, both fixed.
+
+**1. Extension allowlist was treated as a gate.** The sidebar preview and the
+`preview_open` tool classified a path from a hand-maintained extension list
+(`kindByExt` in `web/src/lib/previewKind.ts`, `previewOpenKinds` in
+`internal/tool/preview.go`). Any extension outside it — `.sql`, `.java`, `.rb`,
+`.sh`, `.toml`, `.tf`, `.xml`, `.ini`, `.lua`, `.cs`, `.php`, `.swift`, `.kt`,
+`.graphql`, `.proto`, extensionless `Makefile`/`LICENSE`, dotfiles, … — was
+rejected: the sidebar showed **"Format Not Supported"** and the AI tool errored
+with "file type is not sidebar-previewable". (`.mdx` had already been added on
+2026-09-21; the rest of the class was still broken.)
+
+- Classification is now open: `kindByExt` keeps only extensions with a
+  specialized renderer (pdf/docx/pptx/excel/image/audio/video/mmd/markdown),
+  `NON_PREVIEWABLE_EXTS` is a binary/no-renderer denylist (archives, exes,
+  fonts, databases, non-playable media, legacy Office, …), and **everything
+  else is text** — including extensionless files and dotfiles. The
+  authoritative binary gate is content-based (`is_binary` from the content
+  endpoint), so a missed binary degrades to the existing "Binary File — Edit
+  anyway" screen instead of a dead end.
+- `preview_open` mirrors the same shape: a known renderer kind wins, the
+  denylist is refused, everything else resolves to `kind=text`.
+- `resolvePreviewDoc` no longer needs a `requestedKind === "text"` fallback
+  (unknown text is now `text` by default); the path's extension is
+  authoritative and the legacy `.doc`/`.ppt` OS-open fallback is preserved.
+- `editorLanguage.ts` gained the common languages that were missing
+  (java, cs, php, ruby, perl, r, lua, elixir, clojure, scala, dart, proto,
+  ini/conf, powershell, bat, …) and `.tf`/`.tfvars` now map to Monaco's
+  bundled `hcl` grammar instead of the unregistered `terraform` id.
+
+**2. UTF-16/UTF-32 text was flagged binary by the NUL sniff.** A UTF-16 file is
+full of NUL bytes across its ASCII range, so `bytes.IndexByte(data, 0) >= 0`
+reported real text as binary — common for `.sql` and other files written by
+Windows tools. New `internal/server/text_content.go` (`editorTextContent`)
+transcodes BOM-marked UTF-16/UTF-32 to UTF-8 and classifies the rest by NUL
+byte; used by both `HandleFileContent` and `remoteFileContent`. UTF-8 BOMs are
+left untouched (they never contained NULs). Saving a transcoded file writes
+UTF-8, consistent with the editor's existing "byte fidelity not guaranteed"
+caveat.
+
+- Tests (mutation-verified): `web/src/lib/previewKind.test.ts` (text default +
+  binary denylist), `internal/tool/preview_test.go`
+  `TestPreviewOpenToolDefaultsText`, `internal/server/text_content_test.go`,
+  and `handler_binary_test.go` `TestHandleFileContentTranscodesUTF16`.
+- Web suite 215 files / 1853 tests green; `tsgo` + `vite build` clean;
+  `go build ./...` + `go vet` clean; file/preview/tool Go tests green.
+
 ## 2026-09-23 — Fix: "git commit failed: exit status 1" now explains itself
 
 Reported: the desktop Git panel showed a bare "git commit failed: exit status 1"

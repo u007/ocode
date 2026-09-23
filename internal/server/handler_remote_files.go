@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -403,7 +402,7 @@ func (h *Handler) remoteFileContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
-	isBinary := bytes.IndexByte(data, 0) >= 0
+	data, isBinary := editorTextContent(data)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"path":      path,
 		"content":   string(data),

@@ -13,10 +13,11 @@ import (
 // plumbing needed; the chat stream already carries tool results to the SPA.
 const PreviewOpenSentinel = "PREVIEW_OPEN:"
 
-// previewOpenKinds is the allowlist of sidebar-previewable extensions.
-// Text/code fall back to the existing Monaco editor tab; binaries render
-// via pdf.js (pdf), docx-preview (docx), jszip slide parser (pptx),
-// mermaid.js (mmd/md with diagrams), images, or native audio/video elements.
+// previewOpenKinds maps extensions that have a SPECIALIZED sidebar renderer
+// (pdf.js, docx-preview, jszip slide parser, mermaid.js, images, native
+// audio/video) plus the markdown family. Everything else is text by default —
+// see previewNonTextExts and Execute. The authoritative binary gate is
+// content-based: GET /api/files/content returns is_binary from a NUL sniff.
 var previewOpenKinds = map[string]string{
 	".pdf":  "pdf",
 	".docx": "docx",
@@ -36,18 +37,6 @@ var previewOpenKinds = map[string]string{
 	// .mdx renders through MarkdownViewer and highlights as Monaco `mdx`).
 	".markdown": "text",
 	".mdx":      "text",
-	".txt":      "text",
-	".ts":       "text",
-	".tsx":      "text",
-	".js":       "text",
-	".jsx":      "text",
-	".go":       "text",
-	".py":       "text",
-	".json":     "text",
-	".yaml":     "text",
-	".yml":      "text",
-	".html":     "text",
-	".css":      "text",
 	// Audio/video: browser-playable containers only (mirrors
 	// HandleFileRaw.previewRawTypes; .mkv/.avi stay out).
 	".mp3":  "audio",
@@ -63,6 +52,73 @@ var previewOpenKinds = map[string]string{
 	".webm": "video",
 	".ogv":  "video",
 	".mov":  "video",
+}
+
+// previewNonTextExts lists known binary formats with no in-browser renderer.
+// They keep the OS-open fallback (or stay un-previewable) instead of being
+// opened as text — a huge archive or disk image read through
+// /api/files/content would be JSON-decoded into a string for nothing.
+//
+// This is a UX/perf denylist, NOT the binary gate: an extension missing from
+// it still degrades safely to the content endpoint's NUL-byte check. Keep it
+// roughly in sync with NON_PREVIEWABLE_EXTS in web/src/lib/previewKind.ts.
+var previewNonTextExts = map[string]bool{
+	// Archives, packages, disk images.
+	".zip": true, ".tar": true, ".gz": true, ".tgz": true, ".bz2": true,
+	".tbz": true, ".tbz2": true, ".xz": true, ".txz": true, ".lz": true,
+	".lzma": true, ".zst": true, ".zstd": true, ".7z": true, ".rar": true,
+	".cab": true, ".arj": true, ".lzh": true, ".jar": true, ".war": true,
+	".ear": true, ".apk": true, ".aab": true, ".ipa": true, ".dmg": true,
+	".iso": true, ".img": true, ".vhd": true, ".vhdx": true, ".vmdk": true,
+	".qcow2": true, ".deb": true, ".rpm": true, ".pkg": true, ".mpkg": true,
+	".msi": true, ".msp": true, ".snap": true, ".flatpak": true, ".crx": true,
+	".xpi": true, ".whl": true, ".gem": true, ".nupkg": true, ".vsix": true,
+	".zpaq": true, ".lzo": true,
+	// Executables, libraries, object/debug artifacts.
+	".exe": true, ".dll": true, ".dylib": true, ".so": true, ".o": true,
+	".obj": true, ".a": true, ".lib": true, ".bin": true, ".class": true,
+	".pyc": true, ".pyo": true, ".pyd": true, ".wasm": true, ".elf": true,
+	".com": true, ".sys": true, ".ko": true, ".app": true, ".msix": true,
+	".appx": true, ".node": true, ".out": true, ".pdb": true, ".dsym": true,
+	// Fonts.
+	".ttf": true, ".otf": true, ".woff": true, ".woff2": true, ".eot": true,
+	".ttc": true, ".pfb": true, ".pfm": true, ".dfont": true,
+	// Databases and binary indexes/dumps.
+	".sqlite": true, ".sqlite3": true, ".db": true, ".db3": true, ".mdb": true,
+	".accdb": true, ".idx": true, ".pack": true, ".lmdb": true, ".mdbx": true,
+	".frm": true, ".ibd": true, ".myi": true, ".myd": true, ".rdb": true,
+	".ldb": true, ".sst": true,
+	// Audio/video containers with no reliable browser renderer.
+	".mkv": true, ".avi": true, ".wmv": true, ".flv": true, ".mpg": true,
+	".mpeg": true, ".m2ts": true, ".mts": true, ".vob": true, ".rm": true,
+	".rmvb": true, ".3gp": true, ".3g2": true, ".ogm": true, ".divx": true,
+	".asf": true, ".f4v": true, ".mxf": true, ".dv": true, ".wtv": true,
+	".wma": true, ".aiff": true, ".aif": true, ".aifc": true, ".au": true,
+	".snd": true, ".mid": true, ".midi": true, ".ra": true, ".ram": true,
+	".mka": true, ".ape": true, ".wv": true, ".amr": true, ".ac3": true,
+	".dts": true, ".caf": true, ".aax": true,
+	// Images with no ImageViewer renderer (png/jpg/gif/webp/svg only).
+	".tiff": true, ".tif": true, ".bmp": true, ".heic": true, ".heif": true,
+	".avif": true, ".ico": true, ".cur": true, ".psd": true, ".psb": true,
+	".xcf": true, ".raw": true, ".cr2": true, ".cr3": true, ".nef": true,
+	".arw": true, ".dng": true, ".orf": true, ".rw2": true, ".svgz": true,
+	".jp2": true, ".j2k": true,
+	// Legacy/binary Office and document containers.
+	".doc": true, ".ppt": true, ".docm": true, ".dot": true, ".dotm": true,
+	".dotx": true, ".xlsm": true, ".xlt": true, ".xltx": true, ".xltm": true,
+	".pptm": true, ".pot": true, ".potx": true, ".potm": true, ".pps": true,
+	".ppsx": true, ".ppsm": true, ".vsd": true, ".vsdx": true, ".one": true,
+	".msg": true, ".pub": true,
+	// Other opaque binary containers.
+	".swf": true, ".ai": true, ".eps": true, ".indd": true, ".sketch": true,
+	".fig": true, ".blend": true, ".stl": true, ".fbx": true, ".3ds": true,
+	".glb": true, ".dwg": true, ".der": true, ".p12": true, ".pfx": true,
+	".jks": true, ".keystore": true, ".nib": true, ".car": true, ".icns": true,
+	".pak": true, ".bundle": true, ".parquet": true, ".avro": true, ".orc": true,
+	".arrow": true, ".feather": true, ".npy": true, ".npz": true, ".pkl": true,
+	".pickle": true, ".pt": true, ".pth": true, ".onnx": true, ".h5": true,
+	".hdf5": true, ".safetensors": true, ".ckpt": true, ".gguf": true,
+	".msgpack": true, ".bson": true, ".cbor": true,
 }
 
 // PreviewOpenTool lets the LLM activate the sidebar preview on a file:
@@ -126,9 +182,15 @@ func (t *PreviewOpenTool) Execute(args json.RawMessage) (string, error) {
 	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", fmt.Errorf("path must be workspace-relative and stay inside the project root")
 	}
-	kind, ok := previewOpenKinds[strings.ToLower(filepath.Ext(clean))]
+	ext := strings.ToLower(filepath.Ext(clean))
+	kind, ok := previewOpenKinds[ext]
 	if !ok {
-		return "", fmt.Errorf("file type is not sidebar-previewable (pdf, docx, pptx, mmd/md, images, text/code)")
+		// Text is the default (code, config, markup, extensionless files);
+		// only known binary/no-renderer formats are refused.
+		if previewNonTextExts[ext] {
+			return "", fmt.Errorf("file type is not sidebar-previewable (binary or no renderer)")
+		}
+		kind = "text"
 	}
 	page := a.Page
 	if page < 0 {

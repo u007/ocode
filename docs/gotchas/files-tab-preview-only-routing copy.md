@@ -20,7 +20,7 @@ tags:
   - useEditorTabs
 timestamp: 2026-09-16T09:11:32Z
 status: deprecated
-deprecated_reason: 'Misplaced by a path error: doc tools take bundle-relative paths (root is docs/), so this write landed at docs/docs/gotchas/... instead of docs/gotchas/.... Superseded by the correct doc at gotchas/files-tab-preview-only-routing.md; safe to remove via /docs cleanup.'
+deprecated_reason: 'Superseded by docs/gotchas/files-tab-preview-only-routing.md — duplicate created during prior edit.'
 ---
 # Files Tab Auto-Previews Binary/Office Formats (Preview-Only Routing)
 

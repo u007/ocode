@@ -1,29 +1,11 @@
 ---
 type: Gotcha
 title: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
-description: 'Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown/MDX Edit/Preview/Split mode switch. Updated 2026-09-21 with .mdx support in kindByExt, isMarkdownPath, and the mode switch.'
+description: '''Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown/MDX Edit/Preview/Split mode switch. Open-classification model: specialized renderers + binary denylist + default text. UTF-16/UTF-32 BOM text is transcoded, not flagged binary.'''
 resource: ""
-tags: []
-timestamp: 2026-09-21T16:07:14Z
+tags: [gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth, markdown, mdx, split-mode, useResizableSplit]
+timestamp: 2026-09-23T08:32:38Z
 ---
-# Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
-
-**Type:** Gotcha  
-**Description:** Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown/MDX Edit/Preview/Split mode switch. Updated 2026-09-21 with .mdx support in kindByExt, isMarkdownPath, and the mode switch.  
-**Resource:** web/src/components/Files/FileTabContent.tsx  
-**Tags:** gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth, markdown, mdx, split-mode, useResizableSplit  
-
----
-
-# Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
-
-**Type:** Gotcha  
-**Description:** The web Files-tab editor auto-routes PDF, Word/PowerPoint/Excel, image, and audio/video files to the shared preview surface instead of Monaco; preview-only paths also skip the /api/files/content fetch, and the external-change watchers must stay in sync with that skip. Local audio/video now streams with HTTP range support (http.ServeContent) behind a short-lived single-file capability token (POST /api/files/media-token, mediaAuthMiddleware), so the local media byte cap is gone; the 32 MiB document cap and the 128 MiB cap for the REMOTE buffered path remain. Includes the .doc/.ppt/.mkv/.avi OS-open fallback and divergence from the 2026-09-10 preview design spec. .md, .markdown, and .mdx files keep Monaco with an Edit/Preview/Split mode switch (not preview-only routing).  
-**Resource:** web/src/components/Files/FileTabContent.tsx  
-**Tags:** gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth, markdown, mdx, split-mode, useResizableSplit  
-
----
-
 # Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
 
 Implemented **2026-09-16**. Before this change, clicking any file in the web
@@ -49,14 +31,11 @@ routing point for a Files-tab editor tab body, in priority order:
 The **preview-only kind set** is `pdf`, `docx`, `pptx`, `excel`, `image`,
 `audio`, `video` (`PREVIEW_ONLY_KINDS`, `web/src/lib/previewKind.ts:84`). These
 are binary containers with no editable text representation. `markdown`, `text`,
-and `mermaid` are **deliberately excluded** and keep the Monaco editor, even
-though `previewKindForPath` still resolves them as previewable
-(`previewKind.ts:72`). `.mdx` is also **deliberately excluded** and keeps the
-Monaco editor (it routes to the same markdown mode switch as `.md`/`.markdown`).
-`previewOnlyKindForPath` (`previewKind.ts:91`) is
-therefore the narrow "must not open in Monaco" subset of the broader preview
-allowlist; `previewKindForPath` remains the sidebar/`PreviewSurface` dispatch
-helper.
+and `mermaid` are **deliberately excluded** and keep the Monaco editor.
+`.mdx` is also **deliberately excluded** and keeps the Monaco editor (it routes
+to the same markdown mode switch as `.md`/`.markdown`).
+`previewOnlyKindForPath` (`previewKind.ts:91`) is therefore the narrow
+"must not open in Monaco" subset of the broader previewable set.
 
 `FileTabContent` also owns the PDF-page and PPTX-slide state
 (`FileTabContent.tsx:78-79`) that the controlled viewers need; every editor
@@ -78,6 +57,43 @@ project switch (its `key={sideStateKey}` changes with `activeTabId`), so it
 persists shell state per project via `web/src/components/Preview/sidebarPreviewState.ts`,
 and per-file viewer state lives in `web/src/lib/previewViewState.ts`. See
 `gotchas/project-scope-is-mounting-not-visibility.md` for the full mechanism.
+
+## Open-classification model (2026-09-23)
+
+File open classification is a **three-tier model — not an extension allowlist**.
+`previewKindForPath` (`web/src/lib/previewKind.ts`) resolves a path as:
+
+1. **Specialized renderer** — if the extension maps to one of
+   `pdf`, `docx`, `pptx`, `xlsx`, `xls`, `csv`, `png`, `jpg`, `jpeg`, `gif`,
+   `webp`, `svg`, `audio`, `video`, `mmd`, `md`, `markdown`, `mdx`.
+2. **Binary / no renderer** (`null`) — if the extension is in
+   `NON_PREVIEWABLE_EXTS` (`web/src/lib/previewKind.ts`): archives
+   (`.zip`, `.tar`, `.gz`, `.7z`, `.rar`, `.bz2`), executables and shared
+   libraries (`.exe`, `.dll`, `.so`, `.dylib`, `.o`, `.a`), fonts (`.ttf`,
+   `.otf`, `.woff`, `.woff2`, `.eot`), databases (`.db`, `.sqlite`, `.sqlite3`,
+   `.mdb`), non-browser-playable media (`.mkv`, `.avi`, `.mov`, `.flv`,
+   `.wmv`), unsupported images (`.bmp`, `.tiff`, `.ico`, `.psd`), legacy/binary
+   Office (`.doc`, `.ppt`, `.docm`, `.xlsm`, `.pptm`), and other opaque
+   containers.
+3. **Text** — otherwise (including extensionless paths and dotfiles like
+   `.gitignore`, `Dockerfile`).
+
+`previewOnlyKindForPath` returns a kind only for tier 1 (specialized
+renderers); tier 2 falls back to the OS-open `LegacyOfficePane`; tier 3
+opens Monaco. The authoritative binary gate is **content-based** —
+`GET /api/files/content` returns `is_binary` from a NUL byte sniff
+(`internal/server/text_content.go`), so a non-denylisted extension that
+contains NUL bytes surfaces "Binary File — Edit anyway" regardless of the
+extension.
+
+The server-side open handler mirrors this: `internal/tool/preview.go`
+`Execute()` — `previewOpenKinds` maps only specialized renderers + the markdown
+family; `previewNonTextExts` holds the matching denylist; it falls back to
+`kind="text"` for any non-denylisted extension and refuses only denylisted
+formats (mkv/avi/exe/zip/doc/ppt/...). **`previewNonTextExts` and
+`NON_PREVIEWABLE_EXTS` must stay in sync** (they are independently maintained
+and need not appear in `previewRawTypes` — denylisted paths never reach the raw
+fetch).
 
 ## Markdown mode switch (2026-09-17, .mdx added 2026-09-21)
 
@@ -124,6 +140,25 @@ extensions. 2026-09-16: `.mmd` (Mermaid flow) was already in the markdown kind
 and renders through `MermaidViewer`. 2026-09-21: `.mdx` added to the markdown
 kind (previewable, editor default Edit with mode switch).
 
+## UTF-16 / UTF-32 BOM transcoding (2026-09-23)
+
+The NUL-byte binary sniff (`bytes.IndexByte(data, 0) >= 0`) used to flag valid
+UTF-16/UTF-32 text as binary because they contain NUL bytes — files like `.sql`
+saved as UTF-16 appeared as "Binary File — Edit anyway".
+
+`internal/server/text_content.go` `editorTextContent(data)` now detects a
+UTF-16/UTF-32 BOM (`FF FE`, `00 00 FE FF`, `FF FE 00 00`, `FE FF`) and
+transcodes the content to UTF-8, returning `isBinary=false`. UTF-8 BOM
+(`EF BB BF`) is deliberately **not** stripped (it contains no NULs and
+already round-trips). Both `HandleFileContent` (`internal/server/handler_files.go`)
+and `remoteFileContent` (`internal/server/handler_remote_files.go`) use this
+helper. Saving a transcoded file writes UTF-8 (consistent with the editor's
+existing "byte fidelity not guaranteed" caveat).
+
+Tests: `internal/server/text_content_test.go`,
+`internal/server/handler_binary_test.go` `TestHandleFileContentTranscodesUTF16`,
+`internal/tool/preview_test.go` `TestPreviewOpenToolDefaultsText`.
+
 ## Transport caps stayed in place
 
 The 32 MiB document budget and the 128 MiB remote-buffered cap were kept; media
@@ -147,10 +182,6 @@ still fetch-into-memory + base64 over the transport, so it keeps the 128 MiB
 budget and the stat-before-read guard that stops a huge binary OOMing the
 server. There is **no range transport over SSH**, so remote media cannot use
 `serveMediaFile`.
-
-`TestPreviewRawCapSplitsMedia` (`handler_preview_test.go:233`) still pins
-`previewRawCap`'s media/document split (the helper itself is unchanged even
-though the local media caller no longer consults it).
 
 ## Local media capability tokens (`POST /api/files/media-token`)
 
@@ -198,24 +229,9 @@ inside one project, for six hours — not arbitrary read access. The
 in-memory store means there is no persistence layer to compromise.
 
 **Why not just use the master `?token=` query form?** Because the master token
-is the user's full credential — it must NEVER appear in URLs (browser history,
-proxy logs, Referer headers, devtools network tab). The short-lived single-file
-grant is a scope-limited derivative that the browser can attach to a URL
-safely because it authorizes exactly one resource.
-
-**Why not just serve media from a separate unauthenticated endpoint?** Because
-media in this project can be private (private repos, private workspace files).
-The capability token keeps the auth check at the edge while the browser gets
-what it needs (URL-attachable, range-requestable).
-
-## Why `FileEditor` was left pure
-
-Routing lives in `FileTabContent`, **not** inside `FileEditor`. `FileEditor`
-stays a pure Monaco surface because it is reused for real text by the preview
-viewers: `TextViewer` (`web/src/components/Preview/TextViewer.tsx:112`) and
-`MarkdownViewer` (`web/src/components/Preview/MarkdownViewer.tsx:73`). Putting
-the preview/legacy routing inside `FileEditor` would make those text viewers
-inherit binary-preview branches they must never take.
+leaks the credential (see above) and cannot be scoped to a single file or
+project. The capability form gives per-file, per-host, per-project, time-bounded
+access with no replay across resources.
 
 ## Load-bearing invariant: the fetch skip must stay in sync with the watcher guards
 
@@ -242,7 +258,7 @@ external-change re-check, repopulated the tab's `content` from
 avoid. The skip and the three watcher guards are one invariant expressed in
 four places: a preview-only path is never fetched for content, only opened.
 
-## Legacy `.doc` / `.ppt` / media OS-open fallback
+## Legacy `.doc` / `.ppt` OS-open fallback
 
 Legacy binary Office formats (`.doc`, `.ppt`) have no in-browser renderer
 (`docx-preview` handles only `.docx`; there is no server-side conversion in v1).
@@ -267,9 +283,42 @@ section above for the streaming exception for native formats (`.mp4`, `.webm`,
 (`isLegacyOfficePath(path)`), so both groups skip the content fetch and the
 external-change watchers. The legacy group is binary and has no editor anyway.
 
-## New/changed files (2026-09-21: .mdx support)
+## New/changed files
 
-- `web/src/lib/previewKind.ts` — `kindByExt` gained `".mdx": "markdown"`;
+**2026-09-23 — binary denylist + UTF-16 transcoding (this fix):**
+
+- `web/src/lib/previewKind.ts` — `kindByExt` **removed** its tiny text set
+  (`.txt/.ts/.tsx/.js/.jsx/.go/.py/.json/.yaml/.yml/.html/.css`); now holds
+  ONLY specialized renderers (`pdf`, `docx`, `pptx`, `xlsx`, `xls`, `csv`,
+  images, audio, video, markdown family). New `NON_PREVIEWABLE_EXTS` denylist
+  (archives, executables/libs/objects, fonts, databases, non-browser media,
+  unsupported images, legacy/binary Office). `previewKindForPath` now returns
+  specialized kind → else `null` if denylisted → else `"text"` (extensionless
+  and dotfiles are text).
+- `web/src/lib/editorLanguage.ts` — expanded with valid Monaco basic-language
+  ids (`java`, `cs`→`csharp`, `php`, `perl`, `r`, `lua`, `elixir`, `clojure`,
+  `scala`, `dart`, `proto`→`protobuf`, `ini`/`conf`/`properties`,
+  `powershell`, `bat`, `fsharp`, `vb`, `julia`, `solidity`, `cypher`,
+  `sparql`, `coffee`, `pug`, `handlebars`, `twig`, `liquid`, `rst`, `hcl`,
+  `mysql`/`pgsql`, …); `.tf`/`.tfvars` fixed from unregistered `"terraform"`
+  id to `"hcl"`.
+- `internal/server/text_content.go` (new) — `editorTextContent(data)`:
+  UTF-16/UTF-32 BOM → transcode to UTF-8, `isBinary=false`; otherwise NUL
+  sniff. Wired into `HandleFileContent` (`handler_files.go`) and
+  `remoteFileContent` (`handler_remote_files.go`).
+- `internal/tool/preview.go` — `previewOpenKinds` now maps only specialized
+  renderers + markdown family; new `previewNonTextExts` denylist mirrors
+  `NON_PREVIEWABLE_EXTS`; `Execute()` falls back to `kind="text"` for
+  non-denylisted extensions, refuses only denylisted formats.
+- `internal/server/text_content_test.go` (new), `internal/server/handler_binary_test.go`
+  (`TestHandleFileContentTranscodesUTF16`), `web/src/lib/previewKind.test.ts`,
+  `internal/tool/preview_test.go` (`TestPreviewOpenToolDefaultsText`) — all
+  mutation-verified.
+
+**2026-09-21 — .mdx support:**
+
+- `web/src/lib/previewKind.ts` — `.mdx` moved to the specialized renderer set
+  as `".mdx": "markdown"` (was in `kindByExt` text entries before this fix);
   `isMarkdownPath` now true for `.md`, `.markdown`, `.mdx`
 - `web/src/lib/editorLanguage.ts` (new) — `languageForFile(path)` extracted
   from duplicated Monaco maps; `.mdx` → `mdx`, `.md`/`.markdown` → `markdown`
@@ -277,11 +326,20 @@ external-change watchers. The legacy group is binary and has no editor anyway.
   (`.mdx` + `isMarkdownPath` describe),
   `web/src/components/Files/FileTabContent.test.tsx` ("treats .mdx as markdown
   too")
-- `internal/tool/preview.go` `previewOpenKinds` gained `".mdx": "text"`,
-  `".markdown": "text"`; `internal/server/handler_files.go` `previewRawTypes`
-  gained `".markdown"`/`".mdx"` → `text/markdown; charset=utf-8`
+- `internal/tool/preview.go` `previewOpenKinds`: `".mdx"/".markdown"` → `"text"`;
+  `internal/server/handler_files.go` `previewRawTypes`: `".markdown"/".mdx"` →
+  `text/markdown; charset=utf-8`
 - `internal/tool/preview_test.go`, `internal/server/handler_preview_test.go`,
   `internal/server/handler_files.go` tests updated
+
+**Sync contract (corrected):** the specialized renderer extensions must appear
+in all three of `kindByExt` (→ renderer kind), `previewOpenKinds` (→ text/open
+fallback), and `previewRawTypes` (→ content-type). The denylist
+(`NON_PREVIEWABLE_EXTS`/`previewNonTextExts`) is independently maintained and
+need not appear in `previewRawTypes` — denylisted paths never reach the raw
+fetch. The old contract where `kindByExt` also held text entries (requiring all
+three to be kept in sync with a text layer) is replaced by this narrower
+requirement: only specialized renderer entries must match across the three.
 
 ## Test-suite status
 
@@ -310,6 +368,13 @@ markdown and `isMarkdownPath` describe; `editorLanguage.test.ts` (new) covers
 types. Mutation-verified: removing the `kindByExt` `.mdx` entry fails 3 tests.
 Full web suite green; `tsc --noEmit` clean.
 
+Re-verified 2026-09-23 (this fix): `previewKind.test.ts` covers the new
+three-tier model (specialized renderer → kind, denylisted → null, text →
+"text"); `TestHandleFileContentTranscodesUTF16` verifies UTF-16 → UTF-8
+transcoding with `isBinary=false`; `TestPreviewOpenToolDefaultsText` verifies
+non-denylisted extensions fall back to `kind="text"`. Go and web suites green;
+`tsc --noEmit` and `go vet` clean.
+
 Treat this as a **point-in-time** result, not a standing fact. A suite-status
 note captured while another file is mid-edit does not describe the committed
 tree — this section once briefly carried unrelated failures from a
@@ -324,6 +389,8 @@ bundle.
   documentation-vs-landed-behavior mismatch in the web preview/browser surface.
 - `docs/gotchas/mdx-preview-not-evaluated.md` — MDX preview rule: rendered as
   Markdown, never evaluated (security).
+- `docs/gotchas/files-tab-preview-only-routing copy.md` — deprecated predecessor
+  of this doc (superseded).
 - `docs/superpowers/specs/2026-09-10-preview-multipurpose-design.md` —
   superseded §2 for the Files-tab `.md` behavior (now Edit/Preview/Split in
   `FileTabContent`); sidebar `PreviewHost` path unchanged.

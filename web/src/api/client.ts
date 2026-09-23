@@ -142,6 +142,27 @@ export interface ImageGenConfig {
   timeout?: number;
 }
 
+// HtrStatus is the managed `htrcli serve` daemon snapshot (Settings > Browser).
+export interface HtrStatus {
+  enabled: boolean;
+  running: boolean;
+  managed: boolean;
+  addr: string;
+  port: number;
+  socket: string;
+  binary: string;
+  error?: string;
+}
+
+// HtrTab is one browser tab connected to the managed HTR daemon.
+export interface HtrTab {
+  id: number;
+  url: string;
+  title: string;
+  active: boolean;
+  browser?: string;
+}
+
 // Base path for API calls. When the SPA is served under a tailscale --set-path
 // prefix (e.g. /<sessionID>), API calls must include the prefix or the tailscale
 // proxy routes them to whichever session owns the root path. The /rc command
@@ -866,6 +887,13 @@ export const api = {
     ),
   setBrowserConfig: (fields: { chrome_path: string; idle_timeout_minutes: number; screencast_quality: number }) =>
     fetchJSON<typeof fields>("/api/config/ocode/browser", { method: "PUT", body: JSON.stringify(fields) }),
+
+  // Managed `htrcli serve` daemon lifecycle (Settings > Browser). start/stop
+  // also persist htr_enabled; a failure is reported in status.error at HTTP 200.
+  getHtrStatus: () => fetchJSON<HtrStatus>("/api/config/ocode/htr"),
+  startHtr: () => fetchJSON<HtrStatus>("/api/config/ocode/htr/start", { method: "POST" }),
+  stopHtr: () => fetchJSON<HtrStatus>("/api/config/ocode/htr/stop", { method: "POST" }),
+  listHtrTabs: () => fetchJSON<{ tabs: HtrTab[]; error?: string }>("/api/config/ocode/htr/tabs"),
 
   getFeaturesConfig: () =>
     fetchJSON<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>("/api/config/ocode/features"),

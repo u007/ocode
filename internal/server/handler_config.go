@@ -12,6 +12,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/browse/cdp"
 	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
@@ -1899,7 +1900,24 @@ func (h *Handler) HandleSetBrowserConfig(w http.ResponseWriter, r *http.Request)
 		htrPort = h.cfg.Ocode.Browser.HTRPort
 	}
 	h.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{
+	// Live-apply the enable toggle: enabling starts the managed daemon now and
+	// disabling stops it, instead of waiting for the next ocode restart.
+	// The config is saved either way; a start/stop failure is reported in
+	// htr_error (HTTP 200) so the caller can show the reason inline.
+	htrError := ""
+	if req.HTREnabled != nil {
+		var st htrStatusResponse
+		if *req.HTREnabled {
+			st = h.startManagedHTR()
+		} else {
+			st = h.stopManagedHTR()
+		}
+		htrError = st.Error
+		if htrError != "" {
+			log.Printf("[config] browser PUT htr_enabled=%v live-apply failed: %s", *req.HTREnabled, htrError)
+		}
+	}
+	resp := map[string]any{
 		"chrome_path":          req.ChromePath,
 		"idle_timeout_minutes": req.IdleTimeoutMinutes,
 		"screencast_quality":   config.NormalizeScreencastQuality(req.ScreencastQuality),
@@ -1907,7 +1925,137 @@ func (h *Handler) HandleSetBrowserConfig(w http.ResponseWriter, r *http.Request)
 		"htr_port":             htrPort,
 		"htr_socket_path":      req.HTRSocketPath,
 		"htr_native_host_name": req.HTRNativeHostName,
-	})
+	}
+	if htrError != "" {
+		resp["htr_error"] = htrError
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// HTR daemon lifecycle seams, overridable in tests so the suite never resolves
+// assets, probes a real port, or spawns an htrcli process.
+var (
+	ensureHTRServeFn  = cdp.EnsureHTRServe
+	stopHTRServeFn    = cdp.StopHTRServe
+	htrDaemonStatusFn = cdp.HTRDaemonStatus
+	listHTRTabsFn     = cdp.ListHTRTabs
+	htrOptionsFn      = resolveManagedHTROptions
+)
+
+// htrStatusResponse is the settings-UI snapshot of the managed daemon.
+type htrStatusResponse struct {
+	Enabled bool   `json:"enabled"`
+	Running bool   `json:"running"`
+	Managed bool   `json:"managed"`
+	Addr    string `json:"addr"`
+	Port    int    `json:"port"`
+	Socket  string `json:"socket"`
+	Binary  string `json:"binary"`
+	Error   string `json:"error,omitempty"`
+}
+
+// htrBrowserConfig copies the HTR-relevant browser config under the handler
+// lock, falling back to canonical defaults when no config is loaded.
+func (h *Handler) htrBrowserConfig() config.BrowserConfig {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return config.DefaultBrowserConfig()
+	}
+	return h.cfg.Ocode.Browser
+}
+
+// htrStatus builds the API snapshot from the persisted config plus a live probe.
+func (h *Handler) htrStatus(errMsg string) htrStatusResponse {
+	bcfg := h.htrBrowserConfig()
+	info := htrDaemonStatusFn(bcfg.HTRPort, bcfg.HTRSocketPath)
+	return htrStatusResponse{
+		Enabled: bcfg.HTREnabled,
+		Running: info.Running,
+		Managed: info.Managed,
+		Addr:    info.Addr,
+		Port:    info.Port,
+		Socket:  info.Socket,
+		Binary:  info.Binary,
+		Error:   errMsg,
+	}
+}
+
+func (h *Handler) setHTREnabledInMemory(enabled bool) {
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.Browser.HTREnabled = enabled
+	}
+	h.mu.Unlock()
+}
+
+// startManagedHTR resolves the managed options and ensures exactly one daemon
+// is running, reusing a healthy existing instance. It returns the resulting
+// status with any failure message in Error.
+func (h *Handler) startManagedHTR() htrStatusResponse {
+	bcfg := h.htrBrowserConfig()
+	opts, notice := htrOptionsFn(bcfg)
+	if notice != "" {
+		return h.htrStatus(notice)
+	}
+	if _, err := ensureHTRServeFn(h.procSup, opts, log.Default()); err != nil {
+		return h.htrStatus("HTR automation is unavailable: " + err.Error())
+	}
+	return h.htrStatus("")
+}
+
+// stopManagedHTR stops the managed daemon recorded for the configured port.
+func (h *Handler) stopManagedHTR() htrStatusResponse {
+	bcfg := h.htrBrowserConfig()
+	if _, err := stopHTRServeFn(h.procSup, bcfg.HTRPort, log.Default()); err != nil {
+		return h.htrStatus("failed to stop HTR daemon: " + err.Error())
+	}
+	return h.htrStatus("")
+}
+
+// HandleGetHTRStatus reports the managed `htrcli serve` daemon (enabled flag +
+// live status). It never starts or stops anything.
+func (h *Handler) HandleGetHTRStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.htrStatus(""))
+}
+
+// HandleStartHTR enables HTR in the persisted config and guarantees a single
+// managed daemon is running. Failures are reported in the status body (HTTP
+// 200) so the UI keeps the status fields and can show the reason inline.
+func (h *Handler) HandleStartHTR(w http.ResponseWriter, r *http.Request) {
+	if err := config.SaveOcodeHTRConfig(true, "", "", 0); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save htr config: "+err.Error())
+		return
+	}
+	h.setHTREnabledInMemory(true)
+	writeJSON(w, http.StatusOK, h.startManagedHTR())
+}
+
+// HandleStopHTR disables HTR in the persisted config and stops the managed
+// daemon. Stopping an already-stopped daemon succeeds.
+func (h *Handler) HandleStopHTR(w http.ResponseWriter, r *http.Request) {
+	if err := config.SaveOcodeHTRConfig(false, "", "", 0); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save htr config: "+err.Error())
+		return
+	}
+	h.setHTREnabledInMemory(false)
+	writeJSON(w, http.StatusOK, h.stopManagedHTR())
+}
+
+// HandleListHTRTabs lists the browser tabs connected to the managed daemon.
+// A failure (daemon not running, query error) returns an empty list plus the
+// reason at HTTP 200 so the settings UI renders it inline.
+func (h *Handler) HandleListHTRTabs(w http.ResponseWriter, r *http.Request) {
+	bcfg := h.htrBrowserConfig()
+	tabs, err := listHTRTabsFn(bcfg.HTRPort)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"tabs": []cdp.HTRTab{}, "error": err.Error()})
+		return
+	}
+	if tabs == nil {
+		tabs = []cdp.HTRTab{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tabs": tabs})
 }
 
 // HandleGetFeaturesConfig reports the memory/doc-prompt feature toggles.
