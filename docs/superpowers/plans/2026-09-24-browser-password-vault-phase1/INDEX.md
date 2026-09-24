@@ -1,3 +1,15 @@
+---
+type: Plan
+title: Browser Password Vault — Phase 1 Implementation Plan
+description: 'Phase 1 implementation plan (INDEX.md + parts 01–10) for the browser password vault: internal/vault encrypted store (Argon2id KEK wrapping a random 32-byte AES-256-GCM data key with AAD "ocode-vault-key", each item sealed whole with its id as AAD, vault.json 0600, atomic temp+rename writes under a cross-process OS file lock with load-modify-write merge, ChangeMaster re-wraps the same DK leaving item blobs byte-identical), /api/vault/* handlers in handler_vault.go with per-surface unlock grants (surface is UX state, not a security boundary; malformed sort/limit/offset → 400), generator + URL match, and web api.vault* client with the Settings → Passwords VaultForm. Phase 1 implemented; local-iframe autofill (Phase 2) and Chrome/CDP autofill (Phase 3) deferred to their own plans and tracked in TODO.md under (password-vault).'
+tags:
+  - browser
+  - vault
+  - passwords
+  - plan
+  - superpowers
+timestamp: 2026-09-24T06:51:59Z
+---
 # Browser Password Vault — Phase 1 Implementation Plan
 
 > **For agentic workers:** implement part-by-part, ticking the `- [ ]` steps.

@@ -32,6 +32,10 @@
 
 ## 2026-09-24
 
+* **Update**: Browser Password Vault — Phase 1 Implementation Plan ([superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md))
+* **Creation**: Web "All sessions" dialog slow to open (render bottleneck, child filtering + pagination) ([gotchas/web-all-sessions-dialog-slow.md](/gotchas/web-all-sessions-dialog-slow.md))
+* **Creation**: Per-Chat MCP Toggle ([concepts/per-chat-mcp-toggle.md](/concepts/per-chat-mcp-toggle.md))
+* **Update**: Per-session LLM spend accumulator ([gotchas/per-session-llm-spend-accumulator.md](/gotchas/per-session-llm-spend-accumulator.md))
 * **Creation**: Side Pane StateKey Convention: Per-Session Scoping ([gotchas/side-pane-statekey-convention.md](/gotchas/side-pane-statekey-convention.md))
 * **Update**: Web UI Mobile Layout Breakage (≤767px)" ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
 * **Update**: Project scoping is visibility, not mounting — React key remounts ([gotchas/project-scope-is-mounting-not-visibility.md](/gotchas/project-scope-is-mounting-not-visibility.md))

@@ -39,6 +39,7 @@ okf_version: 0.1
 - [Host and project scoping for web session/project reads](concepts/web-session-host-scoping.md) - Every session/project-scoped web read must carry host and project path; command context, resolved surfaces, and the threading rule
 - [Interrupted Turn Notice](concepts/interrupted-turn-notice.md) - How ocode detects a turn cut off after an answered ask and surfaces a Continue action to the user.
 - [PDF viewer zoom, Space navigation, and find](concepts/pdf-viewer-zoom-find.md) - PDF viewer zoom-at-cursor, Space zoom+pan modifier, cross-page find with overlays, Print/Download, per-file view-state persistence across project switches, and jsdom test gotchas.
+- [Per-Chat MCP Toggle](concepts/per-chat-mcp-toggle.md) - Per-chat MCP server on/off toggle in the web/desktop chat sidebar: session-scoped list/toggle, process-wide persist + per-session override, and the mcpCache rebuild gotcha.
 - [Persistent per-session shell for exclamation-mark commands](concepts/persistent-shell-session.md) - How the web/desktop composer's exclamation-mark commands run in a persistent pty-backed interactive shell per chat tab, with prompt-hook marker framing, pty cleanliness, lifecycle, and the one-shot fallback.
 - [Remote Persistent Sessions and Terminals](concepts/remote-persistent-sessions-terminals.md) - Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, sidebar UI and tab reveal, and wake reconnect.
 - [Sandbox Permission Mode](concepts/sandbox-permission-mode.md) - Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references
@@ -161,6 +162,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [TUI Selection Context Lost on Double Preparation](gotchas/tui-selection-context-lost-on-double-preparation.md) - Confirmed regression: Agent.Step re-prepares TUI-prepared messages with an empty selection and removes the existing [ocode:selection] context.
 - [TUI: skipLLM is not a render gate — fake-agent and cron replies vanish on fresh sessions](gotchas/tui-skipllm-is-not-a-render-gate.md) - Gotcha: renderTranscript in internal/tui/model.go used skipLLM as a "should this render?" predicate, hiding assistant output (fake-agent replies, cron deliveries, LLM errors) on fresh sessions where every message was transient or a user echo. Fix: gate on transient + isCommandHistoryMessage only; skipLLM must never drive rendering.
 - [Version-Changelog Mismatch](gotchas/version-changelog-mismatch.md) - Version mismatch between version.go (0.8.83) and CHANGES.md resolved — CHANGES.md [Unreleased] now includes –– **Version Bump** — 0.8.82 → 0.8.83 entry; `go test ./internal/version/` passes as of this commit. Status updated to resolved-as-of-this-commit.
+- [Web "All sessions" dialog slow to open (render bottleneck, child filtering + pagination)](gotchas/web-all-sessions-dialog-slow.md) - Get-rid of All-sessions dialog 0.73s popup: render-of-6650-rows root cause, child-session filter + 50/page client window, measured numbers, legacy-scan follow-up.
 - [Web model picker must open from the cached model list, not a live refresh](gotchas/web-model-picker-cached-not-live.md) - Gotcha: web model picker slowness — cached open, batch scan, render cap, gzip, configured filter
 - [Web UI Mobile Layout Breakage (≤767px)"](gotchas/web-ui-mobile-layout-breakage.md) - "Gotcha: web UI mobile layout broke because sidebar CSS reserved space on phones, default-open sidebars never closed, a CSS grid collapsed the tab strip, and the floating bottom bar overflowed the viewport edge. Five root causes, eight responsive fixes, and regression tests. Rule 7 now documents per-session side-pane scoping."
 - [Web/Desktop Chat Went Stale Because a Dead SSE Body Never Errors](gotchas/web-sse-stream-silent-death-liveness.md) - Added a note about a second failure mode: turn_active:true with no heartbeat during permission/question continuations causes a false "stalled" badge; continuations must publish heartbeats.
@@ -256,6 +258,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 # superpowers
 
+- [Browser Password Vault — Phase 1 Implementation Plan](superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md) - Phase 1 implementation plan (INDEX.md + parts 01–10) for the browser password vault: internal/vault encrypted store (Argon2id KEK wrapping a random 32-byte AES-256-GCM data key with AAD "ocode-vault-key", each item sealed whole with its id as AAD, vault.json 0600, atomic temp+rename writes under a cross-process OS file lock with load-modify-write merge, ChangeMaster re-wraps the same DK leaving item blobs byte-identical), /api/vault/* handlers in handler_vault.go with per-surface unlock grants (surface is UX state, not a security boundary; malformed sort/limit/offset → 400), generator + URL match, and web api.vault* client with the Settings → Passwords VaultForm. Phase 1 implemented; local-iframe autofill (Phase 2) and Chrome/CDP autofill (Phase 3) deferred to their own plans and tracked in TODO.md under (password-vault).
 - [Delayed Chat Input Consolidation](superpowers/specs/2026-09-09-chat-input-consolidation-design.md)
 - [Embedded Browser Password Vault — Design](superpowers/specs/2026-09-24-browser-password-vault-design.md) - Approved-for-planning design for a Bitwarden-like password vault in ocode's embedded browser (full browser tab + sidebar). Server-side Go crypto: Argon2id-derived KEK wrapping a random AES-256-GCM data key; per-item blobs sealed whole with the item id as AAD; file at <GlobalDataDir>/browse/vault.json (0600). Per-surface unlock (UX-only, not a security boundary). Autofill in local iframe mode via capture.js and in Chrome/CDP mode via vaultFill/vaultCollect + Page.addScriptToEvaluateOnNewDocument observer + Runtime.addBinding. New Settings > Passwords page. Phased: vault core+API+settings, then local autofill, then Chrome autofill.
 - [Laya as a local permission / auto-continue judge — evaluation](superpowers/specs/2026-09-22-laya-local-judge-evaluation.md) - Measured evaluation (2026-09-22) of the Laya System-1 model (3 checkpoints) as a local replacement for typesafe/jev-latest in the auto-permission and auto-continue judges: memory/latency per checkpoint, context budgets, and accuracy on 16 real bash tool calls + 13 real transcript tails pulled from ocode sessions. Verdict: not usable zero-shot; fine-tune or cascade required.
@@ -470,6 +473,16 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [INDEX.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/INDEX.md)
 - [2026-09-21-interrupted-turn-notice.md](superpowers/plans/2026-09-21-interrupted-turn-notice.md)
 - [2026-09-21-persistent-shell-session.md](superpowers/plans/2026-09-21-persistent-shell-session.md)
+- [01-crypto.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md)
+- [02-store-lock.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md)
+- [03-vault-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md)
+- [04-url-match.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md)
+- [05-generator.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md)
+- [06-handler-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md)
+- [07-web-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md)
+- [08-vault-form.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md)
+- [09-settings-group.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md)
+- [10-docs-gates.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [01-architecture.md](superpowers/specs/2026-08-29-remote-ssh/01-architecture.md)
 - [02-phase1-connect.md](superpowers/specs/2026-08-29-remote-ssh/02-phase1-connect.md)
