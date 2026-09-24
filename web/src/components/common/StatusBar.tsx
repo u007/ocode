@@ -182,6 +182,13 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   // the server's per-session accumulator); the global store value is the
   // process-wide daily total, used only as a fallback before a snapshot lands.
   const spending = snap?.spending_usd ?? spendingUSD ?? 0;
+  // Per-session token totals, mirroring the TUI sidebar's
+  // "In … Cache … Out …" usage line. Absent/0 means unknown (omitted on the
+  // wire), so the segment is hidden rather than showing a fabricated 0.
+  const inTok = snap?.input_tokens ?? 0;
+  const cachedTok = snap?.cached_tokens ?? 0;
+  const outTok = snap?.output_tokens ?? 0;
+  const totalTok = snap?.total_tokens ?? 0;
   const modifiedCount = snap?.modified_files?.length ?? 0;
   const lspCount = snap?.lsp_servers?.length ?? 0;
   const extraPathsCount = snap?.extra_allowed_paths?.length ?? 0;
@@ -237,23 +244,24 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   if (collapsed) {
     return (
       <div className="flex items-center border-t border-border px-4 py-1 text-xs text-muted-foreground">
-        <div className="flex items-center gap-3 min-w-0 flex-wrap">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            onClick={toggleCollapsed}
-            title="Expand status bar"
-            aria-label="Expand status bar"
-          >
-            <ChevronUp className="h-4 w-4" />
-          </Button>
+        <div className="flex items-center gap-3 min-w-0 flex-1 flex-wrap">
           {runningIndicator}
           {error && (
             <span className="text-red-400 truncate max-w-[28rem]" title={error}>
               {error}
             </span>
           )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="ml-auto"
+            onClick={toggleCollapsed}
+            title="Expand status bar"
+            aria-label="Expand status bar"
+          >
+            <ChevronUp className="h-4 w-4" />
+          </Button>
         </div>
       </div>
     );
@@ -322,6 +330,7 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
             </Button>
           )}
           <SpeechToolbarToggle />
+          <span>ocode web</span>
           <Button
             type="button"
             variant="ghost"
@@ -332,7 +341,6 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
           >
             <ChevronDown className="h-4 w-4" />
           </Button>
-          <span>ocode web</span>
         </div>
       </div>
       {/* Row 2: session, cwd, context, spend, files, lsp, extra paths */}
@@ -365,6 +373,16 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
               }
             >
               ctx: {ctxCur > 0 ? formatTok(ctxCur) : "?"}/{formatTok(ctxMax)}
+            </span>
+          )}
+          {(inTok > 0 || cachedTok > 0 || outTok > 0) && (
+            <span
+              className="text-muted-foreground"
+              title={`Session tokens — in ${inTok.toLocaleString()} · cached ${cachedTok.toLocaleString()} · out ${outTok.toLocaleString()}${
+                totalTok > 0 ? ` · total ${totalTok.toLocaleString()}` : ""
+              }`}
+            >
+              in {formatTok(inTok)} · cache {formatTok(cachedTok)} · out {formatTok(outTok)}
             </span>
           )}
           {spending > 0 && (

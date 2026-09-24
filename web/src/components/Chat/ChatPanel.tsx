@@ -3,7 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useChatSelector, useChatDispatch, getSessionSlice, parseQuestionFromMessage, type QuestionRequest } from "../../stores/chatStore";
 import { useProjectDispatch } from "../../stores/projectStore";
 import { api } from "../../api/client";
-import MessageBubble, { AssistantText } from "./MessageBubble";
+import MessageBubble, { AssistantText, hasRenderableText } from "./MessageBubble";
 import { StatusBlock, ThinkingBlock, ToolBlock, NoticeBlock } from "./TurnParts";
 import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
 import ModelPromptRow from "./ModelPromptRow";
@@ -1184,7 +1184,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                             }
                           />
                         ))}
-                        {entry.assistant.content ? (
+                        {hasRenderableText(entry.assistant.content) ? (
                           <AssistantText content={entry.assistant.content} onSpeak={requestSpeech} />
                         ) : null}
                       </>
@@ -1208,7 +1208,9 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
               if (part.kind === "thinking")
                 return <ThinkingBlock key={`live-${i}`} text={part.text} onSpeak={() => requestSpeech(part.text || "")} />;
               if (part.kind === "text")
-                return <AssistantText key={`live-${i}`} content={part.text} onSpeak={requestSpeech} />;
+                return hasRenderableText(part.text) ? (
+                  <AssistantText key={`live-${i}`} content={part.text} onSpeak={requestSpeech} />
+                ) : null;
               if (part.kind === "status")
                 return <StatusBlock key={`live-${i}`} text={part.text} />;
               if (part.kind === "notice")

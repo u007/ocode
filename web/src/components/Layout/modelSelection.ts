@@ -47,6 +47,7 @@ export const CLAUDE_CODE_ADVISOR_MODELS: readonly string[] = [
   "claude-opus-4-8",
   "claude-opus-4-7",
   "claude-opus-5",
+  "claude-opus-5-5",
   "claude-haiku-4-5",
   "claude-fable-5",
 ];

@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/u007/ocode/internal/auth"
@@ -140,18 +141,22 @@ type pathPatternEntry struct {
 }
 
 type PermissionManager struct {
-	mode                  PermissionMode
-	rules                 map[string]PermissionLevel
-	userConfirmedRules    map[string]bool // tracks explicit "always allow" decisions
-	patterns              []patternRule
-	pathPatterns          map[string][]pathPatternEntry // toolName → path-glob patterns
-	bashPrefixes          map[string]PermissionLevel
-	bashAutoAllow         map[string]bool
-	bashPrefixModes       map[string]string
-	workDir               string
-	webfetchDomains       map[string]PermissionLevel
-	autoPermissionEnabled bool
-	autoGrants            []config.AutoGrant
+	mode               PermissionMode
+	rules              map[string]PermissionLevel
+	userConfirmedRules map[string]bool // tracks explicit "always allow" decisions
+	patterns           []patternRule
+	pathPatterns       map[string][]pathPatternEntry // toolName → path-glob patterns
+	bashPrefixes       map[string]PermissionLevel
+	bashAutoAllow      map[string]bool
+	bashPrefixModes    map[string]string
+	workDir            string
+	webfetchDomains    map[string]PermissionLevel
+	// autoPermissionEnabled and autoConfig are atomics because the auto-permission
+	// layer is process-wide policy that the Settings UI can change while a turn is
+	// running (PUT /api/config/ocode/permissions-auto pushes it to every live
+	// agent). The judge must be able to read the current config without tearing.
+	autoPermissionEnabled atomic.Bool
+	autoConfig            atomic.Pointer[config.AutoPermissionConfig]
 	claudeBashAllow       []string
 	claudeBashDeny        []string
 	claudeBashAsk         []string
@@ -1458,13 +1463,7 @@ func (pm *PermissionManager) LoadFromOcode(cfg config.PermissionConfig) {
 	if cfg.Mode != "" {
 		pm.SetMode(PermissionMode(cfg.Mode))
 	}
-	if cfg.Auto != nil {
-		pm.SetAutoPermissionEnabled(cfg.Auto.Enabled)
-		pm.autoGrants = append([]config.AutoGrant(nil), cfg.Auto.Grants...)
-	} else {
-		pm.SetAutoPermissionEnabled(false)
-		pm.autoGrants = nil
-	}
+	pm.SetAutoPermissionConfig(cfg.Auto)
 	for k, v := range cfg.Tools {
 		level := PermissionLevel(v)
 		if validPermissionLevel(level) {
@@ -1503,8 +1502,22 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		if path != "" {
 			exists, err := targetExists(pm, path)
 			if !exists && errors.Is(err, os.ErrNotExist) {
-				pm.emitDebug("perm", fmt.Sprintf("Decide DENY (read: target does not exist): tool=%s path=%s", toolName, path))
-				return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: fmt.Sprintf("read target does not exist: %s", path)}
+				resolved := resolvePath(path, pm.workDir)
+				// macOS screenshot filenames contain U+202F before AM/PM and
+				// models routinely re-emit it as an ASCII space. Recover the
+				// sibling before treating the target as missing; the read tool
+				// applies the same recovery, so an allowed call reads the file.
+				res := tool.ResolveReadTarget(resolved, 0)
+				if res.Exists {
+					pm.emitDebug("perm", fmt.Sprintf("Decide: read target recovered via unicode-space variant: tool=%s path=%s resolved=%s", toolName, path, res.Path))
+				} else {
+					reason := fmt.Sprintf("read target does not exist: %s — resolved to %s", path, resolved)
+					if res.Hint != "" {
+						reason += "; " + res.Hint
+					}
+					pm.emitDebug("perm", fmt.Sprintf("Decide DENY (read: target does not exist): tool=%s path=%s resolved=%s", toolName, path, resolved))
+					return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: reason}
+				}
 			}
 		}
 	}
@@ -1726,6 +1739,16 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 				}
 				return PermissionDecision{Level: level}
 			}
+			// An explicit tool-level deny is authoritative for path-scoped tools
+			// too. This branch used to return before the tool-rule lookup at the
+			// bottom of Decide, so a configured `permissions.tools.<tool> = "deny"`
+			// (delete, write, …) was silently ignored. A user deny is a deliberate
+			// policy stop: mark it HardDeny so the auto-permission judge can never
+			// second-guess it.
+			if lvl := pm.Check(toolName); lvl == PermissionDeny {
+				pm.emitDebug("perm", fmt.Sprintf("Decide DENY (tool rule): tool=%s path=%s", toolName, path))
+				return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: fmt.Sprintf("permissions.tools.%s = deny", toolName)}
+			}
 			// Relative paths and glob patterns (non-absolute) are implicitly within workDir.
 			// Use isWithinAllowedScope (not isWithinWorkDir) so extra_allowed_paths
 			// persisted via "always allow this path" are respected for all tools, not
@@ -1771,22 +1794,23 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".sensitive_path",
 				}}
 			}
-			if toolName == "delete" {
-				if pm.IsUserConfirmedRule(toolName) {
-					pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (delete, user-confirmed tool): tool=%s path=%s", toolName, path))
-					return PermissionDecision{Level: PermissionAllow}
+			// Honor the tool-level rule for an in-scope, non-sensitive target.
+			// The delete default is "ask" (so a bare delete still prompts, then
+			// routes to the auto-permission judge); an explicit
+			// `permissions.tools.delete = "allow"` — including the rule persisted
+			// by the dialog's "always allow this tool" — auto-allows it. Sandbox
+			// mode auto-allows the remaining asks (its OS write-wall confines the
+			// effect), preserving the previous delete-only sandbox carve-out.
+			if lvl := pm.Check(toolName); lvl == PermissionAsk && pm.mode != PermissionModeSandbox {
+				rule := "tool." + toolName
+				if toolName == "delete" {
+					// Kept for the dialog's persist-rule affordance and the
+					// existing delete-under-default-ask test.
+					rule = "tool.delete.delete"
 				}
-				// Sandbox mode: the path has already cleared the workdir/allowed-scope
-				// and sensitive-path gates above, so it is treated the same as write/edit
-				// (which fall through to Allow at the bottom of this branch) instead of
-				// singling delete out for an extra prompt.
-				if pm.mode == PermissionModeSandbox {
-					pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (delete, sandbox): tool=%s path=%s", toolName, path))
-					return PermissionDecision{Level: PermissionAllow}
-				}
-				pm.emitDebug("perm", fmt.Sprintf("Decide ASK (delete): tool=%s path=%s", toolName, path))
+				pm.emitDebug("perm", fmt.Sprintf("Decide ASK (tool rule): tool=%s path=%s", toolName, path))
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
-					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".delete",
+					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: rule,
 				}}
 			}
 			pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (path in workdir): tool=%s path=%s", toolName, path))
@@ -4174,7 +4198,7 @@ func (pm *PermissionManager) SetMode(mode PermissionMode) {
 		if mode == PermissionModeYOLO {
 			// YOLO is a hard bypass: it must not retain or re-enable the
 			// LLM auto-permission layer.
-			pm.autoPermissionEnabled = false
+			pm.autoPermissionEnabled.Store(false)
 		}
 	}
 }
@@ -4189,7 +4213,7 @@ func (pm *PermissionManager) SetAutoPermissionEnabled(enabled bool) {
 	if enabled && pm.mode == PermissionModeYOLO {
 		return
 	}
-	pm.autoPermissionEnabled = enabled
+	pm.autoPermissionEnabled.Store(enabled)
 }
 
 // AutoPermissionEnabled reports whether the LLM auto-permission layer is
@@ -4198,18 +4222,60 @@ func (pm *PermissionManager) AutoPermissionEnabled() bool {
 	if pm == nil {
 		return false
 	}
-	return pm.autoPermissionEnabled
+	return pm.autoPermissionEnabled.Load()
+}
+
+// SetAutoPermissionConfig replaces the live auto-permission config — the enabled
+// flag plus the judge model/prompt/budgets, the relaxed concern set and the
+// persisted grant list (the interpreter matcher reads Grants from here). It is
+// safe to call on a running agent: the config pointer and enabled flag are
+// atomics, so a process-wide Settings PUT can update every live agent while a
+// turn's judge reads it, with no torn read. Writers always replace the pointer;
+// the stored struct is never mutated in place.
+//
+// A nil cfg disables the layer (the zero value means "nothing relaxed, nothing
+// configured"), matching LoadFromOcode's previous behavior.
+func (pm *PermissionManager) SetAutoPermissionConfig(cfg *config.AutoPermissionConfig) {
+	if pm == nil {
+		return
+	}
+	if cfg == nil {
+		pm.autoConfig.Store(nil)
+		pm.SetAutoPermissionEnabled(false)
+		return
+	}
+	cp := *cfg
+	cp.RelaxedConcerns = append([]string(nil), cfg.RelaxedConcerns...)
+	cp.Grants = append([]config.AutoGrant(nil), cfg.Grants...)
+	pm.autoConfig.Store(&cp)
+	pm.SetAutoPermissionEnabled(cp.Enabled)
+}
+
+// AutoPermissionConfig returns the live auto-permission config, or nil when the
+// layer has no config. The returned pointer must be treated as immutable —
+// writers replace it via SetAutoPermissionConfig rather than mutating fields.
+func (pm *PermissionManager) AutoPermissionConfig() *config.AutoPermissionConfig {
+	if pm == nil {
+		return nil
+	}
+	return pm.autoConfig.Load()
 }
 
 // AddAutoGrant records a derived interpreter grant in the in-memory matcher set.
 // The session layer is responsible for the durable save; this only keeps the
 // live manager in sync so repeats within the session match without re-consulting
-// the model.
+// the model. The grant list lives inside the atomic config, so this is a
+// copy-on-write replace like SetAutoPermissionConfig.
 func (pm *PermissionManager) AddAutoGrant(g config.AutoGrant) {
 	if pm == nil {
 		return
 	}
-	pm.autoGrants = append(pm.autoGrants, g)
+	var cp config.AutoPermissionConfig
+	if cur := pm.autoConfig.Load(); cur != nil {
+		cp = *cur
+	}
+	cp.Grants = append(append([]config.AutoGrant(nil), cp.Grants...), g)
+	pm.autoConfig.Store(&cp)
 }
 
 // normalizeGrantCommand canonicalizes a shell command enough for exact grant
@@ -4259,7 +4325,11 @@ func (pm *PermissionManager) MatchInterpreterGrant(ie *InterpreterExec, sourceHa
 	normalizedCommand := normalizeGrantCommand(ie.RawCommand)
 	cwd := pm.effectiveWorkDir()
 	resolvedPath := resolvedInterpreterEntrypoint(ie, cwd)
-	for _, g := range pm.autoGrants {
+	var grants []config.AutoGrant
+	if cfg := pm.autoConfig.Load(); cfg != nil {
+		grants = cfg.Grants
+	}
+	for _, g := range grants {
 		if g.Kind != "interpreter_exact" || g.Language != ie.Language || g.SourceMode != ie.SourceMode {
 			continue
 		}
@@ -4319,21 +4389,21 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 	}
 
 	clone := &PermissionManager{
-		mode:                  pm.Mode(),
-		rules:                 make(map[string]PermissionLevel, len(pm.rules)),
-		patterns:              append([]patternRule(nil), pm.patterns...),
-		pathPatterns:          make(map[string][]pathPatternEntry, len(pm.pathPatterns)),
-		bashPrefixes:          make(map[string]PermissionLevel, len(pm.bashPrefixes)),
-		bashAutoAllow:         make(map[string]bool, len(pm.bashAutoAllow)),
-		bashPrefixModes:       make(map[string]string, len(pm.bashPrefixModes)),
-		workDir:               pm.workDir,
-		webfetchDomains:       make(map[string]PermissionLevel, len(pm.webfetchDomains)),
-		autoPermissionEnabled: pm.autoPermissionEnabled,
-		autoGrants:            append([]config.AutoGrant(nil), pm.autoGrants...),
-		claudeBashAllow:       append([]string(nil), pm.claudeBashAllow...),
-		claudeBashDeny:        append([]string(nil), pm.claudeBashDeny...),
-		claudeBashAsk:         append([]string(nil), pm.claudeBashAsk...),
+		mode:            pm.Mode(),
+		rules:           make(map[string]PermissionLevel, len(pm.rules)),
+		patterns:        append([]patternRule(nil), pm.patterns...),
+		pathPatterns:    make(map[string][]pathPatternEntry, len(pm.pathPatterns)),
+		bashPrefixes:    make(map[string]PermissionLevel, len(pm.bashPrefixes)),
+		bashAutoAllow:   make(map[string]bool, len(pm.bashAutoAllow)),
+		bashPrefixModes: make(map[string]string, len(pm.bashPrefixModes)),
+		workDir:         pm.workDir,
+		webfetchDomains: make(map[string]PermissionLevel, len(pm.webfetchDomains)),
+		claudeBashAllow: append([]string(nil), pm.claudeBashAllow...),
+		claudeBashDeny:  append([]string(nil), pm.claudeBashDeny...),
+		claudeBashAsk:   append([]string(nil), pm.claudeBashAsk...),
 	}
+	clone.autoPermissionEnabled.Store(pm.autoPermissionEnabled.Load())
+	clone.autoConfig.Store(pm.autoConfig.Load())
 	for k, v := range pm.rules {
 		clone.rules[k] = v
 	}
@@ -4503,7 +4573,22 @@ func (pm *PermissionManager) ExportConfig() config.PermissionConfig {
 	}
 	var auto *config.AutoPermissionConfig
 	if pm.AutoPermissionEnabled() {
-		auto = &config.AutoPermissionConfig{Enabled: true}
+		// Export the live config, not a bare {Enabled:true}: a caller that feeds
+		// this back through LoadFromOcode (the TUI's permission sync) must not
+		// silently drop the relaxed-concern set or the judge prompt.
+		if cur := pm.AutoPermissionConfig(); cur != nil {
+			cp := *cur
+			// The gate is the enabled atomic, not the struct's flag: the layer may
+			// have been switched on at runtime (SetAutoPermissionEnabled, YOLO and
+			// back) over a config whose Enabled is false. Exporting that false
+			// would disable the layer on round-trip.
+			cp.Enabled = true
+			cp.RelaxedConcerns = append([]string(nil), cur.RelaxedConcerns...)
+			cp.Grants = append([]config.AutoGrant(nil), cur.Grants...)
+			auto = &cp
+		} else {
+			auto = &config.AutoPermissionConfig{Enabled: true}
+		}
 	}
 	return config.PermissionConfig{
 		Mode:  string(pm.Mode()),
@@ -5980,8 +6065,8 @@ const autoJudgeMinConfidenceDefault = 0.85
 // min_confidence and whether it was set (a positive value). Both the normal
 // and opaque floor resolvers defer to it whenever it is present.
 func (a *Agent) configuredAutoJudgeMinConfidence() (float64, bool) {
-	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.MinConfidence > 0 {
-		return a.config.Ocode.Permissions.Auto.MinConfidence, true
+	if auto := a.autoPermissionConfig(); auto != nil && auto.MinConfidence > 0 {
+		return auto.MinConfidence, true
 	}
 	return 0, false
 }

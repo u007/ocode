@@ -3087,7 +3087,7 @@ func (a *Agent) handleToolCallWithImages(name string, args json.RawMessage, b *t
 	if !ok {
 		return text, nil, nil
 	}
-	raw, mime, ierr := irt.ExecuteImage(args)
+	raw, mime, ierr := executeImageWithContext(tool.WithWorkDir(context.Background(), a.workDir), irt, args)
 	if ierr != nil {
 		// The pixels are a best-effort enrichment; the textual stub in `text`
 		// still describes the image, so degrade to it rather than failing the
@@ -3108,6 +3108,16 @@ func (a *Agent) handleToolCallWithImages(name string, args json.RawMessage, b *t
 			path, enc.OrigWidth, enc.OrigHeight, enc.Width, enc.Height)
 	}
 	return note, []Image{enc.Image}, nil
+}
+
+// executeImageWithContext reads a tool's image bytes, preferring the
+// context-aware variant when the tool implements it so a relative path is
+// anchored on the session project root rather than the process cwd.
+func executeImageWithContext(ctx context.Context, irt tool.ImageResultTool, args json.RawMessage) ([]byte, string, error) {
+	if cit, ok := irt.(tool.ContextualImageResultTool); ok {
+		return cit.ExecuteImageCtx(ctx, args)
+	}
+	return irt.ExecuteImage(args)
 }
 
 func (a *Agent) currentModelSupportsVision() bool {
@@ -3360,8 +3370,8 @@ func (a *Agent) autoPermissionModelName() string {
 		if v != "" {
 			return v
 		}
-	} else if a.config != nil {
-		if auto := a.config.Ocode.Permissions.Auto; auto != nil {
+	} else {
+		if auto := a.autoPermissionConfig(); auto != nil {
 			if model := strings.TrimSpace(auto.Model); model != "" {
 				return model
 			}
@@ -3381,8 +3391,8 @@ func (a *Agent) autoPermissionModelDisplayName() string {
 		if v != "" {
 			return v
 		}
-	} else if a.config != nil {
-		if auto := a.config.Ocode.Permissions.Auto; auto != nil {
+	} else {
+		if auto := a.autoPermissionConfig(); auto != nil {
 			if model := strings.TrimSpace(auto.Model); model != "" {
 				return model
 			}
@@ -3398,7 +3408,8 @@ func (a *Agent) autoPermissionModelDisplayName() string {
 }
 
 func (a *Agent) autoPermissionAllowsDestructive() bool {
-	return a != nil && a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.AllowDestructive
+	auto := a.autoPermissionConfig()
+	return auto != nil && auto.AllowDestructive
 }
 
 func (a *Agent) permissionDecisionTrace(name string, args json.RawMessage, decision PermissionDecision, autoEnabled bool) string {
@@ -3586,15 +3597,15 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 	maxCtxBytes := 2048
 	maxSources := 3
 	maxLinesPerSource := 40
-	if a.config != nil && a.config.Ocode.Permissions.Auto != nil {
-		if a.config.Ocode.Permissions.Auto.MaxContextBytes > 0 {
-			maxCtxBytes = a.config.Ocode.Permissions.Auto.MaxContextBytes
+	if auto := a.autoPermissionConfig(); auto != nil {
+		if auto.MaxContextBytes > 0 {
+			maxCtxBytes = auto.MaxContextBytes
 		}
-		if a.config.Ocode.Permissions.Auto.MaxContextSources > 0 {
-			maxSources = a.config.Ocode.Permissions.Auto.MaxContextSources
+		if auto.MaxContextSources > 0 {
+			maxSources = auto.MaxContextSources
 		}
-		if a.config.Ocode.Permissions.Auto.MaxContextLinesPerSource > 0 {
-			maxLinesPerSource = a.config.Ocode.Permissions.Auto.MaxContextLinesPerSource
+		if auto.MaxContextLinesPerSource > 0 {
+			maxLinesPerSource = auto.MaxContextLinesPerSource
 		}
 	}
 
@@ -3721,8 +3732,8 @@ These are format examples only — decide from THIS request's tool and arguments
 	}
 
 	// Apply custom prompt from config if set.
-	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.Prompt != "" {
-		prompt = a.config.Ocode.Permissions.Auto.Prompt + "\n\n" + prompt
+	if auto := a.autoPermissionConfig(); auto != nil && auto.Prompt != "" {
+		prompt = auto.Prompt + "\n\n" + prompt
 	}
 
 	tools := []map[string]interface{}{permissionReadFileTool()}
@@ -3860,11 +3871,11 @@ func (a *Agent) verifyAutoGrant(toolName string, args json.RawMessage, req *Perm
 		if scripts := a.detectExecutedCustomScripts(cmd); len(scripts) > 0 {
 			maxLines := 40
 			maxBytes := maxInterpreterSourceBytes
-			if a.config != nil && a.config.Ocode.Permissions.Auto != nil {
-				if a.config.Ocode.Permissions.Auto.MaxContextLinesPerSource > 0 {
-					maxLines = a.config.Ocode.Permissions.Auto.MaxContextLinesPerSource
+			if auto := a.autoPermissionConfig(); auto != nil {
+				if auto.MaxContextLinesPerSource > 0 {
+					maxLines = auto.MaxContextLinesPerSource
 				}
-				if a.config.Ocode.Permissions.Auto.MaxContextBytes > 0 {
+				if auto.MaxContextBytes > 0 {
 					// MaxContextBytes is total budget, not per-source byte limit; keep per-source
 					// byte cap at maxInterpreterSourceBytes unless an explicit per-source cap is configured.
 					// For now, retain 16 KiB as the per-script byte ceiling.
@@ -5715,6 +5726,18 @@ func stopChContext(ch <-chan struct{}) (context.Context, context.CancelFunc) {
 
 func (a *Agent) Permissions() *PermissionManager {
 	return a.permissions
+}
+
+// autoPermissionConfig returns this agent's live auto-permission config. It
+// reads through the PermissionManager rather than a.config so a process-wide
+// Settings change pushed at runtime (PermissionManager.SetAutoPermissionConfig)
+// is honored by the very next judge call instead of only after an agent rebuild.
+// Nil-safe.
+func (a *Agent) autoPermissionConfig() *config.AutoPermissionConfig {
+	if a == nil || a.permissions == nil {
+		return nil
+	}
+	return a.permissions.AutoPermissionConfig()
 }
 
 // SetSubAgentPermAsker installs the callback that sub-agents spawned by this

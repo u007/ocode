@@ -1115,3 +1115,29 @@ func TestMatchSubcommandAllow_DependencyBinAction(t *testing.T) {
 		}
 	}
 }
+
+// A Settings PUT replaces the grant list on live agents via
+// SetAutoPermissionConfig; the matcher must see the new set, not the one
+// captured at LoadFromOcode time.
+func TestSetAutoPermissionConfigReplacesGrants(t *testing.T) {
+	pm := NewPermissionManager()
+	root := filepath.Join(t.TempDir(), "project")
+	grantPath := filepath.Join(root, "job.py")
+	cmd := "python job.py"
+	ie := &InterpreterExec{Language: "python", SourceMode: "script_file", Entrypoint: grantPath, RawCommand: cmd}
+	grant := config.AutoGrant{Kind: "interpreter_exact", Language: "python", SourceMode: "script_file", NormalizedCommand: normalizeGrantCommand(cmd), EntrypointPath: grantPath, EntrypointSHA256: "abc", CWD: pm.effectiveWorkDir()}
+
+	pm.SetAutoPermissionConfig(&config.AutoPermissionConfig{Enabled: true, Grants: []config.AutoGrant{grant}})
+	if !pm.MatchInterpreterGrant(ie, "abc", true) {
+		t.Fatal("grant pushed via SetAutoPermissionConfig should match")
+	}
+	pm.SetAutoPermissionConfig(&config.AutoPermissionConfig{Enabled: true})
+	if pm.MatchInterpreterGrant(ie, "abc", true) {
+		t.Fatal("grant removed via SetAutoPermissionConfig must stop matching")
+	}
+	// A derived grant added at runtime survives a Clone.
+	pm.AddAutoGrant(grant)
+	if !pm.Clone().MatchInterpreterGrant(ie, "abc", true) {
+		t.Fatal("cloned manager should carry runtime grant")
+	}
+}

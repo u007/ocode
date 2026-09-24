@@ -96,7 +96,7 @@ func TestApplySessionSpendingLiveAgent(t *testing.T) {
 	h.agents[id].addSpendUSD(1.2345)
 
 	var snap TUIStatus
-	h.applySessionSpending(&snap, id)
+	h.applySessionUsage(&snap, id)
 	if snap.SpendingUSD < 1.2344 || snap.SpendingUSD > 1.2346 {
 		t.Fatalf("SpendingUSD = %v, want 1.2345", snap.SpendingUSD)
 	}
@@ -119,7 +119,7 @@ func TestApplySessionSpendingRestoredFromMetadata(t *testing.T) {
 	}
 
 	var snap TUIStatus
-	h.applySessionSpending(&snap, id)
+	h.applySessionUsage(&snap, id)
 	if snap.SpendingUSD != 7.5 {
 		t.Fatalf("SpendingUSD = %v, want 7.5 (persisted)", snap.SpendingUSD)
 	}
@@ -151,7 +151,7 @@ func TestApplySessionSpendingLedgerFallback(t *testing.T) {
 	}
 
 	var snap TUIStatus
-	h.applySessionSpending(&snap, id)
+	h.applySessionUsage(&snap, id)
 	if snap.SpendingUSD < 0.5999 || snap.SpendingUSD > 0.6001 {
 		t.Fatalf("SpendingUSD = %v, want 0.6 (ledger fallback)", snap.SpendingUSD)
 	}
@@ -179,7 +179,7 @@ func TestApplySessionSpendingPrefersLiveAndMetadata(t *testing.T) {
 	h.agents[id].addSpendUSD(1.5)
 
 	var snap TUIStatus
-	h.applySessionSpending(&snap, id)
+	h.applySessionUsage(&snap, id)
 	if snap.SpendingUSD != 1.5 {
 		t.Fatalf("SpendingUSD = %v, want 1.5 (live agent wins)", snap.SpendingUSD)
 	}
@@ -196,10 +196,12 @@ func TestPersistThenRestoreSessionSpendRoundTrip(t *testing.T) {
 	id := session.NewSessionID()
 	saveSessionToDir(t, proj, id)
 
-	h.persistSessionSpend(id, 4.5)
+	as := &agentSession{}
+	as.addSpendUSD(4.5)
+	h.persistSessionTelemetry(id, as)
 
 	var snap TUIStatus
-	h.applySessionSpending(&snap, id)
+	h.applySessionUsage(&snap, id)
 	if snap.SpendingUSD != 4.5 {
 		t.Fatalf("restored SpendingUSD = %v, want 4.5", snap.SpendingUSD)
 	}

@@ -33,6 +33,18 @@ func interruptedTail() []agent.Message {
 	}
 }
 
+// dismissedQuestionTail is the cancel shape: the assistant asked a question,
+// the user CANCELLED it (no answer), and no continuation round runs. This is a
+// deliberate stop, so it must NOT read as an interrupted turn (the reported
+// "cancel the question, it should not continue" bug).
+func dismissedQuestionTail() []agent.Message {
+	return []agent.Message{
+		{Role: "user", Content: "deploy this"},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+		{Role: "tool", ToolID: "call-1", Content: tool.QuestionDismissedResult},
+	}
+}
+
 // stateResponseFor calls GET /state and decodes the response struct itself, so
 // the JSON field name is pinned by the wire contract rather than a
 // hand-written mirror.
@@ -66,6 +78,7 @@ func TestSessionStateInterruptedTail(t *testing.T) {
 		want bool
 	}{
 		{"answered-ask tail", interruptedTail(), true},
+		{"dismissed-question tail", dismissedQuestionTail(), false},
 		{"completed turn", []agent.Message{
 			{Role: "user", Content: "hi"},
 			{Role: "assistant", Content: "done"},

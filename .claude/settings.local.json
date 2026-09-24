@@ -6,10 +6,13 @@
       "Bash(curl -s \"https://raw.githubusercontent.com/openai/codex/main/codex-rs/chatgpt/src/chatgpt_client.rs\")"
     ]
   },
+  "skillOverrides": {
+    "cognee": "off",
+    "agentmail": "off",
+    "aims-api": "name-only",
+    "compress": "off"
+  },
   "enabledPlugins": {
     "cognee-memory@cognee": false
-  },
-  "skillOverrides": {
-    "cognee": "off"
   }
 }

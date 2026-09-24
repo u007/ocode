@@ -200,6 +200,23 @@ export const browserActions = {
     );
   },
 
+  /** Move a surface's state from one key to another when the owning tab is
+   *  rekeyed (a `new-*` chat tab becoming its real session id, or `/reset-id`).
+   *  Without this the side pane would detach from the session it belongs to —
+   *  the old key is dropped by the store and the new key has no state, so the
+   *  pane closes and its live page/scroll is lost. No-op when the source has no
+   *  state, or when the destination already has some (the live target wins). */
+  rekey(oldKey: StateKey, newKey: StateKey) {
+    if (oldKey === newKey) return;
+    browserStore.setState((s) => {
+      const moved = s.byKey[oldKey];
+      if (!moved || s.byKey[newKey]) return s;
+      const next = { ...s.byKey, [newKey]: moved };
+      delete next[oldKey];
+      return { byKey: next };
+    });
+  },
+
   setCollapsed(key: StateKey, collapsed: boolean) {
     mutate(key, (t) => ({ ...t, collapsed }));
   },

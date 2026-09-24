@@ -29,6 +29,7 @@ type Tool interface {
 | `ContextualStreamingTool` | `ExecuteStreamCtx(ctx, args, emit)` | Combines context + streaming (currently only `BashTool`) |
 | `ImageResultTool` | `ExecuteImage(args)` | Tools returning raw image bytes for vision embedding |
 | `ImageProducingTool` | `ProducesImage(args)` | Extends `ImageResultTool`; agent checks this to decide if a call produces an image |
+| `ContextualImageResultTool` | `ExecuteImageCtx(ctx, args)` | Extends `ImageResultTool`; image read needs the session workdir (currently `ReadTool`) |
 
 The agent loop checks for these extensions at dispatch time and calls the appropriate method. `ContextualStreamingTool` is checked first (highest priority), then `StreamingTool`, then `ContextualTool`, then plain `Execute`.
 
@@ -183,6 +184,32 @@ Tools not in any list default to `PermissionAsk` (e.g. `github_pr`, `github_issu
 | `computer.go` | `ComputerTool` — host desktop control (opt-in via `computer_use.enabled`) |
 | `computer_driver.go` | `ComputerDriver` interface — platform abstraction for desktop control |
 | `todo_store.go` | `TodoWriteTool`, `TodoReadTool`, `TodoUpdateTool` — persistent todo plan |
+| `readpath.go` | `NormalizeUnicodeSpaces` + `ResolveReadTarget` — Unicode-space-tolerant read-target resolution and not-found hints (see below) |
+
+### Read-path resolution (`file.go` + `readpath.go`)
+
+`confinedPath(ctx, p)` resolves tilde, strips `:L` line refs, resolves symlinks,
+and enforces workdir/extra-root containment. It is shared by ~18 call sites, so
+**write/edit keep the literal path**. `ReadTool.Execute` and
+`ReadTool.ExecuteImage` instead use `confinedReadPath`, which retries through
+`ResolveReadTarget` when the literal path is missing: macOS screenshot
+filenames contain U+202F (NARROW NO-BREAK SPACE) before AM/PM and models
+routinely re-emit it as an ASCII space. Recovery fires only when exactly one
+sibling matches after `NormalizeUnicodeSpaces` (case preserved), and the
+recovered sibling is re-confined so a symlinked sibling cannot escape the
+allowed roots. `ResolveReadTarget(...).Hint` feeds the permission layer's
+not-found message (`resolved to <abs>; similar names in <dir>: "…"`, with
+non-ASCII spaces escaped).
+
+`ReadTool` implements `ContextualTool` (`ExecuteCtx`) and
+`ContextualImageResultTool` (`ExecuteImageCtx`), so the agent's dispatch passes
+the session project root (`WithWorkDir`, set in `agent.go` from `a.workDir`).
+This matters because the desktop app is launched from Finder with cwd `/`:
+without it a relative read resolved against `/` and missed every project file.
+The search tools already anchored this way (`TestSearchToolsUseContextWorkDir`);
+`ReadTool` was the outlier. `Execute`/`ExecuteImage` remain as `context.Background()`
+wrappers for non-agent callers (tests, TUI direct calls, orphan recovery,
+permission checks), which still fall back to the process cwd.
 
 ## 6. Adding a new tool (checklist)
 

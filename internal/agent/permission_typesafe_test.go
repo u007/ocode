@@ -47,6 +47,17 @@ func newTypesafeJudge(t *testing.T, reply string) (*Agent, *typesafeJudgeHarness
 	return a, h
 }
 
+// setTestAutoPermissionConfig mutates an agent's live auto-permission config via
+// the production setter, so tests exercise the same path the Settings UI uses.
+func setTestAutoPermissionConfig(a *Agent, mutate func(*config.AutoPermissionConfig)) {
+	cfg := config.AutoPermissionConfig{}
+	if cur := a.permissions.AutoPermissionConfig(); cur != nil {
+		cfg = *cur
+	}
+	mutate(&cfg)
+	a.permissions.SetAutoPermissionConfig(&cfg)
+}
+
 func typesafeChoiceReply(choice string, confidence float64) string {
 	return typesafeReplyWithConcern(choice, confidence, "none")
 }

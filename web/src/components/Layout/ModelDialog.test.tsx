@@ -224,6 +224,7 @@ describe("ModelDialog favorites/recents sections", () => {
       expect(await screen.findByText("Claude Code (Read-Only CLI)")).toBeInTheDocument();
       expect(screen.getByText("claude-code/claude-sonnet-4-6")).toBeInTheDocument();
       expect(screen.getByText("claude-code/claude-opus-5")).toBeInTheDocument();
+      expect(screen.getByText("claude-code/claude-opus-5-5")).toBeInTheDocument();
 
       // The synthetic group renders before the first registry provider.
       const html = document.body.innerHTML;

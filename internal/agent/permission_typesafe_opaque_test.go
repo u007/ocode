@@ -58,7 +58,7 @@ func TestTypesafeResolvedConcernKeepsNormalFloor(t *testing.T) {
 // opaque allow that would clear 0.75 must defer when the user set 0.95.
 func TestTypesafeOpaqueConfiguredFloorStillGoverns(t *testing.T) {
 	a, _ := newTypesafeJudge(t, typesafeReplyWithConcern("allow", 0.80, concernTruncatedOrUnknown))
-	a.config.Ocode.Permissions.Auto.MinConfidence = 0.95
+	setTestAutoPermissionConfig(a, func(cfg *config.AutoPermissionConfig) { cfg.MinConfidence = 0.95 })
 
 	allowed, reason, _, consulted := a.consultPermissionModel("bash", json.RawMessage(`{"command":"$g --version"}`), nil)
 	if allowed || !consulted {
@@ -88,7 +88,7 @@ func TestResolveAutoJudgeOpaqueMinConfidence(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			a := NewAgent(nil, nil, &config.Config{}, nil)
-			a.config.Ocode.Permissions.Auto = &config.AutoPermissionConfig{MinConfidence: tc.configured}
+			setTestAutoPermissionConfig(a, func(cfg *config.AutoPermissionConfig) { cfg.MinConfidence = tc.configured })
 			if got := a.resolveAutoJudgeMinConfidence(); got != tc.wantNormal {
 				t.Fatalf("normal floor = %v, want %v", got, tc.wantNormal)
 			}

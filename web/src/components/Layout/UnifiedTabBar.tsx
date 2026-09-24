@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { X, List, Plus, Loader2, Bell, ChevronDown } from "lucide-react";
+import { X, List, Plus, Loader2, Bell, ChevronDown, Pause } from "lucide-react";
 import {
   DndContext,
   closestCenter,
@@ -59,18 +59,49 @@ function deriveChatTabTitle(tab: { title: string; titleManual?: boolean }, slice
   return tab.title || "New session";
 }
 
+type ChatTurnState = "idle" | "running" | "stalled";
+
+/** Live turn status of a chat, mirroring the project sidebar's streaming/stalled
+ *  signals: `stalled` (no heartbeat while a turn is active) wins over `running`
+ *  (turn in flight), otherwise idle. */
+function deriveTurnState(slice: SessionSlice): ChatTurnState {
+  if (slice.turnStalled) return "stalled";
+  if (slice.isStreaming || slice.turnActive) return "running";
+  return "idle";
+}
+
+/** Compact glyph for a chat's live turn state — a blue spinner while running,
+ *  an amber pause when the stream stalled. Null when idle so callers can render
+ *  an empty fixed-size slot. */
+function TurnStateGlyph({ state }: { state: ChatTurnState }) {
+  if (state === "running") {
+    return <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-blue-500" />;
+  }
+  if (state === "stalled") {
+    return <Pause className="h-3 w-3 text-amber-500" />;
+  }
+  return null;
+}
+
+function turnStateTitle(state: ChatTurnState): string | undefined {
+  if (state === "running") return "Running";
+  if (state === "stalled") return "Stalled — streaming stopped";
+  return undefined;
+}
+
 interface ChatDerived {
   id: string;
   initialized: boolean;
   hasPending: boolean;
   displayTitle: string;
+  turnState: ChatTurnState;
 }
 function chatDerivedEqual(a: ChatDerived[], b: ChatDerived[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
     const x = a[i];
     const y = b[i];
-    if (x.id !== y.id || x.initialized !== y.initialized || x.hasPending !== y.hasPending || x.displayTitle !== y.displayTitle) {
+    if (x.id !== y.id || x.initialized !== y.initialized || x.hasPending !== y.hasPending || x.displayTitle !== y.displayTitle || x.turnState !== y.turnState) {
       return false;
     }
   }
@@ -84,6 +115,9 @@ interface TabPillProps {
   isActive: boolean;
   isLoading?: boolean;
   hasPending?: boolean;
+  /** Chat-only: live turn status (running/stalled) shown as a compact badge.
+   *  The slot is always rendered so toggling it never resizes the pill. */
+  turnState?: ChatTurnState;
   /** Terminal-only: a backgrounded terminal emitted a bell/notification. Drives
    *  the "unread activity" badge above the pill. */
   hasAlert?: boolean;
@@ -109,6 +143,7 @@ function TabPill({
   isActive,
   isLoading,
   hasPending,
+  turnState,
   hasAlert,
   isEditing,
   editValue,
@@ -219,6 +254,18 @@ function TabPill({
           {displayTitle}
         </span>
       )}
+      {/* Live turn-status slot: always rendered (empty when idle) so a chat
+          flipping running↔stalled never resizes the pill and reshuffles the
+          wrapping bar — same rationale as the pending-dot slot. */}
+      <span
+        aria-hidden
+        data-testid="tab-turn-state"
+        data-state={turnState ?? "idle"}
+        title={turnStateTitle(turnState ?? "idle")}
+        className="flex h-3.5 w-3.5 shrink-0 items-center justify-center"
+      >
+        <TurnStateGlyph state={turnState ?? "idle"} />
+      </span>
       <span
         role="button"
         tabIndex={0}
@@ -289,6 +336,7 @@ interface TabEntry {
   hasPending?: boolean;
   hasAlert?: boolean;
   isLoading?: boolean;
+  turnState?: ChatTurnState;
 }
 
 interface MobileTabDropdownProps {
@@ -351,6 +399,17 @@ function MobileTabDropdown({
             data-active={active.hasPending ? "true" : "false"}
             className={`h-1.5 w-1.5 shrink-0 rounded-full ${active.hasPending ? "bg-amber-400" : "bg-transparent"}`}
           />
+          {active.turnState && active.turnState !== "idle" && (
+            <span
+              aria-hidden
+              data-testid="mobile-tab-dropdown-active-turn-state"
+              data-state={active.turnState}
+              title={turnStateTitle(active.turnState)}
+              className="flex h-3.5 w-3.5 shrink-0 items-center justify-center"
+            >
+              <TurnStateGlyph state={active.turnState} />
+            </span>
+          )}
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         </button>
       </PopoverTrigger>
@@ -420,6 +479,17 @@ function MobileTabDropdown({
                     className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-red-500 text-white"
                   >
                     <Bell className="h-2 w-2" />
+                  </span>
+                )}
+                {entry.turnState && entry.turnState !== "idle" && (
+                  <span
+                    aria-hidden
+                    data-testid="mobile-tab-dropdown-turn-state"
+                    data-state={entry.turnState}
+                    title={turnStateTitle(entry.turnState)}
+                    className="flex h-3.5 w-3.5 shrink-0 items-center justify-center"
+                  >
+                    <TurnStateGlyph state={entry.turnState} />
                   </span>
                 )}
                 <span
@@ -507,6 +577,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           initialized: slice.initialized,
           hasPending: activeChatId !== tab.id && (slice.pendingPermission !== null || slice.pendingQuestion !== null),
           displayTitle: deriveChatTabTitle(tab, slice),
+          turnState: deriveTurnState(slice),
         };
       }),
     chatDerivedEqual,
@@ -799,6 +870,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         isActive: focusedKind === "chat" && activeChatId === id,
         hasPending: derived?.hasPending ?? false,
         isLoading: isLoadingChatTab(id, derived?.initialized ?? false),
+        turnState: derived?.turnState ?? "idle",
       };
     }
     if (key.startsWith("browser:")) {
@@ -863,6 +935,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           isActive={focusedKind === "chat" && activeChatId === id}
           isLoading={isLoadingChatTab(id, derived?.initialized ?? false)}
           hasPending={derived?.hasPending ?? false}
+          turnState={derived?.turnState ?? "idle"}
           isEditing={editing?.kind === "chat" && editing.id === id}
           editValue={editValue}
           onEditValueChange={setEditValue}

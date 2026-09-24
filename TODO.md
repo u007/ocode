@@ -1,5 +1,35 @@
 # TODO
 
+## Permissions: path-scoped tool-rule follow-ups (2026-09-24)
+
+From the fix that made `Decide` honor `permissions.tools.<tool>` for
+path-scoped tools (see CHANGES.md 2026-09-24):
+
+- **Other explicit tool denies are still not hard.** `bash: "deny"` (`Decide`
+  ~:1692), `computer: "deny"` (~:1868) and the bottom-of-`Decide` deny
+  (~:1874) return a non-`HardDeny`, so the auto-permission judge can override
+  them (`agent.go:3216-3234`). The path-scoped deny is now `HardDeny`; align
+  the rest, or document why they differ.
+- **YOLO ignores explicit tool denies.** `Decide` returns Allow for YOLO
+  (~:1719) before the path-scoped rule check, so `write: "deny"` is not
+  enforced in YOLO mode. Pre-existing and arguably intended (YOLO = allow all),
+  but worth stating.
+- **`ExportConfig` emits every rule, including defaults** (permissions.go:4493),
+  so a config-sourced `allow` is indistinguishable from a built-in default after
+  the TUI `ExportConfig` → `LoadFromOcode` round-trip (tui/model.go:9012). That
+  is why a persisted allow cannot be marked user-confirmed without laundering
+  the defaults. Cleaner: export only non-default rules, or add a provenance
+  field.
+- **`webfetch` still ignores its tool rule.** The domain branch
+  (permissions.go ~:1825) returns `ask` for an uncached non-localhost domain
+  before `pm.Check`, so `webfetch: "allow"` / `"deny"` is a no-op. `deny`
+  (hard) is uncontroversial; `allow` would skip the per-domain consent prompt
+  (a posture change — get explicit sign-off, and keep localhost/private-IP/
+  metadata blocks ahead of any allow).
+- **Tool-name aliases do not share a rule.** `multiedit` and `multi_file_edit`
+  (and `multi_edit`, which is not a real tool) are distinct `pm.rules` keys, so
+  a deny on one name does not cover the other.
+
 ## Laya local judge (`/localmodel`-style) — NOT doing, evaluated and rejected (2026-09-22)
 
 Plan was to run Laya (`convaiinnovations/laya`, non-generative decision model)

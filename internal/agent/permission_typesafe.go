@@ -111,10 +111,10 @@ func IsRelaxableConcern(key string) bool {
 // relaxedConcernKeys returns the configured opt-outs that name a real category,
 // deduplicated and sorted for a stable prompt and stable tests. Nil-safe.
 func (a *Agent) relaxedConcernKeys() []string {
-	if a == nil || a.config == nil {
+	if a == nil {
 		return nil
 	}
-	auto := a.config.Ocode.Permissions.Auto
+	auto := a.autoPermissionConfig()
 	if auto == nil || len(auto.RelaxedConcerns) == 0 {
 		return nil
 	}
@@ -320,8 +320,7 @@ func (a *Agent) askPermissionModelTypesafe(client *TypesafeClient, toolName stri
 // execution — Jev has no read_file tool, so the source must travel inline.
 func (a *Agent) buildTypesafePermissionState(toolName string, args json.RawMessage, req *PermissionRequest) map[string]any {
 	maxCtxBytes, maxSources, maxLinesPerSource := 2048, 3, 40
-	if a.config != nil && a.config.Ocode.Permissions.Auto != nil {
-		auto := a.config.Ocode.Permissions.Auto
+	if auto := a.autoPermissionConfig(); auto != nil {
 		if auto.MaxContextBytes > 0 {
 			maxCtxBytes = auto.MaxContextBytes
 		}
@@ -397,8 +396,8 @@ func (a *Agent) buildTypesafePermissionState(toolName string, args json.RawMessa
 	} else if custom != "" {
 		policy = append(policy, custom)
 	}
-	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.Prompt != "" {
-		policy = append(policy, a.config.Ocode.Permissions.Auto.Prompt)
+	if auto := a.autoPermissionConfig(); auto != nil && auto.Prompt != "" {
+		policy = append(policy, auto.Prompt)
 	}
 	if len(policy) > 0 {
 		state["user_policy"] = strings.Join(policy, "\n\n")

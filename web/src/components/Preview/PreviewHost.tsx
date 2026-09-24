@@ -61,13 +61,14 @@ export default function PreviewHost({
    *  remounts (App remounts it on every session/project switch). */
   onConsumeActivation?: () => void;
 }) {
-  // Restore the project's last sidebar state on MOUNT. The panel is keyed by
-  // the active session tab, so a project switch unmounts and remounts it —
-  // without this the file, page, and active tab all reset. Read once per mount
-  // (not per render) and seed the initial state from it.
+  // Restore this SESSION SURFACE's last sidebar state on MOUNT. The panel is
+  // keyed by the active session tab, so switching sessions (or projects)
+  // unmounts and remounts it — without this the file, page, and active tab all
+  // reset, and without per-session keying one chat's preview would leak into
+  // every other chat. Read once per mount (not per render) and seed from it.
   const initialRef = useRef<SidebarPreviewState | null | undefined>(undefined);
   if (initialRef.current === undefined) {
-    initialRef.current = loadSidebarPreviewState(projectRoot, projectHost);
+    initialRef.current = loadSidebarPreviewState(stateKey);
   }
   const initial = initialRef.current;
 
@@ -128,11 +129,11 @@ export default function PreviewHost({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request, nonce, projectRoot, projectHost]);
 
-  // Persist the shell state for this project so the next mount (project switch
-  // back) restores it. Runs on mount too, which just rewrites the restored
-  // value — idempotent. A doc whose anchor differs from this pane's project
-  // (a request that carried its own root/host) must NOT be stored under this
-  // project's key, or switching here would later restore a foreign file.
+  // Persist the shell state for this SESSION SURFACE so the next mount (session
+  // or project switch back) restores it. Runs on mount too, which just rewrites
+  // the restored value — idempotent. A doc whose anchor differs from this pane's
+  // project (a request that carried its own root/host) must NOT be stored under
+  // this session's key, or switching here would later restore a foreign file.
   useEffect(() => {
     const docBelongsHere =
       !!doc &&
@@ -147,7 +148,7 @@ export default function PreviewHost({
     // project's valid saved preview with an empty entry, so switching away and
     // back would drop it. Leave the stored state untouched instead.
     if ((doc && !docBelongsHere) || (unsupported && !unsupportedBelongsHere)) return;
-    saveSidebarPreviewState(projectRoot, projectHost, {
+    saveSidebarPreviewState(stateKey, {
       surface,
       path: docBelongsHere ? doc.path : undefined,
       kind: docBelongsHere ? doc.kind : undefined,
@@ -156,7 +157,7 @@ export default function PreviewHost({
       page: docBelongsHere ? page : undefined,
       unsupportedPath: unsupportedBelongsHere ? unsupported.path : undefined,
     });
-  }, [projectRoot, projectHost, surface, doc, page, unsupported]);
+  }, [stateKey, projectRoot, projectHost, surface, doc, page, unsupported]);
 
   // Follow project switches for the open doc's anchor (defensive: a project
   // change normally remounts this panel, in which case the initial-read above

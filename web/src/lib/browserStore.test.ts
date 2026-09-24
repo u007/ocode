@@ -95,6 +95,30 @@ describe("browserStore", () => {
     expect(browserStore.state.byKey[KEY].loading).toBe(true);
     expect(browserStore.state.byKey[KEY].mode).toBe("chrome");
   });
+
+  it("rekey moves a surface's state to the new key and drops the old", () => {
+    browserActions.open(KEY);
+    browserActions.navigate(KEY, "https://a.com");
+    const next = "side:chat:ses_new" as const;
+    browserActions.rekey(KEY, next);
+    expect(browserStore.state.byKey[KEY]).toBeUndefined();
+    expect(browserStore.state.byKey[next]?.url).toBe("https://a.com");
+  });
+
+  it("rekey is a no-op when the source is absent or the target already exists", () => {
+    const next = "side:chat:ses_new" as const;
+    // absent source
+    browserActions.rekey(KEY, next);
+    expect(browserStore.state.byKey[next]).toBeUndefined();
+    // target already live: the live target wins, the source is left alone.
+    browserActions.open(KEY);
+    browserActions.navigate(KEY, "https://old.com");
+    browserActions.open(next);
+    browserActions.navigate(next, "https://live.com");
+    browserActions.rekey(KEY, next);
+    expect(browserStore.state.byKey[next]?.url).toBe("https://live.com");
+    expect(browserStore.state.byKey[KEY]?.url).toBe("https://old.com");
+  });
 });
 
 describe("normalizeBrowseURL", () => {

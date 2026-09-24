@@ -6,6 +6,7 @@ import type { BusEnvelope } from "./eventBus";
 import { rekeyDraft } from "./tabDrafts";
 import { rekeyQueue, removeDispatchedQueuedByText, dispatchQueueChanged } from "./tabQueue";
 import { rekeyInputHistory } from "./tabInputHistory";
+import { rekeySidePaneState } from "./sidePaneState";
 import { browserActions, type NavEvent, type TitleEvent, type NewTabEvent, type StateKey } from "./browserStore";
 import { sessionRevisionMoved, clearSessionRevision } from "./sessionRevision";
 
@@ -224,6 +225,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       rekeyDraft(started.request_id, eventSessionId);
       rekeyQueue(started.request_id, eventSessionId);
       rekeyInputHistory(started.request_id, eventSessionId);
+      rekeySidePaneState(started.request_id, eventSessionId);
       r.projectDispatch({
         type: "UPDATE_TAB_ID",
         oldId: started.request_id,
@@ -264,6 +266,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       rekeyDraft(oldId, newId);
       rekeyQueue(oldId, newId);
       rekeyInputHistory(oldId, newId);
+      rekeySidePaneState(oldId, newId);
       r.projectDispatch({ type: "UPDATE_TAB_ID", oldId, newId });
       r.openSessionIds.delete(oldId);
       r.openSessionIds.add(newId);

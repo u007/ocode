@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
@@ -62,6 +63,20 @@ func (h *Handler) lookupAgentSession(id string) *agentSession {
 // by the TUI shows its history in the web sidebar instead of starting at 0.
 const spentUSDMetadataKey = "spend"
 
+// Per-session token-count metadata keys. These are deliberately the exact keys
+// the TUI's sidebarTelemetry writes and reads (metadata() /
+// telemetryFromSessionMetadata in internal/tui/model.go), so a session that
+// moves between the TUI and a headless web/desktop turn keeps ONE running
+// total, and a session created by the TUI shows its token history in the web
+// sidebar instead of starting at 0. "billed_tokens" is the total; the TUI also
+// accepts the legacy "prompt_tokens"/"completion_tokens"/"total_tokens" names.
+const (
+	inputTokensMetadataKey  = "input_tokens"
+	outputTokensMetadataKey = "output_tokens"
+	cachedTokensMetadataKey = "cached_tokens"
+	billedTokensMetadataKey = "billed_tokens"
+)
+
 // addSpendUSD adds v USD to the session's accumulated spend. Safe for
 // concurrent use (atomic).
 func (as *agentSession) addSpendUSD(v float64) {
@@ -110,6 +125,160 @@ func sessionSpendFromMetadata(md map[string]any) float64 {
 	return 0
 }
 
+// sessionUsageFromMetadata extracts the persisted per-session token totals from
+// transcript metadata, tolerating the numeric shapes a JSON round-trip can
+// produce. Keys match the TUI's sidebarTelemetry; the legacy names are accepted
+// as a fallback (and override the new keys only when the new ones are absent).
+func sessionUsageFromMetadata(md map[string]any) (in, out, cached, total int64) {
+	if md == nil {
+		return 0, 0, 0, 0
+	}
+	in = int64FromMetadata(md, inputTokensMetadataKey)
+	out = int64FromMetadata(md, outputTokensMetadataKey)
+	cached = int64FromMetadata(md, cachedTokensMetadataKey)
+	total = int64FromMetadata(md, billedTokensMetadataKey)
+	if in == 0 {
+		in = int64FromMetadata(md, "prompt_tokens")
+	}
+	if out == 0 {
+		out = int64FromMetadata(md, "completion_tokens")
+	}
+	if total == 0 {
+		total = int64FromMetadata(md, "total_tokens")
+	}
+	return in, out, cached, total
+}
+
+// int64FromMetadata reads the first key whose value converts to a non-zero
+// int64, tolerating the numeric shapes a JSON round-trip can produce.
+func int64FromMetadata(md map[string]any, key string) int64 {
+	switch v := md[key].(type) {
+	case int:
+		return int64(v)
+	case int8:
+		return int64(v)
+	case int16:
+		return int64(v)
+	case int32:
+		return int64(v)
+	case int64:
+		return v
+	case float32:
+		return int64(v)
+	case float64:
+		return int64(v)
+	}
+	return 0
+}
+
+// tokenCountsFromMessage returns the token counts a single assistant/tool
+// message contributes, normalized so a provider that folds cache reads into the
+// prompt count does not double-count them:
+//   - in:    NormalizedPromptTokens (excludes cache reads)
+//   - out:   CompletionTokens
+//   - cached: CacheReadTokens + CacheWriteTokens
+//   - total: TotalTokens when reported, else in + out (mirrors the TUI's
+//     sidebarTelemetry.addMessage, which deliberately excludes the cache split
+//     from its fallback total).
+func tokenCountsFromMessage(msg agent.Message) (in, out, cached, total int64) {
+	u := msg.Usage
+	if u == nil {
+		return 0, 0, 0, 0
+	}
+	in = u.NormalizedPromptTokens()
+	total = in
+	if u.CompletionTokens != nil {
+		out = *u.CompletionTokens
+		total += out
+	}
+	if u.CacheReadTokens != nil {
+		cached += *u.CacheReadTokens
+	}
+	if u.CacheWriteTokens != nil {
+		cached += *u.CacheWriteTokens
+	}
+	if u.TotalTokens != nil {
+		total = *u.TotalTokens
+	}
+	return in, out, cached, total
+}
+
+// addUsageFromMessages adds the token counts of a Step's new messages to the
+// session total. Like addSpendFromMessages it sums only the Step delta, never
+// the whole transcript, to avoid double counting.
+func (as *agentSession) addUsageFromMessages(msgs []agent.Message) {
+	if as == nil {
+		return
+	}
+	var in, out, cached, total int64
+	for i := range msgs {
+		mi, mo, mc, mt := tokenCountsFromMessage(msgs[i])
+		in += mi
+		out += mo
+		cached += mc
+		total += mt
+	}
+	as.inTokens.Add(in)
+	as.outTokens.Add(out)
+	as.cachedTokens.Add(cached)
+	as.totalTokens.Add(total)
+}
+
+// addRawUsage accumulates side-channel LLM token counts (advisor, compaction,
+// title generation, sub-agent tasks, …) that do not produce agent.Message
+// values. Mirrors the TUI's sidebarTelemetry.addRawUsage.
+func (as *agentSession) addRawUsage(promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens int64) {
+	if as == nil {
+		return
+	}
+	as.inTokens.Add(promptTokens)
+	as.outTokens.Add(completionTokens)
+	as.cachedTokens.Add(cacheReadTokens + cacheWriteTokens)
+	as.totalTokens.Add(promptTokens + completionTokens)
+}
+
+// seedUsage raises the token accumulators to a restored session total, never
+// lowers any field. Called at agent build with the persisted totals and at a
+// rebuild with the outgoing agent's live totals so a session's token history
+// survives an agent rebuild (profile reconcile, model switch, idle eviction,
+// server restart) instead of resetting to 0 — the same contract as seedSpend.
+func (as *agentSession) seedUsage(in, out, cached, total int64) {
+	if as == nil {
+		return
+	}
+	raise(&as.inTokens, in)
+	raise(&as.outTokens, out)
+	raise(&as.cachedTokens, cached)
+	raise(&as.totalTokens, total)
+}
+
+// raise atomically moves n to at least v (never lowers it).
+func raise(n *atomic.Int64, v int64) {
+	if v <= 0 {
+		return
+	}
+	for {
+		cur := n.Load()
+		if v <= cur || n.CompareAndSwap(cur, v) {
+			return
+		}
+	}
+}
+
+// usageSnapshot returns the session's accumulated token counts.
+func (as *agentSession) usageSnapshot() (in, out, cached, total int64) {
+	if as == nil {
+		return 0, 0, 0, 0
+	}
+	return as.inTokens.Load(), as.outTokens.Load(), as.cachedTokens.Load(), as.totalTokens.Load()
+}
+
+// hasUsage reports whether any token count has been accumulated.
+func (as *agentSession) hasUsage() bool {
+	in, out, cached, total := as.usageSnapshot()
+	return in > 0 || out > 0 || cached > 0 || total > 0
+}
+
 // spendUSD returns the session's accumulated spend in USD.
 func (as *agentSession) spendUSD() float64 {
 	if as == nil {
@@ -131,12 +300,22 @@ func (as *agentSession) addSpendFromMessages(msgs []agent.Message) {
 	as.addSpendUSD(delta)
 }
 
-// persistSessionSpend writes the session's accumulated spend into its
-// transcript metadata so the web/desktop gauge survives an agent rebuild,
-// idle eviction, or server restart. Metadata-only, so it cannot conflict with
-// filtered transcript rows (see session.UpdateMetadataForDir).
-func (h *Handler) persistSessionSpend(sessionID string, usd float64) {
-	if sessionID == "" {
+// persistSessionTelemetry writes the session's accumulated spend and token
+// counts into its transcript metadata so the web/desktop sidebar survives an
+// agent rebuild, idle eviction, or server restart. Metadata-only, so it cannot
+// conflict with filtered transcript rows (see session.UpdateMetadataForDir).
+// The token keys are the same ones the TUI's sidebarTelemetry reads/writes, so
+// the total is shared across surfaces.
+//
+// Nothing is written when every value is zero (a freshly built agent before its
+// first turn), so an untouched session does not gain empty metadata.
+func (h *Handler) persistSessionTelemetry(sessionID string, as *agentSession) {
+	if sessionID == "" || as == nil {
+		return
+	}
+	spend := as.spendUSD()
+	in, out, cached, total := as.usageSnapshot()
+	if spend == 0 && in == 0 && out == 0 && cached == 0 && total == 0 {
 		return
 	}
 	projectRoot := h.sessionProjectRoot(sessionID)
@@ -144,9 +323,23 @@ func (h *Handler) persistSessionSpend(sessionID string, usd float64) {
 		return
 	}
 	if err := session.UpdateMetadataForDir(projectRoot, sessionID, func(md map[string]any) {
-		md[spentUSDMetadataKey] = usd
+		if spend > 0 {
+			md[spentUSDMetadataKey] = spend
+		}
+		if in > 0 {
+			md[inputTokensMetadataKey] = in
+		}
+		if out > 0 {
+			md[outputTokensMetadataKey] = out
+		}
+		if cached > 0 {
+			md[cachedTokensMetadataKey] = cached
+		}
+		if total > 0 {
+			md[billedTokensMetadataKey] = total
+		}
 	}); err != nil {
-		log.Printf("serve: persist spend for %s: %v", sessionID, err)
+		log.Printf("serve: persist telemetry for %s: %v", sessionID, err)
 	}
 }
 
@@ -376,22 +569,26 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	ag.SetAdvisorEnabled(h.advisorSeed(sessionID, h.advisorFlag()))
 	h.wireCompactCallbacks(sessionID, ag)
 	as := &agentSession{agent: ag, messages: messages, model: model, profile: prof, credVersion: auth.ProfileCredentialVersion()}
-	// Restore this session's spend history before anything reads the gauge. The
-	// total lives in transcript metadata (the same "spend" key the TUI writes),
-	// and a freshly built agent starts at zero, so without this seed the
-	// sidebar would show only the current turn's spend after a rebuild/resume.
+	// Restore this session's spend and token history before anything reads the
+	// gauge. The totals live in transcript metadata (the same keys the TUI
+	// writes) and a freshly built agent starts at zero, so without this seed the
+	// sidebar would show only the current turn's usage after a rebuild/resume.
 	if prev, err := session.LoadForDir(projectRoot, sessionID); err == nil {
 		as.seedSpend(sessionSpendFromMetadata(prev.Metadata))
+		in, out, cached, total := sessionUsageFromMetadata(prev.Metadata)
+		as.seedUsage(in, out, cached, total)
 	}
-	// Accumulate side-path spend (advisor, compaction, title, …) into this
-	// session's own total. The main turn's spend is recorded from Step
-	// messages in runTurn; without this, side queries would vanish from the
-	// web's per-session gauge (the TUI wires the same callback for its own
-	// sidebar). Uses the atomic accumulator, so no as.mu needed here.
-	ag.OnSideUsage = func(_, _, _, _ int64, spend *float64) {
+	// Accumulate side-path spend and token usage (advisor, compaction, title,
+	// recap, sub-agent tasks, …) into this session's own totals. The main turn's
+	// usage is recorded from Step messages in runTurn; without this, side
+	// queries would vanish from the web's per-session gauge (the TUI wires the
+	// same callback for its own sidebar). Uses the atomic accumulators, so no
+	// as.mu needed here.
+	ag.OnSideUsage = func(promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens int64, spend *float64) {
 		if spend != nil {
 			as.addSpendUSD(*spend)
 		}
+		as.addRawUsage(promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens)
 	}
 	h.publishBootstrapStage(sessionID, "ready")
 	return as, "", nil
@@ -482,9 +679,12 @@ func (h *Handler) replaceAgentSession(id string, as *agentSession) {
 	h.agents[id] = as
 	h.mu.Unlock()
 	if ok && old != as {
-		// Never let a rebuild regress the session's spend: the outgoing agent
-		// holds turn spend that may not be persisted to metadata yet.
+		// Never let a rebuild regress the session's spend or token history: the
+		// outgoing agent holds turn usage that may not be persisted to metadata
+		// yet.
 		as.seedSpend(old.spendUSD())
+		in, out, cached, total := old.usageSnapshot()
+		as.seedUsage(in, out, cached, total)
 		if old.agent != nil && !h.sessions.IsTurnActive(id) {
 			old.agent.Shutdown()
 		}
@@ -951,9 +1151,11 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		}
 
 		as.messages = append(as.messages, resp...)
-		// Accumulate this Step's main-path spend into the session total so the
-		// web/desktop Context panel can show a per-session figure.
+		// Accumulate this Step's main-path spend and token usage into the
+		// session totals so the web/desktop sidebar can show a per-session
+		// figure (the headless counterpart of the TUI's sidebarTelemetry).
 		as.addSpendFromMessages(resp)
+		as.addUsageFromMessages(resp)
 		// Mirror the TUI's usage ledger for headless turns: web/desktop LLM
 		// calls were never recorded, so /api/spending and /usage undercounted
 		// them. Records carry the session id, so a session's spend can be

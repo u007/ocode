@@ -179,6 +179,13 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
     paths: string[];
     overwrites: string[];
   } | null>(null);
+  // Snapshot of paths awaiting the destructive discard/delete confirmation.
+  // Native window.confirm() silently returns false in the Wails/WKWebView
+  // desktop webview, so the flow must use a rendered dialog (same rule as
+  // FileTree's ConfirmDeleteDialog).
+  const [pendingDiscard, setPendingDiscard] = useState<
+    { path: string; untracked: boolean }[] | null
+  >(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [commitMessage, setCommitMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -370,8 +377,23 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
       }
     }, describe);
   };
+  // Gate the destructive discard/delete behind a rendered confirmation dialog
+  // (native window.confirm() is a no-op in the desktop webview).
+  const requestDiscard = useCallback(
+    (targets: { path: string; untracked: boolean }[]) => {
+      if (targets.length === 0) return;
+      setPendingDiscard(targets);
+    },
+    [],
+  );
+  const doDiscard = () => {
+    if (!pendingDiscard) return;
+    const targets = pendingDiscard;
+    setPendingDiscard(null);
+    void discardTargets(targets);
+  };
   const discardFile = (path: string, untracked: boolean) =>
-    discardTargets([{ path, untracked }]);
+    requestDiscard([{ path, untracked }]);
   const stageAll = (paths: string[]) =>
     runMutation(() => api.gitStage(paths, projectPath, projectHost), `staged ${paths.length} file(s)`);
   const unstageAll = (paths: string[]) =>
@@ -462,7 +484,7 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
           label: discardLabel,
           icon: <Trash2 className="w-3.5 h-3.5" />,
           destructive: true,
-          onClick: () => discardTargets(targets),
+          onClick: () => requestDiscard(targets),
         },
         {
           label: n > 1 ? `Stash ${n} files` : "Stash file",
@@ -472,7 +494,7 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
         ...(openItem ? [openItem] : []),
       ];
     },
-    [onOpenFile, projectPath, stageAll, unstageAll, discardTargets, openStashDialog],
+    [onOpenFile, projectPath, stageAll, unstageAll, requestDiscard, openStashDialog],
   );
 
   const hunkAction = useCallback(
@@ -516,6 +538,23 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
       setSelection(null);
       setCommitDiff(null);
     }, "committed");
+  };
+
+  // Commit staged changes and push to the remote in one action. The awaits are
+  // chained so a failed commit never triggers a push (and the push error, if
+  // any, surfaces through the same sticky error banner as a plain push).
+  const commitAndPush = () => {
+    if (!commitMessage.trim()) {
+      setError("Commit message is required");
+      return;
+    }
+    runMutation(async () => {
+      await api.gitCommit(commitMessage, [], projectPath, projectHost);
+      setCommitMessage("");
+      setSelection(null);
+      setCommitDiff(null);
+      await api.gitPush(projectPath, false, projectHost);
+    }, "committed and pushed");
   };
 
   const selectFile = (file: GitDiffFile, staged: boolean) => {
@@ -636,6 +675,20 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
   const stagedFiles = workspace.staged ?? [];
   const unstagedFiles = workspace.unstaged ?? [];
   const status = workspace.status;
+
+  // Wording for the discard/delete confirmation. A pure-untracked selection is
+  // a real delete; anything containing tracked files is a revert to HEAD.
+  const pendingDiscardTargets = pendingDiscard ?? [];
+  const discardCount = pendingDiscardTargets.length;
+  const discardAllUntracked =
+    discardCount > 0 && pendingDiscardTargets.every((t) => t.untracked);
+  const discardDialogTitle = discardAllUntracked
+    ? discardCount > 1
+      ? `Delete ${discardCount} files?`
+      : "Delete untracked file?"
+    : discardCount > 1
+      ? `Discard changes to ${discardCount} files?`
+      : "Discard changes?";
 
   /** The picked paths belonging to one pane, in no particular order. */
   const pickedPathsInPane = (pane: PaneKey): string[] => {
@@ -1231,6 +1284,14 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
         >
           Commit
         </button>
+        <button
+          onClick={commitAndPush}
+          disabled={busy || !status.has_changes || !commitMessage.trim()}
+          title="Commit staged changes, then push to the remote"
+          className="h-9 px-3 shrink-0 whitespace-nowrap rounded-md border border-border bg-muted/40 text-sm font-medium hover:bg-muted/60 disabled:opacity-40"
+        >
+          Commit &amp; Push
+        </button>
       </div>
 
       {/* Force-push confirmation dialog */}
@@ -1283,6 +1344,56 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
             </Button>
             <Button variant="destructive" onClick={doResetRemote}>
               Reset to Remote
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Discard/delete confirmation. The desktop webview's native confirm()
+          silently returns false, so destructive file actions must use a
+          rendered dialog (same rule as FileTree's ConfirmDeleteDialog). */}
+      <Dialog
+        open={pendingDiscard !== null}
+        onOpenChange={(open) => !open && setPendingDiscard(null)}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-sm">
+              <AlertTriangle className="w-4 h-4 text-red-400" />
+              {discardDialogTitle}
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-xs text-muted-foreground mt-1">
+            {discardAllUntracked
+              ? "This permanently deletes the file(s) from disk and cannot be undone."
+              : "Local changes are reverted to HEAD and cannot be undone."}
+          </p>
+          <ul className="mt-2 space-y-0.5 max-h-36 overflow-y-auto rounded border border-border p-2">
+            {pendingDiscardTargets.slice(0, 5).map((t) => (
+              <li
+                key={t.path}
+                className="font-mono text-[11px] text-foreground truncate"
+                title={t.path}
+              >
+                {t.path}
+              </li>
+            ))}
+            {discardCount > 5 && (
+              <li className="text-[11px] text-muted-foreground/70">
+                …and {discardCount - 5} more
+              </li>
+            )}
+          </ul>
+          <DialogFooter className="mt-4">
+            <Button
+              variant="ghost"
+              onClick={() => setPendingDiscard(null)}
+              data-dialog-default-action
+            >
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={doDiscard} disabled={busy}>
+              {discardAllUntracked ? "Delete" : "Discard"}
             </Button>
           </DialogFooter>
         </DialogContent>

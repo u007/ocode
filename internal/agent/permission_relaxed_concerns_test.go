@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/u007/ocode/internal/config"
@@ -12,7 +13,9 @@ import (
 func relaxedJudgeAgent(t *testing.T, reply string, relaxed ...string) (*Agent, *typesafeJudgeHarness) {
 	t.Helper()
 	a, h := newTypesafeJudge(t, reply)
-	a.config.Ocode.Permissions.Auto.RelaxedConcerns = relaxed
+	setTestAutoPermissionConfig(a, func(cfg *config.AutoPermissionConfig) {
+		cfg.RelaxedConcerns = relaxed
+	})
 	return a, h
 }
 
@@ -172,8 +175,12 @@ func TestRelaxedDestructiveCannotGrantDangerousRm(t *testing.T) {
 		typesafeChoiceReply("allow", 0.99),
 	} {
 		a, _ := relaxedJudgeAgent(t, reply, "destructive")
+		// Replace the manager to get a clean workDir, then restore the auto
+		// config the judge reads (it now lives on the manager, not a.config).
+		auto := a.autoPermissionConfig()
 		a.permissions = NewPermissionManager()
 		a.permissions.workDir = "/Users/james/www/proposal"
+		a.permissions.SetAutoPermissionConfig(auto)
 		allowed, reason, _, _ := a.consultPermissionModel("bash",
 			json.RawMessage(`{"command":"rm -rf ../"}`),
 			&PermissionRequest{ToolName: "bash", Command: "rm -rf ../", Rule: "bash.prefix.rm"})
@@ -215,6 +222,26 @@ func TestChatJudgePromptCarriesRelaxedSection(t *testing.T) {
 }
 
 // chatJudgeCapture records the gatekeeper prompt and replays an allow verdict.
+// The relaxed set lives on the PermissionManager, so an agent with no config
+// snapshot (bridged agent, runtime push) must still honor it.
+func TestRelaxedConcernKeysWithNilAgentConfig(t *testing.T) {
+	a := &Agent{permissions: NewPermissionManager()}
+	a.permissions.SetAutoPermissionConfig(&config.AutoPermissionConfig{
+		Enabled:         true,
+		Model:           "typesafe/jev-latest",
+		RelaxedConcerns: []string{"secrets"},
+	})
+	if got := a.relaxedConcernKeys(); len(got) != 1 || got[0] != "secrets" {
+		t.Fatalf("relaxedConcernKeys = %#v, want [secrets]", got)
+	}
+	if got := a.autoPermissionModelName(); got != "typesafe/jev-latest" {
+		t.Fatalf("autoPermissionModelName = %q, want live config model", got)
+	}
+	if got := a.autoPermissionModelDisplayName(); got != "typesafe/jev-latest" {
+		t.Fatalf("autoPermissionModelDisplayName = %q, want live config model", got)
+	}
+}
+
 type chatJudgeCapture struct{ prompt string }
 
 func (c *chatJudgeCapture) Chat(messages []Message, _ []map[string]interface{}) (*Message, error) {
@@ -226,3 +253,73 @@ func (c *chatJudgeCapture) Chat(messages []Message, _ []map[string]interface{}) 
 
 func (c *chatJudgeCapture) GetProvider() string { return "mock" }
 func (c *chatJudgeCapture) GetModel() string    { return "mock-model" }
+
+// The live-push path: a Settings save replaces the agent's auto-permission
+// config through the permission manager, so the very next judge read sees the
+// new relaxed-concern set without an agent rebuild. Mutation guard: if the
+// getter read a.config instead of the manager, this would keep the old set.
+func TestSetAutoPermissionConfigAppliesLive(t *testing.T) {
+	a, _ := relaxedJudgeAgent(t, typesafeChoiceReply("allow", 0.9), "secrets")
+	if got := a.relaxedConcernKeys(); len(got) != 1 || got[0] != "secrets" {
+		t.Fatalf("initial relaxedConcernKeys = %#v, want [secrets]", got)
+	}
+
+	// Simulate the Settings PUT: uncheck "secrets" and save.
+	a.permissions.SetAutoPermissionConfig(&config.AutoPermissionConfig{
+		Enabled:         true,
+		Model:           "typesafe/jev-latest",
+		RelaxedConcerns: nil,
+	})
+	if got := a.relaxedConcernKeys(); len(got) != 0 {
+		t.Fatalf("relaxedConcernKeys after live update = %#v, want none", got)
+	}
+	if !a.permissions.AutoPermissionEnabled() {
+		t.Fatal("auto-permission should stay enabled after the live update")
+	}
+	if got := a.permissions.AutoPermissionConfig(); got == nil || got.Model != "typesafe/jev-latest" {
+		t.Fatalf("live config not replaced: %+v", got)
+	}
+
+	// A nil config disables the layer entirely.
+	a.permissions.SetAutoPermissionConfig(nil)
+	if a.permissions.AutoPermissionEnabled() {
+		t.Fatal("nil auto config must disable the layer")
+	}
+	if a.autoPermissionConfig() != nil {
+		t.Fatal("nil auto config must clear the stored config")
+	}
+}
+
+// The live push happens while a turn's judge may be reading the config. Run a
+// concurrent reader against repeated replacements under -race: a non-atomic
+// implementation would report a data race on the config pointer or enabled flag.
+func TestSetAutoPermissionConfigConcurrentReads(t *testing.T) {
+	a, _ := relaxedJudgeAgent(t, typesafeChoiceReply("allow", 0.9), "secrets")
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = a.relaxedConcernKeys()
+				_ = a.autoPermissionConfig()
+				_ = a.permissions.AutoPermissionEnabled()
+			}
+		}
+	}()
+
+	for i := 0; i < 500; i++ {
+		a.permissions.SetAutoPermissionConfig(&config.AutoPermissionConfig{
+			Enabled:         true,
+			Model:           "typesafe/jev-latest",
+			RelaxedConcerns: []string{"secrets", "network"},
+		})
+	}
+	close(stop)
+	wg.Wait()
+}

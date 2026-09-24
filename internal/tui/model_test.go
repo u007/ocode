@@ -3647,7 +3647,7 @@ func TestAdvisorPickerPrependsClaudeCodeModels(t *testing.T) {
 	if !strings.Contains(gotItems, "Claude Code (Read-Only CLI)") {
 		t.Fatalf("expected Claude Code section header, got %#v", m.pickerItems)
 	}
-	for _, want := range []string{"claude-code/claude-sonnet-5", "claude-code/claude-opus-5"} {
+	for _, want := range []string{"claude-code/claude-sonnet-5", "claude-code/claude-opus-5", "claude-code/claude-opus-5-5"} {
 		if !containsString(m.pickerValues, want) {
 			t.Fatalf("expected advisor picker values to include %q, got %#v", want, m.pickerValues)
 		}

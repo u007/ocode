@@ -46,6 +46,17 @@ type ContextualTool interface {
 	ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error)
 }
 
+// ContextualImageResultTool is an optional extension of ImageResultTool for
+// tools whose image read needs the execution context — notably the session's
+// project root (WithWorkDir), so a relative path anchors on the project rather
+// than the process cwd (the desktop app is launched from Finder with cwd "/").
+// The agent calls ExecuteImageCtx when available and falls back to
+// ExecuteImage for callers that have no context.
+type ContextualImageResultTool interface {
+	ImageResultTool
+	ExecuteImageCtx(ctx context.Context, args json.RawMessage) (raw []byte, mimeType string, err error)
+}
+
 // StreamingTool is an optional extension of Tool for tools that can emit
 // incremental output as they execute (e.g. a long-running shell command).
 // When a tool implements StreamingTool, the agent loop calls ExecuteStream

@@ -322,8 +322,8 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	  imports, eval/exec, dynamic code loading, truncated source) into "unknown".
 	- Use decision "ask" whenever you are not fully confident.%s`, string(payloadJSON), relaxedGuidance)
 
-	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.Prompt != "" {
-		prompt = a.config.Ocode.Permissions.Auto.Prompt + "\n\n" + prompt
+	if auto := a.autoPermissionConfig(); auto != nil && auto.Prompt != "" {
+		prompt = auto.Prompt + "\n\n" + prompt
 	}
 
 	messages := []Message{{Role: "user", Content: prompt}}

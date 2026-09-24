@@ -118,6 +118,109 @@ func TestPermissions_Sandbox_DeleteAutoAllowed(t *testing.T) {
 	}
 }
 
+// TestPermissions_ToolRuleHonoredForPathScopedTools locks in that an explicit
+// tool rule is authoritative for path-scoped tools. Before this, the
+// path-scoped branch returned before the tool-rule lookup at the bottom of
+// Decide, so `permissions.tools.<tool>` was silently ignored for
+// read/write/edit/delete/… — a configured `delete: "allow"` (what the dialog's
+// "always allow this tool" persists) still asked, and a `delete`/`write:
+// "deny"` was not enforced.
+func TestPermissions_ToolRuleHonoredForPathScopedTools(t *testing.T) {
+	cases := []struct {
+		name     string
+		tool     string
+		rule     PermissionLevel
+		args     string
+		want     PermissionLevel
+		wantHard bool
+	}{
+		{"delete_allow_in_workdir", "delete", PermissionAllow, `{"path":"sub/file.txt"}`, PermissionAllow, false},
+		{"delete_default_ask", "delete", PermissionAsk, `{"path":"sub/file.txt"}`, PermissionAsk, false},
+		{"delete_deny_in_workdir", "delete", PermissionDeny, `{"path":"sub/file.txt"}`, PermissionDeny, true},
+		{"write_allow_in_workdir", "write", PermissionAllow, `{"path":"sub/file.txt","content":"x"}`, PermissionAllow, false},
+		{"write_ask_in_workdir", "write", PermissionAsk, `{"path":"sub/file.txt","content":"x"}`, PermissionAsk, false},
+		{"write_deny_in_workdir", "write", PermissionDeny, `{"path":"sub/file.txt","content":"x"}`, PermissionDeny, true},
+		{"edit_deny_in_workdir", "edit", PermissionDeny, `{"path":"sub/file.txt"}`, PermissionDeny, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pm := NewPermissionManager()
+			pm.SetWorkDir("/Users/test/project")
+			pm.SetRule(tc.tool, tc.rule)
+			dec := pm.Decide(tc.tool, json.RawMessage(tc.args))
+			if dec.Level != tc.want {
+				t.Fatalf("level = %s, want %s (reason=%q)", dec.Level, tc.want, dec.DenyReason)
+			}
+			if dec.HardDeny != tc.wantHard {
+				t.Fatalf("hardDeny = %v, want %v", dec.HardDeny, tc.wantHard)
+			}
+		})
+	}
+}
+
+// TestPermissions_PersistedAlwaysAllowDeleteSurvivesReload is the regression
+// for the reported bug: the dialog persists "always allow this tool" as
+// `permissions.tools.delete = "allow"` (config.SaveSingleToolRule) and a new
+// process loads it via LoadFromOcode. That must auto-allow an in-workdir delete
+// instead of asking and handing the call to the auto-permission judge.
+func TestPermissions_PersistedAlwaysAllowDeleteSurvivesReload(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.LoadFromOcode(config.PermissionConfig{Tools: map[string]string{"delete": "allow"}})
+	dec := pm.Decide("delete", json.RawMessage(`{"path":"sub/file.txt"}`))
+	if dec.Level != PermissionAllow {
+		t.Fatalf("persisted delete:allow after reload = %s, want allow", dec.Level)
+	}
+}
+
+// TestPermissions_ToolRuleAllowDoesNotBypassScopeGates guards the security
+// invariant that predates the fix: a plain tool allow (the default write/edit
+// rules, or a config `delete: "allow"`) does NOT bypass the out-of-scope and
+// sensitive-path gates. Only a user-confirmed allow does.
+func TestPermissions_ToolRuleAllowDoesNotBypassScopeGates(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetRule("delete", PermissionAllow)
+	if dec := pm.Decide("delete", json.RawMessage(`{"path":".env"}`)); dec.Level != PermissionAsk {
+		t.Fatalf("delete:allow on sensitive .env = %s, want ask", dec.Level)
+	}
+	if dec := pm.Decide("delete", json.RawMessage(`{"path":"/home/foreign/file"}`)); dec.Level != PermissionAsk {
+		t.Fatalf("delete:allow out of scope = %s, want ask", dec.Level)
+	}
+}
+
+// TestPermissions_Sandbox_DeleteHonorsExplicitDeny verifies sandbox keeps
+// auto-allowing the in-workdir delete default while an explicit deny stays a
+// hard stop (a user deny must not be relaxed by sandbox or the auto judge).
+func TestPermissions_Sandbox_DeleteHonorsExplicitDeny(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetMode(PermissionModeSandbox)
+	pm.SetRule("delete", PermissionDeny)
+	dec := pm.Decide("delete", json.RawMessage(`{"path":"sub/file.txt"}`))
+	if dec.Level != PermissionDeny || !dec.HardDeny {
+		t.Fatalf("sandbox delete:deny = %+v, want hard deny", dec)
+	}
+}
+
+// TestPermissions_PathPatternAllowBeatsToolDeny pins the precedence: an
+// explicit path-glob rule is more specific than a tool-level rule, so a
+// path-pattern "allow" wins over `permissions.tools.<tool> = "deny"` (the deny
+// check sits after CheckPathPatterns). Outside the pattern the tool deny still
+// applies.
+func TestPermissions_PathPatternAllowBeatsToolDeny(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetRule("write", PermissionDeny)
+	pm.SetPathRule("write", "generated/**", PermissionAllow)
+	if dec := pm.Decide("write", json.RawMessage(`{"path":"generated/out.go","content":"x"}`)); dec.Level != PermissionAllow {
+		t.Fatalf("path-pattern allow over tool deny = %s, want allow", dec.Level)
+	}
+	if dec := pm.Decide("write", json.RawMessage(`{"path":"src/main.go","content":"x"}`)); dec.Level != PermissionDeny {
+		t.Fatalf("tool deny outside the path pattern = %s, want deny", dec.Level)
+	}
+}
+
 func TestIsSensitivePath_AllowsEnvTemplates(t *testing.T) {
 	allowed := []string{
 		".env.example",
@@ -1059,6 +1162,30 @@ func TestPermissions_ExportConfigPreservesAutoPermissionEnabled(t *testing.T) {
 	roundTrip.LoadFromOcode(exported)
 	if !roundTrip.AutoPermissionEnabled() {
 		t.Fatal("expected LoadFromOcode to restore auto-permission enabled state")
+	}
+}
+
+// The layer can be switched on at runtime over a config whose Enabled flag is
+// false (SetAutoPermissionEnabled, YOLO and back). ExportConfig must report the
+// live gate, or feeding the export back through LoadFromOcode disables the
+// layer.
+func TestPermissions_ExportConfigEnabledReflectsRuntimeGate(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetAutoPermissionConfig(&config.AutoPermissionConfig{Enabled: false, Model: "typesafe/jev-latest"})
+	pm.SetAutoPermissionEnabled(true)
+
+	exported := pm.ExportConfig()
+	if exported.Auto == nil || !exported.Auto.Enabled {
+		t.Fatalf("exported auto = %+v, want Enabled:true", exported.Auto)
+	}
+	if exported.Auto.Model != "typesafe/jev-latest" {
+		t.Fatalf("exported auto.model = %q, want live config preserved", exported.Auto.Model)
+	}
+
+	roundTrip := NewPermissionManager()
+	roundTrip.LoadFromOcode(exported)
+	if !roundTrip.AutoPermissionEnabled() {
+		t.Fatal("round-trip disabled the auto-permission layer")
 	}
 }
 

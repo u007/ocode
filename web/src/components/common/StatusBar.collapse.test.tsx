@@ -49,6 +49,28 @@ describe("StatusBar collapse", () => {
     expect(container.querySelectorAll("div > div").length).toBeGreaterThan(1);
   });
 
+  it("keeps the collapse/expand toggle at the right edge in both states", () => {
+    const { container } = render(<StatusBar />);
+
+    // Expanded: the collapse chevron is the last control in the right cluster.
+    const collapseBtn = screen.getByRole("button", { name: "Collapse status bar" });
+    expect(collapseBtn.parentElement?.lastElementChild).toBe(collapseBtn);
+    // The brand label now sits to its left, not to its right.
+    expect(collapseBtn.previousElementSibling).toHaveTextContent("ocode web");
+
+    fireEvent.click(collapseBtn);
+
+    // Collapsed: the expand chevron is pushed to the far right of the slim row.
+    const expandBtn = screen.getByRole("button", { name: "Expand status bar" });
+    expect(expandBtn.parentElement?.lastElementChild).toBe(expandBtn);
+    expect(expandBtn.className).toContain("ml-auto");
+    // Regression: the collapse preference must survive the layout move.
+    expect(window.localStorage.getItem(KEY)).toBe("true");
+    // Still a single slim inner row.
+    const root = container.firstChild as HTMLElement;
+    expect(root.querySelectorAll(":scope > div")).toHaveLength(1);
+  });
+
   it("collapses to a slim row that keeps the working indicator and hides the details", () => {
     state.slice = {
       isStreaming: true,

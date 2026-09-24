@@ -1,4 +1,4 @@
-import { render, fireEvent, act, waitFor } from "@testing-library/react";
+import { render, fireEvent, act, waitFor, screen } from "@testing-library/react";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { TerminalProvider } from "../../stores/terminalStore";
 import TerminalPanel, { writeClipboardText } from "./TerminalPanel";
@@ -21,6 +21,7 @@ const h = vi.hoisted(() => ({
     _customKeyHandler: ((ev: KeyboardEvent) => boolean) | null;
     selectionText: string;
     paste: (text: string) => void;
+    selectAll: ReturnType<typeof vi.fn>;
   }>,
   sockets: [] as Array<{ onopen: (() => void) | null; send: (data: string) => void }>,
 }));
@@ -46,6 +47,8 @@ vi.mock("@xterm/xterm", () => {
       return { dispose: vi.fn() };
     });
     getSelection = vi.fn(() => this.selectionText);
+    hasSelection = vi.fn(() => this.selectionText.length > 0);
+    selectAll = vi.fn();
     onBell = vi.fn(() => ({ dispose: vi.fn() }));
     onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
     parser = {
@@ -416,6 +419,151 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
   });
 });
 
+describe("terminal copy under a redrawing program (claude code over ssh)", () => {
+  // xterm stores a selection as buffer coordinates, not text. A TUI that
+  // redraws in place (claude code's Ink renderer) rewrites the rows under the
+  // selection every frame, so a later live read of getSelection() returns a
+  // partial/mutated line set. The text the user saw at release must be what
+  // every later copy path (Cmd+C, Edit-menu copy event) writes.
+  function fireKey(init: { key: string; metaKey?: boolean }) {
+    const term = h.terminals[0];
+    const { key, ...modifiers } = init;
+    const e = new KeyboardEvent("keydown", { key, ...modifiers, bubbles: true, cancelable: true });
+    return term._customKeyHandler!(e);
+  }
+
+  it("Cmd+C after a redraw writes the text selected at mouse-up, not the mutated buffer", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "line one\nline two\nline three";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 40 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 40 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("line one\nline two\nline three"));
+    writeText.mockClear();
+
+    // Program erases and partially rewrites the rows under the selection.
+    term.selectionText = "line one\n\n";
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(fireKey({ key: "c", metaKey: true })).toBe(false);
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText).toHaveBeenCalledWith("line one\nline two\nline three");
+  });
+
+  it("Edit-menu copy event after a redraw carries the text selected at mouse-up", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "alpha\nbeta";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 40 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 40 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("alpha\nbeta"));
+
+    term.selectionText = "alpha\n";
+    await new Promise((r) => setTimeout(r, 300));
+
+    const setData = vi.fn();
+    const ev = new Event("copy", { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(ev, "clipboardData", { value: { setData } });
+    host.dispatchEvent(ev);
+    expect(setData).toHaveBeenCalledWith("text/plain", "alpha\nbeta");
+  });
+
+  it("Select All after an earlier drag copies the live selection, not the stale drag snapshot", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "dragged";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("dragged"));
+    writeText.mockClear();
+
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    fireEvent.click(screen.getByText("Select All"));
+    expect(term.selectAll).toHaveBeenCalled();
+    term.selectionText = "entire buffer";
+
+    expect(fireKey({ key: "c", metaKey: true })).toBe(false);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("entire buffer"));
+  });
+
+  it("ignores onSelectionChange fired by scrollback trim (no pointer gesture) and keeps the clipboard", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "keep me";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("keep me"));
+    writeText.mockClear();
+
+    // Output scrolls: xterm adjusts the selection rows and fires
+    // onSelectionChange; the rows now hold rewritten content.
+    term.selectionText = "keep";
+    act(() => term._selectionChange?.());
+    await new Promise((r) => setTimeout(r, 300));
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("still copies a drag released outside the container via the debounced path", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    term.selectionText = "released outside";
+    act(() => term._selectionChange?.());
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("released outside"));
+  });
+
+  it("drops the snapshot once the selection is cleared so Ctrl+C sends SIGINT again", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "old";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("old"));
+    writeText.mockClear();
+
+    term.selectionText = "";
+    act(() => term._selectionChange?.());
+    expect(fireKey({ key: "c", metaKey: true })).toBe(true);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(writeText).not.toHaveBeenCalled();
+  });
+});
+
 describe("terminal copy-on-selection", () => {
   it("copies the selection to the system clipboard on mouse-up (TUI parity)", async () => {
     const { container } = render(<Panel />);
@@ -463,7 +611,7 @@ describe("terminal copy-on-selection", () => {
 
   it("copies via the debounced onSelectionChange fallback once the selection settles", async () => {
     vi.useFakeTimers();
-    render(<Panel />);
+    const { container } = render(<Panel />);
     const term = h.terminals[0];
 
     await act(async () => {
@@ -471,7 +619,10 @@ describe("terminal copy-on-selection", () => {
     });
 
     // Simulate a drag producing a selection, released outside the container so
-    // only the xterm onSelectionChange path fires.
+    // only the xterm onSelectionChange path fires. The mousedown marks the
+    // change as pointer-driven (trim-driven changes are ignored).
+    const host = container.firstElementChild as HTMLElement;
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
     act(() => {
       term.selectionText = "dragged text";
       term._selectionChange?.();
@@ -489,13 +640,15 @@ describe("terminal copy-on-selection", () => {
 
   it("does not copy stale text when the selection is cleared", async () => {
     vi.useFakeTimers();
-    render(<Panel />);
+    const { container } = render(<Panel />);
     const term = h.terminals[0];
 
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
 
+    const host = container.firstElementChild as HTMLElement;
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
     act(() => {
       term.selectionText = "do not copy me";
       term._selectionChange?.();

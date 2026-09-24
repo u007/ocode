@@ -41,6 +41,17 @@ interface Props {
   messageIndex?: number;
 }
 
+// hasRenderableText reports whether an assistant content string will actually
+// produce visible output. Thinking models (e.g. DeepSeek) emit bare newlines
+// ("\n\n") as the content of a tool-calling step while the real prose lives in
+// `reasoning_content` and the final answer; react-markdown renders those as an
+// empty document, so guarding on truthiness alone left a blank `bg-muted`
+// bubble carrying nothing but its "Speak" button. Every AssistantText render
+// site (committed + live, grouped + single) must gate on this instead.
+export function hasRenderableText(content: string | undefined | null): boolean {
+  return !!content && content.trim().length > 0;
+}
+
 // AssistantText renders markdown assistant output. Shared by committed messages
 // and the live text stream so rendering stays consistent.
 //
@@ -222,7 +233,9 @@ function MessageBubble({ message, highlight = "", toolName = "", sessionId, mess
             highlight={highlight}
           />
         ))}
-        {message.content ? <AssistantText content={message.content} onSpeak={requestSpeech} /> : null}
+        {hasRenderableText(message.content) ? (
+          <AssistantText content={message.content} onSpeak={requestSpeech} />
+        ) : null}
       </>
     );
   }
@@ -232,6 +245,8 @@ function MessageBubble({ message, highlight = "", toolName = "", sessionId, mess
       <UserBubble message={message} highlight={highlight} sessionId={sessionId} messageIndex={messageIndex} />
     );
   }
+
+  if (!hasRenderableText(message.content)) return null;
 
   return <AssistantText content={message.content} onSpeak={requestSpeech} />;
 }

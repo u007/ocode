@@ -69,6 +69,23 @@ Override per-tool in `ocodeconfig.json` → `permissions.tools`:
 { "permissions": { "tools": { "bash": "allow", "delete": "deny" } } }
 ```
 
+The tool rule is authoritative for **path-scoped** tools too (`read`, `write`,
+`edit`, `delete`, `multiedit`, `multi_file_edit`, `replace_lines`, `apply_patch`,
+`format`, `lsp`, …): `deny` is a `HardDeny` the auto-permission judge cannot
+override; `ask` prompts (then routes to the judge when auto is on); `allow`
+auto-grants an in-scope, non-sensitive target. This is what makes the dialog's
+"always allow this tool" durable — it persists `permissions.tools.<tool> =
+"allow"` (`config.SaveSingleToolRule`) and a new process reloads it through
+`LoadFromOcode`. Because `delete`'s default is `ask`, any non-`ask` delete rule
+is necessarily user-set, so no provenance flag is needed.
+
+A **plain** `allow` (the built-in `write`/`edit` defaults, or a config
+`delete: "allow"`) still does NOT bypass the out-of-scope or sensitive-path
+gates — only a **user-confirmed** allow (the in-session dialog choice,
+`SetUserConfirmedRule`) does. Sandbox mode auto-allows the remaining in-workdir
+asks (its OS write-wall confines the effect); an explicit `delete: "ask"` is
+indistinguishable from the default, so sandbox auto-allows that too.
+
 Agent definitions can override tool permissions for child sessions via `agent_permissions.go`.
 
 ## 5. Bash permission evaluation
@@ -153,7 +170,10 @@ Pattern semantics: `*` matches any character sequence (including empty), so `Bas
 
 ### 6a. Out-of-scope paths
 
-Any absolute path outside the working directory → `ask` (unless the tool has an explicit `allow` rule).
+Any absolute path outside the working directory → `ask`. Temp dirs, immutable
+read roots, and a **user-confirmed** allow (`SetUserConfirmedRule`) are the only
+carve-outs; a plain `allow` rule (including a config `delete: "allow"`) does not
+bypass this gate.
 
 ### 6b. Sensitive paths
 
@@ -189,6 +209,35 @@ Pattern matching supports `**` (recursive), `*` (single segment), `?`, and chara
 
 First webfetch to a domain prompts `ask`. Once approved/denied, the decision is cached for the session.
 
+### 6e. Read-target existence gate (Unicode-space recovery)
+
+Before locked-mode/YOLO/path-rule evaluation, `Decide` checks whether a `read`
+target exists on disk (`targetExists`, `permissions.go:1501`); a genuinely
+missing target is an immediate `HardDeny` (this is the only filesystem
+existence check permitted in the permission system). Two refinements:
+
+- **Unicode-space recovery.** macOS writes screenshot filenames with U+202F
+  (NARROW NO-BREAK SPACE) before AM/PM and models routinely re-emit the path
+  with a plain ASCII space, so a visually identical path failed to stat. The
+  gate now calls `tool.ResolveReadTarget` (`internal/tool/readpath.go`) and
+  allows when exactly one sibling matches after
+  `NormalizeUnicodeSpaces` (U+00A0, U+2007, U+2009, U+202F, U+FEFF → ASCII
+  space). Case is preserved — a case-only mismatch is **not** auto-resolved,
+  only hinted. `ReadTool.Execute`/`ExecuteImage` resolve through the same
+  helper (`confinedReadPath`), re-confining the recovered sibling, so an
+  allowed call actually reads the file. Recovery is read-only: write/edit keep
+  the literal path so a create-new-file flow can never clobber a
+  differently-spaced existing file.
+- **Obvious misses.** A real miss now reports
+  `read target does not exist: <path> — resolved to <abs>; similar names in
+  <dir>: "…"` (or `the parent directory does not exist`), with non-ASCII
+  spaces escaped (`\u202f`) so an invisible character is visible.
+
+Pinned by `internal/tool/readpath_test.go`,
+`internal/tool/read_unicode_space_test.go`, and
+`internal/agent/permissions_read_target_test.go` (mutation-verified: disabling
+recovery fails the read, vision, and permission recovery tests).
+
 ## 7. Auto-permission layer
 
 An optional LLM-based layer that auto-approves/denies permission prompts without user interaction.
@@ -206,11 +255,36 @@ An optional LLM-based layer that auto-approves/denies permission prompts without
       "max_context_bytes": 4096,
       "max_context_sources": 2,
       "max_context_lines_per_source": 80,
-      "grants": []
+      "grants": [],
+      "relaxed_concerns": []
     }
   }
 }
 ```
+
+### Live application (no restart)
+
+The whole `permissions.auto` block is process-wide policy. `PUT /api/config/ocode/permissions-auto`
+saves it and **pushes it to every live agent** (`HandleSetAutoPermissionConfig` →
+`PermissionManager.SetAutoPermissionConfig`), so unchecking a concern — or changing the judge
+model, prompt, budgets, or `enabled` — takes effect on the running chat's next judge call, with
+no agent rebuild or app restart.
+
+The live config sits behind atomics (`autoConfig atomic.Pointer[config.AutoPermissionConfig]`,
+`autoPermissionEnabled atomic.Bool`) because a turn's judge may be reading it while the Settings
+save lands. Read it through `Agent.autoPermissionConfig()` /
+`PermissionManager.AutoPermissionConfig()`; never read `a.config.Ocode.Permissions.Auto` at
+runtime — that is only the build-time seed (and is a *separate* object for profile-bound
+sessions, which is why the push targets the manager, not `a.config`).
+
+### Relaxed concerns (`relaxed_concerns`)
+
+`permissions.auto.relaxed_concerns` is the **negative** enforcement set rendered as the
+Settings → Permissions "Categories the judge must enforce" checkboxes: a category listed here
+has its enforcement switched OFF, so the judge may auto-approve a call whose ONLY concern is
+that category. Empty by default (= everything enforced), and a category added later defaults to
+enforced. Go's deterministic guards (hard blocks, dangerous rm, out-of-scope paths) always
+apply, so relaxing a category can never auto-grant those. Catalog: `agent.RelaxableConcerns()`.
 
 ### Key constraints
 

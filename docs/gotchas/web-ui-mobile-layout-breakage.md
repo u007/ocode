@@ -1,7 +1,7 @@
 ---
 type: Gotcha
-title: Web UI Mobile Layout Breakage (≤767px)
-description: 'Gotcha: web UI mobile layout broke because sidebar CSS reserved space on phones, default-open sidebars never closed, a CSS grid collapsed the tab strip, and the floating bottom bar overflowed the viewport edge. Five root causes, eight responsive fixes, and regression tests.'
+title: Web UI Mobile Layout Breakage (≤767px)"
+description: '"Gotcha: web UI mobile layout broke because sidebar CSS reserved space on phones, default-open sidebars never closed, a CSS grid collapsed the tab strip, and the floating bottom bar overflowed the viewport edge. Five root causes, eight responsive fixes, and regression tests. Rule 7 now documents per-session side-pane scoping."'
 tags:
   - gotcha
   - mobile
@@ -12,19 +12,9 @@ tags:
   - responsive
   - side-pane
   - preview
-timestamp: 2026-09-22T18:24:12Z
+timestamp: 2026-09-24T04:41:08Z
 resource: https://github.com/aimsai2/ocode/blob/main/web/src/lib/sidePaneVisibility.ts
 ---
-# Web UI Mobile Layout Breakage (≤767px)
-
-**Type:** Gotcha
-**Description:** Gotcha: web UI mobile layout broke because sidebar CSS reserved space on phones, default-open sidebars never closed, a CSS grid collapsed the tab strip, and the floating bottom bar overflowed the viewport edge. Five root causes, eight responsive fixes, and regression tests.
-**Resource:** https://github.com/aimsai2/ocode/blob/main/web/src/lib/sidePaneVisibility.ts
-**Tags:** gotcha, mobile, layout, css, web-ui, sidebar, responsive, side-pane, preview
-
----
-
-
 ## Root Cause
 
 Five independent CSS/JS issues combined to break phone-width layouts (≤767px) in the web UI:
@@ -57,6 +47,8 @@ Five independent CSS/JS issues combined to break phone-width layouts (≤767px) 
 
 7. **Right-hand side pane is desktop-only; browser + preview move to tabs on mobile.** `shouldRenderSidePane` (`web/src/lib/sidePaneVisibility.ts`) gained an `isMobile` gate and returns `false` at ≤767px, so the right-hand Browser/Preview pane beside the chat never renders on phones (was a silent no-op before — activations disappeared and there was no UI at all). `App.tsx` passes `useIsMobile()` and also hides the pane's 🌐 "Toggle browser panel" button on mobile. Browser + preview remain reachable as **tabs** on mobile: the `UnifiedTabBar` browser pills and "New browser tab" button, and the session sub-tab `SessionSubTabs` → `PreviewTabPage`. Activation routing is no longer a silent no-op: when an AI `preview_open` tool fires (via `usePreviewActivation`) or the file tree dispatches `ocode:open-preview`, the App effect switches the active session sub-tab to `"preview"` and passes the one-shot `request`/`nonce`/`onConsumeActivation` into `PreviewTabPage`, which selects the file and acknowledges the activation. Desktop keeps the activation in the side pane (`PreviewHost`). This is a behavioral routing rule rather than a CSS fix — the 767px gate mirrors the breakpoint used by Rules 1–5.
 
+   **Per-session pane state (not cross-session).** The pane's open/collapsed state is preserved **per session**, not shared across sessions: it lives in localStorage `ocode.ui.sidebarPreview.v2` keyed by side stateKey (`side:chat:<sessionId>` for the chat surface, `side:term:<terminalId>` for the terminal surface). Switching to a **different chat** shows that chat's own pane state (typically closed) — opening the pane in one chat never opens it in another. Switching between a session's **own sub-tabs** (chat ↔ terminal) keeps each surface type's state separate. Returning to the same session restores exactly what it had. The single source of truth for the stateKey convention and rekey lifecycle is `gotchas/side-pane-statekey-convention.md`.
+
 8. **Files-tab editor header Save button is the touch save path.** `FileEditor` (`:862-878`) renders a lucide `<Save />` button (`aria-label="Save file"`) when an `onSave` prop is provided and the buffer is `dirty`; disabled when clean, omitted entirely for read-only surfaces (no `onSave`). This is the only save mechanism on touch devices — there is no keyboard for `⌘S`/`Ctrl+S`. App.tsx passes `dirty={et.isDirty}` and `onSave={() => void saveEditorTab(et.id).catch((e) => reportActionError(e, "Save file"))}`; save failures surface via `ActionErrorToast`. Header layout contract: the path is `truncate min-w-0` (never forces the action cluster off-screen), the action cluster is `flex shrink-0` (never squished below its content width), the **Save button is first** in the cluster so it survives the narrowest panes, and the "Settings" text label is `hidden sm:inline` (icon-only below `sm`). Live-verified with Playwright at 390px and 360px (Save visible with the file tree both expanded and collapsed) and 320px (visible with the tree collapsed; at ≤320px with the tree expanded the editor pane is only ~60px wide, so the tree must be collapsed). `FileEditor.save.test.tsx` and `App.editorTabScope.test.tsx` ("wires a Save handler and the dirty flag into each editor pane") cover this.
 
 ## Regression Tests
@@ -88,4 +80,4 @@ The same pattern applies to floating fixed-position UI elements like toolbars an
 
 Feature panes that assume a wide viewport follow the same discipline problem: any component gated to a side-pane position must check `isMobile` and route to a tab-based equivalent rather than silently no-oping. The 767px breakpoint is the shared contract across Rules 1–8.
 
-Interactive controls on narrow screens must have a touch-reachable equivalent for every keyboard-only action. `⌘S`/`Ctrl+S` save is invisible on a phone — the editor header Save button (Rule 8) fills that gap. When adding keyboard shortcuts, always ask whether the target device has a keyboard; if not, wire the same action to a visible button and document the pairing.
+Interactive controls that survive only in a side pane (a chat's 🌐 toggle, the file tree's Open button) must have a tab-based equivalent for mobile or they become invisible. The side pane's open/collapsed state is session-scoped (`side:chat:<id>` in `ocode.ui.sidebarPreview.v2`), not global per project — the pane a user left open in one chat is not expected to appear in another.

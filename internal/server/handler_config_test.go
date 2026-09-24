@@ -212,6 +212,48 @@ func TestHandleSetAutoPermissionConfigPersistsRelaxedConcerns(t *testing.T) {
 	}
 }
 
+// The PUT must push the new auto-permission config to every live agent so an
+// already-open chat honors the change on its next judge call. Without the push,
+// the resident agent keeps the config it was built with (the reported bug:
+// unchecking a concern in Settings had no effect on a running session).
+func TestHandleSetAutoPermissionConfigPushesToLiveAgents(t *testing.T) {
+	h := testConfigHandler(t)
+
+	agentCfg := &config.Config{}
+	agentCfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{
+		Enabled:         true,
+		Model:           "mock/judge",
+		RelaxedConcerns: []string{"secrets"},
+	}
+	live := agent.NewAgent(nil, nil, agentCfg, nil)
+	h.mu.Lock()
+	h.agents["ses_live"] = &agentSession{agent: live}
+	h.mu.Unlock()
+
+	if got := live.Permissions().AutoPermissionConfig(); got == nil || !got.ConcernRelaxed("secrets") {
+		t.Fatalf("precondition: live agent config = %+v", got)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/permissions-auto",
+		strings.NewReader(`{"enabled":true,"model":"mock/judge","relaxed_concerns":[]}`))
+	h.HandleSetAutoPermissionConfig(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+
+	got := live.Permissions().AutoPermissionConfig()
+	if got == nil {
+		t.Fatal("live agent lost its auto config")
+	}
+	if got.ConcernRelaxed("secrets") {
+		t.Fatalf("live agent still relaxes secrets after the push: %+v", got.RelaxedConcerns)
+	}
+	if !live.Permissions().AutoPermissionEnabled() {
+		t.Fatal("live agent auto-permission should remain enabled")
+	}
+}
+
 func TestHandleSetDiscoveryConfigPersists(t *testing.T) {
 	h := testConfigHandler(t)
 

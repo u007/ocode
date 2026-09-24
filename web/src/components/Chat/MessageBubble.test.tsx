@@ -97,3 +97,48 @@ describe("MessageBubble compaction notice", () => {
   });
 });
 
+
+// Thinking models (DeepSeek v4.1 flash) emit bare newlines as the content of a
+// tool-calling step while the prose lives in reasoning_content / the final
+// answer. Those messages used to render as an empty bg-muted bubble carrying
+// only its "Speak message" button (screenshot report 2026-09-23). Every
+// AssistantText site must gate on hasRenderableText.
+describe("MessageBubble whitespace-only assistant content", () => {
+  it("does not render an empty text bubble (or its Speak button) on a tool-calling step", () => {
+    render(
+      <MessageBubble
+        message={{
+          role: "assistant",
+          content: "\n\n",
+          reasoning_content: "let me commit and push",
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "bash", arguments: '{"command":"git push"}' },
+            },
+          ],
+        }}
+      />,
+    );
+    // Reasoning + the tool call still render…
+    expect(screen.getByText("🧠 Thinking")).toBeInTheDocument();
+    expect(screen.getByText(/git push/)).toBeInTheDocument();
+    // …but no empty assistant bubble with a Speak control.
+    expect(screen.queryByLabelText("Speak message")).not.toBeInTheDocument();
+  });
+
+  it("renders nothing for a whitespace-only assistant message with no tools or reasoning", () => {
+    const { container } = render(
+      <MessageBubble message={{ role: "assistant", content: "   \n\t" }} />,
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("still renders real text that merely has surrounding whitespace", () => {
+    const { container } = render(
+      <MessageBubble message={{ role: "assistant", content: "\n\nDone.\n" }} />,
+    );
+    expect(container.querySelector("div.bg-muted")!.textContent).toContain("Done.");
+  });
+});

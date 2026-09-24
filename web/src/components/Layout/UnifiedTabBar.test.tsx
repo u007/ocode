@@ -208,6 +208,124 @@ describe("UnifiedTabBar", () => {
     expect(screen.getAllByRole("tab").map((t) => t.getAttribute("aria-label"))).toEqual(orderBefore);
   });
 
+  it("shows a running badge on a chat pill while its turn is active", () => {
+    function SeedRunning() {
+      const dispatch = useChatDispatch();
+      useEffect(() => {
+        dispatch({ type: "SET_TURN_STATE", sessionId: "s1", turnActive: true });
+      }, [dispatch]);
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <TerminalProvider>
+          <BrowserTabsProvider>
+            <SeedRunning />
+            <UnifiedTabBar focusedKind="chat" onFocusKindChange={() => {}} />
+          </BrowserTabsProvider>
+        </TerminalProvider>
+      </ChatProvider>,
+    );
+    const slot = within(screen.getByRole("tab", { name: /chat one/i })).getByTestId("tab-turn-state");
+    expect(slot.dataset.state).toBe("running");
+    // A glyph is actually rendered (the idle slot is empty).
+    expect(slot.querySelector("svg")).toBeTruthy();
+  });
+
+  it("shows a stalled badge when the active turn stops heartbeating", () => {
+    function SeedStalled() {
+      const dispatch = useChatDispatch();
+      useEffect(() => {
+        dispatch({ type: "SET_TURN_STATE", sessionId: "s1", turnActive: true });
+        dispatch({ type: "SET_TURN_STALLED", sessionId: "s1", stalled: true });
+      }, [dispatch]);
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <TerminalProvider>
+          <BrowserTabsProvider>
+            <SeedStalled />
+            <UnifiedTabBar focusedKind="chat" onFocusKindChange={() => {}} />
+          </BrowserTabsProvider>
+        </TerminalProvider>
+      </ChatProvider>,
+    );
+    const slot = within(screen.getByRole("tab", { name: /chat one/i })).getByTestId("tab-turn-state");
+    expect(slot.dataset.state).toBe("stalled");
+    expect(slot.getAttribute("title")).toMatch(/stalled/i);
+    expect(slot.querySelector("svg")).toBeTruthy();
+  });
+
+  it("renders no running/stalled glyph on an idle chat pill", () => {
+    renderBar();
+    const slot = within(screen.getByRole("tab", { name: /chat one/i })).getByTestId("tab-turn-state");
+    expect(slot.dataset.state).toBe("idle");
+    expect(slot.querySelector("svg")).toBeNull();
+  });
+
+  it("shows the turn badge on a background (non-active) chat tab", () => {
+    projectFake.tabs = [
+      { id: "s1", projectPath: "/proj", title: "Chat One", activeSubTab: "chat" },
+      { id: "s2", projectPath: "/proj", title: "Chat Two", activeSubTab: "chat" },
+    ];
+    projectFake.activeTabId = "s1";
+    function SeedBackground() {
+      const dispatch = useChatDispatch();
+      useEffect(() => {
+        dispatch({ type: "SET_TURN_STATE", sessionId: "s2", turnActive: true });
+      }, [dispatch]);
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <TerminalProvider>
+          <BrowserTabsProvider>
+            <SeedBackground />
+            <UnifiedTabBar focusedKind="chat" onFocusKindChange={() => {}} />
+          </BrowserTabsProvider>
+        </TerminalProvider>
+      </ChatProvider>,
+    );
+    const slotIn = (name: RegExp) => within(screen.getByRole("tab", { name })).getByTestId("tab-turn-state");
+    expect(slotIn(/chat two/i).dataset.state).toBe("running");
+    expect(slotIn(/chat one/i).dataset.state).toBe("idle");
+  });
+
+  it("mirrors the turn badge in the mobile dropdown trigger and rows", () => {
+    projectFake.tabs = [
+      { id: "s1", projectPath: "/proj", title: "Chat One", activeSubTab: "chat" },
+      { id: "s2", projectPath: "/proj", title: "Chat Two", activeSubTab: "chat" },
+    ];
+    projectFake.activeTabId = "s1";
+    function SeedBackground() {
+      const dispatch = useChatDispatch();
+      useEffect(() => {
+        dispatch({ type: "SET_TURN_STATE", sessionId: "s2", turnActive: true });
+      }, [dispatch]);
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <TerminalProvider>
+          <BrowserTabsProvider>
+            <SeedBackground />
+            <UnifiedTabBar focusedKind="chat" onFocusKindChange={() => {}} />
+          </BrowserTabsProvider>
+        </TerminalProvider>
+      </ChatProvider>,
+    );
+    // Active tab (s1) is idle → the closed trigger shows no turn badge.
+    const trigger = screen.getByTestId("mobile-tab-dropdown-trigger");
+    expect(trigger.querySelector('[data-testid="mobile-tab-dropdown-active-turn-state"]')).toBeNull();
+    fireEvent.click(trigger);
+    const items = screen.getAllByTestId("mobile-tab-dropdown-item");
+    const s2row = items.find((el) => el.textContent?.includes("Chat Two"))!;
+    expect(within(s2row).getByTestId("mobile-tab-dropdown-turn-state").dataset.state).toBe("running");
+    const s1row = items.find((el) => el.textContent?.includes("Chat One"))!;
+    expect(s1row.querySelector('[data-testid="mobile-tab-dropdown-turn-state"]')).toBeNull();
+  });
+
   it("lists a persisted-but-never-activated terminal as a pill (peek, no pty)", () => {
     window.localStorage.setItem(
       "ocode.ui.terminals.project.v1",

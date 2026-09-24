@@ -1068,6 +1068,15 @@ describe("chatStore in-memory message cap", () => {
     });
     expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q1");
 
+    // A cancelled question is a deliberate STOP: the server-derived
+    // interrupted flag (which would show the "Continue" notice) must clear.
+    state = chatReducer(state, {
+      type: "SET_INTERRUPTED",
+      sessionId: "a",
+      interrupted: true,
+    });
+    expect(getSessionSlice(state, "a").interrupted).toBe(true);
+
     state = chatReducer(state, {
       type: "QUESTION_DISMISSED",
       sessionId: "a",
@@ -1076,6 +1085,7 @@ describe("chatStore in-memory message cap", () => {
 
     const slice = getSessionSlice(state, "a");
     expect(slice.pendingQuestion).toBeNull();
+    expect(slice.interrupted).toBe(false);
     const tool = slice.messages.find(
       (m) => m.role === "tool" && m.tool_call_id === "q1",
     );

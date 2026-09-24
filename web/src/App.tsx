@@ -70,6 +70,7 @@ import ConfirmCloseDialog from "./components/Files/ConfirmCloseDialog";
 import { isNewSessionTabEmpty, rekeyDraft } from "./lib/tabDrafts";
 import { rekeyQueue, clearQueue } from "./lib/tabQueue";
 import { rekeyInputHistory, clearInputHistory } from "./lib/tabInputHistory";
+import { rekeySidePaneState, sideChatKey, sideTermKey } from "./lib/sidePaneState";
 import { cancelLiveDeltas, closeSessionBackend } from "./lib/sessionEvents";
 import { notifyWailsRuntimeReady } from "./lib/wails";
 import { setPendingHighlight, peekPendingHighlight } from "./lib/fileSearchHighlight";
@@ -304,12 +305,12 @@ function HomeApp() {
   // full-width browser *tab*, which has its own `tab:` state surface).
   const sidePanelKind = focusedKind === "terminal" ? "term" : "chat";
   const sideStateKey: StateKey | null =
-    activeTabId && focusedKind !== "browser" ? `side:${sidePanelKind}:${activeTabId}` : null;
+    activeTabId && focusedKind !== "browser"
+      ? sidePanelKind === "term"
+        ? sideTermKey(activeTabId)
+        : sideChatKey(activeTabId)
+      : null;
   const sideTabState = useBrowserStore(sideStateKey ?? ("side:chat:" as StateKey));
-  // Tracks keys whose panel was explicitly closed by the user (via
-  // the close button or toggle), so the tab-switch effect below does
-  // not immediately reopen it.
-  const panelClosedByUser = useRef<Set<string>>(new Set());
   const browserOpen = !!sideStateKey && !!sideTabState?.panelOpen;
   const browserPane = useResizableSidebar({
     storageKey: "ocode.ui.browser_width",
@@ -481,7 +482,6 @@ function HomeApp() {
       return;
     }
     if (!sideStateKey) return;
-    panelClosedByUser.current.delete(sideStateKey);
     browserActions.open(sideStateKey);
   }, [previewNonce, sideStateKey, isMobile, activeTabId, projectDispatch]);
 
@@ -498,26 +498,12 @@ function HomeApp() {
     setPreviewContext(null);
   }, [activeTabId]);
 
-  // When the active chat/terminal tab changes, the sideStateKey changes.
-  // Propagate the browser open state so the right-pane browser doesn't
-  // disappear just because the session/tab switched.
-  const prevSideTabStateRef = useRef<ReturnType<typeof useBrowserStore>>(undefined);
-  useEffect(() => {
-    const prevState = prevSideTabStateRef.current;
-    const prevOpen = prevState?.panelOpen ?? false;
-    const prevCollapsed = prevState?.collapsed ?? false;
-    if (!sideStateKey) {
-      prevSideTabStateRef.current = sideTabState;
-      return;
-    }
-    const currentExists = !!sideTabState;
-    if (prevOpen && !currentExists && !panelClosedByUser.current.has(sideStateKey)) {
-      browserActions.open(sideStateKey);
-      if (prevCollapsed) browserActions.setCollapsed(sideStateKey, true);
-    }
-    panelClosedByUser.current.delete(sideStateKey);
-    prevSideTabStateRef.current = sideTabState;
-  }, [sideStateKey, sideTabState]);
+  // The side pane is scoped PER SESSION: `sideStateKey` includes the session
+  // tab id, so opening the pane in one chat never opens it in another. We
+  // deliberately do NOT propagate the open state across a tab switch — each
+  // session remembers its own pane (open/collapsed) and its own previewed
+  // file (see PreviewHost + sidebarPreviewState, keyed by the same stateKey).
+  // Returning to a session restores exactly what it had.
 
   useEffect(() => {
     const onDelete = (e: Event) => {
@@ -800,6 +786,10 @@ function HomeApp() {
     rekeyQueue(tempTabId, sessionId);
     rekeyDraft(tempTabId, sessionId);
     rekeyInputHistory(tempTabId, sessionId);
+    // The side pane's state is keyed by the tab id (`side:chat:<id>`), so it
+    // must move with the tab or the pane would detach and close on the first
+    // message of a brand-new chat (and on /reset-id).
+    rekeySidePaneState(tempTabId, sessionId);
     projectDispatch({
       type: "UPDATE_TAB_ID",
       oldId: tempTabId,
@@ -1263,10 +1253,8 @@ function HomeApp() {
                       onClick={() => {
                         if (!sideStateKey) return;
                         if (browserOpen) {
-                          panelClosedByUser.current.add(sideStateKey);
                           browserActions.close(sideStateKey);
                         } else {
-                          panelClosedByUser.current.delete(sideStateKey);
                           browserActions.open(sideStateKey);
                         }
                       }}
@@ -1657,7 +1645,6 @@ function HomeApp() {
                         <button
                           type="button"
                           onClick={() => {
-                            panelClosedByUser.current.add(sideStateKey);
                             browserActions.close(sideStateKey);
                           }}
                           title="Close browser panel"

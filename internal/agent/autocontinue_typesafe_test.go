@@ -182,9 +182,7 @@ func TestAutoContinueTypesafeUsesRiskScaledFloorNotPermissionFloor(t *testing.T)
 	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.66, "mid_task"))
 	// Even with a high configured permission floor, auto-continue must not
 	// inherit it.
-	a.config.Ocode.Permissions = config.PermissionConfig{
-		Auto: &config.AutoPermissionConfig{MinConfidence: 0.95},
-	}
+	setTestAutoPermissionConfig(a, func(cfg *config.AutoPermissionConfig) { cfg.MinConfidence = 0.95 })
 	if got := a.resolveAutoJudgeMinConfidence(); got != 0.95 {
 		t.Fatalf("permission floor = %v, want 0.95 (sanity)", got)
 	}

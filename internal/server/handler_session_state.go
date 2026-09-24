@@ -196,7 +196,7 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 		}
 	}
 	h.applySessionContext(&snap, id)
-	h.applySessionSpending(&snap, id)
+	h.applySessionUsage(&snap, id)
 	h.applyTurnTiming(&snap, id)
 	// Permission mode is per session: without this the snapshot would report
 	// the process-wide config default and a chat's yolo/sandbox toggle would
@@ -275,40 +275,73 @@ func (h *Handler) applySessionContext(snap *TUIStatus, id string) {
 	snap.ContextModel = model
 }
 
-// applySessionSpending sets snap's per-session spend (spending_usd) with a
-// strict precedence so the same spend is never counted twice:
+// applySessionUsage sets snap's per-session spend (spending_usd) and token
+// counts (input_tokens/output_tokens/cached_tokens/total_tokens) with a strict
+// precedence so the same usage is never counted twice:
 //
-//  1. the live agent's accumulated total (the authoritative in-process value);
-//  2. the session's persisted "spend" metadata (survives rebuild/restart; the
-//     same key the TUI's sidebarTelemetry writes);
-//  3. only when BOTH are absent, the usage ledger's rows tagged with this
+//  1. the live agent's accumulated totals (the authoritative in-process value);
+//  2. the session's persisted metadata (survives rebuild/restart; the same keys
+//     the TUI's sidebarTelemetry writes);
+//  3. spend only, when BOTH are absent, the usage ledger's rows tagged with this
 //     session id (usage.SessionSpend) — recovery for a session whose metadata
 //     total was lost.
 //
+// Tokens have no ledger equivalent and the transcript does not persist per-
+// message Usage (agent.Message.Usage is json:"-", so it exists only in memory),
+// so a restored session with no token metadata simply reports no token
+// breakdown — the same "n/a" the TUI shows when sidebarTelemetry has no data.
+// Every session that runs through this server from now on persists its totals
+// at turn end (persistSessionTelemetry), so only pre-existing sessions are
+// affected.
+//
 // Zero means unknown and is omitted (omitempty), so the web falls back to the
-// process-wide daily total.
-func (h *Handler) applySessionSpending(snap *TUIStatus, id string) {
+// process-wide daily total for spend and renders no token breakdown.
+//
+// Must stay lock-free with respect to the agentSession mutex: it is called from
+// publishTurnStatusSnapshot (see its doc), which runTurn invokes while holding
+// as.mu. Every live-agent read below is atomic for that reason.
+func (h *Handler) applySessionUsage(snap *TUIStatus, id string) {
+	coveredSpend := false
+	coveredTokens := false
 	if as := h.lookupAgentSession(id); as != nil {
 		if v := as.spendUSD(); v > 0 {
 			snap.SpendingUSD = v
-			return
+			coveredSpend = true
 		}
+		if as.hasUsage() {
+			snap.InputTokens, snap.OutputTokens, snap.CachedTokens, snap.TotalTokens = as.usageSnapshot()
+			coveredTokens = true
+		}
+	}
+	if coveredSpend && coveredTokens {
+		return
 	}
 	projectRoot := h.sessionProjectRoot(id)
 	if projectRoot == "" {
 		return
 	}
 	if s, err := session.LoadForDir(projectRoot, id); err == nil {
-		if v := sessionSpendFromMetadata(s.Metadata); v > 0 {
-			snap.SpendingUSD = v
-			return
+		if !coveredSpend {
+			if v := sessionSpendFromMetadata(s.Metadata); v > 0 {
+				snap.SpendingUSD = v
+				coveredSpend = true
+			}
+		}
+		if !coveredTokens {
+			in, out, cached, total := sessionUsageFromMetadata(s.Metadata)
+			if in > 0 || out > 0 || cached > 0 || total > 0 {
+				snap.InputTokens, snap.OutputTokens, snap.CachedTokens, snap.TotalTokens = in, out, cached, total
+				coveredTokens = true
+			}
 		}
 	}
-	// Last resort: sum this session's attributed ledger rows. Only reached when
-	// there is no live agent and no persisted metadata total, so it cannot
-	// double-count either of the values above.
-	if v, err := usage.SessionSpend(id); err == nil && v > 0 {
-		snap.SpendingUSD = v
+	// Last resort for spend only: sum this session's attributed ledger rows.
+	// Only reached when there is no live agent and no persisted metadata total,
+	// so it cannot double-count either of the values above.
+	if !coveredSpend {
+		if v, err := usage.SessionSpend(id); err == nil && v > 0 {
+			snap.SpendingUSD = v
+		}
 	}
 }
 
@@ -396,7 +429,7 @@ func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 		}
 	}
 	h.applySessionContext(&snap, sessionID)
-	h.applySessionSpending(&snap, sessionID)
+	h.applySessionUsage(&snap, sessionID)
 	if projectRoot != "" {
 		if s, err := session.LoadForDir(projectRoot, sessionID); err == nil && !s.CreatedAt.IsZero() {
 			snap.SessionCreatedAt = s.CreatedAt.UTC().Format(time.RFC3339Nano)
@@ -415,7 +448,7 @@ func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 	// Persist the per-session spend total so it survives an agent rebuild /
 	// idle eviction / restart; the snapshot above carries it for the live gauge.
 	if as := h.lookupAgentSession(sessionID); as != nil {
-		h.persistSessionSpend(sessionID, as.spendUSD())
+		h.persistSessionTelemetry(sessionID, as)
 	}
 	h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "status", Data: snap})
 }
@@ -493,7 +526,7 @@ func (h *Handler) pushSessionStatusSnapshot(id string) {
 	}
 	applySessionModelPrompt(&snap, baseModel, baseCWD)
 	h.applySessionContext(&snap, id)
-	h.applySessionSpending(&snap, id)
+	h.applySessionUsage(&snap, id)
 	h.applyTurnTiming(&snap, id)
 	h.applySessionPermissionFields(&snap, id)
 	h.applySessionAdvisorFields(&snap, id)

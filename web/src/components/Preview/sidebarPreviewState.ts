@@ -1,14 +1,21 @@
-// Persists the sidebar PreviewHost shell state PER PROJECT so switching
-// projects (which remounts the whole panel — `key={sideStateKey}` tracks the
-// active session tab) restores the file that project was last previewing and
-// its page/slide, instead of dropping back to the Browser tab with no file.
+// Persists the sidebar PreviewHost shell state PER SESSION SURFACE so each
+// chat session (and each terminal) remembers the file/page/surface it was last
+// previewing independently. The panel is mounted with `key={sideStateKey}`
+// (`side:chat:<sessionId>` / `side:term:<terminalId>`), so switching sessions
+// unmounts and remounts it — without this the file, page, and active tab would
+// reset, and without per-session scoping one chat's preview would leak into
+// every other chat in the same project.
 //
-// Keyed by project identity (`host::projectRoot`), the same scope the editor
-// tabs use, so a remote project's preview never bleeds into a local one.
+// Keyed by the side surface key (NOT project identity): a chat session is the
+// unit the pane accompanies, so two sessions in the same project must not
+// share a preview slot. Session/terminal ids are globally unique, so the raw
+// stateKey is a sufficient map key.
 
 import type { PreviewKind } from "../../lib/previewKind";
 
-const STORAGE_KEY = "ocode.ui.sidebarPreview.v1";
+// v2: keys changed from `host::projectRoot` (per project) to the side
+// stateKey (per session surface). Old v1 entries are intentionally orphaned.
+const STORAGE_KEY = "ocode.ui.sidebarPreview.v2";
 
 export type SidebarSurface = "browser" | "preview";
 
@@ -27,13 +34,11 @@ export interface SidebarPreviewState {
 
 type Store = Record<string, SidebarPreviewState>;
 
-/** Project-scoped storage key. Returns null when there is no project identity
- *  (boot, before the project list resolves) — nothing is persisted then. */
-export function sidebarPreviewProjectKey(projectRoot?: string, projectHost?: string): string | null {
-  const host = projectHost ?? "";
-  const root = projectRoot ?? "";
-  if (!host && !root) return null;
-  return host ? `${host}::${root}` : root;
+/** Persistence key for one side surface. Returns null when there is no
+ *  stateKey (the pane is not mounted / no session), so nothing is persisted. */
+export function sidebarPreviewKey(stateKey?: string | null): string | null {
+  if (!stateKey) return null;
+  return stateKey;
 }
 
 function isSurface(v: unknown): v is SidebarSurface {
@@ -68,16 +73,16 @@ function loadStore(): Store {
   }
 }
 
-/** Read the persisted shell state for a project, or null when none. */
-export function loadSidebarPreviewState(projectRoot?: string, projectHost?: string): SidebarPreviewState | null {
-  const key = sidebarPreviewProjectKey(projectRoot, projectHost);
+/** Read the persisted shell state for a side surface, or null when none. */
+export function loadSidebarPreviewState(stateKey?: string | null): SidebarPreviewState | null {
+  const key = sidebarPreviewKey(stateKey);
   if (!key) return null;
   return loadStore()[key] ?? null;
 }
 
-/** Write the shell state for a project. No-op without a project identity. */
-export function saveSidebarPreviewState(projectRoot: string | undefined, projectHost: string | undefined, state: SidebarPreviewState) {
-  const key = sidebarPreviewProjectKey(projectRoot, projectHost);
+/** Write the shell state for a side surface. No-op without a stateKey. */
+export function saveSidebarPreviewState(stateKey: string | null | undefined, state: SidebarPreviewState) {
+  const key = sidebarPreviewKey(stateKey);
   if (!key) return;
   try {
     const store = loadStore();
@@ -85,5 +90,25 @@ export function saveSidebarPreviewState(projectRoot: string | undefined, project
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
   } catch (err) {
     console.error("Failed to persist sidebar preview state:", err);
+  }
+}
+
+/** Move a side surface's persisted preview state to a new key when its owning
+ *  tab is rekeyed (a `new-*` chat tab becoming its real session id, or
+ *  `/reset-id`). No-op when the source has no entry or the destination already
+ *  has one (the live target wins). */
+export function rekeySidebarPreviewState(oldKey: string | null | undefined, newKey: string | null | undefined) {
+  const from = sidebarPreviewKey(oldKey);
+  const to = sidebarPreviewKey(newKey);
+  if (!from || !to || from === to) return;
+  try {
+    const store = loadStore();
+    const moved = store[from];
+    if (!moved || store[to]) return;
+    store[to] = moved;
+    delete store[from];
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  } catch (err) {
+    console.error("Failed to rekey sidebar preview state:", err);
   }
 }

@@ -1462,6 +1462,16 @@ func (h *Handler) HandleSetAutoPermissionConfig(w http.ResponseWriter, r *http.R
 		req.Model = preservedModel
 		h.cfg.Ocode.Permissions.Auto = &req
 	}
+	// Push the new auto-permission config to every live agent so the change
+	// takes effect on the running chat's very next judge call instead of only
+	// after that session's agent is rebuilt. allAgents is safe under h.mu (see
+	// HandleSetPermission). The PermissionManager stores it behind atomics, so
+	// this cannot tear a turn's in-flight judge read.
+	for _, a := range h.allAgents() {
+		if pm := a.Permissions(); pm != nil {
+			pm.SetAutoPermissionConfig(&req)
+		}
+	}
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, req)
 }

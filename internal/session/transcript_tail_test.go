@@ -29,6 +29,12 @@ func questionAskContent() string {
 		"\n\n" + tool.SentinelWaitingForUser
 }
 
+// dismissedQuestionContent is the in-place rewrite written when the user
+// cancels a question prompt (Cancel / Escape / X).
+func dismissedQuestionContent() string {
+	return tool.QuestionDismissedResult
+}
+
 // TestTranscriptTailVerdict pins the single classification rule shared by the
 // resident agent's memory and the decoded stored rows (spec §3.1).
 func TestTranscriptTailVerdict(t *testing.T) {
@@ -65,6 +71,28 @@ func TestTranscriptTailVerdict(t *testing.T) {
 				assistantToolCalls(),
 				{Role: "tool", ToolID: "call-1", Content: `{"answer":"yes"}`},
 				{Role: "tool", ToolID: "call-2", Content: permissionAskContent()},
+			},
+			tailWaiting,
+		},
+		{"dismissed question tool row", []agent.Message{
+			assistantToolCalls(),
+			{Role: "tool", ToolID: "call-1", Content: dismissedQuestionContent()},
+		}, tailStopped},
+		{
+			"dismissed question beside a completed tool result",
+			[]agent.Message{
+				assistantToolCalls(),
+				{Role: "tool", ToolID: "call-1", Content: "bash output"},
+				{Role: "tool", ToolID: "call-2", Content: dismissedQuestionContent()},
+			},
+			tailStopped,
+		},
+		{
+			"multi-ask round with a dismissal and an unanswered ask",
+			[]agent.Message{
+				assistantToolCalls(),
+				{Role: "tool", ToolID: "call-1", Content: dismissedQuestionContent()},
+				{Role: "tool", ToolID: "call-2", Content: questionAskContent()},
 			},
 			tailWaiting,
 		},

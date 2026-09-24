@@ -403,7 +403,42 @@ func confinedPath(ctx context.Context, p string) (string, error) {
 	return "", fmt.Errorf("path %q is outside the working directory", p)
 }
 
+// confinedReadPath resolves a read target through confinedPath and, when the
+// literal path does not exist, retries with Unicode space variants normalized
+// (macOS screenshot filenames use U+202F before AM/PM and models routinely
+// re-emit it as an ASCII space — see ResolveReadTarget).
+//
+// The recovered sibling is re-confined, so a symlinked sibling cannot escape
+// the allowed roots. This is deliberately read-only: write/edit keep the
+// literal path so a create-a-new-file flow can never silently overwrite a
+// differently-spaced existing file.
+func confinedReadPath(ctx context.Context, p string) (string, error) {
+	safe, err := confinedPath(ctx, p)
+	if err != nil {
+		return "", err
+	}
+	if _, statErr := os.Lstat(safe); statErr == nil {
+		return safe, nil
+	}
+	res := ResolveReadTarget(safe, 0)
+	if !res.Exists || res.Path == safe {
+		return safe, nil
+	}
+	altSafe, altErr := confinedPath(ctx, res.Path)
+	if altErr != nil {
+		// The variant resolves outside the allowed roots; fall back to the
+		// literal path so the caller reports the original miss.
+		return safe, nil
+	}
+	return altSafe, nil
+}
+
 type ReadTool struct{}
+
+var (
+	_ ContextualTool            = ReadTool{}
+	_ ContextualImageResultTool = ReadTool{}
+)
 
 func (t ReadTool) Name() string        { return "read" }
 func (t ReadTool) Description() string { return "Read file contents from the codebase" }
@@ -449,7 +484,19 @@ func (t ReadTool) Definition() map[string]interface{} {
 	}
 }
 
+// Execute implements Tool. Callers without a context (tests, TUI direct calls,
+// orphan recovery, permission checks) resolve relative paths against the
+// process cwd; the agent calls ExecuteCtx with the session workdir instead.
 func (t ReadTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+// ExecuteCtx implements ContextualTool. Anchoring relative paths on the
+// session's project root (WithWorkDir) matters because the desktop app is
+// launched from Finder with cwd "/", so a bare relative read would otherwise
+// miss every project file (the search tools already anchor this way — see
+// TestSearchToolsUseContextWorkDir).
+func (t ReadTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Path      string `json:"path"`
 		StartLine int    `json:"start_line"`
@@ -469,7 +516,7 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	safe, err := confinedPath(context.Background(), params.Path)
+	safe, err := confinedReadPath(ctx, params.Path)
 	if err != nil {
 		return "", err
 	}
@@ -818,13 +865,20 @@ func readByteWindow(displayPath, safe string, offset, size int) (string, error) 
 // target is a decodable image and the active model can see images; it then
 // resizes and embeds the bytes as a vision block.
 func (t ReadTool) ExecuteImage(args json.RawMessage) ([]byte, string, error) {
+	return t.ExecuteImageCtx(context.Background(), args)
+}
+
+// ExecuteImageCtx implements ContextualImageResultTool so the vision byte
+// read anchors relative paths on the session's project root, matching
+// ExecuteCtx.
+func (t ReadTool) ExecuteImageCtx(ctx context.Context, args json.RawMessage) ([]byte, string, error) {
 	var params struct {
 		Path string `json:"path"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, "", err
 	}
-	safe, err := confinedPath(context.Background(), params.Path)
+	safe, err := confinedReadPath(ctx, params.Path)
 	if err != nil {
 		return nil, "", err
 	}

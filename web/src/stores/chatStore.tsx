@@ -845,6 +845,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // ask from the transcript sentinel) does not immediately reopen the
       // dialog. Idempotent and a no-op when the sentinel is not in the loaded
       // page — the server snapshot is then the only source.
+      //
+      // A dismissal is a deliberate STOP, not an interrupted turn: clear the
+      // server-derived `interrupted` flag here so the "previous reply was
+      // interrupted / Continue" notice cannot linger (the server now classifies
+      // a dismissed-question tail as stopped, so the next reconcile agrees).
       return updateSession(state, action.sessionId, (s) => {
         let replaced = false;
         const messages = s.messages.map((m) => {
@@ -859,7 +864,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           replaced = true;
           return { ...m, content: QUESTION_DISMISSED_RESULT };
         });
-        return { ...s, messages, pendingQuestion: null };
+        return { ...s, messages, pendingQuestion: null, interrupted: false };
       });
     case "QUESTION_ANSWERED":
       // Optimistic echo of the answers the browser just POSTed. The server

@@ -88,10 +88,12 @@ describe("PreviewHost regression (after PreviewSurface extraction)", () => {
   });
 });
 
-describe("PreviewHost per-project persistence", () => {
-  // The panel is keyed by the active session tab in App, so a project switch
-  // UNMOUNTS it. Without persistence the file/page/active-tab all reset.
-  it("restores the last previewed file and page for the same project on remount", () => {
+describe("PreviewHost per-session persistence", () => {
+  // The panel is keyed by the active session tab in App (`key={sideStateKey}`),
+  // so switching sessions/projects UNMOUNTS it. Without persistence the
+  // file/page/active-tab all reset; without per-session keying one chat's
+  // preview would leak into every other chat.
+  it("restores the last previewed file and page for the same session on remount", () => {
     const view = render(
       <PreviewHost
         stateKey="side:chat:t1"
@@ -126,6 +128,32 @@ describe("PreviewHost per-project persistence", () => {
     render(<PreviewHost stateKey="side:chat:t2" projectRoot="/proj-b" request={null} nonce={0} />);
     expect(screen.queryByTestId("preview-surface")).toBeNull();
     expect(screen.getByTestId("browser-panel")).toBeDefined();
+  });
+
+  it("keeps each chat session's preview separate within the SAME project", () => {
+    // The reported bug: opening the side preview in one chat showed it in every
+    // other chat of the project. Two sessions in /proj must not share a slot.
+    const s1 = render(
+      <PreviewHost
+        stateKey="side:chat:s1"
+        projectRoot="/proj"
+        request={{ path: "docs/one.pdf", kind: "pdf", page: 4 }}
+        nonce={1}
+      />,
+    );
+    expect(screen.getByTestId("preview-surface").getAttribute("data-path")).toBe("docs/one.pdf");
+    s1.unmount();
+
+    // Session 2 (same project) starts fresh — no leak from s1.
+    const s2 = render(<PreviewHost stateKey="side:chat:s2" projectRoot="/proj" request={null} nonce={0} />);
+    expect(screen.queryByTestId("preview-surface")).toBeNull();
+    expect(screen.getByTestId("browser-panel")).toBeDefined();
+    s2.unmount();
+
+    // Session 1 restores its own file/page.
+    render(<PreviewHost stateKey="side:chat:s1" projectRoot="/proj" request={null} nonce={0} />);
+    expect(screen.getByTestId("preview-surface").getAttribute("data-path")).toBe("docs/one.pdf");
+    expect(screen.getByTestId("preview-surface").getAttribute("data-page")).toBe("4");
   });
 
 

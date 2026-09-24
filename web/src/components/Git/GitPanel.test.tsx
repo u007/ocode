@@ -196,6 +196,8 @@ describe("GitPanel", () => {
     render(<GitPanel projectPath="/proj" />);
     await screen.findByText("src/untracked.txt");
     fireEvent.click(screen.getByTitle("Delete file"));
+    // Destructive actions are gated behind a rendered confirmation dialog.
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
 
     await waitFor(() =>
       expect(mocks.gitHunk).toHaveBeenCalledWith(
@@ -203,6 +205,34 @@ describe("GitPanel", () => {
         "/proj",
         undefined,
       ),
+    );
+  });
+
+  it("asks for confirmation before deleting an untracked file", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/untracked.txt");
+    fireEvent.click(screen.getByTitle("Delete file"));
+
+    // The dialog appears and nothing is deleted until it is confirmed.
+    expect(await screen.findByText("Delete untracked file?")).toBeTruthy();
+    expect(mocks.gitHunk).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByText("Delete untracked file?")).toBeNull());
+    expect(mocks.gitHunk).not.toHaveBeenCalled();
+  });
+
+  it("asks for confirmation before discarding changes to a tracked file", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+    fireEvent.click(screen.getByTitle("Discard changes"));
+
+    expect(await screen.findByText("Discard changes?")).toBeTruthy();
+    expect(mocks.gitDiscard).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    await waitFor(() =>
+      expect(mocks.gitDiscard).toHaveBeenCalledWith(["src/unstaged.ts"], "/proj", undefined),
     );
   });
 
@@ -219,6 +249,57 @@ describe("GitPanel", () => {
     expect(commitButton).toBeEnabled();
     fireEvent.click(commitButton);
     await waitFor(() => expect(mocks.gitCommit).toHaveBeenCalledWith("save changes", [], "/proj", undefined));
+  });
+
+  it("commits then pushes in one action", async () => {
+    const order: string[] = [];
+    mocks.gitCommit.mockImplementation(async () => {
+      order.push("commit");
+      return workspace.status;
+    });
+    mocks.gitPush.mockImplementation(async () => {
+      order.push("push");
+      return workspace.status;
+    });
+
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+    fireEvent.change(screen.getByPlaceholderText("Commit message for staged changes…"), {
+      target: { value: "ship it" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Commit & Push" }));
+
+    await waitFor(() => expect(mocks.gitPush).toHaveBeenCalledWith("/proj", false, undefined));
+    expect(mocks.gitCommit).toHaveBeenCalledWith("ship it", [], "/proj", undefined);
+    // Commit must complete before the push is attempted.
+    expect(order).toEqual(["commit", "push"]);
+    expect(screen.getByTestId("git-notice").textContent).toBe("committed and pushed");
+  });
+
+  it("does not push when the commit fails", async () => {
+    mocks.gitCommit.mockRejectedValueOnce(new Error("no changes added to commit"));
+
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+    fireEvent.change(screen.getByPlaceholderText("Commit message for staged changes…"), {
+      target: { value: "ship it" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Commit & Push" }));
+
+    await waitFor(() => expect(mocks.gitCommit).toHaveBeenCalled());
+    expect(mocks.gitPush).not.toHaveBeenCalled();
+  });
+
+  it("keeps Commit & Push disabled until a non-empty message is supplied", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+    const button = screen.getByRole("button", { name: "Commit & Push" });
+    expect(button).toBeDisabled();
+
+    fireEvent.change(screen.getByPlaceholderText("Commit message for staged changes…"), {
+      target: { value: "ship it" },
+    });
+    expect(button).toBeEnabled();
   });
 
   it("stages an unstaged file via the right-click context menu", async () => {
@@ -253,6 +334,8 @@ describe("GitPanel", () => {
     fireEvent.click(
       within(menu).getByRole("button", { name: "Delete untracked file" }),
     );
+    // The context-menu delete also confirms through the rendered dialog.
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
 
     await waitFor(() =>
       expect(mocks.gitHunk).toHaveBeenCalledWith(
@@ -659,6 +742,8 @@ describe("GitPanel per-file stash & multi-select", () => {
 
     const menu = await openContextMenuRow("src/unstaged.ts");
     fireEvent.click(within(menu).getByRole("button", { name: "Discard 2 files" }));
+    // A mixed tracked/untracked selection is a "Discard", not a "Delete".
+    fireEvent.click(await screen.findByRole("button", { name: "Discard" }));
 
     // Tracked members revert in one bulk call; the untracked one is removed
     // with the whole-file discard hunk (git cannot restore an untracked file).

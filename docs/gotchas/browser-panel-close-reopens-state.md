@@ -10,6 +10,8 @@ tags:
   - close
   - react
 timestamp: 2026-09-14T02:15:07Z
+status: deprecated
+deprecated_reason: Superseded by per-session side-pane scoping (2026-09-24). The cross-session propagation effect in App.tsx (which called browserActions.open(sideStateKey) for a new session when the old one was open) and the panelClosedByUser ref that caused the close-then-reopen bug were both removed. Pane open/collapsed state now lives under each session's own side:chat:<id> key in localStorage ocode.ui.sidebarPreview.v2; closing the pane in one chat never affects another chat, and switching to a different chat shows that chat's own (likely closed) pane. See gotchas/project-scope-is-mounting-not-visibility.md for the current mechanism.
 ---
 ## Problem
 

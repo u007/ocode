@@ -378,6 +378,17 @@ type agentSession struct {
 	// calls (advisor/compact) via OnSideUsage. Atomic: written by the turn
 	// goroutine and read by HTTP status handlers without taking as.mu.
 	spentMicros atomic.Int64
+	// inTokens/outTokens/cachedTokens/totalTokens are this session's accumulated
+	// LLM token counts, the headless counterpart of the TUI's sidebarTelemetry.
+	// Summed from each turn's Step messages' Usage plus side-path calls
+	// (advisor/compact) via OnSideUsage, and seeded from the persisted session
+	// metadata the TUI also reads/writes. Atomic for the same reason as
+	// spentMicros: written by the turn goroutine, read lock-free by HTTP status
+	// handlers (applySessionUsage must stay lock-free — see its doc).
+	inTokens     atomic.Int64
+	outTokens    atomic.Int64
+	cachedTokens atomic.Int64
+	totalTokens  atomic.Int64
 }
 
 func NewHandler() *Handler {

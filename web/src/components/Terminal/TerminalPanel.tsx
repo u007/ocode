@@ -238,6 +238,20 @@ export default function TerminalPanel({
   const dragMovedRef = useRef(false);
   const dragStartXRef = useRef(0);
   const dragStartYRef = useRef(0);
+  // Text of the selection as it stood when the user finished selecting.
+  // xterm stores a selection as buffer coordinates, not text: a program that
+  // redraws in place (claude code's Ink renderer, especially over a chunked
+  // ssh stream) rewrites the rows under those coordinates every frame, so a
+  // later getSelection() returns a partial/mutated line set. Every copy path
+  // that runs after release (Cmd+C, Edit-menu copy event, context menu)
+  // writes this snapshot instead. Cleared when xterm drops the selection.
+  const selectionSnapshotRef = useRef("");
+  // True from a mousedown in the container until the resulting selection has
+  // been copied. Gates the debounced onSelectionChange copy: xterm also fires
+  // that event on scrollback trim (every scroll while a selection exists),
+  // which must not re-copy the now-rewritten rows.
+  const userSelectingRef = useRef(false);
+  const copyDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; hasSelection: boolean } | null>(null);
   const ctxMenuRef = useRef<HTMLDivElement>(null);
@@ -341,14 +355,22 @@ export default function TerminalPanel({
     };
   }, [ctxMenu]);
 
-  const handleCopy = useCallback(async () => {
+  // Text every post-release copy path writes: the snapshot taken when the
+  // user finished selecting, while xterm still holds that selection. Falls
+  // through to a live read only for selections made without a pointer
+  // gesture (selectAll, API), which never took a snapshot.
+  const selectedTextForCopy = useCallback((): string => {
     const term = termRef.current;
-    if (!term) return;
-    const sel = term.getSelection();
+    if (!term || !term.hasSelection()) return "";
+    return selectionSnapshotRef.current || term.getSelection();
+  }, []);
+
+  const handleCopy = useCallback(async () => {
+    const sel = selectedTextForCopy();
     if (!sel) return;
     await writeClipboardText(sel);
     setCtxMenu(null);
-  }, []);
+  }, [selectedTextForCopy]);
 
   const handleSpeakSelection = useCallback(() => {
     const selection = termRef.current?.getSelection() ?? "";
@@ -393,13 +415,22 @@ export default function TerminalPanel({
   // selections whose release lands outside this container and
   // keyboard/programmatic selections.
   const copySelectionNow = useCallback(() => {
+    userSelectingRef.current = false;
+    if (copyDebounceRef.current !== null) {
+      clearTimeout(copyDebounceRef.current);
+      copyDebounceRef.current = null;
+    }
     const sel = termRef.current?.getSelection() ?? "";
     if (!sel) return false;
+    selectionSnapshotRef.current = sel;
     void writeClipboardText(sel);
     return true;
   }, []);
 
   const handleSelectAll = useCallback(() => {
+    // Not a pointer selection: no snapshot is taken, and the one from an
+    // earlier drag must not win over the live read in selectedTextForCopy.
+    selectionSnapshotRef.current = "";
     termRef.current?.selectAll();
     setCtxMenu(null);
   }, []);
@@ -613,11 +644,11 @@ export default function TerminalPanel({
   //     Clipboard API in pasteFromClipboard. The container `copy` listener
   //     below is the extra fallback for native Edit-menu-driven copies.
   const copyViaShortcut = useCallback(() => {
-    const sel = termRef.current?.getSelection() ?? "";
+    const sel = selectedTextForCopy();
     if (!sel) return false;
     void writeClipboardText(sel);
     return true;
-  }, []);
+  }, [selectedTextForCopy]);
 
   // Paste needs a Clipboard API read, which requires a user gesture and (in
   // WebKit) can be denied; on denial the terminal is focused so the user's
@@ -653,7 +684,7 @@ export default function TerminalPanel({
     const el = containerRef.current;
     if (!el) return;
     const onCopy = (e: ClipboardEvent) => {
-      const sel = termRef.current?.getSelection() ?? "";
+      const sel = selectedTextForCopy();
       if (!sel) return;
       // Record this copy EVEN when xterm's element-level handler already
       // answered it (defaultPrevented): the event is one half of a duplicate
@@ -667,7 +698,7 @@ export default function TerminalPanel({
     };
     el.addEventListener("copy", onCopy);
     return () => el.removeEventListener("copy", onCopy);
-  }, []);
+  }, [selectedTextForCopy]);
 
   // Keep host in this lifecycle's dependencies. HomeApp gates startup on a
   // successful project-metadata snapshot, while a deliberate host identity
@@ -824,15 +855,25 @@ export default function TerminalPanel({
     //     Clipboard API in pasteFromClipboard. The container `copy` listener
     //     below is the extra fallback for native Edit-menu-driven copies.
 
-  // Copy-on-selection debounce: xterm fires onSelectionChange continuously
+    // Copy-on-selection debounce: xterm fires onSelectionChange continuously
     // during a drag, so each event restarts the timer and the copy fires once
     // the selection has settled (i.e. at release). A cleared selection (plain
-    // click, typing, buffer switch) must never touch the clipboard.
-    let copyDebounceId: ReturnType<typeof setTimeout> | null = null;
+    // click, typing, buffer switch) must never touch the clipboard and drops
+    // the snapshot. Only a pointer-driven selection is copied here: xterm
+    // fires the same event on scrollback trim, when the rows under the
+    // selection may already hold rewritten content.
     const selectionDisp = term.onSelectionChange(() => {
-      if (copyDebounceId !== null) clearTimeout(copyDebounceId);
-      copyDebounceId = setTimeout(() => {
-        copyDebounceId = null;
+      if (copyDebounceRef.current !== null) {
+        clearTimeout(copyDebounceRef.current);
+        copyDebounceRef.current = null;
+      }
+      if (!term.hasSelection()) {
+        selectionSnapshotRef.current = "";
+        return;
+      }
+      if (!userSelectingRef.current) return;
+      copyDebounceRef.current = setTimeout(() => {
+        copyDebounceRef.current = null;
         copySelectionNow();
       }, 150);
     });
@@ -1339,7 +1380,10 @@ export default function TerminalPanel({
       observer.disconnect();
       dataSub.dispose();
       selectionDisp.dispose();
-      if (copyDebounceId !== null) clearTimeout(copyDebounceId);
+      if (copyDebounceRef.current !== null) {
+        clearTimeout(copyDebounceRef.current);
+        copyDebounceRef.current = null;
+      }
       bellDisp.dispose();
       titleDisp.dispose();
       osc0TitleDisp.dispose();
@@ -1510,6 +1554,7 @@ export default function TerminalPanel({
       onContextMenu={handleContextMenu}
       onMouseDown={(e) => {
         dragStartedRef.current = true;
+        userSelectingRef.current = true;
         dragMovedRef.current = false;
         dragStartXRef.current = e.clientX;
         dragStartYRef.current = e.clientY;

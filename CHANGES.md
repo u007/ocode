@@ -1,5 +1,325 @@
 # Changelog
 
+## 2026-09-24 — Side "Browser / Preview" pane scoped per chat session
+
+Opening the side preview/browser pane in one chat used to turn it on for every
+chat (and the previewed file was remembered per project, so a second chat
+inherited the first chat's file). Reported as *"when a side preview/browser is
+enabled for a chat session on desktop ui, it should be based on as per chat
+session, not enabled for all chat"*.
+
+- `web/src/App.tsx`: removed the effect that propagated the pane's `panelOpen`
+  state across session-tab switches, and the `panelClosedByUser` ref that only
+  existed to counteract it. The pane open/collapsed state already lived under
+  the per-session key `side:chat:<sessionId>` (`browserStore`); nothing now
+  copies it to other sessions. The AI `preview_open` activation still opens the
+  pane for the CURRENT session only.
+- `web/src/components/Preview/sidebarPreviewState.ts`: the pane's shell state
+  (surface + previewed file/page) is now keyed by the side stateKey
+  (`side:chat:<id>` / `side:term:<id>`) instead of `host::projectRoot`;
+  `STORAGE_KEY` bumped to `ocode.ui.sidebarPreview.v2` (v1 project-keyed entries
+  are intentionally orphaned). New `rekeySidebarPreviewState(old,new)`.
+- `web/src/lib/browserStore.ts`: new `browserActions.rekey(old,new)` to move a
+  surface's live state to a new key.
+- New `web/src/lib/sidePaneState.ts` (`rekeySidePaneState`): moves BOTH the live
+  browser surface and the persisted preview when a chat tab is rekeyed —
+  called from `App.rekeySession` (a `new-*` tab becoming its real `ses_...` id
+  on the first message) and from `sessionEvents.ts` in the `session_started`
+  and `session_rekeyed` (`/reset-id`) handlers. Without this the pane would
+  detach and close when the first message of a brand-new chat rekeys the tab.
+- Tests: `browserStore.test.ts` (rekey), new `sidebarPreviewState.test.ts` and
+  `sidePaneState.test.ts`, `PreviewHost.test.tsx` ("keeps each chat session's
+  preview separate within the SAME project"), and new App-level
+  `App.sidePaneScope.test.tsx` (open in s1, switch to s2 → closed, back → open).
+  PreviewHost and App tests mutation-verified against the old behavior.
+- Docs: `skills/ocode-web/SKILL.md`; knowledge bundle updated via the context agent.
+
+## 2026-09-24 — Web/desktop sidebar + status bar show per-session token totals
+
+The TUI sidebar has always shown a session's `In … Cache … Out …` token line
+(and its spend); the web/desktop surfaces only ever got those numbers from an
+attached TUI (the RC bridge), so a headless web or desktop chat showed no token
+breakdown at all. Reported as *"web and desktop chat missing the spent total
+input, cached and output token count on sidebar and statusbar alike tui"*.
+
+- Server (`internal/server/agent_session.go`, `handler.go`,
+  `handler_session_state.go`): `agentSession` gains four atomic token
+  accumulators (`inTokens`/`outTokens`/`cachedTokens`/`totalTokens`) mirroring
+  `spentMicros`, fed by each Step's messages (`addUsageFromMessages`, normalized
+  so a provider that folds cache reads into the prompt does not double-count)
+  and by side-path calls via `OnSideUsage` (`addRawUsage` — the tokens were
+  previously discarded). They are seeded from persisted metadata at agent build
+  and carried across agent rebuilds (`seedUsage`, monotonic per field), and
+  `persistSessionTelemetry` (replacing `persistSessionSpend`) writes spend +
+  the four token keys the TUI's `sidebarTelemetry` reads/writes in one metadata
+  update. `applySessionUsage` (renamed from `applySessionSpending`) fills
+  `input_tokens`/`output_tokens`/`cached_tokens`/`total_tokens` with the same
+  precedence as spend: live atomics → persisted metadata → (spend only) the
+  usage ledger. `agent.Message.Usage` is `json:"-"`, so the transcript cannot be
+  used to reconstruct tokens — metadata is the only cross-restart source.
+- Web (`web/src/components/Layout/CoworkSidebar.tsx`,
+  `components/common/StatusBar.tsx`, `components/Status/StatusPanel.tsx`): the
+  sidebar's Input/Cached/Output/Total block is now rendered independently of the
+  context gauge, so a restored session with no provider reading still shows its
+  persisted totals; the status bar's row 2 gained an `in … · cache … · out …`
+  segment; the status drill-down panel gained Input/Cached/Output/Total rows. All
+  are hidden when every count is 0 (no fabricated 0).
+- Tests (Go, mutation-verified): new `internal/server/session_usage_test.go`
+  (accumulation + cache-read normalization + seed + metadata keys + live/
+  metadata precedence + persistence round trip + `OnSideUsage` capture + a
+  `runTurn` end-to-end test); `session_spend_test.go` updated for the renamed
+  function. Web: new `CoworkSidebar.tokens.test.tsx` and
+  `StatusBar.tokens.test.tsx` (mutation-verified).
+- Docs: `skills/ocode-web/SKILL.md` §13; knowledge bundle page updated via the
+  context agent.
+- Note: the desktop app must be rebuilt/restarted to pick this up.
+
+## 2026-09-24 — Session tabs: per-chat running/stalled badge
+
+Each chat tab in the Sessions tab strip (`UnifiedTabBar`) now shows its live turn
+state, mirroring the project sidebar's per-project streaming/stalled badges — so a
+background chat that is running or has stopped is visible without opening it.
+
+- `web/src/components/Layout/UnifiedTabBar.tsx`: a fixed-size status slot on every
+  chat pill (plus the mobile/tablet dropdown trigger and rows) renders a blue
+  spinning `Loader2` while the chat is **running** (`slice.isStreaming ||
+  slice.turnActive`) and an amber `Pause` when it is **stalled** (`slice.turnStalled`
+  — no `turn_heartbeat` for 30s while a turn is active). Idle chats render an empty
+  slot. State is derived per chat slice (`deriveTurnState`), so a *background*
+  (non-active) tab shows it too. The slot is always rendered to avoid pill-width
+  reflow when the state flips (same rationale as the pending-dot slot). The existing
+  amber pending dot (waiting for a permission/question) is unchanged and independent.
+- Tests: `UnifiedTabBar.test.tsx` — running badge, stalled badge, idle → no glyph,
+  background tab, mobile-dropdown trigger + row parity (mutation-verified: forcing
+  `deriveTurnState` to `"idle"` fails 4 of them).
+- Docs: `skills/ocode-web/SKILL.md` §26(e).
+- Note: the desktop app must be rebuilt/restarted to pick this up.
+
+## 2026-09-24 — Cancelling a question is a stop, not an interrupted turn
+
+Dismissing a `question` prompt (the dialog's **Cancel** / Escape / X) was
+classified by the interrupted-turn rule as an *unfinished* tail, so right after
+the user deliberately stopped the turn the chat showed **"The previous reply was
+interrupted"** with a **Continue** button. Reported as *"if I cancel the
+question, it should not continue, should stop"*. Live repro: session
+`ses_2026-09-24-105933-be872bd7` ended on the dismissed-question tool row and
+`GET /api/sessions/{id}/state` returned `"interrupted":true`.
+
+- `internal/session/transcript_tail.go`: new `tailStopped` verdict. A trailing
+  tool run that resolved a question by **dismissal**
+  (`tool.QuestionDismissedResult`) — and holds no unanswered sentinel — now
+  reads as `tailStopped`, so `TranscriptTailUnfinished` is false and
+  `Handler.sessionInterrupted` reports `false`. Precedence: an unanswered
+  sentinel anywhere in the round still wins (`tailWaiting` — the dialog owns
+  it); an *answered* ask stays unfinished (a continuation round is owed), so
+  the 2026-09-22 crash-window detection is unchanged.
+- `web/src/stores/chatStore.tsx`: the `QUESTION_DISMISSED` reducer also clears
+  the server-derived `interrupted` flag, so the notice cannot linger between
+  the cancel and the next `/state` reconcile (the server now agrees on the same
+  poll).
+- Tests (all mutation-verified by temporary revert): `transcript_tail_test.go`
+  (`dismissed question tool row`, `dismissed question beside a completed tool
+  result`, `multi-ask round with a dismissal and an unanswered ask`);
+  `handler_session_interrupted_test.go` (`dismissed-question tail` → `false`);
+  `chatStore.test.tsx` (`QUESTION_DISMISSED` clears a pre-set `interrupted`).
+- Docs: `docs/concepts/interrupted-turn-notice.md` updated via the context
+  agent.
+- Note: the desktop app must be rebuilt/restarted to pick this up.
+
+## 2026-09-24 — Permissions: auto-permission settings now apply live to running chats
+
+Unchecking a category in Settings → Permissions (or changing the judge model, prompt,
+budgets, or the auto-approval toggle) had no effect on an already-open chat: the auto
+config was only read from the agent's build-time snapshot, and a profile-bound session
+held a *separate* config object, so the global save never reached it until a rebuild
+(new session / idle eviction / app restart).
+
+- `internal/agent/permissions.go`: the live auto config now lives on the
+  `PermissionManager` behind atomics — `autoConfig atomic.Pointer[config.AutoPermissionConfig]`
+  and `autoPermissionEnabled atomic.Bool` — with `SetAutoPermissionConfig` /
+  `AutoPermissionConfig`. `LoadFromOcode`, `SetMode`, `SetAutoPermissionEnabled`, `Clone`
+  and `ExportConfig` updated accordingly (`ExportConfig` now round-trips the full config so a
+  TUI export/import no longer drops the relaxed-concern set).
+- `internal/agent/agent.go` + `permission_interpreter.go` / `permission_typesafe.go`: every
+  runtime auto-config read (judge prompt, budgets, `min_confidence`, `allow_destructive`,
+  relaxed concerns, judge model) now goes through `Agent.autoPermissionConfig()` instead of
+  `a.config.Ocode.Permissions.Auto`.
+- `internal/server/handler_config.go`: `HandleSetAutoPermissionConfig` pushes the saved config
+  to every live agent (`h.allAgents()`), so the change lands on the running chat's next judge
+  call — no rebuild, no restart.
+- Tests (all mutation-verified): `permission_relaxed_concerns_test.go`
+  `TestSetAutoPermissionConfigAppliesLive` + `TestSetAutoPermissionConfigConcurrentReads`
+  (passes under `-race`); `handler_config_test.go`
+  `TestHandleSetAutoPermissionConfigPushesToLiveAgents` (fails with the push removed).
+- Docs: `skills/ocode-permissions/SKILL.md` §7 (live application + `relaxed_concerns`).
+- Residual: this is in-process only. A remote-SSH project's chat runs on the host's
+  `ocode serve --remote`; config sync happens at connect time, so a settings change still
+  requires reconnecting that host.
+
+## 2026-09-24 — Advisor: add `claude-opus-5-5` to the Claude Code CLI model list
+
+The advisor's Claude Code CLI section (`claude -p --model <alias>`) now offers
+**Opus 5.5** (`claude-opus-5-5`) alongside the existing aliases.
+
+- `internal/tui/picker.go`: `prependClaudeCodeSection` `claudeCodeModels` gains
+  `claude-opus-5-5`, appended after `claude-opus-5` (newest-in-family, matching
+  how `claude-sonnet-5`/`claude-opus-5` were added).
+- `web/src/components/Layout/modelSelection.ts`: `CLAUDE_CODE_ADVISOR_MODELS`
+  gains the same alias — the two lists are a documented sync pair.
+- Tests: `internal/tui/model_test.go` (`TestAdvisorPickerPrependsClaudeCodeModels`)
+  and the web sync guard in `modelSelection.test.ts` + a row assertion in
+  `ModelDialog.test.tsx`.
+- Docs: `docs/concepts/advisor-claude-code-backend.md` model list.
+
+## 2026-09-24 — Git tab: one-click "Commit & Push"
+
+The web/desktop Git tab had a **Commit** button and a separate push icon in
+the header, but no way to commit and push in a single action. The commit box
+now carries a **Commit & Push** button beside **Commit**.
+
+- `web/src/components/Git/GitPanel.tsx`: new `commitAndPush()` — the two calls
+  are chained (`await api.gitCommit(...)` then `await api.gitPush(...)`), so a
+  failed commit never triggers a push; a push failure surfaces through the same
+  sticky error banner as a plain push, and success shows the 5-second
+  "committed and pushed" notice. The button shares the Commit button's enable
+  condition (a non-empty message and pending changes).
+- Tests: `GitPanel.test.tsx` — commits-then-pushes ordering, no push when the
+  commit fails, and the disabled-until-message rule. Mutation-verified
+  (dropping the `gitPush` call fails the ordering test).
+- Docs: `skills/ocode-web/SKILL.md` file map.
+
+## 2026-09-24 — Permissions: honor `permissions.tools` for path-scoped tools (durable "always allow")
+
+A `delete` of an in-repo file was denied by the LLM auto-permission judge
+(Jev/TypeSafe). Root cause: `Decide`'s path-scoped branch
+(`internal/agent/permissions.go`) returned before the per-tool rule lookup at
+the bottom of `Decide`, so `permissions.tools.<tool>` was silently ignored for
+read/write/edit/delete/… `delete` hardcoded `ask`, so a configured
+`delete: "allow"` — exactly what the dialog's "always allow this tool" persists
+(`config.SaveSingleToolRule`) — still asked and routed the call to the judge,
+which denied it as `destructive` with `allow_destructive=false`.
+
+- `internal/agent/permissions.go` path-scoped block: an explicit tool-level
+  `deny` is now a `HardDeny` (the auto judge cannot override a user deny); the
+  in-scope, non-sensitive case now honors the tool rule — `ask` prompts (rule
+  `tool.delete.delete` kept for delete, else `tool.<tool>`), `allow` grants.
+  Sandbox mode still auto-allows the remaining in-workdir asks.
+- Security invariant preserved: a plain `allow` (the built-in `write`/`edit`
+  defaults, or a config `delete: "allow"`) still does not bypass the
+  out-of-scope/sensitive-path gates; only a user-confirmed allow does.
+- Tests: `permissions_test.go` —
+  `TestPermissions_ToolRuleHonoredForPathScopedTools`,
+  `TestPermissions_PersistedAlwaysAllowDeleteSurvivesReload`,
+  `TestPermissions_ToolRuleAllowDoesNotBypassScopeGates`,
+  `TestPermissions_Sandbox_DeleteHonorsExplicitDeny`,
+  `TestPermissions_PathPatternAllowBeatsToolDeny`.
+- Docs: `skills/ocode-permissions/SKILL.md` (sections 4 and 6a).
+
+## 2026-09-24 — Git tab: confirm destructive discard/delete before it runs
+
+Right-clicking a file in the Git tab and choosing "Delete untracked file" /
+"Discard changes" (or clicking the row's hover trash button) ran the mutation
+immediately — no confirmation. The desktop app's WKWebView silently no-ops
+native `window.confirm()`, so a `confirm()` gate would have failed there too;
+the flow now uses a rendered dialog, matching FileTree's `ConfirmDeleteDialog`.
+
+- `web/src/components/Git/GitPanel.tsx`: new `pendingDiscard` state +
+  `requestDiscard()` gate. Both the row hover trash button and the right-click
+  context-menu item now open a confirmation dialog instead of calling
+  `discardTargets()` directly; `doDiscard()` runs it on confirm. Wording is
+  status-aware: pure-untracked selections are "Delete" / "Delete N files?" (a
+  real on-disk delete), anything containing tracked files is "Discard" /
+  "Discard changes?" (revert to HEAD). Cancel is the default action.
+- Tests: `GitPanel.test.tsx` — the three existing discard tests now confirm
+  through the dialog, plus two new tests (untracked delete and tracked discard
+  require confirmation; Cancel leaves the file untouched). Mutation-verified
+  (bypassing `requestDiscard` fails 5 tests).
+- Not changed: the diff pane's per-hunk "Reverse hunk" / whole-file "Delete"
+  buttons still act immediately; only the file-list row actions (the reported
+  right-click path) are gated.
+
+## 2026-09-23 — Read: recover a macOS screenshot filename (U+202F) and make a missing target obvious
+
+macOS writes screenshot filenames with U+202F (NARROW NO-BREAK SPACE) before
+AM/PM; models routinely re-emit that path with a plain ASCII space, so a
+visually identical path failed to stat. The permission layer hard-denied it
+("read target does not exist") even though the file was right there — the link
+renderers already tolerated U+202F (`internal/tui/pathlink.go`,
+`web/src/lib/fileLinks.tsx`), only the read/permission path did not.
+
+- New `internal/tool/readpath.go`: `NormalizeUnicodeSpaces` (U+00A0, U+2007,
+  U+2009, U+202F, U+FEFF → ASCII space) and `ResolveReadTarget(abs, hintMax)`.
+  When the literal path is missing and exactly one sibling matches after
+  normalization (case preserved), that sibling is read; otherwise `Hint` names
+  the resolved path and nearby candidates for the denial message.
+- `ReadTool.Execute` / `ExecuteImage` resolve through the new
+  `confinedReadPath`, which re-confines the recovered sibling (a symlinked
+  sibling still cannot escape the allowed roots). Read-only by design:
+  write/edit keep the literal path so a create-new-file flow can never silently
+  clobber a differently-spaced existing file.
+- `permissions.go` read gate recovers the same variant before denying, and a
+  genuine miss now reports `read target does not exist: <path> — resolved to
+  <abs>; similar names in <dir>: "…"` (or `the parent directory does not
+  exist`), with non-ASCII spaces escaped (`\u202f`) so an invisible character
+  is visible.
+- `ReadTool` now implements `ContextualTool` (`ExecuteCtx`) and
+  `ContextualImageResultTool` (`ExecuteImageCtx`), so the agent passes the
+  session project root via `WithWorkDir`. The desktop app is launched from
+  Finder with cwd `/`, so a relative read previously resolved against `/` and
+  missed every project file — the search tools already anchored on the project
+  root (`TestSearchToolsUseContextWorkDir`), `ReadTool` was the outlier.
+  `Execute`/`ExecuteImage` stay as `context.Background()` wrappers for
+  non-agent callers, and `executeImageWithContext` (`agent.go`) prefers the
+  context-aware image read.
+- Tests: `internal/tool/readpath_test.go`,
+  `internal/tool/read_unicode_space_test.go`,
+  `internal/agent/permissions_read_target_test.go`,
+  `internal/agent/agent_image_context_test.go` — mutation-verified
+  (disabling recovery fails the read, vision, and permission recovery tests;
+  dropping the workdir ctx or the image type-assertion fails the anchoring
+  tests).
+
+## 2026-09-23 — Chat: no empty assistant bubble for whitespace-only content
+
+Thinking models (DeepSeek v4.1 flash, worst in tool-calling steps) emit bare
+newlines as the assistant `content` while the prose lives in
+`reasoning_content` and the final answer. `react-markdown` renders "\n\n" as an
+empty document, so the web chat showed a blank `bg-muted` bubble carrying
+nothing but its "Speak" button — reported as "empty chat text".
+
+- New `hasRenderableText(content)` helper (`web/src/components/Chat/MessageBubble.tsx`):
+  every `AssistantText` render site now gates on `content.trim().length > 0`.
+  Applied in `MessageBubble` (tool-calling branch + plain fallback) and
+  `ChatPanel` (grouped transcript entry + live streamed text parts).
+- The transcript is unchanged — the whitespace content is still sent to the
+  LLM; only the rendering is suppressed. Reasoning + tool calls still render.
+- Tests: `MessageBubble.test.tsx` (empty bubble/Speak suppressed on a
+  tool-calling step, null for whitespace-only with no tools, real text with
+  surrounding whitespace still renders) and `ChatPanel.test.tsx` (live
+  whitespace-only delta renders no Speak) — mutation-verified by reverting each
+  guard.
+
+## 2026-09-23 — Terminal: Cmd+C copies the text selected at release, not a later buffer read
+
+Copying from the desktop/web terminal while a program redraws in place
+(claude code's Ink renderer, worst over a chunked ssh stream) produced
+partial text. xterm stores a selection as buffer coordinates, and every copy
+path (Cmd+C keydown, Edit-menu `copy` event, context menu, and the debounced
+`onSelectionChange` fallback) re-read `getSelection()` at its own moment, by
+which time the rows under the selection had been erased or rewritten. xterm
+also fires `onSelectionChange` on scrollback trim, so the fallback kept
+re-copying mutated rows with no user action.
+
+- `TerminalPanel` snapshots the selection text at mouse-up (or when a drag
+  released outside the container settles). Later copy paths write that
+  snapshot while xterm still reports a selection; the snapshot is dropped when
+  the selection clears so Ctrl+C returns to SIGINT.
+- The debounced `onSelectionChange` copy only runs for a pointer-driven
+  selection (mousedown in the container); trim-driven events are ignored.
+- Tests: `TerminalPanel.copyOnSelect.test.tsx` covers Cmd+C and the copy event
+  after a redraw, trim-driven events, release outside the container, and
+  snapshot clearing.
+
 ## 2026-09-23 — HTR daemon: start/stop + tab list from Settings > Browser
 
 The managed `htrcli serve` daemon was auto-started at ocode boot but had no

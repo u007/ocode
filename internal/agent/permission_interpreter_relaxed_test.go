@@ -146,11 +146,11 @@ func TestVerifyInterpreterEffectsRelaxedKeepsSafetyFloor(t *testing.T) {
 // what the verifier actually applies.
 func TestVerifyInterpreterEffectsReadsAgentOptOuts(t *testing.T) {
 	a, _ := newVerifierAgent(t)
-	a.config.Ocode.Permissions.Auto = &config.AutoPermissionConfig{
-		Enabled:         true,
-		Model:           "openai/gpt-4o-mini",
-		RelaxedConcerns: []string{"network"},
-	}
+	setTestAutoPermissionConfig(a, func(cfg *config.AutoPermissionConfig) {
+		cfg.Enabled = true
+		cfg.Model = "openai/gpt-4o-mini"
+		cfg.RelaxedConcerns = []string{"network"}
+	})
 	ie := &InterpreterExec{Language: "python", SourceMode: "script_file", RawCommand: "python f.py"}
 	r := &interpreterModelResponse{Decision: "allow", Confidence: 0.95, Summary: "s"}
 	r.Effects.Network = []string{"example.com"}
@@ -159,7 +159,7 @@ func TestVerifyInterpreterEffectsReadsAgentOptOuts(t *testing.T) {
 		t.Fatalf("agent opt-out should have been applied, got %q", reason)
 	}
 	// A different category on the same response is still enforced.
-	a.config.Ocode.Permissions.Auto.RelaxedConcerns = []string{"secrets"}
+	setTestAutoPermissionConfig(a, func(cfg *config.AutoPermissionConfig) { cfg.RelaxedConcerns = []string{"secrets"} })
 	if ok, _ := a.verifyInterpreterEffects(ie, r, 0.85, false, false); ok {
 		t.Fatal("only the configured category may be relaxed")
 	}

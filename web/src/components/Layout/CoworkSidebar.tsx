@@ -937,26 +937,6 @@ export default function CoworkSidebar({
                         </span>
                       )}
                     </div>
-                    {(inputTokens > 0 || outputTokens > 0 || cachedTokens > 0 || totalTokens > 0) && (
-                      <div className="mt-2 space-y-0.5 text-[11px] text-muted-foreground">
-                        <div className="flex justify-between">
-                          <span>Input</span>
-                          <span className="font-mono">{formatTokenCount(inputTokens)}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span>Cached</span>
-                          <span className="font-mono">{formatTokenCount(cachedTokens)}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span>Output</span>
-                          <span className="font-mono">{formatTokenCount(outputTokens)}</span>
-                        </div>
-                        <div className="flex justify-between border-t border-border pt-0.5 mt-0.5 font-medium text-foreground">
-                          <span>Total</span>
-                          <span className="font-mono">{formatTokenCount(totalTokens > 0 ? totalTokens : inputTokens + outputTokens)}</span>
-                        </div>
-                      </div>
-                    )}
                   </>
                 ) : (
                   // No provider-reported usage yet (e.g. a restored session
@@ -974,6 +954,30 @@ export default function CoworkSidebar({
               ) : (
                 <div className="text-xs text-muted-foreground">
                   No context data yet
+                </div>
+              )}
+              {/* Per-session token breakdown, mirroring the TUI sidebar's
+                  "In … Cache … Out …" usage line. Rendered independently of the
+                  context gauge so a restored session whose provider reading is
+                  unknown still shows its persisted totals. */}
+              {(inputTokens > 0 || outputTokens > 0 || cachedTokens > 0 || totalTokens > 0) && (
+                <div className="mt-2 space-y-0.5 text-[11px] text-muted-foreground">
+                  <div className="flex justify-between">
+                    <span>Input</span>
+                    <span className="font-mono">{formatTokenCount(inputTokens)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Cached</span>
+                    <span className="font-mono">{formatTokenCount(cachedTokens)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Output</span>
+                    <span className="font-mono">{formatTokenCount(outputTokens)}</span>
+                  </div>
+                  <div className="flex justify-between border-t border-border pt-0.5 mt-0.5 font-medium text-foreground">
+                    <span>Total</span>
+                    <span className="font-mono">{formatTokenCount(totalTokens > 0 ? totalTokens : inputTokens + outputTokens)}</span>
+                  </div>
                 </div>
               )}
             </div>

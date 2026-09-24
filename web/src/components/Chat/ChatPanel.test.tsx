@@ -767,6 +767,21 @@ describe("ChatPanel", () => {
       expect(screen.getByText(/partial answer/)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /speak message/i })).toBeInTheDocument();
     });
+
+    // Thinking models stream bare newlines as the content of a tool-calling
+    // step. The live render used to emit an AssistantText for any text part,
+    // producing a blank bubble with only its Speak button (screenshot report
+    // 2026-09-23). Guard on hasRenderableText instead.
+    it("does not render an empty live text bubble for whitespace-only deltas", async () => {
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId="sess-blank-live" messages={[mk("user", "hi")]} live={["\n\n"]} />
+          <ChatPanel sessionId="sess-blank-live" />
+        </ChatProvider>,
+      );
+      await tick();
+      expect(screen.queryByRole("button", { name: /speak message/i })).not.toBeInTheDocument();
+    });
   });
 
   it("jumps to a match that is NOT yet rendered (unmeasured item)", async () => {

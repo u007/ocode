@@ -98,6 +98,12 @@ export default function StatusPanel({ onClose }: Props) {
   const cwd = snap?.cwd || "";
   const ctxCur = snap?.context_current_tokens ?? 0;
   const ctxMax = snap?.context_max_tokens ?? 0;
+  // Per-session token totals (input/cached/output/billed), mirroring the TUI
+  // sidebar's usage line. Absent/0 means unknown.
+  const inTokens = snap?.input_tokens ?? 0;
+  const cachedTokens = snap?.cached_tokens ?? 0;
+  const outTokens = snap?.output_tokens ?? 0;
+  const totalTokens = snap?.total_tokens ?? 0;
   const subagent = snap?.subagent_model || "";
   const extraPaths = snap?.extra_allowed_paths || [];
   // Prefer the dedicated /api/files/modified fetch; fall back to the
@@ -191,6 +197,18 @@ export default function StatusPanel({ onClose }: Props) {
             </>
           ) : (
             <Row k="Usage" v="(unknown)" />
+          )}
+          {(inTokens > 0 || cachedTokens > 0 || outTokens > 0) && (
+            <>
+              <Row k="Input tokens" v={inTokens.toLocaleString()} mono />
+              <Row k="Cached tokens" v={cachedTokens.toLocaleString()} mono />
+              <Row k="Output tokens" v={outTokens.toLocaleString()} mono />
+              <Row
+                k="Total tokens"
+                v={(totalTokens > 0 ? totalTokens : inTokens + outTokens).toLocaleString()}
+                mono
+              />
+            </>
           )}
           {snap?.context_model && <Row k="Model" v={snap.context_model} />}
         </section>

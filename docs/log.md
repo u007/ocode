@@ -29,6 +29,21 @@
 
 
 
+
+## 2026-09-24
+
+* **Creation**: Side Pane StateKey Convention: Per-Session Scoping ([gotchas/side-pane-statekey-convention.md](/gotchas/side-pane-statekey-convention.md))
+* **Update**: Web UI Mobile Layout Breakage (≤767px)" ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
+* **Update**: Project scoping is visibility, not mounting — React key remounts ([gotchas/project-scope-is-mounting-not-visibility.md](/gotchas/project-scope-is-mounting-not-visibility.md))
+* **Deprecation**: Browser Panel Close Reopens Deleted State: Superseded by per-session side-pane scoping (2026-09-24). The cross-session propagation effect in App.tsx (which called browserActions.open(sideStateKey) for a new session when the old one was open) and the panelClosedByUser ref that caused the close-then-reopen bug were both removed. Pane open/collapsed state now lives under each session's own side:chat:<id> key in localStorage ocode.ui.sidebarPreview.v2; closing the pane in one chat never affects another chat, and switching to a different chat shows that chat's own (likely closed) pane. See gotchas/project-scope-is-mounting-not-visibility.md for the current mechanism. ([gotchas/browser-panel-close-reopens-state.md](/gotchas/browser-panel-close-reopens-state.md))
+* **Update**: Embedded Browser Password Vault — Design ([superpowers/specs/2026-09-24-browser-password-vault-design.md](/superpowers/specs/2026-09-24-browser-password-vault-design.md))
+* **Update**: Per-session LLM spend accumulator ([gotchas/per-session-llm-spend-accumulator.md](/gotchas/per-session-llm-spend-accumulator.md))
+* **Creation**: Per-session LLM spend accumulator ([docs/gotchas/per-session-llm-spend-accumulator.md](/docs/gotchas/per-session-llm-spend-accumulator.md))
+* **Update**: Interrupted Turn Notice ([concepts/interrupted-turn-notice.md](/concepts/interrupted-turn-notice.md))
+* **Update**: Auto-permission settings not applied to a running chat ([gotchas/auto-permission-settings-not-applied-to-live-chat.md](/gotchas/auto-permission-settings-not-applied-to-live-chat.md))
+* **Creation**: Auto-permission settings not applied to a running chat ([gotchas/auto-permission-settings-not-applied-to-live-chat.md](/gotchas/auto-permission-settings-not-applied-to-live-chat.md))
+* **Creation**: Advisor Claude Code CLI backend on web/desktop ([docs/concepts/advisor-claude-code-backend.md](/docs/concepts/advisor-claude-code-backend.md))
+
 ## 2026-09-23
 
 * **Creation**: Embedded HTR Extension and Managed Daemon Design ([docs/superpowers/specs/2026-09-09-embedded-htr-extension-design.md](/docs/superpowers/specs/2026-09-09-embedded-htr-extension-design.md))
