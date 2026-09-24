@@ -117,7 +117,9 @@ Response: `{ items: PulseRow[], next_cursor: string | null }`.
 
 Sources:
 - Live registry: `SessionManager.Snapshot()` for project root, running
-  flag, turn timing, last turn error.
+  flag, turn timing. `sessionEntry` does not record turn errors today
+  (only `bootstrapErr`); add a last-turn-error field set where
+  `turn_error` is published and cleared on the next `turn_started`.
 - `Handler.RunStates()` for running agents.
 - `tailIsPermissionAsk` / `tailIsQuestionAsk` on the session's message
   tail for needs-you status and the ask summary.
