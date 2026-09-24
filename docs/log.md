@@ -31,6 +31,8 @@
 
 
 ## 2026-09-24
+* **Creation**: Tab Loading Indicators — Design Spec ([superpowers/specs/2026-09-24-tab-loading-indicators-design.md](/superpowers/specs/2026-09-24-tab-loading-indicators-design.md))
+* **Update**: Tab Loading Indicators — Design Spec ([superpowers/specs/2026-09-24-tab-loading-indicators-design.md](/superpowers/specs/2026-09-24-tab-loading-indicators-design.md))
 
 * **Update**: Browser Password Vault — Phase 1 Implementation Plan ([superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md))
 * **Creation**: Web "All sessions" dialog slow to open (render bottleneck, child filtering + pagination) ([gotchas/web-all-sessions-dialog-slow.md](/gotchas/web-all-sessions-dialog-slow.md))
