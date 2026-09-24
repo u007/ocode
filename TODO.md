@@ -2148,3 +2148,16 @@ Plan: `docs/superpowers/plans/2026-09-21-persistent-shell-session.md`
   session id never reaches the server, so the shell is only reclaimed by the idle
   reaper. A future fix would defer shell creation until the tab has a real id, or
   send an explicit rekey from the client.
+
+- **(password-vault) Phase 2: local iframe autofill.** Detect login fields in
+  the embedded browse origin (`internal/browse/capture.js` — the same injected
+  bundle that already rewrites script/asset URLs), show an in-field credential
+  icon, and fill/capture through `useBrowserMessages` handlers. Needs a
+  `BrowserPanel` save banner, a `CredentialPicker`, and a key button in
+  `AddressBar`. Plan/spec live under
+  `docs/superpowers/{plans,specs}/2026-09-24-browser-password-vault-*`.
+- **(password-vault) Phase 3: Chrome/CDP autofill.** Fill and collect via
+  `Target.Evaluate` with `vaultFill` / `vaultCollect` messages, plus a
+  `Page.addScriptToEvaluateOnNewDocument` field observer and
+  `Runtime.addBinding`; guard the observer with an `executionContextId` frame
+  check so it only acts on the main frame.

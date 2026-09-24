@@ -1,5 +1,158 @@
 # Changelog
 
+## 2026-09-24 — Browser password vault, phase 1: encrypted store + `/api/vault/*` + Settings → Passwords
+
+Server-side credential vault. **No autofill yet** — Phases 2 (local iframe) and
+3 (Chrome/CDP) are separate plans; this ships the encrypted store, the HTTP
+surface, and the management UI.
+
+- **`internal/vault/` (new package)**: an encrypted file at
+  `<GlobalDataDir>/browse/vault.json`, mode `0600`. A random 32-byte data key
+  (DK) is wrapped by an Argon2id-derived KEK (`time=3`, `memory_kib=65536`,
+  `threads=4`, 16-byte salt, key-wrap AAD `ocode-vault-key`); each item is
+  sealed **whole** with AES-256-GCM using its own `id` as AAD, so a blob moved
+  onto a different item fails to open rather than returning the wrong
+  credential. The master password is never stored. Writes are atomic (temp file +
+  `os.Rename`) under a cross-process OS file lock (`<path>.lock` — `flock` on
+  unix, `LockFileEx` on Windows), and every mutation is a load-modify-write that
+  **merges** the on-disk items (minus this process's tombstones) with its own:
+  saving a stale in-memory snapshot would silently erase a concurrent ocode
+  process's item. `ChangeMaster` re-wraps the same DK under a fresh salt, so
+  every item blob stays byte-identical.
+- **`internal/server/handler_vault.go` (new) + routes**: `/api/vault/status`,
+  `init`, `unlock`, `lock`, `items` (list/create), `items/{id}` (update/delete),
+  `items/{id}/reveal`, `match`, `change-master`, `generate`. Unlock state is
+  tracked per client-supplied `surface` — Settings uses `"settings"`, a browse
+  panel uses its `stateKey`, and `handleBrowseRevoke` revokes exactly that
+  surface when the panel closes. The surface is UX state, **not** a security
+  boundary; the auth token is. Malformed input is rejected rather than coerced:
+  `limit=abc` / `limit=-1` / `limit>1000` / `offset=abc` / `sort=username` are
+  **400**, and the sentinels map to `ErrWrongMaster`→401, `ErrLocked`→403,
+  `ErrNotFound`→404, `ErrExists`→409. Vault request bodies (master passwords,
+  secrets) never reach the debuglog, `/api/logs`, or access logs.
+- **Web**: `api.vault*` client methods plus `VaultItem` / `VaultItemMeta` /
+  `VaultStatus` / `VaultGenOptions` types; a new **Settings → Passwords** group
+  (`VaultForm.tsx`) with create/unlock/lock, an item table (reveal, copy, edit,
+  delete) and a Radix `Dialog` add/edit form with a password generator. The
+  master password lives only in its two inputs (cleared after init/unlock), and
+  revealed passwords are transient per-row state, never persisted client-side.
+- **No new config**: the vault path is derived from `paths.GlobalDataDir()`;
+  `.env.example` is unchanged.
+- Regression: `internal/vault` (crypto round-trip/AAD/tamper, file mode, lock
+  serialization, wrong-master, AAD binding, list sort/pagination, change-master,
+  foreign-item merge, no-plaintext-in-file), `internal/server`
+  (`handler_vault_test.go`: the 403/401/404/409/400 paths plus per-surface
+  grants), and web `client.vault.test.ts`, `VaultForm.test.tsx`,
+  `SettingsPanel.vault.test.tsx`. The AAD-binding, foreign-item-merge,
+  per-surface-grant, and pagination-400 tests were each mutation-verified.
+
+## 2026-09-24 — Web "All sessions" dialog: main sessions only + infinite-scroll pages
+
+Requested: *"all sessions dialog is too slow to popup, it needs to stream list
+and paginated via infinite scrolling, and also it should not show those child
+context, should be only main session."*
+
+Measured against a real project (6,646 sessions, 949 KB response): the dialog
+mounted **6,650 row buttons in ~0.73 s**. The bottleneck was the client render,
+not the fetch — the full list is needed for search anyway, so this is a
+client-side window, not a new paginated endpoint.
+
+- **`web/src/lib/sessionId.ts`** (new): `isChildSessionId(id)` — true when the
+  id contains the `_child_` infix. Child ("context") sessions are minted by the
+  agent as `<parentID>_child_<agentName>_<ts>`
+  (`internal/agent/child_session.go`); they are subagent execution detail, not
+  resumable conversations.
+- **`web/src/components/Layout/SessionDialog.tsx`**: filters child sessions out
+  before search/render, and renders the list in pages of
+  `SESSION_DIALOG_PAGE_SIZE` (50). An `IntersectionObserver` sentinel below the
+  last row streams in the next page as the user scrolls, with an explicit
+  "Load more (N remaining)" button as the fallback where
+  `IntersectionObserver` is unavailable (jsdom). The window resets to page one
+  on dialog open and on every search change; a background list revalidation
+  only clamps it so the user keeps their place. The store cache
+  (`projectStore.projectSessions`) and the unpaginated
+  `GET /api/projects/sessions` are unchanged, so a warm cached list still paints
+  instantly and older remote servers keep working.
+- **Verified in a real browser**: popup 0.73 s → **0.11 s**, first page 50 rows,
+  `Load more (6153 remaining)` — 50 + 6,153 = 6,203 = 6,646 − 443 children
+  exactly — and searching resets to page one.
+- **Tests**: `SessionDialog.test.tsx` (child hidden; first page + Load more),
+  `sessionId.test.ts`. Both mutation-verified (removing the filter / the slice
+  fails them).
+- **Known follow-up (not changed)**: the server still re-reads ~5,527 legacy
+  `.json`/`.ojsonl` session files per list request (~390 ms) and returns the
+  full payload; indexing legacy sessions is a separate optimization.
+
+## 2026-09-24 — Web/desktop chat sidebar: per-chat MCP server toggles
+
+Requested: *"need mcp toggle for desktop / web ui on the chat sidebar"*, scoped
+to *"the reflection only on current chat"*.
+
+Before this, `/mcp enable|disable` (and the Settings → MCP form) updated the
+process-wide config but **no live session's agent ever saw the change**: MCP
+tools are enumerated once into a process-wide `mcpCache` at Handler boot, and
+`buildAgentSession` reads it once. A toggle was effectively dead until an app
+restart. The chat sidebar's `/mcp` command also advertised `enable`/`disable`
+subcommands that did not exist.
+
+- **`internal/server/handler_mcp.go`**: `HandleListMCP` now accepts
+  `?session_id=` and reports that chat's effective enabled state;
+  `HandleSetMCPEnabled` accepts `?session_id=`, records a **per-session
+  override** (`h.mcpSessionOverrides`, guarded by a RWMutex), and rebuilds ONLY
+  that session's agent so the new tool set takes effect in the current chat.
+  The process-wide config is still persisted (`config.SaveMCPEnabled`), matching
+  `/mcp` semantics, so the choice is durable and applies to new sessions.
+  - `rebuildAgentForMCP` forces a rebuild (unlike `reconcileProfileAgent`, it
+    ignores profile/model equality — the tool set is what changed) and defers
+    when a turn is active (logs an `MCP` debuglog line; the next turn rebuilds).
+  - `mcpToolsForSession` re-enumerates MCP tools from the session's **effective
+    config copy** when it has overrides; sessions with no override keep the
+    process-wide `mcpCache` fast path. `applyMCPSessionOverrides` clones the MCP
+    map so the shared `h.cfg.MCP` is never mutated. Overrides are cleared on
+    session release (`clearMCPSessionOverrides` in the registry onEvict hook).
+- **`internal/server/agent_session.go`**: `buildAgentSession` prefers
+  `mcpToolsForSession` and falls back to `h.mcpCache.waitTimeout`.
+- **`internal/debuglog/debuglog.go`**: new `KindMCP`.
+- **`web/src/components/Layout/CoworkSidebar.tsx`**: new collapsible **MCP**
+  section (default collapsed, persisted with the other section keys) listing each
+  configured server with an on/off switch and an `enabled/total` count. The list
+  is fetched session-scoped (`api.getMCP(host, sessionId)`); a toggle PUTs with
+  the host + session id, flips optimistically, refetches, and rolls back on
+  failure. The fetch is an optional call so a partial client/mock leaves the
+  section empty instead of crashing the sidebar.
+- **`web/src/api/client.ts`**: `getMCP(host?, sessionId?)` and
+  `setMCPEnabled(name, enabled, host?, sessionId?)`.
+- **`web/src/components/Chat/commands.ts`**: `/mcp` passes the active session id
+  and its message now points at the sidebar toggle instead of advertising the
+  nonexistent `enable`/`disable` subcommands.
+- Tests: `internal/server/handler_mcp_session_test.go` (5, mutation-verified:
+  disabling `setMCPSessionOverride` fails 4) and
+  `web/src/components/Layout/CoworkSidebar.mcp.test.tsx` (4, mutation-verified:
+  dropping the session id from the fetch/PUT fails 2). `commands.hostScope.test.tsx`
+  assertions updated for the new arity and a new case pins session-id threading.
+- Live-verified: with process-wide `alpha` enabled, a session that toggled it
+  off reports it disabled via `GET /api/mcp?session_id=`, while the unscoped list
+  and other sessions keep the process-wide value.
+- Docs: `skills/ocode-web/SKILL.md`; knowledge bundle updated via the context agent.
+
+## 2026-09-24 — Web/desktop chat sidebar: cache hit % replaces the billed Total row
+
+The chat sidebar's Context section listed `Input / Cached / Output / Total` with
+raw token counts. Requested: *"chat sidebar on desktop and web ui also to show
+the context % of cache"* and *"dont need the total token"*.
+
+- `web/src/components/Layout/CoworkSidebar.tsx`: the `Cached` row now appends the
+  cache hit % (`cached ÷ (input + cached)`, rounded) — the same formula and
+  meaning as the TUI sidebar's `Cache <n> (<pct>%)` line, where `input_tokens`
+  is the normalized prompt count that excludes cache reads. The billed `Total`
+  row was removed (the context gauge already conveys overall usage). Input,
+  Cached and Output raw counts are unchanged.
+- Tests: `web/src/components/Layout/CoworkSidebar.tokens.test.tsx` — asserts the
+  cache % (`(23%)` for 300 cached / 1000 input) and that no `Total` row (nor its
+  `1.5k` value) renders. TUI sidebar and the StatusPanel/StatusBar surfaces were
+  left untouched (the request scoped this to the chat sidebar).
+- Docs: `skills/ocode-web/SKILL.md`; knowledge bundle updated via the context agent.
+
 ## 2026-09-24 — Side "Browser / Preview" pane scoped per chat session
 
 Opening the side preview/browser pane in one chat used to turn it on for every
