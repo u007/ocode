@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/monaco"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/secretjob"
@@ -33,6 +35,7 @@ import (
 	"github.com/u007/ocode/internal/sysperm"
 	"github.com/u007/ocode/internal/tabs"
 	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/vault"
 )
 
 type Handler struct {
@@ -103,6 +106,14 @@ type Handler struct {
 	// server is done once per process instead of once per session - see
 	// newMCPCache.
 	mcpCache *mcpCache
+	// mcpSessionOverrides holds per-session MCP enable/disable overrides keyed
+	// sessionID -> serverName -> enabled. The sidebar's MCP toggle persists the
+	// process-global config (matching /mcp) but ALSO records the choice here so
+	// only the toggling chat's agent picks it up on rebuild; other live chats
+	// keep their existing tool set until their own next rebuild. Empty/nil means
+	// "follow the process-wide config". Guarded by mcpSessionOverridesMu.
+	mcpSessionOverrides   map[string]map[string]bool
+	mcpSessionOverridesMu sync.RWMutex
 	// advisorEnabled is the process-wide runtime gate for the advisor tool,
 	// used by sessions with no per-session override and by the pre-session
 	// sidebar/Settings fallback. Seeded from config, flipped from the web
@@ -122,6 +133,14 @@ type Handler struct {
 	projectGroups    *projects.GroupStore
 	tabsStore        *tabs.Store
 	monaco           *monaco.Store
+	// vault is the password vault backed by <GlobalDataDir>/browse/vault.json;
+	// nil when the data dir could not be resolved (its handlers then 500).
+	// vaultGrants records which client surfaces have unlocked it; guarded by
+	// vaultMu. A surface is client-supplied UX state, not a security boundary —
+	// the auth token is the boundary.
+	vault       *vault.Vault
+	vaultMu     sync.Mutex
+	vaultGrants map[string]bool
 	// terminalAuthConfigured and terminalLoopback are set by Server.New. A
 	// terminal is only exposed without credentials when the server is bound to
 	// a loopback address.
@@ -426,21 +445,23 @@ func NewHandler() *Handler {
 	}
 
 	h := &Handler{
-		agents:           make(map[string]*agentSession),
-		cfg:              cfg,
-		advisorEnabled:   advisorEnabled,
-		workDir:          defaultWorkDir,
-		projects:         projStore,
-		projectGroups:    projGroupStore,
-		tabsStore:        tabsStore,
-		monaco:           monacoStore,
-		headlessSubs:     make(map[chan SSEEvent]struct{}),
-		toolOutput:       newToolOutputCoalescer(),
-		mcpCache:         newMCPCache(),
-		titleGen:         newTitleGenState(),
-		bus:              NewEventBus(),
-		terminalProcs:    newTerminalRegistry(),
-		terminalSessions: newTerminalSessionTable(),
+		agents:              make(map[string]*agentSession),
+		cfg:                 cfg,
+		advisorEnabled:      advisorEnabled,
+		workDir:             defaultWorkDir,
+		projects:            projStore,
+		projectGroups:       projGroupStore,
+		tabsStore:           tabsStore,
+		monaco:              monacoStore,
+		vaultGrants:         make(map[string]bool),
+		headlessSubs:        make(map[chan SSEEvent]struct{}),
+		toolOutput:          newToolOutputCoalescer(),
+		mcpCache:            newMCPCache(),
+		mcpSessionOverrides: make(map[string]map[string]bool),
+		titleGen:            newTitleGenState(),
+		bus:                 NewEventBus(),
+		terminalProcs:       newTerminalRegistry(),
+		terminalSessions:    newTerminalSessionTable(),
 		shellSessions: newShellSessionRegistry(func(opts shellpkg.SessionOptions) (shellSession, error) {
 			return shellpkg.NewSession(opts)
 		}, defaultSessionIdleTimeout, time.Now),
@@ -476,6 +497,9 @@ func NewHandler() *Handler {
 		if as != nil && as.agent != nil {
 			as.agent.Shutdown()
 		}
+		// Drop any per-session MCP overrides so the map doesn't grow one entry
+		// per session id the process has ever served.
+		h.clearMCPSessionOverrides(sessionID)
 	})
 
 	// Reap persistent `!` shells that have been idle past the session idle
@@ -499,6 +523,15 @@ func NewHandler() *Handler {
 		agent.DebugAppend = func(kind, msg string) {
 			debuglog.Log.Append(debuglog.Entry{Kind: debuglog.EntryKind(kind), Message: msg})
 		}
+	}
+
+	// The password vault is a single encrypted file beside the browse state. If
+	// the data dir cannot be resolved the vault stays nil and its handlers
+	// report 500 rather than silently writing somewhere unexpected.
+	if dataDir, err := paths.GlobalDataDir(); err != nil {
+		log.Printf("handler: resolve password vault path: %v (vault disabled)", err)
+	} else {
+		h.vault = vault.New(filepath.Join(dataDir, "browse", "vault.json"))
 	}
 	return h
 }

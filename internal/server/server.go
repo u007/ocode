@@ -225,6 +225,21 @@ func (s *Server) registerRoutes() {
 	// model id rides in the JSON body because "provider/model" ids contain "/".
 	s.mux.HandleFunc("PUT /api/models/favorite", s.authMiddleware(s.handler.HandleAddFavoriteModel))
 	s.mux.HandleFunc("DELETE /api/models/favorite", s.authMiddleware(s.handler.HandleRemoveFavoriteModel))
+	// Password vault. Unlock state is per client-supplied "surface" (granted on
+	// init/unlock, dropped by a surface-scoped lock, or by handleBrowseRevoke
+	// when a browse panel closes). Vault request bodies are never logged.
+	s.mux.HandleFunc("GET /api/vault/status", s.authMiddleware(s.handler.HandleVaultStatus))
+	s.mux.HandleFunc("POST /api/vault/init", s.authMiddleware(s.handler.HandleVaultInit))
+	s.mux.HandleFunc("POST /api/vault/unlock", s.authMiddleware(s.handler.HandleVaultUnlock))
+	s.mux.HandleFunc("POST /api/vault/lock", s.authMiddleware(s.handler.HandleVaultLock))
+	s.mux.HandleFunc("GET /api/vault/items", s.authMiddleware(s.handler.HandleVaultList))
+	s.mux.HandleFunc("GET /api/vault/items/{id}/reveal", s.authMiddleware(s.handler.HandleVaultReveal))
+	s.mux.HandleFunc("POST /api/vault/items", s.authMiddleware(s.handler.HandleVaultCreate))
+	s.mux.HandleFunc("PUT /api/vault/items/{id}", s.authMiddleware(s.handler.HandleVaultUpdate))
+	s.mux.HandleFunc("DELETE /api/vault/items/{id}", s.authMiddleware(s.handler.HandleVaultDelete))
+	s.mux.HandleFunc("POST /api/vault/match", s.authMiddleware(s.handler.HandleVaultMatch))
+	s.mux.HandleFunc("POST /api/vault/change-master", s.authMiddleware(s.handler.HandleVaultChangeMaster))
+	s.mux.HandleFunc("POST /api/vault/generate", s.authMiddleware(s.handler.HandleVaultGenerate))
 	s.mux.HandleFunc("GET /api/agents/runs", s.authMiddleware(s.handleListRuns))
 	s.mux.HandleFunc("GET /api/agents/runs/stream", s.authMiddleware(s.handleRunsStream))
 	s.mux.HandleFunc("GET /api/changes", s.authMiddleware(s.handleListChanges))
@@ -1036,6 +1051,11 @@ func (s *Server) handleBrowseRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.browse.Revoke(req.StateKey)
+	// A closed browse panel must lose its vault access: the surface id is the
+	// browse state key.
+	if s.handler != nil {
+		s.handler.VaultLockSurface(req.StateKey)
+	}
 	if err := os.RemoveAll(browseUploadDir(req.StateKey)); err != nil {
 		log.Printf("browse revoke: remove upload dir for %s: %v", req.StateKey, err)
 	}
