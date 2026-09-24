@@ -919,3 +919,37 @@ export interface RemoteTerminalEntry {
   started_at: string;
   attached: boolean;
 }
+
+// ── Password vault (Phase 1: server-side store + Settings UI) ──────────────
+
+/** Non-secret projection of a vault item (list + URL-match responses). */
+export interface VaultItemMeta {
+  id: string;
+  site: string;
+  url: string;
+  title: string;
+  username: string;
+}
+
+/** A full vault item, including its secret fields (reveal/create/update). */
+export interface VaultItem extends VaultItemMeta {
+  password: string;
+  notes: string;
+  created: string;
+  updated: string;
+}
+
+/** GET /api/vault/status. `unlocked` is true only when the requesting surface
+ *  holds an unlock grant, not merely when the process has a data key. */
+export interface VaultStatus {
+  exists: boolean;
+  unlocked: boolean;
+}
+
+/** POST /api/vault/generate options. Omitted fields default to false/20. */
+export interface VaultGenOptions {
+  length?: number;
+  upper?: boolean;
+  digits?: boolean;
+  symbols?: boolean;
+}

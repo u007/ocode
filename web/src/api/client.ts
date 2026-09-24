@@ -51,6 +51,10 @@ import type {
 	PortMapView,
 	PortMapTarget,
 	ContextBudgetReport,
+	VaultItem,
+	VaultItemMeta,
+	VaultStatus,
+	VaultGenOptions,
 } from "./types";
 
 import { noteSessionRevision } from "../lib/sessionRevision";
@@ -1147,7 +1151,12 @@ export const api = {
       body: JSON.stringify({ deviceCode }),
     }),
   syncLogout: () => fetchEmpty("/api/sync/logout", { method: "POST" }),
-  getMCP: (host?: string) => fetchJSON<MCPStatus[]>("/api/mcp", undefined, host),
+  getMCP: (host?: string, sessionId?: string) =>
+    fetchJSON<MCPStatus[]>(
+      sessionId ? `/api/mcp?session_id=${encodeURIComponent(sessionId)}` : "/api/mcp",
+      undefined,
+      host,
+    ),
   getAdvisor: (host?: string) =>
     fetchJSON<{ model: string }>("/api/config/advisor", undefined, host),
   setAdvisor: (model: string, host?: string) =>
@@ -1798,10 +1807,17 @@ export const api = {
     }, host),
 
   // ── MCP enable/disable ──
-  setMCPEnabled: (name: string, enabled: boolean) =>
+  // Passing a sessionId scopes the toggle to that chat: the server persists the
+  // global config (matching /mcp) but also records a per-session override and
+  // rebuilds only that session's agent, so the change takes effect in the
+  // current chat without disturbing others. host routes remote projects.
+  setMCPEnabled: (name: string, enabled: boolean, host?: string, sessionId?: string) =>
     fetchJSON<{ name: string; status: string }>(
-      `/api/mcp/${encodeURIComponent(name)}/${enabled ? "enable" : "disable"}`,
+      `/api/mcp/${encodeURIComponent(name)}/${enabled ? "enable" : "disable"}${
+        sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""
+      }`,
       { method: "PUT" },
+      host,
     ),
 
   // ── MCP OAuth (/mcp-auth) ──
@@ -2130,6 +2146,75 @@ export const api = {
   setPortMapEnabled: (remotePort: number, enabled: boolean, target?: PortMapTarget) =>
     fetchJSON<PortMapView[]>(portMapsPath(target, `/${remotePort}/${enabled ? "enable" : "disable"}`), {
       method: "POST",
+    }),
+
+  // ── Password vault ──
+  // Server-side, per-surface-unlocked credential store. Settings uses the
+  // fixed surface id "settings"; the vault is process-wide state, so these are
+  // deliberately NOT host-threaded (like the other Settings forms).
+  vaultStatus: (surface: string) =>
+    fetchJSON<VaultStatus>(`/api/vault/status?surface=${encodeURIComponent(surface)}`),
+  vaultInit: (master: string, surface: string) =>
+    fetchJSON<{ unlocked: boolean }>("/api/vault/init", {
+      method: "POST",
+      body: JSON.stringify({ master, surface }),
+    }),
+  vaultUnlock: (master: string, surface: string) =>
+    fetchJSON<{ unlocked: boolean }>("/api/vault/unlock", {
+      method: "POST",
+      body: JSON.stringify({ master, surface }),
+    }),
+  vaultLock: (surface?: string) =>
+    fetchEmpty("/api/vault/lock", {
+      method: "POST",
+      body: JSON.stringify(surface ? { surface } : {}),
+    }),
+  vaultList: (surface: string, opts: { sort?: string; limit?: number; offset?: number }) => {
+    const params = new URLSearchParams();
+    params.set("surface", surface);
+    // Send a value whenever the caller supplied one — the server rejects
+    // malformed input rather than coercing a default, so dropping it here
+    // would silently change behaviour.
+    if (opts.sort !== undefined) params.set("sort", opts.sort);
+    if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts.offset !== undefined) params.set("offset", String(opts.offset));
+    return fetchJSON<{ items: VaultItemMeta[]; total: number }>(
+      `/api/vault/items?${params.toString()}`,
+    );
+  },
+  vaultReveal: (id: string, surface: string) =>
+    fetchJSON<VaultItem>(
+      `/api/vault/items/${encodeURIComponent(id)}/reveal?surface=${encodeURIComponent(surface)}`,
+    ),
+  vaultCreate: (item: Partial<VaultItem>, surface: string) =>
+    fetchJSON<VaultItem>(`/api/vault/items?surface=${encodeURIComponent(surface)}`, {
+      method: "POST",
+      body: JSON.stringify(item),
+    }),
+  vaultUpdate: (id: string, item: Partial<VaultItem>, surface: string) =>
+    fetchJSON<VaultItem>(
+      `/api/vault/items/${encodeURIComponent(id)}?surface=${encodeURIComponent(surface)}`,
+      { method: "PUT", body: JSON.stringify(item) },
+    ),
+  vaultDelete: (id: string, surface: string) =>
+    fetchEmpty(
+      `/api/vault/items/${encodeURIComponent(id)}?surface=${encodeURIComponent(surface)}`,
+      { method: "DELETE" },
+    ),
+  vaultMatch: (url: string, surface: string) =>
+    fetchJSON<{ items: VaultItemMeta[] }>("/api/vault/match", {
+      method: "POST",
+      body: JSON.stringify({ url, surface }),
+    }),
+  vaultChangeMaster: (oldMaster: string, newMaster: string) =>
+    fetchEmpty("/api/vault/change-master", {
+      method: "POST",
+      body: JSON.stringify({ old: oldMaster, new: newMaster }),
+    }),
+  vaultGenerate: (opts: VaultGenOptions) =>
+    fetchJSON<{ password: string }>("/api/vault/generate", {
+      method: "POST",
+      body: JSON.stringify(opts),
     }),
 };
 
