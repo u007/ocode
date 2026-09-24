@@ -31,6 +31,7 @@
 
 
 ## 2026-09-24
+* **Creation**: Plan: Tab Loading Indicators ([superpowers/plans/2026-09-24-tab-loading-indicators.md](/superpowers/plans/2026-09-24-tab-loading-indicators.md))
 * **Creation**: Tab Loading Indicators — Design Spec ([superpowers/specs/2026-09-24-tab-loading-indicators-design.md](/superpowers/specs/2026-09-24-tab-loading-indicators-design.md))
 * **Update**: Tab Loading Indicators — Design Spec ([superpowers/specs/2026-09-24-tab-loading-indicators-design.md](/superpowers/specs/2026-09-24-tab-loading-indicators-design.md))
 
