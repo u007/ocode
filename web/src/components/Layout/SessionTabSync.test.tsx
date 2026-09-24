@@ -81,6 +81,11 @@ describe("SessionTabSync", () => {
     }
     expect(subscribed.has("text")).toBe(true);
     expect(subscribed.has("turn_started")).toBe(true);
+    // Explicit pin (beyond the ROUTABLE_EVENTS loop above, which would silently
+    // stop checking it if the event were dropped from the set): the headless
+    // agent-loop activity feed only reaches the status bar if the SSE transport
+    // actually subscribes to it.
+    expect(subscribed.has("agent_activity")).toBe(true);
   });
 
   it("routes a live 'text' envelope into the session's store slice", () => {

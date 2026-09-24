@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-24T07:51:20Z
+---
 # Part 07 — Web API client + types
 
 ## Files

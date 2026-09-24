@@ -371,6 +371,84 @@ describe("routeBusEnvelope", () => {
     expect(getState().sessions["s1"].bootstrapStage).toBe("mcp");
   });
 
+  // The headless server's live agent-loop feed. Before this, the bottom status
+  // bar's "⟳ llm · ⚙ tool · @ agent" row only ever filled in when a TUI was
+  // attached; web chat and desktop chat are both headless, so it showed a bare
+  // tool name or "working…" instead. The `agent_activity` frame merges the three
+  // activity fields into tuiStatus so StatusBar's existing renderer works
+  // against either source.
+  it("agent_activity merges live agent-loop activity into the session's status snapshot", () => {
+    const { router, actions, getState } = makeRouter(["s1"]);
+    // A full status snapshot arrives first (turn start): model + context are
+    // the fields the rest of the status bar renders.
+    routeBusEnvelope(
+      env("status", { data: { main_model: "anthropic/claude", context_current_tokens: 1234 } }),
+      router,
+    );
+    routeBusEnvelope(
+      env("agent_activity", {
+        data: {
+          session_id: "s1",
+          llm_running: true,
+          active_tools: [{ name: "bash", started_at: "2026-09-24T10:00:00Z" }],
+          active_agents: ["code-reviewer"],
+        },
+      }),
+      router,
+    );
+
+    expect(actions.some((a) => a.type === "SET_AGENT_ACTIVITY")).toBe(true);
+    const snap = getState().sessions["s1"].tuiStatus;
+    expect(snap?.llm_running).toBe(true);
+    expect(snap?.active_tools).toEqual([{ name: "bash", started_at: "2026-09-24T10:00:00Z" }]);
+    expect(snap?.active_agents).toEqual(["code-reviewer"]);
+    // The merge must NOT clobber the rest of the snapshot — that is the whole
+    // reason this is a separate event instead of a partial `status` payload.
+    expect(snap?.main_model).toBe("anthropic/claude");
+    expect(snap?.context_current_tokens).toBe(1234);
+  });
+
+  // A tool that finished publishes a frame with no tools left. Without this the
+  // bar would keep showing a dead "⚙ bash" for the rest of the turn.
+  it("agent_activity with an empty payload clears the running tools", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(
+      env("agent_activity", {
+        data: { session_id: "s1", active_tools: [{ name: "bash" }], active_agents: ["scout"] },
+      }),
+      router,
+    );
+    routeBusEnvelope(env("agent_activity", { data: { session_id: "s1" } }), router);
+
+    const snap = getState().sessions["s1"].tuiStatus;
+    expect(snap?.llm_running).toBe(false);
+    expect(snap?.active_tools).toEqual([]);
+    expect(snap?.active_agents).toEqual([]);
+  });
+
+  // Turn boundary: nothing is running any more, so a late frame must not park a
+  // dead "⟳ llm" in the snapshot that the NEXT turn would inherit.
+  it("turn_done clears the live agent activity", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(
+      env("status", { data: { main_model: "anthropic/claude" } }),
+      router,
+    );
+    routeBusEnvelope(
+      env("agent_activity", { data: { session_id: "s1", llm_running: true, active_tools: [{ name: "bash" }] } }),
+      router,
+    );
+    expect(getState().sessions["s1"].tuiStatus?.llm_running).toBe(true);
+
+    routeBusEnvelope(env("turn_done", { data: { session_id: "s1" } }), router);
+    const snap = getState().sessions["s1"].tuiStatus;
+    expect(snap?.llm_running).toBeUndefined();
+    expect(snap?.active_tools).toBeUndefined();
+    expect(snap?.active_agents).toBeUndefined();
+    // Clearing activity must not disturb the rest of the status snapshot.
+    expect(snap?.main_model).toBe("anthropic/claude");
+  });
+
   it("session_started rekeys a new-* tab and keeps the routing set in sync", () => {
     const { router, actions, projectActions } = makeRouter(["new-123"]);
     setDraft("new-123", "draft");

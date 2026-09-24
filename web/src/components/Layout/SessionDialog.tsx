@@ -5,10 +5,16 @@ import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
 import { cancelLiveDeltas, closeSessionBackend } from "../../lib/sessionEvents";
 import { prefetchSession } from "../../lib/sessionPrefetch";
+import { isChildSessionId } from "../../lib/sessionId";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { MessageSquare, Plus, X, Loader2, Check } from "lucide-react";
+
+/** How many sessions render per page. The list infinite-scrolls: the first
+ *  page paints instantly even for projects with thousands of sessions, and
+ *  further rows stream in as the user scrolls. */
+export const SESSION_DIALOG_PAGE_SIZE = 50;
 
 export default function SessionDialog() {
   const { state: projectState, tabs, activeTabId, openSessionTab, closeSessionTab, toggleSessionPicker, openNewSessionTab, prefetchProjectSessions } = useProjectState();
@@ -17,7 +23,10 @@ export default function SessionDialog() {
 
   const [searchQuery, setSearchQuery] = useState("");
   const [pendingClose, setPendingClose] = useState<{ tabId: string; title: string } | null>(null);
+  const [visibleCount, setVisibleCount] = useState(SESSION_DIALOG_PAGE_SIZE);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
 
   // Auto-focus search input when dialog opens
   const handleOpenChange = useCallback((open: boolean) => {
@@ -27,14 +36,56 @@ export default function SessionDialog() {
     }
   }, [toggleSessionPicker]);
 
+  // Main sessions only — child ("context") sessions are subagent execution
+  // detail, not resumable conversations (see lib/sessionId.ts).
+  const mainSessions = useMemo(
+    () => projectSessions.filter((s) => !isChildSessionId(s.id)),
+    [projectSessions],
+  );
+
   // Filter sessions by search query
   const filteredSessions = useMemo(() => {
-    if (!searchQuery.trim()) return projectSessions;
+    if (!searchQuery.trim()) return mainSessions;
     const q = searchQuery.toLowerCase();
-    return projectSessions.filter(
+    return mainSessions.filter(
       (s) => s.title?.toLowerCase().includes(q) || s.id.toLowerCase().includes(q)
     );
-  }, [projectSessions, searchQuery]);
+  }, [mainSessions, searchQuery]);
+
+  // Reset the window whenever the query changes (a new search starts at page
+  // one) or the dialog is (re)opened. A background list revalidation does NOT
+  // reset it — the window is clamped instead, so the user keeps their place.
+  useEffect(() => {
+    if (sessionPickerOpen) setVisibleCount(SESSION_DIALOG_PAGE_SIZE);
+  }, [sessionPickerOpen, searchQuery]);
+
+  const visibleCountClamped = Math.min(visibleCount, filteredSessions.length);
+  const visibleSessions = useMemo(
+    () => filteredSessions.slice(0, visibleCountClamped),
+    [filteredSessions, visibleCountClamped],
+  );
+  const hasMore = visibleCountClamped < filteredSessions.length;
+
+  const loadMore = useCallback(() => {
+    setVisibleCount((c) => c + SESSION_DIALOG_PAGE_SIZE);
+  }, []);
+
+  // Infinite scroll: load the next page when the sentinel below the last row
+  // enters view. Guarded so jsdom (no IntersectionObserver) falls back to the
+  // explicit "Load more" button rendered alongside the sentinel.
+  useEffect(() => {
+    if (!hasMore) return;
+    const sentinel = sentinelRef.current;
+    if (!sentinel || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) loadMore();
+      },
+      { root: listRef.current, rootMargin: "240px 0px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, loadMore]);
 
   // The per-project session list is cached and revalidated in the background
   // on switch, so it can be slightly stale. Opening the picker is the one
@@ -123,7 +174,7 @@ export default function SessionDialog() {
         </div>
 
         {/* Session list */}
-        <div className="flex-1 overflow-y-auto px-4 pb-4 min-h-0 max-h-[50vh]">
+        <div ref={listRef} className="flex-1 overflow-y-auto px-4 pb-4 min-h-0 max-h-[50vh]">
           {sessionsLoading ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
@@ -134,7 +185,7 @@ export default function SessionDialog() {
             </div>
           ) : (
             <div className="space-y-1">
-              {filteredSessions.map((session) => {
+              {visibleSessions.map((session) => {
                 const open = isTabOpen(session.id);
                 const current = isCurrentSession(session.id);
                 const loading = false;
@@ -210,6 +261,20 @@ export default function SessionDialog() {
                   </button>
                 );
               })}
+
+              {/* Infinite-scroll sentinel + fallback for environments without
+                  IntersectionObserver (e.g. jsdom in tests). */}
+              {hasMore && (
+                <div ref={sentinelRef} className="pt-2">
+                  <button
+                    type="button"
+                    onClick={loadMore}
+                    className="w-full rounded-md px-3 py-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                  >
+                    Load more ({filteredSessions.length - visibleCountClamped} remaining)
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

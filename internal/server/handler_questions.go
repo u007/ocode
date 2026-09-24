@@ -286,6 +286,10 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	// continuation unwinds, exactly like the permission-resolve path.
 	defer h.drainPendingClose(sessID)
 	defer stopHeartbeat()
+	// Live agent-loop activity for the web/desktop status bar, same as runTurn
+	// (a no-op when a TUI bridge owns the feed). Declared last so it runs first.
+	stopActivity := h.startAgentActivityBroadcast(sessID, as.agent)
+	defer stopActivity()
 
 	// Tell every watcher the dialog can be dismissed NOW — before the
 	// continuation round. The answer is already applied in `working`; a slow

@@ -73,6 +73,8 @@ describe("useTurnWatchdogAll", () => {
     // timers (lastHeartbeatAt stamping relies on it).
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     mockGetSessionState.mockReset();
+    // Vitest 4: restoreAllMocks no longer clears vi.fn() call history.
+    mockGetSession.mockReset();
   });
   afterEach(() => {
     vi.useRealTimers();

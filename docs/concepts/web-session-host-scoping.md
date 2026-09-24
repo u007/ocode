@@ -36,7 +36,7 @@ scoped:
 | Command | Scoped call |
 |---------|------------|
 | `/lsp` | `api.getLSPStatuses(host)` |
-| `/mcp` | `getMCP(host)` |
+| `/mcp` | `getMCP(host, sessionId)` (session-scoped so per-chat MCP overrides apply — see `per-chat-mcp-toggle.md`) |
 | `/session list` | `listSessions(undefined, host)` |
 | `/standup` · `/changes` · `/review` | `getCommandContext(name, args, project, host)` → `GET /api/command-context/{name}?args=&project=` |
 | `/docs status\|init\|update\|cleanup` | project + host |

@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-24T07:50:33Z
+---
 # Part 03 — Vault public API
 
 ## Files

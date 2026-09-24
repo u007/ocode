@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-24T07:51:31Z
+---
 # Part 08 — VaultForm settings UI
 
 ## Files

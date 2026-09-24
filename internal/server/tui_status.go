@@ -157,6 +157,24 @@ type ToolActivityStatus struct {
 	StartedAt string `json:"started_at,omitempty"`
 }
 
+// AgentActivityEvent is the payload of the session-scoped `agent_activity`
+// event: the agent-loop activity fields of TUIStatus and nothing else.
+//
+// It exists because the web's SET_TUI_STATUS replaces the whole snapshot, so a
+// PARTIAL `status` payload would blank model/context/spend. The TUI avoids the
+// problem by re-broadcasting a complete snapshot on every activity change;
+// headless web/desktop has no TUI to do that, so it sends this merged-into-
+// place event instead and the client merges these three fields.
+//
+// The field names deliberately match TUIStatus so StatusBar's existing
+// renderer (runningStatusParts) works unchanged against either source.
+type AgentActivityEvent struct {
+	SessionID    string               `json:"session_id"`
+	LLMRunning   bool                 `json:"llm_running,omitzero"`
+	ActiveTools  []ToolActivityStatus `json:"active_tools,omitempty"`
+	ActiveAgents []string             `json:"active_agents,omitempty"`
+}
+
 // LSPStatus mirrors lsp.ServerStatus plus a coarse state string the web can
 // render without knowing LSP internals.
 type LSPStatus struct {

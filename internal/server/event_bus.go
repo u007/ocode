@@ -74,6 +74,13 @@ var sessionScopedEvents = map[string]bool{
 	"md_indexing":         true,
 	"error":               true,
 	"runs":                true,
+	// Live agent-loop activity (llm_running / active_tools / active_agents) for
+	// the web/desktop status bar. Headless-only: a TUI bridge publishes the same
+	// fields through its own complete `status` snapshots instead. Deliberately
+	// NOT in liveFrameEvents (session_manager.go) — activity is a momentary
+	// reading, so replaying it into a mid-turn reload would show a stale
+	// "⟳ llm" for a tool that already finished.
+	"agent_activity": true,
 }
 
 // EventBus is the single server-side broadcaster. Every published event is

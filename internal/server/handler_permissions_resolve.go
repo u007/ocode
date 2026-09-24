@@ -314,6 +314,10 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// continuation unwinds, exactly like the async-job and sync-turn paths.
 	defer h.drainPendingClose(sessID)
 	defer stopHeartbeat()
+	// Live agent-loop activity for the web/desktop status bar, same as runTurn
+	// (a no-op when a TUI bridge owns the feed). Declared last so it runs first.
+	stopActivity := h.startAgentActivityBroadcast(sessID, as.agent)
+	defer stopActivity()
 
 	resp, err := as.agent.Step(working)
 	if err != nil {

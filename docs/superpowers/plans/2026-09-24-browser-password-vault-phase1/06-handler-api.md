@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-24T07:51:10Z
+---
 # Part 06 — Server handlers, routes, per-surface grants
 
 ## Files

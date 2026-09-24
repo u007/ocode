@@ -9,8 +9,17 @@ tags:
   - tui
   - web
   - session
-timestamp: 2026-09-24T04:00:00Z
+timestamp: 2026-09-24T06:00:41Z
+resource: web/src/components/Layout/CoworkSidebar.tsx
 ---
+# Per-session LLM spend accumulator
+
+**Type:** Gotcha  
+**Description:** Per-session LLM spend and token totals — persistence keys, seeding, carry-on-replace, and the daily-total fallback  
+**Tags:** spend, tokens, telemetry, tui, web, session  
+
+---
+
 # Per-session LLM spend accumulator
 
 ## Summary
@@ -75,10 +84,12 @@ usage-ledger rows via `usage.SessionSpend`; tokens do not.
 Tokens are populated for headless (non-TUI) web/desktop sessions by
 `applySessionUsage`; previously only an attached TUI (RC bridge) supplied them,
 so a headless chat showed no token breakdown. Web surfaces: CoworkSidebar (an
-Input/Cached/Output/Total block, rendered independently of the context gauge so
-a restored session with no provider reading still shows its totals), StatusBar
-row 2 (`in … · cache … · out …`), and StatusPanel (token rows). All are hidden
-when every count is 0 — never a fabricated 0.
+Input/Cached(+cache %)/Output block with no billed Total row — the Cached row
+appends the cache hit % (`cached ÷ (input + cached)`, rounded), mirroring the
+TUI sidebar's `Cache <n> (<pct>%)` line — rendered independently of the context
+gauge so a restored session with no provider reading still shows its totals),
+StatusBar row 2 (`in … · cache … · out …`), and StatusPanel (token rows). All
+are hidden when every count is 0 — never a fabricated 0.
 
 ## TUI mirror
 
@@ -110,5 +121,5 @@ from the ledger.
 - `internal/server/session_spend_test.go`
 - `internal/server/session_usage_test.go` (incl. `TestRunTurnAccumulatesSessionTokens`)
 - `internal/tui/model_test.go` `TestBuildTUIStatusSnapshotIncludesSessionSpend`
-- `web/src/components/Layout/CoworkSidebar.tokens.test.tsx`
+- `web/src/components/Layout/CoworkSidebar.tokens.test.tsx` (now also asserts the cache hit % on the Cached row and the absence of the Total row)
 - `web/src/components/common/StatusBar.tokens.test.tsx`

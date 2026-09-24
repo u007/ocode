@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-24T07:51:50Z
+---
 # Part 10 — Docs, TODO, and full gates
 
 ## Files

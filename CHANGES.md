@@ -1,5 +1,128 @@
 # Changelog
 
+## 2026-09-24 — Kaizen: space-bunny-free baseline across all 15 stacks
+
+- New closed-book eval for **`space-bunny-free`** (`opencode-go`, version recorded as `"alpha"` — the provider publishes no version string) on every corpus. Answered through `ocode run -m opencode-go/space-bunny-free -effort med`, one headless session per stack sheet, cwd = an empty scratch dir holding only the `_prompts/<stack>.md` sheet (attached with `-f`). Every answerer session was audited in the sqlite store afterwards: 16/16 are exactly one user turn + one assistant turn, **zero tool calls**, so no repo file or answer key was reachable. Graders were separate agents per stack.
+- Stack scores: python 99.3, php 98.2, ruby 98, react 97, nextjs 97, ror 96.6, golang 95.9, rust 94.6, nestjs 94.0, dotnet 93, tanstack 92.6, csharp 91.1, elixir 89, vbnet 88, conduct 86.1. No flat sweep; every stack has own-wording answers with the model's own errors (contamination check clean on all 15).
+- Below threshold → **4 derived skills**: conduct (validation 0.64, error-handling 0.73, testing 0.67 — hedged "normally no" on empty catch, no always-log-on-rethrow, failing-test-first not stated as the rule), csharp (types-nullability 0.73 — record init-only default, value-vs-reference defaults, `!!` never shipped), elixir (pipe-with 0.69 — failed `with` returns the non-matching value, `IO.inspect` returns its argument), rust (async 0.71, low-n — std ships no executor, cooperative yield only at `.await`). Synced into `skills/kaizen/*-tuning-space-bunny-free/` via `sync-derived-skills.py`; `go build` + `internal/skill` tests pass.
+- Answer-sheet hygiene fixed by hand before grading, all id-only: nestjs emitted a hallucinated `validation-placeholder` record (dropped), nextjs/tanstack/dotnet mislabeled one id each (renamed after confirming the answer body matched the question), rust skipped `rust-ownership-03` (re-asked alone, closed-book, appended), dotnet's first run returned empty (re-run whole sheet).
+- Runner gotcha: `ocode run` launched from a backgrounded shell job inherits an open stdin socket and blocks forever in `read(0)` before creating the client — 15 parallel runs sat idle for 30 min with empty stderr. Redirect `< /dev/null`.
+- Files: `docs/okf/<stack>/answers/space-bunny-free.md` and `docs/okf/<stack>/scores/space-bunny-free.md` for all 15 stacks, `docs/okf/{conduct,csharp,elixir,rust}/derived/*.space-bunny-free.SKILL.md`, `skills/kaizen/{conduct,csharp,elixir,rust}-tuning-space-bunny-free/SKILL.md`, `docs/index.md`, `CHANGES.md`.
+- Version: `internal/version/version.go` 0.8.108 → 0.8.110 for this batch.
+
+## 2026-09-24 — web: `pnpm audit` clean (12 advisories → 0)
+
+- **xlsx** `^0.18.5` → `0.20.3`, now installed from the SheetJS CDN tarball
+  (`https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz`). The fix for the two
+  high advisories (prototype pollution, ReDoS) was never published to npm, so
+  installs now need to reach `cdn.sheetjs.com`. `ExcelViewer` API use
+  (`read`, `utils.decode_range`, `utils.sheet_to_json`) is unchanged.
+- **vitest** `^3.0.0` → `^4.1.11` (GHSA-82fw-gwwq-j7x9). Two Vitest 4 breaking
+  changes needed test fixes: `vi.restoreAllMocks()` no longer clears `vi.fn()`
+  call history (`useTurnWatchdog.test.tsx` now resets `mockGetSession` in
+  `beforeEach`), and an arrow-function `vi.fn` can't be called with `new`
+  (`TerminalPanel.webgl.test.tsx` mocks `Terminal` with a `function`).
+- **postcss** floor `^8.5.23`; autoprefixer/tailwindcss re-resolved so the
+  transitive `nanoid`, `browserslist`, `baseline-browser-mapping` and
+  `postcss-selector-parser` pick up patched versions.
+- **Dockerfile**: the web UI step ran `npm ci`, which fails on this pnpm
+  project (no `package-lock.json`). It now builds in a `node:22-alpine`
+  `web-builder` stage with corepack pnpm and `--frozen-lockfile` (same as
+  `Dockerfile.cross`) and copies `web/dist` into the Go builder. The
+  documented `GO_VERSION` / `ALPINE_VERSION` build args are now declared with
+  `ARG`, so `--build-arg` actually takes effect; `NODE_VERSION` added.
+
+## 2026-09-24 — Web/Desktop chat status bar now tracks the agent loop
+
+Reported: *"web chat and desktop chat statusbar need to be updated as the agent
+loop or main chat loops"*.
+
+- **Root cause**: the agent already tracked what it was doing
+  (`internal/agent/activity.go` — `llmRunning`, `activeTools{Name,StartedAt}`,
+  `activeAgents`), and `StatusBar` already knew how to render it as
+  `⟳ llm · ⚙ tool [HH:MM:SS · 12s] · @ agent`. But those snapshot fields were
+  only ever filled in by the **TUI**: `model.go:18643 listenActivity` blocks on
+  `Activity().Notify()` and re-broadcasts a complete `TUIStatus` on every change.
+  With no TUI attached there was no consumer, so a headless session — which is
+  what both the browser chat (`ocode serve`) and the desktop app (Wails, same
+  embedded bundle) are — fell through `runningStatusParts`' fallbacks and could
+  show nothing but a bare in-flight tool name, or `working…`.
+- **Server**: new per-turn `agent_activity` broadcast
+  (`startAgentActivityBroadcast` in `internal/server/agent_session.go`, modelled
+  on the existing `startTurnHeartbeat` stop/join pattern). It reads
+  `Activity().Notify()` and republishes each change as a session-tagged event
+  carrying ONLY the three activity fields, in a new `AgentActivityEvent`
+  (`internal/server/tui_status.go`). Started next to the heartbeat in all three
+  paths that hold `turnActive=true` — `runTurn`, the permission-answer
+  continuation, and the question-answer continuation — so continuations get it
+  too. New `(*ActivityTracker).Snapshot()` (`internal/agent/activity.go`) gives
+  the PULL half of the feed, used by the new `applySessionActivity` so the
+  existing full `status` snapshots agree with the live events instead of
+  blanking the row mid-turn.
+- **Why a separate event and not a partial `status`**: the web's
+  `SET_TUI_STATUS` **replaces** `tuiStatus` wholesale, so a partial `status`
+  payload would zero the model, context gauge and spend on every tool start.
+  `SET_AGENT_ACTIVITY` **merges** the three fields instead.
+- **Two deliberate exclusions**: `agent_activity` is **not** in
+  `liveFrameEvents` (activity is a momentary reading — replaying it into a
+  mid-turn reload would show a stale `⟳ llm` for a finished tool), and the
+  broadcast is **skipped when an RC bridge is attached**, because
+  `Activity().Notify()` is a single-consumer channel and a second reader would
+  steal snapshots from the TUI and freeze the bridged bar. The bridged path is
+  unchanged.
+- **Client**: `agent_activity` added to `SESSION_SCOPED_EVENTS` (which feeds
+  `ROUTABLE_EVENTS`, so the SSE transport subscribes automatically) → new
+  `SET_AGENT_ACTIVITY` reducer case that merges into `slice.tuiStatus`; the
+  three fields are cleared on the turn boundary (`SET_TURN_STATE` →
+  `turnActive:false`, driven by both `turn_done` and `turn_error`) so a late
+  frame can't park a dead `⟳ llm` for the next turn to inherit.
+  `StatusBar.tsx` needs **no change** — the field names match `TUIStatus` on
+  purpose, so `runningStatusParts` renders either source identically.
+- **Tests** (both mutation-verified against the pre-fix code):
+  `internal/agent/activity_test.go` (Snapshot is a defensive copy that reflects
+  tool/agent/LLM transitions), `internal/server/agent_activity_test.go`
+  (`TestHeadlessTurnBroadcastsAgentActivity` — a blocking LLM call must produce a
+  live `agent_activity` frame AND a mid-turn `status` frame that agrees;
+  `TestAgentActivityBroadcastDefersToRCBridge` — nothing is published with a
+  bridge attached; `TestApplySessionActivityNoLiveAgent`),
+  `web/src/lib/sessionEvents.test.ts` (merge preserves model/context, empty
+  payload clears tools, `turn_done` clears activity), and an explicit
+  `agent_activity` subscription pin in `SessionTabSync.test.tsx`.
+- **Verified**: `go build ./...`, `go vet`, `go test ./internal/agent/
+  ./internal/server/` green; full web suite 226 files / 1921 tests; `tsgo
+  --noEmit` and `vite build` clean.
+
+## 2026-09-24 — Web: React 18.3 → 19.3
+
+Requested: *"is react 19 compatible with my entire web/ stack … make a plan"*,
+then *"do 1 to 7, and 8 left into todo"*.
+
+- **Deps (`web/package.json`)**: `react`/`react-dom` `^19.3.0`, `@types/react`/
+  `@types/react-dom` `^19.3.0`, `@tanstack/react-virtual` `^3.14.13` (fixes a
+  React 19 flushSync dev warning). `@radix-ui/react-slot` `^1.3.3` and
+  `@radix-ui/react-separator` `^1.1.15` now match the versions the other Radix
+  packages depend on; `pnpm why` shows one version each of slot,
+  dismissable-layer, primitive and compose-refs. Every other package in the
+  stack already declares React 19 support.
+- **No app code changes.** `types-react-codemod preset-19` and
+  `codemod react/19/migration-recipe` both reported 0 files to change, and
+  `pnpm typecheck` was clean. No `createRoot` error hooks were added: nothing
+  captures errors globally, and React 19's default `reportError` /
+  `console.error` routing matches today's behavior.
+- **Two tests fixed** for React 19's async `act()` timing: `BrowserPanel` (it
+  clicked before the initial load settled) and `ChatPanel` prepend-scroll
+  (it raced jsdom's rAF clock; now deterministic, with an exact-delta
+  assertion that catches a missing scroll restore). See
+  `docs/gotchas/react-19-upgrade-test-timing-and-typings.md`.
+- **Verified**: full suite 3× green (226 files / 1921 tests), `pnpm build`
+  OK, and the bundle contains React 19.3.0. Headless-Chrome QA of the prod
+  build: All-sessions dialog (focus, search, Escape, no post-close freeze),
+  chat virtual list including older-message prepend and scroll anchor, and
+  Monaco open plus hide/show via tab toggling.
+- **Deferred to TODO.md**: React Compiler trial. Also logged there: the
+  Cmd+K palette renders no commands, which reproduces identically on the
+  React 18 build (not a regression).
+
 ## 2026-09-24 — Browser password vault, phase 1: encrypted store + `/api/vault/*` + Settings → Passwords
 
 Server-side credential vault. **No autofill yet** — Phases 2 (local iframe) and
@@ -3002,7 +3125,7 @@ Two follow-ups to the session-switch work.
 ## [Unreleased]
 
 - **Remote web session routing (2026-09-17)** — open tabs register their remote hosts with the event bus; session model selection, command context, and agent-run seed requests follow the session host. Agent-run caches are host-scoped, unresolved project snapshots defer seed requests, and clearing the active project clears the event bus's active host. Regression coverage includes host inventory, model-dialog routing, command context, project-store state, and agent-run loading.
-- **Version Bump** — 0.8.97 → 0.8.105
+- **Version Bump** — 0.8.97 → 0.8.110
 - **Web/Desktop: Computer Use settings group** (`web/src/components/Settings/`) — new `ComputerUseForm.tsx` (enable checkbox + Save, loads `GET /api/config/computer-use`, saves `PUT /api/config/computer-use`) registered as its own `computer-use` nav entry in `SettingsPanel.tsx` (`OCODE_GROUPS` after OCR + `renderGroup` case). Renders the shared `computer.StatusLines` block, so the panel shows the platform backend and the macOS permission reminder without probing the desktop. Regression suite: `ComputerUseForm.test.tsx` (nav registration verified to fail without the `OCODE_GROUPS` entry). `docs/computer-use.md` updated to document the panel as the third toggle surface.
 - **Agent: remove state reflection feature** (`internal/agent/`) — deleted `state_reflect.go`, `state_reflect_test.go`, `agent_state_reflect_methods.go` and the `reflectState` field / `reflectTail` call from `agent.go`; the reflection hook that appended user messages on preview/browser snapshot changes is removed entirely
 - **LSP diagnostics: fingerprint only emitted diagnostics** (`internal/agent/lsp_inject.go`) — `injectLSPDelta` now records `a.lspSeen[uri]` after the line-cap check and rendering, so diagnostics that were skipped or never delivered are not permanently marked as reported

@@ -5,7 +5,7 @@ import { useProjectState } from "../../stores/projectStore";
 import { resolveSessionHost } from "../../hooks/useSessionHost";
 import { eventBus } from "../../lib/eventBus";
 import { reportActionError } from "../../lib/actionErrors";
-import type { AgentInfo, LSPStatus } from "../../api/types";
+import type { AgentInfo, LSPStatus, MCPStatus } from "../../api/types";
 import PluginsPanel from "./PluginsPanel";
 import ReasoningLevelSelector from "./ReasoningLevelSelector";
 import {
@@ -17,6 +17,7 @@ import {
   Target,
   GitBranch,
   Puzzle,
+  Radio,
   Loader2,
 } from "lucide-react";
 
@@ -71,6 +72,7 @@ const DEFAULT_SECTIONS: Record<string, boolean> = {
   todo: false,
   git: true,
   permissions: true,
+  mcp: false,
 };
 
 function loadExpandedSections(): Record<string, boolean> {
@@ -125,6 +127,11 @@ export default function CoworkSidebar({
   const [selectedAgent, setSelectedAgent] = useState<string>(activeAgent);
   const [agentBusy, setAgentBusy] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(false);
+  // MCP servers for the active chat + which one is mid-toggle. The list is
+  // session-scoped (the server applies this chat's per-session overrides), so
+  // the sidebar reflects the toggle state for THIS conversation.
+  const [mcpServers, setMcpServers] = useState<MCPStatus[]>([]);
+  const [mcpBusy, setMcpBusy] = useState<string | null>(null);
   function truncateTitle(s: string, maxLen: number): string {
     s = s.replace(/\n/g, " ").trim();
     const runes = Array.from(s);
@@ -250,6 +257,27 @@ export default function CoworkSidebar({
     };
   }, [activeProject?.path]);
 
+  // MCP servers for the active chat. Session-scoped so the list reflects this
+  // chat's per-session overrides; a draft ("new-*") tab has no server session
+  // yet, so it shows the process-wide config and the first toggle rides the
+  // session created with the first message.
+  useEffect(() => {
+    let cancelled = false;
+    const sid = sessionId && !sessionId.startsWith("new-") ? sessionId : undefined;
+    // Optional call: MCP listing is sidebar decoration, so a client without the
+    // endpoint (older server, partial test mock) leaves the section empty rather
+    // than crashing the whole chat sidebar.
+    api
+      .getMCP?.(sessionHost, sid)
+      ?.then((servers) => {
+        if (!cancelled) setMcpServers(servers);
+      })
+      ?.catch(console.error);
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionHost, sessionId]);
+
   useEffect(() => {
     api.listAgents(sessionHost).then(setAgents).catch(console.error);
 
@@ -356,6 +384,12 @@ export default function CoworkSidebar({
   const outputTokens = tuiStatus?.output_tokens ?? 0;
   const cachedTokens = tuiStatus?.cached_tokens ?? 0;
   const totalTokens = tuiStatus?.total_tokens ?? 0;
+  // Cache hit rate, mirroring the TUI sidebar's "Cache <n> (<pct>%)" line:
+  // cached reads+writes over the full prompt. `input_tokens` already excludes
+  // cache reads (NormalizedPromptTokens), so the denominator is input+cached.
+  const cacheDenom = inputTokens + cachedTokens;
+  const cachePct =
+    cacheDenom > 0 ? Math.round((cachedTokens / cacheDenom) * 100) : 0;
   const activeRoot = tuiStatus?.cwd ?? "";
   const lspServers: LSPStatus[] = (tuiStatus?.lsp_servers ?? []).filter(
     (s) => activeRoot === "" || s.root === activeRoot || (s.root === "" && activeRoot === ".")
@@ -594,6 +628,39 @@ export default function CoworkSidebar({
       reportActionError(e, "Toggling discovery");
     } finally {
       setDiscoveryLoading(false);
+    }
+  };
+
+  // MCP server on/off for THIS chat. The server persists the process-wide
+  // config (matching `/mcp`) and, when a session id is supplied, records a
+  // per-session override + rebuilds only this chat's agent, so the new tool set
+  // lands here without restarting the app or disturbing other chats. A draft
+  // ("new-*") tab has no server session yet, so its first toggle just persists
+  // globally and the created session inherits it.
+  const toggleMcp = async (name: string) => {
+    const server = mcpServers.find((s) => s.name === name);
+    if (!server) return;
+    const next = !server.enabled;
+    setMcpBusy(name);
+    // Optimistic flip so the switch responds immediately; the refetch below
+    // reconciles with the server's authoritative state.
+    setMcpServers((prev) =>
+      prev.map((s) => (s.name === name ? { ...s, enabled: next } : s)),
+    );
+    try {
+      const sid = sessionId && !sessionId.startsWith("new-") ? sessionId : undefined;
+      await api.setMCPEnabled(name, next, sessionHost, sid);
+      const fresh = await api.getMCP(sessionHost, sid);
+      setMcpServers(fresh);
+    } catch (e) {
+      console.error("toggle mcp error", e);
+      reportActionError(e, `Toggling MCP server ${name}`);
+      // Roll back the optimistic flip on failure.
+      setMcpServers((prev) =>
+        prev.map((s) => (s.name === name ? { ...s, enabled: server.enabled } : s)),
+      );
+    } finally {
+      setMcpBusy(null);
     }
   };
 
@@ -957,9 +1024,12 @@ export default function CoworkSidebar({
                 </div>
               )}
               {/* Per-session token breakdown, mirroring the TUI sidebar's
-                  "In … Cache … Out …" usage line. Rendered independently of the
-                  context gauge so a restored session whose provider reading is
-                  unknown still shows its persisted totals. */}
+                  "In … Cache … Out …" usage line. The Cached row also carries
+                  the cache hit % (cached ÷ full prompt). Rendered independently
+                  of the context gauge so a restored session whose provider
+                  reading is unknown still shows its persisted totals. The
+                  billed Total row was intentionally dropped: the context gauge
+                  already conveys overall usage and the raw Total added noise. */}
               {(inputTokens > 0 || outputTokens > 0 || cachedTokens > 0 || totalTokens > 0) && (
                 <div className="mt-2 space-y-0.5 text-[11px] text-muted-foreground">
                   <div className="flex justify-between">
@@ -968,15 +1038,14 @@ export default function CoworkSidebar({
                   </div>
                   <div className="flex justify-between">
                     <span>Cached</span>
-                    <span className="font-mono">{formatTokenCount(cachedTokens)}</span>
+                    <span className="font-mono">
+                      {formatTokenCount(cachedTokens)}
+                      <span className="ml-1 text-muted-foreground">({cachePct}%)</span>
+                    </span>
                   </div>
                   <div className="flex justify-between">
                     <span>Output</span>
                     <span className="font-mono">{formatTokenCount(outputTokens)}</span>
-                  </div>
-                  <div className="flex justify-between border-t border-border pt-0.5 mt-0.5 font-medium text-foreground">
-                    <span>Total</span>
-                    <span className="font-mono">{formatTokenCount(totalTokens > 0 ? totalTokens : inputTokens + outputTokens)}</span>
                   </div>
                 </div>
               )}
@@ -1215,6 +1284,66 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
                 </div>
               ) : (
                 <div className="text-xs text-muted-foreground">No LSP servers</div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* MCP Section — per-chat on/off for each configured MCP server. The
+            toggle persists the global config (matching `/mcp`) AND rebuilds
+            only this chat's agent, so the newly enabled/disabled tools take
+            effect here without a restart or affecting other chats. */}
+        <div className="border-b border-border">
+          <button
+            onClick={() => toggleSection("mcp")}
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
+          >
+            {expandedSections.mcp ? (
+              <ChevronDown className="w-4 h-4" />
+            ) : (
+              <ChevronRight className="w-4 h-4" />
+            )}
+            <Radio className="w-4 h-4 text-emerald-400" />
+            MCP
+            {mcpServers.length > 0 && (
+              <span className="ml-auto text-[11px] font-mono text-muted-foreground">
+                {mcpServers.filter((s) => s.enabled).length}/{mcpServers.length}
+              </span>
+            )}
+          </button>
+          {expandedSections.mcp && (
+            <div className="px-4 pb-3">
+              {mcpServers.length > 0 ? (
+                <div className="space-y-1">
+                  {mcpServers.map((s) => (
+                    <label
+                      key={s.name}
+                      className="flex items-center justify-between gap-2 cursor-pointer rounded px-1 py-1 hover:bg-muted"
+                      title={`${s.name} (${s.type})`}
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span
+                          className={`font-mono text-[11px] ${s.enabled ? "text-emerald-400" : "text-muted-foreground"}`}
+                        >
+                          {s.enabled ? "●" : "○"}
+                        </span>
+                        <span className="truncate font-mono text-xs text-foreground" title={s.name}>
+                          {s.name}
+                        </span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        aria-label={`MCP server ${s.name}`}
+                        checked={s.enabled}
+                        disabled={mcpBusy === s.name}
+                        onChange={() => toggleMcp(s.name)}
+                        className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+                      />
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground">No MCP servers</div>
               )}
             </div>
           )}

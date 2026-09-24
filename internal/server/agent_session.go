@@ -551,15 +551,24 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// Stage "mcp": MCP tools with a bounded wait. Stragglers are dropped with
 	// a warning event rather than stalling the bootstrap.
 	h.publishBootstrapStage(sessionID, "mcp")
-	timeout := h.mcpBootstrapTimeout
-	if timeout <= 0 {
-		timeout = bootstrapMCPTimeout
-	}
-	mcpTools, mcpErrs, timedOut := h.mcpCache.waitTimeout(timeout)
-	ag.AddMCPTools(mcpTools)
-	ag.AddMCPErrors(mcpErrs)
-	if timedOut {
-		h.publishBootstrapWarning(sessionID, "mcp", "MCP enumeration did not finish within 30s; proceeding without stragglers")
+	// A session that toggled MCP servers from the web sidebar has a per-session
+	// override; enumerate fresh against its effective config so the toggle takes
+	// effect in THIS chat only. Sessions with no override reuse the process-wide
+	// cache (the common case) instead of re-running the blocking enumeration.
+	if sidTools, sidErrs := h.mcpToolsForSession(effCfg, sessionID); sidTools != nil || sidErrs != nil {
+		ag.AddMCPTools(sidTools)
+		ag.AddMCPErrors(sidErrs)
+	} else {
+		timeout := h.mcpBootstrapTimeout
+		if timeout <= 0 {
+			timeout = bootstrapMCPTimeout
+		}
+		mcpTools, mcpErrs, timedOut := h.mcpCache.waitTimeout(timeout)
+		ag.AddMCPTools(mcpTools)
+		ag.AddMCPErrors(mcpErrs)
+		if timedOut {
+			h.publishBootstrapWarning(sessionID, "mcp", "MCP enumeration did not finish within 30s; proceeding without stragglers")
+		}
 	}
 
 	// Seed the runtime advisor gate from the session's own persisted override
@@ -1047,6 +1056,14 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		h.sessions.setTurnActive(sessionID, false)
 		h.flushStrandedInjections(sessionID, as)
 	}()
+	// Mirror the TUI's live activity feed so the web/desktop status bar tracks
+	// the agent loop (⟳ llm · ⚙ tool [time · elapsed] · @ agent) through the
+	// whole turn. Started before turn_started so the very first LLM round is
+	// captured, and stopped by this defer FIRST (defers run LIFO), so no
+	// activity event can land after the turn is marked done. A no-op when a TUI
+	// bridge owns the feed.
+	stopActivity := h.startAgentActivityBroadcast(sessionID, as.agent)
+	defer stopActivity()
 	h.publishTurnStarted(sessionID)
 
 	// In headless mode (no RC bridge), wire up streaming callbacks so live
@@ -1470,6 +1487,60 @@ func (h *Handler) startTurnHeartbeat(sessionID string) func() {
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go h.turnHeartbeat(sessionID, stop, done)
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+// agentActivityBroadcast republishes every change the agent's ActivityTracker
+// reports as a session-tagged `agent_activity` event until stop is closed.
+//
+// This is the headless counterpart of the TUI's own live activity feed: the TUI
+// blocks on Activity().Notify() and re-broadcasts a COMPLETE TUIStatus on each
+// change (see listenActivity + broadcastTUIStatus in the TUI model), which is
+// what feeds the web's `⟳ llm · ⚙ tool · @ agent` status-bar row. With no TUI
+// attached there is nobody doing that, so the web/desktop bar had nothing but a
+// bare in-flight tool name to show. This loop closes that gap.
+//
+// It deliberately publishes an activity-ONLY event rather than a partial
+// `status`: the web's SET_TUI_STATUS replaces the snapshot wholesale, so a
+// partial status payload would blank model/context/spend.
+func (h *Handler) agentActivityBroadcast(sessionID string, tracker *agent.ActivityTracker, stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	for {
+		select {
+		case <-stop:
+			return
+		case snap := <-tracker.Notify():
+			h.broadcastEvent(SSEEvent{
+				SessionID: sessionID,
+				Event:     "agent_activity",
+				Data:      activityEventFromAgent(sessionID, snap),
+			})
+		}
+	}
+}
+
+// startAgentActivityBroadcast starts the `agent_activity` publisher for a turn
+// and returns a function that stops and joins it. Called by EVERY path that
+// holds turnActive=true for a headless session (runTurn and both ask-answer
+// continuations), so the status bar tracks the agent loop for continuations
+// exactly as it does for a fresh turn.
+//
+// The returned stop function must be called exactly once.
+//
+// Gated on no RC bridge: Activity().Notify() is a single-consumer channel and
+// the TUI reads it while one is attached. A second reader here would steal
+// snapshots from it and leave the bridged status bar frozen. The return value
+// is then a no-op so callers need no extra conditional.
+func (h *Handler) startAgentActivityBroadcast(sessionID string, ag *agent.Agent) func() {
+	if h.RCBridge() != nil || ag == nil {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go h.agentActivityBroadcast(sessionID, ag.Activity(), stop, done)
 	return func() {
 		close(stop)
 		<-done

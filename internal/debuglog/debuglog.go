@@ -18,6 +18,7 @@ const (
 	KindWarn      EntryKind = "WARN"
 	KindDiscovery EntryKind = "DISCOVERY"
 	KindProfile   EntryKind = "PROFILE"
+	KindMCP       EntryKind = "MCP"
 )
 
 type Entry struct {

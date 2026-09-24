@@ -30,7 +30,8 @@ vi.mock("@xterm/xterm", () => {
     dispose = vi.fn();
     attachCustomKeyEventHandler = vi.fn(() => true);
   }
-  return { Terminal: vi.fn(() => new Terminal()) };
+  // Vitest 4: an arrow-function mock is not constructible; `new Terminal()` needs `function`.
+  return { Terminal: vi.fn(function () { return new Terminal(); }) };
 });
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
 vi.mock("@xterm/addon-serialize", () => ({ SerializeAddon: class { serialize = vi.fn(() => ""); } }));

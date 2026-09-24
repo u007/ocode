@@ -1,5 +1,32 @@
 # TODO
 
+## Web: React Compiler trial (deferred from the React 19 upgrade, 2026-09-24)
+
+React 19 itself gave no measurable runtime speedup. The reported production
+gains come from the React Compiler.
+
+- Measure INP and render time first with the React DevTools Profiler (chat
+  stream, session list, file tabs), so there is a baseline.
+- Enable `babel-plugin-react-compiler` through `@vitejs/plugin-react`'s
+  optional peer (pin a major).
+- `@tanstack/react-virtual` is incompatible with the compiler
+  ([virtual#736](https://github.com/TanStack/virtual/issues/736)). Opt the
+  virtualized components out with `"use no memo"` (ChatPanel,
+  CommandPalette, SessionDialog and any other `useVirtualizer` user).
+- Keep the existing manual `useMemo`/`useCallback`/`memo`. Removing it
+  changes compiler output.
+- Re-measure. Keep the compiler only if INP improves.
+
+## Web: Command palette (Cmd+K) renders no commands (pre-existing)
+
+Found during React 19 QA (2026-09-24). It reproduces identically on the
+React 18 build, so it is not an upgrade regression. `CommandPalette` passes
+`filtered.length` (about 186) to `useVirtualizer` and gets the full
+`getTotalSize()` (7812px), but `getVirtualItems()` stays empty. The virtualizer
+never measures its scroll element (`CommandList` inside the portal-mounted
+Radix dialog), so the list shows "No commands found". Seen in a headless
+Chrome prod preview; confirm in a real window before fixing.
+
 ## Permissions: path-scoped tool-rule follow-ups (2026-09-24)
 
 From the fix that made `Decide` honor `permissions.tools.<tool>` for

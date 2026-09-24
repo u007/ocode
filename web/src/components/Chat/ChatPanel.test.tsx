@@ -942,14 +942,14 @@ describe("ChatPanel", () => {
     expect(heightBefore).toBeGreaterThan(0);
 
     // Mock scroll geometry with a controlled delta. The real virtualizer's
-    // height grows by 2 * 96 after the prepend; we model that explicitly so
-    // the test does not depend on live DOM measurement races.
+    // height grows by 2 * 96 once the prepended rows render; we tie the
+    // mocked height to that render so the result does not depend on when
+    // jsdom's ~16ms rAF clock fires relative to the test's awaits.
     Object.defineProperty(scrollEl, "clientHeight", { value: 600, configurable: true, writable: true });
     let scrollTopValue = 25;
-    let scrollHeightValue = heightBefore;
     Object.defineProperty(scrollEl, "scrollHeight", {
       configurable: true,
-      get: () => scrollHeightValue,
+      get: () => (scrollEl.textContent?.includes("older1") ? heightBefore + 2 * 96 : heightBefore),
     });
     Object.defineProperty(scrollEl, "scrollTop", {
       configurable: true,
@@ -973,17 +973,14 @@ describe("ChatPanel", () => {
         total: 100,
       });
     });
-    // Height grows after the prepend dispatch but before the RAF that restores scroll.
     await tick();
-    scrollHeightValue = heightBefore + 2 * 96;
-    await flushRAF();
+    // The restore runs in a real animation frame (flushRAF does not service rAF).
+    await advanceFrame();
 
     expect(screen.getByText("older1")).toBeInTheDocument();
-    // Scroll must have moved from its initial 25 to preserve the visible
-    // content (exact delta depends on header/padding measurement, so assert
-    // non-zero movement rather than a brittle pixel count).
-    expect(scrollTopValue).not.toBe(25);
-    expect(scrollTopValue).toBeGreaterThan(0);
+    // Scroll must shift by exactly the prepended height (the mocked delta) to
+    // keep the visible content in place — not pin to the bottom.
+    expect(scrollTopValue).toBe(2 * 96);
   });
 
   it("handles variable-height messages after measurement", async () => {

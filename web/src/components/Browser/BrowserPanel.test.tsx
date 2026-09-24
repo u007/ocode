@@ -174,6 +174,9 @@ describe("BrowserPanel", () => {
     window.addEventListener("cdp:send", onSend);
     try {
       const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" />);
+      // Let the initial (errored) load settle first: a load that starts while
+      // the bypass POST is in flight trips handleBypass's stale-load guard.
+      await waitFor(() => expect(container.querySelector("iframe")?.getAttribute("src")).toContain("__grant="));
       const btn = container.querySelector('[data-testid="tls-bypass-banner"] button') as HTMLButtonElement;
       expect(btn).toBeTruthy();
       const { fireEvent } = await import("@testing-library/react");

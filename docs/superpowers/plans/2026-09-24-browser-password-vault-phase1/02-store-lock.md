@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-24T07:50:21Z
+---
 # Part 02 — File store + OS file lock
 
 ## Files

@@ -94,6 +94,22 @@ func (t *ActivityTracker) snapshot() ActivitySnapshot {
 	}
 }
 
+// Snapshot returns a copy of the current activity state. Safe to call from
+// any goroutine: it holds t.mu only long enough to copy the three fields, and
+// the returned slices never alias the tracker's internals.
+//
+// This is the PULL half of the activity feed. The TUI is a PUSH consumer — it
+// blocks on Notify() and re-broadcasts each change as a full TUIStatus (see
+// listenActivity in the TUI model). Headless web/desktop has no TUI to do that,
+// so the server PULLs this snapshot to stamp the same fields into the status
+// snapshots and agent_activity events that drive its status bar. Pulling never
+// competes with a Notify() reader, so both halves are safe at once.
+func (t *ActivityTracker) Snapshot() ActivitySnapshot {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.snapshot()
+}
+
 // Notify returns the channel TUI consumers read snapshots from.
 func (t *ActivityTracker) Notify() chan ActivitySnapshot {
 	return t.notify

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, type ReactNode } from "react";
 import { Store, useSelector } from "@tanstack/react-store";
-import type { Message, LivePart, TUIStatus, QuestionPrompt, QuestionAnswerPayload } from "../api/types";
+import type { Message, LivePart, TUIStatus, AgentActivityEvent, QuestionPrompt, QuestionAnswerPayload } from "../api/types";
 
 // ── Rehydrate pending asks from persisted transcript ──────────────
 // The server persists a permission/question pause as a sentinel in the
@@ -445,6 +445,7 @@ export type ChatAction =
   | { type: "SET_TOTAL"; sessionId: string; total: number }
   | { type: "SET_SPENDING"; spendingUSD: number | null }
   | { type: "SET_TUI_STATUS"; sessionId: string; status: TUIStatus }
+  | { type: "SET_AGENT_ACTIVITY"; sessionId: string; activity: AgentActivityEvent }
   | { type: "SET_STATUS_LOADING"; sessionId: string; loading: boolean }
   | { type: "SET_TURN_STATE"; sessionId: string; turnActive: boolean }
   | { type: "SET_TURN_ERROR"; sessionId: string; turnError: boolean }
@@ -545,6 +546,23 @@ export function isStaleStatus(
   const nextAt = Date.parse(next.updated_at ?? "");
   if (Number.isNaN(prevAt) || Number.isNaN(nextAt)) return false;
   return nextAt < prevAt;
+}
+
+/** Drop the three live agent-loop activity fields from a status snapshot.
+ *
+ *  Returns the input unchanged when there is nothing to clear, so the common
+ *  "turn ended, no activity was ever recorded" path keeps the existing object
+ *  identity and doesn't re-render every subscriber for no reason. */
+function clearedActivity(status: TUIStatus | null): TUIStatus | null {
+  if (!status) return status;
+  if (
+    status.llm_running === undefined &&
+    status.active_tools === undefined &&
+    status.active_agents === undefined
+  ) {
+    return status;
+  }
+  return { ...status, llm_running: undefined, active_tools: undefined, active_agents: undefined };
 }
 
 function updateSession(
@@ -921,6 +939,24 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       });
     case "SET_SPENDING":
       return { ...state, spendingUSD: action.spendingUSD };
+    case "SET_AGENT_ACTIVITY": {
+      // Live agent-loop reading from the headless server (web/desktop chat),
+      // mirroring the TUI's own activity feed. MERGE the three activity fields
+      // into the existing snapshot — this payload carries nothing else, and a
+      // replace would blank the model / context gauge / spend the rest of the
+      // status bar renders. Defaults to empty rather than undefined so a turn
+      // that just finished its last tool always reports "nothing running".
+      const activity = action.activity;
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        tuiStatus: {
+          ...(s.tuiStatus ?? {}),
+          llm_running: !!activity.llm_running,
+          active_tools: activity.active_tools ?? [],
+          active_agents: activity.active_agents ?? [],
+        },
+      }));
+    }
     case "SET_TUI_STATUS": {
       // Reject a snapshot generated before the one already displayed. The four
       // writers (15s poll, visibility refresh, SSE push, mutation refetch)
@@ -963,6 +999,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
               lastHeartbeatAt: null,
               turnStalled: false,
               isStreaming: false,
+              // Turn boundary: the agent loop is no longer running, so the
+              // live reading is stale. StatusBar gates its activity row on
+              // isStreaming||turnActive regardless, but clearing here stops a
+              // late agent_activity frame from parking a dead "⟳ llm" in the
+              // snapshot for the next turn to inherit.
+              tuiStatus: clearedActivity(s.tuiStatus),
             },
       );
     case "SET_TURN_HEARTBEAT":

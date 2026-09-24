@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-24T07:50:08Z
+---
 # Part 01 — Vault crypto primitives
 
 ## Files

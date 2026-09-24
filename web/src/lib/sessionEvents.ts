@@ -1,7 +1,7 @@
 import { api } from "../api/client";
 import { getSessionSlice, extractPendingFromMessages, type ChatAction, type ChatState } from "../stores/chatStore";
 import type { ProjectAction } from "../stores/projectStore";
-import type { Message, SSEPermissionEvent, TUIStatus } from "../api/types";
+import type { Message, SSEPermissionEvent, TUIStatus, AgentActivityEvent } from "../api/types";
 import type { BusEnvelope } from "./eventBus";
 import { rekeyDraft } from "./tabDrafts";
 import { rekeyQueue, removeDispatchedQueuedByText, dispatchQueueChanged } from "./tabQueue";
@@ -152,6 +152,11 @@ const SESSION_SCOPED_EVENTS = new Set([
   "tool_start",
   "tool_output",
   "tool_result",
+  // Live agent-loop activity (llm_running / active_tools / active_agents) from
+  // the headless server, mirroring the TUI's own live activity feed so the
+  // status bar tracks the agent loop. Routed to SET_AGENT_ACTIVITY, which
+  // MERGES into tuiStatus — unlike `status`, which replaces the snapshot.
+  "agent_activity",
   "turn_started",
   "turn_heartbeat",
   "turn_done",
@@ -549,6 +554,18 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
           chunk: (data as { chunk: string }).chunk,
         });
         return;
+      case "agent_activity": {
+        // Live agent-loop reading from the headless server. MERGE into the
+        // existing tuiStatus (never replace): this payload carries only the
+        // three activity fields, and SET_TUI_STATUS's wholesale replace would
+        // otherwise be the only thing that could clear them.
+        r.dispatch({
+          type: "SET_AGENT_ACTIVITY",
+          sessionId,
+          activity: data as AgentActivityEvent,
+        });
+        return;
+      }
       case "tool_result":
         r.dispatch({
           type: "LIVE_TOOL_RESULT",

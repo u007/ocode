@@ -705,6 +705,21 @@ export interface ToolActivityStatus {
   started_at?: string;
 }
 
+// Payload of the session-scoped `agent_activity` event: the agent-loop
+// activity fields of TUIStatus and nothing else. Pushed by the headless
+// server (web chat / desktop chat) on every ActivityTracker change so the
+// status bar's `⟳ llm · ⚙ tool · @ agent` row tracks the agent loop live, the
+// way it does when a TUI is attached. Merged into the session's tuiStatus —
+// NOT a replacement, because a `status` event replaces the whole snapshot
+// while this one only carries these three fields. Field names match
+// TUIStatus on purpose so StatusBar reads one shape from either source.
+export interface AgentActivityEvent {
+  session_id: string;
+  llm_running?: boolean;
+  active_tools?: ToolActivityStatus[];
+  active_agents?: string[];
+}
+
 export interface LSPStatus {
   cmd: string;
   lang_id?: string;

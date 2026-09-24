@@ -329,7 +329,7 @@ export interface CommandContext {
     /** Available skills (/skills). */
     listSkills: () => Promise<import("../../api/types").SkillEntry[]>;
     /** MCP server status (/mcp). */
-    getMCP: (host?: string) => Promise<import("../../api/types").MCPStatus[]>;
+    getMCP: (host?: string, sessionId?: string) => Promise<import("../../api/types").MCPStatus[]>;
     /** GitHub PR details + diff (/github pr). */
     getGithubPR: (owner: string, repo: string, number: number) => Promise<{ pr: Record<string, unknown>; diff?: string }>;
     /** GitHub issue list (/github issue list). */
@@ -2929,7 +2929,10 @@ async function handleSkills(ctx: CommandContext): Promise<CommandResult> {
 
 async function handleMcp(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const servers = await ctx.api.getMCP(ctx.host);
+    // Scope to this chat so the list reflects its per-session overrides (the
+    // server falls back to the process-wide config for a draft/no-session tab).
+    const sid = ctx.getSessionId?.() || undefined;
+    const servers = await ctx.api.getMCP(ctx.host, sid);
     if (!servers.length) {
       return {
         handled: true,
@@ -2943,7 +2946,7 @@ async function handleMcp(ctx: CommandContext): Promise<CommandResult> {
       handled: true,
       messages: [{
         role: "assistant",
-        content: `## MCP Servers\n\n${lines.join("\n")}\n\nUse \`/mcp enable <name>\` or \`/mcp disable <name>\` to toggle.`,
+        content: `## MCP Servers\n\n${lines.join("\n")}\n\nToggle a server from the **MCP** section of the Cowork sidebar (applies to this chat).`,
       }],
     };
   } catch (err) {

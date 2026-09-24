@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-24T07:50:49Z
+---
 # Part 05 — Password generator
 
 ## Files

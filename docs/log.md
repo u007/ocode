@@ -31,10 +31,24 @@
 
 
 ## 2026-09-24
-* **Creation**: Plan: Tab Loading Indicators ([superpowers/plans/2026-09-24-tab-loading-indicators.md](/superpowers/plans/2026-09-24-tab-loading-indicators.md))
-* **Creation**: Tab Loading Indicators — Design Spec ([superpowers/specs/2026-09-24-tab-loading-indicators-design.md](/superpowers/specs/2026-09-24-tab-loading-indicators-design.md))
-* **Update**: Tab Loading Indicators — Design Spec ([superpowers/specs/2026-09-24-tab-loading-indicators-design.md](/superpowers/specs/2026-09-24-tab-loading-indicators-design.md))
 
+* **Update**: Chat Verbosity Display — Design Spec ([superpowers/specs/2026-09-24-chat-verbosity-display-design.md](/superpowers/specs/2026-09-24-chat-verbosity-display-design.md))
+* **Creation**: Plan: Tab Loading Indicators ([superpowers/plans/2026-09-24-tab-loading-indicators.md](/superpowers/plans/2026-09-24-tab-loading-indicators.md))
+* **Creation**: Chat Verbosity Display — Design Spec ([superpowers/specs/2026-09-24-chat-verbosity-display-design.md](/superpowers/specs/2026-09-24-chat-verbosity-display-design.md))
+* **Update**: Tab Loading Indicators — Design Spec ([superpowers/specs/2026-09-24-tab-loading-indicators-design.md](/superpowers/specs/2026-09-24-tab-loading-indicators-design.md))
+* **Update**:  ([superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md))
+* **Update**:  ([superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md))
+* **Update**:  ([superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md))
+* **Update**:  ([superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md))
+* **Update**:  ([superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md))
+* **Update**:  ([superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md))
+* **Update**:  ([superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md))
+* **Update**:  ([superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md))
+* **Update**:  ([superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md))
+* **Update**:  ([superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md))
+* **Update**: Tab Loading Indicators — Design Spec ([superpowers/specs/2026-09-24-tab-loading-indicators-design.md](/superpowers/specs/2026-09-24-tab-loading-indicators-design.md))
+* **Creation**: Tab Loading Indicators — Design Spec ([superpowers/specs/2026-09-24-tab-loading-indicators-design.md](/superpowers/specs/2026-09-24-tab-loading-indicators-design.md))
+* **Creation**: React 19 upgrade — act() timing in tests and the skipLibCheck dependency ([gotchas/react-19-upgrade-test-timing-and-typings.md](/gotchas/react-19-upgrade-test-timing-and-typings.md))
 * **Update**: Browser Password Vault — Phase 1 Implementation Plan ([superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md](/superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md))
 * **Creation**: Web "All sessions" dialog slow to open (render bottleneck, child filtering + pagination) ([gotchas/web-all-sessions-dialog-slow.md](/gotchas/web-all-sessions-dialog-slow.md))
 * **Creation**: Per-Chat MCP Toggle ([concepts/per-chat-mcp-toggle.md](/concepts/per-chat-mcp-toggle.md))

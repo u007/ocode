@@ -69,7 +69,7 @@ function renderSidebarWithStatus(status: TUIStatus) {
 }
 
 describe("CoworkSidebar per-session token breakdown", () => {
-  it("shows In/Cached/Output/Total tokens from the snapshot, even with no context reading", async () => {
+  it("shows In/Cached(+cache %)/Output tokens and no Total row, even with no context reading", async () => {
     const { container } = renderSidebarWithStatus({
       input_tokens: 1000,
       cached_tokens: 300,
@@ -85,11 +85,14 @@ describe("CoworkSidebar per-session token breakdown", () => {
     expect(await screen.findByText("Input")).toBeTruthy();
     expect(screen.getByText("Cached")).toBeTruthy();
     expect(screen.getByText("Output")).toBeTruthy();
-    expect(screen.getByText("Total")).toBeTruthy();
     expect(screen.getByText("1.0k")).toBeTruthy(); // input 1000
     expect(screen.getByText("300")).toBeTruthy(); // cached
     expect(screen.getByText("200")).toBeTruthy(); // output
-    expect(screen.getByText("1.5k")).toBeTruthy(); // billed total 1500
+    // Cache hit % = cached ÷ (input + cached) = 300 / 1300 ≈ 23%.
+    expect(screen.getByText("(23%)")).toBeTruthy();
+    // The billed Total row was dropped in favour of the cache %.
+    expect(screen.queryByText("Total")).toBeNull();
+    expect(screen.queryByText("1.5k")).toBeNull();
   });
 
   it("shows no breakdown when the snapshot has no token counts", async () => {

@@ -376,6 +376,50 @@ func estimateContextFromMessages(msgs []agent.Message) int64 {
 	return int64(totalChars / 4)
 }
 
+// activityEventFromAgent converts the agent's activity tracker into the wire form
+// of an `agent_activity` event. RFC3339 start timestamps and the field names
+// match what the TUI stamps into TUIStatus (see its status builder), so the
+// web's StatusBar renders either source identically.
+func activityEventFromAgent(sessionID string, snap agent.ActivitySnapshot) AgentActivityEvent {
+	ev := AgentActivityEvent{SessionID: sessionID, LLMRunning: snap.LLMRunning}
+	if len(snap.ActiveTools) > 0 {
+		ev.ActiveTools = make([]ToolActivityStatus, 0, len(snap.ActiveTools))
+		for _, ta := range snap.ActiveTools {
+			ev.ActiveTools = append(ev.ActiveTools, ToolActivityStatus{
+				Name:      ta.Name,
+				StartedAt: ta.StartedAt.Format(time.RFC3339),
+			})
+		}
+	}
+	if len(snap.ActiveAgents) > 0 {
+		ev.ActiveAgents = append([]string(nil), snap.ActiveAgents...)
+	}
+	return ev
+}
+
+// applySessionActivity stamps the agent-loop activity fields onto a per-session
+// status snapshot from the session's LIVE agent, so a full snapshot taken
+// mid-turn (a model switch, a title-gen, a compact) agrees with the
+// `agent_activity` events instead of blanking the status bar's activity row.
+//
+// No-op when a TUI bridge is attached: that surface owns its own activity feed
+// and publishes complete snapshots itself. Also a no-op for a session with no
+// resident agent (idle-evicted, restored, or not yet built), which by
+// definition has nothing running.
+func (h *Handler) applySessionActivity(snap *TUIStatus, sessionID string) {
+	if h.RCBridge() != nil {
+		return
+	}
+	as := h.lookupAgentSession(sessionID)
+	if as == nil || as.agent == nil {
+		return
+	}
+	ev := activityEventFromAgent(sessionID, as.agent.Activity().Snapshot())
+	snap.LLMRunning = ev.LLMRunning
+	snap.ActiveTools = ev.ActiveTools
+	snap.ActiveAgents = ev.ActiveAgents
+}
+
 // applyTurnTiming fills snap's turn timing fields from the SessionManager's
 // authoritative turn lifecycle (setTurnActive). Used for every per-session
 // status snapshot so the web can show current-input elapsed and last-took
@@ -436,6 +480,10 @@ func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 		}
 	}
 	h.applyTurnTiming(&snap, sessionID)
+	// Agent-loop activity (llm_running / active_tools / active_agents) from the
+	// live agent, so this full snapshot agrees with the mid-turn
+	// `agent_activity` events instead of blanking the status bar's activity row.
+	h.applySessionActivity(&snap, sessionID)
 	// Per-session permission mode (see applySessionPermissionFields).
 	h.applySessionPermissionFields(&snap, sessionID)
 	// Per-session advisor gate (see applySessionAdvisorFields).

@@ -13,7 +13,7 @@ import { dispatchCommand } from "./commands";
  */
 function ctx(
   api: Record<string, unknown>,
-  opts: { host?: string; projectPath?: string } = {},
+  opts: { host?: string; projectPath?: string; sessionId?: string } = {},
 ) {
   return {
     commandName: "",
@@ -21,6 +21,7 @@ function ctx(
     api,
     ...(opts.host ? { host: opts.host } : {}),
     ...(opts.projectPath ? { projectPath: opts.projectPath } : {}),
+    ...(opts.sessionId ? { getSessionId: () => opts.sessionId } : {}),
   } as never;
 }
 
@@ -37,7 +38,9 @@ describe("command-context host/project routing", () => {
   it("/mcp reads the active tab's host", async () => {
     const getMCP = vi.fn(async () => []);
     await dispatchCommand("/mcp", ctx({ getMCP }, { host: HOST }));
-    expect(getMCP).toHaveBeenCalledWith(HOST);
+    // The session id is threaded after the host so the server can apply the
+    // chat's per-session MCP overrides; no session in this ctx, hence undefined.
+    expect(getMCP).toHaveBeenCalledWith(HOST, undefined);
   });
 
   it("/session list reads the active tab's host", async () => {
@@ -70,6 +73,12 @@ describe("command-context host/project routing", () => {
   it("a local tab passes an undefined host (unchanged local behavior)", async () => {
     const getMCP = vi.fn(async () => []);
     await dispatchCommand("/mcp", ctx({ getMCP }));
-    expect(getMCP).toHaveBeenCalledWith(undefined);
+    expect(getMCP).toHaveBeenCalledWith(undefined, undefined);
+  });
+
+  it("/mcp passes the active session id so per-chat MCP overrides apply", async () => {
+    const getMCP = vi.fn(async () => []);
+    await dispatchCommand("/mcp", ctx({ getMCP }, { host: HOST, sessionId: "ses_abc" }));
+    expect(getMCP).toHaveBeenCalledWith(HOST, "ses_abc");
   });
 });

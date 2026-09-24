@@ -2,13 +2,28 @@
 # Multi-stage build: frontend assets → Go binary → minimal runtime image.
 #
 # Build args:
-#   GO_VERSION   Go toolchain version (default: 1.26)
+#   GO_VERSION       Go toolchain version (default: 1.26)
+#   NODE_VERSION     Node version for the web UI build (default: 22, same as Dockerfile.cross)
 #   ALPINE_VERSION   Runtime base image tag (default: 3.20)
 
-# ── Stage 1: web UI + Go binary ───────────────────────────────────────────
-FROM golang:${GO_VERSION:-1.26}-alpine AS builder
+ARG GO_VERSION=1.26
+ARG NODE_VERSION=22
+ARG ALPINE_VERSION=3.20
 
-RUN apk add --no-cache nodejs npm
+# ── Stage 1: web UI ───────────────────────────────────────────────────────
+# web/ is a pnpm project (packageManager pinned in package.json); corepack
+# provides that exact pnpm and --frozen-lockfile installs from pnpm-lock.yaml.
+FROM node:${NODE_VERSION}-alpine AS web-builder
+
+WORKDIR /build/web
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile
+
+COPY web/ ./
+RUN pnpm run build
+
+# ── Stage 2: Go binary ────────────────────────────────────────────────────
+FROM golang:${GO_VERSION}-alpine AS builder
 
 WORKDIR /build
 
@@ -19,16 +34,14 @@ RUN go mod download
 # Copy everything and build
 COPY . .
 
-# Build the web UI (required for embedded assets)
-WORKDIR web
-RUN npm ci && npm run build
-WORKDIR /build
+# Built web UI (required for embedded assets)
+COPY --from=web-builder /build/web/dist ./web/dist
 
 # Build the static binary
 RUN go build -ldflags="-s -w" -o /usr/local/bin/ocode .
 
-# ── Stage 2: minimal runtime ──────────────────────────────────────────────
-FROM alpine:${ALPINE_VERSION:-3.20}
+# ── Stage 3: minimal runtime ──────────────────────────────────────────────
+FROM alpine:${ALPINE_VERSION}
 
 # Install runtime deps: ca-certificates for HTTPS, git for version control
 # (ocode uses git via the TUI and subprocess commands)

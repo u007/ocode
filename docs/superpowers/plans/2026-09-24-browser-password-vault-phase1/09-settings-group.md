@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-24T07:51:40Z
+---
 # Part 09 — Settings group wiring
 
 ## Files
