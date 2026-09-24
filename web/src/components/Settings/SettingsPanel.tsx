@@ -25,11 +25,13 @@ import ProfilesManager from "./ProfilesManager";
 import ProfileDebugForm from "./ProfileDebugForm";
 import BackendForm from "./BackendForm";
 import BrowserForm from "./BrowserForm";
+import VaultForm from "./VaultForm";
 import TTSForm from "./TTSForm";
 
 export type SettingsGroupId =
   | "backend"
   | "browser"
+  | "vault"
   | "tts"
   | "profiles"
   | "profile-debug"
@@ -65,6 +67,7 @@ interface GroupDef {
 const OCODE_GROUPS: GroupDef[] = [
   { id: "backend", label: "Backend" },
   { id: "browser", label: "Browser" },
+  { id: "vault", label: "Passwords" },
   { id: "tts", label: "Speech playback" },
   { id: "profiles", label: "Profiles" },
   { id: "profile-debug", label: "Profile Debug" },
@@ -105,6 +108,8 @@ function renderGroup(id: SettingsGroupId) {
       return <BackendForm />;
     case "browser":
       return <BrowserForm />;
+    case "vault":
+      return <VaultForm />;
     case "tts":
       return <TTSForm />;
     case "profiles":
