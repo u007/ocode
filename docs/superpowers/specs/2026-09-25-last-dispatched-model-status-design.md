@@ -1,7 +1,7 @@
 ---
 type: Design
 title: Last-dispatched model in the status bar — design
-description: 'Design spec: per-session last-dispatched model shown in the web/desktop bottom status bar, fed by 202 ChatResponse.model with turn_started.model fallback.'
+description: 'Design spec: per-session last-dispatched model shown in the web/desktop bottom status bar, fed by 202 ChatResponse.model with turn_started.model event fallback; StatusBar renders the segment only from lastDispatchedModel and never falls back to snap.main_model (absent until first dispatch).'
 tags:
   - design
   - status-bar
@@ -9,7 +9,7 @@ tags:
   - web
   - desktop
   - spec
-timestamp: 2026-09-25T07:18:18Z
+timestamp: 2026-09-25T10:49:56Z
 ---
 # Last-dispatched model in the status bar — design
 
@@ -75,8 +75,9 @@ this session just dispatch?".
   change.
 - The TUI sidebar/status is untouched (it already reports its own model).
 - No persistence of the value across page reloads — it is client-memory state;
-  after a reload the bar falls back until the next dispatch or `turn_started`
-  (§3).
+  after a reload (or before the first accepted dispatch) the model segment is
+  **absent** until the next dispatch or `turn_started` (§3). No other surface's
+  value is substituted.
 - No per-message model in the transcript; no server-side "last dispatched"
   registry.
 
@@ -103,14 +104,17 @@ this client.**
 - **Never cleared.** Not by `turn_error`, not by a failed/rejected send, not by
   `SET_TUI_STATUS` / `MERGE_SNAPSHOT`, not by the failed-send `SET_ERROR`
   path. Absence of a new dispatch means "keep showing the last one".
-- **Display precedence in StatusBar:** `lastDispatchedModel` when set;
-  otherwise fall back to `snap?.main_model` (today's behavior — the
-  never-dispatched-in-this-client-session state, e.g. right after a reload).
-  Once set, the segment no longer tracks `main_model`, which is the whole point
-  of the decoupling. An alternative (hide the segment until first dispatch) was
-  considered and rejected: an empty model segment after reload reads as a
-  regression, and the effective model is the honest best guess for a session
-  that has not dispatched yet in this window.
+- **Display rule in StatusBar:** the model segment renders **only when
+  `lastDispatchedModel` is non-empty**, and StatusBar **never reads
+  `snap.main_model`** for it. Before the first accepted dispatch observed by
+  this client — a fresh session, or right after a page/app reload with no
+  in-memory value — the segment is **absent**: no `· model: …` chip at all,
+  not an empty or placeholder value. There is deliberately **no display
+  fallback** to the effective/configured model: falling back to `main_model`
+  would restore exactly the picker-tracking behavior this design removes (§1),
+  making the bar's meaning conditional on which surface happened to populate
+  it last. An empty segment until first dispatch is the honest state — the
+  session genuinely has no *dispatched* model observable by this client.
 
 Consequence: pick a new model in the sidebar → the bar keeps showing the model
 the last turn used until a turn is actually dispatched with the new one, at
@@ -122,9 +126,10 @@ which point it updates immediately from the 202.
 The 202 already carries `Model` on every dispatch endpoint; `turn_started` is
 already a per-session bus event routed to every subscribed client. Zero new
 endpoints, dispatch-time latency, and the store already has the per-session
-slice + rekey plumbing. Cost: client-memory only (lost on reload — covered by
-the `main_model` display fallback), and one additive server field on
-`turn_started`.
+slice + rekey plumbing. Cost: client-memory only — lost on reload, which
+renders as an **absent segment until the next accepted dispatch or
+`turn_started`** (§3), never as another surface's value — and one additive
+server field on `turn_started`.
 
 **B. Server-persisted last-dispatched model exposed on the status snapshot**
 (e.g. a `last_dispatched_model` field on `TUIStatus`, populated at dispatch).
@@ -238,9 +243,15 @@ untouched (retain).
 - The slice read at `:146` already returns the whole slice — add
   `lastDispatchedModel` to the destructure (no new subscription).
 - Replace `const mainModel = snap?.main_model || ""` (`:196`) with
-  `lastDispatchedModel || snap?.main_model || ""` (display fallback, §3).
-- Render site (`:285-288`), collapsed row, titles, and the
-  `reasoning=${thinking_budget}` suffix are unchanged.
+  `const mainModel = lastDispatchedModel || ""`. StatusBar's model segment is
+  sourced **solely** from `lastDispatchedModel`; `snap.main_model` must not be
+  read anywhere on this path (no display fallback, §3).
+- The existing truthiness gate at the render site (`:285-288`, `{mainModel &&
+  (…)}`) then does the right thing: with no in-memory value the segment is
+  **absent** (fresh session or post-reload until the first accepted dispatch),
+  never an empty chip and never another field's value. Render site markup,
+  collapsed row, titles, and the `reasoning=${thinking_budget}` suffix are
+  otherwise unchanged.
 
 ### 5.6 Remote / desktop
 
@@ -285,9 +296,10 @@ untouched (retain).
    never touches the field — retained by construction (tested, §8).
 6. **Empty-model acknowledgements.** Cancel/ack endpoints return
    `ChatResponse{}`; the truthy guard means they never overwrite.
-7. **Status snapshots.** `SET_TUI_STATUS` writes `tuiStatus` only; a sidebar
-   model pick or config push changing `main_model` cannot move the bar once
-   the field is set (the decoupling test, §8).
+7. **Status snapshots.** `SET_TUI_STATUS` writes `tuiStatus` only. A sidebar
+   model pick or config push changing `main_model` can never move the bar —
+   StatusBar does not read `snap.main_model` at all (§5.5), so the bar is
+   decoupled whether or not the field is set (the decoupling test, §8).
 8. **Background re-renders.** The field lives in the already-subscribed slice;
    no new per-token work is added to `StatusBar` (per `TODO.md` history, keep
    it that way).
@@ -342,10 +354,12 @@ repo's mutation-verify convention), then the minimal change makes it pass.
 
 **Rendering — `web/src/components/common/StatusBar.test.ts(x)`**
 
-10. Renders `lastDispatchedModel` when set; falls back to `snap.main_model`
-    when unset; a subsequent `SET_TUI_STATUS` with a different `main_model`
-    does **not** change the rendered value once set. *(Fails: `:196` reads
-    `main_model` unconditionally.)*
+10. Renders the segment with `lastDispatchedModel` when set. With the field
+    **unset** and a status snapshot that carries `main_model`, the segment is
+    **absent** (no `· model: …` chip at all) — StatusBar must not fall back to
+    `snap.main_model`, now or ever; a subsequent `SET_TUI_STATUS` with a
+    different `main_model` never changes or introduces the rendered value.
+    *(Fails: `:196` reads `main_model` unconditionally today.)*
 
 **Server — `internal/server/agent_session_turn_test.go`**
 
@@ -364,9 +378,9 @@ repo's mutation-verify convention), then the minimal change makes it pass.
   (202 + `turn_started.model`), decoupled from the sidebar's effective model;
   notes the `turn_started` payload addition.
 - **`skills/ocode-web/SKILL.md`** — file-map/gotcha line: the status bar's
-  model segment is `lastDispatchedModel`-first with `main_model` display
-  fallback; new send paths must dispatch `SET_LAST_DISPATCHED_MODEL` from the
-  202 body.
+  model segment is driven **solely** by `lastDispatchedModel` and is hidden
+  while unset; it never falls back to `snap.main_model`. New send paths must
+  dispatch `SET_LAST_DISPATCHED_MODEL` from the 202 body.
 - **No user-facing migration.** Web ships with the next bundle build; the
   desktop app needs a rebuild/restart (embedded `web/dist`). Remote hosts need
   no upgrade for the 202 path; the `turn_started.model` fallback appears when
@@ -374,18 +388,21 @@ repo's mutation-verify convention), then the minimal change makes it pass.
 
 ## 10. Open risks
 
-- **R1 — TUI-initiated turns on bridged sessions.** The fallback depends on
-  `publishTurnStarted` running for the turn; bridged sessions that execute the
-  turn through the RC path rather than `runTurn` may not emit it, leaving the
-  bar stale until this client's next 202. Acceptable (the TUI user is not
-  watching the web bar), but verify during implementation; if bridged turns
-  skip `runTurn`, document it here.
+- **R1 — TUI-initiated turns on bridged sessions.** The `turn_started` event
+  fallback depends on `publishTurnStarted` running for the turn; bridged
+  sessions that execute the turn through the RC path rather than `runTurn` may
+  not emit it, leaving the bar stale until this client's next 202. Acceptable
+  (the TUI user is not watching the web bar), but verify during
+  implementation; if bridged turns skip `runTurn`, document it here.
 - **R2 — Multi-client last-writer-wins.** Two windows dispatching different
   models for one session converge on whichever dispatched last. This matches
   the semantics ("last dispatched") and is accepted.
-- **R3 — Value lost on reload.** Deliberate (no persistence, no new endpoint);
-  the `main_model` display fallback covers the gap. If users report the bar
-  "forgetting", persistence would require revisiting approach B.
+- **R3 — Value lost on reload.** Deliberate (no persistence, no new endpoint).
+  Consequence: the model segment is **absent** from the first page load until
+  the session's next accepted dispatch or `turn_started` — there is no display
+  fallback to `main_model` or any other field (§3, §5.5). If users report the
+  bar "forgetting" (or missing) as a problem, persistence would require
+  revisiting approach B — not a fallback.
 - **R4 — Continuation turns without a captured 202.** Permission/question
   continuations initiated by *another* client emit `turn_done.model` but may
   not emit `turn_started` (they drive turn state directly,
