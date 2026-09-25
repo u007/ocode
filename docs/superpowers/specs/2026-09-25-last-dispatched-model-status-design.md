@@ -1,7 +1,7 @@
 ---
 type: Design
 title: Last-dispatched model in the status bar — design
-description: 'Implemented design spec: per-session last-dispatched model shown in the web/desktop bottom status bar, captured from every dispatch-acknowledging 202 (send, command/continue, retry, permission/question continuation, rewind) plus turn_started.model as the headless server-event fallback; bridged RC 202s report RCBridge.ModelForDispatch (live TUIStatus.MainModel, registration Model fallback); rewind 202 reports the queued job''s model; StatusBar renders only lastDispatchedModel and never falls back to snap.main_model (absent until first dispatch).'
+description: 'Implemented design spec: per-session last-dispatched model shown in the web/desktop bottom status bar, captured from every dispatch-acknowledging 202 (send, command/continue, retry, permission/question continuation, rewind) plus turn_started.model as the headless server-event fallback; all bridged RC response branches report RCBridge.ModelForDispatch (live TUIStatus.MainModel with registration Model fallback) while the browser captures only async 202 dispatch acknowledgements; rewind 202 reports the queued job''s model; StatusBar renders only lastDispatchedModel and never falls back to snap.main_model (absent until first dispatch).'
 tags:
   - design
   - status-bar
@@ -9,12 +9,12 @@ tags:
   - web
   - desktop
   - spec
-timestamp: 2026-09-25T13:32:16Z
+timestamp: 2026-09-25T14:06:25Z
 ---
 # Last-dispatched model in the status bar — design
 
 **Date:** 2026-09-25
-**Status:** **Implemented (2026-09-25).** Store field/action, every dispatch-acknowledging send path (initial send, command/continue, retry, permission/question continuations, rewind), the `turn_started.model` fallback, the bridged `ModelForDispatch` 202 source, and the StatusBar-only rendering all shipped. Tests live in the four `*.lastModel.*` web suites plus `internal/server/handler_last_model_test.go` and the `turn_started.model` assertions in `internal/server/agent_session_turn_test.go` (§8; suites re-verified passing at this update).
+**Status:** **Implemented (2026-09-25).** Store field/action, every dispatch-acknowledging send path (initial send, command/continue, retry, permission/question continuations, rewind), the `turn_started.model` fallback, the bridged `ModelForDispatch` source on every RC response branch (the browser still captures only async 202 dispatch acknowledgements), and the StatusBar-only rendering all shipped. Tests live in the four `*.lastModel.*` web suites plus `internal/server/handler_last_model_test.go` and the `turn_started.model` assertions in `internal/server/agent_session_turn_test.go` (§8; suites re-verified passing at this update).
 
 > **Reading the citations.** This tree carries extensive concurrent, unrelated
 > work-in-progress, so line numbers were correct when written but may drift.
@@ -54,11 +54,15 @@ timestamp: 2026-09-25T13:32:16Z
   the queued job (`h.effectiveSessionModel` → `dispatchTurnWithRewind`), **not** a
   stale resident-agent model (`internal/server/handler.go:1332-1352`, with an
   inline comment forbidding the old overwrite).
-- **Server — bridged 202s:** both RC-bridge 202 responses (async send
-  `handler.go:1367`, rewind `handler.go:1329`) return
+- **Server — bridged RC responses:** all three bridged RC response branches —
+  async send 202 (`handler.go:1367`), rewind 202 (`handler.go:1329`), and the
+  synchronous send 200 (`handler.go:1391-1395`) — return
   `ChatResponse{Model: rc.ModelForDispatch()}` — live `TUIStatus.MainModel`
   first, registration `RCBridge.Model` only as fallback
-  (`internal/server/rc_bridge.go:276-286`).
+  (`internal/server/rc_bridge.go:276-286`). The browser captures only the
+  async 202 dispatch acknowledgements (both send endpoints always pass
+  `async: true`); the synchronous 200 reports the same live-model value but is
+  never consumed by the UI.
 - **Rendering:** `StatusBar` reads `lastDispatchedModel` from the session slice
   (`web/src/components/common/StatusBar.tsx:149`), derives
   `dispatchedModel = lastDispatchedModel || ""` (`:196-199`, with a comment that
@@ -169,11 +173,15 @@ this client.**
   handed to `dispatchTurnWithRewind` (`handler.go:1332-1352`), never the resident
   agent's pre-rewind model — the 202 must identify the dispatch the client just
   accepted, not whichever model a to-be-rebuilt agent happened to hold.
-- **Bridged 202s report the live TUI model.** The RC-bridge async-send and
-  rewind 202s use `rc.ModelForDispatch()` (`rc_bridge.go:276-286`): the live
-  `TUIStatus.MainModel` when present, the registration-time
+- **Bridged RC responses report the live TUI model.** All three bridged RC
+  response branches — async-send 202, rewind 202, and the synchronous send 200
+  at the RC result branch — use `rc.ModelForDispatch()` (`rc_bridge.go:276-286`):
+  the live `TUIStatus.MainModel` when present, the registration-time
   `RCBridge.Model` only as fallback. The registration field goes stale as soon
   as the TUI switches model, so it is not used while a live snapshot exists.
+  Capture is unchanged: the browser only ever consumes the async 202 dispatch
+  acknowledgements (both send endpoints always pass `async: true`); the
+  synchronous 200 is not a dispatch acknowledgement this feature records.
 - **Set on `turn_started.model` (fallback).** Covers turns not dispatched by
   this client's 202 where the server executed the turn via `runTurn`: another
   window's headless turn, scheduler/external dispatches, remote-host turns
@@ -265,15 +273,19 @@ not a redefinition.
     that overwrite was removed with an inline comment — the 202 must report the
     model the queued job will use, not a stale resident-agent model. Pinned by
     `TestRewindAcceptedResponseUsesDispatchedModel`.
-  - **RC-bridge 202s** (async send `handler.go:1367`, bridged rewind
-    `handler.go:1329`): `ChatResponse{Model: rc.ModelForDispatch()}`.
+  - **Bridged RC response branches** (async send `handler.go:1367`, rewind
+    `handler.go:1329`, synchronous send 200 at the RC result branch
+    `handler.go:1391-1395`): all three return
+    `ChatResponse{Model: rc.ModelForDispatch()}`.
     `ModelForDispatch` (`rc_bridge.go:276-286`) returns the live
     `TUIStatus.MainModel` when set and falls back to the registration-time
     `RCBridge.Model` only when the live snapshot is empty. Pinned by
-    `TestRCBridgeModelForDispatchPrefersLiveStatus`. Caveat: the *synchronous*
-    bridged 200 (`handler.go:1391-1395`) still reports the registration
-    `rc.Model` — it is not a 202 and the web client never sees it (both send
-    endpoints always pass `async: true`).
+    `TestRCBridgeModelForDispatchPrefersLiveStatus`
+    (`internal/server/handler_last_model_test.go`). The browser captures only
+    the async 202 dispatch acknowledgements — both send endpoints always pass
+    `async: true`, so the synchronous 200 is never issued to the web client;
+    it reports the same live-model value anyway, keeping every RC response
+    branch consistent.
 - **`publishTurnStarted` (`agent_session.go:811`)** now accepts the model and
   adds `"model": …` to the data map when non-empty; its only call site is
   `runTurn` (`:1084`, where `as.model` is in scope). `publishTurnDone`
@@ -450,12 +462,14 @@ guard branch — no behavior change. `turn_done` (`:488-494`) and `turn_error`
   servers omit it (guard branch), older clients ignore it. New client + old
   server: 202 path fully functional, event fallback inert. Old client + new
   server: unaffected.
-- **Bridged TUI sessions:** the async-send and rewind 202s return
-  `ChatResponse{Model: rc.ModelForDispatch()}` (`handler.go:1367`,
-  `:1329`) — live `TUIStatus.MainModel`, registration `RCBridge.Model` only as
-  fallback. The synchronous bridged 200 (`handler.go:1391-1395`) still reports
-  the registration `rc.Model`, but it is not a 202 and the web client always
-  sends `async: true`, so it is outside this feature's capture set. RC-channel
+- **Bridged TUI sessions:** all bridged RC response branches — async-send 202
+  (`handler.go:1367`), rewind 202 (`:1329`), and the synchronous send 200
+  (`handler.go:1391-1395`) — return
+  `ChatResponse{Model: rc.ModelForDispatch()}` — live `TUIStatus.MainModel`,
+  registration `RCBridge.Model` only as fallback. The browser still captures
+  only async 202 dispatch acknowledgements (both send endpoints always pass
+  `async: true`), so the synchronous 200 remains outside this feature's
+  capture set even though it reports the same live-model value. RC-channel
   turns emit no `turn_started` (§5.1); see risk R1.
 - **Retry/ask continuations:** headless 202s carry `Model` and are captured;
   bridge-mode ask resolutions return an empty 200 and are ignored by the
@@ -466,7 +480,8 @@ guard branch — no behavior change. `turn_done` (`:488-494`) and `turn_error`
 ## 8. Test plan / shipped coverage
 
 All suites below existed and passed at this spec update (re-verified
-2026-09-25: the four web suites 14/14, `internal/server` focused Go tests
+2026-09-25: the four web suites 15/15, and the `internal/server` Go regressions
+`handler_last_model_test.go` and the `agent_session_turn_test.go` assertions,
 green). The repo's failing-test-first / mutation-verify convention applies to
 any future change to these paths.
 
@@ -493,46 +508,49 @@ any future change to these paths.
    new.
 7. `turn_error` leaves the field unchanged.
 
-**Send paths — `web/src/hooks/useChat.lastModel.test.tsx` (5)**
+**Send paths — `web/src/hooks/useChat.lastModel.test.tsx` (6)**
 
 8. Successful `sendMessage` (202 `{model}`) records the value for the session.
 9. Rejected send (network error) dispatches no model update and retains the
    previous value.
-10. **Retry:** `api.retrySession` 202 `{model}` is recorded.
-11. **Permission continuation:** `api.resolvePermission` 202 `{model}` is
+10. **Empty-model guard:** an accepted response carrying no / an empty `model`
+    retains the previous value — the §3 / §6.6 guard, a no-op acknowledgement
+    never overwrites.
+11. **Retry:** `api.retrySession` 202 `{model}` is recorded.
+12. **Permission continuation:** `api.resolvePermission` 202 `{model}` is
     recorded.
-12. **Question continuation:** `api.answerQuestion` 202 `{model}` is recorded.
+13. **Question continuation:** `api.answerQuestion` 202 `{model}` is recorded.
 
 **Rendering — `web/src/components/common/StatusBar.lastModel.test.tsx` (2)**
 
-13. With the field **unset** and a status snapshot carrying `main_model`, the
+14. With the field **unset** and a status snapshot carrying `main_model`, the
     segment is **absent** (no model chip) — StatusBar never falls back to
     `snap.main_model`.
-14. With a dispatched value set, the segment shows that value, not the
+15. With a dispatched value set, the segment shows that value, not the
     sidebar's `main_model`.
 
 **Server — `internal/server/handler_last_model_test.go` (2) +
 `agent_session_turn_test.go`**
 
-15. `TestRewindAcceptedResponseUsesDispatchedModel`: a rewind 202 reports the
+16. `TestRewindAcceptedResponseUsesDispatchedModel`: a rewind 202 reports the
     model handed to the queued job (`effectiveSessionModel`), **not** the
     stale resident-agent model (the resident agent in the fixture is seeded
     with a different model and must not win).
-16. `TestRCBridgeModelForDispatchPrefersLiveStatus`: `ModelForDispatch()`
+17. `TestRCBridgeModelForDispatchPrefersLiveStatus`: `ModelForDispatch()`
     prefers the live `TUIStatus.MainModel` and falls back to the registration
     `RCBridge.Model` only when the live snapshot is empty.
-17. `turn_started` envelope data includes `"model"` equal to the session's
+18. `turn_started` envelope data includes `"model"` equal to the session's
     model — asserted in `TestTurnDoneIncludesTookMs` (headless) and
     `TestBridgedTurnTimingStillFlowsOnBus` (bridge attached, `runTurn`
     still publishes) in `internal/server/agent_session_turn_test.go`.
-18. Non-regression: existing 202 `ChatResponse.model` decoding in
+19. Non-regression: existing 202 `ChatResponse.model` decoding in
     `send_message_routing_test.go` still holds.
 
 **Coverage note (known gap):** the `App.sendCommandToSession` capture
 (`App.tsx:886-896`) and the `useChat` draft-tab `targetSessionId` keying have
 no dedicated App/hook test — the keying *rule* they follow is pinned
 reducer-level by cases 3–4, and the capture shape is identical to the
-hook-covered paths (cases 8–12). If either path diverges, add the missing
+hook-covered paths (cases 8–13). If either path diverges, add the missing
 suite rather than relying on the reducer pins.
 
 ## 9. Documentation and rollout
@@ -578,7 +596,7 @@ suite rather than relying on the reducer pins.
   bar "forgetting" (or missing) as a problem, persistence would require
   revisiting approach B — not a fallback.
 - **R4 — Continuation turns without a captured 202.** The local client's own
-  retry/permission/question 202s **are** captured (§5.3, tests 10–12). What
+  retry/permission/question 202s **are** captured (§5.3, tests 11–13). What
   remains uncovered: (a) continuations initiated by *another* client emit
   `turn_done.model` but no `turn_started` (they drive turn state directly,
   `handler_permissions_resolve.go:321-339`), so the observing client's value
